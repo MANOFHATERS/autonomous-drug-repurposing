@@ -3412,6 +3412,29 @@ def _build_edge_record_from_dict(
     phase: Optional[str] = record.get("phase")
     if phase is not None and not isinstance(phase, str):
         phase = str(phase)
+    # v82 ROOT FIX (Phase parsing — "Phase 1/Phase 2" combined phases):
+    # AACT stores combined phases like "Phase 1/Phase 2", "Phase 2/Phase 3",
+    # and "Phase 3/Phase 4". The previous code used the raw AACT phase value
+    # directly for evidence-strength lookup in CLINICALTRIALS_PHASE_STRENGTH.
+    # That works when the config dict has an exact key like "Phase 1/Phase 2",
+    # but AACT also produces shorthand forms like "Phase 1/2" (without the
+    # repeated "Phase" prefix) that DON'T match the config dict keys. This
+    # causes evidence_strength to fall back to 0.0 (missing key) — a
+    # combined-phase trial gets ZERO evidence strength, silently dropping
+    # legitimate evidence.
+    #
+    # Fix: normalize phase values so shorthand forms like "Phase 1/2" are
+    # expanded to the canonical form "Phase 1/Phase 2" that matches the
+    # CLINICALTRIALS_PHASE_STRENGTH and CLINICALTRIALS_VALID_PHASES keys.
+    # The regex handles: "Phase 1/2" → "Phase 1/Phase 2",
+    # "Phase 2/3" → "Phase 2/Phase 3", "Phase 3/4" → "Phase 3/Phase 4".
+    if phase is not None:
+        import re as _re_phase
+        _shorthand_match = _re_phase.match(
+            r"^Phase\s+(\d)\s*/\s*(\d)\s*$", phase.strip()
+        )
+        if _shorthand_match:
+            phase = f"Phase {_shorthand_match.group(1)}/Phase {_shorthand_match.group(2)}"
 
     # Issue 3.3 — detect drug_role from description.
     description: Optional[str] = record.get("description")

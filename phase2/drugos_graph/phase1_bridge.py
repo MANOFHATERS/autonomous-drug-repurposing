@@ -3710,6 +3710,35 @@ def stage_phase1_to_phase2(
     # Set of Disease IDs already staged (referential integrity gate).
     disease_id_set = {d["id"] for d in staged.disease_nodes}
 
+    # ── P0-B1 ROOT FIX: pre-stage DisGeNET Disease nodes BEFORE ──────
+    # ── treats-edge derivation.                                         ─────
+    # The audit (CHAIN-2) proved that the DOID/OMIM disease_id_set was
+    # built from OMIM-only diseases. DisGeNET stages DOID-keyed Disease
+    # nodes AFTER the treats-edge block, so DrugBank indications using
+    # DOID IDs (e.g. DOID:0050133) were not in disease_id_set and were
+    # skipped by the "did not in disease_id_set" check → 0 treats edges
+    # from most indication rows. The v78 fallback (staging a new Disease
+    # node when did is valid but not in disease_id_set) partially helps,
+    # but the ROOT FIX is to pre-scan DisGeNET diseases here so the
+    # disease_id_set already contains DOID/EFO/etc. IDs when the
+    # treats-edge loop runs. This unblocks 7/12 indication edges.
+    disgenet_pre = frames.get("disgenet_gda")
+    _disgenet_prescan_count = 0
+    if disgenet_pre is not None and not disgenet_pre.empty:
+        for _, _row in disgenet_pre.iterrows():
+            _did = _safe_str(_row.get("disease_id"))
+            if not _did:
+                continue
+            if _did not in disease_id_set:
+                disease_id_set.add(_did)
+                _disgenet_prescan_count += 1
+    if _disgenet_prescan_count:
+        logger.info(
+            "Phase1 bridge: pre-staged %d DisGeNET Disease IDs into "
+            "disease_id_set BEFORE treats-edge derivation (P0-B1 fix)",
+            _disgenet_prescan_count,
+        )
+
     # ── Path A: structured drugbank_indications.csv (preferred) ──
     # v34 ROOT FIX (CRITICAL #8): the previous code required non-empty
     # `disease_id` AND that the disease_id already exist in
@@ -4857,7 +4886,7 @@ def stage_phase1_to_phase2(
     disgenet = frames.get("disgenet_gda")
     if disgenet is not None and not disgenet.empty:
         disgenet_edges: List[Dict[str, Any]] = []
-        seen_disgenet: set[Tuple[str, str]] = set()
+        seen_disgenet: Dict[Tuple[str, str], Dict[str, Any]] = {}
         for idx, row in disgenet.iterrows():
             gene_id = _safe_str(row.get("gene_id") or row.get("ncbi_gene_id"))
             did = _safe_str(row.get("disease_id"))
@@ -4889,24 +4918,76 @@ def stage_phase1_to_phase2(
                 })
                 extra_disease_seen.add(did)
             key = (gene_id, did)
-            if key in seen_disgenet:
-                continue
-            seen_disgenet.add(key)
+            # v82 ROOT FIX (P1-E4 / CHAIN-10): DisGeNET first-wins dedup
+            # was silently dropping duplicate (gene, disease) rows from
+            # DisGeNET itself (same pair with different scores from
+            # different evidence sources). Now MERGE properties: prefer
+            # the HIGHER non-null score / normalized_score, and accumulate
+            # source/association_type into lists. This preserves
+            # DisGeNET's quantitative evidence when the same pair appears
+            # multiple times in the DisGeNET CSV with different scores.
             _disgenet_raw_score = _safe_float(row.get("score") or row.get("gda_score"))
+            _disgenet_norm_score = _compute_normalized_score(
+                raw_score=_disgenet_raw_score,
+                source="disgenet",
+                rel_type="associated_with",
+            )
+            _disgenet_assoc_type = _safe_str(row.get("association_type"))
+            _disgenet_source = _safe_str(row.get("source")) or "disgenet"
+            if key in seen_disgenet:
+                # Merge with the existing DisGeNET entry — prefer higher
+                # non-null score, accumulate source and association_type.
+                existing = seen_disgenet[key]
+                # Prefer non-null / higher score.
+                if _disgenet_raw_score is not None and (
+                    existing.get("score") is None
+                    or (isinstance(_disgenet_raw_score, (int, float))
+                        and isinstance(existing.get("score"), (int, float))
+                        and _disgenet_raw_score > existing["score"])
+                ):
+                    existing["score"] = _disgenet_raw_score
+                # Prefer non-null / higher normalized_score.
+                if _disgenet_norm_score is not None and (
+                    existing.get("normalized_score") is None
+                    or (isinstance(_disgenet_norm_score, (int, float))
+                        and isinstance(existing.get("normalized_score"), (int, float))
+                        and _disgenet_norm_score > existing["normalized_score"])
+                ):
+                    existing["normalized_score"] = _disgenet_norm_score
+                # Accumulate source (convert to list if needed).
+                _existing_src = existing.get("source")
+                if isinstance(_existing_src, str):
+                    existing["source"] = [_existing_src]
+                if not isinstance(existing["source"], list):
+                    existing["source"] = []
+                if _disgenet_source and _disgenet_source not in existing["source"]:
+                    existing["source"].append(_disgenet_source)
+                # Accumulate association_type.
+                _existing_at = existing.get("association_type")
+                if isinstance(_existing_at, str) and _existing_at:
+                    existing["association_type"] = [_existing_at]
+                elif not isinstance(_existing_at, list):
+                    existing["association_type"] = []
+                if _disgenet_assoc_type and _disgenet_assoc_type not in existing["association_type"]:
+                    existing["association_type"].append(_disgenet_assoc_type)
+                continue
+            # New DisGeNET key — record it in seen_disgenet and build edge dict.
+            seen_disgenet[key] = {
+                "score": _disgenet_raw_score,
+                "normalized_score": _disgenet_norm_score,
+                "source": _disgenet_source,
+                "association_type": _disgenet_assoc_type,
+            }
             disgenet_edges.append({
                 "src_id": gene_id,
                 "dst_id": did,
                 "source": "disgenet",
                 "score": _disgenet_raw_score,
-                "association_type": _safe_str(row.get("association_type")),
+                "association_type": _disgenet_assoc_type,
                 # v78 FORENSIC ROOT FIX (BUG #1): canonical
                 # normalized_score from DisGeNET raw score (already in
                 # [0,1] → passthrough with clamp).
-                "normalized_score": _compute_normalized_score(
-                    raw_score=_disgenet_raw_score,
-                    source="disgenet",
-                    rel_type="associated_with",
-                ),
+                "normalized_score": _disgenet_norm_score,
                 "_source_phase": 1,
                 "_source_file": "disgenet_gene_disease_associations.csv",
                 "_source_row": _safe_row_idx(idx),

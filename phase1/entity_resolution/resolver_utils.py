@@ -584,6 +584,7 @@ class _MonitoredDict(dict):
 METHOD_CONFIDENCE: Dict[str, float] = _MonitoredDict({
     "inchikey_exact": 1.0,
     "inchikey_connectivity": 0.9,
+    "inchikey_connectivity_no_collapse": 0.85,  # v67 P1-D4: connectivity match without stereoisomer collapse — lower than full connectivity merge
     "name_normalized": 0.8,
     "pubchem_xref": 0.7,
     "fuzzy": 0.65,                  # v29: was 0.85 — inversion fix

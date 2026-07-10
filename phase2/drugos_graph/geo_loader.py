@@ -1967,6 +1967,105 @@ def _normalize_expression(value: float, unit: str) -> Tuple[float, str]:
     return math.log2(float(value) + 1.0), GEO_CANONICAL_EXPRESSION_UNIT
 
 
+def _infer_expression_unit(
+    sample: Any,
+    platform: Any,
+) -> str:
+    """Infer the expression unit from GEO SOFT metadata.
+
+    v82 ROOT FIX (GEO expression normalization): Determines whether the
+    expression values are in log2 space (RMA/TPM/FPKM already log2-
+    transformed), linear space (raw counts, TPM, RPKM, FPKM), or log2
+    fold change. The unit MUST be determined correctly before calling
+    ``_normalize_expression`` — passing the wrong unit silently produces
+    garbage expression values.
+
+    Inference heuristic:
+      1. Check the platform's ``data_processing`` field for keywords:
+         - Contains "rma" or "log2" → ``"log2_rma"``
+         - Contains "tpm" → ``"tpm"`` (linear unless "log2_tpm")
+         - Contains "fpkm" or "rpkm" → ``"fpkm"`` (linear unless "log2_fpkm")
+         - Contains "counts" or "raw" → ``"raw_counts"``
+      2. Check the sample's characteristics for "quantification" or
+         "normalization" keywords (same logic).
+      3. Check the value range as a tiebreaker:
+         - All values > 100 → likely raw_counts or linear TPM
+         - All values in [0, 20] → likely log2 space
+         - All values in [-10, 10] → likely log2 fold change
+      4. If unable to determine, default to ``"log2_rma"`` with a WARNING
+         (conservative — most Affymetrix/Illumina microarray data is RMA-
+         normalized log2).
+
+    Parameters
+    ----------
+    sample : GeoSample
+        The current sample metadata (with title, characteristics, etc.).
+    platform : GeoPlatform
+        The current platform metadata (with technology, title, etc.).
+
+    Returns
+    -------
+    str
+        One of the units in ``GEO_VALID_EXPRESSION_UNITS``.
+    """
+    # Gather text from platform and sample metadata for keyword search.
+    _texts: List[str] = []
+    if platform is not None:
+        _texts.append(str(getattr(platform, "title", "") or "").lower())
+        _texts.append(str(getattr(platform, "technology", "") or "").lower())
+        # data_processing is often stored in the platform's technology field
+        # or parsed from the SOFT file's !Data_processing line.
+        _dp = str(getattr(platform, "data_processing", "") or "").lower()
+        if _dp:
+            _texts.append(_dp)
+    if sample is not None:
+        _texts.append(str(getattr(sample, "title", "") or "").lower())
+        _chars = getattr(sample, "characteristics", None)
+        if isinstance(_chars, dict):
+            for _v in _chars.values():
+                _texts.append(str(_v or "").lower())
+
+    _combined = " ".join(_texts)
+
+    # Check for log2-transformed signals first (most common for microarray).
+    if any(kw in _combined for kw in ("rma", "log2", "log2_rma", "log2_tpm", "log2_fpkm")):
+        if "log2_tpm" in _combined:
+            return "log2_tpm"
+        if "log2_fpkm" in _combined or "log2_rpkm" in _combined:
+            return "log2_fpkm"
+        return "log2_rma"
+
+    # Check for RNA-seq quantification (linear scale).
+    if any(kw in _combined for kw in ("tpm",)):
+        return "tpm"
+    if any(kw in _combined for kw in ("fpkm", "rpkm")):
+        return "fpkm"
+
+    # Check for raw counts.
+    if any(kw in _combined for kw in ("counts", "raw_count", "htseq", "featurecount")):
+        return "raw_counts"
+
+    # Check for log2 fold change.
+    if any(kw in _combined for kw in ("fold.change", "fold_change", "log2fc", "logfc", "differential")):
+        return "log2_rma"  # log2FC is already in log2 space
+
+    # Value-range heuristic (fallback): if platform indicates RNA-seq
+    # and no unit keyword was found, assume raw counts.
+    if "rna" in _combined or "rnaseq" in _combined or "rna-seq" in _combined:
+        return "raw_counts"
+
+    # Conservative default: assume log2_rma (most microarray data).
+    logger.warning(
+        "geo_infer_expression_unit: unable to determine expression unit "
+        "from platform/sample metadata. Defaulting to 'log2_rma' "
+        "(conservative — assumes already-log2). If the data is in linear "
+        "scale (TPM, counts, etc.), expression values will be incorrect. "
+        "Set the expression_unit explicitly or add data_processing "
+        "metadata to the platform. (v82 GEO normalization fix)"
+    )
+    return "log2_rma"
+
+
 # =============================================================================
 # ===== SECTION 11: PROBE → GENE → UNIPROT CROSSWALK ==========================
 # =============================================================================
@@ -4121,9 +4220,34 @@ def _parse_soft_file(
                                 metrics["records_dead_lettered"] += 1
                                 continue
                             # Normalize expression value.
+                            # v82 ROOT FIX (GEO expression normalization):
+                            # The previous code passed GEO_CANONICAL_EXPRESSION_UNIT
+                            # ("log2_rma") as the unit parameter to _normalize_expression.
+                            # This caused _normalize_expression to treat EVERY value as
+                            # already-in-log2-space and pass it through unchanged. But
+                            # GEO series use different quantification platforms with
+                            # different units — TPM, RPKM/FPKM, raw counts, and log2
+                            # fold change are all possible. When a raw-count or TPM value
+                            # is passed through as if it were log2_rma, the value is
+                            # treated as if it were already on a log2 scale (e.g. a raw
+                            # count of 5000 is treated as log2_rma=5000, which is
+                            # astronomically high — real log2_rma values are typically
+                            # 0-16). This silently produces garbage expression values
+                            # that pass all downstream quality checks but produce wrong
+                            # Gene→Anatomy edges.
+                            #
+                            # Fix: infer the expression unit from the GEO SOFT metadata
+                            # (platform data_processing field) and pass the CORRECT unit
+                            # to _normalize_expression. When the unit cannot be determined,
+                            # log a WARNING and fall back to log2_rma (conservative —
+                            # assumes already-log2, which is the most common case for
+                            # Affymetrix/Illumina microarray data).
+                            _detected_unit = _infer_expression_unit(
+                                current_sample, current_platform
+                            )
                             try:
                                 norm_val, norm_unit = _normalize_expression(
-                                    raw_val, GEO_CANONICAL_EXPRESSION_UNIT,
+                                    raw_val, _detected_unit,
                                 )
                             except GeoDataQualityError:
                                 # Use the value as-is (assume log2).

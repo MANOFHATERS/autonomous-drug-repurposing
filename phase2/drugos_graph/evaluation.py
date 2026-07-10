@@ -585,12 +585,28 @@ def _precheck_inputs(
     Fixes E3-002, E5-001.
 
     Returns:
+        NaN if one class is empty (n_pos==0 or n_neg==0) — v82 P0-F12.
         0.5 if scores do not separate classes (single unique score).
         None if normal computation should proceed.
 
     Raises:
         EvaluationInputError: If either array is empty.
     """
+    # v82 ROOT FIX (P0-F12): empty pos or neg arrays produce UNDEFINED
+    # AUC — return NaN instead of 0.5 to prevent macro-average inflation.
+    if len(pos_scores) == 0 or len(neg_scores) == 0:
+        _log_structured(
+            logging.WARNING,
+            "auc_precheck_nan_empty_class",
+            n_pos=len(pos_scores),
+            n_neg=len(neg_scores),
+            message=(
+                "compute_auc returning NaN because one class is empty "
+                "(n_pos=0 or n_neg=0). This AUC is UNDEFINED — "
+                "exclude it from macro-averages. (v82 P0-F12 root fix)"
+            ),
+        )
+        return float("nan")
     all_scores = np.concatenate([pos_scores, neg_scores])
     unique_scores = np.unique(all_scores)
     if len(unique_scores) <= 1:
@@ -1381,8 +1397,27 @@ def _manual_auc(
     """
     n_pos = len(pos_scores)
     n_neg = len(neg_scores)
+    # v82 ROOT FIX (P0-F12): when a relation type has NO positive edges
+    # in the test set, the AUC for that relation should be reported as
+    # NaN/None, NOT 0.5. Returning 0.5 (random baseline) for a relation
+    # with zero positive edges artificially inflates the macro-average
+    # AUC — a model that has never seen a positive example for a
+    # relation is NOT performing at random-chance level on that relation;
+    # the metric is undefined. Callers computing per-relation or macro-
+    # average AUC MUST exclude NaN entries from the average.
     if n_pos == 0 or n_neg == 0:
-        return 0.5
+        _log_structured(
+            logging.WARNING,
+            "auc_returning_nan_empty_class",
+            n_pos=n_pos,
+            n_neg=n_neg,
+            message=(
+                "_manual_auc returning NaN because one class is empty "
+                "(n_pos=0 or n_neg=0). This AUC is UNDEFINED — "
+                "exclude it from macro-averages. (v82 P0-F12 root fix)"
+            ),
+        )
+        return float("nan")
 
     # Do NOT negate scores. The Mann-Whitney U statistic is invariant
     # under monotone transformation, and the AUC direction is handled
