@@ -138,6 +138,45 @@ _SYNTHETIC_PREFIX: str = "SYNTH"
 # Applied iteratively to handle nested parens (FIX #26 / BUG-CODE-02).
 _PARENTHESES_RE: re.Pattern[str] = re.compile(r"\([^)]*\)")
 
+# P2-7 ROOT FIX (v82): the ``_STEREO_PAREN_RE`` regex used to be compiled
+# INSIDE ``_normalize_name_cached`` (an ``@lru_cache(maxsize=8192)``
+# function). On every cache MISS (i.e. for every NEW name encountered),
+# the regex was recompiled — for 8192 unique names, that's 8192
+# recompilations of a complex multi-alternative pattern. Moved to module
+# level so it's compiled EXACTLY ONCE at import. The ``re.IGNORECASE``
+# flag and all the audit-rationale comments are preserved verbatim.
+#
+# PS-4 ROOT FIX (patient safety): the previous blind paren-stripping
+# step removed ALL parenthetical content, collapsing (R)- and
+# (S)-enantiomers onto the same normalized key. (R)-thalidomide
+# (sedative) and (S)-thalidomide (teratogenic) became the same
+# entity — the patient-safety catastrophe the docstrings scream
+# about. Preserve stereo tokens before stripping, then re-attach
+# them in a canonical prefix position.
+_STEREO_PAREN_RE: re.Pattern[str] = re.compile(
+    r"\(\s*("
+    r"[RS]"                          # (R) / (S) chirality
+    r"|[EZ]"                         # (E) / (Z) alkene geometry — v13 ROOT FIX:
+                                     # v12 used "|EZ" which matches the literal
+                                     # 2-char string "EZ", NOT (E) or (Z)
+                                     # separately. (E)- and (Z)-alkene
+                                     # stereoisomers were silently collapsed.
+    r"|D|L"                          # (D) / (L) Fischer
+    r"|±|rac(?:emate)?|racemic"      # racemic
+    r"|[\+\−\-\u2212]"               # (+), (-), (−)
+    # v29 ROOT FIX (audit C-7): Multi-stereo descriptors like
+    # (2R,3S), (2S,3R), (3R,5S) were NOT matched by the original
+    # regex — they were stripped by the paren-removal loop,
+    # silently losing stereochemistry. Atorvastatin (2R,3S) and
+    # (2S,3R) would collapse to the same normalized key — a
+    # patient-safety issue. ROOT FIX: add a pattern that matches
+    # comma-separated position+chirality descriptors.
+    r"|\d{1,2}[RS](?:\s*,\s*\d{1,2}[RS])*"  # (2R,3S), (3R,5S), etc.
+    r"|\d{1,2}[EZ](?:\s*,\s*\d{1,2}[EZ])*"  # (2E,4E), etc.
+    r")\s*\)",
+    re.IGNORECASE,
+)
+
 # Default character allowlist for :func:`normalize_name` — a-z, 0-9, hyphen, slash.
 # Precompiled for the hot path; ``allow_chars`` overrides recompile a new pattern.
 _NON_ALNUM_RE: re.Pattern[str] = re.compile(r"[^a-z0-9\-/]")
@@ -620,36 +659,11 @@ def _normalize_name_cached(name: str, allow_chars: str = "-/") -> str:
     # "(USAN)", "(investigational)", "(withdrawn)") WITHOUT
     # destroying chemically meaningful stereo descriptors: (R), (S),
     # (E), (Z), (+), (-), (±), (D), (L), (rac), (racemate).
-    # PS-4 ROOT FIX (patient safety): the previous blind paren-stripping
-    # step removed ALL parenthetical content, collapsing (R)- and
-    # (S)-enantiomers onto the same normalized key. (R)-thalidomide
-    # (sedative) and (S)-thalidomide (teratogenic) became the same
-    # entity — the patient-safety catastrophe the docstrings scream
-    # about. Preserve stereo tokens before stripping, then re-attach
-    # them in a canonical prefix position.
-    _STEREO_PAREN_RE = re.compile(
-        r"\(\s*("
-        r"[RS]"                          # (R) / (S) chirality
-        r"|[EZ]"                         # (E) / (Z) alkene geometry — v13 ROOT FIX:
-                                         # v12 used "|EZ" which matches the literal
-                                         # 2-char string "EZ", NOT (E) or (Z)
-                                         # separately. (E)- and (Z)-alkene
-                                         # stereoisomers were silently collapsed.
-        r"|D|L"                          # (D) / (L) Fischer
-        r"|±|rac(?:emate)?|racemic"      # racemic
-        r"|[\+\−\-\u2212]"               # (+), (-), (−)
-        # v29 ROOT FIX (audit C-7): Multi-stereo descriptors like
-        # (2R,3S), (2S,3R), (3R,5S) were NOT matched by the original
-        # regex — they were stripped by the paren-removal loop,
-        # silently losing stereochemistry. Atorvastatin (2R,3S) and
-        # (2S,3R) would collapse to the same normalized key — a
-        # patient-safety issue. ROOT FIX: add a pattern that matches
-        # comma-separated position+chirality descriptors.
-        r"|\d{1,2}[RS](?:\s*,\s*\d{1,2}[RS])*"  # (2R,3S), (3R,5S), etc.
-        r"|\d{1,2}[EZ](?:\s*,\s*\d{1,2}[EZ])*"  # (2E,4E), etc.
-        r")\s*\)",
-        re.IGNORECASE,
-    )
+    # PS-4 ROOT FIX (patient safety): see the module-level
+    # ``_STEREO_PAREN_RE`` definition for the full rationale.
+    # P2-7 ROOT FIX (v82): the regex is now module-level (compiled
+    # ONCE at import) instead of being recompiled inside this cached
+    # function on every cache miss.
     stereo_tokens = _STEREO_PAREN_RE.findall(name)
     stereo_tokens = [t.strip().lower() for t in stereo_tokens]
 

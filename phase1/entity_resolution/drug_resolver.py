@@ -1174,15 +1174,14 @@ class _LazyGlobalProxy:
         setattr(_injector, self._attr_name, value)
 
 
-class _LazyModuleGlobals:
-    """Module-level namespace exposing ``_pd`` / ``_requests`` as properties.
-
-    Instances are NOT used — the class methods are accessed via the
-    module-level ``_pd`` and ``_requests`` objects below.
-    """
-
-
 # Module-level proxies (audit 4.28).
+# P2-2 ROOT FIX (v82): the empty ``_LazyModuleGlobals`` class that
+# used to live here was DEAD CODE — its docstring explicitly said
+# "Instances are NOT used." The module-level ``_pd`` and ``_requests``
+# objects below are plain ``Any`` slots populated lazily by
+# ``_get_pd`` / ``_get_requests`` via the ``_injector``. The class
+# misled readers into thinking the lazy-loading mechanism depended
+# on it; it did not. Removed entirely.
 _pd: Any = None  # populated lazily; tests can override via _injector.override(pd=...)
 _requests: Any = None
 
@@ -1805,13 +1804,37 @@ class _MutationContext:
                     error_message=str(exc)[:200] if exc is not None else "",
                     error_code=ErrorCode.RESOLVER_STATE_CORRUPTION.value,
                 )
-                # Wrap the exception in a typed error so callers catch it.
-                if not isinstance(exc, ResolverError):
-                    raise ResolverStateCorruptionError(
-                        f"mutation {self.reason!r} rolled back due to "
-                        f"{type(exc).__name__}: {exc}"
-                    ) from exc
-                return False  # let the original ResolverError propagate
+                # P2-8 ROOT FIX (v82): do NOT wrap non-ResolverError
+                # exceptions in ResolverStateCorruptionError. The
+                # previous implementation wrapped KeyError, ValueError,
+                # MemoryError, etc., which:
+                #   1. MASKED the original exception type — callers
+                #      catching ``except KeyError:`` (or any non-
+                #      ResolverError/ValueError type) could not catch
+                #      the wrapped exception. The ``from exc`` chain
+                #      preserved the original for inspection but
+                #      ``except <Type>:`` blocks don't follow the
+                #      chain, so error-handling logic broke.
+                #   2. Made error-handling unpredictable — operators
+                #      who knew a specific exception type might be
+                #      raised could not catch it.
+                # The root fix: the rollback has ALREADY been performed
+                # (above) and the rollback has ALREADY been logged via
+                # ``_event_log`` (for observability — operators see
+                # "mutation_rolled_back" with the original error_type
+                # and error_message in the structured log). We now
+                # ``return False`` to let the ORIGINAL exception
+                # propagate unchanged. This preserves every caller's
+                # ``except`` contract.
+                #
+                # Note: ``ResolverStateCorruptionError`` is still
+                # raised EXPLICITLY by other code paths (e.g.
+                # ``_assert_initialized``, ``reset``, structural
+                # consistency checks at lines 2123, 2162, 3454, 3460,
+                # 3496) where the corruption is detected by the
+                # resolver ITSELF, not by an unexpected exception
+                # during a mutation. That behaviour is unchanged.
+                return False  # let the ORIGINAL exception propagate
             return False
         finally:
             if self._lock_acquired:

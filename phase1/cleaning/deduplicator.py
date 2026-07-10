@@ -1249,10 +1249,23 @@ def _normalize_unit_to_nm(value: float, unit: str | None) -> tuple[float, str | 
 # ===========================================================================
 _DEAD_LETTERS_LOCK = threading.RLock()
 _dead_letters: list[dict[str, Any]] = []
-# FIX-F / C-18: alias kept for backward-compat with operators/tests that
-# import ``_dead_letter_queue`` from this module. Same list object —
-# in-place mutations (.append/.clear/.pop) are visible through either name.
-_dead_letter_queue: list[dict[str, Any]] = _dead_letters
+# P2-4 ROOT FIX (v82): the ``_dead_letter_queue = _dead_letters`` alias
+# that used to live here was a CONFUSING duplicate-reference — both
+# names pointed to the SAME list object, so in-place mutations
+# (.append/.clear/.pop) were visible through either name, BUT
+# ``get_dead_letters()`` returns ``list(_dead_letters)`` (a snapshot
+# copy). Operators inspecting ``_dead_letter_queue`` directly saw LIVE
+# mutations while ``get_dead_letters()`` returned a SNAPSHOT — the two
+# access paths disagreed.
+#
+# The alias has been REMOVED. The CANONICAL public API for inspecting
+# the queue is ``get_dead_letters()`` (snapshot) /
+# ``clear_dead_letters()`` / ``flush_dead_letters()``. The private
+# list is ``_dead_letters`` only — single name, single source of
+# truth. External code that imported ``_dead_letter_queue`` hits the
+# module-level ``__getattr__`` hook near the end of this file, which
+# returns a SNAPSHOT (matching ``get_dead_letters()``) plus a
+# DeprecationWarning.
 
 
 def _append_dead_letter(
@@ -3224,9 +3237,32 @@ def dedup_interactions(
         #   0 = clean value (< 1 mM, uncensored)
         #   1 = censored-band value (1 mM <= v < 1 M)
         #   2 = explicitly censored value (``>X`` / ``<X`` marker)
+        #
+        # P2-10 ROOT FIX (v82): the previous implementation used
+        # ``working.get("_av_in_censored_band", 0)`` — a DataFrame
+        # ``.get()`` that returns the COLUMN if it exists, or the
+        # SCALAR ``0`` if it doesn't. When the try/except above (line
+        # ~3137-3140) fell into the except branch, the column was set
+        # to a constant ``0`` via ``working["_av_in_censored_band"] = 0``
+        # — BUT if any OTHER exception path skipped that assignment
+        # entirely (e.g. an early-return path, a KeyError on a missing
+        # upstream column), ``working.get("_av_in_censored_band", 0)``
+        # returned the scalar ``0``, and ``censored * 2 + 0`` silently
+        # treated censored-band values as CLEAN (sort key 0 instead of
+        # 1). The CD-7 root fix's censored-band tagging was silently
+        # lost — a patient-safety issue (censored >X measurements could
+        # win dedup over real measurements).
+        #
+        # The root fix: EXPLICITLY ensure the column exists before the
+        # sort-key computation. If it doesn't exist (defensive fallback),
+        # create it as ``0`` (no censored-band values) — same semantics
+        # as the except branch, but now GUARANTEED to be a Series (not a
+        # scalar) so the addition broadcasts correctly.
+        if "_av_in_censored_band" not in working.columns:
+            working["_av_in_censored_band"] = 0
         working["_av_censored_sort"] = (
             working["_av_censored"].astype(int) * 2
-            + working.get("_av_in_censored_band", 0)
+            + working["_av_in_censored_band"]
         )
 
         # [SCI-12] Confidence tiebreaker (higher confidence wins)
@@ -4538,6 +4574,29 @@ def __getattr__(name: str) -> Any:
         return _ACTIVITY_NON_PHYSICAL_MAX
     if name == "ALLOWED_ACTIVITY_TYPES":
         return _ALLOWED_ACTIVITY_TYPES
+    # P2-4 ROOT FIX (v82): backward-compat shim for the removed
+    # ``_dead_letter_queue`` alias. External code that imported
+    # ``_dead_letter_queue`` now gets a SNAPSHOT (matching
+    # ``get_dead_letters()`` semantics) — NOT the live list, because
+    # the live-list alias was the source of the operator confusion
+    # the audit flagged. The snapshot is taken under the dead-letters
+    # lock so it's consistent. A DeprecationWarning nudges callers to
+    # migrate to the public ``get_dead_letters()`` API.
+    if name == "_dead_letter_queue":
+        import warnings as _warnings
+        _warnings.warn(
+            "cleaning.deduplicator._dead_letter_queue is REMOVED (P2-4 v82 "
+            "root fix). The live-list alias was confusing — operators "
+            "inspecting it saw live mutations while get_dead_letters() "
+            "returned snapshots. Use get_dead_letters() for a snapshot, "
+            "or clear_dead_letters() / flush_dead_letters() for mutation. "
+            "This shim returns a snapshot for backward-compat and will be "
+            "removed in a future major version.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        with _DEAD_LETTERS_LOCK:
+            return list(_dead_letters)
     raise AttributeError(
         f"module {__name__!r} has no attribute {name!r}"
     )

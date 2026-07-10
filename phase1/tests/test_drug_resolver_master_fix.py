@@ -117,20 +117,40 @@ class TestDomain1Architecture:
     """Architecture-level invariants."""
 
     def test_mutation_context_rollback_on_exception(self, basic_resolver):
-        """1.3 — _MutationContext rolls back state on exception."""
+        """1.3 — _MutationContext rolls back state on exception.
+
+        P2-8 v82 ROOT FIX: the previous test asserted that non-ResolverError
+        exceptions raised inside _MutationContext were WRAPPED in
+        ResolverStateCorruptionError. That wrapping MASKED the original
+        exception type — callers catching ``except ValueError:`` (or any
+        non-ResolverError/ValueError type) could not catch the wrapped
+        exception. The root fix lets the ORIGINAL exception propagate
+        unchanged; the rollback is still performed and logged via
+        ``_event_log`` for observability.
+        """
         basic_resolver.add_source_records(
             [{"inchikey": ASPIRIN_IK, "name": "Aspirin", "chembl_id": "CHEMBL25"}],
             source="chembl",
         )
         original_count = len(basic_resolver.mapping)
         # Now simulate a mutation that fails mid-way.
-        with pytest.raises(ResolverStateCorruptionError):
+        # P2-8: ValueError propagates as ValueError (NOT wrapped).
+        with pytest.raises(ValueError, match="simulated mid-mutation failure"):
             with _MutationContext(basic_resolver, "test_rollback"):
                 # Inject a deliberate inconsistency.
                 basic_resolver.mapping["FAKE-IK"] = {"canonical_name": "fake"}
                 raise ValueError("simulated mid-mutation failure")
-        # Rollback should have restored the mapping.
+        # Rollback should have restored the mapping (state is consistent).
         assert "FAKE-IK" not in basic_resolver.mapping
+        assert len(basic_resolver.mapping) == original_count
+        # P2-8: confirm a non-ValueError exception type also propagates
+        # unchanged (the OLD code would have wrapped it in
+        # ResolverStateCorruptionError, breaking ``except KeyError:``).
+        with pytest.raises(KeyError):
+            with _MutationContext(basic_resolver, "test_keyerror_rollback"):
+                basic_resolver.mapping["FAKE-IK-2"] = {"canonical_name": "fake2"}
+                raise KeyError("simulated_keyerror_for_p2_8_test")
+        assert "FAKE-IK-2" not in basic_resolver.mapping
         assert len(basic_resolver.mapping) == original_count
 
     def test_dependencyInjector_thread_safe(self):

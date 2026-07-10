@@ -1639,12 +1639,46 @@ def _add_provenance(
 # ===========================================================================
 # Cleaning metadata tracking (GUARD-DQ5, GAP-DQ6)
 # ===========================================================================
-
+# P2-5 ROOT FIX (v82): the previous implementation added a
+# ``_cleaning_applied`` COLUMN to every cleaned DataFrame, accumulating
+# step names ("standardize_inchikey;handle_missing_inchikey;..."). This
+# column was NOT in the documented output schema (see the Data Dictionary
+# above at line ~252) and silently polluted every downstream consumer:
+#   * DB loaders rejected the row (CHECK constraint violations) or
+#     silently included the column in the DB (schema drift).
+#   * Knowledge-graph ingestion in phase2 saw an extra column that
+#     broke Cypher property-list construction.
+#   * Fingerprint reproducibility (IDEM-7) was broken because the
+#     column contains per-row timestamps.
+#
+# The ROOT FIX stores cleaning-step metadata in ``df.attrs`` (the
+# pandas metadata dict) — a SIDE-CHANNEL that does NOT appear in
+# ``df.columns`` and is therefore invisible to schema-validation /
+# DB-loaders / fingerprint computation. ``df.attrs`` is the canonical
+# pandas mechanism for attaching metadata to a DataFrame.
+#
+# Backward-compat:
+#   * The ``_CLEANING_METADATA_COL`` constant is kept for any external
+#     code that references the name (it's the column name we WOULD use
+#     if the opt-in env var is set).
+#   * If ``CLEANING_TRACK_APPLIED_STEPS=1`` is set, the column IS
+#     added (opt-in for operators who want it). Default OFF.
+#   * ``_is_already_cleaned`` checks ``df.attrs`` FIRST (canonical),
+#     then falls back to the column for input DataFrames that already
+#     have it (e.g. re-cleaning a previously-cleaned frame).
 _CLEANING_METADATA_COL = "_cleaning_applied"
+_CLEANING_STEPS_ATTR = "_cleaning_steps_applied"  # attrs key (canonical)
+
+
+def _track_cleaning_steps_enabled() -> bool:
+    """Whether to ALSO emit the ``_cleaning_applied`` column (opt-in)."""
+    return os.environ.get("CLEANING_TRACK_APPLIED_STEPS", "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
 
 
 def _mark_cleaned(df: Any, step_name: str) -> Any:
-    """Add metadata tracking which cleaning steps have been applied.
+    """Record that a cleaning step has been applied to ``df``.
 
     Parameters
     ----------
@@ -1656,15 +1690,36 @@ def _mark_cleaned(df: Any, step_name: str) -> Any:
     Returns
     -------
     pd.DataFrame
-        The same DataFrame with the cleaning metadata column updated.
+        The same DataFrame with cleaning-step metadata updated in
+        ``df.attrs["_cleaning_steps_applied"]`` (canonical). If the
+        ``CLEANING_TRACK_APPLIED_STEPS`` env var is set to a truthy
+        value, the ``_cleaning_applied`` COLUMN is ALSO updated (opt-in
+        backward-compat with operators who rely on the column).
+
+    Notes
+    -----
+    P2-5 ROOT FIX (v82): the previous implementation ALWAYS added the
+    ``_cleaning_applied`` column, polluting the output schema. The
+    column is now opt-in (default OFF) and the canonical metadata
+    store is ``df.attrs`` — invisible to ``df.columns``, DB loaders,
+    and fingerprint computation.
     """
     import pandas as pd
 
-    if _CLEANING_METADATA_COL not in df.columns:
-        df[_CLEANING_METADATA_COL] = ""
-    df[_CLEANING_METADATA_COL] = (
-        df[_CLEANING_METADATA_COL].astype(str) + step_name + ";"
-    )
+    # Canonical path: df.attrs (always written, never visible in df.columns).
+    steps = df.attrs.get(_CLEANING_STEPS_ATTR, [])
+    if not isinstance(steps, list):
+        steps = list(steps)
+    steps.append(step_name)
+    df.attrs[_CLEANING_STEPS_ATTR] = steps
+
+    # Opt-in path: _cleaning_applied column (only if env var is set).
+    if _track_cleaning_steps_enabled():
+        if _CLEANING_METADATA_COL not in df.columns:
+            df[_CLEANING_METADATA_COL] = ""
+        df[_CLEANING_METADATA_COL] = (
+            df[_CLEANING_METADATA_COL].astype(str) + step_name + ";"
+        )
     return df
 
 
@@ -1682,10 +1737,27 @@ def _is_already_cleaned(df: Any, step_name: str) -> bool:
     -------
     bool
         True if the step appears to have been applied already.
+
+    Notes
+    -----
+    P2-5 ROOT FIX (v82): checks ``df.attrs["_cleaning_steps_applied"]``
+    FIRST (the canonical metadata store), then falls back to the
+    ``_cleaning_applied`` column for input DataFrames that already have
+    it (e.g. re-cleaning a previously-cleaned frame produced when the
+    env var was set).
     """
-    if _CLEANING_METADATA_COL not in df.columns:
-        return False
-    return df[_CLEANING_METADATA_COL].str.contains(step_name).any()
+    # Canonical path: df.attrs.
+    steps = df.attrs.get(_CLEANING_STEPS_ATTR, [])
+    if isinstance(steps, list) and step_name in steps:
+        return True
+    # Backward-compat fallback: the _cleaning_applied column (if present
+    # on the INPUT DataFrame — we no longer add it on output by default).
+    if _CLEANING_METADATA_COL in df.columns:
+        try:
+            return df[_CLEANING_METADATA_COL].str.contains(step_name).any()
+        except Exception:
+            return False
+    return False
 
 
 # ===========================================================================
@@ -2031,6 +2103,17 @@ def clean_drugs(
     out.attrs["_input_fingerprint"] = input_fingerprint
     out.attrs["_output_fingerprint"] = output_fingerprint
     out.attrs["cleaning_metrics"] = dict(_metrics)
+
+    # P2-5 ROOT FIX (v82): SAFETY NET — even if the operator opted in
+    # to the ``_cleaning_applied`` column via the
+    # ``CLEANING_TRACK_APPLIED_STEPS`` env var, strip it from the
+    # FINAL output so downstream DB loaders / phase2 graph ingestion /
+    # fingerprint computation never see it. The canonical metadata
+    # remains accessible via ``out.attrs["_cleaning_steps_applied"]``.
+    # The opt-in column is intended for INTERMEDIATE debugging, not
+    # for the production output schema.
+    if _CLEANING_METADATA_COL in out.columns:
+        out = out.drop(columns=[_CLEANING_METADATA_COL])
 
     # Audit log (GAP-S2)
     _audit_log(

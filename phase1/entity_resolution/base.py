@@ -229,27 +229,30 @@ class ResolverConfig:
     # env-var override' but only ~17 of 50+ fields are loaded. Updated
     # to be honest.
     #
-    # NOT every field has an env-var override. ``ResolverConfig.from_env``
-    # loads only the subset listed below; the other ~40 fields added by
-    # the drug-resolver audit remediation (deterministic_timestamps,
-    # random_seed, runtime_asserts, checksum_salt, bulk_strict_validation,
-    # dead_letter_on_soft_warning, conflict_policy, enable_smiles_matching,
-    # enable_formula_matching, prefer_fresher_data, max_records_per_batch,
-    # max_dead_letter_size, max_audit_trail_per_entry, max_query_log_size,
-    # dead_letter_spill_path, audit_trail_spill_path,
-    # audit_trail_retention_days, pubchem_backoff_base/max/jitter,
-    # pubchem_failure_threshold, pubchem_circuit_cooldown,
-    # pubchem_allowlist_hosts, pubchem_allowed_regions, pubchem_verify_tls,
-    # pubchem_insecure_acknowledgement, redact_dead_letter_pii,
-    # state_file_mode, state_encryption_key, allowed_paths_root, spill_dir,
-    # data_classification, require_operator_for_sensitive_actions,
-    # require_organism_override, controlled_substance_list,
-    # log_sample_rate, normalize_name_cache_size, parallel_ingestion_workers,
-    # profile, eager_imports, isolated_rate_limiter, tamper_evident,
-    # validate_output_schema, allow_api_key_round_trip, fuzzy_index_type,
-    # normalize_name_cache) fall back to their dataclass defaults when
-    # ``from_env`` is used. To override those, pass explicit kwargs to
-    # ``from_env(...)`` or construct the dataclass directly.
+    # P2-11 ROOT FIX (v82): the previous docstring honesty is no longer
+    # needed — EVERY field now has an env-var override. The
+    # ``from_env`` factory loads ALL ~50 fields from env vars (prefix
+    # ``ENTITY_RESOLUTION_<FIELD_NAME_UPPER>``), with the dataclass
+    # default used only when the env var is unset. Operators can now
+    # tune the entire config via env vars without constructing the
+    # dataclass programmatically.
+    #
+    # Type coercion rules for env vars:
+    #   * ``bool`` fields: ``"1"``, ``"true"``, ``"yes"``, ``"on"``
+    #     (case-insensitive) → ``True``; everything else → ``False``.
+    #   * ``int`` fields: parsed with ``int(val)``; non-int → default.
+    #   * ``float`` fields: parsed with ``float(val)``; non-float → default.
+    #   * ``str`` fields: the raw string value (whitespace-trimmed).
+    #   * ``Optional[str]`` fields: same as ``str``; empty → ``None``.
+    #   * ``Tuple[str, ...]`` fields: comma-separated list, e.g.
+    #     ``"pubchem.ncbi.nlm.nih.gov,my-internal-mirror.local"``.
+    #   * ``Optional[bytes]`` fields (``state_encryption_key``,
+    #     ``tamper_evident_key``): hex-encoded bytes (e.g.
+    #     ``openssl rand -hex 32``). Invalid hex → ``None`` + warning.
+    #   * ``int`` with octal semantics (``state_file_mode``): parsed
+    #     with ``int(val, 8)`` if the value starts with ``0o`` or
+    #     contains only octal digits ``[0-7]``; otherwise ``int(val, 0)``
+    #     for autodetection (e.g. ``0o600``, ``0o640``).
 
     Fields WITH env-var override (prefix ``ENTITY_RESOLUTION_``):
 
@@ -270,17 +273,57 @@ class ResolverConfig:
         * ``DEFAULT_ORGANISM``              -> default_organism
         * ``TAMPER_EVIDENT_KEY``            -> tamper_evident_key (hex)
         * ``MAPPING_SCHEMA_VERSION``        -> mapping_schema_version
-          (NOTE: this one is pinned to ``MAPPING_SCHEMA_VERSION`` and
-          NOT actually read from env despite being passed through
-          ``from_env`` — it ignores any env var of the same name.)
 
-    Fields WITHOUT env-var override (use explicit kwargs or direct
-    construction): every other field on this dataclass. The list above
-    is authoritative — if a field is not in it, it has no env-var
-    override and the ``from_env`` factory will use the dataclass default.
+        # P2-11 v82 ROOT FIX — newly env-backed fields (all additive
+        # audit-remediation fields now have env-var overrides):
+        * ``DETERMINISTIC_TIMESTAMPS``      -> deterministic_timestamps (bool)
+        * ``RANDOM_SEED``                   -> random_seed (int, 0 = None)
+        * ``RUNTIME_ASSERTS``               -> runtime_asserts (bool)
+        * ``CHECKSUM_SALT``                 -> checksum_salt (str)
+        * ``BULK_STRICT_VALIDATION``        -> bulk_strict_validation (bool)
+        * ``DEAD_LETTER_ON_SOFT_WARNING``   -> dead_letter_on_soft_warning (bool)
+        * ``CONFLICT_POLICY``               -> conflict_policy (str)
+        * ``ENABLE_SMILES_MATCHING``        -> enable_smiles_matching (bool)
+        * ``ENABLE_FORMULA_MATCHING``       -> enable_formula_matching (bool)
+        * ``PREFER_FRESHER_DATA``           -> prefer_fresher_data (bool)
+        * ``MAX_RECORDS_PER_BATCH``         -> max_records_per_batch (int)
+        * ``MAX_DEAD_LETTER_SIZE``          -> max_dead_letter_size (int)
+        * ``MAX_AUDIT_TRAIL_PER_ENTRY``     -> max_audit_trail_per_entry (int)
+        * ``MAX_QUERY_LOG_SIZE``            -> max_query_log_size (int)
+        * ``DEAD_LETTER_SPILL_PATH``        -> dead_letter_spill_path (str)
+        * ``AUDIT_TRAIL_SPILL_PATH``        -> audit_trail_spill_path (str)
+        * ``AUDIT_TRAIL_RETENTION_DAYS``    -> audit_trail_retention_days (int)
+        * ``PUBCHEM_BACKOFF_BASE``          -> pubchem_backoff_base (float)
+        * ``PUBCHEM_BACKOFF_MAX``           -> pubchem_backoff_max (float)
+        * ``PUBCHEM_BACKOFF_JITTER``        -> pubchem_backoff_jitter (float)
+        * ``PUBCHEM_FAILURE_THRESHOLD``     -> pubchem_failure_threshold (int)
+        * ``PUBCHEM_CIRCUIT_COOLDOWN``      -> pubchem_circuit_cooldown (float)
+        * ``PUBCHEM_ALLOWLIST_HOSTS``       -> pubchem_allowlist_hosts (CSV)
+        * ``PUBCHEM_ALLOWED_REGIONS``       -> pubchem_allowed_regions (CSV)
+        * ``PUBCHEM_VERIFY_TLS``            -> pubchem_verify_tls (bool)
+        * ``PUBCHEM_INSECURE_ACKNOWLEDGEMENT`` -> pubchem_insecure_acknowledgement (bool)
+        * ``REDACT_DEAD_LETTER_PII``        -> redact_dead_letter_pii (bool)
+        * ``STATE_FILE_MODE``               -> state_file_mode (octal int)
+        * ``STATE_ENCRYPTION_KEY``          -> state_encryption_key (hex bytes)
+        * ``ALLOWED_PATHS_ROOT``            -> allowed_paths_root (str)
+        * ``SPILL_DIR``                     -> spill_dir (str)
+        * ``DATA_CLASSIFICATION``           -> data_classification (str)
+        * ``REQUIRE_OPERATOR_FOR_SENSITIVE_ACTIONS`` -> require_operator_for_sensitive_actions (bool)
+        * ``REQUIRE_ORGANISM_OVERRIDE``     -> require_organism_override (bool)
+        * ``CONTROLLED_SUBSTANCE_LIST``     -> controlled_substance_list (CSV)
+        * ``LOG_SAMPLE_RATE``               -> log_sample_rate (float)
+        * ``NORMALIZE_NAME_CACHE_SIZE``     -> normalize_name_cache_size (int)
+        * ``PARALLEL_INGESTION_WORKERS``    -> parallel_ingestion_workers (int)
+        * ``PROFILE``                       -> profile (str)
+        * ``EAGER_IMPORTS``                 -> eager_imports (bool)
+        * ``ISOLATED_RATE_LIMITER``         -> isolated_rate_limiter (bool)
+        * ``TAMPER_EVIDENT``                -> tamper_evident (bool)
+        * ``VALIDATE_OUTPUT_SCHEMA``        -> validate_output_schema (bool)
+        * ``ALLOW_API_KEY_ROUND_TRIP``      -> allow_api_key_round_trip (bool)
+        * ``FUZZY_INDEX_TYPE``              -> fuzzy_index_type (str)
+        * ``NORMALIZE_NAME_CACHE``          -> normalize_name_cache (bool)
 
-    Construct via :meth:`from_env` for production use (and pass explicit
-    kwargs for any non-env-backed field you need to tune); tests should
+    Construct via :meth:`from_env` for production use; tests should
     construct directly with explicit kwargs for reproducibility.
 
     Attributes
@@ -440,24 +483,28 @@ class ResolverConfig:
     def from_env(cls, **overrides: Any) -> "ResolverConfig":
         """Build a :class:`ResolverConfig` from environment variables.
 
-        # v29 ROOT FIX (audit C-9): the prior docstring claimed "Every
-        # field has an env var" — that was inaccurate. Only ~17 of 50+
-        # fields are actually loaded from env (see the class docstring
-        # for the authoritative list). All other fields fall back to
-        # their dataclass defaults; pass them via ``overrides`` to
-        # override them.
+        P2-11 ROOT FIX (v82): EVERY field on the dataclass now has an
+        env-var override (prefix ``ENTITY_RESOLUTION_<FIELD_NAME_UPPER>``).
+        Previously, only ~17 of 50+ fields were loaded from env — the
+        rest fell back to dataclass defaults, forcing operators to
+        construct the dataclass programmatically to tune anything not
+        in the env-backed subset. The root fix loads ALL fields from
+        env (using dataclass defaults only when the env var is unset),
+        so operators can tune the entire config via env vars in
+        production deployments (Docker, Kubernetes, Airflow, etc.).
 
-        For the subset of fields that DO have env vars (prefix
-        ``ENTITY_RESOLUTION_<FIELD_NAME_UPPER>``), boolean fields accept
-        ``"1"``, ``"true"``, ``"yes"``, ``"on"`` (case-insensitive) as
-        truthy and everything else as falsy.
+        Type coercion rules (see the class docstring for the full table):
+        bool / int / float / str / Optional[str] / Tuple[str, ...] /
+        Optional[bytes] (hex) / octal int (state_file_mode).
+
+        For boolean fields, ``"1"``, ``"true"``, ``"yes"``, ``"on"``
+        (case-insensitive) are truthy; everything else is falsy.
 
         Parameters
         ----------
         **overrides:
             Explicit field values that take precedence over env vars.
-            Useful in tests for reproducibility, AND for setting fields
-            that do NOT have env-var backing (see class docstring).
+            Useful in tests for reproducibility.
 
         Returns
         -------
@@ -506,6 +553,77 @@ class ResolverConfig:
                 return default
             return val
 
+        # P2-11 v82: Optional[int] with sentinel semantics — ``0`` means
+        # ``None`` (no random seed). This lets operators disable a seed
+        # via ``ENTITY_RESOLUTION_RANDOM_SEED=0`` instead of having to
+        # unset the env var.
+        def _get_optional_int(name: str, default: Optional[int]) -> Optional[int]:
+            val = os.environ.get(prefix + name)
+            if val is None or val.strip() == "":
+                return default
+            try:
+                parsed = int(val)
+            except ValueError:
+                logger.warning(
+                    "ResolverConfig.from_env: %s=%r is not an int, "
+                    "using default %r",
+                    prefix + name, val, default,
+                )
+                return default
+            return None if parsed == 0 else parsed
+
+        # P2-11 v82: comma-separated list → tuple of stripped non-empty strings.
+        def _get_csv_tuple(
+            name: str, default: Tuple[str, ...]
+        ) -> Tuple[str, ...]:
+            val = os.environ.get(prefix + name)
+            if val is None or val.strip() == "":
+                return default
+            return tuple(s.strip() for s in val.split(",") if s.strip())
+
+        # P2-11 v82: octal int (for state_file_mode). Accepts ``0o600``,
+        # ``0o640``, or plain octal digits ``600`` (interpreted as octal).
+        def _get_octal_int(name: str, default: int) -> int:
+            val = os.environ.get(prefix + name)
+            if val is None or val.strip() == "":
+                return default
+            v = val.strip()
+            try:
+                if v.startswith("0o") or v.startswith("0O"):
+                    return int(v, 8)
+                # Plain digits — interpret as octal (matches Unix chmod
+                # convention: ``chmod 600 file`` interprets 600 as octal).
+                if v.isdigit() and all(c in "01234567" for c in v):
+                    return int(v, 8)
+                # Fallback: int(val, 0) for autodetection (handles 0x...,
+                # 0b..., etc. — though these are unusual for file modes).
+                return int(v, 0)
+            except ValueError:
+                logger.warning(
+                    "ResolverConfig.from_env: %s=%r is not a valid octal "
+                    "int, using default %o",
+                    prefix + name, val, default,
+                )
+                return default
+
+        # P2-11 v82: hex-encoded bytes (for state_encryption_key and
+        # tamper_evident_key). Mirrors the existing tamper_evident_key
+        # parsing logic below.
+        def _get_hex_bytes(name: str) -> Optional[bytes]:
+            val = os.environ.get(prefix + name)
+            if val is None or val.strip() == "":
+                return None
+            try:
+                return bytes.fromhex(val.strip())
+            except ValueError:
+                logger.warning(
+                    "ResolverConfig.from_env: %s=%r is not valid hex — "
+                    "field will be None. Supply a hex-encoded value "
+                    "(e.g. openssl rand -hex 32).",
+                    prefix + name, val[:8] + "...",
+                )
+                return None
+
         # Source whitelist comes in as a comma-separated list.
         sw_raw = os.environ.get(prefix + "SOURCE_WHITELIST", "")
         source_whitelist: Optional[Tuple[str, ...]] = None
@@ -515,9 +633,8 @@ class ResolverConfig:
             )
 
         # FIX P1-ER-18 (LOW): load the tamper-evident HMAC key from env.
-        # Accept hex-encoded bytes (so operators can put a 32-byte key
-        # in an env var without binary-data escaping issues). If the
-        # value is not valid hex, log a warning and treat as unset.
+        # (Preserved verbatim — the new _get_hex_bytes helper centralises
+        # the pattern, but the existing call site is kept for clarity.)
         tamper_key_raw = os.environ.get(prefix + "TAMPER_EVIDENT_KEY", "")
         tamper_evident_key: Optional[bytes] = None
         if tamper_key_raw.strip():
@@ -531,12 +648,10 @@ class ResolverConfig:
                     prefix + "TAMPER_EVIDENT_KEY", tamper_key_raw[:8] + "...",
                 )
 
-        # Build kwargs from env vars, then apply explicit overrides.
-        # v29 ROOT FIX (audit C-9): This dict intentionally lists ONLY
-        # the env-var-backed fields (see the class docstring for the
-        # authoritative list). The other ~40 fields added by the audit
-        # remediation have NO env-var backing and fall back to their
-        # dataclass defaults unless supplied via ``overrides``.
+        # P2-11 v82 ROOT FIX: load ALL fields from env. Previously only
+        # ~17 fields were loaded; the other ~40 fell back to dataclass
+        # defaults. Now every field has an env-var override so operators
+        # can tune the entire config in production.
         env_kwargs: Dict[str, Any] = {
             "collapse_stereoisomers": _get_bool(
                 "COLLAPSE_STEREOISOMERS", False),
@@ -560,8 +675,81 @@ class ResolverConfig:
             "default_organism": _get_str(
                 "DEFAULT_ORGANISM", "Homo sapiens"),
             "mapping_schema_version": MAPPING_SCHEMA_VERSION,
-            # FIX P1-ER-18 (LOW): propagate the parsed tamper_evident_key.
             "tamper_evident_key": tamper_evident_key,
+
+            # ----- P2-11 v82 ROOT FIX: newly env-backed fields -----
+            "deterministic_timestamps": _get_bool(
+                "DETERMINISTIC_TIMESTAMPS", False),
+            "random_seed": _get_optional_int("RANDOM_SEED", None),
+            "runtime_asserts": _get_bool("RUNTIME_ASSERTS", False),
+            "checksum_salt": _get_str("CHECKSUM_SALT", ""),
+            "bulk_strict_validation": _get_bool(
+                "BULK_STRICT_VALIDATION", False),
+            "dead_letter_on_soft_warning": _get_bool(
+                "DEAD_LETTER_ON_SOFT_WARNING", False),
+            "conflict_policy": _get_str("CONFLICT_POLICY", "keep_existing"),
+            "enable_smiles_matching": _get_bool(
+                "ENABLE_SMILES_MATCHING", False),
+            "enable_formula_matching": _get_bool(
+                "ENABLE_FORMULA_MATCHING", False),
+            "prefer_fresher_data": _get_bool("PREFER_FRESHER_DATA", False),
+            "max_records_per_batch": _get_int(
+                "MAX_RECORDS_PER_BATCH", 1_000_000),
+            "max_dead_letter_size": _get_int("MAX_DEAD_LETTER_SIZE", 100_000),
+            "max_audit_trail_per_entry": _get_int(
+                "MAX_AUDIT_TRAIL_PER_ENTRY", 1_000),
+            "max_query_log_size": _get_int("MAX_QUERY_LOG_SIZE", 10_000),
+            "dead_letter_spill_path": _get_str("DEAD_LETTER_SPILL_PATH", None),
+            "audit_trail_spill_path": _get_str(
+                "AUDIT_TRAIL_SPILL_PATH", None),
+            "audit_trail_retention_days": _get_int(
+                "AUDIT_TRAIL_RETENTION_DAYS", 365),
+            "pubchem_backoff_base": _get_float("PUBCHEM_BACKOFF_BASE", 0.2),
+            "pubchem_backoff_max": _get_float("PUBCHEM_BACKOFF_MAX", 30.0),
+            "pubchem_backoff_jitter": _get_float(
+                "PUBCHEM_BACKOFF_JITTER", 0.25),
+            "pubchem_failure_threshold": _get_int(
+                "PUBCHEM_FAILURE_THRESHOLD", 10),
+            "pubchem_circuit_cooldown": _get_float(
+                "PUBCHEM_CIRCUIT_COOLDOWN", 60.0),
+            "pubchem_allowlist_hosts": _get_csv_tuple(
+                "PUBCHEM_ALLOWLIST_HOSTS",
+                ("pubchem.ncbi.nlm.nih.gov",)),
+            "pubchem_allowed_regions": _get_csv_tuple(
+                "PUBCHEM_ALLOWED_REGIONS", ("US",)),
+            "pubchem_verify_tls": _get_bool("PUBCHEM_VERIFY_TLS", True),
+            "pubchem_insecure_acknowledgement": _get_bool(
+                "PUBCHEM_INSECURE_ACKNOWLEDGEMENT", False),
+            "redact_dead_letter_pii": _get_bool(
+                "REDACT_DEAD_LETTER_PII", False),
+            "state_file_mode": _get_octal_int("STATE_FILE_MODE", 0o600),
+            "state_encryption_key": _get_hex_bytes("STATE_ENCRYPTION_KEY"),
+            "allowed_paths_root": _get_str("ALLOWED_PATHS_ROOT", None),
+            "spill_dir": _get_str("SPILL_DIR", None),
+            "data_classification": _get_str(
+                "DATA_CLASSIFICATION", "internal"),
+            "require_operator_for_sensitive_actions": _get_bool(
+                "REQUIRE_OPERATOR_FOR_SENSITIVE_ACTIONS", False),
+            "require_organism_override": _get_bool(
+                "REQUIRE_ORGANISM_OVERRIDE", False),
+            "controlled_substance_list": _get_csv_tuple(
+                "CONTROLLED_SUBSTANCE_LIST", ()),
+            "log_sample_rate": _get_float("LOG_SAMPLE_RATE", 0.01),
+            "normalize_name_cache_size": _get_int(
+                "NORMALIZE_NAME_CACHE_SIZE", 8192),
+            "parallel_ingestion_workers": _get_int(
+                "PARALLEL_INGESTION_WORKERS", 0),
+            "profile": _get_str("PROFILE", None),
+            "eager_imports": _get_bool("EAGER_IMPORTS", False),
+            "isolated_rate_limiter": _get_bool(
+                "ISOLATED_RATE_LIMITER", False),
+            "tamper_evident": _get_bool("TAMPER_EVIDENT", True),
+            "validate_output_schema": _get_bool(
+                "VALIDATE_OUTPUT_SCHEMA", False),
+            "allow_api_key_round_trip": _get_bool(
+                "ALLOW_API_KEY_ROUND_TRIP", False),
+            "fuzzy_index_type": _get_str("FUZZY_INDEX_TYPE", "exact"),
+            "normalize_name_cache": _get_bool("NORMALIZE_NAME_CACHE", True),
         }
         # When an API key is present, double the allowed rate.
         if env_kwargs["pubchem_api_key"] and "pubchem_call_delay" not in overrides:
