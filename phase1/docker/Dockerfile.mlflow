@@ -1,0 +1,48 @@
+# v75 ROOT FIX (T-027 — mlflow service re-installs mlflow on every start):
+# The v74 mlflow service used ``image: python:3.11-slim`` and ran
+# ``pip install mlflow psycopg2-binary`` in the ``command:`` field. This
+# re-installed mlflow on EVERY ``docker-compose up`` (30-60s wait), and
+# required network access at start time. ROOT FIX: bake mlflow +
+# psycopg2-binary into a custom image so the container starts in ~1s
+# with no network dependency.
+#
+# The image is tagged ``drugos-mlflow:latest`` by docker-compose's
+# ``build:`` directive. The ``command:`` field in docker-compose.yml
+# now just runs ``mlflow server`` directly — no pip install.
+FROM python:3.11-slim
+
+# Install build deps for psycopg2-binary (binary wheel — usually no
+# compile needed, but install libpq just in case the wheel falls back
+# to source build on an architecture without a pre-built wheel).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Pin mlflow to a stable version. The version is intentionally NOT
+# ``latest`` — mlflow minor versions regularly break the tracking
+# server's REST API contract, and the Phase 2 mlflow_tracker.py module
+# is tested against this specific version.
+RUN pip install --no-cache-dir \
+    "mlflow==2.15.1" \
+    "psycopg2-binary==2.9.9" \
+    "gunicorn==22.0.0"
+
+# Default MLflow port. The healthcheck in docker-compose.yml hits
+# ``/health`` on this port.
+EXPOSE 5000
+
+# MLflow artifact root inside the container. Mapped to the
+# ``mlflow_data`` volume in docker-compose.yml.
+RUN mkdir -p /mlruns
+VOLUME ["/mlruns"]
+
+# Run mlflow server with gunicorn (production-grade WSGI server, ships
+# with mlflow). 4 workers handle concurrent Phase 2 training runs
+# logging to the same tracking server. The ``--access-logfile -`` flag
+# sends access logs to stdout so ``docker-compose logs mlflow`` shows
+# them.
+CMD ["mlflow", "server", \
+     "--host", "0.0.0.0", \
+     "--port", "5000", \
+     "--workers", "4", \
+     "--access-logfile", "-"]

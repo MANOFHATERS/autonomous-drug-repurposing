@@ -1,0 +1,98 @@
+{
+  "pipeline_version": "2.0.0-week2",
+  "schema_version": "2.0.0",
+  "step1": {
+    "validation": {
+      "passed": true,
+      "triples": 81
+    },
+    "elapsed": 0.019187211990356445,
+    "input_checksums": {
+      "drugbank_drugs.csv": "d637d7a73a536a0b04eb781e930de718bcdce3437d14ce53f0172907adc27b14",
+      "drugbank_interactions.csv.gz": "0e16efec1f3724d26d69dd56b3a4014bab7cc79adb3468d8b3890538395dae1c",
+      "omim_gene_disease_associations.csv": "549d4123705e52652d2899df6003ddc4e36bfa4c0ff9cf11a97b26c88e3edd58",
+      "drugbank_indications.csv": "4cb9e9c54844f076c37a687c3c0b350e76204d19787934869074fef99437fd7e",
+      "chembl_drugs.csv": "332ae5ea8904c8342d7ed47b206711f0b540159a7d424b99f0ee6f6a2763a617",
+      "proteins.csv": "b1469b64cda076a97a2f534ba63bf3f21f445488e473c71b8b95771e52817d2b",
+      "protein_protein_interactions.csv": "86ce932ffe886cd1cd0f8b8403fd573ea236b96fbc82e206d85a0a682553fde0",
+      "gene_disease_associations.csv": "541ce559ad462c8f029eda50057586406c33de109b825dfc3e6090c6cdf22a8e",
+      "pubchem_enrichment.csv": "81b8f291ef133edb05a4e88743fd7938ab426ec2c22bf9376393814192523a67",
+      "chembl_activities_clean.csv": "92ec8c247aee1f9e42581cbef66ac1eba9bd01ef3c65f528e6ee078ce4b93199",
+      "omim_gene_disease_susceptibility.csv": "549d4123705e52652d2899df6003ddc4e36bfa4c0ff9cf11a97b26c88e3edd58"
+    },
+    "bridge_summary": {
+      "bridge_version": "1.1.0",
+      "sources_read": [
+        "drugs",
+        "interactions",
+        "omim_gda",
+        "indications",
+        "chembl_drugs",
+        "uniprot_proteins",
+        "string_ppi",
+        "disgenet_gda",
+        "pubchem_enrichment",
+        "chembl_activities",
+        "omim_susceptibility"
+      ],
+      "sources_attempted": [
+        "drugs",
+        "interactions",
+        "omim_gda",
+        "indications",
+        "chembl_drugs",
+        "uniprot_proteins",
+        "string_ppi",
+        "disgenet_gda",
+        "pubchem_enrichment",
+        "chembl_activities",
+        "omim_susceptibility"
+      ],
+      "nodes_staged": 63,
+      "edges_staged": 81,
+      "nodes_loaded": 63,
+      "edges_loaded": 81,
+      "edge_types_present": [
+        "(Compound, activates, Protein)",
+        "(Compound, allosterically_modulates, Protein)",
+        "(Compound, has_clinical_outcome, ClinicalOutcome)",
+        "(Compound, inhibits, Protein)",
+        "(Compound, targets, Protein)",
+        "(Compound, treats, Disease)",
+        "(Gene, associated_with, Disease)",
+        "(Gene, susceptible_to, Disease)",
+        "(Protein, interacts_with, Protein)",
+        "(Protein, participates_in, Pathway)"
+      ],
+      "warnings": [
+        "No Pathway nodes derivable from STRING PPI data (empty or all-singletons). The v43 fix attempts to derive Pathway nodes from STRING PPI connected components; if STRING data is missing, the DOCX 5-node-type contract is incomplete."
+      ],
+      "errors": [],
+      "backend": "csv"
+    }
+  },
+  "step2": {
+    "elapsed": 0.0,
+    "prebuilt": true
+  },
+  "step3": {
+    "error": "The 'neo4j' Python driver is not installed. Install it with: pip install neo4j>=5.0,<6.0",
+    "elapsed": 0.0009648799896240234
+  },
+  "step4": {
+    "skipped": true,
+    "reason": "Neo4j unavailable (step 3 failed)"
+  },
+  "step5": {
+    "skipped": true,
+    "reason": "Neo4j unavailable (step 3 failed)"
+  },
+  "step6": {
+    "skipped": true,
+    "reason": "Neo4j unavailable (step 3 failed)"
+  },
+  "step7": {
+    "skipped": true,
+    "reason": "Neo4j unavailable (step 3 failed)"
+  }
+}

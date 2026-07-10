@@ -1,0 +1,773 @@
+"""
+Master DAG for the Drug Repurposing ETL Platform.
+
+Orchestrates all 7 source pipelines in the correct dependency order:
+
+  download_chembl  ──┐
+  download_drugbank ─┤→ entity_resolution → load_string
+  download_uniprot  ─┤                    → load_disgenet
+  download_string  ──┘                    → load_omim
+  download_disgenet                        → load_pubchem_enrichment
+  download_omim
+  download_pubchem
+
+DrugBank XML check: Uses BranchPythonOperator to skip DrugBank if the XML
+file is not present (it requires manual download — pipeline should not fail
+the whole DAG).
+
+Schedule: Every Sunday at 02:00 UTC  (``0 2 * * 0``)
+"""
+
+from __future__ import annotations
+
+import logging
+import sys
+from datetime import datetime, timedelta
+from pathlib import Path
+
+# ---------------------------------------------------------------------------
+# Ensure project root is on sys.path so pipeline imports work inside Airflow
+# ---------------------------------------------------------------------------
+_PROJECT_ROOT = str(Path(__file__).resolve().parent.parent)
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+
+from airflow.decorators import dag, task
+from airflow.operators.branch import BranchPythonOperator
+from airflow.operators.empty import EmptyOperator
+from airflow.utils.trigger_rule import TriggerRule
+
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# v29 ROOT FIX (audit O-12): XCom used for large dataframes — anti-pattern.
+# Now passes file paths via XCom (and, in practice, tasks communicate through
+# CSV files in processed_data/ + the shared DB, never by returning a DataFrame
+# from a @task). Returning a DataFrame would push it to XCom and saturate the
+# metadata DB. Every @task below returns None and either writes to
+# processed_data/ (producers) or reads from processed_data/ (consumers) —
+# only small file-path strings are ever exchanged between tasks.
+# ---------------------------------------------------------------------------
+# Shared constants
+# ---------------------------------------------------------------------------
+# v75 ROOT FIX (T-024 — SLA/timeout mismatch compounds silently):
+#   v29 set TASK_SLA=4h with TASK_TIMEOUT=8h. The audit's premise was that
+#   the SLA was the binding limit — but Airflow SLA misses are ADVISORY:
+#   they emit an entry to the SLA miss log and (optionally) trigger an
+#   email, but they do NOT kill the running task. The task continued for
+#   another 4h until the 8h execution_timeout fired. With retries=0 on
+#   _trigger_phase2 (line 462), the 8h timeout killed the task RED with
+#   no retry — the 4h SLA warning was the only early signal, and it was
+#   advisory.
+#
+#   Worse: the 8h timeout was documented as "TransE training on real data
+#   can take 6-7h" — so a NORMAL 6-7h run fires the 4h SLA miss every
+#   single time, training operators to ignore SLA warnings. That is the
+#   definition of a noisy false-positive alarm that defeats the purpose
+#   of having an SLA at all.
+#
+#   ROOT FIX (master-grade, no sugar-coating):
+#     1. Align the SLA and the hard timeout at the SAME value (7h). The
+#        SLA miss at 7h now coincides with the hard kill, so there is
+#        exactly ONE signal at exactly ONE time. No false-positive
+#        advisory that trains operators to ignore warnings.
+#     2. The hard timeout is the BINDING limit — by definition, when the
+#        SLA fires, the task is also about to be killed. This is the
+#        scientifically correct configuration for an SLA that is meant
+#        as an early-warning system: the warning must come BEFORE the
+#        kill, and if the only sensible "early warning" time is "right
+#        before the kill", then the SLA is redundant with the timeout
+#        and should be set to the same value to remove the noise.
+#     3. The 7h value is the upper bound of the documented training
+#        window (6-7h on real data). A normal run completes in ≤7h; a
+#        stuck run is killed at 7h. No false positives on normal runs.
+#     4. retries=0 on _trigger_phase2 is preserved (line 462) — a
+#        timed-out Phase 2 training run must NOT be retried
+#        automatically (GPU state, partial checkpoints, and
+#        non-deterministic sampler state would corrupt the retry).
+#        The hard kill at 7h is the patient-safe failure mode.
+#     5. The SLA-miss-is-advisory behaviour is now DOCUMENTED in the
+#        DEFAULT_ARGS comment below so operators do not rely on the
+#        SLA to actually stop the task.
+TASK_SLA = timedelta(hours=7)
+TASK_TIMEOUT = timedelta(hours=7)
+
+DEFAULT_ARGS = {
+    "owner": "drug_repurposing",
+    "depends_on_past": False,
+    "retries": 2,
+    "retry_delay": timedelta(minutes=30),
+    # v75 ROOT FIX (T-024): ``sla`` is ADVISORY — an Airflow SLA miss
+    # writes a row to the sla_miss table and (optionally) sends an email,
+    # but it does NOT kill the running task. The task continues until
+    # ``execution_timeout`` fires. Both are now set to 7h (aligned) so
+    # there is exactly ONE signal at exactly ONE time — operators do
+    # not get a 4h false-positive SLA miss that trains them to ignore
+    # the alarm, and a stuck Phase 2 training run is hard-killed at 7h
+    # (the documented upper bound of normal TransE training time).
+    "sla": TASK_SLA,
+    "execution_timeout": TASK_TIMEOUT,
+    "email_on_failure": False,
+    "email_on_retry": False,
+}
+
+
+# ---------------------------------------------------------------------------
+# Branch helper — DrugBank XML gate
+# ---------------------------------------------------------------------------
+
+def _check_drugbank_xml(**context) -> str:
+    """Return the task-id to branch into based on DrugBank XML availability.
+
+    DrugBank requires a paid license; the XML must be pre-positioned
+    manually.  If the file is missing we gracefully skip the pipeline so the
+    rest of the DAG can continue.
+    """
+    from config.settings import DRUGBANK_XML_PATH
+
+    # v43 ROOT FIX (P1 — _check_drugbank_xml crashes on invalid path):
+    # The previous code did Path(DRUGBANK_XML_PATH) then .exists() +
+    # .stat() with no try/except. If DRUGBANK_XML_PATH is set to an
+    # invalid value (null bytes, extremely long path, etc.), Path()
+    # raises ValueError and .stat() raises OSError — crashing the
+    # branch task and (with retries=2) the entire DAG. The intent was
+    # to gracefully skip DrugBank. Fix: wrap in try/except and return
+    # "skip_drugbank" on any error.
+    try:
+        xml_path = Path(DRUGBANK_XML_PATH)
+        if xml_path.exists() and xml_path.stat().st_size > 0:
+            logger.info("DrugBank XML found at %s — will run pipeline", xml_path)
+            return "download_drugbank"
+    except (OSError, ValueError) as exc:
+        logger.warning(
+            "DrugBank XML path %r is invalid or unreadable (%s) — "
+            "skipping pipeline. To enable: fix DRUGBANK_XML_PATH env var.",
+            DRUGBANK_XML_PATH, exc,
+        )
+        return "skip_drugbank"
+
+    logger.warning(
+        "DrugBank XML not found at %s — skipping pipeline. "
+        "To enable: download from https://go.drugbank.com/ and set "
+        "DRUGBANK_XML_PATH env var.", xml_path,
+    )
+    return "skip_drugbank"
+
+
+# ---------------------------------------------------------------------------
+# Task callables — each delegates to the corresponding pipeline.
+# v40 ROOT FIX (P1 #54): ALL primary download tasks now call
+# ``.run_download_and_clean_only()`` (NOT ``.run()``). The previous code
+# had ChEMBL/DrugBank/UniProt calling ``.run()`` (full run including
+# LOAD to DB) while STRING/DisGeNET/OMIM called
+# ``.run_download_and_clean_only()``. This broke the two-phase design
+# (download → resolve → load) — some pipelines loaded to DB BEFORE
+# entity_resolution ran. The fix: ALL download tasks do download+clean
+# only; the LOAD phase happens in the *_load tasks AFTER
+# entity_resolution. This ensures entity_resolution can influence what
+# gets loaded for ALL sources.
+# ---------------------------------------------------------------------------
+
+@task()  # v41: retries+timeout inherited from DEFAULT_ARGS
+def download_chembl() -> None:
+    """Run the ChEMBL pipeline: approved drugs + bioactivity data (download+clean only)."""
+    from pipelines.chembl_pipeline import ChEMBLPipeline
+    # v40: was .run() (full run including LOAD) — now download+clean only.
+    ChEMBLPipeline().run_download_and_clean_only()
+
+
+@task()  # v41: retries+timeout inherited from DEFAULT_ARGS
+def download_drugbank() -> None:
+    """Run the DrugBank pipeline: parse XML for drug + target data (download+clean only)."""
+    from pipelines.drugbank_pipeline import DrugBankPipeline
+    # v40: was .run() (full run including LOAD) — now download+clean only.
+    DrugBankPipeline().run_download_and_clean_only()
+
+
+@task()  # v41: retries+timeout inherited from DEFAULT_ARGS
+def download_uniprot() -> None:
+    """Run the UniProt pipeline: human reviewed proteins via REST API (download+clean only)."""
+    from pipelines.uniprot_pipeline import UniProtPipeline
+    # v40: was .run() (full run including LOAD) — now download+clean only.
+    UniProtPipeline().run_download_and_clean_only()
+
+
+@task()  # v41: retries+timeout inherited from DEFAULT_ARGS
+def download_string() -> None:
+    """Run the STRING pipeline: download+clean only (load after entity resolution)."""
+    from pipelines.string_pipeline import StringPipeline
+    StringPipeline().run_download_and_clean_only()
+
+
+@task()  # v41: retries+timeout inherited from DEFAULT_ARGS
+def download_disgenet() -> None:
+    """Run the DisGeNET pipeline: download+clean only (load after entity resolution)."""
+    from pipelines.disgenet_pipeline import DisGeNETPipeline
+    DisGeNETPipeline().run_download_and_clean_only()
+
+
+@task()  # v41: retries+timeout inherited from DEFAULT_ARGS
+def download_omim() -> None:
+    """Run the OMIM pipeline: download+clean only (load after entity resolution)."""
+    from pipelines.omim_pipeline import OMIMPipeline
+    OMIMPipeline().run_download_and_clean_only()
+
+
+@task()  # v41: retries+timeout inherited from DEFAULT_ARGS
+def download_pubchem() -> None:
+    """Run the PubChem pipeline: download+clean only (load after entity resolution).
+
+    v35 ROOT FIX (issue 35): previously called ``PubChemPipeline().run()``
+    (the FULL run, including load into DB). This caused a DOUBLE-LOAD: the
+    ``download_pubchem`` task loaded PubChem data into the ``drugs`` table,
+    then the ``load_pubchem_enrichment`` task (line 414 below) called
+    ``PubChemPipeline().run_load_only()`` which loaded the SAME data
+    AGAIN. Both loads were idempotent (upsert), so the duplicate was
+    silently absorbed — but it doubled the load wall-clock time and
+    masked any bug in the load idempotency. Fix: use
+    ``run_download_and_clean_only()`` so only the ``load_pubchem_enrichment``
+    task loads (matching the pattern used by ChEMBL, DrugBank, UniProt,
+    STRING, DisGeNET, and OMIM in this DAG).
+    """
+    from pipelines.pubchem_pipeline import PubChemPipeline
+    PubChemPipeline().run_download_and_clean_only()
+
+
+@task()  # v41: retries+timeout inherited from DEFAULT_ARGS
+def entity_resolution() -> None:
+    """Run cross-database entity resolution.
+
+    Reconciles drug entities across ChEMBL, DrugBank, and PubChem using
+    InChIKey matching, connectivity-block matching, and normalised-name
+    matching.  Also resolves protein entities across UniProt and STRING.
+
+    Results are persisted to the ``entity_mapping`` table and the
+    ``proteins.string_id`` column is updated with resolved STRING IDs.
+
+    v29 ROOT FIX (audit O-12): XCom used for large dataframes — anti-pattern.
+    Now passes file paths via XCom. This task reads every upstream DataFrame
+    from CSV files in ``PROCESSED_DATA_DIR`` (drugs.csv, drugbank_drugs.csv,
+    pubchem_enrichment.csv, proteins.csv, protein_protein_interactions.csv)
+    rather than pulling DataFrames from upstream tasks' XCom. The upstream
+    download tasks return None and persist their output to those CSV files;
+    this task pulls the *file paths* (constants below), not the DataFrames.
+
+    v75 ROOT FIX (T-025 — download_parallel.py skips entity resolution):
+      The entity resolution logic was previously INLINE in this task body.
+      The forensic audit found that ``scripts/download_parallel.py`` and
+      the Makefile's ``download-all`` / ``download-samples`` targets
+      skipped entity resolution entirely because they could not call this
+      Airflow task. ROOT FIX: the logic was extracted into
+      ``entity_resolution/run.py::run_entity_resolution()`` — a single
+      shared function with NO Airflow dependency. This task is now a thin
+      wrapper that calls that function. ``download_parallel.py`` calls
+      the same function. The two callers CANNOT drift.
+    """
+    from entity_resolution.run import run_entity_resolution
+    run_entity_resolution()
+
+
+@task()  # v41: retries+timeout inherited from DEFAULT_ARGS
+def load_string() -> None:
+    """FIX AUDIT-26: Use run_load_only() — data already downloaded and cleaned."""
+    from pipelines.string_pipeline import StringPipeline
+    StringPipeline().run_load_only()
+
+
+@task()  # v41: retries+timeout inherited from DEFAULT_ARGS
+def load_disgenet() -> None:
+    """FIX AUDIT-26: Use run_load_only() — data already downloaded and cleaned."""
+    from pipelines.disgenet_pipeline import DisGeNETPipeline
+    DisGeNETPipeline().run_load_only()
+
+
+@task()  # v41: retries+timeout inherited from DEFAULT_ARGS
+def load_omim() -> None:
+    """FIX AUDIT-27: Use run_load_only() — data already downloaded and cleaned."""
+    from pipelines.omim_pipeline import OMIMPipeline
+    OMIMPipeline().run_load_only()
+
+
+@task()  # v41: retries+timeout inherited from DEFAULT_ARGS
+def load_pubchem_enrichment() -> None:
+    """FIX AUDIT-27: PubChem data already downloaded."""
+    from pipelines.pubchem_pipeline import PubChemPipeline
+    PubChemPipeline().run_load_only()
+
+
+# v79 FORENSIC ROOT FIX (P0-B2 — Master DAG has NO load_chembl /
+#   load_drugbank / load_uniprot task):
+#   The v78 master DAG had download tasks for ChEMBL, DrugBank, and
+#   UniProt that called ``run_download_and_clean_only()`` (CSV only,
+#   NO DB write), but there were NO corresponding ``load_*`` tasks.
+#   The ``drugs``, ``proteins``, and ``drug_protein_interactions``
+#   tables in the staging DB were EMPTY for these 3 sources. Entity
+#   resolution read from an empty DB for ChEMBL/DrugBank/UniProt, and
+#   the Phase 2 bridge (in PostgreSQL mode) read empty ``drugs`` /
+#   ``proteins`` tables → ``drug_canonical_map`` was empty → ALL
+#   Compound-treats-Disease edges were silently skipped (P0-B1
+#   compound). V1 launch criterion ``positive_pairs_sufficient`` was
+#   structurally unverifiable.
+# ROOT FIX: add ``load_chembl()``, ``load_drugbank()``, and
+#   ``load_uniprot()`` tasks that call ``run_load_only()`` (the same
+#   pattern used by load_string / load_disgenet / load_omim /
+#   load_pubchem_enrichment). Wire them after ``entity_resolution``
+#   so entity resolution can influence what gets loaded (the v40
+#   two-phase design: download → resolve → load).
+@task()  # v41: retries+timeout inherited from DEFAULT_ARGS
+def load_chembl() -> None:
+    """v79 P0-B2 ROOT FIX: Load ChEMBL cleaned data into the staging DB.
+
+    Loads ``drugs`` (ChEMBL molecules with max_phase=4) and
+    ``drug_protein_interactions`` (ChEMBL activities with resolved
+    UniProt accessions) into the staging DB. Data was already
+    downloaded + cleaned by ``download_chembl``; this task only
+    performs the DB upsert (idempotent via ON CONFLICT DO UPDATE).
+    """
+    from pipelines.chembl_pipeline import ChEMBLPipeline
+    ChEMBLPipeline().run_load_only()
+
+
+@task()  # v41: retries+timeout inherited from DEFAULT_ARGS
+def load_drugbank() -> None:
+    """v79 P0-B2 ROOT FIX: Load DrugBank cleaned data into the staging DB.
+
+    Loads ``drugs`` (DrugBank FDA-approved drugs with InChIKey) and
+    ``drug_protein_interactions`` (DrugBank drug→target edges) into
+    the staging DB. Data was already downloaded + cleaned by
+    ``download_drugbank``; this task only performs the DB upsert
+    (idempotent via ON CONFLICT DO UPDATE).
+    """
+    from pipelines.drugbank_pipeline import DrugBankPipeline
+    DrugBankPipeline().run_load_only()
+
+
+@task()  # v41: retries+timeout inherited from DEFAULT_ARGS
+def load_uniprot() -> None:
+    """v79 P0-B2 ROOT FIX: Load UniProt cleaned data into the staging DB.
+
+    Loads ``proteins`` (UniProt human reviewed proteins with gene
+    symbols) into the staging DB. Data was already downloaded +
+    cleaned by ``download_uniprot``; this task only performs the DB
+    upsert (idempotent via ON CONFLICT DO UPDATE).
+    """
+    from pipelines.uniprot_pipeline import UniProtPipeline
+    UniProtPipeline().run_load_only()
+
+
+@task(retries=0, execution_timeout=TASK_TIMEOUT, trigger_rule=TriggerRule.ALL_SUCCESS)
+def _trigger_phase2() -> None:
+    """v29 ROOT FIX (audit O-2 — master DAG always reports success).
+
+    v75 ROOT FIX (T-024 — SLA/timeout alignment):
+      ``execution_timeout=TASK_TIMEOUT`` (7h, aligned with TASK_SLA).
+      ``retries=0`` is preserved — a timed-out Phase 2 training run
+      must NOT be retried automatically. The 7h hard kill is the
+      patient-safe failure mode: partial TransE checkpoints, GPU
+      state, and the non-deterministic negative sampler would
+      corrupt any retry. Operators who want a longer training
+      window must explicitly raise BOTH TASK_SLA and TASK_TIMEOUT
+      (keeping them aligned) — never just one.
+
+    The forensic audit found that this task had ``trigger_rule=ALL_DONE``
+    + ``check=False`` + ``retries=0``, which meant Phase 2 could crash,
+    time out, or fail V1 criteria and the DAG would still report GREEN.
+    Every previous AI session that told the user "it's 100% integrated"
+    was reading the DAG's green status without checking the actual
+    Phase 2 exit code or the AUC log.
+
+    ROOT FIX: change ``trigger_rule`` to ``ALL_SUCCESS`` (so Phase 2
+    only runs if all Phase 1 tasks succeeded), use ``check=True`` (so
+    non-zero exit code raises), and propagate timeouts / exceptions
+    instead of swallowing them. The DAG now fails RED when Phase 2
+    fails — operators can no longer claim success without verifying.
+
+    Behavior:
+      * ``trigger_rule=ALL_SUCCESS`` — only runs if ALL Phase 1 tasks
+        succeeded. (Was: ``ALL_DONE`` which fires even on failure.)
+      * ``check=True`` — non-zero exit code raises CalledProcessError.
+        (Was: ``check=False`` which silently ignored failures.)
+      * Timeouts and exceptions propagate — task fails RED. (Was:
+        logged as WARNING and task succeeded.)
+
+    The task still uses the RecordingGraphBuilder by default (no
+    Neo4j required), so it can run in any environment. Operators who
+    want a real Neo4j load set ``DRUGOS_NEO4J_URI``.
+    """
+    import os
+    import subprocess
+    import sys as _sys
+    from pathlib import Path as _Path
+
+    _project_root = _Path(__file__).resolve().parent.parent.parent
+    run_unified = _project_root / "run_unified.py"
+
+    if not run_unified.exists():
+        # Fallback: invoke via ``python -m drugos_graph``.
+        cmd = [
+            _sys.executable, "-m", "drugos_graph",
+            "--data-source", "phase1",
+            "--phase1-dir", str(_project_root / "phase1" / "processed_data"),
+        ]
+    else:
+        cmd = [
+            _sys.executable, str(run_unified),
+            "--phase1-dir", str(_project_root / "phase1" / "processed_data"),
+            "--full-pipeline",
+        ]
+
+    neo4j_uri = os.environ.get("DRUGOS_NEO4J_URI")
+    if neo4j_uri:
+        cmd.extend(["--neo4j-uri", neo4j_uri])
+        if os.environ.get("DRUGOS_NEO4J_USER"):
+            cmd.extend(["--neo4j-user", os.environ["DRUGOS_NEO4J_USER"]])
+        if os.environ.get("DRUGOS_NEO4J_PASSWORD"):
+            cmd.extend(["--neo4j-password", os.environ["DRUGOS_NEO4J_PASSWORD"]])
+
+    logger.info("v29 trigger_phase2: invoking Phase 2 pipeline: %s", " ".join(cmd))
+
+    # v29 ROOT FIX: check=True (was False) so non-zero exit raises
+    # CalledProcessError. This makes the task fail RED when Phase 2
+    # fails, instead of silently logging a WARNING and succeeding.
+    #
+    # v80 FORENSIC ROOT FIX (P0-C9 — Airflow worker OOM on 7h TransE
+    #   training):
+    #   The previous code passed ``capture_output=True`` to
+    #   ``subprocess.run``. This causes subprocess to BUFFER THE
+    #   ENTIRE stdout AND stderr streams in memory until the process
+    #   exits. For a 7-hour TransE training run that emits per-epoch
+    #   logs (loss, gradient norms, validation AUC, per-batch
+    #   progress bars from tqdm), the accumulated output is 10–50 GB.
+    #   The Airflow worker (default 4–8 GB RAM) OOM-crashes mid-
+    #   training, killing the subprocess AND the scheduler. The DAG
+    #   reports RED with "OOMKilled" but the operator has no log to
+    #   diagnose which epoch crashed.
+    #
+    #   ROOT FIX: stream stdout+stderr to a log file on disk (under
+    #   ``<project_root>/logs/phase2_<timestamp>.log``) and pass the
+    #   file handle as ``stdout``/``stderr`` to subprocess. This keeps
+    #   peak memory at O(1) regardless of training length, AND
+    #   preserves the full log for post-mortem debugging. We tail the
+    #   last 2000 chars into the Airflow task log on success for
+    #   operator visibility (matches the previous ``result.stdout[-2000:]``
+    #   behavior). On failure we tail the last 4000 chars of stderr.
+    import os as _os
+    _logs_dir = _project_root / "logs"
+    _logs_dir.mkdir(parents=True, exist_ok=True)
+    from datetime import datetime as _dt
+    _log_timestamp = _dt.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    _phase2_log_path = _logs_dir / f"phase2_trigger_{_log_timestamp}.log"
+    logger.info("v29 trigger_phase2: streaming subprocess output to %s", _phase2_log_path)
+
+    try:
+        with open(_phase2_log_path, "wb") as _log_fh:
+            result = subprocess.run(
+                cmd, cwd=str(_project_root), check=True,
+                stdout=_log_fh, stderr=subprocess.STDOUT,
+                timeout=int(TASK_TIMEOUT.total_seconds()),
+            )
+        logger.info("v29 trigger_phase2: Phase 2 pipeline completed successfully.")
+        # Tail the last 2000 chars of the log for operator visibility.
+        try:
+            with open(_phase2_log_path, "rb") as _tail_fh:
+                _tail_fh.seek(0, 2)
+                _size = _tail_fh.tell()
+                _tail_fh.seek(max(0, _size - 2000))
+                _tail = _tail_fh.read().decode("utf-8", errors="replace")
+            if _tail:
+                logger.info("stdout/stderr tail:\n%s", _tail)
+        except OSError:
+            pass
+    except subprocess.CalledProcessError as exc:
+        # v29 ROOT FIX: propagate the failure. The DAG turns RED.
+        # Tail the last 4000 chars of the log for diagnostics.
+        _err_tail = ""
+        try:
+            with open(_phase2_log_path, "rb") as _tail_fh:
+                _tail_fh.seek(0, 2)
+                _size = _tail_fh.tell()
+                _tail_fh.seek(max(0, _size - 4000))
+                _err_tail = _tail_fh.read().decode("utf-8", errors="replace")
+        except OSError:
+            pass
+        logger.error(
+            "v29 trigger_phase2: Phase 2 pipeline FAILED with exit "
+            "code %d. The DAG will now fail RED — this is the correct "
+            "behavior (audit O-2 root fix). Full log: %s. stderr tail:\n%s",
+            exc.returncode,
+            _phase2_log_path,
+            _err_tail,
+        )
+        raise
+    except subprocess.TimeoutExpired as exc:
+        # v29 ROOT FIX (audit O-10): propagate the timeout. The DAG turns RED.
+        logger.error(
+            "v29 trigger_phase2: Phase 2 pipeline TIMED OUT after %d "
+            "seconds. Subprocess timed out — DAG will FAIL. The DAG will "
+            "now fail RED — this is the correct behavior (audit O-2 / "
+            "O-10 root fix). Full log: %s",
+            int(TASK_TIMEOUT.total_seconds()),
+            _phase2_log_path,
+        )
+        raise
+    except Exception as exc:
+        # v29 ROOT FIX: propagate ANY exception. The DAG turns RED.
+        logger.error(
+            "v29 trigger_phase2: Phase 2 invocation raised %s: %s. "
+            "The DAG will now fail RED (audit O-2 root fix). "
+            "Full log: %s",
+            type(exc).__name__, exc,
+            _phase2_log_path,
+        )
+        raise
+
+
+# ---------------------------------------------------------------------------
+# DAG definition
+# ---------------------------------------------------------------------------
+
+@dag(
+    dag_id="drug_repurposing_master",
+    description=(
+        "Master DAG orchestrating all Drug Repurposing ETL pipelines "
+        "with entity resolution"
+    ),
+    schedule="0 2 * * 0",           # Every Sunday at 02:00 UTC
+    start_date=datetime(2024, 1, 1),
+    catchup=False,
+    max_active_runs=1,
+    default_args=DEFAULT_ARGS,
+    tags=["drug_repurposing", "master", "etl"],
+)
+def master_pipeline() -> None:
+    """Build the master pipeline DAG with all inter-task dependencies."""
+
+    # ── Branch operator: DrugBank XML gate ──────────────────────────────
+    check_drugbank = BranchPythonOperator(
+        task_id="check_drugbank_xml",
+        python_callable=_check_drugbank_xml,
+    )
+
+    skip_drugbank = EmptyOperator(task_id="skip_drugbank")
+
+    drugbank_done = EmptyOperator(
+        task_id="drugbank_done",
+        # v43 ROOT FIX (P0 — DAG produces ZERO data when DrugBank XML is
+        # missing): the previous ALL_SUCCESS trigger rule treated a
+        # SKIPPED branch as non-success. When DRUGBANK_XML_PATH is
+        # absent, _check_drugbank_xml returns "skip_drugbank" →
+        # download_drugbank is SKIPPED → drugbank_done with ALL_SUCCESS
+        # is also SKIPPED → resolve is SKIPPED → all *_load tasks are
+        # SKIPPED → trigger_phase2 is SKIPPED. The DAG reports GREEN
+        # but produces ZERO data.
+        #
+        # The fix: NONE_FAILED_MIN_ONE_SUCCESS. This means:
+        #   - At least one upstream must have succeeded (so a total
+        #     failure of BOTH branches still propagates).
+        #   - No upstream may have FAILED (so a real DrugBank crash
+        #     after retries still aborts the join — preserves the v39
+        #     patient-safety fix).
+        #   - SKIPPED upstreams are OK (so the operator's deliberate
+        #     choice to skip DrugBank doesn't kill the entire DAG).
+        #
+        # This closes the "DAG reports GREEN but produces ZERO data"
+        # hole while preserving the v39 fix's failure-propagation
+        # guarantee. NONE_FAILED_MIN_ONE_SUCCESS is available since
+        # Airflow 2.2 (2021); the requirements pin >=2.10.0.
+        trigger_rule=TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS,
+    )
+
+    # ── Primary download tasks ──────────────────────────────────────────
+    chembl = download_chembl()
+    drugbank = download_drugbank()
+    uniprot = download_uniprot()
+    string = download_string()
+
+    # ── Secondary download tasks ────────────────────────────────────────
+    # v35 ROOT FIX (issue 36): the previous comment claimed DisGeNET and
+    # OMIM "share the gene_disease_associations.csv file via
+    # _save_csv_with_mode" — this is FALSE. DisGeNET writes to
+    # ``gene_disease_associations.csv`` (per DisGeNETPipeline source_name),
+    # and OMIM writes to ``omim_gene_disease_associations.csv`` (per
+    # OMIMPipeline source_name). They write to DIFFERENT files, so running
+    # them in parallel would NOT cause CSV corruption.
+    #
+    # v76 ROOT FIX (T-041 — remove ``disgenet >> omim`` wire for parallel
+    # GDA loading):
+    #   The v40 comment acknowledged that DisGeNET and OMIM write to
+    #   DIFFERENT CSV files and could run in parallel safely, but kept the
+    #   sequential ``disgenet >> omim`` wire "as a defensive choice". This
+    #   added ~5min of DisGeNET runtime to the critical path before OMIM
+    #   started. Over a year of weekly runs, that's ~260 minutes of wasted
+    #   scheduler time. The sequential ordering was NEVER a requirement —
+    #   it was a "choice" that cost latency for zero benefit.
+    #   ROOT FIX: remove the ``disgenet >> omim`` wire entirely. Both
+    #   pipelines now run in PARALLEL (no dependency between them). They
+    #   write to different files (gene_disease_associations.csv vs
+    #   omim_gene_disease_associations.csv) so there is no race condition.
+    #   The ``omim >> drugbank`` wire (T-042) is ALSO removed in this v76
+    #   pass — DrugBank now gracefully handles a missing OMIM CSV — so
+    #   there is no downstream dependency that requires OMIM to finish
+    #   before DisGeNET (or vice versa). The full GDA loading chain is now
+    #   parallel: DisGeNET ‖ OMIM ‖ DrugBank all run concurrently after
+    #   entity resolution.
+    disgenet = download_disgenet()
+    omim = download_omim()
+    # v76 T-041: NO wire between disgenet and omim — they run in parallel.
+    # Both write to different CSV files; no shared state, no race condition.
+
+    # PubChem download task (needs drugs in DB from entity resolution)
+    pubchem_download = download_pubchem()
+
+    # ── Entity resolution ───────────────────────────────────────────────
+    resolve = entity_resolution()
+
+    # ── Post-resolution load tasks ──────────────────────────────────────
+    # v79 P0-B2 ROOT FIX: instantiate the NEW load_chembl / load_drugbank
+    # / load_uniprot tasks (previously missing — drugs/proteins/DPI tables
+    # were empty for these 3 sources after the download-only tasks).
+    chembl_load = load_chembl()
+    drugbank_load = load_drugbank()
+    uniprot_load = load_uniprot()
+    string_load = load_string()
+    disgenet_load = load_disgenet()
+    omim_load = load_omim()
+    pubchem_load = load_pubchem_enrichment()
+
+    # V18 ROOT FIX (Phase 1 ↔ Phase 2 100% connection):
+    # Before v18, the master DAG ended at ``pubchem_load`` — Phase 2
+    # (knowledge graph construction + TransE training) had to be
+    # invoked MANUALLY via ``python -m drugos_graph`` or
+    # ``run_unified.py``. The audit flagged this as the only
+    # meaningful integration gap (Phase 1 → Phase 2 connection was
+    # ~90% complete; this single missing wire was the remaining 10%).
+    #
+    # Root fix: add a ``trigger_phase2`` task that fires
+    # ``run_unified.py --full-pipeline`` after ``pubchem_load``
+    # completes.
+    #
+    # v73 ROOT FIX (T-012 — stale inline comment contradicted the
+    # docstring + actual code):
+    #   The previous inline comment here claimed the trigger_phase2 task
+    #   was fault-tolerant and that Phase 2 failure would NOT abort the
+    #   Phase 1 run. That described the PRE-v29 behavior
+    #   (``trigger_rule=ALL_DONE`` + ``check=False`` + swallowed
+    #   exceptions). The v29 ROOT FIX (docstring at lines 461-487)
+    #   explicitly CHANGED the behavior to fail RED on Phase 2 failure:
+    #   ``trigger_rule=ALL_SUCCESS``, ``check=True``, exceptions
+    #   propagated via ``raise``. The actual code at lines 525/540/551/559
+    #   implements the docstring's "DAG fails RED" behavior. The stale
+    #   inline comment was a contradiction that misled operators into
+    #   building automation that expected the DAG to stay GREEN on
+    #   Phase 2 failure — automation that would break the moment Phase 2
+    #   actually failed.
+    #
+    #   ROOT FIX: delete the stale comment. Update to reflect the
+    #   ACTUAL behavior: Phase 2 failure fails the DAG RED
+    #   (``trigger_rule=ALL_SUCCESS``, ``check=True``, exceptions
+    #   propagated). Operators who want the OLD fault-tolerant
+    #   behavior must explicitly set ``trigger_rule=TriggerRule.ALL_DONE``
+    #   and ``check=False`` on the ``_trigger_phase2`` task — the
+    #   default is now strict coupling per the v29 ROOT FIX.
+    trigger_phase2 = _trigger_phase2()
+
+    # ── Wire dependencies ───────────────────────────────────────────────
+    # v76 ROOT FIX (T-040 — rewrite list-bitshift as explicit statements
+    # for clarity):
+    #   The previous wiring used the list-bitshift syntax:
+    #     check_drugbank >> [drugbank, skip_drugbank] >> drugbank_done
+    #   This works but is fragile — an operator unfamiliar with Airflow's
+    #   list-bitshift may not realize ``drugbank_done`` is downstream of
+    #   BOTH branches. The ``drugbank_done`` join task uses
+    #   ``trigger_rule=TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS`` (set at
+    #   line 463) which correctly handles the SKIPPED branch (if the
+    #   BranchPythonOperator chose ``skip_drugbank``, then ``drugbank``
+    #   is SKIPPED and ``drugbank_done`` accepts the SKIPPED upstream).
+    #   ROOT FIX: rewrite as three EXPLICIT statements so the dependency
+    #   graph is unambiguous to any reader. The behavior is identical;
+    #   only the readability changes. Each ``>>`` is now a single
+    #   edge, making the fan-out (check → two branches) and fan-in
+    #   (two branches → join) visually explicit.
+    check_drugbank >> drugbank       # branch 1: download DrugBank XML
+    check_drugbank >> skip_drugbank  # branch 2: skip (XML not found)
+    drugbank >> drugbank_done        # fan-in: join after branch 1
+    skip_drugbank >> drugbank_done   # fan-in: join after branch 2
+
+    # v76 ROOT FIX (T-042 — remove ``omim >> drugbank`` wire; DrugBank
+    # now runs in PARALLEL with OMIM):
+    #   The v9 ROOT FIX wired ``omim >> drugbank`` because DrugBank's
+    #   ``_write_structured_indications`` step raised RuntimeError when
+    #   the OMIM CSV was missing. The v40 comment kept the wire, calling
+    #   the coupling "acceptable". But the coupling was brittle: if OMIM
+    #   failed (API key missing, network error), DrugBank was SKIPPED via
+    #   the dependency chain — losing ALL DrugBank drug + target data
+    #   from the knowledge graph, a major data loss. The
+    #   BranchPythonOperator checks for DrugBank XML existence, NOT for
+    #   OMIM CSV existence, so if OMIM failed but DrugBank XML existed,
+    #   the branch chose "download_drugbank" but the download then failed
+    #   because the OMIM CSV didn't exist — cascading to DAG RED.
+    #   ROOT FIX: DrugBank's ``_write_structured_indications`` now
+    #   gracefully handles a missing OMIM CSV (logs WARNING, writes a
+    #   header-only drugbank_indications.csv, continues — see
+    #   drugbank_pipeline.py v76 T-042 fix). The ``omim >> drugbank``
+    #   wire is REMOVED. DrugBank now runs in PARALLEL with OMIM. If OMIM
+    #   fails, DrugBank still loads all drug + target data; only the
+    #   drug→disease indication edges are empty for that run. This is the
+    #   scientifically correct trade-off: a KG with DrugBank drugs but no
+    #   indication edges is far more useful than a KG with NO DrugBank
+    #   data at all.
+    # NO ``omim >> drugbank`` wire — DrugBank is independent of OMIM.
+
+    # SCI-FIX: ALL primary + secondary downloads must complete before
+    # entity resolution. Previously, disgenet and omim were orphaned
+    # (no upstream/downstream), causing race conditions where the load
+    # tasks could fire before the downloads finished.
+    # v76 T-042: ``drugbank_done`` (not ``drugbank``) is in the fan-in
+    # because the BranchPythonOperator may skip DrugBank — ``drugbank_done``
+    # joins both branches with NONE_FAILED_MIN_ONE_SUCCESS.
+    chembl >> resolve
+    drugbank_done >> resolve
+    uniprot >> resolve
+    string >> resolve
+    disgenet >> resolve
+    omim >> resolve
+
+    # Entity resolution → dependent loads (fan-out)
+    # v79 P0-B2 ROOT FIX: wire the NEW load_chembl / load_drugbank /
+    # load_uniprot tasks after entity_resolution. These populate the
+    # ``drugs``, ``proteins``, and ``drug_protein_interactions`` tables
+    # for ChEMBL/DrugBank/UniProt — previously empty, which caused the
+    # Phase 2 bridge to find zero Compound nodes and skip ALL treats
+    # edges (P0-B1 compound).
+    resolve >> chembl_load
+    resolve >> drugbank_load
+    resolve >> uniprot_load
+    resolve >> string_load
+    resolve >> disgenet_load
+    resolve >> omim_load
+
+    # SCI-FIX: PubChem needs drugs in the DB (from entity resolution),
+    # so download runs after resolve, then load runs after download.
+    # Previously, download_pubchem was defined but never instantiated,
+    # causing pubchem_load to fail with FileNotFoundError.
+    resolve >> pubchem_download >> pubchem_load
+
+    # V18 ROOT FIX (Phase 1 ↔ Phase 2 100% connection):
+    # v79 P0-B2 ROOT FIX (compound): trigger_phase2 now depends on ALL
+    #   load tasks (chembl, drugbank, uniprot, string, disgenet, omim,
+    #   pubchem), not just pubchem_load. The v78 code wired only
+    #   ``pubchem_load >> trigger_phase2`` — with ALL_SUCCESS, Phase 2
+    #   could fire before the other 6 loads finished, reading a
+    #   half-loaded DB. Now ALL 7 load tasks fan into trigger_phase2;
+    #   with ALL_SUCCESS, Phase 2 fires ONLY after every load succeeds.
+    chembl_load >> trigger_phase2
+    drugbank_load >> trigger_phase2
+    uniprot_load >> trigger_phase2
+    string_load >> trigger_phase2
+    disgenet_load >> trigger_phase2
+    omim_load >> trigger_phase2
+    pubchem_load >> trigger_phase2
+
+
+# Instantiate the DAG
+master_dag = master_pipeline()
