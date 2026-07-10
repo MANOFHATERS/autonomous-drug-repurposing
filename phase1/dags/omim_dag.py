@@ -48,8 +48,16 @@ DEFAULT_ARGS = {
 }
 
 
-@task(retries=2, execution_timeout=timedelta(hours=4),
-      retry_exponential_backoff=True, retry_delay=timedelta(minutes=5))
+# v83 FORENSIC ROOT FIX (P2-13): the previous ``@task`` decorator
+# redundantly re-specified ``retries=2, execution_timeout=4h,
+# retry_exponential_backoff=True, retry_delay=5min`` — ALL of which are
+# already in ``DEFAULT_RETRY_ARGS`` (spread into ``DEFAULT_ARGS`` at line
+# 45 above). The redundant overrides were a maintenance trap: if
+# ``DEFAULT_RETRY_ARGS`` changed, the DAGs didn't follow. ROOT FIX: use
+# a bare ``@task`` — Airflow inherits all retry/timeout params from
+# ``DEFAULT_ARGS``. The ``@fail_fast_on_http_4xx`` decorator is retained
+# (it's the actual functional enhancement, not a redundant override).
+@task
 @fail_fast_on_http_4xx
 def run_omim() -> None:
     """Execute the full OMIM pipeline: download → clean → load."""

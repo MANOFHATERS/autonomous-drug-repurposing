@@ -626,10 +626,21 @@ def download_pubchem_full(raw_dir: Path, inchikeys: list[str] | None = None) -> 
     result: dict[str, Path] = {}
 
     # Determine which InChIKeys to enrich
+    # v83 FORENSIC ROOT FIX (P1-8): the previous code silently switched
+    # from DrugBank InChIKeys to ChEMBL InChIKeys when drugbank_drugs.csv
+    # was missing. DrugBank and ChEMBL may produce different InChIKeys
+    # for the same drug (salt-form differences, stereochemistry handling).
+    # The PubChem enrichment output did NOT record which drug source was
+    # used — making provenance ambiguous. ROOT FIX: track the drug source
+    # explicitly (``drug_source``) and write it into the enrichment CSV
+    # as a new column so downstream consumers (KG builder, audits) know
+    # which drug source each PubChem-enriched row came from.
+    drug_source = "sample"
     if inchikeys is None:
         if mode == "sample":
             from pipelines._embedded_samples import embedded_chembl_molecules
             inchikeys = list(embedded_chembl_molecules()["inchikey"])
+            drug_source = "embedded_sample"
         else:
             # FULL mode: read InChIKeys from Phase 1's processed_data/drugbank_drugs.csv
             # OR from the PostgreSQL drugs table.
@@ -639,20 +650,34 @@ def download_pubchem_full(raw_dir: Path, inchikeys: list[str] | None = None) -> 
                 if drugs_csv.exists():
                     df = pd.read_csv(drugs_csv)
                     inchikeys = list(df["inchikey"].dropna().unique())
+                    drug_source = "drugbank"
+                    logger.info("PubChem: enriching %d InChIKeys from DrugBank (%s)", len(inchikeys), drugs_csv)
                 else:
-                    # Fall back to ChEMBL drugs CSV
+                    # Fall back to ChEMBL drugs CSV — but RECORD the source switch.
                     chembl_csv = raw_dir.parent / "processed_data" / "chembl_drugs.csv"
                     if chembl_csv.exists():
                         df = pd.read_csv(chembl_csv)
                         inchikeys = list(df["inchikey"].dropna().unique())
+                        drug_source = "chembl"
+                        logger.warning(
+                            "PubChem: DrugBank drugs CSV not found at %s — "
+                            "FALLING BACK to ChEMBL drugs CSV (%s). Note: "
+                            "DrugBank and ChEMBL may produce different "
+                            "InChIKeys for the same drug (salt-form / stereo "
+                            "differences). The drug_source column in the "
+                            "enrichment output records which source was used.",
+                            drugs_csv, chembl_csv,
+                        )
                     else:
                         logger.warning("PubChem: no drugs CSV found — using sample InChIKeys")
                         from pipelines._embedded_samples import embedded_chembl_molecules
                         inchikeys = list(embedded_chembl_molecules()["inchikey"])
+                        drug_source = "embedded_sample"
             except Exception as exc:
                 logger.warning("PubChem: failed to read InChIKeys — using samples: %s", exc)
                 from pipelines._embedded_samples import embedded_chembl_molecules
                 inchikeys = list(embedded_chembl_molecules()["inchikey"])
+                drug_source = "embedded_sample"
 
     if mode == "skip":
         logger.info("PubChem: skip mode — using existing files")
@@ -668,11 +693,14 @@ def download_pubchem_full(raw_dir: Path, inchikeys: list[str] | None = None) -> 
     # PubChem PUG-REST rate limit: 5 requests per second (200ms between requests)
     with open(enrichment_path, "w", newline="") as f:
         writer = csv.writer(f)
+        # v83 P1-8: added ``drug_source`` column so downstream consumers
+        # know which drug source (DrugBank / ChEMBL / sample) each
+        # PubChem-enriched row came from.
         writer.writerow([
             "inchikey", "pubchem_cid", "canonical_smiles",
             "xlogp", "tpsa",
             "h_bond_donor_count", "h_bond_acceptor_count",
-            "rotatable_bond_count",
+            "rotatable_bond_count", "drug_source",
         ])
         for i, inchikey in enumerate(inchikeys):
             try:
@@ -704,6 +732,7 @@ def download_pubchem_full(raw_dir: Path, inchikeys: list[str] | None = None) -> 
                             p.get("HBondDonorCount", ""),
                             p.get("HBondAcceptorCount", ""),
                             p.get("RotatableBondCount", ""),
+                            drug_source,
                         ])
                 elif resp.status_code == 404:
                     logger.debug("PubChem: InChIKey %s not found", inchikey)

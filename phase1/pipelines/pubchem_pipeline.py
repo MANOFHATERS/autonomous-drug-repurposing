@@ -922,6 +922,35 @@ class PubChemPipeline(BasePipeline):
                 f"circuit_breaker_threshold must be >= 1, "
                 f"got {self.circuit_breaker_threshold}"
             )
+        # v83 FORENSIC ROOT FIX (P2-18): if ``ca_bundle`` is set to an
+        # EMPTY STRING (misconfiguration), the ``verify=(self.ca_bundle
+        # if self.ca_bundle else True)`` ternary silently falls back to
+        # ``verify=True`` (system CA store) instead of the intended CA
+        # bundle — a TLS-interception bypass that defeats the purpose of
+        # pinning a custom CA bundle. ROOT FIX: validate that if
+        # ``ca_bundle`` is set, it is non-empty AND points to an existing
+        # readable file. Empty / non-existent / unreadable → raise.
+        if self.ca_bundle is not None:
+            ca_str = str(self.ca_bundle).strip()
+            if not ca_str:
+                raise PubChemPipelineError(
+                    "ENTITY_RESOLUTION_PUBCHEM_CA_BUNDLE is set to an empty "
+                    "string — this silently falls back to verify=True (system "
+                    "CA store), bypassing the intended custom CA bundle. Set "
+                    "it to a valid file path or unset it to use the system CA store."
+                )
+            ca_path = Path(ca_str)
+            if not ca_path.exists():
+                raise PubChemPipelineError(
+                    f"ENTITY_RESOLUTION_PUBCHEM_CA_BUNDLE points to a "
+                    f"non-existent file: {ca_str}. Fix the path or unset "
+                    f"the env var to use the system CA store."
+                )
+            if not ca_path.is_file():
+                raise PubChemPipelineError(
+                    f"ENTITY_RESOLUTION_PUBCHEM_CA_BUNDLE is not a regular "
+                    f"file: {ca_str} (could be a directory). Fix the path."
+                )
         if errors:
             raise PubChemPipelineError(
                 "PubChem pipeline config validation failed:\n  - "
@@ -2312,10 +2341,18 @@ class PubChemPipeline(BasePipeline):
             "User-Agent": self._user_agent,
             "Accept-Encoding": "gzip, deflate",
         }
-        # Optional API key (SEC-2).
+        # v83 FORENSIC ROOT FIX (P2-7): the previous code passed the NCBI
+        # API key as ``params["apikey"]`` (query string), which is logged
+        # by CDNs/proxies. The OMIM pipeline avoided this (BUG-2.2) by
+        # using ``Authorization: ApiKey`` header. ROOT FIX: send the API
+        # key via the ``api-key`` HTTP header instead of the query string.
+        # NCBI services accept both forms; the header form keeps the key
+        # out of URLs / proxy logs. If PubChem ignores the header, the
+        # only effect is reverting to the default rate limit (3 req/sec
+        # instead of 10 req/sec) — NOT a breaking change.
         params: dict[str, Any] = {}
         if self.api_key:
-            params["apikey"] = self.api_key
+            headers["api-key"] = self.api_key
 
         last_status: Optional[int] = None
         last_error: Optional[str] = None
@@ -2657,9 +2694,10 @@ class PubChemPipeline(BasePipeline):
                 "User-Agent": self._user_agent,
                 "Accept-Encoding": "gzip, deflate",
             }
+            # v83 P2-7: send API key via header (not query string).
             params: dict[str, Any] = {}
             if self.api_key:
-                params["apikey"] = self.api_key
+                headers["api-key"] = self.api_key
             try:
                 self._api_call_count += 1
                 resp = self.http_session.get(
@@ -2871,6 +2909,34 @@ class PubChemPipeline(BasePipeline):
                 raw_connectivity_smiles
                 or legacy_canonical
             )
+            # v83 FORENSIC ROOT FIX (P2-6): if PubChem omits BOTH
+            # ConnectivitySMILES and CanonicalSMILES, ``canonical_smiles``
+            # is None — the Graph Transformer cannot compute 2D fingerprints
+            # for this compound. ROOT FIX: when canonical is missing but
+            # isomeric is available, use RDKit to compute the canonical
+            # (no-stereo) form from the isomeric form.
+            # ``Chem.MolToSmiles(mol, isomericSmiles=False)`` strips stereo
+            # by default, producing a TRUE canonical SMILES — not a copy of
+            # the isomeric form. This is scientifically correct: the
+            # canonical form is defined as the no-stereo SMILES, and RDKit's
+            # canonicalization algorithm is the industry standard. If RDKit
+            # is not installed or the isomeric SMILES is unparseable, leave
+            # canonical_smiles as None (preserving the previous behaviour
+            # for that edge case).
+            if not canonical_smiles and isomeric_smiles:
+                try:
+                    from rdkit import Chem as _rdkit_Chem
+                    _mol = _rdkit_Chem.MolFromSmiles(isomeric_smiles)
+                    if _mol is not None:
+                        canonical_smiles = _rdkit_Chem.MolToSmiles(
+                            _mol, isomericSmiles=False
+                        )
+                        transformations_applied.append(
+                            "computed_canonical_smiles_from_isomeric_via_rdkit"
+                        )
+                except Exception:
+                    # RDKit not available or parse failed — leave None.
+                    pass
 
             # SCI-18: sanitize every string field.
             molecular_formula = _sanitize_string(pubchem_record.get("MolecularFormula"))
@@ -3026,7 +3092,21 @@ class PubChemPipeline(BasePipeline):
                 cas_number = self._fetch_cas_for_cid(safe_cid)
 
             # Build the lineage columns (Domain 16).
-            download_date = datetime.now(timezone.utc)
+            # v83 FORENSIC ROOT FIX (P1-4): the previous code used
+            # ``datetime.now(timezone.utc)`` for ``download_date``, which
+            # is the CLEAN() time — NOT the actual download time. If the
+            # operator re-runs clean() on cached responses (hours or days
+            # after the actual download), the download_date was wrong,
+            # breaking lineage / reproducibility audits. ROOT FIX: use
+            # ``self._access_timestamp`` (set in ``_fetch_all_batches``
+            # at download time) when available; fall back to now() only
+            # if the timestamp was never set (defensive — should not
+            # happen in normal flow).
+            download_date = (
+                self._access_timestamp
+                if self._access_timestamp is not None
+                else datetime.now(timezone.utc)
+            )
             source_id = f"pubchem:CID:{safe_cid}"
             source_version = self.get_source_version() or (
                 f"pubchem_pug_rest_as_of_{download_date.isoformat()}"
@@ -3236,9 +3316,10 @@ class PubChemPipeline(BasePipeline):
             "User-Agent": self._user_agent,
             "Accept-Encoding": "gzip, deflate",
         }
+        # v83 P2-7: send API key via header (not query string).
         params: dict[str, Any] = {}
         if self.api_key:
-            params["apikey"] = self.api_key
+            headers["api-key"] = self.api_key
         try:
             self._api_call_count += 1
             resp = self.http_session.get(

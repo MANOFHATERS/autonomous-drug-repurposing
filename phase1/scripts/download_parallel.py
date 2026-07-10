@@ -170,11 +170,40 @@ def _run_entity_resolution_phase():
     try:
         from entity_resolution.run import run_entity_resolution
         result = run_entity_resolution()
+        # v83 FORENSIC ROOT FIX (P2-14): the previous code accessed
+        # ``result['drug_mappings']``, ``result['protein_mappings']``,
+        # ``result['proteins_updated']`` directly — if
+        # ``run_entity_resolution`` returned a different dict structure
+        # (e.g. renamed a key), the print() crashed with KeyError and
+        # the script exited with a confusing traceback instead of a
+        # clear error. ROOT FIX: use ``.get()`` with defaults and
+        # validate the result is a dict before accessing. If the
+        # structure is unexpected, log a clear warning but don't crash.
+        if not isinstance(result, dict):
+            print(
+                f"  [WARN] Entity resolution returned non-dict result "
+                f"(type={type(result).__name__}). Cannot extract counts."
+            )
+            return (True, None, result)
+        drug_mappings = result.get("drug_mappings", "N/A")
+        protein_mappings = result.get("protein_mappings", "N/A")
+        proteins_updated = result.get("proteins_updated", "N/A")
+        # Detect missing keys for a clear warning (non-fatal).
+        missing_keys = [
+            k for k in ("drug_mappings", "protein_mappings", "proteins_updated")
+            if k not in result
+        ]
+        if missing_keys:
+            print(
+                f"  [WARN] Entity resolution result missing expected keys: "
+                f"{missing_keys}. Available keys: {sorted(result.keys())}. "
+                f"Reporting 'N/A' for missing counts."
+            )
         print(
             f"  [OK] Entity resolution complete: "
-            f"{result['drug_mappings']} drug mappings, "
-            f"{result['protein_mappings']} protein mappings, "
-            f"{result['proteins_updated']} proteins updated with string_id."
+            f"{drug_mappings} drug mappings, "
+            f"{protein_mappings} protein mappings, "
+            f"{proteins_updated} proteins updated with string_id."
         )
         return (True, None, result)
     except Exception as exc:

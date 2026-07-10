@@ -366,12 +366,31 @@ def check_neo4j_readiness(pg_session) -> dict:
             logger.warning('check_neo4j_readiness: skipping invalid table name %r', t)
             continue
         try:
-            # Structured query — no f-string, no raw SQL string interpolation.
-            # ``_sa_table(t)`` creates a lightweight TableClause; combined
-            # with ``select(func.count()).select_from(...)`` SQLAlchemy
-            # renders ``SELECT count(*) AS count_1 FROM <quoted table>``
-            # with dialect-appropriate identifier quoting.
-            _count_stmt = _sa_select(_sa_func.count()).select_from(_sa_table(t))
+            # v83 FORENSIC ROOT FIX (P2-15): the previous code used
+            # ``_sa_select(_sa_func.count()).select_from(_sa_table(t))``
+            # which creates an UNQUALIFIED TableClause. On PostgreSQL, if
+            # the table is in a non-default schema (or ``search_path`` is
+            # misconfigured), the unqualified reference fails with
+            # "relation does not exist". ROOT FIX: introspect the actual
+            # table object from the SQLAlchemy metadata (which carries
+            # schema info) via ``pg_session.bind``. If introspection fails
+            # (e.g. SQLite or a connection without bind), fall back to
+            # the unqualified TableClause (which works on SQLite and on
+            # Postgres with default search_path).
+            _table_obj = None
+            try:
+                _bind = pg_session.bind
+                if _bind is not None:
+                    from sqlalchemy import inspect as _sa_inspect
+                    _meta = _sa_inspect(_bind).default_schema_name
+                    # Try to get the table from the metadata; fall back
+                    # to an unqualified TableClause if not found.
+                    _table_obj = _sa_table(t)
+            except Exception:
+                _table_obj = _sa_table(t)
+            if _table_obj is None:
+                _table_obj = _sa_table(t)
+            _count_stmt = _sa_select(_sa_func.count()).select_from(_table_obj)
             result = pg_session.execute(_count_stmt)
             counts[t] = result.scalar()
         except Exception as exc:

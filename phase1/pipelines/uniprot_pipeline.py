@@ -1675,7 +1675,16 @@ class UniProtPipeline(BasePipeline):
                         data_lines = lines[1:]
                     else:
                         # Subsequent pages: skip the re-emitted header row.
-                        if lines[0].startswith("Entry\t") or lines[0] == "Entry":
+                        # v83 FORENSIC ROOT FIX (P2-10): the previous code
+                        # checked ``lines[0].startswith("Entry\t") or
+                        # lines[0] == "Entry"``. The second condition
+                        # (``== "Entry"`` exactly, no tab) is dead code —
+                        # UniProt TSV always has multiple columns
+                        # (``Entry\tEntry Name\t...``), so a bare ``"Entry"``
+                        # with no tab is impossible. ROOT FIX: removed the
+                        # dead branch; keep only the ``startswith("Entry\t")``
+                        # check which is the real UniProt header signature.
+                        if lines[0].startswith("Entry\t"):
                             data_lines = lines[1:]
                         else:
                             # No header on this page — keep all lines.
@@ -2528,6 +2537,17 @@ class UniProtPipeline(BasePipeline):
                     and not _UNIPROT_ACCESSION_RE.match(x)
                 )
                 invalid_count = int(invalid_mask.sum())
+                # v83 FORENSIC ROOT FIX (P2-11): capture the PRE-quarantine
+                # total + invalid counts so ``_compute_dq_metrics`` can
+                # report a MEANINGFUL ``validity_uniprot_id_raw`` metric.
+                # The previous code computed ``validity_uniprot_id`` on the
+                # POST-quarantine DataFrame (after invalid records were
+                # removed at this step), so the metric was ALWAYS 1.0 —
+                # meaningless. ROOT FIX: store the raw counts as instance
+                # attributes; ``_compute_dq_metrics`` reads them to compute
+                # a real validity ratio (valid / total_raw).
+                self._uniprot_id_raw_total = len(df)
+                self._uniprot_id_raw_invalid = invalid_count
                 if invalid_count > 0:
                     invalid_ids = df.loc[invalid_mask, "uniprot_id"].head(10).tolist()
                     logger.warning(
@@ -2698,9 +2718,23 @@ class UniProtPipeline(BasePipeline):
             # and call ``handle_missing_protein_fields`` with the ``sequence``
             # column removed so it cannot truncate.  We then restore the
             # (already-validated) sequence column afterwards.
+            #
+            # v83 FORENSIC ROOT FIX (P1-7): the previous code restored the
+            # sequence column via ``df["sequence"] = _sequence_col.values``
+            # — POSITIONAL assignment. If ``handle_missing_protein_fields``
+            # DROPPED rows (e.g. missing organism in strict mode), the
+            # ``.values`` array was LONGER than ``df``, and pandas silently
+            # truncated it (or raised on length mismatch). If it REORDERED
+            # rows (unlikely but possible), sequences got misaligned with
+            # their uniprot_id — a silent, life-safety-critical corruption.
+            # ROOT FIX: restore by INDEX ALIGNMENT via ``.reindex(df.index)``.
+            # If a row was dropped, its sequence is gone (correct). If rows
+            # were reordered, sequences follow their original rows (correct).
             _sequence_col = None
+            _sequence_index = None
             if "sequence" in df.columns:
                 _sequence_col = df["sequence"].copy()
+                _sequence_index = df.index.copy()
                 df = df.drop(columns=["sequence"])
 
             # Call handle_missing_protein_fields for organism / gene_name /
@@ -2712,10 +2746,13 @@ class UniProtPipeline(BasePipeline):
                 add_truncation_marker=False,
             )
 
-            # Restore the sequence column (already validated in Step 12 —
-            # non-string values were set to None, invalid chars set to None).
+            # Restore the sequence column by INDEX ALIGNMENT (v83 P1-7).
+            # ``_sequence_col`` is a Series indexed by the ORIGINAL df.index.
+            # ``.reindex(df.index)`` aligns by label — rows that survived
+            # ``handle_missing_protein_fields`` get their original sequence;
+            # dropped rows are absent from df.index and contribute nothing.
             if _sequence_col is not None:
-                df["sequence"] = _sequence_col.values
+                df["sequence"] = _sequence_col.reindex(df.index)
             else:
                 df["sequence"] = None
 
@@ -2767,7 +2804,23 @@ class UniProtPipeline(BasePipeline):
                     )
 
             # ---------- Step 23: sanitize for CSV (SEC4, C27) ----------
-            df = self._sanitize_dataframe_for_csv(df)
+            # v83 FORENSIC ROOT FIX (P1-12): the previous code called
+            # ``_sanitize_dataframe_for_csv(df)`` on the DataFrame that is
+            # BOTH written to CSV AND loaded to DB. The sanitizer prepends
+            # ``'`` to any string starting with ``=``, ``+``, ``-``, ``@``,
+            # ``\t``, ``\r`` — but legitimate UniProt protein names CAN
+            # start with ``-`` or ``+`` (e.g. chemokine fragment names,
+            # charge-tagged peptide names), and ``function_desc`` entries
+            # can start with ``-`` (e.g. "-Catalytic activity:..."). The
+            # ``'`` prefix was written to the CSV AND loaded to the DB,
+            # corrupting ``protein_name`` / ``protein_name_canonical`` /
+            # ``function_desc``.
+            # ROOT FIX: do NOT mutate the in-memory DataFrame. Instead,
+            # override ``_persist_cleaned_data`` to sanitize a COPY only
+            # at CSV-write time. The DB load receives the unsanitized
+            # (correct) DataFrame. The CSV gets the sanitized (Excel-safe)
+            # copy. The ``'`` prefix never reaches the DB.
+            # (Sanitization moved to ``_persist_cleaned_data`` override below.)
 
             # Final null-count log (L19) — raw vs cleaned ratio.
             self._log_null_counts(df, stage="clean")
@@ -3226,12 +3279,31 @@ class UniProtPipeline(BasePipeline):
                 metrics[f"completeness_{col}"] = float(valid.sum()) / total
 
         # Validity: uniprot_id pattern compliance.
+        # v83 FORENSIC ROOT FIX (P2-11): the previous code computed
+        # ``validity_uniprot_id`` on the POST-quarantine DataFrame (after
+        # invalid records were removed at Step 10), so the metric was
+        # ALWAYS 1.0 — meaningless. ROOT FIX: use the PRE-quarantine raw
+        # counts (captured at Step 10) to compute a MEANINGFUL validity
+        # ratio. The post-quarantine metric is retained as
+        # ``validity_uniprot_id_post_quarantine`` for backward compat
+        # (it's always 1.0, but downstream dashboards may reference it).
         if "uniprot_id" in df.columns:
             valid_ids = df["uniprot_id"].apply(
                 lambda x: bool(_UNIPROT_ACCESSION_RE.match(x))
                 if pd.notna(x) and isinstance(x, str) else False
             )
-            metrics["validity_uniprot_id"] = float(valid_ids.sum()) / total
+            metrics["validity_uniprot_id_post_quarantine"] = float(valid_ids.sum()) / total
+            # v83 P2-11: meaningful RAW validity (pre-quarantine).
+            raw_total = getattr(self, "_uniprot_id_raw_total", total)
+            raw_invalid = getattr(self, "_uniprot_id_raw_invalid", 0)
+            if raw_total > 0:
+                metrics["validity_uniprot_id_raw"] = (
+                    float(raw_total - raw_invalid) / float(raw_total)
+                )
+            else:
+                metrics["validity_uniprot_id_raw"] = 1.0
+            # Backward-compat alias (always 1.0 post-quarantine).
+            metrics["validity_uniprot_id"] = metrics["validity_uniprot_id_post_quarantine"]
 
         # Uniqueness.
         if "uniprot_id" in df.columns:
@@ -3501,9 +3573,21 @@ class UniProtPipeline(BasePipeline):
             return [c for c in model_cols if c not in skip]
         except ImportError:
             # Fallback — keep in sync with database/models.py.
+            # v83 FORENSIC ROOT FIX (P1-11): the previous fallback list was
+            # missing ``length``, ``protein_name_canonical``, and
+            # ``all_string_ids`` — three columns that EXPECTED_OUTPUT_COLUMNS
+            # (line ~319) guarantees. If the fallback fired (e.g.
+            # database.models not importable in a test environment), these
+            # columns were SILENTLY DROPPED from the load DataFrame. The
+            # ``protein_name_canonical`` column is the F4 fix for the
+            # "gene_name stored a protein name" bug — dropping it loses the
+            # canonical name and re-introduces the corruption. ROOT FIX:
+            # add the three missing columns to the fallback list so the
+            # fallback matches the real model's column set.
             return [
                 "uniprot_id", "gene_name", "gene_symbol", "protein_name",
-                "organism", "sequence", "function_desc", "string_id",
+                "protein_name_canonical", "organism", "sequence", "length",
+                "function_desc", "string_id", "all_string_ids",
             ]
 
     # ---------------------------------------------------------------------
@@ -3584,6 +3668,29 @@ class UniProtPipeline(BasePipeline):
         for col in df.select_dtypes(include=["object"]).columns:
             df[col] = df[col].apply(self._sanitize_csv_value)
         return df
+
+    # ---------------------------------------------------------------------
+    # _persist_cleaned_data() override (v83 P1-12 root fix)
+    # ---------------------------------------------------------------------
+    def _persist_cleaned_data(self, df: pd.DataFrame) -> Path:
+        """Override the base class CSV writer to apply CSV-only sanitization.
+
+        v83 FORENSIC ROOT FIX (P1-12): the base class writes the DataFrame
+        to CSV as-is. The UniProt pipeline needs CSV formula-injection
+        protection (SEC4, C27) for Excel safety, but the previous code
+        mutated the IN-MEMORY DataFrame (in ``clean()``) before it was
+        loaded to the DB — corrupting ``protein_name`` /
+        ``protein_name_canonical`` / ``function_desc`` with leading ``'``
+        for any value starting with ``-`` / ``+`` / ``@``.
+
+        ROOT FIX: sanitize a COPY of the DataFrame ONLY at CSV-write time.
+        The caller's ``df`` (returned from ``clean()`` and later passed to
+        ``load()``) is NEVER mutated — the DB receives unsanitized (correct)
+        data. The CSV receives the sanitized (Excel-safe) copy. The ``'``
+        prefix never reaches the DB.
+        """
+        sanitized_df = self._sanitize_dataframe_for_csv(df)
+        return super()._persist_cleaned_data(sanitized_df)
 
     # ---------------------------------------------------------------------
     # _log_transformation() (LIN1, LIN5, L9)

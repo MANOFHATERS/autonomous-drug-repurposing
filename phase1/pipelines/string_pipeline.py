@@ -1438,6 +1438,20 @@ class StringPipeline(BasePipeline):
                 f"Actual columns: {list(links_df.columns)}."
             )
 
+        # FIX BUG-4.3: astype(str) on NaN produces "nan" — drop NaN first.
+        # v83 FORENSIC ROOT FIX (P2-8): the previous code ran the wrong-taxon
+        # quarantine FIRST (which used .astype(str) on protein1/protein2,
+        # converting NaN → "nan"), then ran dropna on the SAME columns
+        # afterwards. NaN rows were therefore BOTH quarantined as "wrong
+        # taxon" (misclassified — they're missing, not cross-species) AND
+        # dropped. ROOT FIX: dropna FIRST, then run the wrong-taxon check
+        # on the cleaned DataFrame. NaN rows are now cleanly dropped (not
+        # misclassified as wrong-taxon), and the wrong-taxon quarantine
+        # only catches actual cross-species contamination.
+        for col in ("protein1", "protein2"):
+            links_df = links_df.dropna(subset=[col]).copy()
+            links_df[col] = links_df[col].astype(str).str.strip()
+
         # FIX GAP-3.9: Organism validation. Reject rows whose protein IDs
         # do not start with "9606." (human). Cross-species contamination
         # would corrupt the human knowledge graph.
@@ -1461,12 +1475,6 @@ class StringPipeline(BasePipeline):
             )
             self._emit_metric("string.wrong_taxon_count", wrong_count)
             links_df = links_df.loc[~wrong_taxon_mask].copy()
-
-        # FIX BUG-4.3: astype(str) on NaN produces "nan" — drop NaN first.
-        # Sci: combined_score is an integer in [0, 1000]. NaN means "missing".
-        for col in ("protein1", "protein2"):
-            links_df = links_df.dropna(subset=[col]).copy()
-            links_df[col] = links_df[col].astype(str).str.strip()
 
         return links_df
 
@@ -1547,13 +1555,28 @@ class StringPipeline(BasePipeline):
         )
         # STRING aliases file is tab-separated, gzipped. We only need 3
         # of its many columns — use ``usecols`` to bound memory (GAP-8.2).
+        # v83 FORENSIC ROOT FIX (P1-3): the previous ``usecols`` lambda
+        # received the RAW column name (before the normalization at the
+        # next step which lowercases + strips '#'). If STRING changes the
+        # header from ``#string_protein_id`` to ``string_protein_id``
+        # (dropping the '#'), the old lambda returned False for that
+        # column → it was dropped → the normalization step couldn't
+        # recover it → SchemaValidationError at the missing-cols check
+        # below. ROOT FIX: the ``usecols`` lambda normalizes the candidate
+        # name the SAME WAY the post-read code does (strip + lstrip '#' +
+        # lower), then checks membership in the normalized target set.
+        # This makes the column selection robust to header-prefix variants.
+        _TARGET_COLS_NORMALIZED = {"string_protein_id", "alias", "source"}
         try:
             aliases_df = pd.read_csv(
                 aliases_path,
                 compression="gzip",
                 sep="\t",
                 low_memory=STRING_LOW_MEMORY,
-                usecols=lambda c: c in ("#string_protein_id", "alias", "source"),
+                usecols=lambda c: (
+                    c.strip().lstrip("#").lower().replace(" ", "_")
+                    in _TARGET_COLS_NORMALIZED
+                ),
             )
         except (ParserError, gzip.BadGzipFile, EOFError, OSError, ValueError) as exc:
             logger.error(
@@ -2352,11 +2375,20 @@ class StringPipeline(BasePipeline):
         # MappingResult dataclass, NOT a dict. Use .mapping.
         # FIX GAP-8.5: Pass the unique UniProt IDs as a filter to avoid
         # loading the entire proteins table.
+        # v83 FORENSIC ROOT FIX (P1-10): the previous code passed a Python
+        # ``set`` to ``get_uniprot_to_protein_id_map``. If the loader
+        # internally calls ``len()`` or indexes into the collection (which
+        # sets do NOT support), it raises ``TypeError: 'set' object is not
+        # subscriptable``. ROOT FIX: materialize the set into a sorted list
+        # before passing. Sorting makes the call deterministic (same input
+        # → same SQL bind-parameter order → same query plan cache hit),
+        # which is a small but real win on Postgres pgbouncer.
         unique_uniprot = set(load_df["uniprot_id_a"].dropna().astype(str)).union(
             load_df["uniprot_id_b"].dropna().astype(str)
         )
+        unique_uniprot_list = sorted(unique_uniprot)
         mapping_result = get_uniprot_to_protein_id_map(
-            session, uniprot_ids=unique_uniprot
+            session, uniprot_ids=unique_uniprot_list
         )
         uniprot_map: Dict[str, int] = mapping_result.mapping
 
@@ -2687,9 +2719,19 @@ class StringPipeline(BasePipeline):
                 run_date = self.start_time
             else:
                 run_date = _dt.now(timezone.utc)
-            # Truncate microseconds to match the base class's datetime
-            # storage (some DBs truncate automatically; SQLite does not).
-            run_date = run_date.replace(microsecond=0)
+            # v83 FORENSIC ROOT FIX (P1-5): the previous code truncated
+            # microseconds here (``run_date = run_date.replace(microsecond=0)``)
+            # but the base class's ``_write_run_log`` (base_pipeline.py:4823)
+            # does NOT truncate — it queries with full microsecond precision.
+            # So the STRING-created row (microseconds=0) was NOT found by
+            # the base-class query, and the base class INSERTed a SECOND
+            # PipelineRun row with full microseconds. Result: two audit
+            # rows for the same run; PPI lineage IDs pointed to the
+            # STRING-created row that never got a final status update.
+            # ROOT FIX: do NOT truncate microseconds. Use ``self.start_time``
+            # with full precision so the STRING-created row matches the
+            # base-class query exactly (the base class UPDATEs it in place
+            # instead of inserting a duplicate).
             existing = (
                 session.query(PipelineRun)
                 .filter(
@@ -2731,12 +2773,27 @@ class StringPipeline(BasePipeline):
         The base class's gzip+CSV detection assumes comma-separated
         files. STRING files are space-separated, so we count lines
         directly via gzip.open.
+
+        v83 FORENSIC ROOT FIX (P2-17): the previous code unconditionally
+        subtracted 1 for the header line, then clamped with ``max(0, ...)``.
+        For an EMPTY file (0 lines), this produced ``max(0, -1) = 0`` —
+        correct by accident, but the ``-1`` was misleading. For a
+        HEADER-ONLY file (1 line), it produced ``max(0, 0) = 0`` — also
+        correct. ROOT FIX: explicit guard — if the file has 0 lines
+        (empty) or 1 line (header only), return 0 directly without
+        the subtraction. This makes the intent clear and avoids the
+        confusing ``max(0, -1)`` pattern.
         """
         try:
             with gzip.open(path, "rt", encoding="utf-8") as fh:
                 count = sum(1 for _ in fh)
+            # v83 P2-17: explicit guards for empty / header-only files.
+            if count <= 1:
+                # 0 lines = empty file; 1 line = header only. Either way,
+                # zero data records.
+                return 0
             # Subtract header line.
-            return max(0, count - 1)
+            return count - 1
         except (OSError, gzip.BadGzipFile, EOFError, UnicodeDecodeError) as exc:
             logger.warning(
                 "[%s] _count_records failed for %s: %s",
