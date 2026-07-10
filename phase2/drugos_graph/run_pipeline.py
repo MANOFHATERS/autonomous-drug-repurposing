@@ -3221,6 +3221,53 @@ def step7_additional_sources(
             "explorer be 100% connected with the Phase 1 dataset."
         )
 
+    # ─── P0-G2 ROOT FIX: load STRING aliases crosswalk BEFORE step7a ────
+    # The STRING aliases file (Ensembl → UniProt) was loaded in step8,
+    # AFTER step7a called string_to_edge_records. Because the crosswalk
+    # was empty during step7a, unresolved_policy="drop" silently dropped
+    # the ENTIRE STRING PPI subgraph when bypassing Phase 1
+    # (--no-skip-download). The KG was missing ~19M PPI edges.
+    #
+    # ROOT FIX: load the STRING aliases crosswalk at the TOP of step7,
+    # before any STRING edge generation. This makes string_to_edge_records'
+    # Ensembl→UniProt resolution work. The step8 reload is idempotent
+    # (register_* methods dedupe) and remains as a defensive second load.
+    try:
+        from .id_crosswalk import get_default_crosswalk as _p0g2_get_cw
+        _p0g2_cw = _p0g2_get_cw()
+        _p0g2_string_cfg = _DS.get("string", {})
+        _p0g2_aliases_fn = _p0g2_string_cfg.get(
+            "aliases_filename", "9606.protein.aliases.v12.0.txt.gz"
+        )
+        _p0g2_aliases_path = _RAW / _p0g2_aliases_fn
+        if _p0g2_aliases_path.exists():
+            _p0g2_before = _p0g2_cw.summary().get("ensembl_protein_to_uniprot", 0)
+            _p0g2_cw.load_string_aliases(_p0g2_aliases_path, allowed_dir=_RAW)
+            _p0g2_after = _p0g2_cw.summary().get("ensembl_protein_to_uniprot", 0)
+            logger.info(
+                "P0-G2 ROOT FIX: pre-loaded STRING aliases crosswalk "
+                "from %s — Ensembl→UniProt mappings %d → %d (loaded "
+                "BEFORE step7a so string_to_edge_records can resolve "
+                "Ensembl IDs to UniProt instead of dropping them).",
+                _p0g2_aliases_path.name, _p0g2_before, _p0g2_after,
+            )
+        else:
+            logger.info(
+                "P0-G2 ROOT FIX: STRING aliases file not found at %s — "
+                "crosswalk will use builtin-only mappings. STRING edges "
+                "with unresolved Ensembl IDs will be handled per "
+                "unresolved_policy (default keep_ensembl in v82).",
+                _p0g2_aliases_path.name,
+            )
+    except Exception as _p0g2_exc:
+        logger.warning(
+            "P0-G2 ROOT FIX: pre-loading STRING aliases crosswalk failed "
+            "(%s: %s) — continuing. step7a may drop unresolved STRING "
+            "edges if unresolved_policy='drop'.",
+            type(_p0g2_exc).__name__, _p0g2_exc,
+        )
+    # ─── End P0-G2 ROOT FIX ───────────────────────────────────────────────
+
     # ─── 7a: STRING PPI (critical data source) ────────────────────────────
     if _phase1_bridge_used:
         # v24 ROOT FIX: Phase 1 bridge already loaded
@@ -3296,7 +3343,18 @@ def step7_additional_sources(
                 if not skip_download:
                     download_string()
                 string_df = parse_string_ppi()
-                string_edges = string_to_edge_records(string_df)
+                # P0-G2 ROOT FIX (cont.): use keep_ensembl instead of the
+                # default "drop". Even after the P0-G2 pre-load of STRING
+                # aliases, some Ensembl IDs (isoforms, novel proteins) may
+                # not have a UniProt mapping. "drop" silently discards those
+                # edges — losing PPI signal. "keep_ensembl" preserves the
+                # edge with the Ensembl ID; a later entity-resolution pass
+                # can re-resolve it. This is the scientifically-correct
+                # default for a knowledge graph that MUST preserve all
+                # known biological relationships.
+                string_edges = string_to_edge_records(
+                    string_df, unresolved_policy="keep_ensembl"
+                )
                 results["string_edges"] = len(string_edges)
                 results["string_source"] = "raw_download"
 
@@ -3814,6 +3872,7 @@ def step7_additional_sources(
             download_clinicaltrials,
             parse_clinicaltrials,
             clinicaltrials_to_edge_records,
+            clinicaltrials_to_node_records,
         )
 
         # v15 ROOT FIX (REM-24): honor skip_download. ClinicalTrials
@@ -3830,10 +3889,50 @@ def step7_additional_sources(
             ct_df = parse_clinicaltrials()
             ct_edges = clinicaltrials_to_edge_records(ct_df)
             results["clinicaltrials_edges"] = len(ct_edges)
-            if not skip_neo4j and ct_edges:
+            # P0-G3 ROOT FIX (cont.): generate flat node records and
+            # load them into the KG. Previously, only edges were loaded
+            # — the MeSH Compound/Disease nodes referenced by the edges
+            # were never created, so the edges dangled (or referenced
+            # nodes created by other loaders, missing the ClinicalTrials
+            # specific MeSH terms). Now we generate and load the nodes.
+            ct_nodes = clinicaltrials_to_node_records(ct_df)
+            results["clinicaltrials_nodes"] = len(ct_nodes)
+            if not skip_neo4j and (ct_edges or ct_nodes):
                 from .kg_builder import DrugOSGraphBuilder
 
                 with DrugOSGraphBuilder(Neo4jConfig()) as builder:
+                    # P0-G3 ROOT FIX (cont.): load nodes FIRST so the
+                    # edges have endpoints to attach to. Group by
+                    # node_type (Compound / Disease) and load each group.
+                    if ct_nodes:
+                        _ct_compound_nodes = [
+                            n for n in ct_nodes if n.get("node_type") == "Compound"
+                        ]
+                        _ct_disease_nodes = [
+                            n for n in ct_nodes if n.get("node_type") == "Disease"
+                        ]
+                        if _ct_compound_nodes:
+                            _ct_n_loaded = builder.load_nodes_batch(
+                                "Compound", _ct_compound_nodes,
+                                source="ClinicalTrials",
+                            )
+                            logger.info(
+                                "Step 7e: loaded %d Compound nodes from "
+                                "ClinicalTrials MeSH terms.",
+                                _ct_n_loaded if isinstance(_ct_n_loaded, int)
+                                else getattr(_ct_n_loaded, "created", 0),
+                            )
+                        if _ct_disease_nodes:
+                            _ct_n_loaded = builder.load_nodes_batch(
+                                "Disease", _ct_disease_nodes,
+                                source="ClinicalTrials",
+                            )
+                            logger.info(
+                                "Step 7e: loaded %d Disease nodes from "
+                                "ClinicalTrials MeSH terms.",
+                                _ct_n_loaded if isinstance(_ct_n_loaded, int)
+                                else getattr(_ct_n_loaded, "created", 0),
+                            )
                     batch_size = Neo4jConfig().batch_size_edges
                     for i in range(0, len(ct_edges), batch_size):
                         batch = ct_edges[i : i + batch_size]
@@ -4327,6 +4426,73 @@ def step8_entity_resolution(df, drug_records) -> dict:
             "Step 8 InChIKey merge failed — project's core mandate "
             "violated. Original error: " + str(exc)
         ) from exc
+
+    # ─── P0-G1 ROOT FIX: populate compound_to_inchikey crosswalk ──────────
+    # The IDCrosswalk.compound_to_inchikey dict was NEVER populated in
+    # production — register_compound_inchikey and load_compound_inchikey_
+    # crosswalk were dead code. The 7 Compound ID namespaces (InChIKey,
+    # CHEMBL, CID, CIDm/CIDs, MESH, DB-id, NAME:) stayed disjoint. Same
+    # drug appeared as 7 different nodes. Graph Transformer learned wrong
+    # edges.
+    #
+    # ROOT FIX: after merge_mappings_by_inchikey unifies Compound mappings
+    # (canonical_id = inchikey, aliases = {drugbank_id, chembl_id,
+    # pubchem_cid, chebi_id, drkg_id, ...}), iterate the resolver's
+    # Compound mappings and register EVERY alias → inchikey pair in the
+    # crosswalk. This makes compound_id_to_inchikey() work for all
+    # downstream loaders (stitch, sider, drkg, clinicaltrials) so they
+    # can normalize Compound references to the canonical InChIKey BEFORE
+    # writing to Neo4j. The 7 disjoint subgraphs collapse to 1.
+    _p0g1_crosswalk = get_default_crosswalk()
+    _p0g1_registered = 0
+    _p0g1_compound_mappings = resolver.mappings.get("Compound", {})
+    for _p0g1_canonical_id, _p0g1_mapping in _p0g1_compound_mappings.items():
+        # canonical_id is the inchikey for resolved compounds; for
+        # unresolved placeholders ("UNRESOLVED:DRKG:...") the inchikey
+        # alias is absent — skip those (nothing to register).
+        _p0g1_ik = _p0g1_mapping.aliases.get("inchikey") if _p0g1_mapping.aliases else None
+        if not isinstance(_p0g1_ik, str) or not _p0g1_ik.strip():
+            # Fall back to canonical_id if it IS a valid inchikey.
+            if isinstance(_p0g1_canonical_id, str) and len(_p0g1_canonical_id) == 27 \
+                    and _p0g1_canonical_id[14] == "-" and _p0g1_canonical_id[25] == "-":
+                _p0g1_ik = _p0g1_canonical_id
+            else:
+                continue
+        _p0g1_ik = _p0g1_ik.strip().upper()
+        _p0g1_conf = getattr(_p0g1_mapping, "confidence", 0.85)
+        _p0g1_conf_label = "verified" if _p0g1_conf >= 0.9 else ("resolved" if _p0g1_conf >= 0.5 else "low_confidence")
+        # Register the inchikey → itself (idempotent self-mapping).
+        _p0g1_registered += _p0g1_crosswalk.register_compound_inchikey(
+            _p0g1_ik, _p0g1_ik,
+            source="entity_resolver:compound_merge",
+            confidence=_p0g1_conf_label,
+        )
+        # Register every alias → inchikey.
+        if _p0g1_mapping.aliases:
+            for _p0g1_alias_key, _p0g1_alias_val in _p0g1_mapping.aliases.items():
+                if _p0g1_alias_key == "inchikey":
+                    continue
+                if isinstance(_p0g1_alias_val, str) and _p0g1_alias_val.strip():
+                    _p0g1_registered += _p0g1_crosswalk.register_compound_inchikey(
+                        _p0g1_alias_val.strip(), _p0g1_ik,
+                        source=f"entity_resolver:{_p0g1_alias_key}",
+                        confidence=_p0g1_conf_label,
+                    )
+                elif isinstance(_p0g1_alias_val, list):
+                    for _p0g1_av in _p0g1_alias_val:
+                        if isinstance(_p0g1_av, str) and _p0g1_av.strip():
+                            _p0g1_registered += _p0g1_crosswalk.register_compound_inchikey(
+                                _p0g1_av.strip(), _p0g1_ik,
+                                source=f"entity_resolver:{_p0g1_alias_key}",
+                                confidence=_p0g1_conf_label,
+                            )
+    logger.info(
+        "P0-G1 ROOT FIX: registered %d Compound alias→InChIKey mappings "
+        "in the IDCrosswalk (from %d resolved Compound mappings). The 7 "
+        "Compound ID namespaces are now unified.",
+        _p0g1_registered, len(_p0g1_compound_mappings),
+    )
+    # ─── End P0-G1 ROOT FIX ───────────────────────────────────────────────
 
     # ─── Protein resolution from UniProt ──────────────────────────────────
     protein_stats: Dict[str, Any] = {

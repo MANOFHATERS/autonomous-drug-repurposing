@@ -4377,6 +4377,19 @@ def clinicaltrials_to_node_records(
     records for MeSH IDs that don't resolve to existing KG nodes, so the
     KG builder can create them.
 
+    P0-G3 ROOT FIX (v82): the previous implementation emitted nodes with
+    shape ``{"node_id": ..., "node_type": ..., "props": {...}}`` — a
+    nested triple-store shape. But ``kg_builder.load_nodes_batch`` requires
+    FLAT dicts with an ``"id"`` key at top level (it validates
+    ``row.get("id")`` and dead-letters any row missing it). The previous
+    shape had NO ``"id"`` key → every single row was silently dead-lettered
+    → ClinicalTrials MeSH Compound/Disease nodes NEVER entered the KG.
+    ROOT FIX: emit flat dicts with ``id``, ``name``, ``source`` at top
+    level (matching ``load_nodes_batch``'s contract), plus ``node_type``
+    so callers can group by label before calling
+    ``load_nodes_batch(label, nodes)``. ``node_type`` is NOT in any
+    NODE_PROPERTY_WHITELIST so ``_whitelist_filter`` drops it cleanly.
+
     Parameters
     ----------
     df : pd.DataFrame
@@ -4387,7 +4400,10 @@ def clinicaltrials_to_node_records(
     Returns
     -------
     list of dict
-        List of node records (``ClinicalTrialNodeRecord`` shape).
+        Flat node records with ``id``, ``name``, ``source``, ``node_type``
+        (and ``mesh`` for Disease nodes). Callers should group by
+        ``node_type`` and pass each group to
+        ``builder.load_nodes_batch(node_type, group_nodes)``.
     """
     cfg = cfg or ClinicalTrialsConfig()
     nodes: List[Dict[str, Any]] = []
@@ -4398,36 +4414,34 @@ def clinicaltrials_to_node_records(
         if drug_mesh and _is_valid_mesh_id_format(drug_mesh):
             if drug_mesh not in seen_ids:
                 seen_ids.add(drug_mesh)
+                # P0-G3 ROOT FIX: flat dict with "id" at top level.
                 nodes.append({
-                    "node_id": drug_mesh,
+                    "id": drug_mesh,
+                    "name": record.get("drug_name") or drug_mesh,
+                    "source": SOURCE_NAME,
                     "node_type": "Compound",
-                    "props": {
-                        "name": record.get("drug_name") or drug_mesh,
-                        "mesh_term": drug_mesh,
-                        "source": SOURCE_NAME,
-                        "_source": SOURCE_NAME,
-                        "_license": LICENSE,
-                        "_attribution": ATTRIBUTION,
-                        "_schema_version": SCHEMA_VERSION,
-                    },
+                    "mesh": drug_mesh,
+                    "_source": SOURCE_NAME,
+                    "_license": LICENSE,
+                    "_attribution": ATTRIBUTION,
+                    "_schema_version": SCHEMA_VERSION,
                 })
         # Disease node from MeSH.
         cond_mesh: Optional[str] = _normalize_mesh(record.get("condition_mesh"))
         if cond_mesh and _is_valid_mesh_id_format(cond_mesh):
             if cond_mesh not in seen_ids:
                 seen_ids.add(cond_mesh)
+                # P0-G3 ROOT FIX: flat dict with "id" at top level.
                 nodes.append({
-                    "node_id": cond_mesh,
+                    "id": cond_mesh,
+                    "name": record.get("condition_name") or cond_mesh,
+                    "source": SOURCE_NAME,
                     "node_type": "Disease",
-                    "props": {
-                        "name": record.get("condition_name") or cond_mesh,
-                        "mesh_term": cond_mesh,
-                        "source": SOURCE_NAME,
-                        "_source": SOURCE_NAME,
-                        "_license": LICENSE,
-                        "_attribution": ATTRIBUTION,
-                        "_schema_version": SCHEMA_VERSION,
-                    },
+                    "mesh": cond_mesh,
+                    "_source": SOURCE_NAME,
+                    "_license": LICENSE,
+                    "_attribution": ATTRIBUTION,
+                    "_schema_version": SCHEMA_VERSION,
                 })
     return nodes
 

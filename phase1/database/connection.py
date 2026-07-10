@@ -226,6 +226,8 @@ class _CircuitBreaker:
     _state: str = "CLOSED"  # CLOSED, OPEN, HALF_OPEN
     _last_failure_time: float = 0.0
     _lock: threading.Lock = field(default_factory=threading.Lock)
+    # P1-A8 ROOT FIX: track whether a HALF_OPEN probe is in flight.
+    _half_open_probe_in_flight: bool = False
 
     @property
     def state(self) -> str:
@@ -241,6 +243,7 @@ class _CircuitBreaker:
         with self._lock:
             self._failure_count = 0
             self._state = "CLOSED"
+            self._half_open_probe_in_flight = False
 
     def record_failure(self) -> None:
         """Record a failed operation."""
@@ -253,15 +256,41 @@ class _CircuitBreaker:
                     "Database circuit breaker OPENED after %d consecutive failures",
                     self._failure_count,
                 )
+            # P1-A8 ROOT FIX: a failed probe in HALF_OPEN trips the
+            # breaker back to OPEN and clears the probe-in-flight flag.
+            if self._state == "HALF_OPEN":
+                self._state = "OPEN"
+                self._half_open_probe_in_flight = False
 
     def allow_request(self) -> bool:
-        """Check if a request should be allowed."""
-        current_state = self.state
-        if current_state == "CLOSED":
+        """Check if a request should be allowed.
+
+        P1-A8 ROOT FIX (v82): the previous implementation returned True for
+        EVERY call in HALF_OPEN — defeating single-probe semantics. Under
+        concurrent pipelines (7 Phase 1 sources running in parallel), all
+        7 would simultaneously get "allowed" and hammer a still-recovering
+        DB, re-tripping the breaker. ROOT FIX: track whether a probe is
+        already in flight; allow exactly ONE probe in HALF_OPEN, reject
+        all others until the probe completes (success → CLOSED, failure
+        → OPEN). This is the textbook circuit-breaker HALF_OPEN semantic.
+        """
+        with self._lock:
+            current_state = self._state
+            if current_state == "OPEN":
+                # Check if recovery timeout has elapsed.
+                if time.monotonic() - self._last_failure_time > self.recovery_timeout:
+                    self._state = "HALF_OPEN"
+                    self._half_open_probe_in_flight = False
+                    current_state = "HALF_OPEN"
+                else:
+                    return False
+            if current_state == "CLOSED":
+                return True
+            # HALF_OPEN: allow exactly ONE probe.
+            if self._half_open_probe_in_flight:
+                return False
+            self._half_open_probe_in_flight = True
             return True
-        if current_state == "HALF_OPEN":
-            return True  # Allow one probe
-        return False  # OPEN
 
 
 # ===========================================================================
@@ -374,8 +403,14 @@ def is_production_environment() -> bool:
     Replaces every ad-hoc ``os.environ.get("ENVIRONMENT") in (...)
     and ``os.getenv("ENV") in {...}`` pattern. Importing this function
     guarantees every module agrees on what "production" means.
+
+    P1-A11 ROOT FIX (v82): the previous implementation returned True for
+    "staging" — giving staging production-sized connection pools (15 vs 5)
+    and fail-closed strictness. Staging is a PRE-PRODUCTION environment
+    that should use dev-sized pools for cost efficiency and allow test
+    fixtures for integration testing. Only "production" is production.
     """
-    return _get_environment() in ("production", "staging")
+    return _get_environment() == "production"
 
 
 def _get_pool_config() -> dict[str, Any]:
@@ -1929,6 +1964,16 @@ def configure_engine(url: str, **kwargs: Any) -> Engine:
     Useful for testing with in-memory SQLite or alternative databases
     without monkey-patching module globals.
 
+    P1-A4 ROOT FIX (v82): the previous implementation released
+    ``_lifecycle_lock`` between ``dispose_engine()`` and ``create_engine()``.
+    A concurrent thread could acquire the lock in that gap, see ``_engine``
+    still pointing at the disposed engine, and use it — triggering
+    ``DetachedInstanceError`` / ``StatementError`` on the next query. Under
+    the 7-concurrent-pipeline Phase 1 workload, this race was non-deterministic
+    and untraceable. ROOT FIX: hold ``_lifecycle_lock`` for the ENTIRE
+    dispose + create sequence — no window where a concurrent thread can
+    observe a half-disposed engine.
+
     Parameters
     ----------
     url : str
@@ -1941,15 +1986,16 @@ def configure_engine(url: str, **kwargs: Any) -> Engine:
     Engine
         The newly created engine.
     """
-    with _lifecycle_lock:
-        dispose_engine(force=True)
-
     global _engine, _session_factory
     with _lifecycle_lock:
-        # Dispose again in case of race
+        # Dispose existing engine WHILE HOLDING THE LOCK — no gap.
         if _engine is not None:
-            _engine.dispose()
+            try:
+                _engine.dispose()
+            except Exception:
+                pass
         _session_factory = None
+        _engine = None
 
         engine = create_engine(url, **kwargs)
         _configure_engine_events(engine)

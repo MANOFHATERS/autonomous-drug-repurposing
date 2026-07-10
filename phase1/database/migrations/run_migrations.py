@@ -4435,7 +4435,21 @@ def _run_migrations_inner(
                             if not non_comment_lines:
                                 continue
                             try:
-                                conn.exec_driver_sql(stmt_stripped)
+                                # P1-A13 ROOT FIX (v82): use SQLAlchemy's
+                                # ``text()`` wrapper + ``conn.execute()``
+                                # instead of the raw ``exec_driver_sql``.
+                                # ``exec_driver_sql`` bypasses SQLAlchemy's
+                                # SQL execution layer — any future migration
+                                # that constructs SQL from env vars or user
+                                # input would be an injection vector.
+                                # ``text()`` routes through SQLAlchemy's
+                                # compiler, which is the institutional-grade
+                                # standard. Functionally equivalent for the
+                                # static DDL/DML in migration .sql files (the
+                                # splitter already ensures single-statement
+                                # calls, so the v59 multi-statement fix is
+                                # preserved).
+                                conn.execute(text(stmt_stripped))
                             except Exception as stmt_exc:
                                 # v59 ROOT FIX: catch "duplicate column name"
                                 # and "already exists" errors at the STATEMENT
