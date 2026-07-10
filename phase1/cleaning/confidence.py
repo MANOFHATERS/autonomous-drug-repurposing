@@ -91,7 +91,7 @@ def classify_confidence(
     score: Optional[float],
     tiers: Optional[list[tuple[float, str]]] = None,
     *,
-    allow_negative: bool = False,
+    allow_negative: bool = True,
 ) -> str:
     """Classify a DisGeNET DSGP score into a confidence tier.
 
@@ -101,8 +101,9 @@ def classify_confidence(
     Parameters
     ----------
     score : float or None
-        The DisGeNET DSGP score, expected to be in ``[0, 1]``.  NaN and
-        negative scores MUST NOT reach this function —
+        The DisGeNET DSGP score, expected to be in ``[-1, 1]`` (the
+        protective-association range) or ``[0, 1]`` (the unsigned
+        range).  NaN and None MUST NOT reach this function —
         :func:`cleaning.missing_values.validate_gda_scores` is responsible
         for clipping before classification (SCI-12, SCI-13).  A defensive
         assertion fires if these invariants are violated.
@@ -110,19 +111,40 @@ def classify_confidence(
         Custom tier list (sorted ascending by threshold).  Defaults to
         :data:`DEFAULT_CONFIDENCE_TIERS`.
     allow_negative : bool, optional
-        v80 FORENSIC ROOT FIX (P0-D6): when ``True``, accept scores in
-        ``[-1.0, 0.0)`` and classify them as the LOWEST tier (``"weak"``)
-        rather than raising ``ValueError``. This is the correct behavior
-        when ``validate_gda_scores`` was called with
-        ``score_range=(-1.0, 1.0)`` and ``preserve_direction=True`` —
-        negative scores represent PROTECTIVE associations (the gene
-        DECREASES disease risk), which are scientifically meaningful and
-        should NOT crash the pipeline. The ``_score_direction`` lineage
-        column (set by ``validate_gda_scores``) preserves the sign
-        information for downstream consumers; this function's job is
-        only to bucket the MAGNITUDE into a tier. Default ``False``
-        (preserves backward compat — callers that expect the strict
-        ``[0, 1]`` contract still get ``ValueError`` on negatives).
+        v82 FORENSIC ROOT FIX (P0-D6b — fragile opt-in contract):
+          The v80 fix added ``allow_negative`` as an OPT-IN parameter
+          (default ``False``) that callers had to remember to pass.
+          This was fragile — the DisGeNET pipeline and any operator
+          running ``validate_gda_scores(score_range=(-1, 1),
+          preserve_direction=True)`` would STILL crash on negative
+          scores unless they also passed ``allow_negative=True`` to
+          ``classify_confidence``. The two modules had incompatible
+          DEFAULT contracts: ``validate_gda_scores`` could preserve
+          negatives, but ``classify_confidence`` rejected them by
+          default.
+
+          ROOT FIX: the DEFAULT is now ``True`` — negative scores in
+          ``[-1, 0)`` are ALWAYS classified as the lowest tier
+          (``"weak"``), because:
+          1. The function's job is to bucket MAGNITUDE into tiers, not
+             to enforce sign semantics.
+          2. The ``_score_direction`` lineage column (set by
+             ``validate_gda_scores``) already preserves the sign info
+             for downstream consumers.
+          3. Protective associations have weak evidence BY DEFINITION
+             (small magnitude), so classifying them as "weak" is
+             semantically correct.
+          4. Crashing on valid protective-association scores is a BUG,
+             not a feature — making it opt-in meant every caller had
+             to remember the flag, and forgetting it crashed the
+             pipeline.
+
+          The ``allow_negative`` parameter is KEPT for backward
+          compatibility but its default is now ``True``. Passing
+          ``allow_negative=False`` emits a ``DeprecationWarning`` and
+          still raises on negatives (preserves the old strict behavior
+          for any caller that explicitly opted into it), but this
+          behavior will be removed in v4.0.0.
 
     Returns
     -------
@@ -132,10 +154,10 @@ def classify_confidence(
     Raises
     ------
     ValueError
-        If ``score`` is None, NaN, or (without ``allow_negative=True``)
-        negative, or greater than 1.0
+        If ``score`` is None, NaN, less than -1.0, or greater than 1.0
         (defensive check — should never fire if the caller respects the
-        SCI-12 / SCI-13 contract).
+        SCI-12 / SCI-13 contract).  Negative scores in ``[-1, 0)`` are
+        NO LONGER rejected (they classify as ``"weak"``).
 
     Notes
     -----
@@ -154,19 +176,24 @@ def classify_confidence(
       (the protective-association mode). The previous
       ``classify_confidence`` raised ``ValueError`` on ANY score < 0,
       which crashed the cleaning pipeline whenever a protective GDA
-      was present. Re-running on data with negative scores was
-      impossible without manual filtering. The ``allow_negative``
-      parameter lets callers opt into the protective-association mode
-      where negatives are classified as the lowest tier (their
-      magnitude is small by definition — protective associations
-      have weak evidence). The ``_score_direction`` column preserves
-      the sign for downstream ranking.
+      was present. The v80 fix added an opt-in ``allow_negative``
+      parameter, but kept the default as ``False`` — meaning the
+      contract was STILL incompatible by default.
+
+    v82 FORENSIC ROOT FIX (P0-D6b — fragile opt-in contract):
+      The v80 opt-in was fragile: callers had to remember to pass
+      ``allow_negative=True``, and forgetting it crashed the pipeline.
+      The DEFAULT is now ``True`` — negatives are always classified as
+      ``"weak"`` (the lowest tier). The ``_score_direction`` column
+      preserves the sign for downstream ranking. Passing
+      ``allow_negative=False`` is deprecated and will be removed in
+      v4.0.0.
     """
     # Defensive invariant (SCI-12): the caller (validate_gda_scores) is
     # responsible for clipping and coercing before this function is
-    # called.  If we ever see a None, NaN, or negative score here, the
-    # contract has been violated — fail LOUDLY with a real exception
-    # (not assert, which is disabled by `python -O`).
+    # called.  If we ever see a None or NaN score here, the contract has
+    # been violated — fail LOUDLY with a real exception (not assert,
+    # which is disabled by `python -O`).
     if score is None:
         raise ValueError(
             "classify_confidence invariant violated: score is None "
@@ -176,21 +203,36 @@ def classify_confidence(
         raise ValueError(
             f"classify_confidence invariant violated: score is NaN ({score!r})"
         )
-    # v80 P0-D6: only reject negative scores when allow_negative=False.
-    if score < 0.0 and not allow_negative:
-        raise ValueError(
-            f"classify_confidence invariant violated: score={score!r} < 0 "
-            f"(validate_gda_scores should have clipped to [0, 1] first, "
-            f"OR call classify_confidence with allow_negative=True for "
-            f"protective-association mode where score_range=(-1, 1))"
+
+    # v82 P0-D6b: deprecation warning for the old strict mode.
+    if not allow_negative:
+        import warnings
+        warnings.warn(
+            "classify_confidence(allow_negative=False) is deprecated and "
+            "will be removed in v4.0.0. Negative scores in [-1, 0) are now "
+            "always classified as 'weak' (the lowest tier) by default. The "
+            "_score_direction lineage column preserves the sign for "
+            "downstream ranking. Stop passing allow_negative=False — it "
+            "will start raising TypeError in v4.0.0.",
+            DeprecationWarning,
+            stacklevel=2,
         )
+        # Preserve the old strict behavior for explicit opt-in callers.
+        if score < 0.0:
+            raise ValueError(
+                f"classify_confidence invariant violated: score={score!r} < 0 "
+                f"(caller explicitly passed allow_negative=False — deprecated. "
+                f"Remove the flag to accept protective-association negatives.)"
+            )
+
+    # v82 P0-D6b: reject scores below -1.0 (outside the protective-
+    # association range). validate_gda_scores should have clipped to
+    # [-1, 1] already.
     if score < -1.0:
-        # Even in allow_negative mode, scores below -1.0 are invalid
-        # (the protective-association range is [-1, 0), not (-inf, 0)).
         raise ValueError(
             f"classify_confidence invariant violated: score={score!r} < -1 "
-            f"(even in protective-association mode, the valid range is "
-            f"[-1, 1]; validate_gda_scores should have clipped first)"
+            f"(the valid range is [-1, 1]; validate_gda_scores should "
+            f"have clipped first)"
         )
     if score > 1.0:
         # v35 ROOT FIX: enforce the upper bound of the DisGeNET DSGP score
@@ -202,7 +244,7 @@ def classify_confidence(
         # producing an over-confident tier.
         raise ValueError(
             f"classify_confidence invariant violated: score={score!r} > 1 "
-            f"(validate_gda_scores should have clipped to [0, 1] first)"
+            f"(validate_gda_scores should have clipped to [-1, 1] first)"
         )
 
     if tiers is None:
@@ -212,11 +254,11 @@ def classify_confidence(
     sorted_tiers = sorted(tiers, key=lambda t: t[0])
     thresholds = [t[0] for t in sorted_tiers]
     labels = [t[1] for t in sorted_tiers]
-    # v80 P0-D6: in allow_negative mode, negative scores are classified
-    # as the lowest tier (their magnitude is small by definition). We
-    # clamp the score to 0.0 for the bisect lookup so negative values
-    # map to the same tier as score=0.0 (the lowest threshold).
-    _bisect_score = max(0.0, score) if allow_negative else score
+    # v82 P0-D6b: negative scores in [-1, 0) are classified as the
+    # lowest tier. We clamp the score to 0.0 for the bisect lookup so
+    # negative values map to the same tier as score=0.0 (the lowest
+    # threshold). The _score_direction column preserves the sign.
+    _bisect_score = max(0.0, float(score))
     # bisect_right returns the insertion point to the right of any
     # existing entries equal to score.  Subtracting 1 gives the index of
     # the tier whose threshold <= score.
@@ -224,7 +266,8 @@ def classify_confidence(
     if idx < 0:
         # score < the lowest threshold — fall back to the lowest tier.
         # This should not happen in practice (the lowest threshold is 0.0
-        # and we asserted score >= 0.0 above), but defensive programming.
+        # and we clamped negative scores to 0.0 above), but defensive
+        # programming.
         idx = 0
     return labels[idx]
 

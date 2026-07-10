@@ -3048,18 +3048,69 @@ def dedup_interactions(
 
     if activity_value_present and keep == "best":
         # [SCI-3] Parse censored values & extract numeric component
+        #
+        # v82 FORENSIC ROOT FIX (P0-D4c — deduplicator ignores pre-existing
+        #   activity_censored column from the pipeline):
+        #   The previous code UNCONDITIONALLY called
+        #   ``_parse_censored_value(working[activity_value_column])`` to
+        #   re-derive the censored flag from the (now-float) activity value.
+        #   But after the ChEMBL pipeline's ``_step_normalize_activity_values``
+        #   runs, the activity_value column is a FLOAT (e.g. ``1000.0``),
+        #   not the original string (``">6"``). ``_parse_censored_value``
+        #   on a float returns ``(False, None, 1000.0)`` — the censor
+        #   information is LOST even though the normalizer correctly
+        #   detected it and the pipeline propagated it into the
+        #   ``activity_censored`` / ``activity_censor_direction`` columns.
+        #
+        #   ROOT FIX: check for the pre-existing ``activity_censored``
+        #   and ``activity_censor_direction`` columns FIRST. If present,
+        #   use them directly (the pipeline already did the censor
+        #   detection on the ORIGINAL string value before conversion).
+        #   Fall back to ``_parse_censored_value`` ONLY if the columns
+        #   are absent (backward compat with DataFrames from older
+        #   pipeline runs that didn't propagate the censor metadata).
         if handle_censored:
-            parsed = working[activity_value_column].apply(_parse_censored_value)  # type: ignore[index]
-            working["_av_censored"] = parsed.apply(lambda t: t[0])
-            working["_av_censor_dir"] = parsed.apply(lambda t: t[1])
-            working["_av_numeric"] = parsed.apply(lambda t: t[2])
-            n_censored = int(working["_av_censored"].sum())
-            if n_censored > 0:
-                _incr_metric(f"{func_name}_censored_seen", n_censored)
-                _log_event(
-                    "info", f"{func_name}.censored_seen", count=n_censored,
-                )
-                transformations.append("parse_censored")
+            _has_preexisting_censored = (
+                "activity_censored" in working.columns
+                and "activity_censor_direction" in working.columns
+            )
+            if _has_preexisting_censored:
+                # v82 P0-D4c: use the pipeline-provided censor metadata
+                # (detected on the ORIGINAL string value, before float
+                # conversion). This is the authoritative source —
+                # re-parsing the float would lose the censor info.
+                working["_av_censored"] = working["activity_censored"].fillna(False).astype(bool)
+                working["_av_censor_dir"] = working["activity_censor_direction"]
+                # _av_numeric is just the float value (already converted
+                # by the pipeline). Use pd.to_numeric for safety.
+                try:
+                    working["_av_numeric"] = pd.to_numeric(
+                        working[activity_value_column], errors="coerce"  # type: ignore[index]
+                    )
+                except Exception:
+                    working["_av_numeric"] = pd.NA
+                n_censored = int(working["_av_censored"].sum())
+                if n_censored > 0:
+                    _incr_metric(f"{func_name}_censored_seen", n_censored)
+                    _log_event(
+                        "info", f"{func_name}.censored_seen", count=n_censored,
+                        details="censor metadata from pre-existing activity_censored column (v82 P0-D4c)",
+                    )
+                    transformations.append("parse_censored_from_pipeline_column")
+            else:
+                # Fallback: re-parse the activity_value column (legacy
+                # path for DataFrames without activity_censored columns).
+                parsed = working[activity_value_column].apply(_parse_censored_value)  # type: ignore[index]
+                working["_av_censored"] = parsed.apply(lambda t: t[0])
+                working["_av_censor_dir"] = parsed.apply(lambda t: t[1])
+                working["_av_numeric"] = parsed.apply(lambda t: t[2])
+                n_censored = int(working["_av_censored"].sum())
+                if n_censored > 0:
+                    _incr_metric(f"{func_name}_censored_seen", n_censored)
+                    _log_event(
+                        "info", f"{func_name}.censored_seen", count=n_censored,
+                    )
+                    transformations.append("parse_censored")
         else:
             working["_av_censored"] = False
             working["_av_censor_dir"] = None

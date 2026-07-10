@@ -788,6 +788,28 @@ class ProteinResolver(Resolver):
         # but with different STRING IDs).
         self._provisional_by_gene_organism: Dict[Tuple[str, str], List[str]] = {}
 
+        # v82 FORENSIC ROOT FIX (P0-D3b — O(N) fallback triggers for
+        # STRING-derived provisionals that lack gene_symbol):
+        #   The v80 _provisional_by_gene_organism index only helps when
+        #   a provisional entry has a gene_symbol. But STRING alias
+        #   records (the dominant source of provisionals) carry ONLY
+        #   ``string_id`` + ``uniprot_id`` — they have NO gene_symbol.
+        #   So the gene-organism index NEVER contains them, and every
+        #   UniProt record that arrives falls through to the O(N)
+        #   defensive scan. On a 100K-scale ingestion this is 10
+        #   billion iterations → Airflow timeout (the exact failure
+        #   mode the v80 fix was supposed to prevent).
+        #
+        #   ROOT FIX: maintain a SECOND index keyed by the alias's
+        #   ``uniprot_id`` field (the real UniProt accession from the
+        #   STRING aliases file, NOT the synthetic uid). When a real
+        #   UniProt record arrives with ``uniprot_id=P12345``, we look
+        #   up ``_provisional_by_alias_uniprot.get("P12345")`` in O(1)
+        #   and find the synthetic uid to promote. This covers the
+        #   STRING-alias case (the common one) without falling back to
+        #   the O(N) scan.
+        self._provisional_by_alias_uniprot: Dict[str, List[str]] = {}
+
     # ------------------------------------------------------------------
     # FIX SCI-02 / SCI-03: static normalizers for gene symbols & organisms.
     # ------------------------------------------------------------------
@@ -1128,38 +1150,63 @@ class ProteinResolver(Resolver):
     # v80 FORENSIC ROOT FIX (P0-D3): helpers to maintain the
     # _provisional_by_gene_organism index. Called whenever a provisional
     # entry is created (register) or removed/promoted (unregister).
-    def _register_provisional_entry(self, uid: str, gene_symbol: Optional[str], organism: Optional[str]) -> None:
-        """Add ``uid`` to the (gene, organism) provisional index.
+    #
+    # v82 FORENSIC ROOT FIX (P0-D3b): also maintain the
+    # _provisional_by_alias_uniprot index for STRING-alias-derived
+    # provisionals that carry a real ``uniprot_id`` field but no
+    # ``gene_symbol``. This is the O(1) fast path that prevents the
+    # O(N) fallback from triggering on real workloads.
+    def _register_provisional_entry(self, uid: str, gene_symbol: Optional[str], organism: Optional[str], alias_uniprot_id: Optional[str] = None) -> None:
+        """Add ``uid`` to the (gene, organism) AND alias-uniprot provisional indexes.
 
-        No-op if gene_symbol or organism is None/empty (the entry will
-        not be findable by the index, but the O(N) fallback in
-        ``_ingest_uniprot_record`` will still catch it as a last resort).
+        No-op for the gene-organism index if gene_symbol or organism is
+        None/empty. No-op for the alias-uniprot index if
+        ``alias_uniprot_id`` is None/empty. An entry may be registered
+        in one, both, or neither index depending on what fields it has.
+        The O(N) fallback in ``_ingest_uniprot_record`` catches anything
+        the indexes miss (defensive, should never fire if the indexes
+        are maintained correctly).
         """
-        if not uid or gene_symbol is None or organism is None:
+        if not uid:
             return
-        _g = self._normalize_gene_symbol(gene_symbol)
-        _o = self._normalize_organism(organism)
-        if not _g or not _o:
-            return
-        _key = (_g, _o)
-        _bucket = self._provisional_by_gene_organism.setdefault(_key, [])
-        if uid not in _bucket:
-            _bucket.append(uid)
+        # Gene-organism index (v80 P0-D3).
+        if gene_symbol is not None and organism is not None:
+            _g = self._normalize_gene_symbol(gene_symbol)
+            _o = self._normalize_organism(organism)
+            if _g and _o:
+                _key = (_g, _o)
+                _bucket = self._provisional_by_gene_organism.setdefault(_key, [])
+                if uid not in _bucket:
+                    _bucket.append(uid)
+        # Alias-uniprot index (v82 P0-D3b) — the fast path for STRING
+        # alias records that carry a real UniProt accession.
+        if alias_uniprot_id:
+            _au = str(alias_uniprot_id).strip().upper()
+            if _au:
+                _abucket = self._provisional_by_alias_uniprot.setdefault(_au, [])
+                if uid not in _abucket:
+                    _abucket.append(uid)
 
     def _unregister_provisional_entry(self, uid: str) -> None:
-        """Remove ``uid`` from all (gene, organism) provisional index buckets.
+        """Remove ``uid`` from all provisional index buckets (both gene-organism AND alias-uniprot).
 
         Called by ``_promote_provisional_entry`` and ``remove_source``.
-        Scans every bucket (O(B) where B = number of distinct
-        gene-organism keys, typically <<1% of N). This is acceptable
-        because promotions are rare (only when a real UniProt record
-        arrives for a previously-provisional entry).
+        Scans every bucket (O(B) where B = number of distinct keys,
+        typically <<1% of N). This is acceptable because promotions are
+        rare (only when a real UniProt record arrives for a previously-
+        provisional entry).
         """
         if not uid:
             return
         for _bucket in self._provisional_by_gene_organism.values():
             try:
                 _bucket.remove(uid)
+            except ValueError:
+                pass
+        # v82 P0-D3b: also clean up the alias-uniprot index.
+        for _abucket in self._provisional_by_alias_uniprot.values():
+            try:
+                _abucket.remove(uid)
             except ValueError:
                 pass
 
@@ -1613,9 +1660,65 @@ class ProteinResolver(Resolver):
         # back to the O(N) scan ONLY if the index is somehow empty
         # (defensive — should never happen if the index is maintained
         # correctly).
+        #
+        # v82 FORENSIC ROOT FIX (P0-D3b — O(N) fallback still triggered
+        #   for STRING-alias-derived provisionals):
+        #   The v80 gene-organism index only helps when the provisional
+        #   entry has a ``gene_symbol``. But STRING alias records (the
+        #   DOMINANT source of provisionals on a real ingestion) carry
+        #   ONLY ``string_id`` + ``uniprot_id`` — they have NO
+        #   ``gene_symbol``. So the gene-organism index NEVER contains
+        #   them, and EVERY UniProt record fell through to the O(N)
+        #   defensive scan. On 100K UniProt records × 100K STRING
+        #   provisionals, that's 10 BILLION iterations — the exact
+        #   Airflow-timeout failure the v80 fix was supposed to prevent.
+        #
+        #   ROOT FIX: check the new ``_provisional_by_alias_uniprot``
+        #   index FIRST (O(1) lookup by the UniProt record's
+        #   ``uniprot_id``). STRING alias records that carried a real
+        #   UniProt accession registered their synthetic uid under that
+        #   accession. When the real UniProt record arrives with the
+        #   same accession, we find the provisional in O(1) and promote
+        #   it — no O(N) scan. The gene-organism index is checked
+        #   SECOND (for provisionals that had a gene but no alias
+        #   uniprot). The O(N) fallback is the LAST resort (defensive,
+        #   should now genuinely never fire).
         rec_gene = self._normalize_gene_symbol(record.get("gene_symbol"))
         rec_org = self._normalize_organism(organism_raw)
         promotion_done = False
+
+        # v82 P0-D3b STEP 1: O(1) lookup by the UniProt record's
+        # ``uniprot_id`` in the alias-uniprot index. This is the fast
+        # path for STRING-alias-derived provisionals.
+        if not promotion_done and base_uid:
+            _alias_candidates = self._provisional_by_alias_uniprot.get(
+                base_uid.strip().upper(), []
+            )
+            for prov_uid in list(_alias_candidates):
+                if prov_uid not in self.mapping:
+                    try:
+                        _alias_candidates.remove(prov_uid)
+                    except ValueError:
+                        pass
+                    continue
+                if not self.is_synthetic_uid(prov_uid):
+                    continue
+                # Found a promotion candidate via the alias-uniprot
+                # index — promote + merge + return.
+                self._promote_provisional_entry(prov_uid, base_uid)
+                self._merge_uniprot_record(base_uid, record)
+                self._stats.inc("records_matched")
+                promotion_done = True
+                logger.debug(
+                    "add_uniprot_records: promoted provisional %s -> %s "
+                    "via alias-uniprot index (O(1))",
+                    prov_uid, base_uid,
+                )
+                break
+        if promotion_done:
+            return
+
+        # v80 P0-D3 STEP 2: O(1) lookup by (gene, organism).
         if rec_gene and rec_org:
             _key = (rec_gene, rec_org)
             _candidates = self._provisional_by_gene_organism.get(_key, [])
@@ -2917,6 +3020,8 @@ class ProteinResolver(Resolver):
         self._last_batch_fingerprints.clear()
         # v80 P0-D3: also clear the provisional-by-gene-organism index.
         self._provisional_by_gene_organism = {}
+        # v82 P0-D3b: also clear the provisional-by-alias-uniprot index.
+        self._provisional_by_alias_uniprot = {}
         logger.info(
             "reset: cleared all internal state (%d entries were discarded)",
             old_count,
@@ -2988,6 +3093,15 @@ class ProteinResolver(Resolver):
             }
             self._provisional_by_gene_organism = {
                 k: v for k, v in self._provisional_by_gene_organism.items() if v
+            }
+            # v82 P0-D3b: rebuild the _provisional_by_alias_uniprot index
+            # to drop any deleted provisional uids.
+            self._provisional_by_alias_uniprot = {
+                k: [x for x in vlist if x not in delete_set]
+                for k, vlist in self._provisional_by_alias_uniprot.items()
+            }
+            self._provisional_by_alias_uniprot = {
+                k: v for k, v in self._provisional_by_alias_uniprot.items() if v
             }
 
         logger.info(
@@ -3498,7 +3612,22 @@ class ProteinResolver(Resolver):
         # (gene, organism) index so _ingest_uniprot_record can find
         # it in O(1) instead of O(N) when a real UniProt record
         # arrives with the same (gene, organism).
-        self._register_provisional_entry(synthetic_uid, gene_symbol, organism or self._config.default_organism)
+        #
+        # v82 P0-D3b: ALSO register under the alias's ``uniprot_id``
+        # field (if present). STRING alias records carry the REAL
+        # UniProt accession in their ``uniprot_id`` column. When a
+        # real UniProt record arrives with that accession, we look it
+        # up in O(1) via ``_provisional_by_alias_uniprot`` instead of
+        # falling through to the O(N) scan. This is the fix for the
+        # Airflow-timeout regression that occurred when STRING aliases
+        # had no gene_symbol (so the gene-organism index was empty
+        # and the O(N) fallback fired for every record).
+        _alias_uniprot = record.get("uniprot_id") or None
+        self._register_provisional_entry(
+            synthetic_uid, gene_symbol,
+            organism or self._config.default_organism,
+            alias_uniprot_id=_alias_uniprot,
+        )
 
         # FIX-P4-6 (v42): increment synthetic_keys_generated ONLY on actual
         # creation (was previously also incremented on the skip path).
@@ -3611,7 +3740,15 @@ class ProteinResolver(Resolver):
         # (gene, organism) index so _ingest_uniprot_record can find
         # it in O(1) instead of O(N) when a real UniProt record
         # arrives with the same (gene, organism).
-        self._register_provisional_entry(synthetic_uid, gene_symbol, organism or self._config.default_organism)
+        # v82 P0-D3b: also register under the ChEMBL target's
+        # ``uniprot_id`` cross-reference if present (same fix as the
+        # STRING path — enables O(1) promotion by UniProt accession).
+        _chembl_alias_uniprot = record.get("uniprot_id") or None
+        self._register_provisional_entry(
+            synthetic_uid, gene_symbol,
+            organism or self._config.default_organism,
+            alias_uniprot_id=_chembl_alias_uniprot,
+        )
 
         # FIX-P4-6 (v42): increment synthetic_keys_generated ONLY on actual
         # creation (was previously also incremented on the skip path).
