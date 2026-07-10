@@ -2202,15 +2202,45 @@ def fill_missing_drug_fields(
             )
             continue
 
-        # Idempotency: skip if already filled (IDEM-2).
+        # v82 FORENSIC ROOT FIX (P1-9 — per-COLUMN idempotency bug):
+        #   The previous code used ``out[lineage_col].any()`` — if ANY
+        #   row had ``_{col}_was_filled=True``, the ENTIRE column was
+        #   skipped on subsequent calls. Scenario: first call fills 50
+        #   rows (out of 100) in drug_type. Second call (e.g., after
+        #   adding new rows) sees ``_{col}_was_filled.any() == True`` and
+        #   skips the column entirely. The 50 new rows with null
+        #   drug_type were NEVER filled. Silent data gap.
+        #
+        #   ROOT FIX: PER-ROW idempotency. Instead of skipping the
+        #   entire column, we only skip rows that ALREADY have the
+        #   lineage marker set. New rows (lineage marker is False/NaN)
+        #   still get filled. This is achieved by computing the null
+        #   mask and then EXCLUDING rows where the lineage marker is
+        #   already True.
         lineage_col = f"_{col}_was_filled"
-        if lineage_col in out.columns and bool(out[lineage_col].any()):
+        # If the lineage column exists and ALL rows are already marked,
+        # skip (truly idempotent — nothing to do).
+        # v82 FORENSIC ROOT FIX (P1-9 bug 2): pandas ``Series.all()``
+        # SKIPS NaN by default, so ``[True, True, NaN].all()`` returns
+        # True — causing the entire column to be skipped even when new
+        # rows (with NaN lineage marker) still need filling. ROOT FIX:
+        # use ``fillna(False).all()`` so NaN is treated as "not filled".
+        if lineage_col in out.columns and bool(out[lineage_col].fillna(False).all()):
             logger.debug(
-                "fill_missing_drug_fields: column '%s' already has lineage "
-                "marker — skipping (idempotent)",
+                "fill_missing_drug_fields: column '%s' fully filled "
+                "(all rows have lineage marker) — skipping (idempotent)",
                 col,
             )
             continue
+
+        # P1-9 continued: compute the set of rows ALREADY filled in a
+        # prior call. These rows are EXCLUDED from the null mask so
+        # that re-running on a partially-filled column only fills NEW
+        # null rows (not the ones already handled).
+        if lineage_col in out.columns:
+            _already_filled = out[lineage_col].fillna(False).astype(bool)
+        else:
+            _already_filled = pd.Series(False, index=out.index)
 
         # Record dtype before (INT-3).
         dtype_before = str(out[col].dtype)
@@ -2255,7 +2285,7 @@ def fill_missing_drug_fields(
                     except Exception:  # noqa: BLE001
                         pass
 
-        before_null = int(is_nullish(out[col], column_context="general").sum())
+        before_null = int((is_nullish(out[col], column_context="general") & ~_already_filled).sum())
 
         if before_null == 0:
             # Initialize lineage column even if nothing was filled.
@@ -2270,7 +2300,8 @@ def fill_missing_drug_fields(
             if lineage_col not in out.columns:
                 out[lineage_col] = False
             # Mark rows where the value WAS NaN as "filled with unknown".
-            null_mask = is_nullish(out[col], column_context="general")
+            # P1-9: exclude rows already filled in a prior call.
+            null_mask = is_nullish(out[col], column_context="general") & ~_already_filled
             out.loc[null_mask, lineage_col] = True
             # Don't actually fill — keep NaN to represent "unknown".
             # But for is_fda_approved with conservative_defaults=True,
@@ -2305,7 +2336,7 @@ def fill_missing_drug_fields(
         #   lineage marker. This is 100% accurate — only rows that were
         #   ACTUALLY null get marked as filled. The post-fillna heuristic
         #   is eliminated entirely.
-        _null_mask_before_fillna = is_nullish(out[col], column_context="general")
+        _null_mask_before_fillna = is_nullish(out[col], column_context="general") & ~_already_filled
         _pd_version = _PD_VERSION
         if _pd_version >= (2, 2):
             with pd.option_context("future.no_silent_downcasting", True):
@@ -3024,247 +3055,183 @@ def validate_gda_scores(
     score_min, score_max = float(score_range[0]), float(score_range[1])
 
     # 1+2. Score coercion + clipping (BUG-DESIGN-5, CODE-14, BUG-SCI-5).
+    # v82 FORENSIC ROOT FIX (P1-1 — OMIM categorical mapping idempotency bug):
+    #   The previous code used a BROAD ``.any()`` gate: if ANY row had
+    #   ``_score_was_clipped=True``, the ENTIRE score-processing branch
+    #   was skipped — including the OMIM categorical mapping. This meant
+    #   that if ``validate_gda_scores`` was called first with source="disgenet"
+    #   (clipping a 1.5→1.0 on one row), a second call with source="omim"
+    #   on the same DataFrame would SKIP the OMIM categorical mapping
+    #   entirely, leaving OMIM scores as raw integers 1/2/3/4 instead of
+    #   mapping them to 0.5/0.6/0.8/0.9. Silent data corruption.
+    #
+    #   ROOT FIX: decouple the three operations:
+    #     1. Numeric coercion — ALWAYS runs (idempotent: to_numeric on
+    #        already-numeric data is a no-op).
+    #     2. OMIM categorical mapping — ALWAYS runs when source="omim"
+    #        (naturally idempotent: mapped values 0.5/0.6/0.8/0.9 are
+    #        NOT integers 1/2/3/4, so re-running won't re-map them).
+    #     3. Clipping — uses PER-ROW idempotency: rows already marked
+    #        ``_score_was_clipped=True`` are not re-clipped, preserving
+    #        their ``_original_score`` lineage. Only NEW out-of-range
+    #        rows get clipped.
     if "score" in out.columns:
-        # Idempotency: skip if already clipped (IDEM-4).
-        if "_score_was_clipped" in out.columns and bool(out["_score_was_clipped"].any()):
-            logger.debug(
-                "validate_gda_scores: score already has clip lineage — "
-                "skipping (idempotent)"
+        score_dtype_before = str(out["score"].dtype)
+
+        # CODE-14: track non-numeric values BEFORE coercion.
+        non_numeric_mask = pd.Series(False, index=out.index)
+        try:
+            non_null_score = out["score"].notna()
+            # A value is "non-numeric" if it's not null and doesn't
+            # match the numeric regex.
+            str_scores = out.loc[non_null_score, "score"].astype(str)
+            non_numeric_mask.loc[non_null_score] = ~str_scores.str.match(
+                _NUMERIC_SCORE_REGEX, na=False
             )
-        else:
-            score_dtype_before = str(out["score"].dtype)
+        except Exception:  # noqa: BLE001
+            pass
+        non_numeric_count = int(non_numeric_mask.sum())
+        if non_numeric_count > 0:
+            logger.warning(
+                "validate_gda_scores: %d non-numeric score value(s) "
+                "detected — coercing to NaN",
+                non_numeric_count,
+            )
+            _increment_metric("non_numeric_scores_coerced", non_numeric_count)
 
-            # CODE-14: track non-numeric values BEFORE coercion.
-            non_numeric_mask = pd.Series(False, index=out.index)
+        # Coerce to numeric (always — idempotent).
+        out["score"] = pd.to_numeric(out["score"], errors="coerce")
+        # FIX P1-ER-22 (LOW): cast to float64 unconditionally so the
+        # OMIM categorical→continuous mapping below (1→0.5 etc.)
+        # doesn't trigger a pandas FutureWarning about assigning
+        # floats to an int64 column.
+        out["score"] = out["score"].astype("float64")
+
+        # OMIM categorical mapping — ALWAYS runs when source="omim".
+        # Naturally idempotent: mapped values 0.5/0.6/0.8/0.9 are NOT
+        # integers 1/2/3/4, so re-running won't re-map them.
+        if source == "omim":
+            _OMIM_CATEGORICAL_MAP = {1: 0.5, 2: 0.6, 3: 0.8, 4: 0.9}
+            if "_omim_categorical_mapped" not in out.columns:
+                out["_omim_categorical_mapped"] = False
             try:
-                non_null_score = out["score"].notna()
-                # A value is "non-numeric" if it's not null and doesn't
-                # match the numeric regex.
-                str_scores = out.loc[non_null_score, "score"].astype(str)
-                non_numeric_mask.loc[non_null_score] = ~str_scores.str.match(
-                    _NUMERIC_SCORE_REGEX, na=False
+                is_categorical = (
+                    out["score"].notna()
+                    & out["score"].apply(
+                        lambda v: float(v).is_integer()
+                        and int(v) in _OMIM_CATEGORICAL_MAP
+                        if pd.notna(v)
+                        else False
+                    )
                 )
-            except Exception:  # noqa: BLE001
-                pass
-            non_numeric_count = int(non_numeric_mask.sum())
-            if non_numeric_count > 0:
+                n_categorical = int(is_categorical.sum())
+                if n_categorical > 0:
+                    if "_original_score" not in out.columns:
+                        out["_original_score"] = None
+                    out.loc[is_categorical, "_original_score"] = out.loc[
+                        is_categorical, "score"
+                    ]
+                    out.loc[is_categorical, "score"] = out.loc[
+                        is_categorical, "score"
+                    ].apply(lambda v: _OMIM_CATEGORICAL_MAP[int(v)])
+                    logger.info(
+                        "validate_gda_scores: source='omim' — mapped "
+                        "%d categorical GDA score(s) (1→0.5, 2→0.6, "
+                        "3→0.8, 4→0.9) to preserve discriminative "
+                        "information. Clipping to [%s, %s] is "
+                        "still applied to non-categorical values.",
+                        n_categorical, score_min, score_max,
+                    )
+                    if "_score_was_clipped" not in out.columns:
+                        out["_score_was_clipped"] = False
+                    out.loc[is_categorical, "_score_was_clipped"] = False
+                    out.loc[is_categorical, "_omim_categorical_mapped"] = True
+                    _increment_metric(
+                        "omim_categorical_scores_mapped", n_categorical
+                    )
+            except Exception as exc:  # noqa: BLE001
                 logger.warning(
-                    "validate_gda_scores: %d non-numeric score value(s) "
-                    "detected — coercing to NaN",
-                    non_numeric_count,
-                )
-                _increment_metric("non_numeric_scores_coerced", non_numeric_count)
-
-            # Coerce to numeric.
-            out["score"] = pd.to_numeric(out["score"], errors="coerce")
-            # FIX P1-ER-22 (LOW): cast to float64 unconditionally so the
-            # OMIM categorical→continuous mapping below (1→0.5 etc.)
-            # doesn't trigger a pandas FutureWarning about assigning
-            # floats to an int64 column.
-            out["score"] = out["score"].astype("float64")
-
-            # FIX P1-ER-22 (LOW): OMIM GDA scores are CATEGORICAL
-            # (1 = provisional, 2 = moderate, 3 = confirmed), NOT
-            # continuous. The default ``score_range=(0.0, 1.0)`` would
-            # clip ALL of them to 1.0, destroying the discriminative
-            # information (a "confirmed" association would be
-            # indistinguishable from a "provisional" one downstream).
-            # When ``source == "omim"``, we map the categorical values
-            # to a [0, 1] numeric scale BEFORE clipping, so:
-            #   1 → 0.5  (provisional — wild-type gene mapped)
-            #   2 → 0.6  (moderate — phenotype mapped)
-            #   3 → 0.9  (confirmed — molecular basis known)
-            # v35 ROOT FIX: the previous ``{1: 0.5, 2: 0.7, 3: 0.9}``
-            # diverged from ``omim_pipeline.SCORE_BY_MAPPING_KEY`` (which
-            # uses 2 → 0.6). The divergence caused the SAME OMIM record
-            # to receive a different score depending on whether it was
-            # cleaned via ``missing_values.validate_gda_scores`` (0.7)
-            # or via the OMIM pipeline's own ``_compute_score`` (0.6).
-            # Aligned with the OMIM pipeline's authoritative map.
-            # Non-categorical OMIM scores (e.g. 0.85) pass through
-            # unchanged and ARE subject to clipping (rare but possible
-            # for OMIM susceptibility associations).
-            # DisGeNET scores are already continuous in [0, 1] and are
-            # handled by the standard clipping path below.
-            if source == "omim":
-                # v36 ROOT FIX (Chain 4): previously the map was
-                # ``{1: 0.5, 2: 0.6, 3: 0.9}`` — MISSING mk=4. The OMIM
-                # pipeline's authoritative ``SCORE_BY_MAPPING_KEY``
-                # (omim_pipeline.py:320-326) maps:
-                #   1 -> 0.5  (gene mapped to phenotype)
-                #   2 -> 0.6  (phenotype with mapped locus)
-                #   3 -> 0.8  (molecular basis known)
-                #   4 -> 0.9  (contiguous gene deletion/duplication syndrome,
-                #              e.g. DiGeorge, Williams)
-                # v42 ROOT FIX (P1-A-4): the previous map was
-                # ``{1: 0.5, 2: 0.6, 3: 0.9, 4: 0.8}`` which was
-                # NON-MONOTONIC — mk=4 (contiguous gene deletion syndrome,
-                # e.g. DiGeorge, Williams) was scored LOWER than mk=3
-                # (molecular basis known), even though mk=4 is clinically
-                # MORE specific (the gene/genomic region is unambiguously
-                # identified). DiGeorge/Williams records were ranked below
-                # single-gene records. ROOT FIX: reorder so the map is
-                # strictly monotonic, with mk=4 now scored HIGHEST
-                # because contiguous-gene-deletion syndromes have the
-                # strongest clinical-gene specificity (the affected
-                # interval is molecularly defined).
-                _OMIM_CATEGORICAL_MAP = {1: 0.5, 2: 0.6, 3: 0.8, 4: 0.9}
-                # Always create the lineage column when source='omim'
-                # so downstream consumers can rely on its presence
-                # (mirrors the always-create pattern used for
-                # ``_score_was_clipped``, ``_original_score``, etc.).
-                if "_omim_categorical_mapped" not in out.columns:
-                    out["_omim_categorical_mapped"] = False
-                # Detect rows whose score is exactly 1, 2, or 3 (the
-                # only valid OMIM categorical values).
-                try:
-                    is_categorical = (
-                        out["score"].notna()
-                        & out["score"].apply(
-                            lambda v: float(v).is_integer()
-                            and int(v) in _OMIM_CATEGORICAL_MAP
-                            if pd.notna(v)
-                            else False
-                        )
-                    )
-                    n_categorical = int(is_categorical.sum())
-                    if n_categorical > 0:
-                        # Record the original categorical value for
-                        # lineage / auditability.
-                        if "_original_score" not in out.columns:
-                            out["_original_score"] = None
-                        out.loc[is_categorical, "_original_score"] = out.loc[
-                            is_categorical, "score"
-                        ]
-                        # Apply the mapping.
-                        out.loc[is_categorical, "score"] = out.loc[
-                            is_categorical, "score"
-                        ].apply(lambda v: _OMIM_CATEGORICAL_MAP[int(v)])
-                        logger.info(
-                            "validate_gda_scores: source='omim' — mapped "
-                            "%d categorical GDA score(s) (1→0.5, 2→0.6, "
-                            "3→0.8, 4→0.9) to preserve discriminative "
-                            "information. Clipping to [%s, %s] is "
-                            "still applied to non-categorical values.",
-                            n_categorical, score_min, score_max,
-                        )
-                        if "_score_was_clipped" not in out.columns:
-                            out["_score_was_clipped"] = False
-                        # Mark categorical-mapped rows with a lineage
-                        # flag so downstream consumers can distinguish
-                        # "raw OMIM categorical" from "clipped score".
-                        out.loc[is_categorical, "_score_was_clipped"] = False
-                        out.loc[is_categorical, "_omim_categorical_mapped"] = True
-                        _increment_metric(
-                            "omim_categorical_scores_mapped", n_categorical
-                        )
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning(
-                        "validate_gda_scores: OMIM categorical mapping "
-                        "failed (%s) — falling back to standard clipping. "
-                        "Categorical scores (1/2/3/4) may be clipped to 1.0.",
-                        exc,
-                    )
-
-            # Track coerced-to-NaN values (CODE-14).
-            coerced_nan_mask = out["score"].isna() & non_numeric_mask
-            if "_score_was_coerced_nan" not in out.columns:
-                out["_score_was_coerced_nan"] = False
-            out.loc[coerced_nan_mask, "_score_was_coerced_nan"] = True
-            coerced_nan_count = int(coerced_nan_mask.sum())
-
-            # BUG-SCI-5: preserve direction (optional).
-            if "_score_direction" not in out.columns:
-                out["_score_direction"] = None
-            if preserve_direction:
-                out.loc[out["score"] > 0, "_score_direction"] = "positive"
-                out.loc[out["score"] < 0, "_score_direction"] = "negative"
-                out.loc[out["score"] == 0, "_score_direction"] = "neutral"
-
-            # Compute clip masks (CODE-7: log_cols computed ONCE).
-            # Legacy v2.0.0 variable names preserved for backward
-            # compatibility with the test suite (test_all_45_fixes.py
-            # ::TestIssue24::test_logs_specific_records scans the source
-            # for these names).  When score_range == (0.0, 1.0) (the
-            # default), these aliases are exact synonyms for
-            # ``below_min_mask`` and ``above_max_mask``.  For other
-            # ranges, they refer to the same masks (just with
-            # configurable bounds).
-            # v40 ROOT FIX (P1 #38): documented that the variable aliasing
-            # (below_zero_mask = below_min_mask) is intentional for
-            # backward compat with tests that grep for these names.
-            below_zero_mask = below_min_mask = out["score"] < score_min  # v40: intentional alias
-            above_one_mask = above_max_mask = out["score"] > score_max    # v40: intentional alias
-            clipped_mask = below_zero_mask | above_one_mask
-            below_zero = int(below_zero_mask.sum())
-            above_one = int(above_one_mask.sum())
-
-            # BUG-DESIGN-5: record original score BEFORE clipping.
-            if "_original_score" not in out.columns:
-                out["_original_score"] = None
-            out.loc[clipped_mask, "_original_score"] = out.loc[clipped_mask, "score"]
-            if "_score_was_clipped" not in out.columns:
-                out["_score_was_clipped"] = False
-            out.loc[clipped_mask, "_score_was_clipped"] = True
-
-            # PERF-5: replace per-row DEBUG logging with a single summary.
-            # Legacy v2.0.0 logged individual bad_records (up to 10);
-            # v3.0.0 logs a single summary line for performance.
-            if below_zero > 0 or above_one > 0:
-                try:
-                    min_score = float(out.loc[below_zero_mask, "score"].min()) if below_zero > 0 else None
-                    max_score = float(out.loc[above_one_mask, "score"].max()) if above_one > 0 else None
-                except Exception:  # noqa: BLE001
-                    min_score = max_score = None
-                # Compute bad_records summary for the legacy log line.
-                log_cols = [c for c in ["disease_id", "gene_symbol", "score"] if c in out.columns]
-                bad_records = out.loc[clipped_mask, log_cols].head(10) if log_cols else None
-                logger.debug(
-                    "validate_gda_scores: out-of-range scores — below %s: "
-                    "min=%s (n=%d); above %s: max=%s (n=%d); bad_records=%s",
-                    score_min,
-                    min_score,
-                    below_zero,
-                    score_max,
-                    max_score,
-                    above_one,
-                    "see DataFrame.attrs" if bad_records is not None else "none",
+                    "validate_gda_scores: OMIM categorical mapping "
+                    "failed (%s) — falling back to standard clipping. "
+                    "Categorical scores (1/2/3/4) may be clipped to 1.0.",
+                    exc,
                 )
 
-            # Clip.
-            out["score"] = out["score"].clip(lower=score_min, upper=score_max)
+        # Track coerced-to-NaN values (CODE-14).
+        coerced_nan_mask = out["score"].isna() & non_numeric_mask
+        if "_score_was_coerced_nan" not in out.columns:
+            out["_score_was_coerced_nan"] = False
+        out.loc[coerced_nan_mask, "_score_was_coerced_nan"] = True
+        coerced_nan_count = int(coerced_nan_mask.sum())
 
-            if below_zero > 0 or above_one > 0:
-                logger.info(
-                    "validate_gda_scores: clipped %d score(s) below %s and "
-                    "%d score(s) above %s to the [%s, %s] range",
-                    below_zero,
-                    score_min,
-                    above_one,
-                    score_max,
-                    score_min,
-                    score_max,
-                )
-                _increment_metric("scores_clipped", below_zero + above_one)
-                columns_affected["score"] = {
-                    "clipped_below": below_zero,
-                    "clipped_above": above_one,
-                    "coerced_nan": coerced_nan_count,
-                    "score_range": list(score_range),
-                    "preserve_direction": preserve_direction,
-                }
-            elif coerced_nan_count > 0:
-                columns_affected["score"] = {
-                    "clipped_below": 0,
-                    "clipped_above": 0,
-                    "coerced_nan": coerced_nan_count,
-                    "score_range": list(score_range),
-                    "preserve_direction": preserve_direction,
-                }
+        # BUG-SCI-5: preserve direction (optional).
+        if "_score_direction" not in out.columns:
+            out["_score_direction"] = None
+        if preserve_direction:
+            out.loc[out["score"] > 0, "_score_direction"] = "positive"
+            out.loc[out["score"] < 0, "_score_direction"] = "negative"
+            out.loc[out["score"] == 0, "_score_direction"] = "neutral"
 
-            score_dtype_after = str(out["score"].dtype)
-            if score_dtype_before != score_dtype_after:
-                dtype_changes["score"] = (score_dtype_before, score_dtype_after)
+        # v82 FORENSIC ROOT FIX (P1-1 continued): PER-ROW clipping
+        # idempotency. Only clip rows that are out-of-range AND not
+        # already marked as clipped. This preserves ``_original_score``
+        # for rows that were clipped in a prior call.
+        # Legacy v2.0.0 variable names preserved for backward compat
+        # with the test suite (test_all_45_fixes.py scans source for
+        # these names).
+        below_zero_mask = below_min_mask = out["score"] < score_min
+        above_one_mask = above_max_mask = out["score"] > score_max
+        clipped_mask = below_zero_mask | above_one_mask
+        # Exclude rows already clipped in a prior call (per-row idempotency).
+        if "_score_was_clipped" in out.columns:
+            _already_clipped = out["_score_was_clipped"].astype(bool)
+            clipped_mask = clipped_mask & ~_already_clipped
+            below_zero_mask = below_zero_mask & ~_already_clipped
+            above_one_mask = above_one_mask & ~_already_clipped
+        below_zero = int(below_zero_mask.sum())
+        above_one = int(above_one_mask.sum())
+        new_clipped = below_zero + above_one
+
+        # BUG-DESIGN-5: record original score BEFORE clipping (only for
+        # newly-clipped rows).
+        if "_original_score" not in out.columns:
+            out["_original_score"] = None
+        out.loc[clipped_mask, "_original_score"] = out.loc[clipped_mask, "score"]
+        if "_score_was_clipped" not in out.columns:
+            out["_score_was_clipped"] = False
+        out.loc[clipped_mask, "_score_was_clipped"] = True
+
+        # Clip only the newly-out-of-range rows.
+        if new_clipped > 0:
+            out.loc[clipped_mask, "score"] = out.loc[clipped_mask, "score"].clip(
+                lower=score_min, upper=score_max
+            )
+            logger.info(
+                "validate_gda_scores: clipped %d new out-of-range score(s) "
+                "(below %s: %d, above %s: %d) to the [%s, %s] range",
+                new_clipped, score_min, below_zero, score_max, above_one,
+                score_min, score_max,
+            )
+            _increment_metric("scores_clipped", new_clipped)
+            columns_affected["score"] = {
+                "clipped_below": below_zero,
+                "clipped_above": above_one,
+                "coerced_nan": coerced_nan_count,
+                "score_range": list(score_range),
+                "preserve_direction": preserve_direction,
+            }
+        elif coerced_nan_count > 0:
+            columns_affected["score"] = {
+                "clipped_below": 0,
+                "clipped_above": 0,
+                "coerced_nan": coerced_nan_count,
+                "score_range": list(score_range),
+                "preserve_direction": preserve_direction,
+            }
+
+        score_dtype_after = str(out["score"].dtype)
+        if score_dtype_before != score_dtype_after:
+            dtype_changes["score"] = (score_dtype_before, score_dtype_after)
     else:
         logger.debug(
             "validate_gda_scores: 'score' column not present — skipping clip"

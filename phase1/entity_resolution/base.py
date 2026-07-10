@@ -865,6 +865,11 @@ class ResolverStats:
     connectivity_matches: int = 0
     name_matches: int = 0
     inchikey_exact_matches: int = 0
+    # v82 FORENSIC ROOT FIX (P1-2): dedicated counter for UniProt exact
+    # matches in ProteinResolver. The previous code incremented
+    # ``inchikey_exact_matches`` (a DRUG metric) for protein UniProt
+    # matches, conflating drug and protein metrics on operator dashboards.
+    uniprot_exact_matches: int = 0
     pubchem_calls: int = 0
     pubchem_successes: int = 0
     pubchem_failures: int = 0

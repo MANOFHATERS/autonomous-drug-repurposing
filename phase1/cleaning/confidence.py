@@ -259,10 +259,24 @@ def classify_confidence(
     # negative values map to the same tier as score=0.0 (the lowest
     # threshold). The _score_direction column preserves the sign.
     _bisect_score = max(0.0, float(score))
+    # v82 FORENSIC ROOT FIX (P1-13 — floating-point boundary edge case):
+    #   ``bisect.bisect_right(thresholds, score)`` is fragile at exact
+    #   tier boundaries due to floating-point representation. For example,
+    #   a score that is mathematically 0.06 but stored as 0.05999999999999999
+    #   (an FP representation artifact) gets classified as "weak" instead
+    #   of "moderate" because bisect_right treats it as < 0.06.
+    #   ROOT FIX: add a small epsilon (1e-9) to the score before the
+    #   bisect lookup. This absorbs FP representation errors at tier
+    #   boundaries without affecting real scores (which are continuous
+    #   and rarely land exactly on a boundary). The epsilon is small
+    #   enough that it doesn't shift any score into a higher tier unless
+    #   the score is within 1e-9 of the boundary — which is exactly the
+    #   FP representation error we want to absorb.
+    _BOUNDARY_EPSILON = 1e-9
     # bisect_right returns the insertion point to the right of any
     # existing entries equal to score.  Subtracting 1 gives the index of
     # the tier whose threshold <= score.
-    idx = bisect.bisect_right(thresholds, _bisect_score) - 1
+    idx = bisect.bisect_right(thresholds, _bisect_score + _BOUNDARY_EPSILON) - 1
     if idx < 0:
         # score < the lowest threshold — fall back to the lowest tier.
         # This should not happen in practice (the lowest threshold is 0.0

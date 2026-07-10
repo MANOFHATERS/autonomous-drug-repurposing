@@ -289,6 +289,20 @@ from .resolver_utils import (
 )
 from .resolver_utils import _sanitize_for_log
 
+# v82 FORENSIC ROOT FIX (P1-10): move CANONICAL_SYNTHETIC_INCHIKEY_REGEX
+# import to MODULE LEVEL. The previous code imported it INSIDE
+# ``_match_by_inchikey`` on every call, which (a) added per-call dict
+# lookup overhead, and (b) created a latent ImportError risk — if
+# ``cleaning._constants`` was ever unimportable (partial install,
+# circular import), every InChIKey match attempt would crash. The
+# module-level import is loaded once at import time and cached by
+# Python's import system. MatchConfidence is already imported at the
+# module level (line 263).
+try:
+    from cleaning._constants import CANONICAL_SYNTHETIC_INCHIKEY_REGEX
+except ImportError:  # pragma: no cover — defensive guard
+    CANONICAL_SYNTHETIC_INCHIKEY_REGEX = None  # type: ignore[assignment]
+
 # =============================================================================
 # Module-level constants
 # =============================================================================
@@ -4357,9 +4371,10 @@ class DrugResolver(Resolver):
             return None
         # v65 ROOT FIX (P1C-009): SYNTH keys get their OWN method label
         # and enum-based confidence (not a hardcoded magic number).
-        from cleaning._constants import CANONICAL_SYNTHETIC_INCHIKEY_REGEX
-        from entity_resolution.base import MatchConfidence
-        if CANONICAL_SYNTHETIC_INCHIKEY_REGEX.match(norm):
+        # v82 FORENSIC ROOT FIX (P1-10): CANONICAL_SYNTHETIC_INCHIKEY_REGEX
+        # and MatchConfidence are now imported at MODULE LEVEL (see top of
+        # file). No more per-call import overhead or ImportError risk.
+        if CANONICAL_SYNTHETIC_INCHIKEY_REGEX is not None and CANONICAL_SYNTHETIC_INCHIKEY_REGEX.match(norm):
             # SYNTH key — computed, not experimental. Weakest evidence.
             # Method label is "synthetic_key_match" (NOT "inchikey_exact")
             # so downstream filters can distinguish real InChIKey matches
@@ -4505,9 +4520,17 @@ class DrugResolver(Resolver):
         # extractOne returns one match with no tie-breaking reported. For
         # names with multiple equal-score matches (e.g. "cyclophosphamide"
         # vs "cyclophosphamide-precursor" both scoring 100), the chosen
-        # one is implementation-defined. Fix: use extract (non-One) to
-        # check for ties and log a WARNING when >=2 matches are within
-        # _FUZZY_TIE_EPSILON of the top score.
+        # one is implementation-defined.
+        # v82 FORENSIC ROOT FIX (P1-6 — deterministic tie-breaking):
+        #   The v43 fix logged a WARNING but still returned the
+        #   implementation-defined extractOne pick. Two runs with the
+        #   same data could pick different canonical entries for tied
+        #   fuzzy matches, breaking reproducibility. ROOT FIX: when a
+        #   near-tie is detected (top - second <= _FUZZY_TIE_EPSILON),
+        #   deterministically select the match whose canonical InChIKey
+        #   is alphabetically FIRST. This ensures the same input always
+        #   produces the same output, satisfying IDEM-5 (deterministic
+        #   tie-breaking).
         _FUZZY_TIE_EPSILON = 1.0  # 1 point out of 100
         try:
             all_results = fuzz_process.extract(
@@ -4528,8 +4551,28 @@ class DrugResolver(Resolver):
                         top_score=top_score,
                         second_match=all_results[1][0],
                         second_score=second_score,
-                        message="Fuzzy match has near-tie — selected match may not be deterministic",
+                        message="Fuzzy match has near-tie — applying deterministic tie-break (alphabetical canonical InChIKey)",
                     )
+                    # DETERMINISTIC TIE-BREAK: among all results within
+                    # _FUZZY_TIE_EPSILON of the top score, pick the one
+                    # whose canonical InChIKey is alphabetically first.
+                    # This guarantees reproducibility across runs.
+                    _tied_candidates = []
+                    for _res in all_results:
+                        _r_norm = _res[0] if len(_res) >= 1 else None
+                        _r_score = _res[1] if len(_res) >= 2 else 0
+                        if _r_norm is None:
+                            continue
+                        if (top_score - _r_score) <= _FUZZY_TIE_EPSILON:
+                            _r_ik = self._name_index.get(_r_norm)
+                            if _r_ik is not None:
+                                _tied_candidates.append((_r_ik, _r_norm, _r_score))
+                    if _tied_candidates:
+                        # Sort by canonical InChIKey (alphabetical) for
+                        # deterministic selection.
+                        _tied_candidates.sort(key=lambda c: c[0])
+                        best_ik = _tied_candidates[0][0]
+                        best_score_100 = _tied_candidates[0][2]
         except Exception:
             pass  # best-effort tie detection; don't break resolution
         return _MatchHit(
@@ -5127,13 +5170,31 @@ class DrugResolver(Resolver):
             }
 
             # Empty-name fallback (audit 2.13 / 3.7).
+            # v82 FORENSIC ROOT FIX (P1-14 — SYNTH key fallback produces
+            #   meaningless names):
+            #   For SYNTH keys, ``canonical_ik[:14]`` is "SYNTH" + 9 base-26
+            #   hash chars (e.g. "SYNTHABCDEFG"). The fallback name became
+            #   "UNKNOWN_SYNTHABCDEFG" — a meaningless name that returns
+            #   nothing useful when queried. ROOT FIX: for SYNTH keys, use
+            #   a more descriptive fallback that includes the source label
+            #   and a short hash suffix, making it at least traceable to
+            #   its origin. For real InChIKeys, the connectivity block
+            #   remains a stable (if not human-readable) identifier.
             if not entry["canonical_name"] or not entry["canonical_name"].strip():
                 fallback = (
                     record.get("chembl_id")
                     or record.get("drugbank_id")
                     or record.get("pubchem_cid")
-                    or f"UNKNOWN_{canonical_ik[:14]}"
                 )
+                if not fallback:
+                    # No source ID available — use a descriptive fallback.
+                    if canonical_ik.startswith("SYNTH"):
+                        # SYNTH key: include source + short hash for traceability.
+                        _short_hash = canonical_ik[5:11] if len(canonical_ik) > 10 else canonical_ik
+                        fallback = f"Unnamed_Biologic_{source or 'unknown'}_{_short_hash}"
+                    else:
+                        # Real InChIKey: use the connectivity block (stable identifier).
+                        fallback = f"Unnamed_Compound_{canonical_ik[:14]}"
                 entry["canonical_name"] = str(fallback)
                 entry["name_is_synthetic"] = True
                 name_is_synthetic = True
@@ -5159,13 +5220,30 @@ class DrugResolver(Resolver):
                 self._name_index_multi.setdefault(norm_name, []).append(canonical_ik)
                 self._name_index_generation += 1
 
-            # Connectivity index (audit 3.9 — only populate when collapsing).
-            if self._config.collapse_stereoisomers:
-                first_block = extract_inchikey_first_block(inchikey)
-                if first_block is not None:
-                    if first_block not in self._connectivity_index:
-                        self._connectivity_index[first_block] = canonical_ik
-                    self._connectivity_index_multi.setdefault(first_block, []).append(canonical_ik)
+            # Connectivity index (audit 3.9).
+            # v82 FORENSIC ROOT FIX (P1-4 — connectivity index never populated
+            # when collapse_stereoisomers=False):
+            #   The previous code ONLY populated ``_connectivity_index``
+            #   when ``collapse_stereoisomers=True``. With the default
+            #   ``collapse_stereoisomers=False`` (the patient-safety
+            #   setting), the index was ALWAYS empty, so
+            #   ``_match_by_connectivity`` always returned None (empty
+            #   index lookup). This meant cross-source stereoisoform
+            #   matching was impossible without re-running with
+            #   ``collapse_stereoisomers=True``.
+            #   ROOT FIX: ALWAYS populate the connectivity index. The
+            #   stereoisoform safety gate in ``_match_by_connectivity``
+            #   (lines 4377-4381) already handles the
+            #   ``collapse_stereoisomers=False`` case correctly — it
+            #   returns None if the full InChIKeys differ. So populating
+            #   the index does NOT break patient safety; it just makes
+            #   the index available for diagnostics, future features,
+            #   and the explicit collapse path.
+            first_block = extract_inchikey_first_block(inchikey)
+            if first_block is not None:
+                if first_block not in self._connectivity_index:
+                    self._connectivity_index[first_block] = canonical_ik
+                self._connectivity_index_multi.setdefault(first_block, []).append(canonical_ik)
 
             # SMILES index (audit 3.13). P1-ER-1 ROOT FIX: removed the
             # ``hasattr`` lazy-init guard — ``__init__`` now declares
@@ -5604,7 +5682,10 @@ class DrugResolver(Resolver):
                 if norm:
                     self._name_index.setdefault(norm, canonical_ik)
                     self._name_index_multi.setdefault(norm, []).append(canonical_ik)
-            if self._config.collapse_stereoisomers and ik:
+            # v82 FORENSIC ROOT FIX (P1-4): ALWAYS populate connectivity
+            # index (not just when collapse_stereoisomers=True). See the
+            # full explanation in ``_create_canonical_entry``.
+            if ik:
                 first_block = extract_inchikey_first_block(ik)
                 if first_block:
                     self._connectivity_index.setdefault(first_block, canonical_ik)

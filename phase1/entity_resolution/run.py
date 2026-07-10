@@ -224,17 +224,56 @@ def run_entity_resolution() -> Dict[str, Any]:
                         break
                 if col_a and col_b:
                     uniprot_ids = set()
-                    for col in (col_a, col_b):
-                        uniprot_ids.update(
-                            str(v).strip()
-                            for v in string_df[col].dropna().unique()
-                            if str(v).strip() and str(v).strip() != "nan"
-                        )
+                    # v82 FORENSIC ROOT FIX (P1-5): also collect STRING IDs
+                    # paired with UniProt IDs so the protein resolver can
+                    # infer the organism from the STRING ID's taxonomy prefix
+                    # (e.g. "9606.ENSP..." = human, "10090.ENSMUSP..." = mouse).
+                    # This prevents non-human proteins from being mislabeled
+                    # as "Homo sapiens" when the UniProt ID is not in the
+                    # organism override table.
+                    uniprot_to_string_id = {}
+                    _string_col_variants = [
+                        ("string_protein_a", "string_protein_b"),
+                        ("string_id_a", "string_id_b"),
+                        ("protein_a", "protein_b"),
+                    ]
+                    _string_col_a, _string_col_b = None, None
+                    for _sa, _sb in _string_col_variants:
+                        if _sa in string_df.columns and _sb in string_df.columns:
+                            _string_col_a, _string_col_b = _sa, _sb
+                            break
+                    for idx in string_df.index:
+                        for col in (col_a, col_b):
+                            uid = string_df.at[idx, col]
+                            if pd.isna(uid):
+                                continue
+                            uid_str = str(uid).strip()
+                            if not uid_str or uid_str == "nan":
+                                continue
+                            uniprot_ids.add(uid_str)
+                            # Try to pair with a STRING ID from the same row.
+                            if _string_col_a and _string_col_b:
+                                for scol in (_string_col_a, _string_col_b):
+                                    sid = string_df.at[idx, scol]
+                                    if pd.notna(sid) and str(sid).strip():
+                                        sid_str = str(sid).strip()
+                                        if "." in sid_str:
+                                            uniprot_to_string_id[uid_str] = sid_str
+                                            break
                     if uniprot_ids:
-                        string_protein_df = pd.DataFrame({"uniprot_id": list(uniprot_ids)})
+                        _data = {"uniprot_id": list(uniprot_ids)}
+                        # Include string_id column if we have any pairings.
+                        if uniprot_to_string_id:
+                            _data["string_id"] = [
+                                uniprot_to_string_id.get(uid)
+                                for uid in uniprot_ids
+                            ]
+                        string_protein_df = pd.DataFrame(_data)
                         logger.info(
-                            "Extracted %d unique UniProt IDs from STRING PPI data",
+                            "Extracted %d unique UniProt IDs from STRING PPI data"
+                            " (%d with paired STRING IDs for organism inference)",
                             len(string_protein_df),
+                            len(uniprot_to_string_id),
                         )
                 else:
                     logger.warning(

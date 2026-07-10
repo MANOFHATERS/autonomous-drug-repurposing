@@ -926,10 +926,16 @@ class ProteinResolver(Resolver):
         # v16 SW-11: strip trailing parenthetical common-name.
         # e.g. "Homo sapiens (Human)" -> "Homo sapiens"
         #      "Mus musculus (Mouse)" -> "Mus musculus"
-        # Only strip if the parenthetical is at the END (so we don't
-        # corrupt "Homo sapiens (Panth.) Linnaeus" — though that's
-        # extremely rare in biomedical DBs).
-        s = re.sub(r"\s*\([^)]*\)\s*$", "", s).strip()
+        # v82 FORENSIC ROOT FIX (P1-11): also strip LEADING parenthetical.
+        # e.g. "(Human) Homo sapiens" -> "Homo sapiens"
+        #      "(Mouse) Mus musculus" -> "Mus musculus"
+        # The previous code only stripped TRAILING parentheticals, so
+        # "(Human) Homo sapiens" failed alias lookup (the key would be
+        # "(human) homo sapiens" after lowercasing, not "human" or
+        # "homo sapiens"). ROOT FIX: strip BOTH leading and trailing
+        # parentheticals before alias lookup and title-casing.
+        s = re.sub(r"\s*\([^)]*\)\s*$", "", s).strip()  # trailing
+        s = re.sub(r"^\s*\([^)]*\)\s*", "", s).strip()  # leading
         # Check alias map (lowercase key).
         lower = s.lower()
         if lower in _ORGANISM_ALIASES:
@@ -2226,7 +2232,11 @@ class ProteinResolver(Resolver):
             logger.debug(
                 "resolve_single: UniProt exact match '%s'", uniprot_id
             )
-            self._stats.inc("inchikey_exact_matches")
+            # v82 FORENSIC ROOT FIX (P1-2): increment the DEDICATED
+            # ``uniprot_exact_matches`` counter, NOT ``inchikey_exact_matches``
+            # (which is a DRUG metric). The previous code conflated drug
+            # and protein metrics on operator dashboards.
+            self._stats.inc("uniprot_exact_matches")
             return self._copy_entry_for_read(self.mapping[uniprot_id])
 
         # 2. STRING → UniProt mapping.
@@ -2556,6 +2566,44 @@ class ProteinResolver(Resolver):
                                         _row_org = str(_row_match.iloc[0]).strip()
                                         if _row_org:
                                             _resolved_organism = _row_org
+                                # v82 FORENSIC ROOT FIX (P1-5 — STRING-derived
+                                # organism default "Homo sapiens" for unknown
+                                # UniProt IDs):
+                                #   The v49 ROOT FIX only helped if the UniProt
+                                #   ID was in the override table (~250 entries)
+                                #   OR if string_df had an organism column. In
+                                #   run.py, string_protein_df is built with ONLY
+                                #   a uniprot_id column (no organism). So for
+                                #   any STRING-derived UniProt ID not in the
+                                #   override table, the organism defaulted to
+                                #   "Homo sapiens" — non-human proteins were
+                                #   mislabeled as human. Cross-species PPI edges
+                                #   connected mouse proteins to human diseases.
+                                #
+                                #   ROOT FIX: Source 3 — infer the organism
+                                #   from the STRING ID taxonomy prefix. STRING
+                                #   IDs have the format ``<taxid>.<protein_id>``
+                                #   (e.g. "9606.ENSP00000269305" = human,
+                                #   "10090.ENSMUSP0000001" = mouse). We extract
+                                #   the taxid prefix and look it up in
+                                #   ``_ORGANISM_ALIASES`` (which already maps
+                                #   common taxids to organism names). This
+                                #   handles the case where string_df has a
+                                #   ``string_id`` column but no ``organism``
+                                #   column.
+                                elif "string_id" in string_df.columns and "uniprot_id" in string_df.columns:
+                                    _sid_match = string_df.loc[
+                                        string_df["uniprot_id"].astype(str).str.strip()
+                                        == uid_str,
+                                        "string_id",
+                                    ].dropna()
+                                    if not _sid_match.empty:
+                                        _sid = str(_sid_match.iloc[0]).strip()
+                                        if _sid and "." in _sid:
+                                            _taxid = _sid.split(".")[0]
+                                            _taxid_org = _ORGANISM_ALIASES.get(_taxid)
+                                            if _taxid_org:
+                                                _resolved_organism = _taxid_org
                                 self.mapping[uid_str] = {
                                     "uniprot_id": uid_str,
                                     "gene_symbol": None,

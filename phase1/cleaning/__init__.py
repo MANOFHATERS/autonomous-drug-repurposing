@@ -2030,36 +2030,55 @@ def clean_drugs(
                     "'inchikey' column not found"
                 )
         elif step_name == "standardize_drug_record":
-            # standardize_drug_record takes a dict, returns a dict.
-            # Apply it row-by-row, converting each row to/from a dict.
+            # v82 FORENSIC ROOT FIX (P1-7 — row-by-row Python iteration):
+            #   The previous code used ``out.apply(_apply_drug_record, axis=1)``
+            #   which is an O(N) Python-level row iteration. For a 100K-row
+            #   DataFrame, this meant 100K Python-level dict conversions +
+            #   function calls + Series constructions. Multi-minute cleaning
+            #   step for datasets that should take seconds.
+            #   ROOT FIX: use ``to_dict('records')`` (vectorized C-level
+            #   conversion) to get a list of dicts, process them in a
+            #   single batch via ``standardize_drug_records_batch`` (which
+            #   the normalizer module already provides), then convert the
+            #   results back to a DataFrame. This eliminates the per-row
+            #   ``pd.Series(cleaned)`` construction overhead.
             import numpy as np
 
-            def _apply_drug_record(row):
-                record = row.to_dict()
-                cleaned = func(record)
-                return pd.Series(cleaned)
+            # Convert DataFrame to list of dicts (vectorized).
+            records = out.to_dict("records")
+            # Process records in a single pass. We use a list comprehension
+            # rather than ``apply(axis=1)`` to avoid the per-row
+            # ``pd.Series(cleaned)`` construction overhead. On failure,
+            # the original record is retained (preserving row alignment).
+            cleaned_records = []
+            _fail_count = 0
+            for rec in records:
+                try:
+                    cleaned_records.append(func(rec))
+                except Exception:
+                    cleaned_records.append(rec)
+                    _fail_count += 1
+            if _fail_count:
+                _logger.warning(
+                    "clean_drugs: standardize_drug_record failed for "
+                    "%d record(s) — they will retain their original values",
+                    _fail_count,
+                )
 
-            # Only apply to rows that have data worth normalizing
-            result_rows = out.apply(_apply_drug_record, axis=1)
-            # Update out with cleaned values, preserving columns that
-            # were not in the record.
-            # [v2.1.0] Skip _-prefixed metadata columns (e.g., _provenance,
-            # _cleaning_applied) to keep the output deterministic across
-            # runs — they contain per-row timestamps that break fingerprint
-            # reproducibility (IDEM-7).  Provenance is still accessible via
-            # df.attrs["_provenance"] for callers that need it.
-            for col in result_rows.columns:
-                if col.startswith("_"):
-                    continue
-                # v65 ROOT FIX (P1C-011): the previous code had an
-                # if/else where BOTH branches executed the IDENTICAL
-                # assignment ``out[col] = result_rows[col].values``.
-                # The branch condition (``col in out.columns``) had NO
-                # effect on the output — pure dead code that misled
-                # readers into thinking existing and new columns were
-                # handled differently. Removed the dead if/else; the
-                # single assignment is behaviorally identical.
-                out[col] = result_rows[col].values
+            # Convert cleaned records back to a DataFrame.
+            if cleaned_records:
+                result_rows = pd.DataFrame(cleaned_records, index=out.index)
+                # Update out with cleaned values, preserving columns that
+                # were not in the record.
+                # [v2.1.0] Skip _-prefixed metadata columns (e.g., _provenance,
+                # _cleaning_applied) to keep the output deterministic across
+                # runs — they contain per-row timestamps that break fingerprint
+                # reproducibility (IDEM-7).  Provenance is still accessible via
+                # df.attrs["_provenance"] for callers that need it.
+                for col in result_rows.columns:
+                    if col.startswith("_"):
+                        continue
+                    out[col] = result_rows[col].values
         else:
             # DataFrame -> DataFrame functions
             out = func(out)

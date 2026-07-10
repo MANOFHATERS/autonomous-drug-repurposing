@@ -564,6 +564,10 @@ class DedupStrategy(str, enum.Enum):
     HIGHEST_ACTIVITY : str
         Keep the row with the highest ``activity_value``
         (for ``pKi`` / ``pIC50`` / ``%`` inhibition assays).
+    AUTO_ACTIVITY_DIRECTION : str
+        Infer the sort direction from ``activity_type`` (default for
+        ``dedup_interactions``). Maps to either LOWEST_ACTIVITY or
+        HIGHEST_ACTIVITY per-row based on the assay type.
     MERGE_FIELDS : str
         Column-wise merge: take the first non-null value per column
         across all rows in the duplicate group.
@@ -574,6 +578,13 @@ class DedupStrategy(str, enum.Enum):
     LAST_OCCURRENCE = "last_occurrence"
     LOWEST_ACTIVITY = "lowest_activity"
     HIGHEST_ACTIVITY = "highest_activity"
+    # v82 FORENSIC ROOT FIX (P1-8): the ``dedup_interactions`` function
+    # used the raw string "auto_activity_direction" when direction="auto",
+    # which was NOT a member of DedupStrategy. Downstream code that
+    # filtered by ``result.strategy in DedupStrategy.__members__.values()``
+    # silently excluded auto-direction results. ROOT FIX: add the enum
+    # member so the strategy name is always a valid DedupStrategy value.
+    AUTO_ACTIVITY_DIRECTION = "auto_activity_direction"
     MERGE_FIELDS = "merge_fields"
 
 
@@ -2180,11 +2191,20 @@ def dedup_by_inchikey(
     # had null InChIKeys".
     _pre_filter_row_count = int(len(working))
 
-    # Auto-strip whitespace
+    # Auto-standardize: strip whitespace AND uppercase.
+    # v82 FORENSIC ROOT FIX (P1-3): the previous code only stripped
+    # whitespace but did NOT uppercase. The ``_is_valid_inchikey_format``
+    # check uses a case-SENSITIVE regex ``^[A-Z]{14}-[A-Z]{10}-[A-Z]$``.
+    # A lowercase InChIKey like "bsynrymutxbxsq-uhfffaoyas-n" failed
+    # validation, was not detected as a duplicate of the uppercase form,
+    # and survived dedup as a separate row — creating duplicate drug
+    # nodes in the knowledge graph. ROOT FIX: uppercase after stripping
+    # so all InChIKeys are normalized to the canonical uppercase form
+    # before the dedup pass.
     if auto_standardize:
         try:
             working["inchikey"] = working["inchikey"].apply(
-                lambda x: x.strip() if isinstance(x, str) else x
+                lambda x: x.strip().upper() if isinstance(x, str) else x
             )
         except Exception:
             pass
@@ -3413,7 +3433,7 @@ def dedup_interactions(
             else (
                 DedupStrategy.HIGHEST_ACTIVITY.value
                 if direction == "desc"
-                else "auto_activity_direction"
+                else DedupStrategy.AUTO_ACTIVITY_DIRECTION.value
             )
         )
         # [SCI-3] Detect if a censored value was overridden
