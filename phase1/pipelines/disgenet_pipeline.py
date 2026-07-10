@@ -181,6 +181,7 @@ from config.settings import (
     DISGENET_MAX_DATA_AGE_DAYS,
     DISGENET_MIN_EXPECTED_RECORDS,
     DISGENET_MIN_SCORE,
+    DISGENET_WEAK_EVIDENCE_THRESHOLD,
     DISGENET_OUTPUT_FILENAME,
     DISGENET_OUTPUT_FILE_MODE,
     DISGENET_PMID_CAP,
@@ -2842,13 +2843,17 @@ class DisGeNETPipeline(BasePipeline):
             return df
         before = len(df)
         if DISGENET_ALLOW_WEAK_EVIDENCE:
-            # Tag weak-evidence rows instead of dropping them.
+            # v82 FORENSIC ROOT FIX (P1-3): use configurable
+            # DISGENET_WEAK_EVIDENCE_THRESHOLD (default 0.1) instead of
+            # the hardcoded 0.1. The weak-evidence band is now
+            # [DISGENET_MIN_SCORE, DISGENET_WEAK_EVIDENCE_THRESHOLD) —
+            # the two thresholds move together when operators tune either.
             weak_mask = (
                 df["score"].notna()
-                & (df["score"] < 0.1)
+                & (df["score"] < DISGENET_WEAK_EVIDENCE_THRESHOLD)
                 & (df["score"] >= DISGENET_MIN_SCORE)
             )
-            # SCI-1: Override confidence_tier to "weak" for sub-0.1 scores.
+            # SCI-1: Override confidence_tier to "weak" for sub-threshold scores.
             df.loc[weak_mask, "confidence_tier"] = "weak"
             # Drop only rows below DISGENET_MIN_SCORE.
             drop_mask = df["score"].notna() & (df["score"] < DISGENET_MIN_SCORE)

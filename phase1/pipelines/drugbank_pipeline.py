@@ -333,7 +333,35 @@ NS: dict[str, str] = {"db": DRUGBANK_XML_NAMESPACE}
 #
 # Before: re.match("^DB\\d{5}$", "DB123456") → None (REJECT)
 # After:  re.match("^DB\\d{5,7}$", "DB123456") → Match (ACCEPT)
-_DRUGBANK_ID_RE: re.Pattern[str] = re.compile(r"^DB\d{5,7}$")
+#
+# v82 FORENSIC ROOT FIX (P1-9 — _synthesize_drugbank_id 8-hex form
+# rejected by DQ4):
+#   ``pipelines/_v50_downloaders.py::_synthesize_drugbank_id`` (the v50
+#   open-data fallback when DrugBank XML is missing AND download_mode=
+#   "full") synthesizes DrugBank IDs as ``DB{8 hex chars upper}`` (e.g.
+#   ``DBA1B2C3D4``) plus the ``DBSYNTH000000`` sentinel for missing
+#   InChIKeys. The previous regex ``^DB\d{5,7}$`` REJECTED both forms
+#   (8-hex contains letters; DBSYNTH000000 is 14 chars). DQ4 (line ~1961)
+#   then SKIPPED every synthesized drug → the pipeline produced ZERO
+#   drugs in v50 open-data fallback mode. The ``load()`` path's VARCHAR(64)
+#   column accepted the IDs, but DQ4 in the clean/parse path rejected
+#   them BEFORE they ever reached load(). The v50 fallback was effectively
+#   dead code.
+# ROOT FIX: extend the regex to ALSO accept:
+#   1. ``DB[\dA-F]{8}`` — the 8-hex synthesized form (uppercase hex only,
+#      matching what ``hashlib.sha256(...).hexdigest()[:8].upper()`` emits).
+#   2. ``DBSYNTH\d{6}`` — the missing-InChIKey sentinel.
+# The regex is still ANCHORED (``^...$``) so partial matches cannot slip
+# through. Real DrugBank IDs (DB\d{5,7}) continue to match the first
+# alternative. The Drug model's drugbank_id column is VARCHAR(64), so all
+# three forms fit. The v50 fallback is now scientifically usable: when
+# DrugBank XML is unavailable, the pipeline can still load ChEMBL-derived
+# drugs with synthesized IDs and the KG is non-empty.
+_DRUGBANK_ID_RE: re.Pattern[str] = re.compile(
+    r"^DB\d{5,7}$"            # real DrugBank IDs: DB00945, DB00722, etc.
+    r"|^DB[\dA-F]{8}$"        # v50 synthesized: DBA1B2C3D4 (8 uppercase hex)
+    r"|^DBSYNTH\d{6}$"        # v50 sentinel for missing InChIKey
+)
 
 # S19: standard InChIKey is 27 chars (14-10-1). Source: InChI Trust.
 # v24 ROOT FIX (FORENSIC-P1-PIPE §1): keep the regex for backward compat,

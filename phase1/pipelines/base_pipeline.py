@@ -2073,10 +2073,40 @@ class BasePipeline(ABC):
         for col in required:
             if col not in df.columns:
                 errors.append(f"Required column '{col}' is missing")
-            elif df[col].isna().any():
-                null_count = int(df[col].isna().sum())
+                continue
+            # v82 FORENSIC ROOT FIX (P1-6 — required-column NULL check
+            # inconsistent with pattern-check NaN-sentinel filter):
+            #   The previous check used ONLY ``df[col].isna().any()``, which
+            #   catches genuine pandas NaN/None but NOT the literal string
+            #   sentinels "nan", "none", "null", "" that the pattern-check
+            #   block (lines ~2105-2110) filters out. A required column
+            #   with values ["BSYNRYMUTXBXSQ-UHFFFAOYSA-N", "nan", ""]
+            #   PASSED this NULL check (pd.isna("nan") is False — it's a
+            #   string), then the literal "nan" survived the pattern check
+            #   (filtered out as a sentinel BEFORE the regex ran), and the
+            #   row with inchikey="nan" was loaded into the DB. Downstream
+            #   entity resolution's ``_inchikey_index.get("nan")`` then
+            #   returned this row for EVERY future lookup that resolved
+            #   to "nan" (e.g. a missing-InChIKey biologic with a
+            #   synthetic key collision) — wrong-row joins silently
+            #   corrupted the KG.
+            # ROOT FIX: extend the NULL check to ALSO flag literal
+            #   NaN-string sentinels. The sentinel set is the SAME one
+            #   the pattern-check block uses (lines ~2107), so the two
+            #   checks are now consistent. A required column with any
+            #   NaN OR any sentinel-string value is now flagged as having
+            #   NULL values (the count is the union of both).
+            _series_str = df[col].astype(str)
+            _nan_sentinel_mask = _series_str.str.lower().isin(
+                ("nan", "none", "null", "")
+            )
+            _true_null_mask = df[col].isna() | _nan_sentinel_mask
+            if _true_null_mask.any():
+                null_count = int(_true_null_mask.sum())
                 errors.append(
-                    f"Required column '{col}' has {null_count} NULL values"
+                    f"Required column '{col}' has {null_count} NULL values "
+                    f"(includes NaN-string sentinels: 'nan', 'none', 'null', "
+                    f"'') — v82 P1-6 root fix"
                 )
 
         # 2-9. Pattern and range validation per column
@@ -4157,33 +4187,69 @@ class BasePipeline(ABC):
         (e.g. due to pandas type-coercion oddities where a column of
         mostly-ints with one "=1+1" string gets coerced to object dtype
         but a column of mostly-floats with one "=A1" string stays
-        object), it would be MISSED. Root fix: convert ALL columns to
-        object dtype before sanitizing, then sanitize every cell. This
-        is O(N) over the full DataFrame, which is acceptable because
-        ``_sanitize_csv_output`` is called ONCE per clean() call (not
-        per row). The previous behaviour is preserved for genuine
-        numeric columns (no string starts with ``=`` so no escaping
-        fires) — the fix only ADDS coverage for the edge case.
+        object), it would be MISSED.
+
+        v82 FORENSIC ROOT FIX (P1-5 — ``df.astype(object)`` destroys
+        numeric dtypes on round-trip):
+          The v65 fix was OVERLY AGGRESSIVE — it cast EVERY column to
+          object dtype, including genuine int64/float64/bool columns.
+          The CSV write then serialized Python objects (int → str), and
+          the read-back re-inferred dtypes. For most columns this
+          round-tripped correctly, but for nullable Int64 columns with
+          NaN, the object-dtype intermediate could produce
+          ``float('nan')`` instead of ``pd.NA``, breaking downstream
+          ``pd.isna()`` checks (the pubchem_cid column in the drugs
+          schema is the canonical victim — ``pubchem_cid is None``
+          checks failed because ``nan != None``).
+        ROOT FIX: scan ALL columns for dangerous-string cells (preserving
+          the v65 coverage guarantee) but WITHOUT the global
+          ``df.astype(object)`` cast. The implementation:
+          1. Build a boolean mask ``_has_dangerous`` per column that is
+             True only if ANY cell in that column is a string starting
+             with a dangerous prefix. This is computed via
+             ``Series.astype(str).str.startswith(CSV_DANGEROUS_PREFIXES)``
+             which works for both object and numeric dtypes (numeric
+             values are stringified first — they will never start with
+             ``=``/``+``/``-``/``@``/``\\t``/``\\r`` because their str
+             representation is purely numeric/scientific).
+          2. For columns where ``_has_dangerous.any()`` is True, cast
+             JUST that column to object and apply the escape lambda.
+          3. For columns where no cell is dangerous, leave the dtype
+             untouched — the CSV writer handles numeric dtypes natively
+             and the read-back preserves the original dtype.
+        This preserves the v65 security fix (every dangerous cell is
+        escaped) while eliminating the P1-5 dtype-destruction regression.
         """
         if df is None or df.empty:
             return df
-        # v65 ROOT FIX (P1-044): scan ALL columns, not just object-dtype.
-        # We cast to object dtype first to ensure ``.apply`` sees the
-        # underlying Python objects (strings, ints, floats) rather than
-        # numpy scalars. The cast is cheap (view, not copy) for columns
-        # that are already object-dtype; for numeric columns it creates
-        # a new object-dtype Series but the ``apply`` only escapes cells
-        # that are STRINGS starting with a dangerous prefix — genuine
-        # numbers are passed through unchanged.
-        df = df.astype(object)
+        # v82 FORENSIC ROOT FIX (P1-5): surgical per-column sanitization.
+        # Build the mask ONCE per column; only cast columns that actually
+        # contain a dangerous-string cell. Genuine numeric columns (int64,
+        # float64, bool, Int64, Float64) never have dangerous-string cells
+        # because their stringified form never starts with ``=``/``+``/
+        # ``-``/``@``/``\t``/``\r`` — so they pass through unchanged.
         for col in df.columns:
-            df[col] = df[col].apply(
-                lambda x: (
-                    f"'{x}"
-                    if isinstance(x, str) and x.startswith(CSV_DANGEROUS_PREFIXES)
-                    else x
-                )
+            series = df[col]
+            # Stringify every cell to detect dangerous prefixes uniformly.
+            # For numeric dtypes this is a cheap O(N) operation; for
+            # object dtype it's the same cost as before.
+            _str_view = series.astype(str)
+            _danger_mask = _str_view.str.startswith(CSV_DANGEROUS_PREFIXES)
+            if not _danger_mask.any():
+                # No dangerous cells in this column — leave dtype intact.
+                continue
+            # Column has at least one dangerous cell — cast to object and
+            # escape ONLY the dangerous cells. Non-dangerous cells keep
+            # their original Python object representation (int → int,
+            # float → float, str → str).
+            _obj_series = series.astype(object)
+            _escaped = _obj_series.where(
+                ~_danger_mask.values,
+                _obj_series.map(
+                    lambda x: f"'{x}" if isinstance(x, str) else x
+                ),
             )
+            df[col] = _escaped
         return df
 
     def _detect_pii(self, df: pd.DataFrame) -> list[str]:
