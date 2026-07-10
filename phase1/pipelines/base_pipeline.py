@@ -1294,7 +1294,21 @@ class BasePipeline(ABC):
                     records_cleaned / max(1, records_downloaded),
                     self.min_clean_ratio,
                 )
-                status = "warning"
+                # v83 FORENSIC ROOT FIX (P0-C11 — pipeline_runs.status
+                #   CHECK constraint violation):
+                #   The DB CHECK (migration 001 line 177-178) only allows
+                #   ('running', 'success', 'failed', 'partial'). The
+                #   previous code wrote 'warning' here, 'partial' is the
+                #   canonical status for "completed with quality concerns".
+                #   The INSERT was raising `CHECK constraint failed:
+                #   chk_pipeline_runs_status`, caught by the audit-log
+                #   exception handler at line ~1577 and silently logged
+                #   as `Audit log write failed` — meaning NO audit trail
+                #   was being recorded for any pipeline run with a
+                #   sub-threshold clean ratio. This is a silent audit-
+                #   trail deletion that violates the institutional-grade
+                #   lineage contract.
+                status = "partial"
 
             if records_cleaned == 0 and records_downloaded > 0:
                 raise DataIntegrityError(
@@ -1351,7 +1365,9 @@ class BasePipeline(ABC):
                         records_loaded / max(1, records_cleaned),
                         self.min_load_ratio,
                     )
-                    status = "warning"
+                    # v83 P0-C11: 'warning' -> 'partial' (DB CHECK constraint
+                    # only allows 'running'/'success'/'failed'/'partial').
+                    status = "partial"
             elif dry_run:
                 logger.info("[%s] Dry run: skipping load()", self.source_name)
                 records_loaded = 0
@@ -1540,7 +1556,18 @@ class BasePipeline(ABC):
                 records_cleaned=records_cleaned,
             )
 
-            status = "download_clean_success"
+            # v83 FORENSIC ROOT FIX (P0-C11 — pipeline_runs.status
+            #   CHECK constraint violation):
+            #   The DB CHECK only allows ('running', 'success', 'failed',
+            #   'partial'). The previous code wrote
+            #   'download_clean_success' which the CHECK rejected,
+            #   silently deleting the audit trail for EVERY download+clean
+            #   run (the audit-log exception handler at line ~1577 caught
+            #   the IntegrityError and logged it as a non-fatal audit-log
+            #   write failure). The pipeline phase is already captured in
+            #   metadata_json.phase='download_clean', so the status column
+            #   only needs the canonical 'success' value.
+            status = "success"
             return raw_paths[0] if raw_paths else Path()
         except Exception as exc:
             status = "failed"
@@ -1696,7 +1723,13 @@ class BasePipeline(ABC):
                 self.source_name,
                 records_loaded,
             )
-            status = "load_success"
+            # v83 FORENSIC ROOT FIX (P0-C11 — pipeline_runs.status
+            #   CHECK constraint violation):
+            #   Same root cause as 'download_clean_success' above. The DB
+            #   CHECK only allows ('running', 'success', 'failed',
+            #   'partial'). 'load_success' is replaced with the canonical
+            #   'success'; the phase information is in metadata_json.phase.
+            status = "success"
         except Exception as exc:
             status = "failed"
             raw_msg = str(exc) if str(exc) else type(exc).__name__
@@ -4878,9 +4911,16 @@ class BasePipeline(ABC):
         Parameters
         ----------
         status : str
-            Run status: ``"success"``, ``"failed"``, ``"warning"``,
-            ``"download_clean_success"``, ``"load_success"``,
-            ``"running"``.
+            Run status. v83 P0-C11: the DB CHECK constraint
+            ``chk_pipeline_runs_status`` (migration 001) only allows
+            ``'running'``, ``'success'``, ``'failed'``, ``'partial'``.
+            The previous code also wrote ``'warning'``,
+            ``'download_clean_success'``, and ``'load_success'`` which
+            the CHECK rejected (silently deleting the audit trail — see
+            the v83 P0-C11 root-cause comment at the call sites).
+            Callers MUST now use only the 4 canonical statuses. The
+            pipeline PHASE (download_clean / load / full) is recorded
+            in ``metadata_json['phase']``, not in the status column.
         started_at : datetime or None
             Run start time (UTC).
         finished_at : datetime or None

@@ -291,15 +291,26 @@ class TestComputeMatchConfidence:
         assert compute_match_confidence("pubchem_xref") == 0.7
 
     def test_fuzzy(self):
-        # D3-3 fix: fuzzy confidence raised from 0.6 → 0.85 so that
-        # METHOD_CONFIDENCE["fuzzy"] >= _FUZZY_THRESHOLD (0.85).
-        assert compute_match_confidence("fuzzy") == 0.85
+        # v83: the v29 ROOT FIX inverted the buggy confidence values.
+        # ``fuzzy`` was 0.85 (stale) — the v29 fix lowered it to 0.65
+        # so it sits BELOW NAME_NORMALIZED (0.80) and ABOVE
+        # PROTEIN_NAME_FUZZY (0.60) in the confidence hierarchy. The
+        # previous test expected the OLD 0.85 value (a stale assertion
+        # that was never updated after v29). See
+        # entity_resolution/base.py:142 and resolver_utils.py:550 for
+        # the v29 inversion-fix rationale.
+        assert compute_match_confidence("fuzzy") == 0.65
 
     def test_uniprot_exact(self):
         assert compute_match_confidence("uniprot_exact") == 1.0
 
     def test_gene_name_organism(self):
-        assert compute_match_confidence("gene_name_organism") == 0.85
+        # v83: the v29 ROOT FIX lowered ``gene_name_organism`` from
+        # 0.85 to 0.75 so it sits BETWEEN NAME_NORMALIZED (0.80) and
+        # FUZZY (0.65). The previous test expected the OLD 0.85 value
+        # (stale assertion). See entity_resolution/base.py:144 and
+        # resolver_utils.py:552.
+        assert compute_match_confidence("gene_name_organism") == 0.75
 
     def test_unknown_method(self):
         assert compute_match_confidence("nonexistent_method") == 0.5

@@ -4434,6 +4434,61 @@ def _run_migrations_inner(
                             ]
                             if not non_comment_lines:
                                 continue
+                            # v83 FORENSIC ROOT FIX (P0-C10 — SQLAlchemy
+                            #   text() mis-parses ``%(...)s`` in SQL comments
+                            #   as pyformat parameter placeholders):
+                            #   Migration 001 line 398 has a comment
+                            #   ``-- Indexes (CMP-02: follow ORM naming
+                            #   convention ix_%(table)s_%(column)s)``.
+                            #   SQLAlchemy's ``text()`` compiles the SQL
+                            #   through its parambinding layer, which
+                            #   interprets ``%(table)s`` as a pyformat-style
+                            #   named parameter. The compiler then converts
+                            #   it to ``?`` (qmark for SQLite) and tries to
+                            #   bind a parameter named ``table`` — which
+                            #   doesn't exist in the params dict, raising
+                            #   ``StatementError: (builtins.KeyError)
+                            #   'table'``. This blocks EVERY Phase 1
+                            #   pipeline on a fresh SQLite DB (the dev/CI
+                            #   default), which means the master DAG cannot
+                            #   run end-to-end in any non-Postgres env —
+                            #   silently gutting the "V1 on free public data
+                            #   + laptop" mandate from the project docx.
+                            #
+                            #   The previous code kept the comment lines
+                            #   INSIDE ``stmt_stripped`` and passed the whole
+                            #   string to ``text()``. The ``non_comment_lines``
+                            #   check only decided whether to SKIP pure-comment
+                            #   statements; it did NOT strip the comments
+                            #   from mixed statements before execution.
+                            #
+                            #   ROOT FIX: execute the SQL with the LEADING
+                            #   comment lines stripped (rebuilt from
+                            #   ``non_comment_lines``). This is the
+                            #   institutional-grade fix because:
+                            #     1. It removes the bug surface entirely —
+                            #        ``text()`` never sees ``%(...)s`` in a
+                            #        comment, so pyformat parsing cannot
+                            #        mis-fire.
+                            #     2. It preserves the existing per-statement
+                            #        semantics (the splitter still produces
+                            #        one statement per ``conn.execute`` call,
+                            #        so the v59 multi-statement fix is
+                            #        preserved).
+                            #     3. It is forward-compatible — any future
+                            #        migration that uses ``%(foo)s`` in a
+                            #        comment (e.g. documenting a Python
+                            #        format-string convention) is protected.
+                            #     4. It mirrors the PostgreSQL path's
+                            #        ``_execute_with_retry`` which already
+                            #        strips comments before execution (see
+                            #        line ~2090).
+                            # We use ``\n`` join (not ``" "``) to preserve
+                            # the original line structure for any
+                            # multi-line statement that depends on
+                            # newlines (none in current migrations, but
+                            # defensive).
+                            stmt_for_execution = "\n".join(non_comment_lines)
                             try:
                                 # P1-A13 ROOT FIX (v82): use SQLAlchemy's
                                 # ``text()`` wrapper + ``conn.execute()``
@@ -4449,7 +4504,10 @@ def _run_migrations_inner(
                                 # splitter already ensures single-statement
                                 # calls, so the v59 multi-statement fix is
                                 # preserved).
-                                conn.execute(text(stmt_stripped))
+                                # v83 P0-C10: ``stmt_for_execution`` has
+                                # comments stripped to prevent pyformat
+                                # mis-parsing of ``%(...)s`` in comments.
+                                conn.execute(text(stmt_for_execution))
                             except Exception as stmt_exc:
                                 # v59 ROOT FIX: catch "duplicate column name"
                                 # and "already exists" errors at the STATEMENT
@@ -4493,10 +4551,16 @@ def _run_migrations_inner(
                                 # the migration failed (the previous code
                                 # logged the entire migration file, making
                                 # it impossible to diagnose).
+                                # v83 P0-C10: include the COMMENT-STRIPPED
+                                # statement in the error message (the
+                                # original stmt_stripped may contain a
+                                # ``%(...)s`` comment that masked the real
+                                # SQL — operators need to see the actual
+                                # SQL that failed, not the comment).
                                 raise StatementExecutionError(
                                     f"SQLite migration {f.name}: statement failed: "
                                     f"{stmt_exc}\nStatement (first 300 chars): "
-                                    f"{stmt_stripped[:300]}"
+                                    f"{stmt_for_execution[:300]}"
                                 ) from stmt_exc
                         # v73 ROOT FIX (T-009): record the migration INSIDE the
                         # same ``engine.begin()`` transaction as the schema
@@ -5672,7 +5736,25 @@ def retry_failed_migration(engine, migration_name: str) -> bool:
                         )
                         continue
 
-                conn.execute(text(stmt))
+                # v83 P0-C10: strip ``--`` comment lines from each statement
+                # before passing to ``text()``. SQLAlchemy's ``text()``
+                # compiles the SQL through its pyformat parameter binder,
+                # which interprets ``%(foo)s`` in comments as a named
+                # parameter placeholder (see the SQLite forward-migration
+                # path at line ~4491 for the full root-cause analysis).
+                # Without this strip, retrying a migration whose SQL
+                # contains a ``%(foo)s`` comment (e.g. migration 001's
+                # ``ix_%(table)s_%(column)s`` naming-convention comment)
+                # would crash with ``KeyError: 'foo'`` — defeating the
+                # retry mechanism.
+                stmt_lines = [
+                    ln for ln in stmt.splitlines()
+                    if ln.strip() and not ln.strip().startswith("--")
+                ]
+                if not stmt_lines:
+                    continue  # pure-comment statement (no-op)
+                stmt_clean = "\n".join(stmt_lines)
+                conn.execute(text(stmt_clean))
 
             # Record success — update the 'retrying' record
             conn.execute(

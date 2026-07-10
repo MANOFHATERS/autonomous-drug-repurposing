@@ -1030,29 +1030,82 @@ class DisGeNETPipeline(BasePipeline):
         :meth:`_download_static` (explicit opt-in via
         ``DISGENET_USE_API=False``).
 
+        v83 FORENSIC ROOT FIX (P0-C13 — DisGeNET pipeline unusable in
+        sample/laptop mode):
+          Same root cause as OMIM P0-C12: the DOCX mandates a $0 data-
+          cost V1 that runs end-to-end on a laptop, but DisGeNET now
+          requires a paid API key (the static URL was deprecated in
+          2024 and may be removed at any time). When the API key is
+          missing OR the live download fails in sample mode, the
+          pipeline raised RuntimeError/DownloadError and the KG build
+          was blocked.
+
+          ROOT FIX: when DRUGOS_DOWNLOAD_MODE=sample (the default) AND
+          (no API key OR the live download fails), fall back to the
+          embedded sample GDA dataset
+          (``_embedded_samples.embedded_disgenet_gda()``). The embedded
+          sample is biologically valid (real gene IDs, real DOIDs, real
+          association types — see the ``embedded_disgenet_gda``
+          docstring). It is written to
+          ``raw_dir/disgenet_embedded_sample.csv`` and returned as the
+          ``download()`` path; ``clean()`` then processes it like any
+          other raw file. In full mode, the API key is STILL required —
+          the embedded sample is a SAMPLE-mode fallback only.
+
         Raises
         ------
         ValueError
             If ``DISGENET_USE_API=True`` but ``DISGENET_API_KEY`` is not
-            set (SCI-27 — no silent fallback to the deprecated static URL).
+            set AND DRUGOS_DOWNLOAD_MODE != "sample" (SCI-27 — no silent
+            fallback to the deprecated static URL in full mode).
         """
+        # v83 P0-C13: sample-mode embedded fallback.
+        _download_mode = os.environ.get("DRUGOS_DOWNLOAD_MODE", "sample").lower().strip()
+
         # SCI-27 / CONF-18: No silent fallback to deprecated static URL.
+        # v83 P0-C13: in sample mode, fall back to embedded samples when
+        # the API key is missing (instead of raising). In full mode,
+        # raise as before.
         if DISGENET_USE_API and not DISGENET_API_KEY:
+            if _download_mode == "sample":
+                logger.warning(
+                    "[disgenet] DISGENET_USE_API=true but DISGENET_API_KEY is "
+                    "not set AND DRUGOS_DOWNLOAD_MODE=sample — falling back to "
+                    "embedded sample GDA dataset so the platform can run "
+                    "end-to-end on a laptop (per the DOCX V1 mandate). "
+                    "Set DISGENET_API_KEY + DRUGOS_DOWNLOAD_MODE=full for "
+                    "the complete DisGeNET corpus."
+                )
+                return self._write_embedded_sample()
             raise ValueError(
                 "DISGENET_USE_API=true but DISGENET_API_KEY is not set. "
                 "Set the DISGENET_API_KEY environment variable or set "
                 "DISGENET_USE_API=false (not recommended - static URL is "
-                "deprecated since 2024)."
+                "deprecated since 2024), OR set DRUGOS_DOWNLOAD_MODE=sample "
+                "to use the embedded sample dataset."
             )
 
         start = time.perf_counter()
         try:
-            if DISGENET_USE_API:
-                self._source_format = DisGeNETSourceFormat.API
-                path = self._download_via_api()
-            else:
-                self._source_format = DisGeNETSourceFormat.TSV
-                path = self._download_static()
+            try:
+                if DISGENET_USE_API:
+                    self._source_format = DisGeNETSourceFormat.API
+                    path = self._download_via_api()
+                else:
+                    self._source_format = DisGeNETSourceFormat.TSV
+                    path = self._download_static()
+            except Exception as exc:
+                # v83 P0-C13: in sample mode, fall back to embedded samples
+                # instead of raising. In full mode, re-raise.
+                if _download_mode == "sample":
+                    logger.warning(
+                        "[disgenet] Live download failed in sample mode (%s: %s) "
+                        "— falling back to embedded sample GDA dataset so the "
+                        "platform can run end-to-end.",
+                        type(exc).__name__, exc,
+                    )
+                    return self._write_embedded_sample()
+                raise
         finally:
             duration = time.perf_counter() - start
             self._emit_metric(
@@ -1086,6 +1139,30 @@ class DisGeNETPipeline(BasePipeline):
             )
 
         return path
+
+    def _write_embedded_sample(self) -> Path:
+        """v83 P0-C13: write the embedded DisGeNET GDA sample to disk and return its path.
+
+        Used as a fallback when the API key is missing OR the live
+        download fails in sample mode. The embedded sample is biologically
+        valid (real gene IDs, real DOIDs, real association types — see
+        ``_embedded_samples.embedded_disgenet_gda`` docstring) and
+        produces a small but scientifically valid Knowledge Graph.
+        """
+        import pandas as _pd
+        from pipelines._embedded_samples import embedded_disgenet_gda
+        dest = self.raw_dir / "disgenet_embedded_sample.csv"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        df = embedded_disgenet_gda()
+        df.to_csv(dest, index=False)
+        self._source_format = "embedded_csv"
+        self._download_method_used = "embedded_sample"
+        self._source_url_sanitised = "embedded://disgenet_gda"
+        logger.info(
+            "[disgenet] Embedded sample GDA dataset written to %s (%d rows)",
+            dest, len(df),
+        )
+        return dest
 
     def _download_static(self) -> Path:
         """Stream-download the deprecated static TSV.gz from DisGeNET.
@@ -1975,6 +2052,54 @@ class DisGeNETPipeline(BasePipeline):
         ``self.last_cleaning_report`` (LOG-5).
         """
         # ----------------------------------------------------------------
+        # v83 P0-C13: short-circuit for the embedded sample CSV. The
+        # embedded sample (written by ``_write_embedded_sample``) already
+        # has the cleaned schema — it was authored to match what the
+        # full clean() pipeline produces. Re-running the TSV parser on
+        # it would crash (it's a CSV with comma separator, not a TSV).
+        # Instead, validate the score, compute confidence_tier, persist
+        # as the canonical DisGeNET output, and return.
+        # ----------------------------------------------------------------
+        if self._source_format == "embedded_csv" or raw_path.name == "disgenet_embedded_sample.csv":
+            logger.info(
+                "[disgenet] _clean_core — embedded sample CSV path (%s)", raw_path,
+            )
+            df = pd.read_csv(raw_path)
+            # Ensure required columns exist.
+            required = [
+                "gene_symbol", "gene_id", "disease_id", "disease_name",
+                "association_type", "source", "score",
+            ]
+            for col in required:
+                if col not in df.columns:
+                    df[col] = None
+            # Compute confidence_tier on the score (Chain-3 root fix:
+            # preserve_direction=False, no silent None fallback — v83).
+            if "score" in df.columns:
+                df["confidence_tier"] = df["score"].apply(
+                    lambda s: (
+                        _classify_confidence(float(s))
+                        if pd.notna(s)
+                        else None
+                    )
+                )
+                df["confidence_tier_method"] = CONFIDENCE_TIER_METHOD_VERSION
+            else:
+                df["confidence_tier"] = None
+                df["confidence_tier_method"] = CONFIDENCE_TIER_METHOD_VERSION
+            # Persist as the canonical DisGeNET output.
+            from config.settings import PROCESSED_DATA_DIR
+            output_path = PROCESSED_DATA_DIR / "disgenet_gene_disease_associations.csv"
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            df.to_csv(output_path, index=False)
+            logger.info(
+                "[disgenet] Embedded sample cleaned: %d rows written to %s",
+                len(df), output_path,
+            )
+            self.last_clean_result = df
+            return df
+
+        # ----------------------------------------------------------------
         # Step 1: Load TSV with explicit dtype, na_values, encoding,
         # on_bad_lines (DQ-28, DQ-29, DQ-30, DQ-31).
         # ----------------------------------------------------------------
@@ -2151,11 +2276,45 @@ class DisGeNETPipeline(BasePipeline):
         # Step 8: Compute confidence_tier on the clipped score (SCI-10,
         # SCI-12, SCI-13, IDEM-17, LIN-15).
         # ----------------------------------------------------------------
+        # v83 FORENSIC ROOT FIX (Chain-3 leftover — silent confidence_tier
+        #   corruption via inline ``float(s) >= 0`` guard):
+        #   The v79 root fix removed ``preserve_direction=True`` (the
+        #   actual root cause of Chain-3), so ``validate_gda_scores`` now
+        #   clips every score to ``[0.0, 1.0]`` before this code runs.
+        #   Negative scores CAN NO LONGER reach this point under the
+        #   contract. But the previous inline guard
+        #     ``lambda s: _classify_confidence(float(s)) if pd.notna(s) and float(s) >= 0 else None``
+        #   still had a silent ``else None`` branch for ANY value that
+        #   was NaN OR negative. Under the new contract:
+        #     * NaN SHOULD have been coerced to 0.0 by validate_gda_scores.
+        #       If a NaN reaches here, that's a CONTRACT VIOLATION — we
+        #       want to surface it as a real error, not silently set
+        #       ``confidence_tier=None`` (which downstream ML filters
+        #       exclude, producing silent data loss).
+        #     * Negative SHOULD have been clipped to 0.0. If a negative
+        #       reaches here, same contract violation.
+        #   ROOT FIX: drop the ``float(s) >= 0`` guard entirely. The
+        #   ``_classify_confidence`` function (cleaning/confidence.py)
+        #   has its own defensive invariants — it raises ``ValueError``
+        #   on None, NaN, negative (without ``allow_negative=True``),
+        #   or >1.0. Letting it raise here surfaces the contract
+        #   violation LOUDLY so operators can diagnose the upstream
+        #   validate_gda_scores bug, instead of silently producing
+        #   ``confidence_tier=None`` rows that the KG silently drops.
+        #   We still guard against ``pd.notna(s)`` for the rare case
+        #   where validate_gda_scores legitimately leaves a NaN (e.g.
+        #   the score column was entirely missing in the source); in
+        #   that case ``None`` is the honest value (NOT a contract
+        #   violation) and downstream filters correctly exclude the
+        #   row. The classify_confidence raise on NaN is reserved for
+        #   the case where a NaN SHOULD have been coerced — but we
+        #   cannot distinguish that from "score column was missing",
+        #   so we use the pandas-native NaN check here.
         if "score" in df.columns:
             df["confidence_tier"] = df["score"].apply(
                 lambda s: (
                     _classify_confidence(float(s))
-                    if pd.notna(s) and float(s) >= 0
+                    if pd.notna(s)
                     else None
                 )
             )

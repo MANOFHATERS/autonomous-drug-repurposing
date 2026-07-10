@@ -866,8 +866,19 @@ _PHASE1_EXPECTED_COLUMNS: Dict[str, List[str]] = {
     "interactions": ["drugbank_id", "uniprot_id", "action_type"],
     "omim_gda": ["gene_mim", "gene_symbol", "disease_id", "disease_name"],
     "chembl_drugs": ["chembl_id", "inchikey"],
-    "uniprot_proteins": ["uniprot_ac", "gene_symbol"],
-    "string_ppi": ["uniprot_ac_a", "uniprot_ac_b", "combined_score"],
+    # v83 P0-C14: ``uniprot_ac`` removed from EXPECTED and moved to
+    # ANY_OF (see _PHASE1_ANY_OF_COLUMNS below). The UniProt pipeline
+    # emits ``uniprot_id`` (canonical accession); the bridge read code
+    # accepts ``uniprot_ac`` / ``accession`` / ``uniprot_id``. Requiring
+    # ``uniprot_ac`` strictly caused a false-positive schema rejection
+    # on every run.
+    "uniprot_proteins": ["gene_symbol"],
+    # v83 P0-C14: ``uniprot_ac_a`` / ``uniprot_ac_b`` removed from
+    # EXPECTED and moved to ANY_OF. The STRING pipeline emits
+    # ``protein_a`` / ``protein_b`` (ENSP IDs); the bridge read code
+    # accepts both forms. ``combined_score`` stays in EXPECTED because
+    # the bridge always reads it (no fallback).
+    "string_ppi": ["combined_score"],
     # v78 FORENSIC ROOT FIX (BUG #7 — Silent Data-Loss):
     # The bridge's DisGeNET block reads
     # ``row.get("gene_id") or row.get("ncbi_gene_id")`` to get the
@@ -911,6 +922,21 @@ _PHASE1_EXPECTED_COLUMNS: Dict[str, List[str]] = {
 # dict lists the alternatives. The validator accepts if AT LEAST ONE
 # of each list is present. A regression that drops ALL alternatives
 # fails fast at read time instead of silently producing zero edges.
+#
+# v83 FORENSIC ROOT FIX (P0-C14 — UniProt/STRING schema mismatch
+#   between Phase 1 pipeline output and bridge expected columns):
+#   The UniProt pipeline writes ``uniprot_id`` (the canonical UniProt
+#   accession) but the bridge validator required ``uniprot_ac``. The
+#   bridge's READ code at line ~4504 already accepted both
+#   ``uniprot_ac`` and ``accession`` via
+#   ``row.get("uniprot_ac") or row.get("accession")`` — but the
+#   VALIDATOR was strict, so the read code never ran. The bridge
+#   crashed with ``DrugOSDataError: missing required column(s)
+#   ['uniprot_ac']`` on every run. ROOT FIX: add ``uniprot_id`` as
+#   an accepted alias for ``uniprot_ac`` (and ``protein_a``/``protein_b``
+#   for STRING PPI — the bridge read code at line ~4554 already
+#   accepts these aliases). The validator now matches the read code's
+#   actual behavior — no more false-positive schema rejections.
 _PHASE1_ANY_OF_COLUMNS: Dict[str, List[List[str]]] = {
     "disgenet_gda": [
         ["gene_id", "ncbi_gene_id"],  # bridge reads row.get("gene_id") or row.get("ncbi_gene_id")
@@ -918,6 +944,20 @@ _PHASE1_ANY_OF_COLUMNS: Dict[str, List[List[str]]] = {
     "string_ppi": [
         # bridge reads row.get("score") or row.get("combined_score")
         ["score", "combined_score"],
+        # v83 P0-C14: bridge reads row.get("uniprot_ac_a") or row.get("protein_a")
+        # or row.get("uniprot_id_a") or row.get("string_id_a") (and same for _b).
+        # The Phase 1 STRING pipeline emits ``string_id_a``/``string_id_b``
+        # (ENSP IDs) and ``uniprot_id_a``/``uniprot_id_b`` (when crosswalk
+        # succeeds). The validator must accept all four forms.
+        ["uniprot_ac_a", "protein_a", "uniprot_id_a", "string_id_a"],
+        ["uniprot_ac_b", "protein_b", "uniprot_id_b", "string_id_b"],
+    ],
+    # v83 P0-C14: UniProt pipeline emits ``uniprot_id`` (canonical
+    # accession) but the bridge read code at line ~4504 accepts
+    # ``uniprot_ac``, ``accession``, OR ``uniprot_id``. The validator
+    # must accept all three to match the read code's actual behavior.
+    "uniprot_proteins": [
+        ["uniprot_ac", "accession", "uniprot_id"],
     ],
 }
 
@@ -4550,7 +4590,16 @@ def stage_phase1_to_phase2(
     if uniprot is not None and not uniprot.empty:
         n_uniprot_staged = 0
         for idx, row in uniprot.iterrows():
-            uniprot_ac = _safe_str(row.get("uniprot_ac") or row.get("accession"))
+            # v83 P0-C14: accept ``uniprot_id`` as an alias for ``uniprot_ac``.
+            # The UniProt pipeline emits ``uniprot_id`` (canonical accession)
+            # but older bridge code expected ``uniprot_ac``. The validator
+            # (via _PHASE1_ANY_OF_COLUMNS) now accepts all three names; the
+            # read code here must do the same to actually consume the data.
+            uniprot_ac = _safe_str(
+                row.get("uniprot_ac")
+                or row.get("accession")
+                or row.get("uniprot_id")
+            )
             if not uniprot_ac:
                 continue
             if uniprot_ac in extra_protein_seen:
@@ -4600,8 +4649,22 @@ def stage_phase1_to_phase2(
             p.get("id", ""): p for p in staged.protein_nodes if p.get("id")
         }
         for idx, row in string_df.iterrows():
-            ac_a = _safe_str(row.get("uniprot_ac_a") or row.get("protein_a"))
-            ac_b = _safe_str(row.get("uniprot_ac_b") or row.get("protein_b"))
+            # v83 P0-C14: accept all column-name forms the Phase 1 STRING
+            # pipeline emits: ``uniprot_ac_a`` (legacy), ``protein_a``
+            # (ENSP alias), ``uniprot_id_a`` (when crosswalk succeeds),
+            # ``string_id_a`` (ENSP IDs from STRING). Same for _b.
+            ac_a = _safe_str(
+                row.get("uniprot_ac_a")
+                or row.get("protein_a")
+                or row.get("uniprot_id_a")
+                or row.get("string_id_a")
+            )
+            ac_b = _safe_str(
+                row.get("uniprot_ac_b")
+                or row.get("protein_b")
+                or row.get("uniprot_id_b")
+                or row.get("string_id_b")
+            )
             if not ac_a or not ac_b:
                 continue
             # v35 M-6: read STRING's name columns so bare Protein nodes
