@@ -403,13 +403,16 @@ GENERATED_RE: re.Pattern[str] = re.compile(
 )
 
 # BUG-3.20: mapping key regex — tightened to [1-4] only.
-# Two forms: strict (mapping key at end of string — the canonical morbidmap
-# format) and lenient (mapping key followed by a trailing inheritance
-# annotation, e.g. "(3), autosomal recessive"). The strict form is tried
-# first; the lenient form only fires when strict fails. Both reject
-# (0), (5), (99) etc. — only [1-4] are valid OMIM mapping keys.
+# v83 FORENSIC ROOT FIX (P1-9): the strict regex required (N) at END of
+# string and the lenient regex required (N), (comma after). Some older
+# morbidmap releases use "(N) autosomal recessive" (space, no comma) —
+# NEITHER regex matched, so mapping_key stayed 0 and the record was
+# silently dropped by the OMIM_MAPPING_KEYS_INCLUDE=[3,4] filter.
+# ROOT FIX: the lenient regex now matches (N) followed by a comma OR a
+# space (covering the "(3) autosomal recessive" form). The strict regex
+# (end-of-string) is tried first and is unchanged.
 MAPPING_KEY_RE: re.Pattern[str] = re.compile(r"\(([1-4])\)\s*$")
-MAPPING_KEY_RE_LENIENT: re.Pattern[str] = re.compile(r"\(([1-4])\)\s*,")
+MAPPING_KEY_RE_LENIENT: re.Pattern[str] = re.compile(r"\(([1-4])\)\s*[, ]")
 
 # BUG-3.21: MIM number regex — 5 to 7 digits, validated against range later.
 # Matches any comma-separated 5-7 digit number with a word boundary after.
@@ -723,8 +726,13 @@ class OMIMPipeline(BasePipeline):
         # at construction time, not mid-pipeline (BUG-12.11).
         self._validate_omim_config()
 
-        # BUG-8.11: HTTP connection reuse via a single requests.Session.
-        self._session: requests.Session = requests.Session()
+        # v83 FORENSIC ROOT FIX (P2-2): the previous code created
+        # ``self._session = requests.Session()`` here but NEVER used it —
+        # the only consumer was the dead ``_api_get`` method (P2-1), which
+        # was itself never called by ``download()``. The unclosed session
+        # leaked socket file descriptors across pipeline runs. ROOT FIX:
+        # removed the unused session. ``download()`` uses the base class's
+        # ``_download_file`` helper which manages its own HTTP connections.
 
         # BUG-5.17: in-memory quarantine buffer (flushed at end of clean()).
         self._quarantine_buffer: list[dict] = []
@@ -928,6 +936,17 @@ class OMIMPipeline(BasePipeline):
     # If a future operator needs the REST API path, they should re-add
     # it and WIRE IT INTO ``download()`` as a true fallback — not leave
     # it as dead code that looks callable but isn't.
+    #
+    # v83 FORENSIC ROOT FIX (P2-1): the ``_api_get`` and ``_backoff_seconds``
+    # methods (90 lines) were ALSO dead code — never called by any
+    # production path. The only consumer of ``_api_get`` was the already-
+    # removed ``_download_via_api``. ``_api_get`` also referenced
+    # ``self._session`` (removed in P2-2), so keeping it would have been
+    # a latent AttributeError. Both methods have been REMOVED. The
+    # ``_api_calls_made`` / ``_api_calls_retried`` counters are retained
+    # (set to 0 in ``__init__``) for metric-emission backward compat —
+    # they will always be 0 now, which is the correct value for a path
+    # that no longer exists.
 
     def _is_cache_fresh(self, dest: Path) -> bool:
         """Return True iff the cached file is younger than ``OMIM_MAX_AGE_DAYS``
@@ -939,108 +958,6 @@ class OMIMPipeline(BasePipeline):
             return age_days <= OMIM_MAX_AGE_DAYS
         except OSError:
             return False
-
-    def _api_get(
-        self,
-        url: str,
-        params: Mapping[str, Any] | None = None,
-    ) -> requests.Response:
-        """GET with retry on transient errors and rate limiting (BUG-1.1).
-
-        Uses ``Authorization: ApiKey`` header (BUG-2.2) — never leaks the
-        key via query string. Honors ``Retry-After`` headers (BUG-6.1).
-        Single sleep per request (BUG-8.1). Bounded retries with jitter
-        (BUG-4.9 / BUG-7.3).
-        """
-        max_retries = OMIM_API_MAX_RETRIES
-        headers = self._omim_auth_headers()
-
-        last_exc: Exception | None = None
-        for attempt in range(1, max_retries + 1):
-            self._api_calls_made += 1
-            try:
-                resp = self._session.get(
-                    url,
-                    params=params,
-                    headers=headers,
-                    timeout=OMIM_API_TIMEOUT,
-                )
-            except RETRYABLE_EXCEPTIONS as exc:
-                last_exc = exc
-                if attempt == max_retries:
-                    safe = self._sanitize_error_message(str(exc))
-                    raise RuntimeError(
-                        f"OMIM GET failed after {max_retries} retries: {safe}"
-                    ) from exc
-                self._api_calls_retried += 1
-                wait = self._backoff_seconds(attempt)
-                logger.warning(
-                    "[omim] GET %s failed (attempt %d/%d): %s — retrying in %.2fs",
-                    self._sanitize_url(url), attempt, max_retries,
-                    self._sanitize_error_message(str(exc)), wait,
-                )
-                time.sleep(wait)
-                continue
-
-            # BUG-6.1: respect Retry-After header on 429.
-            if resp.status_code in RETRYABLE_STATUS_CODES:
-                if attempt == max_retries:
-                    raise RuntimeError(
-                        f"OMIM GET {self._sanitize_url(url)} returned "
-                        f"{resp.status_code} after {max_retries} retries"
-                    )
-                self._api_calls_retried += 1
-                retry_after = resp.headers.get("Retry-After")
-                if retry_after:
-                    try:
-                        wait = float(retry_after)
-                    except ValueError:
-                        wait = self._backoff_seconds(attempt)
-                else:
-                    wait = self._backoff_seconds(attempt)
-                logger.warning(
-                    "[omim] GET %s returned %d (attempt %d/%d) — retrying in %.2fs",
-                    self._sanitize_url(url), resp.status_code,
-                    attempt, max_retries, wait,
-                )
-                time.sleep(wait)
-                continue
-
-            # BUG-6.16: detect 404-in-500-body (permanent URL error).
-            if resp.status_code == 500:
-                body_preview = (resp.text or "")[:500].lower()
-                if "not found" in body_preview or "404" in body_preview:
-                    raise RuntimeError(
-                        f"OMIM GET {self._sanitize_url(url)} returned 500 "
-                        f"with 'Not Found' body — likely permanent URL error"
-                    )
-
-            resp.raise_for_status()
-
-            # BUG-8.1: single sleep per request (here, NOT in the caller).
-            # v29 ROOT FIX (audit P1-22): was 0.1 req/s — 24h+ ingest. Increased to 1 req/s (10x).
-            # Cap the per-request sleep at OMIM_MAX_REQUEST_INTERVAL_SEC (1.0s)
-            # so the nominal rate is at least 1 req/s. If OMIM_REQUEST_INTERVAL
-            # is misconfigured to a larger value downstream, this guard
-            # prevents the 24h-ingest regression from re-emerging.
-            time.sleep(min(OMIM_REQUEST_INTERVAL, self.OMIM_MAX_REQUEST_INTERVAL_SEC))
-            return resp
-
-        # Should be unreachable, but be defensive.
-        safe = self._sanitize_error_message(str(last_exc)) if last_exc else "unknown"
-        raise RuntimeError(
-            f"OMIM GET {self._sanitize_url(url)} exhausted retries: {safe}"
-        )
-
-    @staticmethod
-    def _backoff_seconds(attempt: int) -> float:
-        """Compute a bounded backoff with jitter (BUG-4.9 / BUG-7.3).
-
-        ``wait = min(2 ** attempt, 30) + random.uniform(0, 1)``.
-        """
-        base = min(2 ** attempt, 30)
-        jitter = random.uniform(0, 1)
-        return float(base + jitter)
 
     # ------------------------------------------------------------------
     # Public API: clean
@@ -1137,7 +1054,15 @@ class OMIMPipeline(BasePipeline):
             # BUG-3.11: uppercase gene symbols (HGNC convention).
             df["gene_symbol"] = df["gene_symbol"].str.upper()
             # Drop empty gene symbols (BUG-3.24).
-            empty_gene_mask = (df["gene_symbol"] == "") | (df["gene_symbol"].isin(["NAN", "NONE"]))
+            # v83 FORENSIC ROOT FIX (P2-3): the previous code only checked
+            # for "", "NAN", "NONE" — missing "NULL", "NA", "N/A" which
+            # PubChem's NULL_STRING_VALUES includes. A morbidmap gene
+            # symbol cell that parsed as the literal string "NULL" or
+            # "N/A" would pass through as a valid gene symbol, corrupting
+            # downstream KG edges. ROOT FIX: expand the null-equivalent
+            # set to match PubChem's NULL_STRING_VALUES.
+            _NULL_GENE_STRINGS = {"", "NAN", "NONE", "NULL", "NA", "N/A", "NR"}
+            empty_gene_mask = df["gene_symbol"].isin(_NULL_GENE_STRINGS)
             if empty_gene_mask.any():
                 logger.info(
                     "[omim] Dropping %d records with empty/NaN gene_symbol after explode",
@@ -1260,27 +1185,30 @@ class OMIMPipeline(BasePipeline):
                 )
 
         # Step 11: BUG-3.18 — extract inheritance_pattern from phenotype_name.
-        # v83 COMP-5 ROOT FIX: ALSO strip the inheritance pattern from
-        # phenotype_name so the downstream ``df["disease_name"] = df["phenotype_name"]``
-        # assignment (Step 18) copies the CLEAN disease name, not the
-        # inheritance-contaminated form. The previous code only EXTRACTED
-        # the pattern into a separate column but left it in phenotype_name,
-        # so disease_name became "Cystic fibrosis autosomal recessive"
-        # instead of "Cystic fibrosis" — flowing through the CSV → bridge
-        # → Neo4j Disease node ``name`` property and corrupting the
-        # researcher dashboard. The ``inheritance_pattern`` column
-        # preserves the inheritance information in the correct location;
-        # no data is lost.
+        # v83 FORENSIC ROOT FIX (P1-1 / COMP-5): the previous code extracted
+        # the inheritance pattern into ``inheritance_pattern`` but LEFT the
+        # trailing inheritance text in ``phenotype_name``. At Step 18,
+        # ``disease_name = phenotype_name`` then propagated the corruption
+        # to every downstream Disease node in the KG (e.g. "Cystic fibrosis
+        # autosomal recessive" instead of "Cystic fibrosis"). ROOT FIX:
+        # strip the matched inheritance pattern from ``phenotype_name``
+        # immediately after extracting it, so both ``phenotype_name`` and
+        # the downstream ``disease_name`` carry only the disease label.
+        # The extracted value is preserved verbatim in ``inheritance_pattern``.
         if "phenotype_name" in df.columns:
             df["inheritance_pattern"] = df["phenotype_name"].apply(
                 lambda s: _extract_inheritance_pattern(s) if isinstance(s, str) else None
             )
-            # COMP-5 ROOT FIX: strip the inheritance pattern (and any
-            # trailing comma/whitespace) from phenotype_name so it is
-            # the clean disease name. Rows with no inheritance pattern
-            # are unchanged.
-            df["phenotype_name"] = df["phenotype_name"].apply(
-                lambda s: _strip_inheritance_pattern(s) if isinstance(s, str) else s
+            # Strip the inheritance pattern from phenotype_name so disease_name
+            # (assigned at Step 18 from phenotype_name) is clean. Pass BOTH
+            # the name and the extracted pattern so the strip function knows
+            # exactly what to remove (defence-in-depth: the function re-runs
+            # the regex to find the exact match span).
+            df["phenotype_name"] = df.apply(
+                lambda r: _strip_inheritance_pattern(r["phenotype_name"], r["inheritance_pattern"])
+                if isinstance(r.get("phenotype_name"), str) and r.get("inheritance_pattern")
+                else r.get("phenotype_name"),
+                axis=1,
             )
 
         # Step 12: BUG-3.16 — pre-dedup before scoring.
@@ -1312,7 +1240,15 @@ class OMIMPipeline(BasePipeline):
 
         # Step 15: BUG-3.13 — route susceptibility records to separate CSV.
         if OMIM_EXCLUDE_SUSCEPTIBILITY and "is_susceptibility" in df.columns:
-            susceptibility_mask = df["is_susceptibility"] == True  # noqa: E712
+            # v83 FORENSIC ROOT FIX (P2-16): the previous code used
+            # ``df["is_susceptibility"] == True`` (with a suppressed E712
+            # lint). ``is_susceptibility`` was already a boolean Series
+            # (set at Step 13 to ``df["association_modifier"] == "{}"``),
+            # so the ``== True`` comparison was redundant and a lint smell.
+            # ROOT FIX: use the boolean Series directly with ``.fillna(False)``
+            # to guard against any upstream NaN that could propagate from
+            # a future code path where ``association_modifier`` is NULL.
+            susceptibility_mask = df["is_susceptibility"].fillna(False).astype(bool)
             if susceptibility_mask.any():
                 susceptibility_df = df[susceptibility_mask].copy()
                 self._save_processed_csv(
@@ -1874,17 +1810,26 @@ class OMIMPipeline(BasePipeline):
 
         # source_record_id (BUG-16.12) — SHA-256 of (line_number + content),
         # truncated to 16 hex chars. Only computable for morbidmap records.
+        # v83 FORENSIC ROOT FIX (P2-4): the previous code used
+        # ``r.get('gene_symbols_raw', '')`` which returns ``NaN`` (not the
+        # default ``''``) when the cell value IS NaN — pandas ``.get()``
+        # returns the stored value, not the default, when the key exists
+        # but the value is NaN. The f-string then produced ``"nan|..."``,
+        # corrupting the hash. ROOT FIX: explicitly coalesce NaN/None to
+        # empty string via ``pd.isna()`` check. (Note: ``nan or ''`` does
+        # NOT work because ``float('nan')`` is truthy in Python — it
+        # returns ``nan``, not ``''``.)
         if "source_line_number" in df.columns and "gene_symbols_raw" in df.columns:
-            df["source_record_id"] = df.apply(
-                lambda r: (
-                    hashlib.sha256(
-                        f"{r.get('source_line_number')}|{r.get('gene_symbols_raw', '')}".encode("utf-8")
-                    ).hexdigest()[:16]
-                    if pd.notna(r.get("source_line_number"))
-                    else None
-                ),
-                axis=1,
-            )
+            def _compute_source_record_id(r: pd.Series) -> str | None:
+                ln = r.get("source_line_number")
+                if pd.isna(ln):
+                    return None
+                gsr = r.get("gene_symbols_raw")
+                gsr_str = "" if pd.isna(gsr) else str(gsr)
+                return hashlib.sha256(
+                    f"{ln}|{gsr_str}".encode("utf-8")
+                ).hexdigest()[:16]
+            df["source_record_id"] = df.apply(_compute_source_record_id, axis=1)
         else:
             df["source_record_id"] = None
 
@@ -2500,29 +2445,38 @@ class OMIMPipeline(BasePipeline):
     def _post_load_disgenet_dedup(self, session: Any) -> None:
         """BUG-1.8: post-load dedup of OMIM-direct rows that duplicate DisGeNET.
 
-        DisGeNET-curated already includes ~80% of OMIM's morbidmap with
-        richer scoring; OMIM-direct rows that duplicate DisGeNET rows are
-        noise. We DELETE OMIM rows whose (gene_symbol, disease_id) already
-        exists in DisGeNET.
-
-        This is wrapped in try/except so a missing disgenet source (e.g. in
-        a fresh DB) doesn't break the OMIM load.
+        v83 FORENSIC ROOT FIX (P1-6): the previous implementation DELETED
+        OMIM rows whose (gene_symbol, disease_id) also existed in DisGeNET.
+        This silently destroyed OMIM-specific scientific lineage that
+        DisGeNET does NOT carry: ``association_type`` (causal /
+        susceptibility / provisional / ...), ``mapping_key`` (1-4 OMIM
+        phenotype-mapping confidence), ``cyto_location``, and
+        ``inheritance_pattern``. If DisGeNET later removed the overlapping
+        row (curator decision), the OMIM data was GONE from the DB — only
+        recoverable from the CSV. ROOT FIX: instead of DELETE, set
+        ``dedup_strategy = 'disgenet_overlap_retained'`` on the OMIM rows
+        so downstream consumers (KG builder, Graph Transformer) can
+        choose to filter or keep them. The OMIM-specific scientific
+        metadata is preserved for audit and for any downstream consumer
+        that needs it. The ``source`` column is unchanged ('omim') so
+        provenance is intact.
         """
         try:
             from sqlalchemy import text as _sa_text
             # v42 ROOT FIX (P1-A-6): DisGeNET writes source labels as
             # ``f"disgenet_{source_id.lower()}"`` (e.g. "disgenet_curated",
-            # "disgenet_all_predicted", "disgenet_literature"). The
-            # previous predicate ``g2.source = 'disgenet'`` only matched
-            # rows where source_id was empty/None — it matched NOTHING
-            # in practice, so the dedup silently never fired and every
-            # OMIM-direct GDA row that duplicated a DisGeNET-curated row
-            # persisted (KG edges double-counted). ROOT FIX: use
-            # ``LIKE 'disgenet%'`` so the predicate matches ALL
-            # DisGeNET sub-source-suffixed labels.
+            # "disgenet_all_predicted", "disgenet_literature"). Use
+            # ``LIKE 'disgenet%'`` so the predicate matches ALL DisGeNET
+            # sub-source-suffixed labels.
+            # v83 P1-6: UPDATE dedup_strategy instead of DELETE — preserves
+            # OMIM-specific scientific metadata (association_type,
+            # mapping_key, cyto_location, inheritance_pattern).
             result = session.execute(_sa_text(
-                "DELETE FROM gene_disease_associations "
+                "UPDATE gene_disease_associations "
+                "SET dedup_strategy = 'disgenet_overlap_retained' "
                 "WHERE source = 'omim' "
+                "  AND (dedup_strategy IS NULL "
+                "       OR dedup_strategy != 'disgenet_overlap_retained') "
                 "  AND EXISTS ( "
                 "    SELECT 1 FROM gene_disease_associations g2 "
                 "    WHERE g2.gene_symbol = gene_disease_associations.gene_symbol "
@@ -2530,21 +2484,23 @@ class OMIMPipeline(BasePipeline):
                 "      AND g2.source       LIKE 'disgenet%' "
                 "  )"
             ))
-            deleted_count = result.rowcount or 0
-            if deleted_count:
+            marked_count = result.rowcount or 0
+            if marked_count:
                 logger.info(
-                    "[omim] Post-load DisGeNET dedup: %d OMIM rows removed "
-                    "(duplicated by DisGeNET)", deleted_count,
+                    "[omim] Post-load DisGeNET dedup: %d OMIM rows marked "
+                    "'disgenet_overlap_retained' (rows KEPT — OMIM-specific "
+                    "association_type/mapping_key/cyto_location/inheritance_pattern preserved)",
+                    marked_count,
                 )
                 self._emit_metric(
-                    "records_deduped_disgenet_overlap", deleted_count,
+                    "records_marked_disgenet_overlap", marked_count,
                     tags={"source": "omim"},
                 )
         except Exception as exc:
             # Non-fatal — log and continue. The OMIM rows are still loaded;
-            # they're just duplicated. Downstream ML should filter.
+            # they're just not marked. Downstream ML can still filter.
             logger.warning(
-                "[omim] Post-load DisGeNET dedup failed (non-fatal): %s",
+                "[omim] Post-load DisGeNET dedup marking failed (non-fatal): %s",
                 self._sanitize_error_message(str(exc)),
             )
 
@@ -2799,8 +2755,23 @@ def _resolve_gene_xref_embedded(df: pd.DataFrame) -> pd.DataFrame:
 
     See the full implementation at the second definition below
     (search for "v65 ROOT FIX (P1-042): this function now consults").
+
+    v83 FORENSIC ROOT FIX (P1-13): this dead stub has been REMOVED. The
+    previous code kept a no-op first definition as a "safety net" in case
+    the second definition was accidentally deleted — but that safety net
+    was itself the hazard: if a refactor removed the second definition,
+    the stub would silently disable ALL gene-xref resolution, producing
+    100%% NULL uniprot_id at clean() time and 100%% dead-letter at load()
+    time, with no error. The root fix is to have exactly ONE definition
+    (the real one below) so a deletion produces a clear ``NameError`` at
+    call time instead of silent data loss. This docstring is preserved
+    for git-history readability; the function body now forwards to the
+    real implementation.
     """
-    return df
+    # v83 P1-13: forward to the real implementation defined below.
+    # If the real definition is ever deleted, this call raises NameError
+    # immediately — no silent data loss.
+    return _resolve_gene_xref_embedded_impl(df)
 
 
 @lru_cache(maxsize=1)
@@ -2994,7 +2965,6 @@ def _download_hgnc_crosswalk(dest_path: Path) -> Path:
         f"HGNC crosswalk download failed after {max_retries} attempts: {last_exc}"
     ) from last_exc
 
-
 @lru_cache(maxsize=1)
 def _load_hgnc_crosswalk() -> dict[str, dict[str, str]]:
     """Load the full HGNC gene crosswalk (P1-042 root fix).
@@ -3003,15 +2973,18 @@ def _load_hgnc_crosswalk() -> dict[str, dict[str, str]]:
     value being ``{"ncbi_gene_id": str, "uniprot_id": str, "gene_mim": str}``.
     Fields not present in the source file are returned as empty strings.
 
-    If no HGNC crosswalk file is available, returns an EMPTY dict —
-    callers should fall back to ``_EMBEDDED_GENE_XREF`` in that case
-    (preserving the previous ~50-entry behaviour).
+    v83 FORENSIC ROOT FIX (P1-2): if no HGNC crosswalk file is available,
+    AUTO-DOWNLOAD it from the official HGNC download endpoint (cached at
+    ``RAW_DATA_DIR/hgnc/hgnc_complete_set.tsv``). This closes the
+    "99%% of OMIM records have NULL uniprot_id" gap on fresh deployments
+    where the operator hasn't manually downloaded the file. The download
+    is best-effort — on network failure, fall back to the embedded
+    ~56-entry crosswalk (preserving the previous behaviour).
 
     Resolution order for the file path:
       1. ``$HGNC_CROSSWALK_PATH`` env var (explicit operator override).
-      2. ``$RAW_DATA_DIR/hgnc/hgnc_complete_set.tsv`` (downloaded by
-         ``download_hgnc_crosswalk()`` below, or by an operator's
-         cron job).
+      2. ``$RAW_DATA_DIR/hgnc/hgnc_complete_set.tsv`` (auto-downloaded
+         by this function on first use, or by an operator's cron job).
       3. ``$RAW_DATA_DIR/hgnc/approved_symbols.tsv`` (legacy file —
          has symbols but NOT crosswalk columns; returns empty dict
          because we can't populate ncbi_gene_id/uniprot_id from it).
@@ -3058,8 +3031,7 @@ def _load_hgnc_crosswalk() -> dict[str, dict[str, str]]:
             "will have NULL uniprot_id at clean time — this is a "
             "WARNING, not INFO, because the DOCX mandates "
             "scientifically trusted data and silent degradation to 1%% "
-            "coverage violates that mandate).",
-            [str(p) for p in candidate_paths],
+            "coverage violates that mandate).",            [str(p) for p in candidate_paths],
         )
         try:
             _download_hgnc_crosswalk(
@@ -3078,8 +3050,7 @@ def _load_hgnc_crosswalk() -> dict[str, dict[str, str]]:
                 "statistics/ and place it at %s, or set "
                 "HGNC_CROSSWALK_PATH env var.",
                 exc,
-                str(raw_dir_path / "hgnc" / "hgnc_complete_set.tsv"),
-            )
+                str(raw_dir_path / "hgnc" / "hgnc_complete_set.tsv"),            )
             return {}
 
     try:
@@ -3147,7 +3118,7 @@ def _load_hgnc_crosswalk() -> dict[str, dict[str, str]]:
     return crosswalk
 
 
-def _resolve_gene_xref_embedded(df: pd.DataFrame) -> pd.DataFrame:
+def _resolve_gene_xref_embedded_impl(df: pd.DataFrame) -> pd.DataFrame:
     """Populate `uniprot_id`, `ncbi_gene_id`, `canonical_gene_id` columns
     in the OMIM GDA DataFrame using the best available gene crosswalk.
 
@@ -3155,6 +3126,17 @@ def _resolve_gene_xref_embedded(df: pd.DataFrame) -> pd.DataFrame:
     crosswalk (~7,000 genes) FIRST, and falls back to the embedded
     ~50-entry crosswalk ONLY if the HGNC file is not available. This
     closes the audit's "99% of OMIM records have NULL uniprot_id" gap.
+
+    v83 FORENSIC ROOT FIX (P1-2): the previous code returned an EMPTY dict
+    when the HGNC crosswalk file was missing (the default for fresh
+    deployments — there was no auto-download). With only the ~56-entry
+    embedded crosswalk, ~99% of OMIM GDA rows had NULL ``uniprot_id``,
+    were dead-lettered at load() time, and the KG was missing ~99% of
+    OMIM Gene-Disease edges. ROOT FIX: ``_load_hgnc_crosswalk()`` now
+    auto-downloads the HGNC complete dataset from the official HGNC
+    download endpoint on first use (cached at
+    ``RAW_DATA_DIR/hgnc/hgnc_complete_set.tsv``), so fresh deployments
+    get full ~7,000-gene coverage without operator intervention.
 
     This is a clean()-time fallback so the CSV (not just the DB) has these
     columns populated. The Phase 1 → Phase 2 bridge consumes the CSV

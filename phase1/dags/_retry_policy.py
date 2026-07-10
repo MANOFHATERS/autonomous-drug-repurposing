@@ -117,19 +117,25 @@ def _extract_http_status(exc: BaseException) -> int | None:
             if isinstance(val, int) and 100 <= val <= 599:
                 return val
     # String heuristic — last resort
+    # v83 FORENSIC ROOT FIX (P2-12): the previous code extracted leading
+    # digits from the message — but "2024-01-15 download failed" would
+    # extract "202" (stops at 3 digits) and treat it as HTTP 202 (a
+    # success code), masking the real error. ROOT FIX: only accept a
+    # leading 3-digit number that is IMMEDIATELY followed by a non-digit
+    # (space, colon, end-of-string). This rejects "2024-01-15" (4 digits
+    # before the dash → not a 3-digit HTTP code) while accepting
+    # "404 Not Found" (3 digits followed by a space).
     msg = str(exc).strip()
     if msg and msg[0].isdigit():
-        # "404 Not Found..." → 404
-        digits = ""
-        for ch in msg:
-            if ch.isdigit() and len(digits) < 3:
-                digits += ch
-            elif digits:
-                break
-        if digits:
-            code = int(digits)
-            if 100 <= code <= 599:
-                return code
+        # Extract EXACTLY 3 leading digits (HTTP status codes are 3 digits).
+        if len(msg) >= 3 and msg[:3].isdigit():
+            # The 4th character must NOT be a digit (otherwise this is a
+            # longer number like "2024", not an HTTP status code).
+            fourth_char_is_digit = len(msg) > 3 and msg[3].isdigit()
+            if not fourth_char_is_digit:
+                code = int(msg[:3])
+                if 100 <= code <= 599:
+                    return code
     return None
 
 

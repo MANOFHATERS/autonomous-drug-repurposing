@@ -37,6 +37,10 @@ from airflow.operators.branch import BranchPythonOperator
 from airflow.operators.empty import EmptyOperator
 from airflow.utils.trigger_rule import TriggerRule
 
+# v83 P1-14: import the shared retry policy so the master DAG uses the
+# SAME retry parameters (5min + exponential backoff) as the 7 standalone DAGs.
+from dags._retry_policy import DEFAULT_RETRY_ARGS
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -121,9 +125,16 @@ DEFAULT_ARGS = {
     **DEFAULT_RETRY_ARGS,
     "owner": "drug_repurposing",
     "depends_on_past": False,
-    # v75 ROOT FIX (T-024): ``sla`` is ADVISORY — an Airflow SLA miss
-    # writes a row to the sla_miss table and (optionally) sends an email,
-    # but it does NOT kill the running task. The task continues until
+    # v83 FORENSIC ROOT FIX (P1-14): the previous code used
+    # ``retry_delay=timedelta(minutes=30)`` with NO exponential backoff.
+    # The 7 standalone DAGs use ``DEFAULT_RETRY_ARGS`` (5min + exponential
+    # backoff). ROOT FIX: spread ``DEFAULT_RETRY_ARGS`` into ``DEFAULT_ARGS``
+    # (done above) so the master DAG uses the SAME retry policy. The
+    # ``sla`` / ``execution_timeout`` overrides (7h, T-024) are retained
+    # AFTER the spread so they win over the ``DEFAULT_RETRY_ARGS`` 4h defaults.
+    # T-024: ``sla`` is ADVISORY — an Airflow SLA miss writes a row to
+    # the sla_miss table and (optionally) sends an email, but it does
+    # NOT kill the running task. The task continues until
     # ``execution_timeout`` fires. Both are now set to 7h (aligned) so
     # there is exactly ONE signal at exactly ONE time — operators do
     # not get a 4h false-positive SLA miss that trains them to ignore
@@ -135,8 +146,6 @@ DEFAULT_ARGS = {
     # override is deliberate and documented.
     "sla": TASK_SLA,
     "execution_timeout": TASK_TIMEOUT,
-    "email_on_failure": False,
-    "email_on_retry": False,
 }
 
 

@@ -932,42 +932,57 @@ class TestDomain6Reliability:
     """Tests for error handling, fault tolerance, graceful degradation."""
 
     def test_bug_6_1_retry_after_respected(self, omim_pipeline):
-        """BUG-6.1: Retry-After header must be respected on 429."""
-        # Mock a 429 response with Retry-After: 0 (so the test is fast).
-        mock_resp = MagicMock()
-        mock_resp.status_code = 429
-        mock_resp.headers = {"Retry-After": "0"}
-        mock_resp.text = ""
-        mock_resp.raise_for_status.side_effect = Exception("should not reach")
+        """BUG-6.1: v83 P2-1/P2-2 ROOT FIX — dead API path removed.
 
-        with patch.object(omim_pipeline._session, "get", return_value=mock_resp):
-            with patch("time.sleep") as mock_sleep:
-                with pytest.raises(RuntimeError, match="429"):
-                    omim_pipeline._api_get("https://api.omim.org/api/geneMap")
-                # Verify time.sleep was called (Retry-After was respected).
-                assert mock_sleep.called
+        The previous test validated that ``_api_get`` respected the
+        ``Retry-After`` header on 429. ``_api_get`` was DEAD CODE (removed
+        in v83 P2-1) and ``self._session`` was removed in P2-2. The
+        production ``download()`` uses ``_download_morbidmap()`` which
+        uses the base class's ``_download_file`` — the base class handles
+        retries via ``RETRYABLE_EXCEPTIONS`` / ``RETRYABLE_STATUS_CODES``.
+
+        This test now validates the FIX: the dead ``_api_get`` method and
+        ``self._session`` attribute must NOT exist. Retry-After handling
+        for the PRODUCTION download path is tested in the base pipeline's
+        own test suite.
+        """
+        assert not hasattr(omim_pipeline, "_api_get"), (
+            "v83 P2-1: _api_get should be REMOVED — dead code."
+        )
+        assert not hasattr(omim_pipeline, "_session"), (
+            "v83 P2-2: self._session should be REMOVED — dead code."
+        )
 
     def test_bug_6_5_pagination_bounded(self, omim_pipeline, tmp_path, monkeypatch):
-        """BUG-6.5: Pagination loop must be bounded by OMIM_MAX_PAGINATION_PAGES."""
-        # Lower the bound so the test runs fast.
-        monkeypatch.setattr(op, "OMIM_MAX_PAGINATION_PAGES", 3)
-        # Mock _fetch_gene_map_page to always return a full page → loop should
-        # terminate after exactly OMIM_MAX_PAGINATION_PAGES iterations.
-        full_page = [{"mimNumber": i} for i in range(1000)]
+        """BUG-6.5: v83 P2-1 ROOT FIX — dead API path removed.
 
-        call_count = [0]
-        def fake_fetch(start, limit):
-            call_count[0] += 1
-            return full_page
+        The previous test validated that ``_download_via_api()`` paginated
+        correctly. ``_download_via_api``, ``_fetch_gene_map_page``, and
+        ``_write_gene_map_json`` were ALL dead code (removed in v22 and
+        again confirmed dead in v83 P2-1). The production ``download()``
+        only calls ``_download_morbidmap()`` — the morbidmap text file is
+        the production data source.
 
-        with patch.object(omim_pipeline, "_fetch_gene_map_page", side_effect=fake_fetch):
-            with patch.object(omim_pipeline, "_write_gene_map_json"):
-                with patch.object(omim_pipeline, "_is_cache_fresh", return_value=False):
-                    with patch("time.sleep"):  # no-op sleep
-                        with pytest.raises(RuntimeError, match="exceeded"):
-                            omim_pipeline._download_via_api()
-        # Verify the loop actually hit the bound.
-        assert call_count[0] == 3
+        This test now validates the FIX: the dead API-path methods must
+        NOT exist. The pagination bound (``OMIM_MAX_PAGINATION_PAGES``)
+        is still validated as a config invariant (it must be a positive
+        integer) so a future operator who re-adds the API path inherits
+        the bound.
+        """
+        # Dead methods must not exist.
+        assert not hasattr(omim_pipeline, "_download_via_api"), (
+            "v22/v83 P2-1: _download_via_api should be REMOVED — dead code."
+        )
+        assert not hasattr(omim_pipeline, "_fetch_gene_map_page"), (
+            "v22/v83 P2-1: _fetch_gene_map_page should be REMOVED — dead code."
+        )
+        assert not hasattr(omim_pipeline, "_write_gene_map_json"), (
+            "v22/v83 P2-1: _write_gene_map_json should be REMOVED — dead code."
+        )
+        # The pagination bound config must still be a positive integer.
+        from config.settings import OMIM_MAX_PAGINATION_PAGES
+        assert isinstance(OMIM_MAX_PAGINATION_PAGES, int)
+        assert OMIM_MAX_PAGINATION_PAGES > 0
 
     def test_bug_6_8_utf8_latin1_fallback(self, omim_pipeline, tmp_path):
         """BUG-6.8: Non-UTF-8 bytes must fall back to latin-1."""
@@ -1020,9 +1035,24 @@ class TestDomain8Performance:
         assert OMIM_API_PAGE_LIMIT == 1000
 
     def test_bug_8_11_session_reused(self, omim_pipeline):
-        """BUG-8.11: A requests.Session must be created in __init__."""
-        assert hasattr(omim_pipeline, "_session")
-        assert isinstance(omim_pipeline._session, requests.Session)
+        """BUG-8.11: v83 P2-2 ROOT FIX — the unused ``self._session`` has been REMOVED.
+
+        The previous code created ``self._session = requests.Session()`` but
+        NEVER used it — the only consumer was the dead ``_api_get`` method
+        (P2-1), which was itself never called by ``download()``. The unclosed
+        session leaked socket file descriptors across pipeline runs.
+
+        ROOT FIX: the session is removed. ``download()`` uses the base class's
+        ``_download_file`` helper which manages its own HTTP connections.
+
+        This test now validates the FIX: the unused session attribute must
+        NOT exist (so there's no socket leak).
+        """
+        assert not hasattr(omim_pipeline, "_session"), (
+            "v83 P2-2: self._session should be REMOVED — it was dead code "
+            "that leaked socket file descriptors. The base class's "
+            "_download_file manages HTTP connections."
+        )
 
 
 # ===========================================================================
@@ -1503,24 +1533,26 @@ class TestRegressionBugs:
         assert set(df["gene_symbol"]) == {"GENE1", "GENE2"}
 
     def test_bug_8_1_no_double_sleep_regression(self, omim_pipeline):
-        """Regression: BUG-8.1 — _api_get sleeps once per request."""
-        # Mock session.get to return success.
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.headers = {}
-        mock_resp.json.return_value = {"omim": {"geneMapList": []}}
-        mock_resp.text = "{}"
-        mock_resp.raise_for_status = lambda: None
+        """Regression: BUG-8.1 — v83 P2-1 ROOT FIX.
 
-        with patch.object(omim_pipeline._session, "get", return_value=mock_resp):
-            with patch("time.sleep") as mock_sleep:
-                try:
-                    omim_pipeline._api_get("https://api.omim.org/api/geneMap", {"start": 0})
-                except Exception:
-                    pass
-                # _api_get should sleep exactly once (the rate-limit sleep).
-                # (Retry-sleep would only fire on 429/5xx.)
-                assert mock_sleep.call_count == 1
+        The previous test validated that ``_api_get`` slept exactly once per
+        request. ``_api_get`` was DEAD CODE (never called by ``download()``
+        — only by the already-removed ``_download_via_api``). v83 P2-1
+        REMOVED ``_api_get`` and ``_backoff_seconds`` entirely.
+
+        This test now validates the FIX: the dead ``_api_get`` and
+        ``_backoff_seconds`` methods must NOT exist on the OMIMPipeline class.
+        If a future refactor re-adds an API path, it must be WIRED INTO
+        ``download()`` as a true fallback — not left as dead code.
+        """
+        assert not hasattr(omim_pipeline, "_api_get"), (
+            "v83 P2-1: _api_get should be REMOVED — it was 90 lines of dead "
+            "code never called by download()."
+        )
+        assert not hasattr(omim_pipeline, "_backoff_seconds"), (
+            "v83 P2-1: _backoff_seconds should be REMOVED — it was only used "
+            "by the dead _api_get method."
+        )
 
     def test_bug_2_3_score_branches_reachable_regression(self):
         """Regression: BUG-2.3 — all 4 mapping-key score branches reachable."""
