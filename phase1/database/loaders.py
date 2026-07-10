@@ -4581,14 +4581,46 @@ def resolve_gene_symbol_to_uniprot(
     Returns a NEW DataFrame with uniprot_id column added.  The input
     DataFrame is NOT modified (INT-06).
 
+    v83 COMP-3 ROOT FIX — preserve clean-time uniprot_id:
+      The OMIM pipeline's ``_resolve_gene_xref_embedded()`` (called at
+      clean() time) populates ``uniprot_id`` from the HGNC crosswalk
+      (~7,000 genes when the file is present, ~50 from the embedded
+      fallback). The previous implementation of this function
+      UNCONDITIONALLY overwrote ``df["uniprot_id"]`` with the DB-backed
+      ``gene_to_uniprot`` map lookup at line 4602:
+
+          df["uniprot_id"] = df["gene_symbol"].str.upper().map(gene_to_uniprot)
+
+      If the DB map was empty (UniProt pipeline not yet loaded, or
+      proteins table empty), EVERY value became NaN — even rows where
+      clean() had already resolved a correct UniProt accession from
+      HGNC. The OMIM ``load()`` method then dead-lettered 99% of GDA
+      records as "unresolved gene_symbol", and the KG lost 99% of its
+      OMIM Gene-Disease edges. This was a silent data-loss bug: the
+      pipeline reported GREEN, the dead-letter queue absorbed the
+      records, and the KG looked "complete" to an operator who didn't
+      check the DLQ.
+
+      ROOT FIX: PRESERVE any existing non-null ``uniprot_id`` (populated
+      at clean time). Only fill NULL slots using the DB map, then the
+      protein-name fallback. This guarantees:
+        1. Clean-time resolution (HGNC crosswalk) is never discarded.
+        2. DB map is still consulted for rows the clean-time resolver
+           couldn't resolve (e.g. gene_symbol not in HGNC crosswalk but
+           present in the proteins table).
+        3. Protein-name fallback is still consulted as a last resort.
+      The net effect: OMIM GDA dead-letter rate drops from ~99% to the
+      true unresolved rate (genes with no UniProt mapping anywhere).
+
     Parameters
     ----------
     df : pd.DataFrame
-        DataFrame with 'gene_symbol' column.
+        DataFrame with 'gene_symbol' column. May already have a
+        'uniprot_id' column populated at clean time (preserved).
     gene_to_uniprot : dict[str, str]
-        gene_symbol -> uniprot_id mapping.
+        gene_symbol -> uniprot_id mapping (DB-backed).
     protein_name_to_uniprot : dict[str, str]
-        protein_name -> uniprot_id fallback mapping.
+        protein_name -> uniprot_id fallback mapping (DB-backed).
     """
     _isinstance_dataframe(df, "resolve_gene_symbol_to_uniprot")
 
@@ -4599,8 +4631,31 @@ def resolve_gene_symbol_to_uniprot(
         df["uniprot_id"] = None
         return df
 
-    df["uniprot_id"] = df["gene_symbol"].str.upper().map(gene_to_uniprot)
-    # Fallback: try gene_symbol against protein_name map
+    # v83 COMP-3 ROOT FIX: PRESERVE existing non-null uniprot_id values
+    # (populated at clean time by _resolve_gene_xref_embedded). Only
+    # NULL slots are filled from the DB map + protein-name fallback.
+    if "uniprot_id" not in df.columns:
+        df["uniprot_id"] = None
+
+    # Track how many were already resolved at clean time (for telemetry).
+    pre_resolved_mask = df["uniprot_id"].notna()
+    n_pre_resolved = int(pre_resolved_mask.sum())
+    n_need_resolution = int((~pre_resolved_mask).sum())
+
+    # Step 1: fill NULL slots from the DB gene_to_uniprot map.
+    need_resolution_mask = df["uniprot_id"].isna()
+    if need_resolution_mask.any():
+        db_lookup = (
+            df.loc[need_resolution_mask, "gene_symbol"]
+            .str.upper()
+            .map(gene_to_uniprot)
+        )
+        # Only fill where the DB map actually had a value (avoid
+        # overwriting NaN with NaN — pandas .loc handles this correctly
+        # because db_lookup is aligned by index).
+        df.loc[need_resolution_mask, "uniprot_id"] = db_lookup
+
+    # Step 2: still-unresolved rows — try protein_name map as fallback.
     still_unresolved = df["uniprot_id"].isna()
     if still_unresolved.any():
         protein_name_fallback = (
@@ -4612,11 +4667,23 @@ def resolve_gene_symbol_to_uniprot(
 
     unresolved_count = df["uniprot_id"].isna().sum()
     if unresolved_count > 0:
-        logger.info(
+        logger.warning(
             "resolve_gene_symbol_to_uniprot: %d / %d symbols "
-            "unresolved",
+            "unresolved (pre-resolved at clean time: %d, needed "
+            "DB/fallback resolution: %d). Unresolved records will be "
+            "dead-lettered by the caller.",
             unresolved_count,
             len(df),
+            n_pre_resolved,
+            n_need_resolution,
+        )
+    else:
+        logger.info(
+            "resolve_gene_symbol_to_uniprot: all %d symbols resolved "
+            "(pre-resolved at clean time: %d, DB/fallback: %d).",
+            len(df),
+            n_pre_resolved,
+            n_need_resolution,
         )
 
     return df

@@ -1260,9 +1260,27 @@ class OMIMPipeline(BasePipeline):
                 )
 
         # Step 11: BUG-3.18 — extract inheritance_pattern from phenotype_name.
+        # v83 COMP-5 ROOT FIX: ALSO strip the inheritance pattern from
+        # phenotype_name so the downstream ``df["disease_name"] = df["phenotype_name"]``
+        # assignment (Step 18) copies the CLEAN disease name, not the
+        # inheritance-contaminated form. The previous code only EXTRACTED
+        # the pattern into a separate column but left it in phenotype_name,
+        # so disease_name became "Cystic fibrosis autosomal recessive"
+        # instead of "Cystic fibrosis" — flowing through the CSV → bridge
+        # → Neo4j Disease node ``name`` property and corrupting the
+        # researcher dashboard. The ``inheritance_pattern`` column
+        # preserves the inheritance information in the correct location;
+        # no data is lost.
         if "phenotype_name" in df.columns:
             df["inheritance_pattern"] = df["phenotype_name"].apply(
                 lambda s: _extract_inheritance_pattern(s) if isinstance(s, str) else None
+            )
+            # COMP-5 ROOT FIX: strip the inheritance pattern (and any
+            # trailing comma/whitespace) from phenotype_name so it is
+            # the clean disease name. Rows with no inheritance pattern
+            # are unchanged.
+            df["phenotype_name"] = df["phenotype_name"].apply(
+                lambda s: _strip_inheritance_pattern(s) if isinstance(s, str) else s
             )
 
         # Step 12: BUG-3.16 — pre-dedup before scoring.
@@ -2866,6 +2884,117 @@ def _hgnc_snapshot_version() -> str | None:
 # (https://www.genenames.org/download/statistics/ → "Complete HGNC
 # dataset" → direct download link.)
 # =============================================================================
+
+
+def _download_hgnc_crosswalk(dest_path: Path) -> Path:
+    """Auto-download the HGNC complete gene crosswalk (COMP-3 ROOT FIX).
+
+    Downloads the HGNC "Custom downloads" TSV containing:
+      - Approved symbol
+      - NCBI Gene ID
+      - UniProt accession
+      - OMIM ID
+
+    The endpoint is public (no login) and returns a TSV with a header
+    row. We rename the columns to the canonical names that
+    ``_load_hgnc_crosswalk`` expects so the downstream parse works
+    unchanged.
+
+    Parameters
+    ----------
+    dest_path : Path
+        Destination path (e.g. ``<RAW_DATA_DIR>/hgnc/hgnc_complete_set.tsv``).
+        Parent directories are created if needed.
+
+    Returns
+    -------
+    Path
+        The destination path (same as ``dest_path``) on success.
+
+    Raises
+    ------
+    OSError
+        If the parent directory cannot be created.
+    RuntimeError
+        If the download fails after retries or the response is empty.
+    """
+    import requests
+
+    # HGNC custom download endpoint — no login, returns TSV.
+    # Columns selected: HGNC ID, Approved symbol, NCBI Gene ID, UniProt
+    # accession, OMIM ID. Status=Approved filters out withdrawn/synonym
+    # entries so we get a clean ~7,000-entry human gene crosswalk.
+    HGNC_DOWNLOAD_URL = (
+        "https://www.genenames.org/cgi-bin/download/custom?"
+        "col=gd_hgnc_id&col=gd_app_sym&col=md_eg_id&col=md_prot_id&col=md_mim_id"
+        "&status=Approved&hgnc_dbtag=on"
+        "&order_by=gd_app_sym_sort&format=text&submit=submit"
+    )
+    USER_AGENT = "DrugRepurposingPipeline/1.0 (contact=team-cosmic@venturelab.example)"
+
+    dest_path = Path(dest_path)
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Stream to a .tmp file first, then atomic rename.
+    tmp_path = dest_path.with_suffix(dest_path.suffix + ".tmp")
+
+    logger.info(
+        "[omim] Downloading HGNC complete crosswalk from %s → %s",
+        HGNC_DOWNLOAD_URL.split("?")[0] + "?...",  # hide query string from logs
+        dest_path.name,
+    )
+
+    headers = {"User-Agent": USER_AGENT}
+    max_retries = 3
+    last_exc: Exception | None = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            with requests.get(
+                HGNC_DOWNLOAD_URL, headers=headers, stream=True,
+                timeout=(30.0, 300.0),
+            ) as resp:
+                resp.raise_for_status()
+                # Read content (TSV is small — ~7000 rows × 5 cols ≈ 500KB).
+                content = resp.content
+                if not content or len(content) < 100:
+                    raise RuntimeError(
+                        f"HGNC download returned empty/too-small response "
+                        f"({len(content)} bytes) — endpoint may be down"
+                    )
+                tmp_path.write_bytes(content)
+            # Atomic rename.
+            tmp_path.replace(dest_path)
+            logger.info(
+                "[omim] HGNC crosswalk downloaded: %s (%d bytes)",
+                dest_path.name, dest_path.stat().st_size,
+            )
+            return dest_path
+        except Exception as exc:
+            last_exc = exc
+            # Clean up partial download.
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            if attempt < max_retries:
+                wait = 2 ** (attempt - 1)
+                logger.warning(
+                    "[omim] HGNC download attempt %d/%d failed: %s — retrying in %ds",
+                    attempt, max_retries, exc, wait,
+                )
+                import time as _time
+                _time.sleep(wait)
+            else:
+                logger.error(
+                    "[omim] HGNC download failed after %d attempts: %s",
+                    max_retries, exc,
+                )
+    # All retries exhausted — re-raise the last exception.
+    raise RuntimeError(
+        f"HGNC crosswalk download failed after {max_retries} attempts: {last_exc}"
+    ) from last_exc
+
+
 @lru_cache(maxsize=1)
 def _load_hgnc_crosswalk() -> dict[str, dict[str, str]]:
     """Load the full HGNC gene crosswalk (P1-042 root fix).
@@ -2903,16 +3032,55 @@ def _load_hgnc_crosswalk() -> dict[str, dict[str, str]]:
             break
 
     if crosswalk_path is None:
-        logger.info(
-            "[omim] HGNC full crosswalk not found at any candidate path %s. "
-            "Falling back to the embedded ~50-entry crosswalk. To enable "
-            "full coverage (~7,000 genes), download the HGNC complete "
-            "dataset from https://www.genenames.org/download/statistics/ "
-            "and place it at %s, or set HGNC_CROSSWALK_PATH env var.",
+        # v83 COMP-3 ROOT FIX: auto-download the HGNC crosswalk instead
+        # of requiring the operator to manually place the file. The
+        # previous code logged an INFO message and fell back to the
+        # ~50-entry embedded crosswalk, which left 99% of OMIM GDA
+        # records with NULL uniprot_id at clean time — and (combined
+        # with the resolve_gene_symbol_to_uniprot overwrite bug) caused
+        # 99% of OMIM Gene-Disease edges to be dead-lettered at load
+        # time. The DOCX mandates "scientifically trusted data" —
+        # silently degrading to 1% coverage is the opposite.
+        #
+        # ROOT FIX: attempt an automatic download from HGNC's custom
+        # download endpoint (no login required). If the download
+        # succeeds, re-call _load_hgnc_crosswalk recursively (the
+        # lru_cache is cleared first so the new file is picked up). If
+        # the download fails (network error, HGNC blocks the request,
+        # etc.), escalate to WARNING (was INFO) so the operator sees
+        # the degradation in the DAG log — and fall back to the
+        # embedded crosswalk so the pipeline still runs.
+        logger.warning(
+            "[omim] HGNC full crosswalk not found at any candidate "
+            "path %s. Attempting auto-download from HGNC (COMP-3 "
+            "ROOT FIX). If download fails, will fall back to the "
+            "embedded ~50-entry crosswalk (99%% of OMIM GDA records "
+            "will have NULL uniprot_id at clean time — this is a "
+            "WARNING, not INFO, because the DOCX mandates "
+            "scientifically trusted data and silent degradation to 1%% "
+            "coverage violates that mandate).",
             [str(p) for p in candidate_paths],
-            str(raw_dir_path / "hgnc" / "hgnc_complete_set.tsv"),
         )
-        return {}
+        try:
+            _download_hgnc_crosswalk(
+                raw_dir_path / "hgnc" / "hgnc_complete_set.tsv"
+            )
+            # Clear the lru_cache so the next call re-reads the file.
+            _load_hgnc_crosswalk.cache_clear()
+            # Re-try the load — the file should exist now.
+            return _load_hgnc_crosswalk()
+        except Exception as exc:
+            logger.warning(
+                "[omim] HGNC auto-download failed (%s). Falling back "
+                "to embedded ~50-entry crosswalk. To enable full "
+                "coverage (~7,000 genes), download the HGNC complete "
+                "dataset from https://www.genenames.org/download/"
+                "statistics/ and place it at %s, or set "
+                "HGNC_CROSSWALK_PATH env var.",
+                exc,
+                str(raw_dir_path / "hgnc" / "hgnc_complete_set.tsv"),
+            )
+            return {}
 
     try:
         hgnc_df = pd.read_csv(crosswalk_path, sep="\t", dtype=str)
@@ -3054,3 +3222,48 @@ def _extract_inheritance_pattern(phenotype_name: str) -> str | None:
         return None
     m = _INHERITANCE_RE.search(phenotype_name)
     return m.group(1).lower() if m else None
+
+
+def _strip_inheritance_pattern(phenotype_name: str | None) -> str | None:
+    """Strip a trailing inheritance pattern from a phenotype name (COMP-5 ROOT FIX).
+
+    BUG-3.18 extracted the inheritance pattern into a separate column but
+    did NOT remove it from ``phenotype_name``. The downstream assignment
+    ``df["disease_name"] = df["phenotype_name"]`` (clean() Step 18) then
+    copied the inheritance-contaminated name into ``disease_name``, which
+    flows through the CSV → Phase 2 bridge → Neo4j Disease node ``name``
+    property. Researchers see ``"Cystic fibrosis autosomal recessive"``
+    instead of ``"Cystic fibrosis"`` in the dashboard — a data-quality
+    corruption that violates the DOCX's "scientifically trusted data"
+    mandate.
+
+    ROOT FIX (COMP-5): remove the inheritance pattern (and any trailing
+    comma / whitespace left behind) so ``phenotype_name`` is the clean
+    disease name. The ``inheritance_pattern`` column (extracted in
+    clean() Step 11) preserves the inheritance information separately —
+    no data is lost, it's just in the correct column.
+
+    Examples:
+      >>> _strip_inheritance_pattern("Cystic fibrosis, autosomal recessive")
+      'Cystic fibrosis'
+      >>> _strip_inheritance_pattern("Cystic fibrosis autosomal recessive")
+      'Cystic fibrosis'
+      >>> _strip_inheritance_pattern("Sickle cell anemia")
+      'Sickle cell anemia'
+      >>> _strip_inheritance_pattern(None) is None
+      True
+      >>> _strip_inheritance_pattern("")
+      None
+    """
+    if not phenotype_name or not isinstance(phenotype_name, str):
+        return None
+    cleaned = _INHERITANCE_RE.sub("", phenotype_name)
+    # Remove any trailing/leading commas + collapse whitespace left by the
+    # substitution. Repeat the rstrip(",") in case the substitution left
+    # ", ," or similar artifacts (defensive — the regex word boundary
+    # usually prevents this, but be robust).
+    cleaned = re.sub(r"\s+,", ",", cleaned)
+    cleaned = re.sub(r",\s*,", ",", cleaned)
+    cleaned = cleaned.strip().rstrip(",").strip()
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned if cleaned else None
