@@ -395,7 +395,17 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_drugs_chembl_id
 CREATE UNIQUE INDEX IF NOT EXISTS uq_drugs_drugbank_id
     ON drugs (drugbank_id) WHERE drugbank_id IS NOT NULL;
 
--- Indexes (CMP-02: follow ORM naming convention ix_%(table)s_%(column)s)
+-- Indexes (CMP-02: follow ORM naming convention ix_<table>_<column>)
+-- v83 P0-C10: the previous comment used ``ix_%(table)s_%(column)s`` to
+-- document the Python format-string convention. SQLAlchemy's ``text()``
+-- compiles SQL through its pyformat parameter binder, which interpreted
+-- the ``%(table)s`` in the COMMENT as a named-parameter placeholder and
+-- crashed with ``KeyError: 'table'``. The comment syntax is now
+-- ``ix_<table>_<column>`` (angle-bracket placeholders) -- same meaning,
+-- no pyformat collision. The migration runner also strips ``--`` comment
+-- lines before passing each statement to ``text()`` (see run_migrations.py
+-- v83 P0-C10 fix), so this is defense-in-depth: even if a future comment
+-- accidentally uses ``%(...)s``, the runner will not pass it to text().
 -- [PERF-02] Removed redundant index on inchikey (UNIQUE index already covers it)
 CREATE INDEX IF NOT EXISTS ix_drugs_chembl_id ON drugs (chembl_id);
 CREATE INDEX IF NOT EXISTS ix_drugs_drugbank_id ON drugs (drugbank_id);

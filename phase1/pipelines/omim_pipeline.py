@@ -814,14 +814,50 @@ class OMIMPipeline(BasePipeline):
         If ``OMIM_API_KEY`` is empty: raise RuntimeError. The API path also
         requires a key (BUG-9.15).
 
+        v83 FORENSIC ROOT FIX (P0-C12 — OMIM pipeline unusable in
+        sample/laptop mode):
+          The DOCX explicitly mandates "V1 is built on free, publicly
+          available biomedical data — making the $0 data-cost model
+          viable from day one" and "the platform runs end-to-end on a
+          laptop". But OMIM requires a paid API key (OMIM_API_KEY env
+          var) — without it, the pipeline raised RuntimeError and the
+          KG build was blocked. The OMIM_API_KEY is free for academic
+          use but requires manual registration, which violates the
+          "out-of-the-box laptop run" mandate.
+
+          ROOT FIX: when DRUGOS_DOWNLOAD_MODE=sample (the default) AND
+          OMIM_API_KEY is missing, fall back to the embedded sample
+          GDA dataset (``_embedded_samples.embedded_omim_gda()``). The
+          embedded sample is biologically valid (real MIM numbers, real
+          gene symbols, real disease associations — see the
+          ``embedded_omim_gda`` docstring). It is written to
+          ``raw_dir/omim_embedded_sample.csv`` and returned as the
+          ``download()`` path; ``clean()`` then processes it like any
+          other raw file. In full mode (DRUGOS_DOWNLOAD_MODE=full),
+          the API key is STILL required — the embedded sample is a
+          SAMPLE-mode fallback only, not a production replacement.
+
         Returns:
-            Path to the downloaded file (morbidmap.txt or omim_genemaps.json).
+            Path to the downloaded file (morbidmap.txt, omim_genemaps.json,
+            or omim_embedded_sample.csv).
         """
-        # BUG-9.15 / BUG-9.16: refuse to run without a key.
+        # v83 P0-C12: sample-mode embedded fallback when API key is missing.
+        _download_mode = os.environ.get("DRUGOS_DOWNLOAD_MODE", "sample").lower().strip()
         if not OMIM_API_KEY:
+            if _download_mode == "sample":
+                logger.warning(
+                    "[omim] OMIM_API_KEY is not set AND DRUGOS_DOWNLOAD_MODE=sample "
+                    "— falling back to embedded sample GDA dataset so the platform "
+                    "can run end-to-end on a laptop (per the DOCX V1 mandate). "
+                    "Set OMIM_API_KEY + DRUGOS_DOWNLOAD_MODE=full for the complete "
+                    "OMIM morbidmap corpus."
+                )
+                return self._write_embedded_sample()
+            # BUG-9.15 / BUG-9.16: refuse to run without a key in full mode.
             raise RuntimeError(
-                "OMIM_API_KEY is not set — cannot download from OMIM. "
-                "Set the OMIM_API_KEY environment variable."
+                "OMIM_API_KEY is not set — cannot download from OMIM in full mode. "
+                "Set the OMIM_API_KEY environment variable, OR set "
+                "DRUGOS_DOWNLOAD_MODE=sample to use the embedded sample dataset."
             )
         # BUG-12.6: warn (don't raise) if the key doesn't match UUID format.
         if not re.match(OMIM_API_KEY_FORMAT_RE, OMIM_API_KEY):
@@ -838,6 +874,17 @@ class OMIMPipeline(BasePipeline):
             self._source_url_sanitised = OMIM_DOWNLOADS_URL_SANITISED
             return path
         except Exception as exc:
+            # v83 P0-C12: in sample mode, fall back to embedded samples
+            # instead of raising. In full mode, re-raise (the operator
+            # needs to know the download failed).
+            if _download_mode == "sample":
+                logger.warning(
+                    "[omim] morbidmap download failed in sample mode (%s) — "
+                    "falling back to embedded sample GDA dataset so the "
+                    "platform can run end-to-end.",
+                    self._sanitize_error_message(str(exc)),
+                )
+                return self._write_embedded_sample()
             # Log the sanitised error and re-raise — do NOT silently fall
             # through to the API path (BUG-6.7).
             logger.error(
@@ -845,6 +892,37 @@ class OMIMPipeline(BasePipeline):
                 self._sanitize_error_message(str(exc)),
             )
             raise
+
+    def _write_embedded_sample(self) -> Path:
+        """v83 P0-C12: write the embedded OMIM GDA sample to disk and return its path.
+
+        Used as a fallback when OMIM_API_KEY is missing OR the live
+        download fails in sample mode. The embedded sample is biologically
+        valid (real MIM numbers, real gene symbols — see
+        ``_embedded_samples.embedded_omim_gda`` docstring) and produces a
+        small but scientifically valid Knowledge Graph.
+        """
+        import pandas as _pd
+        from pipelines._embedded_samples import embedded_omim_gda
+        dest = (
+            (self.raw_dir if self.raw_dir else OMIM_RAW_MORBIDMAP_PATH.parent)
+            / "omim_embedded_sample.csv"
+        )
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        df = embedded_omim_gda()
+        # Write as CSV with the same schema clean() expects from the
+        # morbidmap parser (after the parser's structuring step). The
+        # ``clean()`` method detects this file by the ``_source_format``
+        # attribute we set here and skips the morbidmap-specific parsing.
+        df.to_csv(dest, index=False)
+        self._source_format = "embedded_csv"
+        self._download_method_used = "embedded_sample"
+        self._source_url_sanitised = "embedded://omim_gda"
+        logger.info(
+            "[omim] Embedded sample GDA dataset written to %s (%d rows)",
+            dest, len(df),
+        )
+        return dest
 
     def _download_morbidmap(self) -> Path:
         """Download morbidmap.txt from OMIM data downloads (BUG-2.1).
@@ -1052,7 +1130,8 @@ class OMIMPipeline(BasePipeline):
         See the module docstring for the step-by-step contract.
 
         Args:
-            raw_path: path to morbidmap.txt or omim_genemaps.json.
+            raw_path: path to morbidmap.txt, omim_genemaps.json, or
+                omim_embedded_sample.csv (v83 P0-C12 sample-mode fallback).
 
         Returns:
             A DataFrame satisfying the OMIM GDA contract
@@ -1060,6 +1139,37 @@ class OMIMPipeline(BasePipeline):
         """
         clean_started_at = datetime.now(timezone.utc)
         t0 = time.monotonic()
+
+        # v83 P0-C12: short-circuit for the embedded sample CSV. The
+        # embedded sample (written by ``_write_embedded_sample``) already
+        # has the cleaned schema — it was authored to match what the
+        # full clean() pipeline produces. Re-running the morbidmap parser
+        # on it would crash (it's a CSV, not a morbidmap.txt). Instead,
+        # populate lineage columns and persist it as the cleaned output.
+        if self._source_format == "embedded_csv" or raw_path.name == "omim_embedded_sample.csv":
+            logger.info("[omim] clean() — embedded sample CSV path (%s)", raw_path)
+            df = pd.read_csv(raw_path)
+            # Ensure required columns exist (defensive — the embedded
+            # sample already has them, but future schema changes might
+            # not). Add any missing column as None.
+            required = [
+                "gene_symbol", "gene_id", "gene_mim", "disease_id",
+                "disease_name", "phenotype_mim", "association_type",
+                "is_susceptibility", "source", "score",
+            ]
+            for col in required:
+                if col not in df.columns:
+                    df[col] = None
+            # Populate lineage columns (OMIM-specific).
+            self._populate_lineage_columns(df)
+            # Persist as the canonical OMIM output.
+            self._save_processed_csv(df, OMIM_OUTPUT_PATH, primary_source="omim")
+            self._write_manifest(df, clean_started_at, datetime.now(timezone.utc))
+            logger.info(
+                "[omim] Embedded sample cleaned: %d rows written to %s",
+                len(df), OMIM_OUTPUT_PATH,
+            )
+            return df
 
         # BUG-2.5 / BUG-3.6: log the active mapping-key include-list at INFO.
         logger.info(
