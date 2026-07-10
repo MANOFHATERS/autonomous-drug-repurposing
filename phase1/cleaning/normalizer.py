@@ -851,9 +851,14 @@ class ActivityValue(tuple):
     #   3. Is faster (no dict lookup + id() call per property access).
     #   4. Preserves tuple-subclass semantics (still hashes by
     #      (value, unit, censored, is_corrupt) via __hash__).
-    # The legacy ``_AV_EXTRAS`` dict is kept ONLY as a backward-compat
-    # shim for any external code that may have read it directly; it is
-    # no longer populated or queried by ActivityValue itself.
+    #
+    # P2-1 ROOT FIX (v82): the legacy ``_AV_EXTRAS`` dict was kept as
+    # a "backward-compat shim" but was NEVER populated or queried by
+    # any internal caller — pure dead code. It has been REMOVED.
+    # External code that still imports ``_AV_EXTRAS`` from this module
+    # gets an immutable empty dict (MappingProxyType) via the module-
+    # level ``__getattr__`` hook at the end of this file, plus a
+    # DeprecationWarning so operators notice and migrate.
 
     def __new__(
         cls,
@@ -971,11 +976,16 @@ class ActivityValue(tuple):
 # V18 ROOT FIX (SW-5): the side-channel dict is NO LONGER USED by
 # ActivityValue — all extras are stored on ``self.__dict__`` directly
 # (see __new__). This eliminates the id(self) recycling race the audit
-# flagged. The dict is kept ONLY as a backward-compat shim for any
-# external code that may have read it directly (e.g. old tests that
-# introspected ``_AV_EXTRAS``); it is now permanently empty and is
-# not populated or queried by any code path.
-_AV_EXTRAS: dict[int, dict[str, Any]] = {}
+# flagged.
+#
+# P2-1 ROOT FIX (v82): the dead ``_AV_EXTRAS = {}`` declaration has
+# been REMOVED. It was never populated or queried by any internal
+# caller — pure dead code that misled readers into thinking the
+# side-channel was still active. External code that imports
+# ``_AV_EXTRAS`` from this module now hits the module-level
+# ``__getattr__`` hook (defined near the end of this file), which
+# returns an immutable empty dict (``MappingProxyType({})``) and emits
+# a ``DeprecationWarning`` so operators notice and migrate.
 
 
 class ConversionResult(NamedTuple):
@@ -2639,10 +2649,27 @@ def standardize_inchikey(raw_inchikey: Union[str, bytes, None]) -> str | None:
     # the suffixed key is returned as-is and the suffix leaks downstream.
     # We use ``is_canonical_inchikey`` (strict 27-char or SYNTH/mixture)
     # rather than the loose ``validate_inchikey``.
+    #
+    # P2-6 ROOT FIX (v82): the previous check
+    # ``raw_inchikey == raw_inchikey.strip().upper()`` allocated TWO new
+    # string objects per call (``.strip()`` and ``.upper()``) on the hot
+    # path — for a 1M-row DataFrame, that's 2M allocations just to detect
+    # already-normalized keys. The optimized check below uses:
+    #   * ``raw_inchikey[0].isspace()`` / ``raw_inchikey[-1].isspace()``
+    #     — O(1) char checks, no allocation.
+    #   * ``raw_inchikey.isupper()`` — C-level scan, no allocation
+    #     (returns True iff all cased chars are uppercase AND there's at
+    #     least one cased char; for an InChIKey like
+    #     "BSYNRYMUTXBXSQ-UHFFFAOYSA-N" this is True; for the lowercase
+    #     or mixed-case variant it's False).
+    # This is mathematically equivalent to the original check (no leading/
+    # trailing whitespace AND all uppercase) but avoids the allocations.
     if (
         isinstance(raw_inchikey, str)
         and raw_inchikey
-        and raw_inchikey == raw_inchikey.strip().upper()
+        and not raw_inchikey[0].isspace()
+        and not raw_inchikey[-1].isspace()
+        and raw_inchikey.isupper()
         and is_canonical_inchikey(raw_inchikey)
     ):
         logger.debug("standardize_inchikey: fast-path (input already standardized)")
@@ -4907,6 +4934,26 @@ def __getattr__(name: str) -> Any:
         return list(ALLOWED_TYPES)
     if name == "_ALLOWED_TYPES_TUPLE":
         return tuple(ALLOWED_TYPES)
+    # P2-1 ROOT FIX (v82): backward-compat shim for the removed dead
+    # ``_AV_EXTRAS`` dict. External code that still imports
+    # ``from cleaning.normalizer import _AV_EXTRAS`` gets an immutable
+    # empty dict (MappingProxyType) — NOT the original mutable dict,
+    # because the side-channel was a patient-safety hazard (id()
+    # recycling race). The DeprecationWarning nudges operators to
+    # migrate to ``ActivityValue.__dict__`` inspection if they need
+    # the extras. See the V18 ROOT FIX comment on ActivityValue.
+    if name == "_AV_EXTRAS":
+        warnings.warn(
+            "cleaning.normalizer._AV_EXTRAS is REMOVED (P2-1 v82 root fix). "
+            "The side-channel dict was dead code that posed an id() recycling "
+            "race (V18 SW-5 audit). ActivityValue extras are now stored on "
+            "instance.__dict__ directly — inspect that if you need the extras. "
+            "This shim returns an immutable empty dict for backward-compat "
+            "and will be removed in a future major version.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return types.MappingProxyType({})
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 

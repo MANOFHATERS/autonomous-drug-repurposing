@@ -427,9 +427,21 @@ class TestDataQuality:
             "name": ["Aspirin"],
         })
 
-        # First pass should add _cleaning_applied metadata
+        # First pass should record cleaning-step metadata in df.attrs
+        # (P2-5 v82 root fix: the schema-polluting _cleaning_applied
+        # COLUMN is no longer added to df.columns by default — the
+        # canonical metadata store is df.attrs["_cleaning_steps_applied"],
+        # which is invisible to DB loaders / fingerprint computation /
+        # phase2 graph ingestion. The column is opt-in via
+        # CLEANING_TRACK_APPLIED_STEPS=1 for intermediate debugging
+        # only, and even then stripped from the FINAL output.)
         result1 = cleaning.clean_drugs(df)
-        assert cleaning._CLEANING_METADATA_COL in result1.columns
+        # Canonical metadata lives in attrs, NOT in columns.
+        assert cleaning._CLEANING_STEPS_ATTR in result1.attrs
+        assert isinstance(result1.attrs[cleaning._CLEANING_STEPS_ATTR], list)
+        assert len(result1.attrs[cleaning._CLEANING_STEPS_ATTR]) > 0
+        # The schema-polluting column MUST NOT appear in the output.
+        assert cleaning._CLEANING_METADATA_COL not in result1.columns
 
     def test_cleaning_metrics_tracked(self):
         """GAP-DQ6: clean_drugs should track metrics in attrs."""

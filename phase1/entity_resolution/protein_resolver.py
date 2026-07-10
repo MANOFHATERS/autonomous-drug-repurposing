@@ -159,6 +159,32 @@ _DEFAULT_ORGANISM: str = "Homo sapiens"
 register_match_method("string_provisional", 0.5)
 register_match_method("chembl_provisional", 0.5)
 register_match_method("string_derived", 0.5)
+# P2-9 ROOT FIX (v82): register ``string_cross_reference`` with
+# confidence 0.7. The previous docstring on ``_merge_string_into_canonical``
+# explicitly said "Confidence: NOT upgraded by STRING merges (STRING is a
+# cross-reference, not a stronger match method)." But this left provisional
+# STRING entries (confidence 0.5) STUCK at 0.5 even when a later STRING
+# cross-reference CONFIRMED their identity. Downstream filters requiring
+# confidence >= 0.7 (the standard pharmacology-grade threshold) excluded
+# these confirmed entries — silent data loss in the knowledge graph.
+#
+# The root fix: STRING cross-reference IS confirming evidence. When a
+# provisional STRING entry (confidence 0.5) later receives a STRING
+# cross-reference that confirms its identity, the confidence is UPGRADED
+# to 0.7 (the ``string_cross_reference`` method score). This is BELOW
+# exact-name (0.8) and InChIKey (0.95) matches, preserving the
+# confidence hierarchy, but ABOVE the provisional 0.5 floor — confirmed
+# entries now pass the standard >= 0.7 filter.
+#
+# Registration is REQUIRED (not just a hardcoded 0.7 in the merge
+# function) so that:
+#   - ``compute_match_confidence("string_cross_reference")`` resolves
+#     to a registered value (0.7) instead of falling back to the
+#     unknown-method default with an UnknownMethodWarning.
+#   - downstream audits can prove the score is intentional.
+#   - the confidence upgrade is auditable via the method name in the
+#     audit trail.
+register_match_method("string_cross_reference", 0.7)
 
 # ---------------------------------------------------------------------------
 # FIX SCI-03: NCBI Taxonomy canonicalization of organism strings.
@@ -3020,15 +3046,54 @@ class ProteinResolver(Resolver):
 
         FIX IDEM-02: if the same batch is ingested twice, the second
         ingestion is skipped (idempotent).
+
+        P2-3 ROOT FIX (v82): the previous implementation hashed only
+        ``records[:100]`` — for batches >100 records where only records
+        101+ differed from a prior batch, the fingerprint was IDENTICAL
+        and the second batch was silently skipped (idempotency collision
+        → silent data loss). For a 200K-record batch, this means 199,900
+        records could be silently dropped on re-ingestion.
+
+        The root fix uses STREAMING SHA-256 over ALL records:
+          * O(n) time, O(1) memory — for 200K records with ~10-char IDs,
+            that's ~2MB of data hashed, negligible vs. network/parse cost.
+          * Includes the record COUNT as a prefix so adding/removing a
+            duplicate record produces a different fingerprint.
+          * Uses ``\\x00`` separators between fields to prevent
+            concatenation collisions (e.g. ``"ab"+"c"`` vs ``"a"+"bc"``).
+          * Preserves the original order-sensitivity: re-ordering the
+            same records produces a different fingerprint (matches the
+            previous ``records[:100]`` semantics).
+          * Str()/repr() is safe here because IDs are strings/ints; for
+            exotic types, we fall back to ``""`` via the ``or ""`` short-
+            circuit, then ``str()`` which is deterministic for primitives.
         """
         try:
-            payload = json.dumps(
-                [{"id": r.get("uniprot_id", r.get("string_id", r.get("chembl_target_id", "")))}
-                 for r in records[:100]],
-                sort_keys=True,
-            )
-            return hashlib.sha256(payload.encode()).hexdigest()[:16]
+            h = hashlib.sha256()
+            # Prefix with source + count so different sources or
+            # different-sized batches never collide.
+            h.update(source.encode("utf-8", "replace"))
+            h.update(b"\x00")
+            count = len(records)
+            h.update(str(count).encode("ascii", "replace"))
+            h.update(b"\x00")
+            for r in records:
+                rid = (
+                    r.get("uniprot_id")
+                    or r.get("string_id")
+                    or r.get("chembl_target_id")
+                    or ""
+                )
+                # str() is deterministic for str/int (the only ID types
+                # used here). For exotic types, callers should pre-coerce.
+                h.update(str(rid).encode("utf-8", "replace"))
+                h.update(b"\x00")  # separator prevents ID-concatenation collisions
+            return h.hexdigest()[:16]
         except (TypeError, ValueError):
+            # If a record contains an unhashable/unserialisable ID,
+            # fall back to "" (which forces a non-idempotent re-ingest —
+            # safe failure mode: the batch is re-processed rather than
+            # silently skipped).
             return ""
 
     # ------------------------------------------------------------------
@@ -3237,10 +3302,21 @@ class ProteinResolver(Resolver):
           is not already mapped, it's added. If it IS already mapped to a
           DIFFERENT uid, conflict detection applies (CODE-16, CODE-17).
           Real mappings are NEVER overwritten by synthetic uids (CODE-17).
-        - **Confidence**: NOT upgraded by STRING merges (STRING is a
-          cross-reference, not a stronger match method).
+        - **Confidence upgrade (P2-9 v82 ROOT FIX)**: previously, the
+          docstring said "Confidence: NOT upgraded by STRING merges
+          (STRING is a cross-reference, not a stronger match method)."
+          This left provisional STRING entries (confidence 0.5) STUCK at
+          0.5 even when STRING cross-reference CONFIRMED their identity,
+          causing downstream filters requiring confidence >= 0.7 to
+          exclude confirmed entries — silent data loss in the knowledge
+          graph. The root fix: STRING cross-reference IS confirming
+          evidence; confidence is upgraded from 0.5 to 0.7 (the
+          ``string_cross_reference`` method score, registered at module
+          import). The upgrade is MONOTONIC — entries with confidence
+          already >= 0.7 are NOT downgraded.
         - **Sources**: "string" added to entry's sources list (deduplicated).
-        - **Audit trail**: appends a "merge" event with method="string_cross_reference".
+        - **Audit trail**: appends a "merge" event with method="string_cross_reference",
+          PLUS a "confidence_upgrade" event when the confidence is upgraded.
         """
         entry = self.mapping.get(uniprot_id)
         if entry is None:
@@ -3291,6 +3367,33 @@ class ProteinResolver(Resolver):
                         "mapped to '%s', conflict with '%s'",
                         string_id, existing_uid, uniprot_id,
                     )
+
+        # P2-9 ROOT FIX (v82): upgrade confidence when STRING cross-
+        # reference confirms identity. Monotonic — never downgrades.
+        # The ``string_cross_reference`` method was registered at module
+        # import with confidence 0.7 (above the 0.5 provisional floor,
+        # below the 0.8 exact-name match — preserves the hierarchy).
+        try:
+            current_conf = float(entry.get("match_confidence", 0.5) or 0.5)
+        except (TypeError, ValueError):
+            current_conf = 0.5
+        target_conf = compute_match_confidence("string_cross_reference")
+        if current_conf < target_conf:
+            entry["match_confidence"] = target_conf
+            entry["match_method"] = "string_cross_reference"
+            self._append_audit(uniprot_id, {
+                "action": "confidence_upgrade",
+                "source": "string",
+                "method": "string_cross_reference",
+                "confidence_before": current_conf,
+                "confidence_after": target_conf,
+                "reason": "STRING cross-reference confirmed identity",
+            })
+            logger.info(
+                "_merge_string_into_canonical: upgraded confidence for "
+                "'%s' from %.3f to %.3f (STRING cross-reference confirmed)",
+                uniprot_id, current_conf, target_conf,
+            )
 
         sources = entry.get("sources", [])
         if "string" not in sources:
