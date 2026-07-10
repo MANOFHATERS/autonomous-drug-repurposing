@@ -3685,7 +3685,31 @@ class ChEMBLPipeline(BasePipeline):
         return df
 
     def _step_normalize_activity_values(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Normalise activity_value to nM, passing activity_type (S13)."""
+        """Normalise activity_value to nM, passing activity_type (S13).
+
+        v82 FORENSIC ROOT FIX (P0-D4b — pipeline drops censored flag,
+          breaking the deduplicator's censor-aware ranking):
+          The previous implementation stored ONLY ``result.value`` and
+          ``result.unit`` from the :class:`ActivityValue` returned by
+          :func:`normalize_activity_value`. It DROPPED ``result.censored``
+          and ``result.censor_direction``. This meant a censored pIC50
+          like ``">6"`` (which the normalizer correctly converted to
+          ``value=1000.0, censored=True, censor_direction=">"``) was
+          written to the DataFrame as a clean float ``1000.0`` with NO
+          censor metadata. The downstream
+          :func:`cleaning.deduplicator.dedup_interactions` then called
+          :func:`_parse_censored_value(1000.0)` which returns
+          ``(False, None, 1000.0)`` — the censor information was lost.
+          TransE training saw the 1000 nM edge as a PRECISE IC50, not
+          an upper bound, biasing the model toward high-potency
+          predictions.
+
+          ROOT FIX: propagate ``censored`` and ``censor_direction``
+          into new DataFrame columns (``activity_censored`` and
+          ``activity_censor_direction``). The deduplicator checks these
+          pre-existing columns FIRST (before re-parsing the float value)
+          so the censor metadata survives the full pipeline.
+        """
         if "activity_value" not in df.columns or "activity_units" not in df.columns:
             return df
         # Vectorised: build lists, call normalize_activity_value per row.
@@ -3698,6 +3722,10 @@ class ChEMBLPipeline(BasePipeline):
         )
         norm_values: list[float | None] = []
         norm_units: list[str | None] = []
+        # v82 P0-D4b: also collect censored + censor_direction so they
+        # survive into the DataFrame (the previous code dropped them).
+        norm_censored: list[bool] = []
+        norm_censor_dir: list[str | None] = []
         for v, u, at in zip(values, units, activity_types):
             try:
                 result = normalize_activity_value(v, u, activity_type=at)
@@ -3706,6 +3734,9 @@ class ChEMBLPipeline(BasePipeline):
                     float(result.value) if result.value is not None else None
                 )
                 norm_units.append(result.unit)
+                # v82 P0-D4b: preserve the censor metadata.
+                norm_censored.append(bool(result.censored))
+                norm_censor_dir.append(result.censor_direction)
             except Exception as exc:  # noqa: BLE001 — never crash on a single row
                 logger.warning(
                     "[%s] normalize_activity_value failed for value=%r units=%r: %s",
@@ -3713,13 +3744,25 @@ class ChEMBLPipeline(BasePipeline):
                 )
                 norm_values.append(None)
                 norm_units.append(None)
+                norm_censored.append(False)
+                norm_censor_dir.append(None)
 
         df["activity_value"] = norm_values
         df["activity_units"] = norm_units
+        # v82 P0-D4b: write the censor metadata columns so the
+        # deduplicator can use them. These columns are OPTIONAL — the
+        # deduplicator checks for their presence and falls back to
+        # re-parsing the float value if they're absent (backward compat
+        # with DataFrames from older pipeline runs).
+        df["activity_censored"] = norm_censored
+        df["activity_censor_direction"] = norm_censor_dir
         self._log_transformation(
             step="normalize_activity_values",
             rows_affected=len(df),
-            details={"target_unit": "nM"},
+            details={
+                "target_unit": "nM",
+                "censored_count": int(sum(norm_censored)),
+            },
         )
         return df
 
