@@ -175,27 +175,35 @@ class _TokenBucket:
 
 
 class _CircuitBreaker:
-    """Thread-safe circuit breaker (R10).
+    """P2-2 ROOT FIX: unified circuit breaker wrapping the base class.
 
-    States:
-    - ``CLOSED``: requests flow normally. Each failure increments the
-      counter; each success resets it.
-    - ``OPEN``: after ``threshold`` consecutive failures, the breaker
-      opens. All requests fail fast with ``CircuitBreakerOpenError`` for
-      ``reset_seconds``.
-    - ``HALF_OPEN``: after ``reset_seconds``, one probe request is
-      allowed through. If it succeeds, the breaker closes. If it fails,
-      the breaker re-opens for another ``reset_seconds``.
+    The previous implementation duplicated the closed/open/half_open state
+    machine from ``base_pipeline._CircuitBreaker`` with divergent defaults
+    (failure_threshold=10, reset_seconds=60.0 vs the base's 5/3600.0) and
+    incompatible semantics (``before_call()`` raises vs ``is_open()`` returns
+    bool; no half-open probe gate in this version). Operators seeing
+    circuit-breaker logs could not tell which implementation tripped.
+
+    ROOT FIX: this class now wraps ``base_pipeline._CircuitBreaker`` with
+    the ChEMBL-specific defaults (threshold=10, timeout=60s) and adds:
+      - ``source_label`` attribute — included in every log message so
+        operators can distinguish "chembl_circuit_breaker" from
+        "base_pipeline_circuit_breaker".
+      - ``before_call()`` API (the ChEMBL client's preferred interface)
+        which delegates to ``is_open()`` and raises
+        ``CircuitBreakerOpenError`` when the breaker refuses a call.
+      - ``state`` property that delegates to the inner breaker's state.
+
+    The half-open single-probe gate (v40 ROOT FIX P1 #9) is now inherited
+    from the base class — no more divergent probe semantics.
     """
-
-    CLOSED = "closed"
-    OPEN = "open"
-    HALF_OPEN = "half_open"
 
     def __init__(
         self,
         failure_threshold: int = 10,
         reset_seconds: float = 60.0,
+        *,
+        source_label: str = "chembl",
     ) -> None:
         if failure_threshold < 1:
             raise ValueError(
@@ -205,58 +213,75 @@ class _CircuitBreaker:
             raise ValueError(
                 f"reset_seconds must be >= 0, got {reset_seconds}"
             )
+        # Import here to avoid circular import at module level.
+        from pipelines.base_pipeline import _CircuitBreaker as _BaseCircuitBreaker
+
+        self._inner = _BaseCircuitBreaker(
+            failure_threshold=failure_threshold,
+            reset_timeout=reset_seconds,
+        )
         self.failure_threshold: int = failure_threshold
         self.reset_seconds: float = reset_seconds
-        self._state: str = self.CLOSED
+        self.source_label: str = source_label
         self._consecutive_failures: int = 0
-        self._opened_at: float = 0.0
         self._lock = threading.Lock()
 
     @property
     def state(self) -> str:
         """Current breaker state (closed / open / half_open)."""
-        with self._lock:
-            if self._state == self.OPEN:
-                # Check if it's time to transition to HALF_OPEN.
-                if time.monotonic() - self._opened_at >= self.reset_seconds:
-                    self._state = self.HALF_OPEN
-            return self._state
+        # Delegate to the inner breaker's state tracking.
+        # The inner breaker transitions open→half_open inside is_open(),
+        # so we read _state directly after letting it update.
+        inner = self._inner
+        with inner._lock:
+            # Replicate the base class's state transition logic to report
+            # the correct state without mutating it (is_open() does that).
+            if inner._state == "open":
+                if time.time() - inner._last_failure_time > inner._reset_timeout:
+                    return "half_open"
+            return inner._state
 
     def before_call(self) -> None:
         """Raise ``CircuitBreakerOpenError`` if the breaker is OPEN.
 
         In HALF_OPEN state, the call is allowed through (it's the probe).
+        This delegates to the base class's ``is_open()`` which implements
+        the single-probe gate (v40 ROOT FIX P1 #9).
         """
-        if self.state == self.OPEN:
+        if self._inner.is_open():
+            with self._lock:
+                failures = self._consecutive_failures
             raise CircuitBreakerOpenError(
-                "Circuit breaker is OPEN — failing fast. "
-                f"Last {self._consecutive_failures} consecutive failures. "
+                f"[{self.source_label}] Circuit breaker is OPEN — failing fast. "
+                f"Last {failures} consecutive failures. "
                 f"Will retry in {self.reset_seconds:.1f}s."
             )
 
     def record_success(self) -> None:
         """Mark a call as successful — closes the breaker."""
+        self._inner.record_success()
         with self._lock:
             self._consecutive_failures = 0
-            self._state = self.CLOSED
+        logger.debug(
+            "[%s] Circuit breaker CLOSED after successful call",
+            self.source_label,
+        )
 
     def record_failure(self) -> None:
         """Mark a call as failed — may open the breaker."""
+        self._inner.record_failure()
         with self._lock:
             self._consecutive_failures += 1
-            if (
-                self._state == self.HALF_OPEN
-                or self._consecutive_failures >= self.failure_threshold
-            ):
-                self._state = self.OPEN
-                self._opened_at = time.monotonic()
-                logger.error(
-                    "Circuit breaker OPENED after %d consecutive failures "
-                    "(threshold=%d, reset=%ss)",
-                    self._consecutive_failures,
-                    self.failure_threshold,
-                    self.reset_seconds,
-                )
+            is_open = self._inner.is_open()
+        if is_open:
+            logger.error(
+                "[%s] Circuit breaker OPENED after %d consecutive failures "
+                "(threshold=%d, reset=%ss)",
+                self.source_label,
+                self._consecutive_failures,
+                self.failure_threshold,
+                self.reset_seconds,
+            )
 
 
 class CircuitBreakerOpenError(Exception):
@@ -731,18 +756,43 @@ class RateLimitedHttpClient:
         return b"".join(chunks)
 
     @staticmethod
-    def _parse_json(body: bytes, url: str) -> dict[str, Any] | list[Any]:
+    def _parse_json(body: bytes, url: str) -> dict[str, Any]:
         """Parse ``body`` as JSON. Raise ``HttpClientError`` on failure (C4).
 
-        v65 ROOT FIX (P1-027): return type widened from ``dict[str, Any]``
-        to ``dict[str, Any] | list[Any]`` because ``json.loads`` can return
-        either depending on the top-level JSON token (``{}`` → dict,
-        ``[]`` → list). ChEMBL's REST API always returns objects at the
-        top level, but the type contract must reflect the implementation.
+        v65 ROOT FIX (P1-027) + P2-1 ROOT FIX: the v65 fix widened the
+        return type to ``dict | list`` because ``json.loads`` can return
+        either. However, every downstream caller in ``chembl_pipeline.py``
+        uses ``data.get("activities", [])`` or ``data.get("molecules", [])``
+        which would crash with ``AttributeError: 'list' object has no
+        attribute 'get'`` if ChEMBL ever returned a top-level array.
+        Per the ChEMBL REST API contract (documented at
+        https://chembl.gitbook.io/chembl-interface-documentation/web-services),
+        every endpoint returns a JSON *object* at the top level. If a
+        non-dict is received, it is a protocol violation and must be
+        rejected explicitly rather than silently passed downstream where
+        it would crash at an unrelated call site with a confusing error.
+        ROOT FIX: return type is ``dict[str, Any]`` (narrowed back to the
+        API contract). If ``json.loads`` returns a list, raise
+        ``HttpClientError`` with a clear message — this is a server-side
+        protocol violation, not a normal code path.
         """
         try:
             text = body.decode("utf-8", errors="replace")
-            return json.loads(text)
+            parsed = json.loads(text)
+            # P2-1 ROOT FIX: ChEMBL's API contract guarantees a top-level
+            # object. If we get a list (or any non-dict), the server has
+            # violated the contract — reject it explicitly rather than
+            # letting it crash downstream with an inscrutable AttributeError.
+            if not isinstance(parsed, dict):
+                raise HttpClientError(
+                    f"ChEMBL API returned non-object JSON (type={type(parsed).__name__}) "
+                    f"from {url}. Per the ChEMBL REST API contract, all "
+                    f"endpoints return a top-level object. This response "
+                    f"violates the contract and is rejected to prevent "
+                    f"downstream AttributeError on .get() calls. "
+                    f"Body preview: {text[:200]!r}"
+                )
+            return parsed
         except (json.JSONDecodeError, UnicodeDecodeError) as exc:
             preview = body[:500].decode("utf-8", errors="replace")
             logger.error(

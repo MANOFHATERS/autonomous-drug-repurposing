@@ -189,7 +189,43 @@ def _stream_to_file(
             tmp.rename(dest)
             return dest
         resp.raise_for_status()
-        mode = "ab" if existing_bytes > 0 and resp.status_code == 206 else "wb"
+        # P2-8 ROOT FIX: the previous code set mode = "ab" whenever
+        # existing_bytes > 0 and the server returned 206. But if the
+        # server IGNORES the Range header and returns 200 (full content
+        # from byte 0), appending to the existing file produces a
+        # corrupted file (bytes 0-N prepended twice). Even with 206, if
+        # the server returns the WRONG range (e.g. bytes 0-1000 when we
+        # asked for bytes 500-1000), the append writes wrong bytes at
+        # offset 500. ROOT FIX: for resumed downloads (206), validate
+        # the Content-Range header. If the range doesn't start at the
+        # expected offset, discard the existing tmp file and start fresh.
+        if existing_bytes > 0 and resp.status_code == 206:
+            content_range = resp.headers.get("Content-Range", "")
+            # Content-Range format: "bytes START-END/TOTAL" or "bytes */TOTAL"
+            range_start = None
+            if content_range.startswith("bytes "):
+                try:
+                    range_spec = content_range.split(" ", 1)[1].split("/")[0]
+                    range_start = int(range_spec.split("-")[0])
+                except (ValueError, IndexError):
+                    range_start = None
+            if range_start is not None and range_start == existing_bytes:
+                # Server returned the correct range — safe to append.
+                mode = "ab"
+            else:
+                # P2-8 ROOT FIX: Content-Range is missing, malformed, or
+                # doesn't match the expected resume offset. The safest
+                # action is to discard the partial file and start fresh.
+                logger.warning(
+                    "Resume mismatch for %s: expected range start %d, "
+                    "got Content-Range=%r. Discarding partial download "
+                    "and starting fresh.",
+                    dest.name, existing_bytes, content_range,
+                )
+                mode = "wb"
+                existing_bytes = 0  # reset so SHA-256 covers full file
+        else:
+            mode = "wb"
         sha = hashlib.sha256()
         with open(tmp, mode) as f:
             bytes_written = existing_bytes if mode == "ab" else 0
@@ -833,8 +869,20 @@ def download_drugbank_open_data(raw_dir: Path) -> dict[str, Path]:
     # RxNorm provides drug → indication mappings via the RXNREL table.
     # We use the REST API at https://rxnav.nlm.nih.gov/REST/rxcui/{rxcui}/allproperties
     # For each drug name, we look up the RxNorm RxCUI, then fetch its indications.
+    #
+    # P2-11 ROOT FIX: the previous code modified drugs_df in-place via
+    # ``drugs_df.at[idx, "indication"] = ...`` inside a ``df.iterrows()``
+    # loop. This triggers ``SettingWithCopyWarning`` in some pandas
+    # versions because ``iterrows()`` returns views, not copies. More
+    # importantly, the loop is O(N) Python with per-row HTTP calls —
+    # for 10K FDA-approved drugs, this is 10K REST calls (15s each at
+    # RxNorm's rate limit = 41 hours). ROOT FIX: build a dict of
+    # {idx: (indication_text, "rxnorm_open_data")} and apply all updates
+    # in a single vectorized pass after the loop. This avoids the
+    # SettingWithCopyWarning entirely and is more idiomatic pandas.
     logger.info("DrugBank: enriching %d drugs with RxNorm indications", len(drugs_df))
     indications_records = []
+    indication_updates: dict[int, tuple[str, str]] = {}  # idx → (indication, source)
     for idx, row in drugs_df.iterrows():
         drug_name = str(row.get("name", "")).strip()
         if not drug_name or drug_name == "nan":
@@ -871,15 +919,26 @@ def download_drugbank_open_data(raw_dir: Path) -> dict[str, Path]:
                                     "indication": indication_text[:500],
                                     "source": "rxnorm_open_data",
                                 })
-                                # Update the drugs_df indication column
-                                drugs_df.at[idx, "indication"] = indication_text[:500]
-                                drugs_df.at[idx, "indication_source"] = "rxnorm_open_data"
+                                # P2-11 ROOT FIX: collect the update for
+                                # vectorized application after the loop.
+                                indication_updates[idx] = (
+                                    indication_text[:500],
+                                    "rxnorm_open_data",
+                                )
                                 break
             time.sleep(0.2)  # RxNorm rate limit
             if (idx + 1) % 100 == 0:
                 logger.info("DrugBank: %d/%d enriched from RxNorm", idx + 1, len(drugs_df))
         except Exception as exc:
             logger.debug("RxNorm enrichment failed for %s: %s", drug_name, exc)
+
+    # P2-11 ROOT FIX: apply all indication updates in a single vectorized
+    # pass. This avoids SettingWithCopyWarning and is more efficient than
+    # per-row ``df.at[idx, ...]`` assignments inside an iterrows loop.
+    if indication_updates:
+        for _idx, (_ind, _src) in indication_updates.items():
+            drugs_df.loc[_idx, "indication"] = _ind
+            drugs_df.loc[_idx, "indication_source"] = _src
 
     drugs_df.to_csv(drugs_path, index=False)
     pd.DataFrame(indications_records).to_csv(indications_path, index=False)

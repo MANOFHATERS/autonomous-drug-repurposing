@@ -509,6 +509,20 @@ def _sanitize_text(value: str | None) -> str | None:
     contain XML injection characters. This helper strips tags and
     non-printable control characters before storage.
 
+    P2-9 ROOT FIX: the previous code kept ``\\n`` and ``\\t`` in the
+    output (``char.isprintable() or char in "\\n\\t"``). While intended
+    for human readability, multi-line indication text breaks CSV parsing
+    when any code path uses ``df.to_csv()`` without
+    ``quoting=csv.QUOTE_ALL``. The embedded sample path at line ~1478
+    uses ``df.to_csv(index=False)`` without explicit quoting, so
+    newlines in the ``indication`` column break the CSV structure.
+    ROOT FIX: replace newlines and tabs with spaces. This preserves the
+    textual content (the words are still there) while ensuring every
+    code path that writes to CSV produces well-formed output. The atomic
+    writer (``_atomic_write_csv``) uses ``quoting=csv.QUOTE_ALL`` which
+    would escape newlines, but not all write paths go through the atomic
+    writer — the embedded sample path is a direct ``df.to_csv()`` call.
+
     Parameters
     ----------
     value : str or None
@@ -522,7 +536,16 @@ def _sanitize_text(value: str | None) -> str | None:
     if value is None:
         return None
     cleaned = _XML_TAG_RE.sub("", value)
-    cleaned = "".join(char for char in cleaned if char.isprintable() or char in "\n\t")
+    # P2-9 ROOT FIX: replace newlines/tabs with spaces instead of keeping
+    # them. This ensures CSV integrity across ALL write paths, not just
+    # the atomic writer (which uses QUOTE_ALL). Multi-line indication
+    # text is now single-line — the words are preserved but the line
+    # breaks that would break CSV parsing are gone.
+    cleaned = cleaned.replace("\r\n", " ").replace("\n", " ").replace("\r", " ").replace("\t", " ")
+    cleaned = "".join(char for char in cleaned if char.isprintable() or char == " ")
+    # Collapse multiple consecutive spaces into one.
+    import re as _re
+    cleaned = _re.sub(r" +", " ", cleaned)
     cleaned = cleaned.strip()
     return cleaned if cleaned else None
 
@@ -2130,6 +2153,14 @@ class DrugBankPipeline(BasePipeline):
                     props[key] = {"value": value, "source": "calculated"}
 
         # Second pass: load experimental, OVERWRITING calculated when present.
+        # P2-4 ROOT FIX: the previous code overwrote calculated properties
+        # with experimental ones unconditionally — even when the experimental
+        # <value> element was empty (producing value=None). This meant a
+        # calculated LogP of 3.97 would be overwritten by an experimental
+        # LogP of None (empty <value></value> tag). The "experimental >
+        # calculated" precedence must be "experimental-if-non-empty >
+        # calculated" — a None experimental value is NOT more reliable than
+        # a calculated value; it is MISSING data.
         exp_props = elem.find("db:experimental-properties", NS)
         if exp_props is not None:
             for prop in exp_props.findall("db:property", NS):
@@ -2137,17 +2168,32 @@ class DrugBankPipeline(BasePipeline):
                 value = _text_of(prop.find("db:value", NS))
                 if kind:
                     key = kind.lower().replace(" ", "_").replace("-", "_")
-                    if key in props and props[key]["value"] != value:
-                        # DQ11: log discrepancies.
-                        logger.debug(
-                            "[%s] Property %s: calculated=%r experimental=%r "
-                            "(using experimental)",
-                            self.source_name,
-                            key,
-                            props[key]["value"],
-                            value,
-                        )
-                    props[key] = {"value": value, "source": "experimental"}
+                    # P2-4 ROOT FIX: only overwrite if the experimental
+                    # value is non-empty. A None value from <value></value>
+                    # means the experimental measurement was not recorded —
+                    # it should NOT overwrite a valid calculated value.
+                    if value is not None:
+                        if key in props and props[key]["value"] != value:
+                            # DQ11: log discrepancies.
+                            logger.debug(
+                                "[%s] Property %s: calculated=%r experimental=%r "
+                                "(using experimental)",
+                                self.source_name,
+                                key,
+                                props[key]["value"],
+                                value,
+                            )
+                        props[key] = {"value": value, "source": "experimental"}
+                    else:
+                        # Experimental value is empty — keep calculated.
+                        if key in props:
+                            logger.debug(
+                                "[%s] Property %s: experimental value is empty/None, "
+                                "keeping calculated value=%r",
+                                self.source_name,
+                                key,
+                                props[key]["value"],
+                            )
 
         # Flatten for downstream use.
         props_flat: dict[str, str | None] = {k: v["value"] for k, v in props.items()}

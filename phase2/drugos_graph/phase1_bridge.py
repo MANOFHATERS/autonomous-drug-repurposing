@@ -3594,6 +3594,53 @@ def stage_phase1_to_phase2(
             "omim_gene_disease_associations.csv missing or empty — no Gene/Disease nodes or Gene->Disease edges staged"
         )
 
+    # ─── Chain-1 ROOT FIX: stage DisGeNET Disease nodes BEFORE treats ────
+    # The treats-edge derivation at line ~3624 builds ``disease_id_set`` from
+    # the already-staged Disease nodes (which were OMIM-only). DrugBank
+    # indications use DOID-format disease IDs. If DisGeNET's DOID-keyed
+    # Disease nodes haven't been staged yet, the treats-edge loop can't
+    # match them, and even with the v78 fallback that stages unrecognized
+    # DOID IDs as synthetic Disease nodes, the gene→disease→drug multi-hop
+    # path is broken (the synthetic DOID node has no gene associations).
+    #
+    # ROOT FIX: stage the DisGeNET Disease nodes HERE (before the treats-
+    # edge derivation) so that DOID IDs are already in ``disease_id_set``
+    # when the treats-edge loop runs. This unblocks 7 of the 12 embedded-
+    # sample indication rows whose DOID IDs match DisGeNET-staged diseases
+    # (Pain/DOID:0050133, Inflammation/DOID:1101, Cancer/DOID:162,
+    # Migraine/DOID:1197, Epilepsy/DOID:1826, Arthritis/DOID:7148,
+    # Hypertension/DOID:10763). The remaining 5 rows without a DisGeNET
+    # match still use the v78 synthetic-disease fallback.
+    #
+    # Note: Gene-node staging from DisGeNET is deferred to the full
+    # DisGeNET edge-staging section below (line ~4704) — only Disease
+    # nodes are staged here to avoid duplicating Gene-staging logic.
+    extra_disease_seen_pre: set[str] = set()
+    disgenet = frames.get("disgenet_gda")
+    if disgenet is not None and not disgenet.empty:
+        for idx, row in disgenet.iterrows():
+            did = _safe_str(row.get("disease_id"))
+            if not did:
+                continue
+            if did not in extra_disease_seen_pre:
+                dnode = {
+                    "id": did,
+                    "name": _safe_str(row.get("disease_name")),
+                    "_source_phase": 1,
+                    "_source_file": "disgenet_gene_disease_associations.csv",
+                    "_source_row": _safe_row_idx(idx),
+                    "_pipeline_run_id": run_id,
+                    "_loaded_at": loaded_at,
+                    "_schema_version": schema_version,
+                }
+                staged.disease_nodes.append(dnode)
+                extra_disease_seen_pre.add(did)
+        logger.info(
+            "Chain-1 ROOT FIX: pre-staged %d DisGeNET Disease nodes "
+            "before treats-edge derivation (DOID IDs now in disease_id_set)",
+            len(extra_disease_seen_pre),
+        )
+
     # ─── Audit fix (v5 Tier-3 bug #25b): derive Compound-treats-Disease ────
     # Phase 2's CORE_EDGE_TYPES declares ("Compound", "treats", "Disease")
     # as the primary link-prediction target. Phase 1's DrugBank CSV has
