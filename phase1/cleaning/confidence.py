@@ -217,10 +217,23 @@ def classify_confidence(
     # clamp the score to 0.0 for the bisect lookup so negative values
     # map to the same tier as score=0.0 (the lowest threshold).
     _bisect_score = max(0.0, score) if allow_negative else score
+    # v67 ROOT FIX (P1-D13): bisect_right on float thresholds can hit
+    # floating-point edge cases at exact boundaries.  For example,
+    # threshold 0.06 might be stored as 0.059999999999999997 due to
+    # IEEE 754 representation, so bisect_right(thresholds, 0.06) could
+    # return the wrong insertion point (placing 0.06 AFTER the 0.06
+    # threshold instead of AT it). This causes scores exactly at the
+    # boundary to be classified into the WRONG tier.  The fix: add a
+    # small epsilon (1e-9) to the bisect score so that a score exactly
+    # equal to a threshold is treated as slightly above it, ensuring
+    # it classifies into the tier that STARTS at that threshold rather
+    # than the tier below it.  The epsilon is negligible relative to
+    # the smallest meaningful score difference (> 1e-3) in practice.
+    _EPSILON = 1e-9
     # bisect_right returns the insertion point to the right of any
     # existing entries equal to score.  Subtracting 1 gives the index of
     # the tier whose threshold <= score.
-    idx = bisect.bisect_right(thresholds, _bisect_score) - 1
+    idx = bisect.bisect_right(thresholds, _bisect_score + _EPSILON) - 1
     if idx < 0:
         # score < the lowest threshold — fall back to the lowest tier.
         # This should not happen in practice (the lowest threshold is 0.0

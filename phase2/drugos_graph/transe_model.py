@@ -3845,9 +3845,18 @@ def train_transe(
             if float(getattr(history, "held_out_auc", -1.0)) > 0
             else "best_val_auc (held_out_auc not yet computed)"
         )
+        # v82 ROOT FIX (P0-F7): signal whether test_triples were actually
+        # provided so assert_auc_meets_threshold can refuse the
+        # best_val_auc fallback when target_auc > 0 and no held-out
+        # evaluation was performed.
+        _has_test_triples = (
+            test_triples is not None
+            and len(test_triples[0]) > 0
+        )
         _auc_meets = assert_auc_meets_threshold(
             _enforcement_auc,
             threshold=config.target_auc,
+            has_test_triples=_has_test_triples,
         )
         if _auc_meets:
             logger.info(

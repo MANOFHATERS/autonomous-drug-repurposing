@@ -1071,7 +1071,12 @@ CREATE TABLE IF NOT EXISTS gene_disease_associations (
     -- in migration 004 / ORM model) — belt-and-suspenders.
     -- ICD-10: WHO format — letter + 2 digits + optional '.subsection'
     --   Examples: I10, E11.9, M05.1, C50.1, S72.001A
-    -- EFO: OBO curie pattern "EFO:_nnnnnnn" (e.g. EFO:0000400).
+    -- EFO: OBO curie pattern "EFO:nnnnnnn" (e.g. EFO:0000400, EFO:0001360).
+    -- P0-A1 ROOT FIX: removed the incorrect underscore after the colon.
+    -- Standard EFO CURIEs use a colon with no underscore (EFO:0000400),
+    -- NOT the OBO PURL underscore form (EFO_0000400). The previous regex
+    -- '^EFO:_\d{7,}$' quarantined every real EFO ID, making diabetes,
+    -- thyroid carcinoma, etc. invisible to the KG.
     -- Orphanet: "ORPHA:nnnn" (e.g. ORPHA:585).
     CONSTRAINT chk_gda_disease_id_format
         CHECK (
@@ -1083,7 +1088,7 @@ CREATE TABLE IF NOT EXISTS gene_disease_associations (
             OR (disease_id_type = 'mesh'     AND disease_id ~ '^D\d{6}$')
             OR (disease_id_type = 'hpo'      AND disease_id ~ '^HP:\d{7}$')
             OR (disease_id_type = 'icd10'    AND disease_id ~ '^[A-Z]\d{2}(\.[A-Z0-9]{1,4})?$')
-            OR (disease_id_type = 'efo'      AND disease_id ~ '^EFO:_\d{7,}$')
+            OR (disease_id_type = 'efo'      AND disease_id ~ '^EFO:\d{7}$')
             OR (disease_id_type = 'orphanet' AND disease_id ~ '^ORPHA:\d+$')
         ),
     -- [SEC-02] PMID list format validation

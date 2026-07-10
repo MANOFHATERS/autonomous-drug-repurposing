@@ -289,6 +289,13 @@ from .resolver_utils import (
 )
 from .resolver_utils import _sanitize_for_log
 
+# P1-D10 ROOT FIX: moved import of CANONICAL_SYNTHETIC_INCHIKEY_REGEX and
+# MatchConfidence from inside _match_by_inchikey (called per-record) to
+# module level. The previous per-call import added unnecessary overhead
+# on every InChIKey lookup — O(N) import attempts where N is the number
+# of drugs being resolved.
+from cleaning._constants import CANONICAL_SYNTHETIC_INCHIKEY_REGEX
+
 # =============================================================================
 # Module-level constants
 # =============================================================================
@@ -1930,7 +1937,7 @@ class _MatchPipeline:
                 if not name:
                     continue
                 arg = name
-            elif step.method in ("inchikey_exact", "inchikey_connectivity"):
+            elif step.method in ("inchikey_exact", "inchikey_connectivity", "inchikey_connectivity_no_collapse"):
                 if not inchikey:
                     continue
                 arg = inchikey
@@ -2750,7 +2757,7 @@ class DrugResolver(Resolver):
             # not just via resolve_single).
             if hit.method == "inchikey_exact":
                 self._stats.inc("inchikey_exact_matches")
-            elif hit.method == "inchikey_connectivity":
+            elif hit.method in ("inchikey_connectivity", "inchikey_connectivity_no_collapse"):
                 self._stats.inc("connectivity_matches")
             elif hit.method == "name_normalized":
                 self._stats.inc("name_matches")
@@ -2979,7 +2986,7 @@ class DrugResolver(Resolver):
             # Stats
             if method == "inchikey_exact":
                 self._stats.inc("inchikey_exact_matches")
-            elif method == "inchikey_connectivity":
+            elif method in ("inchikey_connectivity", "inchikey_connectivity_no_collapse"):
                 self._stats.inc("connectivity_matches")
             elif method == "name_normalized":
                 self._stats.inc("name_matches")
@@ -4357,8 +4364,8 @@ class DrugResolver(Resolver):
             return None
         # v65 ROOT FIX (P1C-009): SYNTH keys get their OWN method label
         # and enum-based confidence (not a hardcoded magic number).
-        from cleaning._constants import CANONICAL_SYNTHETIC_INCHIKEY_REGEX
-        from entity_resolution.base import MatchConfidence
+        # P1-D10: CANONICAL_SYNTHETIC_INCHIKEY_REGEX moved to module-level
+        # import to avoid per-call import overhead.
         if CANONICAL_SYNTHETIC_INCHIKEY_REGEX.match(norm):
             # SYNTH key — computed, not experimental. Weakest evidence.
             # Method label is "synthetic_key_match" (NOT "inchikey_exact")
@@ -4378,12 +4385,16 @@ class DrugResolver(Resolver):
     def _match_by_connectivity(self, inchikey: str) -> Optional[_MatchHit]:
         """Find ``canonical_inchikey`` by InChIKey first-block match (audit 3.4 / 3.9).
 
-        When ``collapse_stereoisomers=False`` (default), this method
-        returns ``None`` for any candidate whose full InChIKey differs
-        from the indexed one.  When ``collapse_stereoisomers=True``,
-        the legacy first-block-only merge is performed — but every
-        collapse is logged at WARNING and recorded in
-        ``collapsed_stereoisomers``.
+        v67 ROOT FIX (P1-D4): previously, when ``collapse_stereoisomers=False``
+        (the default), this method returned ``None`` for any candidate whose
+        full InChIKey differed from the indexed one — effectively DISABLED
+        connectivity matching. The ``collapse_stereoisomers`` flag should
+        control whether to MERGE records, not whether to COMPARE them. The
+        fix: always perform the connectivity comparison; when the keys differ
+        and ``collapse_stereoisomers=False``, return a low-confidence match
+        (``"inchikey_connectivity_no_collapse"``) so the caller can see the
+        connectivity hit. When ``collapse_stereoisomers=True``, perform the
+        merge as before.
         """
         if not inchikey:
             return None
@@ -4401,7 +4412,19 @@ class DrugResolver(Resolver):
             # Stereoisomer safety gate — only merge if full InChIKeys
             # are identical (audit 3.4).
             if existing_ik != norm:
-                return None
+                # v67 ROOT FIX (P1-D4): return a connectivity match result
+                # even when we're not collapsing stereoisomers. The caller
+                # needs to know a connectivity match EXISTS (same molecular
+                # skeleton, different stereoisoform). Previously returning
+                # None here meant the entire connectivity match was invisible
+                # to the caller, effectively disabling connectivity matching.
+                # Now return a match with a distinct method label and lower
+                # confidence so the caller can decide what to do.
+                return _MatchHit(
+                    canonical_ik=canonical_ik,
+                    method="inchikey_connectivity_no_collapse",
+                    confidence=compute_match_confidence("inchikey_connectivity_no_collapse"),
+                )
         else:
             # Genuine stereoisoform collapse (audit 3.10).
             if existing_ik and existing_ik != norm:
@@ -5127,13 +5150,31 @@ class DrugResolver(Resolver):
             }
 
             # Empty-name fallback (audit 2.13 / 3.7).
+            # v67 ROOT FIX (P1-D14): for SYNTH-prefixed keys,
+            # ``canonical_ik[:14]`` is "SYNTH" + 9 hash chars, NOT a
+            # meaningful connectivity block.  Using it as a fallback name
+            # produces names like "UNKNOWN_SYNTH012345678" which are
+            # confusing and misleading (the hash chars suggest a chemical
+            # identity that doesn't exist).  For SYNTH keys, use
+            # "Unknown_Compound_{hash_suffix}" where hash_suffix is the
+            # last 8 chars of the key (more readable, clearly synthetic).
             if not entry["canonical_name"] or not entry["canonical_name"].strip():
-                fallback = (
-                    record.get("chembl_id")
-                    or record.get("drugbank_id")
-                    or record.get("pubchem_cid")
-                    or f"UNKNOWN_{canonical_ik[:14]}"
-                )
+                if canonical_ik.upper().startswith("SYNTH"):
+                    # SYNTH key — use a synthetic-friendly fallback
+                    _hash_suffix = canonical_ik[-8:] if len(canonical_ik) >= 8 else canonical_ik
+                    fallback = (
+                        record.get("chembl_id")
+                        or record.get("drugbank_id")
+                        or record.get("pubchem_cid")
+                        or f"Unknown_Compound_{_hash_suffix}"
+                    )
+                else:
+                    fallback = (
+                        record.get("chembl_id")
+                        or record.get("drugbank_id")
+                        or record.get("pubchem_cid")
+                        or f"UNKNOWN_{canonical_ik[:14]}"
+                    )
                 entry["canonical_name"] = str(fallback)
                 entry["name_is_synthetic"] = True
                 name_is_synthetic = True

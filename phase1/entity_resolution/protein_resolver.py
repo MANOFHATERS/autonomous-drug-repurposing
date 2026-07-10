@@ -904,9 +904,12 @@ class ProteinResolver(Resolver):
         # v16 SW-11: strip trailing parenthetical common-name.
         # e.g. "Homo sapiens (Human)" -> "Homo sapiens"
         #      "Mus musculus (Mouse)" -> "Mus musculus"
-        # Only strip if the parenthetical is at the END (so we don't
-        # corrupt "Homo sapiens (Panth.) Linnaeus" — though that's
-        # extremely rare in biomedical DBs).
+        # v67 ROOT FIX (P1-D11): also strip LEADING parentheticals.
+        # Some sources prepend the common name: "(Human) Homo sapiens"
+        # was NOT normalised to "Homo sapiens" because only the trailing
+        # pattern was stripped. This fragmented the (gene, organism) index.
+        # Now strip both leading and trailing parentheticals.
+        s = re.sub(r"^\s*\([^)]*\)\s*", "", s).strip()
         s = re.sub(r"\s*\([^)]*\)\s*$", "", s).strip()
         # Check alias map (lowercase key).
         lower = s.lower()
@@ -920,6 +923,16 @@ class ProteinResolver(Resolver):
             return result
         # Single word — capitalize.
         return s.capitalize()
+
+    @staticmethod
+    def _taxon_id_to_organism(taxon_id: str) -> Optional[str]:
+        """Resolve an NCBI Taxonomy ID to an organism name.
+
+        P1-D5 helper: used by ``build_mapping`` to extract the organism
+        from a STRING protein ID prefix (e.g. "9606.ENSP..." →
+        "Homo sapiens"). Returns None if the taxon ID is unknown.
+        """
+        return _ORGANISM_ALIASES.get(taxon_id)
 
     @staticmethod
     def _normalize_gene_symbol_for_fuzzy(gene_name: Optional[str]) -> Optional[str]:
@@ -2123,7 +2136,7 @@ class ProteinResolver(Resolver):
             logger.debug(
                 "resolve_single: UniProt exact match '%s'", uniprot_id
             )
-            self._stats.inc("inchikey_exact_matches")
+            self._stats.inc("uniprot_exact_matches")
             return self._copy_entry_for_read(self.mapping[uniprot_id])
 
         # 2. STRING → UniProt mapping.
@@ -2276,12 +2289,22 @@ class ProteinResolver(Resolver):
                         return self._copy_entry_for_read(self.mapping.get(best_uid))
         else:
             # Fallback: linear sweep with exact-match-only fuzzy_match_score
+            # P1-D6 ROOT FIX: the previous linear sweep used `>` for tie
+            # comparison, so the FIRST candidate at a given score won.
+            # On a second run with different dict iteration order (CPython
+            # hash randomisation), a DIFFERENT candidate could win —
+            # non-deterministic merges. ROOT FIX: on equal score, break
+            # ties deterministically by alphabetical name (lowest wins).
             best_score = 0.0
             best_uid: Optional[str] = None
             best_norm_name: Optional[str] = None
             for indexed_norm, indexed_uid in candidate_index.items():
                 score = fuzzy_match_score(norm, indexed_norm)
-                if score > best_score:
+                if score > best_score or (
+                    score == best_score
+                    and best_norm_name is not None
+                    and indexed_norm < best_norm_name
+                ):
                     best_score = score
                     best_uid = indexed_uid
                     best_norm_name = indexed_norm
@@ -2415,13 +2438,16 @@ class ProteinResolver(Resolver):
                                 # per-organism, but if a non-human file is
                                 # loaded or a cross-contamination happens,
                                 # non-human proteins get mislabeled as human).
-                                # ROOT FIX: cross-check against the
-                                # UniProt organism override table first;
-                                # fall back to a per-row organism column
-                                # in string_df if present; only use the
-                                # default_organism if neither source
-                                # provides an organism.
-                                _resolved_organism = self._config.default_organism
+                                # P1-D5 ROOT FIX: the fallback default was still
+                                # `self._config.default_organism` ("Homo sapiens")
+                                # even when no organism evidence exists. Non-human
+                                # proteins with no override and no organism column
+                                # were still mislabeled as human. ROOT FIX: only
+                                # use default_organism when there is positive
+                                # evidence the protein is human; otherwise set
+                                # organism to None so downstream consumers know the
+                                # organism is unknown rather than assuming human.
+                                _resolved_organism = None
                                 # Source 1: UniProt organism override table
                                 # (populated from
                                 # data/uniprot_organism_crosswalk.yaml via
@@ -2429,6 +2455,7 @@ class ProteinResolver(Resolver):
                                 # _get_effective_uniprot_organism_overrides()
                                 # function — same source used by
                                 # add_uniprot_records for cross-validation).
+                                _organism_evidence = False
                                 try:
                                     _effective_overrides = (
                                         _get_effective_uniprot_organism_overrides()
@@ -2437,6 +2464,7 @@ class ProteinResolver(Resolver):
                                     _effective_overrides = {}
                                 if uid_str in _effective_overrides:
                                     _resolved_organism = _effective_overrides[uid_str]
+                                    _organism_evidence = True
                                 # Source 2: per-row organism column in
                                 # string_df (set by STRING pipeline when it
                                 # knows the organism from the filename).
@@ -2453,6 +2481,26 @@ class ProteinResolver(Resolver):
                                         _row_org = str(_row_match.iloc[0]).strip()
                                         if _row_org:
                                             _resolved_organism = _row_org
+                                            _organism_evidence = True
+                                # Source 3: STRING taxon ID prefix in the
+                                # STRING protein ID (e.g. "9606.ENSP...")
+                                # The taxon ID 9606 = Homo sapiens. If the
+                                # string_df has a "string_id" column, extract
+                                # the taxon prefix and resolve it.
+                                if not _organism_evidence and "string_id" in string_df.columns:
+                                    _sid_match = string_df.loc[
+                                        string_df["uniprot_id"].astype(str).str.strip()
+                                        == uid_str,
+                                        "string_id",
+                                    ].dropna()
+                                    if not _sid_match.empty:
+                                        _sid = str(_sid_match.iloc[0]).strip()
+                                        if "." in _sid:
+                                            _taxon_id = _sid.split(".")[0]
+                                            _taxon_to_org = self._taxon_id_to_organism(_taxon_id)
+                                            if _taxon_to_org is not None:
+                                                _resolved_organism = _taxon_to_org
+                                                _organism_evidence = True
                                 self.mapping[uid_str] = {
                                     "uniprot_id": uid_str,
                                     "gene_symbol": None,

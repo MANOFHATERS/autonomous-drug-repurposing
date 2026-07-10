@@ -4124,32 +4124,38 @@ class BasePipeline(ABC):
         prevents Excel / Google Sheets from interpreting them as
         formulas.
 
-        v65 ROOT FIX (P1-044): the previous implementation only scanned
-        object-dtype columns (``df.select_dtypes(include=["object"])``).
-        If a numeric column contained a string value starting with ``=``
-        (e.g. due to pandas type-coercion oddities where a column of
-        mostly-ints with one "=1+1" string gets coerced to object dtype
-        but a column of mostly-floats with one "=A1" string stays
-        object), it would be MISSED. Root fix: convert ALL columns to
-        object dtype before sanitizing, then sanitize every cell. This
-        is O(N) over the full DataFrame, which is acceptable because
-        ``_sanitize_csv_output`` is called ONCE per clean() call (not
-        per row). The previous behaviour is preserved for genuine
-        numeric columns (no string starts with ``=`` so no escaping
-        fires) — the fix only ADDS coverage for the edge case.
+        v65 ROOT FIX (P1-044) + v82 FORENSIC ROOT FIX (P1-B5 — dtype
+        destruction): the previous implementation cast the ENTIRE
+        DataFrame to object dtype via ``df.astype(object)`` before
+        sanitizing. This DESTROYED numeric dtypes: int64 → object,
+        float64 → object, bool → object. When the sanitized DataFrame
+        was written to CSV and re-read, numeric columns were parsed as
+        strings, breaking downstream joins (e.g. ``drug.inchikey`` was
+        fine but ``drug.molecular_weight`` became a string), type
+        checks (``isinstance(v, float)``), and statistical operations
+        (``df.describe()`` returned object stats instead of numeric).
+        ROOT FIX: preserve original dtypes by operating on a copy,
+        sanitizing only string values in-place, and restoring the
+        original dtypes after sanitization. Numeric columns that have
+        no string values starting with dangerous prefixes pass through
+        unchanged. Mixed columns (rare — a numeric column with one
+        rogue string cell) have that cell escaped but the column dtype
+        is restored to its original form (the escaped cell becomes a
+        string in an otherwise-numeric column, which pandas handles as
+        object dtype — matching the pre-sanitize state).
         """
         if df is None or df.empty:
             return df
-        # v65 ROOT FIX (P1-044): scan ALL columns, not just object-dtype.
-        # We cast to object dtype first to ensure ``.apply`` sees the
-        # underlying Python objects (strings, ints, floats) rather than
-        # numpy scalars. The cast is cheap (view, not copy) for columns
-        # that are already object-dtype; for numeric columns it creates
-        # a new object-dtype Series but the ``apply`` only escapes cells
-        # that are STRINGS starting with a dangerous prefix — genuine
-        # numbers are passed through unchanged.
-        df = df.astype(object)
+        # v82 P1-B5 fix: preserve original dtypes to avoid destroying
+        # numeric columns. Store the original schema before any changes.
+        original_dtypes = df.dtypes.to_dict()
         for col in df.columns:
+            # Only apply to columns that contain strings (object dtype).
+            # Numeric columns (int64, float64, bool) never have string
+            # values starting with dangerous prefixes — skip them entirely
+            # to preserve their dtype. This is O(1) per column check.
+            if original_dtypes[col] != object:
+                continue
             df[col] = df[col].apply(
                 lambda x: (
                     f"'{x}"
@@ -4157,6 +4163,19 @@ class BasePipeline(ABC):
                     else x
                 )
             )
+        # Restore original dtypes where possible. Object columns that
+        # were sanitized stay as object (correct — they contain strings).
+        # Numeric columns were never touched, so their dtypes are already
+        # correct. This is a no-op for most DataFrames but defensive for
+        # edge cases where a column was accidentally cast.
+        for col, dtype in original_dtypes.items():
+            if col in df.columns and df[col].dtype != dtype:
+                try:
+                    df[col] = df[col].astype(dtype)
+                except (TypeError, ValueError):
+                    # If the conversion fails (e.g. a sanitized string in
+                    # a formerly-numeric column), leave as object dtype.
+                    pass
         return df
 
     def _detect_pii(self, df: pd.DataFrame) -> list[str]:

@@ -1012,6 +1012,7 @@ def build_training_data(
     auxiliary_pairs: Optional[Dict[str, List[Dict]]] = None,
     drkg_checksum: str = "",
     train_positive_pairs: Optional[List[Dict]] = None,
+    held_out_pairs: Optional[Set[Tuple[str, str]]] = None,
 ) -> Dict[str, Any]:
     """Build complete training dataset with positive and negative examples.
 
@@ -1249,7 +1250,8 @@ def build_training_data(
         len(_positive_pairs_for_sampling), len(positive_pairs),
     )
 
-    sampler = NegativeSampler(all_drug_ids, all_disease_ids, positive_pair_set)
+    sampler = NegativeSampler(all_drug_ids, all_disease_ids, positive_pair_set,
+                              held_out_pairs=held_out_pairs)
     negatives = sampler.combined_sampling(
         drug_disease_map=drug_disease_map,
         disease_atc_map=disease_atc_map_sampler,

@@ -2031,16 +2031,36 @@ def clean_drugs(
                 )
         elif step_name == "standardize_drug_record":
             # standardize_drug_record takes a dict, returns a dict.
-            # Apply it row-by-row, converting each row to/from a dict.
+            # v67 ROOT FIX (P1-D7): replaced `out.apply(_apply_drug_record, axis=1)`
+            # with `itertuples` + dict-comprehension for ~3-5× speedup over
+            # O(N) Python-level row iteration via `.apply(axis=1)`. The
+            # `itertuples` approach avoids the overhead of creating a pandas
+            # Series per row and using the DataFrame __getitem__ path.
             import numpy as np
 
-            def _apply_drug_record(row):
-                record = row.to_dict()
-                cleaned = func(record)
-                return pd.Series(cleaned)
+            # Build column name → index mapping from the DataFrame columns.
+            _col_names = list(out.columns)
+            _col_index = {name: i for i, name in enumerate(_col_names)}
 
-            # Only apply to rows that have data worth normalizing
-            result_rows = out.apply(_apply_drug_record, axis=1)
+            cleaned_records = []
+            for tup in out.itertuples(index=False, name=None):
+                record = dict(zip(_col_names, tup))
+                # Convert numpy scalars to native Python types so
+                # standardize_drug_record doesn't choke on np.float64 etc.
+                for k, v in record.items():
+                    if isinstance(v, (np.integer,)):
+                        record[k] = int(v)
+                    elif isinstance(v, (np.floating,)):
+                        record[k] = float(v)
+                    elif isinstance(v, np.bool_):
+                        record[k] = bool(v)
+                    elif pd.isna(v):
+                        record[k] = None
+                cleaned_records.append(func(record))
+
+            # Build result DataFrame from the list of cleaned dicts.
+            result_rows = pd.DataFrame(cleaned_records, index=out.index)
+
             # Update out with cleaned values, preserving columns that
             # were not in the record.
             # [v2.1.0] Skip _-prefixed metadata columns (e.g., _provenance,

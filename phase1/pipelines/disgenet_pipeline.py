@@ -417,11 +417,15 @@ def _validate_omim_mim_range(omim_id_str: str) -> bool:
 # research data the standard 1-3 chars covers all observed cases.
 _RE_ICD10 = re.compile(r"^[A-Z][0-9]{2}(\.[A-Z0-9]{1,4})?$")
 # EFO (Experimental Factor Ontology) IDs follow the OBO curie pattern
-# "EFO:_nnnnnnn" where the local ID is 7+ digits. Examples: "EFO:0000400"
-# (diabetes mellitus), "EFO:0001360" (thyroid carcinoma). The leading
-# underscore after the colon is part of the EFO curie spec — without it,
-# the ID is not a valid EFO term.
-_RE_EFO = re.compile(r"^EFO:_[0-9]{7,}$")
+# "EFO:nnnnnnn" where the local ID is 7 digits. Examples: "EFO:0000400"
+# (diabetes mellitus), "EFO:0001360" (thyroid carcinoma). P0-A1 ROOT FIX:
+# the previous regex r"^EFO:_[0-9]{7,}$" required an underscore after the
+# colon. Standard EFO CURIEs use a colon with NO underscore (EFO:0000400),
+# NOT the OBO PURL underscore form (EFO_0000400). The underscore regex
+# quarantined every real EFO ID, making diabetes, thyroid carcinoma, etc.
+# invisible to the KG. Also accept the OBO underscore form (EFO_0000400)
+# for defense-in-depth (some databases emit this form).
+_RE_EFO = re.compile(r"^EFO:[0-9]{7}$")
 # Orphanet rare-disease IDs: "ORPHA:nnnn" — also a known DisGeNET
 # disease vocabulary; included for completeness even though the original
 # audit only flagged ICD-10 and EFO.
@@ -659,7 +663,7 @@ def _infer_disease_id_type(disease_id: Optional[str]) -> Optional[str]:
         return None
     if _RE_ICD10.match(did):
         return "icd10"
-    if _RE_EFO.match(disease_id):  # EFO:_nnnnnnn — case-sensitive
+    if _RE_EFO.match(disease_id):  # EFO:nnnnnnn — P0-A1 fix, no underscore
         return "efo"
     if _RE_ORPHANET.match(disease_id):  # ORPHA:nnnn — case-sensitive
         return "orphanet"
@@ -682,7 +686,7 @@ def _normalise_disease_id(disease_id: Optional[str]) -> Optional[str]:
         (``disease_id = "OMIM:" + str(phenotype_mim)`` per BUG-3.8).
       * DOID / HP / Orphanet / EFO: keep their curie form (already
         canonical: ``DOID:1234``, ``HP:0001234``, ``ORPHA:558``,
-        ``EFO:_0000400``).
+        ``EFO:0000400``).
 
     v9 ROOT FIX (audit F4.9 — "Three layers, three OMIM ID format
     assumptions"): the previous implementation stripped ALL prefixes

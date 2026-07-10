@@ -575,6 +575,10 @@ class DedupStrategy(str, enum.Enum):
     LOWEST_ACTIVITY = "lowest_activity"
     HIGHEST_ACTIVITY = "highest_activity"
     MERGE_FIELDS = "merge_fields"
+    # P1-D8: "auto_activity_direction" was used as a strategy_name value
+    # in dedup_interactions but was not a valid enum member, causing
+    # AttributeError when code tried to look it up. Added as a member.
+    AUTO_ACTIVITY_DIRECTION = "auto_activity_direction"
 
 
 class ActivityDirection(str, enum.Enum):
@@ -2180,11 +2184,17 @@ def dedup_by_inchikey(
     # had null InChIKeys".
     _pre_filter_row_count = int(len(working))
 
-    # Auto-strip whitespace
+    # Auto-strip whitespace and uppercase InChIKeys
+    # v67 ROOT FIX (P1-D3): auto_standardize previously only stripped
+    # whitespace, but did NOT uppercase.  Lowercase InChIKeys (e.g. from
+    # case-insensitive DB exports) were treated as invalid by downstream
+    # validation (which expects uppercase A-Z).  The fix applies both
+    # .strip() and .upper() so that "bfmqwlpfpkvtpl-uhfffaoysa-n" is
+    # normalized to the canonical "BFMQWLPFPKVTPL-UHFFFAOYSA-N".
     if auto_standardize:
         try:
             working["inchikey"] = working["inchikey"].apply(
-                lambda x: x.strip() if isinstance(x, str) else x
+                lambda x: x.strip().upper() if isinstance(x, str) else x
             )
         except Exception:
             pass
@@ -2274,12 +2284,38 @@ def dedup_by_inchikey(
                     non_null_valid.str.match(_INCHIKEY_PATTERN)
                 ]
                 if len(standard_keys) > 0:
-                    prefixes = standard_keys.str.slice(stop=25)
-                    version_chars = standard_keys.str.slice(start=26)
-                    grouped = pd.DataFrame({
-                        "prefix": prefixes,
-                        "version": version_chars,
-                    }).groupby("prefix")["version"].nunique()
+                    # v67 ROOT FIX (P1-D12): replaced position-based slicing
+                    # (stop=25, start=26) with hyphen-aware extraction. The
+                    # previous code assumed hyphens at fixed positions 14 and
+                    # 25, but if a key is missing hyphens (e.g. a 25-char
+                    # key like "BFMQWLPFPKVTPLUHFFFAOYSAN" that slipped
+                    # through a loosened regex), position 25 is NOT a hyphen
+                    # and position 26 is NOT the version char — off-by-one.
+                    # The fix: split on hyphens so the prefix is the first
+                    # two blocks joined (connectivity + fingerprint, no
+                    # version) and the version char is the last block.
+                    # For standard 27-char keys this produces identical
+                    # results; for edge cases it degrades gracefully.
+                    _split = standard_keys.str.split("-")
+                    # Validate that we got exactly 3 parts (14+10+1).
+                    # If not, the key is malformed — skip it.
+                    _valid_split_mask = _split.apply(
+                        lambda parts: isinstance(parts, list) and len(parts) == 3
+                    )
+                    _valid_keys = standard_keys[_valid_split_mask]
+                    _valid_splits = _split[_valid_split_mask]
+                    if len(_valid_keys) > 0:
+                        prefixes = _valid_splits.apply(
+                            lambda parts: f"{parts[0]}-{parts[1]}"
+                        )
+                        version_chars = _valid_splits.apply(lambda parts: parts[2])
+                        grouped = pd.DataFrame({
+                            "prefix": prefixes,
+                            "version": version_chars,
+                        }).groupby("prefix")["version"].nunique()
+                    else:
+                        # No validly-split keys — skip mismatch detection.
+                        grouped = pd.Series(dtype=int)
                     mismatches = grouped[grouped > 1]
                     if len(mismatches) > 0:
                         _incr_metric(

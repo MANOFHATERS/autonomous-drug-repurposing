@@ -900,6 +900,11 @@ class ResolverStats:
     ingestion_exceptions: int = 0
     organism_mismatches: int = 0
     records_promoted: int = 0
+    # P1-D2: separate stat for UniProt ID exact matches in ProteinResolver.
+    # Previously, resolve_single incremented inchikey_exact_matches for
+    # UniProt exact matches, conflating drug (InChIKey) and protein
+    # (UniProt) metrics.
+    uniprot_exact_matches: int = 0
 
     def __post_init__(self) -> None:
         # Set the lock via object.__setattr__ to bypass any property

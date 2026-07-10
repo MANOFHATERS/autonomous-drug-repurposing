@@ -5073,6 +5073,8 @@ def assert_auc_meets_threshold(
     actual_auc: float,
     threshold: float | None = None,
     enforcement_level: AUCEnforcementLevel | None = None,
+    *,
+    has_test_triples: bool | None = None,
 ) -> bool:
     """Assert that the model AUC meets the required threshold.
 
@@ -5085,6 +5087,14 @@ def assert_auc_meets_threshold(
     enforcement_level : AUCEnforcementLevel, optional
         Override enforcement level. Defaults to checking
         ``STRICT_AUC_ENFORCEMENT``.
+    has_test_triples : bool or None, optional
+        Whether held-out test triples were available for evaluation.
+        When ``target_auc > 0`` and ``has_test_triples is False``, the
+        function MUST refuse to pass — a ``best_val_auc`` fallback is
+        not acceptable because it reflects validation-set performance
+        (potentially overfit), not held-out test-set performance per
+        the DOCX V1 criterion. When ``None`` (default), the previous
+        behavior is preserved for backward compatibility.
 
     Returns
     -------
@@ -5137,6 +5147,32 @@ def assert_auc_meets_threshold(
             )
 
     meets = actual_auc >= threshold
+
+    # v82 ROOT FIX (P0-F7): when target_auc > 0 and no test_triples were
+    # provided, the actual_auc is based on best_val_auc (validation set),
+    # NOT on held-out test-set evaluation. The DOCX V1 criterion is
+    # ">0.85 AUC on held-out drug-disease pairs" — a validation-set AUC
+    # cannot satisfy this criterion because it may reflect overfitting.
+    # When has_test_triples is explicitly False and threshold > 0, the
+    # function MUST return False / raise, regardless of actual_auc.
+    if has_test_triples is False and threshold is not None and threshold > 0:
+        msg = (
+            f"AUC enforcement REFUSED: no test_triples were provided but "
+            f"target_auc={threshold:.4f} > 0. The actual_auc={actual_auc:.4f} "
+            f"is based on validation-set (best_val_auc), not held-out "
+            f"test-set evaluation. The DOCX V1 criterion requires test-set "
+            f"AUC — a validation AUC may reflect overfitting and cannot "
+            f"verify the criterion. Enforcement level: {enforcement_level.value}"
+        )
+        logger.error("AUC enforcement refused (no test triples): %s", msg)
+        if enforcement_level in (
+            AUCEnforcementLevel.STANDARD,
+            AUCEnforcementLevel.CLINICAL,
+            AUCEnforcementLevel.REGULATORY,
+        ):
+            raise AUCBelowThresholdError(msg)
+        # RELAXED mode: return False (does not meet threshold).
+        return False
 
     if not meets:
         msg = (

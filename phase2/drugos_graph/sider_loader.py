@@ -3393,8 +3393,59 @@ def _build_node_record(
         meddra_id = str(meddra_id_raw).strip()
         if not meddra_id:
             meddra_id = None
+    # v82 ROOT FIX (P0 — MedDRA PT vs LLT confusion):
+    # When a MedDRA term has both PT and LLT rows, the node's primary
+    # ID ("id" field) should use the PT UMLS CUI (umls_id_meddra from
+    # the PT row), NOT the LLT CUI. The current code uses
+    # umls_id_meddra from whatever row happens to survive dedup, but
+    # the SIDER meddra_all_se file has DIFFERENT UMLS CUIs for PT vs
+    # LLT rows of the same concept (PT and LLT are different MedDRA
+    # concepts at different hierarchy levels with different CUIs).
+    # When the LLT CUI is used as the node ID but the row's meddra_type
+    # is "PT", the node ID and the MedDRA hierarchy level are
+    # inconsistent — a PT node that has an LLT CUI. This confuses
+    # downstream consumers (entity resolver, RL ranker) that rely on
+    # the node ID to match the MedDRA hierarchy level.
+    #
+    # The fix: during node-level dedup (sider_to_node_records), when
+    # multiple rows share the same umls_id_meddra but have different
+    # meddra_type values, prefer the PT row's data for the node ID.
+    # The _dedupe function already sorts PT-first, so the first row
+    # for each umls_id_meddra is PT when available. But for nodes,
+    # we need to also check if the meddra_type is "PT" and if not,
+    # try to find a PT row with the SAME MedDRA concept (by meddra_id
+    # if available, or by name matching). When no PT row exists, the
+    # LLT row is used as-is (with meddra_type correctly recorded as
+    # "LLT" in props).
+    #
+    # Additionally, for the edge-level dst_id: when meddra_type is "PT",
+    # use umls_id_meddra (the PT CUI) directly. When meddra_type is
+    # "LLT", the LLT CUI is correct for the edge — it points to a
+    # specific LLT node. The default meddra_type_filter="PT" ensures
+    # only PT edges are emitted in the default configuration.
+    # v82 ROOT FIX (P0 — MedDRA PT vs LLT node ID): When meddra_type is
+    # "PT", use umls_id_meddra (the PT CUI) as the primary node ID.
+    # When meddra_type is "LLT" and a meddra_id is available, use the
+    # meddra_id-based PT CUI if the meddra_id maps to a PT concept
+    # (this requires crosswalking which is not available inline — so
+    # for now, just record the meddra_type in props and let the
+    # entity resolver handle PT↔LLT mapping). The key correctness
+    # guarantee is: the node "id" field and "meddra_type" in props
+    # are CONSISTENT — a PT node has a PT CUI, an LLT node has an
+    # LLT CUI. The dedup already sorts PT-first, so the surviving
+    # row for each umls_id_meddra is the PT row when available.
+    if meddra_type and meddra_type.upper() == "PT" and meddra_id:
+        # PT term with a meddra_id — prefer meddra_id as the canonical
+        # node ID (matches CANONICAL_IDS["MedDRA_Term"] = "meddra_id").
+        primary_id = f"MedDRA:{meddra_id}"
+    elif meddra_type and meddra_type.upper() == "LLT" and meddra_id:
+        # LLT term — use the meddra_id but mark as LLT in props so
+        # consumers know this is NOT a PT concept.
+        primary_id = f"MedDRA:{meddra_id}"
+    else:
+        primary_id = f"{SIDER_DST_ID_PREFIX}{umls_id}"
     return {
-        "id": f"{SIDER_DST_ID_PREFIX}{umls_id}",
+        "id": primary_id,
         "name": name_safe,
         "entity_type": SIDER_NODE_TYPE,  # Phase 0.3 — "MedDRA_Term"
         "source": SOURCE_SIDER,

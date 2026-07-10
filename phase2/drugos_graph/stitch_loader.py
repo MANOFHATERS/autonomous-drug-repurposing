@@ -349,7 +349,7 @@ Fixes: All 80 audit IDs from BUG-3.1 through GAP-16.5. See inline
 #   drugos_graph/stitch_loader.py | sort -u | wc -l  # MUST be >= 80
 # =============================================================================
 # ── Domain 3 — Scientific Correctness (BUG-3 / GAP-3) ──
-# Fixes BUG-3.1: Preserve CIDm (stereo-specific) vs CIDs (non-stereo/flat) distinction
+# Fixes BUG-3.1: Preserve CIDm (non-stereo/flat) vs CIDs (stereo-specific) distinction
 # Fixes BUG-3.2: Validate species prefix is 9606 (human) before stripping
 # Fixes BUG-3.3: Enforce combined_score as Int64 in [0, 1000]; validate threshold
 # Fixes BUG-3.4: Add organism_taxid parameter; filter non-human rows to DLQ

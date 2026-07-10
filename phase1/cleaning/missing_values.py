@@ -2203,14 +2203,24 @@ def fill_missing_drug_fields(
             continue
 
         # Idempotency: skip if already filled (IDEM-2).
+        # P1-D9 ROOT FIX: the previous check `bool(out[lineage_col].any())`
+        # was per-COLUMN — if ANY row in the column had been previously
+        # filled, the ENTIRE column was skipped on re-run. This meant that
+        # a partially-filled column (some rows filled, some still null)
+        # would NEVER get its remaining rows filled on a second pass.
+        # ROOT FIX: check per-row. Only skip rows that are already marked
+        # as filled; still fill rows where the value is null AND the
+        # lineage marker is not True.
         lineage_col = f"_{col}_was_filled"
-        if lineage_col in out.columns and bool(out[lineage_col].any()):
-            logger.debug(
-                "fill_missing_drug_fields: column '%s' already has lineage "
-                "marker — skipping (idempotent)",
-                col,
-            )
-            continue
+        if lineage_col in out.columns:
+            _already_filled = out[lineage_col].fillna(False).astype(bool)
+            if _already_filled.all():
+                logger.debug(
+                    "fill_missing_drug_fields: column '%s' already has "
+                    "lineage marker for ALL rows — skipping (idempotent)",
+                    col,
+                )
+                continue
 
         # Record dtype before (INT-3).
         dtype_before = str(out[col].dtype)
@@ -3026,12 +3036,31 @@ def validate_gda_scores(
     # 1+2. Score coercion + clipping (BUG-DESIGN-5, CODE-14, BUG-SCI-5).
     if "score" in out.columns:
         # Idempotency: skip if already clipped (IDEM-4).
-        if "_score_was_clipped" in out.columns and bool(out["_score_was_clipped"].any()):
-            logger.debug(
-                "validate_gda_scores: score already has clip lineage — "
-                "skipping (idempotent)"
+        # P1-D1 ROOT FIX: the previous check `bool(out["_score_was_clipped"].any())`
+        # skipped the ENTIRE score-processing block (coercion + OMIM categorical
+        # mapping + clipping) if ANY row had been previously clipped. This meant
+        # that on re-run, unmapped categorical OMIM rows (score=1,2,3,4) in a
+        # DataFrame that also contained previously-clipped rows were never
+        # mapped — the categorical→continuous mapping was skipped wholesale.
+        # ROOT FIX: check per-row, not per-column. Rows that have already been
+        # clipped or categorically mapped are skipped; rows that haven't are
+        # processed. If ALL rows are already processed, skip the entire block.
+        _skip_score_processing = False
+        if "_score_was_clipped" in out.columns:
+            already_processed = (
+                out["_score_was_clipped"]
+                | out.get(
+                    "_omim_categorical_mapped",
+                    pd.Series(False, index=out.index),
+                )
             )
-        else:
+            if already_processed.all():
+                logger.debug(
+                    "validate_gda_scores: all scores already have clip/mapped "
+                    "lineage — skipping (idempotent)"
+                )
+                _skip_score_processing = True
+        if not _skip_score_processing:
             score_dtype_before = str(out["score"].dtype)
 
             # CODE-14: track non-numeric values BEFORE coercion.

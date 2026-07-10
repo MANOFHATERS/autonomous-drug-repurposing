@@ -2306,8 +2306,16 @@ OMIM_USER_AGENT: str = _getenv(
 # ...) which re-compiles the regex on every call. Compiling once at
 # import time is faster and makes the type stubs correct (re.Pattern
 # instead of str).
+# P1-A3 ROOT FIX: the previous regex used [A-Fa-f0-9] for all hex digits
+# but did NOT validate UUID structure (variant/version bits). A valid
+# UUID v4 has the format xxxxxxxx-xxxx-4xxx-[89ab]xxx-xxxxxxxxxxxx
+# where the third group starts with '4' (version) and the fourth group
+# starts with 8/9/a/b (variant). The regex is updated to validate
+# these structural constraints. Case-insensitive flag added so both
+# uppercase and lowercase hex digits are accepted uniformly.
 OMIM_API_KEY_FORMAT_RE: "re.Pattern[str]" = re.compile(
-    r"^[A-Fa-f0-9]{8}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{12}$"
+    r"^[A-Fa-f0-9]{8}-[A-Fa-f0-9]{4}-4[A-Fa-f0-9]{3}-[89abAB][A-Fa-f0-9]{3}-[A-Fa-f0-9]{12}$",
+    re.IGNORECASE,
 )
 
 # BUG-5.6 / BUG-7.2: maximum age (days) of a cached download before forcing
