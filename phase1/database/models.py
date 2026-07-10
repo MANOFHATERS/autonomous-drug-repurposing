@@ -752,7 +752,14 @@ class Drug(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
             #   validation is enforced by the Python validator
             #   (is_canonical_inchikey) on both dialects. The SYNTH%
             #   escape hatch (dev fixtures) is preserved.
-            "LENGTH(inchikey) = 27 AND SUBSTR(inchikey, 15, 1) = '-' AND SUBSTR(inchikey, 26, 1) = '-' OR inchikey LIKE 'SYNTH%'",
+            # P1-A5 ROOT FIX (v82): the previous CHECK was UNPARENTHESIZED —
+            # ``LENGTH=27 AND ... AND ... OR LIKE 'SYNTH%'``. SQL operator
+            # precedence (AND binds tighter than OR) made it evaluate as
+            # intended, but it was FRAGILE: any refactor adding another AND
+            # condition could silently change the grouping. ROOT FIX: add
+            # EXPLICIT parentheses so the grouping is intentional and
+            # refactor-safe.
+            "(LENGTH(inchikey) = 27 AND SUBSTR(inchikey, 15, 1) = '-' AND SUBSTR(inchikey, 26, 1) = '-') OR inchikey LIKE 'SYNTH%'",
             name="chk_drugs_inchikey_format",
         ),
         # [SCI-02] Clinical phase range
@@ -780,8 +787,15 @@ class Drug(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
             name="chk_drugs_is_fda_approved",
         ),
         # [DQ-04] Name minimum length
+        # P1-A9 ROOT FIX (v82): the previous CHECK ``LENGTH(name) >= 2`` did
+        # NOT TRIM whitespace — so a name like "  A" (2 chars with leading
+        # spaces) passed the DB CHECK but failed the Python validator
+        # (``len(name.strip()) >= 2``). Chinese drug names (multi-byte) also
+        # diverged when SQLite's LENGTH() counted bytes vs Python's len()
+        # counted characters in some encoding edge cases. ROOT FIX: use
+        # ``LENGTH(TRIM(name)) >= 2`` to match the Python validator exactly.
         CheckConstraint(
-            "LENGTH(name) >= 2",
+            "LENGTH(TRIM(name)) >= 2",
             name="chk_drugs_name_min_length",
         ),
         # [DQ-09] Molecular weight must be positive

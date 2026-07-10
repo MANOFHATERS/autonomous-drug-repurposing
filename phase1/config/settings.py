@@ -566,8 +566,26 @@ if _DEFAULT_DB_CREDENTIAL_MARKER in DATABASE_URL:
         # If the opt-in IS set, the cosmic:cosmic URL is accepted with
         # only the existing log messages — no additional action needed
         # (the v34 fix's warning at line 483-500 covers the dev-default
-        # case). We do NOT modify DATABASE_URL here because the operator
-        # explicitly set it to cosmic:cosmic (not a placeholder).
+        # case).
+        #
+        # P1-A14 ROOT FIX (v82): the previous code, when the opt-in was
+        # NOT set, only logged an ERROR but LEFT DATABASE_URL pointing at
+        # cosmic:cosmic — so the connection SUCCEEDED with insecure creds
+        # in dev. This is INCONSISTENT with the REPLACE_USER path (which
+        # leaves a placeholder that fails the connection). An operator
+        # who copied .env.example → .env got cosmic:cosmic, saw no error
+        # at import time (just a log line), and the DB connection worked
+        # — silently using insecure creds. ROOT FIX: when the opt-in is
+        # NOT set, REPLACE DATABASE_URL with a refusal placeholder so the
+        # connection FAILS loudly — matching the REPLACE_USER behavior.
+        # This makes both dev-default-credential paths CONSISTENT:
+        # without opt-in → connection fails; with opt-in → connection
+        # succeeds with insecure creds + loud warning.
+        if not _allow_default_db:
+            DATABASE_URL = (
+                "postgresql://REFUSED:REFUSED@localhost:5432/refused"
+                "?DRUGOS_DEV_ALLOW_DEFAULT_DB=0"
+            )
 
 # Detect Docker and warn about localhost (CONF-2)
 if Path("/.dockerenv").exists() and "localhost" in DATABASE_URL:
@@ -2288,7 +2306,9 @@ OMIM_USER_AGENT: str = _getenv(
 # ...) which re-compiles the regex on every call. Compiling once at
 # import time is faster and makes the type stubs correct (re.Pattern
 # instead of str).
-OMIM_API_KEY_FORMAT_RE: "re.Pattern[str]" = re.compile(r"^[a-f0-9-]{36}$")
+OMIM_API_KEY_FORMAT_RE: "re.Pattern[str]" = re.compile(
+    r"^[A-Fa-f0-9]{8}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{12}$"
+)
 
 # BUG-5.6 / BUG-7.2: maximum age (days) of a cached download before forcing
 # a refresh.

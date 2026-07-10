@@ -134,6 +134,13 @@ _VALID_INTERACTION_TYPES: frozenset[str] = frozenset(
     e.value for e in InteractionType
 )
 _VALID_ACTIVITY_TYPES: frozenset[str] = frozenset(e.value for e in ActivityType)
+# P1-A7 ROOT FIX (v82): case-insensitive lookup mapping for activity types.
+# _VALID_ACTIVITY_TYPES contains CANONICAL mixed-case forms ('IC50', 'Kd',
+# 'Ki'). ChEMBL emits lowercase ('ic50', 'kd', 'ki'). This mapping allows
+# O(1) case-insensitive validation while returning the canonical form.
+_ACTIVITY_TYPE_LOWER_TO_CANONICAL: dict[str, str] = {
+    v.lower(): v for v in _VALID_ACTIVITY_TYPES
+}
 # SCI-FIX: Added 'hpo' (Human Phenotype Ontology) — DisGeNET includes HPO
 # disease IDs per Piñero et al. 2020. The ORM model and migration 004
 # both allow 'hpo', so the loader must accept it too.
@@ -905,12 +912,24 @@ def _validate_interaction_type(value: Any) -> str | None:
 
 
 def _validate_activity_type(value: Any) -> str | None:
-    """Validate activity_type against allowed enum (SCI-12)."""
+    """Validate activity_type against allowed enum (SCI-12).
+
+    P1-A7 ROOT FIX (v82): the previous implementation was case-SENSITIVE
+    (``if value in _VALID_ACTIVITY_TYPES``) while ``_validate_drug_type``
+    and ``_validate_interaction_type`` are case-INSENSITIVE (``value.lower()``).
+    ChEMBL emits activity types as lowercase (``ic50``, ``ec50``, ``ki``,
+    ``kd``) — these were quarantined by the case-sensitive check, silently
+    dropping valid activity measurements. ROOT FIX: build a lowercase→canonical
+    mapping at module load time so the lookup is O(1) AND case-insensitive,
+    and return the CANONICAL form (e.g. ``IC50``) so the DB stores
+    consistent values regardless of the source's casing.
+    """
     if value is None:
         return None
     value = str(value).strip()
-    if value in _VALID_ACTIVITY_TYPES:
-        return value
+    _value_lower = value.lower()
+    if _value_lower in _ACTIVITY_TYPE_LOWER_TO_CANONICAL:
+        return _ACTIVITY_TYPE_LOWER_TO_CANONICAL[_value_lower]
     raise ValueError(
         f"Invalid activity_type: '{value}'. "
         f"Must be one of: {sorted(_VALID_ACTIVITY_TYPES)}"
@@ -1479,21 +1498,25 @@ def _pre_validate_gda(
             # and ended up in the in-process dead-letter queue that is
             # lost on restart. Now we quarantine IMMEDIATELY — no DB
             # round-trip, no mutation to empty string.
+            #
+            # P1-A10 ROOT FIX (v82): the v9 fix wrapped _validate_gene_symbol
+            # in an inner try/except that caught ValueError and re-raised —
+            # dead code that added no logic but obscured the flow. The inner
+            # except was a no-op (catch + re-raise = pass-through). ROOT FIX:
+            # remove the dead inner try/except entirely. The ValueError from
+            # _validate_gene_symbol propagates directly to the outer except
+            # at the bottom of the loop, which quarantines the record in ONE
+            # place. No mutation, no wasted DB call, no dead code.
             gs = record.get("gene_symbol")
             if gs is not None and str(gs).strip() and str(gs).strip() != "":
-                try:
-                    validated_gs = _validate_gene_symbol(gs)
-                    if validated_gs is not None:
-                        record["gene_symbol"] = validated_gs
-                    else:
-                        raise ValueError(
-                            f"gene_symbol '{gs}' failed HGNC validation — "
-                            f"quarantining before DB round-trip"
-                        )
-                except ValueError:
-                    # Re-raise so the outer except quarantines the record
-                    # in ONE place — no mutation, no wasted DB call.
-                    raise
+                validated_gs = _validate_gene_symbol(gs)
+                if validated_gs is not None:
+                    record["gene_symbol"] = validated_gs
+                else:
+                    raise ValueError(
+                        f"gene_symbol '{gs}' failed HGNC validation — "
+                        f"quarantining before DB round-trip"
+                    )
 
             # SCI-09: disease_id_type validation
             if "disease_id_type" in record and record["disease_id_type"] is not None:
@@ -1842,7 +1865,22 @@ def bulk_upsert_drugs(
                 # loaded drugs that have name but not groups)
                 if not _is_withdrawn and _name:
                     for _wd_name in _WITHDRAWN_DRUG_NAMES_LOWER:
-                        if _name == _wd_name or _name.startswith(_wd_name + " "):
+                        # P1-A6 ROOT FIX (v82): the previous code used only
+                        # ``startswith(_wd_name + " ")`` (space separator).
+                        # This missed salt forms joined by hyphen
+                        # ("rofecoxib-sodium") or underscore
+                        # ("troglitazone_HCl") — leaving withdrawn drugs
+                        # classified as NOT withdrawn → patient-safety hook
+                        # incomplete for salt forms. ROOT FIX: match space,
+                        # hyphen, AND underscore separators (the three
+                        # delimiters used in ChEMBL / PubChem / DrugBank
+                        # salt-form naming conventions).
+                        if (
+                            _name == _wd_name
+                            or _name.startswith(_wd_name + " ")
+                            or _name.startswith(_wd_name + "-")
+                            or _name.startswith(_wd_name + "_")
+                        ):
                             _is_withdrawn = True
                             break
                 if _is_withdrawn:
@@ -3550,18 +3588,29 @@ def bulk_update_drugs_from_pubchem(
     df: pd.DataFrame,
     batch_size: int = DEFAULT_BATCH_SIZE,
 ) -> int:
-    """Update drugs with PubChem data where pubchem_cid is currently NULL.
+    """Update drugs with PubChem data, refreshing ALL matching drugs.
+
+    P1-A12 ROOT FIX (v82): the previous implementation had
+    ``WHERE inchikey = :inchikey AND pubchem_cid IS NULL`` — skipping
+    CID refreshes for drugs that ALREADY had a CID. This meant
+    molecular_formula / molecular_weight / smiles were never updated
+    for drugs loaded from DrugBank (which sets pubchem_cid at insert
+    time). ROOT FIX: remove the ``AND pubchem_cid IS NULL`` condition.
+    The SET clause uses COALESCE for ALL columns including pubchem_cid,
+    so existing non-NULL values are preserved when the new value is NULL,
+    and updated when the new value is non-NULL. This is the scientifically-
+    correct behavior — PubChem property refreshes should apply to ALL
+    drugs, not just those without a CID.
 
     For each row in *df*, executes::
 
         UPDATE drugs
-        SET pubchem_cid       = :pubchem_cid,
-            molecular_formula = COALESCE(:molecular_formula, ...),
-            molecular_weight  = COALESCE(:molecular_weight, ...),
-            smiles            = COALESCE(:smiles, ...),
+        SET pubchem_cid       = COALESCE(:pubchem_cid, drugs.pubchem_cid),
+            molecular_formula = COALESCE(:molecular_formula, drugs.molecular_formula),
+            molecular_weight  = COALESCE(:molecular_weight, drugs.molecular_weight),
+            smiles            = COALESCE(:smiles, drugs.smiles),
             updated_at        = :updated_at
-        WHERE inchikey = :inchikey
-          AND pubchem_cid IS NULL;
+        WHERE inchikey = :inchikey;
 
     Returns the number of rows actually updated.
 
@@ -3585,13 +3634,12 @@ def bulk_update_drugs_from_pubchem(
     update_sql = text(
         """
         UPDATE drugs
-        SET pubchem_cid       = :pubchem_cid,
+        SET pubchem_cid       = COALESCE(:pubchem_cid, drugs.pubchem_cid),
             molecular_formula = COALESCE(:molecular_formula, drugs.molecular_formula),
             molecular_weight  = COALESCE(:molecular_weight, drugs.molecular_weight),
             smiles            = COALESCE(:smiles, drugs.smiles),
             updated_at        = :updated_at
         WHERE inchikey = :inchikey
-          AND pubchem_cid IS NULL
     """
     )
 

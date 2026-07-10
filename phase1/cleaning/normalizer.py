@@ -774,9 +774,15 @@ _SYNTHETIC_INCHIKEY_STRICT_PATTERN: re.Pattern[str] = re.compile(
 )
 
 # [SCI-15] Mixture InChIKey pattern — multiple components joined by "-".
-_MIXTURE_INCHIKEY_PATTERN: re.Pattern[str] = re.compile(
-    r"^(?:[A-Z]{14}-[A-Z]{10}-[A-Z])(?:-[A-Z]{14}-[A-Z]{10}-[A-Z])*$"
-)
+# P1-A1 ROOT FIX (v82): the previous LOCAL regex used ``*`` (zero-or-more)
+# for the second component, which matches ZERO repetitions — so a single
+# 27-char standard InChIKey also matched. The canonical regex in
+# ``_constants.py`` (v43 ROOT FIX) uses ``+`` (one-or-more) requiring at
+# least 2 components. Divergent "mixture InChIKey" definitions caused
+# dedup_groups to classify single-component keys as mixtures in some
+# code paths but not others. ROOT FIX: import the canonical regex as the
+# SINGLE source of truth — no module should define its own mixture pattern.
+_MIXTURE_INCHIKEY_PATTERN: re.Pattern[str] = CANONICAL_MIXTURE_INCHIKEY_REGEX
 
 
 # ===========================================================================

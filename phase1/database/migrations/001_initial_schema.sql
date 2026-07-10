@@ -335,8 +335,12 @@ CREATE TABLE IF NOT EXISTS drugs (
     CONSTRAINT chk_drugs_is_fda_approved
         CHECK (is_fda_approved IN (0, 1)),
     -- [DQ-04] Drug name minimum 2 characters (a single letter is not a name)
+    -- P1-A9 ROOT FIX (v82): use LENGTH(TRIM(name)) to match the Python
+    -- validator (len(name.strip()) >= 2). The previous LENGTH(name) >= 2
+    -- did not TRIM whitespace — "  A" (2 chars) passed the DB CHECK but
+    -- failed the Python validator, causing silent divergent behavior.
     CONSTRAINT chk_drugs_name_min_length
-        CHECK (LENGTH(name) >= 2),
+        CHECK (LENGTH(TRIM(name)) >= 2),
     -- [SCI-04] Molecular weight must be positive (negative mass is unphysical)
     CONSTRAINT chk_drugs_molecular_weight_positive
         CHECK (molecular_weight IS NULL OR molecular_weight > 0),

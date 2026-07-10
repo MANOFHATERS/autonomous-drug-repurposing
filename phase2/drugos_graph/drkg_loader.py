@@ -3119,6 +3119,20 @@ class DRKGLoader:
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         """Convert records into ``(nodes, edges)`` for the KG.
 
+        P0-G4 ROOT FIX (v82): the previous implementation emitted nodes
+        with shape ``{"entity_type": ..., "entity_id": ..., "index": ...}``
+        — a triple-store shape with NO ``"id"`` key. But
+        ``kg_builder.load_nodes_batch`` validates ``row.get("id")`` and
+        dead-letters any row missing it. The previous shape had NO
+        ``"id"`` key → every single DRKG node was silently dead-lettered
+        → DRKG (1.5M+ biomedical triples) NEVER entered the KG.
+        ROOT FIX: emit flat dicts with ``id``, ``name``, ``source`` at
+        top level (matching ``load_nodes_batch``'s contract), plus
+        ``entity_type`` so callers can group by label before calling
+        ``load_nodes_batch(entity_type, nodes)``. ``entity_type`` and
+        ``index`` are NOT in any NODE_PROPERTY_WHITELIST so
+        ``_whitelist_filter`` drops them cleanly.
+
         Args:
             records: Iterable of DRKG record dicts (e.g. output of
                 ``parse``). A DataFrame is also accepted (converted
@@ -3126,9 +3140,11 @@ class DRKGLoader:
 
         Returns:
             Tuple ``(nodes, edges)`` where ``nodes`` is a list of
-            ``{entity_type, entity_id, index}`` dicts and ``edges`` is a
-            list of ``{src_type, rel_type, dst_type, src_id, dst_id,
-            src_idx, dst_idx}`` dicts.
+            flat ``{id, name, source, entity_type, index}`` dicts
+            (P0-G4 fix — previously ``{entity_type, entity_id, index}``
+            which was silently dead-lettered by load_nodes_batch) and
+            ``edges`` is a list of ``{src_type, rel_type, dst_type,
+            src_id, dst_id, src_idx, dst_idx}`` dicts.
         """
         if isinstance(records, pd.DataFrame):
             df = records
@@ -3146,9 +3162,15 @@ class DRKGLoader:
         idx_to_id: dict[tuple[str, int], str] = {}
         for etype, id_map in entity_maps.items():
             for eid, idx in id_map.items():
+                # P0-G4 ROOT FIX: flat dict with "id" at top level.
+                # Previously emitted {"entity_type", "entity_id", "index"}
+                # which has NO "id" key → load_nodes_batch dead-lettered
+                # every row → DRKG never entered the KG.
                 nodes.append({
+                    "id": eid,
+                    "name": eid,
+                    "source": "DRKG",
                     "entity_type": etype,
-                    "entity_id": eid,
                     "index": idx,
                 })
                 idx_to_id[(etype, idx)] = eid
