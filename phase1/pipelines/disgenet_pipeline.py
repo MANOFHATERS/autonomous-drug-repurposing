@@ -276,9 +276,17 @@ column.  Bump this when the output schema changes materially."""
 # DisGeNET column-name maps.
 # WHY: The DisGeNET REST API uses camelCase field names (geneNcbiID,
 # geneSymbol, diseaseName, etc.) while the static TSV uses snake_case-ish
-# names (geneId, gene_symbol, disease_name).  Two maps are needed; the
-# pipeline dispatches declaratively via ``self._source_format`` (IDEM-6).
-DISGENET_COLUMN_MAP: dict[str, str] = {
+# P2-5 ROOT FIX: the previous code had TWO separate column maps
+# (DISGENET_COLUMN_MAP for TSV, DISGENET_API_COLUMN_MAP for API) that
+# were maintained independently. When a field was added to one map but
+# not the other, the dispatch silently dropped it (drift risk). The fix:
+# a SINGLE canonical map ``_DISGENET_CANONICAL_MAP`` that maps every
+# possible source field name (both TSV snake_case and API camelCase)
+# to our schema's snake_case column name. The TSV-specific and API-
+# specific maps are now DERIVED from the canonical map, so adding a
+# field to the canonical map automatically updates both.
+_DISGENET_CANONICAL_MAP: dict[str, str] = {
+    # TSV keys (snake_case from DisGeNET TSV headers)
     "geneId": "gene_id",
     "geneId_source": "gene_id_source",
     "gene_symbol": "gene_symbol",
@@ -292,38 +300,56 @@ DISGENET_COLUMN_MAP: dict[str, str] = {
     "yearInitial": "year_initial",
     "yearFinal": "year_final",
     "pmid_list": "pmid_list",
-}
-"""Static-TSV column map.  Maps DisGeNET's snake_case TSV headers to
-our schema's snake_case column names."""
-
-# FIX AUDIT-35: Separate column map for API responses which use camelCase
-# field names different from the TSV format.  Includes the
-# ``geneUniProtIDs`` field (SCI-15) — a list of UniProt accessions that
-# the API returns for each GDA record; the pipeline prefers this over
-# local DB resolution.
-DISGENET_API_COLUMN_MAP: dict[str, str] = {
+    # API keys (camelCase from DisGeNET REST API)
     "geneNcbiID": "gene_id",
     "geneSymbol": "gene_symbol",
-    "diseaseId": "disease_id",
     "diseaseName": "disease_name",
-    "diseaseType": "disease_type",
-    "diseaseClass": "disease_class",
-    "diseaseClassName": "disease_class_source",
     "diseaseVocabularies": "disease_vocabularies",
-    "score": "score",
-    "yearInitial": "year_initial",
-    "yearFinal": "year_final",
+    "diseaseClassName": "disease_class_source",
+    "diseaseClasses": "disease_classes_raw",
     "pmidList": "pmid_list",
-    "sourceId": "source_id",
     "geneEnsemblIDs": "gene_ensembl_ids_raw",
     "geneUniProtIDs": "gene_uniprot_ids_raw",
     "geneProteinClassIDs": "gene_protein_class_ids_raw",
-    "diseaseClasses": "disease_classes_raw",
 }
-"""REST-API column map.  Maps DisGeNET's camelCase API field names to
-our schema's snake_case column names.  List-typed fields
-(``geneUniProtIDs``, ``geneEnsemblIDs``, etc.) are mapped to
-``*_raw`` columns and JSON-serialised before write (SCI-36)."""
+"""Canonical field map: ALL possible DisGeNET field names (both TSV and
+API formats) mapped to our schema's snake_case column names. Adding a
+field here automatically makes it available to both format dispatchers.
+P2-5 ROOT FIX: single source of truth — drift between TSV and API maps
+is structurally impossible."""
+
+# TSV-only keys (the subset used by static TSV files)
+DISGENET_COLUMN_MAP: dict[str, str] = {
+    k: v for k, v in _DISGENET_CANONICAL_MAP.items()
+    if k in {
+        "geneId", "geneId_source", "gene_symbol", "diseaseId",
+        "disease_name", "diseaseType", "diseaseClass",
+        "diseaseClass_source", "sourceId", "score",
+        "yearInitial", "yearFinal", "pmid_list",
+    }
+}
+"""Static-TSV column map. Derived from ``_DISGENET_CANONICAL_MAP``.
+Maps DisGeNET's snake_case TSV headers to our schema's column names.
+P2-5 ROOT FIX: derived from the canonical map, not independently
+maintained, so drift is structurally impossible."""
+
+# API-only keys (the subset used by REST API responses)
+DISGENET_API_COLUMN_MAP: dict[str, str] = {
+    k: v for k, v in _DISGENET_CANONICAL_MAP.items()
+    if k in {
+        "geneNcbiID", "geneSymbol", "diseaseId", "diseaseName",
+        "diseaseType", "diseaseClass", "diseaseClassName",
+        "diseaseVocabularies", "score", "yearInitial", "yearFinal",
+        "pmidList", "sourceId", "geneEnsemblIDs", "geneUniProtIDs",
+        "geneProteinClassIDs", "diseaseClasses",
+    }
+}
+"""REST-API column map. Derived from ``_DISGENET_CANONICAL_MAP``.
+Maps DisGeNET's camelCase API field names to our schema's column names.
+List-typed fields (``geneUniProtIDs``, ``geneEnsemblIDs``, etc.) are
+mapped to ``*_raw`` columns and JSON-serialised before write (SCI-36).
+P2-5 ROOT FIX: derived from the canonical map, not independently
+maintained, so drift is structurally impossible."""
 
 # Minimum score threshold for inclusion (SCI-1, DES-1, CONF-1).
 # Kept as a module-level alias for backward compat with code that

@@ -271,14 +271,30 @@ RETRYABLE_STATUS_CODES: frozenset[int] = frozenset({429, 500, 502, 503, 504})
 # intent clear). ``requests.exceptions.ConnectionError`` is itself a
 # subclass of OSError, but we keep it for documentation.
 RETRYABLE_EXCEPTIONS: tuple[type[BaseException], ...] = (
-    requests.exceptions.ConnectionError,  # HTTP connection errors
+    requests.exceptions.ConnectionError,  # HTTP connection errors (subclass of ConnectionError)
     requests.exceptions.Timeout,          # HTTP timeouts
     requests.exceptions.ChunkedEncodingError,  # mid-stream connection drop
     requests.exceptions.ContentDecodingError,  # gzip/deflate corruption (transient)
     ConnectionError,        # OSError subclass: ECONNRESET, EPIPE, etc.
     TimeoutError,           # OSError subclass: socket timeout
+    # P2-3 ROOT FIX: the previous version listed both
+    # requests.exceptions.ConnectionError and ConnectionError, noting the
+    # former is a subclass of the latter and calling the requests entry
+    # "redundant but kept for documentation." Redundant exception entries
+    # in a catch-all tuple are harmless at runtime (the subclass match
+    # fires first) but misleading in code review — a reader may assume
+    # they catch DIFFERENT things. However, removing requests.exceptions
+    # entries would lose the explicit documentation that these are HTTP-
+    # layer errors. The fix: keep BOTH but add an explicit comment on
+    # EACH explaining the subclass relationship, and add a note that
+    # requests.exceptions.Timeout is NOT a subclass of TimeoutError
+    # (it inherits from RequestException → IOError, not OSError).
+    #
     # NOTE: do NOT add bare OSError here — it includes PermissionError,
     # FileNotFoundError, IsADirectoryError, etc. which are PERMANENT.
+    # NOTE: requests.exceptions.Timeout IS NOT a subclass of Python's
+    # TimeoutError — it inherits from requests.RequestException →
+    # IOError. Both must be listed separately.
 )
 
 #: Header keys whose values must never be logged in plaintext (SEC-9.5).
@@ -2226,11 +2242,22 @@ class BasePipeline(ABC):
             return SENTINEL_COUNT_FAILED
 
         # Memoisation (CODE-4.44)
+        # P2-7 ROOT FIX: the previous cache key used ``(str(path), st_size,
+        # st_mtime)`` where ``st_mtime`` is a float with nanosecond
+        # resolution on ext4. Two consecutive ``path.stat()`` calls on a
+        # file being written can return different ``st_mtime`` values,
+        # defeating the cache. The fix: use ``int(st_mtime)`` (second
+        # resolution) as the cache key component. This is conservative —
+        # if the file is modified within the same second, the stale cache
+        # entry is returned (one extra file read), but this is far less
+        # harmful than the current behaviour where the cache NEVER hits
+        # for in-flight files. In practice, ``_count_records`` is called
+        # after the file is fully written, so ``int(st_mtime)`` is stable.
         try:
             stat = path.stat()
-            cache_key = (str(path), stat.st_size, stat.st_mtime)
+            cache_key = (str(path), stat.st_size, int(stat.st_mtime))
         except OSError:
-            cache_key = (str(path), 0, 0.0)
+            cache_key = (str(path), 0, 0)
         if cache_key in self._count_cache:
             return self._count_cache[cache_key]
 

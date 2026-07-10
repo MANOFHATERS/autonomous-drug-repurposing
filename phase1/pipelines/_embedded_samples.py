@@ -531,6 +531,24 @@ def embedded_omim_gda() -> pd.DataFrame:
     ])
 
 
+def embedded_omim_susceptibility() -> pd.DataFrame:
+    """P2-10 ROOT FIX: OMIM gene-disease susceptibility associations.
+
+    The previous code mapped ``omim_susceptibility`` to the SAME function
+    as ``omim_gda`` (``embedded_omim_gda``), producing byte-identical CSV
+    files. The susceptibility file should be a SUBSET — only rows where
+    ``is_susceptibility=True``. This filter produces the 4 susceptibility
+    rows (PTGS2/Colorectal cancer, ADORA2A/Vascular disorders,
+    HMGCR/Hypercholesterolemia, ACE/Myocardial infarction) while the GDA
+    file contains all 6 rows (including the 2 causal associations).
+    This is biologically correct: susceptibility associations are a
+    distinct category from causal associations in OMIM's nosology.
+    """
+    gda = embedded_omim_gda()
+    susc = gda[gda["is_susceptibility"] == True].copy()  # noqa: E712
+    return susc
+
+
 def embedded_disgenet_gda() -> pd.DataFrame:
     """DisGeNET gene-disease associations (curated subset for sample genes)."""
     return pd.DataFrame([
@@ -644,7 +662,12 @@ def write_all_samples(processed_dir) -> dict:
         "interactions": (embedded_drugbank_interactions, "drugbank_interactions.csv.gz"),
         "indications": (embedded_drugbank_indications, "drugbank_indications.csv"),
         "omim_gda": (embedded_omim_gda, "omim_gene_disease_associations.csv"),
-        "omim_susceptibility": (embedded_omim_gda, "omim_gene_disease_susceptibility.csv"),
+        # P2-10 ROOT FIX: the previous code mapped both "omim_gda" and
+        # "omim_susceptibility" to the SAME function (embedded_omim_gda),
+        # producing byte-identical CSV files. The susceptibility file is
+        # now a proper SUBSET (is_susceptibility=True only) via the new
+        # embedded_omim_susceptibility() function.
+        "omim_susceptibility": (embedded_omim_susceptibility, "omim_gene_disease_susceptibility.csv"),
         "disgenet_gda": (embedded_disgenet_gda, "gene_disease_associations.csv"),
         "pubchem_enrichment": (embedded_pubchem_enrichment, "pubchem_enrichment.csv"),
     }
