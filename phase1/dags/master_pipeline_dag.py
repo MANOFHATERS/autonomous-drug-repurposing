@@ -92,11 +92,35 @@ logger = logging.getLogger(__name__)
 TASK_SLA = timedelta(hours=7)
 TASK_TIMEOUT = timedelta(hours=7)
 
+# v83 DAG-2 ROOT FIX: apply the SAME retry policy used by all 7 standalone
+# DAGs (dags/_retry_policy.py::DEFAULT_RETRY_ARGS). The previous DEFAULT_ARGS
+# used ``retries=2, retry_delay=30min`` with NO ``retry_exponential_backoff``
+# and NO ``max_retry_delay``. A 4xx error in the master DAG wasted 60 min
+# (2 × 30min) per task; the standalone DAGs fail-fast in seconds via
+# ``@fail_fast_on_http_4xx`` + ``retry_exponential_backoff=True``. The master
+# DAG is the SUNDAY run — the longest, most data-intensive run of the week —
+# so a 60-min wait per task is the worst possible time to waste.
+#
+# ROOT FIX (DAG-2):
+#   1. Spread ``DEFAULT_RETRY_ARGS`` (5min base delay, exponential backoff,
+#      20min cap) so transient 5xx/network errors recover in ~10s on the
+#      first retry, and the master DAG's retry behavior matches the 7
+#      standalone DAGs exactly.
+#   2. Apply ``@fail_fast_on_http_4xx`` to EVERY @task below so 4xx errors
+#      (401/403/404/400/410/451) immediately raise ``AirflowFailException``
+#      and skip retries — matching the standalone DAGs' fail-fast behavior.
+#      Without this, a 401 (expired DISGENET/OMIM API key) on the master
+#      DAG wastes 60 min (was 30min × 2 retries) before failing RED,
+#      while the same error on the standalone DAG fails in <1 second.
+#   3. Preserve the v75 ROOT FIX (T-024): SLA == execution_timeout == 7h
+#      (aligned, no false-positive advisory).
+#   4. Preserve ``retries=2`` (from DEFAULT_RETRY_ARGS) — same as standalone.
+from dags._retry_policy import DEFAULT_RETRY_ARGS, fail_fast_on_http_4xx
+
 DEFAULT_ARGS = {
+    **DEFAULT_RETRY_ARGS,
     "owner": "drug_repurposing",
     "depends_on_past": False,
-    "retries": 2,
-    "retry_delay": timedelta(minutes=30),
     # v75 ROOT FIX (T-024): ``sla`` is ADVISORY — an Airflow SLA miss
     # writes a row to the sla_miss table and (optionally) sends an email,
     # but it does NOT kill the running task. The task continues until
@@ -105,6 +129,10 @@ DEFAULT_ARGS = {
     # not get a 4h false-positive SLA miss that trains them to ignore
     # the alarm, and a stuck Phase 2 training run is hard-killed at 7h
     # (the documented upper bound of normal TransE training time).
+    # v83 DAG-2: ``sla`` and ``execution_timeout`` come from
+    # DEFAULT_RETRY_ARGS (4h) but the master DAG overrides them to 7h
+    # because trigger_phase2's TransE training can take 6-7h. This
+    # override is deliberate and documented.
     "sla": TASK_SLA,
     "execution_timeout": TASK_TIMEOUT,
     "email_on_failure": False,
@@ -169,6 +197,9 @@ def _check_drugbank_xml(**context) -> str:
 # ---------------------------------------------------------------------------
 
 @task()  # v41: retries+timeout inherited from DEFAULT_ARGS
+# v83 DAG-2 ROOT FIX: @fail_fast_on_http_4xx converts 4xx to
+# AirflowFailException (non-retryable) — matches standalone DAGs.
+@fail_fast_on_http_4xx
 def download_chembl() -> None:
     """Run the ChEMBL pipeline: approved drugs + bioactivity data (download+clean only)."""
     from pipelines.chembl_pipeline import ChEMBLPipeline
@@ -177,6 +208,7 @@ def download_chembl() -> None:
 
 
 @task()  # v41: retries+timeout inherited from DEFAULT_ARGS
+@fail_fast_on_http_4xx  # v83 DAG-2
 def download_drugbank() -> None:
     """Run the DrugBank pipeline: parse XML for drug + target data (download+clean only)."""
     from pipelines.drugbank_pipeline import DrugBankPipeline
@@ -185,6 +217,7 @@ def download_drugbank() -> None:
 
 
 @task()  # v41: retries+timeout inherited from DEFAULT_ARGS
+@fail_fast_on_http_4xx  # v83 DAG-2
 def download_uniprot() -> None:
     """Run the UniProt pipeline: human reviewed proteins via REST API (download+clean only)."""
     from pipelines.uniprot_pipeline import UniProtPipeline
@@ -193,6 +226,7 @@ def download_uniprot() -> None:
 
 
 @task()  # v41: retries+timeout inherited from DEFAULT_ARGS
+@fail_fast_on_http_4xx  # v83 DAG-2
 def download_string() -> None:
     """Run the STRING pipeline: download+clean only (load after entity resolution)."""
     from pipelines.string_pipeline import StringPipeline
@@ -200,6 +234,7 @@ def download_string() -> None:
 
 
 @task()  # v41: retries+timeout inherited from DEFAULT_ARGS
+@fail_fast_on_http_4xx  # v83 DAG-2
 def download_disgenet() -> None:
     """Run the DisGeNET pipeline: download+clean only (load after entity resolution)."""
     from pipelines.disgenet_pipeline import DisGeNETPipeline
@@ -207,6 +242,7 @@ def download_disgenet() -> None:
 
 
 @task()  # v41: retries+timeout inherited from DEFAULT_ARGS
+@fail_fast_on_http_4xx  # v83 DAG-2
 def download_omim() -> None:
     """Run the OMIM pipeline: download+clean only (load after entity resolution)."""
     from pipelines.omim_pipeline import OMIMPipeline
@@ -214,6 +250,7 @@ def download_omim() -> None:
 
 
 @task()  # v41: retries+timeout inherited from DEFAULT_ARGS
+@fail_fast_on_http_4xx  # v83 DAG-2
 def download_pubchem() -> None:
     """Run the PubChem pipeline: download+clean only (load after entity resolution).
 
@@ -234,6 +271,7 @@ def download_pubchem() -> None:
 
 
 @task()  # v41: retries+timeout inherited from DEFAULT_ARGS
+@fail_fast_on_http_4xx  # v83 DAG-2
 def entity_resolution() -> None:
     """Run cross-database entity resolution.
 
@@ -268,6 +306,7 @@ def entity_resolution() -> None:
 
 
 @task()  # v41: retries+timeout inherited from DEFAULT_ARGS
+@fail_fast_on_http_4xx  # v83 DAG-2
 def load_string() -> None:
     """FIX AUDIT-26: Use run_load_only() — data already downloaded and cleaned."""
     from pipelines.string_pipeline import StringPipeline
@@ -275,6 +314,7 @@ def load_string() -> None:
 
 
 @task()  # v41: retries+timeout inherited from DEFAULT_ARGS
+@fail_fast_on_http_4xx  # v83 DAG-2
 def load_disgenet() -> None:
     """FIX AUDIT-26: Use run_load_only() — data already downloaded and cleaned."""
     from pipelines.disgenet_pipeline import DisGeNETPipeline
@@ -282,6 +322,7 @@ def load_disgenet() -> None:
 
 
 @task()  # v41: retries+timeout inherited from DEFAULT_ARGS
+@fail_fast_on_http_4xx  # v83 DAG-2
 def load_omim() -> None:
     """FIX AUDIT-27: Use run_load_only() — data already downloaded and cleaned."""
     from pipelines.omim_pipeline import OMIMPipeline
@@ -289,6 +330,7 @@ def load_omim() -> None:
 
 
 @task()  # v41: retries+timeout inherited from DEFAULT_ARGS
+@fail_fast_on_http_4xx  # v83 DAG-2
 def load_pubchem_enrichment() -> None:
     """FIX AUDIT-27: PubChem data already downloaded."""
     from pipelines.pubchem_pipeline import PubChemPipeline
@@ -315,6 +357,7 @@ def load_pubchem_enrichment() -> None:
 #   so entity resolution can influence what gets loaded (the v40
 #   two-phase design: download → resolve → load).
 @task()  # v41: retries+timeout inherited from DEFAULT_ARGS
+@fail_fast_on_http_4xx  # v83 DAG-2
 def load_chembl() -> None:
     """v79 P0-B2 ROOT FIX: Load ChEMBL cleaned data into the staging DB.
 
@@ -329,6 +372,7 @@ def load_chembl() -> None:
 
 
 @task()  # v41: retries+timeout inherited from DEFAULT_ARGS
+@fail_fast_on_http_4xx  # v83 DAG-2
 def load_drugbank() -> None:
     """v79 P0-B2 ROOT FIX: Load DrugBank cleaned data into the staging DB.
 
@@ -343,6 +387,7 @@ def load_drugbank() -> None:
 
 
 @task()  # v41: retries+timeout inherited from DEFAULT_ARGS
+@fail_fast_on_http_4xx  # v83 DAG-2
 def load_uniprot() -> None:
     """v79 P0-B2 ROOT FIX: Load UniProt cleaned data into the staging DB.
 

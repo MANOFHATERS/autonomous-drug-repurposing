@@ -126,6 +126,54 @@ from database.connection import get_db_session
 from database.loaders import UpsertResult, bulk_upsert_proteins
 from pipelines.base_pipeline import BasePipeline, DownloadError, LoadResult
 
+
+# ---------------------------------------------------------------------------
+# v83 COMP-6 ROOT FIX: stale-cursor detection helper.
+# ---------------------------------------------------------------------------
+def _is_stale_cursor_error(exc: BaseException) -> bool:
+    """Return True if ``exc`` is a UniProt 4xx error indicating a stale cursor.
+
+    UniProt cursor URLs (the ``Link`` header's ``rel="next"`` URL) expire
+    after ~15 minutes. A resumed download that reuses an expired cursor
+    receives HTTP 400 (Bad Request — "invalid cursor") or 404 (Not Found
+    — "cursor not found"). These are non-retryable 4xx per R13, so the
+    pipeline would be stuck without stale-cursor recovery.
+
+    This helper inspects the exception (and any chained cause) for an
+    HTTP status code in {400, 404} and returns True if found. It is
+    intentionally NARROW — only 400/404 trigger recovery. Other 4xx
+    codes (401, 403, 429) indicate different problems (auth, quota,
+    rate-limit) that stale-cursor recovery would not fix.
+    """
+    # Walk the exception chain (exc -> __cause__ -> __context__) to find
+    # an HTTP status code. The DownloadError raised by _fetch_page wraps
+    # the original HTTPError via `from exc`, so __cause__ has the
+    # response object.
+    seen: set[int] = set()  # guard against cycles
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        # Direct status_code attribute (requests.HTTPError).
+        for attr in ("status_code", "status", "code"):
+            val = getattr(current, attr, None)
+            if isinstance(val, int) and val in (400, 404):
+                return True
+        # Nested response object.
+        response = getattr(current, "response", None)
+        if response is not None:
+            for attr in ("status_code", "status", "code"):
+                val = getattr(response, attr, None)
+                if isinstance(val, int) and val in (400, 404):
+                    return True
+        # String heuristic — DownloadError messages include "HTTP NNN".
+        msg = str(current)
+        if "HTTP 400" in msg or "HTTP 404" in msg:
+            return True
+        # Walk the chain.
+        current = current.__cause__ or current.__context__
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Module metadata (DOC16–DOC20)
 # ---------------------------------------------------------------------------
@@ -1430,6 +1478,12 @@ class UniProtPipeline(BasePipeline):
         #   run + pages N..end from this run).
         import os as _os
         is_resuming = False
+        # v83 COMP-6: initialize saved_page so the stale-cursor guard
+        # below never hits NameError on a non-resume path (Python's
+        # short-circuit `and` protects the access, but being explicit
+        # is safer for future maintainers).
+        saved_page = 0
+        saved_total = 0
         if _os.environ.get("DRUGOS_UNIPROT_RESUME", "") == "1":
             ckpt = self._read_checkpoint()
             if ckpt is not None and ckpt.get("cursor_url"):
@@ -1497,11 +1551,82 @@ class UniProtPipeline(BasePipeline):
 
         start_time = time.monotonic()
 
+        # v83 COMP-6 ROOT FIX: stale-cursor recovery flag. If resuming
+        # and the first page fetch fails with a 4xx (expired cursor),
+        # we delete the checkpoint and restart from page 1. This flag
+        # ensures we only attempt recovery ONCE (to avoid infinite loop
+        # if the initial URL also fails for a different reason).
+        _stale_cursor_recovered = False
+        # v83 COMP-6: track whether this is the first iteration of a
+        # resumed run. The first fetch after a resume is the one that
+        # can fail with a stale cursor (the saved cursor URL expired).
+        _is_first_resume_fetch = is_resuming
+
         try:
             with open(tmp_path, open_mode, encoding="utf-8", newline="\n") as fh:
                 while url:
                     page_num += 1
-                    response = self._fetch_page(url, params)
+                    try:
+                        response = self._fetch_page(url, params)
+                    except DownloadError as _fetch_exc:
+                        # v83 COMP-6 ROOT FIX: detect stale cursor on
+                        # the FIRST page of a resumed run. UniProt
+                        # cursors expire after ~15 minutes; if the
+                        # previous run failed mid-way and the operator
+                        # re-triggers with DRUGOS_UNIPROT_RESUME=1,
+                        # the saved cursor URL is now stale → HTTP 400
+                        # (invalid cursor) or 404 (cursor not found).
+                        # The 4xx is non-retryable per R13, so without
+                        # this recovery the pipeline is STUCK until the
+                        # operator manually deletes download_checkpoint.json.
+                        #
+                        # ROOT FIX: if we are resuming AND this is the
+                        # first fetch AND we haven't already recovered,
+                        # delete the checkpoint + restart from the
+                        # initial search URL (page 1). Log loudly so
+                        # the operator sees the self-heal in the DAG log.
+                        if (
+                            _is_first_resume_fetch
+                            and not _stale_cursor_recovered
+                            and _is_stale_cursor_error(_fetch_exc)
+                        ):
+                            logger.warning(
+                                "[%s] COMP-6 ROOT FIX: resumed cursor "
+                                "URL returned 4xx (stale cursor) — "
+                                "deleting checkpoint and restarting "
+                                "from page 1. The previous run's "
+                                "cursor expired (UniProt cursors "
+                                "expire after ~15 min). Original "
+                                "error: %s",
+                                self.source_name, _fetch_exc,
+                            )
+                            self._delete_checkpoint()
+                            _stale_cursor_recovered = True
+                            _is_first_resume_fetch = False
+                            # Reset to fresh-start state.
+                            url = self.uniprot_search_url
+                            params = {
+                                "query": self.uniprot_query,
+                                "format": "tsv",
+                                "fields": fields_str,
+                                "size": self.page_size,
+                            }
+                            page_num = 0
+                            total_records = 0
+                            expected_total = None
+                            # Truncate the temp file so we start fresh.
+                            fh.seek(0)
+                            fh.truncate()
+                            header_written = False
+                            is_resuming = False  # we're a fresh run now
+                            continue
+                        # Not a stale-cursor case, or already recovered
+                        # — re-raise to the outer except.
+                        raise
+
+                    # First fetch succeeded — clear the flag so subsequent
+                    # 4xx errors are NOT treated as stale-cursor cases.
+                    _is_first_resume_fetch = False
 
                     # DQ13 — capture the total result count from the response.
                     x_total = response.headers.get("X-Total-Results")
@@ -1595,6 +1720,16 @@ class UniProtPipeline(BasePipeline):
 
             # F5 — atomic rename.  Only after the full download succeeds.
             tmp_path.replace(output_path)
+
+            # v83 COMP-6 ROOT FIX: delete the checkpoint on success so
+            # the next run does not reuse a stale cursor URL. The
+            # previous code NEVER deleted the checkpoint — on a failed-
+            # then-resumed run, the stale cursor caused HTTP 400 and the
+            # pipeline was stuck. Deleting here guarantees the next run
+            # starts fresh from page 1 unless the operator explicitly
+            # sets DRUGOS_UNIPROT_RESUME=1 AND the checkpoint was
+            # written by a FAILED (not successful) previous run.
+            self._delete_checkpoint()
 
         except (OSError, PermissionError) as exc:
             # R24 / R25 — disk full or permission denied.
@@ -2157,6 +2292,44 @@ class UniProtPipeline(BasePipeline):
             return json.loads(checkpoint_path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, ValueError, OSError):
             return None
+
+    def _delete_checkpoint(self) -> None:
+        """Delete the checkpoint file (COMP-6 ROOT FIX).
+
+        Called after a successful download so the next run does not
+        reuse a stale cursor URL. The previous code NEVER deleted the
+        checkpoint — even on full success — so the checkpoint file
+        persisted with the LAST ``next_url`` (empty string on success,
+        but a valid cursor URL if the download FAILED mid-way). On the
+        next run with ``DRUGOS_UNIPROT_RESUME=1``, the stale cursor
+        was reused; UniProt returns HTTP 400 (invalid cursor) for
+        expired cursors, which is a non-retryable 4xx → the pipeline
+        was stuck until the operator manually deleted the checkpoint
+        file.
+
+        ROOT FIX: delete the checkpoint on success. Combined with the
+        stale-cursor detection in ``download()`` (which deletes the
+        checkpoint + restarts from page 1 if the resumed cursor
+        returns 4xx), the pipeline self-heals instead of getting stuck.
+        """
+        checkpoint_path = self.effective_raw_dir / "download_checkpoint.json"
+        try:
+            if checkpoint_path.exists():
+                checkpoint_path.unlink()
+                logger.info(
+                    "[%s] Deleted checkpoint after successful download "
+                    "(COMP-6 ROOT FIX): %s",
+                    self.source_name, checkpoint_path.name,
+                )
+        except OSError as exc:
+            # Non-fatal — the checkpoint will be overwritten on the
+            # next run's first page write. Log at DEBUG so operators
+            # can diagnose permission issues if they arise.
+            logger.debug(
+                "[%s] Could not delete checkpoint %s: %s "
+                "(non-fatal — will be overwritten on next run)",
+                self.source_name, checkpoint_path.name, exc,
+            )
 
     # ---------------------------------------------------------------------
     # clean() — full cleaning pipeline (F2, F3, F4, S1–S25, DQ1–DQ25, I2, I6)
