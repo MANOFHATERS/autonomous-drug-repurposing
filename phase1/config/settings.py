@@ -1266,8 +1266,34 @@ DISGENET_ALLOW_WEAK_EVIDENCE: bool = _getenv_bool(
     "DISGENET_ALLOW_WEAK_EVIDENCE", default=True
 )
 """If True (default), do NOT filter out weak-evidence rows (score in
-[DISGENET_MIN_SCORE, 0.1)).  Instead, tag them with confidence_tier="weak".
+[DISGENET_MIN_SCORE, DISGENET_WEAK_EVIDENCE_THRESHOLD)).  Instead, tag
+them with confidence_tier="weak".
 If False, hard-filter at DISGENET_MIN_SCORE (drops weak-evidence rows)."""
+
+# v82 FORENSIC ROOT FIX (P1-3 — weak-evidence threshold hardcoded 0.1):
+# The previous code hardcoded ``0.1`` as the weak-evidence threshold in
+# ``disgenet_pipeline._apply_score_filter`` while ``DISGENET_MIN_SCORE``
+# was configurable. The two thresholds were DECOUPLED — operators tuning
+# ``DISGENET_MIN_SCORE`` did not get the expected behavior:
+#   * If MIN_SCORE=0.2 (drop weak evidence): weak-evidence path still
+#     fired for [0.06, 0.1) but those rows were already dropped → dead
+#     code.
+#   * If MIN_SCORE=0.05: weak-evidence threshold (0.1) didn't move, so
+#     rows in [0.05, 0.06) were dropped before the weak-evidence tagger
+#     could rescue them.
+# ROOT FIX: make the weak-evidence threshold configurable as
+# ``DISGENET_WEAK_EVIDENCE_THRESHOLD`` (default 0.1, preserving prior
+# behavior). The weak-evidence band is now
+# ``[DISGENET_MIN_SCORE, DISGENET_WEAK_EVIDENCE_THRESHOLD)`` — the two
+# thresholds move together when operators tune either one.
+DISGENET_WEAK_EVIDENCE_THRESHOLD: float = _getenv_float(
+    "DISGENET_WEAK_EVIDENCE_THRESHOLD", default=0.1
+)
+"""Upper bound (exclusive) of the weak-evidence band. Rows with score in
+``[DISGENET_MIN_SCORE, DISGENET_WEAK_EVIDENCE_THRESHOLD)`` are tagged
+``confidence_tier="weak"`` (when ``DISGENET_ALLOW_WEAK_EVIDENCE=True``)
+instead of being dropped. Default 0.1 (matches Piñero et al. 2020 §2.3
+weak-evidence floor). Must be > ``DISGENET_MIN_SCORE`` to be meaningful."""
 
 # SCI-11 / DES-2 / CONF-2: Confidence tier thresholds.
 # Per Piñero et al. 2020 §2.3, the DSGP score bands are:
@@ -1647,6 +1673,21 @@ def _validate_disgenet_config() -> None:
     if not (0.0 <= DISGENET_MIN_SCORE <= 1.0):
         raise ValueError(
             f"DISGENET_MIN_SCORE={DISGENET_MIN_SCORE} must be in [0, 1]"
+        )
+    # v82 FORENSIC ROOT FIX (P1-3): validate the weak-evidence threshold
+    # is in [0, 1] AND strictly greater than DISGENET_MIN_SCORE (otherwise
+    # the weak-evidence band is empty/inverted and the tagger is dead code).
+    if not (0.0 <= DISGENET_WEAK_EVIDENCE_THRESHOLD <= 1.0):
+        raise ValueError(
+            f"DISGENET_WEAK_EVIDENCE_THRESHOLD="
+            f"{DISGENET_WEAK_EVIDENCE_THRESHOLD} must be in [0, 1]"
+        )
+    if DISGENET_WEAK_EVIDENCE_THRESHOLD <= DISGENET_MIN_SCORE:
+        raise ValueError(
+            f"DISGENET_WEAK_EVIDENCE_THRESHOLD="
+            f"{DISGENET_WEAK_EVIDENCE_THRESHOLD} must be strictly greater "
+            f"than DISGENET_MIN_SCORE={DISGENET_MIN_SCORE} (otherwise the "
+            f"weak-evidence band is empty/inverted)"
         )
     if DISGENET_API_PAGE_SIZE <= 0:
         raise ValueError(
@@ -3664,6 +3705,7 @@ __all__ = [
     # DisGeNET — institutional-grade operational settings (389-fix audit)
     "DISGENET_MIN_SCORE",
     "DISGENET_ALLOW_WEAK_EVIDENCE",
+    "DISGENET_WEAK_EVIDENCE_THRESHOLD",
     "DISGENET_CONFIDENCE_TIERS_JSON",
     "DISGENET_CONFIDENCE_TIERS",
     "DISGENET_PMID_CAP",

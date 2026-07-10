@@ -3976,26 +3976,28 @@ def stage_phase1_to_phase2(
         staged.edges[("Compound", "has_clinical_outcome", "ClinicalOutcome")] = co_edges
 
     # ─── v43 ROOT FIX (Chain 4b): Pathway nodes are now derived from ───
-    # ─── STRING PPI connected components above. The previous "C-16    ───
-    # ─── TODO" warning is preserved as an info-level log only when    ───
-    # ─── no Pathway nodes were produced (e.g. empty STRING data).     ───
-    if not staged.pathway_nodes:
-        # Only emit the warning if we genuinely failed to derive any
-        # Pathway nodes. After the v43 fix, this is rare: as long as
-        # STRING PPI data has at least one connected component with
-        # >= 2 proteins, we emit Pathway nodes.
-        logger.info(
-            "Phase1 bridge: no Pathway nodes derived (STRING PPI data "
-            "empty or all singletons). The DOCX Phase 2 spec mandates "
-            "Pathway as one of 5 node types — this means the spec's "
-            "5-type schema is incomplete for this run."
-        )
-        staged.warnings.append(
-            "No Pathway nodes derivable from STRING PPI data (empty or "
-            "all-singletons). The v43 fix attempts to derive Pathway nodes "
-            "from STRING PPI connected components; if STRING data is "
-            "missing, the DOCX 5-node-type contract is incomplete."
-        )
+    # ─── STRING PPI connected components in the "extra sources" block  ───
+    # ─── further below (line ~4670+).                                  ───
+    # v82 FORENSIC ROOT FIX (misleading premature warning):
+    #   The previous code emitted a "no Pathway nodes derived" warning
+    #   HERE — but this runs BEFORE the actual Pathway derivation block
+    #   at line ~4670+. So the warning fired on EVERY run, even when
+    #   Pathway nodes WERE successfully derived later. The user saw
+    #   both contradictory log lines:
+    #     1. "no Pathway nodes derived (STRING PPI data empty or all
+    #        singletons). The DOCX Phase 2 spec mandates Pathway..."
+    #     2. "derived 1 Pathway nodes from STRING PPI connected
+    #        components. Emitted 8 Protein→participates_in→Pathway
+    #        edges. This restores the DOCX Phase 2 5-node-type contract."
+    #   The first message was an INFO log AND a staged.warnings append,
+    #   so it surfaced in the final summary as a warning, misleading
+    #   operators into thinking the 5-node-type contract was violated
+    #   when it was actually satisfied.
+    # ROOT FIX: remove the premature warning block entirely. The Pathway
+    #   derivation block at line ~4670+ has its OWN logging — INFO when
+    #   pathways are derived, WARNING when derivation fails or returns
+    #   empty. That is the SINGLE source of truth for Pathway status.
+    #   No warning is emitted prematurely based on intermediate state.
 
     # ─── ROOT FIX (Phase1↔Phase2 100% connection): consume the other ─────
     # ─── 5 Phase 1 source CSVs the bridge previously ignored. ─────────────

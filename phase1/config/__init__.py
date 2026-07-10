@@ -160,6 +160,7 @@ __all__ = (
     # DisGeNET — institutional-grade operational settings (389-fix audit)
     "DISGENET_MIN_SCORE",
     "DISGENET_ALLOW_WEAK_EVIDENCE",
+    "DISGENET_WEAK_EVIDENCE_THRESHOLD",  # v82 P1-3 root fix
     "DISGENET_CONFIDENCE_TIERS_JSON",
     "DISGENET_CONFIDENCE_TIERS",
     "DISGENET_PMID_CAP",
@@ -303,6 +304,7 @@ __annotations__ = {
     # DisGeNET — institutional-grade operational settings (389-fix audit)
     "DISGENET_MIN_SCORE": float,
     "DISGENET_ALLOW_WEAK_EVIDENCE": bool,
+    "DISGENET_WEAK_EVIDENCE_THRESHOLD": float,  # v82 P1-3 root fix
     "DISGENET_CONFIDENCE_TIERS_JSON": str,
     "DISGENET_CONFIDENCE_TIERS": list,
     "DISGENET_PMID_CAP": int,
@@ -484,6 +486,7 @@ _SETTING_NAMES = (
     # DisGeNET — institutional-grade operational settings (389-fix audit)
     "DISGENET_MIN_SCORE",
     "DISGENET_ALLOW_WEAK_EVIDENCE",
+    "DISGENET_WEAK_EVIDENCE_THRESHOLD",  # v82 P1-3 root fix
     "DISGENET_CONFIDENCE_TIERS_JSON",
     "DISGENET_CONFIDENCE_TIERS",
     "DISGENET_PMID_CAP",
