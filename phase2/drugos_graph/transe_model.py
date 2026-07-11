@@ -3474,8 +3474,7 @@ def train_transe(
                         n_val_neg = n_val * 10
                         val_neg_tails_list: List[int] = [0] * n_val_neg
                         # Expand val_rels 10x to align with neg slots.
-                        val_rels_expanded_fallback = (
-                            val_rels_dev.repeat_interleave(10)
+                        val_rels_expanded_fallback = val_rels_dev.repeat_interleave(10)
                         # v88 ROOT FIX (BUG #33 — hardcoded relation_idx=0
                         # in val AUC fallback): look up the actual treats
                         # relation index from relation_to_types.
