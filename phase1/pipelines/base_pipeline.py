@@ -566,20 +566,45 @@ class _CircuitBreaker:
     def is_open(self) -> bool:
         """Return True if the breaker is open and calls should be refused.
 
-        v40 ROOT FIX (P1 #9): in half_open state, only the FIRST call
-        (the probe) is allowed. Subsequent calls are refused until the
-        probe completes (record_success or record_failure).
+        v92 ROOT FIX (BUG P1-073): is_open() is now a PURE OBSERVATION
+        method — it does NOT transition state or reserve probe slots.
+        Previously, is_open() mutated state (OPEN→half_open, set
+        _half_open_probe_in_flight=True), which meant monitoring/dashboard
+        code that called is_open() inadvertently broke subsequent
+        allow_request() calls. Callers who want to actually acquire a
+        probe slot MUST call try_acquire_probe() or allow_request().
+        """
+        with self._lock:
+            if self._state == "open":
+                return True
+            if self._state == "half_open":
+                # In half_open, "open" means "refuse additional calls" =
+                # a probe is already in flight.
+                return self._half_open_probe_in_flight
+            return False
+
+    def try_acquire_probe(self) -> bool:
+        """Try to acquire a probe slot in half_open state.
+
+        v92 ROOT FIX (BUG P1-073): This method performs the state mutation
+        that was previously done by is_open(). It transitions OPEN→half_open
+        when the reset timeout has elapsed and reserves a probe slot. Returns
+        True if the request should proceed, False if refused.
+
+        Callers who need to actually acquire a probe slot (i.e., code that
+        decides whether to make a network call) should use this method
+        instead of is_open().
         """
         with self._lock:
             if self._state == "open":
                 if time.time() - self._last_failure_time > self._reset_timeout:
                     self._state = "half_open"
-                    # v40: allow the first probe call.
+                    # Allow the first probe call.
                     self._half_open_probe_in_flight = True
                     return False  # allow this call (the probe)
                 return True
             if self._state == "half_open":
-                # v40: if a probe is already in flight, refuse.
+                # If a probe is already in flight, refuse.
                 if self._half_open_probe_in_flight:
                     return True  # refuse — wait for probe to complete
                 # No probe in flight — allow this call as the new probe.

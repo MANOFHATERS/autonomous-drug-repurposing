@@ -275,7 +275,6 @@ _UNIPROT_ORGANISM_OVERRIDES: Dict[str, str] = {
     "Q9Y6L6": "Homo sapiens",   # SLCO1B1 / OATP1B1
     "Q92887": "Homo sapiens",   # SLCO1B3 / OATP1B3
     # === Common drug targets (Cardiovascular) ===
-    "P00533": "Homo sapiens",   # EGFR
     "P25963": "Homo sapiens",   # NFKB1
     "P01130": "Homo sapiens",   # LDLR
     "P04070": "Homo sapiens",   # PROC (Protein C)
@@ -297,7 +296,6 @@ _UNIPROT_ORGANISM_OVERRIDES: Dict[str, str] = {
     "P09211": "Homo sapiens",   # GSTP1
     # === Common drug targets (Oncology) ===
     "P00519": "Homo sapiens",   # ABL1
-    "P00533": "Homo sapiens",   # EGFR
     "P12931": "Homo sapiens",   # SRC
     "P07948": "Homo sapiens",   # YES1
     "P42680": "Homo sapiens",   # TEK / TIE2
@@ -316,7 +314,6 @@ _UNIPROT_ORGANISM_OVERRIDES: Dict[str, str] = {
     # === Common drug targets (Hematology) ===
     "P14210": "Homo sapiens",   # HGF
     "P08581": "Homo sapiens",   # MET
-    "P17948": "Homo sapiens",   # FLT1
     # === Kinase targets ===
     "P28482": "Homo sapiens",   # MAPK1 / ERK2
     "P27361": "Homo sapiens",   # MAPK3 / ERK1
@@ -333,7 +330,6 @@ _UNIPROT_ORGANISM_OVERRIDES: Dict[str, str] = {
     "Q9UP38": "Homo sapiens",   # NOTCH1
     "P46531": "Homo sapiens",   # NOTCH1
     # === GPCRs commonly targeted by drugs ===
-    "P08913": "Homo sapiens",   # HRH2
     "P35348": "Homo sapiens",   # ADRA1A
     "P35349": "Homo sapiens",   # ADRA1B
     "P25100": "Homo sapiens",   # ADRA1D
