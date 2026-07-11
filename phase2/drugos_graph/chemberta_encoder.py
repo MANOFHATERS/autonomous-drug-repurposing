@@ -974,23 +974,41 @@ def _encode_batch(
     tokenized_batch = {
         k: v.to(device) for k, v in tokenized_batch.items()
     }
-    # v53 ROOT FIX (P2-012): verify model device matches input device
+    # v53 ROOT FIX (P2-012): verify model device matches input device.
+    # v100 ROOT FIX (BUG P2-052 — dead code + swallowing except): the
+    # previous code had three defects:
+    #   1. The bare `except Exception: pass` SWALLOWED the RuntimeError
+    #      raised above — so the device-mismatch check was completely
+    #      silent in production. The "raise" was dead because the
+    #      except caught it on the very next line.
+    #   2. The line below the raise (`# This line is unreachable due
+    #      to the raise above, but kept for documentation`) admitted
+    #      the trailing code was dead — yet the dead-code comment was
+    #      itself misleading because the raise WAS reachable (it just
+    #      got swallowed by the except).
+    #   3. The "Attempting to move model to {_input_device}..." message
+    #      in the RuntimeError implied the function would attempt a
+    #      move — but no move was ever attempted (and the comment
+    #      below confirmed it).
+    # ROOT FIX: catch ONLY StopIteration (model has no parameters,
+    # which is the legitimate skip case) and re-raise RuntimeError
+    # instances explicitly. All other exceptions propagate. The dead
+    # trailing comment is removed. The error message no longer claims
+    # a move will be attempted — the caller is responsible for moving
+    # the model to the correct device before invoking this function.
     try:
         _model_device = next(model.parameters()).device
         _input_device = torch.device(device)
         if _model_device != _input_device:
             raise RuntimeError(
-                f"Device mismatch: model is on {_model_device} but inputs "
-                f"are on {_input_device}. This indicates a bug in the "
-                f"device management code (P2-012). Attempting to move "
-                f"model to {_input_device}..."
+                f"Device mismatch: model is on {_model_device} but "
+                f"inputs are on {_input_device}. The caller must move "
+                f"the model to the input device BEFORE calling "
+                f"_forward_and_pool (P2-012, v100 P2-052 root fix). "
+                f"Use model.to('{device}') on the caller side."
             )
-            # This line is unreachable due to the raise above, but kept
-            # for documentation of the intended fix.
     except StopIteration:
         pass  # model has no parameters (empty) — skip check
-    except Exception:
-        pass  # non-torch model — skip check
 
     with torch.inference_mode():
         model_outputs = model(**tokenized_batch)

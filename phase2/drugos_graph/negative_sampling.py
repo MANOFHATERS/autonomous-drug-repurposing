@@ -1413,12 +1413,33 @@ class NegativeSampler:
 
     def combined_sampling(
         self,
-        drug_disease_map: Dict[str, List[str]] = None,
-        disease_atc_map: Dict[str, Any] = None,
-        failed_trials: List[Dict] = None,
+        # v100 ROOT FIX (BUG P2-035): type-hint correctness fix (NOT a
+        # runtime bug — the defaults are None, not mutable objects, so
+        # there is no mutable-default-arg bug here). The previous type
+        # hints said `Dict[str, List[str]]`, `Dict[str, Any]`, and
+        # `List[Dict]` — but the defaults are None, so the ACTUAL type
+        # is `Optional[Dict[...]]` / `Optional[List[...]]`. The lie
+        # confused static analysis (mypy/pyright reported spurious
+        # "None is not assignable to Dict" errors at call sites that
+        # relied on the default) and misled callers about whether they
+        # must pass a non-None value. Corrected to Optional[...].
+        drug_disease_map: Optional[Dict[str, List[str]]] = None,
+        disease_atc_map: Optional[Dict[str, Any]] = None,
+        failed_trials: Optional[List[Dict]] = None,
         total_negatives: int = MIN_NEGATIVE_PAIRS,
-        strategy_weights: Dict[str, float] = None,
-        **_extra: Any,
+        strategy_weights: Optional[Dict[str, float]] = None,
+        # v100 ROOT FIX (BUG P2-041): the `**_extra: Any` parameter was
+        # REMOVED. The previous "v36 ROOT FIX (Chain 9)" added `**_extra`
+        # to absorb KGNegativeSampler-style kwargs (`relation_idx`,
+        # `head_type`, `tail_type`) that `train_transe` passes — but
+        # NegativeSampler is the COMPOUND-DISEASE-ONLY sampler and
+        # silently produced `(Compound, Disease)` negatives even when a
+        # caller asked for `(Gene, interacts_with, Gene)` negatives.
+        # That is a SCIENTIFIC correctness bug: the API LIED rather
+        # than raising. Now the function raises `TypeError` on
+        # unexpected kwargs — the correct behavior — and callers who
+        # need type-constrained KG sampling must use
+        # `KGNegativeSampler.combined_sampling` directly.
     ) -> List[Dict]:
         """Generate negatives using all three strategies with weighted allocation.
 
@@ -1426,13 +1447,22 @@ class NegativeSampler:
         cross-strategy duplicates. Future optimization: per-strategy caches
         with post-hoc deduplication for parallel execution. (Fix 8.5)
 
-        v36 ROOT FIX (Chain 9): added ``**_extra`` to absorb the
-        KGNegativeSampler-style kwargs (``relation_idx``, ``head_type``,
-        ``tail_type``) that ``train_transe`` passes. NegativeSampler
-        ignores these — it always samples ``(Compound, Disease)`` pairs
-        — but at least the API call no longer raises ``TypeError``.
-        Callers who actually want type-constrained KG sampling should
-        use ``KGNegativeSampler`` directly.
+        v100 ROOT FIX (BUG P2-041): the ``**_extra`` absorption was
+        removed because it silently produced type-wrong negatives for
+        non-treats relations. A caller that passed
+        ``head_type="Gene", tail_type="Gene"`` to this method
+        (NegativeSampler.combined_sampling) used to silently get
+        ``(Compound, Disease)`` negatives — wrong for
+        ``(Gene, interacts_with, Gene)`` triples. The previous
+        ``v36 ROOT FIX (Chain 9): added **_extra`` note claimed this
+        was acceptable because "NegativeSampler ignores these" — but
+        silently ignoring a type constraint is a SCIENTIFIC bug, not
+        a graceful API. The fix REMOVES ``**_extra`` so the function
+        now raises ``TypeError`` if a caller passes unexpected kwargs
+        (``relation_idx``, ``head_type``, ``tail_type``), because
+        ``NegativeSampler`` is the COMPOUND-DISEASE-ONLY sampler.
+        Callers needing type-constrained sampling should use
+        ``KGNegativeSampler.combined_sampling`` instead.
 
         Args:
             drug_disease_map: For strategy (b).
@@ -2352,15 +2382,24 @@ class KGNegativeSampler:
                 # duplicates), but they do NOT contribute to the degree
                 # distribution that shapes the bernoulli sampling
                 # probabilities.
-                _head_degrees = np.zeros(len(head_pool), dtype=np.float64)
-                _tail_degrees = np.zeros(len(tail_pool), dtype=np.float64)
+                #
+                # v100 ROOT FIX (dead degree-build loop): the loop that
+                # previously lived here (building `_head_degrees` /
+                # `_tail_degrees` from `self.known_triples` and the
+                # `_head_idx_map` / `_tail_idx_map`) was immediately
+                # OVERWRITTEN by the v88 train-only loop below (which
+                # rebuilds `_train_head_degrees` / `_train_tail_degrees`
+                # from the SAME `self.known_triples` using the SAME
+                # idx maps, then reassigns `_head_degrees = _train_head_degrees`).
+                # The first loop's `_head_degrees` / `_tail_degrees`
+                # computations were DEAD CODE — wasted work that
+                # produced the same values only to be discarded. ROOT
+                # FIX: deleted the dead first loop; kept ONLY the
+                # `_head_idx_map` / `_tail_idx_map` construction (which
+                # the train-only loop depends on) and the train-only
+                # loop itself.
                 _head_idx_map = {e: i for i, e in enumerate(head_pool)}
                 _tail_idx_map = {e: i for i, e in enumerate(tail_pool)}
-                for (h, r, t) in self.known_triples:
-                    if h in _head_idx_map:
-                        _head_degrees[_head_idx_map[h]] += 1.0
-                    if t in _tail_idx_map:
-                        _tail_degrees[_tail_idx_map[t]] += 1.0
                 # v88 ROOT FIX (BUG #42 — Bernoulli cache leaks held-out
                 # degree info into training): rebuild a TRAIN-ONLY degree
                 # distribution from `self.known_triples` (train-only)
@@ -2495,8 +2534,35 @@ class KGNegativeSampler:
                 # v43 Chain 6: use Bernoulli (degree-weighted) sampling
                 # if probs are cached for this (head_type, tail_type)
                 # pair; otherwise fall back to uniform.
+                #
+                # v100 ROOT FIX (cache-key mismatch): the cache is
+                # POPULATED at line ~2418 with the 3-tuple key
+                # `_cache_key_ht = (head_type, tail_type, _ho_sig)`
+                # (built at line ~2361, where
+                # `_ho_sig = frozenset(_held_out_entities) if
+                # _held_out_entities else None`), but this LOOKUP
+                # previously used a 2-tuple `(head_type, tail_type)`.
+                # The lookup ALWAYS returned None, making the entire
+                # bernoulli-degree-weighted sampling path dead code
+                # (the sampler silently fell back to uniform — the
+                # Wang et al. 2014 Bernoulli scheme was never actually
+                # applied, biasing the model to push embeddings AWAY
+                # from hubs, making predictions for clinically-relevant
+                # targets WORSE than for obscure ones). ROOT FIX: build
+                # `_ho_sig` the same way as line ~2358 and use the SAME
+                # 3-tuple key `(head_type, tail_type, _ho_sig)` for the
+                # lookup. (`_held_out_entities` is built once at
+                # line ~2272 and is invariant within this call, so
+                # rebuilding the frozenset here matches the populate
+                # path exactly.)
+                _ho_sig = (
+                    frozenset(_held_out_entities)
+                    if _held_out_entities
+                    else None
+                )
+                _cache_key_ht = (head_type, tail_type, _ho_sig)
                 _cached_probs = (
-                    self._bernoulli_probs_cache.get((head_type, tail_type))
+                    self._bernoulli_probs_cache.get(_cache_key_ht)
                     if _sampling_method == "bernoulli"
                     and hasattr(self, "_bernoulli_probs_cache")
                     else None
