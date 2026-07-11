@@ -1097,8 +1097,6 @@ class BiomedicalGraphBuilder:
 
         if training_positives_added > 0:
             logger.info(
-<<<<<<< HEAD
-=======
                 f"V90 ROOT FIX (BUG #3, P0): injected {training_positives_added} "
                 f"CURATED TRAINING POSITIVES (real DrugBank/RepoDB drug-disease "
                 f"pairs, NON-KP drugs) as 'treats' edges ONLY. NO multi-hop "
@@ -1132,7 +1130,6 @@ class BiomedicalGraphBuilder:
 
         if training_positives_added > 0:
             logger.info(
->>>>>>> origin/main
                 f"v89 P0 ROOT FIX (Compound #3): injected "
                 f"{training_positives_added} CURATED TRAINING POSITIVES "
                 f"(real DrugBank/RepoDB drug-disease pairs, NON-KP drugs) "
