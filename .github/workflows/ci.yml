@@ -278,9 +278,18 @@ jobs:
           check('P1-13 TP53 uniprot_id resolved', result.loc[result['gene_symbol']=='TP53','uniprot_id'].iloc[0] == 'P04637')
 
           # ─── P1-2: HGNC auto-download function exists ───
-          from pipelines.omim_pipeline import _download_hgnc_crosswalk, _HGNC_DOWNLOAD_URL
+          # v83: the merged code (parallel-agent COMP-3) defines
+          # _download_hgnc_crosswalk(dest_path) with the URL as a LOCAL
+          # variable inside the function. My original v83 P1-2 had it as
+          # a module-level constant. The rebase kept COMP-3's structure —
+          # verify the FUNCTION exists and is callable (the URL is an
+          # implementation detail inside the function body).
+          from pipelines.omim_pipeline import _download_hgnc_crosswalk
           check('P1-2 _download_hgnc_crosswalk exists', callable(_download_hgnc_crosswalk))
-          check('P1-2 HGNC download URL set', 'genenames.org' in _HGNC_DOWNLOAD_URL)
+          # Verify the function source contains the HGNC download URL.
+          import inspect
+          _src = inspect.getsource(_download_hgnc_crosswalk)
+          check('P1-2 HGNC download URL in function body', 'genenames.org' in _src)
 
           # ─── P1-3: STRING usecols lambda normalizes header ───
           _TARGET = {'string_protein_id', 'alias', 'source'}
@@ -296,8 +305,12 @@ jobs:
           check('P1-10 list (not set) passed', 'uniprot_ids=unique_uniprot_list' in src)
 
           # ─── P1-5: STRING PipelineRun no microsecond truncation ───
+          # v83: check EXECUTABLE code only (comments may reference the old
+          # behavior for documentation purposes).
           src = inspect.getsource(StringPipeline._get_or_create_pipeline_run_id)
-          check('P1-5 no microsecond truncation', 'replace(microsecond=0)' not in src)
+          code_lines = [l for l in src.split('\n') if l.strip() and not l.strip().startswith('#')]
+          code_text = '\n'.join(code_lines)
+          check('P1-5 no microsecond truncation in code', 'replace(microsecond=0)' not in code_text)
 
           # ─── P1-4: PubChem download_date uses _access_timestamp ───
           from pipelines.pubchem_pipeline import PubChemPipeline
@@ -331,11 +344,15 @@ jobs:
           check('P1-12 _persist_cleaned_data sanitizes COPY', '_sanitize_dataframe_for_csv' in persist_src and 'super()._persist_cleaned_data' in persist_src)
 
           # ─── P1-14: Master DAG uses DEFAULT_RETRY_ARGS ───
+          # v83: check EXECUTABLE code only (comments may reference the old
+          # 30min behavior for documentation purposes).
           with open('dags/master_pipeline_dag.py') as f:
               dag_src = f.read()
-          check('P1-14 DEFAULT_RETRY_ARGS imported', 'from dags._retry_policy import DEFAULT_RETRY_ARGS' in dag_src)
-          check('P1-14 DEFAULT_RETRY_ARGS spread into DEFAULT_ARGS', '**DEFAULT_RETRY_ARGS' in dag_src)
-          check('P1-14 no 30min retry_delay', 'timedelta(minutes=30)' not in dag_src)
+          dag_code_lines = [l for l in dag_src.split('\n') if l.strip() and not l.strip().startswith('#')]
+          dag_code = '\n'.join(dag_code_lines)
+          check('P1-14 DEFAULT_RETRY_ARGS imported', 'from dags._retry_policy import DEFAULT_RETRY_ARGS' in dag_code)
+          check('P1-14 DEFAULT_RETRY_ARGS spread into DEFAULT_ARGS', '**DEFAULT_RETRY_ARGS' in dag_code)
+          check('P1-14 no 30min retry_delay in code', 'timedelta(minutes=30)' not in dag_code)
 
           # ─── P2-1: OMIM dead _api_get removed ───
           check('P2-1 _api_get removed', not hasattr(OMIMPipeline(), '_api_get'))
