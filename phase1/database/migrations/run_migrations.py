@@ -2035,8 +2035,25 @@ _DESTRUCTIVE_PATTERNS = (
     re.compile(r"DROP\s+TABLE", re.IGNORECASE),
     re.compile(r"DROP\s+INDEX", re.IGNORECASE),
     re.compile(r"TRUNCATE\s+TABLE?", re.IGNORECASE),
+    # v90 ROOT FIX (BUG #14 — P1 UPDATE regex caught ALL UPDATEs):
+    #   The previous regex ``UPDATE\s+\w+\s+SET\s+.*;`` matched ANY UPDATE
+    #   statement — the ``.*`` was greedy and consumed the WHERE clause.
+    #   The comment said "UPDATE without WHERE" but the regex caught ALL
+    #   UPDATEs. Migration 006 has many ``UPDATE drugs SET is_withdrawn =
+    #   TRUE WHERE lower(name) = 'rofecoxib'`` — all flagged as
+    #   "destructive". An operator who set ``allow_destructive_sql=False``
+    #   for safety BLOCKED migration 006 entirely, and the is_withdrawn
+    #   backfill never ran. Vioxx stayed is_withdrawn=FALSE.
+    #   ROOT FIX: replace the regex with a function-based check that
+    #   parses each statement and only flags UPDATEs that lack a WHERE
+    #   clause. The DELETE regex had the same issue (``DELETE FROM \w+ ;``
+    #   only matched DELETEs ending immediately with ``;`` — missed
+    #   multi-line DELETEs). Both are now handled by
+    #   ``_scan_destructive_sql`` below, which splits on ``;`` and checks
+    #   each statement for a WHERE clause.
+    # DELETE without WHERE — handled by _scan_destructive_sql (regex kept
+    # for backwards-compatibility with any code that imports the tuple).
     re.compile(r"DELETE\s+FROM\s+\w+\s*;", re.IGNORECASE),  # DELETE without WHERE
-    re.compile(r"UPDATE\s+\w+\s+SET\s+.*;", re.IGNORECASE),  # UPDATE without WHERE
 )
 
 
@@ -2045,12 +2062,58 @@ def _scan_destructive_sql(sql_content: str) -> list[str]:
 
     GAP-SEC-06: Returns list of found destructive patterns.
     GUARD-SEC-08: Used when allow_destructive_sql is False.
+
+    v90 ROOT FIX (BUG #14): the previous UPDATE regex
+    ``UPDATE\\s+\\w+\\s+SET\\s+.*;`` matched ANY UPDATE statement (the
+    ``.*`` was greedy and consumed the WHERE clause). Migration 006's
+    ``UPDATE drugs SET is_withdrawn = TRUE WHERE lower(name) =
+    'rofecoxib'`` was flagged as "destructive" even though it has a
+    WHERE clause. An operator who enabled the destructive-SQL guard
+    silently blocked the life-safety backfill in migration 006 — Vioxx
+    stayed is_withdrawn=FALSE. ROOT FIX: split the SQL into statements
+    (naive split on ``;`` — sufficient for migration files which use
+    ``;`` as the statement terminator) and check each UPDATE / DELETE
+    statement for a WHERE clause. Only flag statements WITHOUT a WHERE.
     """
     found: list[str] = []
+    # Check the simple patterns first (DROP TABLE, DROP INDEX, TRUNCATE).
     for pattern in _DESTRUCTIVE_PATTERNS:
         m = pattern.search(sql_content)
         if m:
             found.append(m.group(0).strip())
+
+    # v90: per-statement WHERE-clause check for UPDATE and DELETE.
+    # Split on ';' — naive but sufficient for migration files. Strip
+    # comments (lines starting with '--') so a WHERE in a comment doesn't
+    # mask a missing WHERE in the actual statement.
+    _stripped_lines = [
+        line for line in sql_content.splitlines()
+        if not line.strip().startswith("--")
+    ]
+    _stripped_sql = "\n".join(_stripped_lines)
+    # Remove single-line comments after stripping full-line comments.
+    _stripped_sql = re.sub(r"--[^\n]*", "", _stripped_sql)
+    statements = _stripped_sql.split(";")
+    for stmt in statements:
+        stmt_stripped = stmt.strip()
+        if not stmt_stripped:
+            continue
+        upper = stmt_stripped.upper()
+        # Check UPDATE ... SET ... without WHERE
+        if re.match(r"UPDATE\s+\w+\s+SET\s+", upper):
+            if "WHERE" not in upper:
+                # Truncate for readability in the error message.
+                snippet = stmt_stripped[:120]
+                if len(stmt_stripped) > 120:
+                    snippet += "..."
+                found.append(f"UPDATE without WHERE: {snippet}")
+        # Check DELETE FROM ... without WHERE
+        if re.match(r"DELETE\s+FROM\s+\w+", upper):
+            if "WHERE" not in upper:
+                snippet = stmt_stripped[:120]
+                if len(stmt_stripped) > 120:
+                    snippet += "..."
+                found.append(f"DELETE without WHERE: {snippet}")
     return found
 
 
@@ -3262,62 +3325,69 @@ _POSTGRES_ONLY_UPGRADES: dict[str, list[tuple[str, str, str]]] = {
 }
 
 
-def _apply_postgres_only_upgrades(engine, migration_name: str) -> None:
+def _apply_postgres_only_upgrades(conn, migration_name: str) -> None:
     """Apply PostgreSQL-only upgrades for a migration (v75 ROOT FIX T-026).
 
-    Called after a migration is successfully applied on PostgreSQL ONLY.
-    Looks up the migration name in ``_POSTGRES_ONLY_UPGRADES`` and runs
-    each upgrade statement, guarded by its idempotent check.
-
-    Failures are LOGGED but do NOT block the migration chain — the
-    portable SQL file already added the TEXT column, and PostgreSQL can
-    store JSON in TEXT just fine (just without JSONB indexing). The
-    upgrade is a performance/feature enhancement, not a correctness
-    requirement.
+    v90 ROOT FIX (BUG #15 — P1 _apply_postgres_only_upgrades outside
+    transaction):
+      The previous signature was ``_apply_postgres_only_upgrades(engine,
+      migration_name)`` and it opened its OWN ``with engine.begin() as
+      conn:`` block. It was called AFTER the per-migration transaction
+      committed (line ~3991, outside the ``with engine.begin()`` block).
+      If the upgrade failed (e.g. ``ALTER TABLE pipeline_runs ALTER
+      COLUMN metadata_json TYPE JSONB`` failed because a row had invalid
+      JSON), the migration was recorded as "applied" but
+      ``metadata_json`` stayed TEXT. Subsequent queries that assumed
+      JSONB operators (``->``, ``->>``) failed at runtime.
+      ROOT FIX: accept a ``conn`` parameter (the connection from the
+      per-migration transaction) and execute the upgrade INSIDE the
+      caller's transaction. If the upgrade fails, the entire migration
+      rolls back (including the ``_record_migration`` bookkeeping) — the
+      migration is NOT marked as applied, and the operator can fix the
+      root cause (e.g. clean up invalid JSON) and re-run. This is the
+      fail-closed approach appropriate for an institutional-grade pharma
+      system.
     """
-    dialect_name = engine.dialect.name
+    # v90: the dialect check is now done by the caller (inside the
+    # per-migration transaction). We keep a defensive check here for
+    # any future caller that might pass a non-PostgreSQL connection.
+    bind = conn.engine if hasattr(conn, "engine") else conn
+    dialect_name = bind.dialect.name
     if dialect_name != DIALECT_POSTGRESQL:
         return
     upgrades = _POSTGRES_ONLY_UPGRADES.get(migration_name)
     if not upgrades:
         return
-    with engine.begin() as conn:
-        for description, sql, guard_sql in upgrades:
-            try:
-                # Idempotent guard: skip if already applied.
-                guard_result = conn.execute(text(guard_sql))
-                if guard_result.fetchone() is not None:
-                    logger.debug(
-                        "  [SKIP] Postgres-only upgrade (already applied): %s",
-                        description,
-                    )
-                    continue
-            except Exception as guard_exc:
-                # Guard failure (e.g. information_schema not accessible)
-                # — log and proceed with the upgrade attempt. The upgrade
-                # itself is idempotent via IF NOT EXISTS / TYPE guards.
+    for description, sql, guard_sql in upgrades:
+        try:
+            # Idempotent guard: skip if already applied.
+            guard_result = conn.execute(text(guard_sql))
+            if guard_result.fetchone() is not None:
                 logger.debug(
-                    "  [WARN] Postgres-only upgrade guard failed for %s: %s",
-                    description, guard_exc,
-                )
-            try:
-                conn.execute(text(sql))
-                logger.info(
-                    "  [OK] Applied Postgres-only upgrade: %s",
+                    "  [SKIP] Postgres-only upgrade (already applied): %s",
                     description,
                 )
-            except Exception as upgrade_exc:
-                # The upgrade is non-blocking — log and continue. The
-                # TEXT column from the portable migration file is
-                # sufficient for correctness; JSONB is a performance/
-                # feature enhancement only.
-                logger.warning(
-                    "  [WARN] Postgres-only upgrade FAILED (non-blocking): "
-                    "%s — %s. The TEXT column from the portable migration "
-                    "is sufficient for correctness; JSONB is a "
-                    "performance/feature enhancement only.",
-                    description, upgrade_exc,
-                )
+                continue
+        except Exception as guard_exc:
+            # Guard failure (e.g. information_schema not accessible)
+            # — log and proceed with the upgrade attempt. The upgrade
+            # itself is idempotent via IF NOT EXISTS / TYPE guards.
+            logger.debug(
+                "  [WARN] Postgres-only upgrade guard failed for %s: %s",
+                description, guard_exc,
+            )
+        # v90: let failures propagate — the caller's transaction will
+        # roll back, and the migration will NOT be marked as applied.
+        # This is the fail-closed behavior: if the JSONB upgrade fails
+        # (e.g. invalid JSON in metadata_json), the operator must fix
+        # the data and re-run the migration. The previous non-blocking
+        # behavior silently left the column as TEXT while marking the
+        # migration as applied — schema drift.
+        conn.execute(text(sql))
+        logger.info(
+            "  [OK] Applied Postgres-only upgrade: %s",
+            description,
+        )
 
 
 def _apply_python_columns(
@@ -3976,28 +4046,38 @@ def _run_migrations_inner(
                             )
                             raise
 
+                    # v90 ROOT FIX (BUG #15 — P1 _apply_postgres_only_upgrades
+                    # outside transaction): the PostgreSQL-only upgrades
+                    # (e.g. JSONB type upgrade for migration 007) MUST run
+                    # INSIDE the per-migration transaction so they commit
+                    # atomically with the migration. If the upgrade fails
+                    # (e.g. ALTER COLUMN metadata_json TYPE JSONB fails
+                    # because a row has invalid JSON), the entire migration
+                    # rolls back — the migration is NOT marked as applied,
+                    # and the operator can fix the data and re-run. The
+                    # previous code called _apply_postgres_only_upgrades
+                    # AFTER the transaction committed, so a failed upgrade
+                    # left the migration recorded as "applied" but the
+                    # column stayed TEXT — schema drift.
+                    # v75 ROOT FIX (T-026): the hook is called ONLY on
+                    # PostgreSQL (the function checks dialect internally).
+                    # The portable SQL file already added the TEXT column
+                    # on BOTH dialects; this hook upgrades it to JSONB on
+                    # PostgreSQL for indexable, deduplicated JSON storage.
+                    _apply_postgres_only_upgrades(conn, migration_name)
+
                     # Record successful migration (BUG-IDEM-03: upsert).
                     # This is INSIDE the same ``engine.begin()`` block as
-                    # the migration statements, so the recording and the
-                    # schema change commit atomically — we never have a
-                    # recorded migration that didn't actually apply (or
-                    # vice versa).
+                    # the migration statements + the Postgres-only upgrades,
+                    # so the recording, the schema change, AND the upgrade
+                    # commit atomically — we never have a recorded migration
+                    # that didn't actually apply (or vice versa).
                     _record_migration(conn, migration_name, checksum, "applied")
 
                 mig_duration = time.monotonic() - mig_start
                 per_migration_timing[migration_name] = mig_duration
                 applied.append(migration_name)
                 consecutive_failures = 0  # GAP-REL-07: Reset circuit breaker
-
-                # v75 ROOT FIX (T-026 — migration 007 DO $$ block fails on SQLite):
-                # Apply PostgreSQL-only upgrades that the portable SQL file
-                # cannot express (JSONB type upgrade, pg_constraint-guarded
-                # constraint swaps, etc.). Called ONLY on PostgreSQL. The
-                # portable SQL file already added the TEXT column on BOTH
-                # dialects; this hook upgrades it to JSONB on PostgreSQL for
-                # indexable, deduplicated JSON storage. Failures are logged
-                # but non-blocking (TEXT is sufficient for correctness).
-                _apply_postgres_only_upgrades(engine, migration_name)
 
                 # BUG-LINE-01: Populate provenance table
                 with engine.begin() as conn:

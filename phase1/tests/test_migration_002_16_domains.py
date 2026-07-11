@@ -437,7 +437,7 @@ class TestDataQuality:
     def test_dq_02_no_check_violations(self, migration_002_sql):
         """DQ-2: No backfill that would violate CHECK constraints from 001."""
         # gene_symbol = '' violates chk_gda_gene_symbol CHECK (gene_symbol <> '')
-        # disease_id = '' violates chk_gda_disease_id CHECK (disease_id <> '')
+        # disease_id = '' violates chk_gda_disease_id_nonempty CHECK (disease_id <> '')
         # source = '' violates chk_gda_source CHECK (source IS NULL OR source IN (...))
         # Check that none of these backfills exist
         bad_patterns = [
@@ -878,14 +878,32 @@ class TestCompliance:
     """Verify compliance and standards adherence."""
 
     def test_cmp_01_constraint_naming_convention(self, migration_002_sql):
-        """CMP-1: Constraint name follows NAMING_CONVENTION."""
-        # Should have uq_gene_disease_associations_gene_symbol... not uq_gda_gene_disease_source
-        assert "uq_gene_disease_associations_gene_symbol_disease_id_source" in migration_002_sql, (
-            "CMP-1 FAIL: Constraint name doesn't follow NAMING_CONVENTION"
+        """CMP-1: v90 ROOT FIX (BUG #2) — constraint name must match the ORM.
+
+        The ORM (models.py:1681-1684) declares
+        ``UniqueConstraint(..., name="uq_gda_gene_disease_source")``.
+        Migration 001 (line ~1112) creates the same name. Migration 002
+        MUST NOT rename it — keeping the ORM-matching name eliminates
+        the three-way schema drift (dev / prod / post-002 prod) that
+        ``ON CONFLICT ON CONSTRAINT uq_gda_gene_disease_source`` silently
+        failed under.
+        """
+        # v90: migration 002 must ADD the ORM-matching name
+        assert "ADD CONSTRAINT IF NOT EXISTS uq_gda_gene_disease_source" in migration_002_sql, (
+            "CMP-1 FAIL: v90 ROOT FIX — migration 002 must re-add uq_gda_gene_disease_source "
+            "(the ORM-matching name), not invent a new name."
         )
-        # Old incorrect name should be dropped
-        assert "DROP CONSTRAINT IF EXISTS uq_gda_gene_disease_source" in migration_002_sql, (
-            "CMP-1 FAIL: Old constraint name uq_gda_gene_disease_source not dropped"
+        # v90: migration 002 must NOT ADD the old renamed constraint.
+        # The old name may appear in comments documenting the fix, but
+        # must NOT appear in an ADD CONSTRAINT statement.
+        import re as _re
+        _add_old = _re.compile(
+            r"ADD\s+CONSTRAINT[^;]*uq_gene_disease_associations_gene_symbol_disease_id_source",
+            _re.IGNORECASE,
+        )
+        assert not _add_old.search(migration_002_sql), (
+            "CMP-1 FAIL: v90 ROOT FIX — migration 002 must not ADD the renamed "
+            "constraint uq_gene_disease_associations_gene_symbol_disease_id_source."
         )
 
     def test_cmp_02_ix_prefix(self, migration_002_sql):
@@ -1289,8 +1307,8 @@ class TestSQLStructure:
             ("RAISE NOTICE", "LOG-1"),
             # DOC
             ("NULL HANDLING STRATEGY", "DOC-4"),
-            # CMP
-            ("uq_gene_disease_associations_gene_symbol_disease_id_source", "CMP-1"),
+            # CMP — v90 ROOT FIX (BUG #2): must use the ORM-matching name
+            ("ADD CONSTRAINT IF NOT EXISTS uq_gda_gene_disease_source", "CMP-1"),
         ]
         missing = []
         for marker, issue_id in critical_markers:
