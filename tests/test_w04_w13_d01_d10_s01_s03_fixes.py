@@ -417,24 +417,31 @@ class TestW13ComputeAucWarnsStandalone(unittest.TestCase):
 
 
 class TestD01StreamingThresholdLowered(unittest.TestCase):
-    """D-01: streaming threshold lowered to 1,000 (exercisable in demos)."""
+    """D-01 / V90 BUG #45: streaming threshold restored to 100,000.
 
-    def test_streaming_threshold_is_1000(self):
-        """run_full_pipeline should use STREAMING_THRESHOLD = 1_000."""
+    The D-01 "fix" lowered the threshold to 1,000 to "exercise the
+    streaming path in CI/demos," but BUG #45 found this made the demo
+    pipeline SLOWER without benefit. The V90 fix restored it to 100,000
+    (the original value). The streaming path is exercised by a dedicated
+    unit test instead.
+    """
+
+    def test_streaming_threshold_is_100000(self):
+        """run_full_pipeline should use STREAMING_THRESHOLD = 100_000 (V90 BUG #45)."""
         import inspect
         from graph_transformer.gt_rl_bridge import GTRLBridge
         source = inspect.getsource(GTRLBridge.run_full_pipeline)
         self.assertIn(
-            "STREAMING_THRESHOLD = 1_000",
+            "STREAMING_THRESHOLD = 100_000",
             source,
-            "D-01: run_full_pipeline should use STREAMING_THRESHOLD = 1_000 "
-            "(was 100_000 in V27, which never exercised the streaming path "
-            "on demo graphs).",
+            "V90 BUG #45: run_full_pipeline should use STREAMING_THRESHOLD = 100_000 "
+            "(was 1_000 in D-01 which made the demo slower; restored to 100_000 "
+            "because the streaming path is slower than in-memory for small graphs).",
         )
         self.assertIn(
-            "ROOT FIX (D-01)",
+            "V90 BUG #45",
             source,
-            "D-01: run_full_pipeline should have a ROOT FIX (D-01) comment.",
+            "V90 BUG #45: run_full_pipeline should have a V90 BUG #45 comment.",
         )
 
 

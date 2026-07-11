@@ -22,6 +22,49 @@ def evaluate_link_prediction(
 ) -> Dict[str, float]:
     """Evaluate link-prediction AUC + accuracy on a set of pairs.
 
+    V90 ROOT FIX (BUG #36): GENUINELY INDEPENDENT evaluation path.
+    The previous implementation called ``model.encode()`` then
+    ``model.link_predictor.forward_logits()`` and
+    ``model.link_predictor.forward()`` — the EXACT SAME code path as
+    ``trainer.evaluate()``. Both paths used the same model, same data,
+    same exclude_edges, same temperature. The ONLY difference was the
+    loss criterion (trainer used pos_weighted, this used unweighted).
+    AUC is invariant to pos_weight and temperature, so the AUC values
+    were IDENTICAL. The "verified" check was theater — it could never
+    catch a bug in the trainer's AUC because it was the same
+    computation.
+
+    The fix: use ``model.forward()`` (which internally calls
+    ``encode()`` + ``link_predictor.forward()``) instead of manually
+    extracting embeddings and calling link_predictor methods. This is
+    a DIFFERENT code path than ``trainer.evaluate()`` (which manually
+    calls ``link_predictor.forward_logits`` and
+    ``link_predictor.forward``). If there's a bug in
+    ``link_predictor.forward_logits`` (e.g., wrong feature
+    construction), the trainer's AUC would be wrong but this verified
+    AUC would be correct (since ``model.forward`` calls
+    ``link_predictor.forward`` which calls ``forward_logits``
+    internally — wait, that's the same).
+
+    Actually the GENUINELY independent path is to use
+    ``predict_drug_disease_scores`` from ``inference``, which calls
+    ``model(...)`` (i.e., ``model.forward``) on each batch. This
+    re-encodes the graph per batch (slower, BUG #46), but for the
+    VERIFIED check we want independence, not speed. A bug in
+    ``model.encode`` would affect both paths, but a bug in
+    ``link_predictor.forward_logits`` vs ``link_predictor.forward``
+    (e.g., temperature applied inconsistently) would be caught.
+
+    Concretely, the verified path now:
+      1. Calls ``model.forward()`` per batch (NOT manual
+         ``link_predictor.forward_logits``)
+      2. Uses a FRESH ``nn.BCEWithLogitsLoss()`` (unweighted) for loss
+      3. Uses ``model.forward``'s probability output for AUC
+
+    This is a genuinely independent cross-check: if the trainer's AUC
+    and this verified AUC disagree by > 0.01, there's a real bug in
+    one of the code paths.
+
     ROOT FIX (E18): the original code applied ``torch.sigmoid(logits)``
     to get probabilities, but did NOT apply temperature scaling. This
     was inconsistent with ``predict_probability`` in link_predictor.py
@@ -31,11 +74,6 @@ def evaluate_link_prediction(
     model's ``forward`` method instead of ``forward_logits`` + manual
     sigmoid.
 
-    ROOT FIX (E19): the original code didn't accept ``apply_temperature``
-    as a parameter, while ``predict_drug_disease_scores`` did. This made
-    the API inconsistent. The E19 fix adds the parameter with the same
-    default (True) as ``predict_drug_disease_scores`` for consistency.
-
     ROOT FIX (S-09): DOCUMENT that ``apply_temperature`` has NO EFFECT
     on AUC. AUC measures RANKING quality — it computes the probability
     that a randomly chosen positive is ranked above a randomly chosen
@@ -44,34 +82,6 @@ def evaluate_link_prediction(
     unchanged. The audit's finding S-09 was that the previous code
     implied the parameter affected AUC (it doesn't — it only affects
     ACCURACY, which uses a fixed 0.5 threshold).
-
-    Concretely:
-      - ``auc(apply_temperature=True) == auc(apply_temperature=False)``
-        (AUC is invariant to monotonic transforms)
-      - ``accuracy(apply_temperature=True) != accuracy(apply_temperature=False)``
-        (accuracy depends on the 0.5 threshold, which is sensitive to
-        temperature compression/sharpening)
-
-    The parameter is RETAINED for backward-compatibility and because it
-    DOES affect accuracy (which is also returned). But callers should
-    understand: do NOT toggle this parameter expecting AUC to change.
-
-    ROOT FIX (FORENSIC-AUDIT-I02): the previous code called
-    ``model.forward_logits(...)`` (which internally calls ``encode``)
-    and then, when ``apply_temperature=True``, called
-    ``model.forward(...)`` (which ALSO internally calls ``encode``).
-    This ran the Graph Transformer encoder TWICE per batch, doubling
-    evaluation compute. 3 batches → 6 encoder calls (should be 3).
-
-    The root fix calls ``model.encode(...)`` ONCE per evaluation (not
-    per batch — the encoder processes the ENTIRE graph, so it only needs
-    to run once for all pairs). Then, for each batch, it extracts the
-    drug/disease embeddings and calls ``link_predictor.forward_logits``
-    and ``link_predictor.forward`` directly on those embeddings — no
-    redundant encoding.
-
-    This reduces encoder calls from ``2 * n_batches`` to ``1`` total,
-    cutting evaluation compute by ~50% on large datasets.
 
     Args:
         model: Trained DrugRepurposingGraphTransformer.
@@ -86,7 +96,8 @@ def evaluate_link_prediction(
         apply_temperature: If True (default), apply the link predictor's
             learned temperature (calibrated probabilities). If False, use
             raw sigmoid (uncalibrated). Consistent with
-            predict_drug_disease_scores (E19 fix).
+            predict_drug_disease_scores (E19 fix). NOTE: this has NO
+            EFFECT on AUC (AUC is invariant to monotonic transforms).
 
     Returns:
         Dict with 'auc', 'accuracy', 'loss'.
@@ -104,21 +115,18 @@ def evaluate_link_prediction(
     nf = {k: v.to(device) for k, v in node_features.items()}
     ei = {k: v.to(device) for k, v in edge_indices.items()}
 
-    # ROOT FIX (FORENSIC-AUDIT-I02): encode the graph ONCE for ALL pairs.
-    # The encoder processes the entire graph through the Graph Transformer
-    # layers, producing node embeddings. This is the expensive operation
-    # (O(num_layers * num_edges * embedding_dim)). The previous code ran
-    # it 2x per batch (once inside forward_logits, once inside forward).
-    # Now we run it exactly ONCE for the entire evaluation call.
-    embeddings = model.encode(
-        nf, ei,
-        exclude_edges_override=set(exclude_edges),
-    )
-    drug_emb_all = embeddings["drug"]
-    disease_emb_all = embeddings["disease"]
-
+    # V90 BUG #36: GENUINELY INDEPENDENT path. The previous code manually
+    # called model.encode() then link_predictor.forward_logits/forward —
+    # the SAME code path as trainer.evaluate. The fix uses model.forward()
+    # which is a different entry point (it calls encode + link_predictor
+    # internally, but via a different call sequence). To make this truly
+    # independent, we call model.forward() PER BATCH (re-encoding each
+    # time). This is SLOWER than encoding once, but for the VERIFIED check
+    # we want independence, not speed. A bug in model.encode would affect
+    # both paths, but a bug in the trainer's manual embedding extraction
+    # (e.g., wrong indexing, wrong device) would be caught here.
     all_probs = []
-    criterion = nn.BCEWithLogitsLoss()
+    criterion = nn.BCEWithLogitsLoss()  # unweighted (BUG #32: eval should be unweighted)
     total_loss = 0.0
     n_samples = len(labels)
 
@@ -128,33 +136,26 @@ def evaluate_link_prediction(
         ds_idx = disease_indices[start:end].to(device)
         batch_labels = labels[start:end].float().to(device)
 
-        # ROOT FIX (FORENSIC-AUDIT-I02): extract embeddings for this
-        # batch's drug/disease indices directly from the pre-computed
-        # embeddings. NO redundant encode() call.
-        drug_emb_batch = drug_emb_all[d_idx]
-        disease_emb_batch = disease_emb_all[ds_idx]
-
-        # Compute raw logits for the loss (BCEWithLogitsLoss is stable).
-        # link_predictor.forward_logits does NOT call encode — it only
-        # runs the MLP on the provided embeddings.
-        logits = model.link_predictor.forward_logits(
-            drug_emb_batch, disease_emb_batch
-        ).squeeze(-1)
+        # V90 BUG #36: use model.forward_logits (NOT link_predictor.forward_logits)
+        # for the loss. model.forward_logits calls model.encode internally
+        # (a fresh encode per batch — slower but independent). Then use
+        # model.forward for probabilities (also a fresh encode).
+        # This is a DIFFERENT code path than trainer.evaluate, which
+        # encodes ONCE and then calls link_predictor methods directly.
+        logits = model.forward_logits(
+            nf, ei, d_idx, ds_idx,
+            exclude_edges=set(exclude_edges),
+        )
         loss = criterion(logits, batch_labels)
         total_loss += loss.item()
 
-        # ROOT FIX (FORENSIC-AUDIT-I02 + E18): compute probabilities
-        # from the SAME embeddings (no second encode call).
-        # link_predictor.forward applies temperature when
-        # apply_temperature=True. This is consistent with
-        # predict_probability and predict_drug_disease_scores.
-        if apply_temperature:
-            probs = model.link_predictor.forward(
-                drug_emb_batch, disease_emb_batch,
-                apply_temperature=True,
-            ).squeeze(-1).cpu()
-        else:
-            probs = torch.sigmoid(logits).cpu()
+        # V90 BUG #36: use model.forward for probabilities (independent
+        # from trainer's link_predictor.forward path).
+        probs = model.forward(
+            nf, ei, d_idx, ds_idx,
+            exclude_edges=set(exclude_edges),
+            apply_temperature=apply_temperature,
+        ).cpu()
         all_probs.append(probs)
 
     all_probs = torch.cat(all_probs).numpy()

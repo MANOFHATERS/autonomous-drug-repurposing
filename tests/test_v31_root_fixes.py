@@ -126,28 +126,41 @@ def test_v31_kp_multi_hop_paths_injected():
 
 
 def test_v31_feature_rng_instance_level():
-    """P1-11: verify the feature RNG is instance-level (not re-seeded per call)."""
+    """P1-11 / V90 BUG #38: _feature_rng was REMOVED (dead code).
+
+    The V31 P1-11 fix introduced ``self._feature_rng`` to hoist the
+    feature RNG to instance state. However, BUG #38 found that this
+    attribute was DEAD CODE — the per-drug feature computation uses
+    DEDICATED per-drug RNGs (``drug_rng = np.random.default_rng(drug_seed)``),
+    NOT ``self._feature_rng``. The ``rng = self._feature_rng`` line at
+    the top of each method was a DEAD assignment.
+
+    The V90 BUG #38 fix REMOVED ``self._feature_rng`` entirely. This
+    test now verifies the REMOVAL (not the presence) of the dead code.
+    """
     from graph_transformer.gt_rl_bridge import GTRLBridge
 
     bridge = GTRLBridge(output_dir=tempfile.mkdtemp(), seed=42)
 
-    # Verify the instance-level feature RNG exists
-    assert hasattr(bridge, '_feature_rng'), \
-        "Bridge must have instance-level _feature_rng (P1-11 fix)"
-    assert isinstance(bridge._feature_rng, np.random.Generator), \
-        f"_feature_rng must be np.random.Generator, got {type(bridge._feature_rng)}"
+    # V90 BUG #38: _feature_rng must NOT exist (it was dead code, removed).
+    assert not hasattr(bridge, '_feature_rng'), \
+        "V90 BUG #38: _feature_rng must be REMOVED (it was dead code — " \
+        "the per-drug feature computation uses dedicated per-drug RNGs, " \
+        "not self._feature_rng). The V31 P1-11 fix introduced it but the " \
+        "rng = self._feature_rng assignment was never actually used."
 
-    # Verify the RNG state ADVANCES on each call (not re-seeded).
-    # We check this by drawing two samples and verifying they're different.
-    # If the RNG were re-seeded, both samples would be identical.
-    state_before = bridge._feature_rng.bit_generator.state
-    _ = bridge._feature_rng.random(10)
-    state_after = bridge._feature_rng.bit_generator.state
-    assert state_before != state_after, \
-        "Feature RNG state must ADVANCE on each call (P1-11: no re-seeding)"
+    # V90 COMPOUND #2: verify the deterministic name seed helper exists
+    # (replaces hash() for reproducibility).
+    from graph_transformer.gt_rl_bridge import _deterministic_name_seed
+    s1 = _deterministic_name_seed(42, 'aspirin', 42)
+    s2 = _deterministic_name_seed(42, 'aspirin', 42)
+    assert s1 == s2, "V90 COMPOUND #2: _deterministic_name_seed must be reproducible"
+    # Different drugs must get different seeds.
+    s3 = _deterministic_name_seed(42, 'metformin', 42)
+    assert s1 != s3, "V90 COMPOUND #2: different drugs must get different seeds"
 
-    print("  PASS: Feature RNG is instance-level and advances on each call "
-          "(no re-seeding per _compute_supplementary_features call).")
+    print("  PASS: V90 BUG #38 — _feature_rng dead code REMOVED. "
+          "V90 COMPOUND #2 — _deterministic_name_seed is reproducible.")
 
 
 def test_v31_top_k_novel_uses_raw_sigmoid():
@@ -208,21 +221,30 @@ def test_v31_real_drug_names_reordered():
 
 
 def test_v31_pipeline_imports_clean():
-    """Verify all V31 modules import without errors."""
+    """Verify all V31 modules import without errors.
+
+    V90 BUG #38: _feature_rng was REMOVED (dead code). The test no
+    longer asserts its presence.
+    """
     from graph_transformer.gt_rl_bridge import GTRLBridge
     from graph_transformer.data.graph_builder import BiomedicalGraphBuilder
     from graph_transformer.inference import top_k_novel_predictions, predict_drug_disease_scores
     from rl.rl_drug_ranker import train_agent, run_pipeline, PipelineConfig
 
-    # Verify GTRLBridge has _feature_rng
+    # V90 BUG #38: _feature_rng must NOT exist (dead code removed).
     bridge = GTRLBridge(output_dir=tempfile.mkdtemp(), seed=42)
-    assert hasattr(bridge, '_feature_rng')
+    assert not hasattr(bridge, '_feature_rng'), \
+        "V90 BUG #38: _feature_rng must be REMOVED (dead code)"
 
-    print("  PASS: All V31 modules import cleanly. GTRLBridge has _feature_rng.")
+    print("  PASS: All V31 modules import cleanly. V90 BUG #38: _feature_rng removed.")
 
 
 def test_v31_end_to_end_smoke():
-    """End-to-end smoke test: build graph, verify training positives exist."""
+    """End-to-end smoke test: build graph, verify training positives exist.
+
+    V90 BUG #38: _feature_rng was REMOVED (dead code). The test no
+    longer asserts its presence.
+    """
     from graph_transformer.gt_rl_bridge import GTRLBridge
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -237,11 +259,12 @@ def test_v31_end_to_end_smoke():
         assert n_treats > 5, \
             f"Expected >5 treats edges (KPs + training positives), got {n_treats}"
 
-        # Verify the feature RNG is instance-level
-        assert hasattr(bridge, '_feature_rng')
+        # V90 BUG #38: _feature_rng must NOT exist (dead code removed).
+        assert not hasattr(bridge, '_feature_rng'), \
+            "V90 BUG #38: _feature_rng must be REMOVED (dead code)"
 
     print(f"  PASS: End-to-end smoke test passed. Graph has {n_treats} treats edges "
-          f"(KPs + training positives). Feature RNG is instance-level.")
+          f"(KPs + training positives). V90 BUG #38: _feature_rng removed.")
 
 
 def run_all_tests():
