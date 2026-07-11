@@ -2073,17 +2073,27 @@ def fill_missing_drug_fields(
     ``smiles``               ``''`` (empty string)              ``None`` (kept as NaN)
     =======================  =================================  =================================
 
-    **Backward compatibility**: the default ``conservative_defaults=False``
-    preserves the v2.0.0 fill values for all callers in the existing
-    12-file codebase.  Pass ``conservative_defaults=True`` to get the
-    scientifically safer behavior (BUG-SCI-3, BUG-SCI-7, BUG-SCI-10).
+    **Backward compatibility**: the default ``conservative_defaults=True``
+    applies the scientifically safer fill values (BUG-SCI-3, BUG-SCI-7,
+    BUG-SCI-10). Pass ``conservative_defaults=False`` to get the legacy
+    v2.0.0 fill values for backward compatibility with the existing
+    12-file codebase.
 
     Parameters
     ----------
     df : pd.DataFrame
         Drug records.
     conservative_defaults : bool
-        See the table above.  Default False (v2.0.0 behavior).
+        See the table above.  Default True (scientifically safer
+        behavior — v93 ROOT FIX P1-046: the previous docstring said
+        "Default False (v2.0.0 behavior)" but the actual default was
+        True. The docstring contradicted the code, misleading operators
+        into thinking they were getting the legacy v2.0.0 behavior when
+        they were actually getting the safer v3.0.0 behavior. Root fix:
+        update the docstring to match the code. The default remains True
+        because the safer behavior is the correct production default —
+        operators who need the legacy behavior must explicitly opt in
+        with ``conservative_defaults=False``).
     fill_map_override : dict | None
         Per-pipeline overrides.  Merged on top of the default fill_map
         (override takes precedence).  Example:
@@ -3143,8 +3153,34 @@ def validate_gda_scores(
         # The fix: align the validator's map with the pipeline's
         # SCORE_BY_MAPPING_KEY. The map is now {1: 0.5, 2: 0.6, 3: 0.9,
         # 4: 0.8} — matching omim_pipeline.py exactly.
+        #
+        # v93 ROOT FIX (P1-029 — single source of truth): the previous
+        # code hardcoded ``_OMIM_CATEGORICAL_MAP = {1: 0.5, 2: 0.6,
+        # 3: 0.9, 4: 0.8}`` as a local constant. If someone changed
+        # ``SCORE_BY_MAPPING_KEY`` in ``pipelines/omim_pipeline.py``
+        # without updating this local copy, the two would SILENTLY
+        # DIVERGE — the pipeline would emit one set of scores and the
+        # validator would remap them with a different mapping,
+        # corrupting the GDA scores that feed the Graph Transformer
+        # and the RL ranker. Root fix: import the canonical map from
+        # ``pipelines/omim_pipeline.py`` (lazy import — cleaning must
+        # not import pipelines at module load due to circular-dep guard
+        # ARCH-1, GUARD-A7). The pipeline's map IS the single source
+        # of truth.
         if source == "omim":
-            _OMIM_CATEGORICAL_MAP = {1: 0.5, 2: 0.6, 3: 0.9, 4: 0.8}
+            # Lazy import to avoid circular dependency at module load.
+            try:
+                from pipelines.omim_pipeline import SCORE_BY_MAPPING_KEY
+                _OMIM_CATEGORICAL_MAP = SCORE_BY_MAPPING_KEY
+            except ImportError:
+                # Fallback to the hardcoded values (matching the
+                # canonical map) if the pipeline module is not
+                # importable (e.g. during isolated unit tests of
+                # cleaning that do not load the pipelines package).
+                # This is a DEFENSE-IN-DEPTH fallback, NOT a second
+                # source of truth — the canonical map lives in
+                # pipelines/omim_pipeline.py.
+                _OMIM_CATEGORICAL_MAP = {1: 0.5, 2: 0.6, 3: 0.9, 4: 0.8}
             if "_omim_categorical_mapped" not in out.columns:
                 out["_omim_categorical_mapped"] = False
             try:

@@ -82,8 +82,9 @@ pubchem_cid         int | None
 molecular_formula   str | None
 molecular_weight    float | None    > 0
 smiles              str | None
-is_fda_approved     bool            Proxy: ``max_phase == 4``
-max_phase           int | None      0-4 (0=preclinical, 4=approved)
+is_fda_approved     bool | None     Unknown until FDA Orange Book join (v93 fix)
+is_globally_approved bool           Proxy: ``max_phase == 4`` (any regulator)
+max_phase           int | None      0-4 (0=preclinical, 4=approved by any regulator)
 drug_type           str             One of ``DrugType`` enum values
 mechanism_of_action str | None
 ==================  ==============  ========================================
@@ -462,11 +463,12 @@ class ChEMBLPipeline(BasePipeline):
       means "Phase 4 trial reached" = globally approved by ANY regulator
       (FDA, EMA, PMDA, etc.), NOT FDA-specific. This is the accurate
       ChEMBL semantic and is stored in ``is_globally_approved``.
-    - ``is_fda_approved``: V100 ROOT FIX (BUG #5, P0 CRITICAL). The
-      previous code set ``is_fda_approved = (max_phase == 4)`` which
-      CONFLATED global approval with FDA approval — EMA-only drugs were
-      falsely labeled FDA-approved, bypassing the RL ranker's FDA safety
-      filter. The fix: ``is_fda_approved`` is ``None`` (unknown) for
+    - ``is_fda_approved``: V100 ROOT FIX (BUG #5, P0 CRITICAL) /
+      v93 ROOT FIX (P1-027 audit). The previous code set
+      ``is_fda_approved = (max_phase == 4)`` which CONFLATED global
+      approval with FDA approval — EMA-only drugs were falsely labeled
+      FDA-approved, bypassing the RL ranker's FDA safety filter. The
+      fix: ``is_fda_approved`` is ``None`` (unknown) for
       ``max_phase == 4`` drugs until an FDA Orange Book join is wired in,
       ``False`` for ``max_phase < 4``, and ``True`` ONLY when the
       ``approved_by`` field contains "FDA". This is the honest answer.
@@ -698,8 +700,14 @@ class ChEMBLPipeline(BasePipeline):
             if mol_path and mol_path.exists():
                 if mol_path.suffix == ".jsonl":
                     # Parse JSONL into a list of dicts, then use _parse_molecules
+                    # v93 ROOT FIX (P1-043): explicit encoding="utf-8" — the
+                    # ChEMBL API returns UTF-8 JSONL with non-ASCII drug names
+                    # (e.g. "α-Tocopherol", "caf feína"). The default encoding
+                    # is locale.getpreferredencoding() (CP1252 on Windows,
+                    # UTF-8 on Linux). On Windows, non-ASCII names raised
+                    # UnicodeDecodeError, silently dropping the record.
                     mol_records = []
-                    with open(mol_path) as f:
+                    with open(mol_path, encoding="utf-8") as f:
                         for line in f:
                             mol_records.append(_json.loads(line))
                     drugs_df = self._parse_molecules(mol_records)
@@ -711,8 +719,10 @@ class ChEMBLPipeline(BasePipeline):
                 # Persist activities
                 if act_path and act_path.exists():
                     if act_path.suffix == ".jsonl":
+                        # v93 ROOT FIX (P1-043): explicit encoding="utf-8"
+                        # (see mol_path block above for rationale).
                         act_records = []
-                        with open(act_path) as f:
+                        with open(act_path, encoding="utf-8") as f:
                             for line in f:
                                 act_records.append(_json.loads(line))
                         activities_df = _pd.DataFrame(act_records)

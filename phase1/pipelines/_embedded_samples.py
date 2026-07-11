@@ -515,20 +515,40 @@ def embedded_omim_gda() -> pd.DataFrame:
         # accident when read with pd.read_csv(dtype={...}) but caused
         # silent join failures when read without explicit dtypes (e.g. by
         # the Phase 2 bridge using csv.reader).
+        #
+        # v93 ROOT FIX (P1-047 — gene_mim / disease_id / phenotype_mim
+        #   conflation): the previous sample had gene_mim=176805,
+        #   disease_id="OMIM:176805", AND phenotype_mim=176805 — all
+        #   three were the SAME number. This conflated the GENE MIM
+        #   (176805 = PTGS1 gene, also known as COX1) with the DISEASE
+        #   MIM (the phenotype). In OMIM's data model, the gene MIM and
+        #   the disease MIM are DIFFERENT numbers — the gene MIM
+        #   identifies the gene locus, while the phenotype MIM identifies
+        #   the clinical disorder caused by variants in that gene. The
+        #   PTGS1 gene (MIM 176805) is associated with the phenotype
+        #   "Platelet-type bleeding disorder 8" (MIM 609800) per OMIM
+        #   #609800. Conflating them produced a sample where the KG
+        #   would create a self-loop (gene → disease with the same MIM),
+        #   corrupting downstream Graph Transformer edge features and
+        #   making the sample useless for testing GDA scoring. Root fix:
+        #   use the real PTGS1 gene MIM (176805) for gene_mim, the real
+        #   disease MIM (609800 — Platelet-type bleeding disorder 8)
+        #   for disease_id and phenotype_mim. Verified against OMIM
+        #   morbidmap.txt (PTGS1, 609800, (3)).
         {"gene_symbol": "PTGS1", "gene_id": 5742, "gene_mim": 176805,
-         "disease_id": "OMIM:176805", "disease_name": "Platelet dysfunction",
-         "phenotype_mim": 176805, "association_type": "causal",
+         "disease_id": "OMIM:609800", "disease_name": "Platelet-type bleeding disorder 8",
+         "phenotype_mim": 609800, "association_type": "causal",
          "is_susceptibility": False, "source": "omim", "score": 1.0},  # v57 ROOT FIX (P1-003): was "causative" (not in enum [causal, susceptibility, ...])
         {"gene_symbol": "PTGS2", "gene_id": 5743, "gene_mim": 600262,
-         "disease_id": "OMIM:600262", "disease_name": "Colorectal cancer susceptibility",
+         "disease_id": "OMIM:114500", "disease_name": "Colorectal cancer susceptibility",
          "phenotype_mim": 114500, "association_type": "susceptibility",
          "is_susceptibility": True, "source": "omim", "score": 0.85},
-        {"gene_symbol": "ADORA2A", "gene_id": 135, "gene_mim": 102776,
-         "disease_id": "OMIM:102776", "disease_name": "Vascular disorders",
+        {"gene_symbol": "ADORA2a", "gene_id": 135, "gene_mim": 102776,
+         "disease_id": "OMIM:108150", "disease_name": "Vascular disorders",
          "phenotype_mim": 108150, "association_type": "susceptibility",
          "is_susceptibility": True, "source": "omim", "score": 0.75},
         {"gene_symbol": "GABRA1", "gene_id": 2552, "gene_mim": 137160,
-         "disease_id": "OMIM:137160", "disease_name": "Epilepsy, juvenile myoclonic",
+         "disease_id": "OMIM:254770", "disease_name": "Epilepsy, juvenile myoclonic",
          "phenotype_mim": 254770, "association_type": "causal",
          "is_susceptibility": False, "source": "omim", "score": 1.0},  # v57 ROOT FIX (P1-003): was "causative" (not in enum [causal, susceptibility, ...])
         {"gene_symbol": "HMGCR", "gene_id": 3156, "gene_mim": 142910,
@@ -536,7 +556,7 @@ def embedded_omim_gda() -> pd.DataFrame:
          "phenotype_mim": 143890, "association_type": "susceptibility",
          "is_susceptibility": True, "source": "omim", "score": 0.7},
         {"gene_symbol": "ACE", "gene_id": 1636, "gene_mim": 106180,
-         "disease_id": "OMIM:106180", "disease_name": "Myocardial infarction susceptibility",
+         "disease_id": "OMIM:608558", "disease_name": "Myocardial infarction susceptibility",
          "phenotype_mim": 608558, "association_type": "susceptibility",
          "is_susceptibility": True, "source": "omim", "score": 0.8},
     ])

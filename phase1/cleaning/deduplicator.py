@@ -2616,7 +2616,19 @@ def dedup_by_inchikey(
         except Exception:
             pass
         # [LINEAGE-3] Add dead-letter entries for the first N dropped rows
-        max_dl = 100 if not conservative_defaults else 1000
+        #
+        # v93 ROOT FIX (P1-045 — inverted dead-letter cap):
+        #   The previous code had ``max_dl = 100 if not conservative_defaults
+        #   else 1000`` — this is BACKWARDS. ``conservative_defaults=True``
+        #   is the SAFER mode (more conservative about data quality), so it
+        #   should be MORE conservative about dead-letter SIZE too (smaller
+        #   cap), not LESS. The previous code let conservative mode collect
+        #   10x MORE dead-letter entries than non-conservative mode,
+        #   consuming more memory and disk in exactly the mode where the
+        #   operator expects tighter resource limits. Root fix: invert the
+        #   cap — conservative mode gets 100 (smaller), non-conservative
+        #   gets 1000 (larger, for development/debugging).
+        max_dl = 1000 if not conservative_defaults else 100
         for di in dropped_indices[:max_dl]:
             try:
                 row = working[working["_original_index"] == di].iloc[0]
