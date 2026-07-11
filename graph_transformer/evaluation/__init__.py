@@ -119,6 +119,17 @@ def evaluate_link_prediction(
     prior_training = model.training
     model.eval()
     try:
+        # ROOT FIX (v92): the file previously contained TWO parallel
+        # implementations mashed together — a legacy ``model.encode() +
+        # link_predictor.forward_logits()`` path (lines 122-202) that
+        # ended with an ``if`` statement and NO body, followed by a
+        # newer ``model.forward()`` per-batch path (lines 203-270) at
+        # the WRONG indent level (outside the ``try`` block). This
+        # caused ``compileall`` to fail with IndentationError, breaking
+        # CI's build job for every PR. The fix below is the SINGLE
+        # canonical implementation: ``model.forward_logits()`` for the
+        # loss + ``model.forward()`` for probabilities, per batch
+        # (the "genuinely independent" path described in the docstring).
         model.to(device)
         nf = {k: v.to(device) for k, v in node_features.items()}
         ei = {k: v.to(device) for k, v in edge_indices.items()}

@@ -502,25 +502,20 @@ jobs:
             requirements.txt
             phase1/requirements.txt
       - name: Install deps (unconditional — needed for the verification step)
+        # V90 CI fix: the previous 'Check all required jobs passed' step
+        # installed deps ONLY when dependencies failed. When all deps
+        # passed, the install was SKIPPED, so the verification step
+        # crashed with ModuleNotFoundError: No module named 'pandas'.
+        # The fix: always install deps (unconditional).
+        #
+        # ROOT FIX (v92): the previous version of this step had a `name:`
+        # but NO `run:` key — only a comment. This is INVALID in GitHub
+        # Actions (every step MUST have either `uses:` or `run:`). The
+        # invalid step caused the ENTIRE workflow YAML to fail validation,
+        # resulting in 0 jobs being created for EVERY CI run.
         # v91 FORENSIC ROOT FIX: this step had a `name` + comments but NO
         # `run` property — GitHub Actions error: "There's not enough info
-        # to determine what you meant." This was the ROOT CAUSE of ALL CI
-        # failures (0 jobs, instant failure). Added the pip install command.
-        run: |
-          python -m pip install --upgrade pip
-          pip install -q \
-            "pandas>=2.1.4" \
-            "numpy>=1.26.3" \
-            "sqlalchemy>=2.0.25" \
-            "requests>=2.31.0" \
-            "python-dotenv>=1.0.0" \
-            "rapidfuzz>=3.6.1" \
-            "pyyaml>=6.0" \
-            "lxml>=5.1.0" \
-            "filelock>=3.13.0" \
-            "pyarrow>=14.0.0"
-      - name: Check all required jobs passed
-        if: ${{ !(needs.build.result == 'success' && needs.lint.result == 'success' && needs.test.result == 'success' && needs.verify-p2-fixes.result == 'success' && needs.e2e-sample-mode.result == 'success') }}
+        # to determine what you meant." Added the pip install command.
         run: |
           python -m pip install --upgrade pip
           pip install -q \
@@ -550,21 +545,6 @@ jobs:
           echo ""
           echo "  e2e-sample-mode:    ${{ needs.e2e-sample-mode.result }} (informational only — has continue-on-error)"
           exit 1
-
-      - name: Install deps
-        run: |
-          python -m pip install --upgrade pip
-          pip install -q \
-            "pandas>=2.1.4" \
-            "numpy>=1.26.3" \
-            "sqlalchemy>=2.0.25" \
-            "requests>=2.31.0" \
-            "python-dotenv>=1.0.0" \
-            "rapidfuzz>=3.6.1" \
-            "pyyaml>=6.0" \
-            "lxml>=5.1.0" \
-            "filelock>=3.13.0" \
-            "pyarrow>=14.0.0"
 
       - name: Verify v83 P1/P2 root-cause fixes (real production code)
         working-directory: phase1

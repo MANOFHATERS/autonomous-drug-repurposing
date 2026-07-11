@@ -1114,6 +1114,37 @@ class BiomedicalGraphBuilder:
 
         if training_positives_added > 0:
             logger.info(
+                f"V90 ROOT FIX (BUG #3, P0): injected {training_positives_added} "
+                f"CURATED TRAINING POSITIVES (real DrugBank/RepoDB drug-disease "
+                f"pairs, NON-KP drugs) as 'treats' edges ONLY. NO multi-hop "
+                f"path injection (BUG #3 fix removed it). The GT model now "
+                f"learns from the NATURAL topology (random drug->protein, "
+                f"protein->pathway, pathway->disease edges) — if the natural "
+                f"topology is insufficient, the demo graph is too small."
+            )
+
+            # v89 P0 ROOT FIX (Compound #3 / AUC fraud chain): REMOVED the
+            # 3-hop path injection for TRAINING POSITIVES too.
+            #
+            # The V31 "fix" injected a GUARANTEED drug→protein→pathway→
+            # disease path for EACH training positive. This is the SAME
+            # label leakage as the KP injection above: the model learned
+            # "3-hop path exists → positive" trivially, then generalized
+            # this rule to the held-out KPs (which also had injected
+            # paths, before the v89 fix above removed them).
+            #
+            # The audit (v89) confirmed the compound bug chain:
+            #   graph_builder.py injects 3-hop path for every training
+            #   positive → LABEL_LEAKING_EDGES only strips direct treats
+            #   edge, not the path → GT model learns "3-hop path exists
+            #   → positive" → val AUC = 1.0 → scientific-validation gate
+            #   passes trivially → ship garbage to pharma partners.
+            #
+            # The training positives are STILL added as "treats" edges
+            # (the line above this comment block), so the GT model has
+            # real positive signal. But NO synthetic 3-hop path is
+            # injected. The model must learn from NATURAL topology.
+            logger.info(
                 f"v89 P0 ROOT FIX (Compound #3): injected "
                 f"{training_positives_added} CURATED TRAINING POSITIVES "
                 f"(real DrugBank/RepoDB drug-disease pairs, NON-KP drugs) "
