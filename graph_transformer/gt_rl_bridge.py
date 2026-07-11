@@ -2097,25 +2097,24 @@ class GTRLBridge:
             pathway_count_per_disease = {}
         max_pw = max(pathway_count_per_disease.values()) if pathway_count_per_disease else 1
         pw_scale = max(1.0, float(max_pw))
-        # v91 FORENSIC ROOT FIX: define unmet_scale and max_pathways
-        # (both were UNDEFINED — NameError at runtime). unmet_scale is
-        # the max treatment count per disease (clamped to 1.0 to avoid
-        # division by zero). max_pathways mirrors max_pw for the
-        # pathway-connectivity differentiation.
-        max_tc = max(treat_count_per_disease.values()) if treat_count_per_disease else 1
-        unmet_scale = max(1.0, float(max_tc))
+        # v91 FORENSIC ROOT FIX: define max_pathways (was UNDEFINED —
+        # NameError at runtime). max_pathways mirrors max_pw for the
+        # pathway-connectivity differentiation. The canonical
+        # compute_unmet_need_score is imported from biomedical_tables
+        # (line 95) — do NOT shadow it with a local function.
         max_pathways = max_pw
 
-        def compute_unmet_need_score(disease_name: str) -> float:
+        def _unmet_need_for_disease(disease_name: str) -> float:
             ds_idx = disease_map.get(disease_name, -1)
             if ds_idx < 0:
                 return 0.5
             tc = treat_count_per_disease.get(ds_idx, 0)
-            # v91 ROOT FIX: use the canonical compute_unmet_need_score from
-            # biomedical_tables (the curated prevalence + treatment-count
-            # formula). The previous inline formula was a DUPLICATE of this
-            # function with undefined variables (unmet_scale, max_pathways).
-            # Now we delegate to the single source of truth.
+            # v91 ROOT FIX: delegate to the canonical compute_unmet_need_score
+            # from biomedical_tables (curated prevalence + treatment-count
+            # formula). The previous inline formula was a DUPLICATE with
+            # undefined variables (unmet_scale, max_pathways). This local
+            # wrapper is named _unmet_need_for_disease so it does NOT shadow
+            # the imported function.
             base = compute_unmet_need_score(disease_name, n_treatments=tc)
             # v89 ROOT FIX (CI S-F1): add a small pathway-connectivity
             # differentiation so diseases with the SAME treatment count but
@@ -2124,7 +2123,7 @@ class GTRLBridge:
             pw_diff = 0.03 * (pw_count / max(max_pathways, 1)) - 0.015
             return float(np.clip(base + pw_diff, 0.0, 1.0))
 
-        df["unmet_need_score"] = df["disease"].map(compute_unmet_need_score)
+        df["unmet_need_score"] = df["disease"].map(_unmet_need_for_disease)
         logger.info(
             f"v89 ROOT FIX: unmet_need_score computed from curated prevalence "
             f"+ treatment count ({df['unmet_need_score'].nunique()} unique values, "
