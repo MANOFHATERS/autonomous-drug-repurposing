@@ -774,6 +774,9 @@ def main() -> int:
         logger.critical(f"Pipeline RuntimeError: {e}", exc_info=True)
         return 4
     except Exception as e:
+        # Top-level catch-all for main() — this is the ONE appropriate
+        # broad catch per BUG #51 audit. Logs with exc_info=True so
+        # programming bugs are NEVER swallowed silently.
         logger.critical(f"Unexpected exception: {e}", exc_info=True)
         return 5
 
