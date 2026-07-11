@@ -1127,13 +1127,20 @@ if STRING_DETAILED_MODE not in {"optional", "required", "skip"}:
 # TODO(schema-migration): relax the constraint and load homodimers with
 # an is_homodimer flag.  Until then, drop them with WARNING + dead-letter.
 STRING_DROP_SELF_INTERACTIONS: bool = _getenv_bool(
-    "STRING_DROP_SELF_INTERACTIONS", default=True
+    "STRING_DROP_SELF_INTERACTIONS", default=False
 )
-"""If True (default), drop self-interactions (homodimers) to satisfy the
-chk_ppi_ordered DB constraint. If False, fail loudly (do NOT silently
-load — the DB constraint will reject them). TODO(schema-migration): When
-the constraint is relaxed, set this to False and load homodimers with an
-is_homodimer flag."""
+"""If False (default), keep self-interactions (homodimers) with an
+is_homodimer flag column. Homodimers are biologically real and
+clinically critical (EGFR dimerization, HER2/HER3 heterodimerization,
+p53 tetramerization). If True, drop them to satisfy legacy DB
+constraints.
+
+BUG #9 ROOT FIX: default changed from True to False. The previous
+default dropped ALL homodimers, removing clinically critical PPI edges
+from the KG. Drugs targeting EGFR dimerization (e.g. cetuximab) lost
+their PPI context. The Graph Transformer's link prediction for receptor
+dimerization was impossible.
+"""
 
 # GAP-3.11 / GAP-12.7: Dedup strategy for collapsing multiple STRING
 # ENSP pairs that map to the same UniProt pair.

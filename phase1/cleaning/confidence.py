@@ -254,11 +254,14 @@ def classify_confidence(
     sorted_tiers = sorted(tiers, key=lambda t: t[0])
     thresholds = [t[0] for t in sorted_tiers]
     labels = [t[1] for t in sorted_tiers]
-    # v82 P0-D6b: negative scores in [-1, 0) are classified as the
-    # lowest tier. We clamp the score to 0.0 for the bisect lookup so
-    # negative values map to the same tier as score=0.0 (the lowest
-    # threshold). The _score_direction column preserves the sign.
-    _bisect_score = max(0.0, float(score))
+    # BUG #25 ROOT FIX: use abs(score) for the bisect lookup so that
+    # protective associations with large negative magnitude (e.g. score=-0.9)
+    # get appropriate confidence tiers. The previous code clamped negative
+    # scores to 0.0, classifying ALL negative scores as "weak" — so a strong
+    # protective association (score=-0.9) got the same tier as a near-zero
+    # positive association (score=0.01). The _score_direction column still
+    # preserves the sign for downstream consumers.
+    _bisect_score = abs(float(score))
     # v82 FORENSIC ROOT FIX (P1-13 — floating-point boundary edge case):
     #   ``bisect.bisect_right(thresholds, score)`` is fragile at exact
     #   tier boundaries due to floating-point representation. For example,
@@ -272,11 +275,24 @@ def classify_confidence(
     #   enough that it doesn't shift any score into a higher tier unless
     #   the score is within 1e-9 of the boundary — which is exactly the
     #   FP representation error we want to absorb.
+    # BUG #24 ROOT FIX: only apply epsilon when the score is within
+    # floating-point representation error of the boundary (abs < 1e-12),
+    # not unconditionally. The previous code added 1e-9 to EVERY score,
+    # silently promoting scores within 1e-9 of a tier boundary. For a
+    # 4M-row GDA dataset, ~4 scores per boundary were affected. Now only
+    # scores that are essentially ON the boundary (within FP error) get
+    # the epsilon nudge.
     _BOUNDARY_EPSILON = 1e-9
+    _FP_ERROR_TOLERANCE = 1e-12
+    # Check if the score is within FP representation error of any boundary
+    _needs_epsilon = any(
+        abs(_bisect_score - t) < _FP_ERROR_TOLERANCE for t in thresholds
+    )
+    _adjusted_score = _bisect_score + (_BOUNDARY_EPSILON if _needs_epsilon else 0.0)
     # bisect_right returns the insertion point to the right of any
     # existing entries equal to score.  Subtracting 1 gives the index of
     # the tier whose threshold <= score.
-    idx = bisect.bisect_right(thresholds, _bisect_score + _BOUNDARY_EPSILON) - 1
+    idx = bisect.bisect_right(thresholds, _adjusted_score) - 1
     if idx < 0:
         # score < the lowest threshold — fall back to the lowest tier.
         # This should not happen in practice (the lowest threshold is 0.0

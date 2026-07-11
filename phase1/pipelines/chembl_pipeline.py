@@ -862,10 +862,16 @@ class ChEMBLPipeline(BasePipeline):
         clean_start = time.monotonic()
         logger.info("[%s] clean() starting (raw_path=%s)", self.source_name, raw_path)
 
-        # Read the raw drugs CSV (gzipped, UTF-8 — INT-6, INT-7).
+        # Read the raw drugs CSV (UTF-8 — INT-6, INT-7).
+        # BUG #1 ROOT FIX: detect compression from file extension instead
+        # of hardcoding compression="gzip". The v50 download path writes
+        # a plain .csv file, but the legacy v49 path writes .csv.gz.
+        # Hardcoded compression="gzip" crashed with gzip.BadGzipFile
+        # when the v50 path succeeded (the primary download path).
+        _compression = "gzip" if str(raw_path).endswith(".gz") else None
         drugs_df = pd.read_csv(
             raw_path,
-            compression="gzip",
+            compression=_compression,
             low_memory=False,
             encoding="utf-8",
         )
@@ -1106,9 +1112,15 @@ class ChEMBLPipeline(BasePipeline):
         )
 
         # Step 1: Read raw activities CSV.
+        # BUG #10 ROOT FIX: detect compression from file extension instead
+        # of hardcoding compression="gzip". The candidate filenames include
+        # .csv.gz (gzipped), .csv (plain), and .jsonl (not gzipped). When
+        # the v50 path produces a .jsonl or .csv file, hardcoded gzip
+        # raised gzip.BadGzipFile, silently dropping ALL activities.
+        _act_compression = "gzip" if str(activities_raw_path).endswith(".gz") else None
         activities_df = pd.read_csv(
             activities_raw_path,
-            compression="gzip",
+            compression=_act_compression,
             low_memory=False,
             encoding="utf-8",
         )
@@ -1183,7 +1195,13 @@ class ChEMBLPipeline(BasePipeline):
                     "[%s] clean_activities: using drugs.csv drug set (%d drugs)",
                     self.source_name, len(valid_chembl_ids),
                 )
-            except Exception as exc:
+            except (OSError, pd.errors.ParserError, ValueError) as exc:
+                # BUG #18 ROOT FIX: narrowed from broad ``except Exception``
+                # which caught programming bugs (AttributeError from a typo)
+                # and silently downgraded them to "proceeding without filter."
+                # Now only catches legitimate IO/parse errors. Programming bugs
+                # propagate so they surface instead of silently producing
+                # corrupted activity data.
                 logger.warning(
                     "[%s] Could not read drugs.csv for activity filter (%s) — "
                     "proceeding without filter (may cause load() to fail "
@@ -1493,7 +1511,12 @@ class ChEMBLPipeline(BasePipeline):
             total_loaded += int(drugs_result.inserted + drugs_result.updated)
 
             # Step 4: Validate drug count (S18, DQ-13).
-            drug_count = len(df)
+            # BUG #16 ROOT FIX: use drugs_upserted (actual DB writes) instead
+            # of len(df) (input count). If bulk_upsert_drugs failed (e.g.
+            # CHECK constraint violation), drugs_upserted=0 but len(df) was
+            # unchanged, so the validation still passed. Now the validation
+            # catches failed upserts correctly.
+            drug_count = self._metrics.get("drugs_upserted", len(df))
             if drug_count < CHEMBL_EXPECTED_DRUG_COUNT_MIN:
                 # In test environments with CHEMBL_MAX_ROWS set very low,
                 # the count validation will fail. Allow override via env.
@@ -3762,7 +3785,7 @@ class ChEMBLPipeline(BasePipeline):
                 # v82 P0-D4b: preserve the censor metadata.
                 norm_censored.append(bool(result.censored))
                 norm_censor_dir.append(result.censor_direction)
-            except Exception as exc:  # noqa: BLE001 — never crash on a single row
+            except (ValueError, TypeError, OverflowError) as exc:  # BUG #17 FIX: narrowed from broad Exception
                 logger.warning(
                     "[%s] normalize_activity_value failed for value=%r units=%r: %s",
                     self.source_name, v, u, exc,

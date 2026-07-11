@@ -393,17 +393,21 @@ _UNIPROT_RE: re.Pattern[str] = re.compile(
 
 # D5 / COM2: map DrugBank action verbs to InteractionType enum values.
 # Source: database/models.py:150 InteractionType enum.
-# NOTE: DrugBank actions "substrate" and "inducer" do not have direct
-# InteractionType enum counterparts, so they map to "unknown" (the
-# InteractionType enum is pharmacology-focused: inhibitor/agonist/etc.).
-# The original action string is preserved in the action_type column for
-# downstream consumers that need the full pharmacological semantics.
+# BUG #3 ROOT FIX: "inducer" and "substrate" now have their own enum
+# members instead of mapping to "unknown". "Inducer" means the drug
+# INCREASES the activity/expression of an enzyme (e.g. rifampin induces
+# CYP3A4, reducing effectiveness of co-administered drugs). "Substrate"
+# means the drug is metabolized by the enzyme (e.g. warfarin is a
+# CYP2C9 substrate). Both carry critical pharmacological direction for
+# drug-drug interaction prediction. The full action string is still
+# preserved in action_type for downstream consumers needing the original
+# DrugBank verb.
 ACTION_TO_ENUM: dict[str, str] = {
     "inhibitor": "inhibitor",
     "agonist": "agonist",
     "antagonist": "antagonist",
-    "inducer": "unknown",  # no enum counterpart; preserved in action_type
-    "substrate": "unknown",  # no enum counterpart; preserved in action_type
+    "inducer": "inducer",       # BUG #3 FIX: was "unknown" — now preserves mechanistic direction
+    "substrate": "substrate",   # BUG #3 FIX: was "unknown" — now preserves mechanistic direction
     "binder": "binding_agent",
     "blocker": "blocker",
     "modulator": "modulator",
@@ -3850,7 +3854,11 @@ class DrugBankPipeline(BasePipeline):
             # in __exit__). Mirrors chembl_pipeline.py:1207.
             try:
                 session.flush()
-            except Exception as _flush_exc:  # pragma: no cover - defensive
+            except (OperationalError, IntegrityError, SQLAlchemyError) as _flush_exc:
+                # BUG #19 ROOT FIX: narrowed from broad ``except Exception``
+                # which caught programming bugs (AttributeError, TypeError)
+                # and silently swallowed them. Now only catches DB errors.
+                # Programming bugs propagate so operators see real issues.
                 try:
                     session.rollback()
                 except Exception:  # noqa: BLE001 — never mask the flush error
@@ -3869,8 +3877,14 @@ class DrugBankPipeline(BasePipeline):
                     / "dead_letter"
                     / f"drugbank_loader_{self.run_id[:8]}.jsonl"
                 )
-            except Exception:  # pragma: no cover - defensive
-                pass
+            except Exception as _dlq_exc:  # pragma: no cover - defensive
+                # BUG #20 ROOT FIX: was silent ``pass`` — dead-letter records
+                # were lost with no log. Operators couldn't diagnose why drugs
+                # were quarantined. Now logs at WARNING level.
+                logger.warning(
+                    "[drugbank] Dead-letter queue flush failed: %s: %s",
+                    type(_dlq_exc).__name__, _dlq_exc,
+                )
 
             # A3: load interactions (in-memory or from CSV).
             if interactions_df is None:
@@ -3913,13 +3927,22 @@ class DrugBankPipeline(BasePipeline):
                 # because the DB connection dropped, the caller saw load()
                 # return success with NO data committed. Log the error so
                 # operators can detect the silent data loss.
-                except Exception as _exit_exc:  # pragma: no cover - defensive
+                except (OperationalError, IntegrityError, SQLAlchemyError) as _exit_exc:
+                    # BUG #21 ROOT FIX: narrowed from broad ``except Exception``
+                    # which caught programming bugs + commit failures alike.
+                    # Now only catches DB errors. For commit failures (DB
+                    # connection drop), we re-raise because the caller sees
+                    # load() return success but NO data was committed — this
+                    # is unacceptable silent data loss. Other programming bugs
+                    # also propagate.
                     logger.error(
                         "[drugbank] session __exit__ failed (commit/rollback "
                         "may not have completed — loaded data may be lost): "
-                        "%s",
-                        _exit_exc,
+                        "%s: %s",
+                        type(_exit_exc).__name__, _exit_exc,
                     )
+                    # Re-raise: the caller must know that the commit failed
+                    raise
 
         result = LoadResult(
             rows_inserted=total_inserted,
@@ -3962,13 +3985,18 @@ class DrugBankPipeline(BasePipeline):
             from database.models import PipelineRun
             # Mirror the base class keying EXACTLY: source + run_date
             # where run_date == self.start_time (the moment run() started).
+            # BUG #4 ROOT FIX: do NOT truncate microseconds. The base class
+            # _write_run_log (string_pipeline.py:2722-2734) does NOT truncate
+            # microseconds — the v83 P1-5 fix removed the truncation because
+            # it caused duplicate PipelineRun rows. DrugBank's truncation here
+            # creates a DIFFERENT row than the base class later UPDATEs. Result:
+            # two audit rows for the same run; DPI lineage IDs point to the
+            # orphan row that never gets a final status. We now match the base
+            # class keying EXACTLY by preserving microseconds.
             if self.start_time is not None:
                 run_date = self.start_time
             else:
                 run_date = _dt.now(timezone.utc)
-            # Truncate microseconds to match the base class's datetime
-            # storage (some DBs truncate automatically; SQLite does not).
-            run_date = run_date.replace(microsecond=0)
             existing = (
                 session.query(PipelineRun)
                 .filter(

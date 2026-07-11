@@ -535,12 +535,12 @@ _SUSPICIOUS_NAME_PATTERNS: list[re.Pattern[str]] = [
 ]
 
 # Unit-conversion table (nM is the canonical unit for potency).
-_UNIT_CONVERSIONS_TO_NM: dict[str, float] = {
-    "pM": 1.0e-3, "nM": 1.0, "uM": 1.0e3, "µM": 1.0e3, "μM": 1.0e3,
-    "mM": 1.0e6, "M": 1.0e9,
-    "mol/L": 1.0e9, "umol/L": 1.0e3, "nmol/L": 1.0, "mmol/L": 1.0e6,
-    "pmol/L": 1.0e-3, "fmol/L": 1.0e-6,
-}
+# BUG #23 ROOT FIX: import from cleaning._constants instead of maintaining
+# a divergent local copy. The previous local copy and the normalizer's copy
+# had diverged, causing activity values with units like "umol/L" to be
+# stored in the original unit (not nM) in one module but converted in the
+# other, mixing units in the same column. Now there is ONE source of truth.
+from cleaning._constants import UNIT_CONVERSIONS_TO_NM as _UNIT_CONVERSIONS_TO_NM
 
 
 # ===========================================================================

@@ -2503,22 +2503,26 @@ class StringPipeline(BasePipeline):
             )
             self._emit_metric("string.fk_dedup_count", dedup_count)
 
-        # FIX BUG-3.1: Drop self-interactions (homodimers) with WARNING +
-        # dead-letter. The DB schema's chk_ppi_ordered constraint forbids
-        # a_id == b_id. Homodimers are biologically real and clinically
-        # critical (receptor dimerization — EGFR, HER2, p53 tetramerization).
-        # TODO(schema-migration): When the constraint is relaxed, set
-        # STRING_DROP_SELF_INTERACTIONS=False and load homodimers with an
-        # is_homodimer flag.
-        if STRING_DROP_SELF_INTERACTIONS:
-            homodimer_mask = load_df["protein_a_id"] == load_df["protein_b_id"]
-            homodimer_count = int(homodimer_mask.sum())
-            if homodimer_count > 0:
+        # BUG #9 ROOT FIX: Instead of dropping homodimers (self-interactions),
+        # we now ADD an is_homodimer flag column and KEEP them. Homodimers are
+        # biologically real and clinically critical (EGFR dimerization, HER2/HER3
+        # heterodimerization, p53 tetramerization). Dropping them removed critical
+        # PPI edges, making the Graph Transformer's link prediction for receptor
+        # dimerization impossible. When STRING_DROP_SELF_INTERACTIONS=True (legacy
+        # mode), homodimers are still dropped with WARNING + dead-letter.
+        homodimer_mask = load_df["protein_a_id"] == load_df["protein_b_id"]
+        homodimer_count = int(homodimer_mask.sum())
+        # Always add the is_homodimer column for downstream consumers
+        load_df["is_homodimer"] = homodimer_mask
+        if homodimer_count > 0:
+            if STRING_DROP_SELF_INTERACTIONS:
                 logger.warning(
-                    "[%s] Dropping %d self-interaction (homodimer) records due "
-                    "to DB constraint chk_ppi_ordered. These are biologically "
-                    "real (receptor dimerization, p53 tetramerization) and "
-                    "MUST be restored after schema migration. Sample: %s",
+                    "[%s] Dropping %d self-interaction (homodimer) records "
+                    "(STRING_DROP_SELF_INTERACTIONS=True). These are "
+                    "biologically real (receptor dimerization, p53 "
+                    "tetramerization) and SHOULD be kept. Set "
+                    "STRING_DROP_SELF_INTERACTIONS=False to preserve them. "
+                    "Sample: %s",
                     self.source_name,
                     homodimer_count,
                     load_df.loc[homodimer_mask, [
@@ -2531,6 +2535,18 @@ class StringPipeline(BasePipeline):
                     load_df.loc[homodimer_mask].head(1000).to_dict("records"),
                 )
                 load_df = load_df.loc[~homodimer_mask].copy()
+            else:
+                logger.info(
+                    "[%s] Keeping %d self-interaction (homodimer) records "
+                    "with is_homodimer=True. These are biologically real "
+                    "(EGFR dimerization, p53 tetramerization). Sample: %s",
+                    self.source_name,
+                    homodimer_count,
+                    load_df.loc[homodimer_mask, [
+                        "uniprot_id_a", "uniprot_id_b", "combined_score"
+                    ]].head(5).to_dict("records"),
+                )
+                self._emit_metric("string.homodimers_kept", homodimer_count)
 
         if load_df.empty:
             logger.warning(

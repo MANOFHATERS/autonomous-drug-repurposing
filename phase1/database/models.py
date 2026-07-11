@@ -149,7 +149,21 @@ class PipelineStatus(str, enum.Enum):
 
 
 class InteractionType(str, enum.Enum):
-    """Drug–protein interaction types (DES-05)."""
+    """Drug–protein interaction types (DES-05).
+
+    BUG #3 ROOT FIX: added INDUCER and SUBSTRATE enum members.
+    Previously, "inducer" (drug INCREASES enzyme activity, e.g.
+    rifampin induces CYP3A4) and "substrate" (drug IS METABOLIZED BY
+    enzyme, e.g. warfarin is a CYP2C9 substrate) were mapped to
+    "unknown", losing critical pharmacological direction for drug-drug
+    interaction prediction. An RL ranker cannot distinguish "this drug
+    inhibits CYP3A4" (dangerous co-admin) from "this drug induces
+    CYP3A4" (also dangerous, opposite direction). Inducer is
+    semantically closer to activator (both increase activity); substrate
+    is its own mechanistic category. Both preserve the original action
+    string in action_type for downstream consumers needing full
+    pharmacological detail.
+    """
     INHIBITOR = "inhibitor"
     ACTIVATOR = "activator"
     AGONIST = "agonist"
@@ -157,6 +171,8 @@ class InteractionType(str, enum.Enum):
     BINDING_AGENT = "binding_agent"
     BLOCKER = "blocker"
     MODULATOR = "modulator"
+    INDUCER = "inducer"       # drug increases enzyme expression/activity (e.g. rifampin → CYP3A4)
+    SUBSTRATE = "substrate"   # drug is metabolized by enzyme (e.g. warfarin → CYP2C9)
     UNKNOWN = "unknown"
 
 

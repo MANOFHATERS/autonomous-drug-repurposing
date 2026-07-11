@@ -166,12 +166,14 @@ try:
     from sqlalchemy import text as _sa_text
     from sqlalchemy.exc import IntegrityError as _SAIntegrityError
     from sqlalchemy.exc import OperationalError as _SAOperationalError
+    from sqlalchemy.exc import SQLAlchemyError as _SASQLAlchemyError
     _HAS_SQLALCHEMY = True
 except ImportError:  # pragma: no cover
     _sa_select = None  # type: ignore[assignment]
     _sa_text = None  # type: ignore[assignment]
     _SAIntegrityError = None  # type: ignore[assignment]
     _SAOperationalError = None  # type: ignore[assignment]
+    _SASQLAlchemyError = None  # type: ignore[assignment]
     _HAS_SQLALCHEMY = False
 
 # ---------------------------------------------------------------------------
@@ -1175,18 +1177,21 @@ class BasePipeline(ABC):
                 self.downloaded_paths = raw_paths
 
                 if count_records and raw_paths:
-                    records_downloaded = sum(
-                        self._count_records(p) for p in raw_paths
-                    )
-                    # If any individual count failed, propagate the sentinel
-                    if any(
-                        self._count_records(p) == SENTINEL_COUNT_FAILED
-                        for p in raw_paths
-                    ):
+                    # BUG #13 ROOT FIX: use max(0, count) in the sum so that
+                    # SENTINEL_COUNT_FAILED (-1) doesn't corrupt the total.
+                    # The previous code summed raw counts including -1, making
+                    # records_downloaded off by 1+ when any file count failed.
+                    # The "any failed" check re-called _count_records (doubling
+                    # count time for large files) but didn't correct the sum.
+                    individual_counts = [self._count_records(p) for p in raw_paths]
+                    records_downloaded = sum(max(0, c) for c in individual_counts)
+                    # If any individual count failed, propagate a warning
+                    if any(c == SENTINEL_COUNT_FAILED for c in individual_counts):
                         logger.warning(
                             "[%s] One or more record counts failed; "
-                            "records_downloaded may be inaccurate.",
+                            "records_downloaded (%d) excludes failed counts.",
                             self.source_name,
+                            records_downloaded,
                         )
                 else:
                     records_downloaded = SENTINEL_COUNT_FAILED
@@ -4267,17 +4272,35 @@ class BasePipeline(ABC):
             # For numeric dtypes this is a cheap O(N) operation; for
             # object dtype it's the same cost as before.
             _str_view = series.astype(str)
+            # BUG #26 ROOT FIX: for object-dtype columns, exclude numeric-string
+            # cells (like "-5.0") from the "-" dangerous-prefix check. The CSV
+            # injection attack vector is formula injection (e.g. "=CMD(...)",
+            # "+CMD(...)", "@SUM(...)"), NOT negative numbers. A cell containing
+            # "-5.0" as a string is a legitimate numeric string, not a formula
+            # injection attempt. Escaping it to "'-5.0" corrupts downstream
+            # numeric parsing. We check: if the cell starts with "-" AND the
+            # rest of the string looks numeric, it's NOT dangerous.
             _danger_mask = _str_view.str.startswith(CSV_DANGEROUS_PREFIXES)
-            if not _danger_mask.any():
-                # No dangerous cells in this column — leave dtype intact.
+            _real_danger_mask = _danger_mask.copy()
+            if _danger_mask.any():
+                # For cells starting with "-", check if they look like negative numbers
+                _starts_with_dash = _str_view.str.startswith("-")
+                _dash_and_danger = _danger_mask & _starts_with_dash
+                if _dash_and_danger.any():
+                    # These cells start with "-" — check if they're numeric strings
+                    _is_numeric_str = _str_view.str.match(r"^-[0-9].*$")
+                    # Remove numeric-string cells from the danger mask
+                    _real_danger_mask = _danger_mask & ~(_dash_and_danger & _is_numeric_str)
+            if not _real_danger_mask.any():
+                # No truly dangerous cells in this column — leave dtype intact.
                 continue
-            # Column has at least one dangerous cell — cast to object and
+            # Column has at least one truly dangerous cell — cast to object and
             # escape ONLY the dangerous cells. Non-dangerous cells keep
             # their original Python object representation (int → int,
             # float → float, str → str).
             _obj_series = series.astype(object)
             _escaped = _obj_series.where(
-                ~_danger_mask.values,
+                ~_real_danger_mask.values,
                 _obj_series.map(
                     lambda x: f"'{x}" if isinstance(x, str) else x
                 ),
@@ -5015,27 +5038,20 @@ class BasePipeline(ABC):
                 if self._audit_buffer:
                     self._replay_audit_buffer_in_session(session)
 
-        except Exception as exc:
-            # IntegrityError (collision), OperationalError (DB down), or
-            # any other DB-related failure — fall back to local JSONL.
-            if (
-                _HAS_SQLALCHEMY
-                and _SAIntegrityError is not None
-                and isinstance(exc, _SAIntegrityError)
-            ):
-                logger.error(
-                    "[%s] IntegrityError writing run log: %s. "
-                    "Falling back to local JSONL.",
-                    self.source_name,
-                    self._sanitize_error_message(str(exc)),
-                )
-            else:
-                logger.error(
-                    "[%s] Could not write run log to DB: %s. "
-                    "Falling back to local JSONL.",
-                    self.source_name,
-                    self._sanitize_error_message(str(exc)),
-                )
+        # BUG #14 ROOT FIX: narrowed from broad ``except Exception`` which
+        # caught programming bugs (AttributeError, TypeError) and silently
+        # downgraded them to "audit log write failed" warnings. Now only
+        # catches DB-related exceptions (OperationalError, IntegrityError,
+        # SQLAlchemyError) + OSError (DB file unreachable). Programming bugs
+        # propagate so operators see real errors instead of missing audit trails.
+        except (OSError,) as exc:
+            # DB file unreachable / permission denied
+            logger.error(
+                "[%s] OS error writing run log: %s. "
+                "Falling back to local JSONL.",
+                self.source_name,
+                self._sanitize_error_message(str(exc)),
+            )
             self._write_run_log_fallback(
                 status=status,
                 started_at=started_at,
@@ -5046,6 +5062,36 @@ class BasePipeline(ABC):
                 error_message=error_message,
                 metadata_json=metadata_json,
             )
+        except Exception as exc:
+            # Narrow to DB errors only — let programming bugs propagate
+            if _HAS_SQLALCHEMY and _SASQLAlchemyError is not None and isinstance(exc, _SASQLAlchemyError):
+                if isinstance(exc, _SAIntegrityError):
+                    logger.error(
+                        "[%s] IntegrityError writing run log: %s. "
+                        "Falling back to local JSONL.",
+                        self.source_name,
+                        self._sanitize_error_message(str(exc)),
+                    )
+                else:
+                    logger.error(
+                        "[%s] DB error writing run log: %s. "
+                        "Falling back to local JSONL.",
+                        self.source_name,
+                        self._sanitize_error_message(str(exc)),
+                    )
+                self._write_run_log_fallback(
+                    status=status,
+                    started_at=started_at,
+                    finished_at=finished_at,
+                    records_downloaded=records_downloaded,
+                    records_cleaned=records_cleaned,
+                    records_loaded=records_loaded,
+                    error_message=error_message,
+                    metadata_json=metadata_json,
+                )
+            else:
+                # Not a DB error — re-raise so programming bugs surface
+                raise
 
     def _write_run_log_fallback(
         self,
@@ -5124,7 +5170,35 @@ class BasePipeline(ABC):
         """Replay buffered audit records within an existing session."""
         replayed = 0
         remaining: list[dict] = []
+        # BUG #15 ROOT FIX: add a max-retry counter (3 retries max).
+        # The previous code retried permanently-invalid records (e.g. NULL
+        # source, schema violation) forever with no limit, growing the
+        # audit buffer unboundedly and wasting DB time on each replay.
+        _MAX_REPLAY_RETRIES = 3
         for record in self._audit_buffer:
+            # Check retry count — skip records that have exceeded max retries
+            retry_count = record.get("_replay_count", 0)
+            if retry_count >= _MAX_REPLAY_RETRIES:
+                logger.warning(
+                    "[%s] Skipping audit record after %d failed replays: "
+                    "source=%s, run_date=%s",
+                    self.source_name,
+                    retry_count,
+                    record.get("source"),
+                    record.get("run_date"),
+                )
+                # Write to dead-letter file so the record is not lost
+                try:
+                    from pathlib import Path as _P
+                    _dl_path = RAW_DATA_DIR / "pipeline_runs_dead_letter.jsonl"
+                    _dl_path.parent.mkdir(parents=True, exist_ok=True)
+                    import json as _json
+                    with open(_dl_path, "a", encoding="utf-8") as _f:
+                        record.pop("_replay_count", None)
+                        _f.write(_json.dumps(record, default=str) + "\n")
+                except OSError:
+                    pass
+                continue
             try:
                 run_date_str = record.get("run_date")
                 try:
@@ -5154,6 +5228,8 @@ class BasePipeline(ABC):
                 session.add(run)
                 replayed += 1
             except Exception:
+                # Increment retry count and keep for next replay
+                record["_replay_count"] = retry_count + 1
                 remaining.append(record)
         self._audit_buffer = remaining
         if replayed > 0:

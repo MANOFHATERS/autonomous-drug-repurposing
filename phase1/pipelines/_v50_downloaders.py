@@ -319,19 +319,31 @@ def download_chembl_full(raw_dir: Path) -> dict[str, Path]:
                         for act in act_resp.json().get("activities", []):
                             f_act.write(json.dumps(act) + "\n")
                     time.sleep(0.5)  # rate-limit courtesy
-                except Exception as exc:
+                except (requests.RequestException, json.JSONDecodeError, OSError) as exc:
+                    # BUG #22 ROOT FIX: narrowed from broad ``except Exception``
+                    # which caught programming bugs (AttributeError from a typo)
+                    # and silently produced empty molecules file, triggering
+                    # the broken embedded-sample fallback (BUG #2). Now only
+                    # catches legitimate network/parse errors.
                     logger.warning("ChEMBL sample fetch failed for %s: %s", chembl_id, exc)
 
         # If we got 0 molecules, fall back to embedded samples
         if molecules_path.stat().st_size == 0:
             logger.warning("ChEMBL: API unreachable — falling back to embedded samples")
+            # BUG #2 ROOT FIX: embedded fallbacks must write proper CSV, not
+            # JSONL to a .csv file. The previous code used to_json(orient="records",
+            # lines=True) which writes JSONL — but chembl_pipeline's download()
+            # reads with pd.read_csv(), producing garbage. Using to_csv() ensures
+            # the format matches what downstream consumers expect.
             from pipelines._embedded_samples import embedded_chembl_molecules, embedded_chembl_activities
-            embedded_chembl_molecules().to_json(molecules_path.with_suffix(".csv"), orient="records", lines=True)
-            embedded_chembl_activities().to_json(activities_path.with_suffix(".csv"), orient="records", lines=True)
+            molecules_csv_path = molecules_path.with_suffix(".csv")
+            activities_csv_path = activities_path.with_suffix(".csv")
+            embedded_chembl_molecules().to_csv(molecules_csv_path, index=False)
+            embedded_chembl_activities().to_csv(activities_csv_path, index=False)
             molecules_path.unlink(missing_ok=True)
             activities_path.unlink(missing_ok=True)
-            result["molecules"] = molecules_path.with_suffix(".csv")
-            result["activities"] = activities_path.with_suffix(".csv")
+            result["molecules"] = molecules_csv_path
+            result["activities"] = activities_csv_path
         else:
             result["molecules"] = molecules_path
             result["activities"] = activities_path
@@ -871,14 +883,39 @@ def download_drugbank_open_data(raw_dir: Path) -> dict[str, Path]:
     # any collision-sensitive use). Schema allows `DB\d{5,6}` historically,
     # but the load() path accepts longer DB-prefixed IDs and the
     # Drug model's drugbank_id column is VARCHAR(64) — so 8-hex IDs fit.
-    def _synthesize_drugbank_id(inchikey: str) -> str:
+    # BUG #11 ROOT FIX: the previous _synthesize_drugbank_id used a shared
+    # sentinel "DBSYNTH000000" for ALL drugs with missing InChIKeys, causing
+    # all biologics (insulin, antibodies) to collapse into a single Drug node.
+    # Now we use make_synthetic_inchikey from entity_resolution.base (which
+    # generates a unique SYNTH-prefixed key from drug name + molecular data)
+    # and derive the DrugBank ID from the synthetic key hash. This ensures
+    # each biologic gets a unique ID.
+    def _synthesize_drugbank_id(inchikey: str, drug_name: str = "") -> str:
         if not inchikey or not isinstance(inchikey, str):
-            return "DBSYNTH000000"  # sentinel for missing InChIKey
+            # BUG #11 FIX: generate a unique synthetic InChIKey from the drug
+            # name instead of using a shared sentinel, then derive the DB ID
+            # from the synthetic key hash. This prevents all biologics from
+            # collapsing into a single Drug node.
+            try:
+                from entity_resolution.base import make_synthetic_inchikey
+                synthetic_key = make_synthetic_inchikey(drug_name or "unknown")
+                h = hashlib.sha256(synthetic_key.encode()).hexdigest()
+                return f"DB{h[:8].upper()}"
+            except ImportError:
+                # Fallback: hash the drug name directly for uniqueness
+                h = hashlib.sha256((drug_name or "unknown").encode()).hexdigest()
+                return f"DB{h[:8].upper()}"
         h = hashlib.sha256(inchikey.encode()).hexdigest()
         return f"DB{h[:8].upper()}"
 
+    # BUG #11 FIX: pass both inchikey AND name to _synthesize_drugbank_id
+    # so drugs with missing InChIKeys get unique IDs derived from their names
+    # instead of all collapsing to a shared sentinel.
     drugs_df = pd.DataFrame({
-        "drugbank_id": chembl_df["inchikey"].apply(_synthesize_drugbank_id),
+        "drugbank_id": [
+            _synthesize_drugbank_id(ik, nm)
+            for ik, nm in zip(chembl_df["inchikey"], chembl_df.get("name", ""))
+        ],
         "name": chembl_df.get("name", ""),
         "inchikey": chembl_df["inchikey"],
         "smiles": chembl_df.get("smiles", ""),
@@ -918,7 +955,12 @@ def download_drugbank_open_data(raw_dir: Path) -> dict[str, Path]:
             continue
         try:
             # Step 1: Find RxNorm RxCUI by drug name
-            url = f"https://rxnav.nlm.nih.gov/REST/rxcui.json?name={drug_name}&search=2"
+            # BUG #8 ROOT FIX: URL-encode the drug_name. Drug names with
+            # special characters ("Amoxicillin + Clavulanate", "Heparin (porcine)")
+            # produced malformed URLs — & splits query string, + becomes space,
+            # ( and ) cause parse errors. RxNorm returned wrong results or 400.
+            from urllib.parse import quote as _url_quote
+            url = f"https://rxnav.nlm.nih.gov/REST/rxcui.json?name={_url_quote(drug_name, safe='')}&search=2"
             # v64 ROOT FIX (P1-006): send User-Agent header.
             resp = requests.get(url, headers={"User-Agent": HTTP_USER_AGENT}, timeout=15.0)
             rxcui = None
@@ -939,12 +981,21 @@ def download_drugbank_open_data(raw_dir: Path) -> dict[str, Path]:
                         if pc.get("propName") == "INDICATION":
                             indication_text = pc.get("propValue", "")
                             if indication_text:
+                                # BUG #7/#12 ROOT FIX: RxNorm indication text
+                                # is a free-form string like "For the treatment
+                                # of hypertension..." — NOT a structured disease
+                                # name. Mapping it to disease_name creates phantom
+                                # Disease nodes in the KG. The correct approach is
+                                # to set disease_name=None and disease_id=None,
+                                # storing the indication text ONLY in the indication
+                                # column. A curated crosswalk to DOID/OMIM IDs is
+                                # needed before structured disease mapping can work.
                                 indications_records.append({
                                     "drugbank_id": row["drugbank_id"],
                                     "drug_inchikey": row["inchikey"],
                                     "drug_name": drug_name,
-                                    "disease_id": "",  # RxNorm doesn't use DOID
-                                    "disease_name": indication_text[:200],
+                                    "disease_id": None,   # BUG #7 FIX: was "" — RxNorm doesn't use DOID
+                                    "disease_name": None,  # BUG #12 FIX: was indication_text[:200] — free-text
                                     "indication": indication_text[:500],
                                     "source": "rxnorm_open_data",
                                 })

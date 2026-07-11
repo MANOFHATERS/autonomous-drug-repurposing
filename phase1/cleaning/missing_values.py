@@ -2181,8 +2181,15 @@ def fill_missing_drug_fields(
         }
     else:
         # v2.0.0 legacy defaults — preserved for backward compatibility.
+        # BUG #6 ROOT FIX: is_fda_approved default changed from False to None.
+        # The scientifically correct value for a missing FDA approval field
+        # is None (unknown — pending FDA Orange Book validation), NOT False
+        # (definitely not FDA approved). Setting False silently marks unknown
+        # drugs as unapproved, which causes the RL ranker's safety filter to
+        # either exclude real repurposing candidates or silently drop unknown
+        # drugs. Both branches now agree: is_fda_approved defaults to None.
         fill_map = {
-            "is_fda_approved": False,
+            "is_fda_approved": None,  # BUG #6 FIX: was False — None = unknown, not "unapproved"
             "drug_type": "Unknown",
             "max_phase": None,  # FIX #41: None means "unknown"
             "mechanism_of_action": "",
@@ -3110,8 +3117,24 @@ def validate_gda_scores(
         # OMIM categorical mapping — ALWAYS runs when source="omim".
         # Naturally idempotent: mapped values 0.5/0.6/0.8/0.9 are NOT
         # integers 1/2/3/4, so re-running won't re-map them.
+        # BUG #5 ROOT FIX: import the canonical SCORE_BY_MAPPING_KEY from
+        # omim_pipeline instead of maintaining a divergent local copy.
+        # The previous local copy had mk=3→0.8 and mk=4→0.9 (INVERTED
+        # vs the canonical omim_pipeline mapping: mk=3→0.9 "molecular
+        # basis known (strongest)", mk=4→0.8 "contiguous gene syndrome").
+        # This caused the STRONGEST evidence to get the WEAKER score and
+        # vice versa. Now there is ONE source of truth: omim_pipeline.py.
         if source == "omim":
-            _OMIM_CATEGORICAL_MAP = {1: 0.5, 2: 0.6, 3: 0.8, 4: 0.9}
+            try:
+                from pipelines.omim_pipeline import SCORE_BY_MAPPING_KEY as _OMIM_CATEGORICAL_MAP
+            except ImportError:
+                # Fallback: use the canonical mapping directly (must stay
+                # in sync with omim_pipeline.py SCORE_BY_MAPPING_KEY).
+                # mk=3 → 0.9 (molecular basis known — STRONGEST evidence)
+                # mk=4 → 0.8 (contiguous gene syndrome — weaker)
+                # mk=2 → 0.6 (phenotype mapped)
+                # mk=1 → 0.5 (gene mapped)
+                _OMIM_CATEGORICAL_MAP = {1: 0.5, 2: 0.6, 3: 0.9, 4: 0.8}
             if "_omim_categorical_mapped" not in out.columns:
                 out["_omim_categorical_mapped"] = False
             try:

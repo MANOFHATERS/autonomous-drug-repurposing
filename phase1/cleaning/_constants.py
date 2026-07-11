@@ -105,6 +105,34 @@ _ACTIVITY_VALUE_MAX: float = _ACTIVITY_VALUE_CENSORED_MAX_LEGACY
 
 
 # ============================================================================
+# BUG #23 ROOT FIX: shared unit conversion table (single source of truth)
+# ============================================================================
+# The normalizer and deduplicator previously maintained SEPARATE unit
+# conversion tables that DIVERGED. The deduplicator handled umol/L,
+# nmol/L, mmol/L, pmol/L, fmol/L but the normalizer's case-folded
+# lookup table (_UNIT_CONVERSIONS_CF) originally did not include all of
+# these. A value with unit "umol/L" was returned unchanged by the
+# normalizer (with a warning) but converted to nM by the deduplicator,
+# mixing units in the stored activity_value column. Now both modules
+# import from this single shared constant.
+UNIT_CONVERSIONS_TO_NM: dict[str, float] = {
+    "pM": 1e-3,
+    "nM": 1.0,
+    "uM": 1e3,
+    "\u00b5M": 1e3,     # µM (micro sign) → nM
+    "\u03bcM": 1e3,     # μM (Greek mu) → nM
+    "mM": 1e6,
+    "M": 1e9,
+    "mol/L": 1e9,
+    "umol/L": 1e3,
+    "nmol/L": 1.0,
+    "mmol/L": 1e6,
+    "pmol/L": 1e-3,
+    "fmol/L": 1e-6,
+}
+
+
+# ============================================================================
 # v29 ROOT FIX: canonical InChIKey regex (single source of truth)
 # ============================================================================
 #
