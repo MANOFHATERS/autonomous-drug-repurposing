@@ -4650,10 +4650,19 @@ def resolve_gene_symbol_to_uniprot(
             .str.upper()
             .map(gene_to_uniprot)
         )
-        # Only fill where the DB map actually had a value (avoid
-        # overwriting NaN with NaN — pandas .loc handles this correctly
-        # because db_lookup is aligned by index).
-        df.loc[need_resolution_mask, "uniprot_id"] = db_lookup
+        # v89 ROOT FIX (pandas 3.x dtype strictness — CI COMP-3 failure):
+        #   pandas 3.x with pyarrow string backend enforces strict dtype
+        #   on ``df.loc[mask, col] = value`` assignments. If ``db_lookup``
+        #   contains mixed types (e.g. str + None from .map() misses), the
+        #   assignment raises ``TypeError: Invalid value for dtype 'str'``.
+        #   ROOT FIX: explicitly convert ``db_lookup`` to ``object`` dtype
+        #   before assignment so None/NaN values are accepted. This is the
+        #   pandas-recommended workaround for mixed-type assignment to
+        #   string columns (see pandas issue #54286). The downstream code
+        #   treats None as "unresolved" (the ``still_unresolved`` mask at
+        #   line 4659 checks ``df["uniprot_id"].isna()``), so preserving
+        #   None semantics is correct.
+        df.loc[need_resolution_mask, "uniprot_id"] = db_lookup.astype(object)
 
     # Step 2: still-unresolved rows — try protein_name map as fallback.
     still_unresolved = df["uniprot_id"].isna()
@@ -4663,7 +4672,10 @@ def resolve_gene_symbol_to_uniprot(
             .str.upper()
             .map(protein_name_to_uniprot)
         )
-        df.loc[still_unresolved, "uniprot_id"] = protein_name_fallback
+        # v89 ROOT FIX (pandas 3.x dtype strictness — same as Step 1):
+        # explicit ``.astype(object)`` to allow None values in the
+        # string-dtype column.
+        df.loc[still_unresolved, "uniprot_id"] = protein_name_fallback.astype(object)
 
     unresolved_count = df["uniprot_id"].isna().sum()
     if unresolved_count > 0:
