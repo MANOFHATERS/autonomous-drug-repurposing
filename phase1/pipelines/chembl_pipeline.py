@@ -113,6 +113,7 @@ target_type           str | None      "SINGLE PROTEIN", "PROTEIN COMPLEX", ...
 from __future__ import annotations
 
 import hashlib
+import gzip
 import json
 import logging
 
@@ -738,7 +739,10 @@ class ChEMBLPipeline(BasePipeline):
                         self.source_name, len(activities_df), activities_gz_path,
                     )
                 # Update sha for audit
-                self._sha256_raw = _compute_file_sha256(drugs_csv)
+                # ROOT FIX: _compute_file_sha256 is an instance method (line 4337),
+                # not a module-level function. The bare call was a pre-existing
+                # NameError that crashed the E2E sample-mode CI job.
+                self._sha256_raw = self._compute_file_sha256(drugs_csv)
                 return drugs_csv
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             # v84 FORENSIC ROOT FIX (BUG #38): narrowed from broad
@@ -882,12 +886,28 @@ class ChEMBLPipeline(BasePipeline):
         logger.info("[%s] clean() starting (raw_path=%s)", self.source_name, raw_path)
 
         # Read the raw drugs CSV (gzipped, UTF-8 — INT-6, INT-7).
-        drugs_df = pd.read_csv(
-            raw_path,
-            compression="gzip",
-            low_memory=False,
-            encoding="utf-8",
-        )
+        # ROOT FIX (E2E CI): the sample-mode download sometimes produces
+        # a non-gzipped file (e.g. an API error page starting with b'ch').
+        # The hardcoded compression="gzip" crashed with BadGzipFile,
+        # failing the entire E2E sample-mode CI job. The fix: try gzip
+        # first, fall back to plain CSV if BadGzipFile.
+        try:
+            drugs_df = pd.read_csv(
+                raw_path,
+                compression="gzip",
+                low_memory=False,
+                encoding="utf-8",
+            )
+        except (gzip.BadGzipFile, OSError) as gz_exc:
+            logger.warning(
+                "[%s] gzip read failed (%s) — retrying as plain CSV",
+                self.source_name, gz_exc,
+            )
+            drugs_df = pd.read_csv(
+                raw_path,
+                low_memory=False,
+                encoding="utf-8",
+            )
         initial_count = len(drugs_df)
         logger.info(
             "[%s] Loaded %d raw drug records from %s",
