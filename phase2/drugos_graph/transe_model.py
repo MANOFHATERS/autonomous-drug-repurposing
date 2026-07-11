@@ -3485,37 +3485,19 @@ def train_transe(
                         n_val_neg = n_val * 10
                         val_neg_tails_list: List[int] = [0] * n_val_neg
                         # Expand val_rels 10x to align with neg slots.
-                        # v89 CI RECOVERY FIX: a parallel agent inserted
-                        # the BUG #33 fix code INSIDE the parentheses of
-                        # val_rels_expanded_fallback = (...), leaving the
-                        # parenthesis unclosed (SyntaxError). ROOT FIX:
-                        # close the parenthesis after repeat_interleave(10),
-                        # then the BUG #33 fix code follows as separate
-                        # statements at the same indentation level.
+                        # v91 FORENSIC ROOT FIX: the v88 patch left an
+                        # UNCLOSED PARENTHESIS here (`val_rels_expanded_fallback = (`
+                        # with no matching `)`) — a SyntaxError that prevented
+                        # transe_model.py from importing, breaking the ENTIRE
+                        # Phase 3 training pipeline and ALL CI jobs. The v88
+                        # patch also left dead code (a _treats_rel_idx lookup
+                        # and a val_neg_samples call whose result was never
+                        # used). ROOT FIX: close the assignment properly,
+                        # remove the dead code, and keep ONLY the per-relation
+                        # loop that actually samples negatives using each val
+                        # triple's actual relation_idx.
                         val_rels_expanded_fallback = (
                             val_rels_dev.repeat_interleave(10)
-                        )
-                        # v88 ROOT FIX (BUG #33 — hardcoded relation_idx=0
-                        # in val AUC fallback): look up the actual treats
-                        # relation index from relation_to_types.
-                        _treats_rel_idx = 0
-                        _val_rel_to_types = getattr(
-                            negative_sampler, "relation_to_types", {}
-                        ) or {}
-                        for _r_idx_v88, _ht_tuple in _val_rel_to_types.items():
-                            if (
-                                isinstance(_ht_tuple, (tuple, list))
-                                and len(_ht_tuple) == 2
-                                and _ht_tuple[0] == "Compound"
-                                and _ht_tuple[1] == "Disease"
-                            ):
-                                _treats_rel_idx = int(_r_idx_v88)
-                                break
-                        val_neg_samples = negative_sampler.combined_sampling(
-                            total_negatives=n_val * 10,
-                            head_type="Compound",
-                            tail_type="Disease",
-                            relation_idx=_treats_rel_idx,
                         )
                         unique_val_rels_fb = torch.unique(
                             val_rels_expanded_fallback
@@ -3525,7 +3507,6 @@ def train_transe(
                             slots_fb = torch.nonzero(mask_fb, as_tuple=True)[0]
                             n_slots_fb = int(len(slots_fb))
                             # Sample n_slots_fb negatives from this relation's
-                            # pool. Use the actual relation_idx so the
                             # sampler's known-positives filter is applied
                             # correctly. head_type/tail_type remain hardcoded
                             # to Compound/Disease (this is the unit-test

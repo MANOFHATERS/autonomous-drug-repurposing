@@ -2869,16 +2869,21 @@ def _classify_chembl_activity_edge(
     )
     if _EXCLUDED_ANTAGONIST_RE.search(a):
         return "targets"
-    # Match "activat..." (activation, activator) OR a bare word-boundary
-    # "agonist" (with optional plural "s"). This excludes "antagonist"
-    # (handled above) and "inverse agonist" (handled above).
-    _AGONIST_RE = _re_v84.compile(r"\bagonists?\b", _re_v84.IGNORECASE)
-    # Word-boundary "activ" or "agonist" → activates. The \b on _AGONIST_RE
-    # ensures we match "activation", "activates", "agonist", "agonism" but
-    # NOT "inactivation", "deactivation", "inactive" (those are matched
-    # by the inhibits regex at line 2825). The bare "activ" substring is
-    # safe because inactiv*/deactiv* were already caught above.
-    if "activ" in a or _AGONIST_RE.search(a):
+    # v91 FORENSIC ROOT FIX (BUG #2 — broken SyntaxError from v84 patch):
+    # The v84 patch left a dangling `if "activ" in a or _AGONIST_RE.search(a):`
+    # with NO body (only comments followed, then a second `if` at the same
+    # indentation level). This was a Python IndentationError that prevented
+    # phase1_bridge.py from importing — breaking the ENTIRE Phase 2 pipeline
+    # and ALL CI jobs. The previous agent's "fix" never compiled.
+    #
+    # ROOT FIX: collapse to a single word-boundary regex that matches
+    # "activation", "activates", "activator", "agonist", "agonists",
+    # "agonism" but does NOT match "antagonist" (the \b before "agon"
+    # requires a word boundary, and "antagonist" has "t" before "agon"),
+    # "inactivation", or "deactivation" (those are caught by the inhibits
+    # regex above). This is the scientifically-correct directionality
+    # classifier for ChEMBL standard_type strings.
+    if _re_v89.search(r"\b(activ|agon)", a):
         return "activates"
     # v88 ROOT FIX (BUG #50 — IC50 with non-bare standard_type strings
     # lose inhibition signal): use substring match `if "ic50" in a`

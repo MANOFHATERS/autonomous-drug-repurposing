@@ -1098,7 +1098,7 @@ class DisGeNETPipeline(BasePipeline):
                 else:
                     self._source_format = DisGeNETSourceFormat.TSV
                     path = self._download_static()
-            except (OSError, ValueError, ConnectionError, TimeoutError, DownloadError) as exc:  # v85 FORENSIC ROOT FIX (BUG #51) + v92 fix
+            except (OSError, ValueError, ConnectionError, TimeoutError, DownloadError) as exc:  # v85 FORENSIC ROOT FIX (BUG #51) + v91: add DownloadError so 401 falls back to embedded sample
                 # v83 P0-C13: in sample mode, fall back to embedded samples
                 # instead of raising. In full mode, re-raise.
                 #

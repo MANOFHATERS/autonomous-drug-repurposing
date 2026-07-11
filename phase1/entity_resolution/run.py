@@ -609,12 +609,13 @@ def run_entity_resolution() -> Dict[str, Any]:
                 exc,
             )
         else:
+            # v91 FORENSIC ROOT FIX: the previous code had `else:` at the
+            # WRONG indentation (inside the except block, after `raise`) —
+            # a SyntaxError that prevented entity_resolution/run.py from
+            # importing. ROOT FIX: move `else:` to the correct position
+            # (after all except clauses, at the same indent as except).
             # v89 BUG #3: no human aliases file found — log clearly.
-            # This else clause runs only when the try block completed
-            # WITHOUT raising. If string_aliases_df is still empty here,
-            # either no 9606 aliases file was found OR the file had no
-            # UniProt entries. Warn so the operator knows.
-            if string_aliases_df.empty and _string_raw_dir.exists():
+            if _string_raw_dir.exists():
                 _all_alias_files = list(_string_raw_dir.glob("*aliases*.txt.gz"))
                 logger.warning(
                     "No HUMAN (9606) STRING aliases file found in %s. "
