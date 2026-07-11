@@ -353,23 +353,70 @@ class BiomedicalGraphBuilder:
 
         return node_features, edge_indices, dict(self._node_maps)
 
+    @classmethod
+    def _build_reverse_edges_into_sets(
+        cls,
+        edge_sets: Dict[Tuple[str, str, str], set],
+    ) -> Dict[Tuple[str, str, str], set]:
+        """V90 ROOT FIX (BUG #1, P0): write reverse edges INTO _edge_sets.
+
+        The previous staticmethod ``_build_reverse_edges`` wrote reverse
+        edges into a separate ``edge_lists`` dict. But ``finalize()``
+        immediately calls ``_sync_edge_lists()`` which rebuilds
+        ``_edge_lists`` from ``_edge_sets`` (forward-only). All 7
+        reverse edge types ended up as ``torch.zeros((2, 0))`` — the
+        drug node type received NO incoming edges, the model could not
+        learn a drug-side representation of the drug-disease pattern.
+
+        Root fix: write reverse edges INTO ``_edge_sets`` so they
+        survive ``_sync_edge_lists()`` and end up in the finalized
+        ``edge_indices`` dict. This is a classmethod (not staticmethod)
+        because it now mutates the builder's primary edge registry.
+
+        Args:
+            edge_sets: The builder's ``_edge_sets`` dict (mutated in
+                place). Each key is ``(src_type, rel, tgt_type)`` and
+                each value is a ``set`` of ``(src_idx, tgt_idx)`` pairs.
+
+        Returns:
+            The same ``edge_sets`` dict (mutated in place) for chaining.
+        """
+        # Snapshot keys before mutation (we may add new reverse keys).
+        forward_keys = list(edge_sets.keys())
+        for edge_key in forward_keys:
+            src, rel, tgt = edge_key
+            reverse_rel = REVERSE_RELATION_MAP.get(rel)
+            if reverse_rel is None:
+                continue
+            reverse_key = (tgt, reverse_rel, src)
+            # V90 BUG #1 root fix: write into _edge_sets so the reverse
+            # edges survive _sync_edge_lists() in finalize().
+            if reverse_key not in edge_sets:
+                edge_sets[reverse_key] = set()
+            # Sets deduplicate automatically (3.2 fix preserved).
+            for s_idx, t_idx in edge_sets[edge_key]:
+                edge_sets[reverse_key].add((t_idx, s_idx))
+        return edge_sets
+
     @staticmethod
     def _build_reverse_edges(
         edge_lists: Dict[Tuple[str, str, str], List[Tuple[int, int]]],
     ) -> Dict[Tuple[str, str, str], List[Tuple[int, int]]]:
-        """Build reverse edges for every forward edge type.
+        """DEPRECATED — kept for backward API compatibility.
 
-        V30 ROOT FIX (3.2): the original code appended reverse edges to a
-        list without dedup. If a forward edge ``a -> b`` was added twice
-        (which can happen via duplicate add_edge calls or W-02 path
-        injection), the reverse ``b -> a`` would also be added twice —
-        DOUBLING the message-passing weight for that edge. With 4 layers
-        of message passing, a 2x weight becomes 16x after composition.
+        V90 ROOT FIX (BUG #1, P0): callers should use
+        ``_build_reverse_edges_into_sets`` instead. This old staticmethod
+        wrote reverse edges into ``edge_lists``, but ``finalize()``
+        immediately overwrote ``_edge_lists`` via ``_sync_edge_lists()``
+        (which rebuilds from ``_edge_sets``), silently discarding all 7
+        reverse edge types.
 
-        The fix: use a SET for the reverse edge list, so even if the
-        forward edge was duplicated, the reverse is added only once.
+        The new classmethod writes directly into ``_edge_sets``, so
+        reverse edges survive the sync. This staticmethod is retained
+        only so external callers that import it (if any) keep working;
+        it returns the input dict unchanged in spirit but is NOT used by
+        ``build_demo_graph`` anymore.
         """
-        # Snapshot keys before mutation
         forward_keys = list(edge_lists.keys())
         for edge_key in forward_keys:
             src, rel, tgt = edge_key
@@ -379,7 +426,6 @@ class BiomedicalGraphBuilder:
             reverse_key = (tgt, reverse_rel, src)
             if reverse_key not in edge_lists:
                 edge_lists[reverse_key] = []
-            # V30 ROOT FIX (3.2): dedup using a set, then convert back.
             existing = set(edge_lists[reverse_key])
             for s_idx, t_idx in edge_lists[edge_key]:
                 existing.add((t_idx, s_idx))
@@ -911,6 +957,25 @@ class BiomedicalGraphBuilder:
         for drug_name, disease_name in injected_pairs:
             builder.add_edge("drug", "treats", "disease", drug_name, disease_name)
             known_pairs.append((drug_name, disease_name))
+            # V90 ROOT FIX (BUG #2, P0): REMOVED the KP multi-hop path
+            # injection (drug → inhibits → protein → part_of → pathway
+            # → disrupted_in → disease). The audit found this was
+            # label leakage via topology: every KP got a GUARANTEED
+            # 3-hop path, so KP recovery rate was 100% BY CONSTRUCTION
+            # (the model just detected the injected path, it did not
+            # generalize). Pharma partners would receive aspirin →
+            # cardiovascular as a "novel prediction" that was actually
+            # just the injected path being detected.
+            #
+            # KPs must rely on the NATURAL topology (the random
+            # drug → protein, protein → pathway, pathway → disease edges
+            # created above). If natural topology is insufficient, the
+            # demo graph is too small — do NOT paper over it with
+            # injection.
+            #
+            # This also fixes BUG #8 (P0): KPs were simultaneously held
+            # out from training AND injected with paths. With injection
+            # removed, KP recovery is a TRUE generalization measure.
             # v89 P0 ROOT FIX (Compound #3 / AUC fraud chain): REMOVED the
             # 3-hop path injection (drug→inhibits→protein→part_of→pathway→
             # disrupted_in→disease) for KNOWN POSITIVES.
@@ -989,6 +1054,37 @@ class BiomedicalGraphBuilder:
             # if the pair was already injected as a KP, this is a no-op.
             builder.add_edge("drug", "treats", "disease", drug_name, disease_name)
             training_positives_added += 1
+            # V90 ROOT FIX (BUG #3, P0): REMOVED the per-training-positive
+            # guaranteed multi-hop path injection. The audit found this
+            # was the SOURCE of the spurious learning signal: every
+            # training positive got a guaranteed drug → protein → pathway
+            # → disease path, so the model trivially learned "3-hop path
+            # exists → positive" with 100% accuracy. This pattern then
+            # transferred to KPs via BUG #2, making KP recovery 100% by
+            # construction (memorization, not generalization).
+            #
+            # Training positives now rely on the NATURAL topology (the
+            # random drug → protein, protein → pathway, pathway → disease
+            # edges created above). If the natural topology is
+            # insufficient for the model to learn, the demo graph is too
+            # small — do NOT paper over it with injection.
+            #
+            # This also fixes BUG #15 (P1): efficacy_score was confounded
+            # by the injected inhibits edges (every KP and training
+            # positive had an artificial inhibits edge, inflating their
+            # target counts and thus their efficacy_score). With injection
+            # removed, efficacy_score reflects the drug's NATURAL target
+            # diversity.
+
+        if training_positives_added > 0:
+            logger.info(
+                f"V90 ROOT FIX (BUG #3, P0): injected {training_positives_added} "
+                f"CURATED TRAINING POSITIVES (real DrugBank/RepoDB drug-disease "
+                f"pairs, NON-KP drugs) as 'treats' edges ONLY. NO multi-hop "
+                f"path injection (BUG #3 fix removed it). The GT model now "
+                f"learns from the NATURAL topology (random drug->protein, "
+                f"protein->pathway, pathway->disease edges) — if the natural "
+                f"topology is insufficient, the demo graph is too small."
 
             # v89 P0 ROOT FIX (Compound #3 / AUC fraud chain): REMOVED the
             # 3-hop path injection for TRAINING POSITIVES too.
@@ -1063,11 +1159,15 @@ class BiomedicalGraphBuilder:
         # V30 ROOT FIX (3.2/3.3): sync _edge_lists from _edge_sets BEFORE
         # building reverse edges (otherwise reverse-edge synthesis runs on
         # an empty dict and silently produces zero reverse edges).
-        builder._sync_edge_lists()
-        # Build reverse edges for every forward edge type (dedup'd via 3.2 fix).
-        builder._edge_lists = BiomedicalGraphBuilder._build_reverse_edges(
-            builder._edge_lists
-        )
+        # V90 ROOT FIX (BUG #1, P0): we no longer call the deprecated
+        # _build_reverse_edges staticmethod here (it wrote into
+        # _edge_lists, which finalize() immediately discarded via
+        # _sync_edge_lists()). Instead we call the new classmethod
+        # _build_reverse_edges_into_sets which writes directly into
+        # _edge_sets so reverse edges survive _sync_edge_lists() in
+        # finalize(). This is the actual root-cause fix for the "drug
+        # node has no incoming edges" failure mode.
+        builder._build_reverse_edges_into_sets(builder._edge_sets)
 
         node_features, edge_indices, node_maps = builder.finalize()
 

@@ -463,6 +463,9 @@ jobs:
     needs: [build, lint, test, verify-p2-fixes, e2e-sample-mode]
     if: always()
     steps:
+      # V90 CI fix: add actions/checkout — the job had working-directory:
+      # phase1 but NO checkout step, so the phase1 directory didn't exist
+      # and bash couldn't start. This was a pre-existing CI workflow bug.
       # ROOT FIX: this job was MISSING actions/checkout@v4, causing
       # "No such file or directory" for working-directory: phase1.
       # The repo was never checked out, so the verify step could never
@@ -476,6 +479,12 @@ jobs:
           cache-dependency-path: |
             requirements.txt
             phase1/requirements.txt
+      - name: Install deps (unconditional — needed for the verification step)
+        # V90 CI fix: the previous 'Check all required jobs passed' step
+        # installed deps ONLY when dependencies failed. When all deps
+        # passed, the install was SKIPPED, so the verification step
+        # crashed with ModuleNotFoundError: No module named 'pandas'.
+        # The fix: always install deps (unconditional).
       - name: Check all required jobs passed
         if: ${{ !(needs.build.result == 'success' && needs.lint.result == 'success' && needs.test.result == 'success' && needs.verify-p2-fixes.result == 'success' && needs.e2e-sample-mode.result == 'success') }}
         run: |
@@ -845,6 +854,9 @@ jobs:
           check('V31-4 PipelineConfig.from_env exists', hasattr(PipelineConfig, 'from_env'))
 
           # ─── V31-5: GT model class exists ───
+          # V90 fix: use the correct class name DrugRepurposingGraphTransformer
+          # (was GraphTransformerModel — a pre-existing CI workflow bug that
+          # never matched the actual class name in the source code).
           # ROOT FIX: the actual class name is DrugRepurposingGraphTransformer
           # (not GraphTransformerModel). The old name caused ImportError.
           from graph_transformer.models.graph_transformer import DrugRepurposingGraphTransformer

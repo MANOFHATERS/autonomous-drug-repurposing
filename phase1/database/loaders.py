@@ -4759,6 +4759,15 @@ def resolve_gene_symbol_to_uniprot(
             .str.upper()
             .map(gene_to_uniprot)
         )
+        # V90 CI fix: pandas 2.2+ raises TypeError when assigning a
+        # mixed-dtype Series (object with float NaN + str values) to a
+        # column that pandas has inferred as 'str' dtype. The fix is
+        # to ensure the assignment is object-dtype-safe by converting
+        # db_lookup to a plain Python-object Series before assignment.
+        # This was a pre-existing CI failure (P2 + Chain-1 verification
+        # job) unrelated to the Phase 3 V90 fixes, but it blocked the
+        # merge gate. Root cause: pandas 2.2+ stricter dtype enforcement.
+        df.loc[need_resolution_mask, "uniprot_id"] = db_lookup.astype(object)
         # v89 fix: ensure dtype-safe assignment. Newer pandas (2.2+) raises
         # TypeError when assigning a mixed Series to a str-dtype column.
         # Convert to str with NaN preservation, then assign.
@@ -4772,6 +4781,8 @@ def resolve_gene_symbol_to_uniprot(
             .str.upper()
             .map(protein_name_to_uniprot)
         )
+        # V90 CI fix: same dtype-safe assignment as Step 1.
+        df.loc[still_unresolved, "uniprot_id"] = protein_name_fallback.astype(object)
         df.loc[still_unresolved, "uniprot_id"] = protein_name_fallback.astype(object).where(protein_name_fallback.notna(), other=pd.NA)
 
     unresolved_count = df["uniprot_id"].isna().sum()

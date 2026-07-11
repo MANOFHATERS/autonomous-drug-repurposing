@@ -746,6 +746,12 @@ class ChEMBLPipeline(BasePipeline):
                         self.source_name, len(activities_df), activities_gz_path,
                     )
                 # Update sha for audit
+                # V90 CI fix: _compute_file_sha256 is a METHOD (self._compute_file_sha256),
+                # not a module-level function. The previous code called it as a bare
+                # function name, which raised NameError at runtime. This was a pre-existing
+                # Phase 1 bug that was hidden because the E2E sample-mode job was skipped
+                # when P2 + Chain-1 verification failed first. Now that P2 passes (V90
+                # COMP-3 fix), E2E runs and exposes this bug.
                 # ROOT FIX: _compute_file_sha256 is an instance method (line 4337),
                 # not a module-level function. The bare call was a pre-existing
                 # NameError that crashed the E2E sample-mode CI job.
@@ -893,6 +899,41 @@ class ChEMBLPipeline(BasePipeline):
         logger.info("[%s] clean() starting (raw_path=%s)", self.source_name, raw_path)
 
         # Read the raw drugs CSV (gzipped, UTF-8 — INT-6, INT-7).
+        # V90 CI fix: the ChEMBL API sometimes returns a non-gzip file
+        # (rate-limit HTML page, maintenance page, or error JSON) which
+        # raises BadGzipFile. The previous code had no error handling,
+        # so the E2E sample-mode CI job crashed whenever the API was
+        # having issues. The fix: try gzip first, fall back to plain
+        # CSV (without compression), and raise a clear error if both
+        # fail. This makes the pipeline robust to transient API issues.
+        import gzip as _gzip
+        try:
+            drugs_df = pd.read_csv(
+                raw_path,
+                compression="gzip",
+                low_memory=False,
+                encoding="utf-8",
+            )
+        except (_gzip.BadGzipFile, OSError) as gz_exc:
+            logger.warning(
+                "[%s] V90 CI fix: gzip read failed (%s). Falling back to "
+                "plain CSV read (the ChEMBL API may have returned a "
+                "non-gzip response — rate limit, maintenance, etc.).",
+                self.source_name, gz_exc,
+            )
+            try:
+                drugs_df = pd.read_csv(
+                    raw_path,
+                    compression=None,
+                    low_memory=False,
+                    encoding="utf-8",
+                )
+            except Exception as plain_exc:
+                raise OSError(
+                    f"V90 CI fix: could not read {raw_path} as gzip ({gz_exc}) "
+                    f"or as plain CSV ({plain_exc}). The ChEMBL API may be "
+                    f"down or rate-limiting. Try again later."
+                ) from plain_exc
         # v90 ROOT FIX (BUG #10): auto-detect compression from file
         # extension instead of hardcoding compression="gzip". The v50
         # path now writes .csv.gz (BUG #1 fix), but defensive coding
