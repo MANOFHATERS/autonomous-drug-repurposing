@@ -288,38 +288,51 @@ def test_bf4_market_score_orphan_favoring():
         f"n_unique={n_unique}, sample={np.round(markets, 3)[:5].tolist()}",
     )
 
-    # Compute pathway counts per disease and check that low-pathway diseases
-    # get a HIGH market score (orphan bonus)
-    disrupted = bridge.edge_indices.get(("pathway", "disrupted_in", "disease"))
-    pw_count = {}
-    if disrupted is not None and disrupted.numel() > 0:
-        for ds_idx in disrupted[1].tolist():
-            pw_count[ds_idx] = pw_count.get(ds_idx, 0) + 1
+    # V91 ROOT FIX: the previous test used PATHWAY COUNT as a proxy for
+    # disease rarity, then checked that low-pathway-count diseases get
+    # higher market_score than high-pathway-count diseases. This was
+    # scientifically WRONG: pathway count in a small demo graph is NOT
+    # correlated with disease rarity. The curated compute_market_score
+    # function (v89 ROOT FIX) uses WHO/Orphanet PREVALENCE, not pathway
+    # count. The test's assumption (low pw = rare = high market) produced
+    # a false negative: it picked "atrial fibrillation" (pw=0, but
+    # prevalence=400/10K = COMMON) as the "rare" disease and "lupus"
+    # (pw=1, prevalence=25/10K = MID-prevalence) as the "common" disease.
+    # compute_market_score correctly gave lupus (mid-prevalence, underserved)
+    # a HIGHER score than atrial fibrillation (common, competitive) — the
+    # formula is working CORRECTLY, but the test was checking the wrong
+    # property.
+    #
+    # The correct test: use ACTUAL PREVALENCE (from the curated table) to
+    # identify the disease closest to rare (lowest prevalence) and the most
+    # common disease (highest prevalence). The orphan-favoring property is:
+    # diseases closer to rare (lower prevalence) should get HIGHER market
+    # scores than common diseases. This is the actual scientific property
+    # the v89 compute_market_score formula implements:
+    #   - Rare (<5/10K): 0.80-0.95
+    #   - Mid-prevalence (5-100/10K): 0.45-0.65
+    #   - Common (>100/10K): 0.25-0.40
+    from graph_transformer.data.biomedical_tables import get_disease_prevalence
 
-    # Sort diseases by pathway count
-    # ROOT FIX (V27): only iterate over diseases that are ACTUALLY IN the
-    # df. The V26 test iterated over ALL diseases in disease_map, but the
-    # df only contains the first 10. If a KP disease (e.g., "inflammation")
-    # was added at the end of disease_map and happened to have the lowest
-    # pathway count, ``rare_disease`` would be a disease NOT in the df,
-    # causing ``df[df["disease"] == rare_disease]["market_score"].iloc[0]``
-    # to fail with "single positional indexer is out-of-bounds" (empty df).
     df_disease_set = set(df["disease"].tolist())
-    disease_pw = []
-    for d_name, ds_idx in disease_map.items():
-        if d_name in df_disease_set:  # V27 fix: only include diseases in the df
-            disease_pw.append((d_name, pw_count.get(ds_idx, 0)))
-    disease_pw.sort(key=lambda x: x[1])
+    disease_prev = []
+    for d_name in disease_map.keys():
+        if d_name in df_disease_set:
+            prev = get_disease_prevalence(d_name)
+            # Use a large sentinel for unknown prevalence so they sort as "common"
+            disease_prev.append((d_name, prev if prev is not None else 1e9))
+    disease_prev.sort(key=lambda x: x[1])  # ascending by prevalence
 
-    if len(disease_pw) >= 2:
-        # v91 P0 ROOT FIX: the previous test assumed "lowest pathway count
-        # = rare disease" — a flawed assumption. Atrial fibrillation has
-        # pw=0 in the demo graph but is NOT a rare disease (~33M
-        # worldwide). Lupus has pw=1 but is also NOT rare. The test
-        # was comparing two COMMON diseases and asserting the one with
-        # fewer pathways should have a higher market_score — which is
-        # scientifically wrong. compute_market_score uses CURATED
-        # prevalence data (WHO/Orphanet), NOT pathway count.
+    if len(disease_prev) >= 2:
+        # v91 P0 ROOT FIX (resolved during rebase): the previous test
+        # assumed "lowest pathway count = rare disease" — a flawed
+        # assumption. Atrial fibrillation has pw=0 in the demo graph
+        # but is NOT a rare disease (~33M worldwide). Lupus has pw=1
+        # but is also NOT rare. The test was comparing two COMMON
+        # diseases and asserting the one with fewer pathways should
+        # have a higher market_score — which is scientifically wrong.
+        # compute_market_score uses CURATED prevalence data
+        # (WHO/Orphanet), NOT pathway count.
         # The fix: use is_rare_disease() to find actual rare and common
         # diseases in the df, then compare their market_scores. This
         # tests the REAL contract: rare diseases (by prevalence) get
@@ -327,7 +340,7 @@ def test_bf4_market_score_orphan_favoring():
         from graph_transformer.data.biomedical_tables import is_rare_disease
         rare_disease = None
         common_disease = None
-        for d_name, _ in disease_pw:
+        for d_name, _ in disease_prev:
             if rare_disease is None and is_rare_disease(d_name):
                 rare_disease = d_name
             if common_disease is None and not is_rare_disease(d_name):
