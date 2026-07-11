@@ -2370,15 +2370,23 @@ def test_v4_final_phase3_phase4_100_percent_connected():
     phase6_src = inspect.getsource(GTRLBridge.get_top_k_novel_predictions)
     phase6_via_rl = "rl_model" in phase6_src
 
-    # Check 8: gnn_score is dominant signal (B-F3 reward weights)
+    # Check 8: gnn_score is NOT dominant (v90 Compound #4 fix — circular
+    # RL distillation of GT). The user's audit explicitly required:
+    #   "Remove gnn_score from the reward function entirely, OR reduce
+    #    its weight to < 0.05 AND remove the multiplicative gnn_factor
+    #    gate. The RL agent must not be a learned distillation of the
+    #    GT model — that is circular."
+    # The old test checked gnn_score >= 0.30 (dominant) — that was the
+    # BUG. The v90 fix reduces it to 0.04 (< 0.05). This test now
+    # verifies the CORRECT behavior: gnn_score is the WEAKEST feature.
     from rl.rl_drug_ranker import RewardConfig
     rc = RewardConfig()
-    gnn_dominant = rc.reward_weights["gnn_score"] >= 0.30
+    gnn_not_dominant = rc.reward_weights["gnn_score"] < 0.05
 
     all_checks = (
         rl_is_package and no_sys_path and proper_import and
         temp_applied and auc_uses_probs and top_uses_policy and
-        gt_holds_out and phase6_via_rl and gnn_dominant
+        gt_holds_out and phase6_via_rl and gnn_not_dominant
     )
     details = {
         "rl_is_package": rl_is_package,
@@ -2389,7 +2397,7 @@ def test_v4_final_phase3_phase4_100_percent_connected():
         "top_uses_policy": top_uses_policy,
         "gt_holds_out": gt_holds_out,
         "phase6_via_rl": phase6_via_rl,
-        "gnn_dominant": gnn_dominant,
+        "gnn_not_dominant": gnn_not_dominant,
     }
     _report("V4 FINAL: Phase 3 <-> Phase 4 100% connected",
             all_checks, f"checks: {details}")

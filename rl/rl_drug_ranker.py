@@ -643,22 +643,34 @@ class RewardConfig:
 
     feature_cols: List[str] = field(default_factory=lambda: list(FEATURE_COLS))
     reward_weights: Dict[str, float] = field(default_factory=lambda: {
-        # V4 B-F3 fix: bumped gnn_score weight from 0.20 to 0.35.
-        # The audit's finding #3 was that GT's gnn_score was only 1 of
-        # 10 features with weight 0.20 -- a minority signal in its own
-        # downstream consumer. 80% of ranking came from hand-coded
-        # features. The fix: gnn_score is now the dominant signal
-        # (0.35), reflecting that the GT model is the core AI engine.
-        GNN_SCORE_COL: 0.35,
-        SAFETY_COL: 0.18,
-        MARKET_COL: 0.08,
-        CONFIDENCE_COL: 0.08,
-        PATHWAY_COL: 0.10,
-        PATENT_COL: 0.05,
-        RARE_DISEASE_COL: 0.05,
-        UNMET_NEED_COL: 0.05,
-        EFFICACY_COL: 0.04,
-        ADME_COL: 0.02,
+        # v90 ROOT FIX (Compound #4 — circular RL distillation of GT):
+        # gnn_score weight REDUCED from 0.35 to 0.04 (< 0.05 threshold).
+        # The audit (v89) found: "The RL agent must not be a learned
+        # distillation of the GT model — that is circular. With weight
+        # 0.35 + multiplicative gnn_factor gate, gnn_score was the
+        # DOMINANT signal. The RL agent learned to copy GT's ranking →
+        # Phase 4 added no independent signal → if GT was biased/leaked,
+        # RL amplified that bias."
+        #
+        # The fix: gnn_score is now the WEAKEST feature (0.04 weight —
+        # a tie-breaker, not the dominant signal). The RL agent learns
+        # primarily from the 7 INDEPENDENT features (safety, market,
+        # pathway, unmet_need, efficacy, patent, adme, rare_disease).
+        # The GT gnn_score contributes only 4% of the reward.
+        #
+        # The multiplicative gnn_factor gate is also REMOVED in compute()
+        # — see the v89 P0 ROOT FIX block there. The reward is now purely
+        # additive: reward = weighted_sum * safety_factor + validated_bonus.
+        GNN_SCORE_COL: 0.04,
+        SAFETY_COL: 0.25,
+        MARKET_COL: 0.12,
+        CONFIDENCE_COL: 0.10,
+        PATHWAY_COL: 0.15,
+        PATENT_COL: 0.08,
+        RARE_DISEASE_COL: 0.08,
+        UNMET_NEED_COL: 0.10,
+        EFFICACY_COL: 0.05,
+        ADME_COL: 0.03,
         # Sum = 1.00
     })
     safety_hard_reject: float = 0.5
