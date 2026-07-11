@@ -1178,11 +1178,30 @@ def build_training_data(
                     unique_versions, expected,
                 )
         # Case (c): proper pandas metadata API.
+        # P2-012 ROOT FIX: the previous code only checked the key
+        # ``_schema_version`` (with leading underscore). But
+        # drkg_loader.py:1791 sets ``df.attrs["schema_version"]`` (NO
+        # underscore) — so the check NEVER fired and schema drift
+        # between Phase 1 and Phase 2 was silently undetected. The
+        # fix: check BOTH key variants (with and without underscore)
+        # so the existing drkg_loader's metadata is detected. The
+        # underscore variant is preferred (it's the canonical Phase 2
+        # contract); the non-underscore variant is checked as fallback
+        # for backward compat with the drkg_loader.
         elif "_schema_version" in drkg_df.attrs:
             actual = drkg_df.attrs["_schema_version"]
             if actual != expected:
                 logger.warning(
                     "DRKG schema version mismatch (df.attrs): expected %s, got %s",
+                    expected, actual,
+                )
+        elif "schema_version" in drkg_df.attrs:
+            actual = drkg_df.attrs["schema_version"]
+            if actual != expected:
+                logger.warning(
+                    "DRKG schema version mismatch (df.attrs['schema_version']): "
+                    "expected %s, got %s. (P2-012 root fix — checking "
+                    "non-underscore variant emitted by drkg_loader.py)",
                     expected, actual,
                 )
     else:

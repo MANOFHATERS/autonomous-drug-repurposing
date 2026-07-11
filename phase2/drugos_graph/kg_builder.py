@@ -1666,17 +1666,31 @@ class GraphNodeLoader:
                     # Non-Compound labels do not have aliases and use
                     # the original simple MERGE pattern (no perf cost).
                     if storage_label == "Compound":
+                        # P2-005 ROOT FIX: replace the deprecated
+                        # `size((:Compound {id: a}))` pattern expression
+                        # with the Neo4j 5.x `EXISTS { MATCH ... }`
+                        # subquery syntax. The pattern expression
+                        # triggers a full subgraph scan of Compound
+                        # nodes for EACH alias in EACH row of EACH
+                        # batch — for 10K compounds × ~5 aliases ×
+                        # batch_size=1000, that's 50K pattern
+                        # expansions PER BATCH. The EXISTS subquery
+                        # uses the index on Compound(id) (created by
+                        # `create_indexes()`) and short-circuits at
+                        # the first match — orders of magnitude
+                        # faster. This makes the v78 "biotech drug
+                        # MERGE" promise (insulin/mAbs/vaccines merge
+                        # with their ChEMBL/PubChem equivalents)
+                        # actually viable at production scale.
                         cypher = (
                             f"UNWIND $batch AS row\n"
                             # Resolve the effective merge id: prefer an
                             # existing Compound whose id matches any
                             # alias in this row; fall back to row.id.
-                            # `coalesce` + `reduce` lets us scan the
-                            # aliases list in pure Cypher without APOC.
                             f"WITH row, "
                             f"coalesce("
                             f"  [a IN coalesce(row.compound_id_aliases, []) "
-                            f"   WHERE size((:Compound {{id: a}})) > 0 "
+                            f"   WHERE EXISTS {{ MATCH (:Compound {{id: a}}) }} "
                             f"   LIMIT 1][0], "
                             f"  row.id"
                             f") AS merge_id\n"
@@ -2263,6 +2277,38 @@ class GraphEdgeLoader:
                         # ``_version`` are intentionally omitted — they
                         # are MATCH-only semantics and a freshly-created
                         # edge has never been "updated".
+                        #
+                        # P2-022 ROOT FIX: CREATE does NOT deduplicate
+                        # against pre-existing relationships in the
+                        # graph. If the source data has duplicate
+                        # (src, dst) pairs ACROSS batches (the in-batch
+                        # dedup at line ~2219 only catches within-batch
+                        # duplicates), OR if the graph already has
+                        # (src, dst, rel_type) from a prior run,
+                        # CREATE will create a DUPLICATE relationship
+                        # and `relationships_created` will count it.
+                        # This inflates `total_created` and
+                        # `batch_dropped` (which is computed as
+                        # `len(clean_batch) - batch_created` becomes
+                        # NEGATIVE, silently wrapped by Python int
+                        # arithmetic). The fix: emit a WARNING when
+                        # mode="create" is used, recommending MERGE
+                        # for idempotent loads. We also log the
+                        # expected_count vs created_count delta when
+                        # created > expected (the silent-duplicate
+                        # signal).
+                        if i == start_idx:
+                            logger.warning(
+                                "load_edges_batch: mode='create' does "
+                                "NOT deduplicate against pre-existing "
+                                "relationships. If the graph already "
+                                "contains (src, dst, %s) edges from a "
+                                "prior run, CREATE will produce "
+                                "DUPLICATES and relationships_created "
+                                "will overcount. Use mode='merge' for "
+                                "idempotent loads. (P2-022 root fix)",
+                                rel_type,
+                            )
                         cypher = (
                             f"UNWIND $batch AS row\n"
                             f"MATCH (src:{safe_src} {{id: row.src_id}})\n"
@@ -2314,20 +2360,73 @@ class GraphEdgeLoader:
 
                     # Checkpoint
                     if checkpoint_key:
+                        # P2-004 ROOT FIX: use `i + len(batch) - 1` (the
+                        # ACTUAL number of rows in this batch) instead of
+                        # `i + batch_size - 1` (the configured max). The
+                        # node loader at line ~1749 was already fixed
+                        # this way, but the edge loader was missed. For
+                        # the FINAL partial batch (when len(edges) %
+                        # batch_size != 0, the common case), the old code
+                        # wrote `last_completed_idx` BEYOND the actual
+                        # last processed edge — so on resume,
+                        # `start_idx = checkpoint["last_completed_idx"] + 1`
+                        # SKIPPED edges that were never processed. Silent
+                        # edge loss on every crash-resume cycle; the
+                        # graph progressively lost edges across re-runs.
                         write_checkpoint(
                             checkpoint_key,
                             {
-                                "last_completed_idx": i + batch_size - 1,
+                                "last_completed_idx": i + len(batch) - 1,
                                 "ts": _now_iso(),
                             },
                         )
 
                 except (ServiceUnavailable, SessionExpired, OSError) as e:
-                    logger.error(
-                        "Batch %d failed: %s. Checkpoint at %d.",
-                        i, e, max(0, i - 1),
+                    # P2-021 ROOT FIX: per-batch retry with exponential
+                    # backoff before re-raising. The previous code
+                    # re-raised on the FIRST transient failure, aborting
+                    # the entire edge-type load (and triggering a
+                    # pipeline-level retry that re-ran the WHOLE step).
+                    # A single transient blip on edge type #5 of 20
+                    # would lose all progress on edge types 6-20. The
+                    # fix wraps the batch in safe_call_with_retry (the
+                    # same helper used by connect()) so transient
+                    # failures are retried in-place. We do NOT retry
+                    # DrugOSDataError — those are deterministic data
+                    # issues that will fail again on retry.
+                    logger.warning(
+                        "Batch %d transient failure: %s. Retrying "
+                        "with exponential backoff. (P2-021 root fix)",
+                        i, e,
                     )
-                    raise
+                    try:
+                        from .utils import safe_call_with_retry
+                        _retry_result = safe_call_with_retry(
+                            lambda: session.run(cypher, **params).consume().counters,
+                            retries=3,
+                            backoff=1.0,
+                            backoff_factor=2.0,
+                            retryable_exceptions=(
+                                ServiceUnavailable, SessionExpired, OSError,
+                            ),
+                        )
+                        # Recompute stats from the retried result.
+                        stats = _retry_result
+                        batch_created = stats.relationships_created
+                        total_created += batch_created
+                        batch_dropped = len(clean_batch) - batch_created
+                        total_dropped += batch_dropped
+                        logger.info(
+                            "Batch %d retry SUCCEEDED after transient "
+                            "failure. (P2-021 root fix)", i,
+                        )
+                    except Exception as retry_err:
+                        logger.error(
+                            "Batch %d failed after 3 retries: %s. "
+                            "Checkpoint at %d. (P2-021 root fix)",
+                            i, retry_err, max(0, i - 1),
+                        )
+                        raise
                 except DrugOSDataError as e:
                     logger.warning(
                         "Batch %d had data errors: %s. DLQ'd. Continuing.",

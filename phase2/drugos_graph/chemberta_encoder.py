@@ -974,7 +974,17 @@ def _encode_batch(
     tokenized_batch = {
         k: v.to(device) for k, v in tokenized_batch.items()
     }
-    # v53 ROOT FIX (P2-012): verify model device matches input device
+    # v53 ROOT FIX (P2-012): verify model device matches input device.
+    # P2-003 ROOT FIX: the original code wrapped the device check in
+    # `try: ... except StopIteration: pass; except Exception: pass` —
+    # which SILENTLY swallowed the RuntimeError raised on device
+    # mismatch. The forward pass at line 996 then proceeded with
+    # mismatched devices and crashed with a cryptic PyTorch error
+    # ("Expected all tensors to be on the same device"). The narrow
+    # fix: only catch the EXCEPT clause that handles "model has no
+    # parameters" (StopIteration from next(model.parameters())) and
+    # "model is not a torch.nn.Module" (AttributeError). Let
+    # RuntimeError propagate so the operator sees the real cause.
     try:
         _model_device = next(model.parameters()).device
         _input_device = torch.device(device)
@@ -982,15 +992,17 @@ def _encode_batch(
             raise RuntimeError(
                 f"Device mismatch: model is on {_model_device} but inputs "
                 f"are on {_input_device}. This indicates a bug in the "
-                f"device management code (P2-012). Attempting to move "
-                f"model to {_input_device}..."
+                f"device management code (P2-012). Move the model to "
+                f"{_input_device} via `model.to('{_input_device}')` "
+                f"before calling encode_smiles, or pass device="
+                f"'{_model_device.type}' to encode_smiles. (P2-003 root fix)"
             )
-            # This line is unreachable due to the raise above, but kept
-            # for documentation of the intended fix.
     except StopIteration:
         pass  # model has no parameters (empty) — skip check
-    except Exception:
-        pass  # non-torch model — skip check
+    except AttributeError:
+        pass  # non-torch model (no .parameters()) — skip check
+    # NOTE: RuntimeError is intentionally NOT caught here so the real
+    # device-mismatch error propagates to the operator.
 
     with torch.inference_mode():
         model_outputs = model(**tokenized_batch)
