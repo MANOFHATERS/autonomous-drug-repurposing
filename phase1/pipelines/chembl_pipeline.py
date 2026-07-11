@@ -738,7 +738,13 @@ class ChEMBLPipeline(BasePipeline):
                         self.source_name, len(activities_df), activities_gz_path,
                     )
                 # Update sha for audit
-                self._sha256_raw = _compute_file_sha256(drugs_csv)
+                # V90 CI fix: _compute_file_sha256 is a METHOD (self._compute_file_sha256),
+                # not a module-level function. The previous code called it as a bare
+                # function name, which raised NameError at runtime. This was a pre-existing
+                # Phase 1 bug that was hidden because the E2E sample-mode job was skipped
+                # when P2 + Chain-1 verification failed first. Now that P2 passes (V90
+                # COMP-3 fix), E2E runs and exposes this bug.
+                self._sha256_raw = self._compute_file_sha256(drugs_csv)
                 return drugs_csv
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             # v84 FORENSIC ROOT FIX (BUG #38): narrowed from broad
