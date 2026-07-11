@@ -421,7 +421,7 @@ def test_compound_3_resume_returns_test_auc():
         with tempfile.TemporaryDirectory() as tmpdir:
             bridge = GTRLBridge(output_dir=tmpdir, seed=42)
             bridge.build_demo_graph(num_drugs=15, num_diseases=10)
-            bridge.build_model(embedding_dim=16, num_layers=1, num_heads=2)
+            bridge.build_model(embedding_dim=16, num_layers=3, num_heads=2)  # v91: num_layers=3 (BUG #7 requires >=3)
             # First training run (creates checkpoint)
             results1 = bridge.train_model(epochs=2, patience=2, resume_from_checkpoint=False)
             assert "test_auc" in results1, "First run must include test_auc"
@@ -450,7 +450,7 @@ def test_v90_full_smoke_test():
             bridge = GTRLBridge(output_dir=tmpdir, seed=42)
             bridge.build_demo_graph(num_drugs=15, num_diseases=10)
             bridge.build_model(
-                embedding_dim=16, num_layers=1, num_heads=2,
+                embedding_dim=16, num_layers=3, num_heads=2,  # v91: num_layers=3 (BUG #7 requires >=3)
                 link_predictor_hidden_dims=[32, 16],
             )
             results = bridge.train_model(epochs=2, patience=2, resume_from_checkpoint=False)
