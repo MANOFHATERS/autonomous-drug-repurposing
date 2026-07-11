@@ -3295,6 +3295,15 @@ class TransEConfig:
     # FIX C4.10: min_train_triples — was not validated.
     # v22 ROOT FIX (audit Chain 1): in dev mode (default), lower to 5 so
     # the toy fixture can train. Production keeps 100.
+    # P2-024 ROOT FIX: the default is computed via default_factory,
+    # which IS re-evaluated on each TransEConfig() instantiation.
+    # However, the value is then frozen on the instance — if an
+    # operator sets DRUGOS_ENVIRONMENT AFTER constructing a
+    # TransEConfig, the cached value on that instance persists.
+    # Operators who need to change env vars mid-run MUST construct
+    # a NEW TransEConfig() instance (do not reuse the old one).
+    # This is documented behavior; for true dynamic env-var
+    # resolution, use TransEConfig.from_env() at construction time.
     min_train_triples: int = field(
         default_factory=lambda: int(
             os.environ.get(

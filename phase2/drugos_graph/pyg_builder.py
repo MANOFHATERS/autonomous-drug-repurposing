@@ -817,7 +817,16 @@ class PyGBuilder(GraphBuilderProtocol):
                 feat_dim = self._get_feat_dim(node_type)
 
                 if node_features and node_type in node_features:
-                    data[node_type].x = node_features[node_type]
+                    # P2-006 ROOT FIX: clone the caller's tensor instead
+                    # of assigning by reference. The HeteroData now owns
+                    # an independent copy. Any subsequent mutation (e.g.,
+                    # a NormalizeFeatures transform, an in-place add_ from
+                    # a PyG layer, or the caller modifying their dict)
+                    # can NO LONGER corrupt both. The split_for_link_prediction
+                    # method already clones node features for the same
+                    # reason — but build_from_drkg did not, silently
+                    # corrupting ChemBERTa embeddings.
+                    data[node_type].x = node_features[node_type].clone()
                     self.logger.info(
                         f"  {node_type}: {num_nodes:,} nodes, "
                         f"features from pre-computed "
@@ -1028,13 +1037,15 @@ class PyGBuilder(GraphBuilderProtocol):
                         torch.zeros(0, dtype=torch.long)
                     )
 
-                # v88 ROOT FIX (BUG #41 — missing edge_type in HeteroData
-                # for HGTConv): set edge_type = torch.zeros(...) after
-                # edge_index so HGTConv can map each edge to its relation.
-                if edge_index.size(1) > 0:
-                    data[src_type, rel_name, dst_type].edge_type = torch.zeros(
-                        edge_index.size(1), dtype=torch.long
-                    )
+                # P2-009 ROOT FIX: removed the duplicate v88 block that
+                # re-assigned edge_type on consecutive lines with an
+                # identical value. The v84 "BUG #18" fix above already
+                # set edge_type correctly. The v88 "BUG #41 ROOT FIX"
+                # comment claimed this was missing — but the v84 fix
+                # already added it, so the v88 block was dead code that
+                # overwrote the first assignment with an identical
+                # value. Confusing for maintainers and a waste of an
+                # allocation.
 
                 # FIX(issue-13): edge index bounds validation.
                 if edge_index.numel() > 0:
@@ -1076,16 +1087,30 @@ class PyGBuilder(GraphBuilderProtocol):
 
             # Step 5: Post-construction referential integrity sweep
             # FIX(issue-29): post-construction referential integrity sweep.
+            # P2-018 ROOT FIX: replace `assert` with `if not ...: raise
+            # ValueError`. Python -O flag (used in some production
+            # deployments for ~10% speedup) DISABLES assertions — with
+            # -O, the OOB check is skipped, and downstream HGTConv
+            # crashes with a cryptic CUDA index error. Using raise
+            # ensures the check fires regardless of optimization flags.
             for src, rel, dst in data.edge_types:
                 ei = data[src, rel, dst].edge_index
                 if ei.numel() == 0:
                     continue
-                assert (
-                    ei[0].max().item() < data[src].num_nodes
-                ), f"OOB src in {src},{rel},{dst}"
-                assert (
-                    ei[1].max().item() < data[dst].num_nodes
-                ), f"OOB dst in {src},{rel},{dst}"
+                _max_src = ei[0].max().item()
+                _max_dst = ei[1].max().item()
+                if not (_max_src < data[src].num_nodes):
+                    raise ValueError(
+                        f"OOB src in {src},{rel},{dst}: "
+                        f"max_src_index={_max_src} >= "
+                        f"num_src_nodes={data[src].num_nodes}"
+                    )
+                if not (_max_dst < data[dst].num_nodes):
+                    raise ValueError(
+                        f"OOB dst in {src},{rel},{dst}: "
+                        f"max_dst_index={_max_dst} >= "
+                        f"num_dst_nodes={data[dst].num_nodes}"
+                    )
 
             # Step 6: Structural validation
             self._validate_heterodata(data)
@@ -1739,7 +1764,15 @@ class PyGBuilder(GraphBuilderProtocol):
                 if original[nt].x is not None:
                     data[nt].x = original[nt].x.clone()  # P2C-013: clone, not share
             for et in original.edge_types:
-                data[et].edge_index = original[et].edge_index
+                # P2-015 ROOT FIX: clone edge_index instead of sharing
+                # by reference. PyG's ToUndirected transform (when
+                # applied later) mutates edge_index in-place by
+                # appending reverse edges. If the caller applies
+                # ToUndirected to `data` after split_for_link_prediction,
+                # the original HeteroData's edge_index is corrupted.
+                # The same cloning discipline is already applied to
+                # node features one block above (P2C-013).
+                data[et].edge_index = original[et].edge_index.clone()
 
             # Add reverse edges for message passing on NON-target edge
             # types only. Use config.REVERSE_EDGE_PREFIX.

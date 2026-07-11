@@ -717,6 +717,44 @@ class RecordingGraphBuilder:
 # ---------------------------------------------------------------------------
 # 3. Phase1StagedData — the structured intermediate
 # ---------------------------------------------------------------------------
+# P2-014 ROOT FIX: define a typed dict-subclass that carries the backend
+# label as an ATTRIBUTE (not a string-valued dict key). The previous
+# contract returned ``Dict[str, pd.DataFrame]`` but silently inserted a
+# STRING value at key ``"_phase1_backend"`` — a type-system lie. Any
+# downstream iteration site that forgot the ``if key == "_phase1_backend":
+# continue`` guard would crash with
+# ``AttributeError: 'str' object has no attribute 'empty'``. The fix
+# preserves backward compat (the legacy key is still set for callers
+# that pop it) but the canonical API is the ``.backend`` attribute,
+# which is type-safe and cannot collide with DataFrame iteration.
+class _Phase1BridgeResult(dict):
+    """Typed dict-subclass carrying the Phase 1 backend label as an attribute.
+
+    Inherits from ``dict`` so all existing call sites (``items()``,
+    ``get()``, ``pop()``, ``len()``, ``in``, etc.) work unchanged.
+    Adds a ``.backend`` attribute that records which backend
+    (PostgreSQL or CSV) produced the frames — type-safe and
+    iteration-safe.
+
+    For backward compat, the legacy ``"_phase1_backend"`` key is ALSO
+    set on the dict (so callers using ``frames.pop("_phase1_backend",
+    default)`` continue to work). New code should prefer ``.backend``.
+    """
+
+    __slots__ = ("backend",)
+
+    def __init__(self, *args, backend: str = "", **kwargs):
+        super().__init__(*args, **kwargs)
+        # Use object.__setattr__ because __slots__ + dict subclass can
+        # be picky about attribute assignment order.
+        object.__setattr__(self, "backend", backend)
+        # Backward-compat: also expose via the legacy key. Downstream
+        # iteration sites MUST continue to guard with
+        # ``if key == "_phase1_backend": continue`` (the legacy guard
+        # is preserved at all known call sites).
+        super().__setitem__("_phase1_backend", backend)
+
+
 @dataclass
 class Phase1StagedData:
     """Structured Phase 2 node/edge dicts produced from Phase 1 CSVs.
@@ -2260,7 +2298,7 @@ def _read_phase1_from_postgres() -> Dict[str, pd.DataFrame]:
 def read_phase1_outputs(
     phase1_processed_dir: Optional[Path | str] = None,
     prefer_postgres: bool = True,
-) -> Dict[str, pd.DataFrame]:
+) -> "_Phase1BridgeResult":
     """Read Phase 1's outputs into a dict of DataFrames.
 
     v29 ROOT FIX (Phase1↔Phase2 100% connection): the reader now prefers
@@ -2275,9 +2313,10 @@ def read_phase1_outputs(
       2. Otherwise, read CSVs from ``phase1_processed_dir`` (the legacy
          v28 behaviour — preserved for dev/CI without a database).
 
-    The chosen backend is recorded on the returned DataFrames via the
-    special ``"_phase1_backend"`` attribute on the dict, so downstream
-    code (and tests) can verify which path was taken.
+    The chosen backend is recorded on the returned object via the
+    ``.backend`` attribute (P2-014 root fix — type-safe), AND via the
+    legacy ``"_phase1_backend"`` dict key (backward compat with callers
+    that pop it). New code should prefer ``.backend``.
 
     Parameters
     ----------
@@ -2303,8 +2342,11 @@ def read_phase1_outputs(
             "Phase 1 ORM models are the source of truth for Phase 2."
         )
         try:
-            out = _read_phase1_from_postgres()
-            out["_phase1_backend"] = _PHASE1_BACKEND_POSTGRES  # type: ignore[assignment]
+            _pg_out = _read_phase1_from_postgres()
+            # P2-014 ROOT FIX: wrap in _Phase1BridgeResult so the
+            # backend label is a type-safe attribute (not a string
+            # masquerading as a DataFrame in a Dict[str, DataFrame]).
+            out = _Phase1BridgeResult(_pg_out, backend=_PHASE1_BACKEND_POSTGRES)
             return out
         except Exception as exc:
             # v61 ROOT FIX (silent break point #2 — forensic deep fix):
@@ -2526,8 +2568,10 @@ def read_phase1_outputs(
                     "this source before invoking the bridge.",
                     key, p,
                 )
-    out["_phase1_backend"] = _PHASE1_BACKEND_CSV  # type: ignore[assignment]
-    return out
+    # P2-014 ROOT FIX: wrap the CSV-frames dict in _Phase1BridgeResult
+    # so the backend label is a type-safe .backend attribute (not a
+    # string masquerading as a DataFrame in a Dict[str, DataFrame]).
+    return _Phase1BridgeResult(out, backend=_PHASE1_BACKEND_CSV)
 
 
 # ---------------------------------------------------------------------------
@@ -5696,8 +5740,17 @@ def run_phase1_to_phase2(
     frames = read_phase1_outputs(
         phase1_processed_dir, prefer_postgres=prefer_postgres,
     )
-    # frames is a dict that ALSO carries a "_phase1_backend" marker key.
-    backend = frames.pop("_phase1_backend", _PHASE1_BACKEND_CSV)
+    # P2-014 ROOT FIX: prefer the type-safe ``.backend`` attribute
+    # (canonical API). Fall back to the legacy ``"_phase1_backend"``
+    # dict key for backward compat with any caller that constructs a
+    # plain dict (e.g. unit tests that mock read_phase1_outputs).
+    backend = getattr(frames, "backend", None)
+    if not backend:
+        backend = frames.pop("_phase1_backend", _PHASE1_BACKEND_CSV)
+    else:
+        # Still pop the legacy key so downstream iteration over
+        # frames.items() does not see a string value at that key.
+        frames.pop("_phase1_backend", None)
     staged = stage_phase1_to_phase2(
         frames, run_id=run_id, phase1_processed_dir=phase1_processed_dir
     )
