@@ -539,6 +539,7 @@ def run_entity_resolution() -> Dict[str, Any]:
                 #   case-insensitive (lowercase both sides). Skip lines
                 #   that don't have exactly 4 fields after splitting
                 #   (defensive — corrupt lines are logged and skipped).
+                import gzip
                 _alias_records = []
                 _skipped_lines = 0
                 with gzip.open(_alias_file, "rt", encoding="utf-8") as _af:
@@ -596,21 +597,6 @@ def run_entity_resolution() -> Dict[str, Any]:
                         "Loaded STRING aliases from raw file %s: %d UniProt mappings",
                         _alias_file.name, len(string_aliases_df),
                     )
-            else:
-                # v89 BUG #3: no human aliases file found — log clearly.
-                if _string_raw_dir.exists():
-                    _all_alias_files = list(_string_raw_dir.glob("*aliases*.txt.gz"))
-                    logger.warning(
-                        "No HUMAN (9606) STRING aliases file found in %s. "
-                        "Found %d non-human alias files: %s. "
-                        "REFUSING to load non-human aliases (would corrupt "
-                        "organism assignment). string_aliases_df will be "
-                        "empty — resolve_single(string_id=...) will not "
-                        "resolve STRING IDs to UniProt.",
-                        _string_raw_dir,
-                        len(_all_alias_files),
-                        [f.name for f in _all_alias_files[:5]],
-                    )
         except RuntimeError:
             # v89 BUG #28: re-raise RuntimeError (corrupt file) so the
             # operator sees a clear failure. Do NOT swallow it.
@@ -622,6 +608,25 @@ def run_entity_resolution() -> Dict[str, Any]:
                 "will not resolve STRING IDs to UniProt",
                 exc,
             )
+        else:
+            # v89 BUG #3: no human aliases file found — log clearly.
+            # This else clause runs only when the try block completed
+            # WITHOUT raising. If string_aliases_df is still empty here,
+            # either no 9606 aliases file was found OR the file had no
+            # UniProt entries. Warn so the operator knows.
+            if string_aliases_df.empty and _string_raw_dir.exists():
+                _all_alias_files = list(_string_raw_dir.glob("*aliases*.txt.gz"))
+                logger.warning(
+                    "No HUMAN (9606) STRING aliases file found in %s. "
+                    "Found %d non-human alias files: %s. "
+                    "REFUSING to load non-human aliases (would corrupt "
+                    "organism assignment). string_aliases_df will be "
+                    "empty — resolve_single(string_id=...) will not "
+                    "resolve STRING IDs to UniProt.",
+                    _string_raw_dir,
+                    len(_all_alias_files),
+                    [f.name for f in _all_alias_files[:5]],
+                )
 
     # v89 ROOT FIX (BUG #33 — load ChEMBL target data for protein
     # resolution):

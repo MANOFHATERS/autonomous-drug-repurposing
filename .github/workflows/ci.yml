@@ -479,11 +479,11 @@ jobs:
           cache-dependency-path: |
             requirements.txt
             phase1/requirements.txt
-      # V90 CI fix: the previous 'Check all required jobs passed' step
-      # installed deps ONLY when dependencies failed. When all deps
-      # passed, the install was SKIPPED, so the verification step
-      # crashed with ModuleNotFoundError: No module named 'pandas'.
-      # The fix: always install deps (unconditional).
+      # v91 ROOT FIX: removed a BROKEN step here that had only a `name:` and
+      # comment but NO `run:` or `uses:` key. This is invalid GitHub Actions
+      # YAML and caused the ENTIRE workflow to fail to parse — 0 jobs ran.
+      # The actual install deps step is below (line ~499) and is already
+      # unconditional (no `if` gate), so the broken step was redundant.
       - name: Check all required jobs passed
         if: ${{ !(needs.build.result == 'success' && needs.lint.result == 'success' && needs.test.result == 'success' && needs.verify-p2-fixes.result == 'success' && needs.e2e-sample-mode.result == 'success') }}
         run: |

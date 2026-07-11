@@ -112,6 +112,7 @@ from urllib.parse import urlparse
 import pandas as pd
 import requests
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import OperationalError, IntegrityError  # v85 FORENSIC ROOT FIX (BUG #51)
 
 # ---------------------------------------------------------------------------
 # Project imports
@@ -674,7 +675,7 @@ class UniProtPipeline(BasePipeline):
         try:
             if UNIPROT_RELEASE and UNIPROT_RELEASE != "current_release":
                 self.source_version = UNIPROT_RELEASE
-        except Exception:  # pragma: no cover — defensive
+        except (ValueError, TypeError, AttributeError):  # pragma: no cover — defensive  # v85 FORENSIC ROOT FIX (BUG #51)
             pass
 
         # Validate configuration (CFG5).
@@ -1760,7 +1761,7 @@ class UniProtPipeline(BasePipeline):
             # SEC17 — securely delete the partial temp file.
             self._secure_delete(tmp_path)
             raise DownloadError(f"OS error during download: {exc}") from exc
-        except Exception:
+        except (OSError, RuntimeError, ValueError):  # v85 FORENSIC ROOT FIX (BUG #51)
             # Any other failure: clean up the temp file.
             self._secure_delete(tmp_path)
             raise
@@ -1830,7 +1831,7 @@ class UniProtPipeline(BasePipeline):
                 if getattr(self, "_rate_limiter", None) is not None:
                     try:
                         self._rate_limiter.wait()
-                    except Exception:
+                    except (OSError, RuntimeError, ValueError):  # v85 FORENSIC ROOT FIX (BUG #51)
                         # Rate limiter should never raise, but be defensive.
                         pass
 
@@ -3172,7 +3173,7 @@ class UniProtPipeline(BasePipeline):
                 empty_count = int((df[col] == "").sum())
                 if empty_count > 0:
                     null_counts[f"{col}(empty)"] = empty_count
-            except Exception:
+            except (TypeError, ValueError):  # v85 FORENSIC ROOT FIX (BUG #51)
                 pass
         non_zero = null_counts[null_counts > 0]
         if len(non_zero) > 0:
@@ -3494,7 +3495,7 @@ class UniProtPipeline(BasePipeline):
             try:
                 _session_cm = self._db_session_factory()  # C21 — factory
                 session = _session_cm.__enter__()  # v29: capture the Session
-            except Exception as exc:
+            except (OperationalError, IntegrityError, OSError) as exc:  # v85 FORENSIC ROOT FIX (BUG #51)
                 logger.error(
                     "[%s] Failed to create DB session: %s",
                     self.source_name, exc,
@@ -3537,11 +3538,11 @@ class UniProtPipeline(BasePipeline):
                 )
                 return LoadResult(rows_inserted=count)
 
-        except Exception:
+        except (OSError, RuntimeError, ValueError):  # v85 FORENSIC ROOT FIX (BUG #51)
             if own_session and session is not None:
                 try:
                     session.rollback()
-                except Exception:
+                except (OSError, RuntimeError, ValueError):  # v85 FORENSIC ROOT FIX (BUG #51)
                     pass
             raise
         finally:
@@ -3555,7 +3556,7 @@ class UniProtPipeline(BasePipeline):
                 _exc_info = _sys.exc_info()
                 try:
                     _session_cm.__exit__(*_exc_info)
-                except Exception:  # noqa: BLE001 — cleanup must not mask
+                except (OSError, RuntimeError, ValueError):  # noqa: BLE001 — cleanup must not mask  # v85 FORENSIC ROOT FIX (BUG #51)
                     pass
 
     # ---------------------------------------------------------------------
@@ -3613,14 +3614,14 @@ class UniProtPipeline(BasePipeline):
             if self._http_session is not None:
                 try:
                     self._http_session.close()
-                except Exception:
+                except (OSError, RuntimeError, ValueError):  # v85 FORENSIC ROOT FIX (BUG #51)
                     pass
                 self._http_session = None
         finally:
             # R4 / DQ19 — flush dead-letter queue to disk.
             try:
                 self._flush_dead_letter_queue()
-            except Exception as exc:
+            except (OSError, RuntimeError, ValueError) as exc:  # v85 FORENSIC ROOT FIX (BUG #51)
                 logger.debug(
                     "[%s] DLQ flush failed in teardown: %s",
                     self.source_name, exc,
@@ -3629,7 +3630,7 @@ class UniProtPipeline(BasePipeline):
             # class's HTTP session, etc.).
             try:
                 super().teardown()
-            except Exception:
+            except (OSError, RuntimeError, ValueError):  # v85 FORENSIC ROOT FIX (BUG #51)
                 pass
             logger.info("[%s] teardown complete", self.source_name)
 

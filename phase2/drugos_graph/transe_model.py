@@ -3485,6 +3485,13 @@ def train_transe(
                         n_val_neg = n_val * 10
                         val_neg_tails_list: List[int] = [0] * n_val_neg
                         # Expand val_rels 10x to align with neg slots.
+                        # v89 CI RECOVERY FIX: a parallel agent inserted
+                        # the BUG #33 fix code INSIDE the parentheses of
+                        # val_rels_expanded_fallback = (...), leaving the
+                        # parenthesis unclosed (SyntaxError). ROOT FIX:
+                        # close the parenthesis after repeat_interleave(10),
+                        # then the BUG #33 fix code follows as separate
+                        # statements at the same indentation level.
                         val_rels_expanded_fallback = (
                             val_rels_dev.repeat_interleave(10)
                         )
