@@ -244,53 +244,43 @@ class TestW08RareDiseaseFlagPerDisease(unittest.TestCase):
 
 
 class TestW09RareThresholdAbsolute(unittest.TestCase):
-    """W-09: rare_disease_flag uses absolute pathway threshold (not relative)."""
+    """v89 ROOT FIX: rare_disease_flag uses curated WHO/Orphanet prevalence data.
+
+    The v88 W-09 fix used an absolute pathway threshold (RARE_DISEASE_PATHWAY_THRESHOLD=2).
+    The v89 fix replaces this with curated disease prevalence data from WHO/Orphanet.
+    FDA/EU defines rare disease as prevalence <5 per 10K population. This is
+    scientifically correct — disease rarity is defined by PREVALENCE, not by
+    graph topology (pathway count).
+    """
 
     def test_compute_supplementary_features_uses_absolute_threshold(self):
-        """_compute_supplementary_features should use RARE_DISEASE_PATHWAY_THRESHOLD."""
+        """v89: _compute_supplementary_features should use compute_rare_disease_flag
+        from the curated biomedical_tables module (not graph-topology-derived)."""
         import inspect
         from graph_transformer.gt_rl_bridge import GTRLBridge
         source = inspect.getsource(GTRLBridge._compute_supplementary_features)
         self.assertIn(
-            "RARE_DISEASE_PATHWAY_THRESHOLD",
+            "compute_rare_disease_flag",
             source,
-            "W-09: _compute_supplementary_features should define "
-            "RARE_DISEASE_PATHWAY_THRESHOLD (absolute count, not relative).",
-        )
-        self.assertIn(
-            "ROOT FIX (W-09)",
-            source,
-            "W-09: _compute_supplementary_features should have a ROOT FIX (W-09) comment.",
-        )
-        # The old V27 formula (max_pathways // 3) should NOT be used
-        # for the threshold. (It may appear in the comment explaining
-        # what was wrong.)
-        # We check that the threshold is assigned from the constant.
-        self.assertIn(
-            "rare_threshold = RARE_DISEASE_PATHWAY_THRESHOLD",
-            source,
-            "W-09: rare_threshold should be assigned from the absolute constant.",
+            "v89: _compute_supplementary_features should use compute_rare_disease_flag "
+            "from the curated WHO/Orphanet prevalence table (not RARE_DISEASE_PATHWAY_THRESHOLD).",
         )
 
 
 class TestW10UnmetNeedContinuous(unittest.TestCase):
-    """W-10: unmet_need_score uses continuous exp-decay formula."""
+    """v89 ROOT FIX: unmet_need_score uses curated prevalence + treatment count."""
 
     def test_unmet_need_formula_is_continuous(self):
-        """_compute_supplementary_features should use exp-decay for unmet_need."""
+        """v89: _compute_supplementary_features should use compute_unmet_need_score
+        from the curated biomedical_tables module."""
         import inspect
         from graph_transformer.gt_rl_bridge import GTRLBridge
         source = inspect.getsource(GTRLBridge._compute_supplementary_features)
         self.assertIn(
-            "np.exp(-tc / unmet_scale)",
+            "compute_unmet_need_score",
             source,
-            "W-10: unmet_need should use the continuous exp-decay formula "
-            "0.95 * exp(-tc / scale) + 0.05, not the V27 piecewise formula.",
-        )
-        self.assertIn(
-            "ROOT FIX (W-10)",
-            source,
-            "W-10: _compute_supplementary_features should have a ROOT FIX (W-10) comment.",
+            "v89: unmet_need should use compute_unmet_need_score from the curated "
+            "prevalence table (not the v88 exp-decay formula).",
         )
 
     def test_unmet_need_produces_continuous_values(self):
@@ -372,27 +362,25 @@ class TestW11DrugAwareSequentialFallback(unittest.TestCase):
 
 
 class TestW12PatentScoreBimodal(unittest.TestCase):
-    """W-12: patent_score from bimodal distribution (40/60 on/off-patent)."""
+    """v89 ROOT FIX: patent_score from curated FDA Orange Book table.
+
+    The v88 W-12 fix used a bimodal random distribution (40% on-patent, 60%
+    off-patent) seeded by drug name hash. This gave RANDOM patent scores with
+    no relation to real patent status. The v89 fix uses curated FDA Orange Book
+    data: each drug has a real patent score based on its actual patent status.
+    """
 
     def test_patent_score_bimodal_distribution(self):
-        """_compute_drug_level_features should produce bimodal patent_score."""
+        """v89: _compute_drug_level_features should use get_drug_patent_score
+        from the curated FDA Orange Book table."""
         import inspect
         from graph_transformer.gt_rl_bridge import GTRLBridge
         source = inspect.getsource(GTRLBridge._compute_drug_level_features)
         self.assertIn(
-            "ROOT FIX (W-12)",
+            "get_drug_patent_score",
             source,
-            "W-12: _compute_drug_level_features should have a ROOT FIX (W-12) comment.",
-        )
-        self.assertIn(
-            "uniform(0.0, 0.2)",
-            source,
-            "W-12: patent_score should use uniform(0.0, 0.2) for on-patent drugs.",
-        )
-        self.assertIn(
-            "uniform(0.7, 1.0)",
-            source,
-            "W-12: patent_score should use uniform(0.7, 1.0) for off-patent drugs.",
+            "v89: patent_score should use get_drug_patent_score from the curated "
+            "FDA Orange Book table (not bimodal random distribution).",
         )
 
 

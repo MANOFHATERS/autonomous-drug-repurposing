@@ -4759,10 +4759,10 @@ def resolve_gene_symbol_to_uniprot(
             .str.upper()
             .map(gene_to_uniprot)
         )
-        # Only fill where the DB map actually had a value (avoid
-        # overwriting NaN with NaN — pandas .loc handles this correctly
-        # because db_lookup is aligned by index).
-        df.loc[need_resolution_mask, "uniprot_id"] = db_lookup
+        # v89 fix: ensure dtype-safe assignment. Newer pandas (2.2+) raises
+        # TypeError when assigning a mixed Series to a str-dtype column.
+        # Convert to str with NaN preservation, then assign.
+        df.loc[need_resolution_mask, "uniprot_id"] = db_lookup.astype(object).where(db_lookup.notna(), other=pd.NA)
 
     # Step 2: still-unresolved rows — try protein_name map as fallback.
     still_unresolved = df["uniprot_id"].isna()
@@ -4772,7 +4772,7 @@ def resolve_gene_symbol_to_uniprot(
             .str.upper()
             .map(protein_name_to_uniprot)
         )
-        df.loc[still_unresolved, "uniprot_id"] = protein_name_fallback
+        df.loc[still_unresolved, "uniprot_id"] = protein_name_fallback.astype(object).where(protein_name_fallback.notna(), other=pd.NA)
 
     unresolved_count = df["uniprot_id"].isna().sum()
     if unresolved_count > 0:

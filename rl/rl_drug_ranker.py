@@ -4376,6 +4376,8 @@ def literature_crosscheck(
         # ROOT FIX (C11): skip synthetic names
         if _is_synthetic_name(c.drug) or _is_synthetic_name(c.disease):
             c.literature_support = False
+            if hasattr(c, 'literature_count'):
+                c.literature_count = 0
             logger.info(
                 f"  Literature: {c.drug} -> {c.disease}: SKIPPED (synthetic name, "
                 f"would produce false positive on PubMed). support=False"
@@ -4387,14 +4389,26 @@ def literature_crosscheck(
             record = Entrez.read(handle)
             handle.close()
             count = int(record.get("Count", 0))
-            c.literature_support = count > 0
+            # v89 ROOT FIX: raise threshold from 1 to 3 hits. PubMed returns
+            # ≥1 hit for virtually ANY real drug + real disease combination
+            # (there are papers mentioning "aspirin" and "headache" even
+            # though aspirin is not a headache treatment). A 1-hit threshold
+            # is a no-op filter — every candidate passes. The v89 fix requires
+            # ≥3 hits, which is a meaningful discriminating threshold: only
+            # pairs with actual published co-mention evidence pass.
+            c.literature_support = count >= 3
+            if hasattr(c, 'literature_count'):
+                c.literature_count = count
             logger.info(
                 f"  Literature: {c.drug} -> {c.disease}: "
-                f"{count} PubMed hits (support={c.literature_support})"
+                f"{count} PubMed hits (support={c.literature_support}, "
+                f"threshold>=3)"
             )
         except Exception as e:
             logger.warning(f"  Literature check failed for {c.drug}->{c.disease}: {e}")
             c.literature_support = False
+            if hasattr(c, 'literature_count'):
+                c.literature_count = 0
         # ROOT FIX (FORENSIC-AUDIT-I25): rate limit between PubMed requests
         # to avoid IP blocking at production scale.
         _time.sleep(rate_limit_delay)
@@ -4618,51 +4632,84 @@ def redact_proprietary_ids(
 def compute_output_hmac(filepath: str, secret_key: str = "") -> Tuple[Optional[str], bool]:
     """Compute HMAC-SHA256 of the output file for tamper detection.
 
-    ROOT FIX (FORENSIC-AUDIT-I24): the previous code fell back to a
-    hardcoded default key ``"team-cosmic-default"`` (visible in source)
-    when RL_HMAC_KEY was not set. Any attacker who read the source could
-    forge the HMAC. The is_verified=False flag was set, but the HMAC was
-    still computed and stored — giving a false sense of security.
+    v89 ROOT FIX: the previous code returned (None, False) when RL_HMAC_KEY
+    was not set, leaving the output with NO integrity protection at all.
+    The metadata showed output_hmac_sha256 = null, which meant a pharma
+    partner receiving the CSV had NO way to detect accidental corruption
+    (e.g., file transfer errors, encoding issues).
 
-    The root fix: if no key is set, DON'T compute the HMAC at all. Return
-    (None, False) so the caller can set output_hmac_sha256 = null and
-    output_hmac_verified = false in the metadata. This makes it clear to
-    downstream consumers that NO tamper detection is in place, rather than
-    a fake HMAC that looks like tamper detection but isn't.
+    The v89 fix: ALWAYS compute an HMAC. When RL_HMAC_KEY is not set,
+    derive a DETERMINISTIC project-default key from the pipeline_version
+    + run_id (read from the metadata). This provides:
+      1. Accidental-corruption detection (file transfer errors, encoding
+         issues, truncation) — the HMAC will mismatch.
+      2. is_verified=False — clearly marks that the HMAC was NOT computed
+         with a secret key, so it does NOT provide cryptographic tamper
+         detection against an attacker who reads the source code.
+      3. When RL_HMAC_KEY IS set, is_verified=True — provides full
+         cryptographic tamper detection.
 
-    In production, set RL_HMAC_KEY env var to a real secret. Without it,
-    the output will explicitly have no HMAC.
+    This is the RIGHT tradeoff: always have corruption detection (HMAC
+    is never null), but be HONEST about the security level (is_verified
+    flag distinguishes default-key vs secret-key).
 
     Args:
         filepath: Path to the file to HMAC.
         secret_key: Secret key. If empty, falls back to RL_HMAC_KEY env
-            var. If that's also empty, returns (None, False) — NO HMAC
-            is computed.
+            var. If that's also empty, uses a deterministic project-default
+            key (provides corruption detection but NOT cryptographic security).
 
     Returns:
-        Tuple of (hmac_hex_string_or_None, is_verified). Returns
-        (None, False) when no key is available. Returns (hex, True) when
-        a real key is used.
+        Tuple of (hmac_hex_string, is_verified). Always returns a non-None
+        HMAC hex string. Returns (hex, True) only when a real secret key
+        is used (RL_HMAC_KEY env var or explicit secret_key arg). Returns
+        (hex, False) when using the project-default key.
     """
     if not secret_key:
         secret_key = os.environ.get("RL_HMAC_KEY", "")
-    if not secret_key:
-        # ROOT FIX (FORENSIC-AUDIT-I24): do NOT compute a fake HMAC with
-        # a hardcoded default key. Return (None, False) so the caller
-        # can set output_hmac_sha256 = null in the metadata, making it
-        # clear that NO tamper detection is in place.
-        logger.warning(
-            "compute_output_hmac: no secret key provided (set RL_HMAC_KEY "
-            "env var). NO HMAC will be computed. The output metadata will "
-            "have output_hmac_sha256 = null and output_hmac_verified = false. "
-            "(FORENSIC-AUDIT-I24: no fake HMAC with hardcoded default key)"
-        )
-        return None, False
+
+    if secret_key:
+        # Real secret key — full cryptographic tamper detection
+        is_verified = True
+        key_source = "RL_HMAC_KEY env var"
+    else:
+        # v89: derive deterministic project-default key for corruption detection.
+        # This is NOT cryptographically secure (an attacker who reads the source
+        # can forge it), but it DOES detect accidental corruption (file transfer
+        # errors, truncation, encoding issues). The is_verified=False flag makes
+        # the security level HONEST.
+        # Read pipeline_version and run_id from the metadata file if available
+        default_key_parts = ["drugos-pipeline-v2.0.0"]
+        meta_path = filepath.replace(".csv", ".meta.json")
+        try:
+            if os.path.exists(meta_path):
+                import json as _json
+                with open(meta_path) as f:
+                    meta = _json.load(f)
+                default_key_parts.append(str(meta.get("pipeline_version", "")))
+                default_key_parts.append(str(meta.get("run_id", "")))
+        except Exception:
+            pass
+        # Also include the file's own size + mtime for uniqueness
+        try:
+            st = os.stat(filepath)
+            default_key_parts.append(str(st.st_size))
+        except Exception:
+            pass
+        secret_key = "drugos-default:" + ":".join(default_key_parts)
+        is_verified = False
+        key_source = "project-default (corruption detection only, NOT cryptographic)"
+
     h = hmac.new(secret_key.encode(), digestmod=hashlib.sha256)
     with open(filepath, 'rb') as f:
         for chunk in iter(lambda: f.read(1024 * 1024), b''):  # E6 fix: 1MB chunks
             h.update(chunk)
-    return h.hexdigest(), True
+    logger.info(
+        f"compute_output_hmac: HMAC computed using {key_source}. "
+        f"is_verified={is_verified}. "
+        f"{'Set RL_HMAC_KEY for cryptographic tamper detection.' if not is_verified else ''}"
+    )
+    return h.hexdigest(), is_verified
 
 
 def save_provenance_metadata(output_csv_path: str, metadata: Dict[str, Any]) -> str:
@@ -4769,32 +4816,33 @@ def save_results(
         except OSError as e:
             logger.warning(f"Could not set file permissions on {filename}: {e}")
 
-    try:
-        hmac_hex, hmac_verified = compute_output_hmac(filename)
-        # ROOT FIX (FORENSIC-AUDIT-I24): hmac_hex can now be None when
-        # no key is available. Store None in metadata instead of a fake HMAC.
-        meta["output_hmac_sha256"] = hmac_hex
-        meta["output_hmac_verified"] = bool(hmac_verified)
-        if hmac_hex is not None and hmac_verified:
-            logger.info(f"Output HMAC (verified): {hmac_hex[:16]}...")
-        elif hmac_hex is not None and not hmac_verified:
-            logger.warning(
-                f"Output HMAC (UNVERIFIED): {hmac_hex[:16]}... "
-                "Set RL_HMAC_KEY env var for cryptographic tamper detection."
-            )
-        else:
-            # hmac_hex is None — no HMAC computed (FORENSIC-AUDIT-I24 fix)
-            logger.warning(
-                "Output HMAC: NOT computed (no RL_HMAC_KEY set). "
-                "metadata.output_hmac_sha256 = null. "
-                "Set RL_HMAC_KEY env var for tamper detection."
-            )
-    except Exception as e:
-        logger.warning(f"Could not compute HMAC: {e}")
-
+    # v89 ROOT FIX: save metadata FIRST, then compute HMAC.
+    # The HMAC function reads the metadata file to derive a deterministic
+    # project-default key (from pipeline_version + run_id). The metadata
+    # must exist BEFORE compute_output_hmac is called.
+    # Note: the HMAC is computed over the CSV file (not the metadata),
+    # so the HMAC value does not change when we update meta after computing.
     logger.info(f"Results saved to {filename} ({len(df)} rows, perms=0600)")
 
     save_provenance_metadata(filename, meta)
+
+    try:
+        hmac_hex, hmac_verified = compute_output_hmac(filename)
+        # v89: hmac_hex is ALWAYS non-None now (project-default key when
+        # RL_HMAC_KEY not set). Store the HMAC and verification flag.
+        meta["output_hmac_sha256"] = hmac_hex
+        meta["output_hmac_verified"] = bool(hmac_verified)
+        if hmac_verified:
+            logger.info(f"Output HMAC (cryptographically verified): {hmac_hex[:16]}...")
+        else:
+            logger.info(
+                f"Output HMAC (corruption detection, NOT cryptographic): "
+                f"{hmac_hex[:16]}... Set RL_HMAC_KEY env var for full tamper detection."
+            )
+        # Re-save metadata with HMAC fields included
+        save_provenance_metadata(filename, meta)
+    except Exception as e:
+        logger.warning(f"Could not compute HMAC: {e}")
 
     return filename
 
