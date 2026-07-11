@@ -5,7 +5,7 @@ v63 ROOT FIX VERIFICATION — Runtime verification of all 18 P0 issues.
 from __future__ import annotations
 import sys, os, re
 
-HERE = "/home/z/my-project/work"
+HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, f"{HERE}/phase1")
 sys.path.insert(0, f"{HERE}/phase2")
 

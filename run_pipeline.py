@@ -231,38 +231,25 @@ def _ensure_phase1_samples(phase1_dir: Path) -> Path:
 def run_bridge(phase1_dir: Path) -> Tuple[Any, Any]:
     """Bridge: run_phase1_to_phase2 → Phase 2 staged data + builder.
 
-    Returns (staged, builder) where:
-      - staged is a Phase1StagedData (compound_nodes, protein_nodes, ...)
+    Returns (builder, staged) where:
       - builder is a RecordingGraphBuilder (populated, in-memory)
+      - staged is a Phase1StagedData (compound_nodes, protein_nodes, ...)
 
     v90 ROOT FIX: uses run_phase1_to_phase2 (the REAL top-level bridge
     entry point) instead of the non-existent stage_phase1_to_phase2(
     output_dir=None) call. The previous call signature was wrong and
     crashed with TypeError on every run.
+
+    v100 ROOT FIX (R-009): removed the duplicate first run_phase1_to_phase2
+    call whose results were immediately discarded by the second call.
+    The bridge now runs exactly ONE Phase 1→2 pass. Also corrected the
+    docstring (was "Returns (staged, builder)" — the actual return order
+    is (builder, staged); the stale docstring caused the R-003 swap bug
+    at the call site).
     """
     logger.info("=" * 70)
     logger.info("BRIDGE: Phase 1 → Phase 2 (run_phase1_to_phase2)")
     logger.info("=" * 70)
-
-    from drugos_graph.phase1_bridge import run_phase1_to_phase2
-
-    result = run_phase1_to_phase2(
-        phase1_processed_dir=str(phase1_dir),
-        prefer_postgres=False,  # CSV path (no Postgres in dev/CI)
-    )
-    builder = result["builder"]
-    staged = result["staged"]
-    summary = result["summary"]
-    backend = result["backend"]
-
-    logger.info(
-        f"Bridge: backend={backend}, "
-        f"nodes_staged={summary['nodes_staged']}, "
-        f"edges_staged={summary['edges_staged']}, "
-        f"nodes_loaded={summary['nodes_loaded']}, "
-        f"edges_loaded={summary['edges_loaded']}, "
-        f"sources_read={len(summary['sources_read'])}"
-    )
 
     from drugos_graph.phase1_bridge import (
         run_phase1_to_phase2,
@@ -296,34 +283,8 @@ def run_bridge(phase1_dir: Path) -> Tuple[Any, Any]:
     return builder, staged
 
 
-def run_schema_adapter(
-    builder: Any, seed: int = 42
-) -> Tuple[Any, Any, Any, List[Tuple[str, str]]]:
-    """Phase 2 to Phase 3 schema adapter.
-
-    Converts the Phase 2 RecordingGraphBuilder (capitalized labels) into
-    the Phase 3 canonical schema (lowercase labels) via
-    ``adapt_phase2_to_phase3``. This is the REAL integration point that
-    the v89 run_pipeline.py was missing (it called a non-existent
-    ``build_pyg_hetero_data`` function).
-
-    v91 ROOT FIX: a botched edit left the docstring UNCLOSED (missing
-    closing triple-quote), which swallowed the ``def run_phase2_kg_builder``
-    line and the next docstring, producing a SyntaxError on the ``->``
-    arrow character in line 318. The ENTIRE run_pipeline.py was unimportable.
-    The fix closes the docstring and restores the function body that
-    calls ``adapt_phase2_to_phase3`` (matching the type hint's 4-tuple
-    return signature).
-    """
-    from graph_transformer.data.phase2_adapter import adapt_phase2_to_phase3
-    node_features, edge_indices, node_maps, known_pairs = adapt_phase2_to_phase3(
-        builder, seed=seed
-    )
-    return node_features, edge_indices, node_maps, known_pairs
-
-
 def run_phase2_kg_builder(
-    staged: Any, builder: Any
+    staged: Any, builder: Any, seed: int = 42
 ) -> Tuple[Any, Any, Any, List[Tuple[str, str]]]:
     """Phase 2: Build the real biomedical KG from the staged data.
 
@@ -335,6 +296,11 @@ def run_phase2_kg_builder(
 
     Returns (node_features, edge_indices, node_maps, known_pairs) in
     the format the GTRLBridge.run_full_pipeline(graph_data=...) expects.
+
+    v100 ROOT FIX (R-002): added the missing ``seed`` parameter. The
+    body called ``adapt_phase2_to_phase3(builder, seed=seed)`` but the
+    signature had no ``seed`` — every call raised NameError. The seed
+    is now an explicit parameter with a deterministic default of 42.
     """
     logger.info("=" * 70)
     logger.info("PHASE 2 → PHASE 3: Schema Adapter")
@@ -560,7 +526,17 @@ def _resolve_known_positives_to_graph_ids(
                         f"'{best[0]}' (score={best[1]:.0f}) → {dis_id}"
                     )
             except ImportError:
-                pass  # rapidfuzz not installed; skip fuzzy matching
+                # v100 ROOT FIX (R-012): was ``pass`` — silently disabled
+                # fuzzy matching, causing KP Recovery = 0.0% and
+                # scientific_validation failure with no diagnostic. Now
+                # logs a WARNING so the operator knows rapidfuzz is missing
+                # and KP recovery may be degraded. Install with:
+                #   pip install rapidfuzz
+                logger.warning(
+                    "rapidfuzz not installed — KP fuzzy matching disabled. "
+                    "KP recovery rate may be 0%%. Install with: "
+                    "pip install rapidfuzz"
+                )
 
         if d_id and dis_id:
             resolved.append((d_id, dis_id))
@@ -693,7 +669,12 @@ def main() -> int:
 
     try:
         # ─── Phase 1 ────────────────────────────────────────────────
-        ensure_phase1_data(Path(args.phase1_dir))
+        # v100 ROOT FIX (R-005): capture the return value of
+        # ensure_phase1_data (a dict of CSV paths) into ``phase1_csvs``
+        # so the summary print at the end of main() can reference it.
+        # The previous code discarded the return value, causing
+        # NameError: name 'phase1_csvs' is not defined at the summary.
+        phase1_csvs = ensure_phase1_data(Path(args.phase1_dir))
 
         # ─── Bridge ──────────────────────────────────────────────────
         builder, staged = run_bridge(Path(args.phase1_dir))
@@ -701,15 +682,16 @@ def main() -> int:
             logger.error("Phase 1 + Bridge produced 0 nodes. Aborting.")
             return 1
 
-        # ─── Phase 2 → Phase 3 Schema Adapter ────────────────────────
-        graph_data = run_schema_adapter(builder, seed=args.seed)
-        staged, builder = run_bridge(Path(args.phase1_dir))
-        if staged.total_nodes == 0:
-            logger.error("Phase 1 + Bridge produced 0 nodes. Aborting.")
-            return 1
-
-        # ─── Phase 2: Build real KG ─────────────────────────────────
-        graph_data = run_phase2_kg_builder(staged, builder)
+        # ─── Phase 2: Build real KG (with Phase 2→3 schema adapter) ──
+        # v100 ROOT FIX (R-003 + R-004): deleted the dead
+        # ``graph_data = run_schema_adapter(...)`` call (its return was
+        # immediately overwritten by the next line) AND deleted the
+        # swapped ``staged, builder = run_bridge(...)`` re-call (which
+        # re-ran the entire bridge 2x AND swapped the builder/staged
+        # variables, feeding garbage to adapt_phase2_to_phase3). The
+        # builder and staged from the FIRST bridge call above are correct
+        # and reused here. Also pass seed=args.seed (R-002 fix).
+        graph_data = run_phase2_kg_builder(staged, builder, seed=args.seed)
         node_features, edge_indices, node_maps, known_pairs = graph_data
         if len(node_maps.get("drug", {})) == 0:
             logger.error("Schema adapter produced 0 drug nodes. Aborting.")
@@ -785,8 +767,15 @@ def main() -> int:
     except RuntimeError as e:
         logger.critical(f"Pipeline RuntimeError: {e}", exc_info=True)
         return 4
-    except Exception as e:
-        logger.critical(f"Unexpected exception: {e}", exc_info=True)
+    except (OSError, ValueError, KeyError, IOError) as e:
+        # v100 ROOT FIX (R-011): narrowed from bare ``except Exception``.
+        # The previous broad catch swallowed programming bugs
+        # (AttributeError, TypeError, NameError) as generic "unexpected
+        # exception" exit code 5, masking the real root cause. Now only
+        # expected runtime/environment errors are caught and mapped to
+        # exit 5; programming bugs propagate as crashes with full
+        # tracebacks so they are diagnosed and fixed, not hidden.
+        logger.critical(f"Pipeline runtime/environment error: {e}", exc_info=True)
         return 5
 
 

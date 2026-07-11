@@ -242,7 +242,13 @@ def main() -> int:
             phase1_processed_dir=args.phase1_dir,
             builder=builder,
         )
-    except Exception as exc:
+    except (OSError, ValueError, RuntimeError, KeyError) as exc:
+        # v100 ROOT FIX (R-010): narrowed from bare ``except Exception``.
+        # The previous broad catch swallowed programming bugs
+        # (AttributeError, TypeError, NameError) as generic "bridge
+        # FAILED" with exit code 2, masking the real bug. Now only
+        # expected runtime/environment errors are caught; programming
+        # bugs propagate as crashes with full tracebacks.
         log.error("Phase 1→2 bridge FAILED: %s", exc, exc_info=True)
         return 2
 
@@ -307,8 +313,11 @@ def main() -> int:
     except RuntimeError as exc:
         log.error("Phase 3+4 pipeline FAILED: %s", exc, exc_info=True)
         return 3
-    except Exception as exc:
-        log.error("Phase 3+4 pipeline exception: %s", exc, exc_info=True)
+    except (OSError, ValueError, KeyError, IOError) as exc:
+        # v100 ROOT FIX (R-010): narrowed from bare ``except Exception``.
+        # Programming bugs (AttributeError, TypeError, NameError) now
+        # propagate as crashes instead of being masked as exit code 3.
+        log.error("Phase 3+4 pipeline error: %s", exc, exc_info=True)
         return 3
 
     # ─── Final Report ─────────────────────────────────────────────

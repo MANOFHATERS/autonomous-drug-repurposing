@@ -1,27 +1,34 @@
 # Unified Autonomous Drug Repurposing Platform — Makefile
 # ========================================================
-# Single entry point for both Phase 1 (data ingestion) and Phase 2 (knowledge graph).
-# The bridge between the two phases lives in phase2/drugos_graph/phase1_bridge.py.
+# Single entry point for all 4 phases:
+#   Phase 1 (Data Ingestion) → Phase 2 (Knowledge Graph) →
+#   Phase 3 (Graph Transformer) → Phase 4 (RL Hypothesis Ranker)
 
 PYTHON ?= python3
 PIP    ?= pip3
 
-.PHONY: help install test test-phase1 test-phase2 test-bridge test-all run dry-run clean
+.PHONY: help install test test-phase1 test-phase2 test-bridge test-all run run-full-platform run-unified run-pipeline run-real dry-run clean
 
 help:
 	@echo "Unified Autonomous Drug Repurposing Platform"
 	@echo "============================================"
 	@echo ""
 	@echo "Setup:"
-	@echo "  make install         Install Python deps for both phases"
+	@echo "  make install         Install Python deps (top-level requirements.txt)"
 	@echo ""
-	@echo "Run:"
-	@echo "  make dry-run         Phase1 → Bridge → Phase2 (in-memory, no Neo4j)"
-	@echo "  make run             Same as dry-run (alias)"
+	@echo "Run (all 4 phases):"
+	@echo "  make run             Full 4-phase run (Phase 1+2+3+4) — DEFAULT"
+	@echo "  make run-full-platform  Same as make run (explicit name)"
+	@echo "  make dry-run         Same as make run (alias)"
+	@echo ""
+	@echo "Run (partial):"
+	@echo "  make run-unified     Phase 1+2 (+3+4 via --full-pipeline flag)"
+	@echo "  make run-pipeline    v90 4-phase pipeline runner"
+	@echo "  make run-real        Real data pipeline (Phase 1+2+3+4 on real KG)"
 	@echo ""
 	@echo "Test:"
 	@echo "  make test-all        Run ALL tests across both phases + bridge"
-	@echo "  make test-bridge     Run ONLY the Phase1↔Phase2 integration tests"
+	@echo "  make test-bridge     Run ONLY the Phase1<->Phase2 integration tests"
 	@echo "  make test-phase1     Run Phase 1 tests only"
 	@echo "  make test-phase2     Run Phase 2 tests only"
 	@echo ""
@@ -29,16 +36,38 @@ help:
 	@echo "  make clean           Remove __pycache__ and .pytest_cache"
 
 install:
+	# v100 ROOT FIX (R-017): install ONLY the top-level requirements.txt,
+	# which already merges Phase 1 and Phase 2 dependencies. The previous
+	# Makefile installed three requirements files (top-level + phase1/ +
+	# phase2/), which pinned DIFFERENT versions of the same packages —
+	# the last-installed won, silently downgrading previously-installed
+	# packages. The sub-requirements files are kept for backwards
+	# compatibility (cd phase1 && pip install -r requirements.txt) but
+	# the Makefile entry point uses the single merged file.
 	$(PIP) install -r requirements.txt
-	$(PIP) install -r phase1/requirements.txt
-	$(PIP) install -r phase2/drugos_graph/requirements.txt
 	@echo ""
-	@echo "Dependencies installed. Run 'make dry-run' to test the unified pipeline."
+	@echo "Dependencies installed. Run 'make run' for the full 4-phase pipeline."
 
+# v100 ROOT FIX (R-016): the DEFAULT run target now invokes
+# run_full_platform.py (the REAL 4-phase runner: Phase 1 → 2 → 3 → 4
+# on REAL biomedical data). The previous default invoked run_unified.py
+# which only ran Phase 1+2 (BUG R-007) — Phase 3 (Graph Transformer)
+# and Phase 4 (RL ranker) were NEVER invoked by the default entry point.
 dry-run: run
 
-run:
+run: run-full-platform
+
+run-full-platform:
+	$(PYTHON) run_full_platform.py
+
+run-unified:
 	$(PYTHON) run_unified.py
+
+run-pipeline:
+	$(PYTHON) run_pipeline.py
+
+run-real:
+	$(PYTHON) run_real_pipeline.py
 
 run-json:
 	$(PYTHON) run_unified.py --json
