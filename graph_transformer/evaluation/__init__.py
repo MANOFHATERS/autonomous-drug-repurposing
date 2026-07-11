@@ -199,66 +199,17 @@ def evaluate_link_prediction(
         pred_binary = (all_probs > 0.5).astype(int)
         accuracy = float(accuracy_score(all_labels, pred_binary))
 
+        # v91 P0 ROOT FIX: the previous body of this function had a
+        # CORRUPTED duplicate paste — a second copy of the encode-loop
+        # logic was inserted at module-level indentation (4 spaces)
+        # right after this `if` statement, with no body for the `if`.
+        # That made the file unparseable (IndentationError on every
+        # CI run for the last 30+ "fix" branches). The first half
+        # above (lines 122-200) already computes all_probs, all_labels,
+        # and accuracy correctly. All that remains is to compute AUC
+        # + avg_loss, return the dict, and restore training mode in
+        # the `finally` block opened at line 121.
         if len(np.unique(all_labels)) < 2:
-    model.to(device)
-    nf = {k: v.to(device) for k, v in node_features.items()}
-    ei = {k: v.to(device) for k, v in edge_indices.items()}
-
-    # V90 BUG #36: GENUINELY INDEPENDENT path. The previous code manually
-    # called model.encode() then link_predictor.forward_logits/forward —
-    # the SAME code path as trainer.evaluate. The fix uses model.forward()
-    # which is a different entry point (it calls encode + link_predictor
-    # internally, but via a different call sequence). To make this truly
-    # independent, we call model.forward() PER BATCH (re-encoding each
-    # time). This is SLOWER than encoding once, but for the VERIFIED check
-    # we want independence, not speed. A bug in model.encode would affect
-    # both paths, but a bug in the trainer's manual embedding extraction
-    # (e.g., wrong indexing, wrong device) would be caught here.
-    all_probs = []
-    criterion = nn.BCEWithLogitsLoss()  # unweighted (BUG #32: eval should be unweighted)
-    total_loss = 0.0
-    n_samples = len(labels)
-
-    for start in range(0, n_samples, batch_size):
-        end = min(start + batch_size, n_samples)
-        d_idx = drug_indices[start:end].to(device)
-        ds_idx = disease_indices[start:end].to(device)
-        batch_labels = labels[start:end].float().to(device)
-
-        # V90 BUG #36: use model.forward_logits (NOT link_predictor.forward_logits)
-        # for the loss. model.forward_logits calls model.encode internally
-        # (a fresh encode per batch — slower but independent). Then use
-        # model.forward for probabilities (also a fresh encode).
-        # This is a DIFFERENT code path than trainer.evaluate, which
-        # encodes ONCE and then calls link_predictor methods directly.
-        logits = model.forward_logits(
-            nf, ei, d_idx, ds_idx,
-            exclude_edges=set(exclude_edges),
-        )
-        loss = criterion(logits, batch_labels)
-        total_loss += loss.item()
-
-        # V90 BUG #36: use model.forward for probabilities (independent
-        # from trainer's link_predictor.forward path).
-        probs = model.forward(
-            nf, ei, d_idx, ds_idx,
-            exclude_edges=set(exclude_edges),
-            apply_temperature=apply_temperature,
-        ).cpu()
-        all_probs.append(probs)
-
-    all_probs = torch.cat(all_probs).numpy()
-    all_labels = labels.numpy()
-
-    pred_binary = (all_probs > 0.5).astype(int)
-    accuracy = float(accuracy_score(all_labels, pred_binary))
-
-    if len(np.unique(all_labels)) < 2:
-        auc = 0.5
-    else:
-        try:
-            auc = float(roc_auc_score(all_labels, all_probs))
-        except ValueError:
             auc = 0.5
         else:
             try:

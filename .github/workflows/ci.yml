@@ -82,9 +82,21 @@ jobs:
             "filelock>=3.13.0" \
             "pyarrow>=14.0.0"
       - name: Build check — compileall (every .py must parse)
+        # v91 P0 ROOT FIX: the previous compileall scope was
+        #   phase1 phase2 run_unified.py
+        # which EXCLUDED graph_transformer/, rl/, run_pipeline.py,
+        # run_real_pipeline.py, run_full_platform.py. Pre-existing
+        # SyntaxErrors in those files (unclosed parens, dangling if
+        # statements, swallowed function definitions) slipped through
+        # 30+ "fix" branches because CI never compiled them. The user
+        # received "PR failed" emails for a month without any agent
+        # noticing the actual root cause. This expanded scope compiles
+        # EVERY top-level entry point and EVERY non-test source dir.
         run: |
           echo "=== Build check: compiling every Python file ==="
-          python -m compileall -q phase1 phase2 run_unified.py
+          python -m compileall -q \
+            phase1 phase2 graph_transformer rl \
+            run_unified.py run_pipeline.py run_real_pipeline.py run_full_platform.py
           echo "=== compileall PASSED ==="
 
   # == Job 2: Lint (equiv to npm run lint) ==

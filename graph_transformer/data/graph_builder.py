@@ -313,7 +313,26 @@ class BiomedicalGraphBuilder:
         if self._finalized:
             raise RuntimeError("Graph already finalized. Create a new builder.")
 
-        # V30 ROOT FIX (3.3): rebuild _edge_lists from dedup'd _edge_sets.
+        # v91 P0 ROOT FIX (reverse-edge discard, the real root cause):
+        # For 30+ prior "fix" branches the reverse edges were lost because
+        # callers had to remember to invoke _build_reverse_edges_into_sets
+        # (or the broken old _build_reverse_edges static) BEFORE finalize().
+        # If they forgot — and from_phase1_staged_data DID forget (it called
+        # the old static that wrote into _edge_lists, which finalize() then
+        # overwrote via _sync_edge_lists) — the drug node received ZERO
+        # incoming edges and the GT model could not learn a drug-side
+        # representation. AUC collapsed to ~0.5 (random).
+        #
+        # The root fix: finalize() ITSELF builds reverse edges into
+        # _edge_sets BEFORE _sync_edge_lists(). This makes the invariant
+        # structural — no caller can accidentally bypass reverse-edge
+        # construction. Both build_demo_graph (test-only) and
+        # from_phase1_staged_data (production) now get reverse edges for
+        # free, with zero caller cooperation.
+        self._build_reverse_edges_into_sets(self._edge_sets)
+
+        # V30 ROOT FIX (3.3): rebuild _edge_lists from dedup'd _edge_sets
+        # (which now also contain the reverse edges added above).
         self._sync_edge_lists()
 
         # Build node feature tensors. V30 ROOT FIX (3.1): emit ALL
@@ -1078,38 +1097,6 @@ class BiomedicalGraphBuilder:
 
         if training_positives_added > 0:
             logger.info(
-                f"V90 ROOT FIX (BUG #3, P0): injected {training_positives_added} "
-                f"CURATED TRAINING POSITIVES (real DrugBank/RepoDB drug-disease "
-                f"pairs, NON-KP drugs) as 'treats' edges ONLY. NO multi-hop "
-                f"path injection (BUG #3 fix removed it). The GT model now "
-                f"learns from the NATURAL topology (random drug->protein, "
-                f"protein->pathway, pathway->disease edges) — if the natural "
-                f"topology is insufficient, the demo graph is too small."
-
-            # v89 P0 ROOT FIX (Compound #3 / AUC fraud chain): REMOVED the
-            # 3-hop path injection for TRAINING POSITIVES too.
-            #
-            # The V31 "fix" injected a GUARANTEED drug→protein→pathway→
-            # disease path for EACH training positive. This is the SAME
-            # label leakage as the KP injection above: the model learned
-            # "3-hop path exists → positive" trivially, then generalized
-            # this rule to the held-out KPs (which also had injected
-            # paths, before the v89 fix above removed them).
-            #
-            # The audit (v89) confirmed the compound bug chain:
-            #   graph_builder.py injects 3-hop path for every training
-            #   positive → LABEL_LEAKING_EDGES only strips direct treats
-            #   edge, not the path → GT model learns "3-hop path exists
-            #   → positive" → val AUC = 1.0 → scientific-validation gate
-            #   passes trivially → ship garbage to pharma partners.
-            #
-            # The training positives are STILL added as "treats" edges
-            # (the line above this comment block), so the GT model has
-            # real positive signal. But NO synthetic 3-hop path is
-            # injected. The model must learn from NATURAL topology.
-
-        if training_positives_added > 0:
-            logger.info(
                 f"v89 P0 ROOT FIX (Compound #3): injected "
                 f"{training_positives_added} CURATED TRAINING POSITIVES "
                 f"(real DrugBank/RepoDB drug-disease pairs, NON-KP drugs) "
@@ -1156,19 +1143,11 @@ class BiomedicalGraphBuilder:
         # function call and the misleading impression that feature
         # enrichment is happening.
 
-        # V30 ROOT FIX (3.2/3.3): sync _edge_lists from _edge_sets BEFORE
-        # building reverse edges (otherwise reverse-edge synthesis runs on
-        # an empty dict and silently produces zero reverse edges).
-        # V90 ROOT FIX (BUG #1, P0): we no longer call the deprecated
-        # _build_reverse_edges staticmethod here (it wrote into
-        # _edge_lists, which finalize() immediately discarded via
-        # _sync_edge_lists()). Instead we call the new classmethod
-        # _build_reverse_edges_into_sets which writes directly into
-        # _edge_sets so reverse edges survive _sync_edge_lists() in
-        # finalize(). This is the actual root-cause fix for the "drug
-        # node has no incoming edges" failure mode.
-        builder._build_reverse_edges_into_sets(builder._edge_sets)
-
+        # v91 P0 ROOT FIX: removed the explicit
+        # _build_reverse_edges_into_sets() call here. finalize() now
+        # calls it itself before _sync_edge_lists(), so every graph
+        # built via the BiomedicalGraphBuilder API gets reverse edges
+        # automatically. No caller cooperation required.
         node_features, edge_indices, node_maps = builder.finalize()
 
         logger.info(
@@ -1439,10 +1418,19 @@ class BiomedicalGraphBuilder:
                 )
 
         # ─── Finalize: build reverse edges + tensorize ──────────────
-        builder._sync_edge_lists()
-        builder._edge_lists = BiomedicalGraphBuilder._build_reverse_edges(
-            builder._edge_lists
-        )
+        # v91 P0 ROOT FIX: removed the redundant _sync_edge_lists() +
+        # _build_reverse_edges() calls. The previous code:
+        #   1. Called _sync_edge_lists() (rebuilt _edge_lists from _edge_sets)
+        #   2. Called the OLD _build_reverse_edges static method (wrote
+        #      reverse edges into _edge_lists)
+        #   3. Called finalize() — which called _sync_edge_lists() AGAIN,
+        #      rebuilding _edge_lists from _edge_sets (forward-only) and
+        #      DISCARDING the reverse edges just added in step 2.
+        # Net effect: zero reverse edges in the production graph.
+        #
+        # finalize() now calls _build_reverse_edges_into_sets(_edge_sets)
+        # itself before _sync_edge_lists(), so reverse edges are always
+        # present regardless of caller. One source of truth.
         node_features, edge_indices, node_maps = builder.finalize()
 
         total_nodes = sum(nodes_registered_by_type.values())
