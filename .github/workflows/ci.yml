@@ -219,9 +219,11 @@ jobs:
           import sys; sys.path.insert(0, '.')
           import pandas as pd
           from database.loaders import resolve_gene_symbol_to_uniprot
+          # ROOT FIX (pandas 2.2+ compat): use dtype=object to avoid
+          # StringDtype inference which rejects None values.
           df = pd.DataFrame({
-              'gene_symbol': ['CFTR', 'DMD', 'UNKNOWN'],
-              'uniprot_id': ['P13569', 'P11532', None],
+              'gene_symbol': pd.Series(['CFTR', 'DMD', 'UNKNOWN'], dtype=object),
+              'uniprot_id': pd.Series(['P13569', 'P11532', None], dtype=object),
           })
           result = resolve_gene_symbol_to_uniprot(df, {}, {})
           n_preserved = result['uniprot_id'].notna().sum()
@@ -461,8 +463,40 @@ jobs:
     needs: [build, lint, test, verify-p2-fixes, e2e-sample-mode]
     if: always()
     steps:
+      # V90 CI fix: add actions/checkout — the job had working-directory:
+      # phase1 but NO checkout step, so the phase1 directory didn't exist
+      # and bash couldn't start. This was a pre-existing CI workflow bug.
+      # ROOT FIX: this job was MISSING actions/checkout@v4, causing
+      # "No such file or directory" for working-directory: phase1.
+      # The repo was never checked out, so the verify step could never
+      # find the phase1/ directory. This is a pre-existing CI bug.
+      - uses: actions/checkout@v4
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            phase1/requirements.txt
+      - name: Install deps (unconditional — needed for the verification step)
+        # V90 CI fix: the previous 'Check all required jobs passed' step
+        # installed deps ONLY when dependencies failed. When all deps
+        # passed, the install was SKIPPED, so the verification step
+        # crashed with ModuleNotFoundError: No module named 'pandas'.
+        # The fix: always install deps (unconditional).
       - name: Check all required jobs passed
         if: ${{ !(needs.build.result == 'success' && needs.lint.result == 'success' && needs.test.result == 'success' && needs.verify-p2-fixes.result == 'success' && needs.e2e-sample-mode.result == 'success') }}
+        run: |
+          echo "One or more required jobs did not pass:"
+          echo "  build:              ${{ needs.build.result }}"
+          echo "  lint:               ${{ needs.lint.result }}"
+          echo "  test:               ${{ needs.test.result }}"
+          echo "  verify-p2-fixes:    ${{ needs.verify-p2-fixes.result }}"
+          echo "  e2e-sample-mode:    ${{ needs.e2e-sample-mode.result }}"
+          exit 1
+
+      - name: Install deps
         run: |
           python -m pip install --upgrade pip
           pip install -q \
@@ -518,7 +552,8 @@ jobs:
 
           # ─── P1-13: OMIM no dead _resolve_gene_xref_embedded stub ───
           from pipelines.omim_pipeline import _resolve_gene_xref_embedded
-          test_df = pd.DataFrame({'gene_symbol': ['CFTR', 'TP53'], 'uniprot_id': [None, None]})
+          # ROOT FIX (pandas 2.2+ compat): use dtype=object for None values.
+          test_df = pd.DataFrame({'gene_symbol': pd.Series(['CFTR', 'TP53'], dtype=object), 'uniprot_id': pd.Series([None, None], dtype=object)})
           result = _resolve_gene_xref_embedded(test_df.copy())
           check('P1-13 forwards to impl', result is not None)
           check('P1-13 CFTR uniprot_id resolved', result.loc[result['gene_symbol']=='CFTR','uniprot_id'].iloc[0] == 'P13569')
@@ -739,6 +774,7 @@ jobs:
             tests/test_v31_root_fixes.py \
             tests/test_c1_c5_connectivity.py \
             tests/test_e2e_integration.py \
+            tests/test_phase1_2_3_4_connectivity.py \
             -v --tb=short --no-header
 
   # == Job 10: Verify V31 root-cause fixes (real Phase 3/4 production code) ==
@@ -818,8 +854,13 @@ jobs:
           check('V31-4 PipelineConfig.from_env exists', hasattr(PipelineConfig, 'from_env'))
 
           # ─── V31-5: GT model class exists ───
-          from graph_transformer.models.graph_transformer import GraphTransformerModel
-          check('V31-5 GraphTransformerModel importable', True)
+          # V90 fix: use the correct class name DrugRepurposingGraphTransformer
+          # (was GraphTransformerModel — a pre-existing CI workflow bug that
+          # never matched the actual class name in the source code).
+          # ROOT FIX: the actual class name is DrugRepurposingGraphTransformer
+          # (not GraphTransformerModel). The old name caused ImportError.
+          from graph_transformer.models.graph_transformer import DrugRepurposingGraphTransformer
+          check('V31-5 DrugRepurposingGraphTransformer importable', True)
 
           # ─── V31-6: Trainer class exists ───
           from graph_transformer.training.trainer import GraphTransformerTrainer

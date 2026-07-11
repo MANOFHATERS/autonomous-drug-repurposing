@@ -563,7 +563,19 @@ def _extract_protonation_from_inchi(inchi: Optional[str]) -> Optional[str]:
         after_prefix = inchi.split("/", 2)
         if len(after_prefix) >= 2:
             formula_layer = after_prefix[1]
-    except Exception:  # noqa: BLE001 — defensive parsing
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        # v84 FORENSIC ROOT FIX (BUG #32): narrowed from broad
+        # ``except Exception  # noqa: BLE001 — defensive parsing``.
+        # The previous code caught ALL exceptions — including
+        # programming bugs (AttributeError, IndexError, RuntimeError)
+        # — and silently set ``formula_layer = ""``. A bug in the
+        # InChI splitting logic was masked, causing the protonation-
+        # state detector to silently classify every multi-component
+        # InChI as "neutral" — corrupting the Drug salt/protonation
+        # signal the RL ranker uses for safety filtering.
+        # ROOT FIX: catch ONLY the expected parsing exceptions. Any
+        # other exception (programming bug) propagates so it surfaces
+        # immediately instead of silently misclassifying compounds.
         formula_layer = ""
     is_multi_component = "." in formula_layer
 

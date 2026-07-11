@@ -1973,7 +1973,26 @@ class _MatchPipeline:
 # =============================================================================
 # Register once at module import so compute_match_confidence("synthetic_key")
 # returns 0.0 instead of the unknown-method default 0.5.
+# v89 FORENSIC ROOT FIX (BUG #22 P1 — method NAME inconsistency):
+#   The previous code registered ONLY ``"synthetic_key"`` (confidence 0.0)
+#   but ``_match_by_inchikey`` for SYNTH keys returns
+#   ``method="synthetic_key_match"`` (confidence
+#   ``MatchConfidence.SYNTHETIC_KEY_MATCH.value`` = 0.5). The method
+#   NAME used at runtime (``"synthetic_key_match"``) was NOT registered,
+#   so ``compute_match_confidence("synthetic_key_match")`` logged a
+#   WARNING and returned the default 0.5 (which happened to match the
+#   intended value, masking the bug). Downstream filters that grouped
+#   by method name split ``synthetic_key`` and ``synthetic_key_match``
+#   into separate buckets.
+#   ROOT FIX: register ``"synthetic_key_match"`` with confidence 0.5
+#   (matching ``MatchConfidence.SYNTHETIC_KEY_MATCH``). The existing
+#   ``"synthetic_key"`` registration (confidence 0.0) is RETAINED
+#   because ``_creation_method_for`` returns ``"synthetic_key"`` for
+#   entries created with neither InChIKey nor name (a DIFFERENT
+#   semantic — creation fallback, not matching). The two labels now
+#   have distinct, consistent confidence values.
 register_match_method("synthetic_key", 0.0)
+register_match_method("synthetic_key_match", 0.5)
 register_match_method("inchikey_exact_unvalidated", 0.5)
 register_match_method("name_only", 0.3)
 register_match_method("smiles_canonical", 0.75)
@@ -4468,6 +4487,46 @@ class DrugResolver(Resolver):
             return None
 
         # ----- Exact normalised lookup -----
+        # v89 FORENSIC ROOT FIX (BUG #5 P0 — _match_by_name ignored
+        #   ambiguity from _name_index_multi):
+        #   ``self._name_index`` is a single-valued dict
+        #   (norm → canonical_ik). When two different drugs normalize to
+        #   the SAME name (e.g. salt forms "ibuprofen" vs "ibuprofen
+        #   lysinate", or brand vs generic), the FIRST one registered
+        #   won (via ``setdefault`` at line 5219). The resolver KNEW
+        #   there was ambiguity (via ``self._name_index_multi``), but
+        #   ``_match_by_name`` ignored this and silently returned the
+        #   FIRST canonical entry. The ``_name_index_multi`` was
+        #   populated (line 5220) but never consulted during matching.
+        #   Impact: when two distinct drugs shared a normalized name,
+        #   the SECOND drug's records were silently merged into the
+        #   FIRST drug's canonical entry. Drug-target interactions,
+        #   indications, and pharmacology data were co-mingled. A
+        #   patient lookup for one drug returned the other drug's
+        #   contraindications — a patient-safety hazard.
+        #   ROOT FIX: check ``self._name_index_multi.get(norm)`` FIRST.
+        #   If it has >1 DISTINCT entry, the name is ambiguous — return
+        #   None (refuse to match by name alone) and log a WARNING,
+        #   forcing the pipeline to fall through to SMILES/PubChem
+        #   matching or create a new entry with the InChIKey.
+        _multi_candidates = self._name_index_multi.get(norm) or []
+        # Deduplicate while preserving order.
+        _seen = set()
+        _multi_candidates = [ik for ik in _multi_candidates if not (ik in _seen or _seen.add(ik))]
+        if len(_multi_candidates) > 1:
+            self._event_log(
+                logging.WARNING,
+                "name_match_ambiguous_refused",
+                query=norm,
+                candidates=_multi_candidates,
+                message=(
+                    "Normalised name '%s' maps to %d distinct canonical "
+                    "InChIKeys (%s) — refusing to match by name alone to "
+                    "prevent silent drug co-mingling. Falling through to "
+                    "SMILES/PubChem matching or new-entry creation."
+                ),
+            )
+            return None
         canonical_ik = self._name_index.get(norm)
         if canonical_ik is not None:
             return _MatchHit(
@@ -4521,16 +4580,22 @@ class DrugResolver(Resolver):
         # names with multiple equal-score matches (e.g. "cyclophosphamide"
         # vs "cyclophosphamide-precursor" both scoring 100), the chosen
         # one is implementation-defined.
-        # v82 FORENSIC ROOT FIX (P1-6 — deterministic tie-breaking):
-        #   The v43 fix logged a WARNING but still returned the
-        #   implementation-defined extractOne pick. Two runs with the
-        #   same data could pick different canonical entries for tied
-        #   fuzzy matches, breaking reproducibility. ROOT FIX: when a
-        #   near-tie is detected (top - second <= _FUZZY_TIE_EPSILON),
-        #   deterministically select the match whose canonical InChIKey
-        #   is alphabetically FIRST. This ensures the same input always
-        #   produces the same output, satisfying IDEM-5 (deterministic
-        #   tie-breaking).
+        # v89 FORENSIC ROOT FIX (BUG #10 P1 — deterministic tie-break was
+        #   SCIENTIFICALLY ARBITRARY):
+        #   The v82 fix picked the alphabetically-FIRST canonical InChIKey
+        #   among near-tied candidates. This was deterministic (satisfied
+        #   IDEM-5) but SCIENTIFICALLY ARBITRARY — the alphabetically-first
+        #   InChIKey has no relationship to the correct drug. For example,
+        #   "ibuprofen" might tie between
+        #   HEFNNWSXXWATIW-UHFFFAOYSA-N (ibuprofen) and
+        #   HEFNNWSXXWATIW-UHFFFAOYSA-M (a stereoisomer with alphabetically
+        #   earlier last char); the v82 code picked the wrong one.
+        #   ROOT FIX: when there's a near-tie (top - second <=
+        #   _FUZZY_TIE_EPSILON), return None (refuse to match by fuzzy)
+        #   INSTEAD of picking arbitrarily. This forces the pipeline to
+        #   fall through to SMILES/PubChem matching or create a new entry
+        #   with the InChIKey. The error is now SCIENTIFICALLY HONEST:
+        #   we refuse to guess rather than guessing wrong deterministically.
         _FUZZY_TIE_EPSILON = 1.0  # 1 point out of 100
         try:
             all_results = fuzz_process.extract(
@@ -4543,36 +4608,25 @@ class DrugResolver(Resolver):
                 top_score = all_results[0][1] if len(all_results[0]) >= 2 else 0
                 second_score = all_results[1][1] if len(all_results[1]) >= 2 else 0
                 if (top_score - second_score) <= _FUZZY_TIE_EPSILON:
+                    # v89 BUG #10: NEAR-TIE detected — REFUSE to match.
                     self._event_log(
                         logging.WARNING,
-                        "fuzzy_tie_break_ambiguous",
+                        "fuzzy_tie_break_ambiguous_refused",
                         query=norm,
                         top_match=all_results[0][0],
                         top_score=top_score,
                         second_match=all_results[1][0],
                         second_score=second_score,
-                        message="Fuzzy match has near-tie — applying deterministic tie-break (alphabetical canonical InChIKey)",
+                        message=(
+                            "Fuzzy match has near-tie (top=%s score=%s, "
+                            "second=%s score=%s, delta=%.1f <= epsilon=%.1f) "
+                            "— refusing to match by fuzzy to avoid "
+                            "scientifically arbitrary selection. Falling "
+                            "through to SMILES/PubChem matching or "
+                            "new-entry creation."
+                        ),
                     )
-                    # DETERMINISTIC TIE-BREAK: among all results within
-                    # _FUZZY_TIE_EPSILON of the top score, pick the one
-                    # whose canonical InChIKey is alphabetically first.
-                    # This guarantees reproducibility across runs.
-                    _tied_candidates = []
-                    for _res in all_results:
-                        _r_norm = _res[0] if len(_res) >= 1 else None
-                        _r_score = _res[1] if len(_res) >= 2 else 0
-                        if _r_norm is None:
-                            continue
-                        if (top_score - _r_score) <= _FUZZY_TIE_EPSILON:
-                            _r_ik = self._name_index.get(_r_norm)
-                            if _r_ik is not None:
-                                _tied_candidates.append((_r_ik, _r_norm, _r_score))
-                    if _tied_candidates:
-                        # Sort by canonical InChIKey (alphabetical) for
-                        # deterministic selection.
-                        _tied_candidates.sort(key=lambda c: c[0])
-                        best_ik = _tied_candidates[0][0]
-                        best_score_100 = _tied_candidates[0][2]
+                    return None
         except Exception:
             pass  # best-effort tie detection; don't break resolution
         return _MatchHit(
@@ -4601,10 +4655,30 @@ class DrugResolver(Resolver):
         Opt-in only (``ResolverConfig.enable_smiles_matching``).
         The match is keyed on ``_smiles_index``, which is populated in
         :meth:`_create_canonical_entry`.
+
+        v89 FORENSIC ROOT FIX (BUG #9 P1 — SMILES not canonicalized via
+          RDKit):
+          The previous code only did ``smiles.strip()`` — NO
+          canonicalization via RDKit. Two SMILES representing the SAME
+          molecule but written differently ("CC(=O)O" vs "CC(O)=O", or
+          "c1ccccc1" vs "C1=CC=CC=C1") produced DIFFERENT keys and DID
+          NOT match. The ``_smiles_index`` was populated with
+          ``smiles.strip()`` (line 5252), so the same non-canonicalization
+          applied to storage. The 0.75 confidence was misleading — it
+          implied a strong match that rarely fired.
+          ROOT FIX: use
+          ``rdkit.Chem.MolToSmiles(Chem.MolFromSmiles(smiles),
+          isomericSmiles=True, canonical=True)`` to canonicalize before
+          indexing and lookup. Fall back to strip-only if RDKit is
+          unavailable (and downgrade confidence to 0.5 so the misleading
+          0.75 is not applied to a non-canonical match). The same
+          canonicalization is applied in ``_create_canonical_entry`` /
+          ``_merge_into_canonical`` when populating ``_smiles_index``
+          so storage and lookup use the SAME key function.
         """
         if not smiles or not getattr(self._config, "enable_smiles_matching", False):
             return None
-        norm_smiles = smiles.strip()
+        norm_smiles, _canonicalized = self._canonicalize_smiles(smiles)
         if not norm_smiles:
             return None
         # P1-ER-1 ROOT FIX: direct attribute access — _smiles_index is
@@ -4614,11 +4688,62 @@ class DrugResolver(Resolver):
         canonical_ik = self._smiles_index.get(norm_smiles)
         if canonical_ik is None:
             return None
+        # v89 BUG #9: if we fell back to strip-only (RDKit unavailable),
+        # downgrade confidence from 0.75 to 0.5 — the match is weaker
+        # because non-canonical SMILES may miss equivalent molecules.
+        if _canonicalized:
+            _method = "smiles_canonical"
+            _confidence = compute_match_confidence("smiles_canonical")
+        else:
+            _method = "smiles_strip_only"
+            _confidence = 0.5
+            self._event_log(
+                logging.INFO,
+                "smiles_match_strip_only_fallback",
+                smiles_hash=hashlib.sha256(smiles.encode("utf-8")).hexdigest()[:16],
+                message=(
+                    "RDKit unavailable — SMILES match using strip-only "
+                    "normalization (confidence downgraded 0.75 → 0.5). "
+                    "Equivalent molecules with different SMILES strings "
+                    "will NOT match."
+                ),
+            )
         return _MatchHit(
             canonical_ik=canonical_ik,
-            method="smiles_canonical",
-            confidence=compute_match_confidence("smiles_canonical"),
+            method=_method,
+            confidence=_confidence,
         )
+
+    @staticmethod
+    def _canonicalize_smiles(smiles: str) -> tuple:
+        """Canonicalize a SMILES string via RDKit.
+
+        v89 FORENSIC ROOT FIX (BUG #9 P1): centralizes SMILES
+        canonicalization so storage and lookup use the SAME key
+        function. Returns a 2-tuple ``(canonical_smiles, was_canonicalized)``.
+        If RDKit is unavailable or the SMILES is invalid, falls back to
+        ``smiles.strip()`` with ``was_canonicalized=False`` so callers
+        can downgrade confidence.
+        """
+        if not smiles:
+            return ("", False)
+        stripped = smiles.strip()
+        if not stripped:
+            return ("", False)
+        try:
+            from rdkit import Chem
+            mol = Chem.MolFromSmiles(stripped)
+            if mol is None:
+                # Invalid SMILES — fall back to strip-only.
+                return (stripped, False)
+            canonical = Chem.MolToSmiles(mol, isomericSmiles=True, canonical=True)
+            if canonical:
+                return (canonical, True)
+            # MolToSmiles returned empty — fall back.
+            return (stripped, False)
+        except Exception:
+            # RDKit unavailable or raised — fall back to strip-only.
+            return (stripped, False)
 
     def _match_by_pubchem_xref(self, name: str) -> Optional[_MatchHit]:
         """Query PubChem PUG-REST for a cross-reference (audit 3.1 / 3.3 / 3.18 / 3.19 / 4.6 / 6.3 / 9.x).
@@ -5292,8 +5417,15 @@ class DrugResolver(Resolver):
             # SMILES index (audit 3.13). P1-ER-1 ROOT FIX: removed the
             # ``hasattr`` lazy-init guard — ``__init__`` now declares
             # ``_smiles_index`` as a first-class core index.
+            # v89 FORENSIC ROOT FIX (BUG #9 P1): canonicalize SMILES via
+            # RDKit before indexing so equivalent molecules with different
+            # SMILES strings share the SAME index key. Falls back to
+            # strip-only if RDKit is unavailable (the lookup path also
+            # falls back, so storage and lookup remain consistent).
             if smiles and getattr(self._config, "enable_smiles_matching", False):
-                self._smiles_index[smiles.strip()] = canonical_ik
+                _norm_smiles, _ = self._canonicalize_smiles(smiles)
+                if _norm_smiles:
+                    self._smiles_index[_norm_smiles] = canonical_ik
 
             # Source record index (audit 16.21).
             for id_field in ("chembl_id", "drugbank_id", "pubchem_cid"):
@@ -5533,9 +5665,60 @@ class DrugResolver(Resolver):
                 diffs.append(("sources", tuple(sources[:-1]), tuple(sources)))
 
             # ----- Update InChIKey index (alternative keys) -----
+            # v89 FORENSIC ROOT FIX (BUG #14 P1 — InChIKey collision
+            #   silently skipped):
+            #   The previous code added ``incoming_ik`` to
+            #   ``_inchikey_index`` ONLY if it was not already present.
+            #   If ``incoming_ik`` WAS already in the index pointing to
+            #   a DIFFERENT ``canonical_ik``, the code silently skipped
+            #   the update — the conflict was not logged, not dead-
+            #   lettered, not recorded in the audit trail. Two different
+            #   canonical entries now shared the same InChIKey in their
+            #   source data, but only one owned it in the index. Future
+            #   lookups for the colliding InChIKey always returned the
+            #   FIRST canonical entry, never the second. The second
+            #   entry's records were orphaned.
+            #   ROOT FIX: when ``incoming_ik`` is already in the index
+            #   pointing to a DIFFERENT ``canonical_ik``, log a WARNING
+            #   and record the conflict in the audit trail. Do NOT
+            #   overwrite the existing mapping (the first entry owns the
+            #   key). The conflicting record is still merged into its
+            #   own canonical entry — only the index is not updated.
             incoming_ik = _normalize_inchikey(record.get("inchikey", "") or "")
-            if incoming_ik and incoming_ik not in self._inchikey_index:
-                self._inchikey_index[incoming_ik] = canonical_ik
+            if incoming_ik:
+                _existing_owner = self._inchikey_index.get(incoming_ik)
+                if _existing_owner is None:
+                    # Not present — add it.
+                    self._inchikey_index[incoming_ik] = canonical_ik
+                elif _existing_owner != canonical_ik:
+                    # COLLISION: incoming_ik is already owned by a
+                    # DIFFERENT canonical entry. Log + audit; do NOT
+                    # overwrite (first entry owns the key).
+                    self._event_log(
+                        logging.WARNING,
+                        "inchikey_index_collision",
+                        inchikey=incoming_ik,
+                        existing_owner=_existing_owner,
+                        incoming_owner=canonical_ik,
+                        source=source,
+                        message=(
+                            "InChIKey %s is already owned by canonical "
+                            "entry %s; incoming record from source '%s' "
+                            "belongs to canonical entry %s. NOT "
+                            "overwriting the index — the second entry's "
+                            "records will not be findable by this "
+                            "InChIKey. Investigate the data source for "
+                            "InChIKey collisions."
+                        ),
+                    )
+                    self._append_audit(canonical_ik, {
+                        "action": "inchikey_collision",
+                        "source": source,
+                        "inchikey": incoming_ik,
+                        "existing_owner": _existing_owner,
+                        "incoming_owner": canonical_ik,
+                        "message": "InChIKey collision — index not updated",
+                    })
 
             # ----- Update name index -----
             incoming_name = record.get("name", "") or ""
@@ -5551,9 +5734,14 @@ class DrugResolver(Resolver):
 
             # ----- Update SMILES index -----
             # P1-ER-1 ROOT FIX: removed ``hasattr`` lazy-init guard.
+            # v89 FORENSIC ROOT FIX (BUG #9 P1): canonicalize SMILES via
+            # RDKit before indexing (consistent with _match_by_smiles and
+            # _create_canonical_entry).
             incoming_smiles = record.get("smiles") or ""
             if incoming_smiles and getattr(self._config, "enable_smiles_matching", False):
-                self._smiles_index.setdefault(incoming_smiles.strip(), canonical_ik)
+                _norm_smiles, _ = self._canonicalize_smiles(incoming_smiles)
+                if _norm_smiles:
+                    self._smiles_index.setdefault(_norm_smiles, canonical_ik)
 
             # ----- Update source record index -----
             for id_field in ("chembl_id", "drugbank_id", "pubchem_cid"):
@@ -5758,9 +5946,14 @@ class DrugResolver(Resolver):
                     self._connectivity_index.setdefault(first_block, canonical_ik)
                     self._connectivity_index_multi.setdefault(first_block, []).append(canonical_ik)
             # P1-ER-1 ROOT FIX: removed ``hasattr`` lazy-init guard.
+            # v89 FORENSIC ROOT FIX (BUG #9 P1): canonicalize SMILES via
+            # RDKit before indexing (consistent with _match_by_smiles and
+            # _create_canonical_entry).
             smiles = entry.get("smiles") or ""
             if smiles and getattr(self._config, "enable_smiles_matching", False):
-                self._smiles_index[smiles.strip()] = canonical_ik
+                _norm_smiles, _ = self._canonicalize_smiles(smiles)
+                if _norm_smiles:
+                    self._smiles_index[_norm_smiles] = canonical_ik
             for src in entry.get("sources", []):
                 for id_field in ("chembl_id", "drugbank_id", "pubchem_cid"):
                     id_val = entry.get(id_field)

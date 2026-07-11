@@ -2056,7 +2056,7 @@ GEO_SKIP_RECORD_COUNT_GUARD: bool = (
 # ROOT FIX: make DRUGOS_ENV an ALIAS of DRUGOS_ENVIRONMENT (same value,
 # same default). ENVIRONMENT is also aliased below. Now there is ONE
 # source of truth: DRUGOS_ENVIRONMENT.
-DRUGOS_ENV: str = os.environ.get("DRUGOS_ENVIRONMENT", os.environ.get("DRUGOS_ENV", "dev"))
+DRUGOS_ENV: str = os.environ.get("DRUGOS_ENVIRONMENT", os.environ.get("DRUGOS_ENV", "production"))
 
 
 def get_geo_series_path(series_id: str | None = None) -> Path:
@@ -3299,7 +3299,7 @@ class TransEConfig:
         default_factory=lambda: int(
             os.environ.get(
                 "DRUGOS_TRANSE_MIN_TRAIN_TRIPLES",
-                "5" if os.environ.get("DRUGOS_ENVIRONMENT", "dev").lower()
+                "5" if os.environ.get("DRUGOS_ENVIRONMENT", "production").lower()
                 not in ("prod", "production")
                 else "100",
             )
@@ -3314,7 +3314,7 @@ class TransEConfig:
         default_factory=lambda: int(
             os.environ.get(
                 "DRUGOS_TRANSE_MIN_VAL_TRIPLES",
-                "2" if os.environ.get("DRUGOS_ENVIRONMENT", "dev").lower()
+                "2" if os.environ.get("DRUGOS_ENVIRONMENT", "production").lower()
                 not in ("prod", "production")
                 else "30",
             )
@@ -3461,12 +3461,34 @@ class TransEConfig:
         # We accept both values here so a future higher_better model
         # can be added with a new loss path — but the trainer (not the
         # config) is responsible for branching on this value.
+        # v84 FORENSIC ROOT FIX (BUG #13 — TransEConfig must lock
+        # score_direction to "lower_better"): the previous code accepted
+        # BOTH "lower_better" and "higher_better" in TransEConfig's
+        # __post_init__. A user could construct a TransEConfig with
+        # score_direction="higher_better", pass it to a TransE model,
+        # and only discover the incompatibility on the first batch
+        # (when the trainer's assertion fired). ROOT FIX: TransEConfig
+        # is TransE-SPECIFIC — it MUST be "lower_better" only. A
+        # "higher_better" config belongs to a different config class
+        # (e.g. a future HGTConfig). Reject "higher_better" at config
+        # construction time so the failure is immediate and the error
+        # message is actionable.
         if self.score_direction not in ("lower_better", "higher_better"):
             raise ValueError(
                 f"score_direction must be 'lower_better' or 'higher_better', "
                 f"got {self.score_direction!r}. TransE (Bordes 2013) uses "
                 f"'lower_better' (score = -||h + r - t||). "
                 f"(v28 audit ML-9: explicit model-loss contract.)"
+            )
+        if self.score_direction != "lower_better":
+            raise ValueError(
+                f"TransEConfig.score_direction must be 'lower_better' "
+                f"(TransE uses score = -||h + r - t||, lower = more "
+                f"plausible). Got {self.score_direction!r}. A "
+                f"'higher_better' model requires a different config "
+                f"class (e.g. a future HGTConfig) and a different loss "
+                f"formula — drop-in substitution into train_transe will "
+                f"silently train BACKWARDS. (v84 BUG #13 root fix)"
             )
         # v28 ML-14: validate relation_norm_mode so an invalid value
         # fails FAST at config construction, not on the first
@@ -4358,7 +4380,7 @@ DRUGOS_DEPLOYMENT_CONTEXT: str = os.environ.get(
 # Fixes FIX[(12.13)] — environment selector (dev/staging/prod). In
 # ``prod``, ``validate_xsd=True`` and ``cross_check_regulatory=True``
 # by default; in ``dev``, both are False for speed.
-DRUGOS_ENVIRONMENT: str = os.environ.get("DRUGOS_ENVIRONMENT", "dev")
+DRUGOS_ENVIRONMENT: str = os.environ.get("DRUGOS_ENVIRONMENT", "production")
 
 # DRUGBANK_STRICT_VERSION
 # Fixes FIX[(14.11)] FIX[(G.16)] — when "1", refuse to parse if the
@@ -5127,7 +5149,7 @@ def assert_auc_meets_threshold(
         # (the default), which raised AUCBelowThresholdError on the toy
         # fixture's AUC 0.67 < 0.85 → V1 launch criteria always failed.
         # Production (DRUGOS_ENVIRONMENT=production) keeps STANDARD.
-        _dev_mode = os.environ.get("DRUGOS_ENVIRONMENT", "dev").lower() not in ("prod", "production")
+        _dev_mode = os.environ.get("DRUGOS_ENVIRONMENT", "production").lower() not in ("prod", "production")
         if _dev_mode and not STRICT_AUC_ENFORCEMENT:
             enforcement_level = AUCEnforcementLevel.RELAXED
         elif _dev_mode:
@@ -5237,7 +5259,7 @@ def check_auc_meets_threshold(
     if threshold is None:
         threshold = get_target_auc()
     if enforcement_level is None:
-        _dev_mode = os.environ.get("DRUGOS_ENVIRONMENT", "dev").lower() not in ("prod", "production")
+        _dev_mode = os.environ.get("DRUGOS_ENVIRONMENT", "production").lower() not in ("prod", "production")
         if _dev_mode and not STRICT_AUC_ENFORCEMENT:
             enforcement_level = AUCEnforcementLevel.RELAXED
         elif _dev_mode:
@@ -5836,7 +5858,7 @@ def _get_dev_mode() -> bool:
     call, so runtime changes are respected. New code should call this
     function instead of referencing the ``_DEV_MODE`` constant.
     """
-    return os.environ.get("DRUGOS_ENVIRONMENT", "dev").lower() not in (
+    return os.environ.get("DRUGOS_ENVIRONMENT", "production").lower() not in (
         "prod", "production", "stage", "staging",
     )
 
@@ -6880,7 +6902,7 @@ def apply_config_overrides(overrides: dict[str, Any] | None = None) -> None:
 # ROOT FIX: make ENVIRONMENT an alias of DRUGOS_ENVIRONMENT (same
 # default "dev"). The ENVIRONMENT_CONFIGS dict below now keys on
 # "dev" / "staging" / "prod" (matching DRUGOS_ENVIRONMENT values).
-ENVIRONMENT: str = os.environ.get("DRUGOS_ENVIRONMENT", "dev")
+ENVIRONMENT: str = os.environ.get("DRUGOS_ENVIRONMENT", "production")
 
 # v29 ROOT FIX (audit I-5): ENVIRONMENT_CONFIGS + apply_environment_config
 # was dead code. Removed/deprecated.

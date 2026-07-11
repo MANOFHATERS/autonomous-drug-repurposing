@@ -621,6 +621,43 @@ class PyGBuilder(GraphBuilderProtocol):
                         f"node indices). (v39 P2 #39 fix)"
                     )
 
+        # v84 FORENSIC ROOT FIX (BUG #9 — edge_label / edge_label_index
+        # shape mismatch silently inflates AUC):
+        # PyG's HeteroData does NOT enforce any relationship between
+        # edge_index (message-passing edges) and edge_label_index
+        # (supervision edges). A bug that sets edge_label_index =
+        # pos_edge_index (forgetting to concatenate negatives) would
+        # produce a val/test split with edge_label of length N but
+        # edge_label_index of length 2N — the model scores only the
+        # first N (positives only), AUC is 1.0 (perfect separation,
+        # since no negatives are scored), and the launch gate passes
+        # on a degenerate model. ROOT FIX: for each edge type that has
+        # edge_label, assert edge_label.shape[0] == edge_label_index.shape[1].
+        for et in data.edge_types:
+            edge_store = data[et]
+            _has_label = (
+                hasattr(edge_store, "edge_label")
+                and edge_store.edge_label is not None
+            )
+            _has_label_index = (
+                hasattr(edge_store, "edge_label_index")
+                and edge_store.edge_label_index is not None
+            )
+            if _has_label and _has_label_index:
+                _n_label = int(edge_store.edge_label.shape[0])
+                _n_label_index = int(edge_store.edge_label_index.shape[1])
+                if _n_label != _n_label_index:
+                    raise ValueError(
+                        f"Edge type {et!r}: edge_label has {_n_label} "
+                        f"entries but edge_label_index has "
+                        f"{_n_label_index} columns. These MUST match — "
+                        f"a mismatch means the model scores a different "
+                        f"set of edges than the labels it trains/evaluates "
+                        f"against, silently inflating AUC (e.g. scoring "
+                        f"only positives → AUC=1.0 on a degenerate model). "
+                        f"(v84 BUG #9 root fix)"
+                    )
+
     # ═══ Section A -- Graph Construction ═══════════════════════════
 
     def _get_feat_dim(self, node_type: str) -> int:
@@ -808,6 +845,52 @@ class PyGBuilder(GraphBuilderProtocol):
                     # safety benefit. Assign directly.
                     weight = torch.empty(num_nodes, feat_dim)
                     torch.nn.init.xavier_uniform_(weight)
+                    # v84 FORENSIC ROOT FIX (BUG #10 — NaN / dead nodes
+                    # from all-zero Xavier init rows):
+                    # Xavier uniform samples from U(-a, a) where
+                    # a = sqrt(6 / (fan_in + fan_out)). For small feat_dim
+                    # and small num_nodes, this can produce a row of
+                    # all-zeros (rare but possible — the boundary of the
+                    # uniform distribution is 0-probability but finite-
+                    # precision rounding can land there). The downstream
+                    # `normalize_entity_embeddings` in transe_model.py
+                    # divides by the L2 norm clamped at NORM_CLAMP_MIN=
+                    # 1e-9. A zero row becomes 0 / 1e-9 = 0 — silently
+                    # a zero embedding. The model has no signal for that
+                    # node: TransE scores for triples involving this
+                    # node are dominated by the relation and tail, and
+                    # the head's contribution is zero.
+                    #
+                    # ROOT FIX: after Xavier init, detect any all-zero
+                    # rows and replace them with a fresh Xavier sample
+                    # (or a small epsilon vector if re-sampling still
+                    # produces zeros). This guarantees every node has a
+                    # non-zero embedding, preserving the model's ability
+                    # to learn discriminative representations for every
+                    # entity. The check is O(num_nodes * feat_dim) which
+                    # is negligible compared to the Xavier init itself.
+                    _zero_row_mask = (weight.abs().sum(dim=1) == 0)
+                    _n_zero_rows = int(_zero_row_mask.sum().item())
+                    if _n_zero_rows > 0:
+                        self.logger.warning(
+                            f"  {node_type}: {_n_zero_rows} all-zero rows "
+                            f"after Xavier init (rare but possible for "
+                            f"small feat_dim={feat_dim}). Re-initializing "
+                            f"with epsilon vectors to prevent dead nodes. "
+                            f"(v84 BUG #10 root fix)"
+                        )
+                        # Replace zero rows with a small deterministic
+                        # epsilon vector (1e-4 in every dimension). This
+                        # is non-zero so normalize_entity_embeddings
+                        # produces a valid unit vector, and small enough
+                        # that the model can still learn from gradient
+                        # signal. We use epsilon instead of re-sampling
+                        # Xavier because re-sampling could theoretically
+                        # produce another zero row (same low probability).
+                        _eps_vec = torch.full(
+                            (feat_dim,), 1e-4, dtype=weight.dtype,
+                        )
+                        weight[_zero_row_mask] = _eps_vec
                     data[node_type].x = weight
                     self.logger.info(
                         f"  {node_type}: {num_nodes:,} nodes, "
@@ -918,6 +1001,40 @@ class PyGBuilder(GraphBuilderProtocol):
                         )
 
                 data[src_type, rel_name, dst_type].edge_index = edge_index
+                # v84 FORENSIC ROOT FIX (BUG #18 — missing edge_type in
+                # HeteroData):
+                # The previous code set edge_index but NEVER set edge_type
+                # (an integer tensor mapping each edge to its relation
+                # type within a heterogeneous edge type). PyG's HGTConv
+                # and TransformerConv expect edge_type for some operations
+                # (e.g. ToUndirected with rev_edge_types, and certain
+                # HGTConv implementations that index relation-specific
+                # parameters by edge_type). Without it, certain PyG
+                # transforms may fail or produce wrong attention weights.
+                # ROOT FIX: set edge_type to a zeros tensor of length
+                # num_edges (since each (src_type, rel_name, dst_type)
+                # triple is a SINGLE relation type, all edges in this
+                # edge_index belong to relation type 0 within this edge
+                # store). This satisfies PyG's expectation that edge_type
+                # is present and has the correct shape.
+                if edge_index.numel() > 0:
+                    data[src_type, rel_name, dst_type].edge_type = (
+                        torch.zeros(
+                            edge_index.size(1), dtype=torch.long,
+                        )
+                    )
+                else:
+                    data[src_type, rel_name, dst_type].edge_type = (
+                        torch.zeros(0, dtype=torch.long)
+                    )
+
+                # v88 ROOT FIX (BUG #41 — missing edge_type in HeteroData
+                # for HGTConv): set edge_type = torch.zeros(...) after
+                # edge_index so HGTConv can map each edge to its relation.
+                if edge_index.size(1) > 0:
+                    data[src_type, rel_name, dst_type].edge_type = torch.zeros(
+                        edge_index.size(1), dtype=torch.long
+                    )
 
                 # FIX(issue-13): edge index bounds validation.
                 if edge_index.numel() > 0:
@@ -1108,6 +1225,21 @@ class PyGBuilder(GraphBuilderProtocol):
 
             matched = int(valid_mask.sum())
             unmatched = num_compounds - matched
+
+            # v88 ROOT FIX (BUG #30 — NaN/dead embeddings when no
+            # ChemBERTa features match): when matched == 0, initialize
+            # ALL rows with Xavier-style random normal * 0.1 so the
+            # embeddings are non-zero and learnable.
+            if matched == 0 and num_compounds > 0:
+                _rng_v88 = np.random.default_rng(self.config.seed)
+                ordered = _rng_v88.normal(
+                    loc=0.0, scale=0.1, size=(num_compounds, feat_dim)
+                ).astype(np.float32)
+                self.logger.warning(
+                    f"add_chemberta_features: 0/{num_compounds} "
+                    f"compounds matched ChemBERTa embeddings — using "
+                    f"Xavier-style random init (v88 BUG #30 root fix)."
+                )
 
             # FIX(issue-16): mean imputation + has_features flag for
             # unmatched compounds.
@@ -2193,13 +2325,103 @@ class PyGBuilder(GraphBuilderProtocol):
                     if data[nt].x is not None:
                         split_data[nt].x = data[nt].x.clone()  # P2C-013: clone, not share
 
-                # Share non-target edges by reference — edge_index is only
-                # used for indexing (read-only) in PyG message passing, so
-                # sharing is safe. Node features (.x) are cloned above
-                # because they CAN be mutated in-place by layers/transforms.
+                # v84 FORENSIC ROOT FIX (BUG #11 + BUG #24 — HGT message-
+                # passing leakage from non-target / reverse edges in
+                # val/test splits):
+                #
+                # BUG #11: the previous code shared ALL non-target edges
+                # by reference into val/test splits (``for et in
+                # data.edge_types: if et != target_edge_type:
+                # split_data[et].edge_index = data[et].edge_index``).
+                # For an HGT model, this is message-passing leakage: the
+                # val/test HGT encoder sees training-time edges of all
+                # non-target types — including edges incident to val/test
+                # target entities. Val/test AUC is structurally inflated.
+                #
+                # BUG #24: the reverse edge (Disease, rev_treats, Compound)
+                # is NOT split in parallel with the target edge type. After
+                # splitting, val/test splits have Disease-rev_treats-
+                # Compound edges that point to the FULL graph's Compound
+                # entities — including train Compounds. HGT val/test AUC
+                # is inflated by reverse-edge leakage from train Compounds.
+                #
+                # ROOT FIX: for val/test splits, drop non-target edges
+                # (including reverse edges) that touch val/test TARGET
+                # entities. The "target entities" for a split are the
+                # heads and tails of that split's positive edges (the
+                # entities being evaluated). Non-target edges incident
+                # to these entities would leak message-passing signal.
+                # For the TRAIN split, keep all non-target edges (the
+                # train message-passing graph is the full graph).
+                #
+                # We compute the set of target entity indices for this
+                # split from mask_indices (the positive edge indices).
+                _is_val_or_test = generate_negatives  # train split has generate_negatives=False
+                if mask_indices:
+                    _split_pos_idx = torch.as_tensor(
+                        mask_indices, dtype=torch.long
+                    )
+                    _split_pos_edges = edge_index[:, _split_pos_idx]
+                    _split_target_src = set(
+                        int(x) for x in _split_pos_edges[0].tolist()
+                    )
+                    _split_target_dst = set(
+                        int(x) for x in _split_pos_edges[1].tolist()
+                    )
+                else:
+                    _split_target_src = set()
+                    _split_target_dst = set()
+
                 for et in data.edge_types:
-                    if et != target_edge_type:
-                        split_data[et].edge_index = data[et].edge_index
+                    if et == target_edge_type:
+                        continue  # handled below (sliced)
+                    _et_edge_index = data[et].edge_index
+                    if _et_edge_index is None or _et_edge_index.numel() == 0:
+                        # Preserve empty edge stores for schema consistency.
+                        split_data[et].edge_index = _et_edge_index
+                        if hasattr(data[et], "edge_type") and data[et].edge_type is not None:
+                            split_data[et].edge_type = data[et].edge_type
+                        continue
+                    if not _is_val_or_test:
+                        # Train split: keep all non-target edges by reference.
+                        split_data[et].edge_index = _et_edge_index
+                        if hasattr(data[et], "edge_type") and data[et].edge_type is not None:
+                            split_data[et].edge_type = data[et].edge_type
+                        continue
+                    # Val/test split: drop non-target edges that touch
+                    # this split's target entities (heads OR tails of
+                    # the target edge type). This prevents message-passing
+                    # leakage from train edges incident to val/test
+                    # entities. Edges between non-target entities are
+                    # kept (they provide auxiliary structural signal
+                    # without leaking target-entity neighborhoods).
+                    _src_is_target = torch.tensor(
+                        [int(s) in _split_target_src
+                         for s in _et_edge_index[0].tolist()],
+                        dtype=torch.bool,
+                    )
+                    _dst_is_target = torch.tensor(
+                        [int(d) in _split_target_dst
+                         for d in _et_edge_index[1].tolist()],
+                        dtype=torch.bool,
+                    )
+                    # An edge leaks if EITHER endpoint is a target entity
+                    # of this split (the entity being evaluated). Drop it.
+                    _leak_mask = _src_is_target | _dst_is_target
+                    _keep_mask = ~_leak_mask
+                    _n_total = int(_et_edge_index.size(1))
+                    _n_kept = int(_keep_mask.sum().item())
+                    _n_dropped = _n_total - _n_kept
+                    if _n_dropped > 0:
+                        self.logger.info(
+                            f"temporal_split: dropped {_n_dropped}/{_n_total} "
+                            f"non-target edges of {et!r} from val/test split "
+                            f"(touched target entities — would leak via HGT "
+                            f"message passing). (v84 BUG #11+#24 root fix)"
+                        )
+                    split_data[et].edge_index = _et_edge_index[:, _keep_mask]
+                    if hasattr(data[et], "edge_type") and data[et].edge_type is not None:
+                        split_data[et].edge_type = data[et].edge_type[_keep_mask]
 
                 # Only the target edge index is sliced
                 if mask_indices:
@@ -2321,9 +2543,16 @@ class PyGBuilder(GraphBuilderProtocol):
                                 [pos_edge_index, neg_edge_index], dim=1
                             )
                             combined_labels = torch.cat([pos_labels, neg_labels])
+                            # v88 ROOT FIX (BUG #48 — PyG HeteroData built
+                            # with mismatched edge_index): set
+                            #   edge_index = pos_edge_index (positives only)
+                            #   edge_label_index = combined_edge_index
+                            # Negative edges should NOT be in the message-
+                            # passing graph; they should only be in
+                            # edge_label_index for scoring.
                             split_data[
                                 target_edge_type
-                            ].edge_index = combined_edge_index
+                            ].edge_index = pos_edge_index
                             split_data[target_edge_type].edge_label = combined_labels
                             split_data[
                                 target_edge_type

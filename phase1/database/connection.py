@@ -292,6 +292,29 @@ class _CircuitBreaker:
             self._half_open_probe_in_flight = True
             return True
 
+    def reset(self) -> None:
+        """Reset the circuit breaker to CLOSED state (thread-safe).
+
+        v90 ROOT FIX (BUG #11 — P1 circuit breaker reset without lock):
+          The previous ``reset_global_state()`` directly mutated
+          ``_circuit_breaker._failure_count`` and ``_circuit_breaker._state``
+          WITHOUT acquiring ``_circuit_breaker._lock``. If another thread
+          was concurrently checking ``allow_request()`` (which acquires the
+          lock), it read a torn state: ``_failure_count=0`` but ``_state``
+          still momentarily "OPEN" (or vice-versa). The breaker's invariant
+          (``_state == OPEN`` iff ``_failure_count >= threshold``) was
+          violated. Under concurrent test teardown + live pipeline, the
+          breaker could get stuck OPEN (rejecting all DB calls) or stuck
+          CLOSED (never tripping on real failures). Non-deterministic,
+          hard to reproduce. ROOT FIX: this method acquires ``_lock``
+          before mutating state, preserving the invariant.
+        """
+        with self._lock:
+            self._failure_count = 0
+            self._state = "CLOSED"
+            self._last_failure_time = 0.0
+            self._half_open_probe_in_flight = False
+
 
 # ===========================================================================
 # DRIVER CONNECT-ARGS REGISTRY (DES-001)
@@ -374,7 +397,21 @@ def _get_environment() -> str:
       1. DRUGOS_ENVIRONMENT  (canonical, set by docker-compose & docs)
       2. ENVIRONMENT         (legacy fallback)
       3. ENV                 (legacy fallback)
-      4. "development"       (default)
+      4. "production"        (v90 fail-closed default — see below)
+
+    v90 ROOT FIX (BUG #10 — P1 fail-open default):
+      For a pharma platform where bugs kill people, defaulting to
+      "development" is a fail-OPEN posture. A production deployment that
+      forgets to set DRUGOS_ENVIRONMENT (or whose configmap mount fails
+      silently) got DEV-SIZED connection pools (5 instead of 15),
+      permissive logging (stack traces leaked via exc_info=not
+      _is_production()), and no SQLite-in-prod guard. The audit at
+      line ~839 logs logger.error for SQLite-in-non-dev — but
+      _get_environment() already returned "development", so the check
+      passed. ROOT FIX: default to "production" (fail-closed). Operators
+      must EXPLICITLY opt into dev by setting DRUGOS_ENVIRONMENT=dev.
+      This is the standard fail-closed pattern for safety-critical
+      systems — when in doubt, assume production.
 
     The returned value is normalised to one of:
       "development" | "staging" | "production"
@@ -387,7 +424,7 @@ def _get_environment() -> str:
         os.environ.get("DRUGOS_ENVIRONMENT")
         or os.environ.get("ENVIRONMENT")
         or os.environ.get("ENV")
-        or "development"
+        or "production"
     )
     norm = raw.strip().lower()
     if norm in ("prod", "production"):
@@ -499,10 +536,23 @@ def _validate_database_url(url: str) -> None:
         )
 
     # Non-SQLite URLs must have a hostname (SQLite/file don't need one)
+    # v90 ROOT FIX (BUG #9 — P1 Unix socket URLs rejected):
+    #   The previous check rejected ANY URL without a hostname. But
+    #   ``postgresql:///dbname`` (Unix socket connection, no hostname) is
+    #   a VALID PostgreSQL URL format. ``urlparse("postgresql:///dbname")
+    #   .hostname`` returns ``None``. This check REJECTED all Unix-socket
+    #   PostgreSQL connections. On production deployments using Unix
+    #   sockets (common in containerized/k8s environments), init_db()
+    #   raised ValueError and the platform could not start. ROOT FIX:
+    #   allow empty hostname when the path is non-empty (the path carries
+    #   the database name for Unix-socket connections). This accepts
+    #   ``postgresql:///drugos`` while still rejecting truly malformed
+    #   URLs like ``postgresql://`` (no host, no path).
     if (
         not scheme.startswith("sqlite")
         and scheme != "file"
         and not parsed.hostname
+        and not parsed.path
     ):
         raise ValueError(
             f"DATABASE_URL is missing a hostname: '{_mask_url(url)}'"
@@ -797,8 +847,28 @@ def _create_new_engine() -> Engine:
 
     # SQLAlchemy's create_engine cannot handle 'file:' URLs directly;
     # convert 'file:/path/to/db' to 'sqlite:////path/to/db'
+    # v89 ROOT FIX (BUG #31 — file: URL parsing created DB at wrong path):
+    #   The previous code did ``db_path = database_url[5:]`` (strip 'file:')
+    #   then ``f"sqlite:///{db_path}"``. For ``file:///absolute/path``,
+    #   ``database_url[5:]`` = ``//absolute/path``, and
+    #   ``f"sqlite:///{db_path}"`` = ``sqlite://///absolute/path``
+    #   (5 slashes). SQLite interprets the 4th slash as the path separator
+    #   and the 5th as part of the path — so it creates a DB at
+    #   ``//absolute/path`` (a network-style path) or ``/absolute/path``
+    #   depending on the platform, NOT at ``/absolute/path``. Operators
+    #   saw "empty database" with no error — the DB was created at the
+    #   wrong location. ROOT FIX: use ``urlparse`` to extract the path
+    #   component correctly, then construct the SQLite URL with the
+    #   standard ``sqlite:///<absolute_path>`` form (3 slashes for an
+    #   absolute path). This handles ``file:/path``, ``file:///path``,
+    #   and ``file://host/path`` correctly.
     if driver == "file" and database_url.startswith("file:"):
-        db_path = database_url[5:]  # strip 'file:'
+        _parsed_file = urlparse(database_url)
+        db_path = _parsed_file.path or ""
+        if not db_path:
+            raise ValueError(
+                f"Invalid file: URL — no path component: {database_url!r}"
+            )
         database_url = f"sqlite:///{db_path}"
         logger.debug("Converted file: URL to SQLite URL: %s", _mask_url(database_url))
 
@@ -1182,24 +1252,55 @@ def _set_session_variables(
             # parameters instead of manual chr(39) escaping. This is
             # injection-safe — the value is passed as a parameter, not
             # interpolated into the SQL string.
+            #
+            # v89/v90 ROOT FIX (BUG #8 / BUG #37 — session variables
+            #   contaminate across pool reuse):
+            #   The previous code used ``set_config(name, value, FALSE)``
+            #   which sets a SESSION-level variable. Session-level
+            #   variables persist until the session ends — but with
+            #   connection pooling, the "session" is the underlying DB
+            #   connection, which is RETURNED TO THE POOL on
+            #   ``session.close()``. The next ``get_db_session()`` call
+            #   (possibly from a DIFFERENT pipeline) gets a connection
+            #   with STALE ``app.pipeline_name`` / ``app.run_id`` /
+            #   ``app.correlation_id`` variables. If that next call
+            #   writes to ``audit_log`` or ``pipeline_runs``, the lineage
+            #   columns reflect the PREVIOUS pipeline's identity. Under
+            #   the documented 7-concurrent-pipeline workload, cross-
+            #   contamination is near-certain — and operators cannot
+            #   reproduce because the bug depends on pool reuse order.
+            #   Regulatory audits (GDPR/HIPAA) that require "which
+            #   pipeline wrote this row" cannot trust the ``audit_log``
+            #   table. ROOT FIX: use ``set_config(name, value, TRUE)``
+            #   which sets a TRANSACTION-local variable (equivalent to
+            #   ``SET LOCAL``). Transaction-local variables are
+            #   automatically RESET to their previous value (or NULL)
+            #   on COMMIT or ROLLBACK — so when the session commits and
+            #   the connection returns to the pool, the variables are
+            #   GONE. The next checkout gets a clean connection with no
+            #   stale ``app.*`` variables. This is the PostgreSQL-
+            #   documented pattern for connection-pool-safe session
+            #   variables (see PostgreSQL docs §18.1.4: "SET LOCAL's
+            #   effects last only till the end of the current
+            #   transaction").
             from sqlalchemy import text as _sa_text_v38
             if pipeline_name:
                 session.execute(
-                    _sa_text_v38("SELECT set_config('app.pipeline_name', :val, false)"),
+                    _sa_text_v38("SELECT set_config('app.pipeline_name', :val, true)"),
                     {"val": str(pipeline_name)},
                 )
             if run_id:
                 session.execute(
-                    _sa_text_v38("SELECT set_config('app.run_id', :val, false)"),
+                    _sa_text_v38("SELECT set_config('app.run_id', :val, true)"),
                     {"val": str(run_id)},
                 )
             if correlation_id:
                 session.execute(
-                    _sa_text_v38("SELECT set_config('app.correlation_id', :val, false)"),
+                    _sa_text_v38("SELECT set_config('app.correlation_id', :val, true)"),
                     {"val": str(correlation_id)},
                 )
             session.execute(
-                _sa_text_v38("SELECT set_config('app.session_id', :val, false)"),
+                _sa_text_v38("SELECT set_config('app.session_id', :val, true)"),
                 {"val": str(session_id)},
             )
     except Exception as exc:
@@ -1757,13 +1858,26 @@ def check_connection(
 
     start_time = time.monotonic()
     try:
+        # v89 ROOT FIX (BUG #35 — engine variable undefined when
+        #   use_session_pool=True): the previous code defined ``engine``
+        #   only in the ``else`` branch (line 1766), then used
+        #   ``engine if not use_session_pool else get_engine()`` at line
+        #   1782. When ``use_session_pool=True``, ``engine`` was undefined
+        #   — the conditional relied on Python's short-circuit evaluation
+        #   to avoid the NameError. This WORKED but was fragile: any
+        #   refactor that changed the conditional order or removed the
+        #   short-circuit would raise ``NameError: name 'engine' is not
+        #   defined``. ROOT FIX: define ``engine = get_engine()`` BEFORE
+        #   the ``if use_session_pool:`` block so the variable is always
+        #   bound. The ``get_engine()`` call is cheap (returns the cached
+        #   singleton) and the code is now refactor-safe.
+        engine = get_engine()
         if use_session_pool:
             with get_db_session() as session:
                 result = session.execute(text("SELECT 1"))
                 result.close()
                 db_version = _get_db_version(session)
         else:
-            engine = get_engine()
             with engine.connect() as conn:
                 result = conn.execute(text("SELECT 1"))
                 result.close()
@@ -1779,7 +1893,7 @@ def check_connection(
 
         if detailed:
             pool_status = get_pool_status() if _engine is not None else None
-            db_name, db_user = _try_get_db_metadata(engine if not use_session_pool else get_engine())
+            db_name, db_user = _try_get_db_metadata(engine)
             return HealthCheckResult(
                 is_healthy=True,
                 latency_ms=latency_ms,
@@ -2045,9 +2159,11 @@ def reset_global_state() -> None:
     _thread_local.session_id = None
     _thread_local.session_start_time = None
 
-    # Reset circuit breaker
-    _circuit_breaker._failure_count = 0
-    _circuit_breaker._state = "CLOSED"
+    # Reset circuit breaker (v90 ROOT FIX BUG #11: use thread-safe reset()
+    # method instead of directly mutating _failure_count / _state without
+    # the lock — prevents torn-state race conditions under concurrent
+    # test teardown + live pipeline).
+    _circuit_breaker.reset()
 
     logger.debug("All global state reset")
 

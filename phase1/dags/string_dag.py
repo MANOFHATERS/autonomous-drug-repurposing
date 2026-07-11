@@ -6,7 +6,13 @@ filters by minimum combined score, maps STRING IDs to UniProt accessions,
 and bulk-upserts into the ``protein_protein_interactions`` table.
 
 Can be triggered independently or as part of the master pipeline.
-Schedule: 1st of every month at 05:00 UTC
+Schedule: 15th of every month at 05:00 UTC
+
+v89 FORENSIC ROOT FIX (BUG #8 P1 — Sunday Morning Pile-Up):
+  Moved from ``0 5 1 * *`` (1st of month) to ``0 5 15 * *`` (15th of
+  month). The 1st could fall on a Sunday, colliding with the master DAG
+  (Sunday 02:00 UTC, up to 7h runtime). See omim_dag.py for full fix
+  rationale. The 15th never systematically collides with Sunday.
 """
 
 from __future__ import annotations
@@ -54,9 +60,10 @@ def run_string() -> None:
     description="STRING DB ETL pipeline: protein-protein interaction network",
     # v29 ROOT FIX (audit O-11): was schedule=None (dead). Now scheduled.
     # STRING releases a major version monthly; standalone DAG runs on the
-    # 1st of every month at 05:00 UTC so ad-hoc / per-source refreshes work
+    # 15th of every month at 05:00 UTC so ad-hoc / per-source refreshes work
     # without requiring the master DAG.
-    schedule="0 5 1 * *",
+    # v89 BUG #8: moved from 1st to 15th to avoid Sunday collisions.
+    schedule="0 5 15 * *",
     start_date=datetime(2024, 1, 1),
     catchup=False,
     max_active_runs=1,

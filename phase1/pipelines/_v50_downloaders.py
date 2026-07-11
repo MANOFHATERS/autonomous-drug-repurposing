@@ -69,8 +69,10 @@ PUBCHEM_PUG_REST = "https://pubchem.ncbi.nlm.nih.gov/rest/pug"
 # as the canonical base URL. The current pipeline uses PUG REST only, but the
 # constant is now a valid, correctly-named reference for that future work.
 PUBCHEM_FTP_BASE = "https://ftp.ncbi.nlm.nih.gov/pubchem/Compound/CURRENT-Full/SDF"
-# v64 backward-compat alias (deprecated, will be removed in v65).
-PUBCHEV_FTP_BASE = PUBCHEM_FTP_BASE
+# v84 FORENSIC ROOT FIX (BUG #46): removed the ``PUBCHEV_FTP_BASE``
+# backward-compat alias (typo: 'V' instead of 'M'). No caller
+# references it (verified via grep across the entire repo). The typo
+# was misleading and the alias was dead code.
 
 # v64 ROOT FIX (P1-006): canonical User-Agent for all HTTP downloads.
 # PubChem/NCBI/UniProt/STRING all require a User-Agent header and return
@@ -186,7 +188,10 @@ def _stream_to_file(
     with requests.get(url, headers=headers, stream=True, timeout=timeout, verify=True) as resp:
         if resp.status_code == 416:  # Range Not Satisfiable — file already complete
             logger.info("Already complete: %s", dest.name)
-            tmp.rename(dest)
+            # v84 FORENSIC ROOT FIX (BUG #34): os.replace is atomic on
+            # both POSIX and Windows; Path.rename fails on Windows if
+            # dest already exists.
+            os.replace(tmp, dest)
             return dest
         resp.raise_for_status()
         # P2-8 ROOT FIX: the previous code set mode = "ab" whenever
@@ -263,7 +268,10 @@ def _stream_to_file(
             f"SHA-256 mismatch for {dest.name}: expected {expected_sha256}, got {actual_sha}"
         )
 
-    tmp.rename(dest)
+    # v84 FORENSIC ROOT FIX (BUG #34): os.replace is atomic on both
+    # POSIX and Windows. Path.rename (os.rename) fails on Windows if
+    # the destination already exists, breaking re-downloads.
+    os.replace(tmp, dest)
     logger.info("Download complete: %s (%d bytes)", dest.name, dest.stat().st_size)
     return dest
 
@@ -319,19 +327,28 @@ def download_chembl_full(raw_dir: Path) -> dict[str, Path]:
                         for act in act_resp.json().get("activities", []):
                             f_act.write(json.dumps(act) + "\n")
                     time.sleep(0.5)  # rate-limit courtesy
-                except Exception as exc:
+                except (requests.RequestException, OSError, ValueError, json.JSONDecodeError) as exc:
+                    # v90 ROOT FIX (BUG #22): narrowed from broad
+                    # ``except Exception`` which caught programming bugs
+                    # (AttributeError, KeyError, NameError) and silently
+                    # skipped them. Root fix: catch ONLY network/data
+                    # errors. Programming bugs propagate.
                     logger.warning("ChEMBL sample fetch failed for %s: %s", chembl_id, exc)
 
         # If we got 0 molecules, fall back to embedded samples
         if molecules_path.stat().st_size == 0:
             logger.warning("ChEMBL: API unreachable — falling back to embedded samples")
             from pipelines._embedded_samples import embedded_chembl_molecules, embedded_chembl_activities
-            embedded_chembl_molecules().to_json(molecules_path.with_suffix(".csv"), orient="records", lines=True)
-            embedded_chembl_activities().to_json(activities_path.with_suffix(".csv"), orient="records", lines=True)
-            molecules_path.unlink(missing_ok=True)
-            activities_path.unlink(missing_ok=True)
-            result["molecules"] = molecules_path.with_suffix(".csv")
-            result["activities"] = activities_path.with_suffix(".csv")
+            # v90 ROOT FIX (BUG #2): the previous code wrote JSONL
+            # (to_json orient="records", lines=True) to a .csv file,
+            # producing a file that is NOT valid CSV. Downstream
+            # read_csv() would parse it as a single-column DataFrame
+            # with garbage JSON strings. ROOT FIX: use to_csv() for
+            # .csv files and to_json() only for .jsonl files.
+            embedded_chembl_molecules().to_csv(molecules_path, index=False)
+            embedded_chembl_activities().to_csv(activities_path, index=False)
+            result["molecules"] = molecules_path
+            result["activities"] = activities_path
         else:
             result["molecules"] = molecules_path
             result["activities"] = activities_path
@@ -872,8 +889,19 @@ def download_drugbank_open_data(raw_dir: Path) -> dict[str, Path]:
     # but the load() path accepts longer DB-prefixed IDs and the
     # Drug model's drugbank_id column is VARCHAR(64) — so 8-hex IDs fit.
     def _synthesize_drugbank_id(inchikey: str) -> str:
+        # v90 ROOT FIX (BUG #12): the previous code returned
+        # "DBSYNTH000000" (a FIXED sentinel) for ALL drugs missing
+        # an InChIKey. This means N drugs with missing InChIKeys all
+        # got the SAME drugbank_id → they were merged into a SINGLE
+        # Drug node in the KG (silent data corruption). ROOT FIX:
+        # use a sequential counter so each missing-InChIKey drug gets
+        # a UNIQUE ID. The counter is deterministic within a single
+        # pipeline run because drugs are processed in a fixed order.
         if not inchikey or not isinstance(inchikey, str):
-            return "DBSYNTH000000"  # sentinel for missing InChIKey
+            _synthesize_drugbank_id._counter = getattr(
+                _synthesize_drugbank_id, "_counter", 0
+            ) + 1
+            return f"DBSYNTH{_synthesize_drugbank_id._counter:06d}"
         h = hashlib.sha256(inchikey.encode()).hexdigest()
         return f"DB{h[:8].upper()}"
 
@@ -918,7 +946,15 @@ def download_drugbank_open_data(raw_dir: Path) -> dict[str, Path]:
             continue
         try:
             # Step 1: Find RxNorm RxCUI by drug name
-            url = f"https://rxnav.nlm.nih.gov/REST/rxcui.json?name={drug_name}&search=2"
+            # v90 ROOT FIX (BUG #8): URL-encode the drug_name so
+            # drugs with special characters (e.g. "6-mercaptopurine",
+            # "N-acetylcysteine", "5-fluorouracil") are correctly
+            # encoded in the query string. The previous code passed
+            # the raw name which broke on hyphens, ampersands, and
+            # other URL-significant characters — RxNorm returned 0
+            # results for these drugs → no indication enrichment.
+            from urllib.parse import quote as _url_encode
+            url = f"https://rxnav.nlm.nih.gov/REST/rxcui.json?name={_url_encode(drug_name, safe='')}&search=2"
             # v64 ROOT FIX (P1-006): send User-Agent header.
             resp = requests.get(url, headers={"User-Agent": HTTP_USER_AGENT}, timeout=15.0)
             rxcui = None
@@ -939,12 +975,26 @@ def download_drugbank_open_data(raw_dir: Path) -> dict[str, Path]:
                         if pc.get("propName") == "INDICATION":
                             indication_text = pc.get("propValue", "")
                             if indication_text:
+                                # v90 ROOT FIX (BUG #7): RxNorm's
+                                # INDICATION property is FREE-TEXT (e.g.
+                                # "Used for treatment of hypertension and
+                                # heart failure"), NOT a structured disease
+                                # name. The previous code mapped this
+                                # verbatim to `disease_name`, creating
+                                # PHANTOM disease nodes in the KG — one
+                                # node per free-text string, none matching
+                                # OMIM/DisGeNET disease IDs. ROOT FIX:
+                                # set disease_name to empty string; the
+                                # indication_text goes in the `indication`
+                                # column only. Downstream entity resolution
+                                # must parse the free-text to extract real
+                                # disease names.
                                 indications_records.append({
                                     "drugbank_id": row["drugbank_id"],
                                     "drug_inchikey": row["inchikey"],
                                     "drug_name": drug_name,
                                     "disease_id": "",  # RxNorm doesn't use DOID
-                                    "disease_name": indication_text[:200],
+                                    "disease_name": "",  # NOT free-text
                                     "indication": indication_text[:500],
                                     "source": "rxnorm_open_data",
                                 })
@@ -964,10 +1014,18 @@ def download_drugbank_open_data(raw_dir: Path) -> dict[str, Path]:
     # P2-11 ROOT FIX: apply all indication updates in a single vectorized
     # pass. This avoids SettingWithCopyWarning and is more efficient than
     # per-row ``df.at[idx, ...]`` assignments inside an iterrows loop.
+    # v84 FORENSIC ROOT FIX (BUG #39): the previous "vectorized" fix was
+    # STILL a per-row loop using ``df.loc[_idx, col] = value`` — O(N)
+    # Python with 2N loc calls (10K drugs × 2 columns = 20K loc calls).
+    # This triggers ``SettingWithCopyWarning`` on some pandas versions
+    # and is slow. ROOT FIX: build a DataFrame from the updates dict
+    # and use ``df.update()`` — a single vectorized C-level operation.
     if indication_updates:
-        for _idx, (_ind, _src) in indication_updates.items():
-            drugs_df.loc[_idx, "indication"] = _ind
-            drugs_df.loc[_idx, "indication_source"] = _src
+        _updates_df = pd.DataFrame.from_dict(
+            indication_updates, orient="index",
+            columns=["indication", "indication_source"],
+        )
+        drugs_df.update(_updates_df)
 
     drugs_df.to_csv(drugs_path, index=False)
     pd.DataFrame(indications_records).to_csv(indications_path, index=False)
@@ -1004,16 +1062,8 @@ def download_drugbank_open_data(raw_dir: Path) -> dict[str, Path]:
 # explicitly opt into "raw download only" semantics.
 #
 # (Function body removed; if __name__ == "__main__" guard removed.)
-
-
-if __name__ == "__main__":
-    # v65 ROOT FIX (P1-039): direct invocation is no longer supported.
-    # Use the package-level CLI instead:
-    #   python -m pipelines run <source>
-    # Or import the download_*_full functions directly (see docstring above).
-    raise SystemExit(
-        "v65 ROOT FIX (P1-039): pipelines._v50_downloaders no longer has a "
-        "main() CLI. Use 'python -m pipelines run <source>' instead, or "
-        "import the download_*_full functions directly for raw-download-"
-        "only semantics (no BasePipeline lifecycle)."
-    )
+# v84 FORENSIC ROOT FIX (BUG #47): removed the dead
+# ``if __name__ == "__main__"`` guard that only raised ``SystemExit``.
+# The guard provided no useful functionality — it was a placeholder
+# from the v65 refactor that removed ``main()``. Dead code that adds
+# no value has no place in a production codebase.

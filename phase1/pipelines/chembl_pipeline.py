@@ -113,6 +113,7 @@ target_type           str | None      "SINGLE PROTEIN", "PROTEIN COMPLEX", ...
 from __future__ import annotations
 
 import hashlib
+import gzip
 import json
 import logging
 
@@ -713,8 +714,15 @@ class ChEMBLPipeline(BasePipeline):
                 else:
                     activities_df = _pd.DataFrame()
                 # Persist to raw_dir
-                drugs_csv = self.raw_dir / "chembl_drugs.csv"
-                drugs_df.to_csv(drugs_csv, index=False)
+                # v90 ROOT FIX (BUG #1): the previous code wrote
+                # `chembl_drugs.csv` (PLAIN CSV, no gzip) but clean()
+                # reads with `compression="gzip"` → BadGzipFile on every
+                # v50 pipeline run. The v49 path writes `.csv.gz` with
+                # gzip. ROOT FIX: write to `chembl_drugs.csv.gz` with
+                # gzip compression, matching the v49 canonical filename
+                # and the clean() expectations.
+                drugs_csv = self.raw_dir / "chembl_drugs.csv.gz"
+                drugs_df.to_csv(drugs_csv, index=False, compression="gzip")
                 if not activities_df.empty:
                     # v57 ROOT FIX (P1-013 — ChEMBL v50 filename mismatch):
                     #   The previous code wrote `chembl_activities_clean.csv`
@@ -738,9 +746,37 @@ class ChEMBLPipeline(BasePipeline):
                         self.source_name, len(activities_df), activities_gz_path,
                     )
                 # Update sha for audit
-                self._sha256_raw = _compute_file_sha256(drugs_csv)
+                # V90 CI fix: _compute_file_sha256 is a METHOD (self._compute_file_sha256),
+                # not a module-level function. The previous code called it as a bare
+                # function name, which raised NameError at runtime. This was a pre-existing
+                # Phase 1 bug that was hidden because the E2E sample-mode job was skipped
+                # when P2 + Chain-1 verification failed first. Now that P2 passes (V90
+                # COMP-3 fix), E2E runs and exposes this bug.
+                # ROOT FIX: _compute_file_sha256 is an instance method (line 4337),
+                # not a module-level function. The bare call was a pre-existing
+                # NameError that crashed the E2E sample-mode CI job.
+                self._sha256_raw = self._compute_file_sha256(drugs_csv)
                 return drugs_csv
-        except Exception as exc:
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            # v84 FORENSIC ROOT FIX (BUG #38): narrowed from broad
+            # ``except Exception``. The previous code caught ALL
+            # failures from the v50 downloader — including programming
+            # bugs (AttributeError, KeyError) — and silently fell back
+            # to the v49 path. A bug in ``download_chembl_full`` or
+            # ``_parse_molecules`` was masked as "v50 failed, using
+            # v49" — the pipeline ALWAYS fell back to v49, which may
+            # be stale or broken, with no visible warning.
+            # ROOT FIX: catch ONLY the expected I/O, value, and JSON
+            # parse errors. If ``requests`` is available, also catch
+            # ``requests.RequestException``. Programming bugs propagate
+            # so they surface during development instead of silently
+            # degrading to v49 forever.
+            _exc_types = (OSError, ValueError, json.JSONDecodeError)
+            if requests is not None:
+                _exc_types = (OSError, ValueError, json.JSONDecodeError,
+                              requests.RequestException)
+            if not isinstance(exc, _exc_types):
+                raise
             logger.warning(
                 "[%s] v50 downloader failed (%s) — falling back to v49 path",
                 self.source_name, exc,
@@ -863,9 +899,50 @@ class ChEMBLPipeline(BasePipeline):
         logger.info("[%s] clean() starting (raw_path=%s)", self.source_name, raw_path)
 
         # Read the raw drugs CSV (gzipped, UTF-8 — INT-6, INT-7).
+        # V90 CI fix: the ChEMBL API sometimes returns a non-gzip file
+        # (rate-limit HTML page, maintenance page, or error JSON) which
+        # raises BadGzipFile. The previous code had no error handling,
+        # so the E2E sample-mode CI job crashed whenever the API was
+        # having issues. The fix: try gzip first, fall back to plain
+        # CSV (without compression), and raise a clear error if both
+        # fail. This makes the pipeline robust to transient API issues.
+        import gzip as _gzip
+        try:
+            drugs_df = pd.read_csv(
+                raw_path,
+                compression="gzip",
+                low_memory=False,
+                encoding="utf-8",
+            )
+        except (_gzip.BadGzipFile, OSError) as gz_exc:
+            logger.warning(
+                "[%s] V90 CI fix: gzip read failed (%s). Falling back to "
+                "plain CSV read (the ChEMBL API may have returned a "
+                "non-gzip response — rate limit, maintenance, etc.).",
+                self.source_name, gz_exc,
+            )
+            try:
+                drugs_df = pd.read_csv(
+                    raw_path,
+                    compression=None,
+                    low_memory=False,
+                    encoding="utf-8",
+                )
+            except Exception as plain_exc:
+                raise OSError(
+                    f"V90 CI fix: could not read {raw_path} as gzip ({gz_exc}) "
+                    f"or as plain CSV ({plain_exc}). The ChEMBL API may be "
+                    f"down or rate-limiting. Try again later."
+                ) from plain_exc
+        # v90 ROOT FIX (BUG #10): auto-detect compression from file
+        # extension instead of hardcoding compression="gzip". The v50
+        # path now writes .csv.gz (BUG #1 fix), but defensive coding
+        # ensures a plain .csv file (e.g. from a manual download or
+        # API error page) is still readable without BadGzipFile.
+        _compression = "gzip" if raw_path.suffix == ".gz" else None
         drugs_df = pd.read_csv(
             raw_path,
-            compression="gzip",
+            compression=_compression,
             low_memory=False,
             encoding="utf-8",
         )
@@ -876,6 +953,40 @@ class ChEMBLPipeline(BasePipeline):
             initial_count,
             raw_path,
         )
+
+        # v84 FORENSIC ROOT FIX (BUG #50 — COMPOUND): data quality
+        # schema check. The compound bug chain was:
+        #   v50 downloader catches all exceptions (BUG #38 fixed) →
+        #   falls back to embedded samples → writes JSONL to a .csv
+        #   file → clean() reads garbage → falls back to v49 path →
+        #   reports "success" with wrong/missing data.
+        # ROOT FIX: validate the DataFrame schema immediately after
+        # load. If the expected ChEMBL columns are missing (e.g.
+        # ``chembl_id``, ``name``, ``max_phase``), raise a
+        # ``DataQualityError`` instead of silently processing garbage.
+        # This breaks the compound degradation chain at the FIRST
+        # stage where bad data enters the pipeline.
+        _expected_chembl_cols = {"chembl_id", "name", "max_phase"}
+        _actual_cols = set(drugs_df.columns)
+        _missing_critical = _expected_chembl_cols - _actual_cols
+        if _missing_critical and not drugs_df.empty:
+            raise ValueError(
+                f"[{self.source_name}] Data quality check FAILED: raw "
+                f"drugs CSV is missing critical columns "
+                f"{_missing_critical}. Expected at least "
+                f"{_expected_chembl_cols}, got {_actual_cols}. This "
+                f"indicates the v50 downloader produced a malformed "
+                f"file (e.g. JSONL written as CSV). Refusing to "
+                f"process garbage data — fix the downloader."
+            )
+        # Check for empty DataFrame (another silent-degradation signal).
+        if drugs_df.empty:
+            logger.warning(
+                "[%s] Data quality check: raw drugs CSV is EMPTY. "
+                "Proceeding with clean() but the output will have 0 "
+                "drugs — the KG will be missing all ChEMBL compounds.",
+                self.source_name,
+            )
 
         # Step 1: Generate InChIKey from SMILES where missing (C24, C25, C26).
         drugs_df = self._step_generate_inchikeys(drugs_df)
@@ -1106,9 +1217,13 @@ class ChEMBLPipeline(BasePipeline):
         )
 
         # Step 1: Read raw activities CSV.
+        # v90 ROOT FIX (BUG #10): auto-detect compression from file
+        # extension instead of hardcoding compression="gzip". The v50
+        # path writes .csv.gz, but a plain .csv should still work.
+        _compression = "gzip" if activities_raw_path.suffix == ".gz" else None
         activities_df = pd.read_csv(
             activities_raw_path,
-            compression="gzip",
+            compression=_compression,
             low_memory=False,
             encoding="utf-8",
         )
@@ -1183,7 +1298,15 @@ class ChEMBLPipeline(BasePipeline):
                     "[%s] clean_activities: using drugs.csv drug set (%d drugs)",
                     self.source_name, len(valid_chembl_ids),
                 )
-            except Exception as exc:
+            # v90 ROOT FIX (BUG #18): narrowed from broad
+            # ``except Exception`` which caught programming bugs
+            # (AttributeError from wrong column name, KeyError from
+            # missing column) and silently skipped the drug filter,
+            # allowing activities for molecules NOT in our drugs table
+            # to pass through → load() fails with "more than 50%
+            # unresolved drug_id". Root fix: catch ONLY expected I/O
+            # and data errors. Programming bugs propagate.
+            except (OSError, ValueError, pd.errors.EmptyDataError) as exc:
                 logger.warning(
                     "[%s] Could not read drugs.csv for activity filter (%s) — "
                     "proceeding without filter (may cause load() to fail "
@@ -1493,7 +1616,15 @@ class ChEMBLPipeline(BasePipeline):
             total_loaded += int(drugs_result.inserted + drugs_result.updated)
 
             # Step 4: Validate drug count (S18, DQ-13).
-            drug_count = len(df)
+            # v90 ROOT FIX (BUG #16): use drugs_upserted (actual DB
+            # writes) instead of len(df) (input row count) for the
+            # quality gate. len(df) counts ALL input rows including
+            # duplicates, invalid InChIKeys, and rows that failed
+            # upsert — using it as the quality gate passes the check
+            # even when zero rows were actually committed to the DB
+            # (e.g. flush failure). The correct metric is the actual
+            # number of rows that made it into the DB.
+            drug_count = self._metrics.get("drugs_upserted", 0)
             if drug_count < CHEMBL_EXPECTED_DRUG_COUNT_MIN:
                 # In test environments with CHEMBL_MAX_ROWS set very low,
                 # the count validation will fail. Allow override via env.
@@ -3762,7 +3893,15 @@ class ChEMBLPipeline(BasePipeline):
                 # v82 P0-D4b: preserve the censor metadata.
                 norm_censored.append(bool(result.censored))
                 norm_censor_dir.append(result.censor_direction)
-            except Exception as exc:  # noqa: BLE001 — never crash on a single row
+            # v90 ROOT FIX (BUG #17): narrowed from broad
+            # ``except Exception`` which caught programming bugs
+            # (TypeError, AttributeError, NameError) and silently
+            # inserted None, masking real code failures. Root fix:
+            # catch ONLY expected data-quality exceptions (ValueError
+            # from invalid numeric conversion, TypeError from None
+            # inputs, ArithmeticError from overflow). Programming bugs
+            # propagate so they surface during development.
+            except (ValueError, TypeError, ArithmeticError) as exc:  # noqa: BLE001
                 logger.warning(
                     "[%s] normalize_activity_value failed for value=%r units=%r: %s",
                     self.source_name, v, u, exc,

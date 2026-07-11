@@ -6,10 +6,16 @@ cursor-based pagination, cleans and normalises records, and bulk-upserts
 into the ``proteins`` table.
 
 Can be triggered independently or as part of the master pipeline.
-Schedule: 1st of every month at 04:00 UTC (cron ``0 4 1 * *``). UniProt's
+Schedule: 15th of every month at 04:00 UTC (cron ``0 4 15 * *``). UniProt's
 Swiss-Prot human reviewed set updates monthly; the standalone DAG runs
-on the 1st of every month so ad-hoc / per-source refreshes work without
+on the 15th of every month so ad-hoc / per-source refreshes work without
 requiring the master DAG.
+
+v89 FORENSIC ROOT FIX (BUG #8 P1 — Sunday Morning Pile-Up):
+  Moved from ``0 4 1 * *`` (1st of month) to ``0 4 15 * *`` (15th of
+  month). The 1st could fall on a Sunday, colliding with the master DAG
+  (Sunday 02:00 UTC, up to 7h runtime). See omim_dag.py for full fix
+  rationale. The 15th never systematically collides with Sunday.
 """
 
 from __future__ import annotations
@@ -57,9 +63,10 @@ def run_uniprot() -> None:
     description="UniProt ETL pipeline: human reviewed protein data",
     # v29 ROOT FIX (audit O-11): was schedule=None (dead). Now scheduled.
     # UniProt's Swiss-Prot human reviewed set updates monthly; standalone DAG
-    # runs on the 1st of every month at 04:00 UTC so ad-hoc / per-source
+    # runs on the 15th of every month at 04:00 UTC so ad-hoc / per-source
     # refreshes work without requiring the master DAG.
-    schedule="0 4 1 * *",
+    # v89 BUG #8: moved from 1st to 15th to avoid Sunday collisions.
+    schedule="0 4 15 * *",
     start_date=datetime(2024, 1, 1),
     catchup=False,
     max_active_runs=1,

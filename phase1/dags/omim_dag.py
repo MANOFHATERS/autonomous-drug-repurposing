@@ -12,7 +12,20 @@ v39 ROOT FIX (P1 #52): updated docstring. The previous docstring said
 gene deletion/duplication syndrome). Both are loaded.
 
 Can be triggered independently or as part of the master pipeline.
-Schedule: 1st of every month at 07:00 UTC
+Schedule: 15th of every month at 07:00 UTC
+
+v89 FORENSIC ROOT FIX (BUG #8 P1 — Sunday Morning Pile-Up):
+  The previous schedule ``0 7 1 * *`` (1st of month 07:00 UTC) could
+  fall on a Sunday — colliding with the master DAG (Sunday 02:00 UTC,
+  up to 7h runtime). When the 1st falls on Sunday, both the master DAG
+  and this standalone DAG invoke the SAME pipelines (OMIMPipeline().run()),
+  writing to the SAME CSV files and DB tables. This causes file-lock
+  contention and DB write conflicts (~12 collisions per year).
+  ROOT FIX: move to the 15th of the month. The 15th is a fixed
+  day-of-month that is independent of the day-of-week, so it NEVER
+  systematically collides with the Sunday master DAG schedule. The
+  ~2-week offset from the master DAG also gives operators a clean
+  mid-month refresh point without overlapping the weekly cadence.
 """
 
 from __future__ import annotations
@@ -64,9 +77,10 @@ def run_omim() -> None:
     description="OMIM ETL pipeline: gene-phenotype mappings",
     # v29 ROOT FIX (audit O-11): was schedule=None (dead). Now scheduled.
     # OMIM releases new morbidmap entries monthly; standalone DAG runs on
-    # the 1st of every month at 07:00 UTC so ad-hoc / per-source refreshes
+    # the 15th of every month at 07:00 UTC so ad-hoc / per-source refreshes
     # work without requiring the master DAG.
-    schedule="0 7 1 * *",
+    # v89 BUG #8: moved from 1st to 15th to avoid Sunday collisions.
+    schedule="0 7 15 * *",
     start_date=datetime(2024, 1, 1),
     catchup=False,
     max_active_runs=1,

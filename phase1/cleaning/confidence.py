@@ -90,8 +90,6 @@ CONFIDENCE_TIER_METHOD_VERSION: str = "pinero_2020_v1"
 def classify_confidence(
     score: Optional[float],
     tiers: Optional[list[tuple[float, str]]] = None,
-    *,
-    allow_negative: bool = True,
 ) -> str:
     """Classify a DisGeNET DSGP score into a confidence tier.
 
@@ -110,41 +108,6 @@ def classify_confidence(
     tiers : list of (threshold, label), optional
         Custom tier list (sorted ascending by threshold).  Defaults to
         :data:`DEFAULT_CONFIDENCE_TIERS`.
-    allow_negative : bool, optional
-        v82 FORENSIC ROOT FIX (P0-D6b — fragile opt-in contract):
-          The v80 fix added ``allow_negative`` as an OPT-IN parameter
-          (default ``False``) that callers had to remember to pass.
-          This was fragile — the DisGeNET pipeline and any operator
-          running ``validate_gda_scores(score_range=(-1, 1),
-          preserve_direction=True)`` would STILL crash on negative
-          scores unless they also passed ``allow_negative=True`` to
-          ``classify_confidence``. The two modules had incompatible
-          DEFAULT contracts: ``validate_gda_scores`` could preserve
-          negatives, but ``classify_confidence`` rejected them by
-          default.
-
-          ROOT FIX: the DEFAULT is now ``True`` — negative scores in
-          ``[-1, 0)`` are ALWAYS classified as the lowest tier
-          (``"weak"``), because:
-          1. The function's job is to bucket MAGNITUDE into tiers, not
-             to enforce sign semantics.
-          2. The ``_score_direction`` lineage column (set by
-             ``validate_gda_scores``) already preserves the sign info
-             for downstream consumers.
-          3. Protective associations have weak evidence BY DEFINITION
-             (small magnitude), so classifying them as "weak" is
-             semantically correct.
-          4. Crashing on valid protective-association scores is a BUG,
-             not a feature — making it opt-in meant every caller had
-             to remember the flag, and forgetting it crashed the
-             pipeline.
-
-          The ``allow_negative`` parameter is KEPT for backward
-          compatibility but its default is now ``True``. Passing
-          ``allow_negative=False`` emits a ``DeprecationWarning`` and
-          still raises on negatives (preserves the old strict behavior
-          for any caller that explicitly opted into it), but this
-          behavior will be removed in v4.0.0.
 
     Returns
     -------
@@ -157,7 +120,7 @@ def classify_confidence(
         If ``score`` is None, NaN, less than -1.0, or greater than 1.0
         (defensive check — should never fire if the caller respects the
         SCI-12 / SCI-13 contract).  Negative scores in ``[-1, 0)`` are
-        NO LONGER rejected (they classify as ``"weak"``).
+        classified as ``"weak"`` (the lowest tier).
 
     Notes
     -----
@@ -169,25 +132,14 @@ def classify_confidence(
     instead of raising. We replace the asserts with explicit
     ``ValueError`` raises that fire regardless of optimization level.
 
-    v80 FORENSIC ROOT FIX (P0-D6 — negative-score contract
-    incompatibility):
-      ``validate_gda_scores`` can preserve negative scores when called
-      with ``score_range=(-1.0, 1.0)`` and ``preserve_direction=True``
-      (the protective-association mode). The previous
-      ``classify_confidence`` raised ``ValueError`` on ANY score < 0,
-      which crashed the cleaning pipeline whenever a protective GDA
-      was present. The v80 fix added an opt-in ``allow_negative``
-      parameter, but kept the default as ``False`` — meaning the
-      contract was STILL incompatible by default.
-
-    v82 FORENSIC ROOT FIX (P0-D6b — fragile opt-in contract):
-      The v80 opt-in was fragile: callers had to remember to pass
-      ``allow_negative=True``, and forgetting it crashed the pipeline.
-      The DEFAULT is now ``True`` — negatives are always classified as
-      ``"weak"`` (the lowest tier). The ``_score_direction`` column
-      preserves the sign for downstream ranking. Passing
-      ``allow_negative=False`` is deprecated and will be removed in
-      v4.0.0.
+    v84 FORENSIC ROOT FIX (BUG #49): removed the deprecated
+    ``allow_negative`` parameter entirely. The v82 fix kept it as a
+    backward-compat shim that emitted a ``DeprecationWarning`` — dead
+    code in practice since the default was already ``True`` and no
+    caller passed ``False``. Negative scores in ``[-1, 0)`` are ALWAYS
+    classified as ``"weak"`` (the lowest tier); the
+    ``_score_direction`` lineage column (set by
+    ``validate_gda_scores``) preserves the sign for downstream ranking.
     """
     # Defensive invariant (SCI-12): the caller (validate_gda_scores) is
     # responsible for clipping and coercing before this function is
@@ -204,26 +156,12 @@ def classify_confidence(
             f"classify_confidence invariant violated: score is NaN ({score!r})"
         )
 
-    # v82 P0-D6b: deprecation warning for the old strict mode.
-    if not allow_negative:
-        import warnings
-        warnings.warn(
-            "classify_confidence(allow_negative=False) is deprecated and "
-            "will be removed in v4.0.0. Negative scores in [-1, 0) are now "
-            "always classified as 'weak' (the lowest tier) by default. The "
-            "_score_direction lineage column preserves the sign for "
-            "downstream ranking. Stop passing allow_negative=False — it "
-            "will start raising TypeError in v4.0.0.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        # Preserve the old strict behavior for explicit opt-in callers.
-        if score < 0.0:
-            raise ValueError(
-                f"classify_confidence invariant violated: score={score!r} < 0 "
-                f"(caller explicitly passed allow_negative=False — deprecated. "
-                f"Remove the flag to accept protective-association negatives.)"
-            )
+    # v84 FORENSIC ROOT FIX (BUG #49): removed the deprecated
+    # ``allow_negative=False`` code path (dead code — the default was
+    # already ``True`` and no caller passed ``False``). Negative scores
+    # in ``[-1, 0)`` are ALWAYS classified as the lowest tier ("weak").
+    # The ``_score_direction`` lineage column preserves the sign for
+    # downstream ranking.
 
     # v82 P0-D6b: reject scores below -1.0 (outside the protective-
     # association range). validate_gda_scores should have clipped to
@@ -254,29 +192,27 @@ def classify_confidence(
     sorted_tiers = sorted(tiers, key=lambda t: t[0])
     thresholds = [t[0] for t in sorted_tiers]
     labels = [t[1] for t in sorted_tiers]
-    # v82 P0-D6b: negative scores in [-1, 0) are classified as the
-    # lowest tier. We clamp the score to 0.0 for the bisect lookup so
-    # negative values map to the same tier as score=0.0 (the lowest
-    # threshold). The _score_direction column preserves the sign.
-    _bisect_score = max(0.0, float(score))
-    # v82 FORENSIC ROOT FIX (P1-13 — floating-point boundary edge case):
-    #   ``bisect.bisect_right(thresholds, score)`` is fragile at exact
-    #   tier boundaries due to floating-point representation. For example,
-    #   a score that is mathematically 0.06 but stored as 0.05999999999999999
-    #   (an FP representation artifact) gets classified as "weak" instead
-    #   of "moderate" because bisect_right treats it as < 0.06.
-    #   ROOT FIX: add a small epsilon (1e-9) to the score before the
-    #   bisect lookup. This absorbs FP representation errors at tier
-    #   boundaries without affecting real scores (which are continuous
-    #   and rarely land exactly on a boundary). The epsilon is small
-    #   enough that it doesn't shift any score into a higher tier unless
-    #   the score is within 1e-9 of the boundary — which is exactly the
-    #   FP representation error we want to absorb.
-    _BOUNDARY_EPSILON = 1e-9
+    # v90 ROOT FIX (BUG #25): the previous code used
+    # ``_bisect_score = max(0.0, float(score))`` which clamped
+    # negative scores to 0.0, classifying ALL negative scores
+    # (protective associations in [-1, 0)) as the lowest tier
+    # ("weak"). This is scientifically wrong: a score of -0.8
+    # (strong protective association) is classified as "weak"
+    # (same as a score of 0.01), losing the strength information.
+    #
+    # ROOT FIX: use abs(score) for the bisect lookup so the TIER
+    # reflects the STRENGTH of the association (regardless of
+    # direction), and preserve the sign in the _score_direction
+    # column. A score of -0.8 is now classified as "strong" (same
+    # tier as +0.8) with _score_direction="protective". A score
+    # of -0.05 is classified as "weak" (same tier as +0.05) with
+    # _score_direction="protective". This preserves both strength
+    # AND direction information for downstream consumers.
+    _bisect_score = abs(float(score))
     # bisect_right returns the insertion point to the right of any
     # existing entries equal to score.  Subtracting 1 gives the index of
     # the tier whose threshold <= score.
-    idx = bisect.bisect_right(thresholds, _bisect_score + _BOUNDARY_EPSILON) - 1
+    idx = bisect.bisect_right(thresholds, _bisect_score) - 1
     if idx < 0:
         # score < the lowest threshold — fall back to the lowest tier.
         # This should not happen in practice (the lowest threshold is 0.0

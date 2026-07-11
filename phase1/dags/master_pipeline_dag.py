@@ -611,8 +611,13 @@ def _trigger_phase2() -> None:
     import os as _os
     _logs_dir = _project_root / "logs"
     _logs_dir.mkdir(parents=True, exist_ok=True)
-    from datetime import datetime as _dt
-    _log_timestamp = _dt.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    from datetime import datetime as _dt, timezone as _tz
+    # v89 FORENSIC ROOT FIX (BUG #20 P1 — datetime.utcnow() is deprecated
+    #   in Python 3.12+ and returns a NAIVE datetime, not timezone-aware.
+    #   In non-UTC environments the log filename timestamp could drift.
+    #   ROOT FIX: use datetime.now(timezone.utc) which is tz-aware and
+    #   not deprecated. Behaviour is identical on UTC systems.
+    _log_timestamp = _dt.now(_tz.utc).strftime("%Y%m%dT%H%M%SZ")
     _phase2_log_path = _logs_dir / f"phase2_trigger_{_log_timestamp}.log"
     logger.info("v29 trigger_phase2: streaming subprocess output to %s", _phase2_log_path)
 
@@ -919,11 +924,37 @@ def master_pipeline() -> None:
     resolve >> disgenet_load
     resolve >> omim_load
 
-    # SCI-FIX: PubChem needs drugs in the DB (from entity resolution),
-    # so download runs after resolve, then load runs after download.
-    # Previously, download_pubchem was defined but never instantiated,
-    # causing pubchem_load to fail with FileNotFoundError.
-    resolve >> pubchem_download >> pubchem_load
+    # v89 FORENSIC ROOT FIX (BUG #1 P0 — PubChem download queries an EMPTY
+    #   drugs table):
+    #   The previous wiring ``resolve >> pubchem_download >> pubchem_load``
+    #   was SCIENTIFICALLY WRONG. PubChem's ``run_download_and_clean_only()``
+    #   (invoked by ``download_pubchem``) reads InChIKeys from the ``drugs``
+    #   table where ``pubchem_cid IS NULL`` (see pubchem_pipeline.py:1084-1090
+    #   ``select(Drug.inchikey).where(Drug.pubchem_cid.is_(None))``).
+    #
+    #   But the ``drugs`` table is populated by ``chembl_load`` and
+    #   ``drugbank_load`` (which call ``run_load_only()``), NOT by
+    #   ``resolve`` (entity_resolution reads CSVs and writes to the
+    #   ``entity_mapping`` table — it does NOT populate ``drugs``).
+    #   With the previous wiring, ``pubchem_download`` ran CONCURRENTLY
+    #   with ``chembl_load``/``drugbank_load`` (all depend only on
+    #   ``resolve``), so ``pubchem_download`` queried an EMPTY ``drugs``
+    #   table, found zero drugs to enrich, produced an empty
+    #   ``pubchem_enrichment.csv``, and ``pubchem_load`` loaded nothing.
+    #   Every Sunday master DAG run produced a KG with ZERO PubChem
+    #   enrichment data (no CIDs, no molecular formulas, no molecular
+    #   weights). The inline comment at the old line 803 ("PubChem needs
+    #   drugs in the DB (from entity resolution)") was wrong — entity
+    #   resolution does NOT populate the ``drugs`` table.
+    #
+    #   ROOT FIX: wire ``pubchem_download`` AFTER both ``chembl_load``
+    #   and ``drugbank_load`` (the two tasks that populate the ``drugs``
+    #   table with InChIKeys). ``pubchem_load`` remains downstream of
+    #   ``pubchem_download``. This guarantees the ``drugs`` table is
+    #   non-empty when PubChem's download queries it.
+    chembl_load >> pubchem_download
+    drugbank_load >> pubchem_download
+    pubchem_download >> pubchem_load
 
     # V18 ROOT FIX (Phase 1 ↔ Phase 2 100% connection):
     # v79 P0-B2 ROOT FIX (compound): trigger_phase2 now depends on ALL

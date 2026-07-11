@@ -15,10 +15,25 @@ BEGIN;
 -- ===========================================================================
 -- Phase 0: Metadata — schema_version table (ARCH-07)
 -- ===========================================================================
+-- v90 ROOT FIX (BUG #17 — P1 SERIAL vs GENERATED ALWAYS AS IDENTITY):
+--   The previous declaration used ``id SERIAL PRIMARY KEY`` — PostgreSQL's
+--   legacy auto-increment. But migration 001 (line 67-68) uses
+--   ``id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY`` — the SQL
+--   standard (PostgreSQL 10+). GENERATED ALWAYS AS IDENTITY prevents
+--   manual INSERT of the id value; SERIAL allows it. If migration 001
+--   runs first, the table uses IDENTITY; migration 003's CREATE TABLE
+--   IF NOT EXISTS is a no-op. But if migration 003 runs first (e.g. on
+--   a partial install where 001 was skipped), the table uses SERIAL —
+--   and subsequent INSERT INTO schema_version with explicit id values
+--   would behave differently (IDENTITY rejects, SERIAL accepts).
+--   ROOT FIX: use ``GENERATED ALWAYS AS IDENTITY`` to match migration 001.
+--   The ``CREATE TABLE IF NOT EXISTS`` is still a no-op on DBs where 001
+--   already ran, but on partial installs the table is created with the
+--   correct identity semantics.
 CREATE TABLE IF NOT EXISTS schema_version (
-    id          SERIAL PRIMARY KEY,
+    id          INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     version     INTEGER NOT NULL UNIQUE,
-    applied_at  TIMESTAMP DEFAULT NOW(),
+    applied_at  TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     description VARCHAR(200) NOT NULL
 );
 
@@ -31,16 +46,56 @@ ALTER TABLE drugs ALTER COLUMN inchikey TYPE VARCHAR(50);
 -- Idempotency: PostgreSQL does not support IF NOT EXISTS for ADD CONSTRAINT.
 DO $$
 BEGIN
-    -- FIX-P1-C-15: was re-adding loose TEST/OUTER/INNER/IK% prefixes that
-    -- migration 001 never had (schema-drift regression). Now matches
-    -- migration 001 exactly: only the canonical 27-char form OR SYNTH%
-    -- synthetic prefix is allowed.
+    -- v89/v90 ROOT FIX (BUG #3 / BUG #36 — InChIKey validation drift across
+    --   migration 001 / 003 / ORM / 009 / loader):
+    --   The previous code here DROPPED the strict regex constraint from
+    --   migration 001 and ADDED a WEAK one: ``CHECK (LENGTH(inchikey) = 27
+    --   OR inchikey LIKE 'SYNTH%')``. The comment claimed it "matches
+    --   migration 001 exactly" — it did NOT. Migration 001 uses PostgreSQL's
+    --   POSIX regex ``~ '^[A-Z]{14}-[A-Z]{10}-[A-Z]$'`` (strict canonical
+    --   format). The weak LENGTH=27 check accepted any 27-char ASCII string
+    --   (gibberish like ``TESTTESTTESTTESTTESTTESTTES``). The ORM uses a
+    --   portable form (LENGTH=27 + hyphen position SUBSTR checks). Migration
+    --   009 re-tightens on PostgreSQL (regex) but the SQLite fallback is
+    --   still LENGTH-only. The loader delegates to the Python validator
+    --   (strict). Five layers, FIVE different validation strengths — the
+    --   DB CHECK was the weakest (on dev SQLite), so a raw SQL INSERT
+    --   bypassing the ORM could land garbage InChIKeys that the Python
+    --   validator would reject. When the DB was later migrated to prod
+    --   (migration 009), the invalid rows BLOCKED the migration (CHECK
+    --   violation) with no way to know which rows were invalid.
+    --   ROOT FIX: align migration 003's constraint with migration 009's
+    --   strict regex (PostgreSQL) + portable fallback (SQLite). This makes
+    --   migration 001, 003, and 009 all enforce the SAME strict canonical
+    --   InChIKey format on PostgreSQL. The ORM CHECK (portable form with
+    --   hyphen-position validation) is the dev/SQLite backstop. The Python
+    --   validator (cleaning._constants.is_canonical_inchikey) is the
+    --   authoritative source on ALL dialects. Single source of truth
+    --   restored; no layer is weaker than another.
     IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_drugs_inchikey_format') THEN
         ALTER TABLE drugs DROP CONSTRAINT chk_drugs_inchikey_format;
     END IF;
-    ALTER TABLE drugs ADD CONSTRAINT chk_drugs_inchikey_format
-        CHECK (LENGTH(inchikey) = 27 OR inchikey LIKE 'SYNTH%');
-    RAISE NOTICE '  [OK] (Re-)added constraint chk_drugs_inchikey_format (FIX-P1-C-15: matches migration 001)';
+    -- PostgreSQL: strict POSIX regex (matches migration 001 + 009).
+    -- The EXCEPTION block provides a portable LENGTH+hyphen fallback for
+    -- non-PostgreSQL dialects (SQLite dev/test) — same pattern as
+    -- migration 009.
+    BEGIN
+        ALTER TABLE drugs ADD CONSTRAINT chk_drugs_inchikey_format
+            CHECK (
+                inchikey ~ '^[A-Z]{14}-[A-Z]{10}-[A-Z]$'
+                OR inchikey LIKE 'SYNTH%'
+            );
+        RAISE NOTICE '  [OK] (Re-)added constraint chk_drugs_inchikey_format — strict POSIX regex (v89/v90 BUG #3/#36: matches migration 001 + 009)';
+    EXCEPTION WHEN feature_not_supported OR syntax_error THEN
+        ALTER TABLE drugs ADD CONSTRAINT chk_drugs_inchikey_format
+            CHECK (
+                (LENGTH(inchikey) = 27
+                 AND SUBSTR(inchikey, 15, 1) = '-'
+                 AND SUBSTR(inchikey, 26, 1) = '-')
+                OR inchikey LIKE 'SYNTH%'
+            );
+        RAISE NOTICE '  [OK] (Re-)added constraint chk_drugs_inchikey_format — portable fallback (v89/v90 BUG #3/#36: hyphen-position check, not just LENGTH)';
+    END;
 END $$;
 
 ALTER TABLE entity_mapping ALTER COLUMN canonical_inchikey TYPE VARCHAR(50);
@@ -338,12 +393,28 @@ ALTER TABLE drug_protein_interactions ALTER COLUMN source_id DROP DEFAULT;
 UPDATE drug_protein_interactions SET source_id = NULL WHERE source_id = '';
 
 -- [DES-06] Add updated_at to tables missing it
-ALTER TABLE proteins ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT NOW();
-ALTER TABLE drug_protein_interactions ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT NOW();
-ALTER TABLE protein_protein_interactions ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT NOW();
-ALTER TABLE gene_disease_associations ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT NOW();
-ALTER TABLE entity_mapping ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT NOW();
-ALTER TABLE pipeline_runs ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT NOW();
+-- v90 ROOT FIX (BUG #18 — P1 TIMESTAMP vs TIMESTAMP WITH TIME ZONE):
+--   The previous declaration used ``TIMESTAMP DEFAULT NOW()`` — a
+--   naive (no timezone) timestamp. But migration 001 (line 544) declares
+--   ``updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()`` for
+--   proteins. The ORM (models.py:168-172) declares
+--   ``DateTime(timezone=True), nullable=False``. If migration 001 didn't
+--   run (partial install), migration 003 creates proteins.updated_at as
+--   a nullable, no-TZ timestamp. Base.metadata.create_all() on a DB
+--   where migration 003 already ran would NOT upgrade the column — the
+--   table exists, so create_all is a no-op. The column stays nullable +
+--   no-TZ forever. Downstream queries that filter
+--   ``WHERE updated_at > '2024-01-01T00:00:00+00:00'::timestamptz``
+--   produce wrong results (no-TZ timestamps are interpreted in the
+--   session timezone, not UTC). ROOT FIX: use
+--   ``TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()`` to match
+--   migration 001 and the ORM exactly.
+ALTER TABLE proteins ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW();
+ALTER TABLE drug_protein_interactions ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW();
+ALTER TABLE protein_protein_interactions ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW();
+ALTER TABLE gene_disease_associations ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW();
+ALTER TABLE entity_mapping ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW();
+ALTER TABLE pipeline_runs ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW();
 
 -- [DES-07] PipelineRun source and status constraints
 DO $$
@@ -443,7 +514,18 @@ CREATE INDEX IF NOT EXISTS idx_dpi_drug_interaction
 -- ===========================================================================
 -- Record migration
 -- ===========================================================================
+-- v90 ROOT FIX (BUG #16 — P1 migration 003 NOT re-runnable):
+--   Migration 003 was the ONLY migration in the chain (001-011) whose
+--   schema_version INSERT did NOT use ``ON CONFLICT (version) DO
+--   NOTHING``. Re-running migration 003 (e.g. after a partial-apply +
+--   manual fix) raised ``IntegrityError: duplicate key value violates
+--   unique constraint "schema_version_version_key"``. The outer
+--   BEGIN/COMMIT rolled back the ENTIRE migration 003 on re-run, even
+--   though all the ALTERs are idempotent (IF NOT EXISTS). ROOT FIX: add
+--   ``ON CONFLICT (version) DO NOTHING`` — matching migrations 001, 002,
+--   004-011. Now migration 003 is re-runnable like every other migration.
 INSERT INTO schema_version (version, description)
-    VALUES (3, '16-domain models fix: 78 issues across SCI, DQ, DES, IDEM, ARCH, REL, PERF, SEC, LOG, CFG, LINE, INT domains');
+    VALUES (3, '16-domain models fix: 78 issues across SCI, DQ, DES, IDEM, ARCH, REL, PERF, SEC, LOG, CFG, LINE, INT domains')
+    ON CONFLICT (version) DO NOTHING;
 
 COMMIT;

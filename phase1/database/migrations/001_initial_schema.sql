@@ -1057,7 +1057,17 @@ CREATE TABLE IF NOT EXISTS gene_disease_associations (
     --   combination crashed every loader that let disease_id default on
     --   PostgreSQL (SQLite silently accepted the violation). The DEFAULT
     --   is now removed; this CHECK remains as the active guard.
-    CONSTRAINT chk_gda_disease_id
+    -- v90 ROOT FIX (BUG #1 — P0 constraint-name drift): renamed from
+    --   ``chk_gda_disease_id`` to ``chk_gda_disease_id_nonempty`` so the
+    --   migration-created constraint name EXACTLY matches the ORM-declared
+    --   CheckConstraint name in database/models.py (line ~1739). The
+    --   previous name drift meant ``ALTER TABLE ... DROP CONSTRAINT
+    --   chk_gda_disease_id_nonempty`` succeeded on dev DBs (ORM-created
+    --   via Base.metadata.create_all()) but FAILED on prod DBs (migration-
+    --   created), and vice-versa for ``DROP CONSTRAINT chk_gda_disease_id``.
+    --   Schema introspection tools reported contradictory state. Aligning
+    --   the names eliminates the dev/prod schema drift.
+    CONSTRAINT chk_gda_disease_id_nonempty
         CHECK (disease_id <> ''),
     -- [SCI-07] Disease ID type enum
     -- SCI-FIX: include 'hpo' (Human Phenotype Ontology) to match the ORM
@@ -1695,7 +1705,7 @@ END $$;
 
 -- INSERT INTO gene_disease_associations (gene_symbol, disease_id, disease_id_type, source)
 --     VALUES ('', '', 'omim', 'disgenet');
--- Expected: FAIL (chk_gda_gene_symbol, chk_gda_disease_id — empty strings)
+-- Expected: FAIL (chk_gda_gene_symbol, chk_gda_disease_id_nonempty — empty strings)
 
 -- INSERT INTO pipeline_runs (source, status, duration_seconds)
 --     VALUES ('unknown', 'invalid', -5);

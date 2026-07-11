@@ -85,6 +85,13 @@ from database.models import (
     ProteinProteinInteraction,
 )
 
+# v90 ROOT FIX (BUG #10): _get_environment() now defaults to "production"
+# (fail-closed) when DRUGOS_ENVIRONMENT / ENVIRONMENT / ENV is unset. Tests
+# need dev-sized pools and dev-mode logging, so explicitly opt into dev.
+# This MUST run before any connection.py module-level code executes.
+import os as _os
+_os.environ.setdefault("DRUGOS_ENVIRONMENT", "development")
+
 
 # ============================================================================
 # Database fixtures

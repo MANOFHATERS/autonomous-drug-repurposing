@@ -137,9 +137,13 @@ class TestT026_Migration007PortableSql(unittest.TestCase):
                       "T-026: run_migrations.py must define _apply_postgres_only_upgrades function")
         self.assertIn('"007_pipeline_run_metadata.sql"', text,
                       "T-026: _POSTGRES_ONLY_UPGRADES must have an entry for migration 007")
-        # The hook must be CALLED after the PostgreSQL migration applies
-        self.assertIn("_apply_postgres_only_upgrades(engine, migration_name)", text,
-                      "T-026: _apply_postgres_only_upgrades must be called after each PostgreSQL migration")
+        # The hook must be CALLED inside the per-migration transaction.
+        # v90 ROOT FIX (BUG #15): signature changed from (engine, migration_name)
+        # to (conn, migration_name) so the upgrade runs INSIDE the caller's
+        # transaction and commits atomically with the migration.
+        self.assertIn("_apply_postgres_only_upgrades(conn, migration_name)", text,
+                      "T-026/BUG #15: _apply_postgres_only_upgrades must be called with the "
+                      "per-migration connection (conn) so it commits atomically with the migration")
 
 
 class TestT027_MlflowCustomDockerfile(unittest.TestCase):

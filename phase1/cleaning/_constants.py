@@ -286,17 +286,34 @@ def strip_inchikey_extension(inchikey: str) -> str:
     ``-N-a``, etc. These are NOT part of the canonical key and must
     be stripped before validation / deduplication / DB insert.
 
+    v84 FORENSIC ROOT FIX (BUG #52): also strip trailing newlines /
+    whitespace. Some sources emit 28-char keys with a trailing ``\\n``
+    that ``str.strip()`` handles but the previous version's length
+    check (``len(s) > 27``) did not — a 28-char key with a trailing
+    newline would NOT be stripped because ``len("...N\\n") == 28``
+    and the prefix ``s[:27]`` would be ``"...N"``\\n truncated to
+    ``"...N"`` without the newline... actually the newline IS at
+    position 27. The ROOT FIX: call ``.strip()`` FIRST (already done
+    via ``s = inchikey.strip().upper()``), which removes the trailing
+    newline BEFORE the length check. This was already correct in the
+    previous version, but we add an explicit test for this case.
+
     Examples
     --------
     >>> strip_inchikey_extension("BSYNRYMUTXBXSQ-UHFFFAOYSA-N")
     'BSYNRYMUTXBXSQ-UHFFFAOYSA-N'  # already 27-char canonical — unchanged
     >>> strip_inchikey_extension("BSYNRYMUTXBXSQ-UHFFFAOYSA-N-a")
     'BSYNRYMUTXBXSQ-UHFFFAOYSA-N'  # extension stripped
+    >>> strip_inchikey_extension("BSYNRYMUTXBXSQ-UHFFFAOYSA-N\\n")
+    'BSYNRYMUTXBXSQ-UHFFFAOYSA-N'  # trailing newline stripped
     >>> strip_inchikey_extension("SYNTH-ABCDEF0123-ABCDEF0123-A")
     'SYNTH-ABCDEF0123-ABCDEF0123-A'  # SYNTH keys are not stripped
     """
     if not isinstance(inchikey, str):
         return ""
+    # v84 BUG #52: strip ALL surrounding whitespace (including \\n, \\r,
+    # \\t) before processing. Some sources emit InChIKeys with trailing
+    # newlines that would cause the length check to misfire.
     s = inchikey.strip().upper()
     if s.startswith("SYNTH"):
         return s  # SYNTH keys have their own format; do not strip
