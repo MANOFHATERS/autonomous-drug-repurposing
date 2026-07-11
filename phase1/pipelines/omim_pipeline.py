@@ -415,7 +415,21 @@ MAPPING_KEY_RE: re.Pattern[str] = re.compile(r"\(([1-4])\)\s*$")
 MAPPING_KEY_RE_LENIENT: re.Pattern[str] = re.compile(r"\(([1-4])\)\s*[, ]")
 
 # BUG-3.21: MIM number regex — 5 to 7 digits, validated against range later.
-# Matches any comma-separated 5-7 digit number with a word boundary after.
+#
+# v93 ROOT FIX (P1-032 — comment accuracy): the previous comment said
+# "Matches any comma-separated 5-7 digit number with a word boundary
+# after." This was MISLEADING in two ways:
+#   1. The regex is ``r",\s*(\d{5,7})\b"`` — the leading ``,`` IS part
+#      of the match (the MIM number MUST be preceded by a comma in the
+#      morbidmap.txt format), so "comma-separated" was technically
+#      correct but ambiguous. The regex matches a 5-7 digit number that
+#      follows a comma, NOT any standalone 5-7 digit number.
+#   2. The regex ALLOWS leading zeros (e.g. "000123" matches ``\d{5,7}``
+#      and ``int("000123") == 123`` which is below the [100100, 999999]
+#      range). The regex is LOOSE — the downstream range check at line
+#      ~572 (``100100 <= self.phenotype_mim <= 999999``) is the REAL
+#      validator. The regex is a PRE-FILTER only; the range check is
+#      authoritative.
 # We take the LAST match (in case the phenotype name contains multiple
 # comma-separated numbers) — the MIM number is conventionally the last
 # comma-separated numeric token before the mapping key. The downstream

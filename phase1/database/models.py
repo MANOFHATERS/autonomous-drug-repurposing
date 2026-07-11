@@ -50,6 +50,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    column,
     func,
     text,
 )
@@ -1445,9 +1446,23 @@ class DrugProteinInteraction(Base, IDMixin, TimestampMixin):
         # PostgreSQL migration-created DBs (prod) rejected. "Tests green,
         # prod red" anti-pattern. Adding the three missing CHECKs here so
         # dev/test/prod all enforce the same constraints.
+        #
+        # v93 ROOT FIX (P1-049): the DB CHECK was MISSING six valid activity
+        # types that ``cleaning/normalizer.py::_ALLOWED_ACTIVITY_TYPES``
+        # accepts: ``Kb``, ``pKi``, ``pIC50``, ``pEC50``, ``pKd``, ``ED50``.
+        # A DPI row with ``activity_type='pIC50'`` (a perfectly valid
+        # log-scale potency measure used by ChEMBL, PubChem BioAssay, and
+        # BindingDB) was REJECTED by the DB CHECK but ACCEPTED by the
+        # normalizer — losing log-scale activity data from the KG and
+        # corrupting downstream Graph Transformer edge features (only
+        # linear-scale IC50/Ki/Kd/EC50/AC50 survived). The DB CHECK must
+        # be a SUPERSET of (or exactly match) the normalizer's allowed
+        # set — never a subset. Single source of truth:
+        # ``cleaning/normalizer.py::_ALLOWED_ACTIVITY_TYPES``.
         CheckConstraint(
             "activity_type IS NULL OR activity_type IN "
-            "('IC50', 'EC50', 'Ki', 'Kd', 'potency', 'AC50', 'unknown')",
+            "('IC50', 'EC50', 'Ki', 'Kd', 'Kb', 'potency', 'AC50', "
+            "'pKi', 'pIC50', 'pEC50', 'pKd', 'ED50', 'unknown')",
             name="chk_dpi_activity_type",
         ),
         CheckConstraint(
@@ -1583,8 +1598,25 @@ class ProteinProteinInteraction(Base, IDMixin, TimestampMixin):
         # True when protein_a_id == protein_b_id (self-interaction).
         # Downstream ML models can use this flag to learn different
         # representations for homodimers vs heterodimers.
+        #
+        # v93 ROOT FIX (P1-025): the previous CHECK used non-standard SQL
+        # (``==`` and ``= TRUE``) and was logically ASYMMETRIC — it only
+        # enforced "homodimer ⇒ a_id == b_id" but NOT "a_id != b_id ⇒
+        # NOT homodimer". A heterodimer row with ``is_homodimer = TRUE``
+        # (loader bug or manual insert) was SILENTLY ACCEPTED, polluting
+        # the KG with false homodimer flags. Downstream ML models would
+        # then learn wrong homodimer representations (e.g. treating an
+        # EGFR-HER2 heterodimer as a homodimer).
+        #
+        # The new CHECK is a bidirectional biconditional that enforces
+        # BOTH directions portably:
+        #   - homodimer (a_id == b_id) ⇒ is_homodimer MUST be TRUE
+        #   - heterodimer (a_id != b_id) ⇒ is_homodimer MUST be FALSE
+        # Uses ``=`` (standard SQL) and ``TRUE``/``FALSE`` literals,
+        # which work on PostgreSQL, SQLite, and strict-mode MySQL.
         CheckConstraint(
-            "(protein_a_id != protein_b_id) OR (protein_a_id == protein_b_id AND is_homodimer = TRUE)",
+            "(protein_a_id = protein_b_id AND is_homodimer = TRUE) "
+            "OR (protein_a_id != protein_b_id AND is_homodimer = FALSE)",
             name="chk_ppi_homodimer_flag",
         ),
         # [SCI-03] Score bounds — all STRING scores are 0–1000
@@ -1912,9 +1944,43 @@ class GeneDiseaseAssociation(Base, IDMixin, TimestampMixin):
         Index("idx_gda_source_id", "source_id"),
         # [IDEM-14] Index on snapshot_tag for fast snapshot queries
         Index("idx_gda_snapshot_tag", "snapshot_tag"),
+        # v93 ROOT FIX (P1-026 — NULL gene_symbol dedup):
+        # ``gene_symbol`` is nullable (line 1700). On PostgreSQL 14 and
+        # earlier, SQLite, and MySQL, NULLs are treated as DISTINCT in a
+        # UNIQUE constraint — two GDA rows with ``gene_symbol=NULL``,
+        # ``disease_id='C001'``, ``source='disgenet'`` are BOTH allowed
+        # (not considered duplicates). This silently corrupts the KG with
+        # duplicate Gene→Disease edges.
+        #
+        # Portable fix (works on PostgreSQL 12+, SQLite 3.31+, MySQL 8+):
+        # use a functional UNIQUE index on COALESCE(gene_symbol, '') —
+        # NULL is normalized to empty string for the dedup check, so two
+        # NULL-gene rows with the same (disease_id, source) collide.
+        # PostgreSQL 15+ supports ``NULLS NOT DISTINCT`` but we cannot
+        # rely on it (dev runs on SQLite, prod may be on PG 14).
+        #
+        # The application-level dedup in ``database/loaders.py::
+        # bulk_upsert_gdas`` (v93 fix) ALSO drops duplicate NULL-gene
+        # rows before insert as a defense-in-depth measure.
         UniqueConstraint(
             "gene_symbol", "disease_id", "source",
             name="uq_gda_gene_disease_source",
+        ),
+        # Functional UNIQUE index for NULL gene_symbol dedup (portable).
+        # v93 ROOT FIX (P1-026): COALESCE(gene_symbol, '') normalizes
+        # NULL → '' so two NULL-gene rows with the same (disease_id,
+        # source) collide at the index level. Uses ``func.coalesce``
+        # with ``column("gene_symbol")`` (SQLAlchemy expression) so
+        # the DDL generator renders it as a column reference, not a
+        # string literal. On SQLite, functional indexes require
+        # SQLAlchemy >= 1.4; on PostgreSQL, they work natively. The
+        # application-level dedup in ``database/loaders.py::
+        # bulk_upsert_gdas`` (v93 fix) is the defense-in-depth for
+        # SQLite dev/test where functional indexes may not render.
+        Index(
+            "uq_gda_gene_disease_source_nullsafe",
+            func.coalesce(column("gene_symbol"), ""), "disease_id", "source",
+            unique=True,
         ),
         # [SCI-06 / COMP-5] Disease ID type validation — extended to include
         # 'hpo' (HPO terms are valid DisGeNET disease IDs per Piñero et al. 2020).
