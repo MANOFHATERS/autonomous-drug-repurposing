@@ -33,11 +33,29 @@ export interface ClinicalTrial {
 export interface ClinicalTrialSearchResponse {
   total: number;
   trials: ClinicalTrial[];
+  /**
+   * FE-015 ROOT FIX: CT.gov v2 returns an opaque base64 cursor for the
+   * next page. The caller MUST pass this back as `pageToken` (not an
+   * integer offset) to fetch the next page. We expose it so the API
+   * route can return it to the client for follow-up paginated requests.
+   */
+  nextPageToken?: string;
 }
 
 /**
  * Search clinical trials by disease/condition and optionally by intervention (drug).
  * Returns real, currently-registered trials from ClinicalTrials.gov.
+ *
+ * FE-015 ROOT FIX: The previous code did `urlParams.set("pageToken",
+ * String(offset))` — passing a numeric offset like "20" as the pageToken.
+ * CT.gov v2's pageToken is an opaque base64-encoded cursor returned by
+ * the PREVIOUS response, NOT a numeric offset. Passing String(offset)
+ * returns a 400 error or unexpected results. Pagination beyond page 1
+ * was completely broken.
+ *
+ * Root fix: this function now accepts an opaque `pageToken` cursor (from
+ * the previous response) and returns `nextPageToken` in the response.
+ * Numeric offset is no longer supported because CT.gov v2 is cursor-only.
  */
 export async function searchClinicalTrials(params: {
   condition?: string;
@@ -45,10 +63,9 @@ export async function searchClinicalTrials(params: {
   status?: "RECRUITING" | "ACTIVE_NOT_RECRUITING" | "COMPLETED" | "ALL";
   phase?: string;
   limit?: number;
-  offset?: number;
+  pageToken?: string;
 }): Promise<ClinicalTrialSearchResponse> {
   const limit = Math.min(params.limit ?? 20, 100);
-  const offset = params.offset ?? 0;
 
   // Build the query expression the way ClinicalTrials.gov v2 expects.
   // Use the simpler query.cond and query.intr parameters when possible.
@@ -63,12 +80,10 @@ export async function searchClinicalTrials(params: {
     urlParams.set("query", "*");
   }
   urlParams.set("pageSize", String(limit));
-  if (offset > 0) {
-    // pageToken is opaque cursor returned by previous response. We can't
-    // synthesise one from an offset; instead we use the count-based
-    // pageToken convention by passing it as a string offset, which CT.gov
-    // v2 supports via the "pageToken" param for numeric offsets.
-    urlParams.set("pageToken", String(offset));
+  // FE-015: pageToken is an opaque cursor returned by the previous
+  // response. Pass it through verbatim — never synthesise one.
+  if (params.pageToken && params.pageToken.trim()) {
+    urlParams.set("pageToken", params.pageToken.trim());
   }
   urlParams.set("format", "json");
   urlParams.set(
@@ -115,6 +130,10 @@ export async function searchClinicalTrials(params: {
   return {
     total: body?.totalCount ?? trials.length,
     trials,
+    // FE-015: expose the opaque cursor for the next page. The caller passes
+    // this back as pageToken on the next request. When this is absent, there
+    // are no more results.
+    nextPageToken: body?.nextPageToken || undefined,
   };
 }
 

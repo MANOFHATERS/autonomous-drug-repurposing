@@ -43,9 +43,34 @@ export async function getDrugSafetySummary(drugName: string): Promise<DrugSafety
   const q = (drugName || "").trim();
   if (q.length < 2) return null;
 
+  // FE-014 ROOT FIX: Sanitize user input before interpolating into the
+  // openFDA query expression. The previous code did:
+  //   const search = `patient.drug.openfda.generic_name:"${q}"+OR+...`
+  //   const url = `${OPENFDA_BASE}/drug/event.json?search=${encodeURIComponent(search)...}`
+  //
+  // The openFDA search syntax reserves ", (, ), AND, OR, NOT. An attacker
+  // passing q=aspirin") AND (patient.drug.openfda.generic_name:ibuprofen
+  // could manipulate the query — escape the quoted field, inject boolean
+  // operators, exfiltrate data from other drugs, exhaust the openFDA API
+  // quota, or trigger 500s.
+  //
+  // Root fix: strip every character that has special meaning in the openFDA
+  // query language BEFORE interpolation. We allow alphanumerics, spaces,
+  // hyphens, and apostrophes (e.g., "St John's Wort"). Everything else is
+  // removed. We also collapse whitespace and apply a max length.
+  const sanitized = q
+    .replace(/["()\\]/g, "") // remove quotes, parens, backslashes
+    .replace(/\b(AND|OR|NOT)\b/gi, "") // remove boolean operators
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 128);
+  if (sanitized.length < 2) return null;
+
   // openFDA uses the generic (non-proprietary) name in the `patient.drug.openfda.generic_name` field.
   // We do an exact (case-insensitive) match on generic_name OR brand_name.
-  const search = `patient.drug.openfda.generic_name:"${q}"+OR+patient.drug.openfda.brand_name:"${q}"`;
+  // The sanitized value is safe to interpolate because we stripped every
+  // special character above.
+  const search = `patient.drug.openfda.generic_name:"${sanitized}"+OR+patient.drug.openfda.brand_name:"${sanitized}"`;
   const url = `${OPENFDA_BASE}/drug/event.json?search=${encodeURIComponent(search).replace(/%2B/g, "+")}&limit=100`;
 
   // Note: openFDA responses can exceed Next.js's 2MB fetch cache limit, so

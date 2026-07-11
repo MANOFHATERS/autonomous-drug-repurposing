@@ -146,7 +146,7 @@ export function KnowledgeGraphViewer({
                 ? edge.source === selectedNode || edge.target === selectedNode
                 : true;
               return (
-                <g key={edge.id}>
+                <g key={`${edge.source}-${edge.target}-${edge.relation}`}>
                   <line
                     x1={source.x}
                     y1={source.y}
@@ -163,7 +163,7 @@ export function KnowledgeGraphViewer({
                       textAnchor="middle"
                       className="text-[9px] fill-muted-foreground"
                     >
-                      {edge.label}
+                      {edge.relation}
                     </text>
                   )}
                 </g>
@@ -189,7 +189,7 @@ export function KnowledgeGraphViewer({
                         <circle
                           cx={pos.x}
                           cy={pos.y}
-                          r={node.size + 6}
+                          r={(node.size || 20) + 6}
                           fill="none"
                           stroke={typeColors[node.type]}
                           strokeWidth={2}
@@ -201,7 +201,7 @@ export function KnowledgeGraphViewer({
                       <circle
                         cx={pos.x}
                         cy={pos.y}
-                        r={node.size}
+                        r={node.size || 20}
                         fill={typeColors[node.type]}
                         fillOpacity={isConnected ? 0.2 : 0.1}
                         stroke={typeColors[node.type]}
@@ -210,7 +210,7 @@ export function KnowledgeGraphViewer({
                       {/* Label */}
                       <text
                         x={pos.x}
-                        y={pos.y + node.size + 14}
+                        y={pos.y + (node.size || 20) + 14}
                         textAnchor="middle"
                         className="text-[10px] fill-foreground font-medium pointer-events-none"
                       >

@@ -1,0 +1,47 @@
+# DrugOS development infrastructure
+#
+# FE-019 ROOT FIX: PostgreSQL is required for production (per project docx
+# Section 9: "Storage: PostgreSQL + S3"). SQLite was used previously but
+# cannot support concurrent writes or strict type enforcement required for
+# a multi-tenant pharma platform handling PHI/PII.
+#
+# Usage:
+#   docker-compose up -d postgres
+#   DATABASE_URL=postgresql://drugos:drugos_dev_password@localhost:5432/drugos?schema=public npm run db:migrate
+#   npm run dev
+
+version: "3.8"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: drugos-postgres
+    environment:
+      POSTGRES_USER: drugos
+      POSTGRES_PASSWORD: drugos_dev_password
+      POSTGRES_DB: drugos
+    ports:
+      - "5432:5432"
+    volumes:
+      - drugos_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U drugos -d drugos"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # Phase 2: Neo4j Knowledge Graph (uncomment when ready to run Phase 2 locally)
+  # neo4j:
+  #   image: neo4j:5-community
+  #   container_name: drugos-neo4j
+  #   environment:
+  #     NEO4J_AUTH: neo4j/drugos_dev_password
+  #   ports:
+  #     - "7474:7474"  # browser
+  #     - "7687:7687"  # bolt
+  #   volumes:
+  #     - drugos_neo4jdata:/data
+
+volumes:
+  drugos_pgdata:
+  # drugos_neo4jdata:

@@ -1,9 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requireAuth, badRequest, notFound } from "@/lib/api-helpers";
+import { requireAuthRole, badRequest, notFound } from "@/lib/api-helpers";
 import { createProject, listProjects } from "@/lib/services/projects";
 
+/** FE-010 ROOT FIX: Project creation requires a research-capable role. */
 export async function GET() {
-  const auth = await requireAuth();
+  const auth = await requireAuthRole("researcher", "data-scientist", "pi", "business-dev");
   if (auth.user === null) return auth.response;
   if (!auth.user.orgId) return NextResponse.json({ items: [] });
   const projects = await listProjects(auth.user.orgId);
@@ -11,7 +12,7 @@ export async function GET() {
 }
 
 export async function POST(req: NextRequest) {
-  const auth = await requireAuth();
+  const auth = await requireAuthRole("researcher", "data-scientist", "pi", "business-dev");
   if (auth.user === null) return auth.response;
   if (!auth.user.orgId) return badRequest("User has no active organization");
   let body: { name: string; description?: string; visibility?: "private" | "org" | "public"; tags?: string[] };

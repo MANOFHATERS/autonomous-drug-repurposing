@@ -37,8 +37,8 @@ export function DiseaseSearchBar({
       .filter(
         (d) =>
           d.name.toLowerCase().includes(lower) ||
-          d.synonyms.some((s) => s.toLowerCase().includes(lower)) ||
-          d.category.toLowerCase().includes(lower)
+          (d.synonyms || []).some((s) => s.toLowerCase().includes(lower)) ||
+          (d.category || '').toLowerCase().includes(lower)
       )
       .slice(0, 6);
   }, [query]);

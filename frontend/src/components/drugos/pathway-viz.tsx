@@ -30,7 +30,7 @@ export function PathwayViz({ className = '' }: PathwayVizProps) {
   return (
     <div className={`relative ${className}`}>
       <div className="flex items-center justify-between mb-3">
-        <h3 className="text-sm font-semibold text-foreground">{pathwayData.name}</h3>
+        <h3 className="text-sm font-semibold text-foreground">{pathwayData.name || 'Pathway Diagram'}</h3>
         <div className="flex gap-2">
           {Object.entries(typeStyles).map(([type, style]) => (
             <div key={type} className="flex items-center gap-1">

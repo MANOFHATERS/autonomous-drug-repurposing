@@ -1484,7 +1484,9 @@ function FeaturePage({ slug }: { slug: string }) {
       <Card className="mb-16 overflow-hidden">
         <div className="h-64 sm:h-80 bg-gradient-to-br from-[#5B4FCF]/5 to-[#5B4FCF]/10 flex items-center justify-center">
           <div className="text-center">
-            <feature.icon.type className="w-16 h-16 text-[#5B4FCF]/30 mx-auto mb-4" />
+            <div className="w-16 h-16 text-[#5B4FCF]/30 mx-auto mb-4 flex items-center justify-center">
+              {feature?.icon}
+            </div>
             <p className="text-muted-foreground">Interactive Demo Preview</p>
           </div>
         </div>

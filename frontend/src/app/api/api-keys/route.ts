@@ -1,9 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requireAuth, badRequest } from "@/lib/api-helpers";
+import { requireAuthRole, badRequest } from "@/lib/api-helpers";
 import { issueApiKey, listApiKeys } from "@/lib/services/api-keys";
 
+/** FE-010 ROOT FIX: API key management restricted to developer/admin/owner. */
 export async function GET() {
-  const auth = await requireAuth();
+  const auth = await requireAuthRole("developer");
   if (auth.user === null) return auth.response;
   if (!auth.user.orgId) return badRequest("No active organization");
   const keys = await listApiKeys(auth.user.orgId);
@@ -11,7 +12,7 @@ export async function GET() {
 }
 
 export async function POST(req: NextRequest) {
-  const auth = await requireAuth();
+  const auth = await requireAuthRole("developer");
   if (auth.user === null) return auth.response;
   if (!auth.user.orgId) return badRequest("No active organization");
   let body: { name: string };

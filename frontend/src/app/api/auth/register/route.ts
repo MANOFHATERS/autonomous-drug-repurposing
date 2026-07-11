@@ -13,17 +13,56 @@ interface RegisterBody {
   bio?: string;
 }
 
-// Allowed role values. The user's role determines what UI sections they can see.
-const ALLOWED_ROLES = [
+// FE-006 ROOT FIX: "admin" and "owner" removed from the self-registration
+// allowlist. The previous code let ANY unauthenticated user POST
+// {"role":"admin"} to /api/auth/register and get a User record with
+// role="admin" — which then passed the requireAdmin check (admin || owner).
+// That's a textbook privilege-escalation vulnerability: full admin access
+// to /api/admin/users (cross-tenant PII), /api/audit-logs, etc.
+//
+// Self-registration is now restricted to non-privileged roles. The only way
+// to become an admin/owner is to be PROMOTED by an existing admin via
+// PATCH /api/admin/users (which validates the role against ALLOWED_ROLES_ADMIN).
+export const ALLOWED_ROLES_SELF_REG = [
   "researcher",
   "data-scientist",
   "pi",
-  "admin",
   "business-dev",
   "developer",
   "viewer",
 ] as const;
-type AllowedRole = (typeof ALLOWED_ROLES)[number];
+type AllowedSelfRegRole = (typeof ALLOWED_ROLES_SELF_REG)[number];
+
+// Roles that an EXISTING admin/owner can promote a user to. Includes admin
+// and owner because that's the promotion path — but this list is ONLY
+// consulted from the admin endpoint, never from self-registration.
+export const ALLOWED_ROLES_ADMIN = [
+  "researcher",
+  "data-scientist",
+  "pi",
+  "business-dev",
+  "developer",
+  "viewer",
+  "billing",
+  "admin",
+  "owner",
+] as const;
+type AllowedAdminRole = (typeof ALLOWED_ROLES_ADMIN)[number];
+
+export const ALLOWED_USER_STATUSES = [
+  "active",
+  "suspended",
+  "pending_approval",
+] as const;
+type AllowedUserStatus = (typeof ALLOWED_USER_STATUSES)[number];
+
+export function isValidAdminRole(role: unknown): role is AllowedAdminRole {
+  return typeof role === "string" && (ALLOWED_ROLES_ADMIN as readonly string[]).includes(role);
+}
+
+export function isValidUserStatus(status: unknown): status is AllowedUserStatus {
+  return typeof status === "string" && (ALLOWED_USER_STATUSES as readonly string[]).includes(status);
+}
 
 export async function POST(req: NextRequest) {
   let body: RegisterBody;
@@ -45,9 +84,11 @@ export async function POST(req: NextRequest) {
   if (!passwordCheck.ok) return badRequest(passwordCheck.reason || "Password does not meet policy");
   if (!name) return badRequest("Name is required");
 
-  // Validate the role — must be one of our known values.
-  const role: AllowedRole = (ALLOWED_ROLES as readonly string[]).includes(requestedRole)
-    ? (requestedRole as AllowedRole)
+  // Validate the role — must be one of the self-registration-allowed values.
+  // FE-006: admin/owner are NOT in ALLOWED_ROLES_SELF_REG, so an attacker
+  // POSTing {"role":"admin"} gets the default "researcher" — NOT admin.
+  const role: AllowedSelfRegRole = (ALLOWED_ROLES_SELF_REG as readonly string[]).includes(requestedRole)
+    ? (requestedRole as AllowedSelfRegRole)
     : "researcher";
 
   const existing = await db.user.findUnique({ where: { email } });

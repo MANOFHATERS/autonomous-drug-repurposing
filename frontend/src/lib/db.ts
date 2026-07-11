@@ -13,7 +13,7 @@ export const db =
   new PrismaClient(
     process.env.NODE_ENV === 'test'
       ? { datasources: { db: { url: process.env.DATABASE_URL } } }
-      : { log: ['query'] }
+      : { datasources: { db: { url: process.env.DATABASE_URL } } }
   )
 
 if (shouldUseGlobalCache) globalForPrisma.prisma = db
