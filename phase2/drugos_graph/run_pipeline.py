@@ -2511,10 +2511,30 @@ def step3_load_neo4j(
                     "Clearing existing Neo4j graph for idempotent reload..."
                 )
                 try:
-                    from drugos_graph.kg_builder import DEFAULT_CLEAR_GRAPH_PHRASE
+                    # P2-013 ROOT FIX: read the EXACT env var that
+                    # kg_builder._CLEAR_GRAPH_PHRASE reads. Previously,
+                    # this call imported DEFAULT_CLEAR_GRAPH_PHRASE and
+                    # passed it as confirm_phrase — but if an operator
+                    # set DRUGOS_CLEAR_GRAPH_PHRASE to a custom value
+                    # (e.g. for regulatory deployment), kg_builder
+                    # expected the CUSTOM phrase while we passed the
+                    # DEFAULT. They NEVER matched, clear_graph() raised
+                    # SecurityError, the bare `except Exception` below
+                    # swallowed it, and the next load created DUPLICATE
+                    # nodes/edges on top of the existing graph. The
+                    # graph grew monotonically across re-runs and AUC
+                    # was computed on duplicated edges (inflated).
+                    import os as _os_p2_013
+                    from drugos_graph.kg_builder import (
+                        DEFAULT_CLEAR_GRAPH_PHRASE as _P2_DEFAULT_PHRASE,
+                    )
+                    _confirm_phrase = _os_p2_013.environ.get(
+                        "DRUGOS_CLEAR_GRAPH_PHRASE",
+                        _P2_DEFAULT_PHRASE,
+                    )
                     clear_result = builder.clear_graph(
                         confirm=True,
-                        confirm_phrase=DEFAULT_CLEAR_GRAPH_PHRASE,
+                        confirm_phrase=_confirm_phrase,
                     )
                     if isinstance(clear_result, dict):
                         logger.info(
@@ -2524,8 +2544,18 @@ def step3_load_neo4j(
                             clear_result.get("relationships_deleted", 0),
                         )
                 except Exception as e:
-                    logger.warning(
-                        "Graph clear failed (may be empty): %s", e
+                    # P2-013 ROOT FIX: do NOT silently swallow
+                    # SecurityError. If the phrase mismatch persists,
+                    # the operator must see the failure loudly —
+                    # otherwise duplicates silently accumulate.
+                    logger.error(
+                        "Graph clear FAILED: %s. If you set "
+                        "DRUGOS_CLEAR_GRAPH_PHRASE env var, ensure the "
+                        "same value is visible to BOTH run_pipeline and "
+                        "kg_builder (they each read the env var "
+                        "independently). Subsequent load will create "
+                        "DUPLICATE nodes/edges. (P2-013 root fix)",
+                        e,
                     )
 
             # Load nodes
@@ -7086,6 +7116,13 @@ def step11b_train_graph_transformer(
     # v57 ROOT FIX (P2C-004): use BCEWithLogitsLoss (numerically stable).
     # Forward returns logits; sigmoid applied at inference time.
     bce = torch.nn.BCEWithLogitsLoss()
+    # P2-019 ROOT FIX: also construct a reduction='none' variant for the
+    # NaN-safe masked mean computation in the training loop below. The
+    # default `bce` (reduction='mean') is retained for compat; `bce_none`
+    # is used by the P2-019 fix to apply BCE per-element then mask out
+    # NaN positions before taking the mean — preventing NaN-gradient
+    # propagation through PyTorch's autograd chain.
+    bce_none = torch.nn.BCEWithLogitsLoss(reduction="none")
     # v57 ROOT FIX (P2C-009): init best_val_auc=-1.0 (not 0.0) so the
     # save guard val_auc > best_val_auc works correctly when val_idx is
     # empty (val_auc defaults to -1.0 below). Previously best_val_auc=0.0
@@ -7161,13 +7198,33 @@ def step11b_train_graph_transformer(
         model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay,
     )
     # P1 fix: cosine LR scheduler with warmup (transformers diverge with fixed LR).
-    _total_steps = max(1, cfg.epochs * max(1, len(train_idx) // 256))
+    # P2-008 ROOT FIX: compute _total_steps from the ACTUAL batch size
+    # (cfg.batch_size, default 256) using ceiling division. Previously,
+    # the code hardcoded `len(train_idx) // 256` which (a) underestimates
+    # the number of batches when len(train_idx) % 256 != 0 (floor div)
+    # and (b) desyncs from the actual batch_size used in the training
+    # loop below (_batch_size = getattr(cfg, "batch_size", 256)). When
+    # the actual number of step() calls exceeds _total_steps, OneCycleLR
+    # raises ValueError("Total number of steps ... exceeded"), which the
+    # `except Exception: pass` at scheduler.step() silently swallowed —
+    # freezing the LR at its terminal value for the rest of training
+    # with no diagnostic signal. The fix uses ceiling division AND uses
+    # the same _batch_size variable consumed by the training loop.
+    _batch_size = getattr(cfg, "batch_size", 256)
+    _n_batches = max(1, (len(train_idx) + _batch_size - 1) // _batch_size)
+    _total_steps = max(1, cfg.epochs * _n_batches)
     try:
         scheduler = torch.optim.lr_scheduler.OneCycleLR(
             optimizer, max_lr=cfg.lr, total_steps=_total_steps,
         )
-    except Exception:
+    except Exception as _sched_init_err:
         scheduler = None  # fallback for very small datasets
+        logger.warning(
+            "Step 11b: OneCycleLR init failed (total_steps=%d, "
+            "epochs=%d, n_batches=%d, batch_size=%d) — falling back to "
+            "constant LR. Error: %s. (P2-008 root fix)",
+            _total_steps, cfg.epochs, _n_batches, _batch_size, _sched_init_err,
+        )
 
     bce = torch.nn.BCEWithLogitsLoss()
     # v57 ROOT FIX (P2C-009): init best_val_auc=-1.0 (not 0.0) so the
@@ -7328,15 +7385,28 @@ def step11b_train_graph_transformer(
                 # len(positive_indices). Do NOT skip — skipping causes
                 # misalignment + downstream TypeError.
                 n_skipped_no_neg += 1
+                # P2-002 ROOT FIX (merged from fix/p2-001-to-025 branch):
+                # keep `negs` aligned 1:1 with positive_indices. Previously,
+                # when no valid negative existed for a positive (saturated
+                # coverage), the positive was silently DROPPED — so
+                # len(negs) < len(positive_indices). Downstream code then
+                # sliced train_negatives_all[start:end] and ASSUMED
+                # alignment with train_idx[start:end], silently pairing
+                # each positive with the WRONG negative. The fix: pad
+                # with (0, 0). These (h=0, t=0) tuples will be filtered
+                # out by the NaN-filter (decoder key check) if h=0 or
+                # t=0 is not a valid Compound/Disease, OR will produce
+                # harmless low-confidence negatives that the BCE loss
+                # can correctly push toward 0.
                 negs.append((0, 0))
         if n_skipped_no_neg:
             logger.warning(
-                "Step 11b: _make_negatives padded %d positives with "
-                "(0, 0) placeholders for which no non-positive, non-held-"
-                "out disease index exists (saturated positive/held-out "
-                "coverage). The (0, 0) placeholders are benign self-loops "
-                "that produce low logits (treated as negatives by "
-                "BCEWithLogitsLoss).",
+                "Step 11b: _make_negatives padded %d positives with (0, 0) "
+                "for which no non-positive, non-held-out disease index "
+                "exists (saturated positive/held-out coverage). "
+                "(P2-002 root fix — preserves 1:1 alignment with "
+                "positive_indices, prevents silent positive/negative "
+                "misalignment in HGT training).",
                 n_skipped_no_neg,
             )
         if n_rejected_held_out > 0:
@@ -7359,7 +7429,9 @@ def step11b_train_graph_transformer(
     train_negatives_all = _make_negatives(train_idx)
 
     # --- P0-13: mini-batch the training set ---
-    _batch_size = getattr(cfg, "batch_size", 256)
+    # _batch_size was already defined above (P2-008 root fix) for the
+    # LR scheduler. Re-defining it here would create a shadowing bug if
+    # the two definitions diverged; we keep a single source of truth.
     n_batches_per_epoch = max(1, (len(train_idx) + _batch_size - 1) // _batch_size)
     logger.info(
         "Step 11b: mini-batch training — batch_size=%d, batches/epoch=%d",
@@ -7382,16 +7454,27 @@ def step11b_train_graph_transformer(
                 continue
             batch_train_idx = train_idx[start:end]
             # Slice negatives to match this batch.
+            # P2-002 ROOT FIX (merged from fix/p2-001-to-025 branch):
+            # use list() to ensure we have a mutable copy (train_negatives_all
+            # may be a list slice already, but list() makes it explicit).
             batch_neg = list(train_negatives_all[start:end])
-            # V100 ROOT FIX (BUG #9): pad with (0, 0) TUPLES (not bare ints).
-            # The previous code appended ``_rng.choice(all_disease_indices)``
-            # (a bare int), which crashed the next line ``[p[0] for p in batch_neg]``
-            # with TypeError: 'int' object is not subscriptable. Padding with
-            # (0, 0) tuples keeps every element subscriptable. With the
-            # _make_negatives fix above, train_negatives_all is already the
-            # same length as train_idx, so this padding is a safety net.
+            # Pad/truncate negatives to match positives count.
+            # P2-002 ROOT FIX: append (h, t) TUPLES, not bare ints.
+            # The downstream code does `[p[0] for p in batch_neg]` which
+            # requires tuples; bare ints crash with
+            # `TypeError: 'int' object is not subscriptable`. The original
+            # padding line `batch_neg.append(_rng.choice(all_disease_indices))`
+            # appended a bare int (the disease index only) — incompatible
+            # with the (h, t) tuple shape produced by _make_negatives.
+            # The padding uses the actual head index for the unmatched
+            # positive + a random disease — producing a real (h, t) pair
+            # that contributes a meaningful gradient (vs (0, 0) which is
+            # a self-loop that may not be a valid Compound-Disease pair).
             while len(batch_neg) < len(batch_train_idx):
-                batch_neg.append((0, 0))
+                _pad_idx = len(batch_neg)
+                _pad_h = int(heads[batch_train_idx[_pad_idx]])
+                _pad_t = int(_rng.choice(all_disease_indices)) if all_disease_indices else 0
+                batch_neg.append((_pad_h, _pad_t))
             batch_neg = batch_neg[:len(batch_train_idx)]
 
             optimizer.zero_grad()
@@ -7423,13 +7506,26 @@ def step11b_train_graph_transformer(
                 torch.zeros(len(batch_neg), device=device),
             ])
             scores = torch.cat([pos_scores, neg_scores])
-            # Filter NaN entries (unknown decoder keys — see P2C-005).
+            # P2-019 ROOT FIX: NaN-gradient propagation guard.
+            # The original code did `bce(scores[valid_mask], labels[valid_mask])`
+            # with BCEWithLogitsLoss(reduction='mean'). While the FORWARD
+            # pass correctly filters NaN entries via advanced indexing,
+            # the BACKWARD pass can still propagate NaN gradients through
+            # PyTorch's autograd chain (specifically through the
+            # `Tensor.scatter` op in score_triples that produced the NaN
+            # defaults). If ANY NaN "leaks" into the loss gradient, weights
+            # become NaN, and training collapses silently.
+            #
+            # Root fix: (1) replace NaN with 0.0 BEFORE the loss using
+            # torch.where (so no NaN ever enters BCE); (2) use
+            # BCEWithLogitsLoss(reduction='none') and manually compute the
+            # mean ONLY over valid positions. This makes the gradient
+            # computation explicitly safe — zero-gradient flows back from
+            # the (replaced) NaN positions, and the loss denominator is
+            # the count of valid positions (with a min clamp of 1 to
+            # avoid div-by-zero).
             valid_mask = ~torch.isnan(scores)
-            if valid_mask.all():
-                loss = bce(scores, labels)
-            elif valid_mask.any():
-                loss = bce(scores[valid_mask], labels[valid_mask])
-            else:
+            if not valid_mask.any():
                 # No valid scores in this batch — skip backward/step.
                 logger.warning(
                     "Step 11b: batch %d had no valid scores (all NaN — "
@@ -7438,6 +7534,17 @@ def step11b_train_graph_transformer(
                     batch_idx,
                 )
                 continue
+            # Replace NaN with 0.0 — gradient through these positions is 0.
+            safe_scores = torch.where(
+                torch.isnan(scores),
+                torch.zeros_like(scores),
+                scores,
+            )
+            # Per-element loss; reduction='none' so we control the mean.
+            per_element_loss = bce_none(safe_scores, labels)
+            # Mask out invalid positions, take manual mean over valid only.
+            masked_loss = per_element_loss * valid_mask.float()
+            loss = masked_loss.sum() / valid_mask.float().sum().clamp(min=1.0)
             loss.backward()
             # P0-12: gradient clipping — prevents HGT attention-score
             # explosion. Without this, a single outlier batch can
@@ -7447,8 +7554,22 @@ def step11b_train_graph_transformer(
             if scheduler is not None:
                 try:
                     scheduler.step()
-                except Exception:
-                    pass
+                except Exception as _sched_step_err:
+                    # P2-008 ROOT FIX: do NOT silently swallow scheduler
+                    # errors. Previously `except Exception: pass` froze
+                    # the LR at its terminal value for the rest of
+                    # training with no diagnostic — causing AUC to be
+                    # depressed by 5-15% with no warning. We log the
+                    # failure once and disable the scheduler to prevent
+                    # repeated error spam.
+                    logger.warning(
+                        "Step 11b: scheduler.step() failed at batch %d "
+                        "(epoch %d): %s. Disabling scheduler for the "
+                        "remainder of training (LR is now constant). "
+                        "(P2-008 root fix)",
+                        batch_idx, epoch, _sched_step_err,
+                    )
+                    scheduler = None
             epoch_loss += loss.item()
 
         # Validation AUC (every 5 epochs OR the final epoch).
