@@ -340,7 +340,7 @@ describe("Crypto utility: encryptSecret / decryptSecret round-trip", () => {
   // Set a test key
   beforeAll(() => {
     process.env.WEBHOOK_SECRET_KEY = Buffer.alloc(32, 0x42).toString("base64");
-    process.env.NODE_ENV = "development";
+    (process.env as Record<string, string>).NODE_ENV = "development";
   });
 
   test("encrypt then decrypt returns original plaintext", async () => {

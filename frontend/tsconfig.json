@@ -40,6 +40,7 @@
     "node_modules",
     "examples",
     "tests/e2e",
-    "uploaded_code"
+    "uploaded_code",
+    "scripts"
   ]
 }
