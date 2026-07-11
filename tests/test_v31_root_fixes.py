@@ -278,9 +278,9 @@ def test_v31_end_to_end_smoke():
         assert n_treats > 5, \
             f"Expected >5 treats edges (KPs + training positives), got {n_treats}"
 
-        # V90 ROOT FIX (BUG #18 + BUG #38): _feature_rng was REMOVED as dead code.
+        # V90 ROOT FIX (BUG #18): _feature_rng was REMOVED as dead code.
         assert not hasattr(bridge, '_feature_rng'), \
-            "V90 BUG #18/#38: _feature_rng should be REMOVED (dead code)"
+            "V90 BUG #18: _feature_rng should be REMOVED (dead code)"
 
     print(f"  PASS: End-to-end smoke test passed. Graph has {n_treats} treats edges "
           f"(KPs + training positives). V90 BUG #18: _feature_rng removed.")

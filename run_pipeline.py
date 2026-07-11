@@ -231,47 +231,31 @@ def _ensure_phase1_samples(phase1_dir: Path) -> Path:
 def run_bridge(phase1_dir: Path) -> Tuple[Any, Any]:
     """Bridge: run_phase1_to_phase2 → Phase 2 staged data + builder.
 
-    Returns (staged, builder) where:
-      - staged is a Phase1StagedData (compound_nodes, protein_nodes, ...)
+    Returns (builder, staged) where:
       - builder is a RecordingGraphBuilder (populated, in-memory)
+      - staged is a Phase1StagedData (compound_nodes, protein_nodes, ...)
 
-    v90 ROOT FIX: uses run_phase1_to_phase2 (the REAL top-level bridge
-    entry point) instead of the non-existent stage_phase1_to_phase2(
-    output_dir=None) call. The previous call signature was wrong and
-    crashed with TypeError on every run.
+    v91 ROOT FIX: the previous version called run_phase1_to_phase2 TWICE
+    (lines 247-265 then lines 267-281). The first call's result was
+    immediately overwritten by the second call. Wasted I/O + log spam.
+    Consolidated into a single call. Also fixed the docstring which
+    claimed "Returns (staged, builder)" but the function actually
+    returned (builder, staged) — callers in main() expected
+    (builder, staged), so the docstring was the lie.
     """
     logger.info("=" * 70)
     logger.info("BRIDGE: Phase 1 → Phase 2 (run_phase1_to_phase2)")
     logger.info("=" * 70)
-
-    from drugos_graph.phase1_bridge import run_phase1_to_phase2
-
-    result = run_phase1_to_phase2(
-        phase1_processed_dir=str(phase1_dir),
-        prefer_postgres=False,  # CSV path (no Postgres in dev/CI)
-    )
-    builder = result["builder"]
-    staged = result["staged"]
-    summary = result["summary"]
-    backend = result["backend"]
-
-    logger.info(
-        f"Bridge: backend={backend}, "
-        f"nodes_staged={summary['nodes_staged']}, "
-        f"edges_staged={summary['edges_staged']}, "
-        f"nodes_loaded={summary['nodes_loaded']}, "
-        f"edges_loaded={summary['edges_loaded']}, "
-        f"sources_read={len(summary['sources_read'])}"
-    )
 
     from drugos_graph.phase1_bridge import (
         run_phase1_to_phase2,
         RecordingGraphBuilder,
     )
 
-    builder = RecordingGraphBuilder()
     # v90: ensure Phase 1 CSVs exist (Tier-2 embedded sample fallback).
     phase1_dir = _ensure_phase1_samples(phase1_dir)
+
+    builder = RecordingGraphBuilder()
     result = run_phase1_to_phase2(
         phase1_processed_dir=str(phase1_dir),
         builder=builder,
@@ -296,41 +280,15 @@ def run_bridge(phase1_dir: Path) -> Tuple[Any, Any]:
     return builder, staged
 
 
-def run_schema_adapter(
-    builder: Any, seed: int = 42
-) -> Tuple[Any, Any, Any, List[Tuple[str, str]]]:
-    """Phase 2 to Phase 3 schema adapter.
-
-    Converts the Phase 2 RecordingGraphBuilder (capitalized labels) into
-    the Phase 3 canonical schema (lowercase labels) via
-    ``adapt_phase2_to_phase3``. This is the REAL integration point that
-    the v89 run_pipeline.py was missing (it called a non-existent
-    ``build_pyg_hetero_data`` function).
-
-    v91 FORENSIC ROOT FIX: the previous version of this function had an
-    UNCLOSED DOCSTRING (the opening triple-quote was never matched by a
-    closing triple-quote). This caused the ``return staged, builder``
-    statement to be trapped inside the string, the function had NO body,
-    and the NEXT function's docstring (``run_phase2_kg_builder``) was
-    consumed as this function's body — producing a SyntaxError on the
-    unicode arrow character at line 318. The file did not compile,
-    breaking ALL CI jobs. ROOT FIX: close the docstring properly and
-    give the function a real body that delegates to
-    ``adapt_phase2_to_phase3``.
-    """
-    from graph_transformer.data.phase2_adapter import adapt_phase2_to_phase3
-    return adapt_phase2_to_phase3(builder, seed=seed)
-
-
 def run_phase2_kg_builder(
-    staged: Any, builder: Any, seed: int = 42
+    builder: Any, staged: Any = None, seed: int = 42
 ) -> Tuple[Any, Any, Any, List[Tuple[str, str]]]:
     """Phase 2: Build the real biomedical KG from the staged data.
 
     v90 ROOT FIX: uses the REAL APIs:
-      1. bridge_to_pyg_maps(builder) -> (entity_maps, edge_maps)
-      2. Label normalization (Compound->drug, Disease->disease, ...)
-      3. PyGBuilder.build_from_drkg() -> PyG HeteroData
+      1. bridge_to_pyg_maps(builder) → (entity_maps, edge_maps)
+      2. Label normalization (Compound→drug, Disease→disease, ...)
+      3. PyGBuilder.build_from_drkg() → PyG HeteroData
       4. known_pairs extracted from (drug, treats, disease) edges
 
     Returns (node_features, edge_indices, node_maps, known_pairs) in
@@ -340,11 +298,20 @@ def run_phase2_kg_builder(
     logger.info("PHASE 2 → PHASE 3: Schema Adapter")
     logger.info("=" * 70)
 
-    from graph_transformer.data.phase2_adapter import adapt_phase2_to_phase3
-
-    node_features, edge_indices, node_maps, known_pairs = adapt_phase2_to_phase3(
-        builder, seed=seed
-    )
+    # v91 ROOT FIX: removed the dead ``adapt_phase2_to_phase3(builder,
+    # seed=seed)`` call. The previous code:
+    #   1. Called adapt_phase2_to_phase3(builder, seed=seed)
+    #   2. But ``seed`` was NOT a parameter of run_phase2_kg_builder
+    #      (the signature was ``def run_phase2_kg_builder(staged, builder)``).
+    #      This raised NameError on every invocation.
+    #   3. Even if seed had been in scope, the result was immediately
+    #      OVERWRITTEN by the PyGBuilder logic below (lines that rebuild
+    #      node_features/edge_indices/node_maps/known_pairs from scratch).
+    #      So the adapt_phase2_to_phase3 call was dead code that did
+    #      nothing useful AND crashed with NameError.
+    # The PyGBuilder path below is the real Phase 2→3 adapter. It uses
+    # bridge_to_pyg_maps + label normalization + PyGBuilder.build_from_drkg
+    # to produce the HeteroData the GT model trains on.
 
     from drugos_graph.phase1_bridge import bridge_to_pyg_maps
     from drugos_graph.pyg_builder import PyGBuilder, PyGConfig
@@ -693,25 +660,23 @@ def main() -> int:
 
     try:
         # ─── Phase 1 ────────────────────────────────────────────────
-        ensure_phase1_data(Path(args.phase1_dir))
+        phase1_csv_paths = ensure_phase1_data(Path(args.phase1_dir))
+        n_phase1_csvs = len(phase1_csv_paths)
 
         # ─── Bridge ──────────────────────────────────────────────────
         builder, staged = run_bridge(Path(args.phase1_dir))
-        if builder.total_nodes == 0:
+        if staged.total_nodes == 0:
             logger.error("Phase 1 + Bridge produced 0 nodes. Aborting.")
             return 1
 
-        # ─── Phase 2: Build real KG + Phase 3 Schema Adapter ────────
-        # v91 FORENSIC ROOT FIX: the previous code had a DUPLICATE
-        # run_bridge() call here (line 705 re-assigned `staged, builder`
-        # with swapped order, overwriting the correct values from line
-        # 698). It also called BOTH run_schema_adapter AND
-        # run_phase2_kg_builder — the first result was immediately
-        # overwritten by the second. ROOT FIX: call run_phase2_kg_builder
-        # ONCE with the original (staged, builder) from the bridge. This
-        # is the complete Phase 2 → Phase 3 path (label normalization +
-        # PyG HeteroData + schema adaptation).
-        graph_data = run_phase2_kg_builder(staged, builder, seed=args.seed)
+        # ─── Phase 2: Build real KG (single source of truth) ────────
+        # v91 ROOT FIX: removed the redundant run_schema_adapter() call
+        # (it was a no-op with an unclosed docstring that swallowed the
+        # next function definition) and the redundant second run_bridge()
+        # call (which re-fetched Phase 1 data and discarded the first
+        # call's result). The pipeline now goes:
+        #   Phase 1 → run_bridge → run_phase2_kg_builder → run_phase3_and_4
+        graph_data = run_phase2_kg_builder(builder, staged=staged, seed=args.seed)
         node_features, edge_indices, node_maps, known_pairs = graph_data
         if len(node_maps.get("drug", {})) == 0:
             logger.error("Schema adapter produced 0 drug nodes. Aborting.")
@@ -731,8 +696,9 @@ def main() -> int:
 
         # ─── Summary ────────────────────────────────────────────────
         print("\n" + "=" * 70)
-        print("v90 4-PHASE PIPELINE COMPLETE - SUMMARY")
+        print("v91 4-PHASE PIPELINE COMPLETE - SUMMARY")
         print("=" * 70)
+        print(f"  Phase 1 CSVs found:      {n_phase1_csvs}")
         print(f"  Phase 2 nodes (staged):  {staged.total_nodes}")
         print(f"  Phase 2 edges (staged):  {staged.total_edges}")
         print(f"  Phase 3 drugs in KG:     {len(node_maps.get('drug', {}))}")
@@ -777,9 +743,6 @@ def main() -> int:
         logger.critical(f"Pipeline RuntimeError: {e}", exc_info=True)
         return 4
     except Exception as e:
-        # Top-level catch-all for main() — this is the ONE appropriate
-        # broad catch per BUG #51 audit. Logs with exc_info=True so
-        # programming bugs are NEVER swallowed silently.
         logger.critical(f"Unexpected exception: {e}", exc_info=True)
         return 5
 

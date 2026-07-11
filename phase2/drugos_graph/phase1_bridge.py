@@ -1236,23 +1236,6 @@ def _phase1_db_available() -> bool:
                 _sa_text("SELECT COUNT(*) AS n FROM drugs")
             ).fetchone()
             return bool(row is not None and row[0] is not None and int(row[0]) > 0)
-    except ImportError as exc:
-        # v91 ROOT FIX: ImportError is NOT a database connectivity issue —
-        # it's a Python module import issue (e.g., "attempted relative
-        # import beyond top-level package" when test order pollutes the
-        # module cache). The DB backend is simply unavailable in this
-        # process. Fall back to CSV silently (with a debug log) instead
-        # of re-raising as RuntimeError (which crashed the test fixture
-        # when test_e2e_integration.py ran before test_phase1_2_3_4_
-        # connectivity.py).
-        logger.debug(
-            "Phase1 bridge: database module import failed (%s: %s) — "
-            "falling back to CSV reader. This is expected when the "
-            "phase1 package is not fully importable in this process "
-            "(e.g., test isolation issues).",
-            type(exc).__name__, exc,
-        )
-        return False
     except Exception as exc:  # noqa: BLE001 — best-effort detection
         failure_mode = _classify_db_failure(exc)
         # v61 ROOT FIX: classify and act per failure mode.
@@ -2869,21 +2852,25 @@ def _classify_chembl_activity_edge(
     )
     if _EXCLUDED_ANTAGONIST_RE.search(a):
         return "targets"
-    # v91 FORENSIC ROOT FIX (BUG #2 — broken SyntaxError from v84 patch):
-    # The v84 patch left a dangling `if "activ" in a or _AGONIST_RE.search(a):`
-    # with NO body (only comments followed, then a second `if` at the same
-    # indentation level). This was a Python IndentationError that prevented
-    # phase1_bridge.py from importing — breaking the ENTIRE Phase 2 pipeline
-    # and ALL CI jobs. The previous agent's "fix" never compiled.
-    #
-    # ROOT FIX: collapse to a single word-boundary regex that matches
-    # "activation", "activates", "activator", "agonist", "agonists",
-    # "agonism" but does NOT match "antagonist" (the \b before "agon"
-    # requires a word boundary, and "antagonist" has "t" before "agon"),
-    # "inactivation", or "deactivation" (those are caught by the inhibits
-    # regex above). This is the scientifically-correct directionality
-    # classifier for ChEMBL standard_type strings.
-    if _re_v89.search(r"\b(activ|agon)", a):
+    # Match "activat..." (activation, activator) OR a bare word-boundary
+    # "agonist" (with optional plural "s"). This excludes "antagonist"
+    # (handled above) and "inverse agonist" (handled above).
+    _AGONIST_RE = _re_v84.compile(r"\bagonists?\b", _re_v84.IGNORECASE)
+    # v91 P0 ROOT FIX (covalent-inhibitor misclassification + SyntaxError):
+    # The previous code had a DANGLING `if "activ" in a or _AGONIST_RE.search(a):`
+    # with NO body — a SyntaxError that prevented the entire phase1_bridge
+    # module from importing. Worse, the substring check `"activ" in a`
+    # matched "INACTIVAT*"/"DEACTIVAT*"/"inactive" → covalent inhibitors
+    # were misclassified as "activates". The v89 word-boundary regex below
+    # (\b(activ|agon)) is the real scientific fix — it does NOT match
+    # "inactivation" because the \b requires a word boundary before "activ".
+    # Removing the dangling substring-if fixes BOTH the SyntaxError AND
+    # the covalent-inhibitor misclassification in one stroke.
+    # Word-boundary "activ" or "agon" → activates. The \b ensures we
+    # match "activation", "activates", "agonist", "agonism" but NOT
+    # "inactivation", "deactivation", "inactive" (those are matched
+    # by the inhibits regex above).
+    if _re_v89.search(r"\b(activ|agon)", a) or _AGONIST_RE.search(a):
         return "activates"
     # v88 ROOT FIX (BUG #50 — IC50 with non-bare standard_type strings
     # lose inhibition signal): use substring match `if "ic50" in a`

@@ -949,8 +949,7 @@ class GraphTransformerTrainer:
             "optimizer_state_dict": self.optimizer.state_dict(),
             "best_val_auc": self.best_val_auc,
             "best_val_loss": self.best_val_loss,
-            "best_epoch": self.best_epoch,  # BUG #21/#33: actual best, not last
-            "best_state_dict": self.best_state_dict,
+            "best_epoch": self.best_epoch,  # V90 BUG #21/#33: actual best, not last
             "history": list(self.training_history),  # V30 (8.25): copy, not reference
             "graph_schema": {
                 "node_types": list(self.node_features.keys()),
