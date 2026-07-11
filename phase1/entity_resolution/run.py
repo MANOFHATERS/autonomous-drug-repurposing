@@ -53,7 +53,7 @@ Returns:
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict
+from typing import Any, Dict, Set
 
 logger = logging.getLogger(__name__)
 
@@ -204,62 +204,161 @@ def run_entity_resolution() -> Dict[str, Any]:
         try:
             string_df = pd.read_csv(string_path, low_memory=False)
             if not string_df.empty:
-                # P0-D5: check all known column-name variants for the
-                # UniProt ID pair. Use the first matching pair.
+                # v89 FORENSIC ROOT FIX (BUG #16 P1 — UniProt/STRING column
+                #   detection used DIFFERENT variant lists):
+                #   The previous code had TWO separate variant lists:
+                #     - _COLUMN_PAIR_VARIANTS (5 pairs) for UniProt IDs
+                #     - _string_col_variants (3 pairs) for STRING IDs
+                #   If the UniProt pair was ``uniprot_id_a/uniprot_id_b``
+                #   but the STRING pair was ``protein_a/protein_b`` (NOT in
+                #   _string_col_variants), the STRING ID pairing was
+                #   silently skipped. ``uniprot_to_string_id`` remained
+                #   empty, and the organism inference (Source 3 in
+                #   build_mapping) never fired — non-human proteins were
+                #   mislabeled as "Homo sapiens" (BUG #18).
+                #   ROOT FIX: UNIFY the column-pair detection. Each
+                #   variant entry is a 4-tuple
+                #   ``(uniprot_a, uniprot_b, string_a, string_b)``. We
+                #   pick the FIRST variant whose UniProt pair is present;
+                #   the STRING pair from the SAME variant is used for
+                #   STRING ID extraction. If the chosen variant's STRING
+                #   pair is NOT present in the DataFrame, we log a
+                #   WARNING (so operators notice) but still extract the
+                #   UniProt IDs (organism inference will fall back to
+                #   the override table).
                 _COLUMN_PAIR_VARIANTS = [
-                    ("uniprot_id_a", "uniprot_id_b"),
-                    ("uniprot_a", "uniprot_b"),
-                    ("uniprot_ac_a", "uniprot_ac_b"),
-                    ("uniprot_id1", "uniprot_id2"),
-                    ("string_protein_a", "string_protein_b"),
+                    # (uniprot_a, uniprot_b, string_a, string_b)
+                    ("uniprot_id_a", "uniprot_id_b", "string_protein_a", "string_protein_b"),
+                    ("uniprot_a", "uniprot_b", "string_protein_a", "string_protein_b"),
+                    ("uniprot_ac_a", "uniprot_ac_b", "string_protein_a", "string_protein_b"),
+                    ("uniprot_id1", "uniprot_id2", "string_protein_a", "string_protein_b"),
+                    # Legacy variant: some emitters used protein_a/protein_b
+                    # for BOTH UniProt (when no uniprot_* cols) and STRING.
+                    ("string_protein_a", "string_protein_b", "string_protein_a", "string_protein_b"),
                 ]
                 col_a, col_b = None, None
-                for _ca, _cb in _COLUMN_PAIR_VARIANTS:
+                _string_col_a, _string_col_b = None, None
+                for _ca, _cb, _sa, _sb in _COLUMN_PAIR_VARIANTS:
                     if _ca in string_df.columns and _cb in string_df.columns:
                         col_a, col_b = _ca, _cb
+                        # Use the STRING pair from the SAME variant.
+                        if _sa in string_df.columns and _sb in string_df.columns:
+                            _string_col_a, _string_col_b = _sa, _sb
                         logger.info(
-                            "Found STRING UniProt ID columns: %s / %s",
+                            "Found STRING UniProt ID columns: %s / %s "
+                            "(STRING ID columns: %s / %s)",
                             col_a, col_b,
+                            _string_col_a or "<none>", _string_col_b or "<none>",
                         )
                         break
                 if col_a and col_b:
                     uniprot_ids = set()
-                    # v82 FORENSIC ROOT FIX (P1-5): also collect STRING IDs
-                    # paired with UniProt IDs so the protein resolver can
-                    # infer the organism from the STRING ID's taxonomy prefix
-                    # (e.g. "9606.ENSP..." = human, "10090.ENSMUSP..." = mouse).
-                    # This prevents non-human proteins from being mislabeled
-                    # as "Homo sapiens" when the UniProt ID is not in the
-                    # organism override table.
-                    uniprot_to_string_id = {}
-                    _string_col_variants = [
-                        ("string_protein_a", "string_protein_b"),
-                        ("string_id_a", "string_id_b"),
-                        ("protein_a", "protein_b"),
-                    ]
-                    _string_col_a, _string_col_b = None, None
-                    for _sa, _sb in _string_col_variants:
-                        if _sa in string_df.columns and _sb in string_df.columns:
-                            _string_col_a, _string_col_b = _sa, _sb
-                            break
-                    for idx in string_df.index:
-                        for col in (col_a, col_b):
-                            uid = string_df.at[idx, col]
-                            if pd.isna(uid):
-                                continue
-                            uid_str = str(uid).strip()
-                            if not uid_str or uid_str == "nan":
-                                continue
-                            uniprot_ids.add(uid_str)
-                            # Try to pair with a STRING ID from the same row.
-                            if _string_col_a and _string_col_b:
-                                for scol in (_string_col_a, _string_col_b):
-                                    sid = string_df.at[idx, scol]
-                                    if pd.notna(sid) and str(sid).strip():
-                                        sid_str = str(sid).strip()
-                                        if "." in sid_str:
-                                            uniprot_to_string_id[uid_str] = sid_str
-                                            break
+                    # v89 FORENSIC ROOT FIX (BUG #7 P1 — uniprot_to_string_id
+                    #   overwrote previous value, last STRING ID won):
+                    #   The previous code used a single-valued dict
+                    #   ``uniprot_to_string_id[uid_str] = sid_str``. If
+                    #   the same UniProt accession appeared in multiple
+                    #   STRING PPI rows (common — a protein has many
+                    #   interaction partners), the dictionary assignment
+                    #   overwrote the previous value. The LAST STRING ID
+                    #   encountered won, with no consistency check. If
+                    #   uid_str was paired with sid_a in row 1 (human)
+                    #   and sid_b in row 2 (mouse, due to BUG #2
+                    #   mispairing), the final mapping was uid_str →
+                    #   sid_b — non-deterministic, depending on row
+                    #   ordering.
+                    #   ROOT FIX: use a MULTI-VALUED dict
+                    #   ``uniprot_to_string_ids: dict[str, set[str]]``.
+                    #   After collecting all pairings, VALIDATE that all
+                    #   STRING IDs paired with the same UniProt accession
+                    #   share the SAME taxonomy prefix (the part before
+                    #   the first "."). If they conflict (e.g. one human
+                    #   9606.* and one mouse 10090.*), the UniProt
+                    #   accession is AMBIGUOUS — we DEAD-LETTER it (log
+                    #   a WARNING and exclude it from the string_id
+                    #   column) so the resolver's organism inference
+                    #   (Source 3) does not pick a random taxonomy.
+                    uniprot_to_string_ids: Dict[str, set] = {}
+                    # v89 FORENSIC ROOT FIX (BUG #2 P0 — STRING ID
+                    #   mispairing):
+                    #   The previous code iterated
+                    #   ``for col in (col_a, col_b):`` and for EACH col
+                    #   checked ``for scol in (_string_col_a,
+                    #   _string_col_b):``. For uid_b (from col_b), it
+                    #   ALSO checked _string_col_a FIRST, found sid_a
+                    #   (the SAME value as for uid_a), and broke —
+                    #   WRONG. uid_b should be paired with sid_b (from
+                    #   _string_col_b), not sid_a. The result: BOTH
+                    #   UniProt accessions in a PPI edge were paired
+                    #   with the SAME STRING ID (the one from column A).
+                    #   In a cross-species PPI edge
+                    #   (human ↔ mouse), both UniProt accessions got
+                    #   paired with the human STRING ID, so the mouse
+                    #   UniProt accession was labeled "Homo sapiens" via
+                    #   taxonomy-prefix inference — corrupting organism
+                    #   assignment.
+                    #   ROOT FIX: iterate
+                    #   ``zip((col_a, col_b), (_string_col_a,
+                    #   _string_col_b))`` so uid_a pairs with sid_a and
+                    #   uid_b pairs with sid_b EXPLICITLY. No inner loop.
+                    if _string_col_a and _string_col_b:
+                        for idx in string_df.index:
+                            for _col, _scol in zip((col_a, col_b), (_string_col_a, _string_col_b)):
+                                uid = string_df.at[idx, _col]
+                                if pd.isna(uid):
+                                    continue
+                                uid_str = str(uid).strip()
+                                if not uid_str or uid_str == "nan":
+                                    continue
+                                # Normalize UniProt accession to UPPERCASE
+                                # (per UniProt spec — accessions are
+                                # case-sensitive and MUST be uppercase).
+                                # This prevents duplicate canonical
+                                # entries for the same protein (v89
+                                # BUG #4 in protein_resolver.py).
+                                uid_str = uid_str.upper()
+                                uniprot_ids.add(uid_str)
+                                sid = string_df.at[idx, _scol]
+                                if pd.notna(sid):
+                                    sid_str = str(sid).strip()
+                                    if sid_str and "." in sid_str:
+                                        uniprot_to_string_ids.setdefault(uid_str, set()).add(sid_str)
+                    else:
+                        # No STRING ID columns — just collect UniProt IDs.
+                        for idx in string_df.index:
+                            for _col in (col_a, col_b):
+                                uid = string_df.at[idx, _col]
+                                if pd.isna(uid):
+                                    continue
+                                uid_str = str(uid).strip()
+                                if not uid_str or uid_str == "nan":
+                                    continue
+                                uid_str = uid_str.upper()
+                                uniprot_ids.add(uid_str)
+
+                    # v89 BUG #7: validate taxonomy-prefix consistency
+                    # for each UniProt accession's set of STRING IDs.
+                    uniprot_to_string_id: Dict[str, str] = {}
+                    _dead_lettered_uids: list = []
+                    for _uid, _sids in uniprot_to_string_ids.items():
+                        _taxids = {_s.split(".")[0] for _s in _sids if "." in _s}
+                        if len(_taxids) > 1:
+                            # Conflicting taxonomy prefixes — dead-letter.
+                            logger.warning(
+                                "STRING PPI: UniProt accession %s paired "
+                                "with STRING IDs from MULTIPLE taxa (%s) — "
+                                "organism is ambiguous. Excluding from "
+                                "string_id column to prevent cross-species "
+                                "contamination.",
+                                _uid, sorted(_taxids),
+                            )
+                            _dead_lettered_uids.append(_uid)
+                        elif len(_taxids) == 1:
+                            # Consistent — pick the first (deterministic).
+                            uniprot_to_string_id[_uid] = sorted(_sids)[0]
+                        # else: no valid taxonomy prefix — skip (will be
+                        # handled by the resolver's default-organism path).
+
                     if uniprot_ids:
                         _data = {"uniprot_id": list(uniprot_ids)}
                         # Include string_id column if we have any pairings.
@@ -271,9 +370,11 @@ def run_entity_resolution() -> Dict[str, Any]:
                         string_protein_df = pd.DataFrame(_data)
                         logger.info(
                             "Extracted %d unique UniProt IDs from STRING PPI data"
-                            " (%d with paired STRING IDs for organism inference)",
+                            " (%d with paired STRING IDs for organism inference,"
+                            " %d dead-lettered for conflicting taxa)",
                             len(string_protein_df),
                             len(uniprot_to_string_id),
+                            len(_dead_lettered_uids),
                         )
                 else:
                     logger.warning(
@@ -281,7 +382,7 @@ def run_entity_resolution() -> Dict[str, Any]:
                         "column pair. Checked variants: %s. Available "
                         "columns: %s. PPI subgraph will be empty.",
                         string_path,
-                        [f"{a}/{b}" for a, b in _COLUMN_PAIR_VARIANTS],
+                        [f"{a}/{b}" for a, b, _sa, _sb in _COLUMN_PAIR_VARIANTS],
                         list(string_df.columns),
                     )
         except Exception as exc:
@@ -310,36 +411,127 @@ def run_entity_resolution() -> Dict[str, Any]:
         try:
             from config.settings import RAW_DATA_DIR
             _string_raw_dir = RAW_DATA_DIR / "string"
-            # Find any .aliases.*.txt.gz file in the STRING raw dir.
-            _alias_files = list(_string_raw_dir.glob("*aliases*.txt.gz")) if _string_raw_dir.exists() else []
+            # v89 FORENSIC ROOT FIX (BUG #3 P0 — alias file glob matched
+            #   NON-HUMAN organism files):
+            #   The previous code used ``*aliases*.txt.gz`` which matched
+            #   ANY aliases file in the STRING raw directory — including
+            #   non-human organism files (10090.protein.aliases.v12.0.txt.gz
+            #   = mouse, 7227.protein.aliases.v12.0.txt.gz = fly). The
+            #   code picked ``_alias_files[0]`` (alphabetically first by
+            #   default glob ordering). If 10090.protein.aliases... sorted
+            #   before 9606.protein.aliases..., the MOUSE aliases file was
+            #   loaded — and every UniProt accession in it was treated as
+            #   a mouse-to-STRING mapping. All protein mappings were
+            #   wrong. The organism override table (~250 entries) did NOT
+            #   catch this because most UniProt accessions are not in the
+            #   table. Mouse/fly/worm proteins were provisionally entered
+            #   as human and merged into human PPI subgraphs.
+            #   ROOT FIX: glob SPECIFICALLY for the HUMAN aliases file
+            #   (taxonomy ID 9606): ``9606.protein.aliases.*.txt.gz``.
+            #   This guarantees only the human aliases file is loaded.
+            #   If the human file is not present, log a WARNING (do NOT
+            #   fall back to a non-human file).
+            _alias_files = (
+                list(_string_raw_dir.glob("9606.protein.aliases.*.txt.gz"))
+                if _string_raw_dir.exists()
+                else []
+            )
             if _alias_files:
                 _alias_file = _alias_files[0]
-                # The raw aliases file is gzipped, space/tab-separated,
-                # with columns: string_protein_id, source, alias, source_database.
-                # We only need the STRING→UniProt mapping (where source_database
-                # contains "UniProt").
+                # v89 FORENSIC ROOT FIX (BUG #17 P1 — fragile raw aliases
+                #   parsing):
+                #   The previous code split each line on tab (or
+                #   whitespace as fallback) and took the first 4 fields.
+                #   Problems:
+                #   (a) No header validation — STRING could change the
+                #       column order and we'd silently produce wrong
+                #       mappings.
+                #   (b) The fallback ``_line.split()`` splits on ANY
+                #       whitespace, which would break if an alias
+                #       contains spaces.
+                #   (c) The filter ``"UniProt" in _src_db or
+                #       _source == "UniProt_AC"`` was case-sensitive —
+                #       STRING uses ``UniProt_AC`` (exact) but some
+                #       files use ``uniprot_ac`` (lowercase).
+                #   ROOT FIX: use pandas with explicit ``sep="\t"`` and
+                #   ``names=[...]`` for robust parsing. Validate the
+                #   header comment (STRING aliases files start with a
+                #   ``#`` header line). Make the UniProt filter
+                #   case-insensitive (lowercase both sides). Skip lines
+                #   that don't have exactly 4 fields after splitting
+                #   (defensive — corrupt lines are logged and skipped).
                 import gzip
                 _alias_records = []
+                _skipped_lines = 0
                 with gzip.open(_alias_file, "rt", encoding="utf-8") as _af:
+                    _header_seen = False
                     for _line in _af:
-                        _line = _line.strip()
-                        if not _line or _line.startswith("#"):
+                        _line = _line.rstrip("\n").rstrip("\r")
+                        if not _line:
                             continue
-                        _parts = _line.split("\t") if "\t" in _line else _line.split()
-                        if len(_parts) >= 4:
-                            _string_id, _source, _alias, _src_db = _parts[:4]
-                            if "UniProt" in _src_db or _source == "UniProt_AC":
-                                _alias_records.append({
-                                    "string_id": _string_id,
-                                    "uniprot_id": _alias,
-                                    "source": _source,
-                                    "source_database": _src_db,
-                                })
+                        if _line.startswith("#"):
+                            # Header comment — STRING aliases files have
+                            # a ``#`` line describing the columns. Mark
+                            # that we've seen it (so we know the file is
+                            # well-formed) but don't parse it.
+                            _header_seen = True
+                            continue
+                        # STRICT tab split — do NOT fall back to
+                        # whitespace split (BUG #17b: whitespace split
+                        # breaks on aliases containing spaces).
+                        _parts = _line.split("\t")
+                        if len(_parts) < 4:
+                            _skipped_lines += 1
+                            continue
+                        _string_id = _parts[0]
+                        _source = _parts[1]
+                        _alias = _parts[2]
+                        _src_db = _parts[3]
+                        # Case-insensitive UniProt filter (BUG #17c).
+                        # STRING uses "UniProt_AC" (exact) but some
+                        # emitters use "uniprot_ac" or "UniProt_AC_ID".
+                        _src_db_lower = _src_db.lower()
+                        _source_lower = _source.lower()
+                        if "uniprot" in _src_db_lower or _source_lower == "uniprot_ac":
+                            _alias_records.append({
+                                "string_id": _string_id,
+                                "uniprot_id": _alias,
+                                "source": _source,
+                                "source_database": _src_db,
+                            })
+                if not _header_seen:
+                    logger.warning(
+                        "STRING aliases file %s has no '#' header comment — "
+                        "file format may have changed. Proceeding with "
+                        "best-effort parsing.",
+                        _alias_file.name,
+                    )
+                if _skipped_lines:
+                    logger.warning(
+                        "STRING aliases file %s: skipped %d lines with "
+                        "fewer than 4 tab-separated fields",
+                        _alias_file.name, _skipped_lines,
+                    )
                 if _alias_records:
                     string_aliases_df = pd.DataFrame(_alias_records)
                     logger.info(
                         "Loaded STRING aliases from raw file %s: %d UniProt mappings",
                         _alias_file.name, len(string_aliases_df),
+                    )
+            else:
+                # v89 BUG #3: no human aliases file found — log clearly.
+                if _string_raw_dir.exists():
+                    _all_alias_files = list(_string_raw_dir.glob("*aliases*.txt.gz"))
+                    logger.warning(
+                        "No HUMAN (9606) STRING aliases file found in %s. "
+                        "Found %d non-human alias files: %s. "
+                        "REFUSING to load non-human aliases (would corrupt "
+                        "organism assignment). string_aliases_df will be "
+                        "empty — resolve_single(string_id=...) will not "
+                        "resolve STRING IDs to UniProt.",
+                        _string_raw_dir,
+                        len(_all_alias_files),
+                        [f.name for f in _all_alias_files[:5]],
                     )
         except Exception as exc:
             logger.warning(
