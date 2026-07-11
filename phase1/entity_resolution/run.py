@@ -601,21 +601,6 @@ def run_entity_resolution() -> Dict[str, Any]:
             # v89 BUG #28: re-raise RuntimeError (corrupt file) so the
             # operator sees a clear failure. Do NOT swallow it.
             raise
-            else:
-                # v89 BUG #3: no human aliases file found — log clearly.
-                if _string_raw_dir.exists():
-                    _all_alias_files = list(_string_raw_dir.glob("*aliases*.txt.gz"))
-                    logger.warning(
-                        "No HUMAN (9606) STRING aliases file found in %s. "
-                        "Found %d non-human alias files: %s. "
-                        "REFUSING to load non-human aliases (would corrupt "
-                        "organism assignment). string_aliases_df will be "
-                        "empty — resolve_single(string_id=...) will not "
-                        "resolve STRING IDs to UniProt.",
-                        _string_raw_dir,
-                        len(_all_alias_files),
-                        [f.name for f in _all_alias_files[:5]],
-                    )
         except Exception as exc:
             logger.warning(
                 "Could not load raw STRING aliases file: %s — "
@@ -623,6 +608,26 @@ def run_entity_resolution() -> Dict[str, Any]:
                 "will not resolve STRING IDs to UniProt",
                 exc,
             )
+        else:
+            # v91 FORENSIC ROOT FIX: the previous code had `else:` at the
+            # WRONG indentation (inside the except block, after `raise`) —
+            # a SyntaxError that prevented entity_resolution/run.py from
+            # importing. ROOT FIX: move `else:` to the correct position
+            # (after all except clauses, at the same indent as except).
+            # v89 BUG #3: no human aliases file found — log clearly.
+            if _string_raw_dir.exists():
+                _all_alias_files = list(_string_raw_dir.glob("*aliases*.txt.gz"))
+                logger.warning(
+                    "No HUMAN (9606) STRING aliases file found in %s. "
+                    "Found %d non-human alias files: %s. "
+                    "REFUSING to load non-human aliases (would corrupt "
+                    "organism assignment). string_aliases_df will be "
+                    "empty — resolve_single(string_id=...) will not "
+                    "resolve STRING IDs to UniProt.",
+                    _string_raw_dir,
+                    len(_all_alias_files),
+                    [f.name for f in _all_alias_files[:5]],
+                )
 
     # v89 ROOT FIX (BUG #33 — load ChEMBL target data for protein
     # resolution):

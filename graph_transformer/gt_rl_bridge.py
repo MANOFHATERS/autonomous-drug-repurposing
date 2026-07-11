@@ -2095,8 +2095,16 @@ class GTRLBridge:
             pathway_count_per_disease = {}
         max_pw = max(pathway_count_per_disease.values()) if pathway_count_per_disease else 1
         pw_scale = max(1.0, float(max_pw))
+        # v91 FORENSIC ROOT FIX: define unmet_scale and max_pathways
+        # (both were UNDEFINED — NameError at runtime). unmet_scale is
+        # the max treatment count per disease (clamped to 1.0 to avoid
+        # division by zero). max_pathways mirrors max_pw for the
+        # pathway-connectivity differentiation.
+        max_tc = max(treat_count_per_disease.values()) if treat_count_per_disease else 1
+        unmet_scale = max(1.0, float(max_tc))
+        max_pathways = max_pw
 
-        def _unmet_need_for_disease(disease_name: str) -> float:
+        def compute_unmet_need_score(disease_name: str) -> float:
             ds_idx = disease_map.get(disease_name, -1)
             if ds_idx < 0:
                 return 0.5
@@ -2126,16 +2134,8 @@ class GTRLBridge:
             pw_count = pathway_count_per_disease.get(ds_idx, 0)
             pw_diff = 0.03 * (pw_count / max(max_pathways, 1)) - 0.015
             return float(np.clip(base + pw_diff, 0.0, 1.0))
-            treat_component = 0.95 * float(np.exp(-tc / unmet_scale)) + 0.05
-            # v90 S-F1: pathway-connectivity component. Diseases with
-            # more known pathway disruptions have LOWER unmet need.
-            pw = pathway_count_per_disease.get(ds_idx, 0)
-            pw_component = 1.0 - 0.4 * (float(pw) / pw_scale)
-            # Blend: 70% treatment signal, 30% pathway signal.
-            base = 0.7 * treat_component + 0.3 * pw_component
-            return float(np.clip(base, 0.0, 1.0))
 
-        df["unmet_need_score"] = df["disease"].map(_unmet_need_for_disease)
+        df["unmet_need_score"] = df["disease"].map(compute_unmet_need_score)
         logger.info(
             f"v89 ROOT FIX: unmet_need_score computed from curated prevalence "
             f"+ treatment count ({df['unmet_need_score'].nunique()} unique values, "

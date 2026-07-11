@@ -1085,6 +1085,7 @@ class BiomedicalGraphBuilder:
                 f"learns from the NATURAL topology (random drug->protein, "
                 f"protein->pathway, pathway->disease edges) — if the natural "
                 f"topology is insufficient, the demo graph is too small."
+            )
 
             # v89 P0 ROOT FIX (Compound #3 / AUC fraud chain): REMOVED the
             # 3-hop path injection for TRAINING POSITIVES too.

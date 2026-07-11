@@ -299,18 +299,31 @@ def run_bridge(phase1_dir: Path) -> Tuple[Any, Any]:
 def run_schema_adapter(
     builder: Any, seed: int = 42
 ) -> Tuple[Any, Any, Any, List[Tuple[str, str]]]:
-    """Phase 2 → Phase 3 schema adapter.
+    """Phase 2 to Phase 3 schema adapter.
 
     Converts the Phase 2 RecordingGraphBuilder (capitalized labels) into
     the Phase 3 canonical schema (lowercase labels) via
     ``adapt_phase2_to_phase3``. This is the REAL integration point that
     the v89 run_pipeline.py was missing (it called a non-existent
     ``build_pyg_hetero_data`` function).
-    return staged, builder
+
+    v91 FORENSIC ROOT FIX: the previous version of this function had an
+    UNCLOSED DOCSTRING (the opening triple-quote was never matched by a
+    closing triple-quote). This caused the ``return staged, builder``
+    statement to be trapped inside the string, the function had NO body,
+    and the NEXT function's docstring (``run_phase2_kg_builder``) was
+    consumed as this function's body — producing a SyntaxError on the
+    unicode arrow character at line 318. The file did not compile,
+    breaking ALL CI jobs. ROOT FIX: close the docstring properly and
+    give the function a real body that delegates to
+    ``adapt_phase2_to_phase3``.
+    """
+    from graph_transformer.data.phase2_adapter import adapt_phase2_to_phase3
+    return adapt_phase2_to_phase3(builder, seed=seed)
 
 
 def run_phase2_kg_builder(
-    staged: Any, builder: Any
+    staged: Any, builder: Any, seed: int = 42
 ) -> Tuple[Any, Any, Any, List[Tuple[str, str]]]:
     """Phase 2: Build the real biomedical KG from the staged data.
 
@@ -688,15 +701,17 @@ def main() -> int:
             logger.error("Phase 1 + Bridge produced 0 nodes. Aborting.")
             return 1
 
-        # ─── Phase 2 → Phase 3 Schema Adapter ────────────────────────
-        graph_data = run_schema_adapter(builder, seed=args.seed)
-        staged, builder = run_bridge(Path(args.phase1_dir))
-        if staged.total_nodes == 0:
-            logger.error("Phase 1 + Bridge produced 0 nodes. Aborting.")
-            return 1
-
-        # ─── Phase 2: Build real KG ─────────────────────────────────
-        graph_data = run_phase2_kg_builder(staged, builder)
+        # ─── Phase 2: Build real KG + Phase 3 Schema Adapter ────────
+        # v91 FORENSIC ROOT FIX: the previous code had a DUPLICATE
+        # run_bridge() call here (line 705 re-assigned `staged, builder`
+        # with swapped order, overwriting the correct values from line
+        # 698). It also called BOTH run_schema_adapter AND
+        # run_phase2_kg_builder — the first result was immediately
+        # overwritten by the second. ROOT FIX: call run_phase2_kg_builder
+        # ONCE with the original (staged, builder) from the bridge. This
+        # is the complete Phase 2 → Phase 3 path (label normalization +
+        # PyG HeteroData + schema adaptation).
+        graph_data = run_phase2_kg_builder(staged, builder, seed=args.seed)
         node_features, edge_indices, node_maps, known_pairs = graph_data
         if len(node_maps.get("drug", {})) == 0:
             logger.error("Schema adapter produced 0 drug nodes. Aborting.")
@@ -729,17 +744,6 @@ def main() -> int:
         print(f"  RL Candidates Ranked:    {results.get('rl_ranked_high', 0)}")
         print(f"  Candidates Returned:     {results.get('n_candidates_returned', 0)}")
         print(f"  Output Directory:        {output_dir}")
-        print(f"  Phase 1 CSVs found:     {len(phase1_csvs)}")
-        print(f"  Phase 2 nodes (staged): {staged.total_nodes}")
-        print(f"  Phase 2 edges (staged): {staged.total_edges}")
-        print(f"  Phase 2 drugs in KG:    {len(node_maps.get('drug', {}))}")
-        print(f"  Phase 2 diseases in KG: {len(node_maps.get('disease', {}))}")
-        print(f"  GT Best Val AUC:        {results.get('gt_best_val_auc', 0):.4f}")
-        print(f"  GT Test AUC (verified): {results.get('gt_test_auc_verified', 'N/A')}")
-        print(f"  GT Epochs Trained:      {results.get('gt_epochs_trained', 0)}")
-        print(f"  RL Candidates Ranked:   {results.get('rl_ranked_high', 0)}")
-        print(f"  Candidates Returned:    {results.get('n_candidates_returned', 0)}")
-        print(f"  Output Directory:       {output_dir}")
 
         sv = results.get("scientific_validation", {})
         print()
