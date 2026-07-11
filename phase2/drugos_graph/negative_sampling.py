@@ -123,6 +123,8 @@ from .config import (
     PACKAGE_VERSION,
     PIPELINE_VERSION,
 )
+# P2-016 root fix: import DrugOSDataError for regulatory-mode shortfall raise.
+from .exceptions import DrugOSDataError
 
 logger = logging.getLogger(__name__)
 
@@ -396,16 +398,51 @@ class NegativeSampler:
         self.max_cache_size = max_cache_size
 
         # Fix 7.1: Seeded RNG for reproducibility
+        # P2-017 ROOT FIX: the original code only validated `seed`
+        # (the explicit per-instance arg). When `seed is None`, it
+        # fell through to `np.random.default_rng(SEED)` — but if SEED
+        # itself was None (e.g., DRUGOS_SEED env var unset AND the
+        # config fallback returned None), `default_rng(None)` creates
+        # an UNSEEDED Generator (OS-entropy-seeded, non-deterministic).
+        # The `except (TypeError, ValueError)` clause never fires
+        # because `default_rng(None)` does not raise. The NegativeSampler
+        # then claims reproducibility (`self.seed = SEED = None`) but
+        # actually uses OS entropy — an FDA 21 CFR Part 11 violation.
+        # The fix: validate SEED is not None before calling default_rng.
         self.seed = seed
         if seed is not None:
             self._rng = np.random.default_rng(seed)
-        else:
+        elif SEED is not None:
+            # Module-level SEED fallback — validate it's not None.
             try:
                 self._rng = np.random.default_rng(SEED)
                 self.seed = SEED
             except (TypeError, ValueError):  # v85 FORENSIC ROOT FIX (BUG #51)
                 self._rng = None
                 self.seed = None
+        else:
+            # P2-017 ROOT FIX: SEED is None — cannot guarantee
+            # reproducibility. In regulatory mode, this is a hard
+            # violation. Otherwise, fall back to None and warn loudly.
+            _regulatory = (
+                os.environ.get("DRUGOS_REGULATORY_MODE", "0") == "1"
+                or os.environ.get("DRUGOS_DETERMINISTIC_MODE", "0") == "1"
+            )
+            if _regulatory:
+                raise RuntimeError(
+                    "NegativeSampler: SEED is None and no explicit seed "
+                    "provided. In regulatory mode (DRUGOS_REGULATORY_MODE=1), "
+                    "this is an FDA 21 CFR Part 11 reproducibility "
+                    "violation. Set DRUGOS_SEED env var or pass seed= "
+                    "explicitly. (P2-017 root fix)"
+                )
+            self._rng = None
+            self.seed = None
+            logger.warning(
+                "NegativeSampler: SEED is None — RNG will be unseeded "
+                "and results will NOT be reproducible. Set DRUGOS_SEED "
+                "env var to fix. (P2-017 root fix)"
+            )
 
         # Fix 16.3: Cache eviction counter
         self._total_evicted: int = 0
@@ -939,6 +976,55 @@ class NegativeSampler:
         # Fix 8.4: Batch rejection sampling
         batch_size = min(num_negatives, 1000)
 
+        # P2-007 ROOT FIX: Bernoulli degree-weighting for random_sampling.
+        # The legacy random_sampling used pure uniform sampling over
+        # drugs and diseases. Biomedical KGs have heavy-tailed degree
+        # distributions (TP53, EGFR, "disease" hub nodes with thousands
+        # of edges). Uniform sampling under-represents hub nodes as
+        # negatives — but the rejection filter then rejects the FEWER
+        # valid negatives for high-degree drugs (because most of their
+        # disease pairs are positives). Net effect: low-degree drugs
+        # are over-sampled as negatives, high-degree drugs are
+        # under-sampled. The KGNegativeSampler class correctly uses
+        # Bernoulli degree-weighting per Wang et al. 2014 — but this
+        # legacy random_sampling (used by combined_sampling for the
+        # random strategy, which gets 50% of the budget by default)
+        # did NOT.
+        #
+        # Root fix: build degree-weighted probability arrays once,
+        # cache on the instance, and use rng.choice(p=probs) instead
+        # of rng.integers(). Mirrors KGNegativeSampler's
+        # _bernoulli_probs_cache pattern.
+        if not hasattr(self, "_p2_007_drug_probs"):
+            _drug_degrees = np.zeros(n_drugs, dtype=np.float64)
+            _disease_degrees = np.zeros(n_diseases, dtype=np.float64)
+            _drug_idx = {d: i for i, d in enumerate(self.all_drug_ids)}
+            _disease_idx = {d: i for i, d in enumerate(self.all_disease_ids)}
+            for (d, dis) in self._rejection_pairs:
+                if d in _drug_idx:
+                    _drug_degrees[_drug_idx[d]] += 1.0
+                if dis in _disease_idx:
+                    _disease_degrees[_disease_idx[dis]] += 1.0
+            # Add uniform smoothing (epsilon) so zero-degree entities
+            # still have non-zero probability. Mirrors KGNegativeSampler.
+            _eps = 1.0
+            self._p2_007_drug_probs = (
+                _drug_degrees + _eps
+            ) / (_drug_degrees.sum() + _eps * n_drugs)
+            self._p2_007_disease_probs = (
+                _disease_degrees + _eps
+            ) / (_disease_degrees.sum() + _eps * n_diseases)
+            logger.info(
+                "P2-007 root fix: built Bernoulli degree-weighted "
+                "probabilities for random_sampling — "
+                "drug_degree_max=%.0f, disease_degree_max=%.0f, "
+                "drug_probs_sum=%.4f, disease_probs_sum=%.4f. "
+                "Mirrors KGNegativeSampler (Wang et al. 2014).",
+                float(_drug_degrees.max()), float(_disease_degrees.max()),
+                float(self._p2_007_drug_probs.sum()),
+                float(self._p2_007_disease_probs.sum()),
+            )
+
         while len(negatives) < num_negatives and attempts < max_attempts:
             actual_batch = min(
                 batch_size,
@@ -948,8 +1034,20 @@ class NegativeSampler:
             if actual_batch <= 0:
                 break
 
-            drug_indices = rng.integers(0, n_drugs, size=actual_batch)
-            disease_indices = rng.integers(0, n_diseases, size=actual_batch)
+            # P2-007 ROOT FIX: use degree-weighted choice instead of
+            # uniform integers. rng.choice with p=probs samples indices
+            # proportional to degree, so hubs (TP53, etc.) are sampled
+            # as negatives in proportion to their degree — preventing
+            # the systematic under-representation of hub pairs that
+            # depressed AUC on hub-heavy test sets.
+            drug_indices = rng.choice(
+                n_drugs, size=actual_batch, replace=True,
+                p=self._p2_007_drug_probs,
+            )
+            disease_indices = rng.choice(
+                n_diseases, size=actual_batch, replace=True,
+                p=self._p2_007_disease_probs,
+            )
 
             for drug_idx, disease_idx in zip(drug_indices, disease_indices):
                 attempts += 1
@@ -995,6 +1093,44 @@ class NegativeSampler:
                 "collision_rate": collision_rate,
             },
         )
+
+        # P2-016 ROOT FIX: log CRITICAL (not INFO) when shortfall > 10%.
+        # Small/dense graphs (dev fixtures, sub-graph experiments) hit
+        # high collision rates and the loop terminates with
+        # len(negatives) < num_negatives. Downstream build_training_data
+        # warns if < 90% of target, but proceeds anyway. The model then
+        # trains on FEWER negatives than the configured neg_ratio, with
+        # no hard enforcement. AUC is computed against a smaller
+        # negative pool — easier to distinguish — silently inflated.
+        # The fix: emit a CRITICAL log (and an explicit error in
+        # regulatory mode) when shortfall > 10%, so operators cannot
+        # miss the silent AUC inflation. We do NOT raise by default in
+        # non-regulatory mode because small dev fixtures legitimately
+        # cannot satisfy the target on dense sub-graphs.
+        shortfall = num_negatives - len(negatives)
+        shortfall_pct = shortfall / max(num_negatives, 1)
+        if shortfall_pct > 0.10:
+            _regulatory = (
+                os.environ.get("DRUGOS_REGULATORY_MODE", "0") == "1"
+                or os.environ.get("DRUGOS_DETERMINISTIC_MODE", "0") == "1"
+            )
+            logger.critical(
+                "P2-016 root fix: random_sampling shortfall of %d/%d "
+                "negatives (%.1f%%). Model will train on fewer negatives "
+                "than the configured neg_ratio — AUC may be silently "
+                "inflated due to smaller negative pool. Consider "
+                "increasing max_attempts, decreasing neg_ratio, or "
+                "expanding the drug/disease pools. (regulatory_mode=%s)",
+                shortfall, num_negatives, shortfall_pct * 100,
+                _regulatory,
+            )
+            if _regulatory:
+                raise DrugOSDataError(
+                    f"random_sampling shortfall {shortfall}/{num_negatives} "
+                    f"({shortfall_pct*100:.1f}%) exceeds 10% threshold in "
+                    f"regulatory mode. AUC results would be silently "
+                    f"inflated. (P2-016 root fix)"
+                )
 
         # Fix 8.3: Log cache memory warning
         cache_pct = len(self.negative_cache) / max(self.max_cache_size, 1) * 100

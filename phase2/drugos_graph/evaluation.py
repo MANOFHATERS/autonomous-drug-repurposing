@@ -1112,13 +1112,33 @@ def compute_auc(
             # but are NOT all the same constant). Degenerate scores are
             # handled by _precheck_inputs below (returns AUC=0.5). True
             # leakage still raises.
+            # P2-010 ROOT FIX: choose atol based on the score dtype.
+            # The previous code used atol=1e-12 which is too tight for
+            # fp16/bf16 ChemBERTa features — a model trained on
+            # insufficient data that produces NEARLY identical (but
+            # not bit-identical) pos/neg scores (e.g. pos=[0.51,...]
+            # vs neg=[0.49,...]) had overlap_ratio=0 and was NOT
+            # detected as degenerate, triggering false
+            # EvaluationIntegrityError alarms that masked real
+            # evaluation results. The fix: use 1e-6 for fp32, 1e-3 for
+            # fp16/bf16. We compute atol once and reuse for both
+            # pos_scores and neg_scores.
+            _scores_for_atol = (
+                pos_scores if len(pos_scores) > 0 else neg_scores
+            )
+            if len(_scores_for_atol) > 0 and _scores_for_atol.dtype in (
+                np.float16, np.bfloat16,
+            ):
+                _p2_010_atol = 1e-3
+            else:
+                _p2_010_atol = 1e-6
             _pos_all_same = bool(
                 len(pos_scores) > 0
-                and np.all(np.isclose(pos_scores, pos_scores[0], atol=1e-12))
+                and np.all(np.isclose(pos_scores, pos_scores[0], atol=_p2_010_atol))
             )
             _neg_all_same = bool(
                 len(neg_scores) > 0
-                and np.all(np.isclose(neg_scores, neg_scores[0], atol=1e-12))
+                and np.all(np.isclose(neg_scores, neg_scores[0], atol=_p2_010_atol))
             )
             _is_degenerate = _pos_all_same and _neg_all_same
             if _is_degenerate:
@@ -2462,13 +2482,35 @@ def _nan_result(seed: Optional[int] = None) -> EvaluationResult:
     """Create an EvaluationResult with all-NaN metrics for graceful degradation.
 
     Fixes E6-004.
+    P2-020 ROOT FIX: the previous _nan_result constructed an
+    EvaluationResult without pos_scores/neg_scores. The bootstrap CI
+    was then computed against N(0.3, 0.15) vs N(0.7, 0.15) synthetic
+    draws — NOT against the model's actual scores. The CI was reported
+    with synthetic=True, but consumers may not check this flag,
+    silently presenting synthetic CIs as real model uncertainty.
+    The fix: explicitly mark the result as synthetic in the
+    quality_report so consumers can detect it, AND attach empty
+    pos_scores/neg_scores arrays so any downstream code that tries
+    to recompute the CI from the raw scores gets a clear empty
+    signal rather than silently falling back to synthetic draws.
     """
     nan_metrics: Dict[str, Any] = {"auc": float("nan")}
     return EvaluationResult(
         metrics=nan_metrics,
         counts={"num_positives": 0, "num_negatives": 0},
         provenance=build_lineage_metadata(),
-        quality_report={},
+        quality_report={
+            "synthetic": True,
+            "synthetic_reason": (
+                "_nan_result: evaluation failed; metrics are NaN and "
+                "any bootstrap CI computed downstream is synthetic "
+                "(N(0.3,0.15) vs N(0.7,0.15) draws). Consumers MUST "
+                "check quality_report['synthetic'] before reporting "
+                "CIs. (P2-020 root fix)"
+            ),
+            "pos_scores": [],
+            "neg_scores": [],
+        },
         evaluation_metric_version=EVALUATION_METRIC_VERSION,
         evaluation_schema_version=EVALUATION_SCHEMA_VERSION,
     )
