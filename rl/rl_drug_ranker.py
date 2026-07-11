@@ -1181,7 +1181,7 @@ class PipelineConfig:
     # default because PipelineConfig did not define these fields. A user
     # who set ppo_gamma: 0.9 in YAML got TypeError (unknown field) or
     # silent ignore. Now they are first-class config fields.
-    ppo_gamma: float = 0.0  # V30 (10.29): 0.0 for contextual bandit
+    ppo_gamma: float = 0.95  # P4-018 v2: aligned with parallel agent's choice (sequential MDP)
     ppo_ent_coef: float = 0.01
     ppo_clip_range: float = 0.2
     ppo_net_arch: Optional[Dict[str, List[int]]] = None  # default: dict(pi=[128,64], vf=[64,32])
