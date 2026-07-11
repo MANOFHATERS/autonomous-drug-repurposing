@@ -1828,6 +1828,29 @@ class GTRLBridge:
         # clearly low unmet_need.
         unmet_scale = max(2.0, float(max_treats) * 0.5)
 
+        # v90 ROOT FIX (S-F1): add a disease-connectivity component to
+        # unmet_need_score. On small demo graphs (15 diseases), most
+        # diseases have tc=0 (no treatments), so the exp-decay formula
+        # produces 1.0 for ALL of them → only 3 distinct values. The
+        # RL agent cannot learn from a constant feature.
+        #
+        # Fix: blend the treatment-count signal with a pathway-
+        # connectivity signal. Diseases connected to MORE pathways
+        # (via protein→part_of→pathway→disrupted_in→disease) have
+        # LOWER unmet need (more biological research has been done).
+        # This produces continuous variation even when tc=0 for all
+        # diseases.
+        disrupted_ei = self.edge_indices.get(("pathway", "disrupted_in", "disease"))
+        if disrupted_ei is not None and disrupted_ei.numel() > 0:
+            pathway_count_per_disease = compute_graph_degrees(
+                {("pathway", "disrupted_in", "disease"): disrupted_ei},
+                "disease", direction="in"
+            )
+        else:
+            pathway_count_per_disease = {}
+        max_pw = max(pathway_count_per_disease.values()) if pathway_count_per_disease else 1
+        pw_scale = max(1.0, float(max_pw))
+
         def _unmet_need_for_disease(disease_name: str) -> float:
             ds_idx = disease_map.get(disease_name, -1)
             if ds_idx < 0:
@@ -1839,7 +1862,13 @@ class GTRLBridge:
             # per-pair property. The original rng.normal(0, 0.02) per row
             # was making the same disease appear more/less under-served
             # depending on which drug it was paired with — meaningless.
-            base = 0.95 * float(np.exp(-tc / unmet_scale)) + 0.05
+            treat_component = 0.95 * float(np.exp(-tc / unmet_scale)) + 0.05
+            # v90 S-F1: pathway-connectivity component. Diseases with
+            # more known pathway disruptions have LOWER unmet need.
+            pw = pathway_count_per_disease.get(ds_idx, 0)
+            pw_component = 1.0 - 0.4 * (float(pw) / pw_scale)
+            # Blend: 70% treatment signal, 30% pathway signal.
+            base = 0.7 * treat_component + 0.3 * pw_component
             return float(np.clip(base, 0.0, 1.0))
 
         df["unmet_need_score"] = df["disease"].map(_unmet_need_for_disease)
@@ -2091,7 +2120,18 @@ class GTRLBridge:
             dropout=model_dropout,
         )
 
-        gt_results = self.train_model(epochs=gt_epochs, patience=40)
+        # v90 ROOT FIX: when graph_data is provided (REAL Phase 2 graph),
+        # force fresh training. The previous code used the default
+        # resume_from_checkpoint=True, which loaded a STALE checkpoint
+        # from a prior demo-graph run. The GT model then produced
+        # predictions for the wrong graph topology → GT Test AUC = 0.0.
+        # When graph_data is None (demo graph fallback), keep the
+        # resume behavior for backward compat.
+        gt_results = self.train_model(
+            epochs=gt_epochs,
+            patience=40,
+            resume_from_checkpoint=graph_data is None,
+        )
 
         # Generate RL input
         logger.info("=" * 60)
