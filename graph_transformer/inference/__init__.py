@@ -62,6 +62,17 @@ def predict_drug_disease_scores(
     # mid-training (by a background thread, an API server, or an
     # interactive notebook), it silently disabled dropout and BatchNorm
     # updates for the rest of the process.
+    #
+    # V91 ROOT FIX (dead code removal): the previous edit prepended a
+    # BUG #19 try/finally block but LEFT the old per-batch-encode body
+    # as the executing path (calling model(...) per batch, which re-
+    # encodes the graph every batch — BUG #46 NOT actually fixed), and
+    # appended the encode-once optimization as DEAD CODE after the
+    # finally (unreachable because the try block returns). This combined
+    # both defects: BUG #46 was never in effect, AND 35 lines of dead
+    # code misled reviewers. The fix below merges both: the encode-once
+    # optimization runs INSIDE the try/finally, so BUG #19 (save/restore
+    # training mode) AND BUG #46 (encode once) are both live.
     prior_training = model.training
     model.eval()
     try:
@@ -72,8 +83,8 @@ def predict_drug_disease_scores(
         # V90 BUG #46: encode the graph ONCE for ALL pairs (not per batch).
         # The encoder processes the entire graph through the Graph Transformer
         # layers, producing node embeddings. This is the expensive operation.
-        # The previous code ran it once per batch (via model.forward which
-        # calls encode internally), wasting N_batches × compute.
+        # Calling model(...) per batch re-encodes every batch, wasting
+        # N_batches × compute. Encode once, then index per batch.
         embeddings = model.encode(
             nf, ei,
             exclude_edges_override=set(exclude_edges),
@@ -90,7 +101,7 @@ def predict_drug_disease_scores(
             ds_idx = disease_indices[start:end].to(device)
             # V90 BUG #46: extract per-batch embeddings via indexing (NO
             # redundant encode call). Then call link_predictor.forward
-            # directly with apply_temperature.
+            # directly with apply_temperature (V4 B-F5 fix preserved).
             drug_emb_batch = drug_emb_all[d_idx]
             disease_emb_batch = disease_emb_all[ds_idx]
             probs = model.link_predictor.forward(
@@ -101,7 +112,9 @@ def predict_drug_disease_scores(
 
         return torch.cat(all_probs).numpy()
     finally:
-        # V90 ROOT FIX (BUG #19): restore the prior training state.
+        # V90 ROOT FIX (BUG #19): restore the prior training state so
+        # callers that invoke this mid-training do not silently lose
+        # dropout / BatchNorm updates for the rest of the process.
         model.train(prior_training)
 
 

@@ -507,18 +507,14 @@ jobs:
         # passed, the install was SKIPPED, so the verification step
         # crashed with ModuleNotFoundError: No module named 'pandas'.
         # The fix: always install deps (unconditional).
-        # v91 P0 ROOT FIX (CI workflow unparseable): the previous version
-        # of this step had ONLY a `name:` key and comments — NO `run:` or
-        # `uses:` key. GitHub Actions REJECTS any step without `run:` or
-        # `uses:` as a YAML schema violation, which makes the ENTIRE
-        # workflow file unparseable. Every CI run for 30+ days showed
-        # run-name = ".github/workflows/ci.yml" (the file PATH, not "CI")
-        # with 0 jobs — the signature of an unparseable workflow. The
-        # broken step was inserted between the "Set up Python" step and
-        # the "Check all required jobs passed" step, splitting what should
-        # have been a single install-deps step into a name-only fragment
-        # + a separate check step. This fix collapses the fragment into
-        # the check step (which already has a `run:` block).
+        # V91 ROOT FIX (CI workflow unparseable, resolved during rebase):
+        # the previous version of this step had ONLY a `name:` key and
+        # comments — NO `run:` or `uses:` key. GitHub Actions REJECTS any
+        # step without `run:` or `uses:` as a YAML schema violation, which
+        # makes the ENTIRE workflow file unparseable. Every CI run for 30+
+        # days showed 0 jobs — the signature of an unparseable workflow.
+        # The fix: add the `run:` block that installs the deps needed for
+        # the verification step.
         run: |
           python -m pip install --upgrade pip
           pip install -q \
