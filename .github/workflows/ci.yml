@@ -1,0 +1,200 @@
+# =============================================================================
+# Autonomous Drug Repurposing — Institutional-Grade CI Pipeline
+# =============================================================================
+# Triggers on push/PR to main and manual dispatch.
+# Jobs: lint → (phase1-tests, phase2-tests, bridge-test) → ci-success
+# ci-success is the single required status check for branch protection.
+# =============================================================================
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch: {}
+
+env:
+  DATABASE_URL: "sqlite:///test.db"
+  DRUGOS_DOWNLOAD_MODE: "skip"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PYTHONDONTWRITEBYTECODE: "1"
+
+# ---------------------------------------------------------------------------
+# Global concurrency: one CI run per branch; later runs cancel earlier ones.
+# ---------------------------------------------------------------------------
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # =========================================================================
+  # Lint — flake8 + mypy on source (not tests), continues on error
+  # =========================================================================
+  lint:
+    name: Lint (flake8 + mypy)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install flake8 mypy
+          pip install -r requirements.txt
+
+      - name: flake8 — phase1 source
+        run: |
+          flake8 phase1/ --exclude=phase1/tests,phase1/tests/**,phase1/**/__pycache__ --max-line-length=120 --statistics || true
+
+      - name: flake8 — phase2 source
+        run: |
+          flake8 phase2/ --exclude=phase2/tests,phase2/tests/**,phase2/**/__pycache__ --max-line-length=120 --statistics || true
+
+      - name: mypy — phase1 source
+        run: |
+          mypy phase1/ --exclude 'phase1/tests' --ignore-missing-imports --no-error-summary || true
+
+      - name: mypy — phase2 source
+        run: |
+          mypy phase2/ --exclude 'phase2/tests' --ignore-missing-imports --no-error-summary || true
+
+  # =========================================================================
+  # Phase 1 Tests — data-ingestion unit & integration tests
+  # =========================================================================
+  phase1-tests:
+    name: Phase 1 Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-timeout
+
+      - name: Run Phase 1 tests
+        env:
+          DATABASE_URL: "sqlite:///test.db"
+          DRUGOS_DOWNLOAD_MODE: "skip"
+        run: |
+          pytest phase1/tests/ \
+            -x \
+            --timeout=120 \
+            -q \
+            --ignore=phase1/tests/test_production_loaders.py \
+            -k "not postgresql and not psycopg2 and not pg_connection"
+
+  # =========================================================================
+  # Phase 2 Tests — knowledge-graph / ML tests
+  # =========================================================================
+  phase2-tests:
+    name: Phase 2 Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-timeout
+
+      - name: Run Phase 2 tests
+        env:
+          DATABASE_URL: "sqlite:///test.db"
+          DRUGOS_DOWNLOAD_MODE: "skip"
+        run: |
+          pytest phase2/tests/ \
+            -x \
+            --timeout=120 \
+            -q \
+            --ignore=phase2/tests/test_phase1_phase2_bridge.py
+
+  # =========================================================================
+  # Bridge Test — Phase 1 → Phase 2 integration contract
+  # =========================================================================
+  bridge-test:
+    name: Bridge Test (P1→P2)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-timeout
+
+      - name: Run bridge test
+        env:
+          DATABASE_URL: "sqlite:///test.db"
+          DRUGOS_DOWNLOAD_MODE: "skip"
+        run: |
+          pytest phase2/tests/test_phase1_phase2_bridge.py \
+            -x \
+            --timeout=120
+
+  # =========================================================================
+  # CI Success — required status check (all jobs must pass)
+  # =========================================================================
+  ci-success:
+    name: CI Success
+    runs-on: ubuntu-latest
+    if: always()
+    needs: [lint, phase1-tests, phase2-tests, bridge-test]
+    steps:
+      - name: Check all jobs passed
+        run: |
+          echo "lint           : ${{ needs.lint.result }}"
+          echo "phase1-tests   : ${{ needs.phase1-tests.result }}"
+          echo "phase2-tests   : ${{ needs.phase2-tests.result }}"
+          echo "bridge-test    : ${{ needs.bridge-test.result }}"
+
+          # lint uses continue-on-error, so its result is always 'success'
+          # even if linters find issues. We only gate on test jobs.
+          # If you want lint to be gating, remove continue-on-error above.
+          if [[ "${{ needs.phase1-tests.result }}" != "success" ]]; then
+            echo "::error::phase1-tests failed (${{ needs.phase1-tests.result }})"
+            exit 1
+          fi
+          if [[ "${{ needs.phase2-tests.result }}" != "success" ]]; then
+            echo "::error::phase2-tests failed (${{ needs.phase2-tests.result }})"
+            exit 1
+          fi
+          if [[ "${{ needs.bridge-test.result }}" != "success" ]]; then
+            echo "::error::bridge-test failed (${{ needs.bridge-test.result }})"
+            exit 1
+          fi
+          echo "All test jobs passed — CI success ✓"
