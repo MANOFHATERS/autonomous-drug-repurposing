@@ -292,6 +292,29 @@ class _CircuitBreaker:
             self._half_open_probe_in_flight = True
             return True
 
+    def reset(self) -> None:
+        """Reset the circuit breaker to CLOSED state (thread-safe).
+
+        v90 ROOT FIX (BUG #11 — P1 circuit breaker reset without lock):
+          The previous ``reset_global_state()`` directly mutated
+          ``_circuit_breaker._failure_count`` and ``_circuit_breaker._state``
+          WITHOUT acquiring ``_circuit_breaker._lock``. If another thread
+          was concurrently checking ``allow_request()`` (which acquires the
+          lock), it read a torn state: ``_failure_count=0`` but ``_state``
+          still momentarily "OPEN" (or vice-versa). The breaker's invariant
+          (``_state == OPEN`` iff ``_failure_count >= threshold``) was
+          violated. Under concurrent test teardown + live pipeline, the
+          breaker could get stuck OPEN (rejecting all DB calls) or stuck
+          CLOSED (never tripping on real failures). Non-deterministic,
+          hard to reproduce. ROOT FIX: this method acquires ``_lock``
+          before mutating state, preserving the invariant.
+        """
+        with self._lock:
+            self._failure_count = 0
+            self._state = "CLOSED"
+            self._last_failure_time = 0.0
+            self._half_open_probe_in_flight = False
+
 
 # ===========================================================================
 # DRIVER CONNECT-ARGS REGISTRY (DES-001)
@@ -374,7 +397,21 @@ def _get_environment() -> str:
       1. DRUGOS_ENVIRONMENT  (canonical, set by docker-compose & docs)
       2. ENVIRONMENT         (legacy fallback)
       3. ENV                 (legacy fallback)
-      4. "development"       (default)
+      4. "production"        (v90 fail-closed default — see below)
+
+    v90 ROOT FIX (BUG #10 — P1 fail-open default):
+      For a pharma platform where bugs kill people, defaulting to
+      "development" is a fail-OPEN posture. A production deployment that
+      forgets to set DRUGOS_ENVIRONMENT (or whose configmap mount fails
+      silently) got DEV-SIZED connection pools (5 instead of 15),
+      permissive logging (stack traces leaked via exc_info=not
+      _is_production()), and no SQLite-in-prod guard. The audit at
+      line ~839 logs logger.error for SQLite-in-non-dev — but
+      _get_environment() already returned "development", so the check
+      passed. ROOT FIX: default to "production" (fail-closed). Operators
+      must EXPLICITLY opt into dev by setting DRUGOS_ENVIRONMENT=dev.
+      This is the standard fail-closed pattern for safety-critical
+      systems — when in doubt, assume production.
 
     The returned value is normalised to one of:
       "development" | "staging" | "production"
@@ -387,7 +424,7 @@ def _get_environment() -> str:
         os.environ.get("DRUGOS_ENVIRONMENT")
         or os.environ.get("ENVIRONMENT")
         or os.environ.get("ENV")
-        or "development"
+        or "production"
     )
     norm = raw.strip().lower()
     if norm in ("prod", "production"):
@@ -499,10 +536,23 @@ def _validate_database_url(url: str) -> None:
         )
 
     # Non-SQLite URLs must have a hostname (SQLite/file don't need one)
+    # v90 ROOT FIX (BUG #9 — P1 Unix socket URLs rejected):
+    #   The previous check rejected ANY URL without a hostname. But
+    #   ``postgresql:///dbname`` (Unix socket connection, no hostname) is
+    #   a VALID PostgreSQL URL format. ``urlparse("postgresql:///dbname")
+    #   .hostname`` returns ``None``. This check REJECTED all Unix-socket
+    #   PostgreSQL connections. On production deployments using Unix
+    #   sockets (common in containerized/k8s environments), init_db()
+    #   raised ValueError and the platform could not start. ROOT FIX:
+    #   allow empty hostname when the path is non-empty (the path carries
+    #   the database name for Unix-socket connections). This accepts
+    #   ``postgresql:///drugos`` while still rejecting truly malformed
+    #   URLs like ``postgresql://`` (no host, no path).
     if (
         not scheme.startswith("sqlite")
         and scheme != "file"
         and not parsed.hostname
+        and not parsed.path
     ):
         raise ValueError(
             f"DATABASE_URL is missing a hostname: '{_mask_url(url)}'"
@@ -1203,7 +1253,7 @@ def _set_session_variables(
             # injection-safe — the value is passed as a parameter, not
             # interpolated into the SQL string.
             #
-            # v89 ROOT FIX (BUG #37 — COMPOUND: session variables
+            # v89/v90 ROOT FIX (BUG #8 / BUG #37 — session variables
             #   contaminate across pool reuse):
             #   The previous code used ``set_config(name, value, FALSE)``
             #   which sets a SESSION-level variable. Session-level
@@ -2109,9 +2159,11 @@ def reset_global_state() -> None:
     _thread_local.session_id = None
     _thread_local.session_start_time = None
 
-    # Reset circuit breaker
-    _circuit_breaker._failure_count = 0
-    _circuit_breaker._state = "CLOSED"
+    # Reset circuit breaker (v90 ROOT FIX BUG #11: use thread-safe reset()
+    # method instead of directly mutating _failure_count / _state without
+    # the lock — prevents torn-state race conditions under concurrent
+    # test teardown + live pipeline).
+    _circuit_breaker.reset()
 
     logger.debug("All global state reset")
 
