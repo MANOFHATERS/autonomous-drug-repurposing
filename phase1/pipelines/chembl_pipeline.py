@@ -892,10 +892,21 @@ class ChEMBLPipeline(BasePipeline):
         clean_start = time.monotonic()
         logger.info("[%s] clean() starting (raw_path=%s)", self.source_name, raw_path)
 
-        # Read the raw drugs CSV (gzipped, UTF-8 — INT-6, INT-7).
+        # Read the raw drugs CSV. The v50 downloader writes a PLAIN CSV
+        # (``chembl_drugs.csv`` — no .gz extension, no gzip compression),
+        # while the v49 fallback path writes a GZIPPED CSV
+        # (``chembl_drugs.csv.gz``). v90 COMPRESSION-MISMATCH FIX: the
+        # previous code FORCED ``compression="gzip"``, which raised
+        # ``gzip.BadGzipFile: Not a gzipped file (b'ch')`` when the v50
+        # downloader wrote a plain CSV. ROOT FIX: use
+        # ``compression="infer"`` so pandas auto-detects the compression
+        # from the file extension (.gz → gzip, no extension → plain).
+        # This handles BOTH paths (v50 plain CSV and v49 gzipped CSV)
+        # without hardcoding one. The UTF-8 encoding and low_memory=False
+        # flags are preserved (INT-6, INT-7).
         drugs_df = pd.read_csv(
             raw_path,
-            compression="gzip",
+            compression="infer",
             low_memory=False,
             encoding="utf-8",
         )
