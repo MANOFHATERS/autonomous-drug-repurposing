@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import numpy as np
 import torch
@@ -1461,21 +1461,89 @@ class BiomedicalGraphBuilder:
                     f"({src_label}, {rel}, {dst_label}))."
                 )
 
+        # ─── DERIVE (pathway, disrupted_in, disease) edges ──────────
+        # v100 ROOT FIX (CRITICAL — pathway_score=0.0 bug):
+        # The Phase 1→2 bridge produces Gene→encodes→Protein,
+        # Gene→associated_with→Disease, Gene→susceptible_to→Disease,
+        # and Protein→participates_in→Pathway edges. It does NOT
+        # produce Pathway→disrupted_in→Disease edges directly.
+        # The GT model's pathway_score REQUIRES these edges. Without
+        # them, pathway_score=0.0 for ALL pairs (audit's #1 finding).
+        gene_id_to_protein_name: Dict[str, str] = {}
+        for edge in edges_staged.get(("Gene", "encodes", "Protein"), []):
+            g_id = str(edge.get("src_id", edge.get("source_id", ""))).strip()
+            p_id = str(edge.get("dst_id", edge.get("target_id", ""))).strip()
+            p_name = phase2_id_to_phase3_name.get(("protein", p_id))
+            if g_id and p_name:
+                gene_id_to_protein_name[g_id] = p_name
+
+        # v100 FALLBACK: if no encodes edges, use gene_symbol → protein name matching
+        if not gene_id_to_protein_name:
+            protein_name_by_upper: Dict[str, str] = {}
+            for (p3_type, p2_id), p3_name in list(phase2_id_to_phase3_name.items()):
+                if p3_type == "protein":
+                    upper = p3_name.strip().upper()
+                    if upper and upper not in protein_name_by_upper:
+                        protein_name_by_upper[upper] = p3_name
+            n_matched = 0
+            for gene in getattr(staged_data, "gene_nodes", []):
+                g_id = str(gene.get("id", "")).strip()
+                gene_symbol = str(gene.get("gene_symbol", gene.get("symbol", gene.get("name", "")))).strip().upper()
+                if not g_id or not gene_symbol:
+                    continue
+                p_name = protein_name_by_upper.get(gene_symbol)
+                if p_name:
+                    gene_id_to_protein_name[g_id] = p_name
+                    n_matched += 1
+            if n_matched > 0:
+                logger.info(f"from_phase1_staged_data: v100 FALLBACK — matched {n_matched} genes to proteins via gene_symbol.")
+
+        protein_name_to_pathway_names: Dict[str, Set[str]] = {}
+        for edge in edges_staged.get(("Protein", "participates_in", "Pathway"), []):
+            p_id = str(edge.get("src_id", edge.get("source_id", ""))).strip()
+            w_id = str(edge.get("dst_id", edge.get("target_id", ""))).strip()
+            p_name = phase2_id_to_phase3_name.get(("protein", p_id))
+            w_name = phase2_id_to_phase3_name.get(("pathway", w_id))
+            if p_name and w_name:
+                protein_name_to_pathway_names.setdefault(p_name, set()).add(w_name)
+
+        derived_pw_disease = 0
+        for gene_rel in ("associated_with", "susceptible_to"):
+            for edge in edges_staged.get(("Gene", gene_rel, "Disease"), []):
+                g_id = str(edge.get("src_id", edge.get("source_id", ""))).strip()
+                d_id = str(edge.get("dst_id", edge.get("target_id", ""))).strip()
+                p_name = gene_id_to_protein_name.get(g_id)
+                d_name = phase2_id_to_phase3_name.get(("disease", d_id))
+                if not p_name or not d_name:
+                    continue
+                for w_name in protein_name_to_pathway_names.get(p_name, set()):
+                    if builder.add_edge("pathway", "disrupted_in", "disease", w_name, d_name):
+                        derived_pw_disease += 1
+
+        if derived_pw_disease > 0:
+            edges_by_phase3_type[("pathway", "disrupted_in", "disease")] = derived_pw_disease
+            logger.info(f"from_phase1_staged_data: v100 ROOT FIX — derived {derived_pw_disease} (pathway, disrupted_in, disease) edges. pathway_score will be NON-ZERO.")
+        else:
+            logger.warning("from_phase1_staged_data: derived ZERO pathway→disease edges. pathway_score will be 0.0.")
+
         # ─── Finalize: build reverse edges + tensorize ──────────────
-        builder._sync_edge_lists()
-        builder._edge_lists = BiomedicalGraphBuilder._build_reverse_edges(
-            builder._edge_lists
-        )
+        # v100 ROOT FIX (CRITICAL — reverse edges discarded bug):
+        # Use _build_reverse_edges_into_sets (writes into _edge_sets)
+        # NOT the deprecated _build_reverse_edges (writes into _edge_lists
+        # which finalize() discards via _sync_edge_lists).
+        builder._build_reverse_edges_into_sets(builder._edge_sets)
         node_features, edge_indices, node_maps = builder.finalize()
 
         total_nodes = sum(nodes_registered_by_type.values())
         total_edges = sum(edges_by_phase3_type.values())
+        n_reverse = sum(v.shape[1] for k, v in edge_indices.items() if k not in edges_by_phase3_type)
         logger.info(
             f"from_phase1_staged_data: REAL graph built from Phase 1→2 "
             f"staged data — {total_nodes} nodes ({nodes_registered_by_type}), "
             f"{total_edges} forward edges ({len(edges_by_phase3_type)} types), "
-            f"{len(known_pairs)} REAL known treatment pairs (from "
-            f"Compound→treats→Disease edges)."
+            f"{n_reverse} reverse edges (v100 fix: now preserved), "
+            f"{derived_pw_disease} derived pathway→disease edges, "
+            f"{len(known_pairs)} REAL known treatment pairs."
         )
 
         if not known_pairs:

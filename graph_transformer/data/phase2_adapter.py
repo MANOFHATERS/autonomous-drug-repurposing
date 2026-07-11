@@ -406,10 +406,14 @@ def adapt_phase2_to_phase3(
     )
 
     # ─── Step 8: Build reverse edges + finalize ────────────────────────
-    gt_builder._sync_edge_lists()
-    gt_builder._edge_lists = BiomedicalGraphBuilder._build_reverse_edges(
-        gt_builder._edge_lists
-    )
+    # v100 ROOT FIX (CRITICAL — reverse edges discarded bug):
+    # The previous code called the DEPRECATED _build_reverse_edges
+    # staticmethod which writes into _edge_lists. But finalize()
+    # immediately calls _sync_edge_lists() which rebuilds _edge_lists
+    # from _edge_sets (forward-only), DISCARDING all 7 reverse edge
+    # types. Use _build_reverse_edges_into_sets (writes into _edge_sets)
+    # so reverse edges survive _sync_edge_lists() in finalize().
+    gt_builder._build_reverse_edges_into_sets(gt_builder._edge_sets)
     node_features, edge_indices, node_maps = gt_builder.finalize()
 
     # ─── Step 9: Extract known_pairs from (drug, treats, disease) edges ─

@@ -1101,6 +1101,20 @@ class DisGeNETPipeline(BasePipeline):
             except (OSError, ValueError, ConnectionError, TimeoutError, DownloadError) as exc:  # v85 FORENSIC ROOT FIX (BUG #51) + v91: add DownloadError so 401 falls back to embedded sample
                 # v83 P0-C13: in sample mode, fall back to embedded samples
                 # instead of raising. In full mode, re-raise.
+                #
+                # ROOT FIX (v92): added ``DownloadError`` to the catch list.
+                # ``DownloadError`` inherits from ``PipelineError`` →
+                # ``Exception`` (NOT from ``OSError``), so the previous
+                # catch list ``(OSError, ValueError, ConnectionError,
+                # TimeoutError)`` did NOT catch it. When DisGeNET's
+                # deprecated static URL returns HTTP 401 (which it does
+                # now — the URL was deprecated in 2024 and redirects to
+                # the API which requires a key), ``_download_with_retries``
+                # raises ``DownloadError`` (after all retries are
+                # exhausted). This propagated up and crashed the E2E
+                # sample-mode pipeline, breaking CI's E2E job. The fix
+                # adds ``DownloadError`` so the sample-mode fallback
+                # fires correctly.
                 if _download_mode == "sample":
                     logger.warning(
                         "[disgenet] Live download failed in sample mode (%s: %s) "
