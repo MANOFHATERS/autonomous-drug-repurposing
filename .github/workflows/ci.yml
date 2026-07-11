@@ -818,8 +818,16 @@ jobs:
           check('V31-4 PipelineConfig.from_env exists', hasattr(PipelineConfig, 'from_env'))
 
           # ─── V31-5: GT model class exists ───
-          from graph_transformer.models.graph_transformer import GraphTransformerModel
-          check('V31-5 GraphTransformerModel importable', True)
+          # v90 STALE-CI FIX: the previous check imported
+          # ``GraphTransformerModel`` from
+          # ``graph_transformer.models.graph_transformer``, but that
+          # class does NOT exist — the actual class is
+          # ``DrugRepurposingGraphTransformer`` (renamed in V4 A1/A2
+          # root fix when the link predictor was scaled down to prevent
+          # overfitting on small demo graphs). The CI verification was
+          # never updated, so this check failed on every run since V4.
+          from graph_transformer.models.graph_transformer import DrugRepurposingGraphTransformer
+          check('V31-5 DrugRepurposingGraphTransformer importable', True)
 
           # ─── V31-6: Trainer class exists ───
           from graph_transformer.training.trainer import GraphTransformerTrainer
