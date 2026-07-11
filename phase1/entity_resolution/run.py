@@ -398,8 +398,29 @@ def run_entity_resolution() -> Dict[str, Any]:
         # sqlite3.OperationalError. Use DELETE FROM which is universally
         # supported (ANSI SQL) and behaves correctly within an explicit
         # transaction on both dialects.
+        #
+        # V90 CI fix: deduplicate save_df on chembl_id (and other unique
+        # key columns) BEFORE inserting. The entity_mapping table has a
+        # UNIQUE constraint on chembl_id; if the staging data has
+        # duplicates (e.g., the same drug appearing in both DrugBank and
+        # ChEMBL sources with the same chembl_id), the INSERT fails with
+        # "UNIQUE constraint failed: entity_mapping.chembl_id". The fix:
+        # drop_duplicates on chembl_id, keeping the first occurrence.
         engine = get_engine()
         with engine.begin() as conn:
+            # V90 CI fix: deduplicate on chembl_id (and other unique keys)
+            _dedup_cols = [c for c in ["chembl_id", "drugbank_id", "pubchem_cid"]
+                           if c in save_df.columns]
+            if _dedup_cols:
+                n_before = len(save_df)
+                save_df = save_df.drop_duplicates(subset=_dedup_cols, keep="first")
+                n_after = len(save_df)
+                if n_before != n_after:
+                    logger.warning(
+                        "V90 CI fix: deduplicated entity_mapping staging "
+                        "data on %s: %d -> %d rows (removed %d duplicates)",
+                        _dedup_cols, n_before, n_after, n_before - n_after,
+                    )
             save_df.to_sql(
                 "_tmp_entity_mapping_staging",
                 con=conn,
