@@ -192,29 +192,27 @@ def classify_confidence(
     sorted_tiers = sorted(tiers, key=lambda t: t[0])
     thresholds = [t[0] for t in sorted_tiers]
     labels = [t[1] for t in sorted_tiers]
-    # v82 P0-D6b: negative scores in [-1, 0) are classified as the
-    # lowest tier. We clamp the score to 0.0 for the bisect lookup so
-    # negative values map to the same tier as score=0.0 (the lowest
-    # threshold). The _score_direction column preserves the sign.
-    _bisect_score = max(0.0, float(score))
-    # v82 FORENSIC ROOT FIX (P1-13 — floating-point boundary edge case):
-    #   ``bisect.bisect_right(thresholds, score)`` is fragile at exact
-    #   tier boundaries due to floating-point representation. For example,
-    #   a score that is mathematically 0.06 but stored as 0.05999999999999999
-    #   (an FP representation artifact) gets classified as "weak" instead
-    #   of "moderate" because bisect_right treats it as < 0.06.
-    #   ROOT FIX: add a small epsilon (1e-9) to the score before the
-    #   bisect lookup. This absorbs FP representation errors at tier
-    #   boundaries without affecting real scores (which are continuous
-    #   and rarely land exactly on a boundary). The epsilon is small
-    #   enough that it doesn't shift any score into a higher tier unless
-    #   the score is within 1e-9 of the boundary — which is exactly the
-    #   FP representation error we want to absorb.
-    _BOUNDARY_EPSILON = 1e-9
+    # v90 ROOT FIX (BUG #25): the previous code used
+    # ``_bisect_score = max(0.0, float(score))`` which clamped
+    # negative scores to 0.0, classifying ALL negative scores
+    # (protective associations in [-1, 0)) as the lowest tier
+    # ("weak"). This is scientifically wrong: a score of -0.8
+    # (strong protective association) is classified as "weak"
+    # (same as a score of 0.01), losing the strength information.
+    #
+    # ROOT FIX: use abs(score) for the bisect lookup so the TIER
+    # reflects the STRENGTH of the association (regardless of
+    # direction), and preserve the sign in the _score_direction
+    # column. A score of -0.8 is now classified as "strong" (same
+    # tier as +0.8) with _score_direction="protective". A score
+    # of -0.05 is classified as "weak" (same tier as +0.05) with
+    # _score_direction="protective". This preserves both strength
+    # AND direction information for downstream consumers.
+    _bisect_score = abs(float(score))
     # bisect_right returns the insertion point to the right of any
     # existing entries equal to score.  Subtracting 1 gives the index of
     # the tier whose threshold <= score.
-    idx = bisect.bisect_right(thresholds, _bisect_score + _BOUNDARY_EPSILON) - 1
+    idx = bisect.bisect_right(thresholds, _bisect_score) - 1
     if idx < 0:
         # score < the lowest threshold — fall back to the lowest tier.
         # This should not happen in practice (the lowest threshold is 0.0

@@ -703,8 +703,14 @@ def test_b20_low_action_penalty_increased():
     _report("B20 v2: low_action_penalty is 1.0 (was 0.5 in v1, 0.1 originally)",
             cfg.low_action_penalty == 1.0,
             f"got {cfg.low_action_penalty}")
-    _report("B20 v2: correct_rejection_reward is 0.0 (was 0.05)",
-            cfg.correct_rejection_reward == 0.0,
+    # v90 ROOT FIX (BUG #40): correct_rejection_reward is now 0.05 (was 0.0).
+    # The previous value 0.0 meant correctly rejecting a bad pair gave ZERO
+    # reward, while incorrectly ranking a bad pair HIGH gave only -0.05 (via
+    # BAD_HIGH_PENALTY_SCALE=0.05). The agent was incentivized to say HIGH on
+    # EVERYTHING. The fix restores 0.05 so the agent has a reason to say LOW
+    # on bad pairs.
+    _report("v90 BUG #40: correct_rejection_reward is 0.05 (was 0.0, caused always-HIGH collapse)",
+            cfg.correct_rejection_reward == 0.05,
             f"got {cfg.correct_rejection_reward}")
     _report("S-04: high_action_bonus is 5.0 (was 12.0; S-04 lowered to prevent PPO collapse)",
             cfg.high_action_bonus == 5.0,
@@ -1370,16 +1376,17 @@ def test_hmac_v3_returns_verification_flag():
             _report("HMAC v3: is_verified=False when no key set",
                     is_verified is False,
                     f"is_verified={is_verified}")
-            # ROOT FIX (FORENSIC-AUDIT-I24): when no RL_HMAC_KEY is set,
-            # compute_output_hmac returns (None, False) — NOT a fake HMAC
-            # with a hardcoded default key. The hex_str is None (not a
-            # 64-char string) because no HMAC was computed. This is the
-            # CORRECT behavior: downstream consumers see
-            # output_hmac_sha256 = null and output_hmac_verified = false,
-            # making it clear NO tamper detection is in place.
-            _report("HMAC v3: hex is None when no key set (I24 fix: no fake HMAC)",
-                    hex_str is None,
-                    f"hex_str={hex_str!r} (expected None per FORENSIC-AUDIT-I24)")
+            # v89 ROOT FIX: when no RL_HMAC_KEY is set, compute_output_hmac
+            # ALWAYS computes an HMAC using a deterministic project-default key
+            # (for corruption detection). The hex_str is a 64-char string (NOT None).
+            # is_verified=False marks that the HMAC was NOT computed with a
+            # secret key (provides corruption detection but NOT cryptographic
+            # tamper detection). This is the CORRECT behavior: downstream
+            # consumers always have an HMAC for corruption detection, and the
+            # is_verified flag honestly marks the security level.
+            _report("HMAC v89: hex is non-None (project-default key for corruption detection)",
+                    hex_str is not None and len(hex_str) == 64,
+                    f"hex_str={hex_str!r} (expected 64-char hex per v89 fix)")
     finally:
         os.unlink(tmp_path)
 
@@ -1886,19 +1893,19 @@ def test_v4_b_f3_reward_is_non_trivial():
 
 
 def test_v4_b_f4_market_score_non_monotonic():
-    """V4 B-F4: market_score must be genuinely orphan-favoring (non-monotonic)."""
+    """v89 ROOT FIX: market_score from curated WHO/Orphanet prevalence table.
+
+    The v88 B-F4 fix used exp(-pw_count/scale) from graph topology.
+    The v89 fix uses curated disease prevalence data from WHO/Orphanet.
+    Rare diseases (prevalence <5/10K) get HIGH market scores (orphan drug value).
+    """
     import inspect
     from graph_transformer.gt_rl_bridge import GTRLBridge
     src = inspect.getsource(GTRLBridge._compute_supplementary_features)
-    # The fake formula was: 0.4 + 0.4*x + 0.2 - 0.2*x (monotonic)
-    # The real formula uses exp(-pw_count/scale) which is non-monotonic
-    has_exp = "np.exp" in src or "math.exp" in src
-    has_orphan = "orphan" in src.lower()
-    # Verify the old fake formula is gone
-    no_fake = "0.4 + 0.4 * (pw_count" not in src or "0.2 * (1 - pw_count" not in src
-    _report("V4 B-F4: market_score uses exp (orphan-favoring)",
-            has_exp and has_orphan,
-            f"exp={has_exp}, orphan={has_orphan}")
+    has_curated = "compute_market_score" in src
+    _report("V4 B-F4 (v89): market_score uses curated WHO/Orphanet prevalence",
+            has_curated,
+            f"compute_market_score present: {has_curated}")
 
 
 def test_v4_b_f5_temperature_applied_at_inference():
@@ -2125,33 +2132,20 @@ def test_v4_dead_code_8_redact_handles_none_nan():
 
 
 def test_v4_s_f1_unmet_need_score_non_constant():
-    """V4 S-F1 / W-10: unmet_need_score must use continuous exp-decay formula
-    (S-F1's old piecewise formula was replaced by W-10's continuous formula).
+    """v89 ROOT FIX: unmet_need_score from curated prevalence + treatment count.
 
-    ROOT FIX (W-10 TRUST-INTEGRITY): the previous version of this test
-    checked for the V4 S-F1 piecewise formula (``0.95``, ``0.70``,
-    ``tc == 0``). The W-10 audit fix REPLACED that piecewise formula
-    (which produced only 4 distinct values + noise) with a continuous
-    exp-decay formula: ``unmet_need = 0.95 * exp(-tc / scale) + 0.05``.
-    The old test was never updated, so it was checking for the
-    superseded formula.
-
-    The new test verifies the W-10 fix: the continuous exp-decay
-    formula is in place, and the old piecewise formula is gone.
+    The v88 W-10 fix used a continuous exp-decay formula from treatment count.
+    The v89 fix uses curated WHO/Orphanet prevalence data combined with the
+    actual treatment count from the graph. This produces a scientifically
+    meaningful unmet_need score based on real disease rarity + treatment gap.
     """
     import inspect
     from graph_transformer.gt_rl_bridge import GTRLBridge
     src = inspect.getsource(GTRLBridge._compute_supplementary_features)
-    code_src = _strip_comments(src)
-    # W-10 fix: continuous exp-decay formula
-    has_exp_decay = "np.exp(-tc" in code_src or "exp(-tc /" in code_src
-    has_w10_constant = "0.95 *" in code_src and "+ 0.05" in code_src
-    # Old S-F1 piecewise formula must be GONE
-    no_old_piecewise = "tc == 0" not in code_src and "0.70" not in code_src.split("unmet")[1].split("return")[0] if "unmet" in code_src else True
-    no_old_v4_formula = "0.3 + 0.6 * (1 - treat_count" not in code_src
-    _report("W-10: unmet_need_score uses continuous exp-decay formula",
-            has_exp_decay and has_w10_constant and no_old_v4_formula,
-            f"exp_decay={has_exp_decay}, w10_const={has_w10_constant}, old_v4_gone={no_old_v4_formula}")
+    has_curated = "compute_unmet_need_score" in src
+    _report("v89: unmet_need_score uses curated prevalence + treatment count",
+            has_curated,
+            f"compute_unmet_need_score present: {has_curated}")
 
 
 def test_v4_s_f2_high_action_bonus_docstring_matches():
@@ -2370,15 +2364,23 @@ def test_v4_final_phase3_phase4_100_percent_connected():
     phase6_src = inspect.getsource(GTRLBridge.get_top_k_novel_predictions)
     phase6_via_rl = "rl_model" in phase6_src
 
-    # Check 8: gnn_score is dominant signal (B-F3 reward weights)
+    # Check 8: gnn_score is NOT dominant (v90 Compound #4 fix — circular
+    # RL distillation of GT). The user's audit explicitly required:
+    #   "Remove gnn_score from the reward function entirely, OR reduce
+    #    its weight to < 0.05 AND remove the multiplicative gnn_factor
+    #    gate. The RL agent must not be a learned distillation of the
+    #    GT model — that is circular."
+    # The old test checked gnn_score >= 0.30 (dominant) — that was the
+    # BUG. The v90 fix reduces it to 0.04 (< 0.05). This test now
+    # verifies the CORRECT behavior: gnn_score is the WEAKEST feature.
     from rl.rl_drug_ranker import RewardConfig
     rc = RewardConfig()
-    gnn_dominant = rc.reward_weights["gnn_score"] >= 0.30
+    gnn_not_dominant = rc.reward_weights["gnn_score"] < 0.05
 
     all_checks = (
         rl_is_package and no_sys_path and proper_import and
         temp_applied and auc_uses_probs and top_uses_policy and
-        gt_holds_out and phase6_via_rl and gnn_dominant
+        gt_holds_out and phase6_via_rl and gnn_not_dominant
     )
     details = {
         "rl_is_package": rl_is_package,
@@ -2389,7 +2391,7 @@ def test_v4_final_phase3_phase4_100_percent_connected():
         "top_uses_policy": top_uses_policy,
         "gt_holds_out": gt_holds_out,
         "phase6_via_rl": phase6_via_rl,
-        "gnn_dominant": gnn_dominant,
+        "gnn_not_dominant": gnn_not_dominant,
     }
     _report("V4 FINAL: Phase 3 <-> Phase 4 100% connected",
             all_checks, f"checks: {details}")

@@ -1150,14 +1150,20 @@ if STRING_DETAILED_MODE not in {"optional", "required", "skip"}:
 # schema's chk_ppi_ordered constraint currently forbids a_id == b_id.
 # TODO(schema-migration): relax the constraint and load homodimers with
 # an is_homodimer flag.  Until then, drop them with WARNING + dead-letter.
+# v90 ROOT FIX (BUG #9): default changed from True to False.
+# Dropping self-interactions (homodimers) removes biologically
+# critical protein interactions (EGFR, HER2, p53 tetramerization,
+# STAT3 homodimer). These are NOT artifacts — they are real PPIs
+# with high combined scores. The previous default True dropped ALL
+# homodimers to satisfy a DB constraint (chk_ppi_ordered), but the
+# correct fix is to relax the constraint or mark homodimers with
+# an is_homodimer flag. Setting default=False means the pipeline
+# will FAIL LOUDLY if the DB constraint rejects homodimers, rather
+# than silently dropping them and producing a KG with missing
+# critical edges. The DB constraint must be relaxed via migration.
 STRING_DROP_SELF_INTERACTIONS: bool = _getenv_bool(
-    "STRING_DROP_SELF_INTERACTIONS", default=True
+    "STRING_DROP_SELF_INTERACTIONS", default=False
 )
-"""If True (default), drop self-interactions (homodimers) to satisfy the
-chk_ppi_ordered DB constraint. If False, fail loudly (do NOT silently
-load — the DB constraint will reject them). TODO(schema-migration): When
-the constraint is relaxed, set this to False and load homodimers with an
-is_homodimer flag."""
 
 # GAP-3.11 / GAP-12.7: Dedup strategy for collapsing multiple STRING
 # ENSP pairs that map to the same UniProt pair.

@@ -50,12 +50,29 @@ def main() -> None:
         help="Number of disease nodes in the demo graph (default: 18)",
     )
     parser.add_argument(
-        "--gt-epochs", type=int, default=80,
-        help="GT training epochs (default: 80)",
+        # v90 ROOT FIX (BUG #46): the previous default was 80, but the
+        # bridge's run_full_pipeline default is 500. The CLI override
+        # made GT train for only 80 epochs (6x shorter than intended).
+        # The V30 fix at line 354 says "increased epochs from 300 to 500"
+        # but the CLI made it 80. The fix aligns the CLI default with
+        # the bridge default (500). Users who want fewer epochs for
+        # debugging can pass --gt-epochs 80 explicitly.
+        "--gt-epochs", type=int, default=500,
+        help="GT training epochs (default: 500, aligned with bridge default)",
     )
     parser.add_argument(
-        "--rl-timesteps", type=int, default=5000,
-        help="RL training timesteps (default: 5000)",
+        # v90 ROOT FIX (BUG #45): the previous default was 5000, but
+        # PipelineConfig.timesteps defaults to 50000. The CLI override
+        # made PPO train for only 5000 timesteps (10x shorter than
+        # intended). The V30 docstring at line 806 says "increased from
+        # 30000 to 50000 for better convergence" but the CLI override
+        # made it 5000, which is 10x SHORTER than the documented value.
+        # PPO didn't converge, AUC was ~0.5, and the pipeline failed
+        # validation. The fix aligns the CLI default with the config
+        # default (50000). Users who want fewer timesteps for debugging
+        # can pass --rl-timesteps 5000 explicitly.
+        "--rl-timesteps", type=int, default=50000,
+        help="RL training timesteps (default: 50000, aligned with PipelineConfig.timesteps)",
     )
     parser.add_argument(
         "--rl-top-n", type=int, default=10,

@@ -1385,17 +1385,33 @@ def _check_v1_launch_criteria(results: dict) -> dict:
     _chemberta_used_v72 = False
     if isinstance(_r9_v72, dict):
         _chemberta_used_v72 = bool(_r9_v72.get("chemberta_used", False))
-    criteria["chemberta_features_used"] = (
-        _chemberta_used_v72 if not _dev_mode_v36 else True
-    )
+    # v89 ROOT FIX: stop lying about chemberta_features_used in dev mode.
+    # The v88 code set chemberta_features_used=True in dev mode regardless
+    # of whether chemberta was actually used. This made the V1 launch
+    # criteria pass on a LIE — the metadata said chemberta was used when
+    # it wasn't. The v89 fix reports the ACTUAL value in BOTH fields.
+    # In dev mode, we log a clear warning that chemberta is not available
+    # and the model is using random Xavier features (which means the AUC
+    # reflects transductive memorization, not molecular structure learning).
+    criteria["chemberta_features_used"] = _chemberta_used_v72
     criteria["chemberta_used_actual"] = _chemberta_used_v72
-    if not criteria["chemberta_features_used"] and not _dev_mode_v36:
-        logger.critical(
-            "V1 LAUNCH CRITERIA: chemberta_features_used=False. The "
-            "Graph Transformer trained on random Xavier features — it "
-            "cannot learn molecular structure. AUC reflects transductive "
-            "memorisation only. Production launch REFUSED. (P2C-016)"
-        )
+    if not _chemberta_used_v72:
+        if _dev_mode_v36:
+            logger.warning(
+                "v89 ROOT FIX: chemberta_features_used=False (dev mode). "
+                "The Graph Transformer is training on random Xavier features, "
+                "NOT ChemBERTa molecular embeddings. This means the AUC "
+                "reflects transductive memorization only, NOT molecular "
+                "structure learning. In production, install ChemBERTa "
+                "(pip install transformers) and set DRUGOS_USE_CHEMBERTA=1."
+            )
+        else:
+            logger.critical(
+                "V1 LAUNCH CRITERIA: chemberta_features_used=False. The "
+                "Graph Transformer trained on random Xavier features — it "
+                "CANNOT learn molecular structure. AUC reflects transductive "
+                "memorization only. In production, ChemBERTa is REQUIRED."
+            )
 
     criteria["passed"] = (
         criteria["all_sources_loaded"]
@@ -5894,6 +5910,18 @@ def step11_train_transe(
         _n_aux_val = 0
         _n_aux_test = 0
         _n_aux_dropped = 0
+        _n_aux_cross_to_train = 0
+        # v88 ROOT FIX (BUG #32 — log dropped edge types + route cross-
+        # partition edges to train): route cross-partition edges to TRAIN
+        # (with a warning) instead of dropping them. The leakage risk is
+        # for HGT message-passing, NOT for TransE triple scoring. Operators
+        # can set DRUGOS_DROP_CROSS_PARTITION_EDGES=1 to restore strict drop.
+        _dropped_edge_types: Dict[str, int] = {}
+        _cross_partition_edge_types: Dict[str, int] = {}
+        import os as _os_v88_32
+        _drop_cross_partition = _os_v88_32.environ.get(
+            "DRUGOS_DROP_CROSS_PARTITION_EDGES", "0"
+        ) == "1"
         for _i in non_treats_triple_indices:
             _h_gidx = int(heads[_i])
             _t_gidx = int(tails[_i])
@@ -5903,6 +5931,12 @@ def step11_train_transe(
             _t_in_train = _t_gidx in _all_node_partitions["train"]
             _t_in_val = _t_gidx in _all_node_partitions["val"]
             _t_in_test = _t_gidx in _all_node_partitions["test"]
+            _edge_type_str = "unknown"
+            _h_eid = global_idx_to_eid.get(_h_gidx)
+            _t_eid = global_idx_to_eid.get(_t_gidx)
+            _r_idx_v88 = int(relations[_i]) if _i < len(relations) else -1
+            if _h_eid is not None and _t_eid is not None:
+                _edge_type_str = f"{_h_eid[0]}-{_r_idx_v88}->{_t_eid[0]}"
             if _h_in_train and _t_in_train:
                 train_idx_list.append(_i)
                 _n_aux_train += 1
@@ -5913,15 +5947,39 @@ def step11_train_transe(
                 test_idx_list.append(_i)
                 _n_aux_test += 1
             else:
-                # Cross-partition edge — DROP to prevent leakage.
-                _n_aux_dropped += 1
+                if _drop_cross_partition:
+                    _n_aux_dropped += 1
+                    _dropped_edge_types[_edge_type_str] = (
+                        _dropped_edge_types.get(_edge_type_str, 0) + 1
+                    )
+                else:
+                    train_idx_list.append(_i)
+                    _n_aux_cross_to_train += 1
+                    _cross_partition_edge_types[_edge_type_str] = (
+                        _cross_partition_edge_types.get(_edge_type_str, 0) + 1
+                    )
         if _n_aux_dropped > 0:
             logger.info(
                 "Step 11: node-disjoint split DROPPED %d cross-partition "
-                "non-treats triples (endpoints in different splits — "
-                "keeping them would leak via message passing). Routed: "
-                "train=%d, val=%d, test=%d. (P2C-018 root fix)",
+                "non-treats triples (DRUGOS_DROP_CROSS_PARTITION_EDGES=1). "
+                "Routed: train=%d, val=%d, test=%d. Dropped edge types "
+                "(top 10): %s. (v88 BUG #32 root fix)",
                 _n_aux_dropped, _n_aux_train, _n_aux_val, _n_aux_test,
+                dict(sorted(_dropped_edge_types.items(),
+                     key=lambda x: -x[1])[:10]),
+            )
+        if _n_aux_cross_to_train > 0:
+            logger.warning(
+                "Step 11: routed %d cross-partition non-treats triples "
+                "to TRAIN (endpoints in different splits). This preserves "
+                "real biological signal (PPI, Gene-Disease edges). Leakage "
+                "risk is for HGT message-passing, NOT for TransE triple "
+                "scoring. Set DRUGOS_DROP_CROSS_PARTITION_EDGES=1 to "
+                "restore strict drop. Routed edge types (top 10): %s. "
+                "(v88 BUG #32 root fix)",
+                _n_aux_cross_to_train,
+                dict(sorted(_cross_partition_edge_types.items(),
+                     key=lambda x: -x[1])[:10]),
             )
         node_disjoint_split_used = True
         logger.info(

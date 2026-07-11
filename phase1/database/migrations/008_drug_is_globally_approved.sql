@@ -155,11 +155,16 @@ ALTER TABLE drugs ALTER COLUMN is_globally_approved SET NOT NULL;
 -- globally approved AND withdrawn. This is a hard patient-safety
 -- invariant; if a future loader bug or trigger tries to set both,
 -- PostgreSQL will reject the INSERT/UPDATE with IntegrityError.
+-- v90 ROOT FIX (BUG #6): use the portable ``= 1`` form (not ``= TRUE``)
+-- so the constraint works identically on SQLite dev/test DBs created via
+-- the migration runner. The ORM (models.py) now declares the SAME
+-- constraint with the SAME name so dev DBs created via create_all() also
+-- enforce it — closing the "tests pass on dev, prod kills" anti-pattern.
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_drugs_no_approved_and_withdrawn') THEN
         ALTER TABLE drugs ADD CONSTRAINT chk_drugs_no_approved_and_withdrawn
-            CHECK (NOT (is_globally_approved = TRUE AND is_withdrawn = TRUE));
+            CHECK (NOT (is_globally_approved = 1 AND is_withdrawn = 1));
         RAISE NOTICE '  [OK] Added patient-safety invariant chk_drugs_no_approved_and_withdrawn';
     ELSE
         RAISE NOTICE '  [SKIP] constraint chk_drugs_no_approved_and_withdrawn already exists';
