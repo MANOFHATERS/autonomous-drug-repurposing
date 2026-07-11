@@ -3473,6 +3473,7 @@ def train_transe(
                         # unit-test fallback path.
                         n_val_neg = n_val * 10
                         val_neg_tails_list: List[int] = [0] * n_val_neg
+                        # v91: keep HEAD's properly-closed version.
                         # Expand val_rels 10x to align with neg slots.
                         # v91 P0 ROOT FIX: the outer paren was UNCLOSED
                         # (the v88 fix block was pasted INSIDE the
