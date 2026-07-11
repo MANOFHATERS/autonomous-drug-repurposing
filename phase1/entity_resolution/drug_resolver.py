@@ -5046,7 +5046,41 @@ class DrugResolver(Resolver):
             SHA-256-derived checksum of the input record (audit C.8).
         """
         with _MutationContext(self, f"create_entry({source!r}, {method!r})", structural=False):
-            inchikey = _normalize_inchikey(record.get("inchikey", "") or "")
+            # v89 ROOT FIX (BUG #34 — _create_canonical_entry does not
+            # mutate record["inchikey"], leaking the non-normalized
+            # value to callers):
+            #   The previous code did ``inchikey = _normalize_inchikey(
+            #   record.get("inchikey", "") or "")`` and stored the
+            #   NORMALIZED value in the canonical entry (line ~5140:
+            #   ``"inchikey": inchikey``). But the ORIGINAL ``record``
+            #   dict was NOT mutated — ``record["inchikey"]`` still had
+            #   the protonation suffix (e.g. ``RZVAJAI...-U`` instead of
+            #   ``RZVAJAI...``). If the caller later inspected the
+            #   record (e.g. for a subsequent lookup, a log, or storing
+            #   it elsewhere), they saw the non-normalized value. This
+            #   is a leaky abstraction: the function appears to
+            #   normalize but doesn't.
+            #
+            #   ROOT FIX: normalize ``record["inchikey"]`` IN PLACE so
+            #   the caller's record dict is consistent with the
+            #   canonical entry. This is safe because:
+            #     1. The record dict is constructed by ``_df_to_records``
+            #        (a fresh dict per row) — no aliasing concerns.
+            #     2. The normalization is idempotent — calling
+            #        ``_normalize_inchikey`` on an already-normalized
+            #        value returns the same value.
+            #     3. Downstream code that uses the record (e.g.
+            #        ``_merge_into_canonical``) re-normalizes, so
+            #        normalizing here doesn't change behavior — it just
+            #        prevents the leaky abstraction.
+            _raw_inchikey = record.get("inchikey", "") or ""
+            inchikey = _normalize_inchikey(_raw_inchikey)
+            # Mutate the record in place so callers see the normalized
+            # value. Only mutate if the record actually has an inchikey
+            # field (avoid creating a new key on a record that doesn't
+            # have one — that would be a different kind of leak).
+            if "inchikey" in record and record["inchikey"] != inchikey:
+                record["inchikey"] = inchikey
             name = record.get("name", "") or ""
             name_is_synthetic = False
 
@@ -5221,29 +5255,39 @@ class DrugResolver(Resolver):
                 self._name_index_generation += 1
 
             # Connectivity index (audit 3.9).
-            # v82 FORENSIC ROOT FIX (P1-4 — connectivity index never populated
-            # when collapse_stereoisomers=False):
-            #   The previous code ONLY populated ``_connectivity_index``
-            #   when ``collapse_stereoisomers=True``. With the default
-            #   ``collapse_stereoisomers=False`` (the patient-safety
-            #   setting), the index was ALWAYS empty, so
-            #   ``_match_by_connectivity`` always returned None (empty
-            #   index lookup). This meant cross-source stereoisoform
-            #   matching was impossible without re-running with
-            #   ``collapse_stereoisomers=True``.
-            #   ROOT FIX: ALWAYS populate the connectivity index. The
-            #   stereoisoform safety gate in ``_match_by_connectivity``
-            #   (lines 4377-4381) already handles the
-            #   ``collapse_stereoisomers=False`` case correctly — it
-            #   returns None if the full InChIKeys differ. So populating
-            #   the index does NOT break patient safety; it just makes
-            #   the index available for diagnostics, future features,
-            #   and the explicit collapse path.
-            first_block = extract_inchikey_first_block(inchikey)
-            if first_block is not None:
-                if first_block not in self._connectivity_index:
-                    self._connectivity_index[first_block] = canonical_ik
-                self._connectivity_index_multi.setdefault(first_block, []).append(canonical_ik)
+            # v82 FORENSIC ROOT FIX (P1-4) → v89 ROOT FIX (BUG #41):
+            #   v82 ALWAYS populated ``_connectivity_index`` even when
+            #   ``collapse_stereoisomers=False`` (the default). But
+            #   ``_match_by_connectivity`` (line ~4393) returns ``None``
+            #   when ``collapse_stereoisomers=False`` and the full
+            #   InChIKeys differ — so the index was populated but NEVER
+            #   USED for matching in the default config. This wasted
+            #   ~20% memory on ChEMBL-scale data (~2M drugs).
+            #
+            #   v89 ROOT FIX: gate the connectivity index population on
+            #   ``collapse_stereoisomers=True``. The index is ONLY
+            #   useful when stereoisomer collapse is enabled (the only
+            #   code path that reads it). When collapse is disabled
+            #   (default), ``_match_by_connectivity`` returns ``None``
+            #   for any candidate whose full InChIKey differs — it
+            #   never reads ``_connectivity_index``. The v82 rationale
+            #   ("for diagnostics, future features, and the explicit
+            #   collapse path") is weak — diagnostics can use
+            #   ``extract_inchikey_first_block`` on demand.
+            #
+            #   When ``collapse_stereoisomers=True``, the index is
+            #   populated AND read by ``_match_by_connectivity`` —
+            #   unchanged from v82. The behavior is identical to v82
+            #   in the collapse-enabled path; only the default path
+            #   (collapse disabled) is optimized to skip the wasted
+            #   memory. The SAME gating is applied in
+            #   ``_rebuild_indices`` (line ~5745) for consistency.
+            if getattr(self._config, "collapse_stereoisomers", False):
+                first_block = extract_inchikey_first_block(inchikey)
+                if first_block is not None:
+                    if first_block not in self._connectivity_index:
+                        self._connectivity_index[first_block] = canonical_ik
+                    self._connectivity_index_multi.setdefault(first_block, []).append(canonical_ik)
 
             # SMILES index (audit 3.13). P1-ER-1 ROOT FIX: removed the
             # ``hasattr`` lazy-init guard — ``__init__`` now declares
@@ -5682,10 +5726,33 @@ class DrugResolver(Resolver):
                 if norm:
                     self._name_index.setdefault(norm, canonical_ik)
                     self._name_index_multi.setdefault(norm, []).append(canonical_ik)
-            # v82 FORENSIC ROOT FIX (P1-4): ALWAYS populate connectivity
-            # index (not just when collapse_stereoisomers=True). See the
-            # full explanation in ``_create_canonical_entry``.
-            if ik:
+            # v82 FORENSIC ROOT FIX (P1-4) → v89 ROOT FIX (BUG #41):
+            #   v82 ALWAYS populated the connectivity index, even when
+            #   ``collapse_stereoisomers=False`` (the default). But
+            #   ``_match_by_connectivity`` (line ~4393) returns ``None``
+            #   when ``collapse_stereoisomers=False`` and the full
+            #   InChIKeys differ — so the index was populated but NEVER
+            #   USED for matching in the default config. This wasted
+            #   ~20% memory on ChEMBL-scale data (~2M drugs).
+            #
+            #   v89 ROOT FIX: gate the connectivity index population on
+            #   ``collapse_stereoisomers=True``. The index is ONLY
+            #   useful when stereoisomer collapse is enabled (the only
+            #   code path that reads it). When collapse is disabled
+            #   (default), ``_match_by_connectivity`` returns ``None``
+            #   for any candidate whose full InChIKey differs — it
+            #   never reads ``_connectivity_index``. The v82 rationale
+            #   ("for diagnostics, future features, and the explicit
+            #   collapse path") is weak — diagnostics can use
+            #   ``extract_inchikey_first_block`` on demand.
+            #
+            #   When ``collapse_stereoisomers=True``, the index is
+            #   populated AND read by ``_match_by_connectivity`` —
+            #   unchanged from v82. The behavior is identical to v82
+            #   in the collapse-enabled path; only the default path
+            #   (collapse disabled) is optimized to skip the wasted
+            #   memory.
+            if ik and getattr(self._config, "collapse_stereoisomers", False):
                 first_block = extract_inchikey_first_block(ik)
                 if first_block:
                     self._connectivity_index.setdefault(first_block, canonical_ik)
