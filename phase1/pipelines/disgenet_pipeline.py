@@ -204,7 +204,7 @@ from database.loaders import (
     resolve_gene_symbol_to_uniprot,
 )
 from database.models import GeneDiseaseAssociation, PMID_LIST_LENGTH
-from pipelines.base_pipeline import BasePipeline, UNIPROT_ID_PATTERN
+from pipelines.base_pipeline import BasePipeline, UNIPROT_ID_PATTERN, DownloadError
 
 # ---------------------------------------------------------------------------
 # Module logger
@@ -1098,7 +1098,7 @@ class DisGeNETPipeline(BasePipeline):
                 else:
                     self._source_format = DisGeNETSourceFormat.TSV
                     path = self._download_static()
-            except (OSError, ValueError, ConnectionError, TimeoutError) as exc:  # v85 FORENSIC ROOT FIX (BUG #51)
+            except (OSError, ValueError, ConnectionError, TimeoutError, DownloadError) as exc:  # v85 FORENSIC ROOT FIX (BUG #51) + v91: add DownloadError so 401 falls back to embedded sample
                 # v83 P0-C13: in sample mode, fall back to embedded samples
                 # instead of raising. In full mode, re-raise.
                 if _download_mode == "sample":
