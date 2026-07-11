@@ -81,6 +81,12 @@ if _ROOT not in sys.path:
 _PHASE1_ROOT = os.path.join(_ROOT, "phase1")
 if _PHASE1_ROOT not in sys.path:
     sys.path.insert(0, _PHASE1_ROOT)
+# v100 ROOT FIX: phase2/ must be on sys.path so `drugos_graph` is importable.
+# The previous code only added _ROOT and _PHASE1_ROOT, causing
+# ModuleNotFoundError: No module named 'drugos_graph' at the Phase 2 bridge import.
+_PHASE2_ROOT = os.path.join(_ROOT, "phase2")
+if _PHASE2_ROOT not in sys.path:
+    sys.path.insert(0, _PHASE2_ROOT)
 
 logging.basicConfig(
     level=logging.INFO,
