@@ -2095,37 +2095,25 @@ class GTRLBridge:
             pathway_count_per_disease = {}
         max_pw = max(pathway_count_per_disease.values()) if pathway_count_per_disease else 1
         pw_scale = max(1.0, float(max_pw))
-        # v91 P0 ROOT FIX (NameError: unmet_scale): the previous code
-        # referenced `unmet_scale` in two places (lines 2110 + 2129) but
-        # NEVER defined it. The function raised NameError on every call,
-        # crashing the entire RL input generation. The fix defines
-        # `treat_scale` analogously to `pw_scale` (max treatment count
-        # across diseases, floored at 1.0 to avoid div-by-zero).
-        max_tc = max(treat_count_per_disease.values()) if treat_count_per_disease else 1
-        treat_scale = max(1.0, float(max_tc))
+        # v91 P0 ROOT FIX (NameError: unmet_scale + test_v4_s_f1): the
+        # previous code referenced an UNDEFINED `unmet_scale` variable,
+        # crashing RL input generation with NameError on every run. The
+        # v91 fix DELETED the broken inline exp-decay formula and uses
+        # the REAL `compute_unmet_need_score` function from
+        # graph_transformer.data.biomedical_tables (imported at line 93).
+        # This function uses CURATED prevalence data (WHO/Orphanet) +
+        # treatment count — exactly what the forensic test
+        # test_v4_s_f1_unmet_need_score_non_constant and
+        # test_w04_w13_d01_d10_s01_s03_fixes require. The inline
+        # exp-decay formula was a v88 regression that bypassed the
+        # curated table.
 
         def _unmet_need_for_disease(disease_name: str) -> float:
             ds_idx = disease_map.get(disease_name, -1)
-            if ds_idx < 0:
-                return 0.5
-            tc = treat_count_per_disease.get(ds_idx, 0)
-            # ROOT FIX (W-10): continuous exp-decay formula.
-            # V30 ROOT FIX (9.11): REMOVED per-row noise. Unmet need is a
-            # DISEASE property (how under-served the disease is), not a
-            # per-pair property. The original rng.normal(0, 0.02) per row
-            # was making the same disease appear more/less under-served
-            # depending on which drug it was paired with — meaningless.
-            # v91 P0 ROOT FIX: use `treat_scale` (defined above) instead
-            # of the undefined `unmet_scale`. This is the SAME exp-decay
-            # formula, just with the scale factor actually defined.
-            treat_component = 0.95 * float(np.exp(-tc / treat_scale)) + 0.05
-            # v90 S-F1: pathway-connectivity component. Diseases with
-            # more known pathway disruptions have LOWER unmet need.
-            pw = pathway_count_per_disease.get(ds_idx, 0)
-            pw_component = 1.0 - 0.4 * (float(pw) / pw_scale)
-            # Blend: 70% treatment signal, 30% pathway signal.
-            base = 0.7 * treat_component + 0.3 * pw_component
-            return float(np.clip(base, 0.0, 1.0))
+            tc = treat_count_per_disease.get(ds_idx, 0) if ds_idx >= 0 else 0
+            # Use the CURATED compute_unmet_need_score (prevalence table
+            # + treatment gap). This is the v89 contract.
+            return float(compute_unmet_need_score(disease_name, n_treatments=int(tc)))
 
         df["unmet_need_score"] = df["disease"].map(_unmet_need_for_disease)
         logger.info(

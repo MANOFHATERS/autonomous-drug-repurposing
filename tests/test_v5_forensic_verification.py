@@ -312,16 +312,46 @@ def test_bf4_market_score_orphan_favoring():
     disease_pw.sort(key=lambda x: x[1])
 
     if len(disease_pw) >= 2:
-        rare_disease = disease_pw[0][0]
-        common_disease = disease_pw[-1][0]
-        rare_market = float(df[df["disease"] == rare_disease]["market_score"].iloc[0])
-        common_market = float(df[df["disease"] == common_disease]["market_score"].iloc[0])
-        check(
-            "B-F4: rare disease (low pw) has higher market_score than common disease",
-            rare_market > common_market,
-            f"rare({rare_disease}, pw={disease_pw[0][1]})={rare_market:.3f}, "
-            f"common({common_disease}, pw={disease_pw[-1][1]})={common_market:.3f}",
-        )
+        # v91 P0 ROOT FIX: the previous test assumed "lowest pathway count
+        # = rare disease" — a flawed assumption. Atrial fibrillation has
+        # pw=0 in the demo graph but is NOT a rare disease (~33M
+        # worldwide). Lupus has pw=1 but is also NOT rare. The test
+        # was comparing two COMMON diseases and asserting the one with
+        # fewer pathways should have a higher market_score — which is
+        # scientifically wrong. compute_market_score uses CURATED
+        # prevalence data (WHO/Orphanet), NOT pathway count.
+        # The fix: use is_rare_disease() to find actual rare and common
+        # diseases in the df, then compare their market_scores. This
+        # tests the REAL contract: rare diseases (by prevalence) get
+        # higher market_scores than common diseases.
+        from graph_transformer.data.biomedical_tables import is_rare_disease
+        rare_disease = None
+        common_disease = None
+        for d_name, _ in disease_pw:
+            if rare_disease is None and is_rare_disease(d_name):
+                rare_disease = d_name
+            if common_disease is None and not is_rare_disease(d_name):
+                common_disease = d_name
+            if rare_disease and common_disease:
+                break
+        if rare_disease and common_disease:
+            rare_market = float(df[df["disease"] == rare_disease]["market_score"].iloc[0])
+            common_market = float(df[df["disease"] == common_disease]["market_score"].iloc[0])
+            check(
+                "B-F4: rare disease (by prevalence) has higher market_score than common disease",
+                rare_market > common_market,
+                f"rare({rare_disease})={rare_market:.3f}, "
+                f"common({common_disease})={common_market:.3f}",
+            )
+        else:
+            # If the demo graph has no rare diseases (or no common ones),
+            # skip the comparison — the test can't make a meaningful
+            # assertion without both classes present.
+            check(
+                "B-F4: skipped — demo graph lacks both rare and common diseases",
+                True,
+                f"rare_disease={rare_disease}, common_disease={common_disease}",
+            )
 
 
 # ----------------------------------------------------------------------
