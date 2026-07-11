@@ -3483,8 +3483,6 @@ def train_transe(
                         val_rels_expanded_fallback = (
                             val_rels_dev.repeat_interleave(10)
                         )
-<<<<<<< HEAD
-=======
                         # v88 ROOT FIX (BUG #33 — hardcoded relation_idx=0
                         # in val AUC fallback): look up the actual treats
                         # relation index from relation_to_types.
@@ -3507,7 +3505,6 @@ def train_transe(
                             tail_type="Disease",
                             relation_idx=_treats_rel_idx,
                         )
->>>>>>> 34930d5 (v91: fix infinite recursion in compute_unmet_need_score (tc=0 case))
                         unique_val_rels_fb = torch.unique(
                             val_rels_expanded_fallback
                         )
