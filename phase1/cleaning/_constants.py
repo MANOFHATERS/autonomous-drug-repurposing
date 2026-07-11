@@ -335,7 +335,7 @@ def is_canonical_inchikey(inchikey: str) -> bool:
     """
     if not isinstance(inchikey, str) or not inchikey:
         return False
-    s = inchikey.strip()
+    s = inchikey.strip().upper()  # v92 ROOT FIX (BUG P1-069): normalize to uppercase
     if CANONICAL_INCHIKEY_REGEX.match(s):
         return True
     elif CANONICAL_SYNTHETIC_INCHIKEY_REGEX.match(s):
