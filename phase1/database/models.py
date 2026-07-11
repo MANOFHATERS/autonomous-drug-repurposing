@@ -157,6 +157,13 @@ class InteractionType(str, enum.Enum):
     BINDING_AGENT = "binding_agent"
     BLOCKER = "blocker"
     MODULATOR = "modulator"
+    # v90 ROOT FIX (BUG #3): added INDUCER and SUBSTRATE enum values.
+    # CYP induction (upregulation of enzyme expression) and CYP
+    # substrate (drug metabolized by the enzyme) are pharmacologically
+    # DISTINCT from inhibition and "unknown". Mapping them to "unknown"
+    # lost pharmacological direction in the KG.
+    INDUCER = "inducer"
+    SUBSTRATE = "substrate"
     UNKNOWN = "unknown"
 
 
