@@ -4650,10 +4650,15 @@ def resolve_gene_symbol_to_uniprot(
             .str.upper()
             .map(gene_to_uniprot)
         )
-        # Only fill where the DB map actually had a value (avoid
-        # overwriting NaN with NaN — pandas .loc handles this correctly
-        # because db_lookup is aligned by index).
-        df.loc[need_resolution_mask, "uniprot_id"] = db_lookup
+        # V90 CI fix: pandas 2.2+ raises TypeError when assigning a
+        # mixed-dtype Series (object with float NaN + str values) to a
+        # column that pandas has inferred as 'str' dtype. The fix is
+        # to ensure the assignment is object-dtype-safe by converting
+        # db_lookup to a plain Python-object Series before assignment.
+        # This was a pre-existing CI failure (P2 + Chain-1 verification
+        # job) unrelated to the Phase 3 V90 fixes, but it blocked the
+        # merge gate. Root cause: pandas 2.2+ stricter dtype enforcement.
+        df.loc[need_resolution_mask, "uniprot_id"] = db_lookup.astype(object)
 
     # Step 2: still-unresolved rows — try protein_name map as fallback.
     still_unresolved = df["uniprot_id"].isna()
@@ -4663,7 +4668,8 @@ def resolve_gene_symbol_to_uniprot(
             .str.upper()
             .map(protein_name_to_uniprot)
         )
-        df.loc[still_unresolved, "uniprot_id"] = protein_name_fallback
+        # V90 CI fix: same dtype-safe assignment as Step 1.
+        df.loc[still_unresolved, "uniprot_id"] = protein_name_fallback.astype(object)
 
     unresolved_count = df["uniprot_id"].isna().sum()
     if unresolved_count > 0:
