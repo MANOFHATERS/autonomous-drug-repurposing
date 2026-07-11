@@ -323,7 +323,7 @@ def test_bf4_market_score_orphan_favoring():
             disease_prev.append((d_name, prev if prev is not None else 1e9))
     disease_prev.sort(key=lambda x: x[1])  # ascending by prevalence
 
-    if len(disease_pw) >= 2:
+    if len(disease_prev) >= 2:
         # v91 P0 ROOT FIX (resolved during rebase): the previous test
         # assumed "lowest pathway count = rare disease" — a flawed
         # assumption. Atrial fibrillation has pw=0 in the demo graph
@@ -340,7 +340,7 @@ def test_bf4_market_score_orphan_favoring():
         from graph_transformer.data.biomedical_tables import is_rare_disease
         rare_disease = None
         common_disease = None
-        for d_name, _ in disease_pw:
+        for d_name, _ in disease_prev:
             if rare_disease is None and is_rare_disease(d_name):
                 rare_disease = d_name
             if common_disease is None and not is_rare_disease(d_name):
