@@ -92,11 +92,12 @@ jobs:
         # received "PR failed" emails for a month without any agent
         # noticing the actual root cause. This expanded scope compiles
         # EVERY top-level entry point and EVERY non-test source dir.
+        # v100: run_pipeline.py renamed to run_4phase.py (R-019).
         run: |
           echo "=== Build check: compiling every Python file ==="
           python -m compileall -q \
             phase1 phase2 graph_transformer rl \
-            run_unified.py run_pipeline.py run_real_pipeline.py run_full_platform.py
+            run_unified.py run_4phase.py run_real_pipeline.py run_full_platform.py
           echo "=== compileall PASSED ==="
 
   # == Job 2: Lint (equiv to npm run lint) ==
