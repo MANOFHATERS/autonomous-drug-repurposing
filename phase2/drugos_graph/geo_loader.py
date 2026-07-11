@@ -4181,10 +4181,36 @@ def _parse_soft_file(
                                     raw_val = 0.0  # simplified
                                 else:
                                     raw_val = 0.0
-                            # Skip NaN even in non-drop strategies (fixes
-                            # GEO-5.9).
-                            if math.isnan(raw_val) and nan_strategy == "drop":
+                            # BUG #61 ROOT FIX: NaN/Inf expression values
+                            # must ALWAYS be dropped, regardless of
+                            # nan_strategy. NaN bypasses the `value < 0`
+                            # guard in _normalize_expression (NaN < 0 is
+                            # False) and math.log2(nan) = nan, so NaN
+                            # propagates through the threshold check into
+                            # edge features -> NaN loss in HGT training.
+                            # The previous code only dropped NaN when
+                            # nan_strategy == "drop"; for "zero" and
+                            # "impute_mean" it let NaN through (the
+                            # strategies replaced non-numeric STRINGS
+                            # with 0.0, but float("nan") is a valid float
+                            # that bypassed the ValueError path above).
+                            # Fix: drop NaN/Inf unconditionally BEFORE
+                            # _normalize_expression.
+                            if not math.isfinite(raw_val):
                                 metrics["records_dropped"] += 1
+                                _write_dead_letter({
+                                    "timestamp": _iso_now(),
+                                    "series_id": series_id,
+                                    "line_number": line_no,
+                                    "reason": "nan_or_inf_expression",
+                                    "record": {
+                                        "probe_id": probe_id,
+                                        "sample_id": sample_id,
+                                        "value": raw_val,
+                                    },
+                                    "parser_version": PARSER_VERSION,
+                                })
+                                metrics["records_dead_lettered"] += 1
                                 continue
                             # Resolve probe → gene → UniProt.
                             gene_id, gene_symbol = _resolve_probe_to_gene(
@@ -4770,7 +4796,43 @@ def filter_by_organism(
     Fixes: GEO-3.13 (organism filter).
     """
     target = organism.lower().strip()
-    target_taxid = GEO_HUMAN_TAXID if target == "homo sapiens" else None
+    # v84 FORENSIC ROOT FIX (BUG #23 — organism filter inconsistency):
+    # The previous code only required a taxid match for "Homo sapiens"
+    # (target_taxid = 9606). For non-human organisms, target_taxid was
+    # None and the taxid check was skipped — a record with
+    # sample_organism="Mus musculus" and sample_taxid=9606 (mislabeled)
+    # would pass the non-human filter. Mouse protein data could enter
+    # the human KG.
+    #
+    # ROOT FIX: build a taxid map for known organisms. For ALL organisms,
+    # require BOTH sample_organism string match AND sample_taxid match
+    # (if the taxid is known for that organism). If the organism is
+    # unknown (no taxid in the map), fall back to string-only match with
+    # a warning so operators know the taxid cross-check was skipped.
+    _ORGANISM_TAXID_MAP = {
+        "homo sapiens": 9606,
+        "mus musculus": 10090,
+        "rattus norvegicus": 10116,
+        "danio rerio": 7955,
+        "drosophila melanogaster": 7227,
+        "caenorhabditis elegans": 6239,
+        "saccharomyces cerevisiae": 4932,
+        "macaca mulatta": 9544,
+        "pan troglodytes": 9598,
+        "sus scrofa": 9823,
+        "bos taurus": 9913,
+        "gallus gallus": 9031,
+    }
+    target_taxid = _ORGANISM_TAXID_MAP.get(target)
+    if target_taxid is None:
+        logger.warning(
+            "GEO filter_by_organism: organism %r not in the known taxid "
+            "map — falling back to string-only match (no taxid cross-"
+            "check). Mis-labeled records (organism string says X, taxid "
+            "says Y) will pass the filter. Add the organism to "
+            "_ORGANISM_TAXID_MAP for production safety. (v84 BUG #23)",
+            organism,
+        )
     n_in = 0
     n_out = 0
     for record in records:
@@ -4779,8 +4841,19 @@ def filter_by_organism(
         rec_tax = record.get("sample_taxid", 0)
         if rec_org != target:
             continue
-        if target_taxid is not None and rec_tax != target_taxid:
-            continue
+        # v84 BUG #23: require taxid match for ALL organisms (when taxid
+        # is known). The previous code skipped this check for non-human
+        # organisms, allowing mis-labeled records through.
+        if target_taxid is not None:
+            # Coerce rec_tax to int for comparison (it may be a string
+            # from a CSV/JSON source). Missing/invalid taxid → 0, which
+            # won't match any known taxid → record is filtered out.
+            try:
+                rec_tax_int = int(rec_tax)
+            except (TypeError, ValueError):
+                rec_tax_int = 0
+            if rec_tax_int != target_taxid:
+                continue
         n_out += 1
         yield record
     logger.info(

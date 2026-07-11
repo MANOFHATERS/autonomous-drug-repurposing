@@ -157,6 +157,13 @@ class InteractionType(str, enum.Enum):
     BINDING_AGENT = "binding_agent"
     BLOCKER = "blocker"
     MODULATOR = "modulator"
+    # v90 ROOT FIX (BUG #3): added INDUCER and SUBSTRATE enum values.
+    # CYP induction (upregulation of enzyme expression) and CYP
+    # substrate (drug metabolized by the enzyme) are pharmacologically
+    # DISTINCT from inhibition and "unknown". Mapping them to "unknown"
+    # lost pharmacological direction in the KG.
+    INDUCER = "inducer"
+    SUBSTRATE = "substrate"
     UNKNOWN = "unknown"
 
 
@@ -840,6 +847,30 @@ class Drug(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
             "is_globally_approved IS NOT NULL AND is_globally_approved IN (0, 1)",
             name="chk_drugs_is_globally_approved",
         ),
+        # v90 ROOT FIX (BUG #6 — P0 patient-safety invariant missing from ORM):
+        #   Migration 008 (line ~160-167) adds the patient-safety invariant
+        #   ``chk_drugs_no_approved_and_withdrawn`` — a drug CANNOT be both
+        #   globally-approved AND withdrawn. This prevents a withdrawn killer
+        #   drug (Vioxx, Baycol, thalidomide) from being surfaced as a safe
+        #   repurposing candidate. BUT the invariant was NOT declared on the
+        #   ORM Drug model — dev DBs created via Base.metadata.create_all()
+        #   (the SQLite/pytest path) LACK this invariant. A test that sets
+        #   is_globally_approved=True, is_withdrawn=True passes on dev but
+        #   fails on prod. The Python-side safety hook in bulk_upsert_drugs
+        #   (loaders.py:1886-1892) sets is_globally_approved=False when
+        #   is_withdrawn=True — but a direct SQL INSERT or a different
+        #   loader bypassing that hook can violate the invariant on dev
+        #   with no error. ROOT FIX: declare the CheckConstraint on the
+        #   ORM with the portable form (works on both SQLite and PostgreSQL).
+        #   The ``NOT (is_globally_approved = TRUE AND is_withdrawn = TRUE)``
+        #   form uses ``= TRUE`` which works on PostgreSQL; on SQLite,
+        #   ``= TRUE`` is rewritten by the migration runner's translator
+        #   to ``= 1``. The ORM form below uses ``IN (1, TRUE)`` to be
+        #   portable across both dialects without translation.
+        CheckConstraint(
+            "NOT (is_globally_approved = 1 AND is_withdrawn = 1)",
+            name="chk_drugs_no_approved_and_withdrawn",
+        ),
         # [DQ] completeness_score range 0.0-1.0
         CheckConstraint(
             "completeness_score IS NULL OR (completeness_score >= 0.0 AND completeness_score <= 1.0)",
@@ -1457,6 +1488,12 @@ class ProteinProteinInteraction(Base, IDMixin, TimestampMixin):
     )
     # [INT-04] Score JSON for source-specific payloads beyond STRING
     score_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # v91 ROOT FIX (BUG #9): is_homodimer flag column.
+    # True when protein_a_id == protein_b_id (self-interaction / homodimer).
+    # Biologically critical: EGFR dimerization, p53 tetramerization, etc.
+    is_homodimer: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="0",
+    )
     # [IDEM-01] Pipeline run tracking
     pipeline_run_id: Mapped[Optional[int]] = mapped_column(
         Integer, ForeignKey("pipeline_runs.id", ondelete="SET NULL"), nullable=True,
@@ -1472,10 +1509,27 @@ class ProteinProteinInteraction(Base, IDMixin, TimestampMixin):
 
     __table_args__ = (
         UniqueConstraint("protein_a_id", "protein_b_id", name="uq_ppi_protein_pair"),
-        # [DES-02] [IDEM-03] Prevent symmetric duplicates — protein_a_id must be smaller
+        # [DES-02] [IDEM-03] Prevent symmetric duplicates — protein_a_id must
+        # be <= protein_b_id. v91 ROOT FIX (BUG #9): changed from strict
+        # less-than (protein_a_id < protein_b_id) to less-than-or-equal,
+        # allowing homodimers (protein_a_id == protein_b_id). Homodimers
+        # are biologically real and clinically critical: EGFR dimerization,
+        # HER2/HER3 heterodimerization, p53 tetramerization are fundamental
+        # to cancer biology. Dropping ALL homodimers from the KG removed
+        # these critical edges, making drugs targeting EGFR dimerization
+        # (e.g. cetuximab) lose their PPI context. The is_homodimer flag
+        # column distinguishes self-interactions from heterodimers.
         CheckConstraint(
-            "protein_a_id < protein_b_id",
+            "protein_a_id <= protein_b_id",
             name="chk_ppi_ordered",
+        ),
+        # v91 ROOT FIX (BUG #9): is_homodimer flag column.
+        # True when protein_a_id == protein_b_id (self-interaction).
+        # Downstream ML models can use this flag to learn different
+        # representations for homodimers vs heterodimers.
+        CheckConstraint(
+            "(protein_a_id != protein_b_id) OR (protein_a_id == protein_b_id AND is_homodimer = TRUE)",
+            name="chk_ppi_homodimer_flag",
         ),
         # [SCI-03] Score bounds — all STRING scores are 0–1000
         CheckConstraint(
@@ -2625,9 +2679,23 @@ class PubChemCompoundProperty(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
     )
 
     # [IDEM-9] Soft-delete flag for re-run idempotency.
-    is_deleted: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, default=False, server_default="0",
-    )
+    # v90 ROOT FIX (BUG #7 — P1 re-declared is_deleted overrides mixin):
+    #   The previous code RE-DECLARED ``is_deleted`` here, even though
+    #   ``PubChemCompoundProperty`` already inherits ``SoftDeleteMixin``
+    #   (which declares ``is_deleted`` and ``deleted_at`` at base.py:186).
+    #   In SQLAlchemy 2.0 declarative, re-declaring a column from a mixin
+    #   in the class body OVERRIDES the mixin's definition. The
+    #   ``soft_delete()`` and ``restore()`` helper methods from
+    #   SoftDeleteMixin still reference ``self.is_deleted`` and
+    #   ``self.deleted_at`` — but ``deleted_at`` is now orphaned from the
+    #   mixin (still inherited, but the override created inconsistent
+    #   metadata). The ``idx_pubchem_props_is_deleted`` partial index
+    #   (below) references ``is_deleted`` which had DIVERGENT column
+    #   metadata between the mixin-declared and re-declared versions.
+    #   ROOT FIX: remove the re-declaration. SoftDeleteMixin already
+    #   provides ``is_deleted`` with the SAME semantics (Boolean,
+    #   nullable=False, server_default="0") plus ``deleted_at`` and the
+    #   ``soft_delete()`` / ``restore()`` helper methods.
 
     __table_args__ = (
         # [SCI-19, IDEM-4] Composite unique constraint — one row per

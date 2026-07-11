@@ -571,7 +571,7 @@ def _validate_score_array(
                     "original_dtype": str(_orig_dtype),
                     "coerced_dtype": "float64",
                 })
-        except Exception:
+        except (ValueError, TypeError):  # v85 FORENSIC ROOT FIX (BUG #51)
             pass
     arr = _sanitize_scores(arr, allow_nan=allow_nan, allow_inf=allow_inf)
     return arr
@@ -825,7 +825,7 @@ def _check_sklearn_version() -> Optional[str]:
         return ver
     except ImportError:
         return None
-    except Exception:
+    except (ImportError, AttributeError, ValueError):  # v85 FORENSIC ROOT FIX (BUG #51)
         return None
 
 
@@ -1331,7 +1331,7 @@ def compute_auc(
                                 "(pip install scikit-learn) to enable "
                                 "verification. (v39 P2 #15 fix)",
                     )
-            except Exception:
+            except (ImportError, AttributeError, ValueError, RuntimeError):  # v85 FORENSIC ROOT FIX (BUG #51)
                 pass  # defensive — don't let logging fail the AUC computation
             EVALUATION_TRANSFORMATIONS_LOG.append(
                 {"action": "auc_via_manual", "reason": "sklearn_unavailable"}
@@ -1340,7 +1340,7 @@ def compute_auc(
 
     except DrugOSDataError:
         raise
-    except Exception as e:
+    except (RuntimeError, ValueError, KeyError, TypeError) as e:  # v85 FORENSIC ROOT FIX (BUG #51)
         raise EvaluationError(
             f"Unexpected error in compute_auc: {e}",
             context={
@@ -1578,7 +1578,7 @@ def precision_at_k(
 
     except DrugOSDataError:
         raise
-    except Exception as e:
+    except (RuntimeError, ValueError, KeyError, TypeError) as e:  # v85 FORENSIC ROOT FIX (BUG #51)
         raise EvaluationError(
             f"Unexpected error in precision_at_k: {e}",
             context={
@@ -1659,7 +1659,7 @@ def recall_at_k(
 
     except DrugOSDataError:
         raise
-    except Exception as e:
+    except (RuntimeError, ValueError, KeyError, TypeError) as e:  # v85 FORENSIC ROOT FIX (BUG #51)
         raise EvaluationError(
             f"Unexpected error in recall_at_k: {e}",
             context={
@@ -1715,7 +1715,7 @@ def mean_reciprocal_rank(
 
     except DrugOSDataError:
         raise
-    except Exception as e:
+    except (RuntimeError, ValueError, KeyError, TypeError) as e:  # v85 FORENSIC ROOT FIX (BUG #51)
         raise EvaluationError(
             f"Unexpected error in mean_reciprocal_rank: {e}",
             context={
@@ -1777,7 +1777,7 @@ def hits_at_k(
 
     except DrugOSDataError:
         raise
-    except Exception as e:
+    except (RuntimeError, ValueError, KeyError, TypeError) as e:  # v85 FORENSIC ROOT FIX (BUG #51)
         raise EvaluationError(
             f"Unexpected error in hits_at_k: {e}",
             context={
@@ -2383,7 +2383,7 @@ def evaluate_link_prediction(
                 input_checksums["model_checkpoint_sha256"] = (
                     compute_model_hash(model_path)
                 )
-            except Exception:
+            except (ImportError, AttributeError, ValueError):  # v85 FORENSIC ROOT FIX (BUG #51)
                 pass
 
         provenance = build_lineage_metadata(
@@ -2444,7 +2444,7 @@ def evaluate_link_prediction(
             )
             return _nan_result(seed)
         raise
-    except Exception as e:
+    except (RuntimeError, ValueError, KeyError, TypeError, OSError) as e:  # v85 FORENSIC ROOT FIX (BUG #51)
         if on_failure in ("warn", "return_nan"):
             lvl = logging.ERROR if on_failure == "warn" else logging.WARNING
             logger.log(lvl, f"Evaluation failed: {e}", exc_info=True)
@@ -2622,7 +2622,7 @@ def _log_to_mlflow(
         try:
             from .mlflow_tracker import MLflowTracker
             tracker = MLflowTracker()
-        except Exception:
+        except (ImportError, AttributeError, ValueError):  # v85 FORENSIC ROOT FIX (BUG #51)
             _log_structured(
                 logging.DEBUG,
                 "mlflow_logging_failed",
@@ -2639,7 +2639,7 @@ def _log_to_mlflow(
             "evaluation_metric_version": result.evaluation_metric_version,
             "audit_hash": result.audit_hash,
         })
-    except Exception as e:
+    except (RuntimeError, ValueError, KeyError, TypeError, OSError) as e:  # v85 FORENSIC ROOT FIX (BUG #51)
         _log_structured(
             logging.WARNING,
             "mlflow_logging_failed",

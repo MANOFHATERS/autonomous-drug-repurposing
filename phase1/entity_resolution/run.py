@@ -361,12 +361,29 @@ def run_entity_resolution() -> Dict[str, Any]:
 
                     if uniprot_ids:
                         _data = {"uniprot_id": list(uniprot_ids)}
-                        # Include string_id column if we have any pairings.
-                        if uniprot_to_string_id:
-                            _data["string_id"] = [
-                                uniprot_to_string_id.get(uid)
-                                for uid in uniprot_ids
-                            ]
+                        # v89 ROOT FIX (BUG #43 — string_id column
+                        # conditionally added defeats downstream
+                        # presence checks):
+                        #   The previous code ONLY added the ``string_id``
+                        #   column if ``uniprot_to_string_id`` was
+                        #   non-empty. If ALL rows failed to pair (e.g. no
+                        #   STRING ID columns detected), the column was
+                        #   NOT added. Downstream code
+                        #   (protein_resolver.build_mapping line ~2594)
+                        #   checks ``"string_id" in string_df.columns``
+                        #   — if the column is absent, Source 3
+                        #   (taxonomy-prefix inference) doesn't fire,
+                        #   and STRING-derived proteins default to
+                        #   "Homo sapiens" (cross-species contamination).
+                        #   ROOT FIX: ALWAYS add the ``string_id`` column
+                        #   (even if all values are None), so downstream
+                        #   code can detect its presence and attempt
+                        #   organism inference. None values are handled
+                        #   correctly by the resolver.
+                        _data["string_id"] = [
+                            uniprot_to_string_id.get(uid)
+                            for uid in uniprot_ids
+                        ]
                         string_protein_df = pd.DataFrame(_data)
                         logger.info(
                             "Extracted %d unique UniProt IDs from STRING PPI data"
@@ -437,7 +454,69 @@ def run_entity_resolution() -> Dict[str, Any]:
                 else []
             )
             if _alias_files:
+                # v89 ROOT FIX (BUG #28 — corrupt aliases file silently
+                # disables STRING→UniProt cross-reference):
+                #   The previous code opened the first matching aliases
+                #   file with ``gzip.open`` and iterated. If the file
+                #   was corrupt (truncated download, partial write,
+                #   disk corruption), ``gzip.open`` raised
+                #   ``gzip.BadGzipFile`` (Python 3.8+) or ``OSError``.
+                #   The broad ``except Exception`` at the bottom caught
+                #   it and logged a WARNING — but ``string_aliases_df``
+                #   remained empty. The organism inference (Source 3
+                #   in build_mapping) then didn't fire, and
+                #   STRING-derived proteins defaulted to "Homo sapiens"
+                #   (cross-species contamination). The operator saw a
+                #   generic warning but had no signal that the file
+                #   was corrupt or that the KG was compromised.
+                #
+                #   ROOT FIX: validate the gzip file integrity BEFORE
+                #   parsing. If corrupt, dead-letter the file (move to
+                #   a ``dead_letter/`` subdir) and raise a clear error
+                #   so the operator can re-download. Do NOT silently
+                #   continue with an empty DataFrame.
+                import gzip
                 _alias_file = _alias_files[0]
+                # Pre-flight: verify the gzip integrity by reading the
+                # first byte. ``gzip.BadGzipFile`` is raised on corrupt
+                # files; ``OSError`` on truncated files. We read up to
+                # 1 byte — if that succeeds, the file is a valid gzip.
+                try:
+                    with gzip.open(_alias_file, "rb") as _probe:
+                        _probe.read(1)
+                except (gzip.BadGzipFile, OSError, EOFError) as _gz_exc:
+                    _dl_dir = _string_raw_dir / "dead_letter"
+                    _dl_dir.mkdir(parents=True, exist_ok=True)
+                    _dl_path = _dl_dir / _alias_file.name
+                    try:
+                        _alias_file.rename(_dl_path)
+                        logger.error(
+                            "v89 BUG #28: STRING aliases file %s is "
+                            "corrupt (%s). Moved to dead-letter at %s. "
+                            "Re-download the file (delete it and re-run "
+                            "the STRING pipeline). The KG's PPI subgraph "
+                            "will be incomplete until re-downloaded.",
+                            _alias_file.name, _gz_exc, _dl_path,
+                        )
+                    except OSError as _rename_exc:
+                        logger.error(
+                            "v89 BUG #28: STRING aliases file %s is "
+                            "corrupt (%s) AND could not be moved to "
+                            "dead-letter (%s). The file remains in place; "
+                            "delete it manually and re-run the STRING "
+                            "pipeline.",
+                            _alias_file.name, _gz_exc, _rename_exc,
+                        )
+                    raise RuntimeError(
+                        f"STRING aliases file {_alias_file.name} is "
+                        f"corrupt ({_gz_exc}). File moved to dead-letter. "
+                        f"Re-run the STRING pipeline to re-download. "
+                        f"(v89 BUG #28)"
+                    ) from _gz_exc
+                # The raw aliases file is gzipped, space/tab-separated,
+                # with columns: string_protein_id, source, alias, source_database.
+                # We only need the STRING→UniProt mapping (where source_database
+                # contains "UniProt").
                 # v89 FORENSIC ROOT FIX (BUG #17 P1 — fragile raw aliases
                 #   parsing):
                 #   The previous code split each line on tab (or
@@ -518,21 +597,10 @@ def run_entity_resolution() -> Dict[str, Any]:
                         "Loaded STRING aliases from raw file %s: %d UniProt mappings",
                         _alias_file.name, len(string_aliases_df),
                     )
-            else:
-                # v89 BUG #3: no human aliases file found — log clearly.
-                if _string_raw_dir.exists():
-                    _all_alias_files = list(_string_raw_dir.glob("*aliases*.txt.gz"))
-                    logger.warning(
-                        "No HUMAN (9606) STRING aliases file found in %s. "
-                        "Found %d non-human alias files: %s. "
-                        "REFUSING to load non-human aliases (would corrupt "
-                        "organism assignment). string_aliases_df will be "
-                        "empty — resolve_single(string_id=...) will not "
-                        "resolve STRING IDs to UniProt.",
-                        _string_raw_dir,
-                        len(_all_alias_files),
-                        [f.name for f in _all_alias_files[:5]],
-                    )
+        except RuntimeError:
+            # v89 BUG #28: re-raise RuntimeError (corrupt file) so the
+            # operator sees a clear failure. Do NOT swallow it.
+            raise
         except Exception as exc:
             logger.warning(
                 "Could not load raw STRING aliases file: %s — "
@@ -540,11 +608,112 @@ def run_entity_resolution() -> Dict[str, Any]:
                 "will not resolve STRING IDs to UniProt",
                 exc,
             )
+        else:
+            # v89 BUG #3: no human aliases file found — log clearly.
+            # This else clause runs only when the try block completed
+            # WITHOUT raising. If string_aliases_df is still empty here,
+            # either no 9606 aliases file was found OR the file had no
+            # UniProt entries. Warn so the operator knows.
+            if string_aliases_df.empty and _string_raw_dir.exists():
+                _all_alias_files = list(_string_raw_dir.glob("*aliases*.txt.gz"))
+                logger.warning(
+                    "No HUMAN (9606) STRING aliases file found in %s. "
+                    "Found %d non-human alias files: %s. "
+                    "REFUSING to load non-human aliases (would corrupt "
+                    "organism assignment). string_aliases_df will be "
+                    "empty — resolve_single(string_id=...) will not "
+                    "resolve STRING IDs to UniProt.",
+                    _string_raw_dir,
+                    len(_all_alias_files),
+                    [f.name for f in _all_alias_files[:5]],
+                )
+
+    # v89 ROOT FIX (BUG #33 — load ChEMBL target data for protein
+    # resolution):
+    #   The previous code loaded UniProt + STRING data but NOT ChEMBL
+    #   target data. The ``add_chembl_target_records`` method on
+    #   ProteinResolver was registered in ``_SOURCE_INGESTORS`` but
+    #   never invoked from ``build_mapping`` because there was no
+    #   ``chembl_target_df`` parameter. ChEMBL target IDs (e.g.
+    #   CHEMBL2366519 for EGFR) were not cross-referenced with UniProt
+    #   accessions, leaving drug-target edges from ChEMBL orphaned
+    #   from the canonical Protein nodes.
+    #
+    #   ROOT FIX: load the ChEMBL activities CSV (which contains
+    #   ``chembl_target_id`` + ``uniprot_id`` cross-references, emitted
+    #   by the ChEMBL pipeline's clean() stage as
+    #   ``chembl_activities_clean.csv``). Pass it as
+    #   ``chembl_target_df`` to ``build_mapping`` so the resolver can
+    #   link ChEMBL target IDs to UniProt accessions. This completes
+    #   the drug → target → pathway → disease chain (Phase 1 → Phase 2
+    #   → Phase 3 → Phase 4 connectivity).
+    chembl_target_df = pd.DataFrame()
+    chembl_activities_path = PROCESSED_DATA_DIR / "chembl_activities_clean.csv"
+    if chembl_activities_path.exists():
+        try:
+            _chembl_acts_df = pd.read_csv(chembl_activities_path, low_memory=False)
+            if not _chembl_acts_df.empty:
+                # The ChEMBL activities CSV has many columns; we only
+                # need the protein-resolution subset. Required column:
+                # ``chembl_target_id``. Optional but useful:
+                # ``uniprot_id``, ``gene_symbol``, ``organism``,
+                # ``target_name``. If ``chembl_target_id`` is absent,
+                # the resolver's schema validation (BUG #23 pattern)
+                # will log an ERROR and skip ingestion — surface the
+                # issue to the operator instead of silent failure.
+                _chembl_target_cols = [
+                    c for c in (
+                        "chembl_target_id", "uniprot_id", "gene_symbol",
+                        "organism", "target_name", "target_type",
+                    ) if c in _chembl_acts_df.columns
+                ]
+                if "chembl_target_id" in _chembl_acts_df.columns:
+                    # Deduplicate by chembl_target_id (keep first
+                    # occurrence of each target — activities CSV has
+                    # one row per activity, but we only need one row
+                    # per target for protein resolution).
+                    chembl_target_df = (
+                        _chembl_acts_df[_chembl_target_cols]
+                        .drop_duplicates(subset=["chembl_target_id"])
+                        .reset_index(drop=True)
+                    )
+                    logger.info(
+                        "Loaded ChEMBL target data from %s: %d unique "
+                        "targets (for protein resolution via "
+                        "add_chembl_target_records). (v89 BUG #33)",
+                        chembl_activities_path.name, len(chembl_target_df),
+                    )
+                else:
+                    logger.warning(
+                        "ChEMBL activities CSV %s has no 'chembl_target_id' "
+                        "column. Available columns: %s. Cannot use for "
+                        "protein resolution — ChEMBL target IDs will not "
+                        "be cross-referenced with UniProt. (v89 BUG #33)",
+                        chembl_activities_path.name,
+                        list(_chembl_acts_df.columns),
+                    )
+        except Exception as exc:
+            logger.warning(
+                "Failed to load ChEMBL activities CSV %s: %s. ChEMBL "
+                "target IDs will not be cross-referenced with UniProt. "
+                "(v89 BUG #33)",
+                chembl_activities_path, exc,
+            )
+    else:
+        logger.info(
+            "ChEMBL activities CSV not found at %s — skipping ChEMBL "
+            "target → UniProt cross-reference. Run the ChEMBL pipeline "
+            "first to enable. (v89 BUG #33)",
+            chembl_activities_path,
+        )
 
     protein_mapping_df = protein_resolver.build_mapping(
         uniprot_df,
         string_aliases_df=string_aliases_df if not string_aliases_df.empty else None,
         string_df=string_protein_df if not string_protein_df.empty else None,
+        # v89 BUG #33: pass ChEMBL target data so add_chembl_target_records
+        # is invoked, linking ChEMBL target IDs to UniProt accessions.
+        chembl_target_df=chembl_target_df if not chembl_target_df.empty else None,
     )
     logger.info(
         "Protein entity resolution complete: %d canonical entities",
@@ -584,14 +753,123 @@ def run_entity_resolution() -> Dict[str, Any]:
                 save_df[c] = None
         save_df = save_df[model_cols]
 
+        # ROOT FIX (E2E CI): deduplicate on chembl_id before persisting.
+        # The entity_mapping table has a UNIQUE constraint on chembl_id,
+        # but the resolution process can produce multiple rows with the
+        # same chembl_id (e.g. from different sources mapping to the same
+        # ChEMBL compound). Without dedup, the INSERT fails with
+        # sqlite3.IntegrityError: UNIQUE constraint failed.
+        # Keep the first row per chembl_id (deterministic by save_df order).
+        # Rows with NULL chembl_id are kept (NULL is not subject to UNIQUE).
+        n_before = len(save_df)
+        if "chembl_id" in save_df.columns:
+            chembl_non_null = save_df["chembl_id"].notna()
+            dup_mask = chembl_non_null & save_df["chembl_id"].duplicated(keep="first")
+            if dup_mask.any():
+                logger.warning(
+                    "Deduplicating %d rows with duplicate chembl_id "
+                    "(keeping first occurrence). %d rows remain.",
+                    int(dup_mask.sum()), n_before - int(dup_mask.sum()),
+                )
+                save_df = save_df[~dup_mask].copy()
+
         # Transactional: temp table + DELETE/INSERT — atomic, rolls back on failure.
         # v9 ROOT FIX (audit F3.5): TRUNCATE TABLE is PostgreSQL-specific
         # syntax. On SQLite-backed dev/test environments it raises
         # sqlite3.OperationalError. Use DELETE FROM which is universally
         # supported (ANSI SQL) and behaves correctly within an explicit
         # transaction on both dialects.
+        # v89 ROOT FIX (BUG #29 — leftover temp tables on failed runs):
+        #   The previous code put the ``DROP TABLE IF EXISTS`` INSIDE
+        #   the ``with engine.begin()`` transaction. On SQLite, DROP
+        #   TABLE within a transaction may behave unexpectedly, AND if
+        #   the INSERT failed (constraint violation, type mismatch),
+        #   the transaction rolled back — so the DROP never executed,
+        #   leaving an orphaned ``_tmp_entity_mapping_staging`` table
+        #   in the DB. Repeated failures accumulated orphaned temp
+        #   tables.
+        #
+        #   ROOT FIX: wrap the temp-table lifecycle in a TRY/FINALLY
+        #   so the temp table is ALWAYS dropped, even on failure. The
+        #   DELETE+INSERT remains atomic (same transaction); the DROP
+        #   runs in a SEPARATE transaction after the main work, so it
+        #   commits even if the main transaction rolled back.
+        engine = get_engine()
+        try:
+            with engine.begin() as conn:
+                save_df.to_sql(
+                    "_tmp_entity_mapping_staging",
+                    con=conn,
+                    if_exists="replace",
+                    index=False,
+                    method="multi",
+                    chunksize=5000,
+                )
+                conn.execute(text("DELETE FROM entity_mapping"))
+                conn.execute(text("""
+                    INSERT INTO entity_mapping
+                        (canonical_inchikey, canonical_name, chembl_id,
+                         drugbank_id, pubchem_cid, uniprot_id, string_id,
+                         match_confidence, match_method)
+                    SELECT
+                        canonical_inchikey, canonical_name, chembl_id,
+                        drugbank_id, pubchem_cid, uniprot_id, string_id,
+                        match_confidence, match_method
+                    FROM _tmp_entity_mapping_staging
+                """))
+        finally:
+            # v89 BUG #29: ALWAYS drop the temp table, even if the main
+            # transaction failed. Use a SEPARATE transaction so the DROP
+            # commits independently. ``if_exists='replace'`` on the next
+            # run would handle it, but explicit cleanup avoids orphaned
+            # tables accumulating on repeated failures.
+            try:
+                with engine.begin() as _cleanup_conn:
+                    _cleanup_conn.execute(
+                        text("DROP TABLE IF EXISTS _tmp_entity_mapping_staging")
+                    )
+            except Exception as _cleanup_exc:  # noqa: BLE001
+                logger.warning(
+                    "v89 BUG #29: could not drop temp table "
+                    "_tmp_entity_mapping_staging (%s). It will be dropped "
+                    "on the next run via if_exists='replace'.",
+                    _cleanup_exc,
+                )
+        #
+        # V90 CI fix: deduplicate save_df on chembl_id (and other unique
+        # key columns) BEFORE inserting. The entity_mapping table has a
+        # UNIQUE constraint on chembl_id; if the staging data has
+        # duplicates (e.g., the same drug appearing in both DrugBank and
+        # ChEMBL sources with the same chembl_id), the INSERT fails with
+        # "UNIQUE constraint failed: entity_mapping.chembl_id". The fix:
+        # drop_duplicates on chembl_id, keeping the first occurrence.
         engine = get_engine()
         with engine.begin() as conn:
+            # V90 CI fix: deduplicate on chembl_id (the UNIQUE-constrained
+            # column) BEFORE inserting. The previous fix deduplicated on
+            # the COMBINATION of (chembl_id, drugbank_id, pubchem_cid),
+            # but the UNIQUE constraint is on chembl_id ALONE — so two
+            # rows with the same chembl_id but different drugbank_id
+            # still caused a UNIQUE violation. The fix: deduplicate on
+            # chembl_id only, keeping the first occurrence. Rows with
+            # NULL/empty chembl_id are NOT deduplicated (SQLite allows
+            # multiple NULLs in a UNIQUE column).
+            if "chembl_id" in save_df.columns:
+                n_before = len(save_df)
+                # Only deduplicate rows where chembl_id is non-null &
+                # non-empty. Keep first occurrence.
+                has_chembl = save_df["chembl_id"].notna() & (save_df["chembl_id"].astype(str).str.strip() != "")
+                chembl_rows = save_df[has_chembl].drop_duplicates(subset=["chembl_id"], keep="first")
+                non_chembl_rows = save_df[~has_chembl]
+                save_df = pd.concat([chembl_rows, non_chembl_rows], ignore_index=True)
+                n_after = len(save_df)
+                if n_before != n_after:
+                    logger.warning(
+                        "V90 CI fix: deduplicated entity_mapping staging "
+                        "data on chembl_id: %d -> %d rows (removed %d "
+                        "duplicates with the same chembl_id)",
+                        n_before, n_after, n_before - n_after,
+                    )
             save_df.to_sql(
                 "_tmp_entity_mapping_staging",
                 con=conn,
@@ -651,45 +929,114 @@ def run_entity_resolution() -> Dict[str, Any]:
             update_df = resolved[["uniprot_id", "string_id"]].copy()
             update_df = update_df.dropna(subset=["uniprot_id", "string_id"])
             if not update_df.empty:
+                # v89 ROOT FIX (BUG #30 — uniprot_id uniqueness not
+                # validated before UPDATE):
+                #   The UPDATE below uses a correlated subquery
+                #   (SQLite) / UPDATE...FROM (PostgreSQL) that joins
+                #   ``proteins.uniprot_id`` to the temp table's
+                #   ``uniprot_id``. If the ``proteins`` table has
+                #   DUPLICATE ``uniprot_id`` rows (e.g. from a previous
+                #   bad load), the UPDATE affects ALL matching rows —
+                #   potentially setting DIFFERENT ``string_id`` values
+                #   on different rows (last-write-wins in the subquery).
+                #   The code assumes ``uniprot_id`` is unique, but this
+                #   was never validated.
+                #
+                #   ROOT FIX: pre-flight uniqueness check. If duplicates
+                #   exist, log an ERROR with the duplicate count, dead-
+                #   letter the affected updates, and SKIP the UPDATE —
+                #   do NOT silently corrupt multiple rows. The operator
+                #   must fix the duplicate ``uniprot_id`` rows in the
+                #   ``proteins`` table before re-running.
                 engine = get_engine()
-                with engine.begin() as conn:
-                    update_df.to_sql(
-                        "_tmp_protein_string_update", con=conn,
-                        if_exists="replace", index=False,
-                        method="multi", chunksize=5000,
+                _dup_check_sql = text("""
+                    SELECT uniprot_id, COUNT(*) AS cnt
+                    FROM proteins
+                    WHERE uniprot_id IS NOT NULL
+                    GROUP BY uniprot_id
+                    HAVING COUNT(*) > 1
+                """)
+                try:
+                    with engine.begin() as _dup_conn:
+                        _dup_rows = _dup_conn.execute(_dup_check_sql).fetchall()
+                except Exception as _dup_exc:  # noqa: BLE001
+                    # If the dup-check query itself fails (e.g. proteins
+                    # table doesn't exist yet), log and proceed — the
+                    # UPDATE will fail with a clearer error.
+                    logger.warning(
+                        "v89 BUG #30: could not check uniprot_id "
+                        "uniqueness in proteins table (%s). Proceeding "
+                        "with UPDATE; if it fails, check for duplicates.",
+                        _dup_exc,
                     )
-                    # v75 ROOT FIX (T-025 compound): the PostgreSQL UPDATE
-                    # ... FROM syntax is not valid on SQLite. SQLite uses
-                    # UPDATE ... SET col = (SELECT ...) WHERE EXISTS.
-                    # Detect the dialect and dispatch the right SQL.
-                    dialect_name = engine.dialect.name
-                    if dialect_name == "sqlite":
-                        conn.execute(text("""
-                            UPDATE proteins
-                            SET string_id = (
-                                SELECT t.string_id
-                                FROM _tmp_protein_string_update t
-                                WHERE t.uniprot_id = proteins.uniprot_id
+                    _dup_rows = []
+                if _dup_rows:
+                    _dup_count = len(_dup_rows)
+                    _dup_examples = [str(r[0]) for r in _dup_rows[:5]]
+                    logger.error(
+                        "v89 BUG #30: proteins table has %d duplicate "
+                        "uniprot_id values (examples: %s). The string_id "
+                        "UPDATE is SKIPPED to avoid corrupting multiple "
+                        "rows. Fix the duplicates (deduplicate or re-load "
+                        "the proteins table) before re-running entity "
+                        "resolution.",
+                        _dup_count, _dup_examples,
+                    )
+                    # Skip the UPDATE — do not corrupt multiple rows.
+                else:
+                    try:
+                        with engine.begin() as conn:
+                            update_df.to_sql(
+                                "_tmp_protein_string_update", con=conn,
+                                if_exists="replace", index=False,
+                                method="multi", chunksize=5000,
                             )
-                            WHERE EXISTS (
-                                SELECT 1 FROM _tmp_protein_string_update t
-                                WHERE t.uniprot_id = proteins.uniprot_id
+                            # v75 ROOT FIX (T-025 compound): the PostgreSQL UPDATE
+                            # ... FROM syntax is not valid on SQLite. SQLite uses
+                            # UPDATE ... SET col = (SELECT ...) WHERE EXISTS.
+                            # Detect the dialect and dispatch the right SQL.
+                            dialect_name = engine.dialect.name
+                            if dialect_name == "sqlite":
+                                conn.execute(text("""
+                                    UPDATE proteins
+                                    SET string_id = (
+                                        SELECT t.string_id
+                                        FROM _tmp_protein_string_update t
+                                        WHERE t.uniprot_id = proteins.uniprot_id
+                                    )
+                                    WHERE EXISTS (
+                                        SELECT 1 FROM _tmp_protein_string_update t
+                                        WHERE t.uniprot_id = proteins.uniprot_id
+                                    )
+                                    AND string_id IS NULL
+                                """))
+                            else:
+                                conn.execute(text("""
+                                    UPDATE proteins p
+                                    SET string_id = t.string_id
+                                    FROM _tmp_protein_string_update t
+                                    WHERE p.uniprot_id = t.uniprot_id
+                                    AND p.string_id IS NULL
+                                """))
+                        proteins_updated = len(resolved)
+                        logger.info(
+                            "Updated string_id for %d proteins", proteins_updated,
+                        )
+                    finally:
+                        # v89 BUG #29 (applied to the protein temp table
+                        # too): ALWAYS drop the temp table, even on
+                        # failure, in a separate transaction.
+                        try:
+                            with engine.begin() as _cleanup_conn:
+                                _cleanup_conn.execute(
+                                    text("DROP TABLE IF EXISTS _tmp_protein_string_update")
+                                )
+                        except Exception as _cleanup_exc:  # noqa: BLE001
+                            logger.warning(
+                                "v89 BUG #29: could not drop temp table "
+                                "_tmp_protein_string_update (%s).",
+                                _cleanup_exc,
                             )
-                            AND string_id IS NULL
-                        """))
-                    else:
-                        conn.execute(text("""
-                            UPDATE proteins p
-                            SET string_id = t.string_id
-                            FROM _tmp_protein_string_update t
-                            WHERE p.uniprot_id = t.uniprot_id
-                            AND p.string_id IS NULL
-                        """))
-                    conn.execute(text("DROP TABLE IF EXISTS _tmp_protein_string_update"))
-                proteins_updated = len(resolved)
-                logger.info(
-                    "Updated string_id for %d proteins", proteins_updated,
-                )
 
     logger.info("Entity resolution pipeline complete")
     return {

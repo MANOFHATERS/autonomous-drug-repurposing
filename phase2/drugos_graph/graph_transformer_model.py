@@ -242,6 +242,13 @@ class GraphTransformerModel(nn.Module):
         self.relation_types = [tuple(r) for r in relation_types]
         d = self.config.embedding_dim
 
+        # v88 ROOT FIX (BUG #43 — expose score_higher_is_better for
+        # explicit duck-typing in train_transe): HGT's decoder produces
+        # sigmoid logits (higher = more plausible), so
+        # score_higher_is_better = True. This makes the BUG #43 fix
+        # in train_transe robust to class renames.
+        self.score_higher_is_better = True
+
         # Relation triple → index.
         # v35 ROOT FIX (H-13 / M-1): the previous code keyed decoders by
         # the relation name alone (via ``_sanitize_relation_key(rel)``).
@@ -579,6 +586,30 @@ class GraphTransformerModel(nn.Module):
         first node type's count on HGT).
         """
         return sum(self._node_counts.values())
+
+    # v84 FORENSIC ROOT FIX (BUG #12 — declare score_direction on the
+    # Phase 2 GraphTransformerModel so the eval path can read it directly
+    # instead of substring-matching the class name). The GraphTransformer
+    # uses a link predictor that outputs logits; higher = more plausible
+    # drug-disease pair. Direction is "higher_better".
+    @property
+    def score_direction(self) -> str:
+        """Scoring convention: 'higher_better' for GraphTransformer.
+
+        The link predictor outputs logits. Higher score = more plausible
+        triple. The eval path uses this to set `higher_is_better=True`
+        for AUC computation.
+        """
+        return "higher_better"
+
+    @property
+    def score_higher_is_better(self) -> bool:
+        """Legacy boolean form of score_direction. True for GraphTransformer.
+
+        Deprecated: prefer `score_direction` (str). Kept for backward
+        compat with code that reads the boolean form.
+        """
+        return True
 
     @property
     def relation_embeddings(self) -> nn.Embedding:

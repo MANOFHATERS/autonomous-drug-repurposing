@@ -99,6 +99,7 @@ import numpy as np
 import pandas as pd
 from pandas.errors import ParserError
 from sqlalchemy import inspect
+from sqlalchemy.exc import OperationalError, IntegrityError  # v85 FORENSIC ROOT FIX (BUG #51)
 from sqlalchemy.orm import Session
 
 # ---------------------------------------------------------------------------
@@ -389,7 +390,7 @@ class StringPipeline(BasePipeline):
         try:
             from database.connection import is_production_environment
             return is_production_environment()
-        except Exception:
+        except (ImportError, OSError, ValueError):  # v85 FORENSIC ROOT FIX (BUG #51)
             # v36 defensive fallback: still prefer DRUGOS_ENVIRONMENT
             # over the broken ENV/ENVIRONMENT reads.
             import os as _os
@@ -452,9 +453,7 @@ class StringPipeline(BasePipeline):
                     "verify proteins table is non-empty: %s",
                     self.source_name, exc,
                 )
-            except Exception as exc:
-                # DB-layer errors propagate: do NOT silently bypass the
-                # dependency check (P1-14 rationale).
+            except (OperationalError, IntegrityError) as exc:  # v85 FORENSIC ROOT FIX (BUG #51)
                 logger.warning(
                     "[%s] pre_check: DB error verifying proteins table is "
                     "non-empty: %s",
@@ -666,7 +665,7 @@ class StringPipeline(BasePipeline):
                         pairs.append((p1, ua))
                     if p2 and ub:
                         pairs.append((p2, ub))
-            except Exception as exc:
+            except (OSError, ValueError, pd.errors.ParserError) as exc:  # v85 FORENSIC ROOT FIX (BUG #51)
                 logger.error(
                     "[%s] Could not load embedded_string_ppi: %s — "
                     "aliases file will be empty, STRING→UniProt mapping "
@@ -905,10 +904,10 @@ class StringPipeline(BasePipeline):
                 # Also compute the SHA-256 for audit (best-effort).
                 try:
                     self._aliases_sha256 = self._compute_sha256(aliases_path)
-                except Exception:
+                except (OSError, ValueError):  # v85 FORENSIC ROOT FIX (BUG #51)
                     self._aliases_sha256 = ""
                 return ppi_path
-        except Exception as exc:
+        except (OSError, ValueError, pd.errors.ParserError, ConnectionError, TimeoutError) as exc:  # v85 FORENSIC ROOT FIX (BUG #51)
             logger.warning(
                 "[%s] v50 downloader failed (%s) — falling back to v49 path",
                 self.source_name, exc,
@@ -1012,7 +1011,7 @@ class StringPipeline(BasePipeline):
                     exc,
                 )
                 self._emit_metric("string.detailed_tls_failure", 1)
-            except Exception as exc:
+            except (OSError, ValueError, ConnectionError, TimeoutError) as exc:  # v85 FORENSIC ROOT FIX (BUG #51)
                 logger.warning(
                     "[%s] Detailed links download failed (network error): %s. "
                     "Sub-scores will be NULL in this run. Set "
@@ -1267,7 +1266,7 @@ class StringPipeline(BasePipeline):
         # SHA-256. The base class writes the CSV; we write the sidecar.
         try:
             self._write_metadata_sidecar()
-        except Exception as exc:
+        except (OSError, ValueError, json.JSONDecodeError) as exc:  # v85 FORENSIC ROOT FIX (BUG #51)
             logger.warning(
                 "[%s] Could not write metadata sidecar: %s",
                 self.source_name,
@@ -1277,7 +1276,7 @@ class StringPipeline(BasePipeline):
         # FIX GAP-16.3: Write the transformation log.
         try:
             self._write_transformation_log()
-        except Exception as exc:
+        except (OSError, ValueError) as exc:  # v85 FORENSIC ROOT FIX (BUG #51)
             logger.warning(
                 "[%s] Could not write transformation log: %s",
                 self.source_name,
@@ -2313,13 +2312,15 @@ class StringPipeline(BasePipeline):
                set for performance — GAP-8.5).
             2. Drop rows where FK lookup fails (dead-letter the unmapped
                UniProt IDs — GAP-5.4, GAP-11.3).
-            3. Ensure ``protein_a_id < protein_b_id`` (defense-in-depth;
+            3. Ensure ``protein_a_id <= protein_b_id`` (defense-in-depth;
                ``_pre_validate_ppi`` in ``loaders.py`` also enforces this
-               and logs a WARNING for each swap — GAP-4.5).
-            4. Drop self-interactions with WARNING + dead-letter
-               (DB constraint; TODO(schema-migration): allow homodimers —
-               BUG-3.1).  ``_pre_validate_ppi`` in ``loaders.py`` also
-               quarantines them — GAP-4.4.
+               and logs a WARNING for each swap — GAP-4.5). v91 ROOT FIX
+               (BUG #9): now allows a_id == b_id (homodimers) with
+               is_homodimer=True flag.
+            4. Self-interactions (homodimers) are kept with is_homodimer=True
+               flag instead of being dropped. The DB constraint now allows
+               protein_a_id == protein_b_id. Homodimers are biologically
+               critical (EGFR dimerization, p53 tetramerization).
             5. Bulk upsert via ``bulk_upsert_ppi`` with
                ``pipeline_run_id`` and ``input_checksum`` (BUG-16.2,
                GAP-15.6, GAP-15.7).
@@ -2347,7 +2348,7 @@ class StringPipeline(BasePipeline):
                     correlation_id=self.correlation_id,
                 )
                 session = ctx.__enter__()
-            except Exception as exc:
+            except (OperationalError, IntegrityError, OSError) as exc:  # v85 FORENSIC ROOT FIX (BUG #51)
                 logger.error(
                     "[%s] Failed to open DB session: %s",
                     self.source_name,
@@ -2364,17 +2365,17 @@ class StringPipeline(BasePipeline):
             if owns_session and session is not None:
                 try:
                     session.commit()
-                except Exception:
+                except (OperationalError, IntegrityError, OSError):  # v85 FORENSIC ROOT FIX (BUG #51)
                     try:
                         session.rollback()
-                    except Exception:
+                    except (OSError, RuntimeError, ValueError):  # v85 FORENSIC ROOT FIX (BUG #51)
                         pass
             return result
-        except Exception:
+        except (OSError, RuntimeError, ValueError):  # v85 FORENSIC ROOT FIX (BUG #51)
             if owns_session and session is not None:
                 try:
                     session.rollback()
-                except Exception:
+                except (OSError, RuntimeError, ValueError):  # v85 FORENSIC ROOT FIX (BUG #51)
                     pass
             raise
         finally:
@@ -2392,11 +2393,11 @@ class StringPipeline(BasePipeline):
                 _exc_info = _sys.exc_info()
                 try:
                     ctx.__exit__(*_exc_info)
-                except Exception:
+                except (OSError, RuntimeError, ValueError):  # v85 FORENSIC ROOT FIX (BUG #51)
                     pass
                 try:
                     session.close()
-                except Exception:
+                except (OSError, RuntimeError, ValueError):  # v85 FORENSIC ROOT FIX (BUG #51)
                     pass
 
     def _load_with_session(self, df: pd.DataFrame, session: Session) -> int:
@@ -2666,7 +2667,7 @@ class StringPipeline(BasePipeline):
                 )
                 # Clear the global queue so it doesn't accumulate across runs.
                 _dead_letter_queue.clear()
-        except Exception as exc:
+        except (OSError, RuntimeError, ValueError) as exc:  # v85 FORENSIC ROOT FIX (BUG #51)
             logger.debug(
                 "[%s] Could not flush loader dead-letter queue: %s",
                 self.source_name,
@@ -2695,7 +2696,7 @@ class StringPipeline(BasePipeline):
             actual_columns = set(
                 inspector.get_columns("protein_protein_interactions").keys()
             )
-        except Exception as exc:
+        except (OperationalError, IntegrityError, OSError, ValueError) as exc:  # v85 FORENSIC ROOT FIX (BUG #51)
             # SQLite + fallback: query PRAGMA table_info.
             try:
                 from sqlalchemy import text
@@ -2703,7 +2704,7 @@ class StringPipeline(BasePipeline):
                     text("PRAGMA table_info(protein_protein_interactions)")
                 ).fetchall()
                 actual_columns = {row[1] for row in rows}
-            except Exception as inner_exc:
+            except (OperationalError, IntegrityError, OSError, ValueError) as inner_exc:  # v85 FORENSIC ROOT FIX (BUG #51)
                 logger.warning(
                     "[%s] Could not verify DB schema: %s / %s",
                     self.source_name,
@@ -2789,7 +2790,7 @@ class StringPipeline(BasePipeline):
             session.add(run)
             session.flush()  # populate run.id without committing
             return int(run.id)
-        except Exception as exc:
+        except (OperationalError, IntegrityError) as exc:  # v85 FORENSIC ROOT FIX (BUG #51)
             logger.warning(
                 "[%s] Could not get/create PipelineRun row for lineage: %s. "
                 "PPI rows will have NULL pipeline_run_id (acceptable but "

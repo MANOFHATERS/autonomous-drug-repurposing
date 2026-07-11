@@ -56,18 +56,24 @@ BEGIN;
 --    gene_disease_associations. This index did not exist before 002.
 DROP INDEX IF EXISTS uq_gene_disease_associations_gda_coalesced;
 
--- 2. Drop the renamed unique constraint 002 added on
---    gene_disease_associations. 002 added
---    `uq_gene_disease_associations_gene_symbol_disease_id_source` after
---    dropping 001's `uq_gda_gene_disease_source`. To undo, we drop
---    002's constraint and re-add 001's.
+-- 2. v90 ROOT FIX (BUG #2): migration 002 now KEEPS the ORM-matching
+--    constraint name ``uq_gda_gene_disease_source`` (it no longer renames
+--    it to ``uq_gene_disease_associations_gene_symbol_disease_id_source``).
+--    For backwards-compatibility with DBs that ran the OLD v82-v89
+--    migration 002 (which created the renamed constraint), we still drop
+--    the old name here. On DBs running the v90+ migration 002, this
+--    DROP is a no-op (constraint never existed under that name).
 ALTER TABLE gene_disease_associations
     DROP CONSTRAINT IF EXISTS uq_gene_disease_associations_gene_symbol_disease_id_source;
 
--- 3. Re-add the ORIGINAL constraint from 001_initial_schema.sql (line 914).
---    002 dropped this when it replaced it with the renamed version.
---    Idempotent guard: only re-add if it doesn't already exist (in case
---    the rollback is run on a DB where 001 was applied but 002 wasn't).
+-- 3. Re-add the ORIGINAL constraint from 001_initial_schema.sql (line ~1112).
+--    v90 ROOT FIX (BUG #2): since migration 002 now KEEPS the name
+--    ``uq_gda_gene_disease_source``, the constraint already exists with
+--    the correct name after 002. This re-add is a no-op on v90+ DBs
+--    (idempotent guard skips it). It only fires on DBs that ran the old
+--    v82-v89 migration 002 (which renamed the constraint) — there, the
+--    DROP above removed the renamed constraint, and this re-adds the
+--    correctly-named one.
 DO $$
 BEGIN
     IF NOT EXISTS (

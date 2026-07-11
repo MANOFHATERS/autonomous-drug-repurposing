@@ -115,7 +115,7 @@ except ImportError as _seed_import_exc:
         "(audit TOP-14, v54 ROOT-3 fix).",
         _seed_import_exc,
     )
-except Exception as _seed_exc:  # noqa: BLE001 — best-effort, do not block
+except (RuntimeError, OSError, ValueError) as _seed_exc:  # noqa: BLE001 — best-effort, do not block
     import logging as _logging
 
     _logging.getLogger("unified").warning(
@@ -195,7 +195,7 @@ def _build_real_neo4j(uri: str, user: str, password: str):
     builder.connect()
     try:
         builder.create_constraints()
-    except Exception as exc:
+    except (OSError, ValueError) as exc:
         logging.warning("create_constraints() failed (continuing): %s", exc)
     return builder
 
@@ -498,7 +498,7 @@ def main(argv: Optional[list] = None) -> int:
                     "(embedded samples, no API calls). stderr tail: %s",
                     _proc.returncode, (_proc.stderr or "")[-500:],
                 )
-        except Exception as _tier1_exc:
+        except (subprocess.SubprocessError, OSError, ValueError) as _tier1_exc:
             log.warning(
                 "Tier 1 exception: %s — falling back to Tier 2.",
                 _tier1_exc,
@@ -538,7 +538,7 @@ def main(argv: Optional[list] = None) -> int:
                         (_proc.stdout or "")[-500:],
                         (_proc.stderr or "")[-500:],
                     )
-            except Exception as _tier2_exc:
+            except (OSError, ValueError, ImportError) as _tier2_exc:
                 log.error(
                     "Tier 2 exception: %s", _tier2_exc,
                 )
@@ -614,7 +614,7 @@ def main(argv: Optional[list] = None) -> int:
         builder = _build_real_neo4j(neo4j_uri, neo4j_user, neo4j_password)
         neo4j_connected = True
         log.info("Neo4j connection ESTABLISHED — KG will be persisted.")
-    except Exception as exc:
+    except (OSError, ValueError, ConnectionError) as exc:
         log.warning(
             "Neo4j connection to %s failed: %s. Falling back to "
             "RecordingGraphBuilder (in-memory). The staged graph WILL "
@@ -780,11 +780,11 @@ def main(argv: Optional[list] = None) -> int:
             "block — report to the development team. (v54 ROOT-4 fix).",
             _persist_json_exc,
         )
-    except Exception as _persist_exc:
-        # Catch-all for unexpected errors — WARNING (non-fatal) but
+    except (OSError, PermissionError) as _persist_exc:
+        # Catch-all for I/O errors — WARNING (non-fatal) but
         # with full traceback so the operator can diagnose.
         log.warning(
-            "Failed to persist staged graph to disk (unexpected error, "
+            "Failed to persist staged graph to disk (unexpected I/O error, "
             "non-fatal): %s",
             _persist_exc,
             exc_info=True,
@@ -962,11 +962,12 @@ def main(argv: Optional[list] = None) -> int:
                 return 4
             log.error("Pipeline raised SystemExit(%d).", code)
             return code
-        except Exception as exc:
+        except (RuntimeError, OSError, ValueError, ConnectionError) as exc:
             # v21 ROOT FIX: catch V1LaunchCriteriaFailed (our typed
-            # exception from run_pipeline) and translate to exit code 4.
-            # All other Exceptions get exit code 5.
-            exc_module = type(exc).__module__
+            # exception from run_pipeline, derived from RuntimeError) and
+            # translate to exit code 4. Other specific runtime/env errors
+            # also map to exit code 5. Programming bugs (TypeError,
+            # AttributeError, etc.) are NOT caught — they must propagate.
             exc_name = type(exc).__name__
             if exc_name == "V1LaunchCriteriaFailed":
                 log.error(

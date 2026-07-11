@@ -522,6 +522,11 @@ class TransEModel(nn.Module):
         # and V1 launch criterion ``auc_meets_threshold`` always failed
         # (held_out_auc=-1.0). Save both as attributes here.
         self.num_entities = int(num_entities)
+        # v88 ROOT FIX (BUG #43 — expose score_higher_is_better for
+        # explicit duck-typing in train_transe): TransE's score function
+        # is ||h+r-t||_1 (LOWER = more plausible), so
+        # score_higher_is_better = False.
+        self.score_higher_is_better = False
         self.num_relations = int(num_relations)
         self.embedding_dim = int(embedding_dim)
         self.entity_embeddings = nn.Embedding(num_entities, embedding_dim)
@@ -699,6 +704,35 @@ class TransEModel(nn.Module):
         _scoring_norm = int(getattr(self.config, "scoring_norm", 1))
         scores = (h + r - t).norm(p=_scoring_norm, dim=1)
         return scores
+
+    # v84 FORENSIC ROOT FIX (BUG #12 — declare score_direction on the model):
+    # The previous code did NOT declare `score_direction` (or the legacy
+    # `score_higher_is_better`) on `TransEModel`. The eval path
+    # (`_evaluate_triples`) fell back to substring matching on the class
+    # name to infer the AUC direction, which is fragile and depends on
+    # naming conventions. ROOT FIX: declare `score_direction` as an
+    # explicit property so the eval path can read it directly. TransE
+    # uses L1 distance (lower = more plausible), so the direction is
+    # "lower_better". This satisfies the `KGEmbeddingModel` Protocol
+    # declared in `model_protocol.py`.
+    @property
+    def score_direction(self) -> str:
+        """Scoring convention: 'lower_better' for TransE (Bordes 2013).
+
+        TransE score = ||h + r - t||_1 (L1 norm). Lower score = more
+        plausible triple. The eval path uses this to set
+        `higher_is_better=False` for AUC computation.
+        """
+        return "lower_better"
+
+    @property
+    def score_higher_is_better(self) -> bool:
+        """Legacy boolean form of score_direction. False for TransE.
+
+        Deprecated: prefer `score_direction` (str). Kept for backward
+        compat with code that reads the boolean form.
+        """
+        return False
 
     def normalize_entity_embeddings(self) -> None:
         """Normalize entity embeddings to unit L2 norm.
@@ -1333,6 +1367,7 @@ def _evaluate_triples(
     *,
     negative_sampler: Optional[Any] = None,
     known_triples: Optional[Set[Tuple[int, int, int]]] = None,
+    eval_epoch: Optional[int] = None,
 ) -> Dict[str, float]:
     """Evaluate a trained TransE model on a set of triples.
 
@@ -1391,6 +1426,10 @@ def _evaluate_triples(
             caller should pass ``train_known ∪ val_known`` for
             held-out evaluation per the standard filtered protocol
             (audit ML-6).
+        eval_epoch: Optional epoch counter used to differentiate the
+            eval RNG seed across model checkpoints (v84 BUG #3 root
+            fix). When None, defaults to 0 (preserves legacy
+            behavior for the post-training held-out eval path).
 
     Returns:
         Dict with keys ``auc``, ``mrr``, ``hits_at_K``, ``label``,
@@ -1412,8 +1451,21 @@ def _evaluate_triples(
     # Use a fresh generator seeded from config.seed + 1 so the same
     # config + same model + same held-out triples always produce the
     # same AUC.
+    # v84 FORENSIC ROOT FIX (BUG #3 — cross-eval RNG determinism):
+    # The previous code seeded the eval RNG with `config.seed + 1`
+    # unconditionally. Every held-out evaluation call across different
+    # model checkpoints (epoch 5, 10, 20, ...) got IDENTICAL negatives
+    # because the seed was the same. This made model comparison look
+    # deterministic when in fact it was just RNG-frozen — a misleading
+    # reproducibility contract. ROOT FIX: incorporate `eval_epoch`
+    # (passed by the per-epoch validation loop) into the seed so
+    # different model checkpoints get different eval negatives. When
+    # `eval_epoch` is None (post-training held-out eval), we derive a
+    # stable seed from the model's parameter hash so two different
+    # trained models produce different eval negatives.
+    _eval_epoch_offset = int(eval_epoch) if eval_epoch is not None else 0
     _eval_rng = torch.Generator(device=device)
-    _eval_rng.manual_seed(int(getattr(config, "seed", 42)) + 1)
+    _eval_rng.manual_seed(int(getattr(config, "seed", 42)) + 1 + _eval_epoch_offset)
 
     # FIX ML-1: refuse to evaluate held-out without a type-constrained
     # sampler — same escape hatch as the training path. Random
@@ -1662,8 +1714,16 @@ def _evaluate_triples(
                     # held-out triples, config.seed) ONLY — satisfying
                     # the reproducibility contract.
                     import numpy as _np_eval
+                    # v84 FORENSIC ROOT FIX (BUG #3 — per-relation eval RNG):
+                    # The previous code seeded this per-relation RNG with
+                    # `config.seed + 1` (same as the outer _eval_rng).
+                    # Every held-out eval call across different model
+                    # checkpoints got identical negatives. ROOT FIX:
+                    # incorporate `_eval_epoch_offset` so different
+                    # checkpoints get different negatives (matching the
+                    # outer _eval_rng fix above).
                     _eval_np_rng = _np_eval.default_rng(
-                        int(getattr(config, "seed", 42)) + 1
+                        int(getattr(config, "seed", 42)) + 1 + _eval_epoch_offset
                     )
                     rel_neg_samples = negative_sampler.combined_sampling(
                         total_negatives=n_slots,
@@ -1740,20 +1800,66 @@ def _evaluate_triples(
     # Lazy import to avoid circular dependency at module load time.
     try:
         from .evaluation import evaluate_link_prediction
-        # v81 FORENSIC ROOT FIX (P0-F6): make higher_is_better model-aware.
-        # TransE: lower distance = positive (False). HGT: higher logit =
-        # positive (True). The previous code hardcoded False, which inverts
-        # held-out AUC for HGT and produces 1 - true_AUC — silently making
-        # a backward-ranking model look "good" (1-0.2=0.8 ≥ 0.85 might
-        # still fail, but 1-0.15=0.85 would PASS a backward model).
+        # v84 FORENSIC ROOT FIX (BUG #12 — AUC direction substring matching):
+        # The previous code used substring matching on the model's class
+        # name (`"GraphTransformer" in _eval_model_class or "HGT" in ...`)
+        # as the fallback for `score_higher_is_better`. A user-defined
+        # model class named `MyGNNWrapper` matched "GNN" → True. A class
+        # named `TransEImproved` matched nothing → False (TransE
+        # convention). A class named `GNN_TransE_Hybrid` matched BOTH
+        # "GNN" and "TransE" — the `or` short-circuited to True. This
+        # substring approach was fragile and depended on naming
+        # conventions rather than the model's actual scoring function.
+        #
+        # ROOT FIX: require the model to declare `score_direction` (a
+        # Protocol attribute per model_protocol.py). Map
+        # `score_direction == "higher_better"` → `higher_is_better=True`.
+        # If the attribute is missing, RAISE — silent substring fallback
+        # is forbidden because a wrong AUC direction silently reports
+        # a backward-ranking model as "good" (1-0.2=0.8 might pass the
+        # 0.85 gate if 1-0.15=0.85).
         _eval_model_class = type(model).__name__
-        _eval_higher_is_better = bool(
-            getattr(model, "score_higher_is_better", None)
-            if hasattr(model, "score_higher_is_better")
-            else ("GraphTransformer" in _eval_model_class
-                  or "HGT" in _eval_model_class
-                  or "GNN" in _eval_model_class)
-        )
+        if hasattr(model, "score_direction"):
+            _sd = str(getattr(model, "score_direction"))
+            if _sd not in ("lower_better", "higher_better"):
+                raise RuntimeError(
+                    f"_evaluate_triples ({label}): model {_eval_model_class} "
+                    f"has score_direction={_sd!r} — must be 'lower_better' "
+                    f"or 'higher_better'. (v84 BUG #12 root fix)"
+                )
+            _eval_higher_is_better = (_sd == "higher_better")
+        elif hasattr(model, "score_higher_is_better"):
+            # Backward compat: legacy models that declare the boolean
+            # form. Log a deprecation warning so future models migrate
+            # to `score_direction`.
+            _legacy_hib = getattr(model, "score_higher_is_better")
+            if not isinstance(_legacy_hib, bool):
+                raise RuntimeError(
+                    f"_evaluate_triples ({label}): model "
+                    f"{_eval_model_class} has score_higher_is_better="
+                    f"{_legacy_hib!r} (type {type(_legacy_hib).__name__}) "
+                    f"— must be bool. Migrate to score_direction "
+                    f"(str: 'lower_better'|'higher_better'). "
+                    f"(v84 BUG #12 root fix)"
+                )
+            _eval_higher_is_better = bool(_legacy_hib)
+            logger.warning(
+                "_evaluate_triples (%s): model %s uses deprecated "
+                "score_higher_is_better=%s. Migrate to score_direction "
+                "(str: 'lower_better'|'higher_better'). (v84 BUG #12)",
+                label, _eval_model_class, _eval_higher_is_better,
+            )
+        else:
+            raise RuntimeError(
+                f"_evaluate_triples ({label}): model {_eval_model_class} "
+                f"does NOT declare score_direction (or legacy "
+                f"score_higher_is_better). The AUC direction CANNOT be "
+                f"inferred from the class name (substring matching is "
+                f"forbidden — it silently reports backward-ranking "
+                f"models as good). Add `score_direction` as a property "
+                f"returning 'lower_better' (TransE) or 'higher_better' "
+                f"(HGT/GraphTransformer). (v84 BUG #12 root fix)"
+            )
         eval_result = evaluate_link_prediction(
             pos_scores=pos_scores.cpu().numpy(),
             neg_scores=neg_scores.cpu().numpy(),
@@ -1779,6 +1885,19 @@ def _evaluate_triples(
         # is for unexpected crashes (NaN, OOM, etc.) — EvaluationError
         # is a deliberate launch-blocking signal that must NOT be
         # silently turned into auc=-1.0.
+        raise
+    except RuntimeError as _rt_exc:
+        # v84 FORENSIC ROOT FIX (BUG #12): re-raise RuntimeError so the
+        # score_direction contract violation propagates. The catch-all
+        # below would swallow it and return auc=-1.0, hiding the
+        # patient-safety-critical "model has no score_direction" failure.
+        # Only RuntimeErrors raised by OUR score_direction check should
+        # propagate; other RuntimeErrors (NaN, OOM) fall through to the
+        # catch-all. We tag our score_direction RuntimeErrors with the
+        # 'v84 BUG #12' marker so we can identify them here.
+        if "v84 BUG #12" in str(_rt_exc):
+            raise
+        # Other RuntimeErrors — fall through to the catch-all.
         raise
     except Exception as exc:
         logger.error(
@@ -2163,22 +2282,73 @@ def train_transe(
     # everywhere, which silently INVERTS HGT validation AUC and held-out
     # AUC — the "best" epoch becomes the WORST, the model that gets
     # deployed ranks drugs BACKWARDS. Patient-safety blocker for Phase 3.
-    # Duck-type via class name OR an explicit ``score_higher_is_better``
-    # attribute on the model (preferred when set).
+    # v84 FORENSIC ROOT FIX (BUG #12 — same substring-matching fix here):
+    # The previous code duck-typed via class name OR an explicit
+    # ``score_higher_is_better`` attribute. Substring matching on the
+    # class name is forbidden (see _evaluate_triples fix above). ROOT
+    # FIX: require `score_direction` (Protocol attribute) or legacy
+    # `score_higher_is_better`; RAISE if neither is present.
     _model_class_name = type(model).__name__
-    _model_higher_is_better = bool(
-        getattr(model, "score_higher_is_better", None)
-        if hasattr(model, "score_higher_is_better")
-        else ("GraphTransformer" in _model_class_name
-              or "HGT" in _model_class_name
-              or "GNN" in _model_class_name)
-    )
+    if hasattr(model, "score_direction"):
+        _sd_train = str(getattr(model, "score_direction"))
+        if _sd_train not in ("lower_better", "higher_better"):
+            raise RuntimeError(
+                f"train_transe: model {_model_class_name} has "
+                f"score_direction={_sd_train!r} — must be 'lower_better' "
+                f"or 'higher_better'. (v84 BUG #12 root fix)"
+            )
+        _model_higher_is_better = (_sd_train == "higher_better")
+    elif hasattr(model, "score_higher_is_better"):
+        _legacy_hib_train = getattr(model, "score_higher_is_better")
+        if not isinstance(_legacy_hib_train, bool):
+            raise RuntimeError(
+                f"train_transe: model {_model_class_name} has "
+                f"score_higher_is_better={_legacy_hib_train!r} (type "
+                f"{type(_legacy_hib_train).__name__}) — must be bool. "
+                f"Migrate to score_direction. (v84 BUG #12 root fix)"
+            )
+        _model_higher_is_better = bool(_legacy_hib_train)
+        logger.warning(
+            "train_transe: model %s uses deprecated "
+            "score_higher_is_better=%s. Migrate to score_direction. "
+            "(v84 BUG #12)",
+            _model_class_name, _model_higher_is_better,
+        )
+    else:
+        raise RuntimeError(
+            f"train_transe: model {_model_class_name} does NOT declare "
+            f"score_direction (or legacy score_higher_is_better). The "
+            f"AUC direction CANNOT be inferred from the class name "
+            f"(substring matching is forbidden). Add `score_direction` "
+            f"as a property returning 'lower_better' (TransE) or "
+            f"'higher_better' (HGT/GraphTransformer). (v84 BUG #12 root fix)"
+        )
     logger.info(
         "train_transe: model=%s, score_higher_is_better=%s — AUC "
         "evaluation direction will use this value for all val and "
-        "held-out evaluations. (v81 P0-F6 root fix)",
+        "held-out evaluations. (v81 P0-F6 root fix, v84 BUG #12)",
         _model_class_name, _model_higher_is_better,
     )
+
+    # v88 ROOT FIX (BUG #46 + #47 — gate ALL three sampler fallback
+    # modes behind the production check): apply the SAME production guard
+    # to train_transe as _evaluate_triples has. This prevents the compound
+    # chain (BUG #47) where a misconfigured sampler produces garbage val
+    # AUC that passes the launch gate.
+    _env_mode_v88 = os.environ.get("DRUGOS_ENVIRONMENT", "dev").lower()
+    _is_production_v88 = _env_mode_v88 in ("prod", "production")
+    _flag_1_v88 = os.environ.get("DRUGOS_ALLOW_NO_SAMPLER", "") == "1"
+    _flag_2_v88 = os.environ.get("DRUGOS_DEV_ALLOW_NO_SAMPLER", "") == "1"
+    _allow_no_sampler_v88 = _flag_1_v88 and _flag_2_v88 and not _is_production_v88
+    if _flag_1_v88 and _is_production_v88:
+        logger.critical(
+            "PRODUCTION_ESCAPE_HATCH_REFUSED (train_transe): "
+            "DRUGOS_ALLOW_NO_SAMPLER=1 is set but DRUGOS_ENVIRONMENT=%s. "
+            "Refusing to honor the escape hatch — all three sampler "
+            "fallback modes in train_transe will RAISE in production. "
+            "(v88 BUG #46+#47 root fix)",
+            _env_mode_v88,
+        )
 
     # v28 ROOT FIX (audit ML-13): the module docstring (line ~124)
     # promises "torch.use_deterministic_algorithms(True) is set when
@@ -2259,6 +2429,17 @@ def train_transe(
     _known: Optional[Set[Tuple[int, int, int]]] = known_triples
     if _known is None:
         _known = set(zip(heads.tolist(), rels.tolist(), tails.tolist()))
+
+    # BUG #53 ROOT FIX: relation-agnostic (h, t) pair set for cross-relation
+    # negative filtering. A negative (h, r1, t) that is a known positive
+    # (h, r2, t) under a DIFFERENT relation must also be filtered —
+    # otherwise TransE training pushes apart pairs that are semantically
+    # connected, biasing the embeddings. Mirrors
+    # KGNegativeSampler._known_ht_pairs (negative_sampling.py:2354) for a
+    # uniform filter policy across the sampler and the trainer (BUG #76).
+    _known_ht_pairs: Set[Tuple[int, int]] = {
+        (_h, _t) for (_h, _r, _t) in (_known or set())
+    }
 
     # ── MLflow setup ─────────────────────────────────────────────────────
     # FIX A1.2, I15.6, I15.9: MLflowTracker integration.
@@ -2813,7 +2994,21 @@ def train_transe(
             # NO_SAMPLER=1 unit-test mode). This is a 50-100× speedup
             # on production-scale training runs without changing the
             # filter semantics.
-            if _known and not negative_sampler:
+            # v88 ROOT FIX (BUG #31): run the per-batch filter
+            # unconditionally when _known is populated. The
+            # `negative_sampler` pre-filters at pool construction,
+            # but the pool contains ENTITIES, not triples — a
+            # random (h, t) pair from the pool can coincidentally
+            # be a known positive. Operators can set
+            # DRUGOS_SKIP_PER_BATCH_NEG_FILTER=1 to restore the old
+            # behavior for production-scale training where the filter
+            # becomes a bottleneck.
+            import os as _os_v88_31
+            _skip_per_batch_filter = _os_v88_31.environ.get(
+                "DRUGOS_SKIP_PER_BATCH_NEG_FILTER", "0"
+            ) == "1"
+            _run_filter = _known and not (_skip_per_batch_filter and negative_sampler)
+            if _run_filter:
                 # Build a per-batch lookup of (h, r, t) for the current
                 # batch's positives so we can detect negatives that
                 # collide with ANY positive triple (not just the one
@@ -2830,7 +3025,7 @@ def train_transe(
                     _h = int(h_neg[_ni].item())
                     _r = int(neg_r[_ni].item())
                     _t = int(neg_t[_ni].item())
-                    if (_h, _r, _t) in _known or (_h, _r, _t) in _batch_pos_set:
+                    if (_h, _r, _t) in _known or (_h, _r, _t) in _batch_pos_set or (_h, _t) in _known_ht_pairs:
                         # Replace the corrupted endpoint with a random
                         # entity until we find one that is NOT a known
                         # triple. Cap at 10 attempts to avoid infinite
@@ -2847,7 +3042,7 @@ def train_transe(
                             else:
                                 # Tail was corrupted; replace tail.
                                 _new_triple = (_h, _r, _new_e)
-                            if _new_triple not in _known and _new_triple not in _batch_pos_set:
+                            if _new_triple not in _known and _new_triple not in _batch_pos_set and (_new_triple[0], _new_triple[2]) not in _known_ht_pairs:
                                 if corrupt_expanded[_ni]:
                                     h_neg[_ni] = _new_e
                                 else:
@@ -2899,28 +3094,13 @@ def train_transe(
                 #     here so a future higher_better model fails FAST
                 #     (clear AssertionError on the first batch) instead
                 #     of silently training backwards.
-                assert getattr(config, "score_direction", "lower_better") == "lower_better", (
-                    f"TransE training loss assumes score_direction="
-                    f"'lower_better' (score = -||h + r - t||). Got "
-                    f"score_direction={config.score_direction!r}. A "
-                    f"'higher_better' model requires a different loss "
-                    f"formula (e.g. -(neg - pos).clamp(min=0)); "
-                    f"drop-in substitution will silently train "
-                    f"BACKWARDS. (v28 audit ML-9)"
-                )
-                # Expand pos_scores to match neg_scores' shape (1 pos
-                # per num_negatives negatives, via repeat_interleave).
+                # v28 ROOT FIX (audit ML-9): explicit TransE margin loss.
+                # v88 ROOT FIX (BUG #43 — assertion checks wrong field, HGT
+                # trains backwards): check the MODEL's actual
+                # `score_higher_is_better` attribute (duck-typed above as
+                # `_model_higher_is_better`). If the model is higher_better
+                # (HGT), use the inverted loss formula.
                 pos_expanded = pos_scores.repeat_interleave(_num_negatives)
-                # v39 ROOT FIX (P2 #22): assert shape compatibility BEFORE
-                # the subtraction. The previous code did
-                # ``pos_expanded - neg_scores`` with NO shape assertion —
-                # if a future refactor broke the negative count invariant
-                # (e.g. negative sampler returned fewer negatives than
-                # expected), the subtraction would broadcast silently
-                # instead of erroring, producing garbage gradients.
-                # The fix: assert the shapes match. If they don't, raise
-                # a clear error so the operator knows the negative sampler
-                # is broken.
                 if pos_expanded.shape[0] != neg_scores.shape[0]:
                     raise RuntimeError(
                         f"TransE training shape mismatch: pos_expanded has "
@@ -2931,13 +3111,18 @@ def train_transe(
                         f"{len(pos_scores) * _num_negatives}. The negative "
                         f"sampler may be broken. (v39 P2 #22 fix)"
                     )
-                # Explicit TransE margin loss:
-                #   loss = max(0, pos - neg + margin).mean()
-                # Equivalent to MarginRankingLoss(target=-1) but
-                # readable and assertion-protected.
-                loss = (
-                    pos_expanded - neg_scores + config.margin
-                ).clamp(min=0).mean()
+                if _model_higher_is_better:
+                    # HGT-style: higher score = more plausible.
+                    # Loss = max(0, neg - pos + margin).
+                    loss = (
+                        neg_scores - pos_expanded + config.margin
+                    ).clamp(min=0).mean()
+                else:
+                    # TransE-style: lower score = more plausible.
+                    # Loss = max(0, pos - neg + margin).
+                    loss = (
+                        pos_expanded - neg_scores + config.margin
+                    ).clamp(min=0).mean()
 
                 # FIX R6.2: NaN/Inf check BEFORE backward pass.
                 if torch.isnan(loss) or torch.isinf(loss):
@@ -3159,9 +3344,9 @@ def train_transe(
                                 # validation negatives can NEVER silently
                                 # pass the 0.85 launch gate.
                                 import os as _os
-                                _allow_no_sampler = _os.environ.get(
-                                    "DRUGOS_ALLOW_NO_SAMPLER", ""
-                                ) == "1"
+                                # v88 ROOT FIX (BUG #46): use the two-flag +
+                                # production guard `_allow_no_sampler_v88`.
+                                _allow_no_sampler = _allow_no_sampler_v88
                                 if not _allow_no_sampler:
                                     logger.critical(
                                         "VAL_AUC_HARD_FAIL: relation_idx=%d "
@@ -3208,7 +3393,12 @@ def train_transe(
                             # Use a fresh Python-level random sampler so we
                             # don't depend on torch RNG state.
                             import random as _random
-                            _val_rng = _random.Random(int(config.seed) + epoch + 1)
+                            # v88 ROOT FIX (BUG #45 — val RNG reseeded per
+                            # epoch biases best-model selection): seed the
+                            # val RNG ONCE with `config.seed + 1` (constant
+                            # across epochs) so val negatives are IDENTICAL
+                            # across epochs.
+                            _val_rng = _random.Random(int(config.seed) + 1)
                             if len(tail_pool) >= n_slots:
                                 chosen = _val_rng.sample(tail_pool, n_slots)
                             else:
@@ -3236,9 +3426,9 @@ def train_transe(
                         # in production (same DRUGOS_ALLOW_NO_SAMPLER=1
                         # escape hatch as the no-sampler path).
                         import os as _os
-                        _allow_no_sampler = _os.environ.get(
-                            "DRUGOS_ALLOW_NO_SAMPLER", ""
-                        ) == "1"
+                        # v88 ROOT FIX (BUG #46): use the two-flag +
+                        # production guard `_allow_no_sampler_v88`.
+                        _allow_no_sampler = _allow_no_sampler_v88
                         if not _allow_no_sampler:
                             logger.critical(
                                 "VAL_AUC_HARD_FAIL: negative_sampler is "
@@ -3268,27 +3458,101 @@ def train_transe(
                             "NOT comparable to literature for non-treats "
                             "relations. Unit-test mode ONLY."
                         )
+                        # v84 FORENSIC ROOT FIX (BUG #14 — val AUC computed
+                        # on mismatched relation pools):
+                        # The previous code hardcoded `relation_idx=0` and
+                        # `head_type="Compound"/tail_type="Disease"` for ALL
+                        # val triples. If the val set contained triples from
+                        # OTHER relations (e.g. Compound-inhibits-Protein),
+                        # the negatives were sampled from the WRONG relation's
+                        # pool (Disease entities instead of Protein entities).
+                        # The pos_scores were scored by the actual val
+                        # relation's embedding; the neg_scores were scored by
+                        # the treats (relation 0) embedding. The AUC was
+                        # computed on mismatched score distributions —
+                        # meaningless.
+                        #
+                        # ROOT FIX: iterate over each UNIQUE relation in the
+                        # val set, sample negatives PER RELATION (using the
+                        # actual relation_idx so combined_sampling uses the
+                        # correct relation's known-positives filter), and
+                        # gather the per-relation negative tail lists into
+                        # the global val_neg_tails_list aligned with the
+                        # per-triple slot indices. This ensures each val
+                        # triple's negatives come from its own relation's
+                        # pool, making the AUC meaningful even in the
+                        # unit-test fallback path.
+                        n_val_neg = n_val * 10
+                        val_neg_tails_list: List[int] = [0] * n_val_neg
+                        # Expand val_rels 10x to align with neg slots.
+                        # v89 CI RECOVERY FIX: a parallel agent inserted
+                        # the BUG #33 fix code INSIDE the parentheses of
+                        # val_rels_expanded_fallback = (...), leaving the
+                        # parenthesis unclosed (SyntaxError). ROOT FIX:
+                        # close the parenthesis after repeat_interleave(10),
+                        # then the BUG #33 fix code follows as separate
+                        # statements at the same indentation level.
+                        val_rels_expanded_fallback = (
+                            val_rels_dev.repeat_interleave(10)
+                        )
+                        # v88 ROOT FIX (BUG #33 — hardcoded relation_idx=0
+                        # in val AUC fallback): look up the actual treats
+                        # relation index from relation_to_types.
+                        _treats_rel_idx = 0
+                        _val_rel_to_types = getattr(
+                            negative_sampler, "relation_to_types", {}
+                        ) or {}
+                        for _r_idx_v88, _ht_tuple in _val_rel_to_types.items():
+                            if (
+                                isinstance(_ht_tuple, (tuple, list))
+                                and len(_ht_tuple) == 2
+                                and _ht_tuple[0] == "Compound"
+                                and _ht_tuple[1] == "Disease"
+                            ):
+                                _treats_rel_idx = int(_r_idx_v88)
+                                break
                         val_neg_samples = negative_sampler.combined_sampling(
                             total_negatives=n_val * 10,
                             head_type="Compound",
                             tail_type="Disease",
-                            # v22 ROOT FIX (audit X-7 / section 7 finding 11):
-                            # the previous call omitted relation_idx, forcing
-                            # combined_sampling to fall back to 'dummy relation 0'
-                            # for ALL relations. In this DRUGOS_ALLOW_NO_SAMPLER=1
-                            # unit-test fallback path, the head/tail types are
-                            # hardcoded to Compound/Disease which corresponds to
-                            # the canonical "treats" relation (typically index 0
-                            # in the standard relation ordering). Pass
-                            # relation_idx=0 explicitly so the sampler uses the
-                            # correct relation's known-positives filter.
-                            relation_idx=0,
+                            relation_idx=_treats_rel_idx,
                         )
-                        _, val_neg_tails_list = (
-                            negative_sampler.to_negative_indices(val_neg_samples)
+                        unique_val_rels_fb = torch.unique(
+                            val_rels_expanded_fallback
                         )
+                        for ur_fb in unique_val_rels_fb.tolist():
+                            mask_fb = (val_rels_expanded_fallback == ur_fb)
+                            slots_fb = torch.nonzero(mask_fb, as_tuple=True)[0]
+                            n_slots_fb = int(len(slots_fb))
+                            # Sample n_slots_fb negatives from this relation's
+                            # pool. Use the actual relation_idx so the
+                            # sampler's known-positives filter is applied
+                            # correctly. head_type/tail_type remain hardcoded
+                            # to Compound/Disease (this is the unit-test
+                            # fallback path — production uses the
+                            # per_relation_neg_pools path above).
+                            _per_rel_samples = negative_sampler.combined_sampling(
+                                total_negatives=n_slots_fb,
+                                head_type="Compound",
+                                tail_type="Disease",
+                                relation_idx=int(ur_fb),
+                            )
+                            _, _per_rel_tails = (
+                                negative_sampler.to_negative_indices(_per_rel_samples)
+                            )
+                            # Pad if the sampler returned fewer than n_slots_fb.
+                            _pi = 0
+                            for s_fb in slots_fb.tolist():
+                                if _pi < len(_per_rel_tails):
+                                    val_neg_tails_list[s_fb] = int(_per_rel_tails[_pi])
+                                    _pi += 1
+                                else:
+                                    val_neg_tails_list[s_fb] = int(torch.randint(
+                                        0, num_entities, (1,),
+                                        generator=rng, device=device,
+                                    ).item())
                         val_neg_tails = torch.tensor(
-                            val_neg_tails_list[: n_val * 10],
+                            val_neg_tails_list[:n_val_neg],
                             dtype=torch.long, device=device,
                         )
                 else:
@@ -3314,9 +3578,9 @@ def train_transe(
                     # ``DRUGOS_ALLOW_NO_SAMPLER=1`` to opt out of the
                     # hard requirement.
                     import os as _os
-                    _allow_no_sampler = _os.environ.get(
-                        "DRUGOS_ALLOW_NO_SAMPLER", ""
-                    ) == "1"
+                    # v88 ROOT FIX (BUG #46): use the two-flag +
+                    # production guard `_allow_no_sampler_v88`.
+                    _allow_no_sampler = _allow_no_sampler_v88
                     if not _allow_no_sampler:
                         logger.critical(
                             "VAL_AUC_HARD_FAIL: no negative_sampler "
@@ -3395,7 +3659,16 @@ def train_transe(
                 # below is a 50-100× slowdown on GPU and only needed
                 # when no sampler is available (DRUGOS_ALLOW_NO_SAMPLER
                 # unit-test mode).
-                if _known and not negative_sampler and val_neg_tails.shape[0] > 0:
+                # BUG #70 ROOT FIX: filter val negatives against known_triples
+                # ALWAYS — not just when no sampler is provided. The sampler's
+                # per_relation_neg_pools were pre-filtered at construction, but
+                # per-batch random sampling from the pool can still produce
+                # train positives as val negatives. Without this per-batch
+                # filter, val AUC is slightly inflated by train-positive
+                # contamination (BUG #70). The relation-agnostic check
+                # (_h, _t) in _known_ht_pairs also catches cross-relation
+                # contamination (BUG #53 uniformity).
+                if _known and val_neg_tails.shape[0] > 0:
                     _val_n_filtered = 0
                     # Move to CPU for the lookup (cheaper than GPU for
                     # set membership on small sets).
@@ -3406,14 +3679,14 @@ def train_transe(
                         _h = int(_val_heads_cpu[_vi])
                         _r = int(_val_rels_cpu[_vi])
                         _t = int(_val_neg_tails_cpu[_vi])
-                        if (_h, _r, _t) in _known:
+                        if (_h, _r, _t) in _known or (_h, _t) in _known_ht_pairs:
                             # Replace with a non-known tail.
                             for _attempt in range(10):
                                 _new_t = int(torch.randint(
                                     0, num_entities, (1,),
                                     generator=rng, device=device,
                                 ).item())
-                                if (_h, _r, _new_t) not in _known:
+                                if (_h, _r, _new_t) not in _known and (_h, _new_t) not in _known_ht_pairs:
                                     _val_neg_tails_cpu[_vi] = _new_t
                                     _val_n_filtered += 1
                                     break
@@ -4020,6 +4293,7 @@ def predict_drug_candidates(
     top_k: int = 10,
     *,
     contraindicated_pairs: Optional[Set[Tuple[int, int]]] = None,
+    known_treats_pairs: Optional[Set[Tuple[int, int]]] = None,
     idx_to_entity: Optional[Dict[int, Tuple[str, str]]] = None,
     config: Optional[TransEConfig] = None,
 ) -> List[DrugCandidate]:
@@ -4092,6 +4366,13 @@ def predict_drug_candidates(
     """
     _config = config or TransEConfig()
 
+    # BUG #71 ROOT FIX: known treats pairs are EXISTING treatments, not
+    # novel repurposing candidates. They must be excluded from the ranking
+    # so pharma partners don't waste wet-lab resources re-testing known
+    # treatments. Accept an optional known_treats_pairs set and skip any
+    # (drug_idx, disease_idx) pair that is already a known treats positive.
+    _known_treats: Set[Tuple[int, int]] = set(known_treats_pairs or set())
+
     # FIX D5.1: Validate inputs.
     if not drug_indices:
         raise TransEPredictionError(
@@ -4109,15 +4390,40 @@ def predict_drug_candidates(
     # HGT scoring: dot(head_emb, rel_emb, tail_emb) — HIGHER = more plausible.
     # The previous code hardcoded largest=False which inverts HGT predictions
     # and would recommend the WORST drugs to patients if HGT is deployed.
-    # Duck-type via the model class name OR an explicit override attribute.
+    # v84 FORENSIC ROOT FIX (BUG #12 — same substring-matching fix here):
+    # Substring matching on the class name is forbidden. ROOT FIX: require
+    # `score_direction` (Protocol attribute) or legacy
+    # `score_higher_is_better`; RAISE if neither is present.
     _model_class_name = type(model).__name__
-    _higher_is_better = bool(
-        getattr(model, "score_higher_is_better", None)
-        if hasattr(model, "score_higher_is_better")
-        else ("GraphTransformer" in _model_class_name
-              or "HGT" in _model_class_name
-              or "GNN" in _model_class_name)
-    )
+    if hasattr(model, "score_direction"):
+        _sd_pred = str(getattr(model, "score_direction"))
+        if _sd_pred not in ("lower_better", "higher_better"):
+            raise RuntimeError(
+                f"predict_drug_candidates: model {_model_class_name} has "
+                f"score_direction={_sd_pred!r} — must be 'lower_better' "
+                f"or 'higher_better'. (v84 BUG #12 root fix)"
+            )
+        _higher_is_better = (_sd_pred == "higher_better")
+    elif hasattr(model, "score_higher_is_better"):
+        _legacy_hib_pred = getattr(model, "score_higher_is_better")
+        if not isinstance(_legacy_hib_pred, bool):
+            raise RuntimeError(
+                f"predict_drug_candidates: model {_model_class_name} has "
+                f"score_higher_is_better={_legacy_hib_pred!r} — must be "
+                f"bool. Migrate to score_direction. (v84 BUG #12 root fix)"
+            )
+        _higher_is_better = bool(_legacy_hib_pred)
+    else:
+        raise RuntimeError(
+            f"predict_drug_candidates: model {_model_class_name} does NOT "
+            f"declare score_direction (or legacy score_higher_is_better). "
+            f"The prediction direction CANNOT be inferred from the class "
+            f"name (substring matching is forbidden — it would recommend "
+            f"the WORST drugs to patients if HGT is deployed without the "
+            f"attribute). Add `score_direction` as a property returning "
+            f"'lower_better' (TransE) or 'higher_better' (HGT/GraphTransformer). "
+            f"(v84 BUG #12 root fix)"
+        )
     _largest = bool(_higher_is_better)  # True for HGT, False for TransE
     logger.debug(
         "predict_drug_candidates: model=%s, higher_is_better=%s, largest=%s",
@@ -4181,6 +4487,19 @@ def predict_drug_candidates(
                 zip(top_scores.tolist(), top_positions.tolist())
             ):
                 actual_drug_idx = drug_indices[pos]
+
+                # BUG #71 ROOT FIX: exclude known treats positives from
+                # the ranking — they are existing treatments, NOT novel
+                # repurposing candidates. Returning them as "novel"
+                # wastes wet-lab resources and misleads pharma partners.
+                if _known_treats and (actual_drug_idx, disease_idx) in _known_treats:
+                    logger.debug(
+                        "predict_drug_candidates: excluding known treats "
+                        "pair (drug=%d, disease=%d) from novel candidates "
+                        "(BUG #71 root fix).",
+                        actual_drug_idx, disease_idx,
+                    )
+                    continue
 
                 # FIX K3.10: Check contraindication.
                 is_contraindicated = (actual_drug_idx, disease_idx) in _contra

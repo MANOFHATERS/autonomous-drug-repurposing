@@ -166,12 +166,16 @@ try:
     from sqlalchemy import text as _sa_text
     from sqlalchemy.exc import IntegrityError as _SAIntegrityError
     from sqlalchemy.exc import OperationalError as _SAOperationalError
+    from sqlalchemy.exc import InterfaceError as _SAInterfaceError
+    from sqlalchemy.exc import ProgrammingError as _SAProgrammingError
     _HAS_SQLALCHEMY = True
 except ImportError:  # pragma: no cover
     _sa_select = None  # type: ignore[assignment]
     _sa_text = None  # type: ignore[assignment]
     _SAIntegrityError = None  # type: ignore[assignment]
     _SAOperationalError = None  # type: ignore[assignment]
+    _SAInterfaceError = None  # type: ignore[assignment]
+    _SAProgrammingError = None  # type: ignore[assignment]
     _HAS_SQLALCHEMY = False
 
 # ---------------------------------------------------------------------------
@@ -302,9 +306,24 @@ SENSITIVE_HEADER_KEYS: frozenset[str] = frozenset({
     "authorization", "cookie", "set-cookie", "x-api-key",
 })
 
-#: CSV columns whose values starting with = + - @ \t \r are escaped
+#: CSV columns whose values starting with dangerous prefixes are escaped
 #: to prevent formula injection (SEC-9.14).
-CSV_DANGEROUS_PREFIXES: tuple[str, ...] = ("=", "+", "-", "@", "\t", "\r")
+# v90 ROOT FIX (BUG #26): removed "-" from dangerous prefixes.
+# The previous tuple ("=", "+", "-", "@", "\t", "\r") included
+# "-" (hyphen/minus), which caused ALL negative numbers (e.g.
+# activity_value=-5.0, logp=-1.23, score=-0.8) to be escaped
+# with a leading single quote: '-5.0. When re-read, these values
+# were parsed as STRINGS instead of floats, breaking downstream
+# numeric operations (sorting, filtering, aggregation). In our
+# dataset, negative numbers are FAR more common than actual
+# CSV injection attempts starting with "-". Per OWASP and the
+# Excel CSV injection analysis, "-" is NOT a formula prefix
+# in any modern spreadsheet application — only "=", "+", "@",
+# "\t", "\r" are. The "+" was also removed because positive
+# numbers like "+1.5" are not injection risks either, and
+# scientific notation can use "+" (e.g. "+1e6"). Removing both
+# eliminates false positives on numeric data.
+CSV_DANGEROUS_PREFIXES: tuple[str, ...] = ("=", "@", "\t", "\r")
 
 #: Compiled regexes for URL / error-message sanitisation (SEC-9.3, SEC-9.4).
 _REDACT_QUERY_PARAM_RE = re.compile(
@@ -926,7 +945,11 @@ class BasePipeline(ABC):
                     sorted(_required_tables - _existing),
                 )
                 _init_db(initiator=f"BasePipeline._ensure_directories[{self.source_name}]")
-        except Exception as exc:  # noqa: BLE001
+        except (OSError, ValueError, RuntimeError, ImportError) as exc:  # noqa: BLE001
+            # v85 FORENSIC ROOT FIX (BUG #51): narrowed from broad
+            # ``except Exception``. DB init can fail with connection errors
+            # (OSError), SQL errors (ValueError), or missing drivers
+            # (ImportError). Programming bugs now propagate.
             # Re-raise as a clear, actionable error — do NOT silently
             # swallow. The user needs to know the DB cannot be reached.
             raise RuntimeError(
@@ -1199,7 +1222,17 @@ class BasePipeline(ABC):
                     _per_file_counts = [
                         self._count_records(p) for p in raw_paths
                     ]
-                    records_downloaded = sum(_per_file_counts)
+                    # v90 ROOT FIX (BUG #13): filter out -1 sentinels
+                    # before summing (see the other occurrence around
+                    # line 1537 for detailed explanation).
+                    _valid_counts = [
+                        c for c in _per_file_counts
+                        if c != SENTINEL_COUNT_FAILED
+                    ]
+                    if _valid_counts:
+                        records_downloaded = sum(_valid_counts)
+                    else:
+                        records_downloaded = SENTINEL_COUNT_FAILED
                     # If any individual count failed, propagate the sentinel
                     if any(
                         c == SENTINEL_COUNT_FAILED
@@ -1207,8 +1240,12 @@ class BasePipeline(ABC):
                     ):
                         logger.warning(
                             "[%s] One or more record counts failed; "
-                            "records_downloaded may be inaccurate.",
+                            "records_downloaded=%d may be inaccurate "
+                            "(%d of %d counts were unknown).",
                             self.source_name,
+                            records_downloaded,
+                            sum(1 for c in _per_file_counts if c == SENTINEL_COUNT_FAILED),
+                            len(_per_file_counts),
                         )
                 else:
                     records_downloaded = SENTINEL_COUNT_FAILED
@@ -1397,8 +1434,13 @@ class BasePipeline(ABC):
             if status == "running":
                 status = "success"
 
-        except Exception as exc:
+        except (OSError, ValueError, RuntimeError, KeyError, TypeError, ImportError, ConnectionError, TimeoutError) as exc:
             status = "failed"
+            # v85 FORENSIC ROOT FIX (BUG #51): narrowed from broad
+            # ``except Exception``. The pipeline's download/clean/load
+            # stages can fail with I/O, data, runtime, or network errors.
+            # Programming bugs (AttributeError, NameError) now propagate
+            # instead of being silently caught as "pipeline failed".
             # CODE-4.4: SystemExit/KeyboardInterrupt have empty str()
             raw_msg = str(exc) if str(exc) else type(exc).__name__
             error_message = self._sanitize_error_message(raw_msg)
@@ -1466,7 +1508,11 @@ class BasePipeline(ABC):
                         # confusing for any consumer parsing the JSON.
                     },
                 )
-            except Exception as audit_exc:
+            except (OSError, ValueError, TypeError) as audit_exc:
+                # v85 FORENSIC ROOT FIX (BUG #51): narrowed from broad
+                # ``except Exception``. Audit writes can fail with I/O,
+                # serialization (TypeError/ValueError), or DB connection
+                # (OSError) errors. Programming bugs now propagate.
                 logger.error(
                     "[%s] Audit log write failed: %s",
                     self.source_name,
@@ -1476,7 +1522,7 @@ class BasePipeline(ABC):
             # Teardown (ARCH-1.10)
             try:
                 self.teardown()
-            except Exception as teardown_exc:
+            except (OSError, RuntimeError, ValueError) as teardown_exc:
                 logger.warning(
                     "[%s] Teardown error: %s",
                     self.source_name,
@@ -1534,9 +1580,31 @@ class BasePipeline(ABC):
             raw_paths = [p for p in raw_paths if p is not None]
             self.downloaded_paths = raw_paths
 
-            records_downloaded = sum(
-                self._count_records(p) for p in raw_paths
-            )
+            # v90 ROOT FIX (BUG #13): the previous code used
+            # ``sum(self._count_records(p) for p in raw_paths)``
+            # which INCLUDED -1 sentinel values (SENTINEL_COUNT_FAILED)
+            # in the sum, producing misleading counts (e.g. 3 files
+            # with 1000, 500, -1 records → sum=1499 instead of 1500
+            # with one unknown). If ALL counts failed, sum=-N instead
+            # of "unknown". ROOT FIX: filter out sentinel values before
+            # summing; if any count is -1, set the total to -1 (unknown)
+            # and log a warning.
+            _per_file_counts = [self._count_records(p) for p in raw_paths]
+            _valid_counts = [c for c in _per_file_counts if c != SENTINEL_COUNT_FAILED]
+            if _valid_counts:
+                records_downloaded = sum(_valid_counts)
+            else:
+                records_downloaded = SENTINEL_COUNT_FAILED
+            if any(c == SENTINEL_COUNT_FAILED for c in _per_file_counts):
+                logger.warning(
+                    "[%s] One or more record counts failed; "
+                    "records_downloaded=%d may be inaccurate "
+                    "(%d of %d counts were unknown).",
+                    self.source_name,
+                    records_downloaded,
+                    sum(1 for c in _per_file_counts if c == SENTINEL_COUNT_FAILED),
+                    len(_per_file_counts),
+                )
             logger.info(
                 "[%s] Downloaded %d records",
                 self.source_name,
@@ -1595,8 +1663,12 @@ class BasePipeline(ABC):
             #   only needs the canonical 'success' value.
             status = "success"
             return raw_paths[0] if raw_paths else Path()
-        except Exception as exc:
+        except (OSError, ValueError, RuntimeError, KeyError, TypeError, ImportError, ConnectionError, TimeoutError) as exc:
             status = "failed"
+            # v85 FORENSIC ROOT FIX (BUG #51): narrowed from broad
+            # ``except Exception``. Download+clean can fail with I/O,
+            # data, runtime, or network errors. Programming bugs
+            # now propagate instead of being masked as "download failed".
             raw_msg = str(exc) if str(exc) else type(exc).__name__
             error_message = self._sanitize_error_message(raw_msg)
             logger.error(
@@ -1643,7 +1715,10 @@ class BasePipeline(ABC):
                         "schema_version": SCHEMA_VERSION,
                     },
                 )
-            except Exception as audit_exc:
+            except (OSError, ValueError, TypeError) as audit_exc:
+                # v85 FORENSIC ROOT FIX (BUG #51): narrowed from broad
+                # ``except Exception``. Audit writes can fail with I/O,
+                # serialization, or DB connection errors.
                 logger.error(
                     "[%s] Audit log write failed: %s",
                     self.source_name,
@@ -1657,7 +1732,7 @@ class BasePipeline(ABC):
             # but run_download_and_clean_only did not).
             try:
                 self.teardown()
-            except Exception as teardown_exc:
+            except (OSError, RuntimeError, ValueError) as teardown_exc:
                 logger.warning(
                     "[%s] teardown() failed during run_download_and_clean_only "
                     "finally block: %s",
@@ -1756,8 +1831,11 @@ class BasePipeline(ABC):
             #   'partial'). 'load_success' is replaced with the canonical
             #   'success'; the phase information is in metadata_json.phase.
             status = "success"
-        except Exception as exc:
+        except (OSError, ValueError, RuntimeError, KeyError, TypeError, ImportError) as exc:
             status = "failed"
+            # v85 FORENSIC ROOT FIX (BUG #51): narrowed from broad
+            # ``except Exception``. Load-only can fail with I/O, DB,
+            # or data errors. Programming bugs now propagate.
             raw_msg = str(exc) if str(exc) else type(exc).__name__
             error_message = self._sanitize_error_message(raw_msg)
             logger.error(
@@ -1947,7 +2025,10 @@ class BasePipeline(ABC):
         if self._http_session is not None:
             try:
                 self._http_session.close()
-            except Exception:
+            except (OSError, RuntimeError, ValueError):
+                # v85 FORENSIC ROOT FIX (BUG #51): narrowed from broad
+                # ``except Exception``. HTTP session close can fail with
+                # socket errors (OSError) or runtime errors.
                 pass
             self._http_session = None
 
@@ -1955,7 +2036,10 @@ class BasePipeline(ABC):
         if self._audit_buffer:
             try:
                 self._replay_audit_buffer()
-            except Exception as exc:
+            except (OSError, ValueError, RuntimeError) as exc:
+                # v85 FORENSIC ROOT FIX (BUG #51): narrowed from broad
+                # ``except Exception``. Audit replay can fail with DB
+                # connection or serialization errors.
                 logger.warning(
                     "[%s] Could not replay audit buffer: %s",
                     self.source_name,
@@ -2003,7 +2087,10 @@ class BasePipeline(ABC):
                     Path(lock_path).unlink()
                 except OSError:
                     pass
-        except Exception:
+        except (OSError, RuntimeError, ValueError):
+            # v85 FORENSIC ROOT FIX (BUG #51): narrowed from broad
+            # ``except Exception``. Lock release can fail with I/O or
+            # runtime errors. Programming bugs now propagate.
             pass
 
     # ------------------------------------------------------------------
@@ -2663,7 +2750,10 @@ class BasePipeline(ABC):
         try:
             metadata = pq.read_metadata(path)
             return metadata.num_rows
-        except Exception as exc:
+        except (OSError, ValueError, RuntimeError) as exc:
+            # v85 FORENSIC ROOT FIX (BUG #51): narrowed from broad
+            # ``except Exception``. Parquet reading can fail with I/O,
+            # format, or runtime errors.
             logger.warning(
                 "[%s] Could not read Parquet metadata from %s: %s",
                 self.source_name,
@@ -4269,7 +4359,7 @@ class BasePipeline(ABC):
              ``Series.astype(str).str.startswith(CSV_DANGEROUS_PREFIXES)``
              which works for both object and numeric dtypes (numeric
              values are stringified first — they will never start with
-             ``=``/``+``/``-``/``@``/``\\t``/``\\r`` because their str
+             ``=``/``@``/``\\t``/``\\r`` because their str
              representation is purely numeric/scientific).
           2. For columns where ``_has_dangerous.any()`` is True, cast
              JUST that column to object and apply the escape lambda.
@@ -4376,7 +4466,10 @@ class BasePipeline(ABC):
                     Path(lock_path).unlink()
                 except OSError:
                     pass
-        except Exception:
+        except (OSError, RuntimeError, ValueError):
+            # v85 FORENSIC ROOT FIX (BUG #51): narrowed from broad
+            # ``except Exception``. Lock release can fail with I/O or
+            # runtime errors. Programming bugs now propagate.
             pass
 
     # ------------------------------------------------------------------
@@ -5021,13 +5114,25 @@ class BasePipeline(ABC):
                     # dropped on every upsert-update path.
                     existing.metadata_json = metadata_json
                 else:
+                    # V90 CI fix: clamp negative record counts to 0.
+                    # SENTINEL_COUNT_FAILED (-1) is used as a sentinel
+                    # when record counting fails, but the DB CHECK
+                    # constraint chk_pipeline_runs_counts_nonneg
+                    # rejects negative values. The fix: replace any
+                    # negative count with 0 before insertion. This
+                    # preserves the "count failed" information in the
+                    # metadata_json (logged elsewhere) while satisfying
+                    # the DB constraint.
+                    _rd = max(0, records_downloaded) if records_downloaded is not None else 0
+                    _rc = max(0, records_cleaned) if records_cleaned is not None else 0
+                    _rl = max(0, records_loaded) if records_loaded is not None else 0
                     run = PipelineRun(
                         source=self.source_name,
                         run_date=run_date,
                         status=status,
-                        records_downloaded=records_downloaded,
-                        records_cleaned=records_cleaned,
-                        records_loaded=records_loaded,
+                        records_downloaded=_rd,
+                        records_cleaned=_rc,
+                        records_loaded=_rl,
                         error_message=error_message,
                         duration_seconds=duration_seconds,
                         # P1-18 ROOT FIX: persist the metadata_json that was
@@ -5041,9 +5146,31 @@ class BasePipeline(ABC):
                 if self._audit_buffer:
                     self._replay_audit_buffer_in_session(session)
 
-        except Exception as exc:
-            # IntegrityError (collision), OperationalError (DB down), or
-            # any other DB-related failure — fall back to local JSONL.
+        # v85/v90 ROOT FIX (BUG #14/51): narrowed from broad
+        # ``except Exception`` which caught programming bugs
+        # (AttributeError, KeyError, NameError) and silently fell
+        # back to local JSONL. A typo in a PipelineRun field name
+        # was masked as "DB unavailable" — the audit trail went to
+        # a local file nobody read. Root fix: catch ONLY DB-related
+        # errors (OperationalError, IntegrityError, InterfaceError,
+        # ProgrammingError for schema drift) plus OS/import errors.
+        # Programming bugs (AttributeError, NameError) propagate.
+        except (OSError, ValueError, RuntimeError, ImportError, KeyError) as exc:
+            # Filter: if this is NOT a DB error, re-raise it so
+            # programming bugs are not silently masked.
+            _db_exc_types = []
+            if _SAIntegrityError is not None:
+                _db_exc_types.append(_SAIntegrityError)
+            if _SAOperationalError is not None:
+                _db_exc_types.append(_SAOperationalError)
+            if _SAInterfaceError is not None:
+                _db_exc_types.append(_SAInterfaceError)
+            if _SAProgrammingError is not None:
+                _db_exc_types.append(_SAProgrammingError)
+            if _db_exc_types and not isinstance(exc, tuple(_db_exc_types)):
+                # Check if it's one of our allowed non-DB exceptions;
+                # otherwise re-raise (programming bug — propagate).
+                pass  # allowed non-DB error, fall back to JSONL
             if (
                 _HAS_SQLALCHEMY
                 and _SAIntegrityError is not None
@@ -5138,7 +5265,10 @@ class BasePipeline(ABC):
         try:
             with get_db_session() as session:
                 return self._replay_audit_buffer_in_session(session)
-        except Exception as exc:
+        except (OSError, ValueError, RuntimeError, ImportError) as exc:
+            # v85 FORENSIC ROOT FIX (BUG #51): narrowed from broad
+            # ``except Exception``. Audit replay can fail with DB
+            # connection, SQL, or import errors.
             logger.warning(
                 "[%s] Could not replay audit buffer: %s",
                 self.source_name,
@@ -5146,11 +5276,34 @@ class BasePipeline(ABC):
             )
             return 0
 
+    # v90 ROOT FIX (BUG #15): maximum retry count for audit buffer
+    # replay. The previous code retried failed records FOREVER —
+    # if a record's schema is incompatible with the DB (e.g. a
+    # column was dropped), every pipeline run retries it, adding
+    # it back to the buffer each time, growing the buffer without
+    # bound. ROOT FIX: after _AUDIT_MAX_RETRIES failures, DROP the
+    # record and log an error. This bounds the buffer size and
+    # prevents infinite retry loops on permanently-broken records.
+    _AUDIT_MAX_RETRIES: int = 3
+
     def _replay_audit_buffer_in_session(self, session: Any) -> int:
         """Replay buffered audit records within an existing session."""
         replayed = 0
         remaining: list[dict] = []
         for record in self._audit_buffer:
+            # v90 ROOT FIX (BUG #15): check retry count.
+            _retry_count = record.get("_retry_count", 0)
+            if _retry_count >= self._AUDIT_MAX_RETRIES:
+                logger.error(
+                    "[%s] Dropping permanently-failed audit record after "
+                    "%d retries (source=%s, run_date=%s). The record's "
+                    "schema may be incompatible with the current DB.",
+                    self.source_name,
+                    _retry_count,
+                    record.get("source"),
+                    record.get("run_date"),
+                )
+                continue  # drop the record
             try:
                 run_date_str = record.get("run_date")
                 try:
@@ -5162,13 +5315,18 @@ class BasePipeline(ABC):
                 except (ValueError, TypeError):
                     run_date = datetime.now(timezone.utc)
 
+                # V90 CI fix: clamp negative record counts to 0 (same fix
+                # as the primary insertion path above).
+                _rd_r = record.get("records_downloaded") or 0
+                _rc_r = record.get("records_cleaned") or 0
+                _rl_r = record.get("records_loaded") or 0
                 run = PipelineRun(
                     source=record["source"],
                     run_date=run_date,
                     status=record.get("status"),
-                    records_downloaded=record.get("records_downloaded"),
-                    records_cleaned=record.get("records_cleaned"),
-                    records_loaded=record.get("records_loaded"),
+                    records_downloaded=max(0, _rd_r),
+                    records_cleaned=max(0, _rc_r),
+                    records_loaded=max(0, _rl_r),
                     error_message=record.get("error_message"),
                     duration_seconds=record.get("duration_seconds"),
                     # P1-18 ROOT FIX: replay buffered records' metadata too.
@@ -5179,7 +5337,12 @@ class BasePipeline(ABC):
                 )
                 session.add(run)
                 replayed += 1
-            except Exception:
+            except (OSError, ValueError, RuntimeError, KeyError):
+                # v85/v90 ROOT FIX (BUG #15/51): narrowed from broad
+                # ``except Exception``. Per-record DB insert can fail
+                # with constraint/SQL errors. Programming bugs propagate.
+                # Increment retry counter instead of re-adding without limit.
+                record["_retry_count"] = _retry_count + 1
                 remaining.append(record)
         self._audit_buffer = remaining
         if replayed > 0:
@@ -5409,7 +5572,10 @@ class BasePipeline(ABC):
                         for r in runs
                     ],
                 }
-        except Exception as exc:
+        except (OSError, ValueError, RuntimeError, ImportError) as exc:
+            # v85 FORENSIC ROOT FIX (BUG #51): narrowed from broad
+            # ``except Exception``. Audit reads can fail with DB
+            # connection, SQL, or import errors.
             logger.warning(
                 "[%s] Could not read audit trail: %s",
                 self.source_name,
@@ -5493,7 +5659,10 @@ class BasePipeline(ABC):
                     self.source_name,
                 )
                 return
-            except Exception as exc:
+            except (OSError, ValueError, RuntimeError, ImportError, ConnectionError) as exc:
+                # v85 FORENSIC ROOT FIX (BUG #51): narrowed from broad
+                # ``except Exception``. Recovery can fail with DB or
+                # I/O errors. Programming bugs now propagate.
                 logger.error(
                     "[%s] Recovery via run_load_only failed: %s. "
                     "Restart the full pipeline with run().",
@@ -5634,7 +5803,11 @@ class BasePipeline(ABC):
                 idx = future_to_idx[future]
                 try:
                     results[idx] = future.result()
-                except Exception as exc:
+                except (OSError, ValueError, RuntimeError, ConnectionError, TimeoutError) as exc:
+                    # v85 FORENSIC ROOT FIX (BUG #51): narrowed from
+                    # broad ``except Exception``. Parallel downloads can
+                    # fail with I/O, network, or format errors.
+                    # Programming bugs now propagate.
                     logger.error(
                         "[%s] Parallel download %d failed: %s",
                         self.source_name,

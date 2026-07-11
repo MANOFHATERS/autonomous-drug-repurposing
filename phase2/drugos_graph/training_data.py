@@ -421,13 +421,14 @@ def _compute_drkg_checksum(drkg_df: Any) -> str:
                     for col in cols:
                         try:
                             row_vals.append(str(drkg_df.iloc[idx][col]))
-                        except Exception:
+                        except (KeyError, ValueError, IndexError):  # v85 FORENSIC ROOT FIX (BUG #51)
+                            logger.warning("iloc access failed for idx=%s col=%s", idx, col)  # v85 FORENSIC ROOT FIX (BUG #51)
                             row_vals.append("<err>")
                     sample_rows.append("|".join(row_vals))
         col_sample = str(cols)
         raw = f"{n_rows}:{col_sample}:{chr(10).join(sample_rows)}"
         return hashlib.sha256(raw.encode()).hexdigest()[:16]
-    except Exception:
+    except (ValueError, TypeError, RuntimeError, KeyError, OSError):  # v85 FORENSIC ROOT FIX (BUG #51)
         return "unknown"
 
 
@@ -694,6 +695,18 @@ def extract_positive_pairs(
         head_id = _sanitize_string(str(row.head_id))
         tail_id = _sanitize_string(str(row.tail_id))
         relation_name = str(row.relation_name) if pd_notna(row.relation_name) else ""
+
+        # v88 ROOT FIX (BUG #49 — defensive assert on DRKG edge direction):
+        # assert head_type=='Compound' and tail_type=='Disease' so a future
+        # regex broadening to include DtC FAILS FAST instead of silently
+        # inverting edges.
+        _head_type = str(getattr(row, "head_type", "Compound"))
+        _tail_type = str(getattr(row, "tail_type", "Disease"))
+        assert _head_type == "Compound" and _tail_type == "Disease", (
+            f"DRKG treats row has unexpected edge direction: "
+            f"head_type={_head_type!r}, tail_type={_tail_type!r}. "
+            f"Expected Compound→Disease (CtD). (v88 BUG #49 root fix)"
+        )
 
         # DQI-002, DQI-003: Filter NaN/None/empty entity IDs
         if not _is_valid_entity_id(head_id) or not _is_valid_entity_id(tail_id):
@@ -1493,15 +1506,35 @@ def temporal_split_pairs(
     val: List[Dict] = []
     test: List[Dict] = []
 
+    # v88 ROOT FIX (BUG #34 — drug-level leakage in temporal split):
+    # split by DRUG approval year (the drug's FIRST approval across all
+    # diseases), not by (drug, disease) approval year. A drug is in train
+    # iff its first approval year <= cutoff-2. This ensures no drug
+    # appears in both train and test.
+    drug_first_approval: Dict[str, int] = {}
+    for (drug_id, disease_id), year in approval_years.items():
+        if year is None:
+            continue
+        if drug_id not in drug_first_approval or year < drug_first_approval[drug_id]:
+            drug_first_approval[drug_id] = year
+    logger.info(
+        "temporal_split_pairs: computed first-approval year for %d "
+        "unique drugs (v88 BUG #34 root fix).",
+        len(drug_first_approval),
+    )
+
     for pair in positive_pairs_sorted:
         key = (pair.get("drug_id", ""), pair.get("disease_id", ""))
         year = approval_years.get(key)
+        # v88 ROOT FIX (BUG #34): use the DRUG's first approval year.
+        drug_id_v88 = pair.get("drug_id", "")
+        drug_year = drug_first_approval.get(drug_id_v88)
 
-        if year is None:
+        if drug_year is None and year is None:
             no_year.append(pair)
-        elif year <= cutoff_year - 2:
+        elif (drug_year if drug_year is not None else year) <= cutoff_year - 2:
             train.append(pair)
-        elif year <= cutoff_year:
+        elif (drug_year if drug_year is not None else year) <= cutoff_year:
             val.append(pair)
         else:
             test.append(pair)

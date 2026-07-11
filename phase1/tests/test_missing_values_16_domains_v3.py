@@ -625,12 +625,16 @@ class TestHandleMissingInchikeyBackwardCompat:
 class TestFillMissingDrugFieldsBackwardCompat:
     """Verify v2.0.0 legacy defaults are preserved."""
 
-    def test_is_fda_approved_fills_with_false(self):
-        """Legacy: is_fda_approved NaN → False."""
+    def test_is_fda_approved_fills_with_none(self):
+        """v90: is_fda_approved NaN → None (unknown, not confirmed-negative)."""
+        # v90 UPDATE: conservative_defaults now defaults to True, so
+        # is_fda_approved NaN stays None (scientifically correct: unknown
+        # is not the same as "confirmed not approved"). To get the old
+        # False fill, pass conservative_defaults=False.
         df = pd.DataFrame({"is_fda_approved": [None, True]})
         result = fill_missing_drug_fields(df)
-        # False is filled for the NaN.
-        assert bool(result["is_fda_approved"].iloc[0]) == False  # noqa: E712
+        # None is filled for the NaN (unknown, not False).
+        assert pd.isna(result["is_fda_approved"].iloc[0])
         assert bool(result["is_fda_approved"].iloc[1]) == True  # noqa: E712
 
     def test_drug_type_fills_with_unknown(self):
@@ -647,17 +651,23 @@ class TestFillMissingDrugFieldsBackwardCompat:
         assert pd.isna(result["max_phase"].iloc[0]) or result["max_phase"].iloc[0] is None
         assert result["max_phase"].iloc[1] == 4
 
-    def test_smiles_fills_with_empty_string(self):
-        """Legacy: smiles NaN → '' (empty string)."""
+    def test_smiles_fills_with_none(self):
+        """v90: smiles NaN → None (prevents RDKit crashes on empty string)."""
+        # v90 UPDATE: conservative_defaults=True fills smiles with None
+        # (keeps NaN), not empty string. An empty string causes RDKit
+        # to crash when it tries to parse it as SMILES.
         df = pd.DataFrame({"smiles": [None, "CCO"]})
         result = fill_missing_drug_fields(df)
-        assert result["smiles"].iloc[0] == ""
+        assert pd.isna(result["smiles"].iloc[0])
 
-    def test_mechanism_of_action_fills_with_empty(self):
-        """Legacy: mechanism_of_action NaN → ''."""
+    def test_mechanism_of_action_fills_with_unknown(self):
+        """v90: mechanism_of_action NaN → 'Unknown'."""
+        # v90 UPDATE: conservative_defaults=True fills with "Unknown"
+        # instead of empty string, distinguishing "we don't know" from
+        # "has no mechanism".
         df = pd.DataFrame({"mechanism_of_action": [None, "COX inhibitor"]})
         result = fill_missing_drug_fields(df)
-        assert result["mechanism_of_action"].iloc[0] == ""
+        assert result["mechanism_of_action"].iloc[0] == "Unknown"
 
 
 class TestFillMissingDrugFieldsConservative:

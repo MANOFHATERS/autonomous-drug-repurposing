@@ -17,6 +17,11 @@ mlflow.db
 *.pkl
 phase2/data/processed/*.json
 phase2/logs/
+phase1/processed_data/
+
+# Generated pipeline outputs
 output_real_run/
 output_v89/
+output_v90/
+output_full_platform/
 checkpoints/
