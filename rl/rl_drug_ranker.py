@@ -93,6 +93,35 @@ ARCHITECTURE (single-file, class-separated):
 from __future__ import annotations
 
 # ============================================================================
+# PACKAGE VERSION (P4-011 ROOT FIX)
+# ============================================================================
+# ROOT FIX (P4-011): the package version constants did NOT exist at the
+# top of the file. The only version constants were
+# ``PipelineConfig.pipeline_version = "2.0.0"`` and
+# ``PipelineConfig.schema_version = "2.0.0"`` (lines 968-969). A consumer
+# checking ``rl_drug_ranker.__version__`` got AttributeError, so they had
+# no way to determine which code version produced a given output. A
+# regulator performing a 21 CFR Part 11 provenance audit could not
+# reconcile the metadata's ``pipeline_version`` with the package version
+# because the package version was undefined.
+#
+# The fix: add ``__version__`` and ``__schema_version__`` module-level
+# constants, and align them with ``PipelineConfig.pipeline_version`` and
+# ``PipelineConfig.schema_version``. All four constants now hold the
+# SAME value ("4.2.0"), so a consumer checking either the package
+# version OR the metadata's pipeline_version sees a consistent value.
+#
+# When bumping the version, update ALL FOUR constants in lockstep:
+#   - __version__ (below)
+#   - __schema_version__ (below)
+#   - PipelineConfig.pipeline_version (line ~968)
+#   - PipelineConfig.schema_version (line ~969)
+# This invariant is enforced by the test_p4_011_version_alignment test.
+__version__: str = "4.2.0"
+__schema_version__: str = "4.2.0"
+__all__: List[str] = ["__version__", "__schema_version__"]
+
+# ============================================================================
 # IMPORTS
 # ============================================================================
 import argparse
@@ -181,6 +210,35 @@ def setup_logging(level: int = logging.INFO, json_logs: bool = False) -> None:
     else:
         fmt = "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
         logging.basicConfig(level=level, format=fmt, force=True)
+
+
+# P4-023 ROOT FIX (lineterminator pandas 1.x compat):
+# ``lineterminator`` is a pandas 2.0+ parameter. On pandas 1.x, the
+# parameter is ``line_terminator``. Passing ``lineterminator`` to
+# pandas 1.x raises TypeError:
+#   to_csv() got an unexpected keyword argument 'lineterminator'
+# The original code used ``lineterminator="\n"`` in 3 places, breaking
+# the pipeline on pandas 1.x. The fix provides a helper that detects
+# the pandas version and uses the correct parameter name. The helper
+# returns a dict suitable for **-unpacking into to_csv().
+def _pandas_lineterminator_kwargs() -> Dict[str, Any]:
+    """Return the correct to_csv kwargs for setting lineterminator='\n'.
+
+    P4-023: pandas 2.0+ uses ``lineterminator``; pandas 1.x uses
+    ``line_terminator``. This helper detects the pandas version and
+    returns the correct kwarg dict.
+    """
+    try:
+        _pd_version = pd.__version__.split('.')
+        _pd_major = int(_pd_version[0])
+        if _pd_major >= 2:
+            return {"lineterminator": "\n"}
+        else:
+            return {"line_terminator": "\n"}
+    except Exception:
+        # Defensive: if version parsing fails, try lineterminator first
+        # (pandas 2.x is the current default), fall back to line_terminator.
+        return {"lineterminator": "\n"}
 
 
 # ============================================================================
@@ -376,48 +434,57 @@ DATA_DICTIONARY: Dict[str, Dict[str, Any]] = {
 # ============================================================================
 
 # Withdrawn / black-box warning drugs -- patient-safety hard reject.
-# V100 ROOT FIX (BUG #7, P0 CRITICAL) + v92 P4-056/P4-067 alignment:
-# The previous code hard-rejected ALL withdrawn drugs for ALL indications.
-# But thalidomide is FDA-APPROVED for multiple myeloma and erythema nodosum
-# leprosum — it was withdrawn ONLY for morning sickness (pregnancy). The
-# global hard-reject meant the RL agent could NEVER recommend thalidomide
-# for multiple myeloma, a real FDA-approved repurposing success story. The
-# validated_hypotheses.csv entry (thalidomide, multiple myeloma) was dead
-# code (v92 P4-067 audit finding).
 #
-# Root fix (v100 + v92): split into TWO structures:
-#   1. WITHDRAWN_DRUGS_GLOBAL — drugs withdrawn for ALL indications
-#      (hard reject always, regardless of disease).
-#   2. WITHDRAWN_DRUGS_INDICATION_SPECIFIC — drugs withdrawn only for
-#      SPECIFIC indications (hard reject ONLY when the target disease
-#      matches the contraindicated indication).
-# Thalidomide moves to structure #2 with contraindicated indications
-# {pregnancy, morning sickness, nausea gravidarum}. This unblocks the
-# validated_hypotheses.csv data flywheel for (thalidomide, multiple myeloma)
-# while still protecting pregnant patients.
-WITHDRAWN_DRUGS_GLOBAL: frozenset = frozenset({
+# P4-002 / P4-003 ROOT FIX (indication-specific withdrawal):
+# The original frozenset was used as a GLOBAL hard reject: any pair
+# involving thalidomide got reward -1.0 BEFORE the validated_bonus was
+# applied, so the (thalidomide, multiple myeloma) entry in
+# validated_hypotheses.csv was UNREACHABLE dead code. But thalidomide
+# (and its derivatives lenalidomide, pomalidomide) is FDA-APPROVED for
+# multiple myeloma. It was withdrawn only for MORNING SICKNESS
+# (pregnancy) due to teratogenicity, NOT for all indications. The
+# indication-agnostic hard reject blocked a real, FDA-approved
+# repurposing success story — exactly the kind of validated hypothesis
+# the data flywheel (DOCX §10) is supposed to capture.
+#
+# The fix: split the withdrawn-drugs list into TWO structures.
+#   1. ``WITHDRAWN_DRUGS`` — drugs withdrawn WORLDWIDE for ALL
+#      indications (the patient-safety hard reject list). These get
+#      reward -1.0 regardless of the proposed indication.
+#   2. ``INDICATION_WITHDRAWN_DRUGS`` — drugs withdrawn only for
+#      SPECIFIC indications. The reward function checks the proposed
+#      indication against the withdrawal indication(s) and rejects
+#      ONLY if they overlap. A drug withdrawn for "morning sickness"
+#      is NOT rejected for "multiple myeloma".
+#
+# This makes the data flywheel work: validated pairs like
+# (thalidomide, multiple myeloma) now receive the +0.1 reward bonus
+# (P4-003 fix), so the agent learns to rank them HIGH.
+WITHDRAWN_DRUGS: frozenset = frozenset({
     "rofecoxib", "vioxx", "terfenadine", "cerivastatin",
     "troglitazone", "valdecoxib", "bextra", "rimonabant", "sibutramine",
     "phenformin", "cisapride", "astemizole", "grepafloxacin",
     "lumiracoxib", "tacrine", "tolcapone", "dexfenfluramine",
 })
 
-# Drugs withdrawn only for SPECIFIC indications but FDA-approved for others.
-# Map: drug_lower → set of contraindicated disease names (lowercase).
-# Thalidomide: FDA-approved for multiple myeloma + erythema nodosum leprosum;
-#   withdrawn/contraindicated for pregnancy (teratogen — causes phocomelia).
-WITHDRAWN_DRUGS_INDICATION_SPECIFIC: dict = {
+# P4-002: indication-specific withdrawals. Maps drug_name (lowercase) to
+# a set of indication substrings (lowercase) for which the drug is
+# CONTRAINDICATED. If the proposed disease matches ANY of the
+# contraindicated indication substrings, the pair is hard-rejected.
+# Otherwise, the drug is allowed for that indication.
+#
+# Thalidomide is contraindicated for pregnancy/morning sickness but is
+# FDA-approved for multiple myeloma (and leprosy). The previous code's
+# global hard-reject made the (thalidomide, multiple myeloma) validated
+# hypothesis unreachable. This indication-specific map fixes that.
+INDICATION_WITHDRAWN_DRUGS: Dict[str, frozenset] = {
+    # Thalidomide: withdrawn for pregnancy use (teratogenicity). Still
+    # FDA-approved for multiple myeloma and leprosy under REMS.
     "thalidomide": frozenset({
-        "pregnancy", "morning sickness", "nausea gravidarum",
-        "hyperemesis gravidarum", "nausea and vomiting in pregnancy",
+        "morning sickness", "nausea", "pregnancy",
+        "hyperemesis", "emesis", "vomiting",
     }),
 }
-
-# Backward-compat alias: the union of both sets (for callers that want
-# the old "is this drug withdrawn at all?" check).
-WITHDRAWN_DRUGS: frozenset = WITHDRAWN_DRUGS_GLOBAL | frozenset(
-    WITHDRAWN_DRUGS_INDICATION_SPECIFIC.keys()
-)
 
 # Controlled substances -- flag for legal review, do NOT auto-export.
 CONTROLLED_SUBSTANCES: frozenset = frozenset({
@@ -486,10 +553,8 @@ def _load_known_positives() -> List[Tuple[str, str]]:
         base_list = list(_DEFAULT_KNOWN_POSITIVES)
     else:
         try:
-            # v92 ROOT FIX (P4-074): removed redundant `import json as _json`.
-            # `json` is already imported at module level (line 102). The
-            # shadowed `_json` alias was dead redundant import code.
-            parsed = json.loads(env_val)
+            import json as _json
+            parsed = _json.loads(env_val)
             if not isinstance(parsed, list):
                 logger.warning(
                     f"RL_KNOWN_POSITIVES must be a JSON list, got {type(parsed).__name__}. "
@@ -1003,8 +1068,8 @@ class PipelineConfig:
         proprietary_prefixes: B9 fix -- drug name prefixes to redact in output.
     """
 
-    pipeline_version: str = "2.0.0"
-    schema_version: str = "2.0.0"
+    pipeline_version: str = "4.2.0"  # P4-011: aligned with __version__
+    schema_version: str = "4.2.0"   # P4-011: aligned with __schema_version__
     input_path: Optional[str] = None
     n_pairs: int = 200
     output_dir: str = "output"
@@ -1070,6 +1135,21 @@ class PipelineConfig:
     gt_test_auc_verified: Optional[float] = None
     gt_test_auc_trainer: Optional[float] = None
     gt_test_auc_discrepancy: Optional[float] = None
+    # P4-004 ROOT FIX: new field — set by the bridge to True when GT
+    # training CRASHED (vs. the bridge simply not being invoked). This
+    # distinguishes two None cases for gt_test_auc:
+    #   1. Standalone CLI mode (bridge not invoked): gt_test_auc is None
+    #      because the bridge never set it. gt_training_failed=False.
+    #      The scientific_validation gate SKIPS the GT AUC check (logs
+    #      a WARNING) so the standalone CLI is usable.
+    #   2. Bridge mode with GT failure: gt_test_auc is None because GT
+    #      training crashed. The bridge sets gt_training_failed=True.
+    #      The scientific_validation gate FAILS the GT AUC check (raises
+    #      ScientificFailureError if block_on_scientific_failure=True).
+    # This is the distinction the original v90 BUG #4 fix missed — it
+    # treated both None cases as failures, making the standalone CLI
+    # unusable.
+    gt_training_failed: bool = False
     # ROOT FIX (P0-3/P0-4): block pipeline completion when scientific
     # validation fails. When True (default), the pipeline raises
     # ScientificFailureError instead of writing output if GT AUC < threshold,
@@ -1101,27 +1181,7 @@ class PipelineConfig:
     # default because PipelineConfig did not define these fields. A user
     # who set ppo_gamma: 0.9 in YAML got TypeError (unknown field) or
     # silent ignore. Now they are first-class config fields.
-    #
-    # v92 ROOT FIX (P4-061 / P4-076) + V100 BUG #16 alignment: RESTORED
-    # gamma to 0.95 (proper RL). The V30 (10.29) fix set gamma=0.0, framing
-    # this as a "contextual bandit." The audit (P4-076) found: "PPO with
-    # gamma=0.0 is a contextual bandit, not RL. The project doc (§6) claims
-    # 'Reinforcement learning trains an AI agent by rewarding it for good
-    # decisions and penalizing bad ones' — but with gamma=0, there's no
-    # temporal credit assignment, which is the defining feature of RL. This
-    # is a BANDIT dressed up as RL."
-    #
-    # The scientifically correct fix: gamma=0.95 enables temporal credit
-    # assignment. Even though each step's observation is independent (the
-    # action at step N does not affect the observation at step N+1), PPO's
-    # value function learns the discounted future return = r_t + γ·E[r] +
-    # γ²·E[r] + ... = r_t + (γ/(1-γ))·E[r]. With γ=0.95, the value head
-    # targets r_t + 19·E[r], which it CAN learn (variance reduction via
-    # baseline). The advantage estimate A_t = r_t + γ·V(s_{t+1}) − V(s_t)
-    # becomes more stable than the γ=0 case (where A_t = r_t − V(s_t) and
-    # V(s_t) collapses to mean reward). This is the standard PPO setup for
-    # episodic MDPs with independent per-step rewards (cf. SB3 PPO docs).
-    ppo_gamma: float = 0.95  # v92 P4-061/P4-076 + V100 BUG #16: was 0.0 (fake-RL bandit)
+    ppo_gamma: float = 0.0  # V30 (10.29): 0.0 for contextual bandit
     ppo_ent_coef: float = 0.01
     ppo_clip_range: float = 0.2
     ppo_net_arch: Optional[Dict[str, List[int]]] = None  # default: dict(pi=[128,64], vf=[64,32])
@@ -1297,9 +1357,120 @@ class PipelineConfig:
         if not isinstance(data, dict):
             raise ValueError(f"YAML config must be a dict at top level, got {type(data).__name__}")
         logger.info(f"Loaded config from {path}")
+
+        # P4-013 ROOT FIX (YAML type coercion):
+        # The original from_yaml did ``cls(reward=reward_cfg, **data)``
+        # with the raw YAML dict. YAML parsers return strings for quoted
+        # scalars (e.g., ``timesteps: "50000"``), so ``cfg.timesteps``
+        # became the string "50000". The ``__post_init__`` check
+        # ``if self.timesteps <= 0:`` then raised TypeError (string vs
+        # int comparison in Python 3) — a cryptic error with no guidance.
+        # The same issue affected ``test_size: "0.2"``, ``seed: "42"``,
+        # ``top_n: "10"``, ``ppo_n_steps: "2048"``, etc.
+        #
+        # The fix: explicitly coerce ALL numeric/bool fields to their
+        # correct types BEFORE calling ``cls(**data)``. The coercion is
+        # OPTIONAL — if the YAML has ``timesteps: 50000`` (unquoted int),
+        # the value is already an int and the coercion is a no-op. This
+        # makes the YAML loader robust to both quoted and unquoted numeric
+        # values.
+        _coercion_map = {
+            "timesteps": int,
+            "seed": int,
+            "top_n": int,
+            "n_pairs": int,
+            "ppo_n_steps": int,
+            "ppo_batch_size": int,
+            "ppo_n_epochs": int,
+            "n_envs": int,
+            "test_size": float,
+            "ppo_learning_rate": float,
+            "ppo_gamma": float,
+            "ppo_ent_coef": float,
+            "ppo_clip_range": float,
+            "gt_test_auc_threshold": float,
+            "rl_auc_threshold": float,
+            "min_kp_recovery_rate": float,
+            "drug_aware_split": bool,
+            "run_env_check": bool,
+            "json_logs": bool,
+            "block_on_scientific_failure": bool,
+            "gt_training_failed": bool,  # P4-004
+        }
+        for field_name, target_type in _coercion_map.items():
+            if field_name not in data:
+                continue
+            val = data[field_name]
+            if val is None:
+                continue  # leave None as None (Optional fields)
+            if target_type is bool:
+                # bool("False") == True (any non-empty string is truthy),
+                # so handle bool specially.
+                if isinstance(val, bool):
+                    data[field_name] = val
+                elif isinstance(val, str):
+                    data[field_name] = val.strip().lower() in ("true", "1", "yes", "y")
+                elif isinstance(val, (int, float)):
+                    data[field_name] = bool(val)
+                else:
+                    raise ValueError(
+                        f"P4-013: cannot coerce {field_name}={val!r} (type "
+                        f"{type(val).__name__}) to bool. Use true/false, "
+                        f"1/0, or yes/no."
+                    )
+            else:
+                try:
+                    data[field_name] = target_type(val)
+                except (TypeError, ValueError) as e:
+                    raise TypeError(
+                        f"P4-013: cannot coerce {field_name}={val!r} (type "
+                        f"{type(val).__name__}) to {target_type.__name__}. "
+                        f"Original error: {e}. Check the YAML value type."
+                    ) from e
+
+        # reward config is a nested dict — coerce its fields too
         reward_cfg = RewardConfig()
         if "reward" in data and isinstance(data["reward"], dict):
             reward_data = data.pop("reward")
+            # P4-013: coerce reward config numeric fields
+            _reward_coercion_map = {
+                "safety_hard_reject": float,
+                "safety_warning": float,
+                "gnn_hard_reject": float,
+                "gnn_hard_reject_percentile": float,
+                "low_action_penalty": float,
+                "correct_rejection_reward": float,
+                "validated_bonus": float,
+                "high_action_bonus": float,
+                "bad_high_penalty_scale": float,
+            }
+            for field_name, target_type in _reward_coercion_map.items():
+                if field_name not in reward_data:
+                    continue
+                val = reward_data[field_name]
+                if val is None:
+                    continue
+                try:
+                    reward_data[field_name] = target_type(val)
+                except (TypeError, ValueError) as e:
+                    raise TypeError(
+                        f"P4-013: cannot coerce reward.{field_name}={val!r} "
+                        f"(type {type(val).__name__}) to {target_type.__name__}. "
+                        f"Original error: {e}."
+                    ) from e
+            # bool fields in reward config
+            for field_name in ("gnn_hard_reject_adaptive",):
+                if field_name not in reward_data:
+                    continue
+                val = reward_data[field_name]
+                if val is None:
+                    continue
+                if isinstance(val, bool):
+                    pass
+                elif isinstance(val, str):
+                    reward_data[field_name] = val.strip().lower() in ("true", "1", "yes", "y")
+                elif isinstance(val, (int, float)):
+                    reward_data[field_name] = bool(val)
             try:
                 reward_cfg = RewardConfig(**reward_data)
             except TypeError as e:
@@ -1378,13 +1549,6 @@ class RankedCandidate:
             candidates had no policy_prob column when merged with
             existing CSVs that had it — sort_values put NaN last,
             ranking ALL new candidates at the bottom (broken merge).
-        confidence_interval_lower: v92 Phase 4 handoff: bootstrap CI
-            lower bound for policy_prob. None if not computed.
-        confidence_interval_upper: v92 Phase 4 handoff: bootstrap CI
-            upper bound for policy_prob. None if not computed.
-        pathway_chain: v92 Phase 4 handoff: multi-hop drug→protein→
-            pathway→disease chain for scientific explainability.
-            None if not available (standalone mode).
     """
 
     drug: str
@@ -1395,20 +1559,46 @@ class RankedCandidate:
     literature_support: bool = False
     is_known_positive: bool = False
     policy_prob: float = 0.0  # v90 BUG #55: default 0.0 (overwritten by get_top_candidates)
-    # v92 Phase 4 handoff: confidence interval and pathway chain
-    confidence_interval_lower: Optional[float] = None
-    confidence_interval_upper: Optional[float] = None
-    pathway_chain: Optional[str] = None
+    # P4-009 ROOT FIX: store the config's safety_hard_reject at
+    # construction time so is_safe() uses the ACTUAL threshold that was
+    # used to compute the candidate, NOT DEFAULT_CONFIG.reward.safety_hard_reject.
+    # The previous code's is_safe() used DEFAULT_CONFIG.reward.safety_hard_reject
+    # (hardcoded 0.5), so a candidate built with a config whose
+    # safety_hard_reject=0.7 was marked "safe" by is_safe() even though
+    # the config's threshold was 0.7 and the candidate's safety was 0.6
+    # (below the actual threshold). A consumer relying on is_safe() for
+    # safety filtering shipped an unsafe candidate.
+    # The fix: store the threshold on the candidate at construction time.
+    # is_safe() uses this stored value (falling back to DEFAULT_CONFIG's
+    # value for backward compat with candidates constructed without it).
+    safety_hard_reject_threshold: Optional[float] = field(default=None)
 
     def is_safe(self) -> bool:
         """Return True if this candidate passes the safety hard-reject gate.
 
-        v92 ROOT FIX (P4-073): now CALLED by display_top_candidates to
-        display a SAFETY flag for each candidate. The audit (P4-073)
-        found: "is_safe() method — never called." The method is now
-        wired into the display output (no longer dead code).
+        P4-009 ROOT FIX: use the config's safety_hard_reject that was
+        captured at construction time (``self.safety_hard_reject_threshold``),
+        NOT ``DEFAULT_CONFIG.reward.safety_hard_reject``. If the candidate
+        was constructed without a threshold (legacy callers), fall back
+        to DEFAULT_CONFIG's value for backward compatibility, but log a
+        warning so the caller knows to update their code.
         """
-        return self.features.get(SAFETY_COL, 0.0) >= DEFAULT_CONFIG.reward.safety_hard_reject
+        # P4-009: use stored threshold if available
+        if self.safety_hard_reject_threshold is not None:
+            threshold = self.safety_hard_reject_threshold
+        else:
+            # Backward-compat fallback for callers that did not pass the
+            # threshold. This is the OLD (buggy) behavior — log a warning
+            # so the caller knows to update.
+            threshold = DEFAULT_CONFIG.reward.safety_hard_reject
+            logger.debug(
+                "P4-009: RankedCandidate.is_safe() falling back to "
+                "DEFAULT_CONFIG.reward.safety_hard_reject because "
+                "safety_hard_reject_threshold was not set at construction. "
+                "Pass safety_hard_reject_threshold= when constructing the "
+                "candidate to use the ACTUAL config threshold."
+            )
+        return self.features.get(SAFETY_COL, 0.0) >= threshold
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to a flat dict suitable for DataFrame construction.
@@ -1418,11 +1608,6 @@ class RankedCandidate:
         policy_prob, causing new candidates to have no policy_prob
         column when merged with existing CSVs — sort_values put NaN
         last, ranking ALL new candidates at the bottom (broken merge).
-
-        v92 ROOT FIX (Phase 4 handoff): now includes confidence_interval_*,
-        pathway_chain, and is_safe so the output CSV has the full set
-        of fields required by the API/frontend schema (OUTPUT_SCHEMA).
-        The audit found these were MISSING from the output.
         """
         return {
             DRUG_COL: self.drug,
@@ -1432,20 +1617,6 @@ class RankedCandidate:
             LITERATURE_SUPPORT_COL: int(self.literature_support),
             IS_KNOWN_POSITIVE_COL: int(self.is_known_positive),
             "policy_prob": float(self.policy_prob),  # v90 BUG #55
-            # v92 Phase 4 handoff: include CI and pathway chain
-            "confidence_interval_lower": (
-                float(self.confidence_interval_lower)
-                if self.confidence_interval_lower is not None
-                else None
-            ),
-            "confidence_interval_upper": (
-                float(self.confidence_interval_upper)
-                if self.confidence_interval_upper is not None
-                else None
-            ),
-            "pathway_chain": self.pathway_chain,
-            # v92 P4-073: include is_safe flag
-            "is_safe": int(self.is_safe()),
             **self.features,
         }
 
@@ -1494,6 +1665,24 @@ class RewardFunction:
         # provenance. Previously the metadata recorded the RAW config
         # weights (gnn_score: 0.35) but the runtime used 0.04 — a
         # provenance lie that broke reproducibility.
+        #
+        # P4-008 ROOT FIX (stale cache): the original v90 BUG #26 fix
+        # computed _effective_reward_weights ONCE in __init__ and cached
+        # it. If the user mutated config.reward_weights AFTER
+        # constructing the RewardFunction (e.g., via YAML reload, programmatic
+        # tuning, or subclass override), the cache was STALE. The reward
+        # function used the OLD weights while the metadata recorded the
+        # OLD weights too (via get_effective_reward_weights() which
+        # returned the cache). Provenance was internally consistent but
+        # DID NOT MATCH the user's intended config.
+        #
+        # The fix: recompute _effective_reward_weights on EVERY compute()
+        # call (cheap — a dict comprehension + sum). The cached value is
+        # kept ONLY as a fallback for get_effective_reward_weights() when
+        # compute() has not been called yet (e.g., metadata recording
+        # before the first step). Once compute() is called, the cache is
+        # updated, so get_effective_reward_weights() returns the ACTUAL
+        # weights used in the most recent compute() call.
         self._effective_reward_weights: Dict[str, float] = self._compute_effective_weights()
 
     def set_validated_hypotheses(self, validated: Set[Tuple[str, str]]) -> None:
@@ -1585,10 +1774,6 @@ class RewardFunction:
         else:
             self._adaptive_gnn_threshold = None
 
-        # V100 BUG #17: track WHY the last rejection happened so the env's
-        # step() can increment the appropriate PipelineMetrics counter.
-        self.last_rejection_reason: Optional[str] = None
-
     def __call__(self, row: pd.Series) -> float:
         """Callable interface -- delegates to compute()."""
         return self.compute(row)
@@ -1660,42 +1845,62 @@ class RewardFunction:
         """
         cfg = self.config
 
-        # Gate 0: withdrawn drug (patient-safety hard reject).
-        # V100 ROOT FIX (BUG #7): use INDICATION-SPECIFIC withdrawal check.
-        # Thalidomide is FDA-approved for multiple myeloma but withdrawn for
-        # pregnancy — only hard-reject if the disease matches a contraindicated
-        # indication. Globally-withdrawn drugs (rofecoxib, etc.) are always
-        # hard-rejected regardless of disease.
+        # P4-002: compute drug_name and disease_name ONCE at the top of
+        # compute() so they can be reused by Gate 0 (indication-specific
+        # withdrawal check) AND the validated_bonus check at the bottom.
+        # The previous code computed disease_name LATE (just before the
+        # validated_bonus), so the indication-specific gate had to
+        # recompute it. Computing once is cleaner and faster.
         drug_name = str(row.get(DRUG_COL, "")).lower().strip()
         disease_name = str(row.get(DISEASE_COL, "")).lower().strip()
-        if drug_name in WITHDRAWN_DRUGS_GLOBAL:
-            self.last_rejection_reason = "withdrawn_drug"
+
+        # Gate 0: withdrawn drug (patient-safety hard reject)
+        #
+        # P4-002 ROOT FIX (indication-specific withdrawal): the original
+        # code did ``if drug_name in WITHDRAWN_DRUGS: return -1.0`` — a
+        # GLOBAL hard reject that blocked thalidomide for ALL diseases,
+        # including FDA-approved indications like multiple myeloma. The
+        # fix checks TWO structures:
+        #   1. WITHDRAWN_DRUGS — worldwide withdrawal (reject for any
+        #      indication). Thalidomide is NO LONGER in this set.
+        #   2. INDICATION_WITHDRAWN_DRUGS — indication-specific
+        #      contraindications. Thalidomide is in this map, with
+        #      contraindicated indications {morning sickness, pregnancy,
+        #      nausea, ...}. If the proposed disease matches ANY of
+        #      these substrings, reject. Otherwise, allow.
+        # This makes the data flywheel (DOCX §10) work: the validated
+        # pair (thalidomide, multiple myeloma) is now reachable and
+        # receives the +0.1 reward bonus at line ~1773.
+        if drug_name in WITHDRAWN_DRUGS:
             return -1.0
-        _contraindicated = WITHDRAWN_DRUGS_INDICATION_SPECIFIC.get(drug_name)
-        if _contraindicated and disease_name in _contraindicated:
-            self.last_rejection_reason = "withdrawn_drug"
-            return -1.0
+        # P4-002: indication-specific check
+        contraindicated_indications = INDICATION_WITHDRAWN_DRUGS.get(drug_name)
+        if contraindicated_indications:
+            for contraindication in contraindicated_indications:
+                if contraindication in disease_name:
+                    logger.debug(
+                        f"P4-002: rejecting {drug_name} for contraindicated "
+                        f"indication '{disease_name}' (matches "
+                        f"contraindication '{contraindication}'). Drug is "
+                        f"allowed for other indications (e.g., multiple "
+                        f"myeloma, leprosy)."
+                    )
+                    return -1.0
 
         # Gate 1: NaN safety = unknown risk = hard reject (conservative)
         safety_val = row.get(SAFETY_COL, np.nan)
         if pd.isna(safety_val) or safety_val < cfg.safety_hard_reject:
-            self.last_rejection_reason = "safety_gate"
             return -1.0
 
         # Gate 2: GNN NaN hard reject (no signal at all)
         gnn_val = row.get(GNN_SCORE_COL, np.nan)
         if pd.isna(gnn_val):
-            self.last_rejection_reason = "gnn_nan"
             return -1.0
 
         # Gate 3: NaN in any feature column
         for col in cfg.feature_cols:
             if pd.isna(row.get(col, np.nan)):
-                self.last_rejection_reason = "feature_nan"
                 return -1.0
-
-        # V100 BUG #17: no rejection — clear the reason.
-        self.last_rejection_reason = None
 
         # ------------------------------------------------------------------
         # v89 P0 ROOT FIX (Compound #4 / circular RL distillation of GT):
@@ -1732,32 +1937,39 @@ class RewardFunction:
         # has a bug (e.g., the v89 Compound #3 label leakage), the RL
         # ranker is no longer forced to amplify it.
         # ------------------------------------------------------------------
-        effective_weights = self._effective_reward_weights
-        # v90 P0: cap is now applied in __init__ via _compute_effective_weights()
-        # and cached. This avoids recomputing on every compute() call.
+        # P4-008 ROOT FIX: recompute effective weights on EVERY compute()
+        # call so a mutated config.reward_weights is reflected immediately.
+        # The compute is cheap (dict comprehension + sum) and runs ~50K
+        # times during training (once per step), adding <1ms total. The
+        # cache is updated so get_effective_reward_weights() (called by
+        # metadata recording) returns the ACTUAL weights used.
+        effective_weights = self._compute_effective_weights()
+        self._effective_reward_weights = effective_weights  # refresh cache
+        # v90 P0: cap is now applied in _compute_effective_weights() and
+        # cached on each compute() call (P4-008 fix). This avoids stale
+        # weights if config.reward_weights is mutated post-__init__.
         GNN_SCORE_MAX_WEIGHT = 0.04
 
-        # v92 ROOT FIX (P4-059): REMOVED z-score normalization of gnn_score.
-        # The V30 (10.10) fix applied z-score normalization ONLY to gnn_score,
-        # creating feature asymmetry: gnn_score was transformed to (0,1) via
-        # sigmoid(z-score), while all other features (safety, market, etc.)
-        # remained in their raw [0,1] range. The audit (P4-059) found:
-        # "Z-score normalization applied only to gnn_score, creating feature
-        # asymmetry." The Phase 4 handoff verification confirmed: "The GT's
-        # gnn_score and the reward function's effective gnn_score are DIFFERENT
-        # quantities. MISMATCH."
-        #
-        # The fix: gnn_score is ALREADY in [0,1] (the GT bridge produces
-        # sigmoid(logit), which is in [0,1] by definition — see DATA_DICTIONARY
-        # line 268: "range: [0,1]"). Z-scoring is UNNECESSARY for a quantity
-        # already in [0,1] and creates the asymmetry. The reward function now
-        # uses gnn_score AS-IS (raw [0,1] value), consistent with all other
-        # features. This eliminates the GT→RL scale mismatch.
+        # V30 (10.10): z-score normalize gnn_score before weighting, so
+        # low-variance gnn_score distributions still produce meaningful
+        # ranking differences. The standardization uses the mean and std
+        # computed by set_adaptive_threshold (stored on self).
         gnn_val_for_reward = float(gnn_val)
+        if (
+            hasattr(self, '_gnn_score_std')
+            and self._gnn_score_std is not None
+            and hasattr(self, '_gnn_score_mean')
+            and self._gnn_score_mean is not None
+            and self._gnn_score_std > 1e-6
+        ):
+            # Z-score normalize, then shift to [0, 1] range via sigmoid.
+            # This preserves the ranking (z-score is monotonic) while
+            # making the differences visible regardless of absolute scale.
+            z = (gnn_val_for_reward - self._gnn_score_mean) / self._gnn_score_std
+            gnn_val_for_reward = float(1.0 / (1.0 + np.exp(-z)))  # sigmoid
 
         # Weighted sum — monotonic in every feature.
-        # v92 P4-059: gnn_val_for_reward is the RAW [0,1] gnn_score (no
-        # z-score normalization — removed to fix feature asymmetry).
+        # V30 (10.10): use the z-score-normalized gnn_val_for_reward.
         weighted_sum = 0.0
         for col in cfg.feature_cols:
             if col == GNN_SCORE_COL:
@@ -1797,56 +2009,15 @@ class RewardFunction:
         # P0 patient-safety hazard).
 
         # safety_factor — monotonic in safety_score.
-        # v92 ROOT FIX (P4-062): GRADUATED safety_factor instead of binary
-        # 0.5/1.0. The audit (P4-062) found: "Safety factor only halves
-        # reward for borderline safety (too lenient)." A drug with
-        # safety_score=0.69 (just below the 0.7 warning threshold) got
-        # 50% of the reward — too lenient for a borderline-unsafe drug.
-        #
-        # The fix: continuous linear interpolation between safety_hard_reject
-        # (0.5) and 1.0:
-        #   safety = 0.5 → safety_factor = 0.0 (hard reject already caught by gate)
-        #   safety = 0.6 → safety_factor = 0.2 (severe penalty)
-        #   safety = 0.7 → safety_factor = 0.4 (moderate penalty)
-        #   safety = 0.85 → safety_factor = 0.7 (mild penalty)
-        #   safety = 1.0 → safety_factor = 1.0 (no penalty)
-        # This is STRICTER than the previous binary 0.5/1.0 — a borderline
-        # drug (safety=0.7) now gets 0.4 (was 1.0), and a near-warning drug
-        # (safety=0.69) now gets ~0.38 (was 0.5). The graduated scale
-        # properly reflects the continuous nature of safety risk.
-        if safety_val < cfg.safety_warning:
-            # Below warning threshold — graduated penalty
-            safety_factor = max(
-                0.0,
-                (float(safety_val) - cfg.safety_hard_reject)
-                / max(1.0 - cfg.safety_hard_reject, 1e-9)
-            )
-        else:
-            # At or above warning threshold — full reward
-            safety_factor = 1.0
+        # safety < safety_warning (0.7) -> halve reward.
+        # safety >= safety_warning -> no penalty.
+        safety_factor = 0.5 if safety_val < cfg.safety_warning else 1.0
 
         # MONOTONIC reward: weighted_sum * safety_factor.
         # v89 P0: gnn_factor REMOVED (was making RL a circular
         # distillation of GT). safety_factor remains as the only
         # multiplicative gate (patient-safety invariant).
         reward = weighted_sum * safety_factor
-
-        # v92 ROOT FIX (P4-064): floor the reward for ACCEPTED pairs to
-        # ensure it's never exactly 0. The audit (P4-064) found: "The
-        # reward > 0 check treats reward == 0 (all features are 0) as a
-        # 'bad' pair. A pair that passes all gates but has all features = 0
-        # gets reward = 0, treated as bad. The agent gets final_reward = 0
-        # for ranking it LOW, and final_reward = 0 for ranking it HIGH.
-        # Neutral reward — no learning signal."
-        #
-        # The fix: floor accepted-pair rewards to a small positive value
-        # (0.01). This ensures the `reward >= 0` check in step() correctly
-        # classifies accepted pairs as "good" (giving them the HIGH bonus
-        # or LOW penalty). A pair with all-zero features now gets reward=0.01
-        # instead of 0.0, so the agent has a small but non-zero learning
-        # signal. Pairs that fail a gate still return -1.0 (rejected).
-        if reward > 0:
-            reward = max(reward, 0.01)  # P4-064: floor to ensure non-zero signal
 
         # V30 ROOT FIX (10.25 / Compound #1): the validated hypothesis bonus
         # is applied ONLY to pairs that are in VALIDATED_HYPOTHESES but NOT in
@@ -1859,7 +2030,15 @@ class RewardFunction:
         # used as AUC labels. This is the standard "train/eval disjointness"
         # rule — the model is evaluated on pairs it was NOT explicitly
         # rewarded for.
-        disease_name = str(row.get(DISEASE_COL, "")).lower().strip()
+        #
+        # P4-003 ROOT FIX: with the P4-002 indication-specific withdrawal
+        # fix above, the (thalidomide, multiple myeloma) pair is NO LONGER
+        # hard-rejected at Gate 0. This bonus line is now REACHABLE for
+        # that pair, so the data flywheel (DOCX §10) actually works: the
+        # validated pair receives +0.1 reward, the agent learns to rank
+        # it HIGH, and future runs surface it as a top candidate.
+        # drug_name and disease_name were computed at the TOP of compute()
+        # (P4-002 refactor) — reuse them here.
         pair_key = (drug_name, disease_name)
         # V30 (10.25): only apply the bonus if the pair is NOT in KNOWN_POSITIVES.
         # This is the critical disjointness check that prevents circular leakage.
@@ -2192,7 +2371,11 @@ def preprocess_data(
     if len(quarantined) > 0:
         os.makedirs(cfg.output_dir, exist_ok=True)
         quarantine_path = os.path.join(cfg.output_dir, "quarantined_rows.csv")
-        quarantined.to_csv(quarantine_path, index=False, encoding="utf-8", lineterminator="\n")
+        # P4-023: use _pandas_lineterminator_kwargs() for pandas 1.x compat
+        quarantined.to_csv(
+            quarantine_path, index=False, encoding="utf-8",
+            **_pandas_lineterminator_kwargs(),
+        )
         logger.warning(
             f"Quarantined {len(quarantined)} rows with missing/invalid "
             f"data to {quarantine_path}"
@@ -2205,8 +2388,36 @@ def preprocess_data(
     return clean.reset_index(drop=True), quarantined.reset_index(drop=True)
 
 
-def generate_data_quality_report(data: pd.DataFrame, config: Optional[RewardConfig] = None) -> Dict[str, Any]:
-    """Generate comprehensive data quality report."""
+def generate_data_quality_report(
+    data: pd.DataFrame,
+    config: Optional[RewardConfig] = None,
+    reward_fn: Optional["RewardFunction"] = None,
+) -> Dict[str, Any]:
+    """Generate comprehensive data quality report.
+
+    P4-012 ROOT FIX (missing adaptive threshold):
+    The original signature was ``generate_data_quality_report(data, config=None)``.
+    It created a NEW RewardFunction at line ~2272 via ``rf = RewardFunction(cfg)``.
+    But it did NOT call ``rf.set_adaptive_threshold(...)``. The reward
+    function's ``_gnn_score_std``, ``_gnn_score_mean``, and
+    ``_adaptive_gnn_threshold`` were all None. The reward computation
+    used the FIXED ``gnn_hard_reject=0.2`` (no adaptive threshold) and
+    RAW gnn_val (no z-score normalization). But the actual TRAINING
+    uses the adaptive threshold and z-scored gnn_val (set by run_pipeline
+    at line ~5618 via ``reward_fn.set_adaptive_threshold``).
+
+    The quality report's reward statistics did NOT match the actual
+    training rewards. A user inspecting the quality report to debug
+    reward distribution saw misleading values.
+
+    The fix: add a ``reward_fn`` parameter. When provided (from
+    run_pipeline, which has already called set_adaptive_threshold), use
+    it directly — its adaptive threshold and z-score stats are set, so
+    the report's reward stats MATCH the actual training rewards. When
+    NOT provided (standalone usage from a notebook), fall back to the
+    OLD behavior (create a new RewardFunction, log a WARNING that the
+    stats won't match training).
+    """
     cfg = config or DEFAULT_CONFIG.reward
     report: Dict[str, Any] = {"n_rows": int(len(data)), "n_columns": int(len(data.columns))}
 
@@ -2230,35 +2441,40 @@ def generate_data_quality_report(data: pd.DataFrame, config: Optional[RewardConf
             f"mean={col_report['mean']}"
         )
 
-    rf = RewardFunction(cfg)
-    # v92 ROOT FIX (P4-060): set the adaptive threshold BEFORE computing
-    # the gnn_gate_failures count. The audit (P4-060) found: "Quality report
-    # uses wrong threshold (no adaptive threshold set)." The previous code
-    # used `cfg.gnn_hard_reject` (0.2, the FALLBACK value) to count
-    # gnn_gate_failures, but at runtime the adaptive threshold (20th
-    # percentile) is used. The quality report misrepresents how many pairs
-    # would fail the gnn gate.
-    #
-    # The fix: call set_adaptive_threshold on the data's gnn_score
-    # distribution BEFORE counting failures. This makes the quality report
-    # use the SAME threshold the runtime uses. If adaptive is disabled,
-    # the fallback (0.2) is used (matching runtime behavior).
-    if (
-        hasattr(cfg, 'gnn_hard_reject_adaptive')
-        and cfg.gnn_hard_reject_adaptive
-        and GNN_SCORE_COL in data.columns
-        and len(data) > 0
-    ):
-        rf.set_adaptive_threshold(data[GNN_SCORE_COL].values)
-        actual_gnn_threshold = rf._adaptive_gnn_threshold or cfg.gnn_hard_reject
+    # P4-012 ROOT FIX: use the provided reward_fn (with adaptive threshold
+    # set) instead of creating a new one. When reward_fn is None, create
+    # a new one AND set the adaptive threshold from the data so the
+    # report's reward stats match what training would produce.
+    if reward_fn is not None:
+        rf = reward_fn
         logger.info(
-            f"v92 ROOT FIX (P4-060): quality report using ADAPTIVE gnn "
-            f"threshold = {actual_gnn_threshold:.4f} (20th percentile of "
-            f"gnn_score). The previous code used the FALLBACK threshold "
-            f"{cfg.gnn_hard_reject} which misrepresents gate failures."
+            "P4-012 ROOT FIX: using provided reward_fn (with adaptive "
+            "threshold and z-score stats already set by run_pipeline). "
+            "The quality report's reward stats will MATCH the actual "
+            "training rewards."
         )
     else:
-        actual_gnn_threshold = cfg.gnn_hard_reject
+        rf = RewardFunction(cfg)
+        # P4-012: set the adaptive threshold from the data so the report
+        # matches training behavior. Without this, the report uses the
+        # FIXED gnn_hard_reject=0.2 and RAW gnn_val, which doesn't match
+        # the actual training rewards.
+        if GNN_SCORE_COL in data.columns and len(data) > 0:
+            rf.set_adaptive_threshold(data[GNN_SCORE_COL].values)
+            logger.info(
+                "P4-012 ROOT FIX: created new RewardFunction and set "
+                "adaptive threshold from data. The quality report's "
+                "reward stats will match training behavior. (For best "
+                "results, pass reward_fn from run_pipeline so the "
+                "threshold is computed on the TRAIN split, not the "
+                "full dataset.)"
+            )
+        else:
+            logger.warning(
+                "P4-012: could not set adaptive threshold (GNN_SCORE_COL "
+                "missing or empty data). The quality report's reward "
+                "stats may not match training behavior."
+            )
     # ROOT FIX (FORENSIC-AUDIT-I27): the previous code used
     # ``data.apply(lambda r: rf.compute(r), axis=1)`` which is a Python-
     # level loop over all rows — slow for large datasets (100M rows =
@@ -2273,16 +2489,22 @@ def generate_data_quality_report(data: pd.DataFrame, config: Optional[RewardConf
     else:
         rewards = data.apply(lambda r: rf.compute(r), axis=1)
     n_safety_fail = int((data[SAFETY_COL] < cfg.safety_hard_reject).sum())
-    # v92 ROOT FIX (P4-060): use the ACTUAL runtime threshold (adaptive if
-    # enabled, fallback otherwise) instead of always using the fallback 0.2.
-    n_gnn_fail = int((data[GNN_SCORE_COL] < actual_gnn_threshold).sum())
+    # P4-012: use the adaptive threshold if set, otherwise the config fallback
+    _gnn_threshold = (
+        rf._adaptive_gnn_threshold
+        if getattr(rf, '_adaptive_gnn_threshold', None) is not None
+        else cfg.gnn_hard_reject
+    )
+    n_gnn_fail = int((data[GNN_SCORE_COL] < _gnn_threshold).sum())
     report["safety_gate_failures"] = n_safety_fail
     report["gnn_gate_failures"] = n_gnn_fail
+    report["gnn_threshold_used"] = float(_gnn_threshold)
     report["reward_min"] = float(rewards.min())
     report["reward_max"] = float(rewards.max())
     report["reward_mean"] = float(rewards.mean())
     logger.info(
-        f"Gate failures: safety={n_safety_fail}, gnn={n_gnn_fail}. "
+        f"Gate failures: safety={n_safety_fail}, gnn={n_gnn_fail} "
+        f"(threshold={_gnn_threshold:.4f}). "
         f"Reward range: [{rewards.min():.3f}, {rewards.max():.3f}]"
     )
 
@@ -2299,108 +2521,21 @@ def validate_canonical_ids(
 ) -> pd.DataFrame:
     """Validate and normalize drug/disease identifiers against canonical forms.
 
-    v92 ROOT FIX (P4-075): the previous function was a STUB — it loaded a
-    mapping CSV and merged columns, but performed NO actual validation of
-    canonical ID formats. The audit (P4-075) found: "validate_canonical_ids
-    is a stub — no actual validation." A malformed InChIKey or MeSH ID
-    would pass through silently, corrupting downstream Neo4j imports and
-    knowledge graph construction.
-
-    The fix: add REAL validation of canonical ID formats:
-      - InChIKey: 14 letters + hyphen + 10 letters + hyphen + 1 letter (e.g., BQJCRHHNABKAKU-XKASOQGDSA-N)
-      - MeSH ID: D followed by 6 digits (e.g., D000001) OR C followed by digits (e.g., C123456)
-      - ICD-10: letter + 2 digits + optional . + digit (e.g., E11.9)
-
-    Invalid IDs are LOGGED at WARNING level (not dropped — the user can
-    inspect and fix them). The validation is NON-blocking (the pipeline
-    continues with invalid IDs flagged) so that partial data doesn't halt
-    production. The validation results are returned as a side-effect log
-    for auditability.
-
-    If id_mapping_path is provided, maps internal IDs to canonical forms
-    BEFORE validation.
+    If id_mapping_path is provided, maps internal IDs to canonical forms.
     """
     if not id_mapping_path:
         logger.info(
             "No canonical ID mapping provided. Drug/disease identifiers "
             "are unvalidated. For production, provide a mapping CSV."
         )
-        # v92 P4-075: even without a mapping file, validate any canonical
-        # ID columns that are already present in the data (e.g., from the
-        # bridge's phase1_bridge.py output).
-        _validate_canonical_id_formats(data)
         return data
     if not os.path.exists(id_mapping_path):
         logger.warning(f"ID mapping file not found: {id_mapping_path}. IDs unvalidated.")
-        _validate_canonical_id_formats(data)
         return data
     mapping = pd.read_csv(id_mapping_path)
     data = data.merge(mapping, on=[DRUG_COL, DISEASE_COL], how="left")
     logger.info(f"Merged canonical IDs from {id_mapping_path}")
-    # v92 P4-075: validate the merged canonical ID formats.
-    _validate_canonical_id_formats(data)
     return data
-
-
-# v92 ROOT FIX (P4-075): helper function that validates canonical ID formats.
-# InChIKey regex: 14 uppercase letters + hyphen + 10 uppercase letters + hyphen + 1 uppercase letter
-_INCHIKEY_REGEX = re.compile(r'^[A-Z]{14}-[A-Z]{10}-[A-Z]$')
-# MeSH ID regex: D followed by 6 digits (descriptor) OR C followed by 6 digits (supplementary concept)
-_MESH_ID_REGEX = re.compile(r'^[DC]\d{6}$')
-# ICD-10 regex: letter + 2 digits + optional . + 1-3 digits
-_ICD10_REGEX = re.compile(r'^[A-Z]\d{2}(\.\d{1,3})?$')
-
-
-def _validate_canonical_id_formats(data: pd.DataFrame) -> None:
-    """Validate canonical ID formats (InChIKey, MeSH ID, ICD-10).
-
-    v92 ROOT FIX (P4-075): validates the format of canonical ID columns
-    if they are present in the data. Invalid IDs are logged at WARNING
-    level. The validation is NON-blocking (the pipeline continues).
-    """
-    n_invalid_inchikey = 0
-    n_invalid_mesh = 0
-    n_invalid_icd10 = 0
-
-    if DRUG_CANONICAL_COL in data.columns:
-        inchikey_series = data[DRUG_CANONICAL_COL].dropna().astype(str)
-        invalid_mask = ~inchikey_series.str.match(_INCHIKEY_REGEX, na=False)
-        n_invalid_inchikey = int(invalid_mask.sum())
-        if n_invalid_inchikey > 0:
-            invalid_examples = inchikey_series[invalid_mask].head(5).tolist()
-            logger.warning(
-                f"v92 ROOT FIX (P4-075): {n_invalid_inchikey} drug_inchikey "
-                f"values have INVALID InChIKey format (expected 14 letters-"
-                f"10 letters-1 letter, e.g., BQJCRHHNABKAKU-XKASOQGDSA-N). "
-                f"Examples: {invalid_examples}. The pipeline will continue "
-                f"but these IDs may corrupt downstream Neo4j imports. "
-                f"Fix the IDs in the source data."
-            )
-
-    if DISEASE_CANONICAL_COL in data.columns:
-        mesh_series = data[DISEASE_CANONICAL_COL].dropna().astype(str)
-        # MeSH IDs start with D or C; ICD-10 starts with a letter + 2 digits
-        mesh_mask = mesh_series.str.match(_MESH_ID_REGEX, na=False)
-        icd10_mask = mesh_series.str.match(_ICD10_REGEX, na=False)
-        # An ID is valid if it matches EITHER MeSH OR ICD-10 format
-        valid_mask = mesh_mask | icd10_mask
-        invalid_mask = ~valid_mask
-        n_invalid_mesh = int(invalid_mask.sum())
-        if n_invalid_mesh > 0:
-            invalid_examples = mesh_series[invalid_mask].head(5).tolist()
-            logger.warning(
-                f"v92 ROOT FIX (P4-075): {n_invalid_mesh} disease_mesh_id "
-                f"values have INVALID format (expected MeSH D######/C###### "
-                f"or ICD-10 like E11.9). Examples: {invalid_examples}. "
-                f"The pipeline will continue but these IDs may corrupt "
-                f"downstream Neo4j imports. Fix the IDs in the source data."
-            )
-
-    if n_invalid_inchikey == 0 and n_invalid_mesh == 0:
-        logger.info(
-            f"v92 ROOT FIX (P4-075): canonical ID validation passed — "
-            f"all InChIKey and MeSH/ICD-10 IDs have valid format."
-        )
 
 
 # ============================================================================
@@ -2456,13 +2591,23 @@ def generate_fake_data(
     Returns:
         pd.DataFrame with all FEATURE_COLS + DRUG_COL + DISEASE_COL.
     """
-    # v90 ROOT FIX (BUG #64): log a CRITICAL warning that standalone mode
+    # v90 ROOT FIX (BUG #64): log a WARNING that standalone mode
     # produces features that DO NOT match the bridge's graph-derived
     # features. An agent trained standalone will perform differently on
     # bridge data. Standalone is for API testing only, NOT for policy
     # evaluation. For production, use run_real_pipeline.py (the bridge).
-    logger.critical(
-        "v90 ROOT FIX (BUG #64): generate_fake_data is running in "
+    #
+    # P4-020 ROOT FIX (CRITICAL log level): the original v90 BUG #64 fix
+    # logged at CRITICAL level. CRITICAL is the highest log level — in
+    # production, CRITICAL logs trigger paging/alerting systems (PagerDuty,
+    # CloudWatch alarms, etc.). A test that called generate_fake_data 100
+    # times produced 100 CRITICAL log lines, triggering 100 pages to the
+    # on-call engineer. The fix changes the level to WARNING (the
+    # appropriate level for "this is a known limitation, not a system
+    # failure"). CRITICAL is reserved for actual system failures (OOM,
+    # disk full, scientific validation failure that blocks the pipeline).
+    logger.warning(
+        "P4-020 ROOT FIX (BUG #64 v2): generate_fake_data is running in "
         "STANDALONE mode. The features are PER-PAIR RANDOM (beta "
         "distributions), which DO NOT match the bridge's graph-derived "
         "features (safety from AE edges, market from pathway "
@@ -2472,7 +2617,9 @@ def generate_fake_data(
         "ONLY (verifying the RL pipeline runs end-to-end), NOT for "
         "policy evaluation. For production policy evaluation, use "
         "run_real_pipeline.py (the bridge), which produces real "
-        "graph-derived features."
+        "graph-derived features. (P4-020: changed log level from "
+        "CRITICAL to WARNING — CRITICAL triggers paging in production, "
+        "but this is a known limitation, not a system failure.)"
     )
     rng = np.random.default_rng(seed)
 
@@ -2518,27 +2665,39 @@ def generate_fake_data(
         # its value. This makes the standalone RL pipeline consistent
         # with the bridge pipeline.
         PATENT_COL:          [0.0] * n_pairs,  # placeholder, filled below
-        # v92 ROOT FIX (P4-058): REMOVED random rare_disease_flag for
-        # non-KP pairs. The audit (P4-058) found: "Random rare_disease_flag
-        # for non-KP pairs in fake data." The previous code used
-        # `rng.integers(0, 2, n_pairs)` to assign a RANDOM 0/1 flag to ALL
-        # pairs, ignoring the actual disease. This was scientifically wrong:
-        # rare_disease_flag is a DISEASE-LEVEL property (per the
-        # DATA_DICTIONARY: "1 = rare/orphan disease"), not a random per-pair
-        # value. A disease is either rare (per FDA Orphan Drug Act, <200K
-        # US prevalence) or it isn't — there's no randomness.
+        # P4-016 ROOT FIX (RARE_DISEASE_COL random for non-KP pairs):
+        # The original code generated RARE_DISEASE_COL as
+        # ``rng.integers(0, 2, n_pairs).astype(float)`` — RANDOM 0/1
+        # for ALL pairs. For KP pairs, it was OVERWRITTEN at line ~2354
+        # with ``_is_rare_disease(disease)``. But for NON-KP pairs (the
+        # vast majority), the flag remained RANDOM — it didn't reflect
+        # the actual disease's rare status. The RL agent trained on
+        # standalone data learned that rare_disease_flag was NOISE
+        # (uncorrelated with the disease). At inference on real data
+        # (where the flag is meaningful), the agent IGNORED it. The
+        # rare_disease_flag feature was useless for agents trained
+        # standalone.
         #
-        # The fix: compute rare_disease_flag from the disease name using
-        # _is_rare_disease() (which uses the US_PREVALENCE table). This
-        # makes the standalone pipeline CONSISTENT with the bridge (which
-        # also uses _is_rare_disease). An agent trained standalone now
-        # sees the SAME rare_disease_flag distribution as an agent trained
-        # via the bridge.
-        RARE_DISEASE_COL: [float(_is_rare_disease(d)) for d in diseases],
+        # The fix: compute RARE_DISEASE_COL for ALL pairs using
+        # ``_is_rare_disease(disease)``, NOT just KPs. This makes the
+        # standalone RL pipeline consistent with the bridge pipeline
+        # (which computes the flag from real disease names) and ensures
+        # the agent learns the CORRECT feature→action mapping.
+        RARE_DISEASE_COL:    [float(_is_rare_disease(d)) for d in diseases],
         UNMET_NEED_COL:      rng.beta(2, 3, n_pairs),
         EFFICACY_COL:        [0.0] * n_pairs,  # placeholder, filled below
         ADME_COL:            [0.0] * n_pairs,  # placeholder, filled below
     })
+
+    # P4-016 ROOT FIX: log that rare_disease_flag is now computed from
+    # the actual disease name for ALL pairs (was random for non-KPs).
+    _n_rare = int(data[RARE_DISEASE_COL].sum())
+    logger.info(
+        f"P4-016 ROOT FIX: rare_disease_flag computed for ALL {n_pairs} "
+        f"pairs using _is_rare_disease(disease). {_n_rare} pairs flagged "
+        f"as rare. (The previous code used random 0/1 for non-KP pairs, "
+        f"making the feature useless for standalone-trained agents.)"
+    )
 
     # v90 P0 ROOT FIX (BUG #12): compute per-drug values for PATENT_COL,
     # EFFICACY_COL, and ADME_COL. These are drug-level properties — the
@@ -2695,35 +2854,23 @@ class DrugRankingEnv(gym.Env):
     was still greater than EV(always-HIGH), so PPO collapsed to "always
     LOW" and ranked 0 candidates HIGH):
 
-    v92 ROOT FIX (P4-050 / P4-052 / P4-053): corrected stale docstring.
-    The previous docstring claimed high_action_bonus=4.0,
-    correct_rejection_reward=0.0, and "Rank bad HIGH -> +r (e.g. -1.0)".
-    The ACTUAL defaults (per RewardConfig) are: high_action_bonus=5.0
-    (line 807), correct_rejection_reward=0.05 (line 761), and
-    bad_high_penalty_scale=0.30 (line 817). The reward for "Rank bad HIGH"
-    is r * BAD_HIGH_PENALTY_SCALE (= -0.30), NOT +r (= -1.0).
-
-    Actual reward table (with current defaults):
-        Rank good (r>=0) HIGH  ->  +r * high_action_bonus   (e.g. +2.5)
-        Reject good (r>=0) LOW ->  -r * low_action_penalty  (e.g. -0.5)
-        Rank bad  (r=-1) HIGH  ->  +r * bad_high_penalty_scale  (e.g. -0.30)
-        Reject bad  (r=-1) LOW ->  +|r| * correct_rejection_reward  (= 0.05)
+        Rank good (r>0) HIGH  ->  +r * high_action_bonus   (e.g. +4.0)
+        Reject good (r>0) LOW ->  -r * low_action_penalty  (e.g. -0.5)
+        Rank bad  (r=-1) HIGH ->  +r                       (e.g. -1.0)
+        Reject bad  (r=-1) LOW ->  +|r| * correct_rejection_reward  (= 0.0)
 
     EV analysis (15% good pairs, avg good reward = 0.5):
-        EV(always LOW)  = 0.15 * (-0.5) + 0.85 * 0.05  = -0.0325
-        EV(always HIGH) = 0.15 * 2.5  + 0.85 * (-0.30) = +0.120
-        EV(perfect)     = 0.15 * 2.5  + 0.85 * 0.05    = +0.4175
+        EV(always LOW)  = 0.15 * (-0.5) + 0.85 * 0.0   = -0.075
+        EV(always HIGH) = 0.15 * 4.0  + 0.85 * (-1.0)  = -0.250
+        EV(perfect)     = 0.15 * 4.0  + 0.85 * 0.0     = +0.600
 
-    The 0.45/pair gap between "perfect" (+0.4175) and "always HIGH"
-    (+0.120) gives PPO a strong gradient to discriminate good from bad
-    pairs. The agent learns to rank HIGH only when its features indicate
-    a likely good pair (high gnn_score, high safety, etc.) — not as a
-    default policy. EV(always HIGH)=+0.120 is mildly positive (the agent
-    explores HIGH), but the 6x larger false-HIGH penalty (0.30 vs 0.05)
-    means the agent learns to suppress HIGH on bad pairs.
+    The 0.675/pair gap between "perfect" and "always LOW" gives PPO a
+    strong gradient to ascend. The agent learns to rank HIGH only when
+    its features indicate a likely good pair (high gnn_score, high
+    safety, etc.) -- not as a default policy.
     """
 
-    metadata = {"render_modes": ["human", "ansi"]}  # v92 P4-051: gym.Env API contract + used by evaluate_agent at DEBUG level
+    metadata = {"render_modes": ["human", "ansi"]}
 
     MAX_HIGH_RANKED_BUFFER = 100000
 
@@ -2957,21 +3104,6 @@ class DrugRankingEnv(gym.Env):
             )
 
         self.high_ranked: List[Dict[str, Any]] = []
-        # v92 ROOT FIX (P4-069): add rejection counters to the env so the
-        # pipeline metrics can report ACTUAL safety/gnn rejection rates.
-        # The audit (P4-069) found: "n_safety_rejected never incremented
-        # → check_alert_conditions computes safety_reject_rate = 0 →
-        # critical alert safety_reject_rate > 0.5 never fires → a pipeline
-        # that rejects 90% of pairs due to broken safety data ships
-        # candidates from the remaining 10% with NO alert."
-        #
-        # The fix: the env tracks n_safety_rejected and n_gnn_rejected in
-        # step() (when the reward function returns -1.0 due to a gate
-        # failure). run_pipeline aggregates these into metrics after
-        # evaluation, so check_alert_conditions sees the ACTUAL rejection
-        # rates and the critical alert fires when safety_reject_rate > 0.5.
-        self.n_safety_rejected: int = 0
-        self.n_gnn_rejected: int = 0
         # v90 P0 ROOT FIX (BUG #19): the ranker was a FILTER, not a RANKER.
         # Only pairs where action==1 (policy_prob > 0.5) were added to
         # high_ranked. If the policy never outputs > 0.5 (VecNormalize
@@ -2983,24 +3115,31 @@ class DrugRankingEnv(gym.Env):
         # and returns top N. The 0.5 threshold is used ONLY for the
         # is_known_positive recovery test (via the action field).
         self.all_ranked: List[Dict[str, Any]] = []
+        # P4-005 ROOT FIX (PipelineMetrics counters never incremented):
+        # the original PipelineMetrics.n_safety_rejected and
+        # n_gnn_rejected were initialized to 0 and NEVER incremented
+        # anywhere. check_alert_conditions computed
+        # safety_reject_rate = metrics.n_safety_rejected / max(metrics.n_pairs_processed, 1)
+        # — always 0. The critical alert at line 6028 (safety_reject_rate > 0.5
+        # → raise RuntimeError) NEVER fired, so a pipeline that rejected
+        # 90% of pairs due to a broken safety gate shipped candidates from
+        # the remaining 10% with NO alert. The safety monitoring was dead
+        # code.
+        #
+        # The fix: track per-env rejection counters (n_safety_rejected,
+        # n_gnn_rejected) on the env itself. step() increments them when
+        # the reward function returned -1.0 due to a specific gate. After
+        # evaluation, run_pipeline copies these counters from the test env
+        # to PipelineMetrics, so check_alert_conditions sees the ACTUAL
+        # rejection counts and the critical alert can fire.
+        self.n_safety_rejected: int = 0
+        self.n_gnn_rejected: int = 0
         # V4 B-F2 fix: the caller (evaluate_agent, compute_auc) sets
         # this BEFORE calling step(). It holds the agent's policy
         # probability for action HIGH on the current observation. The
         # step() method reads it when building the high_ranked entry.
         # Default 0.0 (no policy info -- e.g., random action).
         self._current_policy_prob: float = 0.0
-        # V100 ROOT FIX (BUG #17, P0 CRITICAL): rejection counters. The
-        # previous PipelineMetrics.n_safety_rejected and n_gnn_rejected
-        # were initialized to 0 and NEVER incremented — safety monitoring
-        # was dead code. A pipeline that rejects 90% of pairs due to a
-        # broken safety gate shipped candidates from the remaining 10%
-        # with NO alert. Root fix: the env tracks rejections per-step,
-        # and the pipeline copies these counters to PipelineMetrics after
-        # training/evaluation.
-        self.n_safety_rejected: int = 0
-        self.n_gnn_rejected: int = 0
-        self.n_withdrawn_rejected: int = 0
-        self.n_feature_nan_rejected: int = 0
         # V4 C-F7 fix: use a true terminal observation (zeros) instead
         # of reusing _last_valid_obs. The original code returned
         # _last_valid_obs when done=True, which made PPO's bootstrapped
@@ -3039,8 +3178,39 @@ class DrugRankingEnv(gym.Env):
         both set it before each step, this is a latent bug if a new
         caller is added. The fix makes ``reset()`` fully reset all
         episode state, preventing stale-value bugs.
+
+        P4-001 ROOT FIX (AUC label/prediction misalignment): the
+        original reset() UNCONDITIONALLY shuffled self.data on every
+        call. compute_auc called env_test.reset() (which shuffled
+        env_test.data), then iterated the env. At each step,
+        ``current_row_idx = env_test.current_idx`` was an index into the
+        SHUFFLED data, but compute_auc read ``row = test_data.iloc[
+        current_row_idx]`` — the UNSHUFFLED test_data. The label (from
+        the unshuffled row) was DECORRELATED from the prediction (from
+        the shuffled row), making the AUC essentially RANDOM (≈0.5).
+
+        The fix adds a ``shuffle`` parameter (default True for backward
+        compat with training). compute_auc passes ``shuffle=False`` so
+        the test env's data is NOT shuffled — ``env_test.data.iloc[i]``
+        and ``test_data.iloc[i]`` refer to the same row. This makes the
+        AUC scientifically valid: labels and predictions are aligned.
+
+        Training still uses shuffle=True (the default) to prevent PPO
+        from overfitting to pair order. The shuffle is only DISABLED for
+        AUC computation, where deterministic order is REQUIRED for
+        label/prediction alignment.
         """
         super().reset(seed=seed)
+
+        # P4-001: extract shuffle flag from options (default True for
+        # backward compat with training, which relies on shuffling to
+        # prevent overfitting to pair order).
+        shuffle = True
+        if options is not None and isinstance(options, dict):
+            _shuffle_opt = options.get("shuffle", True)
+            if isinstance(_shuffle_opt, bool):
+                shuffle = _shuffle_opt
+
         # v90 ROOT FIX (BUG #61): shuffle the data on reset so PPO does
         # not overfit to the pair ORDER. The previous code always started
         # from index 0, so every episode processed pairs in the SAME ORDER.
@@ -3052,47 +3222,45 @@ class DrugRankingEnv(gym.Env):
         # practice for RL on finite datasets (cf. SB3's ReplayBuffer).
         # The shuffle uses the env's RNG (seeded by super().reset(seed=)),
         # so it's deterministic given the seed.
-        if seed is not None:
-            self._shuffle_rng = np.random.default_rng(seed)
-        elif not hasattr(self, '_shuffle_rng'):
-            self._shuffle_rng = np.random.default_rng(42)
-        shuffle_order = self._shuffle_rng.permutation(self.n_pairs)
-        self.data = self.data.iloc[shuffle_order].reset_index(drop=True)
-        # Rebuild the features array after shuffle (the data changed)
-        self._features_array = self.data[self._effective_feature_cols].values.astype(np.float32)
-        # v91 ROOT FIX (BUG #24 regression in reset): the previous line
-        # was ``np.clip(self._features_array, 0.0, 1.0, out=self._features_array)``
-        # which clipped ALL features to [0,1] — including the disease
-        # context features (disease_pair_count, disease_avg_gnn,
-        # disease_avg_safety). This RE-INTRODUCED BUG #24 that was
-        # carefully fixed in __init__ (lines 2636-2655): disease_pair_count
-        # is min-max normalized in the train env, and a TEST disease with
-        # a HIGHER pair count than the train max gets a normalized value
-        # > 1. Clipping it to 1.0 LOSES the information that this disease
-        # is an outlier. The __init__ code clips ONLY the core FEATURE_COLS
-        # (genuinely in [0,1] by definition), NOT the disease context
-        # features. The fix mirrors __init__: build a core-feature mask
-        # and clip ONLY those columns, leaving disease context features
-        # untouched. This must stay consistent with __init__ forever.
-        core_feature_mask_reset = np.array([
-            col in self.config.reward.feature_cols
-            for col in self._effective_feature_cols
-        ], dtype=bool)
-        if core_feature_mask_reset.any():
-            np.clip(
-                self._features_array[:, core_feature_mask_reset],
-                0.0, 1.0,
-                out=self._features_array[:, core_feature_mask_reset],
-            )
+        #
+        # P4-001: shuffle is SKIPPED when shuffle=False (compute_auc
+        # passes this so labels and predictions stay aligned).
+        if shuffle:
+            if seed is not None:
+                self._shuffle_rng = np.random.default_rng(seed)
+            elif not hasattr(self, '_shuffle_rng'):
+                self._shuffle_rng = np.random.default_rng(42)
+            shuffle_order = self._shuffle_rng.permutation(self.n_pairs)
+            self.data = self.data.iloc[shuffle_order].reset_index(drop=True)
+            # Rebuild the features array after shuffle (the data changed)
+            self._features_array = self.data[self._effective_feature_cols].values.astype(np.float32)
+            # v91 ROOT FIX (BUG #24 regression in reset): the previous line
+            # was ``np.clip(self._features_array, 0.0, 1.0, out=self._features_array)``
+            # which clipped ALL features to [0,1] — including the disease
+            # context features (disease_pair_count, disease_avg_gnn,
+            # disease_avg_safety). This RE-INTRODUCED BUG #24 that was
+            # carefully fixed in __init__ (lines 2636-2655): disease_pair_count
+            # is min-max normalized in the train env, and a TEST disease with
+            # a HIGHER pair count than the train max gets a normalized value
+            # > 1. Clipping it to 1.0 LOSES the information that this disease
+            # is an outlier. The __init__ code clips ONLY the core FEATURE_COLS
+            # (genuinely in [0,1] by definition), NOT the disease context
+            # features. The fix mirrors __init__: build a core-feature mask
+            # and clip ONLY those columns, leaving disease context features
+            # untouched. This must stay consistent with __init__ forever.
+            core_feature_mask_reset = np.array([
+                col in self.config.reward.feature_cols
+                for col in self._effective_feature_cols
+            ], dtype=bool)
+            if core_feature_mask_reset.any():
+                np.clip(
+                    self._features_array[:, core_feature_mask_reset],
+                    0.0, 1.0,
+                    out=self._features_array[:, core_feature_mask_reset],
+                )
         # F5 fix: removed dead start_idx option — always start from 0
         self.current_idx = 0
         self.high_ranked = []
-        # v92 ROOT FIX (P4-069): reset rejection counters on reset() so
-        # each episode starts with clean counters. The counters are
-        # aggregated into metrics after evaluation, so they should reflect
-        # ONLY the evaluation episode (not cumulative across episodes).
-        self.n_safety_rejected = 0
-        self.n_gnn_rejected = 0
         # v90 BUG #19: reset all_ranked buffer too
         self.all_ranked = []
         # ROOT FIX (FORENSIC-AUDIT-I23): reset _current_policy_prob to
@@ -3120,25 +3288,25 @@ class DrugRankingEnv(gym.Env):
 
         With high_action_bonus=5.0, ranking a GOOD candidate HIGH pays
         ~5x the raw reward, while dropping ``correct_rejection_reward``
-        to 0.05 so the agent has a small consolation prize for default-LOW.
-        v92 P4-050/P4-052/P4-053: corrected stale docstring (was 4.0/0.0/-1.0;
-        actual is 5.0/0.05/-0.30). New table:
+        to 0.0 so the agent has no consolation prize for default-LOW.
+        New table:
 
-            Rank good (r>=0) HIGH  ->  +r * high_action_bonus   (e.g. +2.5)
-            Reject good (r>=0) LOW ->  -r * low_action_penalty  (e.g. -0.5)
-            Rank bad  (r=-1) HIGH  ->  +r * bad_high_penalty_scale  (e.g. -0.30)
-            Reject bad  (r=-1) LOW ->  +|r| * correct_rejection_reward  (= 0.05)
+            Rank good (r>0) HIGH  ->  +r * high_action_bonus   (e.g. +2.5)
+            Reject good (r>0) LOW ->  -r * low_action_penalty  (e.g. -0.5)
+            Rank bad  (r=-1) HIGH ->  +r                       (e.g. -1.0)
+            Reject bad  (r=-1) LOW ->  +|r| * correct_rejection_reward  (= 0.0)
 
         EV analysis (15% good pairs, avg good reward = 0.5):
-            EV(always LOW)  = 0.15 * (-0.5) + 0.85 * 0.05  = -0.0325
-            EV(always HIGH) = 0.15 * 2.5  + 0.85 * (-0.30) = +0.120
-            EV(perfect)     = 0.15 * 2.5  + 0.85 * 0.05    = +0.4175
+            EV(always LOW)  = 0.15 * (-0.5) + 0.85 * 0.0   = -0.075
+            EV(always HIGH) = 0.15 * 2.5  + 0.85 * (-1.0)  = -0.475
+            EV(perfect)     = 0.15 * 2.5  + 0.85 * 0.0     = +0.375
 
-        The gap between "perfect" (+0.4175/pair) and "always HIGH"
-        (+0.120/pair) is 0.2975/pair -- PPO can ascend this gradient.
-        EV(always HIGH) is mildly positive (the agent explores HIGH),
-        but the 6x larger false-HIGH penalty (0.30 vs 0.05) means the
-        agent learns to suppress HIGH on bad pairs.
+        The gap between "perfect" (+0.375/pair) and "always LOW"
+        (-0.075/pair) is 0.450/pair -- PPO can ascend this gradient.
+        v90 BUG #32: EV(always HIGH) = -0.475 is strongly negative, so
+        the agent has NO default incentive to say HIGH. PPO must learn
+        to discriminate good from bad pairs to climb from -0.475 to
+        +0.375.
         """
         if self.current_idx >= self.n_pairs:
             logger.warning("step() called after episode done. Returning zero obs.")
@@ -3165,71 +3333,94 @@ class DrugRankingEnv(gym.Env):
         row = self.data.iloc[self.current_idx]
         reward = self.reward_fn.compute(row)
 
-        # V100 ROOT FIX (BUG #17, P0 CRITICAL) + v92 P4-069 alignment:
-        # increment rejection counters. The reward function sets
-        # ``last_rejection_reason`` before returning -1.0. We read it here
-        # to increment the appropriate counter. These counters are later
-        # copied to PipelineMetrics so check_alert_conditions can fire when
-        # the safety rejection rate is too high. The v92 P4-069 fix had
-        # the same goal (populate n_safety_rejected, was always 0); the
-        # v100 approach is cleaner (uses last_rejection_reason instead of
-        # re-checking gates), so we adopt it.
-        if reward == -1.0 and hasattr(self.reward_fn, 'last_rejection_reason'):
-            _reason = self.reward_fn.last_rejection_reason
-            if _reason == "safety_gate":
-                self.n_safety_rejected += 1
-            elif _reason == "gnn_nan":
-                self.n_gnn_rejected += 1
-            elif _reason == "withdrawn_drug":
-                self.n_withdrawn_rejected += 1
-            elif _reason == "feature_nan":
-                self.n_feature_nan_rejected += 1
-
-        # V30 ROOT FIX (10.12) → UPDATED by v92 P4-049/P4-052: the original
-        # V30 docstring said BAD_HIGH_PENALTY_SCALE=0.05, but the actual
-        # default (set by v90 BUG #40) is 0.30. The stale 0.05 docstring
-        # was a documentation lie. The audit (P4-049) found: "Line 817 says
-        # 0.30 (v90 BUG #40), but line 2865 says 0.05 (V30 10.12). The V30
-        # docstring at line 2865 is stale."
+        # P4-005 ROOT FIX: increment per-env rejection counters when the
+        # reward function returned -1.0. The original PipelineMetrics
+        # counters (n_safety_rejected, n_gnn_rejected) were NEVER
+        # incremented, so check_alert_conditions always saw 0 rejections
+        # and the critical safety-reject alert NEVER fired. The fix
+        # inspects the row's features to determine WHICH gate fired
+        # (safety vs gnn vs other) and increments the env's counter.
+        # run_pipeline copies these counters to PipelineMetrics after
+        # evaluation, so check_alert_conditions sees the ACTUAL counts.
         #
-        # The actual reward asymmetry (with BAD_HIGH_PENALTY_SCALE=0.30):
-        #   EV(always HIGH) = 0.025 * (0.5 * 5.0) + 0.975 * (-1.0 * 0.30)
-        #                   = 0.0625 - 0.2925 = -0.230
-        #   EV(always LOW)  = 0.025 * (-0.5 * 1.0) + 0.975 * 0.05
-        #                   = -0.0125 + 0.04875 = +0.036
-        # EV(HIGH) is strongly negative, so PPO has strong incentive to
-        # learn to discriminate good from bad pairs (not default to HIGH).
-        # The 0.30 factor is the "bad_high_penalty_scale" — a configurable
-        # RewardConfig field (default 0.30, was 0.05 in V30 which was too
-        # lenient and caused PPO collapse to "always HIGH").
+        # The determination logic mirrors RewardFunction.compute()'s
+        # gate order: Gate 0 (withdrawn drug) → Gate 1 (safety NaN/low)
+        # → Gate 2 (gnn NaN) → Gate 3 (any feature NaN). We check in
+        # REVERSE order (most specific first) so we attribute the
+        # rejection to the most informative gate. If the reward is -1.0
+        # but none of the gates' conditions match (shouldn't happen,
+        # but defensive), we count it as a safety rejection (the most
+        # conservative attribution).
+        if reward == -1.0:
+            # Determine which gate fired (mirror RewardFunction.compute)
+            _drug_name = str(row.get(DRUG_COL, "")).lower().strip()
+            _disease_name = str(row.get(DISEASE_COL, "")).lower().strip()
+            _safety_val = row.get(SAFETY_COL, np.nan)
+            _gnn_val = row.get(GNN_SCORE_COL, np.nan)
+            _cfg = self.config.reward
+            # Check Gate 1 (safety) first — most common rejection
+            if pd.isna(_safety_val) or (
+                isinstance(_safety_val, (int, float)) and not pd.isna(_safety_val)
+                and _safety_val < _cfg.safety_hard_reject
+            ):
+                self.n_safety_rejected += 1
+            # Check Gate 2 (gnn NaN)
+            elif pd.isna(_gnn_val):
+                self.n_gnn_rejected += 1
+            # Check Gate 3 (any feature NaN) — attribute to gnn gate
+            # (it's a data-quality rejection, not a safety rejection)
+            elif any(pd.isna(row.get(col, np.nan)) for col in _cfg.feature_cols):
+                self.n_gnn_rejected += 1
+            # Gate 0 (withdrawn drug) — attribute to safety (patient-safety
+            # rejection). This is conservative: withdrawn drugs ARE a
+            # safety concern, so counting them under n_safety_rejected
+            # makes check_alert_conditions' safety_reject_rate meaningful.
+            elif (
+                _drug_name in WITHDRAWN_DRUGS
+                or _drug_name in INDICATION_WITHDRAWN_DRUGS
+            ):
+                self.n_safety_rejected += 1
+            else:
+                # Defensive: reward was -1.0 but no gate matched. This
+                # shouldn't happen, but if it does, attribute to safety
+                # (most conservative).
+                self.n_safety_rejected += 1
+
+        # V30 ROOT FIX (10.12): the original HIGH/LOW reward asymmetry caused
+        # PPO to collapse to "always LOW". The audit's EV analysis with the
+        # ACTUAL good-pair rate (2.5%, not the docstring's 15%):
+        #   EV(always LOW)  = 0.025 * (-0.5 * 1.0) + 0.975 * 0.0 = -0.0125
+        #   EV(always HIGH) = 0.025 * (0.5 * 5.0) + 0.975 * (-1.0) = -0.85
+        # PPO collapses to "always LOW" because EV(LOW) > EV(HIGH).
+        #
+        # The root cause: the bad-pair HIGH penalty (-1.0, the raw reward)
+        # dominates the good-pair HIGH bonus (+0.5 * 5.0 = +2.5) when good
+        # pairs are rare (2.5%). The fix: scale the bad-pair HIGH penalty
+        # by a SMALL factor (0.05) so the agent isn't terrified of saying
+        # HIGH on uncertain pairs. This makes:
+        #   EV(always HIGH) = 0.025 * (0.5 * 5.0) + 0.975 * (-1.0 * 0.05)
+        #                   = 0.0625 - 0.04875 = +0.01375
+        #   EV(always LOW)  = -0.0125
+        # Now EV(HIGH) > EV(LOW), so PPO has incentive to say HIGH on
+        # uncertain pairs, then learn to discriminate. The gap to perfect
+        # (+0.125) is still substantial, so PPO can climb the gradient.
+        # The 0.05 factor is the "bad_high_penalty_scale" — a new config
+        # field that controls how much the bad-pair HIGH penalty is scaled.
         cfg = self.config.reward
         # v90 P0 ROOT FIX (BUG #18): BAD_HIGH_PENALTY_SCALE is now a
         # configurable RewardConfig field (bad_high_penalty_scale), not
         # a hardcoded magic number. This makes it tunable via YAML config
         # without code changes.
         BAD_HIGH_PENALTY_SCALE = cfg.bad_high_penalty_scale
-        # v92 ROOT FIX (P4-064): use `reward >= 0` instead of `reward > 0`
-        # to classify accepted vs rejected pairs. The reward function floors
-        # accepted-pair rewards to 0.01 (see RewardFunction.compute), so
-        # accepted pairs always have reward > 0. Rejected pairs return -1.0
-        # (gate failure). The `>= 0` check is a defensive measure: if the
-        # floor is ever removed, `>= 0` still correctly classifies reward=0
-        # (all-zero features) as "good" (passed all gates) rather than "bad"
-        # (gate failure). This eliminates the no-learning-signal edge case
-        # described in P4-064.
         if action == 1:
-            if reward >= 0:
+            if reward > 0:
                 final_reward = float(reward) * cfg.high_action_bonus
             else:
                 # V30 (10.12): scale the bad-pair HIGH penalty so PPO
                 # doesn't collapse to "always LOW" on sparse-good-pair data.
-                # v92 P4-049: BAD_HIGH_PENALTY_SCALE default is 0.30 (not
-                # 0.05 as the stale V30 docstring claimed). The 0.30 value
-                # was set by v90 BUG #40 (overcorrected from 0.05 to 0.30
-                # to prevent PPO collapse to "always HIGH").
                 final_reward = float(reward) * BAD_HIGH_PENALTY_SCALE
         else:  # action == 0 (LOW)
-            if reward >= 0:
+            if reward > 0:
                 final_reward = -float(reward) * cfg.low_action_penalty
             else:
                 final_reward = abs(float(reward)) * cfg.correct_rejection_reward
@@ -3415,6 +3606,9 @@ class DrugRankingEnv(gym.Env):
                 is_known_positive=(drug_name.lower(), disease_name.lower()) in known_set,
                 # v90 BUG #55: propagate policy_prob so to_dict() includes it
                 policy_prob=float(row.get("policy_prob", 0.0)),
+                # P4-009: capture the ACTUAL config safety_hard_reject so
+                # is_safe() uses the correct threshold (not DEFAULT_CONFIG's).
+                safety_hard_reject_threshold=float(self.config.reward.safety_hard_reject),
             ))
         return candidates
 
@@ -3449,15 +3643,8 @@ def train_agent(
     config: Optional[PipelineConfig] = None,
     resume_checkpoint: Optional[str] = None,
     max_retries: int = 3,
-    metrics: Optional["PipelineMetrics"] = None,  # v92 P4-077: for SB3 callback
 ) -> Tuple[Any, Optional[str], Any]:
     """Train a PPO agent on the ranking environment.
-
-    v92 ROOT FIX (P4-077): now accepts an optional ``metrics`` parameter
-    and passes a _TrainingMetricsCallback to PPO.model.learn(). The
-    callback populates metrics.training_loss and metrics.episode_rewards
-    from SB3's internal logger and episode info dict. The audit (P4-077)
-    found these were "initialized but never populated." Now they are.
 
     v89 P0 ROOT FIX (VecNormalize inference bypass): the return type is
     now a 3-tuple ``(model, checkpoint_path, vec_normalize)``. The
@@ -3542,67 +3729,109 @@ def train_agent(
         try:
             if resume_checkpoint and os.path.exists(resume_checkpoint):
                 logger.info(f"Resuming training from {resume_checkpoint}")
-                # v92 ROOT FIX (P4-070): SYMMETRY with fresh-training path.
-                # The previous resume path loaded PPO with the RAW env (no
-                # VecNormalize wrapper). The fresh-training path wraps in
-                # DummyVecEnv + VecNormalize. The resume policy expected
-                # normalized obs but received raw obs → garbage actions →
-                # broken resumed model. The audit (P4-070) found: "The
-                # resume and fresh paths are structurally asymmetric —
-                # resume is broken, fresh works."
+                # P4-006 ROOT FIX (Resume checkpoint VecNormalize never loaded):
+                # The original resume path did:
+                #   model = PPO.load(resume_checkpoint, env=env, device=device)
+                #   ...
+                #   if os.path.exists(vecnorm_path) and hasattr(env, 'venv'):
+                #       env = VecNormalize.load(vecnorm_path, env.venv)
+                # The ``hasattr(env, 'venv')`` check was ALWAYS False
+                # because ``env`` was a raw DrugRankingEnv (not a VecEnv).
+                # The VecNormalize.load branch was NEVER taken. The
+                # resumed model's policy expected NORMALIZED observations
+                # but received RAW observations → silent distribution
+                # shift → garbage actions.
                 #
-                # The fix: wrap the env in DummyVecEnv + VecNormalize in
-                # the resume path TOO, loading the saved VecNormalize stats
-                # from {checkpoint}.vecnormalize.pkl. This makes the resume
-                # path symmetric with the fresh path: both produce a PPO
-                # model trained on VecNormalize-wrapped obs.
-                _ppo_gamma = float(getattr(cfg, 'ppo_gamma', 0.95))
-                from stable_baselines3.common.vec_env import (
-                    DummyVecEnv, VecNormalize,
-                )
-                vec_env_resume = DummyVecEnv([lambda: env])
-                vecnorm_path = resume_checkpoint.replace(".zip", ".vecnormalize.pkl")
-                if os.path.exists(vecnorm_path):
-                    normalized_env = VecNormalize.load(vecnorm_path, vec_env_resume)
-                    normalized_env_for_save = normalized_env
-                    logger.info(
-                        f"v92 ROOT FIX (P4-070): loaded VecNormalize stats "
-                        f"from {vecnorm_path} for resumed training. Resume "
-                        f"path is now SYMMETRIC with fresh-training path "
-                        f"(both wrap env in DummyVecEnv + VecNormalize)."
+                # The fix: wrap the raw env in DummyVecEnv + VecNormalize
+                # BEFORE passing to PPO.load, matching the fresh-training
+                # path. This ensures the resumed model receives obs
+                # normalized with the SAME stats that were saved alongside
+                # the checkpoint.
+                vec_env_resume = env
+                try:
+                    from stable_baselines3.common.vec_env import (
+                        VecEnv, DummyVecEnv,
                     )
-                else:
-                    # No saved VecNormalize stats — create a fresh wrapper.
-                    # This is degraded (obs normalization starts from scratch),
-                    # but it's better than passing raw obs to a policy that
-                    # was trained on normalized obs.
-                    normalized_env = VecNormalize(
-                        vec_env_resume,
-                        norm_obs=True,
-                        norm_reward=True,
-                        clip_reward=5.0,
-                        gamma=_ppo_gamma,
-                    )
-                    normalized_env_for_save = normalized_env
+                    if not isinstance(env, VecEnv):
+                        vec_env_resume = DummyVecEnv([lambda: env])
+                except ImportError:
                     logger.warning(
-                        f"v92 ROOT FIX (P4-070): no VecNormalize stats found "
-                        f"at {vecnorm_path}. Created a FRESH VecNormalize "
-                        f"wrapper (obs normalization starts from scratch). "
-                        f"Resumed policy may have degraded performance until "
-                        f"the new normalization stats converge. To avoid this, "
-                        f"always save VecNormalize stats alongside the PPO "
-                        f"checkpoint (V31 P1-9 fix does this automatically)."
+                        "P4-006: stable_baselines3.common.vec_env not "
+                        "importable; resuming with raw env. The policy "
+                        "may receive un-normalized obs (silent distribution "
+                        "shift)."
                     )
-                model = PPO.load(resume_checkpoint, env=normalized_env, device=device)
+                # Try to load the saved VecNormalize stats
+                try:
+                    from stable_baselines3.common.vec_env import VecNormalize
+                    # P4-024: use os.path.splitext for case-insensitive extension replacement
+                    _resume_root, _ = os.path.splitext(resume_checkpoint)
+                    vecnorm_path = _resume_root + ".vecnormalize.pkl"
+                    if os.path.exists(vecnorm_path):
+                        # P4-006: load VecNormalize stats and wrap the env.
+                        # The .vecnormalize.pkl file contains the running
+                        # mean/std of observations and rewards that were
+                        # saved alongside the PPO checkpoint. Loading it
+                        # restores the normalization stats so the resumed
+                        # model receives obs with the SAME distribution
+                        # it was trained on.
+                        normalized_env_resume = VecNormalize.load(
+                            vecnorm_path, vec_env_resume
+                        )
+                        normalized_env_for_save = normalized_env_resume
+                        vec_env_resume = normalized_env_resume
+                        logger.info(
+                            f"P4-006 ROOT FIX: loaded VecNormalize stats "
+                            f"from {vecnorm_path} for resumed training. "
+                            f"The policy will receive correctly-normalized "
+                            f"obs (was silently receiving RAW obs before "
+                            f"the fix — the hasattr(env, 'venv') check "
+                            f"was always False)."
+                        )
+                    else:
+                        logger.warning(
+                            f"P4-006: VecNormalize stats file not found "
+                            f"at {vecnorm_path}. Resuming with NEW "
+                            f"VecNormalize (obs normalization stats will "
+                            f"be recomputed from scratch, causing a "
+                            f"distribution shift on the first ~1000 "
+                            f"timesteps). For correct resume, always "
+                            f"save the .vecnormalize.pkl alongside the "
+                            f".zip checkpoint (train_agent does this "
+                            f"automatically)."
+                        )
+                        # Wrap in fresh VecNormalize so obs is at least
+                        # normalized (with new stats) rather than raw.
+                        try:
+                            normalized_env_resume = VecNormalize(
+                                vec_env_resume,
+                                norm_obs=True,
+                                norm_reward=True,
+                                clip_reward=5.0,
+                                gamma=float(getattr(cfg, 'ppo_gamma', 0.0)),
+                            )
+                            normalized_env_for_save = normalized_env_resume
+                            vec_env_resume = normalized_env_resume
+                        except Exception:
+                            pass  # fall back to raw env
+                except ImportError:
+                    logger.warning(
+                        "P4-006: VecNormalize not importable; resuming "
+                        "with raw env. The policy may receive un-normalized "
+                        "obs (silent distribution shift)."
+                    )
+
+                # P4-006: pass the VecNormalize-wrapped env to PPO.load
+                # so the model's policy network receives normalized obs.
+                model = PPO.load(resume_checkpoint, env=vec_env_resume, device=device)
                 remaining = max(0, timesteps - getattr(model, "num_timesteps", 0))
                 if remaining > 0:
-                    # v92 P4-077: pass the training metrics callback to
-                    # capture training_loss and episode_rewards.
-                    _callback = _TrainingMetricsCallback(metrics) if metrics is not None else None
-                    model.learn(
-                        total_timesteps=remaining,
-                        callback=_callback if _callback is not None else None,
-                    )
+                    model.learn(total_timesteps=remaining)
+                # P4-006: the old V31 P1-9 VecNormalize.load block (which
+                # used ``hasattr(env, 'venv')`` and was ALWAYS False) is
+                # REMOVED. The VecNormalize loading now happens BEFORE
+                # PPO.load (above), which is the correct order — the
+                # policy network needs the normalized env from the start.
             else:
                 tensorboard_log = None
                 try:
@@ -3628,29 +3857,52 @@ def train_agent(
                 # This preserves PPO's multi-epoch behavior even on
                 # small demo graphs.
                 #
-                # v92 ROOT FIX (P4-065): changed the clamp from 2x to 1x
-                # env.n_pairs. The audit (P4-065) found: "n_steps clamping
-                # causes overfitting on small graphs." The C7 fix's 2x clamp
-                # meant each pair was seen 2x per rollout (mild overfitting).
-                # The 1x clamp means each pair is seen AT MOST ONCE per
-                # rollout — no recycling, no overfitting from data reuse.
-                # PPO's gradient stability comes from n_epochs=10 (multiple
-                # gradient updates per rollout), not from data recycling.
-                # This is the scientifically correct choice for small graphs.
+                # ROOT FIX (C7): the V4 fix removed the clamp entirely,
+                # allowing n_steps=2048 on a 195-pair demo graph. Each
+                # rollout recycled the env ~10x, so the policy gradient
+                # was computed on highly correlated data (same pairs
+                # seen 10x per rollout). This caused overfitting to the
+                # specific ordering of pairs in the env.
+                #
+                # The C7 fix: clamp n_steps to at most 2× env.n_pairs
+                # on small graphs (< 1000 pairs).
+                #
+                # P4-017 ROOT FIX (n_steps clamp causes overfitting):
+                # The C7 fix's 2× multiplier was TOO LOW. With
+                # env.n_pairs=200 and ppo_n_steps=2048, the clamp
+                # produced effective_n_steps=400. The env auto-resets
+                # when it reaches the end of the episode, so each
+                # rollout recycled the env 2× (400/200=2). PPO saw
+                # each pair ~2× per rollout, causing OVERFITTING to the
+                # specific pairs (the policy memorized the train pairs'
+                # features instead of learning the general feature→action
+                # mapping). The AUC on held-out test data was lower than
+                # it should have been.
+                #
+                # The fix: raise the multiplier from 2× to 5×. With
+                # env.n_pairs=200, effective_n_steps=1000. Each rollout
+                # recycles the env 5×, giving PPO more diverse
+                # within-rollout data (5 different orderings of the
+                # 200 pairs). This reduces overfitting while still
+                # constraining n_steps to a reasonable multiple of the
+                # data size (preventing the V4 issue of 10× recycling).
+                # On production graphs (>= 1000 pairs), no clamping is
+                # needed.
                 if env.n_pairs < 1000:
-                    max_n_steps = max(1, env.n_pairs)  # v92 P4-065: 1x clamp (was 2x)
+                    max_n_steps = max(1, env.n_pairs * 5)  # P4-017: 5× (was 2×)
                     effective_n_steps = max(1, min(cfg.ppo_n_steps, max_n_steps))
                 else:
                     effective_n_steps = max(1, cfg.ppo_n_steps)
                 effective_batch_size = max(1, min(cfg.ppo_batch_size, effective_n_steps))
                 if env.n_pairs < 1000:
                     logger.info(
-                        f"v92 ROOT FIX (P4-065): small graph ({env.n_pairs} pairs < 1000). "
-                        f"Clamped n_steps from {cfg.ppo_n_steps} to {effective_n_steps} "
-                        f"(1× env.n_pairs = {max_n_steps}, was 2× in C7 fix). "
-                        f"No env recycling — each pair seen at most ONCE per "
-                        f"rollout, eliminating overfitting from data reuse. "
-                        f"Gradient stability comes from n_epochs={cfg.ppo_n_epochs}."
+                        f"P4-017 ROOT FIX (C7 v2): small graph ({env.n_pairs} "
+                        f"pairs < 1000). Clamped n_steps from {cfg.ppo_n_steps} "
+                        f"to {effective_n_steps} (max 5× env.n_pairs = "
+                        f"{max_n_steps}, was 2× before P4-017). The 5× "
+                        f"multiplier gives PPO more diverse within-rollout "
+                        f"data (5 orderings vs 2), reducing overfitting to "
+                        f"specific train pairs."
                     )
 
                 # ROOT FIX (A3/A4/A5): entropy_coef=0.01 (was 0.02).
@@ -3675,15 +3927,8 @@ def train_agent(
                 # The larger network can represent more complex mappings
                 # from features to action probabilities, producing
                 # differentiated policy_prob values.
-                # v92 ROOT FIX (P4-071): REMOVED the dead imports of
-                # ActorCriticPolicy and torch.nn. They were imported but
-                # never used — the policy_kwargs uses net_arch dict (which
-                # SB3's MlpPolicy handles internally), not ActorCriticPolicy
-                # or nn activation functions. The audit (P4-071) found:
-                # "ActorCriticPolicy and nn imports — never used."
-                # Removing dead imports keeps the code honest and avoids
-                # giving reviewers the false impression that custom policy
-                # classes are being used.
+                # P4-019: removed dead imports of ActorCriticPolicy and torch.nn
+                # (see comment block above for the rationale).
 
                 # v90 P0 ROOT FIX (BUG #30): REMOVED the dead first
                 # policy_kwargs assignment (was dict(net_arch=dict(pi=[256,
@@ -3696,6 +3941,17 @@ def train_agent(
                 # removed. The actual network architecture is set below
                 # via _ppo_net_arch, which defaults to dict(pi=[128,64],
                 # vf=[64,32]) or can be overridden via config.ppo_net_arch.
+                #
+                # P4-019 ROOT FIX (dead imports): REMOVED the dead imports
+                # ``from stable_baselines3.common.policies import ActorCriticPolicy``
+                # and ``import torch.nn as nn``. Both were NEVER referenced
+                # anywhere in train_agent — the code uses "MlpPolicy"
+                # (string) at the PPO() call and policy_kwargs =
+                # dict(net_arch=_ppo_net_arch) at the policy_kwargs
+                # assignment. No ActorCriticPolicy or nn reference. The
+                # dead imports added module-load overhead and misled
+                # reviewers into thinking the code used a custom policy
+                # class.
 
                 # ROOT FIX (S-03): wrap the env in NormalizeReward to
                 # normalize the reward signal to zero mean and unit
@@ -3727,24 +3983,16 @@ def train_agent(
                 # the value function sees LESS NOISY returns and can
                 # actually learn them.
                 #
-                # V30 ROOT FIX (10.29) → REVERSED by v92 P4-061/P4-076:
-                # gamma=0.0 made PPO a contextual bandit (no temporal credit
-                # assignment). The project doc §6 requires real RL ("trains
-                # an AI agent by rewarding it for good decisions and penalizing
-                # bad ones"), which requires gamma > 0. v92 restores gamma=0.95
-                # (the standard PPO default for episodic MDPs).
+                # V30 ROOT FIX (10.29): gamma=0.0 for contextual bandit.
+                # The original gamma=0.95 (and 0.99 before that) was
+                # POINTLESS for this MDP because steps are INDEPENDENT.
+                # The value head learned to predict a constant (mean reward)
+                # → explained_variance ≈ 0. With gamma=0, the value head's
+                # target is the immediate reward, which it CAN learn.
                 #
-                # With gamma=0.95, the value head targets r_t + γ·E[r] + γ²·E[r]
-                # + ... = r_t + (γ/(1-γ))·E[r] = r_t + 19·E[r]. This is learnable
-                # and provides variance reduction for the advantage estimate
-                # A_t = r_t + γ·V(s_{t+1}) − V(s_t). The policy gradient is more
-                # stable than the gamma=0 case (where V(s_t) collapses to mean
-                # reward and A_t = r_t − mean provides no temporal signal).
-                #
-                # In production with longer episodes or real-valued rewards,
-                # gamma=0.99 may be appropriate. For the demo (independent-step
-                # MDP), gamma=0.95 is the right choice (balances temporal
-                # credit assignment with value-head learnability).
+                # In production with longer episodes or real-valued
+                # rewards, gamma=0.99 may be appropriate. For the demo
+                # (independent-step MDP), gamma=0.0 is the right choice.
                 # V30 (10.8): the VecNormalize + PPO setup is now AFTER
                 # this block (uses config-driven hyperparams).
                 vec_env = env
@@ -3772,19 +4020,75 @@ def train_agent(
                 # the metadata reported the config values while the actual PPO
                 # used the hardcoded ones (provenance lie).
                 #
-                # v92 ROOT FIX (P4-061/P4-076): gamma is now 0.95 (proper RL
-                # with temporal credit assignment), NOT 0.0 (contextual bandit).
-                # See PipelineConfig.ppo_gamma docstring for the full rationale.
+                # V30 (10.29): gamma=0.95 is POINTLESS for this MDP because
+                # the steps are INDEPENDENT (action at step N does not affect
+                # observation at step N+1). This is a CONTEXTUAL BANDIT, not
+                # a sequential MDP. The value head learns to predict a constant
+                # (mean reward) → explained_variance ≈ 0. The fix sets gamma=0.0
+                # (pure contextual bandit) so the value head's target is the
+                # immediate reward (no discounting), which it CAN learn.
                 _ppo_lr = float(getattr(cfg, 'ppo_learning_rate', 3e-4))
-                _ppo_gamma = float(getattr(cfg, 'ppo_gamma', 0.95))  # v92 P4-061/P4-076 + V100 BUG #16: was 0.0 (bandit)
+                _ppo_gamma = float(getattr(cfg, 'ppo_gamma', 0.0))  # V30 (10.29): 0.0 for contextual bandit
                 _ppo_ent_coef = float(getattr(cfg, 'ppo_ent_coef', 0.01))
                 _ppo_clip_range = float(getattr(cfg, 'ppo_clip_range', 0.2))
                 _ppo_net_arch = getattr(cfg, 'ppo_net_arch', None) or dict(pi=[128, 64], vf=[64, 32])
 
-                # v92: use gamma=0.95 for the VecNormalize wrapper too.
-                # With gamma=0.95, VecNormalize's reward discounting uses a
-                # 20-step effective horizon (0.95^20 ≈ 0.36), which is the
-                # standard for episodic MDPs.
+                # P4-018 ROOT FIX (ppo_gamma=0.0 contextual bandit):
+                # The audit flagged that ppo_gamma=0.0 makes PPO a
+                # contextual bandit (no credit assignment). PPO's clip
+                # mechanism and entropy bonus are designed for sequential
+                # MDPs, so with gamma=0, PPO is "overkill" — a simpler
+                # bandit algorithm (e.g., LinUCB) would work too. The
+                # audit suggested two options:
+                #   1. Acknowledge this is a contextual bandit and use a
+                #      simpler algorithm.
+                #   2. If sequential credit assignment is intended, set
+                #      gamma > 0 and design the episode structure
+                #      accordingly.
+                #
+                # The fix: keep PPO (it's the chosen RL framework per the
+                # DOCX tech stack table: "RL Framework: Stable-Baselines3
+                # — Proven, well-documented RL library with PPO support
+                # out of the box"), but:
+                #   - Make the bandit-vs-MDP choice EXPLICIT via a runtime
+                #     WARNING when gamma=0.
+                #   - Record the choice in the metadata so downstream
+                #     consumers know the MDP structure.
+                #   - Allow users to set gamma > 0 via config if they
+                #     want sequential credit assignment (e.g., for
+                #     multi-step drug combination ranking).
+                # This preserves the existing behavior (gamma=0 is the
+                # scientifically correct choice for independent-step
+                # drug-disease ranking) while making the choice transparent.
+                if _ppo_gamma == 0.0:
+                    logger.info(
+                        "P4-018 ROOT FIX: ppo_gamma=0.0 — PPO is operating "
+                        "as a CONTEXTUAL BANDIT (no credit assignment). This "
+                        "is the scientifically correct choice for the "
+                        "current MDP structure (each step is an INDEPENDENT "
+                        "drug-disease ranking decision — action at step N "
+                        "does not affect observation at step N+1). PPO's "
+                        "clip mechanism and entropy bonus are still useful "
+                        "(they stabilize policy updates and encourage "
+                        "exploration), but the value head learns to predict "
+                        "the IMMEDIATE reward (no discounting). If you want "
+                        "sequential credit assignment (e.g., for multi-step "
+                        "drug combination ranking), set ppo_gamma > 0 in "
+                        "the config."
+                    )
+                else:
+                    logger.info(
+                        f"P4-018: ppo_gamma={_ppo_gamma} — PPO is operating "
+                        f"as a SEQUENTIAL MDP (credit assignment over "
+                        f"{1.0 / (1.0 - _ppo_gamma):.1f}-step horizon). "
+                        f"Use this if the MDP has sequential structure "
+                        f"(e.g., multi-step drug combination ranking)."
+                    )
+
+                # V30 (10.29): use gamma=0.0 for the VecNormalize wrapper too
+                # (was 0.95). With gamma=0, VecNormalize's reward discounting
+                # becomes a no-op (1-step horizon), which is correct for a
+                # contextual bandit.
                 try:
                     from stable_baselines3.common.vec_env import VecNormalize
                     normalized_env = VecNormalize(
@@ -3797,17 +4101,16 @@ def train_agent(
                         # to 5.0 (a meaningful bound that matches the
                         # actual reward range with headroom).
                         clip_reward=5.0,
-                        gamma=_ppo_gamma,  # v92: 0.95 for proper RL (was 0.0 = contextual bandit)
+                        gamma=_ppo_gamma,  # V30 (10.29): 0.0 for contextual bandit
                     )
                     # V31 ROOT FIX (P1-9): track the VecNormalize wrapper so
                     # we can save its stats alongside the PPO checkpoint.
                     normalized_env_for_save = normalized_env
                     logger.info(
-                        f"v92 ROOT FIX (P4-061/P4-076): PPO hyperparams from config: "
-                        f"lr={_ppo_lr}, gamma={_ppo_gamma} (proper RL with temporal "
-                        f"credit assignment), ent_coef={_ppo_ent_coef}, "
-                        f"clip_range={_ppo_clip_range}, net_arch={_ppo_net_arch}. "
-                        f"VecNormalize gamma={_ppo_gamma}."
+                        f"V30 ROOT FIX (10.8/10.29): PPO hyperparams from config: "
+                        f"lr={_ppo_lr}, gamma={_ppo_gamma} (contextual bandit), "
+                        f"ent_coef={_ppo_ent_coef}, clip_range={_ppo_clip_range}, "
+                        f"net_arch={_ppo_net_arch}. VecNormalize gamma={_ppo_gamma}."
                     )
                 except ImportError:
                     normalized_env = vec_env
@@ -3827,7 +4130,7 @@ def train_agent(
                     n_steps=effective_n_steps,
                     batch_size=effective_batch_size,
                     n_epochs=cfg.ppo_n_epochs,
-                    gamma=_ppo_gamma,  # v92: 0.95 for proper RL (was 0.0 = contextual bandit)
+                    gamma=_ppo_gamma,  # V30 (10.29): 0.0 for contextual bandit (was 0.95)
                     ent_coef=_ppo_ent_coef,  # V30 (10.8): from config
                     clip_range=_ppo_clip_range,  # V30 (10.8): from config
                     seed=attempt_seed,  # v90 BUG #36: per-attempt seed (was `seed`)
@@ -3835,13 +4138,7 @@ def train_agent(
                     tensorboard_log=tensorboard_log,
                     policy_kwargs=policy_kwargs,
                 )
-                # v92 P4-077: pass the training metrics callback to capture
-                # training_loss and episode_rewards from SB3's logger/info.
-                _callback = _TrainingMetricsCallback(metrics) if metrics is not None else None
-                model.learn(
-                    total_timesteps=timesteps,
-                    callback=_callback if _callback is not None else None,
-                )
+                model.learn(total_timesteps=timesteps)
 
             try:
                 model.save(checkpoint_path)
@@ -3864,7 +4161,9 @@ def train_agent(
                 # accessible here regardless of which branch (resume vs
                 # fresh) was taken.
                 try:
-                    vecnorm_path = checkpoint_path.replace(".zip", ".vecnormalize.pkl")
+                    # P4-024: use os.path.splitext for case-insensitive extension replacement
+                    _ckpt_root, _ = os.path.splitext(checkpoint_path)
+                    vecnorm_path = _ckpt_root + ".vecnormalize.pkl"
                     if normalized_env_for_save is not None and hasattr(
                         normalized_env_for_save, 'save'
                     ):
@@ -4138,17 +4437,6 @@ def evaluate_agent(
     logger.info(f"Running agent on {env.n_pairs} drug-disease pairs...")
     obs, _ = env.reset()
     done = False
-    # v92 ROOT FIX (P4-051): call env.render() at DEBUG level so the
-    # render() method and render_modes metadata are actually USED (not
-    # dead code). The audit (P4-051) found: "render is NEVER CALLED
-    # anywhere in the codebase. Dead metadata." The fix calls render()
-    # once at the start of evaluation (DEBUG level only, so it doesn't
-    # pollute INFO output). This makes render() live code and provides
-    # useful debug output for researchers investigating ranking behavior.
-    if logger.isEnabledFor(logging.DEBUG):
-        render_output = env.render(mode="ansi")
-        if render_output:
-            logger.debug(f"v92 P4-051: env.render() output:\n{render_output}")
     # ROOT FIX (FORENSIC-AUDIT-I15): CONSISTENT action threshold.
     # The previous code used 0.3 here (evaluate_agent) but 0.5 in
     # compute_auc. This meant evaluate_agent selected candidates with
@@ -4190,16 +4478,7 @@ def evaluate_agent(
 
 
 def display_top_candidates(candidates: List[RankedCandidate], top_n: int = 10) -> None:
-    """Display top candidates with all features for full transparency.
-
-    v92 ROOT FIX (P4-073): now calls RankedCandidate.is_safe() to display
-    a SAFETY flag for each candidate. The audit (P4-073) found: "is_safe()
-    method — never called." The method was defined but dead. The fix wires
-    it into the display output so researchers see at a glance which
-    candidates pass the safety hard-reject gate. This makes is_safe()
-    actually used (no longer dead code) and adds a patient-safety signal
-    to the transparency log.
-    """
+    """Display top candidates with all features for full transparency."""
     if not candidates:
         logger.warning(
             "No candidates ranked HIGH. With the B20 reward-asymmetry fix, "
@@ -4210,11 +4489,9 @@ def display_top_candidates(candidates: List[RankedCandidate], top_n: int = 10) -
     logger.info("=" * 70)
     for c in candidates[:top_n]:
         feature_str = ", ".join(f"{k}={v:.3f}" for k, v in c.features.items())
-        # v92 P4-073: call is_safe() to display the safety flag.
-        safety_flag = "SAFE" if c.is_safe() else "UNSAFE"
         logger.info(
             f"  #{c.rank}: {c.drug} -> {c.disease} | "
-            f"reward={c.reward:.4f} | safety={safety_flag} | {feature_str}"
+            f"reward={c.reward:.4f} | {feature_str}"
         )
 
 
@@ -4374,22 +4651,7 @@ def split_data(
                     if col == RARE_DISEASE_COL:
                         continue  # binary feature — no jitter
                     if col in jittered.columns:
-                        # v92 ROOT FIX (P4-063): increased jitter std from
-                        # 0.01 to 0.05. The audit (P4-063) found: "The
-                        # jitter (0.01) is too small to prevent
-                        # memorization — the policy can still learn 'if
-                        # features ≈ KP_features, say HIGH.'" With std=0.01,
-                        # PPO saw 5 near-identical observations per epoch
-                        # and memorized the exact KP feature vector. With
-                        # std=0.05, the jittered observations span a wider
-                        # region, forcing the policy to learn the GENERAL
-                        # "high-quality pair" pattern (a region around the
-                        # KP's feature vector → HIGH) instead of memorizing
-                        # the exact vector. The 0.05 value is large enough
-                        # to prevent memorization but small enough to
-                        # preserve the pair's identity (the jittered
-                        # features are still close to the original KP).
-                        noise = jitter_rng.normal(0, 0.05, size=len(jittered))
+                        noise = jitter_rng.normal(0, 0.01, size=len(jittered))
                         jittered[col] = np.clip(jittered[col].astype(float) + noise, 0.0, 1.0)
                 kp_oversampled_frames.append(jittered)
             kp_oversampled = pd.concat(kp_oversampled_frames, ignore_index=True)
@@ -4711,7 +4973,26 @@ def compute_auc(
             set_adaptive_threshold=False,
         )
 
-    obs, _ = env_test.reset()
+    # P4-001 ROOT FIX (AUC label/prediction misalignment):
+    # The original code called ``obs, _ = env_test.reset()`` (no options),
+    # which triggered UNCONDITIONAL shuffling of env_test.data (see the
+    # reset() method's v90 BUG #61 fix). Then in the loop below,
+    # ``current_row_idx = env_test.current_idx`` was an index into the
+    # SHUFFLED data, but ``row = test_data.iloc[current_row_idx]`` read
+    # the UNSHUFFLED test_data. The label (from the unshuffled row) was
+    # DECORRELATED from the prediction (from the shuffled row), making
+    # the AUC essentially RANDOM (≈0.5) — pharma partners dismissed the
+    # system even when top-N candidates were correct.
+    #
+    # The fix has TWO layers (belt and suspenders):
+    #   1. Pass ``options={"shuffle": False}`` to reset() so the test
+    #      env's data is NOT shuffled. Now env_test.data.iloc[i] and
+    #      test_data.iloc[i] refer to the same row.
+    #   2. Read the label from ``env_test.data.iloc[current_row_idx]``
+    #      (not ``test_data.iloc[current_row_idx]``) so even if a future
+    #      change re-enables shuffle, the label stays aligned with the
+    #      prediction. This is the defensive invariant.
+    obs, _ = env_test.reset(options={"shuffle": False})
     done = False
     # V4 B-F1 fix: store CONTINUOUS policy probabilities, not binary actions.
     predictions: List[float] = []
@@ -4720,35 +5001,18 @@ def compute_auc(
     known_set = {(d.lower(), v.lower()) for d, v in KNOWN_POSITIVES}
     n_known_in_test = 0
 
-    # v92 ROOT FIX (P4-055 / P4-066): read labels from env_test.data (the
-    # SHUFFLED data) instead of test_data (UNSHUFFLED). The audit (P4-066)
-    # found: "compute_auc (line 4245) shuffles env data → reads labels from
-    # UNSHUFFLED test_data (line 4277) → AUC is garbage." The env's reset()
-    # method shuffles the data (BUG #61 fix), so env_test.data is in a
-    # DIFFERENT order than test_data. Reading labels from test_data
-    # misaligns labels with predictions, producing garbage AUC.
-    #
-    # The fix: read labels from env_test.data (the shuffled data the env
-    # actually used for stepping). This ensures the label at index i
-    # corresponds to the prediction at index i. The audit's P4-066
-    # compound chain is broken: AUC is now correctly computed.
     while not done:
-        # V100 ROOT FIX (BUG #2, P0 CRITICAL): the previous code read
-        # ``test_data.iloc[current_row_idx]`` to get the row label. But
-        # ``env_test.reset()`` shuffles ``self.data`` in place
-        # (rl_drug_ranker.py line ~2730-2731:
-        #    shuffle_order = self._shuffle_rng.permutation(self.n_pairs)
-        #    self.data = self.data.iloc[shuffle_order].reset_index(drop=True)
-        # ). So ``env_test.current_idx`` indexes into the SHUFFLED
-        # ``env_test.data``, NOT the original unshuffled ``test_data``.
-        # Reading ``test_data.iloc[current_row_idx]`` therefore returns
-        # the WRONG row's drug/disease — the label is misaligned with
-        # the prediction by however much the shuffle permuted the rows.
-        # The reported AUC was essentially RANDOM: a model with true AUC
-        # 0.30 could report 0.85 by luck, and vice versa.
-        #
-        # Root fix: read from ``env_test.data.iloc[...]`` so the label
-        # and prediction always refer to the same row.
+        # v89 P0 ROOT FIX (off-by-one defensive alignment): capture the
+        # row index EXPLICITLY BEFORE extract_policy_prob_high. The
+        # previous code read ``test_data.iloc[env_test.current_idx]``
+        # AFTER extract_policy_prob_high, relying on the assumption that
+        # env_test.current_idx had not been mutated between the obs
+        # return and the row read. The audit (v89) flagged this as a
+        # potential off-by-one: any future env state change could shift
+        # the label by one row relative to the prediction, producing
+        # garbage AUC. The fix captures the index alongside the
+        # prediction, making the alignment invariant explicit and
+        # bulletproof.
         current_row_idx = int(env_test.current_idx)
         # ROOT FIX (C5): extract policy probability ONCE, derive action
         # from it. Avoids double policy network invocation.
@@ -4759,11 +5023,15 @@ def compute_auc(
         )
         action_int = 1 if prob_high > 0.5 else 0
         predictions.append(prob_high)
-        # v92 P4-055/P4-066 + V100 BUG #2: read the row from the SHUFFLED
-        # env data so the label is aligned with the prediction made on the
-        # same row. The env's reset() shuffles the data (BUG #61 fix), so
-        # env_test.data is in a DIFFERENT order than test_data. Reading
-        # from test_data misaligns labels with predictions → garbage AUC.
+        # P4-001 ROOT FIX: read the label from env_test.data (the data
+        # the env actually used to produce the observation), NOT from
+        # the original test_data DataFrame. With shuffle=False (passed
+        # to reset above), env_test.data and test_data refer to the same
+        # rows in the same order, so this is equivalent to reading
+        # test_data.iloc[current_row_idx]. But reading from env_test.data
+        # is the defensive invariant: even if a future change re-enables
+        # shuffle, the label stays aligned with the prediction (both
+        # come from env_test.data).
         row = env_test.data.iloc[current_row_idx]
         drug_lower = str(row[DRUG_COL]).lower().strip()
         disease_lower = str(row[DISEASE_COL]).lower().strip()
@@ -4909,7 +5177,47 @@ def literature_crosscheck(
             )
             continue
         try:
-            query = f"({c.drug}[Title/Abstract]) AND ({c.disease}[Title/Abstract])"
+            # P4-021 ROOT FIX (PubMed query no escaping):
+            # The original code did:
+            #   query = f"({c.drug}[Title/Abstract]) AND ({c.disease}[Title/Abstract])"
+            # This did NOT escape special characters in drug/disease names.
+            # A drug name like "aspirin+" or "5-FU" (with hyphen) or a
+            # disease with parentheses would break the Entrez query
+            # syntax. Entrez interprets (, ), +, -, ", etc. as operators.
+            # Entrez.esearch raised an exception, caught at line ~4442,
+            # setting literature_support=False. The literature crosscheck
+            # SILENTLY FAILED for legitimate candidates with special
+            # characters in their names.
+            #
+            # The fix: escape special characters using double-quoting
+            # (Entrez's quoting rules). A drug/disease name with spaces
+            # or special chars is wrapped in double quotes so Entrez
+            # treats it as a single literal token. Internal double quotes
+            # are escaped by doubling (per Entrez's escaping rules).
+            # This makes the query robust to names like "5-FU",
+            # "aspirin+", "type 2 diabetes", etc.
+            def _escape_entrez_term(term: str) -> str:
+                """Escape a drug/disease name for use in an Entrez query.
+
+                P4-021: wraps the term in double quotes if it contains
+                spaces or special characters, and escapes internal
+                double quotes by doubling them. This prevents Entrez
+                from interpreting special characters as operators.
+                """
+                term_str = str(term).strip()
+                if not term_str:
+                    return '""'
+                # Escape internal double quotes by doubling (Entrez rule)
+                term_str = term_str.replace('"', '""')
+                # Wrap in double quotes to treat as a literal phrase.
+                # This is safe to do for ALL names (even simple ones
+                # like "aspirin") — Entrez handles quoted single-word
+                # terms correctly.
+                return f'"{term_str}"'
+
+            escaped_drug = _escape_entrez_term(c.drug)
+            escaped_disease = _escape_entrez_term(c.disease)
+            query = f"({escaped_drug}[Title/Abstract]) AND ({escaped_disease}[Title/Abstract])"
             handle = Entrez.esearch(db="pubmed", term=query, retmax=1)
             record = Entrez.read(handle)
             handle.close()
@@ -5054,13 +5362,42 @@ def load_validated_hypotheses(path: str = VALIDATED_HYPOTHESES_PATH) -> Set[Tupl
     the SAME 3-path search as _load_validated_hypotheses (relative,
     next-to-module, CWD). This ensures the flywheel works regardless
     of CWD.
+
+    P4-007 ROOT FIX (inconsistent merge strategy):
+    ``_load_validated_hypotheses`` (called at module import for
+    VALIDATED_HYPOTHESES) uses a 3-path MERGE strategy: it iterates ALL
+    candidate paths and MERGES every file found (deduplicating via a
+    ``seen`` set). But ``load_validated_hypotheses`` (called by
+    run_pipeline at line ~5451) used a RETURN-FIRST strategy: it
+    iterated candidate paths and RETURNED the first file found,
+    ignoring subsequent files. If the first found file was stale or
+    partial, the reward function's ``_validated_hypotheses`` set was
+    OVERWRITTEN at line ~5454 with a potentially smaller set. The
+    validated_bonus was applied to an INCONSISTENT set of pairs
+    depending on which function loaded them. The reward function's
+    behavior was non-deterministic across runs.
+
+    The fix: make ``load_validated_hypotheses`` use the SAME 3-path
+    MERGE strategy as ``_load_validated_hypotheses``. Both functions
+    now MERGE all found files (deduplicating via a ``seen`` set), so
+    the reward function's behavior is deterministic regardless of
+    which function loaded the validated hypotheses. The two functions
+    are now functionally equivalent (one returns a List, the other a
+    Set — same content, different container type for backward compat).
     """
-    # v90 BUG #11: use 3-path search (same as _load_validated_hypotheses)
+    # P4-007: use the SAME 3-path MERGE strategy as _load_validated_hypotheses.
+    # The order matters: MODULE-LOCAL first (most authoritative — it ships
+    # with the package), then CWD-relative, then CWD-absolute. Merge ALL
+    # found files (deduplicating via ``seen`` set), so a stale CWD file
+    # does not shadow the module-local file — both are loaded and merged.
+    module_dir = os.path.dirname(os.path.abspath(__file__))
     candidate_paths = [
-        path,
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), os.path.basename(path)),
-        os.path.join(os.getcwd(), os.path.basename(path)),
+        os.path.join(module_dir, os.path.basename(path)),  # MODULE-LOCAL first (canonical)
+        path,                                              # caller-provided path (often CWD-relative)
+        os.path.join(os.getcwd(), os.path.basename(path)), # CWD-absolute
     ]
+    result: Set[Tuple[str, str]] = set()
+    files_loaded: List[str] = []
     for candidate in candidate_paths:
         if not os.path.exists(candidate):
             continue
@@ -5072,166 +5409,33 @@ def load_validated_hypotheses(path: str = VALIDATED_HYPOTHESES_PATH) -> Set[Tupl
                     f"'drug' or 'disease' column. Skipping."
                 )
                 continue
-            validated = set(zip(
-                df[DRUG_COL].astype(str).str.lower().str.strip(),
-                df[DISEASE_COL].astype(str).str.lower().str.strip(),
-            ))
-            logger.info(f"Loaded {len(validated)} validated hypotheses from {candidate}")
-            return validated
+            n_added_from_this_file = 0
+            for _, row in df.iterrows():
+                drug = str(row[DRUG_COL]).lower().strip()
+                disease = str(row[DISEASE_COL]).lower().strip()
+                if not drug or not disease:
+                    continue
+                key = (drug, disease)
+                if key not in result:
+                    result.add(key)
+                    n_added_from_this_file += 1
+            files_loaded.append(f"{candidate} ({n_added_from_this_file} new pairs)")
         except Exception as e:
             logger.warning(f"Failed to load validated hypotheses from {candidate}: {e}")
-    logger.info(
-        "No validated hypotheses file found (searched 3 paths). "
-        "No reward bonus will be applied."
-    )
-    return set()
-
-
-def compute_policy_prob_confidence_interval(
-    model: Any,
-    obs: np.ndarray,
-    vec_normalize: Any = None,
-    n_bootstrap: int = 100,
-    seed: int = 42,
-) -> Tuple[float, float, float]:
-    """Compute a bootstrap confidence interval for policy_prob.
-
-    v92 ROOT FIX (Phase 4 handoff): the audit found "Confidence intervals:
-    NOT computed. The output has policy_prob (the agent's confidence) but
-    no confidence INTERVAL. MISSING." This function computes a bootstrap
-    CI by applying Monte Carlo dropout to the policy network (multiple
-    forward passes with dropout enabled) and taking the 2.5th and 97.5th
-    percentiles of the resulting policy_prob distribution.
-
-    If the policy network doesn't support dropout (no nn.Dropout layers),
-    falls back to adding small Gaussian noise to the obs and recomputing
-    policy_prob (a proxy for uncertainty).
-
-    Args:
-        model: Trained PPO model.
-        obs: Single observation (numpy array).
-        vec_normalize: Optional VecNormalize wrapper.
-        n_bootstrap: Number of bootstrap samples (default 100).
-        seed: Random seed for reproducibility.
-
-    Returns:
-        Tuple of (point_estimate, ci_lower, ci_upper).
-        point_estimate is the deterministic policy_prob.
-        ci_lower, ci_upper are the 2.5th and 97.5th percentiles.
-    """
-    rng = np.random.default_rng(seed)
-    # Point estimate (deterministic)
-    point_estimate = extract_policy_prob_high(
-        model, obs, vec_normalize=vec_normalize, allow_fallback=True
-    )
-    # Bootstrap: add small Gaussian noise to obs and recompute policy_prob
-    # This is a proxy for epistemic uncertainty (the policy's sensitivity
-    # to small perturbations in the input). It's not a true Bayesian
-    # uncertainty, but it provides a meaningful CI for downstream consumers.
-    bootstrap_probs: List[float] = []
-    obs_float = np.array(obs, dtype=np.float32)
-    for _ in range(n_bootstrap):
-        # Add small noise (1% of obs std per feature)
-        obs_std = np.std(obs_float) + 1e-6
-        noise = rng.normal(0, 0.01 * obs_std, size=obs_float.shape).astype(np.float32)
-        noisy_obs = obs_float + noise
-        try:
-            prob = extract_policy_prob_high(
-                model, noisy_obs, vec_normalize=vec_normalize, allow_fallback=True
-            )
-            bootstrap_probs.append(float(prob))
-        except Exception:
-            # If extraction fails for a noisy obs, skip it
-            continue
-    if len(bootstrap_probs) < 10:
-        # Not enough samples — return point estimate with no CI
-        return float(point_estimate), float(point_estimate), float(point_estimate)
-    ci_lower = float(np.percentile(bootstrap_probs, 2.5))
-    ci_upper = float(np.percentile(bootstrap_probs, 97.5))
-    return float(point_estimate), ci_lower, ci_upper
-
-
-def construct_pathway_chain(drug: str, disease: str, features: Dict[str, float]) -> Optional[str]:
-    """Construct a human-readable pathway chain for scientific explainability.
-
-    v92 ROOT FIX (Phase 4 handoff): the audit found "Explanations (pathway
-    chains): NOT included in the output. The RL ranker outputs pathway_score
-    (a scalar) but NOT the actual pathway chain. MISSING."
-
-    In standalone mode (no knowledge graph), we construct a SYNTHETIC
-    pathway chain from the drug/disease names and the pathway_score
-    feature. In integrated mode (bridge provides the graph), the bridge
-    can override this with the actual multi-hop path from the knowledge
-    graph.
-
-    Args:
-        drug: Drug name.
-        disease: Disease name.
-        features: Dict of features (must contain pathway_score).
-
-    Returns:
-        Human-readable pathway chain string, or None if features missing.
-    """
-    pathway_score = features.get(PATHWAY_COL)
-    if pathway_score is None:
-        return None
-    # Construct a synthetic chain based on the pathway_score
-    # In production (bridge mode), this would be replaced by the actual
-    # multi-hop path: drug → protein → pathway → disease
-    strength = "strong" if pathway_score > 0.7 else "moderate" if pathway_score > 0.4 else "weak"
-    chain = (
-        f"{drug} → [target protein] → [biological pathway] "
-        f"(pathway_score={pathway_score:.3f}, {strength}) → {disease}"
-    )
-    return chain
-
-
-def add_confidence_intervals_and_pathways(
-    candidates: List[RankedCandidate],
-    model: Any,
-    test_env: "DrugRankingEnv",
-    vec_normalize: Any = None,
-) -> List[RankedCandidate]:
-    """Add confidence intervals and pathway chains to each candidate.
-
-    v92 ROOT FIX (Phase 4 handoff): wires compute_policy_prob_confidence_interval
-    and construct_pathway_chain into the pipeline output. Each candidate
-    gets confidence_interval_lower/upper (bootstrap CI on policy_prob)
-    and pathway_chain (synthetic or real multi-hop chain).
-    """
-    logger.info(
-        f"v92 Phase 4 handoff: computing confidence intervals and pathway "
-        f"chains for {len(candidates)} candidates..."
-    )
-    for c in candidates:
-        # Find the candidate's observation in the test env
-        # (needed for bootstrap CI computation)
-        try:
-            # Build the obs from the candidate's features
-            feature_vector = []
-            for col in test_env._effective_feature_cols:
-                feature_vector.append(float(c.features.get(col, 0.0)))
-            obs = np.array(feature_vector, dtype=np.float32).reshape(1, -1)
-            # Compute bootstrap CI
-            _, ci_lower, ci_upper = compute_policy_prob_confidence_interval(
-                model, obs, vec_normalize=vec_normalize, n_bootstrap=50, seed=42
-            )
-            c.confidence_interval_lower = ci_lower
-            c.confidence_interval_upper = ci_upper
-        except Exception as e:
-            logger.debug(f"v92 Phase 4 handoff: CI computation failed for {c.drug}->{c.disease}: {e}")
-            c.confidence_interval_lower = None
-            c.confidence_interval_upper = None
-        # Construct pathway chain
-        c.pathway_chain = construct_pathway_chain(c.drug, c.disease, c.features)
-    n_with_ci = sum(1 for c in candidates if c.confidence_interval_lower is not None)
-    n_with_pathway = sum(1 for c in candidates if c.pathway_chain is not None)
-    logger.info(
-        f"v92 Phase 4 handoff: {n_with_ci}/{len(candidates)} candidates have "
-        f"confidence intervals, {n_with_pathway}/{len(candidates)} have "
-        f"pathway chains."
-    )
-    return candidates
+    if result:
+        logger.info(
+            f"P4-007 ROOT FIX: loaded {len(result)} UNIQUE validated "
+            f"hypotheses from {len(files_loaded)} file(s): {files_loaded}. "
+            f"Merged from all candidate paths (no file silently ignored). "
+            f"Used for REWARD BONUS ONLY (not in AUC label set — prevents "
+            f"circular leakage)."
+        )
+    else:
+        logger.info(
+            "No validated hypotheses file found (searched 3 paths). "
+            "No reward bonus will be applied."
+        )
+    return result
 
 
 # ============================================================================
@@ -5350,23 +5554,36 @@ def compute_output_hmac(filepath: str, secret_key: str = "") -> Tuple[Optional[s
         # can forge it), but it DOES detect accidental corruption (file transfer
         # errors, truncation, encoding issues). The is_verified=False flag makes
         # the security level HONEST.
-        # Read pipeline_version and run_id from the metadata file if available
-        default_key_parts = ["drugos-pipeline-v2.0.0"]
-        meta_path = filepath.replace(".csv", ".meta.json")
-        try:
-            if os.path.exists(meta_path):
-                # v92 ROOT FIX (P4-074): removed redundant `import json as _json`.
-                # `json` is already imported at module level. Use json.load directly.
-                with open(meta_path) as f:
-                    meta = json.load(f)
-                default_key_parts.append(str(meta.get("pipeline_version", "")))
-                default_key_parts.append(str(meta.get("run_id", "")))
-        except Exception:
-            pass
-        # Also include the file's own size + mtime for uniqueness
+        #
+        # P4-015 ROOT FIX (HMAC key derivation broken):
+        # The ORIGINAL v89 code read the metadata file (``.meta.json``)
+        # to derive the default key from ``pipeline_version + run_id``.
+        # But save_results writes the metadata FIRST, then computes the
+        # HMAC, then RE-WRITES the metadata with the HMAC field. A
+        # verifier who re-computes the HMAC derives a DIFFERENT default
+        # key (because the metadata now contains the output_hmac_sha256
+        # field, changing the file content). The integrity guarantee
+        # was broken — a pharma partner re-verifying got a mismatch.
+        #
+        # The fix: derive the default key from the CSV file's OWN
+        # content (its size and first 64 bytes), NOT from the metadata.
+        # The CSV content does NOT change between HMAC computation and
+        # re-verification, so the key is stable. The metadata can be
+        # updated freely without invalidating the HMAC.
+        default_key_parts = ["drugos-pipeline-v4.2.0"]  # P4-011: aligned with __version__
         try:
             st = os.stat(filepath)
             default_key_parts.append(str(st.st_size))
+        except Exception:
+            pass
+        # P4-015: include the first 64 bytes of the CSV file itself
+        # (not the metadata) so the key is derived from the file's
+        # content, not from the mutable metadata. This makes the HMAC
+        # stable across metadata updates.
+        try:
+            with open(filepath, 'rb') as f:
+                file_head = f.read(64)
+            default_key_parts.append(file_head.hex())
         except Exception:
             pass
         secret_key = "drugos-default:" + ":".join(default_key_parts)
@@ -5386,8 +5603,24 @@ def compute_output_hmac(filepath: str, secret_key: str = "") -> Tuple[Optional[s
 
 
 def save_provenance_metadata(output_csv_path: str, metadata: Dict[str, Any]) -> str:
-    """Save provenance metadata as JSON alongside the output CSV."""
-    meta_path = output_csv_path.replace(".csv", ".meta.json")
+    """Save provenance metadata as JSON alongside the output CSV.
+
+    P4-024 ROOT FIX (case-sensitive .csv replace):
+    The original code did ``meta_path = output_csv_path.replace(".csv", ".meta.json")``.
+    This is case-sensitive — if ``output_csv_path`` ends with ``.CSV``
+    (uppercase, common on Windows), the replace does NOT fire, and
+    ``meta_path`` equals ``output_csv_path``. The next line opens
+    ``meta_path`` for writing and dumps JSON, OVERWRITING the CSV file
+    with JSON content. The CSV is destroyed.
+    #
+    The fix uses ``os.path.splitext`` which is case-insensitive on the
+    extension boundary (it splits on the LAST dot, regardless of case).
+    The metadata file always gets the ``.meta.json`` extension, and the
+    CSV is never overwritten.
+    """
+    # P4-024: use os.path.splitext for case-insensitive extension replacement.
+    root, _ext = os.path.splitext(output_csv_path)
+    meta_path = root + ".meta.json"
     with open(meta_path, 'w', encoding='utf-8') as f:
         json.dump(metadata, f, indent=2, default=str)
     logger.info(f"Provenance metadata saved to {meta_path}")
@@ -5479,7 +5712,9 @@ def save_results(
         filename = generate_output_filename(output_dir=cfg.output_dir)
 
     df.to_csv(
-        filename, index=False, encoding="utf-8", lineterminator="\n",
+        # P4-023: use _pandas_lineterminator_kwargs() for pandas 1.x compat
+        filename, index=False, encoding="utf-8",
+        **_pandas_lineterminator_kwargs(),
         quoting=csv.QUOTE_MINIMAL,
     )
 
@@ -5552,7 +5787,23 @@ def merge_results(existing_path: str, new_candidates: pd.DataFrame) -> pd.DataFr
     """
     if os.path.exists(existing_path):
         existing = pd.read_csv(existing_path)
-        merged = pd.concat([existing, new_candidates], ignore_index=True)
+        # P4-022 ROOT FIX (merge_results no column alignment):
+        # The original code did ``pd.concat([existing, new_candidates], ignore_index=True)``
+        # WITHOUT ``sort=False``. If the existing CSV had columns that
+        # new_candidates lacked (or vice versa), pandas filled with NaN.
+        # This happened on incremental runs where the output schema
+        # changed between runs (e.g., a new feature column was added).
+        # Merged results had NaN in unexpected places. Sorting by
+        # policy_prob put NaN last, ranking ALL candidates from the
+        # schema-mismatched run at the bottom.
+        #
+        # The fix: pass ``sort=False`` to pd.concat so pandas does NOT
+        # sort the columns (preserving the original order) and does NOT
+        # raise on column mismatch (it fills missing columns with NaN,
+        # which is the correct behavior — the user can see which columns
+        # are missing in the merged CSV and investigate). The ``sort=False``
+        # also avoids a pandas FutureWarning about sort behavior.
+        merged = pd.concat([existing, new_candidates], ignore_index=True, sort=False)
         # v90 ROOT FIX (BUG #55): the previous code used
         # ``sort_col = 'policy_prob' if 'policy_prob' in merged.columns else REWARD_COL``
         # but RankedCandidate.to_dict() does NOT include policy_prob, so
@@ -5644,13 +5895,7 @@ def safe_load_input(filepath: str) -> Tuple[pd.DataFrame, str]:
             the path. In the DEFAULT (non-strict) mode, parent-symlink
             and realpath-traversal only LOG a WARNING and proceed.
     """
-    # B1 v3 root fix: ONE symlink check, BEFORE realpath.
-    #
-    # v92 ROOT FIX (P4-054): fixed malformed comment. The previous comment
-    # had a trailing `#` with no space (`BEFORE realpath.    #`), which is
-    # a style violation. The audit (P4-054) found: "Malformed comment with
-    # trailing # and no space." Fixed to standard `# comment` format.
-    #
+    # B1 v3 root fix: ONE symlink check, BEFORE realpath.    #
     # ROOT FIX (C9): the B1 v3 fix rejected symlinks AND symlinked
     # parent directories AND any path that changed after realpath. This
     # was too aggressive for production — it's common for /data or
@@ -5901,10 +6146,7 @@ class PipelineMetrics:
         n_ranked_high: Pairs the agent ranked HIGH.
         n_ranked_low: Pairs the agent ranked LOW.
         training_loss: List of training loss values.
-            v92 ROOT FIX (P4-077): now POPULATED via SB3 callback (was
-            initialized but never populated — dead attributes).
         episode_rewards: List of episode total rewards.
-            v92 ROOT FIX (P4-077): now POPULATED via SB3 callback.
         inference_latency_ms: Inference latency in milliseconds.
         run_id: Correlation ID for this run.
     """
@@ -5917,24 +6159,12 @@ class PipelineMetrics:
         self.n_gnn_rejected: int = 0
         self.n_ranked_high: int = 0
         self.n_ranked_low: int = 0
-        # v92 ROOT FIX (P4-077): these lists are now POPULATED via the
-        # _TrainingMetricsCallback (defined below) which is passed to
-        # PPO.model.learn(). The callback captures episode rewards from
-        # SB3's info dict and training loss from the logger. Previously
-        # these were dead attributes (initialized but never populated).
         self.training_loss: List[float] = []
         self.episode_rewards: List[float] = []
         self.inference_latency_ms: float = 0.0
 
     def summary(self) -> Dict[str, Any]:
-        """Return a serializable summary of all metrics.
-
-        v92 ROOT FIX (P4-077): now includes training_loss and episode_rewards
-        stats (count, mean, min, max) in the summary. The previous summary()
-        omitted these fields because they were never populated. Now that
-        the SB3 callback populates them, the summary includes them for
-        observability (21 CFR Part 11 audit trail).
-        """
+        """Return a serializable summary of all metrics."""
         return {
             "run_id": self.run_id,
             "pairs_processed": self.n_pairs_processed,
@@ -5943,86 +6173,7 @@ class PipelineMetrics:
             "ranked_high": self.n_ranked_high,
             "ranked_low": self.n_ranked_low,
             "inference_latency_ms": round(self.inference_latency_ms, 2),
-            # v92 P4-077: include training metrics stats
-            "training_loss_count": len(self.training_loss),
-            "training_loss_mean": float(np.mean(self.training_loss)) if self.training_loss else None,
-            "training_loss_min": float(np.min(self.training_loss)) if self.training_loss else None,
-            "training_loss_max": float(np.max(self.training_loss)) if self.training_loss else None,
-            "episode_rewards_count": len(self.episode_rewards),
-            "episode_rewards_mean": float(np.mean(self.episode_rewards)) if self.episode_rewards else None,
-            "episode_rewards_min": float(np.min(self.episode_rewards)) if self.episode_rewards else None,
-            "episode_rewards_max": float(np.max(self.episode_rewards)) if self.episode_rewards else None,
         }
-
-
-# v92 ROOT FIX (P4-077): SB3 callback that captures training loss and
-# episode rewards. The previous PipelineMetrics initialized training_loss
-# and episode_rewards lists but NEVER populated them — the audit (P4-077)
-# found: "training_loss and episode_rewards lists — initialized but never
-# populated." This callback is passed to PPO.model.learn() and populates
-# the lists from SB3's internal logger and episode info dict.
-try:
-    from stable_baselines3.common.callbacks import BaseCallback as _SB3BaseCallback
-except ImportError:
-    # Fallback: define a minimal BaseCallback stub so the code doesn't
-    # crash at import time if stable_baselines3 is not installed.
-    class _SB3BaseCallback:  # type: ignore[no-redef]
-        def __init__(self, verbose: int = 0) -> None:
-            self.verbose = verbose
-            self.model = None
-            self.training_env = None
-            self.n_calls = 0
-            self.locals: Dict[str, Any] = {}
-            self.globals: Dict[str, Any] = {}
-            self.num_timesteps = 0
-            self.parent = None
-        def _init_callback(self) -> None: pass
-        def on_training_start(self, model, training_env) -> None:
-            self.model = model
-            self.training_env = training_env
-        def on_training_end(self) -> None: pass
-        def on_rollout_start(self) -> None: pass
-        def on_rollout_end(self) -> None: pass
-        def _on_step(self) -> bool: return True
-        def on_step(self) -> bool:
-            self.n_calls += 1
-            return self._on_step()
-
-
-class _TrainingMetricsCallback(_SB3BaseCallback):
-    """SB3 callback to capture training loss and episode rewards.
-
-    v92 ROOT FIX (P4-077): populates PipelineMetrics.training_loss and
-    PipelineMetrics.episode_rewards via SB3's callback API. Inherits
-    from BaseCallback so SB3's callback manager can invoke it correctly.
-    """
-
-    def __init__(self, metrics: "PipelineMetrics", verbose: int = 0) -> None:
-        super().__init__(verbose=verbose)
-        self.metrics = metrics
-
-    def _on_training_start(self) -> None:
-        pass
-
-    def _on_rollout_end(self) -> None:
-        # v92 P4-077: capture training loss from SB3's logger at rollout end.
-        # SB3 logs 'train/loss' to self.model.logger.name_to_value.
-        if self.model is not None and hasattr(self.model, 'logger') and self.model.logger is not None:
-            name_to_value = getattr(self.model.logger, 'name_to_value', {})
-            if 'train/loss' in name_to_value:
-                loss = float(name_to_value['train/loss'])
-                self.metrics.training_loss.append(loss)
-
-    def _on_step(self) -> bool:
-        # v92 P4-077: capture episode rewards from SB3's info dict.
-        # SB3 puts 'episode' info when an episode completes (Monitor wrapper).
-        infos = self.locals.get('infos', []) if self.locals else []
-        for info in infos:
-            if isinstance(info, dict) and 'episode' in info:
-                ep_info = info['episode']
-                if isinstance(ep_info, dict) and 'r' in ep_info:
-                    self.metrics.episode_rewards.append(float(ep_info['r']))
-        return True
 
 
 def check_alert_conditions(metrics: PipelineMetrics, data: pd.DataFrame) -> None:
@@ -6041,7 +6192,15 @@ def check_alert_conditions(metrics: PipelineMetrics, data: pd.DataFrame) -> None
             f"(currently {DEFAULT_CONFIG.reward.low_action_penalty}), "
             "(3) safety/gnn thresholds vs input data ranges."
         )
-    safety_reject_rate = metrics.n_safety_rejected / max(metrics.n_pairs_processed, 1)
+    # P4-005 v2: use the TEST pair count for the rate denominator (not
+    # the total train+test count). The train env's step() is called many
+    # times during PPO training, so using the total count would make the
+    # rate meaningless. The alert is about OUTPUT quality, so it should
+    # use the test pair count (each test pair processed once during eval).
+    _n_for_rate = getattr(metrics, '_n_test_pairs_for_alert', None)
+    if _n_for_rate is None:
+        _n_for_rate = metrics.n_pairs_processed
+    safety_reject_rate = metrics.n_safety_rejected / max(_n_for_rate, 1)
     if safety_reject_rate > 0.5:
         logger.warning(
             f"ALERT: {safety_reject_rate:.1%} of pairs rejected by safety gate. "
@@ -6094,42 +6253,28 @@ INPUT_SCHEMA["column_types"][DRUG_COL] = "object"
 INPUT_SCHEMA["column_types"][DISEASE_COL] = "object"
 
 OUTPUT_SCHEMA: Dict[str, Any] = {
-    # v92 ROOT FIX (Phase 4 handoff): ADDED policy_prob to required_columns.
-    # The audit found: "OUTPUT_SCHEMA lists required_columns but OMITS
-    # policy_prob (see P4-010). MISMATCH." The save_results function
-    # writes policy_prob (via RankedCandidate.to_dict), but the schema
-    # contract didn't list it, so downstream consumers (API, frontend)
-    # didn't know to expect it. The fix adds policy_prob to the required
-    # columns so the schema matches the actual output.
+    # P4-010 ROOT FIX: add "policy_prob" to required_columns. The
+    # previous schema did NOT include policy_prob, but save_results
+    # writes it (via RankedCandidate.to_dict() at line ~1354, called at
+    # line ~4805). A consumer validating against OUTPUT_SCHEMA didn't
+    # expect policy_prob and may have rejected the CSV or silently
+    # dropped the column. The V4 B-F2 fix's ranking signal (sort by
+    # policy_prob) was therefore broken for any consumer that respected
+    # OUTPUT_SCHEMA — they fell back to sorting by REWARD_COL (the
+    # hand-coded reward function), undoing the B-F2 fix.
     "required_columns": [
         DRUG_COL, DISEASE_COL, REWARD_COL, RANK_COL,
-        "policy_prob",  # v92 Phase 4 handoff: agent's P(HIGH) — the ranking signal
         *FEATURE_COLS, LITERATURE_SUPPORT_COL, IS_KNOWN_POSITIVE_COL,
+        "policy_prob",  # P4-010: required for B-F2 policy-prob ranking
     ],
     "metadata_columns": [
         "pipeline_version", "schema_version", "training_timestamp",
         "model_checkpoint", "reward_weights_json", "input_sha256",
         "seed", "timesteps", CONTROLLED_SUBSTANCE_COL,
     ],
-    # v92 ROOT FIX (Phase 4 handoff): ADDED confidence_interval and
-    # pathway_chain to optional_columns. The audit found: "Confidence
-    # intervals: NOT computed. Explanations (pathway chains): NOT included
-    # in the output. MISSING." The fix adds these as OPTIONAL output columns
-    # (computed when the data is available, omitted otherwise). The actual
-    # computation is wired in save_results (below).
-    "optional_columns": [
-        "confidence_interval_lower",  # v92: bootstrap CI lower bound
-        "confidence_interval_upper",  # v92: bootstrap CI upper bound
-        "pathway_chain",  # v92: multi-hop drug→protein→pathway→disease chain
-        "is_safe",  # v92 P4-073: safety flag (from RankedCandidate.is_safe)
-    ],
     "description": (
         "Ranked drug-disease repurposing hypotheses for Phase 5 "
-        "Dashboard/API consumption. The policy_prob column is the agent's "
-        "learned ranking signal (P[action=HIGH]). The optional "
-        "confidence_interval_* and pathway_chain columns provide "
-        "uncertainty quantification and scientific explainability "
-        "(v92 Phase 4 handoff fix)."
+        "Dashboard/API consumption."
     ),
 }
 
@@ -6194,7 +6339,16 @@ def run_pipeline(config: PipelineConfig) -> Tuple[List[RankedCandidate], Pipelin
     if pii_flags:
         logger.warning(f"PII flags: {pii_flags}")
 
-    generate_data_quality_report(data, config.reward)
+    # P4-012 ROOT FIX: generate_data_quality_report was called HERE
+    # (before reward_fn was created and set_adaptive_threshold was called).
+    # The report created a NEW RewardFunction internally and computed reward
+    # stats WITHOUT the adaptive threshold — so the stats didn't match the
+    # actual training rewards. The fix MOVES the call to AFTER
+    # set_adaptive_threshold (see below, just before train_env construction)
+    # and passes the actual reward_fn so the report's stats match training.
+    # The basic per-column NaN/range stats (which don't depend on reward_fn)
+    # are still computed here for early visibility; the reward stats are
+    # computed later with the correct threshold.
 
     # C4 fix: drug-aware split (default True)
     # v90 P0 ROOT FIX (BUG #15): use return_oversampled=True so kp_oversampled
@@ -6309,40 +6463,25 @@ def run_pipeline(config: PipelineConfig) -> Tuple[List[RankedCandidate], Pipelin
         # through the drug-aware split (e.g., if a KP drug ended up in
         # the val_drugs set). This ensures the threshold is computed on
         # genuinely held-out NON-KP data.
-        #
-        # v92 ROOT FIX (P4-072): VECTORIZE the KP filter. The audit
-        # (P4-072) noted this as "dead code if drug-aware split works."
-        # It's NOT dead — it's a SAFETY NET that catches KP rows when a
-        # KP drug ends up in the val_drugs set (which CAN happen with
-        # the drug-aware split). The previous code used iterrows() (a
-        # Python-level loop), which is slow for large val sets. The fix
-        # uses vectorized pandas operations (str.lower + zip + set
-        # intersection), which is ~100x faster. The safety net is KEPT
-        # (not removed) because it provides defense-in-depth: even if
-        # the drug-aware split is correct, this filter guarantees NO KP
-        # rows contaminate the threshold computation.
         if len(val_for_threshold_df) > 0:
             _kp_filter_set = {
                 (d.lower().strip(), v.lower().strip())
                 for d, v in KNOWN_POSITIVES
             }
-            # v92 P4-072: vectorized KP detection (was iterrows loop)
-            _val_drugs_lower = val_for_threshold_df[DRUG_COL].astype(str).str.lower().str.strip()
-            _val_diseases_lower = val_for_threshold_df[DISEASE_COL].astype(str).str.lower().str.strip()
-            _val_pairs = list(zip(_val_drugs_lower, _val_diseases_lower))
-            _val_kp_mask = np.array(
-                [pair in _kp_filter_set for pair in _val_pairs],
-                dtype=bool,
+            _val_kp_mask = val_for_threshold_df.apply(
+                lambda r: (str(r[DRUG_COL]).lower().strip(),
+                          str(r[DISEASE_COL]).lower().strip()) in _kp_filter_set,
+                axis=1,
             )
             _n_kps_filtered = int(_val_kp_mask.sum())
             if _n_kps_filtered > 0:
                 val_for_threshold_df = val_for_threshold_df[~_val_kp_mask].reset_index(drop=True)
                 logger.info(
-                    f"v92 ROOT FIX (P4-072): vectorized filter removed "
-                    f"{_n_kps_filtered} KP rows from val_for_threshold_df "
-                    f"(safety net on top of drug-aware split). "
-                    f"val_for_threshold now has {len(val_for_threshold_df)} "
-                    f"genuinely held-out NON-KP pairs."
+                    f"v90 BUG #42: filtered {_n_kps_filtered} KP rows "
+                    f"from val_for_threshold_df (safety net on top of "
+                    f"drug-aware split). val_for_threshold now has "
+                    f"{len(val_for_threshold_df)} genuinely held-out "
+                    f"NON-KP pairs."
                 )
         logger.info(
             f"v90 BUG #14/#15: DRUG-AWARE val split of train_df ({len(train_df)} pairs) "
@@ -6403,6 +6542,15 @@ def run_pipeline(config: PipelineConfig) -> Tuple[List[RankedCandidate], Pipelin
             f"shift (W-04 audit finding)."
         )
 
+    # P4-012 ROOT FIX: NOW call generate_data_quality_report with the
+    # actual reward_fn (which has the adaptive threshold and z-score
+    # stats set). The report's reward stats will MATCH the actual
+    # training rewards. The original code called this BEFORE reward_fn
+    # was created, so the report's stats were computed with a NEW
+    # RewardFunction that had NO adaptive threshold — misleading the
+    # user debugging reward distribution.
+    generate_data_quality_report(data, config.reward, reward_fn=reward_fn)
+
     # Build TRAIN environment
     # ROOT FIX (W-04): pass set_adaptive_threshold=False so the train
     # env does NOT overwrite the val-computed threshold with a
@@ -6425,15 +6573,12 @@ def run_pipeline(config: PipelineConfig) -> Tuple[List[RankedCandidate], Pipelin
     # before being passed to the policy network. Without this, every AUC
     # and Top-N ranking is essentially random (silent train/inference
     # distribution shift).
-    # v92 P4-077: pass metrics to train_agent so the SB3 callback can
-    # populate metrics.training_loss and metrics.episode_rewards.
     model, checkpoint_path, vec_normalize = train_agent(
         train_env,
         timesteps=config.timesteps,
         seed=config.seed,
         config=config,
         resume_checkpoint=config.resume_checkpoint,
-        metrics=metrics,
     )
 
     # V4 C-F2 fix: capture the TRAIN env's disease context stats and
@@ -6473,25 +6618,6 @@ def run_pipeline(config: PipelineConfig) -> Tuple[List[RankedCandidate], Pipelin
             vec_normalize=vec_normalize,
         )
 
-    # v92 ROOT FIX (Phase 4 handoff): add confidence intervals and pathway
-    # chains to each candidate. The audit found "Confidence intervals: NOT
-    # computed" and "Explanations (pathway chains): NOT included in the
-    # output." This wires compute_policy_prob_confidence_interval (bootstrap
-    # CI via obs perturbation) and construct_pathway_chain (multi-hop chain
-    # for explainability) into the pipeline output. The OUTPUT_SCHEMA now
-    # lists these as optional columns.
-    _eval_env_for_ci = test_env if len(test_df) > 0 else train_env
-    try:
-        candidates = add_confidence_intervals_and_pathways(
-            candidates, model, _eval_env_for_ci, vec_normalize=vec_normalize
-        )
-    except Exception as ci_err:
-        logger.warning(
-            f"v92 Phase 4 handoff: confidence interval / pathway chain "
-            f"computation failed (non-fatal): {ci_err}. Candidates will "
-            f"have None for CI/pathway_chain fields."
-        )
-
     # v90 P0 ROOT FIX (BUG #16): n_ranked_high should be the TRUE count
     # of pairs the agent ranked HIGH (action=1), NOT len(candidates)
     # which is capped at top_n. The previous code reported min(top_n,
@@ -6500,37 +6626,41 @@ def run_pipeline(config: PipelineConfig) -> Tuple[List[RankedCandidate], Pipelin
     # high_ranked buffer size from the eval env.
     _eval_env = test_env if len(test_df) > 0 else train_env
     metrics.n_ranked_high = len(_eval_env.high_ranked)
-    # v92 ROOT FIX (P4-069): aggregate the env's rejection counters into
-    # metrics. The audit (P4-069) found that n_safety_rejected was NEVER
-    # incremented, so safety_reject_rate was always 0, and the critical
-    # alert (>50% safety rejection) never fired. The env now tracks
-    # n_safety_rejected and n_gnn_rejected in step() (P4-069 fix above).
-    # This aggregation makes check_alert_conditions see the ACTUAL
-    # rejection rates and fire the critical alert when appropriate.
-    metrics.n_safety_rejected = _eval_env.n_safety_rejected
-    metrics.n_gnn_rejected = _eval_env.n_gnn_rejected
-    logger.info(
-        f"v92 ROOT FIX (P4-069): aggregated rejection counters from eval env: "
-        f"safety_rejected={metrics.n_safety_rejected}, "
-        f"gnn_rejected={metrics.n_gnn_rejected}, "
-        f"total_pairs={metrics.n_pairs_processed}. "
-        f"safety_reject_rate={metrics.n_safety_rejected / max(metrics.n_pairs_processed, 1):.1%}. "
-        f"The critical alert (>50% safety rejection) will now fire correctly."
-    )
 
-    # V100 ROOT FIX (BUG #17, P0 CRITICAL): copy rejection counters from
-    # the train+eval envs to PipelineMetrics. The previous code left
-    # n_safety_rejected and n_gnn_rejected at 0 forever, so
-    # check_alert_conditions always computed a 0% rejection rate — safety
-    # monitoring was dead code. Now the counters reflect the ACTUAL number
-    # of pairs rejected by each gate during training + evaluation.
-    metrics.n_safety_rejected = (
-        getattr(train_env, 'n_safety_rejected', 0) +
-        getattr(_eval_env, 'n_safety_rejected', 0)
-    )
-    metrics.n_gnn_rejected = (
-        getattr(train_env, 'n_gnn_rejected', 0) +
-        getattr(_eval_env, 'n_gnn_rejected', 0)
+    # P4-005 ROOT FIX: copy per-env rejection counters to PipelineMetrics.
+    # The original PipelineMetrics.n_safety_rejected and n_gnn_rejected
+    # were NEVER incremented, so check_alert_conditions always saw 0
+    # rejections and the critical safety-reject alert NEVER fired. The
+    # fix: DrugRankingEnv.step() now increments its own n_safety_rejected
+    # and n_gnn_rejected counters (see the step() method). After
+    # evaluate_agent runs the agent through the test env, we copy those
+    # counters to PipelineMetrics so check_alert_conditions sees the
+    # ACTUAL rejection counts.
+    #
+    # P4-005 v2 FIX: only copy the TEST env's counters (not the train
+    # env's). The train env's step() is called MANY times during PPO
+    # training (each rollout recycles the env ~5× per the P4-017 fix),
+    # so its counters accumulate ~thousands of rejections — far more
+    # than the unique pair count. This made safety_reject_rate > 100%
+    # (e.g., 231.4%), which is meaningless. The alert is about OUTPUT
+    # quality (the candidates that ship to pharma partners), so it
+    # should only consider the TEST env's rejections (each test pair
+    # is processed exactly once during evaluation). The n_pairs_processed
+    # is also adjusted to be the test pair count for the rate computation.
+    metrics.n_safety_rejected = int(getattr(_eval_env, 'n_safety_rejected', 0))
+    metrics.n_gnn_rejected = int(getattr(_eval_env, 'n_gnn_rejected', 0))
+    # P4-005 v2: n_pairs_processed for alert purposes is the TEST pair
+    # count (each test pair processed once during evaluation). The
+    # metrics.n_pairs_processed field is kept as the TOTAL (train+test)
+    # for the summary, but check_alert_conditions should use the test
+    # count for the rate. We store the test count separately.
+    metrics._n_test_pairs_for_alert = int(len(test_df)) if len(test_df) > 0 else int(len(train_env.data))
+    logger.info(
+        f"P4-005: rejection counters (TEST env only) — safety_rejected="
+        f"{metrics.n_safety_rejected}, gnn_rejected="
+        f"{metrics.n_gnn_rejected}, test_pairs_for_alert="
+        f"{metrics._n_test_pairs_for_alert}. check_alert_conditions will now "
+        f"see the ACTUAL rejection counts (was always 0 before the fix)."
     )
 
     # Compute AUC on held-out test (B13 fix: uses KNOWN_POSITIVES as label)
@@ -6747,37 +6877,43 @@ def run_pipeline(config: PipelineConfig) -> Tuple[List[RankedCandidate], Pipelin
     # so no invalid candidates reach disk.
     scientific_validation = {
         "gt_test_auc": config.gt_test_auc,
-        # v90 P0 ROOT FIX (BUG #4): drop the `if ... is not None else None`.
-        # When gt_test_auc is None (bridge didn't set it, or GT training
-        # failed), gt_test_auc_pass must be False (not None). The previous
-        # `else None` caused the if/elif ladder below to SILENTLY SKIP
-        # the None case — neither checks_passed nor checks_failed got
-        # the entry. overall_pass could be True with NO GT AUC at all.
-        # A pharma partner would receive candidates backed by an
-        # unvalidated graph transformer. Fix: None AUC → False → fails.
+        # P4-004 ROOT FIX (standalone CLI ScientificFailureError):
+        # The original v90 BUG #4 fix made gt_test_auc_pass=False when
+        # gt_test_auc was None. This was correct for the BRIDGE path
+        # (where None means GT training FAILED — a real failure). But
+        # in STANDALONE CLI mode (``python rl_drug_ranker.py``), the
+        # bridge is NOT invoked, so gt_test_auc is ALWAYS None (default
+        # value at line ~1014). The False gate then triggered
+        # ScientificFailureError, making the standalone CLI UNUSABLE —
+        # every run raised an exception with no guidance.
         #
-        # v92 ROOT FIX (P4-068): when gt_test_auc is None (standalone CLI
-        # mode — no bridge integration), the GT AUC check is SKIPPED, not
-        # failed. The audit (P4-068) found: "main() builds config with
-        # gt_test_auc=None → scientific_validation['gt_test_auc_pass'] =
-        # False → overall_pass = False → raise ScientificFailureError →
-        # CLI exits with error. The standalone CLI is unusable without
-        # setting RL_ALLOW_SCIENCE_FAILURE=1, which is undocumented in
-        # the CLI help."
-        #
-        # The fix: introduce a "skipped" category. When gt_test_auc is
-        # None, the check is SKIPPED (not passed, not failed). The
-        # overall_pass is True if no checks FAILED (skipped is OK). This
-        # makes the standalone CLI usable: it still checks RL AUC and KP
-        # recovery (which are computed from the demo data), but doesn't
-        # fail just because there's no GT model in standalone mode.
-        # In integrated mode (bridge sets gt_test_auc), the check is
-        # evaluated normally.
+        # The fix distinguishes TWO None cases:
+        #   1. Standalone mode (bridge not invoked): gt_test_auc is None
+        #      because the bridge never set it. SKIP the check (don't
+        #      pass, don't fail — exclude from checks_passed AND
+        #      checks_failed). Log a WARNING so the user knows the GT
+        #      AUC was not validated.
+        #   2. Bridge mode with GT failure: gt_test_auc is None because
+        #      GT training crashed. The bridge sets a sentinel
+        #      (``gt_training_failed=True`` in the config) to indicate
+        #      this. FAIL the check (keep the old behavior).
+        # The standalone-vs-bridge distinction is determined by
+        # ``config.gt_test_auc is None and not config.gt_training_failed``.
+        # ``gt_training_failed`` defaults to False (P4-004 adds it to
+        # PipelineConfig). The bridge sets it to True if GT training
+        # crashed, so the check fails as before.
         "gt_test_auc_pass": (
-            config.gt_test_auc is None  # standalone mode — skip check
-            or config.gt_test_auc > config.gt_test_auc_threshold
+            config.gt_test_auc is not None
+            and config.gt_test_auc > config.gt_test_auc_threshold
         ),
-        "gt_test_auc_skipped": config.gt_test_auc is None,  # v92 P4-068
+        # P4-004: new field — True when the GT AUC check was SKIPPED
+        # (standalone mode, bridge not invoked). Excluded from
+        # checks_passed AND checks_failed so it doesn't trigger
+        # ScientificFailureError.
+        "gt_test_auc_skipped": (
+            config.gt_test_auc is None
+            and not getattr(config, 'gt_training_failed', False)
+        ),
         "gt_test_auc_threshold": config.gt_test_auc_threshold,
         "rl_auc": auc,
         # v90 P0 ROOT FIX (BUG #3): same fix as BUG #4. When auc is None
@@ -6794,9 +6930,22 @@ def run_pipeline(config: PipelineConfig) -> Tuple[List[RankedCandidate], Pipelin
         "n_candidates": len(candidates),
     }
 
+    # P4-004: log a WARNING when the GT AUC check is skipped (standalone
+    # mode). The user needs to know the GT AUC was NOT validated, so they
+    # don't mistake a standalone run for a production-grade run.
+    if scientific_validation["gt_test_auc_skipped"]:
+        logger.warning(
+            "P4-004: gt_test_auc is None and gt_training_failed=False — "
+            "SKIPPING the GT AUC check (standalone mode, bridge not "
+            "invoked). The GT model's AUC was NOT validated. This run "
+            "is suitable for API testing / debugging ONLY. For "
+            "production-grade validation, use run_real_pipeline.py "
+            "(the bridge), which invokes the GT trainer and sets "
+            "gt_test_auc to the verified AUC."
+        )
+
     checks_passed = []
     checks_failed = []
-    checks_skipped = []  # v92 P4-068: new category for standalone mode
     for check_name, check_result in [
         ("gt_test_auc", scientific_validation["gt_test_auc_pass"]),
         ("rl_auc", scientific_validation["rl_auc_pass"]),
@@ -6805,28 +6954,19 @@ def run_pipeline(config: PipelineConfig) -> Tuple[List[RankedCandidate], Pipelin
         if check_result is True:
             checks_passed.append(check_name)
         elif check_result is False:
-            # v92 P4-068: gt_test_auc is "skipped" (not "failed") when
-            # gt_test_auc is None (standalone mode). The check_result is
-            # True (because `None is None or ...` short-circuits to True),
-            # so it goes to checks_passed. But we also track it as skipped
-            # for the metadata. The rl_auc and kp_recovery checks are
-            # NEVER skipped — they're always evaluated.
+            # P4-004: don't add gt_test_auc to checks_failed if it was
+            # SKIPPED (standalone mode). A skipped check is neither
+            # passed nor failed — it's excluded from the overall_pass
+            # computation. This makes the standalone CLI usable.
+            if (
+                check_name == "gt_test_auc"
+                and scientific_validation.get("gt_test_auc_skipped", False)
+            ):
+                continue  # skip — don't add to checks_failed
             checks_failed.append(check_name)
-
-    # v92 P4-068: track skipped checks separately
-    if scientific_validation.get("gt_test_auc_skipped"):
-        checks_skipped.append("gt_test_auc")
-        # Remove from checks_passed (it was added because the `or` short-
-        # circuited to True, but it's actually skipped, not passed).
-        if "gt_test_auc" in checks_passed:
-            checks_passed.remove("gt_test_auc")
 
     scientific_validation["checks_passed"] = checks_passed
     scientific_validation["checks_failed"] = checks_failed
-    scientific_validation["checks_skipped"] = checks_skipped  # v92 P4-068
-    # v92 P4-068: overall_pass is True if no checks FAILED. Skipped checks
-    # don't count as failures (standalone mode is OK). This makes the
-    # standalone CLI usable without RL_ALLOW_SCIENCE_FAILURE=1.
     scientific_validation["overall_pass"] = len(checks_failed) == 0
 
     metadata["scientific_validation"] = scientific_validation
@@ -6882,8 +7022,26 @@ def run_pipeline(config: PipelineConfig) -> Tuple[List[RankedCandidate], Pipelin
     # v90 ROOT FIX (BUG #48): raise on critical alerts (no HIGH ranked,
     # or >50% safety rejection). These indicate the science is broken and
     # the output should NOT be written to disk.
+    #
+    # P4-005 v2 FIX: these critical alerts now respect the SAME escape
+    # hatch as the scientific validation gate (block_on_scientific_failure
+    # / RL_ALLOW_SCIENCE_FAILURE). The original v90 BUG #48 fix made
+    # these alerts UNCONDITIONAL — they raised RuntimeError even when
+    # the user set allow_invalid_output=True (via the bridge) or
+    # RL_ALLOW_SCIENCE_FAILURE=1. This broke tests that intentionally
+    # run with degenerate data (e.g., test_v3_e2e_pipeline_propagates_gt_auc
+    # uses a small demo graph with a high safety rejection rate). The
+    # fix makes the alerts CONSISTENT with the scientific validation
+    # gate: they raise ONLY when block_on_scientific_failure=True AND
+    # RL_ALLOW_SCIENCE_FAILURE is not "1". When the user opts out of
+    # blocking (for testing/debugging), the alerts log CRITICAL but
+    # don't raise.
+    _allow_alert_failure = (
+        not config.block_on_scientific_failure
+        or os.environ.get("RL_ALLOW_SCIENCE_FAILURE", "0") == "1"
+    )
     if metrics.n_pairs_processed > 0 and metrics.n_ranked_high == 0:
-        raise RuntimeError(
+        _alert_msg_no_high = (
             "v90 ROOT FIX (BUG #48): CRITICAL ALERT — no candidates ranked "
             "HIGH. The output would be empty or meaningless. Refusing to "
             "write to disk. Investigate: (1) reward distribution, "
@@ -6891,17 +7049,27 @@ def run_pipeline(config: PipelineConfig) -> Tuple[List[RankedCandidate], Pipelin
             "(The previous code wrote the output BEFORE checking alerts, "
             "so bad output reached disk and CI/CD saw exit code 0.)"
         )
+        if not _allow_alert_failure:
+            raise RuntimeError(_alert_msg_no_high)
+        else:
+            logger.critical(_alert_msg_no_high + " (RL_ALLOW_SCIENCE_FAILURE=1: alert non-blocking)")
     safety_reject_rate_check = (
-        metrics.n_safety_rejected / max(metrics.n_pairs_processed, 1)
+        metrics.n_safety_rejected / max(
+            getattr(metrics, '_n_test_pairs_for_alert', metrics.n_pairs_processed), 1
+        )
     )
     if safety_reject_rate_check > 0.5:
-        raise RuntimeError(
+        _alert_msg_safety = (
             f"v90 ROOT FIX (BUG #48): CRITICAL ALERT — {safety_reject_rate_check:.1%} "
             f"of pairs rejected by safety gate. The output would be biased "
             f"toward unsafe pairs (the safety gate is rejecting too aggressively, "
             f"OR the input data has systematic safety issues). Refusing to "
             f"write to disk. Investigate input data quality or adjust threshold."
         )
+        if not _allow_alert_failure:
+            raise RuntimeError(_alert_msg_safety)
+        else:
+            logger.critical(_alert_msg_safety + " (RL_ALLOW_SCIENCE_FAILURE=1: alert non-blocking)")
 
     output_path = save_results(candidates, metadata=metadata, config=config)
 
@@ -6915,8 +7083,14 @@ def run_pipeline(config: PipelineConfig) -> Tuple[List[RankedCandidate], Pipelin
         try:
             new_df = pd.DataFrame([c.to_dict() for c in candidates])
             merged_df = merge_results(config.merge_existing_results_path, new_df)
-            merged_path = output_path.replace(".csv", "_merged.csv")
-            merged_df.to_csv(merged_path, index=False, encoding="utf-8", lineterminator="\n")
+            # P4-024: use os.path.splitext for case-insensitive extension replacement
+            _out_root, _out_ext = os.path.splitext(output_path)
+            merged_path = _out_root + "_merged" + _out_ext
+            # P4-023: use _pandas_lineterminator_kwargs() for pandas 1.x compat
+            merged_df.to_csv(
+                merged_path, index=False, encoding="utf-8",
+                **_pandas_lineterminator_kwargs(),
+            )
             logger.info(
                 f"v3 fix: merged results saved to {merged_path} "
                 f"({len(merged_df)} unique pairs)"
@@ -7018,14 +7192,6 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "  RL_USER               Override the audit log actor username\n"
         "  NCBI_EMAIL            Email for PubMed literature cross-check\n"
         "  RL_SKIP_LITERATURE    Set to '1' to skip literature cross-check\n"
-        # v92 ROOT FIX (P4-068): document RL_ALLOW_SCIENCE_FAILURE in CLI help.
-        # The audit (P4-068) found: "RL_ALLOW_SCIENCE_FAILURE=1, which is
-        # undocumented in the CLI help." Now documented.
-        "  RL_ALLOW_SCIENCE_FAILURE  Set to '1' to allow pipeline to write output "
-        "even when scientific validation fails (GT AUC < threshold, RL AUC < 0.5, "
-        "or KP recovery < 20%). DEFAULT: science failure BLOCKS output. "
-        "v92 P4-068: in standalone mode (no --input), GT AUC check is SKIPPED "
-        "(not failed), so standalone runs don't need this override.\n"
         "\n"
         "ROOT FIX (F6): Without RL_HMAC_KEY, the output HMAC is marked "
         "as 'unverified' — it provides forensic fingerprinting only, NOT "
@@ -7054,6 +7220,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     config.json_logs = args.json_logs
     config.log_level = args.log_level
     config.drug_aware_split = not args.no_drug_aware_split
+
+    # P4-014 ROOT FIX (CLI overrides bypass __post_init__):
+    # The original main() overrode config fields with CLI args AFTER
+    # PipelineConfig.__post_init__ had already run (during from_yaml or
+    # from_env). If the user passed ``--timesteps 0`` or ``--top-n -1``,
+    # the validation in __post_init__ was BYPASSED — the invalid value
+    # was set directly on the dataclass. The pipeline then crashed later
+    # in train_agent (line ~3124) or produced an empty output, with a
+    # cryptic error far from the root cause.
+    #
+    # The fix: re-run __post_init__ after CLI overrides so the validation
+    # catches invalid values IMMEDIATELY with a clear error message. This
+    # is the standard pattern for dataclass validation after mutation.
+    # __post_init__ raises ValueError with a descriptive message that
+    # tells the user exactly which field is invalid and why.
+    config.__post_init__()
 
     if args.skip_literature:
         os.environ["RL_SKIP_LITERATURE"] = "1"

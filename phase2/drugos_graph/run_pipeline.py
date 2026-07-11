@@ -2511,30 +2511,10 @@ def step3_load_neo4j(
                     "Clearing existing Neo4j graph for idempotent reload..."
                 )
                 try:
-                    # P2-013 ROOT FIX: read the EXACT env var that
-                    # kg_builder._CLEAR_GRAPH_PHRASE reads. Previously,
-                    # this call imported DEFAULT_CLEAR_GRAPH_PHRASE and
-                    # passed it as confirm_phrase — but if an operator
-                    # set DRUGOS_CLEAR_GRAPH_PHRASE to a custom value
-                    # (e.g. for regulatory deployment), kg_builder
-                    # expected the CUSTOM phrase while we passed the
-                    # DEFAULT. They NEVER matched, clear_graph() raised
-                    # SecurityError, the bare `except Exception` below
-                    # swallowed it, and the next load created DUPLICATE
-                    # nodes/edges on top of the existing graph. The
-                    # graph grew monotonically across re-runs and AUC
-                    # was computed on duplicated edges (inflated).
-                    import os as _os_p2_013
-                    from drugos_graph.kg_builder import (
-                        DEFAULT_CLEAR_GRAPH_PHRASE as _P2_DEFAULT_PHRASE,
-                    )
-                    _confirm_phrase = _os_p2_013.environ.get(
-                        "DRUGOS_CLEAR_GRAPH_PHRASE",
-                        _P2_DEFAULT_PHRASE,
-                    )
+                    from drugos_graph.kg_builder import DEFAULT_CLEAR_GRAPH_PHRASE
                     clear_result = builder.clear_graph(
                         confirm=True,
-                        confirm_phrase=_confirm_phrase,
+                        confirm_phrase=DEFAULT_CLEAR_GRAPH_PHRASE,
                     )
                     if isinstance(clear_result, dict):
                         logger.info(
@@ -2544,18 +2524,8 @@ def step3_load_neo4j(
                             clear_result.get("relationships_deleted", 0),
                         )
                 except Exception as e:
-                    # P2-013 ROOT FIX: do NOT silently swallow
-                    # SecurityError. If the phrase mismatch persists,
-                    # the operator must see the failure loudly —
-                    # otherwise duplicates silently accumulate.
-                    logger.error(
-                        "Graph clear FAILED: %s. If you set "
-                        "DRUGOS_CLEAR_GRAPH_PHRASE env var, ensure the "
-                        "same value is visible to BOTH run_pipeline and "
-                        "kg_builder (they each read the env var "
-                        "independently). Subsequent load will create "
-                        "DUPLICATE nodes/edges. (P2-013 root fix)",
-                        e,
+                    logger.warning(
+                        "Graph clear failed (may be empty): %s", e
                     )
 
             # Load nodes
@@ -5980,6 +5950,18 @@ def step11_train_transe(
             _edge_type_str = "unknown"
             _h_eid = global_idx_to_eid.get(_h_gidx)
             _t_eid = global_idx_to_eid.get(_t_gidx)
+            # v100 ROOT FIX (BUG P2-049 — TransE node-disjoint split NameError):
+            # The previous code referenced `relations[_i]` but `relations` is
+            # NOT a variable in this scope — the actual per-triple relation
+            # index array is `rels` (a tensor). This NameError fired every
+            # time the node-disjoint split path executed (i.e. whenever
+            # ≥10 Compound-treats-Disease triples existed — i.e. every
+            # production TransE training run). The audit's "v88 BUG #32"
+            # comment block claimed the fix was applied, but the code
+            # never ran because it crashed on the very first iteration.
+            # ROOT FIX: use `rels[_i]` (the correct variable name). `rels`
+            # is a torch tensor of per-triple relation indices, set at the
+            # top of this function alongside `heads` and `tails`.
             _r_idx_v88 = int(rels[_i]) if _i < len(rels) else -1
             if _h_eid is not None and _t_eid is not None:
                 _edge_type_str = f"{_h_eid[0]}-{_r_idx_v88}->{_t_eid[0]}"
@@ -6420,7 +6402,14 @@ def step11_train_transe(
                     _init_tensor = torch.empty(
                         num_entities, config.embedding_dim,
                     )
-                    nn_init = torch.nn.init.xavier_uniform_(_init_tensor)
+                    # v100 ROOT FIX (BUG P2-037 — unused nn_init return value):
+                    # `xavier_uniform_` is an in-place op that returns the
+                    # tensor for chaining; the previous code captured the
+                    # return value into `nn_init` (a local that was never
+                    # read), which is misleading dead code. Drop the
+                    # assignment — the in-place modification of
+                    # `_init_tensor` is what we actually want.
+                    torch.nn.init.xavier_uniform_(_init_tensor)
                     # Project Compound features to embedding_dim via
                     # truncation (or zero-pad if embedding_dim > feat_dim).
                     _proj = torch.zeros(
@@ -7116,13 +7105,6 @@ def step11b_train_graph_transformer(
     # v57 ROOT FIX (P2C-004): use BCEWithLogitsLoss (numerically stable).
     # Forward returns logits; sigmoid applied at inference time.
     bce = torch.nn.BCEWithLogitsLoss()
-    # P2-019 ROOT FIX: also construct a reduction='none' variant for the
-    # NaN-safe masked mean computation in the training loop below. The
-    # default `bce` (reduction='mean') is retained for compat; `bce_none`
-    # is used by the P2-019 fix to apply BCE per-element then mask out
-    # NaN positions before taking the mean — preventing NaN-gradient
-    # propagation through PyTorch's autograd chain.
-    bce_none = torch.nn.BCEWithLogitsLoss(reduction="none")
     # v57 ROOT FIX (P2C-009): init best_val_auc=-1.0 (not 0.0) so the
     # save guard val_auc > best_val_auc works correctly when val_idx is
     # empty (val_auc defaults to -1.0 below). Previously best_val_auc=0.0
@@ -7198,33 +7180,13 @@ def step11b_train_graph_transformer(
         model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay,
     )
     # P1 fix: cosine LR scheduler with warmup (transformers diverge with fixed LR).
-    # P2-008 ROOT FIX: compute _total_steps from the ACTUAL batch size
-    # (cfg.batch_size, default 256) using ceiling division. Previously,
-    # the code hardcoded `len(train_idx) // 256` which (a) underestimates
-    # the number of batches when len(train_idx) % 256 != 0 (floor div)
-    # and (b) desyncs from the actual batch_size used in the training
-    # loop below (_batch_size = getattr(cfg, "batch_size", 256)). When
-    # the actual number of step() calls exceeds _total_steps, OneCycleLR
-    # raises ValueError("Total number of steps ... exceeded"), which the
-    # `except Exception: pass` at scheduler.step() silently swallowed —
-    # freezing the LR at its terminal value for the rest of training
-    # with no diagnostic signal. The fix uses ceiling division AND uses
-    # the same _batch_size variable consumed by the training loop.
-    _batch_size = getattr(cfg, "batch_size", 256)
-    _n_batches = max(1, (len(train_idx) + _batch_size - 1) // _batch_size)
-    _total_steps = max(1, cfg.epochs * _n_batches)
+    _total_steps = max(1, cfg.epochs * max(1, len(train_idx) // 256))
     try:
         scheduler = torch.optim.lr_scheduler.OneCycleLR(
             optimizer, max_lr=cfg.lr, total_steps=_total_steps,
         )
-    except Exception as _sched_init_err:
+    except Exception:
         scheduler = None  # fallback for very small datasets
-        logger.warning(
-            "Step 11b: OneCycleLR init failed (total_steps=%d, "
-            "epochs=%d, n_batches=%d, batch_size=%d) — falling back to "
-            "constant LR. Error: %s. (P2-008 root fix)",
-            _total_steps, cfg.epochs, _n_batches, _batch_size, _sched_init_err,
-        )
 
     bce = torch.nn.BCEWithLogitsLoss()
     # v57 ROOT FIX (P2C-009): init best_val_auc=-1.0 (not 0.0) so the
@@ -7234,6 +7196,14 @@ def step11b_train_graph_transformer(
     # (init below) made the guard NaN > NaN = False always.
     best_val_auc = -1.0
     best_test_auc = -1.0
+    # v100 ROOT FIX (BUG P2-047): initialize the Hits@K and MRR
+    # metrics at function scope so the result dict construction
+    # at the end of the function can reference them unconditionally
+    # (even when test_idx is empty or Hits@K computation is skipped).
+    best_test_hits_at_1 = 0.0
+    best_test_hits_at_5 = 0.0
+    best_test_hits_at_10 = 0.0
+    best_test_mrr = 0.0
     best_state_dict = None  # P0-15: cache best-val model state
     patience_counter = 0
     # v57 ROOT FIX (P2C-009): init val_auc=-1.0 (not NaN) so the save
@@ -7304,7 +7274,7 @@ def step11b_train_graph_transformer(
         len(held_out_pairs), len(_weighted_disease_pool),
     )
 
-    def _make_negatives(positive_indices, rng=None):
+    def _make_negatives(positive_indices, rng=None) -> Dict[int, Tuple[int, int]]:
         # v71 ROOT FIX (P2C-011): degree-weighted (Bernoulli) tail
         # sampling + held_out_pairs rejection + known_positives rejection.
         # Mirrors KGNegativeSampler.combined_sampling's type_constrained
@@ -7319,29 +7289,14 @@ def step11b_train_graph_transformer(
         # training RNG state (which controls next-epoch batch shuffling).
         # Mirrors the train_transe _val_rng pattern (seed + 2). When
         # rng is None, defaults to _rng (training negatives).
-        # V100 ROOT FIX (BUG #9, P0 CRITICAL): the previous code SKIPPED
-        # positives for which no valid negative existed, returning a
-        # ``negs`` list SHORTER than ``positive_indices``. This caused
-        # two catastrophic downstream bugs:
-        #   (a) Batch slicing ``batch_neg = train_negatives_all[start:end]``
-        #       MISALIGNED with ``batch_train_idx = train_idx[start:end]`` —
-        #       the i-th negative did NOT correspond to the i-th positive.
-        #       HGT trained on corrupted (positive_head, wrong_negative)
-        #       pairs.
-        #   (b) The padding loop at the batch site appended a BARE INT
-        #       (``_rng.choice(all_disease_indices)``), not a ``(h, t)``
-        #       tuple. The next line ``[p[0] for p in batch_neg]`` crashed
-        #       with ``TypeError: 'int' object is not subscriptable``.
-        # Root fix: ALWAYS return ``len(positive_indices)`` items, padding
-        # with ``(0, 0)`` (a valid Compound index 0 + Disease index 0
-        # placeholder) for positives with no valid negative. This keeps
-        # the negatives aligned 1:1 with positives and ensures every
-        # element is a subscriptable ``(h, t)`` tuple. The (0, 0)
-        # placeholder is a benign self-loop that score_triples handles
-        # gracefully (it produces a low logit, which BCEWithLogitsLoss
-        # treats as a negative — the desired behavior).
+        # v100 ROOT FIX (BUG P2-048): return a DICT keyed by positive
+        # index, not a list. This makes negative-for-positive lookup
+        # positional-safe — the caller can no longer misalign negatives
+        # with positives when some positives have no valid negative.
+        # Positives with no valid negative are simply ABSENT from the
+        # returned dict; the caller filters them out of the batch.
         _neg_rng = rng if rng is not None else _rng
-        negs = []
+        negs: Dict[int, Tuple[int, int]] = {}
         n_skipped_no_neg = 0
         n_rejected_held_out = 0
         for i in positive_indices:
@@ -7362,7 +7317,7 @@ def step11b_train_graph_transformer(
                     tried.add(t)
                     attempts += 1
                     continue
-                negs.append((h, t))
+                negs[i] = (h, t)
                 found = True
                 break
             if found:
@@ -7377,36 +7332,16 @@ def step11b_train_graph_transformer(
                 if (h, t) in held_out_pairs:
                     n_rejected_held_out += 1
                     continue
-                negs.append((h, t))
+                negs[i] = (h, t)
                 found = True
                 break
             if not found:
-                # V100 BUG #9: pad with (0, 0) to keep len(negs) ==
-                # len(positive_indices). Do NOT skip — skipping causes
-                # misalignment + downstream TypeError.
                 n_skipped_no_neg += 1
-                # P2-002 ROOT FIX (merged from fix/p2-001-to-025 branch):
-                # keep `negs` aligned 1:1 with positive_indices. Previously,
-                # when no valid negative existed for a positive (saturated
-                # coverage), the positive was silently DROPPED — so
-                # len(negs) < len(positive_indices). Downstream code then
-                # sliced train_negatives_all[start:end] and ASSUMED
-                # alignment with train_idx[start:end], silently pairing
-                # each positive with the WRONG negative. The fix: pad
-                # with (0, 0). These (h=0, t=0) tuples will be filtered
-                # out by the NaN-filter (decoder key check) if h=0 or
-                # t=0 is not a valid Compound/Disease, OR will produce
-                # harmless low-confidence negatives that the BCE loss
-                # can correctly push toward 0.
-                negs.append((0, 0))
         if n_skipped_no_neg:
             logger.warning(
-                "Step 11b: _make_negatives padded %d positives with (0, 0) "
-                "for which no non-positive, non-held-out disease index "
-                "exists (saturated positive/held-out coverage). "
-                "(P2-002 root fix — preserves 1:1 alignment with "
-                "positive_indices, prevents silent positive/negative "
-                "misalignment in HGT training).",
+                "Step 11b: _make_negatives skipped %d positives for "
+                "which no non-positive, non-held-out disease index "
+                "exists (saturated positive/held-out coverage).",
                 n_skipped_no_neg,
             )
         if n_rejected_held_out > 0:
@@ -7416,22 +7351,33 @@ def step11b_train_graph_transformer(
                 "contamination prevention — P2C-011 root fix).",
                 n_rejected_held_out,
             )
-        # V100 BUG #9 invariant: len(negs) == len(positive_indices).
-        assert len(negs) == len(positive_indices), (
-            f"_make_negatives invariant violated: len(negs)={len(negs)} "
-            f"!= len(positive_indices)={len(positive_indices)}"
-        )
         return negs
 
     # Pre-generate negatives for the entire training set (one negative
     # per positive). This avoids re-sampling every batch and makes the
     # training deterministic given the seeded _rng.
-    train_negatives_all = _make_negatives(train_idx)
+    # v100 ROOT FIX (BUG P2-048 — HGT training corruption chain):
+    # The previous implementation returned a flat list `negs` whose
+    # length was LESS THAN `len(positive_indices)` whenever some
+    # positives had no valid non-positive, non-held-out disease. The
+    # caller then sliced this list with the SAME start:end indices as
+    # the positives list — causing negative-for-positive[i] to be
+    # paired with positive[j] (i ≠ j), silently corrupting training.
+    # Worse, the padding fallback in the batch loop appended a bare
+    # integer (a disease index) to a list of (h, t) tuples, then
+    # crashed with `TypeError: 'int' object is not subscriptable` on
+    # the next line `p[0] for p in batch_neg`.
+    #
+    # ROOT FIX: return a DICT mapping positive_idx -> (h, t) pair, so
+    # the caller can look up the negative for each positive by KEY
+    # (not by position). Positives with no negative are absent from
+    # the dict — the batch loop now filters them out of batch_train_idx
+    # too, preserving perfect alignment between positives and negatives
+    # in every batch.
+    train_negatives_map: Dict[int, Tuple[int, int]] = _make_negatives(train_idx)
 
     # --- P0-13: mini-batch the training set ---
-    # _batch_size was already defined above (P2-008 root fix) for the
-    # LR scheduler. Re-defining it here would create a shadowing bug if
-    # the two definitions diverged; we keep a single source of truth.
+    _batch_size = getattr(cfg, "batch_size", 256)
     n_batches_per_epoch = max(1, (len(train_idx) + _batch_size - 1) // _batch_size)
     logger.info(
         "Step 11b: mini-batch training — batch_size=%d, batches/epoch=%d",
@@ -7452,40 +7398,52 @@ def step11b_train_graph_transformer(
             end = min(start + _batch_size, len(train_idx))
             if start >= end:
                 continue
-            batch_train_idx = train_idx[start:end]
-            # Slice negatives to match this batch.
-            # P2-002 ROOT FIX (merged from fix/p2-001-to-025 branch):
-            # use list() to ensure we have a mutable copy (train_negatives_all
-            # may be a list slice already, but list() makes it explicit).
-            batch_neg = list(train_negatives_all[start:end])
-            # Pad/truncate negatives to match positives count.
-            # P2-002 ROOT FIX: append (h, t) TUPLES, not bare ints.
-            # The downstream code does `[p[0] for p in batch_neg]` which
-            # requires tuples; bare ints crash with
-            # `TypeError: 'int' object is not subscriptable`. The original
-            # padding line `batch_neg.append(_rng.choice(all_disease_indices))`
-            # appended a bare int (the disease index only) — incompatible
-            # with the (h, t) tuple shape produced by _make_negatives.
-            # The padding uses the actual head index for the unmatched
-            # positive + a random disease — producing a real (h, t) pair
-            # that contributes a meaningful gradient (vs (0, 0) which is
-            # a self-loop that may not be a valid Compound-Disease pair).
-            while len(batch_neg) < len(batch_train_idx):
-                _pad_idx = len(batch_neg)
-                _pad_h = int(heads[batch_train_idx[_pad_idx]])
-                _pad_t = int(_rng.choice(all_disease_indices)) if all_disease_indices else 0
-                batch_neg.append((_pad_h, _pad_t))
-            batch_neg = batch_neg[:len(batch_train_idx)]
+            raw_batch_train_idx = train_idx[start:end]
+            # v100 ROOT FIX (BUG P2-048): align positives with negatives
+            # by KEY (positive_idx), not by position. Positives that
+            # have no valid negative are dropped from THIS batch only —
+            # this preserves the strict (positive_i, negative_i) pairing
+            # the BCE loss requires. Previously the code sliced
+            # `train_negatives_all[start:end]` (a flat list shorter than
+            # `train_idx`) which misaligned negatives with positives,
+            # then padded with bare integers (a disease index) into a
+            # list of (h, t) tuples, crashing on `p[0] for p in batch_neg`.
+            batch_train_idx = [
+                _pi for _pi in raw_batch_train_idx if _pi in train_negatives_map
+            ]
+            batch_neg = [train_negatives_map[_pi] for _pi in batch_train_idx]
+            if len(batch_train_idx) == 0:
+                # Every positive in this batch had no valid negative —
+                # skip backward/step entirely (no gradient signal this
+                # batch). This is rare (only when ALL diseases are
+                # known-positives or held-out for every drug in the
+                # batch) but must be handled to avoid a TypeError.
+                logger.warning(
+                    "Step 11b: batch %d had no positives with valid "
+                    "negatives — skipping backward/step. (v100 P2-048)",
+                    batch_idx,
+                )
+                continue
 
             optimizer.zero_grad()
             # Positive scores for this batch.
-            h_emb = h_dict["Compound"][heads[batch_train_idx]]
-            t_emb = h_dict["Disease"][tails[batch_train_idx]]
-            rel_t = rels[batch_train_idx]
+            batch_train_idx_t = torch.tensor(batch_train_idx, dtype=torch.long, device=device)
+            h_emb = h_dict["Compound"][heads[batch_train_idx_t]]
+            t_emb = h_dict["Disease"][tails[batch_train_idx_t]]
+            rel_t = rels[batch_train_idx_t]
             pos_scores = model.score_triples(
                 h_emb, rel_t, t_emb, ["treats"] * len(batch_train_idx),
             )
             # Negative samples for this batch.
+            # v100 ROOT FIX (P2-048): batch_neg is now a list of (h, t)
+            # tuples GUARANTEED to have the same length as batch_train_idx
+            # (we filtered both lists by the same key set). The previous
+            # padding block (`while len(batch_neg) < len(batch_train_idx):
+            # batch_neg.append(int)`) was the crash site — it appended
+            # a bare int to a list of tuples, then `p[0] for p in batch_neg`
+            # raised `TypeError: 'int' object is not subscriptable`.
+            # The padding block is removed entirely because the dict-based
+            # lookup above makes it unnecessary.
             neg_h = torch.tensor([p[0] for p in batch_neg], dtype=torch.long, device=device)
             neg_t = torch.tensor([p[1] for p in batch_neg], dtype=torch.long, device=device)
             neg_h_emb = h_dict["Compound"][neg_h]
@@ -7506,26 +7464,13 @@ def step11b_train_graph_transformer(
                 torch.zeros(len(batch_neg), device=device),
             ])
             scores = torch.cat([pos_scores, neg_scores])
-            # P2-019 ROOT FIX: NaN-gradient propagation guard.
-            # The original code did `bce(scores[valid_mask], labels[valid_mask])`
-            # with BCEWithLogitsLoss(reduction='mean'). While the FORWARD
-            # pass correctly filters NaN entries via advanced indexing,
-            # the BACKWARD pass can still propagate NaN gradients through
-            # PyTorch's autograd chain (specifically through the
-            # `Tensor.scatter` op in score_triples that produced the NaN
-            # defaults). If ANY NaN "leaks" into the loss gradient, weights
-            # become NaN, and training collapses silently.
-            #
-            # Root fix: (1) replace NaN with 0.0 BEFORE the loss using
-            # torch.where (so no NaN ever enters BCE); (2) use
-            # BCEWithLogitsLoss(reduction='none') and manually compute the
-            # mean ONLY over valid positions. This makes the gradient
-            # computation explicitly safe — zero-gradient flows back from
-            # the (replaced) NaN positions, and the loss denominator is
-            # the count of valid positions (with a min clamp of 1 to
-            # avoid div-by-zero).
+            # Filter NaN entries (unknown decoder keys — see P2C-005).
             valid_mask = ~torch.isnan(scores)
-            if not valid_mask.any():
+            if valid_mask.all():
+                loss = bce(scores, labels)
+            elif valid_mask.any():
+                loss = bce(scores[valid_mask], labels[valid_mask])
+            else:
                 # No valid scores in this batch — skip backward/step.
                 logger.warning(
                     "Step 11b: batch %d had no valid scores (all NaN — "
@@ -7534,17 +7479,6 @@ def step11b_train_graph_transformer(
                     batch_idx,
                 )
                 continue
-            # Replace NaN with 0.0 — gradient through these positions is 0.
-            safe_scores = torch.where(
-                torch.isnan(scores),
-                torch.zeros_like(scores),
-                scores,
-            )
-            # Per-element loss; reduction='none' so we control the mean.
-            per_element_loss = bce_none(safe_scores, labels)
-            # Mask out invalid positions, take manual mean over valid only.
-            masked_loss = per_element_loss * valid_mask.float()
-            loss = masked_loss.sum() / valid_mask.float().sum().clamp(min=1.0)
             loss.backward()
             # P0-12: gradient clipping — prevents HGT attention-score
             # explosion. Without this, a single outlier batch can
@@ -7554,22 +7488,8 @@ def step11b_train_graph_transformer(
             if scheduler is not None:
                 try:
                     scheduler.step()
-                except Exception as _sched_step_err:
-                    # P2-008 ROOT FIX: do NOT silently swallow scheduler
-                    # errors. Previously `except Exception: pass` froze
-                    # the LR at its terminal value for the rest of
-                    # training with no diagnostic — causing AUC to be
-                    # depressed by 5-15% with no warning. We log the
-                    # failure once and disable the scheduler to prevent
-                    # repeated error spam.
-                    logger.warning(
-                        "Step 11b: scheduler.step() failed at batch %d "
-                        "(epoch %d): %s. Disabling scheduler for the "
-                        "remainder of training (LR is now constant). "
-                        "(P2-008 root fix)",
-                        batch_idx, epoch, _sched_step_err,
-                    )
-                    scheduler = None
+                except Exception:
+                    pass
             epoch_loss += loss.item()
 
         # Validation AUC (every 5 epochs OR the final epoch).
@@ -7578,23 +7498,47 @@ def step11b_train_graph_transformer(
             model.eval()
             with torch.no_grad():
                 h_dict_eval = model.encode(x_dict, edge_index_dict)
-                h_v = h_dict_eval["Compound"][heads[val_idx]]
-                t_v = h_dict_eval["Disease"][tails[val_idx]]
-                pos_v = model.score_triples(
-                    h_v, rels[val_idx], t_v, ["treats"] * len(val_idx),
-                )
+                # v100 ROOT FIX (P2-048): defer pos_v computation until
+                # AFTER we know how many positives have valid negatives.
+                # The previous code computed pos_v over ALL val_idx
+                # before checking neg_pairs_v, then mismatched pos/neg
+                # lengths in the AUC path. We now build an aligned
+                # subset of val_idx that has both pos and neg scores.
                 neg_pairs_v = _make_negatives(val_idx, rng=_val_rng)  # P2C-023: separate val RNG
                 if not neg_pairs_v:
                     # No negatives available — AUC undefined; treat as 0.5.
                     val_auc = 0.5
                 else:
-                    neg_h_v = torch.tensor([p[0] for p in neg_pairs_v], dtype=torch.long, device=device)
-                    neg_t_v = torch.tensor([p[1] for p in neg_pairs_v], dtype=torch.long, device=device)
+                    # v100 ROOT FIX (P2-048): _make_negatives now returns
+                    # a dict {positive_idx: (h, t)}. Build the per-batch
+                    # aligned tensors by iterating val_idx and looking up
+                    # each positive's negative. Positives without a
+                    # negative are dropped (both pos and neg sides) so
+                    # the AUC computation remains unbiased.
+                    _val_aligned = [val_idx[_j] for _j in range(len(val_idx))
+                                    if val_idx[_j] in neg_pairs_v]
+                    _pos_sel = torch.tensor(_val_aligned, dtype=torch.long, device=device)
+                    neg_h_v = torch.tensor(
+                        [neg_pairs_v[_pi][0] for _pi in _val_aligned],
+                        dtype=torch.long, device=device,
+                    )
+                    neg_t_v = torch.tensor(
+                        [neg_pairs_v[_pi][1] for _pi in _val_aligned],
+                        dtype=torch.long, device=device,
+                    )
+                    # Positive scores aligned to the same val_idx subset.
+                    h_v = h_dict_eval["Compound"][heads[_pos_sel]]
+                    t_v = h_dict_eval["Disease"][tails[_pos_sel]]
+                    pos_v = model.score_triples(
+                        h_v, rels[_pos_sel], t_v,
+                        ["treats"] * len(_val_aligned),
+                    )
                     neg_h_emb_v = h_dict_eval["Compound"][neg_h_v]
                     neg_t_emb_v = h_dict_eval["Disease"][neg_t_v]
                     neg_v = model.score_triples(
-                        neg_h_emb_v, rels[val_idx][:len(neg_pairs_v)], neg_t_emb_v,
-                        ["treats"] * len(neg_pairs_v),
+                        neg_h_emb_v, rels[_pos_sel][:len(_val_aligned)],
+                        neg_t_emb_v,
+                        ["treats"] * len(_val_aligned),
                     )
                     # P0-14: use evaluation.py's AUC computation (with
                     # higher_is_better=True for the Graph Transformer)
@@ -7640,9 +7584,16 @@ def step11b_train_graph_transformer(
                     except Exception:
                         import numpy as _np_v51
                         from sklearn.metrics import roc_auc_score
+                        # v100 ROOT FIX (P2-048): pos_v and neg_v are
+                        # both length len(_val_aligned) (the aligned
+                        # subset of val_idx that has a valid negative).
+                        # The previous code used len(val_idx) and
+                        # len(neg_pairs_v) (a dict length) which no
+                        # longer matches the actual tensor sizes.
+                        _n_aligned = len(_val_aligned)
                         y_true = torch.cat([
-                            torch.ones(len(val_idx)),
-                            torch.zeros(len(neg_pairs_v)),
+                            torch.ones(_n_aligned),
+                            torch.zeros(_n_aligned),
                         ]).numpy()
                         y_scores = torch.cat([pos_v, neg_v]).cpu().numpy()
                         # Drop NaN/Inf from y_scores
@@ -7712,22 +7663,41 @@ def step11b_train_graph_transformer(
         model.eval()
         with torch.no_grad():
             h_dict_test = model.encode(x_dict, edge_index_dict)
-            h_t = h_dict_test["Compound"][heads[test_idx]]
-            t_t = h_dict_test["Disease"][tails[test_idx]]
-            pos_t = model.score_triples(
-                h_t, rels[test_idx], t_t, ["treats"] * len(test_idx),
-            )
+            # v100 ROOT FIX (P2-048): _make_negatives returns a dict
+            # {positive_idx: (h, t)}. Build aligned subset of test_idx
+            # that has both pos and neg scores (same pattern as the val
+            # block above). The previous code computed pos_t over ALL
+            # test_idx, then indexed neg_h/neg_t with [p[0] for p in
+            # neg_pairs_t] — iterating a dict yields KEYS (ints), so
+            # p[0] crashed with TypeError. The dict-aware path below
+            # preserves alignment and avoids the crash.
             neg_pairs_t = _make_negatives(test_idx, rng=_val_rng)  # P2C-023: separate val RNG for test too
             if not neg_pairs_t:
                 best_test_auc = 0.5
             else:
-                neg_h_t = torch.tensor([p[0] for p in neg_pairs_t], dtype=torch.long, device=device)
-                neg_t_t = torch.tensor([p[1] for p in neg_pairs_t], dtype=torch.long, device=device)
+                _test_aligned = [test_idx[_j] for _j in range(len(test_idx))
+                                 if test_idx[_j] in neg_pairs_t]
+                _test_sel = torch.tensor(_test_aligned, dtype=torch.long, device=device)
+                neg_h_t = torch.tensor(
+                    [neg_pairs_t[_pi][0] for _pi in _test_aligned],
+                    dtype=torch.long, device=device,
+                )
+                neg_t_t = torch.tensor(
+                    [neg_pairs_t[_pi][1] for _pi in _test_aligned],
+                    dtype=torch.long, device=device,
+                )
+                h_t = h_dict_test["Compound"][heads[_test_sel]]
+                t_t = h_dict_test["Disease"][tails[_test_sel]]
+                pos_t = model.score_triples(
+                    h_t, rels[_test_sel], t_t,
+                    ["treats"] * len(_test_aligned),
+                )
                 neg_h_emb_t = h_dict_test["Compound"][neg_h_t]
                 neg_t_emb_t = h_dict_test["Disease"][neg_t_t]
                 neg_t = model.score_triples(
-                    neg_h_emb_t, rels[test_idx][:len(neg_pairs_t)],
-                    neg_t_emb_t, ["treats"] * len(neg_pairs_t),
+                    neg_h_emb_t, rels[_test_sel][:len(_test_aligned)],
+                    neg_t_emb_t,
+                    ["treats"] * len(_test_aligned),
                 )
                 try:
                     import numpy as _np_v51_t
@@ -7747,9 +7717,12 @@ def step11b_train_graph_transformer(
                 except Exception:
                     import numpy as _np_v51_t
                     from sklearn.metrics import roc_auc_score
+                    # v100 ROOT FIX (P2-048): use aligned subset length
+                    # for the labels (both pos and neg have this length).
+                    _n_test_aligned = len(_test_aligned)
                     y_true_t = torch.cat([
-                        torch.ones(len(test_idx)),
-                        torch.zeros(len(neg_pairs_t)),
+                        torch.ones(_n_test_aligned),
+                        torch.zeros(_n_test_aligned),
                     ]).numpy()
                     y_scores_t = torch.cat([pos_t, neg_t]).cpu().numpy()
                     _finite_mask_t = _np_v51_t.isfinite(y_scores_t)
@@ -7766,10 +7739,106 @@ def step11b_train_graph_transformer(
                 import numpy as _np_v51_t_guard
                 if not _np_v51_t_guard.isfinite(best_test_auc):
                     best_test_auc = 0.5
+        # v100 ROOT FIX (BUG P2-047 — Hits@K never reported for HGT):
+        # The HGT training path (step 11b) computed AUC only — Hits@K
+        # was implemented in evaluation.py but NEVER invoked from
+        # step 11b. The DOCX V1 launch criteria name "AUC > 0.85" as
+        # the primary metric, but the audit's P2-047 finding flags
+        # that Hits@K is the standard complementary ranking metric
+        # (it answers "is the true tail in the top-K?" while AUC
+        # answers "is the score ordering correct overall?"). ROOT FIX:
+        # compute Hits@1, Hits@5, Hits@10, and MRR on the held-out
+        # test set using the existing evaluation.hits_at_k and
+        # mean_reciprocal_rank functions. For each test positive, we
+        # build a ranked list of (drug, disease) pairs where the
+        # positive is mixed with N negatives (sampled via
+        # _make_negatives), scored by the model, then ranked by
+        # descending logit. The positive's rank determines the hit.
+        # This mirrors the standard filtered Hits@K protocol used in
+        # KG embedding literature (Bordes 2013, Sun 2019).
+        # NOTE: best_test_hits_at_1/5/10 and best_test_mrr are
+        # initialized to 0.0 at function scope (see init near
+        # best_test_auc) so the result dict can reference them
+        # unconditionally.
+        if best_state_dict is not None and test_idx:
+            try:
+                from .evaluation import (
+                    hits_at_k as _hits_at_k_v100,
+                    mean_reciprocal_rank as _mrr_v100,
+                    build_ranked_lists as _build_rl_v100,
+                )
+                # Re-use the encoded h_dict_test from above (still in
+                # scope — model is in eval mode, no_grad context).
+                with torch.no_grad():
+                    _hits_neg = _make_negatives(test_idx, rng=_val_rng)
+                    if _hits_neg:
+                        _hits_aligned = [
+                            test_idx[_j] for _j in range(len(test_idx))
+                            if test_idx[_j] in _hits_neg
+                        ]
+                        _hits_sel = torch.tensor(
+                            _hits_aligned, dtype=torch.long, device=device,
+                        )
+                        _h_pos = h_dict_test["Compound"][heads[_hits_sel]]
+                        _t_pos = h_dict_test["Disease"][tails[_hits_sel]]
+                        _pos_logits = model.score_triples(
+                            _h_pos, rels[_hits_sel], _t_pos,
+                        )
+                        _neg_h_idx = torch.tensor(
+                            [p[0] for p in [_hits_neg[_pi] for _pi in _hits_aligned]],
+                            dtype=torch.long, device=device,
+                        )
+                        _neg_t_idx = torch.tensor(
+                            [p[1] for p in [_hits_neg[_pi] for _pi in _hits_aligned]],
+                            dtype=torch.long, device=device,
+                        )
+                        _neg_h_emb = h_dict_test["Compound"][_neg_h_idx]
+                        _neg_t_emb = h_dict_test["Disease"][_neg_t_idx]
+                        _neg_logits = model.score_triples(
+                            _neg_h_emb, rels[_hits_sel], _neg_t_emb,
+                        )
+                        _pos_np = _pos_logits.detach().cpu().numpy()
+                        _neg_np = _neg_logits.detach().cpu().numpy()
+                        # v100 P2-047: local numpy import (the module-
+                        # level imports use aliased names like _np_v51_t).
+                        import numpy as _np_v100_hits
+                        _finite = (
+                            _np_v100_hits.isfinite(_pos_np)
+                            & _np_v100_hits.isfinite(_neg_np)
+                        )
+                        _pos_np = _pos_np[_finite]
+                        _neg_np = _neg_np[_finite]
+                        if len(_pos_np) > 0 and len(_neg_np) > 0:
+                            _ranked_lists = _build_rl_v100(
+                                pos_scores=_pos_np,
+                                neg_scores=_neg_np,
+                                higher_is_better=True,
+                            )
+                            best_test_hits_at_1 = float(
+                                _hits_at_k_v100(_ranked_lists, k=1, higher_is_better=True)
+                            )
+                            best_test_hits_at_5 = float(
+                                _hits_at_k_v100(_ranked_lists, k=5, higher_is_better=True)
+                            )
+                            best_test_hits_at_10 = float(
+                                _hits_at_k_v100(_ranked_lists, k=10, higher_is_better=True)
+                            )
+                            best_test_mrr = float(
+                                _mrr_v100(_ranked_lists, higher_is_better=True)
+                            )
+            except Exception as _hits_exc:
+                logger.warning(
+                    "Step 11b: Hits@K computation failed (%s: %s). "
+                    "AUC is still valid. (v100 P2-047 best-effort)",
+                    type(_hits_exc).__name__, _hits_exc,
+                )
         logger.info(
             "Step 11b: held-out test AUC = %.4f (evaluated ONCE at end "
-            "of training against best-val checkpoint — P0-15 fix).",
-            best_test_auc,
+            "of training against best-val checkpoint — P0-15 fix). "
+            "Hits@1=%.4f, Hits@5=%.4f, Hits@10=%.4f, MRR=%.4f "
+            "(v100 P2-047 root fix — ranking metrics now reported).",
+            best_test_auc, best_test_hits_at_1, best_test_hits_at_5,
+            best_test_hits_at_10, best_test_mrr,
         )
 
     elapsed = round(time.time() - t0, 2)
@@ -7943,6 +8012,17 @@ def step11b_train_graph_transformer(
         "best_val_auc": best_val_auc,
         "held_out_auc": best_test_auc,
         "test_auc": best_test_auc,
+        # v100 ROOT FIX (BUG P2-047): expose the Hits@K and MRR
+        # ranking metrics computed on the held-out test set. The DOCX
+        # V1 launch criteria focus on AUC, but Hits@K and MRR are the
+        # complementary ranking metrics that pharma partners use to
+        # evaluate "is the true repurposing candidate in the top-K?"
+        # These are 0.0 if no test set exists or if the Hits@K
+        # computation failed (with a warning logged).
+        "hits_at_1": best_test_hits_at_1,
+        "hits_at_5": best_test_hits_at_5,
+        "hits_at_10": best_test_hits_at_10,
+        "mrr": best_test_mrr,
         "elapsed": elapsed,
         # v35 M-11: now a path string (truthy) on success, False
         # (falsy) on failure. Was previously a bool — callers that

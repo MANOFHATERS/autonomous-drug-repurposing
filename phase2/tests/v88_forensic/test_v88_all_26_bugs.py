@@ -238,12 +238,28 @@ def test_bug_41_edge_type_tensor_set():
     """BUG #41: missing edge_type in HeteroData for HGTConv.
 
     The fix sets edge_type = torch.zeros(...) after edge_index.
+
+    v100 ROOT FIX (BUG P2-053): the previous version of this test
+    asserted the literal string `"edge_type = torch.zeros"` was in
+    the source. That literal only appeared in the v88 BUG #41 block,
+    which was a DUPLICATE of the v84 BUG #18 block (both set edge_type
+    to torch.zeros with identical semantics). The v100 P2-053 fix
+    removed the dead v88 duplicate, leaving only the v84 block (which
+    uses multi-line `edge_type = (\\n    torch.zeros(...)\\n)` format).
+    The test now checks for the ACTUAL behavior (edge_type IS set to
+    a torch.zeros tensor) rather than a brittle literal-string match.
     """
     import inspect
+    import re
     from drugos_graph import pyg_builder
     src = inspect.getsource(pyg_builder)
-    assert "edge_type = torch.zeros" in src, (
-        "BUG #41 fix: edge_type tensor assignment not found"
+    # The v84 block uses `data[...].edge_type = (\\n    torch.zeros(...)\\n)`.
+    # Check that AT LEAST ONE assignment of edge_type to torch.zeros exists
+    # (across both single-line and multi-line formats).
+    pattern = r'edge_type\s*=\s*\(?\s*torch\.zeros'
+    assert re.search(pattern, src), (
+        "BUG #41 fix: edge_type tensor assignment not found "
+        "(neither single-line nor multi-line form present)"
     )
 
 
