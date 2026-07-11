@@ -818,8 +818,11 @@ jobs:
           check('V31-4 PipelineConfig.from_env exists', hasattr(PipelineConfig, 'from_env'))
 
           # ─── V31-5: GT model class exists ───
-          from graph_transformer.models.graph_transformer import GraphTransformerModel
-          check('V31-5 GraphTransformerModel importable', True)
+          # V90 fix: use the correct class name DrugRepurposingGraphTransformer
+          # (was GraphTransformerModel — a pre-existing CI workflow bug that
+          # never matched the actual class name in the source code).
+          from graph_transformer.models.graph_transformer import DrugRepurposingGraphTransformer
+          check('V31-5 DrugRepurposingGraphTransformer importable', True)
 
           # ─── V31-6: Trainer class exists ───
           from graph_transformer.training.trainer import GraphTransformerTrainer
