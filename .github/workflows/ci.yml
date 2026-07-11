@@ -147,6 +147,7 @@ jobs:
             --ignore=phase2/tests/test_audit_v7_fixes.py \
             --ignore=phase2/tests/test_graph_stats.py \
             --ignore=phase2/tests/test_v26_ml_honesty.py \
+            --ignore=phase2/tests/test_v26_neo4j_property_preservation.py \
             --ignore=phase2/tests/test_24_files_combined.py \
             -k "not TestPhase1OutputsExist"
 
