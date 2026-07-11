@@ -739,6 +739,7 @@ jobs:
             tests/test_v31_root_fixes.py \
             tests/test_c1_c5_connectivity.py \
             tests/test_e2e_integration.py \
+            tests/test_phase1_2_3_4_connectivity.py \
             -v --tb=short --no-header
 
   # == Job 10: Verify V31 root-cause fixes (real Phase 3/4 production code) ==
