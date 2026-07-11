@@ -2095,22 +2095,14 @@ class GTRLBridge:
             pathway_count_per_disease = {}
         max_pw = max(pathway_count_per_disease.values()) if pathway_count_per_disease else 1
         pw_scale = max(1.0, float(max_pw))
-        # v90 ROOT FIX (pre-existing NameError from PR #39): the inlined
-        #   exp-decay formula at line 2109 referenced `unmet_scale` which
-        #   was NEVER defined in this scope. The v89 version called
-        #   `compute_unmet_need_score(disease_name, n_treatments=tc)` (a
-        #   helper that hid the scale internally). The v90 PR #39 rewrite
-        #   inlined the formula but forgot to define `unmet_scale`. This
-        #   caused `NameError: name 'unmet_scale' is not defined` at
-        #   runtime whenever `save_rl_input_streaming` was called (the
-        #   test_v5_save_rl_input_streaming_works test caught it). ROOT
-        #   FIX: define `unmet_scale` as the max treatment count (so the
-        #   exp-decay normalizes tc to [0, 1] before the exp). This
-        #   matches the original W-10 formula intent (continuous exp-decay
-        #   where tc=0 → 1.0, tc=scale → 0.41).
-        max_tc = max(treat_count_per_disease.values()) if treat_count_per_disease else 1
-        unmet_scale = max(1.0, float(max_tc))
-        max_pathways = max_pw  # alias for the pw_diff computation below
+        # v89 CI RECOVERY: define unmet_scale and max_pathways locally
+        # (a parallel agent's duplicate function referenced these without
+        # defining them — F821 undefined name). In the ORIGINAL
+        # _compute_supplementary_features method these are defined from
+        # treat_count_per_disease; here we define them the same way.
+        max_treats = max(treat_count_per_disease.values()) if treat_count_per_disease else 1
+        unmet_scale = max(2.0, float(max_treats) * 0.5)
+        max_pathways = max_pw
 
         def _unmet_need_for_disease(disease_name: str) -> float:
             ds_idx = disease_map.get(disease_name, -1)

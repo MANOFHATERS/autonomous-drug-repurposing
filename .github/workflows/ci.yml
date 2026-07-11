@@ -479,20 +479,30 @@ jobs:
           cache-dependency-path: |
             requirements.txt
             phase1/requirements.txt
+      - name: Install deps (unconditional — needed for the verification step)
+        # V90 CI fix: the previous 'Check all required jobs passed' step
+        # installed deps ONLY when dependencies failed. When all deps
+        # passed, the install was SKIPPED, so the verification step
+        # crashed with ModuleNotFoundError: No module named 'pandas'.
+        # The fix: always install deps (unconditional).
+        # v89 CI RECOVERY: the V90 fix added the name+comment but FORGOT
+        # the `run:` command. GitHub Actions rejected the workflow with
+        # "There's not enough info to determine what you meant" (0 jobs).
+        # ROOT FIX: add the actual pip install command.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -q \
+            "pandas>=2.1.4" \
+            "numpy>=1.26.3" \
+            "sqlalchemy>=2.0.25" \
+            "requests>=2.31.0" \
+            "python-dotenv>=1.0.0" \
+            "rapidfuzz>=3.6.1" \
+            "pyyaml>=6.0" \
+            "lxml>=5.1.0" \
+            "filelock>=3.13.0" \
+            "pyarrow>=14.0.0"
       - name: Check all required jobs passed
-        # V90 CI fix: the previous step structure had a `- name:` with NO
-        # `run`/`uses`/`with` (only a comment), which is invalid GitHub
-        # Actions YAML syntax and caused the entire workflow to fail
-        # parsing: "Line 482, Col 9: There's not enough info to determine
-        # what you meant. Add one of these properties: cancel, run, shell,
-        # uses, wait, wait-all, with, working-directory". This meant CI
-        # NEVER actually ran on any branch — every push showed
-        # "completed/failure" with 0 jobs. ROOT FIX: remove the empty
-        # `- name: Install deps (unconditional...)` step (it was a stray
-        # comment block masquerading as a step) and merge the dep-install
-        # into the actual `Install deps` step below. The conditional
-        # `Check all required jobs passed` step (with `if:` + `run:`) is
-        # preserved — it exits 1 if any dependency job failed.
         if: ${{ !(needs.build.result == 'success' && needs.lint.result == 'success' && needs.test.result == 'success' && needs.verify-p2-fixes.result == 'success' && needs.e2e-sample-mode.result == 'success') }}
         run: |
           echo "One or more required jobs did not pass:"
@@ -504,11 +514,6 @@ jobs:
           exit 1
 
       - name: Install deps
-        # V90 CI fix: install deps UNCONDITIONALLY (not just when deps
-        # jobs failed). The previous 'Check all required jobs passed'
-        # step installed deps ONLY inside its `if:` block — when all
-        # deps passed, the install was SKIPPED, so the verification step
-        # crashed with ModuleNotFoundError: No module named 'pandas'.
         run: |
           python -m pip install --upgrade pip
           pip install -q \

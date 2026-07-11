@@ -200,6 +200,8 @@ def evaluate_link_prediction(
         accuracy = float(accuracy_score(all_labels, pred_binary))
 
         if len(np.unique(all_labels)) < 2:
+            # v89 CI RECOVERY: AUC is undefined when only one class is
+            # present. Return 0.5 (random chance) instead of crashing.
             auc = 0.5
         else:
             try:

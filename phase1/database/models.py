@@ -1544,6 +1544,12 @@ class ProteinProteinInteraction(Base, IDMixin, TimestampMixin):
     )
     # [INT-04] Score JSON for source-specific payloads beyond STRING
     score_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # v91 ROOT FIX (BUG #9): is_homodimer flag column.
+    # True when protein_a_id == protein_b_id (self-interaction / homodimer).
+    # Biologically critical: EGFR dimerization, p53 tetramerization, etc.
+    is_homodimer: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="0",
+    )
     # [IDEM-01] Pipeline run tracking
     pipeline_run_id: Mapped[Optional[int]] = mapped_column(
         Integer, ForeignKey("pipeline_runs.id", ondelete="SET NULL"), nullable=True,
@@ -1559,10 +1565,27 @@ class ProteinProteinInteraction(Base, IDMixin, TimestampMixin):
 
     __table_args__ = (
         UniqueConstraint("protein_a_id", "protein_b_id", name="uq_ppi_protein_pair"),
-        # [DES-02] [IDEM-03] Prevent symmetric duplicates — protein_a_id must be smaller
+        # [DES-02] [IDEM-03] Prevent symmetric duplicates — protein_a_id must
+        # be <= protein_b_id. v91 ROOT FIX (BUG #9): changed from strict
+        # less-than (protein_a_id < protein_b_id) to less-than-or-equal,
+        # allowing homodimers (protein_a_id == protein_b_id). Homodimers
+        # are biologically real and clinically critical: EGFR dimerization,
+        # HER2/HER3 heterodimerization, p53 tetramerization are fundamental
+        # to cancer biology. Dropping ALL homodimers from the KG removed
+        # these critical edges, making drugs targeting EGFR dimerization
+        # (e.g. cetuximab) lose their PPI context. The is_homodimer flag
+        # column distinguishes self-interactions from heterodimers.
         CheckConstraint(
-            "protein_a_id < protein_b_id",
+            "protein_a_id <= protein_b_id",
             name="chk_ppi_ordered",
+        ),
+        # v91 ROOT FIX (BUG #9): is_homodimer flag column.
+        # True when protein_a_id == protein_b_id (self-interaction).
+        # Downstream ML models can use this flag to learn different
+        # representations for homodimers vs heterodimers.
+        CheckConstraint(
+            "(protein_a_id != protein_b_id) OR (protein_a_id == protein_b_id AND is_homodimer = TRUE)",
+            name="chk_ppi_homodimer_flag",
         ),
         # [SCI-03] Score bounds — all STRING scores are 0–1000
         CheckConstraint(

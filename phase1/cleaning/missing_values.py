@@ -2181,8 +2181,14 @@ def fill_missing_drug_fields(
         }
     else:
         # v2.0.0 legacy defaults — preserved for backward compatibility.
+        # v91 ROOT FIX (BUG #6): is_fda_approved default changed from
+        # False to None. False means "definitely NOT FDA approved" which
+        # is scientifically wrong for unknown drugs — the correct value
+        # for a missing FDA approval field is None (unknown). Marking
+        # unknown drugs as unapproved silently excluded real repurposing
+        # candidates from the RL ranker's safety filter.
         fill_map = {
-            "is_fda_approved": False,
+            "is_fda_approved": None,
             "drug_type": "Unknown",
             "max_phase": None,  # FIX #41: None means "unknown"
             "mechanism_of_action": "",

@@ -1109,19 +1109,6 @@ class BiomedicalGraphBuilder:
             # real positive signal. But NO synthetic 3-hop path is
             # injected. The model must learn from NATURAL topology.
 
-        if training_positives_added > 0:
-            logger.info(
-                f"v89 P0 ROOT FIX (Compound #3): injected "
-                f"{training_positives_added} CURATED TRAINING POSITIVES "
-                f"(real DrugBank/RepoDB drug-disease pairs, NON-KP drugs) "
-                f"as 'treats' edges ONLY. NO synthetic 3-hop path "
-                f"injection (the V31 injection was label leakage — "
-                f"LABEL_LEAKING_EDGES only strips the direct treats edge, "
-                f"not the injected path, so the model learned '3-hop path "
-                f"exists → positive' trivially and val AUC = 1.0). The "
-                f"model now learns from NATURAL topology only."
-            )
-
         # V30 ROOT FIX (3.10): REMOVED the random "known positives"
         # generation. With random positives, the model was being trained
         # to predict RANDOM pairs as positive. This is scientific noise
