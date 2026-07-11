@@ -1098,7 +1098,7 @@ class DisGeNETPipeline(BasePipeline):
                 else:
                     self._source_format = DisGeNETSourceFormat.TSV
                     path = self._download_static()
-            except Exception as exc:
+            except (OSError, ValueError, ConnectionError, TimeoutError) as exc:  # v85 FORENSIC ROOT FIX (BUG #51)
                 # v83 P0-C13: in sample mode, fall back to embedded samples
                 # instead of raising. In full mode, re-raise.
                 if _download_mode == "sample":
@@ -1498,7 +1498,7 @@ class DisGeNETPipeline(BasePipeline):
             )
             return dest
 
-        except Exception:
+        except (OSError, csv_mod.Error, ValueError):  # v85 FORENSIC ROOT FIX (BUG #51)
             # Clean up the .tmp file on any failure (DQ-12).
             try:
                 if tmp_dest.exists():
@@ -3241,7 +3241,7 @@ class DisGeNETPipeline(BasePipeline):
                 quoting=csv_mod.QUOTE_ALL,  # COMP-14
             )
             os.replace(tmp_path, output_path)
-        except Exception:
+        except (OSError, csv_mod.Error, ValueError):  # v85 FORENSIC ROOT FIX (BUG #51)
             # Clean up the .tmp file on failure.
             try:
                 if tmp_path.exists():
@@ -3513,7 +3513,7 @@ class DisGeNETPipeline(BasePipeline):
                         "P1-21 batched insert)",
                         len(new_records),
                     )
-            except Exception as exc:  # noqa: BLE001
+            except (OSError, RuntimeError, ValueError) as exc:  # noqa: BLE001  # v85 FORENSIC ROOT FIX (BUG #51)
                 logger.warning(
                     "[disgenet] Could not flush clean-time dead-letter "
                     "records to DB: %s",
@@ -3768,7 +3768,7 @@ class DisGeNETPipeline(BasePipeline):
                 c.name for c in sa_inspect(GeneDiseaseAssociation).columns
                 if c.name not in _AUTO_MANAGED_COLS
             ]
-        except Exception:  # noqa: BLE001
+        except (ImportError, OSError, ValueError):  # noqa: BLE001  # v85 FORENSIC ROOT FIX (BUG #51)
             # Fallback: hardcode the column list (excluding auto-managed).
             model_cols = [
                 "gene_symbol", "uniprot_id", "disease_id", "disease_id_type",
@@ -3838,7 +3838,7 @@ class DisGeNETPipeline(BasePipeline):
         try:
             content = df.to_csv(index=False).encode("utf-8")
             return hashlib.sha256(content).hexdigest()
-        except Exception:  # noqa: BLE001
+        except (OSError, ValueError):  # noqa: BLE001  # v85 FORENSIC ROOT FIX (BUG #51)
             return ""
 
     def _write_dead_letter_file(
@@ -3895,7 +3895,7 @@ class DisGeNETPipeline(BasePipeline):
             if objects:
                 session.bulk_save_objects(objects)
                 session.flush()
-        except Exception as exc:  # noqa: BLE001
+        except (OSError, RuntimeError, ValueError) as exc:  # noqa: BLE001  # v85 FORENSIC ROOT FIX (BUG #51)
             logger.warning(
                 "[disgenet] Could not write to dead_letter_gda table: %s",
                 exc,
