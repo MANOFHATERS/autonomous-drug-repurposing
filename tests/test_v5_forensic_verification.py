@@ -288,39 +288,51 @@ def test_bf4_market_score_orphan_favoring():
         f"n_unique={n_unique}, sample={np.round(markets, 3)[:5].tolist()}",
     )
 
-    # Compute pathway counts per disease and check that low-pathway diseases
-    # get a HIGH market score (orphan bonus)
-    disrupted = bridge.edge_indices.get(("pathway", "disrupted_in", "disease"))
-    pw_count = {}
-    if disrupted is not None and disrupted.numel() > 0:
-        for ds_idx in disrupted[1].tolist():
-            pw_count[ds_idx] = pw_count.get(ds_idx, 0) + 1
+    # v91 ROOT FIX (B-F4 test was using pathway count as rarity proxy —
+    # scientifically wrong): the v89 ROOT FIX changed market_score to use
+    # CURATED WHO/Orphanet disease prevalence (the scientifically correct
+    # approach). Rare diseases (prevalence < 5/10K per FDA/EU) get HIGH
+    # market scores (orphan drug value). Common diseases get LOWER scores.
+    #
+    # The PREVIOUS version of this test used PATHWAY COUNT as a proxy for
+    # rarity (low pathway count = "rare"). That proxy is WRONG: a disease
+    # can have 0 pathway connections in the demo graph but still be COMMON
+    # (e.g., atrial fibrillation, prevalence ~3300/10K). The test was
+    # picking atrial fibrillation (pw=0, but actually common) as the "rare"
+    # disease and lupus (pw=1, but actually less common than AFib) as the
+    # "common" disease — then asserting rare_market > common_market, which
+    # failed because the production code correctly gives AFib a LOWER
+    # market_score than lupus.
+    #
+    # ROOT FIX: use the ACTUAL disease prevalence (from get_disease_prevalence
+    # in biomedical_tables.py, the same table compute_market_score uses) to
+    # determine which disease is rare vs common. This aligns the test's
+    # rarity definition with the production code's rarity definition.
+    from graph_transformer.data.biomedical_tables import get_disease_prevalence
 
-    # Sort diseases by pathway count
-    # ROOT FIX (V27): only iterate over diseases that are ACTUALLY IN the
-    # df. The V26 test iterated over ALL diseases in disease_map, but the
-    # df only contains the first 10. If a KP disease (e.g., "inflammation")
-    # was added at the end of disease_map and happened to have the lowest
-    # pathway count, ``rare_disease`` would be a disease NOT in the df,
-    # causing ``df[df["disease"] == rare_disease]["market_score"].iloc[0]``
-    # to fail with "single positional indexer is out-of-bounds" (empty df).
     df_disease_set = set(df["disease"].tolist())
-    disease_pw = []
-    for d_name, ds_idx in disease_map.items():
-        if d_name in df_disease_set:  # V27 fix: only include diseases in the df
-            disease_pw.append((d_name, pw_count.get(ds_idx, 0)))
-    disease_pw.sort(key=lambda x: x[1])
+    disease_prev = []
+    for d_name in disease_map.keys():
+        if d_name in df_disease_set:
+            prev = get_disease_prevalence(d_name)
+            # Unknown prevalence (None) → treat as mid-prevalence (50/10K)
+            # so it sorts between rare and common.
+            prev_val = prev if prev is not None else 50.0
+            disease_prev.append((d_name, prev_val, prev))
+    disease_prev.sort(key=lambda x: x[1])  # sort by prevalence ascending
 
-    if len(disease_pw) >= 2:
-        rare_disease = disease_pw[0][0]
-        common_disease = disease_pw[-1][0]
+    if len(disease_prev) >= 2:
+        # rare_disease = lowest prevalence (actually rare)
+        # common_disease = highest prevalence (actually common)
+        rare_disease = disease_prev[0][0]
+        common_disease = disease_prev[-1][0]
         rare_market = float(df[df["disease"] == rare_disease]["market_score"].iloc[0])
         common_market = float(df[df["disease"] == common_disease]["market_score"].iloc[0])
         check(
-            "B-F4: rare disease (low pw) has higher market_score than common disease",
+            "B-F4: rare disease (low prevalence) has higher market_score than common disease",
             rare_market > common_market,
-            f"rare({rare_disease}, pw={disease_pw[0][1]})={rare_market:.3f}, "
-            f"common({common_disease}, pw={disease_pw[-1][1]})={common_market:.3f}",
+            f"rare({rare_disease}, prev={disease_prev[0][1]})={rare_market:.3f}, "
+            f"common({common_disease}, prev={disease_prev[-1][1]})={common_market:.3f}",
         )
 
 
