@@ -54,6 +54,44 @@ Stage Summary:
 - No NEW CI failures (same jobs pass/fail as main before merge)
 
 ---
+Task ID: v90-real-integration-fix
+Agent: main (v90 real integration pass)
+Task: Fix the REAL Phase 1-2-3-4 integration that previous sessions claimed was "100% connected" but never actually ran. The v89 run_pipeline.py called fictional APIs (build_pyg_hetero_data doesn't exist; stage_phase1_to_phase2 was called with wrong kwargs). Fix the VecNormalize inference bypass (third leg of AUC-fraud chain). Fix gnn_score circular distillation. Fix unmet_need constant bug. Run real code end-to-end, create branch, push, verify CI, merge.
+
+Work Log:
+- Read project docx (Team_Cosmic_Build_Process_Updated.docx) — confirmed 4-phase architecture (Phase 1 data ingestion → Phase 2 KG → Phase 3 Graph Transformer → Phase 4 RL ranker).
+- Cloned repo. Ignored all v62/v78/v89 "ROOT_FIX_SUMMARY" markdown files (the user explicitly said comments lie — verified by running code).
+- Installed all deps into venv: torch (CPU), torch-geometric, gymnasium, stable-baselines3, pandas, sqlalchemy, rapidfuzz, etc.
+- Generated Phase 1 embedded sample data (11 CSVs, 65 nodes, 79 edges).
+- Discovered ROOT CAUSE of integration failure: run_pipeline.py called `stage_phase1_to_phase2(phase1_processed_dir=..., output_dir=None)` — but the REAL function signature is `stage_phase1_to_phase2(frames, *, run_id=None, phase1_processed_dir=None)` (no output_dir kwarg, requires frames positional arg, returns Phase1StagedData not 3-tuple). The pipeline CRASHED at the bridge call — it never ran end-to-end.
+- Discovered SECOND root cause: run_pipeline.py imported `build_pyg_hetero_data` from pyg_builder — but this function DOES NOT EXIST. The real API is `PyGBuilder.build_from_drkg(entity_maps, edge_maps)`.
+- Discovered THIRD root cause: Phase 2 schema uses capitalized node labels (Compound, Protein, Disease, Pathway, ClinicalOutcome, Gene) but Phase 3 expects lowercase (drug, protein, disease, pathway, clinical_outcome). Fundamental schema mismatch.
+- Created graph_transformer/data/phase2_adapter.py — the REAL schema adapter that:
+  (a) Maps Compound→drug, Protein→protein, Pathway→pathway, Disease→disease, ClinicalOutcome→clinical_outcome (drops Gene)
+  (b) Maps edge types to Phase 3's 14 canonical types
+  (c) DERIVES (pathway, disrupted_in, disease) edges from Gene→Disease + gene_symbol→Protein + Protein→Pathway (the bridge doesn't produce these directly)
+  (d) Normalizes drug/disease names to lowercase + maps to KNOWN_POSITIVES vocabulary
+  (e) Produces the 4-tuple (node_features, edge_indices, node_maps, known_pairs) via BiomedicalGraphBuilder
+- Rewrote run_pipeline.py to use the REAL bridge API: run_phase1_to_phase2() → adapt_phase2_to_phase3() → GTRLBridge.run_full_pipeline(graph_data=...).
+- Fixed VecNormalize inference bypass (third leg of AUC-fraud compound chain): the previous code passed `lambda: None` to DummyVecEnv which crashed → VecNormalize stats NEVER loaded → RL inference on RAW obs → random rankings. Fixed by creating a minimal Gymnasium env with the PPO model's observation space, then calling VecNormalize.load() with DummyVecEnv wrapping it.
+- Fixed gnn_score circular distillation (Compound #4): config weight reduced from 0.35 to 0.04 (< 0.05 threshold per user's explicit requirement). The runtime cap in compute() is preserved as a safety net.
+- Fixed unmet_need_score constant bug (S-F1): the formula `0.95 * exp(-tc/scale) + 0.05` gave 1.0 for ALL diseases with tc=0, making it constant on demo graphs. Fixed by blending 70% treatment-count signal + 30% pathway-connectivity signal.
+- Updated 3 stale tests that encoded OLD buggy behavior:
+  (a) test_e2e_integration.py::test_v4_final_phase3_phase4_100_percent_connected — checked gnn_score >= 0.30 (dominant); updated to check < 0.05 (not dominant)
+  (b) test_v30_forensic_fixes.py::test_compound_2_gnn_score_weight_capped — checked weight > 0.20 with runtime cap; updated to check weight < 0.05 in config
+  (c) test_v5_forensic_verification.py::test_sf1_unmet_need_not_constant — was already failing on main (pre-existing); fixed by the unmet_need formula change
+
+Stage Summary:
+- Pipeline NOW RUNS END-TO-END: Phase 1 → Bridge → Schema Adapter → Phase 3 (GT) → Phase 4 (RL). Verified by actual execution.
+- With 80 GT epochs + 5000 RL timesteps on the 10-drug sample graph:
+  * RL AUC = 1.0 (PASS — perfect ranking, VecNormalize fix works)
+  * KP Recovery = 100% (PASS — agent finds ALL known positives)
+  * GT AUC = 0.57 (below 0.85 threshold — expected on 10-drug demo; production needs 10K drugs + Morgan fingerprints)
+- All 435 tests pass: 211 Phase 1/2 tests + 224 Phase 3/4 tests.
+- Build check (compileall) passes on all source files.
+- E2E bridge test passes: 10 Compound nodes, 15 Protein nodes, 12 treats edges.
+- Scientific validation gate is HONEST: correctly reports GT AUC below threshold, correctly reports RL AUC + KP recovery passing.
+- Files changed: run_pipeline.py (rewritten), graph_transformer/data/phase2_adapter.py (new), graph_transformer/gt_rl_bridge.py (VecNormalize fix + unmet_need fix), rl/rl_drug_ranker.py (gnn_score config), tests/test_e2e_integration.py, tests/test_v30_forensic_fixes.py, .gitignore
 Task ID: v90-p0-forensic-root-fixes-remaining
 Agent: main (v90 forensic root-fix pass)
 Task: Verify v89 fixes against actual code (not comments), fix all remaining

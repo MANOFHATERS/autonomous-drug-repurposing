@@ -2325,40 +2325,58 @@ class GTRLBridge:
                 vecnorm_path = ckpt_path.replace(".zip", ".vecnormalize.pkl")
                 if os.path.exists(vecnorm_path):
                     try:
-                        from stable_baselines3.common.vec_env import VecNormalize as _VNSync
-                        # VecNormalize.load requires a VecEnv to wrap. We
-                        # don't have a live env at this point (we're just
-                        # loading stats for inference), so we create a
-                        # minimal DummyVecEnv wrapper that's never stepped.
-                        # The normalize_obs() method only uses the stored
-                        # running mean/std, not the env.
-                        from stable_baselines3.common.vec_env import DummyVecEnv as _DVE
-                        _dummy_env_fn = lambda: None  # noqa: E731
-                        try:
-                            self.rl_vec_normalize = _VNSync.load(
-                                vecnorm_path, _DVE([_dummy_env_fn])
-                            )
-                        except Exception:
-                            # Fallback: load the pickle directly and
-                            # extract the obs_rms (RunningMeanStd) for
-                            # manual normalization. This avoids the
-                            # DummyVecEnv requirement.
-                            import pickle as _pickle
-                            with open(vecnorm_path, "rb") as f:
-                                _vn_state = _pickle.load(f)
-                            self.rl_vec_normalize = _VNSync(_DVE([_dummy_env_fn]))
-                            try:
-                                self.rl_vec_normalize.__setstate__(_vn_state)
-                            except Exception:
-                                # Last-resort fallback: store the state
-                                # dict; extract_policy_prob_high will
-                                # detect the missing normalize_obs and
-                                # log a CRITICAL warning.
-                                self.rl_vec_normalize = None
+                        # v90 REAL ROOT FIX (VecNormalize inference bypass):
+                        # The previous code tried VecNormalize.load() with
+                        # a DummyVecEnv wrapping ``lambda: None``. DummyVecEnv
+                        # requires a callable returning a REAL Gymnasium env,
+                        # so this crashed → VecNormalize stats were NEVER
+                        # loaded at inference → every RL AUC and Top-N
+                        # ranking was computed on RAW (un-normalized) obs →
+                        # silent distribution shift → random rankings.
+                        #
+                        # The REAL fix: create a minimal Gymnasium env with
+                        # the SAME observation space as the training env
+                        # (extracted from the loaded PPO model), wrap it in
+                        # DummyVecEnv, then call VecNormalize.load(). This
+                        # satisfies SB3's requirement without needing the
+                        # original training env.
+                        import pickle as _pickle
+                        import numpy as _np
+                        from stable_baselines3.common.vec_env import (
+                            VecNormalize as _VNSync,
+                            DummyVecEnv as _DVE,
+                        )
+                        import gymnasium as _gym
+
+                        # Extract observation space from the loaded PPO model
+                        _obs_space = self.rl_model.observation_space
+                        _act_space = self.rl_model.action_space
+
+                        class _MinimalEnv(_gym.Env):
+                            """Minimal env with the correct observation space.
+                            Never stepped — only exists so VecNormalize.load()
+                            can reconstruct the wrapper."""
+
+                            def __init__(self):
+                                super().__init__()
+                                self.observation_space = _obs_space
+                                self.action_space = _act_space
+
+                            def reset(self, *, seed=None, options=None):
+                                return _np.zeros(_obs_space.shape, dtype=_np.float32), {}
+
+                            def step(self, action):
+                                return _np.zeros(_obs_space.shape, dtype=_np.float32), 0.0, True, False, {}
+
+                        self.rl_vec_normalize = _VNSync.load(
+                            vecnorm_path, _DVE([_MinimalEnv])
+                        )
                         logger.info(
-                            f"v89 P0 ROOT FIX: loaded VecNormalize stats "
-                            f"from {vecnorm_path}. RL inference will "
-                            f"normalize obs before policy network."
+                            f"v90 ROOT FIX: loaded VecNormalize stats "
+                            f"from {vecnorm_path} via VecNormalize.load() "
+                            f"with minimal env (obs_space shape="
+                            f"{getattr(_obs_space, 'shape', '?')}). RL "
+                            f"inference will normalize obs before policy."
                         )
                     except Exception as vne:
                         logger.warning(
