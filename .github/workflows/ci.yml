@@ -7,7 +7,7 @@
 # Also triggerable manually via workflow_dispatch.
 #
 # Verifies:
-#   1. Build — py_compile on every .py file (equiv to tsc --noEmit)
+#   1. Build — compileall on every .py file (equiv to tsc --noEmit)
 #   2. Lint — flake8 for fatal errors only (syntax, undefined names)
 #   3. Test — pytest on Phase 1 + Phase 2 test suites
 #   4. P2/Chain-1 verification — all 11 P2 fixes + Chain-1 at runtime
