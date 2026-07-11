@@ -200,14 +200,17 @@ def evaluate_link_prediction(
         accuracy = float(accuracy_score(all_labels, pred_binary))
 
         if len(np.unique(all_labels)) < 2:
+            # v89 CI RECOVERY: AUC is undefined when only one class is
+            # present. Return 0.5 (random chance) instead of crashing.
             auc = 0.5
         else:
             try:
                 auc = float(roc_auc_score(all_labels, all_probs))
             except ValueError:
                 auc = 0.5
+
         avg_loss = total_loss / max(1, (n_samples + batch_size - 1) // batch_size)
-        return {"loss": avg_loss, "auc": auc, "accuracy": accuracy, "probs": all_probs, "pred_binary": pred_binary}
+        return {"loss": avg_loss, "auc": auc, "accuracy": accuracy}
     finally:
         # V90 ROOT FIX (BUG #19): restore the prior training state.
         model.train(prior_training)

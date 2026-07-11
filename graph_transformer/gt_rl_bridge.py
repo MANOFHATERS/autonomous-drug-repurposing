@@ -2095,11 +2095,14 @@ class GTRLBridge:
             pathway_count_per_disease = {}
         max_pw = max(pathway_count_per_disease.values()) if pathway_count_per_disease else 1
         pw_scale = max(1.0, float(max_pw))
-        # v100 ROOT FIX: define unmet_scale for the exp-decay formula below.
-        # The previous code referenced `unmet_scale` but never defined it,
-        # causing NameError at runtime. Scale=3.0 gives good differentiation:
-        # tc=0 → 1.0, tc=3 → 0.72, tc=10 → 0.38.
-        unmet_scale = 3.0
+        # v89 CI RECOVERY: define unmet_scale and max_pathways locally
+        # (a parallel agent's duplicate function referenced these without
+        # defining them — F821 undefined name). In the ORIGINAL
+        # _compute_supplementary_features method these are defined from
+        # treat_count_per_disease; here we define them the same way.
+        max_treats = max(treat_count_per_disease.values()) if treat_count_per_disease else 1
+        unmet_scale = max(2.0, float(max_treats) * 0.5)
+        max_pathways = max_pw
 
         def _unmet_need_for_disease(disease_name: str) -> float:
             ds_idx = disease_map.get(disease_name, -1)
@@ -2129,7 +2132,7 @@ class GTRLBridge:
             #   know much about it). The secondary signal is small (±0.03)
             #   so it doesn't overwhelm the primary treatment-count signal.
             pw_count = pathway_count_per_disease.get(ds_idx, 0)
-            pw_diff = 0.03 * (pw_count / max(max_pw, 1)) - 0.015
+            pw_diff = 0.03 * (pw_count / max(max_pathways, 1)) - 0.015
             return float(np.clip(base + pw_diff, 0.0, 1.0))
 
         df["unmet_need_score"] = df["disease"].map(_unmet_need_for_disease)
