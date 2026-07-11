@@ -2450,6 +2450,7 @@ class GTRLBridge:
         import glob as _glob
         import json as _json
         import os as _os_mod
+        import time as _time_mod
         rl_auc = None
         rl_meta = None  # v90 BUG #5: store fresh meta for reuse below
         meta_files = _glob.glob(os.path.join(self.output_dir, "top_candidates_*.meta.json"))
@@ -2466,7 +2467,7 @@ class GTRLBridge:
         # None (which correctly fails the validation gate per BUG #3 fix).
         if meta_files:
             meta_files.sort(key=_os_mod.path.getmtime, reverse=True)
-            _bridge_run_time = _os_mod.time.time()
+            _bridge_run_time = _time_mod.time()
             _found_fresh_meta = False
             for _meta_file in meta_files:
                 try:

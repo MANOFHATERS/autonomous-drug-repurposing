@@ -2594,9 +2594,13 @@ class DrugRankingEnv(gym.Env):
         # ALL pairs by policy_prob and returns top N regardless of the
         # 0.5 threshold. The 0.5 threshold is used ONLY for the
         # is_known_positive recovery test (via the action field).
-        if not self.all_ranked:
+        # Backward compat: if all_ranked is empty but high_ranked has
+        # entries (e.g., tests that set high_ranked directly), fall back
+        # to high_ranked.
+        _ranked_buffer = self.all_ranked if self.all_ranked else self.high_ranked
+        if not _ranked_buffer:
             return []
-        df = pd.DataFrame(self.all_ranked)
+        df = pd.DataFrame(_ranked_buffer)
         # V4 B-F2 fix: sort by policy_prob (agent's learned ranking),
         # NOT by REWARD_COL (hand-coded reward function). Falls back
         # to REWARD_COL if policy_prob is not present (legacy data).
