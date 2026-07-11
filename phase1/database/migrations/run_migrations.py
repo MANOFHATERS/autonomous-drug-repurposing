@@ -4507,6 +4507,11 @@ def _run_migrations_inner(
                                 # v83 P0-C10: ``stmt_for_execution`` has
                                 # comments stripped to prevent pyformat
                                 # mis-parsing of ``%(...)s`` in comments.
+                                # (Reconciled with v82 P1-A13 revised: the
+                                # comment-stripping approach is superior to
+                                # reverting to exec_driver_sql because it
+                                # preserves the injection-safety of text()
+                                # while fixing the %(table)s parse bug.)
                                 conn.execute(text(stmt_for_execution))
                             except Exception as stmt_exc:
                                 # v59 ROOT FIX: catch "duplicate column name"
