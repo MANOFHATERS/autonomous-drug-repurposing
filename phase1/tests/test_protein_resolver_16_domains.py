@@ -366,8 +366,15 @@ class TestDesign:
     def test_design02_match_confidence_enum_used(self):
         """DESIGN-02: MatchConfidence enum values should be consistent."""
         assert MatchConfidence.UNIPROT_EXACT.value == 1.0
-        assert MatchConfidence.GENE_NAME_ORGANISM.value == 0.85
-        assert MatchConfidence.PROTEIN_NAME_FUZZY.value == 0.90
+        # v90 STALE-TEST FIX: the v29 SCI-02 inversion fix lowered both
+        # GENE_NAME_ORGANISM (was 0.85 → 0.75) and PROTEIN_NAME_FUZZY
+        # (was 0.90 → 0.60) because a fuzzy / gene-name match is by
+        # definition LESS reliable than an exact UniProt match (1.0)
+        # and should NOT exceed name_normalized (0.80). The previous
+        # assertions reflected the PRE-v29 values. ROOT FIX: assert
+        # the CURRENT post-v29 values.
+        assert MatchConfidence.GENE_NAME_ORGANISM.value == 0.75
+        assert MatchConfidence.PROTEIN_NAME_FUZZY.value == 0.60
 
     def test_design06_provisional_dedup(self):
         """DESIGN-06: Duplicate provisional creation is handled."""
@@ -600,20 +607,53 @@ class TestSecurity:
 
     def test_sec15_tamper_evident_signature(self):
         """SEC-15: State dict includes HMAC signature when tamper_evident=True."""
-        resolver = ProteinResolver()
+        # v90 STALE-TEST FIX: the v29 SEC-15 implementation requires
+        # ``ResolverConfig.tamper_evident_key`` to be set (either via
+        # constructor kwarg or ``ENTITY_RESOLUTION_TAMPER_EVIDENT_KEY``
+        # env var + ``ResolverConfig.from_env()``). Without it,
+        # ``to_state_dict`` logs a CRITICAL warning and SKIPS signing.
+        # The previous test used the default ``ProteinResolver()`` whose
+        # default ``ResolverConfig`` has ``tamper_evident_key=None``, so
+        # the assertion ``'_signature' in state`` always failed.
+        # ROOT FIX: construct a ``ResolverConfig`` with a test-only key
+        # and pass it to the resolver.
+        _test_key = bytes.fromhex("a" * 64)  # 32-byte test key (zeros)
+        cfg = ResolverConfig(tamper_evident_key=_test_key)
+        resolver = ProteinResolver(config=cfg)
         state = resolver.to_state_dict()
         assert "_signature" in state
 
     def test_sec15_tamper_detection(self):
         """SEC-15: Tampered state dict is rejected."""
-        resolver = ProteinResolver()
-        state = resolver.to_state_dict()
-        sig = state.pop("_signature")
-        # Tamper with data.
-        state["mapping"]["FAKE"] = {"tampered": True}
-        state["_signature"] = sig
-        with pytest.raises(ValueError, match="mismatch|tamper"):
-            ProteinResolver.from_state_dict(state)
+        # v90 STALE-TEST FIX: same key-config fix as
+        # test_sec15_tamper_evident_signature — without a key, no
+        # signature is produced, so ``state.pop('_signature')`` raised
+        # KeyError. ROOT FIX: construct with a test-only key.
+        # NOTE: ``from_state_dict`` reads the key from env var
+        # ``ENTITY_RESOLUTION_TAMPER_EVIDENT_KEY`` (because it's a
+        # classmethod with no ``self._config`` yet — the config is part
+        # of the signed payload, so it can't be used to source the key).
+        # So we must ALSO set the env var for the verification side.
+        import os
+        _test_key = bytes.fromhex("a" * 64)
+        _test_key_hex = "a" * 64
+        old_env_key = os.environ.get("ENTITY_RESOLUTION_TAMPER_EVIDENT_KEY")
+        os.environ["ENTITY_RESOLUTION_TAMPER_EVIDENT_KEY"] = _test_key_hex
+        try:
+            cfg = ResolverConfig(tamper_evident_key=_test_key)
+            resolver = ProteinResolver(config=cfg)
+            state = resolver.to_state_dict()
+            sig = state.pop("_signature")
+            # Tamper with data.
+            state["mapping"]["FAKE"] = {"tampered": True}
+            state["_signature"] = sig
+            with pytest.raises(ValueError, match="mismatch|tamper"):
+                ProteinResolver.from_state_dict(state)
+        finally:
+            if old_env_key is None:
+                os.environ.pop("ENTITY_RESOLUTION_TAMPER_EVIDENT_KEY", None)
+            else:
+                os.environ["ENTITY_RESOLUTION_TAMPER_EVIDENT_KEY"] = old_env_key
 
     def test_comp04_class_mismatch_rejected(self):
         """COMP-04: State dict from wrong resolver class is rejected."""
@@ -671,7 +711,13 @@ class TestConfiguration:
     def test_config06_deprecation_warning(self):
         """CONFIG-06/DOC-17: _PROTEIN_FUZZY_THRESHOLD is deprecated."""
         from entity_resolution.protein_resolver import _PROTEIN_FUZZY_THRESHOLD
-        assert _PROTEIN_FUZZY_THRESHOLD == 0.90  # Still accessible.
+        # v90 STALE-TEST FIX: the v29 SCI-02 inversion fix lowered
+        # ``_PROTEIN_FUZZY_THRESHOLD`` from 0.90 to 0.60 to match the
+        # corrected ``MatchConfidence.PROTEIN_NAME_FUZZY=0.60`` (was 0.90).
+        # The previous assertion ``== 0.90`` reflected the PRE-v29 value.
+        # ROOT FIX: assert the CURRENT post-v29 value (0.60). The constant
+        # is still accessible (just with a corrected value).
+        assert _PROTEIN_FUZZY_THRESHOLD == 0.60  # Still accessible (post-v29 value).
 
     def test_config_validation(self):
         """CONFIG: Invalid config values are rejected on validate()."""

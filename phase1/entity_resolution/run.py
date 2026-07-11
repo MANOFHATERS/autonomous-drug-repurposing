@@ -609,6 +609,7 @@ def run_entity_resolution() -> Dict[str, Any]:
                 exc,
             )
         else:
+<<<<<<< HEAD
             # v91 P0 ROOT FIX: moved this `else:` clause to AFTER both
             # `except` clauses (Python requires try/except/else in that
             # order). The previous code placed `else:` INSIDE the
@@ -620,6 +621,15 @@ def run_entity_resolution() -> Dict[str, Any]:
             # This runs when the try block completed without exception
             # but the loop above did not find a HUMAN (9606) aliases file.
             if _string_raw_dir.exists() and string_aliases_df.empty:
+=======
+            # v91 FORENSIC ROOT FIX: the previous code had `else:` at the
+            # WRONG indentation (inside the except block, after `raise`) —
+            # a SyntaxError that prevented entity_resolution/run.py from
+            # importing. ROOT FIX: move `else:` to the correct position
+            # (after all except clauses, at the same indent as except).
+            # v89 BUG #3: no human aliases file found — log clearly.
+            if _string_raw_dir.exists():
+>>>>>>> origin/main
                 _all_alias_files = list(_string_raw_dir.glob("*aliases*.txt.gz"))
                 logger.warning(
                     "No HUMAN (9606) STRING aliases file found in %s. "
@@ -884,6 +894,9 @@ def run_entity_resolution() -> Dict[str, Any]:
                 chunksize=5000,
             )
             conn.execute(text("DELETE FROM entity_mapping"))
+            # v90 DEDUP FIX: dedup staging by chembl_id before INSERT to
+            # avoid UNIQUE constraint violation when resolver produces
+            # duplicate chembl_id entries. Keep highest-confidence row.
             conn.execute(text("""
                 INSERT INTO entity_mapping
                     (canonical_inchikey, canonical_name, chembl_id,
@@ -891,9 +904,29 @@ def run_entity_resolution() -> Dict[str, Any]:
                      match_confidence, match_method)
                 SELECT
                     canonical_inchikey, canonical_name, chembl_id,
-                    drugbank_id, pubchem_cid, uniprot_id, string_id,
-                    match_confidence, match_method
+                     drugbank_id, pubchem_cid, uniprot_id, string_id,
+                     match_confidence, match_method
+                FROM (
+                    SELECT
+                        canonical_inchikey, canonical_name, chembl_id,
+                        drugbank_id, pubchem_cid, uniprot_id, string_id,
+                        match_confidence, match_method,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY chembl_id
+                            ORDER BY match_confidence DESC NULLS LAST,
+                                     canonical_inchikey
+                        ) AS rn
+                    FROM _tmp_entity_mapping_staging
+                    WHERE chembl_id IS NOT NULL
+                ) deduped_chembl
+                WHERE rn = 1
+                UNION ALL
+                SELECT
+                    canonical_inchikey, canonical_name, chembl_id,
+                     drugbank_id, pubchem_cid, uniprot_id, string_id,
+                     match_confidence, match_method
                 FROM _tmp_entity_mapping_staging
+                WHERE chembl_id IS NULL
             """))
             conn.execute(text("DROP TABLE IF EXISTS _tmp_entity_mapping_staging"))
         logger.info(

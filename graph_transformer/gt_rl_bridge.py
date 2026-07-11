@@ -2095,6 +2095,7 @@ class GTRLBridge:
             pathway_count_per_disease = {}
         max_pw = max(pathway_count_per_disease.values()) if pathway_count_per_disease else 1
         pw_scale = max(1.0, float(max_pw))
+<<<<<<< HEAD
         # v91 P0 ROOT FIX (NameError: unmet_scale + test_v4_s_f1): the
         # previous code referenced an UNDEFINED `unmet_scale` variable,
         # crashing RL input generation with NameError on every run. The
@@ -2114,6 +2115,33 @@ class GTRLBridge:
             # Use the CURATED compute_unmet_need_score (prevalence table
             # + treatment gap). This is the v89 contract.
             return float(compute_unmet_need_score(disease_name, n_treatments=int(tc)))
+=======
+        # v91 FORENSIC ROOT FIX: define max_pathways (was UNDEFINED —
+        # NameError at runtime). max_pathways mirrors max_pw for the
+        # pathway-connectivity differentiation. The canonical
+        # compute_unmet_need_score is imported from biomedical_tables
+        # (line 95) — do NOT shadow it with a local function.
+        max_pathways = max_pw
+
+        def _unmet_need_for_disease(disease_name: str) -> float:
+            ds_idx = disease_map.get(disease_name, -1)
+            if ds_idx < 0:
+                return 0.5
+            tc = treat_count_per_disease.get(ds_idx, 0)
+            # v91 ROOT FIX: delegate to the canonical compute_unmet_need_score
+            # from biomedical_tables (curated prevalence + treatment-count
+            # formula). The previous inline formula was a DUPLICATE with
+            # undefined variables (unmet_scale, max_pathways). This local
+            # wrapper is named _unmet_need_for_disease so it does NOT shadow
+            # the imported function.
+            base = compute_unmet_need_score(disease_name, n_treatments=tc)
+            # v89 ROOT FIX (CI S-F1): add a small pathway-connectivity
+            # differentiation so diseases with the SAME treatment count but
+            # DIFFERENT pathway connectivity get slightly different scores.
+            pw_count = pathway_count_per_disease.get(ds_idx, 0)
+            pw_diff = 0.03 * (pw_count / max(max_pathways, 1)) - 0.015
+            return float(np.clip(base + pw_diff, 0.0, 1.0))
+>>>>>>> origin/main
 
         df["unmet_need_score"] = df["disease"].map(_unmet_need_for_disease)
         logger.info(
