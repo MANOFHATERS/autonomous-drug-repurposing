@@ -575,7 +575,19 @@ class TestDomain4Coding:
         # Fuzzy match: "asprin" vs "aspirin".
         result = basic_resolver.resolve_single("asprin")
         assert result.match_method == "fuzzy"
-        assert result.match_confidence == 0.85
+        # v90 STALE-TEST FIX: the v29 ROOT FIX (audit D3-3 / SCI-02 inversion)
+        # lowered ``fuzzy`` confidence from 0.85 to 0.65 because a fuzzy match
+        # is by definition LESS reliable than an exact name_normalized match
+        # (0.80). The previous assertion ``== 0.85`` reflected the PRE-v29
+        # value and was never updated when the confidence was corrected. This
+        # caused the test to fail on every CI run after v29 was merged,
+        # masking real regressions. ROOT FIX: assert the CURRENT correct
+        # value (0.65) and reference the v29 inversion rationale.
+        assert result.match_confidence == 0.65, (
+            f"v29 inversion fix: fuzzy confidence should be 0.65 (was 0.85 "
+            f"pre-v29, lowered because fuzzy < name_normalized=0.80). "
+            f"Got: {result.match_confidence}"
+        )
 
     def test_exc_response_null_deref_protection(self):
         """3.17 — HTTPError with response=None doesn't crash."""
@@ -854,12 +866,36 @@ class TestDomain8Performance:
         """8.4 / C.21 — to_dataframe(chunksize=N) streams chunks."""
         # Ingest 50 records with TRULY DISTINCT names that won't fuzzy-match.
         # Use random-looking names from a deterministic generator.
+        # v90 STALE-FIXTURE FIX: the previous InChIKey pattern
+        # ``AAAAAAAAAAAAAA-{i:09d}-N`` was MALFORMED — the second block
+        # was 9 digits (not 10 letters), so it did NOT match the
+        # ``[A-Z]{14}-[A-Z]{10}-[A-Z]`` pattern that
+        # ``cleaning.normalizer.standardize_inchikey`` validates against.
+        # The malformed keys triggered silent merging / rejection,
+        # producing 30 entries instead of 50 (only 30 of 50 records
+        # landed in ``r.mapping``). ROOT FIX: generate VALID
+        # InChIKey-shaped strings (14 hex-letters - 10 hex-letters -
+        # 1 hex-letter) using SHA256-derived hashes — all uppercase,
+        # all in [A-F0-9], matching the InChIKey pattern.
         import hashlib
         def make_name(i: int) -> str:
-            h = hashlib.sha256(f"drug-{i}".encode()).hexdigest()[:12]
-            return f"Compound{h.upper()}"
+            # v90: use the FULL 64-char SHA256 hex as part of the name.
+            # The previous 12-char prefix caused fuzzy-match false
+            # positives — two names like "Compound627D420A2FF7" vs
+            # "CompoundE3C7D1D257B6" share the "Compound" prefix and
+            # have ~50% suffix similarity, which can exceed the default
+            # fuzzy_threshold (0.80) under token_sort_ratio. With a
+            # 64-char hex suffix, the names are guaranteed <50% similar.
+            return f"Compound_{hashlib.sha256(f'name-{i}'.encode()).hexdigest().upper()}"
+        def make_ik(i: int) -> str:
+            # v90: convert SHA256 hex to LETTERS only (A-P), since the
+            # InChIKey pattern ``[A-Z]{14}-[A-Z]{10}-[A-Z]`` requires
+            # uppercase letters — SHA256 hex contains 0-9 which fail.
+            h = hashlib.sha256(f"ik-{i}".encode()).hexdigest().lower()[:25]
+            letters = ''.join(chr(ord('A') + int(c, 16)) for c in h)
+            return f"{letters[:14]}-{letters[14:24]}-{letters[24]}"
         records = [
-            {"inchikey": f"AAAAAAAAAAAAAA-{i:09d}-N",
+            {"inchikey": make_ik(i),
              "name": make_name(i),
              "chembl_id": f"CHEMBL{i}"}
             for i in range(50)
@@ -880,12 +916,21 @@ class TestDomain8Performance:
     def test_remove_source_single_pass(self, basic_resolver):
         """4.10 / 8.3 — remove_source rebuilds indices in a single pass."""
         # Add 100 records with TRULY DISTINCT names.
+        # v90 STALE-FIXTURE FIX: same malformed-InChIKey fix as
+        # test_to_dataframe_streaming — see that test for full rationale.
         import hashlib
         def make_name(i: int) -> str:
-            h = hashlib.sha256(f"drug-{i}".encode()).hexdigest()[:12]
-            return f"Compound{h.upper()}"
+            # v90: use full 64-char hex name — see
+            # test_to_dataframe_streaming for full rationale.
+            return f"Compound_{hashlib.sha256(f'name-{i}'.encode()).hexdigest().upper()}"
+        def make_ik(i: int) -> str:
+            # v90: convert SHA256 hex to LETTERS only (A-P) — see
+            # test_to_dataframe_streaming for full rationale.
+            h = hashlib.sha256(f"ik-{i}".encode()).hexdigest().lower()[:25]
+            letters = ''.join(chr(ord('A') + int(c, 16)) for c in h)
+            return f"{letters[:14]}-{letters[14:24]}-{letters[24]}"
         records = [
-            {"inchikey": f"AAAAAAAAAAAAAA-{i:09d}-N",
+            {"inchikey": make_ik(i),
              "name": make_name(i),
              "chembl_id": f"CHEMBL{i}"}
             for i in range(100)
@@ -1571,9 +1616,23 @@ class TestFullIntegration:
         def worker(idx: int):
             try:
                 # Use distinct InChIKeys per thread to avoid idempotency-skip.
+                # v90 STALE-FIXTURE FIX: previous InChIKey pattern
+                # ``AAAAAAAAAAAA{idx:02d}-{idx:09d}-N`` was MALFORMED
+                # (digits in the second block don't match
+                # ``[A-Z]{10}``). Use a VALID InChIKey-shaped string
+                # derived from SHA256 so standardize_inchikey accepts it
+                # without warnings and the resolver creates distinct
+                # entries per thread (was producing <10 entries due to
+                # silent merging of malformed keys).
+                import hashlib as _hl
+                _h = _hl.sha256(f"thread-ik-{idx}".encode()).hexdigest().lower()[:25]
+                _letters = ''.join(chr(ord('A') + int(c, 16)) for c in _h)
+                _ik = f"{_letters[:14]}-{_letters[14:24]}-{_letters[24]}"
+                # v90: use full 64-char hex name to avoid fuzzy false-positives
+                _name = f"Drug_{_hl.sha256(f'thread-name-{idx}'.encode()).hexdigest().upper()}"
                 r.add_source_records(
-                    [{"inchikey": f"AAAAAAAAAAAA{idx:02d}-{idx:09d}-N",
-                      "name": f"Drug{idx}", "chembl_id": f"CHEMBL{idx}"}],
+                    [{"inchikey": _ik,
+                      "name": _name, "chembl_id": f"CHEMBL{idx}"}],
                     source="chembl",
                 )
             except Exception as e:
