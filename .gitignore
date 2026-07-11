@@ -18,3 +18,4 @@ mlflow.db
 phase2/data/processed/*.json
 phase2/logs/
 phase1/processed_data/
+.venv/

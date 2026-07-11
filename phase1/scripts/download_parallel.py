@@ -344,7 +344,28 @@ if __name__ == "__main__":
     else:
         print("\n" + "=" * 70)
         print("All pipelines + entity resolution completed successfully.")
-        print(f"  Drug mappings:   {er_result['drug_mappings']}")
-        print(f"  Protein mappings: {er_result['protein_mappings']}")
-        print(f"  Proteins updated: {er_result['proteins_updated']}")
+        # v89 FORENSIC ROOT FIX (BUG #21 P1 — TypeError on non-dict
+        #   er_result):
+        #   The previous code accessed ``er_result['drug_mappings']``
+        #   directly. But ``_run_entity_resolution_phase()`` can return
+        #   ``(True, None, result)`` where ``result`` is NOT a dict
+        #   (line 187: ``return (True, None, result)`` when
+        #   ``not isinstance(result, dict)``). In that case,
+        #   ``er_result['drug_mappings']`` raised
+        #   ``TypeError: '...' object is not subscriptable`` — a
+        #   confusing crash that masked the actual success. The safer
+        #   ``.get()`` pattern at lines 188-190 was added in v83 but
+        #   this success-path print was NOT updated.
+        #   ROOT FIX: use the SAME isinstance + .get() guard already
+        #   used at lines 188-190. If er_result is a dict, print the
+        #   counts; otherwise print a generic success message.
+        if isinstance(er_result, dict):
+            print(f"  Drug mappings:    {er_result.get('drug_mappings', 'N/A')}")
+            print(f"  Protein mappings: {er_result.get('protein_mappings', 'N/A')}")
+            print(f"  Proteins updated: {er_result.get('proteins_updated', 'N/A')}")
+        else:
+            print(
+                f"  Entity resolution completed (result type="
+                f"{type(er_result).__name__}, counts unavailable)."
+            )
         print("=" * 70)
