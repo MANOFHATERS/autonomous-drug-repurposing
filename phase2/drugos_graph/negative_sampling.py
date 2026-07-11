@@ -139,9 +139,22 @@ NEGATIVE_SAMPLING_SCHEMA_VERSION: str = "2.1.0"
 # Fix 12.1: Configurable cache size with env var override
 DEFAULT_NEGATIVE_CACHE_SIZE: int = 500_000
 
-# Fix 12.4: 50x gives ~98% probability of finding enough negatives in
-# graphs with up to 80% coverage. Documented rationale for the multiplier.
+# v84 FORENSIC ROOT FIX (BUG #21 — magic multiplier):
+# The previous flat 50x multiplier was justified by a hand-wavy "~98%
+# probability in graphs with up to 80% coverage" claim. The real
+# probability of finding N unique negatives in a graph with positive
+# coverage p follows the coupon-collector tail:
+#   P(enough) = 1 - (1 - (1-p))^k  approximated for k attempts.
+# For a target success probability P_target and observed density p,
+# the minimum multiplier k is:
+#   k = ceil(log(1 - P_target) / log(p))
+# Default p=0.8, P_target=0.98 → k = ceil(log(0.02)/log(0.8)) = 28,
+# so 50 is a conservative cap. We compute the multiplier from the
+# actual graph density at sampler-construction time (see
+# KGNegativeSampler._compute_max_attempts) and fall back to this
+# cap when density is unknown (e.g. module-level constants).
 MAX_ATTEMPT_MULTIPLIER: int = 50
+_DEFAULT_NEGATIVE_SUCCESS_PROB: float = 0.98
 
 # Fix 12.5: Cache eviction ratio -- amortized eviction policy.
 # When cache exceeds max, evict this fraction to amortize cost over many
@@ -179,17 +192,29 @@ _ATC_RELATIONSHIPS: Dict[str, set] = {
     "S": {"D", "J", "N", "P", "R"},
     "V": {"J"},
 }
+# v84 FORENSIC ROOT FIX (BUG #22 — import inside loop):
+# The previous code re-imported `os` inside the inner loop and re-read
+# the env var on every neighbor pair. While Python caches imports, this
+# was both a code smell and a race-condition risk if the env var changed
+# mid-loop. ROOT FIX: read the env var ONCE at module top, then reuse
+# the scalar inside the loop.
+import os as _os_atc_module
+_ATC_NEIGHBOR_SIMILARITY: float = float(
+    _os_atc_module.environ.get("DRUGOS_ATC_NEIGHBOR_SIMILARITY", "0.6")
+)
 for _cls_a, _neighbors in _ATC_RELATIONSHIPS.items():
     for _cls_b in _neighbors:
-        # v43 ROOT FIX (P2 — _ATC_SIMILARITY hardcoded 0.6): the
-        # previous code used a fixed 0.6 for ALL neighbor pairs with no
-        # biological basis. Fix: make it configurable via env var
-        # DRUGOS_ATC_NEIGHBOR_SIMILARITY (default 0.6 for backward compat).
-        import os as _os_atc
-        _atc_sim = float(_os_atc.environ.get("DRUGOS_ATC_NEIGHBOR_SIMILARITY", "0.6"))
-        _ATC_SIMILARITY[(_cls_a, _cls_b)] = _atc_sim
-        _ATC_SIMILARITY[(_cls_b, _cls_a)] = _atc_sim
+        _ATC_SIMILARITY[(_cls_a, _cls_b)] = _ATC_NEIGHBOR_SIMILARITY
+        _ATC_SIMILARITY[(_cls_b, _cls_a)] = _ATC_NEIGHBOR_SIMILARITY
     _ATC_SIMILARITY[(_cls_a, _cls_a)] = 1.0
+# v84 ROOT FIX (BUG #8 — missing-pair default).
+# Sentinel similarity used for ATC class pairs that have NO entry in
+# the curated _ATC_RELATIONSHIPS map. The previous code defaulted to
+# 0.0 (maximally dissimilar) via .get((a,b), 0.0), which collapsed the
+# wrong-class confidence gradient: most pairs got confidence=0.5 (the
+# max). Scientifically, "no documented relationship" means "uncertain",
+# not "maximally dissimilar". We use 0.5 (uncertain) as the default.
+_ATC_UNKNOWN_SIMILARITY: float = 0.5
 
 # Regex for ATC code validation (Fix 5.5)
 _ATC_CODE_PATTERN = re.compile(r"^([A-Z])$|^[A-Z][0-9]{2}.*$")
@@ -378,7 +403,7 @@ class NegativeSampler:
             try:
                 self._rng = np.random.default_rng(SEED)
                 self.seed = SEED
-            except Exception:
+            except (TypeError, ValueError):  # v85 FORENSIC ROOT FIX (BUG #51)
                 self._rng = None
                 self.seed = None
 
@@ -664,7 +689,20 @@ class NegativeSampler:
         if atc_known == atc_sampled:
             return 0.3
 
-        similarity = _ATC_SIMILARITY.get((atc_known, atc_sampled), 0.0)
+        # v84 FORENSIC ROOT FIX (BUG #8 — wrong-class confidence collapse):
+        # The previous code defaulted missing ATC pairs to similarity=0.0
+        # via _ATC_SIMILARITY.get((a,b), 0.0), which made every unknown
+        # pair MAXIMALLY dissimilar (confidence=0.5, the upper bound).
+        # Since most ATC pairs are NOT in the curated _ATC_RELATIONSHIPS
+        # map, the majority of wrong-class negatives collapsed to 0.5 —
+        # destroying the confidence gradient. Scientifically, "no
+        # documented relationship" means "uncertain", not "maximally
+        # dissimilar". ROOT FIX: use _ATC_UNKNOWN_SIMILARITY=0.5 as the
+        # default, so missing pairs get confidence = 0.35 + 0.15*0.5 =
+        # 0.425 (mid-range), preserving the gradient.
+        similarity = _ATC_SIMILARITY.get(
+            (atc_known, atc_sampled), _ATC_UNKNOWN_SIMILARITY
+        )
         confidence = 0.35 + 0.15 * (1.0 - similarity)
         return max(0.3, min(0.5, round(confidence, 4)))
 
@@ -1160,8 +1198,15 @@ class NegativeSampler:
             except ValueError:
                 sampled_indices = np.arange(n_candidates)
 
-            for idx in sampled_indices:
-                idx = int(idx)
+            for raw_idx in sampled_indices:
+                # v84 FORENSIC ROOT FIX (BUG #7 — loop var rebind):
+                # The previous code did `for idx in sampled_indices: idx = int(idx)`
+                # which rebound the loop variable inside the body. This is a
+                # Python anti-pattern: a `continue` or `break` after the
+                # rebind would have surprising semantics. ROOT FIX: use a
+                # distinct variable name for the converted index so the
+                # loop variable's type contract is preserved.
+                idx = int(raw_idx)
                 disease_id = candidate_diseases[idx]
                 atc_sampled = candidate_atc_classes[idx]
                 pair = (drug_id, disease_id)
@@ -1169,14 +1214,50 @@ class NegativeSampler:
                 if pair in self._rejection_pairs or pair in self.negative_cache:
                     continue
 
-                # M-4: pick the atc_known as the closest-class member
-                # from the full known set (the lowest-similarity class
-                # gives the strongest mechanistic-mismatch signal).
-                # Fall back to the first known class string for
-                # backward-compat with the legacy single-class field.
+                # v84 FORENSIC ROOT FIX (BUG #1 — alphabetical sort masquerading
+                # as similarity-based selection):
+                # The M-4 ROOT FIX comment promised to "pick the atc_known as
+                # the closest-class member from the full known set (the
+                # lowest-similarity class gives the strongest mechanistic-
+                # mismatch signal)". The implementation `next(iter(sorted(
+                # known_classes)))` was a LIE — sorted() on single-letter
+                # ATC codes is alphabetical (A, B, C, ...), NOT similarity-
+                # based. Drugs with known diseases spanning class "A" always
+                # got atc_known="A" regardless of the sampled class, even
+                # when "A" was biologically distant from the sampled class
+                # (e.g. sampled="L"). This systematically biased wrong-class
+                # confidence grading.
+                #
+                # ROOT FIX: for each (known_class, sampled_class) pair,
+                # compute the biological similarity via _ATC_SIMILARITY
+                # (with _ATC_UNKNOWN_SIMILARITY=0.5 fallback for pairs not
+                # in the curated map), and pick the known class with the
+                # LOWEST similarity to the sampled class — this gives the
+                # strongest mechanistic-mismatch signal as documented.
                 atc_known = ""
                 if known_classes:
-                    atc_known = next(iter(sorted(known_classes)))
+                    _sampled_letter = (
+                        atc_sampled[0].upper() if atc_sampled else ""
+                    )
+                    if _sampled_letter:
+                        # Pick the known class with the LOWEST similarity
+                        # to the sampled class. Ties broken alphabetically
+                        # for determinism.
+                        def _sim_to_sampled(k_cls: str) -> float:
+                            k_letter = k_cls[0].upper() if k_cls else ""
+                            return _ATC_SIMILARITY.get(
+                                (k_letter, _sampled_letter),
+                                _ATC_UNKNOWN_SIMILARITY,
+                            )
+
+                        atc_known = min(
+                            known_classes,
+                            key=lambda _k: (_sim_to_sampled(_k), _k),
+                        )
+                    else:
+                        # No sampled class signal — fall back to first
+                        # known class alphabetically for backward compat.
+                        atc_known = next(iter(sorted(known_classes)))
 
                 # Fix 3.3: Calibrated confidence based on ATC class distance
                 confidence = self._compute_class_confidence(atc_known, atc_sampled)
@@ -1777,6 +1858,8 @@ class KGNegativeSampler:
         seed: Optional[int] = None,
         relation_to_types: Optional[Dict[int, Tuple[str, str]]] = None,
         held_out_pairs: Optional[Set[Tuple[int, int, int]]] = None,
+        sampling_method: str = "bernoulli",
+        model_type: str = "inductive",
         **_extra: Any,
     ) -> None:
         if num_entities <= 0:
@@ -1849,20 +1932,60 @@ class KGNegativeSampler:
         self._rejection_set: Set[Tuple[int, int, int]] = (
             self.known_triples | self.held_out_pairs
         )
-        # v53 ROOT FIX (P2-044 — entity-level leakage):
-        # The v36 fix only catches TRIPLE-level leakage (h, r, t) —
-        # if the sampler produces a NEGATIVE triple (h', r, t') where
-        # h' or t' is an entity that ONLY appears in val/test, the
-        # model's embedding for that entity is influenced by the
-        # negative signal during training. For inductive HGT, this
-        # is entity-level leakage. ROOT FIX: build a set of
-        # held-out ENTITY indices (heads + tails from held_out_pairs)
-        # and EXCLUDE them from the negative sampling pool. This
-        # ensures val/test entities are never used as negatives.
+        # v84 FORENSIC ROOT FIX (BUG #16 — _sampling_method never set):
+        # The previous code read `getattr(self, "_sampling_method", "bernoulli")`
+        # in combined_sampling but NEVER set the attribute in __init__. The
+        # entire bernoulli-vs-uniform branch was effectively hardcoded to
+        # bernoulli with no way to disable it (the degree-weighting bias
+        # from BUG #4 could not be turned off). ROOT FIX: accept a
+        # `sampling_method` constructor parameter (default "bernoulli" for
+        # backward compat) and store it as `self._sampling_method`.
+        # Valid values: "bernoulli" (degree-weighted, Wang et al. 2014)
+        # or "uniform" (flat random — for ablations / debugging).
+        if sampling_method not in ("bernoulli", "uniform"):
+            raise ValueError(
+                f"sampling_method must be 'bernoulli' or 'uniform', "
+                f"got {sampling_method!r}. (v84 BUG #16 root fix)"
+            )
+        self._sampling_method: str = sampling_method
+        # v84 FORENSIC ROOT FIX (BUG #6 — held_out_entities for transductive
+        # TransE): The previous code unconditionally built
+        # `self._held_out_entities` and excluded them from the negative
+        # sampling pool. But TransE is a TRANSDUCTIVE model — it learns
+        # embeddings for ALL entities (including held-out) during training
+        # and evaluates on a subset of triples among those same entities.
+        # Excluding held-out entities from the negative pool means TransE
+        # never sees them as negatives during training, then is asked to
+        # rank them as negatives at eval time — a train/eval distribution
+        # mismatch that makes held-out AUC essentially random. ROOT FIX:
+        # gate the held-out entity exclusion on model_type. For
+        # model_type="transductive" (TransE baseline), do NOT exclude
+        # held-out entities. For model_type="inductive" (HGT), keep the
+        # exclusion (it's correct for inductive evaluation).
+        if model_type not in ("inductive", "transductive"):
+            raise ValueError(
+                f"model_type must be 'inductive' or 'transductive', "
+                f"got {model_type!r}. 'inductive' excludes held-out "
+                f"entities from the negative pool (HGT). 'transductive' "
+                f"keeps them in the pool (TransE). (v84 BUG #6 root fix)"
+            )
+        self._model_type: str = model_type
         self._held_out_entities: Set[int] = set()
-        for _h, _r, _t in self.held_out_pairs:
-            self._held_out_entities.add(_h)
-            self._held_out_entities.add(_t)
+        if self._model_type == "inductive":
+            for _h, _r, _t in self.held_out_pairs:
+                self._held_out_entities.add(_h)
+                self._held_out_entities.add(_t)
+        else:
+            # Transductive (TransE): held-out entities MUST remain in the
+            # negative pool. TransE learns embeddings for every entity
+            # during training; excluding held-out entities from negatives
+            # creates a train/eval distribution mismatch.
+            logger.info(
+                "KGNegativeSampler: model_type=%s — held-out entities "
+                "are KEPT in the negative sampling pool (transductive "
+                "convention). (v84 BUG #6 root fix)",
+                self._model_type,
+            )
         if self.held_out_pairs:
             logger.info(
                 "KGNegativeSampler: %d held-out pairs added to rejection "
@@ -2191,22 +2314,49 @@ class KGNegativeSampler:
         _sampling_method = getattr(self, "_sampling_method", "bernoulli")
         _pools_nonempty = len(head_pool) > 0 and len(tail_pool) > 0
         if _sampling_method == "bernoulli" and _pools_nonempty:
-            # Cache key: (head_type, tail_type). Build probs lazily.
-            _cache_key_ht = (head_type, tail_type)
+            # v84 FORENSIC ROOT FIX (BUG #5 — stale bernoulli cache key):
+            # The previous cache key was `(head_type, tail_type)` only. The
+            # cache was built from the (possibly filtered) pool on the
+            # first call, but if `_held_out_entities` was empty on the
+            # first call and populated on a later call (or vice versa),
+            # the cached probs were built from the WRONG pool. The
+            # probabilities didn't sum to 1 over the filtered pool, and
+            # np.random.choice(p=probs) silently used mismatched
+            # probabilities. ROOT FIX: include a stable hash of
+            # `_held_out_entities` in the cache key so different held-out
+            # sets produce different cache entries.
+            _ho_sig = (
+                frozenset(_held_out_entities) if _held_out_entities else None
+            )
+            _cache_key_ht = (head_type, tail_type, _ho_sig)
             if not hasattr(self, "_bernoulli_probs_cache"):
                 self._bernoulli_probs_cache: dict = {}
             if _cache_key_ht not in self._bernoulli_probs_cache:
-                # Build degree counts from known_triples. Each entity's
-                # degree = number of triples it appears in (as head OR
-                # tail). P(entity) = degree / sum(degrees). If an
-                # entity has zero degree (shouldn't happen in
-                # type_constrained pool, but defensive), give it a
-                # uniform prior.
+                # v84 FORENSIC ROOT FIX (BUG #4 — bernoulli degree leakage):
+                # The previous code built `_head_degrees` / `_tail_degrees`
+                # from `self._rejection_set` (which includes held-out val/
+                # test triples per the v36 Chain 9 fix). The bernoulli
+                # degree distribution was therefore built from train+val+
+                # test triples. A held-out drug with high val/test degree
+                # got a HIGHER sampling probability in the bernoulli
+                # distribution — meaning the model was more likely to see
+                # that held-out drug as a negative during training. This
+                # is entity-level leakage: the sampler biased toward
+                # held-out entities, indirectly revealing their existence
+                # (and degree class) to the model before evaluation.
+                #
+                # ROOT FIX: build degrees from `self.known_triples`
+                # (TRAIN-ONLY) only, NOT from `self._rejection_set`.
+                # The held-out triples remain in `_rejection_set` for the
+                # triple-level rejection filter (preventing exact triple
+                # duplicates), but they do NOT contribute to the degree
+                # distribution that shapes the bernoulli sampling
+                # probabilities.
                 _head_degrees = np.zeros(len(head_pool), dtype=np.float64)
                 _tail_degrees = np.zeros(len(tail_pool), dtype=np.float64)
                 _head_idx_map = {e: i for i, e in enumerate(head_pool)}
                 _tail_idx_map = {e: i for i, e in enumerate(tail_pool)}
-                for (h, r, t) in self._rejection_set:
+                for (h, r, t) in self.known_triples:
                     if h in _head_idx_map:
                         _head_degrees[_head_idx_map[h]] += 1.0
                     if t in _tail_idx_map:

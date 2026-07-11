@@ -1,27 +1,7 @@
-# Combined .gitignore
-.venv/
-venv/
-__pycache__/
+# v91: ignore pipeline run outputs (they're regenerable)
+output_*/
+phase1/processed_data/
 *.pyc
-*.pyo
-*.pyd
+__pycache__/
 .pytest_cache/
-phase1/data/dead_letter/
-phase1/processed_data/
-phase1/raw_data/
 *.egg-info/
-.ruff_cache/
-.env
-mlflow.db
-*.pt
-*.pkl
-phase2/data/processed/*.json
-phase2/logs/
-phase1/processed_data/
-
-# Generated pipeline outputs
-output_real_run/
-output_v89/
-output_v90/
-output_full_platform/
-checkpoints/

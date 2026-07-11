@@ -339,16 +339,17 @@ def download_chembl_full(raw_dir: Path) -> dict[str, Path]:
         if molecules_path.stat().st_size == 0:
             logger.warning("ChEMBL: API unreachable — falling back to embedded samples")
             from pipelines._embedded_samples import embedded_chembl_molecules, embedded_chembl_activities
-            # v90 ROOT FIX (BUG #2): the previous code wrote JSONL
-            # (to_json orient="records", lines=True) to a .csv file,
-            # producing a file that is NOT valid CSV. Downstream
-            # read_csv() would parse it as a single-column DataFrame
-            # with garbage JSON strings. ROOT FIX: use to_csv() for
-            # .csv files and to_json() only for .jsonl files.
-            embedded_chembl_molecules().to_csv(molecules_path, index=False)
-            embedded_chembl_activities().to_csv(activities_path, index=False)
-            result["molecules"] = molecules_path
-            result["activities"] = activities_path
+            # v85/v90 ROOT FIX (BUG #2/50): was .to_json() which writes JSONL
+            # to a .csv file — downstream pd.read_csv() parses it as garbage.
+            # Now uses .to_csv() so format matches extension and downstream
+            # CSV reader works correctly. Also fixes extension from .jsonl
+            # to .csv to match the actual content.
+            embedded_chembl_molecules().to_csv(molecules_path.with_suffix(".csv"), index=False)
+            embedded_chembl_activities().to_csv(activities_path.with_suffix(".csv"), index=False)
+            molecules_path.unlink(missing_ok=True)
+            activities_path.unlink(missing_ok=True)
+            result["molecules"] = molecules_path.with_suffix(".csv")
+            result["activities"] = activities_path.with_suffix(".csv")
         else:
             result["molecules"] = molecules_path
             result["activities"] = activities_path

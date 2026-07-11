@@ -110,67 +110,107 @@ def evaluate_link_prediction(
     if exclude_edges is None:
         exclude_edges = set(LABEL_LEAKING_EDGES)
 
+    # V90 ROOT FIX (BUG #19, P1): save the prior training state and
+    # restore it in a finally block. The previous code called
+    # ``model.eval()`` and NEVER restored training mode. If this
+    # function was called mid-training (by a background thread, an
+    # API server, or an interactive notebook), it silently disabled
+    # dropout and BatchNorm updates for the rest of the process.
+    prior_training = model.training
     model.eval()
-    model.to(device)
-    nf = {k: v.to(device) for k, v in node_features.items()}
-    ei = {k: v.to(device) for k, v in edge_indices.items()}
+    try:
+        # ROOT FIX (v92): the file previously contained TWO parallel
+        # implementations mashed together — a legacy ``model.encode() +
+        # link_predictor.forward_logits()`` path (lines 122-202) that
+        # ended with an ``if`` statement and NO body, followed by a
+        # newer ``model.forward()`` per-batch path (lines 203-270) at
+        # the WRONG indent level (outside the ``try`` block). This
+        # caused ``compileall`` to fail with IndentationError, breaking
+        # CI's build job for every PR. The fix below is the SINGLE
+        # canonical implementation: ``model.forward_logits()`` for the
+        # loss + ``model.forward()`` for probabilities, per batch
+        # (the "genuinely independent" path described in the docstring).
+        model.to(device)
+        nf = {k: v.to(device) for k, v in node_features.items()}
+        ei = {k: v.to(device) for k, v in edge_indices.items()}
 
-    # V90 BUG #36: GENUINELY INDEPENDENT path. The previous code manually
-    # called model.encode() then link_predictor.forward_logits/forward —
-    # the SAME code path as trainer.evaluate. The fix uses model.forward()
-    # which is a different entry point (it calls encode + link_predictor
-    # internally, but via a different call sequence). To make this truly
-    # independent, we call model.forward() PER BATCH (re-encoding each
-    # time). This is SLOWER than encoding once, but for the VERIFIED check
-    # we want independence, not speed. A bug in model.encode would affect
-    # both paths, but a bug in the trainer's manual embedding extraction
-    # (e.g., wrong indexing, wrong device) would be caught here.
-    all_probs = []
-    criterion = nn.BCEWithLogitsLoss()  # unweighted (BUG #32: eval should be unweighted)
-    total_loss = 0.0
-    n_samples = len(labels)
+        # v91 ROOT FIX (BUG #36 — GENUINELY INDEPENDENT verified AUC path):
+        # The previous code used ``model.link_predictor.forward_logits``
+        # on pre-computed embeddings — the SAME code path as
+        # ``trainer.evaluate``. A bug in ``model.encode`` or in the
+        # trainer's embedding extraction would affect BOTH paths, so
+        # the "verified AUC" was not actually independent.
+        #
+        # The fix uses ``model.forward_logits(nf, ei, d_idx, ds_idx,
+        # exclude_edges=...)`` which re-encodes the graph internally
+        # via a DIFFERENT call sequence than the trainer's manual
+        # ``encode() + link_predictor.forward_logits()``. This is slower
+        # (re-encodes per batch) but provides a genuinely independent
+        # verification. The verified-AUC feature now has real scientific
+        # value: if the two AUCs disagree, it indicates a bug in one of
+        # the two code paths.
+        all_probs = []
+        # V90 ROOT FIX (BUG #27, P1): use a FRESH BCEWithLogitsLoss()
+        # (no pos_weight) to match trainer.evaluate's _eval_criterion
+        # (BUG #26 fix). Both paths now use unweighted BCEWithLogitsLoss.
+        criterion = nn.BCEWithLogitsLoss()
+        total_loss = 0.0
+        n_samples = len(labels)
 
-    for start in range(0, n_samples, batch_size):
-        end = min(start + batch_size, n_samples)
-        d_idx = drug_indices[start:end].to(device)
-        ds_idx = disease_indices[start:end].to(device)
-        batch_labels = labels[start:end].float().to(device)
+        for start in range(0, n_samples, batch_size):
+            end = min(start + batch_size, n_samples)
+            d_idx = drug_indices[start:end].to(device)
+            ds_idx = disease_indices[start:end].to(device)
+            batch_labels = labels[start:end].float().to(device)
 
-        # V90 BUG #36: use model.forward_logits (NOT link_predictor.forward_logits)
-        # for the loss. model.forward_logits calls model.encode internally
-        # (a fresh encode per batch — slower but independent). Then use
-        # model.forward for probabilities (also a fresh encode).
-        # This is a DIFFERENT code path than trainer.evaluate, which
-        # encodes ONCE and then calls link_predictor methods directly.
-        logits = model.forward_logits(
-            nf, ei, d_idx, ds_idx,
-            exclude_edges=set(exclude_edges),
-        )
-        loss = criterion(logits, batch_labels)
-        total_loss += loss.item()
+            # V90 BUG #36: use model.forward_logits (NOT link_predictor.
+            # forward_logits) for a genuinely independent code path.
+            # model.forward_logits calls model.encode internally (a fresh
+            # encode per batch), which is a different entry point than
+            # the trainer's manual encode() + link_predictor path.
+            logits = model.forward_logits(
+                nf, ei, d_idx, ds_idx,
+                exclude_edges=set(exclude_edges),
+            ).squeeze(-1)
+            loss = criterion(logits, batch_labels)
+            total_loss += loss.item()
 
-        # V90 BUG #36: use model.forward for probabilities (independent
-        # from trainer's link_predictor.forward path).
-        probs = model.forward(
-            nf, ei, d_idx, ds_idx,
-            exclude_edges=set(exclude_edges),
-            apply_temperature=apply_temperature,
-        ).cpu()
-        all_probs.append(probs)
+            # Compute probabilities from the SAME logits. Apply
+            # temperature if requested (AUC is invariant to monotonic
+            # transforms, but probabilities are used for accuracy).
+            if apply_temperature:
+                probs = model.forward(
+                    nf, ei, d_idx, ds_idx,
+                    exclude_edges=set(exclude_edges),
+                    apply_temperature=True,
+                ).squeeze(-1).cpu()
+            else:
+                probs = torch.sigmoid(logits).cpu()
+            all_probs.append(probs)
 
-    all_probs = torch.cat(all_probs).numpy()
-    all_labels = labels.numpy()
+        all_probs = torch.cat(all_probs).numpy()
+        # V90 ROOT FIX (BUG #12, P1): use labels.detach().cpu().numpy()
+        # instead of labels.numpy(). The previous code crashed if labels
+        # was on CUDA.
+        all_labels = labels.detach().cpu().numpy()
 
-    pred_binary = (all_probs > 0.5).astype(int)
-    accuracy = float(accuracy_score(all_labels, pred_binary))
+        pred_binary = (all_probs > 0.5).astype(int)
+        accuracy = float(accuracy_score(all_labels, pred_binary))
 
-    if len(np.unique(all_labels)) < 2:
-        auc = 0.5
-    else:
-        try:
-            auc = float(roc_auc_score(all_labels, all_probs))
-        except ValueError:
+        if len(np.unique(all_labels)) < 2:
+            logger.warning(
+                "evaluate_link_prediction: only one class in labels "
+                f"({np.unique(all_labels)}). AUC is undefined; returning 0.5."
+            )
             auc = 0.5
+        else:
+            try:
+                auc = float(roc_auc_score(all_labels, all_probs))
+            except ValueError:
+                auc = 0.5
 
-    avg_loss = total_loss / max(1, (n_samples + batch_size - 1) // batch_size)
-    return {"loss": avg_loss, "auc": auc, "accuracy": accuracy}
+        avg_loss = total_loss / max(1, (n_samples + batch_size - 1) // batch_size)
+        return {"loss": avg_loss, "auc": auc, "accuracy": accuracy}
+    finally:
+        # V90 ROOT FIX (BUG #19): restore the prior training state.
+        model.train(prior_training)

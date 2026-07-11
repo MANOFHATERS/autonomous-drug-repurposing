@@ -952,10 +952,18 @@ def _whitelist_filter(
         # is_globally_approved) so the coalesce pattern works. Drop None
         # for all other fields (preserving the v36 Neo4j property-erasure
         # fix for non-safety fields).
+        # v85 FORENSIC ROOT FIX (BUG-SCI-3): added "toxicity" to the
+        # safety-critical None fields. The module docstring explicitly
+        # states that the RL safety ranker uses "withdrawn, terminated,
+        # illicit, toxicity, and sensitive" properties. But "toxicity"
+        # was MISSING from this frozenset — so a drug with toxicity=None
+        # had that property DROPPED by _whitelist_filter, and the RL
+        # ranker interpreted the missing property as "not toxic" (safe).
+        # This is the exact patient-harm pathway the docstring warns about.
         _SAFETY_CRITICAL_NONE_FIELDS = frozenset({
             "withdrawn", "terminated", "illicit",
             "fda_approved", "is_fda_approved", "is_withdrawn",
-            "is_globally_approved", "sensitive",
+            "is_globally_approved", "sensitive", "toxicity",
         })
         if v is None:
             if k in _SAFETY_CRITICAL_NONE_FIELDS:
@@ -3203,12 +3211,69 @@ class DrugOSGraphBuilder:
         """
         return self._conn.driver
 
-    def __enter__(self) -> DrugOSGraphBuilder:
-        self.connect()
+    def __enter__(self) -> "DrugOSGraphBuilder":
+        # v84 FORENSIC ROOT FIX (BUG #19 — Neo4j driver not closed on
+        # connect() exception):
+        # The previous code did `def __enter__(self): self.connect();
+        # return self`. If `connect()` raised (e.g. auth failure,
+        # network error, bad driver state), `__exit__` was never
+        # called (the `with` block never entered), but `self._conn =
+        # GraphConnection(...)` was already constructed in __init__ —
+        # the GraphConnection holds a reference to the (unclosed)
+        # driver. The driver leaks (no close called), exhausting the
+        # Neo4j connection pool over time.
+        #
+        # ROOT FIX: wrap `connect()` in try/except inside `__enter__`.
+        # If `connect()` raises, call `disconnect()` to release the
+        # driver, then re-raise the original exception so the caller
+        # sees the connect failure. This guarantees the driver is
+        # always closed on connect failure, preventing connection-pool
+        # exhaustion.
+        try:
+            self.connect()
+        except Exception:
+            # Best-effort cleanup: disconnect may itself raise if the
+            # driver is in a bad state. Swallow that secondary error
+            # so the original connect exception propagates cleanly.
+            try:
+                self.disconnect()
+            except Exception as _cleanup_exc:  # noqa: BLE001
+                # Log the cleanup failure but don't mask the original error.
+                import logging as _logging_v84
+                _logging_v84.getLogger(__name__).warning(
+                    "DrugOSGraphBuilder.__enter__: connect() failed and "
+                    "disconnect() cleanup also failed (%s: %s). The Neo4j "
+                    "driver may leak. Original connect exception will be "
+                    "re-raised. (v84 BUG #19 root fix)",
+                    type(_cleanup_exc).__name__, _cleanup_exc,
+                )
+            raise
         return self
 
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> bool:
-        self.disconnect()
+        # v84 FORENSIC ROOT FIX (BUG #19): wrap disconnect() in
+        # try/except so a failure during disconnect does NOT replace
+        # the original exception (if any). The original code did
+        # `self.disconnect(); return False` — if disconnect() raised
+        # while another exception was already in flight, the original
+        # exception was lost (replaced by the disconnect exception),
+        # making debugging impossible.
+        try:
+            self.disconnect()
+        except Exception as _disc_exc:  # noqa: BLE001
+            import logging as _logging_v84
+            _logging_v84.getLogger(__name__).error(
+                "DrugOSGraphBuilder.__exit__: disconnect() failed "
+                "(%s: %s). The Neo4j driver may leak. Original "
+                "exception (if any) is preserved. (v84 BUG #19 root fix)",
+                type(_disc_exc).__name__, _disc_exc,
+            )
+            # If there was no original exception, re-raise the disconnect
+            # failure so the caller sees it. If there WAS an original
+            # exception, suppress the disconnect failure so the original
+            # propagates (return False = don't suppress).
+            if exc_type is None:
+                raise
         return False
 
     # ─── Connection Management (delegates to GraphConnection) ──────────

@@ -213,12 +213,31 @@ def drug_aware_split(
         # ALSO filtered held-out drugs — potentially infinite confusion.
         # The fix: after filtering, if train_drugs is empty, pull drugs
         # from val_drugs (which has non-held-out drugs) to populate train.
+        #
+        # V90 ROOT FIX (BUG #14, P1): the previous fallback moved drugs
+        # from val_drugs to train_drugs WITHOUT checking whether those
+        # val drugs were themselves held-out. On a tiny demo graph
+        # where the fallback triggers AND val_drugs happens to contain
+        # held-out drugs (e.g., after the stratified split put KPs in
+        # val), KP drugs ended up in train. This violated the C-3
+        # fix's guarantee that KPs never appear in training. The fix:
+        # filter held-out drugs from val_drugs BEFORE moving them to
+        # train_drugs. If val_drugs becomes empty after filtering, we
+        # raise (the graph is too small to satisfy the split contract).
         if held_out_set:
             train_drugs = train_drugs[~torch.tensor(
                 [int(d) in held_out_set for d in train_drugs.tolist()], dtype=torch.bool
             )]
+            # V90 BUG #14: filter held-out drugs from val_drugs BEFORE
+            # moving them to train_drugs. The previous code moved
+            # val_drugs[:n_move] to train WITHOUT checking if those
+            # drugs were held-out (KP drugs), leaking KPs into train.
+            val_drugs = val_drugs[~torch.tensor(
+                [int(d) in held_out_set for d in val_drugs.tolist()], dtype=torch.bool
+            )]
             # ROOT FIX (FORENSIC-AUDIT-I07): if train_drugs is now empty,
-            # move some drugs from val_drugs to train_drugs.
+            # move drugs from val_drugs (now filtered of held-out) to
+            # train_drugs.
             if len(train_drugs) == 0 and len(val_drugs) > 0:
                 n_move = max(1, len(val_drugs) // 2)
                 train_drugs = val_drugs[:n_move]
@@ -226,7 +245,18 @@ def drug_aware_split(
                 logger.warning(
                     f"FORENSIC-AUDIT-I07: train_drugs was empty after "
                     f"held-out filtering. Moved {n_move} drugs from val "
-                    f"to train to prevent degenerate split."
+                    f"to train to prevent degenerate split. "
+                    f"(V90 BUG #14: val_drugs was filtered of held-out "
+                    f"drugs BEFORE moving, so no KP leakage.)"
+                )
+            elif len(train_drugs) == 0 and len(val_drugs) == 0:
+                raise RuntimeError(
+                    f"V90 ROOT FIX (BUG #14): after filtering held-out "
+                    f"drugs, BOTH train_drugs and val_drugs are empty. "
+                    f"The graph is too small ({n_drugs} drugs, "
+                    f"{len(held_out_set)} held-out) to satisfy the "
+                    f"drug-aware split. Either increase the graph size "
+                    f"or reduce the held-out set."
                 )
             # Re-add held-out drugs to val/test if not already there
             existing_val = set(int(d) for d in val_drugs.tolist())
@@ -266,9 +296,17 @@ def drug_aware_split(
         test_drugs = sorted_drugs[n_train_d + n_val_d:]
         # V4 B-F6 fix: ensure held-out drugs are not in train.
         # ROOT FIX (FORENSIC-AUDIT-I07): same empty-train guard as above.
+        # V90 ROOT FIX (BUG #14, P1): same val_drugs filtering fix as
+        # above — filter held-out drugs from val_drugs BEFORE moving
+        # them to train_drugs to prevent KP leakage into train.
         if held_out_set:
             train_drugs = train_drugs[~torch.tensor(
                 [int(d) in held_out_set for d in train_drugs.tolist()], dtype=torch.bool
+            )]
+            # V90 BUG #14: filter held-out drugs from val_drugs BEFORE
+            # moving them to train_drugs (fallback path).
+            val_drugs = val_drugs[~torch.tensor(
+                [int(d) in held_out_set for d in val_drugs.tolist()], dtype=torch.bool
             )]
             # ROOT FIX (FORENSIC-AUDIT-I07): if train_drugs is empty after
             # filtering, move drugs from val to train.
@@ -279,7 +317,16 @@ def drug_aware_split(
                 logger.warning(
                     f"FORENSIC-AUDIT-I07 (fallback): train_drugs was empty "
                     f"after held-out filtering. Moved {n_move} drugs from "
-                    f"val to train."
+                    f"val to train. (V90 BUG #14: val_drugs was filtered "
+                    f"of held-out drugs BEFORE moving, so no KP leakage.)"
+                )
+            elif len(train_drugs) == 0 and len(val_drugs) == 0:
+                raise RuntimeError(
+                    f"V90 ROOT FIX (BUG #14, fallback): after filtering "
+                    f"held-out drugs, BOTH train_drugs and val_drugs are "
+                    f"empty. The graph is too small ({n_drugs} drugs, "
+                    f"{len(held_out_set)} held-out) to satisfy the "
+                    f"drug-aware split."
                 )
             existing_val = set(int(d) for d in val_drugs.tolist())
             existing_test = set(int(d) for d in test_drugs.tolist())

@@ -59,13 +59,35 @@ logger = logging.getLogger(__name__)
 # Base delay 5 min so even non-backoff-aware Airflow versions wait 5 min
 # (was 30 min in v73 — too long for transient errors that recover in
 # seconds, and pointless for 4xx that never recover).
+#
+# v89 FORENSIC ROOT FIX (BUG #37 — SLA == execution_timeout defeats
+# early-warning):
+#   The previous config set ``sla = execution_timeout = 4h``. Per
+#   Airflow semantics, an SLA miss is ADVISORY — it writes a row to
+#   the ``sla_miss`` table and (optionally) sends an email, but it
+#   does NOT kill the running task. With SLA == execution_timeout,
+#   the SLA miss fires at EXACTLY 4h, and the hard kill fires at
+#   EXACTLY 4h — there is NO early-warning window. Operators cannot
+#   proactively investigate slow tasks before they are killed.
+#
+#   ROOT FIX: set ``sla = 3h`` and ``execution_timeout = 4h``. The
+#   1-hour gap gives operators an advisory signal at 3h ("this task
+#   is taking longer than expected — investigate") BEFORE the hard
+#   kill at 4h. This is the scientifically correct configuration for
+#   an SLA meant as an early-warning system: the warning must come
+#   BEFORE the kill, not simultaneously with it.
+#
+#   The master DAG overrides BOTH to 7h (aligned) because TransE
+#   training on real data can take 6-7h — see
+#   master_pipeline_dag.py::TASK_SLA / TASK_TIMEOUT for the
+#   master-specific rationale.
 DEFAULT_RETRY_ARGS: dict[str, Any] = {
     "retries": 2,
     "retry_delay": timedelta(minutes=5),
     "retry_exponential_backoff": True,
     "max_retry_delay": timedelta(minutes=20),  # cap exponential growth
     "execution_timeout": timedelta(hours=4),
-    "sla": timedelta(hours=4),
+    "sla": timedelta(hours=3),  # v89 BUG #37: 1h early-warning window before 4h hard kill
     "email_on_failure": False,
     "email_on_retry": False,
 }

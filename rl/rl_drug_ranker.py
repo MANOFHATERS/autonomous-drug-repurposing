@@ -2731,7 +2731,30 @@ class DrugRankingEnv(gym.Env):
         self.data = self.data.iloc[shuffle_order].reset_index(drop=True)
         # Rebuild the features array after shuffle (the data changed)
         self._features_array = self.data[self._effective_feature_cols].values.astype(np.float32)
-        np.clip(self._features_array, 0.0, 1.0, out=self._features_array)
+        # v91 ROOT FIX (BUG #24 regression in reset): the previous line
+        # was ``np.clip(self._features_array, 0.0, 1.0, out=self._features_array)``
+        # which clipped ALL features to [0,1] — including the disease
+        # context features (disease_pair_count, disease_avg_gnn,
+        # disease_avg_safety). This RE-INTRODUCED BUG #24 that was
+        # carefully fixed in __init__ (lines 2636-2655): disease_pair_count
+        # is min-max normalized in the train env, and a TEST disease with
+        # a HIGHER pair count than the train max gets a normalized value
+        # > 1. Clipping it to 1.0 LOSES the information that this disease
+        # is an outlier. The __init__ code clips ONLY the core FEATURE_COLS
+        # (genuinely in [0,1] by definition), NOT the disease context
+        # features. The fix mirrors __init__: build a core-feature mask
+        # and clip ONLY those columns, leaving disease context features
+        # untouched. This must stay consistent with __init__ forever.
+        core_feature_mask_reset = np.array([
+            col in self.config.reward.feature_cols
+            for col in self._effective_feature_cols
+        ], dtype=bool)
+        if core_feature_mask_reset.any():
+            np.clip(
+                self._features_array[:, core_feature_mask_reset],
+                0.0, 1.0,
+                out=self._features_array[:, core_feature_mask_reset],
+            )
         # F5 fix: removed dead start_idx option — always start from 0
         self.current_idx = 0
         self.high_ranked = []
@@ -6086,8 +6109,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--input", type=str, default=None,
                         help="Path to GNN output CSV (default: generate fake data)")
-    parser.add_argument("--timesteps", type=int, default=10000,
-                        help="PPO training timesteps (default: 10000)")
+    parser.add_argument("--timesteps", type=int, default=50000,
+                        help="PPO training timesteps (default: 50000, aligned with PipelineConfig.timesteps)")
     parser.add_argument("--top-n", type=int, default=10,
                         help="Number of top candidates to return (default: 10)")
     parser.add_argument("--seed", type=int, default=42,

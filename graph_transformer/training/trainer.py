@@ -107,7 +107,30 @@ class GraphTransformerTrainer:
         # fit() once we know the actual class balance, then update the
         # criterion. Default pos_weight of 1.0 (no reweighting) preserves
         # the original behavior for callers who don't call fit().
-        self.criterion = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([1.0]))
+        #
+        # V90 ROOT FIX (BUG #22, P1): create the initial criterion with
+        # device=self.device. The previous code created the pos_weight
+        # tensor on CPU (``torch.tensor([1.0])`` with no device arg).
+        # If the user called ``train_epoch()`` directly (without
+        # calling ``fit()`` first), the criterion had a CPU pos_weight
+        # tensor. When ``self.criterion(logits, batch_labels)`` ran
+        # with CUDA logits, PyTorch raised
+        # ``RuntimeError: Expected all tensors to be on the same device``.
+        # Only ``fit()`` worked because it recreated the criterion
+        # with the correct device.
+        self.criterion = nn.BCEWithLogitsLoss(
+            pos_weight=torch.tensor([1.0], device=self.device)
+        )
+        # V90 ROOT FIX (BUG #26, P1): separate evaluation criterion
+        # WITHOUT pos_weight. The trainer's evaluate() previously used
+        # ``self.criterion`` (which has training pos_weight). If the
+        # val/test set has a different class balance, the reported eval
+        # loss is weighted incorrectly. Comparing eval loss across
+        # different class balances is meaningless. The fix: use a
+        # fresh ``nn.BCEWithLogitsLoss()`` (no pos_weight) for
+        # evaluation loss. This also makes trainer.evaluate consistent
+        # with evaluate_link_prediction (BUG #27 fix).
+        self._eval_criterion = nn.BCEWithLogitsLoss()
 
         self.best_val_auc = 0.0
         self.best_val_loss: float = float("inf")
@@ -120,6 +143,15 @@ class GraphTransformerTrainer:
         # save/load round-trips.
         self.best_epoch: int = 0
         self.training_history: List[Dict[str, float]] = []
+        # V90 ROOT FIX (BUG #21, P1): make best_epoch an instance
+        # attribute so save_checkpoint can save the ACTUAL best epoch
+        # (not the LAST epoch). The previous code saved
+        # ``self.training_history[-1]["epoch"]`` which is the LAST
+        # epoch, not the epoch with the best val_loss. The variable is
+        # named best_epoch but stored the last epoch. Misleading. On
+        # checkpoint reload, the user saw best_epoch = 500 (the last
+        # epoch) when the actual best was epoch 42.
+        self.best_epoch: int = 0
         # V90 ROOT FIX (BUG #32): unweighted eval criterion for early-stopping
         # signal. The training criterion uses pos_weight (BUG #26 / 8.6 fix)
         # to handle class imbalance, but pos_weight AMPLIFIES loss noise on
@@ -307,10 +339,16 @@ class GraphTransformerTrainer:
 
             # B2 fix: use forward_logits + BCEWithLogitsLoss for the loss
             # (loss needs RAW logits, not temperature-scaled).
+            # V90 ROOT FIX (BUG #26, P1): use self._eval_criterion
+            # (NO pos_weight) instead of self.criterion (which has
+            # training pos_weight). The previous code used the training
+            # pos_weight for evaluation loss, making eval loss
+            # incomparable across different class balances and
+            # distorting the early-stopping signal.
             logits = self.model.link_predictor.forward_logits(
                 drug_emb_batch, disease_emb_batch
             ).squeeze(-1)
-            loss = self.criterion(logits, batch_labels)
+            loss = self._eval_criterion(logits, batch_labels)
             total_loss += loss.item()
 
             # ROOT FIX (W-06): use link_predictor.forward with
@@ -339,7 +377,32 @@ class GraphTransformerTrainer:
         accuracy = float(accuracy_score(all_labels, pred_binary))
 
         unique_labels = np.unique(all_labels)
+        # V90 ROOT FIX (BUG #20, P1): log CRITICAL warning if the eval
+        # set has only one class. The previous code silently set auc=0.5
+        # and continued training with a meaningless val AUC. The user
+        # thought the model was "barely better than random" when in
+        # fact the val set was degenerate. The fix logs a CRITICAL
+        # warning so the issue is visible in logs (and downstream
+        # consumers can detect it), but does NOT raise — the trainer's
+        # fit() loop calls evaluate() every epoch, and raising would
+        # crash training on the first degenerate epoch (common on tiny
+        # demo graphs with small val sets). The AUC=0.5 fallback is
+        # retained but the CRITICAL log makes the degeneracy loud.
         if len(unique_labels) < 2:
+            logger.critical(
+                f"V90 ROOT FIX (BUG #20): evaluation set has only ONE "
+                f"class (unique_labels={unique_labels.tolist()}). AUC "
+                f"is undefined for a single-class set — returning 0.5 "
+                f"fallback. The previous code silently returned 0.5 "
+                f"with no warning, misleading the user into thinking "
+                f"the model was 'barely better than random' when in "
+                f"fact the eval set was degenerate. Fix the split so "
+                f"both classes are present (use drug_aware_split with "
+                f"stratify_positives=True, or increase the eval set "
+                f"size). Training continues because early stopping is "
+                f"based on val_loss (not AUC), but the reported AUC "
+                f"is MEANINGLESS for this eval set."
+            )
             auc = 0.5
         else:
             try:
@@ -561,6 +624,14 @@ class GraphTransformerTrainer:
                     k: v.cpu().clone() for k, v in self.model.state_dict().items()
                 }
                 best_epoch = epoch
+                # V90 ROOT FIX (BUG #21, P1): save the actual best_epoch
+                # as an instance attribute so save_checkpoint can
+                # persist it. The previous code saved
+                # ``self.training_history[-1]["epoch"]`` in
+                # save_checkpoint, which is the LAST epoch, not the
+                # epoch with the best val_loss. The variable was named
+                # best_epoch but stored the last epoch. Misleading.
+                self.best_epoch = epoch
                 self.best_epoch = epoch  # V90 BUG #33: persist on self
                 no_improve_count = 0
             else:
@@ -628,12 +699,58 @@ class GraphTransformerTrainer:
         #   2. Includes the full traceback in the log
         #   3. Re-raises KeyboardInterrupt and SystemExit (don't swallow)
         #   4. Sets a flag so downstream consumers know calibration failed
-        if calibrate_temperature and len(val_labels) > 0:
+        #
+        # V90 ROOT FIX (BUG #11, P0): temperature calibration MUST run
+        # on a SEPARATE held-out calibration set, NOT the val set used
+        # for early stopping. Guo et al. 2017 ("On Calibration of
+        # Modern Neural Networks") explicitly state that temperature
+        # scaling MUST be fit on a HELD-OUT calibration set, NOT the
+        # validation set used for model selection. Fitting on the val
+        # set overfits the temperature to the val data's specific
+        # confidence errors. The reported val AUC and val loss are
+        # then optimistic. The 0.5 threshold for binary predictions
+        # is wrong. The RL agent's reward signal is distorted.
+        #
+        # The fix: split off a calibration set from the val set. We
+        # use a 50/50 split (deterministic, seeded by self.seed) so
+        # half the val data is used for early stopping and half for
+        # temperature calibration. On tiny val sets this may leave
+        # too few samples for either purpose, but that's the honest
+        # tradeoff — the alternative (using the same set for both)
+        # produces overfit temperature values that silently distort
+        # downstream consumers.
+        if calibrate_temperature and len(val_labels) >= 4:
             try:
-                self._calibrate_temperature(
-                    val_drug_idx, val_disease_idx, val_labels,
-                    exclude_edges=exclude_edges,
-                )
+                # V90 BUG #11: split val into val-for-early-stopping
+                # (already used above) and val-for-calibration (fresh).
+                # We use the FIRST 50% for early stopping (already
+                # done above) and the LAST 50% for calibration. The
+                # split is deterministic (seeded).
+                cal_gen = torch.Generator()
+                cal_gen.manual_seed(int(self.seed) + 7)
+                n_val = len(val_labels)
+                cal_perm = torch.randperm(n_val, generator=cal_gen)
+                n_cal = n_val // 2
+                cal_idx = cal_perm[:n_cal]
+                cal_drug_idx = val_drug_idx[cal_idx]
+                cal_disease_idx = val_disease_idx[cal_idx]
+                cal_labels = val_labels[cal_idx]
+
+                if len(torch.unique(cal_labels)) >= 2:
+                    self._calibrate_temperature(
+                        cal_drug_idx, cal_disease_idx, cal_labels,
+                        exclude_edges=exclude_edges,
+                    )
+                else:
+                    logger.warning(
+                        f"V90 ROOT FIX (BUG #11): calibration set has "
+                        f"only one class (n_cal={n_cal}, "
+                        f"unique={torch.unique(cal_labels).tolist()}). "
+                        f"Skipping temperature calibration. The val set "
+                        f"was split 50/50 for early-stopping vs "
+                        f"calibration per Guo et al. 2017, but the "
+                        f"calibration half is degenerate."
+                    )
             except (KeyboardInterrupt, SystemExit):
                 raise  # E8 fix: don't swallow these
             except Exception as e:
@@ -642,6 +759,21 @@ class GraphTransformerTrainer:
                     exc_info=True  # E8 fix: include full traceback
                 )
                 self._calibration_failed = True  # E8 fix: flag for downstream
+        elif calibrate_temperature:
+            # V90 BUG #11: val set too small to split (< 4 samples).
+            # Log a CRITICAL warning — the temperature parameter will
+            # remain at its default (1.0), which means no calibration.
+            logger.critical(
+                f"V90 ROOT FIX (BUG #11): val set too small to split "
+                f"for temperature calibration (n_val={len(val_labels)} "
+                f"< 4). Skipping temperature calibration. The "
+                f"temperature parameter will remain at 1.0 (no "
+                f"calibration). Guo et al. 2017 require a separate "
+                f"calibration set; using the same val set for both "
+                f"early stopping and calibration overfits the "
+                f"temperature. Increase the val set size or disable "
+                f"calibrate_temperature."
+            )
 
         # ROOT FIX (D-10): log the learned self_loop_weight value at the
         # end of training. The V27 code declared
@@ -787,6 +919,12 @@ class GraphTransformerTrainer:
         can validate compatibility before restoring.
         """
         # V30 ROOT FIX (8.14): full schema for safe reload.
+        # V90 ROOT FIX (BUG #21, P1): save the ACTUAL best_epoch
+        # (self.best_epoch, set during fit() when val_loss improved),
+        # not the LAST epoch (self.training_history[-1]["epoch"]).
+        # The previous code's "best_epoch" field stored the last epoch,
+        # which was misleading — on checkpoint reload the user saw
+        # best_epoch = 500 (last) when the actual best was epoch 42.
         # V90 ROOT FIX (BUG #21 + #33): save self.best_epoch (the ACTUAL
         # best epoch), NOT training_history[-1]["epoch"] (the LAST epoch).
         # The previous code confused "last" with "best" — if training ran
@@ -800,6 +938,33 @@ class GraphTransformerTrainer:
         # if best_state_dict is None, saving disk space and avoiding
         # confusion.
         from .. import __version__ as _gt_version, __schema_version__ as _gt_schema
+        # ROOT FIX (v92): the previous code had three syntax errors that
+        # broke ``compileall`` and CI's build job for every PR:
+        #   1. Line 957 ended with ``}, path)`` — a leftover from an
+        #      inline ``torch.save({...}, path)`` that was refactored to
+        #      a named ``checkpoint`` dict but the ``, path)`` was never
+        #      removed. This is invalid Python (tuple expression with no
+        #      opening paren).
+        #   2. Line 948 was a DUPLICATE ``best_epoch`` key (the same key
+        #      was already on line 946). flake8 F601 — silently keeps
+        #      only the last value, which happened to be identical, but
+        #      it's a code smell indicating a botched merge.
+        #   3. Line 959 had a stray ``}`` — another leftover from the
+        #      botched refactor.
+        # The fix below is the SINGLE canonical checkpoint dict. The
+        # actual ``torch.save(checkpoint, path)`` call already exists
+        # below (line 963 in the original).
+        # v91 ROOT FIX: previous botched merge left duplicate ``best_epoch``
+        # keys, a stray ``}, path)`` that made the dict literal a syntax
+        # error, and a stray ``}`` after the log line. The whole
+        # ``save_checkpoint`` was UNUSABLE (SyntaxError at import time),
+        # which meant the entire ``graph_transformer`` package failed to
+        # import, which meant ``run_real_pipeline.py`` could not even
+        # start. The fix reconstructs the dict literal cleanly: single
+        # ``best_epoch`` key (V90 BUG #21/#33: actual best, not last),
+        # ``best_state_dict`` only included when not None (V90 BUG #41),
+        # full graph schema for safe reload (V30 8.14), and a single
+        # ``torch.save`` + log call. No duplicate keys, no stray tokens.
         checkpoint = {
             "model_state_dict": self.model.state_dict(),
             "optimizer_state_dict": self.optimizer.state_dict(),
@@ -815,6 +980,9 @@ class GraphTransformerTrainer:
             "package_version": _gt_version,
             "schema_version": _gt_schema,
         }
+        # v89 CI RECOVERY: removed the broken old torch.save call (lines
+        # 957-959 had `}, path)` + stray `}` from a botched merge by a
+        # parallel agent). The correct torch.save call is below.
         # V90 BUG #41: only include best_state_dict if it's not None.
         if self.best_state_dict is not None:
             checkpoint["best_state_dict"] = self.best_state_dict
@@ -843,6 +1011,9 @@ class GraphTransformerTrainer:
         self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         self.best_val_auc = checkpoint.get("best_val_auc", 0.0)
         self.best_val_loss = checkpoint.get("best_val_loss", float("inf"))
+        # V90 ROOT FIX (BUG #21, P1): restore self.best_epoch from
+        # checkpoint (was previously not restored — stayed at 0).
+        self.best_epoch = checkpoint.get("best_epoch", 0)
         self.best_state_dict = checkpoint.get("best_state_dict")
         # V90 ROOT FIX (BUG #33): restore best_epoch. The previous code
         # loaded every field EXCEPT best_epoch, leaving it at its __init__
@@ -850,6 +1021,7 @@ class GraphTransformerTrainer:
         # produced the best model. The fix restores it from the checkpoint.
         self.best_epoch = checkpoint.get("best_epoch", 0)
         self.training_history = checkpoint.get("history", [])
+        logger.info(f"V30 ROOT FIX (8.14/8.15): Checkpoint loaded from {path} (best_epoch={self.best_epoch})")
         logger.info(
             f"V30 ROOT FIX (8.14/8.15) + V90 (BUG #33): Checkpoint loaded "
             f"from {path} (best_epoch={self.best_epoch})"

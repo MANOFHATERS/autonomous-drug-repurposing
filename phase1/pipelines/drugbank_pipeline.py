@@ -654,7 +654,7 @@ def _atomic_csv_write(
             quoting=quoting,
         )
         os.replace(tmp_path, path)  # atomic on POSIX (A2)
-    except Exception:
+    except (OSError, csv.Error, ValueError):  # v85 FORENSIC ROOT FIX (BUG #51)
         if tmp_path.exists():
             try:
                 tmp_path.unlink()
@@ -1316,7 +1316,7 @@ class DrugBankPipeline(BasePipeline):
                     self.source_name, len(drugs_df), drugs_csv.name,
                 )
                 return drugs_csv
-        except Exception as exc:
+        except (OSError, ValueError, pd.errors.ParserError) as exc:  # v85 FORENSIC ROOT FIX (BUG #51)
             logger.warning(
                 "[%s] Open-data DrugBank solution failed (%s) — falling "
                 "back to embedded samples.",
@@ -2662,8 +2662,7 @@ class DrugBankPipeline(BasePipeline):
                         else f"drugbank:{dbid}"
                     )
                     df.at[idx, "inchikey"] = make_synthetic_inchikey(_hash_input)
-                except Exception as _exc:
-                    # v35 ROOT FIX (CRITICAL #2 re-introduction guard):
+                except (ImportError, AttributeError, ValueError, RuntimeError) as _exc:  # v85 FORENSIC ROOT FIX (BUG #51)
                     # previously this except block silently degraded to the
                     # legacy ``f"SYNTH-{dbid}"`` format (13 chars), which
                     # does NOT match the resolver's 27-char ``SYNTH{hash}-...``
@@ -2698,7 +2697,7 @@ class DrugBankPipeline(BasePipeline):
                             else f"drugbank:{dbid}"
                         )
                         df.at[idx, "inchikey"] = make_synthetic_inchikey(_hash_input)
-                    except Exception as _exc:
+                    except (ImportError, AttributeError, ValueError, RuntimeError) as _exc:  # v85 FORENSIC ROOT FIX (BUG #51)
                         # v35 ROOT FIX: see comment in the
                         # DRUGBANK_GENERATE_SYNTH_KEYS branch above — raise
                         # instead of silently degrading to legacy SYNTH-{dbid}.
@@ -3355,7 +3354,7 @@ class DrugBankPipeline(BasePipeline):
                     "(0 indication rows — OMIM CSV was missing).",
                     self.source_name,
                 )
-            except Exception:
+            except (OSError, csv.Error, ValueError):  # v85 FORENSIC ROOT FIX (BUG #51)
                 if tmp_path_empty.exists():
                     tmp_path_empty.unlink()
                 raise
@@ -3402,7 +3401,7 @@ class DrugBankPipeline(BasePipeline):
                     "(0 indication rows — OMIM CSV schema mismatch).",
                     self.source_name,
                 )
-            except Exception:
+            except (OSError, csv.Error, ValueError):  # v85 FORENSIC ROOT FIX (BUG #51)
                 if tmp_path_s.exists():
                     tmp_path_s.unlink()
                 raise
@@ -3600,7 +3599,7 @@ class DrugBankPipeline(BasePipeline):
                 "[%s] BUG-A-005: wrote %d structured indication rows to %s",
                 self.source_name, rows_written, _log_path(indications_path),
             )
-        except Exception:
+        except (OSError, csv.Error, ValueError):  # v85 FORENSIC ROOT FIX (BUG #51)
             if tmp_path.exists():
                 try:
                     tmp_path.unlink()
@@ -3660,11 +3659,11 @@ class DrugBankPipeline(BasePipeline):
         # SEC8: who ran the pipeline.
         try:
             created_by = getpass.getuser()
-        except Exception:  # pragma: no cover - defensive
+        except OSError:  # pragma: no cover - defensive
             created_by = "unknown"
         try:
             created_on = socket.gethostname()
-        except Exception:  # pragma: no cover - defensive
+        except OSError:  # pragma: no cover - defensive
             created_on = "unknown"
 
         provenance = {
@@ -3883,7 +3882,7 @@ class DrugBankPipeline(BasePipeline):
             # in __exit__). Mirrors chembl_pipeline.py:1207.
             try:
                 session.flush()
-            # v90 ROOT FIX (BUG #19): narrowed from broad
+            # v85/v90 ROOT FIX (BUG #19/51): narrowed from broad
             # ``except Exception`` which caught programming bugs
             # (AttributeError, KeyError, NameError) and silently
             # rolled back. Root fix: catch ONLY SQLAlchemy DBAPI
@@ -3891,7 +3890,7 @@ class DrugBankPipeline(BasePipeline):
             except (OperationalError, IntegrityError, PendingRollbackError) as _flush_exc:  # pragma: no cover - defensive
                 try:
                     session.rollback()
-                except Exception:  # noqa: BLE001 — never mask the flush error
+                except (OSError, RuntimeError, ValueError):  # noqa: BLE001 — never mask the flush error  # v85 FORENSIC ROOT FIX (BUG #51)
                     pass
                 logger.warning(
                     "[drugbank] session.flush() failed (rolled back; "
@@ -3912,7 +3911,7 @@ class DrugBankPipeline(BasePipeline):
                     / "dead_letter"
                     / f"drugbank_loader_{self.run_id[:8]}.jsonl"
                 )
-            except OSError as _dlq_exc:  # pragma: no cover - defensive
+            except (OSError, RuntimeError, ValueError) as _dlq_exc:  # pragma: no cover - defensive  # v85/v90 FORENSIC ROOT FIX (BUG #20/51)
                 logger.warning(
                     "[drugbank] Failed to flush dead-letter queue: %s: %s",
                     type(_dlq_exc).__name__, _dlq_exc,
@@ -3936,11 +3935,11 @@ class DrugBankPipeline(BasePipeline):
                 total_skipped += dpi_result.quarantined
                 total_failed += dpi_result.failed
 
-        except Exception:
+        except (OSError, RuntimeError, ValueError):  # v85 FORENSIC ROOT FIX (BUG #51)
             if owns_session:
                 try:
                     session.rollback()
-                except Exception:  # pragma: no cover - defensive
+                except (OSError, RuntimeError, ValueError):  # pragma: no cover - defensive  # v85 FORENSIC ROOT FIX (BUG #51)
                     pass
             raise
         finally:
@@ -3954,15 +3953,14 @@ class DrugBankPipeline(BasePipeline):
                 _exc_info = _sys.exc_info()
                 try:
                     _session_cm.__exit__(*_exc_info)
-                # v90 ROOT FIX (BUG #21): the previous
+                # v85/v90 ROOT FIX (BUG #21/51): the previous
                 # ``except Exception: pass`` silently swallowed
                 # __exit__ failures — if commit fails because the DB
                 # connection dropped, the caller saw load() return
                 # success with NO data committed. Changed to catch
-                # only DB errors (OperationalError for connection
-                # loss, InterfaceError for invalid connection handle).
-                # Programming bugs propagate.
-                except (OperationalError, InterfaceError) as _exit_exc:  # pragma: no cover - defensive
+                # DB errors (OperationalError, InterfaceError) and
+                # OS/runtime errors. Programming bugs propagate.
+                except (OperationalError, InterfaceError, OSError, RuntimeError, ValueError) as _exit_exc:  # pragma: no cover - defensive
                     logger.error(
                         "[drugbank] session __exit__ failed (commit/rollback "
                         "may not have completed — loaded data may be lost): "

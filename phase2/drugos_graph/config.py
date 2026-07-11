@@ -3461,12 +3461,34 @@ class TransEConfig:
         # We accept both values here so a future higher_better model
         # can be added with a new loss path — but the trainer (not the
         # config) is responsible for branching on this value.
+        # v84 FORENSIC ROOT FIX (BUG #13 — TransEConfig must lock
+        # score_direction to "lower_better"): the previous code accepted
+        # BOTH "lower_better" and "higher_better" in TransEConfig's
+        # __post_init__. A user could construct a TransEConfig with
+        # score_direction="higher_better", pass it to a TransE model,
+        # and only discover the incompatibility on the first batch
+        # (when the trainer's assertion fired). ROOT FIX: TransEConfig
+        # is TransE-SPECIFIC — it MUST be "lower_better" only. A
+        # "higher_better" config belongs to a different config class
+        # (e.g. a future HGTConfig). Reject "higher_better" at config
+        # construction time so the failure is immediate and the error
+        # message is actionable.
         if self.score_direction not in ("lower_better", "higher_better"):
             raise ValueError(
                 f"score_direction must be 'lower_better' or 'higher_better', "
                 f"got {self.score_direction!r}. TransE (Bordes 2013) uses "
                 f"'lower_better' (score = -||h + r - t||). "
                 f"(v28 audit ML-9: explicit model-loss contract.)"
+            )
+        if self.score_direction != "lower_better":
+            raise ValueError(
+                f"TransEConfig.score_direction must be 'lower_better' "
+                f"(TransE uses score = -||h + r - t||, lower = more "
+                f"plausible). Got {self.score_direction!r}. A "
+                f"'higher_better' model requires a different config "
+                f"class (e.g. a future HGTConfig) and a different loss "
+                f"formula — drop-in substitution into train_transe will "
+                f"silently train BACKWARDS. (v84 BUG #13 root fix)"
             )
         # v28 ML-14: validate relation_norm_mode so an invalid value
         # fails FAST at config construction, not on the first
@@ -3628,7 +3650,7 @@ if _EVAL_CONFIG_ENV:
         }
         _eval_defaults.update(_eval_overrides)
         EVALUATION_CONFIG: EvaluationConfig = EvaluationConfig(**_eval_defaults)
-    except Exception:
+    except (ValueError, json.JSONDecodeError):  # v85 FORENSIC ROOT FIX (BUG #51)
         EVALUATION_CONFIG = EvaluationConfig()
 else:
     EVALUATION_CONFIG: EvaluationConfig = EvaluationConfig()
@@ -6505,7 +6527,7 @@ def auto_size_neo4j_memory(
             if len(lines) >= 2:
                 parts = lines[1].split()
                 total_system_memory_gb = int(parts[1])
-        except Exception:
+        except (subprocess.SubprocessError, OSError, ValueError):  # v85 FORENSIC ROOT FIX (BUG #51)
             total_system_memory_gb = 16  # Safe default
 
     # Neo4j recommends: 50% heap, 25-50% pagecache, rest for OS
@@ -6752,7 +6774,7 @@ def audit_log(
         with open(filepath, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, default=str) + "\n")
         return filepath
-    except Exception as exc:
+    except (OSError, ValueError, json.JSONDecodeError) as exc:  # v85 FORENSIC ROOT FIX (BUG #51)
         logger.error("Failed to write audit log: %s", exc)
         return None
 
@@ -7236,7 +7258,7 @@ def log_transformation(
         filepath = TRANSFORMATION_LOG_DIR / f"transform_{timestamp}.jsonl"
         with open(filepath, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, default=str) + "\n")
-    except Exception as exc:
+    except (OSError, ValueError, json.JSONDecodeError) as exc:  # v85 FORENSIC ROOT FIX (BUG #51)
         logger.error("Failed to log transformation: %s", exc)
     logger.info(
         "Transform: %s | %s -> %s | type=%s | records=%s",
@@ -7666,7 +7688,7 @@ def validate_all() -> dict[str, list[str]]:
     for v in validators:
         try:
             report[v.__name__] = v()
-        except Exception as exc:
+        except (ValueError, TypeError, RuntimeError, KeyError, OSError) as exc:  # v85 FORENSIC ROOT FIX (BUG #51)
             report[v.__name__] = [f"VALIDATOR CRASHED: {exc}"]
     return report
 
@@ -7836,7 +7858,7 @@ def _self_test_frozen_dataclasses() -> bool:
                 return False
             except AttributeError:
                 pass  # Expected — frozen dataclass raises AttributeError
-        except Exception as exc:
+        except (ImportError, AttributeError, ValueError) as exc:  # v85 FORENSIC ROOT FIX (BUG #51)
             logger.error("Cannot create %s: %s", cls.__name__, exc)
             return False
     return True
@@ -7936,7 +7958,7 @@ if __name__ == "__main__":
             else:
                 print(f"  FAIL: {name}")
                 failed += 1
-        except Exception as exc:
+        except (ValueError, TypeError, RuntimeError, KeyError, OSError) as exc:  # v85 FORENSIC ROOT FIX (BUG #51)
             print(f"  ERROR: {name} — {exc}")
             failed += 1
 

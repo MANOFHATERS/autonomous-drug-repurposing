@@ -27,6 +27,7 @@ import os
 import sys
 import unittest
 from unittest.mock import patch
+import pytest
 
 import numpy as np
 import pandas as pd
@@ -155,20 +156,26 @@ class TestW07KPDrugsExcludedFromNegatives(unittest.TestCase):
     """W-07: KP drugs excluded from negative sampling in train_model."""
 
     def test_train_model_excludes_kp_drugs(self):
-        """train_model should sample negatives from non_kp_drug_indices only."""
+        """train_model should sample negatives from non_kp_drug_indices only.
+        
+        V90 ROOT FIX (BUG #5): the split logic was extracted into
+        ``_compute_training_split()`` so the resume_from_checkpoint
+        path can compute the SAME test split. We check BOTH methods' source.
+        """
         import inspect
         from graph_transformer.gt_rl_bridge import GTRLBridge
-        source = inspect.getsource(GTRLBridge.train_model)
+        source = (inspect.getsource(GTRLBridge.train_model)
+                  + inspect.getsource(GTRLBridge._compute_training_split))
         self.assertIn(
             "kp_drug_indices",
             source,
-            "W-07: train_model should define kp_drug_indices to exclude "
-            "KP drugs from negative sampling.",
+            "W-07: train_model or _compute_training_split should define "
+            "kp_drug_indices to exclude KP drugs from negative sampling.",
         )
         self.assertIn(
             "non_kp_drug_indices",
             source,
-            "W-07: train_model should sample negatives from "
+            "W-07: should sample negatives from "
             "non_kp_drug_indices (not range(num_drugs)).",
         )
         self.assertIn(
@@ -501,16 +508,22 @@ class TestS01DrugAwareSplitAllSizes(unittest.TestCase):
     """S-01: GT uses drug_aware_split on ALL graph sizes (no pair-wise)."""
 
     def test_train_model_uses_drug_aware_split(self):
-        """train_model should call drug_aware_split for all graph sizes."""
+        """train_model should call drug_aware_split for all graph sizes.
+        
+        V90 ROOT FIX (BUG #5): the split logic was extracted into
+        ``_compute_training_split()``. We check BOTH methods' source.
+        """
         import inspect
         from graph_transformer.gt_rl_bridge import GTRLBridge
-        source = inspect.getsource(GTRLBridge.train_model)
+        source = (inspect.getsource(GTRLBridge.train_model)
+                  + inspect.getsource(GTRLBridge._compute_training_split))
         # The pair-wise split (torch.randperm on pairs) should NOT be
         # in the active code path.
         self.assertIn(
             "drug_aware_split(",
             source,
-            "S-01: train_model should call drug_aware_split() for all graph sizes.",
+            "S-01: train_model or _compute_training_split should call "
+            "drug_aware_split() for all graph sizes.",
         )
         self.assertIn(
             "ROOT FIX (C-3)",

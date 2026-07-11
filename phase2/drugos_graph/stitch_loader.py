@@ -898,6 +898,17 @@ STITCH_ACTION_TO_REL_TYPE: Dict[str, str] = {
     "metabolism": "metabolized_by",
     "transport": "transported_by",
     "carrier": "carried_by",
+    # BUG #59 ROOT FIX: explicit mapping for STITCH action values that
+    # previously fell through to the "fallback_binds" path with a WARNING.
+    # "reactivation" = reactivating an inhibited enzyme = functionally
+    # activation. Map to "activates" (the scientifically correct relation).
+    "reactivation": "activates",
+    # "non-inhibitory" = NOT inhibition — could be activation, binding, or
+    # unknown. Mapping to "activates" is WRONG (BUG #59 patient-safety
+    # risk: spurious activates edges). Map to "binds" (direction unknown)
+    # — the conservative, patient-safe choice that never invents a
+    # direction the source data does not support.
+    "non-inhibitory": "binds",
 }
 
 # Circuit breaker constants (mirrors string_loader R6-12 pattern).

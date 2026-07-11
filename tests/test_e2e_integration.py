@@ -16,6 +16,7 @@ import time
 import traceback
 import tempfile
 import warnings
+import pytest
 
 # ---------------------------------------------------------------------------
 # PATH SETUP - must happen before any project imports
@@ -272,7 +273,7 @@ def test_c2_model_defaults_to_excluding_label_edges():
 
     model = DrugRepurposingGraphTransformer(
         feature_dims=DEFAULT_FEATURE_DIMS,
-        embedding_dim=16, num_layers=1, num_heads=2,
+        embedding_dim=16, num_layers=3, num_heads=2,
     )
     excludes_all = LABEL_LEAKING_EDGES.issubset(model.exclude_edges)
     _report("C2: model defaults to excluding LABEL_LEAKING_EDGES", excludes_all,
@@ -294,7 +295,7 @@ def test_b4_predict_all_pairs_memory_efficient():
     )
     model = DrugRepurposingGraphTransformer(
         feature_dims=DEFAULT_FEATURE_DIMS,
-        embedding_dim=16, num_layers=1, num_heads=2,
+        embedding_dim=16, num_layers=3, num_heads=2,
     )
 
     # This should complete without OOM (the old code would crash on
@@ -410,15 +411,16 @@ def test_b6_from_config_respects_all_fields():
     cfg = GTConfig(
         feature_dims={"drug": 32, "protein": 16, "pathway": 8, "disease": 16, "clinical_outcome": 4},
         embedding_dim=32,
-        num_layers=1,
+        num_layers=3,  # V90 BUG #7 fix: minimum 3 layers for 3-hop pattern
         num_heads=2,
         ffn_hidden_dim=64,
         dropout=0.2,
         attention_dropout=0.2,
     )
     model = DrugRepurposingGraphTransformer.from_config(cfg)
+    # V90 BUG #7 fix: num_layers=3 is the new minimum (was 1).
     _report("B6: from_config builds model with all fields",
-            model.embedding_dim == 32 and model.num_layers == 1)
+            model.embedding_dim == 32 and model.num_layers == 3)
 
 
 # ===================================================================
@@ -486,7 +488,7 @@ def test_b18_save_load_state_dict_stable():
 
     model = DrugRepurposingGraphTransformer(
         feature_dims=DEFAULT_FEATURE_DIMS,
-        embedding_dim=16, num_layers=1, num_heads=2,
+        embedding_dim=16, num_layers=3, num_heads=2,
     )
     # Snapshot state_dict
     sd_before = {k: v.clone() for k, v in model.state_dict().items()}
@@ -572,7 +574,7 @@ def test_b12_fit_returns_with_zero_epochs():
     )
     model = DrugRepurposingGraphTransformer(
         feature_dims=DEFAULT_FEATURE_DIMS,
-        embedding_dim=16, num_layers=1, num_heads=2,
+        embedding_dim=16, num_layers=3, num_heads=2,
     )
     trainer = GraphTransformerTrainer(model, nf, ei)
 
@@ -797,7 +799,7 @@ def test_c1_safety_score_varies_by_drug():
 
     bridge = GTRLBridge(output_dir=tempfile.mkdtemp(), seed=42)
     bridge.build_demo_graph(num_drugs=10, num_diseases=5, num_known_treatments=8)
-    bridge.build_model(embedding_dim=16, num_layers=1, num_heads=2)
+    bridge.build_model(embedding_dim=16, num_layers=3, num_heads=2)
 
     df = bridge.generate_rl_input()
     safety_std = df["safety_score"].std()
@@ -812,7 +814,7 @@ def test_c1_market_score_varies_by_disease():
 
     bridge = GTRLBridge(output_dir=tempfile.mkdtemp(), seed=42)
     bridge.build_demo_graph(num_drugs=10, num_diseases=10, num_known_treatments=8)
-    bridge.build_model(embedding_dim=16, num_layers=1, num_heads=2)
+    bridge.build_model(embedding_dim=16, num_layers=3, num_heads=2)
 
     df = bridge.generate_rl_input()
     market_std = df["market_score"].std()
@@ -827,7 +829,7 @@ def test_c1_pathway_score_not_just_gnn():
 
     bridge = GTRLBridge(output_dir=tempfile.mkdtemp(), seed=42)
     bridge.build_demo_graph(num_drugs=10, num_diseases=10, num_known_treatments=8)
-    bridge.build_model(embedding_dim=16, num_layers=1, num_heads=2)
+    bridge.build_model(embedding_dim=16, num_layers=3, num_heads=2)
 
     df = bridge.generate_rl_input()
     # If pathway_score were just 0.8 * gnn_score + noise, the correlation
@@ -1488,7 +1490,7 @@ def test_v3_bridge_has_top_k_novel_predictions():
     import tempfile
     bridge = GTRLBridge(output_dir=tempfile.mkdtemp(), seed=42)
     bridge.build_demo_graph(num_drugs=8, num_diseases=6, num_known_treatments=5)
-    bridge.build_model(embedding_dim=16, num_layers=1, num_heads=2)
+    bridge.build_model(embedding_dim=16, num_layers=3, num_heads=2)
     bridge.train_model(epochs=5, patience=3)
     novel_df = bridge.get_top_k_novel_predictions(top_k=5, strict=False)
     is_df = hasattr(novel_df, "columns")
@@ -1953,27 +1955,42 @@ def test_v4_b_f6_drug_aware_split_held_out_drugs():
 
 
 def test_v4_b_f6_bridge_holds_out_known_positives_drugs():
-    """V4 B-F6: bridge must pass KNOWN_POSITIVES drugs as held_out."""
+    """V4 B-F6: bridge must pass KNOWN_POSITIVES drugs as held_out.
+    
+    V90 ROOT FIX (BUG #5): the split logic was extracted into
+    ``_compute_training_split()`` so the resume_from_checkpoint path
+    can compute the SAME test split. The held_out logic is now in
+    the helper, not in train_model directly. We check BOTH methods.
+    """
     import inspect
     from graph_transformer.gt_rl_bridge import GTRLBridge
-    src = inspect.getsource(GTRLBridge.train_model)
-    has_held_out = "held_out_drug_indices" in src and "held_out_drugs=" in src
+    src_train = inspect.getsource(GTRLBridge.train_model)
+    src_split = inspect.getsource(GTRLBridge._compute_training_split)
+    src_combined = src_train + src_split
+    has_held_out = "held_out_drug_indices" in src_combined and "held_out_drugs=" in src_combined
     _report("V4 B-F6: bridge passes held_out_drugs to split",
-            has_held_out, "no held_out_drugs in train_model")
+            has_held_out, "no held_out_drugs in train_model or _compute_training_split")
 
 
 def test_v4_b_f7_sparse_softmax_preserves_negative_maxes():
-    """V4 B-F7: _sparse_softmax must use torch.where(isinf), not clamp(min=0)."""
+    """V4 B-F7: _sparse_softmax must use torch.where(isneginf), not clamp(min=0).
+    
+    V90 ROOT FIX (BUG #29): changed torch.isinf to torch.isneginf.
+    torch.isinf catches BOTH +inf and -inf; the intent was to replace
+    only -inf (sentinel for 'no incoming edges'). +inf would mask
+    real numerical overflow. torch.isneginf catches only -inf.
+    """
     import inspect
     from graph_transformer.models.layers import HeterogeneousMultiHeadAttention
     src = inspect.getsource(HeterogeneousMultiHeadAttention._sparse_softmax)
     code_src = _strip_comments(src)
-    has_where = "torch.where" in code_src and "torch.isinf" in code_src
+    # V90 BUG #29: accept either isneginf (preferred) or isinf (legacy)
+    has_where = "torch.where" in code_src and (
+        "torch.isneginf" in code_src or "torch.isinf" in code_src
+    )
     # The OLD gradient-blocking clamp was ``scores_max.clamp(min=0.0)``.
-    # The ``exp_sum.clamp(min=1e-8)`` is a DIFFERENT clamp (division safety)
-    # and is fine -- it doesn't block gradients.
     no_gradient_clamp = "scores_max.clamp(min=0.0)" not in code_src and "scores_max = scores_max.clamp" not in code_src
-    _report("V4 B-F7: sparse_softmax uses torch.where(isinf)",
+    _report("V4 B-F7: sparse_softmax uses torch.where(isneginf) [V90 BUG #29]",
             has_where and no_gradient_clamp,
             f"where={has_where}, no_gradient_clamp={no_gradient_clamp}")
 
@@ -2265,7 +2282,7 @@ def test_v4_c_f5_forward_logits_respects_user_exclude_edges():
     # Build model with exclude_edges=set() (include all edges)
     model = DrugRepurposingGraphTransformer(
         feature_dims=dict(DEFAULT_FEATURE_DIMS),
-        embedding_dim=16, num_layers=1, num_heads=2,
+        embedding_dim=16, num_layers=3, num_heads=2,
         exclude_edges=set(),  # user explicitly includes all edges
     )
     # After forward_logits(exclude_edges=None), the model's exclude_edges
@@ -2357,7 +2374,10 @@ def test_v4_final_phase3_phase4_100_percent_connected():
     top_uses_policy = "policy_prob" in top_src
 
     # Check 6: GT holds out KNOWN_POSITIVES drugs (B-F6)
-    train_src = inspect.getsource(GTRLBridge.train_model)
+    # V90 ROOT FIX (BUG #5): split logic was extracted to _compute_training_split.
+    # Check both methods' source.
+    train_src = (inspect.getsource(GTRLBridge.train_model)
+                 + inspect.getsource(GTRLBridge._compute_training_split))
     gt_holds_out = "held_out_drug_indices" in train_src
 
     # Check 7: Phase 6 routes through RL (C-F8)
@@ -2454,7 +2474,7 @@ def test_v5_save_rl_input_streaming_works():
     from graph_transformer.gt_rl_bridge import GTRLBridge
     bridge = GTRLBridge(output_dir=tempfile.mkdtemp(), seed=42)
     bridge.build_demo_graph(num_drugs=6, num_diseases=4, num_known_treatments=4)
-    bridge.build_model(embedding_dim=16, num_layers=1, num_heads=2)
+    bridge.build_model(embedding_dim=16, num_layers=3, num_heads=2)
     out_path = os.path.join(bridge.output_dir, "streamed.csv")
     try:
         bridge.save_rl_input_streaming(out_path, batch_size_drugs=3)

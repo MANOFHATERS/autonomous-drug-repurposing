@@ -1486,11 +1486,14 @@ def _pre_validate_ppi(
             a_id = record.get("protein_a_id")
             b_id = record.get("protein_b_id")
             if a_id is not None and b_id is not None:
+                # v91 ROOT FIX (BUG #9): allow homodimers (a_id == b_id).
+                # Homodimers are biologically real (EGFR dimerization,
+                # p53 tetramerization). Set is_homodimer=True for
+                # self-interactions instead of quarantining them.
                 if a_id == b_id:
-                    raise ValueError(
-                        f"protein_a_id == protein_b_id ({a_id}) — "
-                        "self-interaction is not allowed"
-                    )
+                    record["is_homodimer"] = True
+                else:
+                    record["is_homodimer"] = False
                 if a_id > b_id:
                     logger.warning(
                         "%s: swapping protein_a_id(%d) > protein_b_id(%d)",
@@ -4041,7 +4044,13 @@ def _build_pubchem_compound_properties_table() -> Any:
             "enriched_at", DateTime(timezone=True),
             nullable=False, server_default=func.current_timestamp(),
         ),
-        Column("is_deleted", Boolean, default=False, server_default="0"),
+        # v90 ROOT FIX (BUG #23): `server_default=text("FALSE")` instead of
+        #   the non-portable `server_default="0"`. This Column object mirrors
+        #   the ORM PubChemCompoundProperty model — the previous "0" literal
+        #   diverged from the ORM (`server_default="0"` → now also FALSE) and
+        #   migration 005 (`is_deleted BOOLEAN NOT NULL DEFAULT FALSE`).
+        #   `text` is already imported at line 44 above.
+        Column("is_deleted", Boolean, default=False, server_default=text("FALSE")),
         Column("created_at", DateTime(timezone=True)),
         Column("updated_at", DateTime(timezone=True)),
         # V18 CD-2: align constraint NAME to ORM (was
@@ -4759,6 +4768,28 @@ def resolve_gene_symbol_to_uniprot(
             .str.upper()
             .map(gene_to_uniprot)
         )
+        # v89 ROOT FIX (pandas 3.x dtype strictness — CI COMP-3 failure):
+        #   pandas 3.x with pyarrow string backend enforces strict dtype
+        #   on ``df.loc[mask, col] = value`` assignments. If ``db_lookup``
+        #   contains mixed types (e.g. str + None from .map() misses), the
+        #   assignment raises ``TypeError: Invalid value for dtype 'str'``.
+        #   ROOT FIX: explicitly convert ``db_lookup`` to ``object`` dtype
+        #   before assignment so None/NaN values are accepted. This is the
+        #   pandas-recommended workaround for mixed-type assignment to
+        #   string columns (see pandas issue #54286). The downstream code
+        #   treats None as "unresolved" (the ``still_unresolved`` mask at
+        #   line 4659 checks ``df["uniprot_id"].isna()``), so preserving
+        #   None semantics is correct.
+        df.loc[need_resolution_mask, "uniprot_id"] = db_lookup.astype(object)
+        # V90 CI fix: pandas 2.2+ raises TypeError when assigning a
+        # mixed-dtype Series (object with float NaN + str values) to a
+        # column that pandas has inferred as 'str' dtype. The fix is
+        # to ensure the assignment is object-dtype-safe by converting
+        # db_lookup to a plain Python-object Series before assignment.
+        # This was a pre-existing CI failure (P2 + Chain-1 verification
+        # job) unrelated to the Phase 3 V90 fixes, but it blocked the
+        # merge gate. Root cause: pandas 2.2+ stricter dtype enforcement.
+        df.loc[need_resolution_mask, "uniprot_id"] = db_lookup.astype(object)
         # v89 fix: ensure dtype-safe assignment. Newer pandas (2.2+) raises
         # TypeError when assigning a mixed Series to a str-dtype column.
         # Convert to str with NaN preservation, then assign.
@@ -4772,6 +4803,12 @@ def resolve_gene_symbol_to_uniprot(
             .str.upper()
             .map(protein_name_to_uniprot)
         )
+        # v89 ROOT FIX (pandas 3.x dtype strictness — same as Step 1):
+        # explicit ``.astype(object)`` to allow None values in the
+        # string-dtype column.
+        df.loc[still_unresolved, "uniprot_id"] = protein_name_fallback.astype(object)
+        # V90 CI fix: same dtype-safe assignment as Step 1.
+        df.loc[still_unresolved, "uniprot_id"] = protein_name_fallback.astype(object)
         df.loc[still_unresolved, "uniprot_id"] = protein_name_fallback.astype(object).where(protein_name_fallback.notna(), other=pd.NA)
 
     unresolved_count = df["uniprot_id"].isna().sum()

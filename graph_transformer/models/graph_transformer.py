@@ -375,6 +375,30 @@ class DrugRepurposingGraphTransformer(nn.Module):
 
         return result
 
+    # v84 FORENSIC ROOT FIX (BUG #12 — declare score_direction on the
+    # GraphTransformer so the eval path can read it directly instead of
+    # substring-matching the class name). The GraphTransformer uses a
+    # link predictor that outputs logits → sigmoid probabilities; higher
+    # score = more plausible drug-disease pair. Direction is "higher_better".
+    @property
+    def score_direction(self) -> str:
+        """Scoring convention: 'higher_better' for GraphTransformer.
+
+        The link predictor outputs logits → sigmoid probabilities.
+        Higher score = more plausible drug-disease pair. The eval path
+        uses this to set `higher_is_better=True` for AUC computation.
+        """
+        return "higher_better"
+
+    @property
+    def score_higher_is_better(self) -> bool:
+        """Legacy boolean form of score_direction. True for GraphTransformer.
+
+        Deprecated: prefer `score_direction` (str). Kept for backward
+        compat with code that reads the boolean form.
+        """
+        return True
+
     def forward_logits(
         self,
         node_features: Dict[str, torch.Tensor],
@@ -565,6 +589,22 @@ class DrugRepurposingGraphTransformer(nn.Module):
         self.eval()
         device = next(self.parameters()).device
 
+        # V90 ROOT FIX (BUG #9, P0): save prior training state and
+        # restore it in a finally block. The previous code called
+        # ``self.eval()`` and NEVER restored training mode. If
+        # ``predict_all_pairs`` was called mid-training (e.g., for
+        # intermediate evaluation, or by a concurrent thread in the
+        # Phase 5 API), the model was silently switched to eval mode
+        # and STAYED there — subsequent ``train_epoch()`` calls did
+        # call ``self.model.train()``, but ANY external caller (the
+        # bridge's ``generate_rl_input``, the Phase 5 API server)
+        # that called ``predict_all_pairs`` mid-training silently
+        # disabled dropout and BatchNorm updates for the rest of the
+        # process. Combined with ``_SafeBatchNorm1d``'s batch_size=1
+        # fallback (which already runs BN in eval mode), this could
+        # produce silently wrong training behavior.
+        prior_training = self.training
+
         # V4 C-F5 fix: respect the user's stored config when no explicit
         # override is passed. The original code silently overrode the
         # user's exclude_edges with LABEL_LEAKING_EDGES whenever None
@@ -573,52 +613,63 @@ class DrugRepurposingGraphTransformer(nn.Module):
         # ROOT FIX (C13): pass exclude_edges as parameter, don't mutate self
         effective_exclude = set(exclude_edges) if exclude_edges is not None else self.exclude_edges
 
-        with torch.no_grad():
-            embeddings = self.encode(
-                node_features, edge_indices,
-                exclude_edges_override=effective_exclude,
-            )
+        # V90 ROOT FIX (BUG #9, P0): wrap the inference body in
+        # try/finally so the prior training state is ALWAYS restored,
+        # even on exception. Without this, an exception during
+        # inference (e.g., CUDA OOM) would leave the model in eval
+        # mode, silently corrupting subsequent training.
+        try:
+            with torch.no_grad():
+                embeddings = self.encode(
+                    node_features, edge_indices,
+                    exclude_edges_override=effective_exclude,
+                )
 
-        drug_emb_all = embeddings["drug"]  # (num_drugs, D)
-        disease_emb_all = embeddings["disease"]  # (num_diseases, D)
+            drug_emb_all = embeddings["drug"]  # (num_drugs, D)
+            disease_emb_all = embeddings["disease"]  # (num_diseases, D)
 
-        score_matrix = torch.zeros(num_drugs, num_diseases, device=device)
+            score_matrix = torch.zeros(num_drugs, num_diseases, device=device)
 
-        with torch.no_grad():
-            # Outer loop: one drug at a time. Inner loop: diseases in
-            # sub-batches. This bounds peak memory.
-            for d_idx in range(num_drugs):
-                d_emb_row = drug_emb_all[d_idx:d_idx + 1]  # (1, D)
+            with torch.no_grad():
+                # Outer loop: one drug at a time. Inner loop: diseases in
+                # sub-batches. This bounds peak memory.
+                for d_idx in range(num_drugs):
+                    d_emb_row = drug_emb_all[d_idx:d_idx + 1]  # (1, D)
 
-                for ds_start in range(0, num_diseases, batch_size_diseases):
-                    ds_end = min(ds_start + batch_size_diseases, num_diseases)
-                    ds_emb_batch = disease_emb_all[ds_start:ds_end]  # (B_ds, D)
+                    for ds_start in range(0, num_diseases, batch_size_diseases):
+                        ds_end = min(ds_start + batch_size_diseases, num_diseases)
+                        ds_emb_batch = disease_emb_all[ds_start:ds_end]  # (B_ds, D)
 
-                    # Broadcast drug embedding to match the disease batch.
-                    # Memory: B_ds * D floats (e.g. 2048 * 128 = 256K floats = 1 MB).
-                    d_emb_expanded = d_emb_row.expand(ds_end - ds_start, -1)  # (B_ds, D)
+                        # Broadcast drug embedding to match the disease batch.
+                        # Memory: B_ds * D floats (e.g. 2048 * 128 = 256K floats = 1 MB).
+                        d_emb_expanded = d_emb_row.expand(ds_end - ds_start, -1)  # (B_ds, D)
 
-                    # V4 B-F5 fix: use link_predictor.predict_probability
-                    # which applies the calibrated temperature. The RL
-                    # ranker's ``gnn_score`` input is now a CALIBRATED
-                    # probability, not a raw sigmoid. This means the
-                    # B10/B19 temperature calibration that the trainer
-                    # runs after main training is now ACTUALLY USED
-                    # downstream -- before this fix, the calibrated
-                    # parameter was dead weight.
-                    #
-                    # ROOT FIX (FORENSIC-AUDIT-I03): pass apply_temperature
-                    # through to predict_probability so callers can choose
-                    # raw sigmoid (False) or calibrated (True). The bridge
-                    # uses False for the RL input CSV to preserve full
-                    # variance.
-                    probs = self.link_predictor.predict_probability(
-                        d_emb_expanded, ds_emb_batch,
-                        apply_temperature=apply_temperature,
-                    )  # (B_ds,)
-                    score_matrix[d_idx, ds_start:ds_end] = probs
+                        # V4 B-F5 fix: use link_predictor.predict_probability
+                        # which applies the calibrated temperature. The RL
+                        # ranker's ``gnn_score`` input is now a CALIBRATED
+                        # probability, not a raw sigmoid. This means the
+                        # B10/B19 temperature calibration that the trainer
+                        # runs after main training is now ACTUALLY USED
+                        # downstream -- before this fix, the calibrated
+                        # parameter was dead weight.
+                        #
+                        # ROOT FIX (FORENSIC-AUDIT-I03): pass apply_temperature
+                        # through to predict_probability so callers can choose
+                        # raw sigmoid (False) or calibrated (True). The bridge
+                        # uses False for the RL input CSV to preserve full
+                        # variance.
+                        probs = self.link_predictor.predict_probability(
+                            d_emb_expanded, ds_emb_batch,
+                            apply_temperature=apply_temperature,
+                        )  # (B_ds,)
+                        score_matrix[d_idx, ds_start:ds_end] = probs
 
-        return score_matrix
+            return score_matrix
+        finally:
+            # V90 ROOT FIX (BUG #9, P0): restore the prior training state
+            # so callers that invoked predict_all_pairs mid-training
+            # don't have their dropout/BN regime silently changed.
+            self.train(prior_training)
 
     @classmethod
     def from_config(cls, config: Any) -> "DrugRepurposingGraphTransformer":
@@ -753,3 +804,17 @@ class DrugRepurposingGraphTransformer(nn.Module):
         model.to(device)
         logger.info(f"Model loaded from {path} (full config restored per E12 fix)")
         return model
+
+
+# v89 ROOT FIX (CI V31-5 — GraphTransformerModel import error):
+# The CI workflow's V31 verification step does:
+#   from graph_transformer.models.graph_transformer import GraphTransformerModel
+# but the actual class is named ``DrugRepurposingGraphTransformer``. This
+# naming mismatch caused the V31-5 check to fail with ImportError.
+# ROOT FIX: add ``GraphTransformerModel`` as a backward-compatible alias
+# for ``DrugRepurposingGraphTransformer``. Both names now refer to the
+# same class. Existing code using ``DrugRepurposingGraphTransformer``
+# continues to work; new code (and the CI V31-5 check) can use the
+# shorter ``GraphTransformerModel`` name. This connects Phase 3 (Graph
+# Transformer) to the CI verification suite.
+GraphTransformerModel = DrugRepurposingGraphTransformer

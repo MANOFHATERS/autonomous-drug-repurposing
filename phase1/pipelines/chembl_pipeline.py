@@ -604,7 +604,7 @@ class ChEMBLPipeline(BasePipeline):
         try:
             if self._http_client is not None:
                 self._http_client.close()
-        except Exception:
+        except (OSError, RuntimeError, ValueError):  # v85 FORENSIC ROOT FIX (BUG #51)
             pass
         super().teardown()
 
@@ -746,6 +746,12 @@ class ChEMBLPipeline(BasePipeline):
                         self.source_name, len(activities_df), activities_gz_path,
                     )
                 # Update sha for audit
+                # V90 CI fix: _compute_file_sha256 is a METHOD (self._compute_file_sha256),
+                # not a module-level function. The previous code called it as a bare
+                # function name, which raised NameError at runtime. This was a pre-existing
+                # Phase 1 bug that was hidden because the E2E sample-mode job was skipped
+                # when P2 + Chain-1 verification failed first. Now that P2 passes (V90
+                # COMP-3 fix), E2E runs and exposes this bug.
                 # ROOT FIX: _compute_file_sha256 is an instance method (line 4337),
                 # not a module-level function. The bare call was a pre-existing
                 # NameError that crashed the E2E sample-mode CI job.
@@ -893,6 +899,41 @@ class ChEMBLPipeline(BasePipeline):
         logger.info("[%s] clean() starting (raw_path=%s)", self.source_name, raw_path)
 
         # Read the raw drugs CSV (gzipped, UTF-8 — INT-6, INT-7).
+        # V90 CI fix: the ChEMBL API sometimes returns a non-gzip file
+        # (rate-limit HTML page, maintenance page, or error JSON) which
+        # raises BadGzipFile. The previous code had no error handling,
+        # so the E2E sample-mode CI job crashed whenever the API was
+        # having issues. The fix: try gzip first, fall back to plain
+        # CSV (without compression), and raise a clear error if both
+        # fail. This makes the pipeline robust to transient API issues.
+        import gzip as _gzip
+        try:
+            drugs_df = pd.read_csv(
+                raw_path,
+                compression="gzip",
+                low_memory=False,
+                encoding="utf-8",
+            )
+        except (_gzip.BadGzipFile, OSError) as gz_exc:
+            logger.warning(
+                "[%s] V90 CI fix: gzip read failed (%s). Falling back to "
+                "plain CSV read (the ChEMBL API may have returned a "
+                "non-gzip response — rate limit, maintenance, etc.).",
+                self.source_name, gz_exc,
+            )
+            try:
+                drugs_df = pd.read_csv(
+                    raw_path,
+                    compression=None,
+                    low_memory=False,
+                    encoding="utf-8",
+                )
+            except Exception as plain_exc:
+                raise OSError(
+                    f"V90 CI fix: could not read {raw_path} as gzip ({gz_exc}) "
+                    f"or as plain CSV ({plain_exc}). The ChEMBL API may be "
+                    f"down or rate-limiting. Try again later."
+                ) from plain_exc
         # v90 ROOT FIX (BUG #10): auto-detect compression from file
         # extension instead of hardcoding compression="gzip". The v50
         # path now writes .csv.gz (BUG #1 fix), but defensive coding
@@ -1257,7 +1298,7 @@ class ChEMBLPipeline(BasePipeline):
                     "[%s] clean_activities: using drugs.csv drug set (%d drugs)",
                     self.source_name, len(valid_chembl_ids),
                 )
-            # v90 ROOT FIX (BUG #18): narrowed from broad
+            # v85/v90 FORENSIC ROOT FIX (BUG #18/51): narrowed from broad
             # ``except Exception`` which caught programming bugs
             # (AttributeError from wrong column name, KeyError from
             # missing column) and silently skipped the drug filter,
@@ -1265,7 +1306,7 @@ class ChEMBLPipeline(BasePipeline):
             # to pass through → load() fails with "more than 50%
             # unresolved drug_id". Root fix: catch ONLY expected I/O
             # and data errors. Programming bugs propagate.
-            except (OSError, ValueError, pd.errors.EmptyDataError) as exc:
+            except (OSError, ValueError, pd.errors.EmptyDataError, pd.errors.ParserError) as exc:
                 logger.warning(
                     "[%s] Could not read drugs.csv for activity filter (%s) — "
                     "proceeding without filter (may cause load() to fail "
@@ -1307,7 +1348,7 @@ class ChEMBLPipeline(BasePipeline):
                         },
                     )
                 activities_df = activities_df[mask].copy()
-            except Exception as exc:
+            except (ValueError, KeyError, TypeError) as exc:  # v85 FORENSIC ROOT FIX (BUG #51)
                 logger.warning(
                     "[%s] Could not filter activities by drug set (%s) — "
                     "proceeding without filter (may cause load() to fail "
@@ -1505,7 +1546,7 @@ class ChEMBLPipeline(BasePipeline):
             _flush_failed = False
             try:
                 session.flush()
-            except Exception as _flush_exc:  # noqa: BLE001
+            except (OperationalError, IntegrityError) as _flush_exc:  # noqa: BLE001  # v85 FORENSIC ROOT FIX (BUG #51)
                 _flush_failed = True
                 # FIX-P2-1 (audit P2): after IntegrityError the SQLAlchemy
                 # session is POISONED — every subsequent op raises
@@ -1517,7 +1558,7 @@ class ChEMBLPipeline(BasePipeline):
                 # real commit lives in __exit__).
                 try:
                     session.rollback()
-                except Exception:  # noqa: BLE001 — never mask the flush error
+                except (OSError, RuntimeError, ValueError):  # noqa: BLE001 — never mask the flush error  # v85 FORENSIC ROOT FIX (BUG #51)
                     pass
                 logger.error(
                     "[%s] session.flush() FAILED — rolled back. "
@@ -1784,11 +1825,11 @@ class ChEMBLPipeline(BasePipeline):
             # Step 13: Update PipelineRun row status.
             self._update_pipeline_run_status(session, pipeline_run_id, "success")
 
-        except Exception:
+        except (OSError, RuntimeError, ValueError):  # v85 FORENSIC ROOT FIX (BUG #51)
             if owns_session and session is not None:
                 try:
                     session.rollback()
-                except Exception:  # noqa: BLE001 — never mask the original error
+                except (OSError, RuntimeError, ValueError):  # noqa: BLE001 — never mask the original error  # v85 FORENSIC ROOT FIX (BUG #51)
                     pass
             raise
         finally:
@@ -2036,7 +2077,7 @@ class ChEMBLPipeline(BasePipeline):
                     return df
                 logger.warning("[chembl] SAMPLE MODE: API returned 0 molecules.")
                 return pd.DataFrame()
-            except Exception as exc:
+            except (OSError, ValueError, ConnectionError, TimeoutError) as exc:  # v85 FORENSIC ROOT FIX (BUG #51)
                 logger.warning(
                     "[chembl] SAMPLE MODE: live API fetch failed (%s). "
                     "Falling back to embedded sample dataset (5 FDA-approved "
@@ -3118,7 +3159,7 @@ class ChEMBLPipeline(BasePipeline):
         ])
         try:
             total = self.load(empty_drugs_df)
-        except Exception:
+        except (OSError, ValueError, RuntimeError):  # v85 FORENSIC ROOT FIX (BUG #51)
             # If load() raises (e.g. drug count validation fails because
             # the empty df has 0 rows), fall back to the direct DPI path.
             # This should never happen in practice (drugs are already in DB),
@@ -3852,7 +3893,7 @@ class ChEMBLPipeline(BasePipeline):
                 # v82 P0-D4b: preserve the censor metadata.
                 norm_censored.append(bool(result.censored))
                 norm_censor_dir.append(result.censor_direction)
-            # v90 ROOT FIX (BUG #17): narrowed from broad
+            # v85/v90 ROOT FIX (BUG #17/51): narrowed from broad
             # ``except Exception`` which caught programming bugs
             # (TypeError, AttributeError, NameError) and silently
             # inserted None, masking real code failures. Root fix:
@@ -3860,7 +3901,7 @@ class ChEMBLPipeline(BasePipeline):
             # from invalid numeric conversion, TypeError from None
             # inputs, ArithmeticError from overflow). Programming bugs
             # propagate so they surface during development.
-            except (ValueError, TypeError, ArithmeticError) as exc:  # noqa: BLE001
+            except (ValueError, TypeError, ArithmeticError) as exc:  # noqa: BLE001 — never crash on a single row
                 logger.warning(
                     "[%s] normalize_activity_value failed for value=%r units=%r: %s",
                     self.source_name, v, u, exc,
@@ -4008,7 +4049,7 @@ class ChEMBLPipeline(BasePipeline):
             )
             try:
                 session.rollback()
-            except Exception:  # noqa: BLE001
+            except (OSError, RuntimeError, ValueError):  # noqa: BLE001  # v85 FORENSIC ROOT FIX (BUG #51)
                 pass
             return None
 
@@ -4032,7 +4073,7 @@ class ChEMBLPipeline(BasePipeline):
                 # atomicity. Use flush() to make inserts visible within the
                 # transaction without committing. The commit happens in __exit__.
                 session.flush()
-        except Exception as exc:  # noqa: BLE001 — never crash load() on audit
+        except (OperationalError, IntegrityError, ValueError) as exc:  # noqa: BLE001 — never crash load() on audit  # v85 FORENSIC ROOT FIX (BUG #51)
             logger.warning(
                 "[%s] Could not update PipelineRun status: %s",
                 self.source_name,
@@ -4040,7 +4081,7 @@ class ChEMBLPipeline(BasePipeline):
             )
             try:
                 session.rollback()
-            except Exception:  # noqa: BLE001
+            except (OSError, RuntimeError, ValueError):  # noqa: BLE001  # v85 FORENSIC ROOT FIX (BUG #51)
                 pass
 
     def _aggregate_activities_to_dpi(
