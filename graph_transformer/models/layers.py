@@ -145,15 +145,29 @@ class HeterogeneousMultiHeadAttention(nn.Module):
         #
         # The root fix uses a SEPARATE ``self_loop_proj`` for self-loops,
         # so the self-loop pathway is independent from the edge-message
-        # pathway. The self-loop weight is now a LEARNABLE scalar (not a
-        # hardcoded 0.1), initialized to 0.5 (V30 ROOT FIX 5.4: previous
-        # 0.1 under-contributed self-loops to ~10% of edge message weight,
-        # causing "rich get richer" dynamics where hub nodes updated
-        # aggressively and isolated nodes barely moved. 0.5 gives self-loops
-        # equal standing with a single edge-type message, which is the
-        # standard residual-connection weight).
+        # pathway.
+        #
+        # P3-S01 ROOT FIX (SCIENTIFIC): initialize ``self_loop_weight`` to
+        # 1.0, the standard residual-connection weight (He et al. 2016,
+        # "Identity Mappings in Deep Residual Networks"). The previous
+        # initializations were:
+        #   - V27: 0.1 (hardcoded, under-contributed self-loops to ~10% of
+        #     edge message weight; "rich get richer" dynamics where hub
+        #     nodes updated aggressively and isolated nodes barely moved).
+        #   - V30 5.4: 0.5 (claimed to give self-loops "equal standing with
+        #     a single edge-type message"). The P3-S01 audit found 0.5 is
+        #     still TOO HIGH: combined with cross_type_norm ≈ 0.27 for 14
+        #     edge types, a node with 3 incoming edge types receives a
+        #     total edge message of 3 * 0.27 = 0.81, while the self-loop
+        #     contributes 0.5 — self-loops are ~38% of the total message,
+        #     disproportionately high for a "residual" connection.
+        # The fix initializes to 1.0 (standard residual identity) and lets
+        # gradient descent learn the right balance. With 1.0, the self-loop
+        # starts as the dominant pathway (good for early-training stability,
+        # when edge messages are noise) and the model can dial it down as
+        # edge messages become meaningful.
         self.self_loop_proj = nn.Linear(embedding_dim, embedding_dim, bias=False)
-        self.self_loop_weight = nn.Parameter(torch.tensor(0.5))
+        self.self_loop_weight = nn.Parameter(torch.tensor(1.0))
 
         # Edge type gating (learnable weights per edge type)
         if self.edge_types:
@@ -164,7 +178,8 @@ class HeterogeneousMultiHeadAttention(nn.Module):
         else:
             self.edge_gates = nn.ParameterDict()
 
-        # V30 ROOT FIX (5.3): Cross-edge-type normalization.
+        # V30 ROOT FIX (5.3) + P3-039 ROOT FIX (comment accuracy):
+        # Cross-edge-type normalization.
         # The original code summed per-edge-type softmaxed messages without
         # any cross-type normalization. For a target node receiving messages
         # from K edge types, the total message magnitude was ~K * |V|. Hub
@@ -177,6 +192,19 @@ class HeterogeneousMultiHeadAttention(nn.Module):
         # bounds the total message magnitude regardless of how many edge
         # types a node receives from. This is the same scheme used by
         # Heterogeneous Graph Attention Networks (HAN, Wang et al. 2019).
+        #
+        # P3-039 ACCURACY FIX: the previous comment claimed this implements
+        # PER-NODE normalization (divisor = sqrt(num_edge_types_contributing
+        # to THIS node)). That was FALSE. The code computes a SINGLE GLOBAL
+        # divisor at the start of forward and applies it to ALL nodes,
+        # regardless of how many edge types each node actually receives
+        # from. A hub node with 7 incoming edge types and a leaf node with
+        # 1 incoming edge type both get divided by sqrt(active_count).
+        # This is the standard HGT approximation (avoids a costly per-node
+        # scatter for the divisor), but the comment must NOT claim it's
+        # per-node. Per-node normalization would require a separate
+        # scatter to count incoming edge types per node, then a per-node
+        # divide — future work if hub-node saturation becomes a problem.
         #
         # V90 ROOT FIX (BUG #17, P1): the divisor is now computed
         # DYNAMICALLY per forward call from the edge types that
@@ -264,14 +292,20 @@ class HeterogeneousMultiHeadAttention(nn.Module):
         messages = messages + self_loop_messages * self.self_loop_weight
 
         # Process each edge type
-        # V30 ROOT FIX (5.3): track which edge types actually contribute
-        # messages to each target node, so we can apply per-node cross-type
-        # normalization at the end. The original code summed messages from
-        # all K edge types without normalizing, causing hub nodes to explode.
-        # Per-node divisor: sqrt(num_edge_types_contributing_to_this_node).
-        # We approximate with the global sqrt(num_edge_types) divisor
-        # (registered as a buffer above), which is standard HGT practice
-        # and avoids a costly per-node scatter.
+        # P3-039 ROOT FIX (comment accuracy): the previous comment claimed
+        # to "track which edge types actually contribute messages to each
+        # target node, so we can apply per-node cross-type normalization".
+        # That was FALSE — no such tracking happens. The code applies the
+        # GLOBAL cross_type_norm (computed above from active_edge_type_count)
+        # uniformly to all edge types and all target nodes. This is the
+        # standard HGT approximation (avoids a costly per-node scatter for
+        # the divisor) and is consistent with the comment block at the
+        # top of __init__ (see P3-039 fix there). The original V30 5.3
+        # fix's intent (bound total message magnitude regardless of how
+        # many edge types a node receives from) is achieved by the global
+        # divisor — a node receiving from K edge types gets total message
+        # K * (1/sqrt(active_count)) * |V|, which is bounded by
+        # K * |V| / sqrt(active_count) <= sqrt(active_count) * |V|.
         for (src_type, rel_type, tgt_type), edge_idx in edge_indices.items():
             if edge_idx.numel() == 0:
                 continue

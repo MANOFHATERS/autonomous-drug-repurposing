@@ -239,13 +239,13 @@ def adapt_phase2_to_phase3(
         )
 
     # ─── Step 3: Build Gene → Protein mapping (by gene_symbol) ─────────
-    # This is used to derive (pathway, disrupted_in, disease) edges.
-    gene_symbol_to_protein_id: Dict[str, str] = {}
-    for gene in p2_nodes.get("Gene", []):
-        gene_symbol = str(gene.get("gene_symbol", "")).strip().upper()
-        if gene_symbol:
-            gene_symbol_to_protein_id[gene_symbol] = gene["id"]
-
+    # P3-021 ROOT FIX: removed the dead ``gene_symbol_to_protein_id`` dict
+    # that was populated but NEVER READ. The actual gene→protein mapping
+    # uses ``gene_id_to_uniprot`` below, which is built via
+    # ``protein_id_by_name`` lookup. Keeping the dead dict around made the
+    # code look like it did two things when it only did one — a maintenance
+    # trap. The mapping that IS read (``gene_id_to_uniprot``) is built
+    # directly from the Protein nodes' names.
     protein_id_by_name: Dict[str, str] = {}
     for protein in p2_nodes.get("Protein", []):
         name = str(protein.get("name", "")).strip().upper()
@@ -499,16 +499,46 @@ def adapt_phase2_to_phase3(
         f"treatment pairs from (drug, treats, disease) edges."
     )
 
-    # Log which KNOWN_POSITIVES are present in the graph (for recovery test)
+    # Log which KNOWN_POSITIVES are present in the graph (for recovery test).
+    # P3-022 ROOT FIX: the previous code used ``except Exception: pass``,
+    # which silently swallowed ALL exceptions:
+    #   - ImportError (rl package not installed) → kp_set never populated,
+    #     present_kps always empty, log says "0/N KNOWN_POSITIVES present"
+    #     even when they ARE present. Misleading, hides real integration
+    #     bugs between Phase 3 and Phase 4.
+    #   - ValueError (rl package format change, e.g. 3-tuples instead of
+    #     2-tuples) → the unpacking ``for d, v in _KP`` raises, swallowed,
+    #     same misleading "0/N" log.
+    # We now catch ONLY ImportError (Phase 4 not deployed yet — log a
+    # WARNING so the user knows the integration check was skipped) and
+    # explicitly catch ValueError (data-format drift — log an ERROR so
+    # the maintainer fixes the unpacking). No bare ``except Exception``.
     try:
         from rl.rl_drug_ranker import KNOWN_POSITIVES as _KP
-        kp_set = {(d.lower(), v.lower()) for d, v in _KP}
-        present_kps = [p for p in known_pairs if p in kp_set]
-        logger.info(
-            f"adapt_phase2_to_phase3: {len(present_kps)}/{len(_KP)} "
-            f"KNOWN_POSITIVES present in the Phase 2 graph: {present_kps}"
+    except ImportError as e:
+        logger.warning(
+            f"adapt_phase2_to_phase3: Phase 4 rl package not importable "
+            f"({e}); skipping KNOWN_POSITIVES recovery check. This is "
+            f"expected when running Phase 3 standalone, but in production "
+            f"the Phase 4 ranker MUST be installed for the scientific "
+            f"validation gate to be meaningful."
         )
-    except Exception:
-        pass
+    else:
+        try:
+            kp_set = {(d.lower(), v.lower()) for d, v in _KP}
+        except (ValueError, TypeError) as e:
+            logger.error(
+                f"adapt_phase2_to_phase3: rl.KNOWN_POSITIVES format drift "
+                f"— expected 2-tuples (drug, disease), got "
+                f"{type(_KP).__name__} with elements of unexpected shape "
+                f"({e}). The recovery check is skipped. Update the "
+                f"unpacking in this block to match the new format."
+            )
+        else:
+            present_kps = [p for p in known_pairs if p in kp_set]
+            logger.info(
+                f"adapt_phase2_to_phase3: {len(present_kps)}/{len(_KP)} "
+                f"KNOWN_POSITIVES present in the Phase 2 graph: {present_kps}"
+            )
 
     return node_features, edge_indices, node_maps, known_pairs

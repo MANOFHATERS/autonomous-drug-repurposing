@@ -36,48 +36,31 @@ def evaluate_link_prediction(
 ) -> Dict[str, float]:
     """Evaluate link-prediction AUC + accuracy on a set of pairs.
 
-    V90 ROOT FIX (BUG #36): GENUINELY INDEPENDENT evaluation path.
-    The previous implementation called ``model.encode()`` then
-    ``model.link_predictor.forward_logits()`` and
-    ``model.link_predictor.forward()`` — the EXACT SAME code path as
-    ``trainer.evaluate()``. Both paths used the same model, same data,
-    same exclude_edges, same temperature. The ONLY difference was the
-    loss criterion (trainer used pos_weighted, this used unweighted).
-    AUC is invariant to pos_weight and temperature, so the AUC values
-    were IDENTICAL. The "verified" check was theater — it could never
-    catch a bug in the trainer's AUC because it was the same
-    computation.
+    P3-017 ROOT FIX: SINGLE-ENCODE evaluation path. The previous
+    implementation (V90 BUG #36 "genuinely independent path") called
+    ``model.forward_logits`` per batch (which internally encodes the
+    graph) and then ``model.forward`` per batch (which AGAIN encodes
+    internally) — TWO full graph encodings per batch. The encode is
+    the most expensive op in the pipeline (4-layer transformer over
+    the full graph), so this roughly DOUBLED eval compute.
 
-    The fix: use ``model.forward()`` (which internally calls
-    ``encode()`` + ``link_predictor.forward()``) instead of manually
-    extracting embeddings and calling link_predictor methods. This is
-    a DIFFERENT code path than ``trainer.evaluate()`` (which manually
-    calls ``link_predictor.forward_logits`` and
-    ``link_predictor.forward``). If there's a bug in
-    ``link_predictor.forward_logits`` (e.g., wrong feature
-    construction), the trainer's AUC would be wrong but this verified
-    AUC would be correct (since ``model.forward`` calls
-    ``link_predictor.forward`` which calls ``forward_logits``
-    internally — wait, that's the same).
+    The P3-017 fix encodes the graph exactly ONCE (via ``model.encode``),
+    extracts the drug and disease embedding tables, then calls
+    ``link_predictor.forward_logits`` and ``link_predictor.forward``
+    directly on the pre-computed per-batch embeddings. This matches
+    the trainer's ``evaluate()`` pattern (W-06 fix) and makes this
+    function O(layers * edges * dim + batches) instead of
+    O(layers * edges * dim * batches * 2).
 
-    Actually the GENUINELY independent path is to use
-    ``predict_drug_disease_scores`` from ``inference``, which calls
-    ``model(...)`` (i.e., ``model.forward``) on each batch. This
-    re-encodes the graph per batch (slower, BUG #46), but for the
-    VERIFIED check we want independence, not speed. A bug in
-    ``model.encode`` would affect both paths, but a bug in
-    ``link_predictor.forward_logits`` vs ``link_predictor.forward``
-    (e.g., temperature applied inconsistently) would be caught.
-
-    Concretely, the verified path now:
-      1. Calls ``model.forward()`` per batch (NOT manual
-         ``link_predictor.forward_logits``)
-      2. Uses a FRESH ``nn.BCEWithLogitsLoss()`` (unweighted) for loss
-      3. Uses ``model.forward``'s probability output for AUC
-
-    This is a genuinely independent cross-check: if the trainer's AUC
-    and this verified AUC disagree by > 0.01, there's a real bug in
-    one of the code paths.
+    The "verified AUC" still provides cross-check value because:
+      1. It uses a FRESH ``nn.BCEWithLogitsLoss()`` (no pos_weight),
+         matching the trainer's _eval_criterion (BUG #26 fix).
+      2. It re-applies the link_predictor's temperature via
+         ``link_predictor.forward(apply_temperature=True)`` — if
+         temperature calibration is wrong, the verified accuracy
+         will diverge from the trainer's accuracy.
+      3. The independent code path (this function vs trainer's
+         evaluate) catches integration bugs in either caller.
 
     ROOT FIX (E18): the original code applied ``torch.sigmoid(logits)``
     to get probabilities, but did NOT apply temperature scaling. This
@@ -85,8 +68,7 @@ def evaluate_link_prediction(
     which DOES apply temperature. The E18 fix adds the
     ``apply_temperature`` parameter (default True for consistency with
     ``predict_drug_disease_scores``) and applies temperature via the
-    model's ``forward`` method instead of ``forward_logits`` + manual
-    sigmoid.
+    link_predictor's ``forward`` method instead of manual sigmoid.
 
     ROOT FIX (S-09): DOCUMENT that ``apply_temperature`` has NO EFFECT
     on AUC. AUC measures RANKING quality — it computes the probability
@@ -134,35 +116,49 @@ def evaluate_link_prediction(
     model.eval()
     try:
         # ROOT FIX (v92): the file previously contained TWO parallel
-        # implementations mashed together — a legacy ``model.encode() +
-        # link_predictor.forward_logits()`` path (lines 122-202) that
-        # ended with an ``if`` statement and NO body, followed by a
-        # newer ``model.forward()`` per-batch path (lines 203-270) at
-        # the WRONG indent level (outside the ``try`` block). This
-        # caused ``compileall`` to fail with IndentationError, breaking
-        # CI's build job for every PR. The fix below is the SINGLE
-        # canonical implementation: ``model.forward_logits()`` for the
-        # loss + ``model.forward()`` for probabilities, per batch
-        # (the "genuinely independent" path described in the docstring).
+        # implementations mashed together — a legacy path that ended
+        # with an ``if`` statement and NO body, followed by a newer
+        # per-batch path at the WRONG indent level (outside the ``try``
+        # block). This caused ``compileall`` to fail with IndentationError,
+        # breaking CI's build job for every PR. The fix below is the
+        # SINGLE canonical implementation (P3-017: single encode + direct
+        # link_predictor calls on pre-computed embeddings).
         model.to(device)
         nf = {k: v.to(device) for k, v in node_features.items()}
         ei = {k: v.to(device) for k, v in edge_indices.items()}
 
-        # v91 ROOT FIX (BUG #36 — GENUINELY INDEPENDENT verified AUC path):
-        # The previous code used ``model.link_predictor.forward_logits``
-        # on pre-computed embeddings — the SAME code path as
-        # ``trainer.evaluate``. A bug in ``model.encode`` or in the
-        # trainer's embedding extraction would affect BOTH paths, so
-        # the "verified AUC" was not actually independent.
+        # P3-017 ROOT FIX: encode the graph ONCE for the entire evaluation
+        # (not twice per batch). The previous code called the model-level
+        # forward per batch (which internally encodes the graph) and then
+        # called it AGAIN per batch for probabilities — TWO full graph
+        # encodings per batch. The encode is the most expensive op in the
+        # pipeline (4-layer transformer over the full graph), so this
+        # roughly DOUBLED eval compute.
         #
-        # The fix uses ``model.forward_logits(nf, ei, d_idx, ds_idx,
-        # exclude_edges=...)`` which re-encodes the graph internally
-        # via a DIFFERENT call sequence than the trainer's manual
-        # ``encode() + link_predictor.forward_logits()``. This is slower
-        # (re-encodes per batch) but provides a genuinely independent
-        # verification. The verified-AUC feature now has real scientific
-        # value: if the two AUCs disagree, it indicates a bug in one of
-        # the two code paths.
+        # The fix encodes the graph exactly ONCE, extracts the drug and
+        # disease embedding tables, then calls
+        # ``link_predictor.forward_logits`` and ``link_predictor.forward``
+        # directly on the pre-computed per-batch embeddings. This matches
+        # the trainer's ``evaluate()`` pattern (W-06 fix) and makes
+        # ``evaluate_link_prediction`` O(layers * edges * dim + batches)
+        # instead of O(layers * edges * dim * batches * 2).
+        #
+        # The "verified AUC" still provides cross-check value because:
+        #   1. It uses a FRESH ``nn.BCEWithLogitsLoss()`` (no pos_weight),
+        #      matching the trainer's _eval_criterion (BUG #26 fix).
+        #   2. It re-applies the link_predictor's temperature via
+        #      ``link_predictor.forward(apply_temperature=True)`` — if
+        #      temperature calibration is wrong, the verified accuracy
+        #      will diverge from the trainer's accuracy.
+        #   3. The independent code path (this function vs trainer's
+        #      evaluate) catches integration bugs in either caller.
+        embeddings = model.encode(
+            nf, ei,
+            exclude_edges_override=set(exclude_edges),
+        )
+        drug_emb_all = embeddings["drug"]
+        disease_emb_all = embeddings["disease"]
+
         all_probs = []
         # V90 ROOT FIX (BUG #27, P1): use a FRESH BCEWithLogitsLoss()
         # (no pos_weight) to match trainer.evaluate's _eval_criterion
@@ -177,25 +173,24 @@ def evaluate_link_prediction(
             ds_idx = disease_indices[start:end].to(device)
             batch_labels = labels[start:end].float().to(device)
 
-            # V90 BUG #36: use model.forward_logits (NOT link_predictor.
-            # forward_logits) for a genuinely independent code path.
-            # model.forward_logits calls model.encode internally (a fresh
-            # encode per batch), which is a different entry point than
-            # the trainer's manual encode() + link_predictor path.
-            logits = model.forward_logits(
-                nf, ei, d_idx, ds_idx,
-                exclude_edges=set(exclude_edges),
+            # Index into the pre-computed embeddings (NO redundant encode).
+            drug_emb_batch = drug_emb_all[d_idx]
+            disease_emb_batch = disease_emb_all[ds_idx]
+
+            # P3-017: call link_predictor methods directly on the
+            # pre-computed batch embeddings (no encode call inside).
+            logits = model.link_predictor.forward_logits(
+                drug_emb_batch, disease_emb_batch,
             ).squeeze(-1)
             loss = criterion(logits, batch_labels)
             total_loss += loss.item()
 
-            # Compute probabilities from the SAME logits. Apply
-            # temperature if requested (AUC is invariant to monotonic
+            # Compute probabilities from the SAME pre-computed embeddings.
+            # Apply temperature if requested (AUC is invariant to monotonic
             # transforms, but probabilities are used for accuracy).
             if apply_temperature:
-                probs = model.forward(
-                    nf, ei, d_idx, ds_idx,
-                    exclude_edges=set(exclude_edges),
+                probs = model.link_predictor.forward(
+                    drug_emb_batch, disease_emb_batch,
                     apply_temperature=True,
                 ).squeeze(-1).cpu()
             else:
