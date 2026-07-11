@@ -551,11 +551,28 @@ def test_retry_logic_removed():
 # ============================================================================
 
 def test_run_pipeline_exits_nonzero_on_failure():
-    """run_real_pipeline.py must exit non-zero on validation failure."""
+    """run_real_pipeline.py must exit non-zero on validation failure.
+
+    P3-017 follow-up: a parallel agent rewrote run_real_pipeline.py to
+    use ``return 4`` (in main()) + ``sys.exit(main())`` instead of
+    inline ``sys.exit(1)`` / ``sys.exit(0)`` calls. Both patterns
+    achieve the same scientific contract (non-zero exit on failure,
+    zero exit on success). We accept either pattern.
+    """
     with open(os.path.join(_CODEBASE, "run_real_pipeline.py")) as f:
         source = f.read()
-    assert "sys.exit(1)" in source, "run_real_pipeline should exit(1) on failure"
-    assert "sys.exit(0)" in source, "run_real_pipeline should exit(0) on success"
+    # P3-017 follow-up: accept either the old inline sys.exit(N) pattern
+    # OR the new return-N + sys.exit(main()) pattern.
+    has_inline_exit1 = "sys.exit(1)" in source
+    has_return_4 = "return 4" in source  # validation failure exit code
+    has_return_0 = "return 0" in source  # success exit code
+    has_sys_exit_main = "sys.exit(main())" in source
+    # At least one failure-path pattern must be present
+    assert has_inline_exit1 or (has_return_4 and has_sys_exit_main), \
+        "run_real_pipeline should exit non-zero on failure (either sys.exit(1) or return 4 + sys.exit(main()))"
+    # At least one success-path pattern must be present
+    assert "sys.exit(0)" in source or (has_return_0 and has_sys_exit_main), \
+        "run_real_pipeline should exit zero on success (either sys.exit(0) or return 0 + sys.exit(main()))"
     print("PASS: Phase I — run_real_pipeline exits non-zero on validation failure")
 
 
