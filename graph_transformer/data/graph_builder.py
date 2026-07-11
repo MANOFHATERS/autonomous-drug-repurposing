@@ -1474,19 +1474,25 @@ class BiomedicalGraphBuilder:
                 )
 
         # ─── Finalize: build reverse edges + tensorize ──────────────
-        # V100 ROOT FIX (BUG #1, P0 CRITICAL): the previous code called the
-        # DEPRECATED `_build_reverse_edges` staticmethod which wrote reverse
-        # edges into `_edge_lists`. But `finalize()` immediately invokes
-        # `_sync_edge_lists()` which rebuilds `_edge_lists` from `_edge_sets`
-        # (forward-only), silently discarding ALL 7 reverse edge types. The
-        # production graph therefore had ZERO reverse edges, drug nodes got
-        # NO incoming messages, and GT AUC was 0.42 (BELOW RANDOM).
+        # V92+V100 ROOT FIX (BUG P3-001 / BUG #1, P0 CRITICAL): the
+        # previous code called the DEPRECATED ``_build_reverse_edges``
+        # staticmethod which wrote reverse edges into ``_edge_lists``.
+        # But ``finalize()`` immediately invokes ``_sync_edge_lists()``
+        # which rebuilds ``_edge_lists`` from ``_edge_sets`` (forward-
+        # only), silently DISCARDING ALL 7 reverse edge types. The
+        # production graph had ZERO reverse edges, drug nodes got NO
+        # incoming messages, and HeterogeneousMultiHeadAttention could
+        # not aggregate messages INTO drug nodes. Drug-disease
+        # predictions were essentially random.
         #
-        # Root fix: write reverse edges INTO `_edge_sets` so they survive
-        # the sync inside `finalize()`. This matches the demo-graph path
-        # (build_demo_graph, line ~1205) which already uses the correct
-        # classmethod. After this fix, the production graph and the demo
-        # graph both build reverse edges the same way.
+        # Root fix (V92 + V100, identical): write reverse edges INTO
+        # ``_edge_sets`` so they survive the sync inside ``finalize()``.
+        # This matches the demo-graph path (build_demo_graph, line ~1205)
+        # which already uses the correct classmethod. After this fix,
+        # the production graph and the demo graph both build reverse
+        # edges the same way. ``finalize()`` performs the
+        # ``_sync_edge_lists`` internally, so we do NOT call it manually
+        # here.
         builder._build_reverse_edges_into_sets(builder._edge_sets)
         node_features, edge_indices, node_maps = builder.finalize()
 

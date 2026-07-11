@@ -1,10 +1,24 @@
 """Evaluation utilities for the Graph Transformer."""
 from __future__ import annotations
 
+import logging
 from typing import Any, Dict
 
 import numpy as np
 import torch
+
+# V92 ROOT FIX (BUG P3-002, CRITICAL): the file previously imported only
+# numpy and torch but used ``logger.warning(...)`` in the one-class-label
+# fallback branch (line ~200). On any eval set with a single class
+# (common on small demo graphs, degenerate splits, or held-out KP-only
+# test sets), the call raised ``NameError: name 'logger' is not
+# defined``. The NameError was swallowed by the ``except Exception`` in
+# ``gt_rl_bridge.train_model`` (line ~1052), so ``test_auc_verified``
+# was NEVER set and the scientific_validation gate silently fell back
+# to the trainer's AUC — defeating the entire purpose of the
+# "verified AUC" cross-check. Declaring the module logger here is the
+# root-cause fix.
+logger = logging.getLogger(__name__)
 
 
 @torch.no_grad()

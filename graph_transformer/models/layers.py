@@ -323,7 +323,20 @@ class HeterogeneousMultiHeadAttention(nn.Module):
             # and weighted_V_flat is (E, num_heads * head_dim). The scatter
             # distributes per-head attention outputs to the correct target nodes.
             weighted_V_flat = weighted_V.view(-1, self.num_heads * self.head_dim)
-            gate = self.edge_gates.get(edge_key, torch.tensor(1.0, device=device))
+            # V92 ROOT FIX (BUG P3-003): ``nn.ParameterDict.get(key, default)``
+            # was only added in PyTorch 2.x. On older PyTorch (1.x, still
+            # common in enterprise pharma IT), this raises
+            # ``AttributeError: 'ParameterDict' object has no attribute 'get'``
+            # on every forward pass. Use an explicit membership check instead
+            # — this works on every PyTorch version and is semantically
+            # identical. By construction ``edge_key`` is always present in
+            # ``self.edge_gates`` (built from ``self.edge_types`` at init),
+            # so the fallback is only a defensive default for legacy graphs
+            # that were built before an edge type was added to the schema.
+            if edge_key in self.edge_gates:
+                gate = self.edge_gates[edge_key]
+            else:
+                gate = torch.tensor(1.0, device=device)
             # V30 ROOT FIX (5.3): apply cross-type normalization per edge
             # type's contribution. Each edge type's message is scaled by
             # 1/sqrt(num_edge_types) so the total message magnitude is

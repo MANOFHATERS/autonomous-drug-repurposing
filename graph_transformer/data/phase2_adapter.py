@@ -85,7 +85,7 @@ import numpy as np
 import torch
 
 from . import DEFAULT_FEATURE_DIMS, EDGE_TYPES
-from .graph_builder import BiomedicalGraphBuilder
+from .graph_builder import BiomedicalGraphBuilder, _deterministic_seed
 
 logger = logging.getLogger(__name__)
 
@@ -303,59 +303,118 @@ def adapt_phase2_to_phase3(
     # Track Phase 2 ID → Phase 3 canonical name for edge endpoint resolution.
     p2_id_to_p3_name: Dict[str, str] = {}
 
-    # Register drugs (Compound → drug)
+    # Register drugs (Compound -> drug)
+    # V92 ROOT FIX (BUG P3-006, CRITICAL - None-name collision):
+    # The previous code used ``compound.get("name", compound["id"])``.
+    # If the "name" key exists but its value is None (common in Phase 1
+    # DrugBank rows where the name column is nullable), ``.get("name",
+    # compound["id"])`` returns None (NOT the default, because the key
+    # exists). Then ``_canonical_drug_name(None)`` calls
+    # ``str(None).strip().lower()`` = "none", which is TRUTHY, so the
+    # ``if not drug_name:`` check passed silently. ALL None-named
+    # compounds collapsed to a single node named "none" (the builder
+    # dedupes by name). Multiple distinct drugs became ONE node, their
+    # features were dropped (first registration wins), and all their
+    # edges pointed to the same node index. Predictions for the merged
+    # drugs were all identical.
+    #
+    # ROOT FIX: validate that the resolved name is a non-empty string
+    # BEFORE canonicalizing. Fall back to ``compound["id"]`` (which is
+    # always required and unique per node) when name is None/empty.
+    # Also lowercase the id fallback for consistency with KNOWN_POSITIVES
+    # vocabulary.
     for compound in p2_nodes.get("Compound", []):
-        drug_name = _canonical_drug_name(compound.get("name", compound["id"]))
+        raw_name = compound.get("name")
+        if not isinstance(raw_name, str) or not raw_name.strip():
+            drug_name = str(compound["id"]).strip().lower()
+        else:
+            drug_name = _canonical_drug_name(raw_name)
         if not drug_name:
-            drug_name = compound["id"].lower()
+            drug_name = str(compound["id"]).strip().lower()
         p2_id_to_p3_name[compound["id"]] = drug_name
-        feat = np.random.default_rng(seed + hash(drug_name) & 0xFFFFFFFF).standard_normal(
+        # V92 ROOT FIX (BUG P3-007, CRITICAL - non-reproducible features):
+        # The previous code used Python's built-in ``hash()`` to seed
+        # per-node feature RNGs: ``np.random.default_rng(seed + hash(
+        # drug_name) & 0xFFFFFFFF)``. ``hash(str)`` is randomized per
+        # Python process via PYTHONHASHSEED (enabled by default since
+        # Python 3.3 for security). Two runs with the same seed=42
+        # produced DIFFERENT feature vectors for the same drug. This
+        # DIRECTLY CONTRADICTS the v89 ROOT FIX in graph_builder.py:32-62
+        # (``_deterministic_seed`` using SHA-256) which was specifically
+        # introduced to fix this exact bug. The Phase 1->3 production
+        # path reintroduced the bug that the demo path fixed.
+        #
+        # ROOT FIX: use ``BiomedicalGraphBuilder._deterministic_seed``
+        # (the SHA-256 helper defined at graph_builder.py:32). This is
+        # deterministic across processes, platforms, and Python versions,
+        # making node features reproducible. The same drug always gets
+        # the same feature vector, so train/test splits are stable, CI
+        # does not flake, and bug reproduction is possible.
+        feat = np.random.default_rng(
+            _deterministic_seed(str(seed), "drug", drug_name)
+        ).standard_normal(
             DEFAULT_FEATURE_DIMS["drug"]
         ).astype(np.float32)
         gt_builder.register_node("drug", drug_name, feat)
 
-    # Register proteins (Protein → protein)
+    # Register proteins (Protein -> protein)
     for protein in p2_nodes.get("Protein", []):
         protein_name = str(protein.get("name", protein["id"])).strip()
         if not protein_name:
-            protein_name = protein["id"]
+            protein_name = str(protein["id"]).strip()
         p2_id_to_p3_name[protein["id"]] = protein_name
+        # V92 ROOT FIX (BUG P3-007): use SHA-256 _deterministic_seed
+        # instead of non-reproducible hash(). See the drug-registration
+        # block above for the full rationale.
         feat = np.random.default_rng(
-            seed + hash(protein_name) & 0xFFFFFFFF
+            _deterministic_seed(str(seed), "protein", protein_name)
         ).standard_normal(DEFAULT_FEATURE_DIMS["protein"]).astype(np.float32)
         gt_builder.register_node("protein", protein_name, feat)
 
-    # Register pathways (Pathway → pathway)
+    # Register pathways (Pathway -> pathway)
     for pathway in p2_nodes.get("Pathway", []):
         pathway_name = str(pathway.get("name", pathway["id"])).strip()
         if not pathway_name:
-            pathway_name = pathway["id"]
+            pathway_name = str(pathway["id"]).strip()
         # Use the stable pathway ID as the canonical name (pathway names
         # are descriptive, not unique-enough for indexing).
         p2_id_to_p3_name[pathway["id"]] = pathway["id"]
+        # V92 ROOT FIX (BUG P3-007): use SHA-256 _deterministic_seed
+        # instead of non-reproducible hash(). See the drug-registration
+        # block above for the full rationale.
         feat = np.random.default_rng(
-            seed + hash(pathway["id"]) & 0xFFFFFFFF
+            _deterministic_seed(str(seed), "pathway", pathway["id"])
         ).standard_normal(DEFAULT_FEATURE_DIMS["pathway"]).astype(np.float32)
         gt_builder.register_node("pathway", pathway["id"], feat)
 
-    # Register diseases (Disease → disease, with name canonicalization)
+    # Register diseases (Disease -> disease, with name canonicalization)
     for disease in p2_nodes.get("Disease", []):
-        raw_name = str(disease.get("name", disease["id"])).strip()
-        disease_name = _canonical_disease_name(raw_name) if raw_name else disease["id"]
+        raw_name = disease.get("name")
+        if not isinstance(raw_name, str) or not raw_name.strip():
+            raw_name = str(disease["id"]).strip()
+        else:
+            raw_name = str(raw_name).strip()
+        disease_name = _canonical_disease_name(raw_name) if raw_name else str(disease["id"]).strip()
         p2_id_to_p3_name[disease["id"]] = disease_name
+        # V92 ROOT FIX (BUG P3-007): use SHA-256 _deterministic_seed
+        # instead of non-reproducible hash(). See the drug-registration
+        # block above for the full rationale.
         feat = np.random.default_rng(
-            seed + hash(disease_name) & 0xFFFFFFFF
+            _deterministic_seed(str(seed), "disease", disease_name)
         ).standard_normal(DEFAULT_FEATURE_DIMS["disease"]).astype(np.float32)
         gt_builder.register_node("disease", disease_name, feat)
 
-    # Register clinical outcomes (ClinicalOutcome → clinical_outcome)
+    # Register clinical outcomes (ClinicalOutcome -> clinical_outcome)
     for outcome in p2_nodes.get("ClinicalOutcome", []):
         outcome_name = str(outcome.get("name", outcome["id"])).strip()
         if not outcome_name:
-            outcome_name = outcome["id"]
+            outcome_name = str(outcome["id"]).strip()
         p2_id_to_p3_name[outcome["id"]] = outcome_name
+        # V92 ROOT FIX (BUG P3-007): use SHA-256 _deterministic_seed
+        # instead of non-reproducible hash(). See the drug-registration
+        # block above for the full rationale.
         feat = np.random.default_rng(
-            seed + hash(outcome_name) & 0xFFFFFFFF
+            _deterministic_seed(str(seed), "clinical_outcome", outcome_name)
         ).standard_normal(
             DEFAULT_FEATURE_DIMS["clinical_outcome"]
         ).astype(np.float32)

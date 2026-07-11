@@ -2156,7 +2156,14 @@ class GTRLBridge:
             # nested function calls itself with the same default args).
             return float(_compute_unmet_need_score_table(disease_name, int(tc)))
 
-        df["unmet_need_score"] = df["disease"].map(compute_unmet_need_score)
+        # V92 ROOT FIX (BUG P3-012): REMOVED the duplicate assignment
+        # ``df["unmet_need_score"] = df["disease"].map(compute_unmet_need_score)``
+        # that previously ran here. The SAME column was overwritten ~63
+        # lines later by ``df["unmet_need_score"] = df["disease"].map(
+        # _unmet_need_for_disease)``, so the first assignment was pure
+        # wasted compute (N extra ``compute_unmet_need_score`` calls per
+        # row). The second (curated + pathway-aware) assignment is the
+        # one that survives, so we keep ONLY that one.
         # v91 ROOT FIX: use the curated compute_unmet_need_score function
         # from biomedical_tables.py (imported at module level, line 93).
         # This uses REAL WHO/Orphanet prevalence data + treatment count,
@@ -2185,38 +2192,50 @@ class GTRLBridge:
             #   for the base score, then add the v89 S-F1 pathway-
             #   connectivity differentiation on top. This satisfies the
             #   source-check tests AND uses the curated prevalence table.
-            base = compute_unmet_need_score(disease_name, tc)
-            # v89 ROOT FIX (CI S-F1 — unmet_need_score too few distinct
+            # V92 ROOT FIX (BUG P3-005, CRITICAL - dead S-F1 differentiation):
+            # The previous structure had both the try and except branches
+            # return early, so the pathway-connectivity differentiation
+            # below (pw_diff = 0.03 * ...) was UNREACHABLE. On small demo
+            # graphs where most diseases have tc=0, ALL diseases got the
+            # SAME compute_unmet_need_score(disease_name, 0) value. The
+            # "v89 ROOT FIX (CI S-F1)" claim was FALSE.
+            #
+            # ROOT FIX: restructure so the pathway-connectivity
+            # differentiation is the SINGLE reachable code path. Compute
+            # base via compute_unmet_need_score (with a defensive
+            # fallback that does NOT early-return), then add the
+            # pathway-connectivity pw_diff and clip. This is the
+            # SCIENTIFICALLY correct behavior: the curated prevalence +
+            # treatment count provides the primary signal, and the
+            # pathway-connectivity provides a small secondary signal for
+            # continuous variation on demo graphs (where many diseases
+            # share the same treatment count of 0).
+            try:
+                base = float(compute_unmet_need_score(disease_name, n_treatments=int(tc)))
+            except Exception:
+                # Defensive fallback ONLY for the base value - does NOT
+                # return early. We still apply the pathway-connectivity
+                # differentiation below so demo-graph diseases with
+                # identical treatment counts get distinct unmet_need
+                # scores. Guard against zero division (unmet_scale /
+                # pw_scale could be 0 in degenerate configs).
+                treat_component = 0.95 * float(np.exp(-tc / max(unmet_scale, 1e-9))) + 0.05
+                pw = pathway_count_per_disease.get(ds_idx, 0)
+                pw_component = 1.0 - 0.4 * (float(pw) / max(pw_scale, 1e-9))
+                base = 0.7 * treat_component + 0.3 * pw_component
+            # v89 ROOT FIX (CI S-F1 - unmet_need_score too few distinct
             # values on demo graph): add a small pathway-connectivity
             # differentiation. Diseases with the SAME treatment count but
             # DIFFERENT pathway connectivity get slightly different
-            # unmet_need scores. The secondary signal is small (±0.03)
+            # unmet_need scores. The secondary signal is small (+/-0.015)
             # so it doesn't overwhelm the primary treatment-count signal.
-            # v89 ROOT FIX: use curated prevalence + treatment count from
-            # biomedical_tables.compute_unmet_need_score. This uses REAL
-            # WHO/Orphanet prevalence data (rare diseases get higher unmet
-            # need) combined with the graph's treatment count.
-            # V90 fix: the parallel agent introduced the curated table but
-            # the bridge was still using the inline formula. The tests
-            # (test_unmet_need_formula_is_continuous, test_v4_s_f1) expect
-            # compute_unmet_need_score to be called. This wires it in.
-            try:
-                return float(compute_unmet_need_score(disease_name, n_treatments=int(tc)))
-            except Exception:
-                # Fallback to the inline formula if the curated table
-                # doesn't have the disease (shouldn't happen for demo
-                # diseases, but defensive).
-                treat_component = 0.95 * float(np.exp(-tc / unmet_scale)) + 0.05
-                pw = pathway_count_per_disease.get(ds_idx, 0)
-                pw_component = 1.0 - 0.4 * (float(pw) / pw_scale)
-                base = 0.7 * treat_component + 0.3 * pw_component
-                return float(np.clip(base, 0.0, 1.0))
-            # Use the curated function (prevalence + treatment count).
-            # Add a small pathway-connectivity secondary signal for
-            # continuous variation on the demo graph (S-F1 fix).
-            base = compute_unmet_need_score(disease_name, int(tc))
+            # V92 ROOT FIX (BUG P3-005): this code is now REACHABLE -
+            # previously the try/except above returned early, making
+            # this block dead code. Now base is always set (either by
+            # the curated function or the defensive fallback), and we
+            # always apply the pw_diff secondary signal here.
             pw_count = pathway_count_per_disease.get(ds_idx, 0)
-            pw_diff = 0.03 * (pw_count / max(max_pw, 1)) - 0.015
+            pw_diff = 0.03 * (float(pw_count) / max(max_pw, 1)) - 0.015
             return float(np.clip(base + pw_diff, 0.0, 1.0))
 
         df["unmet_need_score"] = df["disease"].map(_unmet_need_for_disease)
@@ -2527,17 +2546,27 @@ class GTRLBridge:
             link_predictor_hidden_dims=model_link_predictor_hidden_dims,
         )
 
-        # v90 ROOT FIX: when graph_data is provided (REAL Phase 2 graph),
-        # force fresh training. The previous code used the default
-        # resume_from_checkpoint=True, which loaded a STALE checkpoint
-        # from a prior demo-graph run. The GT model then produced
-        # predictions for the wrong graph topology → GT Test AUC = 0.0.
-        # When graph_data is None (demo graph fallback), keep the
-        # resume behavior for backward compat.
+        # v90 ROOT FIX + V92 ROOT FIX (BUG P3-008, CRITICAL):
+        # The V90 fix set ``resume_from_checkpoint=graph_data is None``,
+        # but ``graph_data is None`` is ALSO True when
+        # ``phase1_staged_data`` is provided (the production Phase 1->3
+        # path, lines 2348-2360 above load the graph via
+        # ``load_graph_from_phase1`` and DO NOT set ``graph_data``).
+        # So when a user ran the production path with
+        # ``phase1_staged_data=...``, the bridge loaded a STALE
+        # checkpoint from a prior demo-graph run. The GT model then
+        # produced predictions for the WRONG graph topology, GT Test
+        # AUC = 0.0 (or random), and the scientific_validation gate
+        # failed.
+        #
+        # ROOT FIX: only resume from checkpoint when BOTH ``graph_data``
+        # AND ``phase1_staged_data`` are None — i.e., the demo-graph
+        # fallback path. Any production path (graph_data OR
+        # phase1_staged_data) forces fresh training.
         gt_results = self.train_model(
             epochs=gt_epochs,
             patience=40,
-            resume_from_checkpoint=graph_data is None,
+            resume_from_checkpoint=(graph_data is None and phase1_staged_data is None),
         )
 
         # Generate RL input
@@ -3254,16 +3283,18 @@ class GTRLBridge:
             else "pilot" if _num_drugs_in_graph < 1000
             else "production"
         )
-        # V100 ROOT FIX (BUG #3, P0 CRITICAL): the previous line below
-        # SILENTLY re-lowered ``kp_recovery_threshold`` from the V90 BUG #31
-        # fix (max(rl_config_threshold, 0.5)) back to the raw
-        # ``rl_config.min_kp_recovery_rate`` (default 0.2). With gamma=0.2,
-        # a coin-flip model that recovers 1 of 2 test KPs by chance (50%
-        # recovery) passes the gate, and broken models ship to pharma
-        # partners. The reassignment is DELETED — the threshold computed
-        # at line ~3241 (max(rl_config_threshold, 0.5)) is the source of
-        # truth and MUST NOT be overwritten.
-        # kp_recovery_threshold = float(getattr(rl_config, "min_kp_recovery_rate", 0.2))  # DELETED V100
+        # V92+V100 ROOT FIX (BUG P3-004 / BUG #3, P0 CRITICAL): the
+        # previous line below RE-ASSIGNED ``kp_recovery_threshold`` from
+        # ``rl_config.min_kp_recovery_rate`` (default 0.2), silently
+        # discarding the stricter ``max(rl_config_threshold, 0.5)`` value
+        # computed above (the V90 BUG #31 safety net). A coin-flip model
+        # that recovered 1 of 2 test KPs by chance (50% recovery) passed
+        # the gate, and broken models shipped to pharma partners.
+        # The fix: REMOVE the reassignment (deleted in both V92 and V100).
+        # The ``kp_recovery_threshold`` computed above (already
+        # ``max(rl_config_threshold, 0.5)``) is the value used by the
+        # scientific_validation gate below.
+        # kp_recovery_threshold = float(getattr(rl_config, "min_kp_recovery_rate", 0.2))  # DELETED V92+V100
         scientific_validation = {
             "gt_test_auc": gt_test_auc,
             "gt_test_auc_threshold": _auc_threshold,

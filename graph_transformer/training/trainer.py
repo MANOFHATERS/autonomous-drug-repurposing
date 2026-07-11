@@ -1003,18 +1003,71 @@ class GraphTransformerTrainer:
 
         V30 ROOT FIX (8.15): use weights_only=True for torch.load to
         prevent arbitrary code execution from untrusted checkpoints.
+
+        V92 ROOT FIX (BUG P3-009, P3-010, P3-011):
+          - P3-009: after loading best_state_dict, RESTORE it into the
+            live model via model.load_state_dict(best_state_dict).
+            The previous code loaded model_state_dict (the LAST-epoch
+            weights, possibly overfit) but never restored best_state_dict
+            (the BEST validation weights). The user thought they had the
+            best model but actually had the last-epoch model.
+          - P3-010: use .get() for optimizer_state_dict so old
+            checkpoints that don't have it don't raise KeyError.
+          - P3-011: feature-detect the weights_only parameter (added in
+            PyTorch 1.13). Older PyTorch raises TypeError if the kwarg
+            is passed.
         """
-        # V30 ROOT FIX (8.15): weights_only=True prevents arbitrary code
-        # execution from untrusted checkpoints.
-        checkpoint = torch.load(path, map_location=self.device, weights_only=True)
+        # V92 ROOT FIX (BUG P3-011): feature-detect the ``weights_only``
+        # parameter. It was added in PyTorch 1.13; older PyTorch raises
+        # ``TypeError: load() got an unexpected keyword argument
+        # 'weights_only'``. This is common in enterprise pharma IT
+        # environments that pin to older PyTorch for stability.
+        import inspect
+        if "weights_only" in inspect.signature(torch.load).parameters:
+            checkpoint = torch.load(path, map_location=self.device, weights_only=True)
+        else:
+            checkpoint = torch.load(path, map_location=self.device)
+
+        # Load model_state_dict (the LAST-epoch weights by convention).
         self.model.load_state_dict(checkpoint["model_state_dict"])
-        self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+
+        # V92 ROOT FIX (BUG P3-010): use .get() for optimizer_state_dict.
+        # Older checkpoints that don't have it (e.g., from inference-only
+        # saves) raise KeyError on the hardcoded access. Use a defensive
+        # .get() and only load when present.
+        opt_state = checkpoint.get("optimizer_state_dict")
+        if opt_state is not None:
+            self.optimizer.load_state_dict(opt_state)
+
         self.best_val_auc = checkpoint.get("best_val_auc", 0.0)
         self.best_val_loss = checkpoint.get("best_val_loss", float("inf"))
         # V90 ROOT FIX (BUG #21, P1): restore self.best_epoch from
-        # checkpoint (was previously not restored — stayed at 0).
+        # checkpoint (was previously not restored - stayed at 0).
         self.best_epoch = checkpoint.get("best_epoch", 0)
         self.best_state_dict = checkpoint.get("best_state_dict")
+        # V92 ROOT FIX (BUG P3-009, CRITICAL): RESTORE the best model
+        # into the live model. The previous code loaded best_state_dict
+        # from the checkpoint but NEVER called
+        # ``self.model.load_state_dict(self.best_state_dict)``. The model
+        # kept whatever weights it had before load_checkpoint (random
+        # init if just constructed, or last-epoch weights if fit() was
+        # called). The user thought they loaded the best model but
+        # actually had the LAST (possibly overfit) model. Predictions
+        # and AUC were wrong.
+        #
+        # ROOT FIX: if best_state_dict is present in the checkpoint,
+        # load it into the live model AFTER the model_state_dict load.
+        # This ensures the live model has the BEST validation weights,
+        # not the last-epoch weights. If best_state_dict is absent
+        # (e.g., older checkpoints), fall back to model_state_dict
+        # (already loaded above) - this preserves backward compat.
+        if self.best_state_dict is not None:
+            self.model.load_state_dict(self.best_state_dict)
+            logger.info(
+                f"V92 ROOT FIX (BUG P3-009): restored BEST validation "
+                f"model weights (best_epoch={self.best_epoch}) into the "
+                f"live model."
+            )
         # V90 ROOT FIX (BUG #33): restore best_epoch. The previous code
         # loaded every field EXCEPT best_epoch, leaving it at its __init__
         # default of 0. After reload, the user could not tell which epoch
@@ -1023,6 +1076,6 @@ class GraphTransformerTrainer:
         self.training_history = checkpoint.get("history", [])
         logger.info(f"V30 ROOT FIX (8.14/8.15): Checkpoint loaded from {path} (best_epoch={self.best_epoch})")
         logger.info(
-            f"V30 ROOT FIX (8.14/8.15) + V90 (BUG #33): Checkpoint loaded "
-            f"from {path} (best_epoch={self.best_epoch})"
+            f"V30 ROOT FIX (8.14/8.15) + V90 (BUG #33) + V92 (P3-009/010/011): "
+            f"Checkpoint loaded from {path} (best_epoch={self.best_epoch})"
         )
