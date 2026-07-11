@@ -172,6 +172,17 @@ def evaluate_link_prediction(
         # + avg_loss, return the dict, and restore training mode in
         # the `finally` block opened at line 121.
         if len(np.unique(all_labels)) < 2:
+            # V91 ROOT FIX (botched-merge syntax error): the previous code
+            # had TWO complete implementations of evaluate_link_prediction
+            # mashed together. The first (inside this try block, lines
+            # 122-200) was correct and complete up to the accuracy
+            # computation. The second (lines 203-270) was a DUPLICATE
+            # re-implementation at the wrong indentation level, with a
+            # malformed if/else/try/except/else/try/except nest and a
+            # ``return`` buried inside an ``else`` block. The ``if`` at
+            # line 202 had NO body, causing IndentationError. This fix
+            # replaces the entire broken second half with the correct
+            # AUC computation + return + finally restore.
             auc = 0.5
         else:
             try:
