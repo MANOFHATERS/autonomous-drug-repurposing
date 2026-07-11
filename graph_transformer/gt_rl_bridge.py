@@ -2095,6 +2095,22 @@ class GTRLBridge:
             pathway_count_per_disease = {}
         max_pw = max(pathway_count_per_disease.values()) if pathway_count_per_disease else 1
         pw_scale = max(1.0, float(max_pw))
+        # v90 ROOT FIX (pre-existing NameError from PR #39): the inlined
+        #   exp-decay formula at line 2109 referenced `unmet_scale` which
+        #   was NEVER defined in this scope. The v89 version called
+        #   `compute_unmet_need_score(disease_name, n_treatments=tc)` (a
+        #   helper that hid the scale internally). The v90 PR #39 rewrite
+        #   inlined the formula but forgot to define `unmet_scale`. This
+        #   caused `NameError: name 'unmet_scale' is not defined` at
+        #   runtime whenever `save_rl_input_streaming` was called (the
+        #   test_v5_save_rl_input_streaming_works test caught it). ROOT
+        #   FIX: define `unmet_scale` as the max treatment count (so the
+        #   exp-decay normalizes tc to [0, 1] before the exp). This
+        #   matches the original W-10 formula intent (continuous exp-decay
+        #   where tc=0 → 1.0, tc=scale → 0.41).
+        max_tc = max(treat_count_per_disease.values()) if treat_count_per_disease else 1
+        unmet_scale = max(1.0, float(max_tc))
+        max_pathways = max_pw  # alias for the pw_diff computation below
 
         def _unmet_need_for_disease(disease_name: str) -> float:
             ds_idx = disease_map.get(disease_name, -1)
@@ -2126,14 +2142,6 @@ class GTRLBridge:
             pw_count = pathway_count_per_disease.get(ds_idx, 0)
             pw_diff = 0.03 * (pw_count / max(max_pathways, 1)) - 0.015
             return float(np.clip(base + pw_diff, 0.0, 1.0))
-            treat_component = 0.95 * float(np.exp(-tc / unmet_scale)) + 0.05
-            # v90 S-F1: pathway-connectivity component. Diseases with
-            # more known pathway disruptions have LOWER unmet need.
-            pw = pathway_count_per_disease.get(ds_idx, 0)
-            pw_component = 1.0 - 0.4 * (float(pw) / pw_scale)
-            # Blend: 70% treatment signal, 30% pathway signal.
-            base = 0.7 * treat_component + 0.3 * pw_component
-            return float(np.clip(base, 0.0, 1.0))
 
         df["unmet_need_score"] = df["disease"].map(_unmet_need_for_disease)
         logger.info(
