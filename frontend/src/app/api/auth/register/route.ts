@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { hashPassword, validateEmail, validatePasswordPolicy, signAccessToken, rotateRefreshToken, setAuthCookies } from "@/lib/auth/server";
-import { badRequest, internalError, writeAuditLog, requireCsrfOrSend } from "@/lib/api-helpers";
+import { badRequest, internalError, writeAuditLog } from "@/lib/api-helpers";
 
 interface RegisterBody {
   email: string;
@@ -13,29 +13,6 @@ interface RegisterBody {
   bio?: string;
 }
 
-<<<<<<< HEAD
-// ROOT FIX for FE-006 (self-registration allows "admin" role → privilege
-// escalation + cross-tenant data access).
-//
-// Previously: ALLOWED_ROLES included "admin". A self-registered user could
-// pass `role: "admin"` and immediately gain admin UI access and the ability
-// to call /api/admin/users to read every user in every organization
-// (because admin role checks are not org-scoped). This is a privilege
-// escalation and a cross-tenant data leak.
-//
-// ROOT FIX: "admin" and "owner" are EXCLUDED from the self-registration
-// allowlist. Only roles that are safe for a brand-new self-serve account
-// are accepted. Existing admin/owner accounts are created by a super-admin
-// via the admin console, not by self-registration.
-//
-// Note: an organization's FIRST member is always created with org role
-// "owner" (see the OrganizationMember.create below) — that is the
-// organization-level role, separate from the user-level account role
-// controlled here. The user-level account role remains "researcher" (or
-// another non-admin role from the allowlist) even though they own their
-// workspace.
-const ALLOWED_ROLES = [
-=======
 // FE-006 ROOT FIX: "admin" and "owner" removed from the self-registration
 // allowlist. The previous code let ANY unauthenticated user POST
 // {"role":"admin"} to /api/auth/register and get a User record with
@@ -47,7 +24,6 @@ const ALLOWED_ROLES = [
 // to become an admin/owner is to be PROMOTED by an existing admin via
 // PATCH /api/admin/users (which validates the role against ALLOWED_ROLES_ADMIN).
 export const ALLOWED_ROLES_SELF_REG = [
->>>>>>> fix/v101-forensic-root-fixes-20-critical-bugs
   "researcher",
   "data-scientist",
   "pi",
@@ -89,12 +65,6 @@ export function isValidUserStatus(status: unknown): status is AllowedUserStatus 
 }
 
 export async function POST(req: NextRequest) {
-  // Note: register is a PRE-AUTH endpoint — the caller has no session yet,
-  // so the CSRF double-submit cookie cannot be verified. The password
-  // requirement is the proof of intent. CSRF is enforced on all
-  // AUTHENTICATED state-changing endpoints (2fa/disable, api-keys, billing,
-  // admin/users, etc.) — see requireCsrfOrSend() in api-helpers.ts.
-
   let body: RegisterBody;
   try {
     body = await req.json();

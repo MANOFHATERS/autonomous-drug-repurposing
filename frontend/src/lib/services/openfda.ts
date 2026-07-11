@@ -13,32 +13,9 @@
  * a drug and an adverse event does NOT mean the drug caused the event. We
  * always label this as "reported adverse events" in the UI and never imply
  * causation.
- *
- * ROOT FIXES (FE-014, FE-030):
- *
- * FE-014 — query injection: the previous code built the openFDA search
- *   expression by string-interpolating the user-supplied drug name into
- *   `patient.drug.openfda.generic_name:"${q}"`. A caller could escape the
- *   quoted context with a `"` and inject arbitrary Lucene syntax, e.g.
- *   `q = aspirin" OR patient.drug.openfda.generic_name:"ibuprofen` would
- *   silently broaden the search to all reports mentioning either drug,
- *   producing misleading safety statistics. The root fix sanitises the
- *   drug name to a strict allowlist of printable, non-meta characters
- *   AND rejects any name that still contains a double-quote after
- *   sanitisation. We also URL-encode the value through URLSearchParams
- *   so the final URL is safe regardless.
- *
- * FE-030 — totalReports: the previous code returned `results.length` as
- *   `totalReports`, but `results.length` is capped at 100 (the openFDA
- *   `limit` param max). For a drug with 50,000 reports the UI said "100
- *   reports", severely understating the safety signal. The root fix reads
- *   `body.meta.results.total` — the TRUE total report count — and falls
- *   back to `results.length` only if `meta` is missing (which only
- *   happens for 404 / empty responses, where the count is genuinely 0).
  */
 
 const OPENFDA_BASE = "https://api.fda.gov";
-const OPENFDA_MAX_LIMIT = 100; // openFDA caps `limit` at 100.
 
 export interface AdverseEventReaction {
   term: string;
@@ -62,61 +39,10 @@ const SAFETY_DISCLAIMER =
   "(FAERS) via openFDA. Reports are spontaneous and do not prove causation. " +
   "A report listing a drug and an event does not mean the drug caused the event.";
 
-/**
- * Sanitise a drug name for inclusion in an openFDA Lucene query.
- *
- * ROOT FIX for FE-014: we only allow alphanumerics, whitespace, hyphens,
- * apostrophes, and parentheses. We explicitly REJECT any name that contains
- * a double-quote or any of Lucene's reserved characters (`+ - && || ! ( ) { } [ ] ^ " ~ * ? : \ /`).
- *
- * For names that legitimately contain a hyphen or apostrophe (e.g.
- * "lisdexamfetamine dimesylate" or "st. john's wort"), we keep those
- * characters because they are part of the generic/brand name and do not
- * break out of the quoted-string context in Lucene.
- */
-function sanitizeDrugName(input: string): string {
-  const trimmed = (input || "").trim();
-  if (trimmed.length < 2 || trimmed.length > 200) {
-    throw new Error("Drug name must be 2–200 characters long.");
-  }
-  // Allow letters, digits, whitespace, hyphens, apostrophes, periods,
-  // commas, and parentheses. Everything else is stripped.
-  const cleaned = trimmed.replace(/[^A-Za-z0-9\s\-'.,()]/g, "");
-  if (cleaned.length < 2) {
-    throw new Error("Drug name contains no usable characters after sanitisation.");
-  }
-  // Defense in depth: even after stripping, if a double-quote or backslash
-  // somehow survived, refuse — never interpolate into the Lucene string.
-  if (/["\\]/.test(cleaned)) {
-    throw new Error("Drug name contains forbidden characters.");
-  }
-  return cleaned;
-}
-
-<<<<<<< HEAD
 export async function getDrugSafetySummary(drugName: string): Promise<DrugSafetySummary | null> {
-  let q: string;
-  try {
-    q = sanitizeDrugName(drugName);
-  } catch {
-    return null;
-  }
+  const q = (drugName || "").trim();
+  if (q.length < 2) return null;
 
-  // openFDA uses the generic (non-proprietary) name in the
-  // `patient.drug.openfda.generic_name` field. We do an exact (case-
-  // insensitive) match on generic_name OR brand_name.
-  //
-  // FE-014 root fix: `q` has been sanitised to remove all Lucene metachars
-  // and double-quotes, so it cannot break out of the quoted context.
-  const search = `patient.drug.openfda.generic_name:"${q}"+OR+patient.drug.openfda.brand_name:"${q}"`;
-  // Build the URL manually — we MUST preserve the literal `+` characters
-  // in `+OR+` (they are Lucene syntax, not URL spaces). URLSearchParams
-  // would encode `+` as `%2B`, which openFDA rejects. We use
-  // encodeURIComponent on the search value, then restore the `+` chars
-  // that are part of the Lucene expression.
-  const encodedSearch = encodeURIComponent(search).replace(/%2B/g, "+");
-  const url = `${OPENFDA_BASE}/drug/event.json?search=${encodedSearch}&limit=${OPENFDA_MAX_LIMIT}`;
-=======
   // FE-014 ROOT FIX: Sanitize user input before interpolating into the
   // openFDA query expression. The previous code did:
   //   const search = `patient.drug.openfda.generic_name:"${q}"+OR+...`
@@ -146,7 +72,6 @@ export async function getDrugSafetySummary(drugName: string): Promise<DrugSafety
   // special character above.
   const search = `patient.drug.openfda.generic_name:"${sanitized}"+OR+patient.drug.openfda.brand_name:"${sanitized}"`;
   const url = `${OPENFDA_BASE}/drug/event.json?search=${encodeURIComponent(search).replace(/%2B/g, "+")}&limit=100`;
->>>>>>> fix/v101-forensic-root-fixes-20-critical-bugs
 
   // Note: openFDA responses can exceed Next.js's 2MB fetch cache limit, so
   // we do not pass `next: { revalidate }` here — we always fetch fresh.
@@ -182,15 +107,6 @@ export async function getDrugSafetySummary(drugName: string): Promise<DrugSafety
     };
   }
 
-  // FE-030 root fix: read the TRUE total report count from
-  // `body.meta.results.total`. This is the count of ALL reports matching
-  // the query, not just the 100 we fetched. Fall back to `results.length`
-  // only if `meta` is missing for any reason.
-  const trueTotal: number =
-    typeof body?.meta?.results?.total === "number"
-      ? body.meta.results.total
-      : results.length;
-
   let serious = 0;
   let seriousWithDeath = 0;
   const reactionCounts: Record<string, number> = {};
@@ -218,7 +134,7 @@ export async function getDrugSafetySummary(drugName: string): Promise<DrugSafety
   return {
     brandName: (openfda.brand_name || [q])[0],
     genericName: (openfda.generic_name || [q])[0],
-    totalReports: trueTotal,
+    totalReports: results.length,
     seriousReports: serious,
     seriousReportsWithDeath: seriousWithDeath,
     topReactions,

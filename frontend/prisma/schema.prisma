@@ -125,25 +125,13 @@ model Project {
   description     String?
   status          String       @default("active") // active | archived | completed | on_hold
   visibility      String       @default("private") // private | org | public
-  ownerId         String?
+  ownerId         String
   organizationId  String
   tags            String       @default("") // comma-separated
   createdAt       DateTime     @default(now())
   updatedAt       DateTime     @updatedAt
 
-  // FE-029 ROOT FIX: previously `ownerId String` (required) with
-  // `owner User @relation(fields: [ownerId], references: [id])` and no
-  // `onDelete` clause. The default `Restrict` meant deleting a user who
-  // owned any project threw a foreign-key constraint error — the admin
-  // could never clean up after an offboarded employee without first
-  // manually re-assigning every project.
-  //
-  // ROOT FIX: `ownerId` is now optional (`String?`) and the relation uses
-  // `onDelete: SetNull`. Deleting a user nulls out `ownerId` on their
-  // projects; the projects themselves are preserved (admin can re-assign
-  // later). This is the standard pattern for "owned but not owned-by-a-
-  // required-user" resources.
-  owner           User?          @relation(fields: [ownerId], references: [id], onDelete: SetNull)
+  owner           User           @relation(fields: [ownerId], references: [id])
   organization    Organization   @relation(fields: [organizationId], references: [id])
   hypotheses      Hypothesis[]
   comments        Comment[]
@@ -170,29 +158,14 @@ model Hypothesis {
   safetyScore        Float?
   marketScore        Float?
   overallScore       Float?
-  // ROOT FIX (Phase 4 → API handoff): previously the Hypothesis schema had
-  // NO field for the RL ranker's confidence interval or explanation. The
-  // dashboard's "Repurposing Confidence: 92%" was a hardcoded mock value
-  // with no relationship to the RL agent's actual output. We now store:
-  //  - rank: the RL agent's 1-indexed rank for this (drug, disease) pair
-  //  - policyProb: the PPO policy's probability of selecting this pair
-  //  - reward: the RL agent's computed reward for this pair
-  //  - gnnScore: the Phase 3 graph transformer's score (forwarded by RL)
-  //  - literatureSupport: count of PubMed papers supporting this pair
-  //  - confidenceIntervalLow / High: 95% CI bounds on the plausibility score
-  //  - explanation: human-readable explanation of the ranking (pathway chain)
-  //  - rlModelVersion: the RL agent's model version (for auditability)
-  //  - rlUpdatedAt: when the RL agent last updated these fields
-  rank                Int?
-  policyProb          Float?
-  reward              Float?
-  gnnScore            Float?
-  literatureSupport   Int?
-  confidenceIntervalLow   Float?
-  confidenceIntervalHigh  Float?
-  explanation         String?
-  rlModelVersion      String?
-  rlUpdatedAt         DateTime?
+  // FE-002: RL ranker output fields (persisted by rl-ranker service).
+  rank               Int?
+  policyProb         Float?
+  reward             Float?
+  gnnScore           Float?
+  literatureSupport  Boolean?
+  rlModelVersion     String?
+  rlUpdatedAt        DateTime?
   notes        String?
   createdById  String
   createdAt    DateTime @default(now())
@@ -324,21 +297,12 @@ model ApiKey {
   createdAt       DateTime @default(now())
 
   organization Organization @relation(fields: [organizationId], references: [id])
-<<<<<<< HEAD
-  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  // FE-022 root fix: index on (organizationId, userId, revokedAt) so the
-  // per-user list/revoke queries are O(log n) instead of O(n).
-  @@index([organizationId, userId, revokedAt])
-  @@index([hashedKey])
-=======
   user         User         @relation(fields: [userId], references: [id])
 
   // FE-018 ROOT FIX: missing indexes added for org/user/revokedAt lookups.
   @@index([organizationId])
   @@index([userId])
   @@index([revokedAt])
->>>>>>> fix/v101-forensic-root-fixes-20-critical-bugs
 }
 
 // ---------------------------------------------------------------------------
@@ -388,24 +352,6 @@ model WebhookEndpoint {
   id              String   @id @default(cuid())
   organizationId  String
   url             String
-<<<<<<< HEAD
-  // FE-017 ROOT FIX: previously `secret String` stored the webhook signing
-  // secret in plaintext. Anyone with DB read access (a backup, a DBA, a
-  // SQL injection) could forge valid webhook deliveries. The root fix
-  // stores only the SHA-256 hash of the secret — the same pattern we use
-  // for ApiKey.hashedKey. The raw secret is shown to the user ONCE at
-  // creation time and never persisted. When we sign an outbound webhook
-  // we re-derive the HMAC by re-fetching the raw secret from the request
-  // context (the user supplies it once when creating the endpoint; we
-  // sign the first delivery immediately and never persist the raw).
-  //
-  // For a real Stripe-style integration the webhook signing key would be
-  // generated server-side, returned to the user once, and stored only as
-  // a hash. Verifying inbound webhooks is a separate concern (we are the
-  // sender, not the receiver).
-  secretHash      String
-  secretPrefix    String   // first 8 chars shown in UI for identification
-=======
   // FE-017 ROOT FIX: Webhook signing secrets are now stored as AES-256-GCM
   // ciphertext (format: "v1:<base64 iv>:<base64 ciphertext>:<base64 tag>").
   // The plaintext secret is NEVER persisted. Encryption/decryption is handled
@@ -413,7 +359,6 @@ model WebhookEndpoint {
   // means a DB backup leak does NOT expose signing secrets — an attacker
   // would also need the KMS/env var to forge webhook deliveries.
   secretEncrypted String
->>>>>>> fix/v101-forensic-root-fixes-20-critical-bugs
   events          String   @default("*") // comma-separated event types
   enabled         Boolean  @default(true)
   lastTriggeredAt DateTime?

@@ -5,13 +5,6 @@ import {
   signAccessToken,
   rotateRefreshToken,
   setAuthCookies,
-<<<<<<< HEAD
-  checkLoginRate,
-  recordLoginFailure,
-  recordLoginSuccess,
-} from "@/lib/auth/server";
-import { badRequest, writeAuditLog, getClientIp, requireCsrfOrSend } from "@/lib/api-helpers";
-=======
   signMfaChallengeToken,
 } from "@/lib/auth/server";
 import { badRequest, writeAuditLog } from "@/lib/api-helpers";
@@ -22,40 +15,13 @@ import {
   recordFailedLogin,
   recordSuccessfulLogin,
 } from "@/lib/auth/rate-limit";
->>>>>>> fix/v101-forensic-root-fixes-20-critical-bugs
 
 interface LoginBody {
   email: string;
   password: string;
 }
 
-/**
- * POST /api/auth/login
- *
- * ROOT FIXES:
- *  - FE-004 (2FA bypass): if the user has `mfaEnabled = true`, we NO LONGER
- *    issue access/refresh tokens. Instead we return `{ mfa_required: true,
- *    mfa_ticket }` and the client must POST to /api/auth/2fa/login-verify
- *    with the 6-digit TOTP code. Only after the TOTP code is verified are
- *    auth cookies issued.
- *  - FE-009 (no rate limit): we cap failed logins per (email, ip) tuple.
- *    After 5 failures in 15 minutes the tuple is locked out for 15 minutes.
- *  - FE-025 (CSRF): we enforce the double-submit CSRF token on this
- *    state-changing endpoint.
- *
- * The `mfa_ticket` is a short-lived (5 min) JWT signed with the same
- * JWT_SECRET. It encodes only the user id and email — not the role or
- * orgId — so even if it leaked it could not be used as a session token.
- * It is single-use: /api/auth/2fa/login-verify consumes it.
- */
 export async function POST(req: NextRequest) {
-<<<<<<< HEAD
-  // Note: login is a PRE-AUTH endpoint — the caller has no session yet, so
-  // the CSRF double-submit cookie cannot be verified. The password
-  // requirement is the proof of intent. CSRF is enforced on all
-  // AUTHENTICATED state-changing endpoints (2fa/disable, api-keys, billing,
-  // admin/users, etc.) — see requireCsrfOrSend() in api-helpers.ts.
-=======
   // FE-009 ROOT FIX (Layer 1): IP-based rate limit. Stops credential
   // stuffing where an attacker rotates usernames from one IP. Done BEFORE
   // parsing the body so even malformed requests count against the bucket.
@@ -73,7 +39,6 @@ export async function POST(req: NextRequest) {
       }
     );
   }
->>>>>>> fix/v101-forensic-root-fixes-20-critical-bugs
 
   let body: LoginBody;
   try {
@@ -85,27 +50,6 @@ export async function POST(req: NextRequest) {
   const password = body.password || "";
   if (!email || !password) return badRequest("Email and password are required");
 
-<<<<<<< HEAD
-  const ip = getClientIp(req);
-
-  // Rate limit — FE-009.
-  const rate = checkLoginRate(email, ip);
-  if (!rate.allowed) {
-    return NextResponse.json(
-      {
-        error: "rate_limited",
-        message: `Too many failed login attempts. Try again in ${rate.retryAfterSeconds}s.`,
-        retry_after: rate.retryAfterSeconds,
-      },
-      { status: 429, headers: { "Retry-After": String(rate.retryAfterSeconds) } }
-    );
-  }
-
-  const user = await db.user.findUnique({ where: { email } });
-  if (!user) {
-    recordLoginFailure(email, ip);
-    return NextResponse.json(
-=======
   const user = await db.user.findUnique({
     where: { email },
     select: {
@@ -126,7 +70,6 @@ export async function POST(req: NextRequest) {
   // an attacker can't enumerate accounts by email.
   const invalidCredentials = () =>
     NextResponse.json(
->>>>>>> fix/v101-forensic-root-fixes-20-critical-bugs
       { error: "invalid_credentials", message: "Invalid email or password" },
       { status: 401 }
     );
@@ -163,13 +106,6 @@ export async function POST(req: NextRequest) {
 
   const ok = await verifyPassword(password, user.passwordHash);
   if (!ok) {
-<<<<<<< HEAD
-    recordLoginFailure(email, ip);
-    return NextResponse.json(
-      { error: "invalid_credentials", message: "Invalid email or password" },
-      { status: 401 }
-    );
-=======
     recordIpAttempt(req);
     // FE-009: Increment failedLoginCount; auto-lock if threshold hit.
     const lockResult = await recordFailedLogin(user.id);
@@ -219,31 +155,9 @@ export async function POST(req: NextRequest) {
       mfaToken,
       message: "Multi-factor authentication required. POST this token and your 6-digit TOTP code to /api/auth/2fa/login-verify.",
     });
->>>>>>> fix/v101-forensic-root-fixes-20-critical-bugs
   }
 
-  // FE-004 root fix: if 2FA is enabled, do NOT issue session tokens yet.
-  // Issue a short-lived MFA ticket that the client exchanges for real
-  // session tokens by POSTing the TOTP code to /api/auth/2fa/login-verify.
-  if (user.mfaEnabled) {
-    const { issueMfaTicket } = await import("@/lib/auth/totp");
-    const mfaTicket = issueMfaTicket({ userId: user.id, email: user.email });
-    await writeAuditLog({
-      user: { userId: user.id, email: user.email, role: user.role },
-      action: "login_mfa_challenge",
-      resource: `user:${user.id}`,
-      metadata: { ip },
-    });
-    return NextResponse.json({
-      mfa_required: true,
-      mfa_ticket: mfaTicket,
-      email: user.email,
-    });
-  }
-
-  // Password correct + 2FA not enabled → finish login.
-  recordLoginSuccess(email, ip);
-
+  // Find the user's primary organization (first membership).
   const membership = await db.organizationMember.findFirst({
     where: { userId: user.id },
     orderBy: { joinedAt: "asc" },
@@ -265,7 +179,6 @@ export async function POST(req: NextRequest) {
     user: { userId: user.id, email: user.email, role: user.role, orgId: membership?.organizationId },
     action: "login",
     resource: `user:${user.id}`,
-    metadata: { ip },
   });
 
   return NextResponse.json({

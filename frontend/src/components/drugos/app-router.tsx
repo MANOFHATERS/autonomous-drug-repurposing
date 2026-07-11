@@ -61,7 +61,6 @@ import { DrugOSNavContext } from './nav-context'
 import { useSession } from './session-provider'
 import { api, type ApiError, type TeamMember } from '@/lib/api-client'
 import { canAccessSection, visibleSectionsForRole, roleLabel } from '@/lib/rbac'
-import { APP_DISPLAY_STRING } from '@/lib/version'
 
 // =====================================================================
 // TYPES & ROUTER CONTEXT
@@ -1485,19 +1484,9 @@ function FeaturePage({ slug }: { slug: string }) {
       <Card className="mb-16 overflow-hidden">
         <div className="h-64 sm:h-80 bg-gradient-to-br from-[#5B4FCF]/5 to-[#5B4FCF]/10 flex items-center justify-center">
           <div className="text-center">
-<<<<<<< HEAD
-            {/* FE-027 unblock: feature.icon may be undefined; coerce to a
-                safe fallback so tsc is satisfied and the page never crashes. */}
-            {(() => {
-              const Icon = (feature?.icon as any) || Search;
-              const IconComp = (Icon as any)?.type ?? Icon;
-              return <IconComp className="w-16 h-16 text-[#5B4FCF]/30 mx-auto mb-4" />;
-            })()}
-=======
             <div className="w-16 h-16 text-[#5B4FCF]/30 mx-auto mb-4 flex items-center justify-center">
               {feature?.icon}
             </div>
->>>>>>> fix/v101-forensic-root-fixes-20-critical-bugs
             <p className="text-muted-foreground">Interactive Demo Preview</p>
           </div>
         </div>
@@ -2285,26 +2274,6 @@ function AppShell({ children, section }: { children: React.ReactNode; section: s
   const [showNotifs, setShowNotifs] = useState(false)
   const [headerSearch, setHeaderSearch] = useState('')
 
-  // ROOT FIX for FE-040: real notifications from /api/notifications instead
-  // of mock `notifData` from mock-data.ts. We fetch on mount and refetch
-  // every 60s so the bell icon stays current.
-  const [realNotifs, setRealNotifs] = useState<{ id: string; type: string; title: string; body: string; readAt: string | null; createdAt: string }[]>([]);
-  const [notifsLoading, setNotifsLoading] = useState(true);
-  useEffect(() => {
-    let mounted = true;
-    const fetchNotifs = () => {
-      fetch('/api/notifications', { credentials: 'include' })
-        .then(async (r) => (r.ok ? r.json() : Promise.reject(r)))
-        .then((r: { items: typeof realNotifs }) => {
-          if (mounted) { setRealNotifs(r.items || []); setNotifsLoading(false); }
-        })
-        .catch(() => { if (mounted) setNotifsLoading(false); });
-    };
-    fetchNotifs();
-    const id = setInterval(fetchNotifs, 60_000);
-    return () => { mounted = false; clearInterval(id); };
-  }, []);
-
   // Auth guard: if session resolves and there's no user, bounce to login.
   useEffect(() => {
     if (!loading && !user) {
@@ -2338,8 +2307,7 @@ function AppShell({ children, section }: { children: React.ReactNode; section: s
     .join('') || user.email[0]?.toUpperCase()
   const activeOrg = organizations.find(o => o.id === activeOrganizationId) || organizations[0]
 
-  // FE-040 root fix: derive unread count from REAL notifications.
-  const unreadNotifs = realNotifs.filter(n => !n.readAt).length
+  const unreadNotifs = notifData.filter(n => !n.read).length
   const toggleGroup = (label: string) => {
     setExpandedGroups(prev => prev.includes(label) ? prev.filter(g => g !== label) : [...prev, label])
   }
@@ -2421,7 +2389,7 @@ function AppShell({ children, section }: { children: React.ReactNode; section: s
 
       <div className="border-t border-border p-3">
         <div className="text-[10px] text-muted-foreground text-center">
-          {APP_DISPLAY_STRING} · {roleLabel(user.role)}
+          DrugOS v0.3.0 · {roleLabel(user.role)} · © 2026
         </div>
       </div>
     </div>
@@ -2498,28 +2466,22 @@ function AppShell({ children, section }: { children: React.ReactNode; section: s
                   <Badge variant="secondary" className="text-[10px]">{unreadNotifs} new</Badge>
                 </DropdownMenuLabel>
                 <DropdownMenuSeparator />
-                {notifsLoading ? (
-                  <div className="px-3 py-4 text-xs text-muted-foreground text-center">Loading notifications…</div>
-                ) : realNotifs.length === 0 ? (
-                  <div className="px-3 py-4 text-xs text-muted-foreground text-center">No notifications.</div>
-                ) : (
-                  realNotifs.slice(0, 5).map(n => (
-                    <DropdownMenuItem key={n.id} className="flex flex-col items-start gap-1 p-3 cursor-pointer">
-                      <div className="flex items-center gap-2 w-full">
-                        <span className={cn(
-                          'h-2 w-2 rounded-full shrink-0',
-                          n.type === 'success' && 'bg-[#1D9E75]',
-                          n.type === 'warning' && 'bg-[#D4853A]',
-                          n.type === 'error' && 'bg-[#C0392B]',
-                          n.type === 'info' && 'bg-[#5B4FCF]'
-                        )} />
-                        <span className="text-sm font-medium truncate">{n.title}</span>
-                        {!n.readAt && <Badge className="ml-auto text-[9px] h-4">New</Badge>}
-                      </div>
-                      <span className="text-xs text-muted-foreground line-clamp-1">{n.body}</span>
-                    </DropdownMenuItem>
-                  ))
-                )}
+                {notifData.slice(0, 5).map(n => (
+                  <DropdownMenuItem key={n.id} className="flex flex-col items-start gap-1 p-3 cursor-pointer">
+                    <div className="flex items-center gap-2 w-full">
+                      <span className={cn(
+                        'h-2 w-2 rounded-full shrink-0',
+                        n.type === 'success' && 'bg-[#1D9E75]',
+                        n.type === 'warning' && 'bg-[#D4853A]',
+                        n.type === 'error' && 'bg-[#C0392B]',
+                        n.type === 'info' && 'bg-[#5B4FCF]'
+                      )} />
+                      <span className="text-sm font-medium truncate">{n.title}</span>
+                      {!n.read && <Badge className="ml-auto text-[9px] h-4">New</Badge>}
+                    </div>
+                    <span className="text-xs text-muted-foreground line-clamp-1">{n.message}</span>
+                  </DropdownMenuItem>
+                ))}
               </DropdownMenuContent>
             </DropdownMenu>
 
@@ -2572,163 +2534,6 @@ function AppShell({ children, section }: { children: React.ReactNode; section: s
 // APP SECTION PAGES
 // =====================================================================
 
-// ROOT FIX for FE-001 / FE-040: Real Phase 1/2/4 status card. Fetches
-// live data from the corresponding /api endpoint and renders real counts
-// (Phase 1: nodes/edges loaded; Phase 2: graph sources loaded; Phase 4:
-// RL candidates count). Previously these were all mock values.
-function PhaseStatusCard({ title, endpoint, icon }: { title: string; endpoint: string; icon: React.ReactNode }) {
-  const [state, setState] = useState<{
-    loading: boolean;
-    error: string | null;
-    data: any;
-  }>({ loading: true, error: null, data: null });
-
-  useEffect(() => {
-    let mounted = true;
-    fetch(endpoint, { credentials: 'include' })
-      .then(async (r) => {
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        return r.json();
-      })
-      .then((data) => {
-        if (mounted) setState({ loading: false, error: null, data });
-      })
-      .catch((e) => {
-        if (mounted) setState({ loading: false, error: String(e.message || e), data: null });
-      });
-    return () => { mounted = false };
-  }, [endpoint]);
-
-  // Derive a one-line summary from the endpoint-specific response shape.
-  let summary = 'Loading…';
-  let detail: string | null = null;
-  if (state.error) {
-    summary = 'Unavailable';
-    detail = state.error;
-  } else if (!state.loading && state.data) {
-    if (endpoint === '/api/dataset') {
-      const d = state.data;
-      summary = `${d.sources?.filter((s: any) => s.loaded).length ?? 0}/${d.sources?.length ?? 0} sources loaded`;
-      detail = `${d.nodesLoaded ?? 0} nodes · ${d.edgesLoaded ?? 0} edges`;
-    } else if (endpoint === '/api/knowledge-graph') {
-      const d = state.data;
-      summary = `${d.sources?.filter((s: any) => s.loaded).length ?? 0}/${d.sources?.length ?? 0} sources loaded`;
-      detail = `${d.nodeCount ?? 0} nodes · ${d.edgeCount ?? 0} edges`;
-    } else if (endpoint === '/api/rl') {
-      const d = state.data;
-      summary = `${d.count ?? 0} ranked candidates`;
-      detail = d.source === 'none' ? 'No RL output yet' : `source: ${d.source}`;
-    }
-  }
-
-  return (
-    <Card>
-      <CardContent className="pt-6">
-        <div className="flex items-start justify-between">
-          <div>
-            <p className="text-sm text-muted-foreground">{title}</p>
-            <p className="text-lg font-bold text-foreground mt-1">{summary}</p>
-            {detail && <p className="text-xs text-muted-foreground mt-1">{detail}</p>}
-          </div>
-          <div className="w-10 h-10 rounded-lg bg-[#5B4FCF]/10 text-[#5B4FCF] flex items-center justify-center">{icon}</div>
-        </div>
-      </CardContent>
-    </Card>
-  );
-}
-
-// ROOT FIX for FE-001: Real RL-ranked candidates card. Fetches the Phase 4
-// RL ranker output via /api/rl and renders the actual validated drug-disease
-// pairs (thalidomide→multiple myeloma, sildenafil→PAH, etc.). Previously
-// the dashboard rendered hardcoded mock candidates from mock-data.ts.
-function RankedHypothesesCard({ limit = 10 }: { limit?: number }) {
-  const [state, setState] = useState<{
-    loading: boolean;
-    error: string | null;
-    data: any;
-  }>({ loading: true, error: null, data: null });
-
-  useEffect(() => {
-    let mounted = true;
-    fetch(`/api/rl?limit=${limit}`, { credentials: 'include' })
-      .then(async (r) => {
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        return r.json();
-      })
-      .then((data) => {
-        if (mounted) setState({ loading: false, error: null, data });
-      })
-      .catch((e) => {
-        if (mounted) setState({ loading: false, error: String(e.message || e), data: null });
-      });
-    return () => { mounted = false };
-  }, [limit]);
-
-  const candidates: any[] = state.data?.candidates ?? [];
-  const source: string = state.data?.source ?? 'none';
-
-  return (
-    <Card className="mb-6">
-      <CardHeader>
-        <div className="flex items-center justify-between">
-          <div>
-            <CardTitle className="text-lg">Top RL-Ranked Repurposing Candidates</CardTitle>
-            <p className="text-xs text-muted-foreground mt-1">
-              Real Phase 4 RL ranker output — validated drug-disease pairs.
-              {source === 'none' && ' No output available yet.'}
-              {source === 'local_csv' && ' Served from local RL artifact.'}
-              {source === 'rl_service' && ' Served from live RL service.'}
-            </p>
-          </div>
-          <Badge variant="outline" className="text-xs">{candidates.length} candidates</Badge>
-        </div>
-      </CardHeader>
-      <CardContent>
-        {state.loading ? (
-          <div className="text-sm text-muted-foreground py-4 text-center">Loading real RL output…</div>
-        ) : state.error ? (
-          <div className="text-sm text-red-500 py-4 text-center">Failed to load: {state.error}</div>
-        ) : candidates.length === 0 ? (
-          <div className="text-sm text-muted-foreground py-4 text-center">
-            No RL-ranked candidates available. Run the Phase 4 RL ranker
-            (<code className="text-xs">python rl/rl_drug_ranker.py</code>) to produce output.
-          </div>
-        ) : (
-          <div className="space-y-2">
-            {candidates.map((c, i) => (
-              <div
-                key={`${c.drug}-${c.disease}-${i}`}
-                className="flex items-center justify-between py-2 border-b border-border last:border-0"
-              >
-                <div className="flex items-center gap-3">
-                  <div className="w-7 h-7 rounded-full bg-[#5B4FCF]/10 text-[#5B4FCF] flex items-center justify-center text-xs font-bold">
-                    {c.rank ?? i + 1}
-                  </div>
-                  <div>
-                    <p className="font-medium text-foreground text-sm">
-                      <span className="capitalize">{c.drug}</span>
-                      <span className="text-muted-foreground mx-1.5">→</span>
-                      <span className="capitalize">{c.disease}</span>
-                    </p>
-                    <p className="text-xs text-muted-foreground">
-                      {c.policyProb !== undefined && `policy_prob: ${c.policyProb.toFixed(3)} · `}
-                      {c.reward !== undefined && `reward: ${c.reward.toFixed(3)} · `}
-                      {c.gnnScore !== undefined && `gnn: ${c.gnnScore.toFixed(3)} · `}
-                      {c.safetyScore !== undefined && `safety: ${c.safetyScore.toFixed(3)} · `}
-                      {c.literatureSupport !== undefined && `lit: ${c.literatureSupport}`}
-                      {c.policyProb === undefined && c.reward === undefined && c.gnnScore === undefined && c.safetyScore === undefined && c.literatureSupport === undefined && 'validated pair (minimal schema)'}
-                    </p>
-                  </div>
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-      </CardContent>
-    </Card>
-  );
-}
-
 function AppDashboard() {
   const { navigate } = useRouter()
   const { user } = useSession()
@@ -2740,34 +2545,6 @@ function AppDashboard() {
         subtitle={`Welcome back, ${user?.name || user?.email || 'Researcher'}`}
         action={<Button className="bg-[#5B4FCF] hover:bg-[#4B3FBF]" onClick={() => navigate({ page: 'app', section: 'search' })}><Search className="w-4 h-4 mr-1" /> New Search</Button>}
       />
-
-      {/* ROOT FIX for FE-001 / FE-040: Real ML pipeline status cards.
-          Previously this dashboard only rendered mock data. These three
-          cards fetch real data from /api/rl, /api/dataset, and
-          /api/knowledge-graph — the actual Phase 1/2/4 pipeline outputs. */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-6">
-        <PhaseStatusCard
-          title="Phase 1 — Dataset"
-          endpoint="/api/dataset"
-          icon={<Database className="w-5 h-5" />}
-        />
-        <PhaseStatusCard
-          title="Phase 2 — Knowledge Graph"
-          endpoint="/api/knowledge-graph"
-          icon={<Share2 className="w-5 h-5" />}
-        />
-        <PhaseStatusCard
-          title="Phase 4 — RL Ranker"
-          endpoint="/api/rl"
-          icon={<Activity className="w-5 h-5" />}
-        />
-      </div>
-
-      {/* ROOT FIX for FE-001: Real RL-ranked candidates. Previously the
-          dashboard rendered mock `drugCandidates` from mock-data.ts. This
-          card now fetches real validated drug-disease pairs from the
-          Phase 4 RL ranker output via /api/rl. */}
-      <RankedHypothesesCard limit={10} />
 
       {/* Stats */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">

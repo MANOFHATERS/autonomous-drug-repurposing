@@ -1,13 +1,4 @@
 // DrugOS Mock Data - Comprehensive dataset for all 232 screens
-//
-// ROOT FIX (FE-027 unblock): the interfaces below previously did NOT
-// declare many fields that the UI components reference (Disease.icd10,
-// DrugCandidate.name, ClinicalTrial.condition, etc.). The previous build
-// config `typescript.ignoreBuildErrors: true` hid all of these errors.
-// Now that the build is strict (FE-027 root fix), we extend the interfaces
-// to declare every field the components actually use. Optional fields are
-// marked `?` so the mock data objects (which don't always populate every
-// field) remain valid.
 
 export interface Disease {
   id: string;
@@ -18,25 +9,12 @@ export interface Disease {
   prevalence: string;
   description: string;
   geneticBasis: boolean;
-<<<<<<< HEAD
-  // FE-027 unblock: fields referenced by disease-search-bar.tsx and
-  // screens/core-screen.tsx. These are optional because not every mock
-  // disease entry populates them.
-  icd10?: string;
-  category?: string;
-  synonyms?: string[];
-  candidateCount?: number;
-  clinicalTrialCount?: number;
-  orphaCode?: string;
-  evidenceCount?: number;
-=======
   // FE-011: optional fields used by DiseaseSearchBar and dashboard.
   synonyms?: string[];
   category?: string;
   candidateCount?: number;
   clinicalTrialCount?: number;
   icd10?: string;
->>>>>>> fix/v101-forensic-root-fixes-20-critical-bugs
 }
 
 export interface DrugCandidate {
@@ -59,23 +37,6 @@ export interface DrugCandidate {
   rank?: number;
   targets: string[];
   pathways: string[];
-  // FE-027 unblock: fields referenced by candidate-table.tsx,
-  // screens/core-screen.tsx, and core-screens.tsx.
-  name?: string; // alias for drugName (some components use .name)
-  diseaseName?: string;
-  phase?: string; // alias for clinicalPhase
-  repurposingConfidence?: number;
-  drugBankId?: string;
-  formula?: string;
-  molecularWeight?: string;
-  fdaApproved?: boolean;
-  yearApproved?: number;
-  patentStatus?: string;
-  targetGenes?: string[];
-  adverseEffects?: string[];
-  contraindications?: string[];
-  drugInteractions?: string[];
-  evidenceCount?: number;
 }
 
 export interface ClinicalTrial {
@@ -90,9 +51,6 @@ export interface ClinicalTrial {
   drugName: string;
   disease: string;
   outcome: string;
-  // FE-027 unblock: fields referenced by screens/core-screen.tsx.
-  condition?: string;
-  sponsor?: string;
 }
 
 export interface GraphNode {
@@ -101,14 +59,9 @@ export interface GraphNode {
   type: 'drug' | 'disease' | 'gene' | 'protein' | 'pathway';
   x: number;
   y: number;
-<<<<<<< HEAD
-  // FE-027 unblock: field referenced by knowledge-graph-viewer.tsx.
-  size?: number;
-=======
   // FE-011: optional fields used by knowledge-graph-viewer.
   size?: number;
   description?: string;
->>>>>>> fix/v101-forensic-root-fixes-20-critical-bugs
 }
 
 export interface GraphEdge {
@@ -116,17 +69,7 @@ export interface GraphEdge {
   target: string;
   relation: string;
   evidence: number;
-  // FE-027 unblock: fields referenced by knowledge-graph-viewer.tsx and
-  // pathway-viz.tsx. Some components use `id` / `label` / `type` aliases.
-  id?: string;
-  label?: string;
-  type?: string;
 }
-
-// FE-027 unblock: aliases referenced by knowledge-graph-viewer.tsx.
-// Some components import these names instead of GraphNode/GraphEdge.
-export type KnowledgeGraphNode = GraphNode;
-export type KnowledgeGraphEdge = GraphEdge;
 
 export interface User {
   id: string;
@@ -428,12 +371,6 @@ export interface Patent {
   expirationDate: string;
   claims: number;
   drugName: string;
-  // FE-027 unblock: field referenced by screens/core-screen.tsx.
-  relatedDrugId?: string;
-  // Aliases used by some components.
-  patentId?: string;
-  grantDate?: string;
-  expiryDate?: string;
 }
 
 export const patents: Patent[] = [
@@ -533,66 +470,6 @@ export const drugInteractions: DrugInteraction[] = [
 // === TYPE EXPORTS ===
 export type SafetyTier = DrugCandidate['safetyTier'];
 
-<<<<<<< HEAD
-// FE-027 unblock: aliases referenced by knowledge-graph-viewer.tsx and
-// pathway-viz.tsx. Some components import these names instead of
-// graphNodes/graphEdges. We export them as aliases so the imports resolve.
-export const knowledgeGraphNodes: GraphNode[] = graphNodes;
-export const knowledgeGraphEdges: GraphEdge[] = graphEdges;
-
-// FE-027 unblock: pathwayData referenced by pathway-viz.tsx.
-export const pathwayData = {
-  nodes: graphNodes,
-  edges: graphEdges,
-  title: 'Sample Pathway',
-  name: 'Sample Pathway', // alias for components that use .name
-  description: 'Mock pathway data — replaced by real KG queries at runtime.',
-};
-
-// FE-027 unblock: getScoreBreakdown referenced by screens/core-screen.tsx.
-// Returns a per-component score breakdown for a drug candidate.
-// The component iterates `breakdown.components` with `Object.entries` and
-// reads `breakdown.overall`, so `components` is a flat object keyed by
-// camelCase field name and `overall` is the weighted average.
-export interface ScoreBreakdown {
-  components: Record<string, number>;
-  overall: number;
-}
-
-export function getScoreBreakdown(candidate: DrugCandidate | string): ScoreBreakdown {
-  // Some call sites pass a drug name string instead of a candidate —
-  // gracefully return a zero breakdown in that case.
-  if (typeof candidate === 'string') {
-    return {
-      components: {
-        knowledgeGraph: 0,
-        molecularSimilarity: 0,
-        safety: 0,
-        clinical: 0,
-      },
-      overall: 0,
-    };
-  }
-  const components = {
-    knowledgeGraph: candidate.kgScore,
-    molecularSimilarity: candidate.molSimScore,
-    safety: candidate.safetyScore,
-    clinical: candidate.clinicalScore,
-  };
-  const overall =
-    candidate.kgScore * 0.4 +
-    candidate.molSimScore * 0.2 +
-    candidate.safetyScore * 0.25 +
-    candidate.clinicalScore * 0.15;
-  return { components, overall };
-}
-
-// FE-027 unblock: dashboard aggregate stats referenced by
-// screens/dashboard-screen.tsx. These are mock values for the dashboard
-// shell — the real per-user stats come from /api/auth/me and /api/rl.
-export const dashboardStats = {
-  totalCandidates: 247,
-=======
 // ---------------------------------------------------------------------------
 // FE-011 ROOT FIX: Dashboard summary data.
 //
@@ -621,48 +498,11 @@ export interface DashboardStats {
 
 export const dashboardStats: DashboardStats = {
   totalCandidates: 274,
->>>>>>> fix/v101-forensic-root-fixes-20-critical-bugs
   clinicalTrials: 89,
   queriesThisMonth: 342,
   reportsGenerated: 87,
 };
 
-<<<<<<< HEAD
-export const recentActivity = [
-  { id: 'ra1', type: 'query', user: 'Dr. Sarah Chen', action: 'searched', target: "Huntington's Disease", timestamp: '2026-07-11T10:00:00Z' },
-  { id: 'ra2', type: 'candidate', user: 'James Miller', action: 'saved', target: 'Memantine → HD', timestamp: '2026-07-11T09:30:00Z' },
-  { id: 'ra3', type: 'report', user: 'Dr. Priya Sharma', action: 'generated', target: 'AD Evidence Package', timestamp: '2026-07-11T09:00:00Z' },
-  { id: 'ra4', type: 'safety', user: 'System', action: 'flagged', target: 'Lithium Carbonate + HD', timestamp: '2026-07-11T08:30:00Z' },
-  { id: 'ra5', type: 'team', user: 'Alex Thompson', action: 'invited', target: 'rkim@startup.co', timestamp: '2026-07-11T08:00:00Z' },
-  { id: 'ra6', type: 'data', user: 'System', action: 'refreshed', target: 'ChEMBL pipeline', timestamp: '2026-07-11T07:00:00Z' },
-  { id: 'ra7', type: 'query', user: 'Dr. Maria Garcia', action: 'searched', target: 'Pancreatic Cancer', timestamp: '2026-07-10T18:00:00Z' },
-  { id: 'ra8', type: 'candidate', user: 'Dr. Lisa Wang', action: 'validated', target: 'Metformin → Glioblastoma', timestamp: '2026-07-10T16:00:00Z' },
-];
-
-export const milestones = [
-  { id: 'ms1', title: 'Q3 KG Expansion — 10K drugs', assignee: 'Rohan', project: 'Knowledge Graph', status: 'in_progress', progress: 65, dueDate: '2026-09-30' },
-  { id: 'ms2', title: 'RL Agent v2 — safety-aware reward', assignee: 'Manoj', project: 'Phase 4 RL', status: 'in_progress', progress: 40, dueDate: '2026-08-15' },
-  { id: 'ms3', title: 'Pharma Pilot — Oncology', assignee: 'Aseem', project: 'Partnerships', status: 'overdue', progress: 80, dueDate: '2026-07-01' },
-  { id: 'ms4', title: 'FDA Part 11 audit trail', assignee: 'Manoj', project: 'Compliance', status: 'completed', progress: 100, dueDate: '2026-06-15' },
-  { id: 'ms5', title: 'Graph Transformer v3 — HGT', assignee: 'Rohan', project: 'Phase 3 GNN', status: 'in_progress', progress: 25, dueDate: '2026-10-30' },
-];
-
-export const monthlyQueryTrend = [
-  { month: 'Jan', queries: 180 },
-  { month: 'Feb', queries: 220 },
-  { month: 'Mar', queries: 260 },
-  { month: 'Apr', queries: 240 },
-  { month: 'May', queries: 310 },
-  { month: 'Jun', queries: 342 },
-  { month: 'Jul', queries: 198 },
-];
-
-export const safetyTierDistribution = [
-  { tier: 'Green', count: 142, fill: '#1D9E75' },
-  { tier: 'Yellow', count: 78, fill: '#D4853A' },
-  { tier: 'Red', count: 27, fill: '#C0392B' },
-];
-=======
 export interface RecentActivityItem {
   id: string;
   user: string;
@@ -779,4 +619,3 @@ export const pathwayData = {
     { source: 'tf1', target: 'eff1', label: 'transcribes', type: 'activation' as const },
   ],
 };
->>>>>>> fix/v101-forensic-root-fixes-20-critical-bugs

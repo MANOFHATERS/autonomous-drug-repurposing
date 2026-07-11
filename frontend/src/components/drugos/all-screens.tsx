@@ -12,17 +12,12 @@ import {
   Edit, Trash2, Share2, Bookmark, Copy, User, Building,
   FlaskConical, Network, Target, Play, MessageSquare, Award, ShieldCheck, Server,
   FileCheck, Handshake, Microscope, Beaker, Atom, GitFork, Columns3, FolderKanban,
-<<<<<<< HEAD
-  DollarSign, Percent, Palette, Plug, ToggleRight, Network as Sitemap, Cookie, Archive,
-  BookMarked, Smartphone, Headphones, Ticket, Library, MessageCircle, Lightbulb,
-=======
   DollarSign, Percent, Palette, Plug, ToggleRight, Cookie, Archive,
   BookMarked, Smartphone, MonitorSmartphone, Headphones, Ticket, Library, MessageCircle, Lightbulb,
->>>>>>> fix/v101-forensic-root-fixes-20-critical-bugs
   RotateCcw, ShieldAlert, LogIn, UserCheck, Hourglass, Siren, Pill,
   Calculator, Gauge, Workflow, ShoppingCart, FolderLock, KeyRound, ScanSearch,
   Upload, Save, Send, Webhook, Braces, Settings2, LogOut, ArrowUpRight, ArrowDownRight,
-  Minus, CircleDot, Workflow as WorkflowIcon, LineChart as LineChartIcon, MonitorSmartphone
+  Minus, CircleDot, Workflow as WorkflowIcon, LineChart as LineChartIcon
 } from 'lucide-react'
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, ResponsiveContainer,

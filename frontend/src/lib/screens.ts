@@ -9,16 +9,6 @@ export interface ScreenMeta {
   icon: string;
 }
 
-// FE-027 unblock: sidebarCategories + ScreenCategory type referenced by
-// placeholder-screen.tsx and layout/app-shell.tsx. Built by grouping the
-// flat `screens` array by category.
-export interface ScreenCategory {
-  id: string;
-  label: string;
-  icon: string;
-  items: ScreenMeta[];
-}
-
 export const screenCategories = [
   { id: 'PUB', label: 'Public', icon: 'Globe' },
   { id: 'AUTH', label: 'Authentication', icon: 'Lock' },
@@ -293,22 +283,6 @@ export function getScreensByCategory(category: string): ScreenMeta[] {
   return screens.filter(s => s.category === category);
 }
 
-<<<<<<< HEAD
-// FE-027 unblock: alias referenced by screens/core-screen.tsx and
-// dashboard-screen.tsx. Some components import `getScreenMeta` instead of
-// `getScreenById`.
-export const getScreenMeta = getScreenById;
-
-// FE-027 unblock: sidebarCategories referenced by placeholder-screen.tsx
-// and layout/app-shell.tsx. Built by grouping `screens` by category, in
-// the order specified by `screenCategories`.
-export const sidebarCategories: ScreenCategory[] = screenCategories.map((cat) => ({
-  id: cat.id,
-  label: cat.label,
-  icon: cat.icon,
-  items: screens.filter((s) => s.category === cat.id),
-}));
-=======
 // ---------------------------------------------------------------------------
 // FE-012 + FE-013 ROOT FIX: Backward-compat aliases.
 //
@@ -350,4 +324,3 @@ export const sidebarCategories: ScreenCategory[] = buildSidebarCategories();
 export function getScreenMeta(id: string): ScreenMeta | undefined {
   return getScreenById(id);
 }
->>>>>>> fix/v101-forensic-root-fixes-20-critical-bugs

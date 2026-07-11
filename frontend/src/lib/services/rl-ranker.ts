@@ -267,7 +267,7 @@ export async function syncRlOutputToHypotheses(): Promise<number> {
           reward: c.reward ?? null,
           gnnScore: c.gnnScore ?? null,
           safetyScore: c.safetyScore ?? null,
-          literatureSupport: c.literatureSupport ?? null,
+          literatureSupport: Boolean(c.literatureSupport) ?? null,
           // Derive a 0-1 overallScore from the available signals.
           overallScore: computeOverallScore(c),
           rlModelVersion: "rl_drug_ranker.py-v101",

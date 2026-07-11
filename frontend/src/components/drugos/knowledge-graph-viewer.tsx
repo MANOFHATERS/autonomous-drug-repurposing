@@ -189,11 +189,7 @@ export function KnowledgeGraphViewer({
                         <circle
                           cx={pos.x}
                           cy={pos.y}
-<<<<<<< HEAD
-                          r={(node.size ?? 10) + 6}
-=======
                           r={(node.size || 20) + 6}
->>>>>>> fix/v101-forensic-root-fixes-20-critical-bugs
                           fill="none"
                           stroke={typeColors[node.type]}
                           strokeWidth={2}
@@ -205,11 +201,7 @@ export function KnowledgeGraphViewer({
                       <circle
                         cx={pos.x}
                         cy={pos.y}
-<<<<<<< HEAD
-                        r={(node.size ?? 10)}
-=======
                         r={node.size || 20}
->>>>>>> fix/v101-forensic-root-fixes-20-critical-bugs
                         fill={typeColors[node.type]}
                         fillOpacity={isConnected ? 0.2 : 0.1}
                         stroke={typeColors[node.type]}
@@ -218,11 +210,7 @@ export function KnowledgeGraphViewer({
                       {/* Label */}
                       <text
                         x={pos.x}
-<<<<<<< HEAD
-                        y={pos.y + (node.size ?? 10) + 14}
-=======
                         y={pos.y + (node.size || 20) + 14}
->>>>>>> fix/v101-forensic-root-fixes-20-critical-bugs
                         textAnchor="middle"
                         className="text-[10px] fill-foreground font-medium pointer-events-none"
                       >
