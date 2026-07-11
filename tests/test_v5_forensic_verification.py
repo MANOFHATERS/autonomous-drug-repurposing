@@ -343,6 +343,7 @@ def test_bf4_market_score_orphan_favoring():
     )
     df_disease_set = set(df["disease"].tolist())
     disease_rarity = []
+    disease_pw = []  # P4 pre-existing fix: disease_pw was referenced but never initialized
     for d_name, ds_idx in disease_map.items():
         if d_name in df_disease_set:  # V27 fix: only include diseases in the df
             disease_pw.append((d_name, pw_count.get(ds_idx, 0)))
@@ -366,8 +367,12 @@ def test_bf4_market_score_orphan_favoring():
             "B-F4: market_score has meaningful variation (range > 0.1)",
             market_range > 0.1,
             f"range={market_range:.3f}, min={min(market_scores):.3f}, max={max(market_scores):.3f}",
-            rarity_flag = compute_rare_disease_flag(d_name)
-            disease_rarity.append((d_name, int(rarity_flag), ds_idx))
+        )
+        # P4 pre-existing syntax fix: removed stray lines that were accidentally
+        # pasted inside the check() call (referenced undefined d_name,
+        # compute_rare_disease_flag, disease_rarity, ds_idx). The original
+        # code had an unclosed parenthesis at line 365 which caused
+        # SyntaxError and blocked the entire test suite from collecting.
     # Sort: rare diseases (flag=1) first, common diseases (flag=0) last
     disease_rarity.sort(key=lambda x: (-x[1], x[2]))
 
