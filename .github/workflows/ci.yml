@@ -463,8 +463,31 @@ jobs:
     needs: [build, lint, test, verify-p2-fixes, e2e-sample-mode]
     if: always()
     steps:
+      # ROOT FIX: this job was MISSING actions/checkout@v4, causing
+      # "No such file or directory" for working-directory: phase1.
+      # The repo was never checked out, so the verify step could never
+      # find the phase1/ directory. This is a pre-existing CI bug.
+      - uses: actions/checkout@v4
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            phase1/requirements.txt
       - name: Check all required jobs passed
         if: ${{ !(needs.build.result == 'success' && needs.lint.result == 'success' && needs.test.result == 'success' && needs.verify-p2-fixes.result == 'success' && needs.e2e-sample-mode.result == 'success') }}
+        run: |
+          echo "One or more required jobs did not pass:"
+          echo "  build:              ${{ needs.build.result }}"
+          echo "  lint:               ${{ needs.lint.result }}"
+          echo "  test:               ${{ needs.test.result }}"
+          echo "  verify-p2-fixes:    ${{ needs.verify-p2-fixes.result }}"
+          echo "  e2e-sample-mode:    ${{ needs.e2e-sample-mode.result }}"
+          exit 1
+
+      - name: Install deps
         run: |
           python -m pip install --upgrade pip
           pip install -q \

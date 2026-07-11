@@ -738,7 +738,10 @@ class ChEMBLPipeline(BasePipeline):
                         self.source_name, len(activities_df), activities_gz_path,
                     )
                 # Update sha for audit
-                self._sha256_raw = _compute_file_sha256(drugs_csv)
+                # ROOT FIX: _compute_file_sha256 is an instance method (line 4337),
+                # not a module-level function. The bare call was a pre-existing
+                # NameError that crashed the E2E sample-mode CI job.
+                self._sha256_raw = self._compute_file_sha256(drugs_csv)
                 return drugs_csv
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             # v84 FORENSIC ROOT FIX (BUG #38): narrowed from broad
