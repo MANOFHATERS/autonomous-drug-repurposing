@@ -337,6 +337,10 @@ class TestFillMissingDrugFields:
 
     def test_defaults_applied(self):
         """NaN values in drug fields are filled with proper defaults."""
+        # v90 UPDATE: conservative_defaults now defaults to True, so
+        # is_fda_approved stays None (unknown), mechanism_of_action
+        # becomes "Unknown", and smiles stays None. Test updated to
+        # match the new scientifically-correct default behavior.
         df = pd.DataFrame(
             {
                 "inchikey": ["AAA"],
@@ -349,13 +353,16 @@ class TestFillMissingDrugFields:
             }
         )
         result = fill_missing_drug_fields(df)
-        assert result["is_fda_approved"].iloc[0] == False
+        # conservative_defaults=True: is_fda_approved stays None (unknown, not False)
+        assert pd.isna(result["is_fda_approved"].iloc[0])
         assert result["drug_type"].iloc[0] == "Unknown"
         # FIX #41: max_phase default is now None (unknown), not 0 (no clinical data)
         assert pd.isna(result["max_phase"].iloc[0])
-        assert result["mechanism_of_action"].iloc[0] == ""
+        # conservative_defaults=True: mechanism_of_action becomes "Unknown"
+        assert result["mechanism_of_action"].iloc[0] == "Unknown"
         assert result["molecular_formula"].iloc[0] == ""
-        assert result["smiles"].iloc[0] == ""
+        # conservative_defaults=True: smiles stays None (prevents RDKit crashes)
+        assert pd.isna(result["smiles"].iloc[0])
 
     def test_existing_values_preserved(self):
         """Non-NaN values are not overwritten by defaults."""

@@ -1288,7 +1288,7 @@ class TestSQLFileStructure:
             "chk_ppi_database_score",
             "chk_ppi_textmining_score",
             "chk_gda_gene_symbol",
-            "chk_gda_disease_id",
+            "chk_gda_disease_id_nonempty",
             "chk_gda_disease_id_type",
             "chk_gda_disease_id_format",
             "chk_entity_mapping_confidence_range",

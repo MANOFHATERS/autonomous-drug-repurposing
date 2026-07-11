@@ -76,6 +76,19 @@ F = TypeVar("F", bound=Callable[..., Any])
 # HTTP 4xx status codes that should NOT be retried. 429 (Too Many Requests)
 # is intentionally EXCLUDED — it's a rate-limit signal and retries (with
 # exponential backoff) are the correct response.
+# 408 (Request Timeout) is ALSO intentionally EXCLUDED — it represents a
+# transient condition where the server timed out waiting for the client;
+# retrying is the correct response (the server is up, the request was just
+# too slow). 408 is NOT in this set, so is_http_4xx_error() returns False
+# for 408, and the task is retried with exponential backoff. This is the
+# scientifically correct behavior for a transient timeout.
+# v89 FORENSIC ROOT FIX (BUG #19 P1): 409 (Conflict) was MISSING from the
+#   non-retryable set. 409 indicates a state conflict on the server (e.g.
+#   concurrent writes to the same resource, optimistic-lock failure).
+#   Retrying the SAME request will not resolve the conflict — the client
+#   must change the request (e.g. re-read the current state and re-apply).
+#   Retrying 409 wasted 60 minutes of exponential backoff for an error
+#   that never self-resolves. ROOT FIX: add 409 to the non-retryable set.
 _NON_RETRYABLE_HTTP_STATUSES: frozenset[int] = frozenset(
     {
         400,  # Bad Request — malformed query, won't fix by retrying
@@ -84,6 +97,9 @@ _NON_RETRYABLE_HTTP_STATUSES: frozenset[int] = frozenset(
         403,  # Forbidden — quota exceeded / IP blocked, won't fix by retrying
         404,  # Not Found — wrong endpoint, won't fix by retrying
         405,  # Method Not Allowed — wrong HTTP verb, won't fix by retrying
+        409,  # Conflict — state conflict (concurrent write, optimistic lock);
+              # retrying the SAME request won't resolve it — must re-read
+              # and re-apply. v89 BUG #19.
         410,  # Gone — resource permanently removed, won't fix by retrying
         451,  # Unavailable For Legal Reasons — geo-blocked, won't fix
     }

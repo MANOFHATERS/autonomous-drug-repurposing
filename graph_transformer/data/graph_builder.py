@@ -13,8 +13,9 @@ FIX vs original codebase (B8):
 """
 from __future__ import annotations
 
+import hashlib
 import logging
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -26,6 +27,39 @@ from . import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _deterministic_seed(*parts: str) -> int:
+    """Deterministic 31-bit seed from string parts using SHA-256.
+
+    ROOT FIX (v89 P0): Python's built-in ``hash()`` is randomized per
+    process via ``PYTHONHASHSEED`` for security (defense against hash-
+    collision DoS attacks). This means ``hash("aspirin")`` returns a
+    DIFFERENT integer in every Python process. The previous code used
+    ``hash(drug_name) + hash(disease_name)`` to seed the multi-hop path
+    RNG, which made:
+
+      1. Graph topology NON-REPRODUCIBLE across processes (different
+         drug-protein-pathway-disease paths injected each run).
+      2. Train/test splits NON-REPRODUCIBLE (the demo graph differs
+         between the training run and the evaluation run).
+      3. CI flakes (the same commit could pass CI once and fail once,
+         because the random graph topology differed).
+      4. Bug reproduction impossible (a user reports "GT AUC = 0.27"
+         but the developer's run produces a different graph and gets
+         AUC = 0.85).
+
+    The fix: SHA-256 hash the concatenated parts and take the low 31
+    bits as the seed. SHA-256 is deterministic across processes,
+    platforms, and Python versions. The 31-bit mask keeps the value
+    in the valid range for ``np.random.default_rng`` (which accepts
+    any non-negative int up to 2**63-1, but 31 bits is plenty of
+    entropy for a per-pair seed and matches the previous ``% (2**31)``
+    behavior).
+    """
+    h = hashlib.sha256("|".join(str(p) for p in parts).encode("utf-8"))
+    # Take first 4 bytes (32 bits), mask to 31 bits (non-negative).
+    return int.from_bytes(h.digest()[:4], "big") & 0x7FFFFFFF
 
 
 class BiomedicalGraphBuilder:
@@ -877,52 +911,33 @@ class BiomedicalGraphBuilder:
         for drug_name, disease_name in injected_pairs:
             builder.add_edge("drug", "treats", "disease", drug_name, disease_name)
             known_pairs.append((drug_name, disease_name))
-            # V30: NO multi-hop injection. The model learns from natural
-            # topology (random drug→protein, protein→pathway, pathway→disease
-            # edges created above). This is the HONEST signal.
-
-            # V31 ROOT FIX (P0-1 / KP Recovery): inject a multi-hop
-            # biological plausibility path for KP drugs WITHOUT adding
-            # the "treats" label edge (that was already added above).
+            # v89 P0 ROOT FIX (Compound #3 / AUC fraud chain): REMOVED the
+            # 3-hop path injection (drug→inhibits→protein→part_of→pathway→
+            # disrupted_in→disease) for KNOWN POSITIVES.
             #
-            # SCIENTIFIC RATIONALE: in a REAL biomedical knowledge graph
-            # (Phase 1-2, built from DrugBank + STRING + DisGeNET),
-            # known-positive drugs like aspirin have REAL biological
-            # paths: aspirin → COX-1 → inflammatory pathway →
-            # inflammation. The "treats" edge (aspirin → inflammation)
-            # is the LABEL; the multi-hop path is the BIOLOGICAL EVIDENCE.
+            # The previous V31 "fix" REINTRODUCED the exact label leakage
+            # that V30 had removed. The audit (v89) confirmed:
+            #   - For every KP, a GUARANTEED drug→protein→pathway→disease
+            #     path was injected.
+            #   - LABEL_LEAKING_EDGES only strips the direct "treats" edge
+            #     during training, NOT the injected 3-hop path.
+            #   - The GT model trivially learned "3-hop path exists →
+            #     positive" → val AUC = 1.0 (perfect, fraudulent).
+            #   - The scientific-validation gate (GT AUC > 0.85) passed
+            #     trivially because the leakage inflated the AUC.
             #
-            # The V30 fix removed ALL multi-hop injection (Compound #3)
-            # because the W-02 code injected paths for RANDOM pairs
-            # (noise). But removing paths for KPs too left the held-out
-            # KP drugs with NO graph signal → the model couldn't score
-            # them → KP recovery = 0%.
+            # The model MUST learn from NATURAL TOPOLOGY only — the random
+            # drug→protein, protein→pathway, pathway→disease edges created
+            # above. This is the HONEST signal. Demo AUC will be lower
+            # (the model has no leakage crutch), but this is the TRUE
+            # measure of the model's generalization ability.
             #
-            # The V31 fix injects REAL biological plausibility paths
-            # (drug → protein → pathway → disease) for KPs. This is NOT
-            # label leakage — the "treats" edge is still the prediction
-            # target. The multi-hop path is the TOPOLOGICAL EVIDENCE the
-            # model uses to predict the treatment. The model learns from
-            # training positives that "path exists → high score", then
-            # applies this to KP drugs (which have paths but whose
-            # "treats" edges are held out from training).
-            #
-            # This is EXACTLY how the system works in production: the
-            # graph contains topology (paths from DrugBank/STRING), and
-            # the model predicts which drug-disease pairs are treatments
-            # based on the topology.
-            if len(dedicated_proteins) > 0 and len(dedicated_pathways) > 0:
-                # v89: ROUND-ROBIN unique assignment — no rng.choice, no
-                # cross-contamination within the dedicated pool.
-                kp_protein = _next_dedicated_protein()
-                kp_pathway = _next_dedicated_pathway()
-                if not kp_protein or not kp_pathway:
-                    continue
-                builder.add_edge("drug", "inhibits", "protein", drug_name, kp_protein)
-                builder.add_edge("protein", "part_of", "pathway", kp_protein, kp_pathway)
-                builder.add_edge(
-                    "pathway", "disrupted_in", "disease", kp_pathway, disease_name
-                )
+            # In production, the real Phase 1→2 pipeline injects REAL
+            # topology from DrugBank + STRING + DisGeNET (not synthetic
+            # 3-hop paths for KPs). The KP drugs have REAL biological
+            # paths in the production KG because they are REAL drugs with
+            # REAL mechanisms — not because the demo builder synthesizes
+            # them.
 
         # ------------------------------------------------------------------
         # V31 ROOT FIX (P0-1 / Compound #3): inject CURATED TRAINING
@@ -975,58 +990,39 @@ class BiomedicalGraphBuilder:
             builder.add_edge("drug", "treats", "disease", drug_name, disease_name)
             training_positives_added += 1
 
-            # V31 ROOT FIX (P0-1 continued): inject a GUARANTEED multi-hop
-            # biological plausibility path (drug -> protein -> pathway ->
-            # disease) for EACH training positive. This simulates what a
-            # REAL biomedical knowledge graph (Phase 1-2, built from
-            # DrugBank + STRING + DisGeNET) would contain: drugs that
-            # treat a disease share protein targets and pathway
-            # connectivity with that disease.
+            # v89 P0 ROOT FIX (Compound #3 / AUC fraud chain): REMOVED the
+            # 3-hop path injection for TRAINING POSITIVES too.
             #
-            # CRITICAL DIFFERENCE from the V30 W-02 fix that was REMOVED:
-            #   - W-02 (REMOVED) injected paths for RANDOM pairs and KPs.
-            #     This trained the model on noise (Compound #3 fix).
-            #   - V31 injects paths ONLY for REAL DrugBank/RepoDB training
-            #     positives. This simulates real biomedical topology.
+            # The V31 "fix" injected a GUARANTEED drug→protein→pathway→
+            # disease path for EACH training positive. This is the SAME
+            # label leakage as the KP injection above: the model learned
+            # "3-hop path exists → positive" trivially, then generalized
+            # this rule to the held-out KPs (which also had injected
+            # paths, before the v89 fix above removed them).
             #
-            # The KPs (held out by C-3 fix) do NOT get path injection,
-            # so the recovery test remains a TRUE generalization measure.
-            # The model must learn the GENERAL pattern "drugs that share
-            # pathway connectivity with a disease tend to treat it" from
-            # the training positives, then apply it to the held-out KPs.
+            # The audit (v89) confirmed the compound bug chain:
+            #   graph_builder.py injects 3-hop path for every training
+            #   positive → LABEL_LEAKING_EDGES only strips direct treats
+            #   edge, not the path → GT model learns "3-hop path exists
+            #   → positive" → val AUC = 1.0 → scientific-validation gate
+            #   passes trivially → ship garbage to pharma partners.
             #
-            # If the drug already has drug->protein edges from the random
-            # generator above, we ADD one more (to a NEW protein) that
-            # connects to a pathway that connects to the target disease.
-            # This guarantees at least one learnable multi-hop path per
-            # training positive.
-            if len(dedicated_proteins) > 0 and len(dedicated_pathways) > 0:
-                # v89: ROUND-ROBIN unique assignment — no rng.choice, no
-                # cross-contamination within the dedicated pool.
-                protein = _next_dedicated_protein()
-                pathway = _next_dedicated_pathway()
-                if not protein or not pathway:
-                    continue
-                # drug -> inhibits -> protein
-                builder.add_edge("drug", "inhibits", "protein", drug_name, protein)
-                # protein -> part_of -> pathway
-                builder.add_edge("protein", "part_of", "pathway", protein, pathway)
-                # pathway -> disrupted_in -> disease
-                builder.add_edge(
-                    "pathway", "disrupted_in", "disease", pathway, disease_name
-                )
+            # The training positives are STILL added as "treats" edges
+            # (the line above this comment block), so the GT model has
+            # real positive signal. But NO synthetic 3-hop path is
+            # injected. The model must learn from NATURAL topology.
 
         if training_positives_added > 0:
             logger.info(
-                f"V31 ROOT FIX (P0-1): injected {training_positives_added} "
-                f"CURATED TRAINING POSITIVES (real DrugBank/RepoDB drug-"
-                f"disease pairs, NON-KP drugs) as 'treats' edges, EACH with "
-                f"a guaranteed drug->protein->pathway->disease multi-hop "
-                f"biological plausibility path (simulating real biomedical "
-                f"KG topology). The GT model now has REAL learnable signal. "
-                f"KPs remain held out (C-3 fix) for the recovery test — "
-                f"they do NOT get path injection, so the recovery test "
-                f"remains a TRUE generalization measure."
+                f"v89 P0 ROOT FIX (Compound #3): injected "
+                f"{training_positives_added} CURATED TRAINING POSITIVES "
+                f"(real DrugBank/RepoDB drug-disease pairs, NON-KP drugs) "
+                f"as 'treats' edges ONLY. NO synthetic 3-hop path "
+                f"injection (the V31 injection was label leakage — "
+                f"LABEL_LEAKING_EDGES only strips the direct treats edge, "
+                f"not the injected path, so the model learned '3-hop path "
+                f"exists → positive' trivially and val AUC = 1.0). The "
+                f"model now learns from NATURAL topology only."
             )
 
         # V30 ROOT FIX (3.10): REMOVED the random "known positives"
@@ -1069,5 +1065,295 @@ class BiomedicalGraphBuilder:
             f"{len(known_pairs)} known treatment pairs "
             f"({len(injected_pairs)} named positives injected)"
         )
+
+        return node_features, edge_indices, node_maps, known_pairs
+
+    # ------------------------------------------------------------------
+    # ROOT FIX (Phase 1+2+3+4 100% Connection):
+    # from_phase1_staged_data — build a REAL graph from Phase 1→2 output
+    # ------------------------------------------------------------------
+    # The user's forensic audit found that Phase 3 (Graph Transformer)
+    # and Phase 4 (RL Ranker) were 0% connected to Phase 1 (Data
+    # Ingestion) and Phase 2 (Knowledge Graph). The only graph
+    # construction path was ``build_demo_graph()``, which generates a
+    # SYNTHETIC random graph with hardcoded drug names. The 8,500 lines
+    # of Phase 1 pipeline code and the Phase 2 bridge were DEAD in the
+    # Phase 3+4 run path.
+    #
+    # This method is the missing wire. It accepts a ``Phase1StagedData``
+    # (produced by ``phase2.drugos_graph.phase1_bridge.stage_phase1_to_phase2``)
+    # — or any duck-typed object with the same shape — and converts it
+    # into the ``(node_features, edge_indices, node_maps, known_pairs)``
+    # tuple that the GT model and RL bridge expect.
+    #
+    # The conversion is lossless and bidirectionally traceable:
+    #   - Every Phase 2 node label is mapped to a Phase 3 node type.
+    #   - Every Phase 2 edge relation is mapped to a Phase 3 edge type.
+    #   - Known treatment pairs are extracted from REAL ``(Compound,
+    #     treats, Disease)`` edges — NOT synthetic random pairs.
+    #
+    # Node label mapping (Phase 2 → Phase 3):
+    #   Compound       → drug
+    #   Protein        → protein
+    #   Pathway        → pathway
+    #   Disease        → disease
+    #   ClinicalOutcome→ clinical_outcome
+    #   Gene           → (skipped — not in the DOCX 5-node-type spec;
+    #                    gene info is captured via protein→pathway edges)
+    #
+    # Edge relation mapping (Phase 2 → Phase 3):
+    #   (Compound, inhibits, Protein)         → (drug, inhibits, protein)
+    #   (Compound, activates, Protein)        → (drug, activates, protein)
+    #   (Compound, targets, Protein)          → (drug, inhibits, protein)
+    #   (Compound, treats, Disease)           → (drug, treats, disease)
+    #   (Compound, tested_for, Disease)       → (drug, tested_for, disease)
+    #   (Compound, causes, ClinicalOutcome)   → (drug, causes, clinical_outcome)
+    #   (Protein, part_of, Pathway)           → (protein, part_of, pathway)
+    #   (Protein, participates_in, Pathway)   → (protein, part_of, pathway)
+    #   (Pathway, disrupted_in, Disease)      → (pathway, disrupted_in, disease)
+    #   Other edges (Gene→Disease, Protein→Protein) → skipped (not in
+    #   the Phase 3 14-edge-type schema; logged at INFO for auditability)
+    # ------------------------------------------------------------------
+    _PHASE2_TO_PHASE3_NODE_TYPE: Dict[str, str] = {
+        "Compound": "drug",
+        "Protein": "protein",
+        "Pathway": "pathway",
+        "Disease": "disease",
+        "ClinicalOutcome": "clinical_outcome",
+    }
+
+    _PHASE2_TO_PHASE3_EDGE_TYPE: Dict[Tuple[str, str, str], Tuple[str, str, str]] = {
+        ("Compound", "inhibits", "Protein"): ("drug", "inhibits", "protein"),
+        ("Compound", "activates", "Protein"): ("drug", "activates", "protein"),
+        ("Compound", "targets", "Protein"): ("drug", "inhibits", "protein"),
+        ("Compound", "unknown", "Protein"): ("drug", "inhibits", "protein"),
+        ("Compound", "allosterically_modulates", "Protein"): ("drug", "activates", "protein"),
+        ("Compound", "treats", "Disease"): ("drug", "treats", "disease"),
+        ("Compound", "tested_for", "Disease"): ("drug", "tested_for", "disease"),
+        ("Compound", "causes", "ClinicalOutcome"): ("drug", "causes", "clinical_outcome"),
+        ("Protein", "part_of", "Pathway"): ("protein", "part_of", "pathway"),
+        ("Protein", "participates_in", "Pathway"): ("protein", "part_of", "pathway"),
+        ("Pathway", "disrupted_in", "Disease"): ("pathway", "disrupted_in", "disease"),
+    }
+
+    @staticmethod
+    def from_phase1_staged_data(
+        staged_data: Any,
+        seed: int = 42,
+    ) -> Tuple[
+        Dict[str, torch.Tensor],
+        Dict[Tuple[str, str, str], torch.Tensor],
+        Dict[str, Dict[str, int]],
+        List[Tuple[str, str]],
+    ]:
+        """Build a REAL knowledge graph from Phase 1→2 staged data.
+
+        This is the Phase 2 → Phase 3 bridge: it takes the
+        ``Phase1StagedData`` produced by
+        ``phase2.drugos_graph.phase1_bridge.stage_phase1_to_phase2()``
+        (which itself consumes REAL Phase 1 CSVs / PostgreSQL output)
+        and converts it into the ``(node_features, edge_indices,
+        node_maps, known_pairs)`` format that the Graph Transformer
+        model and the GT-RL bridge expect.
+
+        Unlike ``build_demo_graph()`` (which generates a SYNTHETIC
+        random graph with hardcoded drug names), this method produces a
+        graph from REAL biomedical data — the 7 sources (ChEMBL,
+        DrugBank, UniProt, STRING, DisGeNET, OMIM, PubChem) that Phase
+        1 ingested. The known_pairs are extracted from REAL
+        ``(Compound, treats, Disease)`` edges (sourced from
+        DrugBank indications), NOT synthetic random pairs.
+
+        Args:
+            staged_data: A ``Phase1StagedData`` (or duck-typed object)
+                with attributes ``compound_nodes``, ``protein_nodes``,
+                ``pathway_nodes``, ``disease_nodes``,
+                ``clinical_outcome_nodes``, and ``edges`` (a dict
+                keyed by ``(src_label, rel, dst_label)`` tuples).
+            seed: Random seed for reproducible feature initialization.
+
+        Returns:
+            Tuple of (node_features, edge_indices, node_maps,
+            known_pairs) — identical shape to ``build_demo_graph()``.
+
+        Raises:
+            ValueError: If the staged data has zero Compound nodes or
+                zero Disease nodes (the GT model cannot train without
+                both).
+        """
+        rng = np.random.default_rng(seed)
+        builder = BiomedicalGraphBuilder(
+            feature_dims=DEFAULT_FEATURE_DIMS, seed=seed
+        )
+
+        # ─── Register nodes (Phase 2 label → Phase 3 type) ──────────
+        # Phase 1 CSVs carry metadata (InChIKey, SMILES, UniProt ID,
+        # etc.) but NOT feature vectors. The GT model learns from graph
+        # TOPOLOGY (edges), so we initialize features with seeded
+        # standard_normal (magnitude ~1, matching He/Xavier init
+        # expectations). In production, replace with Morgan fingerprints
+        # for drugs, ESM-2 embeddings for proteins, etc.
+        node_collections = {
+            "Compound": getattr(staged_data, "compound_nodes", []),
+            "Protein": getattr(staged_data, "protein_nodes", []),
+            "Pathway": getattr(staged_data, "pathway_nodes", []),
+            "Disease": getattr(staged_data, "disease_nodes", []),
+            "ClinicalOutcome": getattr(staged_data, "clinical_outcome_nodes", []),
+        }
+
+        # Map: (phase3_type, phase2_node_id) → phase3_node_name
+        # We use the human-readable ``name`` when available (so the RL
+        # ranker's KNOWN_POSITIVES list can match by drug name), falling
+        # back to the canonical ``id``.
+        phase2_id_to_phase3_name: Dict[Tuple[str, str], str] = {}
+        nodes_registered_by_type: Dict[str, int] = {}
+
+        for phase2_label, nodes in node_collections.items():
+            phase3_type = BiomedicalGraphBuilder._PHASE2_TO_PHASE3_NODE_TYPE.get(phase2_label)
+            if phase3_type is None:
+                logger.warning(
+                    f"from_phase1_staged_data: skipping unknown Phase 2 "
+                    f"node label '{phase2_label}' ({len(nodes)} nodes)."
+                )
+                continue
+            names: List[str] = []
+            for node in nodes:
+                node_id = str(node.get("id", "")).strip()
+                node_name = str(node.get("name", "")).strip()
+                # Prefer the human-readable name (e.g. "aspirin") so the
+                # RL ranker's KNOWN_POSITIVES list can match by name.
+                # Fall back to the canonical ID (e.g. "DB00001") when
+                # the name is empty or a placeholder.
+                display_name = node_name if node_name and node_name.lower() not in (
+                    "", "nan", "none", "null", "unknown"
+                ) else node_id
+                if not display_name:
+                    logger.warning(
+                        f"from_phase1_staged_data: skipping {phase2_label} "
+                        f"node with no id and no name: {node}"
+                    )
+                    continue
+                # Deduplicate: if the display_name already exists for
+                # this node type, skip (Phase 1 may produce duplicates
+                # across sources — e.g. ChEMBL + DrugBank both list
+                # aspirin).
+                if display_name in names:
+                    continue
+                names.append(display_name)
+                phase2_id_to_phase3_name[(phase3_type, node_id)] = display_name
+
+            if not names:
+                logger.info(
+                    f"from_phase1_staged_data: no {phase2_label} nodes to "
+                    f"register (phase3_type={phase3_type})."
+                )
+                continue
+
+            feat_dim = DEFAULT_FEATURE_DIMS[phase3_type]
+            features = rng.standard_normal((len(names), feat_dim)).astype(np.float32)
+            builder.register_nodes(phase3_type, names, features)
+            nodes_registered_by_type[phase3_type] = len(names)
+            logger.info(
+                f"from_phase1_staged_data: registered {len(names)} "
+                f"{phase3_type} nodes (from Phase 2 label '{phase2_label}')."
+            )
+
+        # Validate the minimum graph: the GT model needs at least 1 drug
+        # and 1 disease to produce any drug-disease prediction.
+        if nodes_registered_by_type.get("drug", 0) == 0:
+            raise ValueError(
+                "from_phase1_staged_data: staged data has ZERO Compound "
+                "(drug) nodes. The GT model cannot train without drug "
+                "nodes. Check that Phase 1 produced drugbank_drugs.csv "
+                "and that the bridge staged it into compound_nodes."
+            )
+        if nodes_registered_by_type.get("disease", 0) == 0:
+            raise ValueError(
+                "from_phase1_staged_data: staged data has ZERO Disease "
+                "nodes. The GT model cannot train without disease "
+                "nodes. Check that Phase 1 produced "
+                "omim_gene_disease_associations.csv and that the bridge "
+                "staged it into disease_nodes."
+            )
+
+        # ─── Register edges (Phase 2 relation → Phase 3 edge type) ──
+        edges_by_phase3_type: Dict[Tuple[str, str, str], int] = {}
+        known_pairs: List[Tuple[str, str]] = []
+        edges_staged = getattr(staged_data, "edges", {}) or {}
+
+        for (src_label, rel, dst_label), edge_list in edges_staged.items():
+            phase3_edge = BiomedicalGraphBuilder._PHASE2_TO_PHASE3_EDGE_TYPE.get(
+                (src_label, rel, dst_label)
+            )
+            if phase3_edge is None:
+                logger.info(
+                    f"from_phase1_staged_data: skipping "
+                    f"({src_label}, {rel}, {dst_label}) edges — not in "
+                    f"the Phase 3 14-edge-type schema ({len(edge_list)} "
+                    f"edges skipped)."
+                )
+                continue
+
+            p3_src, p3_rel, p3_dst = phase3_edge
+            added = 0
+            for edge in edge_list:
+                src_id = str(edge.get("src_id", edge.get("source_id", ""))).strip()
+                dst_id = str(edge.get("dst_id", edge.get("target_id", ""))).strip()
+                src_name = phase2_id_to_phase3_name.get((p3_src, src_id))
+                dst_name = phase2_id_to_phase3_name.get((p3_dst, dst_id))
+                if src_name is None or dst_name is None:
+                    # The edge references a node that was skipped (e.g.
+                    # a Gene→Disease edge where Gene nodes are not in
+                    # the Phase 3 schema). Log at DEBUG and skip.
+                    logger.debug(
+                        f"from_phase1_staged_data: skipping edge "
+                        f"({src_label},{rel},{dst_label}) "
+                        f"{src_id}→{dst_id} — node not registered "
+                        f"(src_name={src_name}, dst_name={dst_name})."
+                    )
+                    continue
+                added_ok = builder.add_edge(p3_src, p3_rel, p3_dst, src_name, dst_name)
+                if added_ok:
+                    added += 1
+                    # Extract known treatment pairs from REAL treats edges.
+                    if p3_rel == "treats" and p3_src == "drug" and p3_dst == "disease":
+                        known_pairs.append((src_name, dst_name))
+
+            if added > 0:
+                edges_by_phase3_type[phase3_edge] = added
+                logger.info(
+                    f"from_phase1_staged_data: added {added} "
+                    f"({p3_src}, {p3_rel}, {p3_dst}) edges (from Phase 2 "
+                    f"({src_label}, {rel}, {dst_label}))."
+                )
+
+        # ─── Finalize: build reverse edges + tensorize ──────────────
+        builder._sync_edge_lists()
+        builder._edge_lists = BiomedicalGraphBuilder._build_reverse_edges(
+            builder._edge_lists
+        )
+        node_features, edge_indices, node_maps = builder.finalize()
+
+        total_nodes = sum(nodes_registered_by_type.values())
+        total_edges = sum(edges_by_phase3_type.values())
+        logger.info(
+            f"from_phase1_staged_data: REAL graph built from Phase 1→2 "
+            f"staged data — {total_nodes} nodes ({nodes_registered_by_type}), "
+            f"{total_edges} forward edges ({len(edges_by_phase3_type)} types), "
+            f"{len(known_pairs)} REAL known treatment pairs (from "
+            f"Compound→treats→Disease edges)."
+        )
+
+        if not known_pairs:
+            logger.warning(
+                f"from_phase1_staged_data: ZERO known treatment pairs "
+                f"extracted from the staged data. The GT model will have "
+                f"no positive training labels. Check that Phase 1 "
+                f"produced drugbank_indications.csv and that the bridge "
+                f"staged (Compound, treats, Disease) edges. Falling back "
+                f"to the RL ranker's KNOWN_POSITIVES list for recovery "
+                f"testing (these will be injected as held-out edges by "
+                f"the bridge if needed)."
+            )
 
         return node_features, edge_indices, node_maps, known_pairs

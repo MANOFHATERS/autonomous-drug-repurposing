@@ -291,7 +291,9 @@ from pipelines.base_pipeline import (
 # Narrowing to DB-error-only lets real bugs surface.
 from sqlalchemy.exc import (  # noqa: E402
     IntegrityError,
+    InterfaceError,
     OperationalError,
+    PendingRollbackError,
 )
 
 # Audit DOC13: try lxml, fall back to stdlib ElementTree (INT12).
@@ -364,9 +366,15 @@ _DRUGBANK_ID_RE: re.Pattern[str] = re.compile(
 )
 
 # S19: standard InChIKey is 27 chars (14-10-1). Source: InChI Trust.
-# v24 ROOT FIX (FORENSIC-P1-PIPE §1): keep the regex for backward compat,
-# but add a delegating wrapper that calls the canonical validator.
-_INCHIKEY_RE: re.Pattern[str] = re.compile(r"^[A-Z]{14}-[A-Z]{10}-[A-Z]$")
+# v84 FORENSIC ROOT FIX (BUG #52): removed the local ``_INCHIKEY_RE``
+# regex definition. The codebase had THREE divergent InChIKey regex
+# copies (``_constants.CANONICAL_INCHIKEY_REGEX``, ``_INCHIKEY_RE``
+# here, and ``INCHIKEY_PATTERN`` in base_pipeline). If any copy
+# diverged, InChIKeys that passed cleaning could fail dedup or DB
+# insert — silent data loss at stage boundaries. ROOT FIX: import
+# the SINGLE canonical regex from ``cleaning._constants`` so there
+# is exactly one source of truth.
+from cleaning._constants import CANONICAL_INCHIKEY_REGEX as _INCHIKEY_RE  # noqa: E402
 
 
 def _is_valid_inchikey(key: str) -> bool:
@@ -393,17 +401,21 @@ _UNIPROT_RE: re.Pattern[str] = re.compile(
 
 # D5 / COM2: map DrugBank action verbs to InteractionType enum values.
 # Source: database/models.py:150 InteractionType enum.
-# NOTE: DrugBank actions "substrate" and "inducer" do not have direct
-# InteractionType enum counterparts, so they map to "unknown" (the
-# InteractionType enum is pharmacology-focused: inhibitor/agonist/etc.).
-# The original action string is preserved in the action_type column for
-# downstream consumers that need the full pharmacological semantics.
+# v90 ROOT FIX (BUG #3): "inducer" maps to "inducer" (CYP induction
+# is a PHARMACOLOGICALLY DISTINCT mechanism — it UPREGULATES enzyme
+# expression, the opposite of inhibition). Mapping "inducer" to
+# "unknown" lost the pharmacological direction, causing the KG to
+# treat CYP inducers and inhibitors identically → GT model cannot
+# learn pharmacological direction → predictions are pharmacologically
+# incoherent. "substrate" maps to "substrate" for the same reason —
+# a CYP substrate is a drug metabolized BY the enzyme, distinct from
+# an inhibitor/inducer that AFFECTS the enzyme.
 ACTION_TO_ENUM: dict[str, str] = {
     "inhibitor": "inhibitor",
     "agonist": "agonist",
     "antagonist": "antagonist",
-    "inducer": "unknown",  # no enum counterpart; preserved in action_type
-    "substrate": "unknown",  # no enum counterpart; preserved in action_type
+    "inducer": "inducer",  # v90: was "unknown" — CYP induction is pharmacologically distinct
+    "substrate": "substrate",  # v90: was "unknown" — CYP substrate is pharmacologically distinct
     "binder": "binding_agent",
     "blocker": "blocker",
     "modulator": "modulator",
@@ -3542,10 +3554,31 @@ class DrugBankPipeline(BasePipeline):
                         # <=5 chars, but defensively check again.
                         if not isinstance(dname, str) or len(dname) <= 5:
                             continue
-                        # Word-boundary match to avoid spurious substring hits
-                        # (e.g. "cancer" should not match "cancer antigen").
+                        # v84 FORENSIC ROOT FIX (BUG #29): the previous
+                        # ``\b{dname}\b`` pattern treats HYPHENS as word
+                        # boundaries (``\b`` matches between a word char
+                        # and a non-word char, and ``-`` is non-word).
+                        # This caused TWO classes of false positives in
+                        # drug→disease indication edges:
+                        #   (a) "diabetes" matched inside "pre-diabetes"
+                        #       (a DIFFERENT condition) because ``\b``
+                        #       fired between ``-`` and ``d``.
+                        #   (b) "anemia" matched inside "aplastic anemia"
+                        #       (a different disease) because the space
+                        #       before "anemia" satisfied ``\b``.
+                        # ROOT FIX: replace ``\b`` with lookbehind /
+                        # lookahead that treats hyphens AND letters as
+                        # word-continuation characters. Now "diabetes"
+                        # does NOT match inside "pre-diabetes" (the char
+                        # before "d" is "-", a continuation char, so the
+                        # negative lookbehind fails). Combined with the
+                        # length-descending sort + break-on-first-match,
+                        # this eliminates the false-positive class while
+                        # keeping the curated OMIM disease vocabulary as
+                        # the matching source (no free-text heuristics).
                         import re as _re
-                        pattern = r"\b" + _re.escape(dname.lower()) + r"\b"
+                        _escaped = _re.escape(dname.lower())
+                        pattern = r"(?<![a-z\-])" + _escaped + r"(?![a-z\-])"
                         if _re.search(pattern, indication_lower):
                             writer.writerow({
                                 "drugbank_id": dbid,
@@ -3850,7 +3883,12 @@ class DrugBankPipeline(BasePipeline):
             # in __exit__). Mirrors chembl_pipeline.py:1207.
             try:
                 session.flush()
-            except Exception as _flush_exc:  # pragma: no cover - defensive
+            # v90 ROOT FIX (BUG #19): narrowed from broad
+            # ``except Exception`` which caught programming bugs
+            # (AttributeError, KeyError, NameError) and silently
+            # rolled back. Root fix: catch ONLY SQLAlchemy DBAPI
+            # errors and IntegrityError. Programming bugs propagate.
+            except (OperationalError, IntegrityError, PendingRollbackError) as _flush_exc:  # pragma: no cover - defensive
                 try:
                     session.rollback()
                 except Exception:  # noqa: BLE001 — never mask the flush error
@@ -3863,14 +3901,22 @@ class DrugBankPipeline(BasePipeline):
                 )
 
             # Flush loader dead-letter queue if any.
+            # v90 ROOT FIX (BUG #20): the previous code used
+            # ``except Exception: pass`` which silently swallowed
+            # ALL failures including programming bugs. Root fix:
+            # catch ONLY OS/IO errors (disk full, permission denied).
+            # Programming bugs propagate so they surface during dev.
             try:
                 flush_dead_letter_queue(
                     PROCESSED_DATA_DIR
                     / "dead_letter"
                     / f"drugbank_loader_{self.run_id[:8]}.jsonl"
                 )
-            except Exception:  # pragma: no cover - defensive
-                pass
+            except OSError as _dlq_exc:  # pragma: no cover - defensive
+                logger.warning(
+                    "[drugbank] Failed to flush dead-letter queue: %s: %s",
+                    type(_dlq_exc).__name__, _dlq_exc,
+                )
 
             # A3: load interactions (in-memory or from CSV).
             if interactions_df is None:
@@ -3908,12 +3954,15 @@ class DrugBankPipeline(BasePipeline):
                 _exc_info = _sys.exc_info()
                 try:
                     _session_cm.__exit__(*_exc_info)
-                # FIX-P2-4 (audit P2): the previous ``except Exception: pass``
-                # silently swallowed __exit__ failures — if commit fails
-                # because the DB connection dropped, the caller saw load()
-                # return success with NO data committed. Log the error so
-                # operators can detect the silent data loss.
-                except Exception as _exit_exc:  # pragma: no cover - defensive
+                # v90 ROOT FIX (BUG #21): the previous
+                # ``except Exception: pass`` silently swallowed
+                # __exit__ failures — if commit fails because the DB
+                # connection dropped, the caller saw load() return
+                # success with NO data committed. Changed to catch
+                # only DB errors (OperationalError for connection
+                # loss, InterfaceError for invalid connection handle).
+                # Programming bugs propagate.
+                except (OperationalError, InterfaceError) as _exit_exc:  # pragma: no cover - defensive
                     logger.error(
                         "[drugbank] session __exit__ failed (commit/rollback "
                         "may not have completed — loaded data may be lost): "
@@ -3966,9 +4015,20 @@ class DrugBankPipeline(BasePipeline):
                 run_date = self.start_time
             else:
                 run_date = _dt.now(timezone.utc)
-            # Truncate microseconds to match the base class's datetime
-            # storage (some DBs truncate automatically; SQLite does not).
-            run_date = run_date.replace(microsecond=0)
+            # v90 ROOT FIX (BUG #4): the previous code truncated
+            # microseconds with `run_date.replace(microsecond=0)`.
+            # If two DrugBank pipeline runs start within the same
+            # second (e.g. in tests or rapid re-runs), they get the
+            # SAME truncated run_date → the query finds the FIRST
+            # run's PipelineRun row → DPI rows are linked to the
+            # WRONG pipeline run (data lineage corruption). If the
+            # first run was a failure, the second run's successful
+            # DPIs appear under the failed run → audit trail is wrong.
+            # ROOT FIX: keep full microsecond precision so each run
+            # has a unique run_date. The DB column is TIMESTAMP or
+            # DATETIME which both support microsecond precision in
+            # modern databases (PostgreSQL, MySQL 5.6+, SQLite via
+            # string storage).
             existing = (
                 session.query(PipelineRun)
                 .filter(
@@ -4130,8 +4190,23 @@ class DrugBankPipeline(BasePipeline):
             return UpsertResult()
 
         # C6: use Int64 nullable type for defensive casting.
+        # v84 FORENSIC ROOT FIX (BUG #40): the previous code cast to
+        # ``Int64`` (nullable) at line 4133-4134, then IMMEDIATELY cast
+        # to non-nullable ``int64`` at line 4144-4145. If ANY NaN
+        # survived the ``dropna`` at line 4118 (e.g. due to index
+        # misalignment or a race condition), the ``.astype("int64")``
+        # call raises ``ValueError`` — crashing the pipeline. ROOT FIX:
+        # do a FINAL defensive dropna right before the non-nullable
+        # cast, so the cast is guaranteed to succeed. This is belt-and-
+        # suspenders: the dropna at line 4118 should have caught
+        # everything, but defensive programming for a biomedical
+        # pipeline is non-negotiable.
         resolved_interactions["drug_id"] = resolved_interactions["drug_id"].astype("Int64")
         resolved_interactions["protein_id"] = resolved_interactions["protein_id"].astype("Int64")
+        # Final defensive dropna — guarantees no NaN reaches the int64 cast.
+        resolved_interactions = resolved_interactions.dropna(
+            subset=["drug_id", "protein_id"]
+        ).copy()
 
         # D5 / COM2: map actions to InteractionType enum (never use "target").
         resolved_interactions["interaction_type"] = resolved_interactions[

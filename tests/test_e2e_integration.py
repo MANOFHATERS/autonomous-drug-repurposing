@@ -608,13 +608,28 @@ def test_b13_compute_auc_uses_known_positives():
 # ===================================================================
 
 def test_b14_run_pipeline_evaluates_on_test_env():
-    """B14 fix: run_pipeline must build a test_env for evaluate_agent."""
+    """B14 fix: run_pipeline must build a test_env for evaluate_agent.
+
+    v89 P0: the call signature changed to pass vec_normalize (the
+    VecNormalize wrapper from training) so the obs is normalized at
+    inference. The test now checks for the multi-line call pattern.
+    """
     from rl_drug_ranker import run_pipeline
     import inspect
 
     src = inspect.getsource(run_pipeline)
-    has_test_env = "test_env" in src and "evaluate_agent(model, test_env" in src
-    _report("B14: run_pipeline builds test_env for evaluate_agent", has_test_env)
+    # v89: the call is now multi-line:
+    #   candidates = evaluate_agent(
+    #       model, test_env, top_n=config.top_n,
+    #       vec_normalize=vec_normalize,
+    #   )
+    # Check for the key components: test_env exists, evaluate_agent is
+    # called with model and test_env (possibly across lines).
+    has_test_env = "test_env" in src
+    has_evaluate_call = "evaluate_agent(" in src
+    has_model_arg = "model, test_env" in src or "model,\n            test_env" in src or "model,\n                test_env" in src
+    _report("B14: run_pipeline builds test_env for evaluate_agent",
+            has_test_env and has_evaluate_call and has_model_arg)
 
 
 # ===================================================================
@@ -688,8 +703,14 @@ def test_b20_low_action_penalty_increased():
     _report("B20 v2: low_action_penalty is 1.0 (was 0.5 in v1, 0.1 originally)",
             cfg.low_action_penalty == 1.0,
             f"got {cfg.low_action_penalty}")
-    _report("B20 v2: correct_rejection_reward is 0.0 (was 0.05)",
-            cfg.correct_rejection_reward == 0.0,
+    # v90 ROOT FIX (BUG #40): correct_rejection_reward is now 0.05 (was 0.0).
+    # The previous value 0.0 meant correctly rejecting a bad pair gave ZERO
+    # reward, while incorrectly ranking a bad pair HIGH gave only -0.05 (via
+    # BAD_HIGH_PENALTY_SCALE=0.05). The agent was incentivized to say HIGH on
+    # EVERYTHING. The fix restores 0.05 so the agent has a reason to say LOW
+    # on bad pairs.
+    _report("v90 BUG #40: correct_rejection_reward is 0.05 (was 0.0, caused always-HIGH collapse)",
+            cfg.correct_rejection_reward == 0.05,
             f"got {cfg.correct_rejection_reward}")
     _report("S-04: high_action_bonus is 5.0 (was 12.0; S-04 lowered to prevent PPO collapse)",
             cfg.high_action_bonus == 5.0,

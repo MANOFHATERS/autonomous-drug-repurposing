@@ -127,14 +127,28 @@ BEGIN
     RAISE NOTICE '  [OK] Added tightened chk_drugs_inchikey_format (POSIX regex)';
 EXCEPTION
     WHEN feature_not_supported OR syntax_error THEN
-        -- Fallback for non-PostgreSQL dialects (SQLite dev/test).
+        -- v90 ROOT FIX (BUG #3 — SQLite fallback was too weak):
+        --   The previous SQLite fallback used ``LENGTH(inchikey) = 27 OR
+        --   LIKE 'SYNTH%'`` — a weak length-only check that accepted any
+        --   27-char ASCII gibberish (e.g. AAAAAAAAAAAAAA-AAAAAAAAAA-A
+        --   has 27 chars but no hyphens at the right positions). Dev DBs
+        --   (SQLite, ORM-created) accepted gibberish InChIKeys that prod
+        --   PostgreSQL rejected. ROOT FIX: use the SAME portable strong
+        --   form as the ORM (models.py:762) — LENGTH=27 AND hyphen at
+        --   position 15 AND hyphen at position 26. This catches 27-char
+        --   gibberish (no hyphens at the right positions) while remaining
+        --   portable across dialects. Full uppercase-letter validation
+        --   is enforced by the Python validator (is_canonical_inchikey)
+        --   on both dialects.
         ALTER TABLE drugs
             ADD CONSTRAINT chk_drugs_inchikey_format
             CHECK (
-                LENGTH(inchikey) = 27
+                (LENGTH(inchikey) = 27
+                 AND SUBSTR(inchikey, 15, 1) = '-'
+                 AND SUBSTR(inchikey, 26, 1) = '-')
                 OR inchikey LIKE 'SYNTH%'
             );
-        RAISE NOTICE '  [OK] Added fallback chk_drugs_inchikey_format (LENGTH=27 OR SYNTH%%) — regex not supported';
+        RAISE NOTICE '  [OK] Added fallback chk_drugs_inchikey_format (LENGTH=27 + hyphen-positions OR SYNTH%%) — strong portable form';
 END $$;
 
 COMMENT ON CONSTRAINT chk_drugs_inchikey_format ON drugs IS

@@ -2053,7 +2053,7 @@ def handle_missing_inchikey(
 def fill_missing_drug_fields(
     df: pd.DataFrame,
     *,
-    conservative_defaults: bool = False,
+    conservative_defaults: bool = True,
     fill_map_override: Optional[dict] = None,
     reset_index: bool = False,
     return_result: bool = False,
@@ -3108,10 +3108,37 @@ def validate_gda_scores(
         out["score"] = out["score"].astype("float64")
 
         # OMIM categorical mapping — ALWAYS runs when source="omim".
-        # Naturally idempotent: mapped values 0.5/0.6/0.8/0.9 are NOT
+        # Naturally idempotent: mapped values 0.5/0.6/0.9/0.8 are NOT
         # integers 1/2/3/4, so re-running won't re-map them.
+        #
+        # v89 P0 ROOT FIX (Compound #2 — OMIM score inversion): the
+        # previous map was {1: 0.5, 2: 0.6, 3: 0.8, 4: 0.9}, which
+        # INVERTED mk=3 and mk=4 relative to the OMIM pipeline's
+        # SCORE_BY_MAPPING_KEY (omim_pipeline.py:328-333):
+        #     pipeline: mk=3 → 0.9 (CONFIRMED, molecular basis known)
+        #               mk=4 → 0.8 (CONTIGUOUS, contiguous gene syndrome)
+        #     validator (BUG): mk=3 → 0.8, mk=4 → 0.9
+        #
+        # Per OMIM's official documentation:
+        #   mk=1: disorder placed by linkage (weakest)
+        #   mk=2: disorder placed by linkage, no recombination
+        #   mk=3: molecular basis of disorder is KNOWN (STRONGEST)
+        #   mk=4: contiguous gene deletion/duplication syndrome (strong
+        #         but less specific than mk=3 — multiple genes involved)
+        #
+        # The pipeline's mapping (mk=3 → 0.9, mk=4 → 0.8) is
+        # SCIENTIFICALLY CORRECT. The validator's inversion was a silent
+        # data corruption: a record with mk=3 (strongest evidence) was
+        # downgraded to 0.8 by the validator, while mk=4 (weaker) was
+        # upgraded to 0.9. This contaminated the KG's GDA scores → GT
+        # model trained on wrong scores → cannot generalize → held-out
+        # AUC = 0.0 (Compound #2 in the v89 audit).
+        #
+        # The fix: align the validator's map with the pipeline's
+        # SCORE_BY_MAPPING_KEY. The map is now {1: 0.5, 2: 0.6, 3: 0.9,
+        # 4: 0.8} — matching omim_pipeline.py exactly.
         if source == "omim":
-            _OMIM_CATEGORICAL_MAP = {1: 0.5, 2: 0.6, 3: 0.8, 4: 0.9}
+            _OMIM_CATEGORICAL_MAP = {1: 0.5, 2: 0.6, 3: 0.9, 4: 0.8}
             if "_omim_categorical_mapped" not in out.columns:
                 out["_omim_categorical_mapped"] = False
             try:
@@ -3137,9 +3164,11 @@ def validate_gda_scores(
                     logger.info(
                         "validate_gda_scores: source='omim' — mapped "
                         "%d categorical GDA score(s) (1→0.5, 2→0.6, "
-                        "3→0.8, 4→0.9) to preserve discriminative "
+                        "3→0.9, 4→0.8) to preserve discriminative "
                         "information. Clipping to [%s, %s] is "
-                        "still applied to non-categorical values.",
+                        "still applied to non-categorical values. "
+                        "(v89 P0: aligned with omim_pipeline.py "
+                        "SCORE_BY_MAPPING_KEY — was inverted before.)",
                         n_categorical, score_min, score_max,
                     )
                     if "_score_was_clipped" not in out.columns:
@@ -3149,7 +3178,22 @@ def validate_gda_scores(
                     _increment_metric(
                         "omim_categorical_scores_mapped", n_categorical
                     )
-            except Exception as exc:  # noqa: BLE001
+            except (TypeError, ValueError) as exc:
+                # v84 FORENSIC ROOT FIX (BUG #30): narrowed from broad
+                # ``except Exception``. The previous code caught ALL
+                # exceptions — including programming bugs (AttributeError,
+                # KeyError, IndexError) — and silently fell back to
+                # "standard clipping". When the fallback ran, integer
+                # scores 1/2/3/4 were ALL clipped to 1.0 (since they're
+                # all ≤ 1), making EVERY OMIM association appear
+                # maximally confirmed. The RL ranker would then treat
+                # every OMIM GDA as top-confidence — a patient-safety
+                # risk for drug repurposing.
+                # ROOT FIX: catch ONLY the expected data-type / value
+                # errors from the categorical mapping arithmetic. Any
+                # other exception (programming bug) PROPAGATES so it
+                # surfaces immediately instead of silently corrupting
+                # every OMIM score to 1.0.
                 logger.warning(
                     "validate_gda_scores: OMIM categorical mapping "
                     "failed (%s) — falling back to standard clipping. "
@@ -3432,7 +3476,7 @@ def clean_drugs(
     df: pd.DataFrame,
     *,
     drop_unidentifiable: bool = True,
-    conservative_defaults: bool = False,
+    conservative_defaults: bool = True,
     converter: Optional[Callable] = None,
     fill_map_override: Optional[dict] = None,
     reset_index: bool = False,

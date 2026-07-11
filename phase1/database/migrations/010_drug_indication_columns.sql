@@ -92,7 +92,22 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_gda_gene_id_disease_source
 
 -- Also add a B-tree index on gene_id alone for fast lookup
 -- (used by entity resolution cross-source joins).
-CREATE INDEX IF NOT EXISTS idx_gda_gene_id
+-- v90 ROOT FIX (BUG #19 — P1 idx_gda_gene_id full vs partial conflict):
+--   The previous code created a PARTIAL index named ``idx_gda_gene_id``
+--   with ``WHERE gene_id IS NOT NULL``. But migration 004 (line 134)
+--   already created a FULL index named ``idx_gda_gene_id`` (no WHERE
+--   clause). PostgreSQL's ``CREATE INDEX IF NOT EXISTS`` is a NO-OP if
+--   an index with the same name already exists — it does NOT replace
+--   it. Migration 004 runs first (version 4 < version 10), creating the
+--   FULL index. Migration 010's partial index creation was silently
+--   skipped. The partial-index optimization (smaller index, faster
+--   writes for NULL-gene_id rows) was never realised. ROOT FIX: use a
+--   DIFFERENT name (``idx_gda_gene_id_partial``) for the partial index
+--   so it actually gets created alongside the full index from migration
+--   004. The full index (``idx_gda_gene_id``) remains for general
+--   queries; the partial index (``idx_gda_gene_id_partial``) is an
+--   optimization for queries that filter ``WHERE gene_id IS NOT NULL``.
+CREATE INDEX IF NOT EXISTS idx_gda_gene_id_partial
     ON gene_disease_associations (gene_id)
     WHERE gene_id IS NOT NULL;
 
