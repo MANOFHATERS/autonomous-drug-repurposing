@@ -233,6 +233,24 @@ class NodeTypeProjection(nn.Module):
     def forward(self, node_features: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         """Project all node type features to the unified embedding space.
 
+        V90 ROOT FIX (BUG #49): iterate node_features in the ORDER defined
+        by ``self._type_to_idx`` (i.e., the order of ``feature_dims.keys()``
+        at construction time), NOT the dict's insertion order. The previous
+        code iterated ``node_features.items()`` directly, which works in
+        Python 3.7+ (dict preserves insertion order) BUT only if the caller
+        built the dict with the same key order as ``feature_dims``. If a
+        caller passed a dict with a different insertion order (e.g.,
+        ``{"disease": ..., "drug": ...}`` instead of
+        ``{"drug": ..., "disease": ...}``), the iteration order would
+        differ from the type-index mapping, causing subtle bugs in any
+        downstream code that assumes a consistent order.
+
+        The fix sorts the iteration by ``self._type_to_idx[node_type]``
+        so the output dict's iteration order ALWAYS matches the
+        construction-time feature_dims order, regardless of the input
+        dict's insertion order. This makes the projection order-stable
+        across different callers.
+
         Args:
             node_features: Dict mapping node type name to feature tensor
                 of shape (num_nodes_of_type, raw_feature_dim).
@@ -243,7 +261,12 @@ class NodeTypeProjection(nn.Module):
         """
         projected: Dict[str, torch.Tensor] = {}
 
-        for node_type, features in node_features.items():
+        # V90 BUG #49: iterate in _type_to_idx order (construction-time
+        # feature_dims order), NOT node_features.items() order. This
+        # ensures order-stability regardless of the input dict's
+        # insertion order.
+        for node_type in sorted(node_features.keys(), key=lambda nt: self._type_to_idx.get(nt, -1)):
+            features = node_features[node_type]
             if node_type not in self.projections:
                 logger.warning(
                     f"Unknown node type '{node_type}'. Known types: "

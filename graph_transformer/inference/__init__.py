@@ -23,6 +23,21 @@ def predict_drug_disease_scores(
 ) -> np.ndarray:
     """Predict probability scores for a list of (drug, disease) pairs.
 
+    V90 ROOT FIX (BUG #46): encode the graph ONCE, then extract per-batch
+    embeddings. The previous code called ``model(...)`` (i.e.,
+    ``model.forward(...)``) per batch, which internally calls
+    ``model.encode(...)`` (the expensive Graph Transformer forward pass)
+    for EVERY batch. For N batches, this ran N full graph encodings
+    instead of 1. On a 10K-node graph with 100 batches, this was 100x
+    slower than necessary.
+
+    The fix mirrors ``trainer.evaluate()`` and ``evaluate_link_prediction()``:
+    encode the graph ONCE at the start, then for each batch extract the
+    drug/disease embeddings via indexing and call
+    ``link_predictor.forward()`` directly (no encode call). This reduces
+    encoder calls from N_batches to 1, cutting inference compute by
+    ~N_batches×.
+
     Args:
         model: Trained DrugRepurposingGraphTransformer.
         node_features: Dict of node feature tensors.
@@ -75,6 +90,41 @@ def predict_drug_disease_scores(
     finally:
         # V90 ROOT FIX (BUG #19): restore the prior training state.
         model.train(prior_training)
+    model.to(device)
+    nf = {k: v.to(device) for k, v in node_features.items()}
+    ei = {k: v.to(device) for k, v in edge_indices.items()}
+
+    # V90 BUG #46: encode the graph ONCE for ALL pairs (not per batch).
+    # The encoder processes the entire graph through the Graph Transformer
+    # layers, producing node embeddings. This is the expensive operation.
+    # The previous code ran it once per batch (via model.forward which
+    # calls encode internally), wasting N_batches × compute.
+    embeddings = model.encode(
+        nf, ei,
+        exclude_edges_override=set(exclude_edges),
+    )
+    drug_emb_all = embeddings["drug"]
+    disease_emb_all = embeddings["disease"]
+
+    all_probs: List[torch.Tensor] = []
+    n = len(drug_indices)
+
+    for start in range(0, n, batch_size):
+        end = min(start + batch_size, n)
+        d_idx = drug_indices[start:end].to(device)
+        ds_idx = disease_indices[start:end].to(device)
+        # V90 BUG #46: extract per-batch embeddings via indexing (NO
+        # redundant encode call). Then call link_predictor.forward
+        # directly with apply_temperature.
+        drug_emb_batch = drug_emb_all[d_idx]
+        disease_emb_batch = disease_emb_all[ds_idx]
+        probs = model.link_predictor.forward(
+            drug_emb_batch, disease_emb_batch,
+            apply_temperature=apply_temperature,
+        ).squeeze(-1)
+        all_probs.append(probs.cpu())
+
+    return torch.cat(all_probs).numpy()
 
 
 @torch.no_grad()

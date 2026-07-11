@@ -379,6 +379,15 @@ def compute_graph_degrees(
     large edge counts. The bridge calls this function 4 times per
     ``generate_rl_input`` invocation, so the speedup compounds.
 
+    V90 ROOT FIX (BUG #50): the function still returns a Dict[int, int]
+    for backward compatibility with existing callers that use
+    ``degrees.get(d_idx, 0)``. However, a NEW function
+    ``compute_graph_degrees_array`` is added that returns the counts as
+    a numpy array for vectorized use. Callers that need vectorized
+    access (e.g., the bridge's _compute_supplementary_features) should
+    migrate to the new function. The dict-returning version is kept for
+    backward compat.
+
     Args:
         edge_indices: Dict mapping (src, rel, tgt) to (2, E) tensor.
         node_type: Node type to compute degrees for.
@@ -417,6 +426,69 @@ def compute_graph_degrees(
         if c > 0:
             degrees[idx] = c
     return degrees
+
+
+def compute_graph_degrees_array(
+    edge_indices: Dict[Tuple[str, str, str], torch.Tensor],
+    node_type: str,
+    direction: str = "out",
+    num_nodes: Optional[int] = None,
+) -> np.ndarray:
+    """Compute per-node degree as a numpy array (vectorized).
+
+    V90 ROOT FIX (BUG #50): the bridge's ``_compute_supplementary_features``
+    uses ``compute_graph_degrees`` (which returns a Dict[int, int]) in a
+    Python-level loop: ``ae_count_per_drug.get(d_idx, 0)``. For 10K drugs,
+    this is 10K dict lookups. The audit's BUG #50 finding: "Could be
+    vectorized by returning the counts tensor directly."
+
+    This new function returns the counts as a numpy array of length
+    ``num_nodes`` (or ``max_index + 1`` if num_nodes is None). Callers
+    can then use vectorized numpy indexing (``ae_counts[drug_indices]``)
+    instead of Python-level dict lookups.
+
+    Args:
+        edge_indices: Dict mapping (src, rel, tgt) to (2, E) tensor.
+        node_type: Node type to compute degrees for.
+        direction: 'out' (outgoing edges), 'in' (incoming edges), or
+            'both' (sum).
+        num_nodes: Total number of nodes of this type. If None, uses
+            ``max_index + 1``. Pass the actual count for a correctly-
+            sized array (avoids IndexError on lookups for high-index
+            nodes that have zero edges).
+
+    Returns:
+        numpy array of length num_nodes (or max_index + 1) with per-node
+        degree counts. Nodes with no edges have count 0.
+    """
+    all_indices: List[torch.Tensor] = []
+
+    for (src, rel, tgt), ei in edge_indices.items():
+        if ei.numel() == 0:
+            continue
+        if direction in ("out", "both") and src == node_type:
+            all_indices.append(ei[0])
+        if direction in ("in", "both") and tgt == node_type:
+            all_indices.append(ei[1])
+
+    if not all_indices:
+        size = num_nodes if num_nodes is not None else 0
+        return np.zeros(size, dtype=np.int64)
+
+    concatenated = torch.cat(all_indices)
+    if concatenated.numel() == 0:
+        size = num_nodes if num_nodes is not None else 0
+        return np.zeros(size, dtype=np.int64)
+
+    counts = torch.bincount(concatenated)
+    counts_np = counts.numpy().astype(np.int64)
+
+    if num_nodes is not None and len(counts_np) < num_nodes:
+        # Pad with zeros to reach num_nodes length.
+        padded = np.zeros(num_nodes, dtype=np.int64)
+        padded[:len(counts_np)] = counts_np
+        return padded
+    return counts_np
 
 
 def save_dict_to_json(data: Dict[str, Any], path: str) -> None:

@@ -149,14 +149,22 @@ class _CircuitBreaker:
     def state(self) -> str:
         """Current breaker state (``'closed'``, ``'open'``, or ``'half_open'``).
 
-        Accessing this property may trigger an open → half_open transition
-        if the reset timeout has elapsed.  The transition is performed
-        under the lock so it is thread-safe.
+        v89 FORENSIC ROOT FIX (BUG #12 P1 — pure observation):
+          The previous implementation triggered an open → half_open
+          transition when the reset timeout had elapsed. This was a
+          SIDE EFFECT on a read-only property — the same class of bug
+          as ``is_open()``. Monitoring code that read ``breaker.state``
+          for dashboards inadvertently transitioned the breaker, and
+          because the transition did NOT set
+          ``_half_open_probe_in_flight`` consistently with
+          ``allow_request()``, it could leave the breaker in a
+          half-reserved state.
+          ROOT FIX: this property is now PURE OBSERVATION. It returns
+          the current state string without any transition. The open →
+          half_open transition is performed EXCLUSIVELY by
+          ``allow_request()``.
         """
         with self._lock:
-            if self._state == "open":
-                if self._last_failure_time > 0 and time.monotonic() - self._last_failure_time > self._reset_timeout:
-                    self._state = "half_open"
             return self._state
 
     @state.setter
@@ -193,10 +201,46 @@ class _CircuitBreaker:
             self._half_open_probe_in_flight = False
 
     def record_failure(self) -> None:
-        """Record a failed operation — may open the breaker."""
+        """Record a failed operation — may open the breaker.
+
+        v89 FORENSIC ROOT FIX (BUG #13 P1 — half-open probe flag not cleared
+          on threshold-path re-open):
+          The previous code checked ``if self._state == "half_open"`` AFTER
+          the ``if self._failure_count >= self._failure_threshold`` block.
+          When a half-open probe failed, ``_failure_count`` (which was NOT
+          reset on entering half_open) was already >= threshold, so the
+          threshold block set ``self._state = "open"`` FIRST. The subsequent
+          ``if self._state == "half_open"`` check then evaluated False
+          (state was now "open"), so ``_half_open_probe_in_flight`` was
+          NOT cleared. The flag stayed True, blocking all future probes
+          (combined with Bug #12's ``is_open()`` mutation, this could
+          stick the breaker open forever).
+          ROOT FIX: check for half_open FIRST and handle it exclusively
+          (clear the flag, set state to open, log, and return). The
+          threshold check only fires when NOT in half_open. This guarantees
+          the flag is ALWAYS cleared when leaving half_open, regardless of
+          which path triggered the transition.
+        """
         with self._lock:
             self._failure_count += 1
             self._last_failure_time = time.monotonic()
+            if self._state == "half_open":
+                # A failed probe in half_open trips the breaker back to
+                # open. ALWAYS clear the probe-in-flight flag when leaving
+                # half_open (v89 BUG #13 — was not cleared on the
+                # threshold-path re-open, leaving the breaker stuck).
+                self._state = "open"
+                self._half_open_probe_in_flight = False
+                label = self.name or "circuit_breaker"
+                logger.warning(
+                    "[%s] Circuit breaker re-OPENED after failed half-open "
+                    "probe (failure_count=%d, threshold=%d, reset_timeout=%.1fs)",
+                    label,
+                    self._failure_count,
+                    self._failure_threshold,
+                    self._reset_timeout,
+                )
+                return
             if self._failure_count >= self._failure_threshold:
                 if self._state != "open":
                     label = self.name or "circuit_breaker"
@@ -209,11 +253,6 @@ class _CircuitBreaker:
                         self._reset_timeout,
                     )
                 self._state = "open"
-            # A failed probe in half_open trips the breaker back to open
-            # and clears the probe-in-flight flag.
-            if self._state == "half_open":
-                self._state = "open"
-                self._half_open_probe_in_flight = False
 
     # -- Check APIs ----------------------------------------------------
 
@@ -250,30 +289,44 @@ class _CircuitBreaker:
     def is_open(self) -> bool:
         """Return True if the breaker is open and calls should be refused.
 
-        This is the logical inverse of ``allow_request()`` for most
-        practical purposes, but the half-open semantics differ:
-        ``is_open()`` returns False for the single probe call (meaning
-        "the breaker is not open, go ahead"), while additional calls
-        in half_open return True ("still effectively open, refuse").
+        v89 FORENSIC ROOT FIX (BUG #12 P1 — is_open() mutated state):
+          The previous implementation MUTATED state when called from the
+          "open" state with an elapsed reset timeout: it transitioned to
+          "half_open" AND set ``_half_open_probe_in_flight = True``. This
+          RESERVED the probe slot, so a subsequent ``allow_request()``
+          call (which sets the flag to False before the probe, then True
+          to reserve) saw the flag already True and returned False —
+          refusing the actual probe. The breaker appeared stuck open even
+          after the reset timeout. Any monitoring/dashboard code that
+          called ``is_open()`` inadvertently broke the subsequent
+          ``allow_request()`` call.
+          ROOT FIX: make ``is_open()`` a PURE OBSERVATION method. It does
+          NOT transition state, does NOT reserve probe slots. The
+          open → half_open transition is performed EXCLUSIVELY by
+          ``allow_request()``. Callers who want to actually acquire a
+          probe slot MUST call ``allow_request()``.
 
-        In half_open state, only the FIRST call (the probe) is allowed.
-        Subsequent calls are refused until the probe completes
-        (record_success or record_failure).
+        Semantics
+        ---------
+        - state == "closed": return False (not open, calls allowed).
+        - state == "open": return True (open, calls refused). Note: even
+          if the reset timeout has elapsed, we return True because the
+          state has not yet transitioned. ``allow_request()`` will
+          transition to half_open on the next call.
+        - state == "half_open": return ``_half_open_probe_in_flight``
+          (True if a probe is already in flight and additional calls
+          should be refused; False if no probe is in flight and the next
+          ``allow_request()`` call will acquire the probe).
         """
         with self._lock:
             if self._state == "open":
-                if time.monotonic() - self._last_failure_time > self._reset_timeout:
-                    self._state = "half_open"
-                    # Allow the first probe call.
-                    self._half_open_probe_in_flight = True
-                    return False  # not open — allow this probe
+                # Pure observation — do NOT transition to half_open here.
+                # allow_request() performs the transition when a caller
+                # actually wants to acquire a probe slot.
                 return True
             if self._state == "half_open":
-                # If a probe is already in flight, refuse.
-                if self._half_open_probe_in_flight:
-                    return True  # refuse — wait for probe to complete
-                # No probe in flight — allow this call as the new probe.
-                self._half_open_probe_in_flight = True
-                return False
+                # In half_open, "open" means "refuse additional calls" =
+                # a probe is already in flight.
+                return self._half_open_probe_in_flight
             # closed
             return False

@@ -21,7 +21,11 @@
 BEGIN;
 
 -- Drop the GDA indexes first (they depend on gene_disease_associations)
-DROP INDEX IF EXISTS idx_gda_gene_id;
+-- v90 ROOT FIX (BUG #19): the partial index was renamed from
+-- idx_gda_gene_id to idx_gda_gene_id_partial in migration 010. Drop the
+-- renamed partial index here. (The full idx_gda_gene_id from migration
+-- 004 is NOT dropped here — it belongs to migration 004, not 010.)
+DROP INDEX IF EXISTS idx_gda_gene_id_partial;
 DROP INDEX IF EXISTS uq_gda_gene_id_disease_source;
 
 -- Drop the drug indication columns

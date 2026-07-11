@@ -151,8 +151,19 @@ class DrugRepurposingGraphTransformer(nn.Module):
         self.num_heads = num_heads
         self.edge_types = list(edge_types) if edge_types is not None else list(DEFAULT_EDGE_TYPES)
         self.node_types = list(node_types) if node_types is not None else list(DEFAULT_NODE_TYPES)
-        # Default to the label-leaking edge set if not specified.
-        self.exclude_edges = set(exclude_edges) if exclude_edges is not None else set(LABEL_LEAKING_EDGES)
+        # V90 ROOT FIX (BUG #48): use frozenset consistently for exclude_edges.
+        # The previous code converted the input to a mutable set, while
+        # LABEL_LEAKING_EDGES (the default source) is an immutable frozenset.
+        # The type mismatch was confusing — a reviewer couldn't tell if the
+        # model's exclude_edges was mutable or not. The fix uses frozenset
+        # consistently: the default is frozenset(LABEL_LEAKING_EDGES), and
+        # any caller-provided iterable is converted to frozenset. This
+        # makes the immutability contract explicit and prevents accidental
+        # mutation of self.exclude_edges.
+        if exclude_edges is None:
+            self.exclude_edges = frozenset(LABEL_LEAKING_EDGES)
+        else:
+            self.exclude_edges = frozenset(exclude_edges)
         # ROOT FIX (E12/E13): store ALL config fields for save/load round-trip
         self.ffn_hidden_dim = ffn_hidden_dim
         self.dropout = dropout
@@ -363,6 +374,30 @@ class DrugRepurposingGraphTransformer(nn.Module):
             result[ntype] = emb
 
         return result
+
+    # v84 FORENSIC ROOT FIX (BUG #12 — declare score_direction on the
+    # GraphTransformer so the eval path can read it directly instead of
+    # substring-matching the class name). The GraphTransformer uses a
+    # link predictor that outputs logits → sigmoid probabilities; higher
+    # score = more plausible drug-disease pair. Direction is "higher_better".
+    @property
+    def score_direction(self) -> str:
+        """Scoring convention: 'higher_better' for GraphTransformer.
+
+        The link predictor outputs logits → sigmoid probabilities.
+        Higher score = more plausible drug-disease pair. The eval path
+        uses this to set `higher_is_better=True` for AUC computation.
+        """
+        return "higher_better"
+
+    @property
+    def score_higher_is_better(self) -> bool:
+        """Legacy boolean form of score_direction. True for GraphTransformer.
+
+        Deprecated: prefer `score_direction` (str). Kept for backward
+        compat with code that reads the boolean form.
+        """
+        return True
 
     def forward_logits(
         self,

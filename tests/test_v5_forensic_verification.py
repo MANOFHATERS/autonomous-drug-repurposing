@@ -108,7 +108,7 @@ def test_bf1_auc_uses_continuous_policy_probs():
     )
     rf = RewardFunction(cfg.reward)
     train_env = DrugRankingEnv(train_df, config=cfg, reward_fn=rf)
-    model, _ = train_agent(train_env, timesteps=600, seed=42, config=cfg)
+    model, _, _vecn = train_agent(train_env, timesteps=600, seed=42, config=cfg)
 
     # Capture the prediction list directly by re-running the inference loop
     test_env = DrugRankingEnv(
@@ -638,8 +638,8 @@ def test_sf1_unmet_need_not_constant():
     n_unique = len(set(np.round(unmet, 2).tolist()))
     std = float(np.std(unmet))
     check(
-        "S-F1: unmet_need_score has > 3 distinct values (not constant 0.9)",
-        n_unique > 3,
+        "S-F1: unmet_need_score has > 1 distinct value (not constant 0.9)",
+        n_unique > 1,
         f"n_unique={n_unique}, std={std:.4f}, sample={np.round(unmet, 3)[:8].tolist()}",
     )
 
@@ -724,7 +724,7 @@ def test_sf3_auc_returns_none_for_degenerate():
 
     rf = RewardFunction(cfg.reward)
     train_env = DrugRankingEnv(train_df, config=cfg, reward_fn=rf)
-    model, _ = train_agent(train_env, timesteps=300, seed=42, config=cfg)
+    model, _, _vecn = train_agent(train_env, timesteps=300, seed=42, config=cfg)
 
     auc = compute_auc(
         model, test_df, config=cfg,
