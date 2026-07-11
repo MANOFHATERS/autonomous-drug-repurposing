@@ -960,8 +960,8 @@ class ChEMBLPipeline(BasePipeline):
         # try/except correctly fell back to a plain-CSV read — but this
         # second read then raised BadGzipFile and crashed the pipeline.
         # The first try/except block was effectively dead code. ROOT FIX:
-        # remove the second unconditional read entirely; the try/except
-        # above already handles both gzip and plain-CSV cases correctly.
+        # remove the dead try/except gzip fallback block that was
+        # immediately overwritten by the extension-based read above.
         # (Parallel V100 fix BUG #18 applied the same root fix — kept
         # this comment for the more detailed forensic trail.)
         initial_count = len(drugs_df)

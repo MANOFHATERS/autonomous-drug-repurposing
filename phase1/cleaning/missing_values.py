@@ -106,8 +106,10 @@ Module-level mutable state (``_metrics``, ``_dead_letters``,
 ``_current_correlation_id``) is guarded by ``threading.RLock`` instances.
 The four public functions are stateless with respect to user input — they
 always copy the input DataFrame before mutating.  However, the
-module-level state IS shared across threads.  Use ``reset_metrics`` and
-``clear_dead_letters`` only from a single thread (typically the test
+module-level state IS shared across threads. Locks are acquired
+before any mutation, so concurrent calls are safe but serialized on
+the lock. ``reset_metrics`` and ``clear_dead_letters`` acquire the same
+locks and are safe to call from any thread (typically the test
 runner or pipeline supervisor).
 
 ================================================================================
@@ -3190,174 +3192,6 @@ def validate_gda_scores(
         # not import pipelines at module load due to circular-dep guard
         # ARCH-1, GUARD-A7). The pipeline's map IS the single source
         # of truth.
-        if source == "omim":
-            # P1-007 ROOT FIX (v100 forensic — dead-code elimination):
-            #
-            # The previous code tried to detect pre-mapping integer scores
-            # (1/2/3/4) in the `score` column and map them to floats
-            # (0.5/0.6/0.9/0.8) via `float(v).is_integer() and int(v) in
-            # _OMIM_CATEGORICAL_MAP`. But the OMIM pipeline
-            # (pipelines/omim_pipeline.py:1780 `base = SCORE_BY_MAPPING_KEY.get(
-            # mapping_key, 0.4)`) ALREADY converts mapping_key to the float
-            # score BEFORE writing to CSV. By the time validate_gda_scores
-            # runs, the score column contains floats like 0.5/0.6/0.9/0.8 —
-            # NEVER integers 1/2/3/4. So the previous block was DEAD CODE
-            # in the actual pipeline flow (it could only fire if someone
-            # manually passed raw integer scores BEFORE running the OMIM
-            # pipeline — a path that doesn't exist in production).
-            #
-            # ROOT FIX: detect the OMIM mapping_key column (which IS still
-            # integer 1/2/3/4 in the OMIM pipeline output — see
-            # omim_pipeline.py:543 `mapping_key: int` in the dataclass, and
-            # the column is written to CSV) and use that to VERIFY the
-            # score is correct. If the score column contains a raw integer
-            # (defensive — for callers that bypass the OMIM pipeline), map
-            # it. If the mapping_key column is present and the score
-            # doesn't match the expected value, RE-MAP the score from the
-            # mapping_key (fixes any upstream inversion). This makes the
-            # block LIVE in the standard pipeline flow (it now validates
-            # and corrects) instead of dead code.
-            #
-            # SINGLE SOURCE OF TRUTH (merged from parallel V100 fix):
-            # Lazy-import the canonical SCORE_BY_MAPPING_KEY from
-            # pipelines/omim_pipeline.py so the validator and the pipeline
-            # CANNOT diverge. Hardcoded fallback is defense-in-depth for
-            # isolated unit tests that don't load the pipelines package.
-            try:
-                from pipelines.omim_pipeline import SCORE_BY_MAPPING_KEY
-                _OMIM_CATEGORICAL_MAP = SCORE_BY_MAPPING_KEY
-            except ImportError:
-                _OMIM_CATEGORICAL_MAP = {1: 0.5, 2: 0.6, 3: 0.9, 4: 0.8}
-            if "_omim_categorical_mapped" not in out.columns:
-                out["_omim_categorical_mapped"] = False
-            try:
-                # Path A (LIVE in standard pipeline): use the mapping_key
-                # column to verify/repair the score.
-                needs_remap_mask = pd.Series(False, index=out.index)
-                if "mapping_key" in out.columns:
-                    mk_numeric = pd.to_numeric(
-                        out["mapping_key"], errors="coerce",
-                    )
-                    mk_valid = mk_numeric.notna() & mk_numeric.isin(
-                        list(_OMIM_CATEGORICAL_MAP.keys()),
-                    )
-                    if mk_valid.any():
-                        expected_score = mk_numeric.map(
-                            _OMIM_CATEGORICAL_MAP,
-                        )
-                        actual_score = pd.to_numeric(
-                            out["score"], errors="coerce",
-                        )
-                        # Re-map when the actual score doesn't match the
-                        # expected value (within a small float tolerance).
-                        mismatch = (
-                            mk_valid
-                            & (
-                                actual_score.isna()
-                                | (
-                                    (actual_score - expected_score).abs()
-                                    > 1e-9
-                                )
-                            )
-                        )
-                        if mismatch.any():
-                            if "_original_score" not in out.columns:
-                                out["_original_score"] = None
-                            out.loc[mismatch, "_original_score"] = out.loc[
-                                mismatch, "score"
-                            ]
-                            out.loc[mismatch, "score"] = expected_score.loc[
-                                mismatch
-                            ]
-                            needs_remap_mask = needs_remap_mask | mismatch
-                            logger.warning(
-                                "validate_gda_scores: source='omim' — "
-                                "RE-MAPPED %d GDA score(s) whose value "
-                                "did not match the expected "
-                                "SCORE_BY_MAPPING_KEY mapping (1→0.5, "
-                                "2→0.6, 3→0.9, 4→0.8). This indicates "
-                                "an upstream inversion (the v89 P0 bug "
-                                "class) — the score has been corrected "
-                                "to match the OMIM pipeline's "
-                                "SCORE_BY_MAPPING_KEY table.",
-                                int(mismatch.sum()),
-                            )
-
-                # Path B (defensive — for callers that bypass the OMIM
-                # pipeline and pass raw integer scores): detect integer
-                # scores 1/2/3/4 and map them.
-                # P1-011 ROOT FIX (v100 forensic): simplify the lambda's
-                # truthiness to avoid the ambiguous-parse fragility. The
-                # previous form `float(v).is_integer() and int(v) in MAP
-                # if pd.notna(v) else False` was technically correct but
-                # depended on Python's conditional-expression parsing
-                # rules in a non-obvious way. The new form is explicit.
-                integer_score_mask = (
-                    out["score"].notna()
-                    & out["score"].apply(
-                        lambda v: (
-                            pd.notna(v)
-                            and isinstance(v, (int, float))
-                            and not isinstance(v, bool)
-                            and float(v).is_integer()
-                            and int(v) in _OMIM_CATEGORICAL_MAP
-                        )
-                    )
-                )
-                if integer_score_mask.any():
-                    if "_original_score" not in out.columns:
-                        out["_original_score"] = None
-                    out.loc[integer_score_mask, "_original_score"] = out.loc[
-                        integer_score_mask, "score"
-                    ]
-                    out.loc[integer_score_mask, "score"] = out.loc[
-                        integer_score_mask, "score"
-                    ].apply(lambda v: _OMIM_CATEGORICAL_MAP[int(v)])
-                    needs_remap_mask = (
-                        needs_remap_mask | integer_score_mask
-                    )
-                    logger.info(
-                        "validate_gda_scores: source='omim' — mapped "
-                        "%d raw-integer categorical GDA score(s) "
-                        "(1→0.5, 2→0.6, 3→0.9, 4→0.8) to preserve "
-                        "discriminative information. (Defensive path: "
-                        "the OMIM pipeline should have already done "
-                        "this — the caller bypassed the pipeline.)",
-                        int(integer_score_mask.sum()),
-                    )
-
-                n_categorical = int(needs_remap_mask.sum())
-                if n_categorical > 0:
-                    if "_score_was_clipped" not in out.columns:
-                        out["_score_was_clipped"] = False
-                    out.loc[needs_remap_mask, "_score_was_clipped"] = False
-                    out.loc[needs_remap_mask, "_omim_categorical_mapped"] = True
-                    _increment_metric(
-                        "omim_categorical_scores_mapped", n_categorical,
-                    )
-            except (TypeError, ValueError) as exc:
-                # v84 FORENSIC ROOT FIX (BUG #30): narrowed from broad
-                # ``except Exception``. The previous code caught ALL
-                # exceptions — including programming bugs (AttributeError,
-                # KeyError, IndexError) — and silently fell back to
-                # "standard clipping". When the fallback ran, integer
-                # scores 1/2/3/4 were ALL clipped to 1.0 (since they're
-                # all ≤ 1), making EVERY OMIM association appear
-                # maximally confirmed. The RL ranker would then treat
-                # every OMIM GDA as top-confidence — a patient-safety
-                # risk for drug repurposing.
-                # ROOT FIX: catch ONLY the expected data-type / value
-                # errors from the categorical mapping arithmetic. Any
-                # other exception (programming bug) PROPAGATES so it
-                # surfaces immediately instead of silently corrupting
-                # every OMIM score to 1.0.
-                logger.warning(
-                    "validate_gda_scores: OMIM categorical mapping "
-                    "failed (%s) — falling back to standard clipping. "
-                    "Categorical scores (1/2/3/4) may be clipped to 1.0.",
-                    exc,
-                )
-
         # Track coerced-to-NaN values (CODE-14).
         coerced_nan_mask = out["score"].isna() & non_numeric_mask
         if "_score_was_coerced_nan" not in out.columns:
@@ -3390,9 +3224,9 @@ def validate_gda_scores(
         # implementation only captured direction (and lost strength
         # via the abs() in the wrong place). The lineage is now
         # CONSISTENT and consumed.
-        if "_score_direction" not in out.columns:
-            out["_score_direction"] = None
         if preserve_direction:
+            if "_score_direction" not in out.columns:
+                out["_score_direction"] = None
             out.loc[out["score"] > 0, "_score_direction"] = "positive"
             out.loc[out["score"] < 0, "_score_direction"] = "negative"
             out.loc[out["score"] == 0, "_score_direction"] = "neutral"

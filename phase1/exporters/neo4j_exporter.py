@@ -417,9 +417,22 @@ def check_neo4j_readiness(pg_session) -> dict:
                         else:
                             _table_obj = _sa_table(t)
             except Exception:
-                _table_obj = _sa_table(t)
+                # P1-002 ROOT FIX: use _meta_name (schema name) in _sa_table()
+                # call with schema= parameter for the fallback case too.
+                if _meta_name:
+                    _table_obj = _sa_table(
+                        t, schema=_meta_name,
+                    )
+                else:
+                    _table_obj = _sa_table(t)
             if _table_obj is None:
-                _table_obj = _sa_table(t)
+                # P1-002 ROOT FIX: use _meta_name (schema name) here too.
+                if _meta_name:
+                    _table_obj = _sa_table(
+                        t, schema=_meta_name,
+                    )
+                else:
+                    _table_obj = _sa_table(t)
             _count_stmt = _sa_select(_sa_func.count()).select_from(_table_obj)
             result = pg_session.execute(_count_stmt)
             counts[t] = result.scalar()

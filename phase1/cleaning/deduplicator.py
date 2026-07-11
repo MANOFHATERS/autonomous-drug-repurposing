@@ -1737,8 +1737,8 @@ def validate_config() -> list[str]:
 def validate_environment() -> dict[str, Any]:
     """[CFG-7] Return environment info for diagnostic purposes."""
     issues: list[str] = []
-    py_version = f"{__import__('sys').version_info.major}.{__import__('sys').version_info.minor}"
-    if __import__('sys').version_info < (3, 9):
+    py_version = f"{sys.version_info.major}.{sys.version_info.minor}"
+    if sys.version_info < (3, 9):
         issues.append(f"Python {py_version} < 3.9 (deduplicator v3.0.0 requires 3.9+)")
     pd_version = pd.__version__
     try:
@@ -1747,10 +1747,17 @@ def validate_environment() -> dict[str, Any]:
             issues.append(f"pandas {pd_version} < 2.1.4")
     except Exception:
         pass
+    # P1-054 ROOT FIX: avoid __import__('numpy') — use a lazy helper.
+    def _get_numpy_version() -> str:
+        try:
+            import numpy as _np
+            return _np.__version__
+        except ImportError:
+            return "N/A"
     return {
         "python_version": py_version,
         "pandas_version": pd_version,
-        "numpy_version": __import__("numpy").__version__,
+        "numpy_version": _get_numpy_version(),
         "module_version": _MODULE_VERSION,
         "schema_version": _OUTPUT_SCHEMA_VERSION,
         "rule_version": _RULE_VERSION,
@@ -2304,7 +2311,7 @@ def dedup_by_inchikey(
                     non_null_valid.str.match(_INCHIKEY_PATTERN)
                 ]
                 if len(standard_keys) > 0:
-                    prefixes = standard_keys.str.slice(stop=26)   # v92 ROOT FIX (BUG P1-067): 26 chars (indices 0-25), includes trailing hyphen
+                    prefixes = standard_keys.str.slice(stop=26)   # v92 ROOT FIX (BUG P1-067): 26 chars = 14-char hash block + hyphen + 10-char hash block + hyphen (indices 0-25)
                     version_chars = standard_keys.str.slice(start=26)  # version char only (index 26)
                     grouped = pd.DataFrame({
                         "prefix": prefixes,

@@ -639,6 +639,7 @@ _DEFAULT_UNIT_CONVERSIONS: dict[str, float] = {
     "nmol/L": 1.0,
     "mmol/L": 1e6,
     "pmol/L": 1e-3,
+    "fM": 1e-6,
     "fmol/L": 1e-6,
 }
 # Mutable underlying dict — configure_normalizer() mutates this.
@@ -697,12 +698,13 @@ from cleaning._constants import (
 #   Root fix: REMOVE the self-assignment. The name is already bound by
 #   the ``from cleaning._constants import ... as _ACTIVITY_CENSORED_MAX``
 #   statement above. The type annotation is documented in the comment.
-# DEPRECATED alias — kept ONLY for backward compat with any external
-# code that imported the old name. New code MUST use
-# ``_ACTIVITY_CENSORED_MAX`` (clear) or the canonical
-# ``ACTIVITY_VALUE_CENSORED_THRESHOLD`` from ``cleaning._constants``.
-# This alias will be removed in v2.0.0.
-_ACTIVITY_VALUE_MAX: float = _ACTIVITY_CENSORED_MAX  # 1e6 = 1 mM (DEPRECATED — see above)
+# v93 ROOT FIX (P1-051 — deprecated alias removed):
+#   The previous code kept ``_ACTIVITY_VALUE_MAX: float = _ACTIVITY_CENSORED_MAX``
+#   as a DEPRECATED alias for backward compat. No internal callers use
+#   this alias (all were migrated to ``_ACTIVITY_CENSORED_MAX`` in v66).
+#   External code should use the canonical ``ACTIVITY_VALUE_CENSORED_THRESHOLD``
+#   from ``cleaning._constants`` or the module-local ``_ACTIVITY_CENSORED_MAX``.
+#   The deprecated alias is removed to eliminate the misleading name.
 
 # [IDEM-12] Significant figures for activity value rounding.
 _ACTIVITY_VALUE_SIG_FIGS: int = 6
@@ -722,7 +724,7 @@ _ACTIVITY_VALUE_SIG_FIGS: int = 6
 # "None".
 _ALLOWED_ACTIVITY_TYPES: frozenset[str] = frozenset({
     "IC50", "Ki", "Kd", "EC50", "Kb",
-    "pKi", "pIC50", "pEC50", "pKd",
+    "pKi", "pIC50", "pEC50", "pKd", "pKb", "pED50", "pAC50",
     "ED50", "AC50",
 })
 
@@ -1890,21 +1892,30 @@ def _convert_to_inchikey_cached(
     smiles: str,
     options: str,
     standard: bool,
+    stereo_policy: str = "preserve",
 ) -> str | None:
     """Cached SMILES → InChIKey conversion (CODE-17, PERF-3).
 
     The cache is process-local and not shared across workers.  Cache
     stats are available via :func:`get_cache_info`.
+
+    Parameters
+    ----------
+    stereo_policy : str
+        Per-call override for the global ``STEREO_POLICY``. Defaults to
+        "preserve". When not None, this takes precedence over the module
+        global.
     """
     if not _RDKIT_AVAILABLE:
         return None
-    return _convert_to_inchikey_uncached(smiles, options, standard)
+    return _convert_to_inchikey_uncached(smiles, options, standard, stereo_policy)
 
 
 def _convert_to_inchikey_uncached(
     smiles: str,
     options: str,
     standard: bool,
+    stereo_policy: str = "preserve",
 ) -> str | None:
     """Actual SMILES → InChIKey conversion logic (uncached)."""
     global _RDKIT_INCHI_BROKEN  # [REL-6] set on first MolToInchi AttributeError
@@ -1973,20 +1984,61 @@ def _convert_to_inchikey_uncached(
                 _truncate_for_log(smiles), len(frags), mixture_inchikey,
             )
             return mixture_inchikey
-        # Mixture InChIKey failed — fall back to largest fragment, but
-        # log at WARNING so operators know a salt form was collapsed.
-        logger.warning(
-            "convert_to_inchikey: SALT-FORM COLLAPSE — SMILES %s has %d "
-            "fragments. Mixture InChIKey generation failed; falling back "
-            "to largest fragment. The salt form is DISCARDED. "
-            "Patient-safety risk: the wrong formulation may be selected "
-            "for a wet-lab trial. Original SMILES preserved in log.",
-            _truncate_for_log(smiles), len(frags),
-        )
-        try:
-            mol = max(frags, key=lambda m: m.GetNumAtoms())
-        except Exception:
-            pass  # keep original
+        # Mixture InChIKey failed — fall back to desalting (P1-061 ROOT FIX):
+        # remove small counterions (< 10 atoms) while preserving organic fragments.
+        # The previous code just took the largest fragment, which collapsed salt
+        # forms AND kept small organic counterions (e.g. citrate, fumarate) that
+        # are NOT the active ingredient. Desalting removes counterions by atom
+        # count heuristic: fragments with < 10 atoms are almost always inorganic
+        # counterions (Na⁺, Cl⁻, K⁺, etc.) or very small organic salts (acetate).
+        # Organic fragments (≥ 10 atoms) are preserved as the active ingredient(s).
+        # If desalting leaves exactly one organic fragment, we use it; if it leaves
+        # multiple organic fragments (a co-crystal or formulation), we use the
+        # largest one and log the demotion.
+        organic_frags = []
+        counterion_frags = []
+        for _frag in frags:
+            try:
+                _n_atoms = _frag.GetNumAtoms()
+            except Exception:
+                _n_atoms = 0
+            if _n_atoms < 10:
+                counterion_frags.append(_frag)
+            else:
+                organic_frags.append(_frag)
+        if counterion_frags:
+            # Log which counterions are removed for audit trail.
+            _ci_smiles = []
+            for _cf in counterion_frags:
+                try:
+                    _ci_smiles.append(Chem.MolToSmiles(_cf, isomericSmiles=True, canonical=True))
+                except Exception:
+                    _ci_smiles.append(f"<{len(counterion_frags)} counterion(s) with <10 atoms>")
+            logger.info(
+                "convert_to_inchikey: DESALTING — removed %d counterion(s) "
+                "(< 10 atoms) from SMILES %s. Counterion SMILES: %s",
+                len(counterion_frags),
+                _truncate_for_log(smiles),
+                _ci_smiles,
+            )
+        if organic_frags:
+            # Use the largest organic fragment as the active ingredient.
+            mol = max(organic_frags, key=lambda m: m.GetNumAtoms())
+            if len(organic_frags) > 1:
+                logger.warning(
+                    "convert_to_inchikey: multiple organic fragments after "
+                    "desalting — using largest. SMILES: %s, organic fragments: %d",
+                    _truncate_for_log(smiles), len(organic_frags),
+                )
+        else:
+            # All fragments are small (< 10 atoms) — no organic fragment.
+            # Fall back to the largest fragment (original behavior) as a
+            # last resort. This is extremely rare (e.g. a tiny salt like
+            # sodium chloride with no organic component at all).
+            try:
+                mol = max(frags, key=lambda m: m.GetNumAtoms())
+            except Exception:
+                pass  # keep original
 
     # [SCI-5] Tautomer canonicalization (guarded — not all RDKit builds
     # include MolStandardize).
@@ -2027,7 +2079,12 @@ def _convert_to_inchikey_uncached(
         )
 
     # [SCI-6, SCI-16] Stereo handling (preserve by default).
-    if STEREO_POLICY == "ignore":
+    # P1-062 ROOT FIX: use the per-call ``stereo_policy`` parameter instead
+    # of the global ``STEREO_POLICY``. The parameter defaults to "preserve"
+    # and is resolved per-call: if stereo_policy is not None, it overrides
+    # the global; otherwise the global STEREO_POLICY is used.
+    _effective_stereo = stereo_policy if stereo_policy is not None else STEREO_POLICY
+    if _effective_stereo == "ignore":
         try:
             Chem.RemoveStereochemistry(mol)
         except Exception:
@@ -2143,6 +2200,7 @@ def convert_to_inchikey_detailed(
     timeout: float | None = None,
     raise_on_error: bool = False,
     activity_type: str | None = None,  # ignored; for forward compat
+    stereo_policy: str | None = None,  # P1-062: per-call override for STEREO_POLICY
 ) -> ConversionResult:
     """Convert SMILES → InChIKey with full result metadata (DQ-2).
 
@@ -2406,7 +2464,7 @@ def convert_to_inchikey_detailed(
             old_handler = signal.signal(signal.SIGALRM, _timeout_handler)
             signal.setitimer(signal.ITIMER_REAL, timeout)
             try:
-                inchikey = _convert_to_inchikey_cached(smiles, options or "", standard)
+                inchikey = _convert_to_inchikey_cached(smiles, options or "", standard, stereo_policy or "preserve")
             except TimeoutError:
                 _cb_convert.record_failure()
                 return ConversionResult(
@@ -2449,7 +2507,7 @@ def convert_to_inchikey_detailed(
                 "in worker thread — proceeding without timeout"
             )
             try:
-                inchikey = _convert_to_inchikey_cached(smiles, options or "", standard)
+                inchikey = _convert_to_inchikey_cached(smiles, options or "", standard, stereo_policy or "preserve")
             except MemoryError:
                 _cb_convert.record_failure()
                 return ConversionResult(
@@ -2463,7 +2521,7 @@ def convert_to_inchikey_detailed(
     else:
         # No timeout requested, or Windows platform (signal.alarm unavailable).
         try:
-            inchikey = _convert_to_inchikey_cached(smiles, options or "", standard)
+            inchikey = _convert_to_inchikey_cached(smiles, options or "", standard, stereo_policy or "preserve")
         except MemoryError:
             _cb_convert.record_failure()
             return ConversionResult(
@@ -2880,9 +2938,13 @@ def is_valid_inchikey(key: str) -> bool:
         return False
     if _INCHIKEY_PATTERN.match(cleaned):
         return True
-    if cleaned.startswith("SYNTH"):
+    if cleaned.startswith("SYNTH") and len(cleaned) >= 7:
         # SYNTH is the platform's own synthetic-key namespace (produced
         # by drug_resolver.synthesize_inchikey) — legitimately accepted.
+        # P1-069 ROOT FIX: reject bare "SYNTH" (5 chars) — a valid
+        # synthetic key must have at least 7 chars ("SYNTH" + at least
+        # 2 chars of hash suffix). A bare "SYNTH" is almost certainly
+        # a placeholder or truncated value, not a legitimate key.
         return True
     if _MIXTURE_INCHIKEY_PATTERN.match(cleaned):
         return True
@@ -4213,7 +4275,7 @@ def normalize_activity_value(
         _is_p_scale = (
             activity_type is not None
             and isinstance(activity_type, str)
-            and activity_type.strip() in ("pKi", "pIC50", "pEC50", "pKd")
+            and activity_type.strip() in ("pKi", "pIC50", "pEC50", "pKd", "pKb", "pED50", "pAC50")
         )
         if not _is_p_scale:
             logger.debug(
@@ -4439,7 +4501,7 @@ def normalize_activity_value(
     #   we also preserve that.
     if activity_type is not None and isinstance(activity_type, str):
         _at = activity_type.strip()
-        if _at in ("pKi", "pIC50", "pEC50", "pKd"):
+        if _at in ("pKi", "pIC50", "pEC50", "pKd", "pKb", "pED50", "pAC50"):
             try:
                 # p-scale → nM: 10^(9 - pValue)
                 # pIC50=6 → 10^3 nM = 1 µM ✓

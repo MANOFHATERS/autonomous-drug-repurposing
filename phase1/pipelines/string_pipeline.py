@@ -1892,7 +1892,8 @@ class StringPipeline(BasePipeline):
         # UniProt accessions after mapping. The DB loader's canonicalization
         # (on integer surrogate PKs) is the real enforcement point for the
         # UNIQUE(protein_a_id, protein_b_id) constraint. This method is
-        # kept for logging/diagnostic value but is NOT a correctness guarantee.
+        # effectively a no-op for the DB constraint — it is kept for
+        # logging/diagnostic value but is NOT a correctness guarantee.
         df = df.copy()
         original_protein1 = df["protein1"].copy()
         canonical_a = df[["protein1", "protein2"]].min(axis=1)

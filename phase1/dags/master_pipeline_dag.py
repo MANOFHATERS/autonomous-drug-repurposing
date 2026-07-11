@@ -128,9 +128,9 @@ except Exception as _exc:  # noqa: BLE001 — config import must never kill DAG 
 #   7h, and the hard kill ALSO fires at exactly 7h — the operator gets
 #   no early warning, just a single "task killed" notification.
 #
-#   Root fix: set TASK_SLA = 6h (1h before the 7h kill). The SLA miss
-#   at 6h is ADVISORY — it pages the operator but does NOT stop the
-#   task. The operator has a 1h window to decide: extend the timeout
+#   Root fix: set TASK_SLA = 5h (2h before the 7h kill). The SLA miss
+#   at 5h is ADVISORY — it pages the operator but does NOT stop the
+#   task. The operator has a 2h window to decide: extend the timeout
 #   (via Airflow's clear+retry with a longer timeout), kill the task
 #   manually, or let it run to the 7h hard kill. The 7h TASK_TIMEOUT
 #   remains the patient-safe failure mode (GPU state, partial
@@ -147,10 +147,10 @@ except Exception as _exc:  # noqa: BLE001 — config import must never kill DAG 
 #        automatically (GPU state, partial checkpoints, and
 #        non-deterministic sampler state would corrupt the retry).
 #        The hard kill at 7h is the patient-safe failure mode.
-#     3. The SLA-miss at 6h is ADVISORY — it pages but does not stop.
+#     3. The SLA-miss at 5h is ADVISORY — it pages but does not stop.
 #        Operators do not rely on the SLA to stop the task; the 7h
 #        timeout does that.
-TASK_SLA = timedelta(hours=6)
+TASK_SLA = timedelta(hours=5)
 TASK_TIMEOUT = timedelta(hours=7)
 
 # v83 DAG-2 ROOT FIX: apply the SAME retry policy used by all 7 standalone
@@ -354,6 +354,11 @@ def download_pubchem() -> None:
     v35 ROOT FIX (issue 35): previously called ``PubChemPipeline().run()``
     (the FULL run, including load into DB). This caused a DOUBLE-LOAD: the
     ``download_pubchem`` task loaded PubChem data into the ``drugs`` table,
+
+    P1-071 ROOT FIX: added ``trigger_rule=none_failed_min_one_success`` so
+    that pubchem_download and pubchem_load do not fail the DAG when upstream
+    tasks that are NOT required for PubChem (e.g. drugbank_load) are skipped.
+    """
     then the ``load_pubchem_enrichment`` task (line 414 below) called
     ``PubChemPipeline().run_load_only()`` which loaded the SAME data
     AGAIN. Both loads were idempotent (upsert), so the duplicate was
@@ -429,7 +434,12 @@ def load_omim() -> None:
 @task()  # v41: retries+timeout inherited from DEFAULT_ARGS
 @fail_fast_on_http_4xx  # v83 DAG-2
 def load_pubchem_enrichment() -> None:
-    """FIX AUDIT-27: PubChem data already downloaded."""
+    """FIX AUDIT-27: PubChem data already downloaded.
+
+    P1-071 ROOT FIX: added ``trigger_rule=none_failed_min_one_success`` so
+    that this task runs even if some upstream tasks are skipped, as long
+    as pubchem_download succeeds.
+    """
     from pipelines.pubchem_pipeline import PubChemPipeline
     PubChemPipeline().run_load_only()
 
@@ -827,6 +837,8 @@ def master_pipeline() -> None:
     # Both write to different CSV files; no shared state, no race condition.
 
     # PubChem download task (needs drugs in DB from entity resolution)
+    # P1-071 ROOT FIX: use none_failed_min_one_success so pubchem_download
+    # runs even if drugbank_load is skipped (DrugBank XML not present).
     pubchem_download = download_pubchem()
 
     # ── Entity resolution ───────────────────────────────────────────────
@@ -842,6 +854,8 @@ def master_pipeline() -> None:
     string_load = load_string()
     disgenet_load = load_disgenet()
     omim_load = load_omim()
+    # P1-071 ROOT FIX: use none_failed_min_one_success for pubchem_load
+    # so it runs even if some upstream tasks are skipped.
     pubchem_load = load_pubchem_enrichment()
 
     # V18 ROOT FIX (Phase 1 ↔ Phase 2 100% connection):

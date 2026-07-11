@@ -4,7 +4,8 @@
 v93 ROOT FIX (P1-031 — thread-safety / parallelism correctness):
     The previous code used ``ThreadPoolExecutor`` with
     ``max_workers=len(FIRST_PASS_DOWNLOAD)`` (3 workers: ChEMBL,
-    UniProt, STRING). The docstring claimed "4 workers" — wrong.
+    UniProt, STRING). The docstring previously claimed "4 workers" — wrong.
+    P1-053 ROOT FIX: the docstring now correctly says "3 workers".
     More importantly, ``ThreadPoolExecutor`` is NOT SAFE for these
     pipelines because they share module-level mutable state:
       - ``cleaning.normalizer._dead_letters`` (dead-letter queue)

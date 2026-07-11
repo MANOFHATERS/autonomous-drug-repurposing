@@ -56,6 +56,9 @@ DEFAULT_CONFIDENCE_TIERS: list[tuple[float, str]] = [
     #   [0.3, 1.0]    — strong evidence
     # The previous code labeled [0.0, 0.06) as "weak" (Piñero calls this
     # sub-weak) and [0.06, 0.3) as "moderate" (Piñero calls this weak).
+    # P1-058 ROOT FIX: the [0.06, 0.3) band is "weak" per Piñero 2020,
+    # not "moderate". The previous v43 fix labeled this "moderate" which
+    # inflated the perceived confidence of weak-evidence GDA edges.
     # This INFLATED the perceived confidence of every weak-evidence GDA
     # edge — patient-safety risk because downstream ML filters expecting
     # confidence_tier == "weak" only caught SUB-FLOOR scores, missing the
@@ -68,7 +71,7 @@ DEFAULT_CONFIDENCE_TIERS: list[tuple[float, str]] = [
     # sites remain in agreement.
     # (Parallel V100 fix BUG #4 applied the same root fix.)
     (0.0, "sub_weak"),   # [0.0, 0.06)  — sub-weak (below the published weak-evidence floor; Piñero et al. 2020 §2.3)
-    (0.06, "weak"),      # [0.06, 0.3)  — weak evidence (Piñero et al. 2020 §2.3 weak band — the actual weak band)
+    (0.06, "weak"),      # [0.06, 0.3)  — weak evidence (Piñero et al. 2020 §2.3 weak band)
     (0.3, "strong"),     # [0.3, 1.0]   — strong evidence (Piñero et al. 2020 §2.3)
 ]
 """Default confidence-tier thresholds (Piñero et al. 2020).
@@ -82,11 +85,11 @@ v100 P1-004 ROOT FIX (SCIENTIFIC MISLABEL — forensic root fix):
 The previous labels were ``"weak"`` / ``"moderate"`` / ``"strong"``
 mapped to thresholds (0.0, 0.06, 0.3). Per Piñero et al. 2020 §2.3 the
 bands are sub-weak / weak / strong — there is NO "moderate" band in the
-publication. The previous code labeled [0.0, 0.06) as "weak" (Piñero
-calls this sub-weak) and [0.06, 0.3) as "moderate" (Piñero calls this
-weak). This inflated the perceived confidence of every weak-evidence
-GDA edge — a patient-safety risk because downstream ML filters
-expecting ``confidence_tier == "weak"`` only caught SUB-FLOOR scores
+publication. P1-058 ROOT FIX: the [0.06, 0.3) band is "weak" per Piñero
+2020, not "moderate". The previous v43 fix labeled this "moderate", which
+inflated the perceived confidence of every weak-evidence GDA edge —
+a patient-safety risk because downstream ML filters expecting
+``confidence_tier == "weak"`` only caught SUB-FLOOR scores
 and missed the actual weak band, while models trained on
 ``confidence_tier == "moderate"`` were trained on what is actually
 weak evidence.

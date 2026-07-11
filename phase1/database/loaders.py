@@ -155,6 +155,10 @@ _VALID_DISEASE_ID_TYPES: frozenset[str] = frozenset(
      "icd10", "efo", "orphanet"}
 )
 
+# P1-070: shared constant for OMIM disease ID format string.
+# Used by both the loader and the OMIM pipeline for consistent formatting.
+OMIM_DISEASE_ID_FORMAT: str = "OMIM:{mim}"
+
 # ---------------------------------------------------------------------------
 # SCI-FIX (disease_id format validation): mirrors the
 # ``chk_gda_disease_id_format`` CHECK constraint in migration
@@ -776,6 +780,9 @@ def _validate_inchikey(value: Any) -> str | None:
             # rejected, that policy belongs in the canonical validator
             # (so ALL sites enforce it consistently), not bolted onto
             # the loader alone.
+            # P1-069 ROOT FIX: normalize SYNTH keys to uppercase.
+            if value.upper().startswith("SYNTH"):
+                return value.upper()
             return value
         raise ValueError(
             f"Invalid InChIKey format: '{value}'. "
@@ -788,7 +795,8 @@ def _validate_inchikey(value: Any) -> str | None:
     if _STANDARD_INCHIKEY_RE.match(value):
         return value
     if value.upper().startswith("SYNTH"):
-        return value
+        # P1-069 ROOT FIX: normalize SYNTH keys to uppercase.
+        return value.upper()
     raise ValueError(
         f"Invalid InChIKey format: '{value}'. "
         "Must be 27-char standard format or start with 'SYNTH'."
