@@ -421,13 +421,14 @@ def _compute_drkg_checksum(drkg_df: Any) -> str:
                     for col in cols:
                         try:
                             row_vals.append(str(drkg_df.iloc[idx][col]))
-                        except Exception:
+                        except (KeyError, ValueError, IndexError):  # v85 FORENSIC ROOT FIX (BUG #51)
+                            logger.warning("iloc access failed for idx=%s col=%s", idx, col)  # v85 FORENSIC ROOT FIX (BUG #51)
                             row_vals.append("<err>")
                     sample_rows.append("|".join(row_vals))
         col_sample = str(cols)
         raw = f"{n_rows}:{col_sample}:{chr(10).join(sample_rows)}"
         return hashlib.sha256(raw.encode()).hexdigest()[:16]
-    except Exception:
+    except (ValueError, TypeError, RuntimeError, KeyError, OSError):  # v85 FORENSIC ROOT FIX (BUG #51)
         return "unknown"
 
 

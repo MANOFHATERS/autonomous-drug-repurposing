@@ -403,7 +403,7 @@ class NegativeSampler:
             try:
                 self._rng = np.random.default_rng(SEED)
                 self.seed = SEED
-            except Exception:
+            except (TypeError, ValueError):  # v85 FORENSIC ROOT FIX (BUG #51)
                 self._rng = None
                 self.seed = None
 
