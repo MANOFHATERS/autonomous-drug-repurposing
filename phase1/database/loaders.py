@@ -4704,6 +4704,24 @@ def resolve_gene_symbol_to_uniprot(
     if "uniprot_id" not in df.columns:
         df["uniprot_id"] = None
 
+    # v90 PANDAS-DTYPE FIX: when pandas runs with the PyArrow-backed
+    # string dtype (the default in pandas 3.0+ and opt-in via
+    # ``pd.set_option("future.infer_string", True)`` in 2.x), the
+    # ``uniprot_id`` column may be inferred as ``string[pyarrow]``
+    # instead of ``object``. Assigning a float-NaN Series (produced by
+    # ``.map({})`` on an empty dict) to a ``string[pyarrow]`` column
+    # raises ``TypeError: Invalid value for dtype 'str'`` because
+    # float NaN is not a valid string-missing-value sentinel (only
+    # ``pd.NA`` / ``None`` are). ROOT FIX: coerce the ``uniprot_id``
+    # column to ``object`` dtype before any ``.loc[...] = ...``
+    # assignment. This makes the column accept both str and NaN
+    # without dtype-promotion errors, matching the pre-PyArrow
+    # behavior that the original v83 COMP-3 fix was written against.
+    # The downstream ``DatabaseLoader._upsert_proteins`` already
+    # handles dtype coercion at write time, so this is safe.
+    if str(df["uniprot_id"].dtype) not in ("object", "category"):
+        df["uniprot_id"] = df["uniprot_id"].astype(object)
+
     # Track how many were already resolved at clean time (for telemetry).
     pre_resolved_mask = df["uniprot_id"].notna()
     n_pre_resolved = int(pre_resolved_mask.sum())
@@ -4720,7 +4738,11 @@ def resolve_gene_symbol_to_uniprot(
         # Only fill where the DB map actually had a value (avoid
         # overwriting NaN with NaN — pandas .loc handles this correctly
         # because db_lookup is aligned by index).
-        df.loc[need_resolution_mask, "uniprot_id"] = db_lookup
+        # v90 PANDAS-DTYPE FIX: convert db_lookup to object Series so
+        # its NaN values are float-NaN (compatible with object column)
+        # rather than pandas-NA (which would also be fine, but be
+        # explicit for clarity).
+        df.loc[need_resolution_mask, "uniprot_id"] = db_lookup.astype(object)
 
     # Step 2: still-unresolved rows — try protein_name map as fallback.
     still_unresolved = df["uniprot_id"].isna()
@@ -4730,7 +4752,7 @@ def resolve_gene_symbol_to_uniprot(
             .str.upper()
             .map(protein_name_to_uniprot)
         )
-        df.loc[still_unresolved, "uniprot_id"] = protein_name_fallback
+        df.loc[still_unresolved, "uniprot_id"] = protein_name_fallback.astype(object)
 
     unresolved_count = df["uniprot_id"].isna().sum()
     if unresolved_count > 0:

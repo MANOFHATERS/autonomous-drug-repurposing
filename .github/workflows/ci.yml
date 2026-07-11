@@ -461,8 +461,24 @@ jobs:
     needs: [build, lint, test, verify-p2-fixes, e2e-sample-mode]
     if: always()
     steps:
-      - name: Check all required jobs passed
-        if: ${{ !(needs.build.result == 'success' && needs.lint.result == 'success' && needs.test.result == 'success' && needs.verify-p2-fixes.result == 'success' && needs.e2e-sample-mode.result == 'success') }}
+      - uses: actions/checkout@v4
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: phase1/requirements.txt
+      - name: Install deps
+        # v90 STALE-CI FIX: the previous step had a conditional
+        # ``if: ${{ !(needs.build.result == 'success' && ...) }}`` that
+        # ONLY ran the dep install when one of the required jobs FAILED.
+        # When all required jobs passed, the dep install was SKIPPED,
+        # so the verification step ran WITHOUT pandas/sqlalchemy/etc.
+        # installed → ImportError on every check. The job appeared to
+        # "fail when all required jobs passed" which is the opposite of
+        # what was intended. ROOT FIX: ALWAYS install deps (remove the
+        # inverted conditional). The job runs unconditionally on every
+        # push to a fix/** branch per the workflow's ``on:`` triggers.
         run: |
           python -m pip install --upgrade pip
           pip install -q \
