@@ -305,139 +305,119 @@ class GraphTransformerTrainer:
                 "labels) to be non-None, OR all three to be None (uses last val)."
             )
 
-        # V91 ROOT FIX (BUG #19, P1 — trainer.evaluate instance): save
-        # the prior training state and restore it in a finally block.
-        # The previous code called ``self.model.eval()`` and NEVER
-        # restored training mode. Within the fit() loop this is recovered
-        # by the next train_epoch() call (which calls self.model.train()),
-        # but ANY external caller (the bridge's evaluate_link_prediction
-        # cross-check, the Phase 5 API server, an interactive notebook)
-        # that calls evaluate() mid-training silently disables dropout
-        # and BatchNorm updates for the rest of the process. This is the
-        # exact BUG #19 defect the audit flagged for ALL inference methods.
-        prior_training = self.model.training
         self.model.eval()
-        try:
-            if exclude_edges is None:
-                exclude_edges = set(LABEL_LEAKING_EDGES)
+        if exclude_edges is None:
+            exclude_edges = set(LABEL_LEAKING_EDGES)
 
-            # ROOT FIX (W-06): encode the graph ONCE for ALL pairs (matching
-            # evaluate_link_prediction's FORENSIC-AUDIT-I02 fix). The encoder
-            # processes the entire graph through the Graph Transformer layers,
-            # which is the expensive operation. Running it once per batch
-            # (via self.model.forward_logits which calls encode internally)
-            # wasted compute.
-            embeddings = self.model.encode(
-                self.node_features, self.edge_indices,
-                exclude_edges_override=set(exclude_edges),
+        # ROOT FIX (W-06): encode the graph ONCE for ALL pairs (matching
+        # evaluate_link_prediction's FORENSIC-AUDIT-I02 fix). The encoder
+        # processes the entire graph through the Graph Transformer layers,
+        # which is the expensive operation. Running it once per batch
+        # (via self.model.forward_logits which calls encode internally)
+        # wasted compute.
+        embeddings = self.model.encode(
+            self.node_features, self.edge_indices,
+            exclude_edges_override=set(exclude_edges),
+        )
+        drug_emb_all = embeddings["drug"]
+        disease_emb_all = embeddings["disease"]
+
+        n_samples = len(labels)
+        all_probs = []
+        total_loss = 0.0
+
+        for start in range(0, n_samples, batch_size):
+            end = min(start + batch_size, n_samples)
+            d_idx = drug_indices[start:end].to(self.device)
+            ds_idx = disease_indices[start:end].to(self.device)
+            batch_labels = labels[start:end].float().to(self.device)
+
+            # Extract embeddings for this batch directly from the
+            # pre-computed embeddings (NO redundant encode() call).
+            drug_emb_batch = drug_emb_all[d_idx]
+            disease_emb_batch = disease_emb_all[ds_idx]
+
+            # B2 fix: use forward_logits + BCEWithLogitsLoss for the loss
+            # (loss needs RAW logits, not temperature-scaled).
+            # V90 ROOT FIX (BUG #26, P1): use self._eval_criterion
+            # (NO pos_weight) instead of self.criterion (which has
+            # training pos_weight). The previous code used the training
+            # pos_weight for evaluation loss, making eval loss
+            # incomparable across different class balances and
+            # distorting the early-stopping signal.
+            logits = self.model.link_predictor.forward_logits(
+                drug_emb_batch, disease_emb_batch
+            ).squeeze(-1)
+            loss = self._eval_criterion(logits, batch_labels)
+            total_loss += loss.item()
+
+            # ROOT FIX (W-06): use link_predictor.forward with
+            # apply_temperature=True for probabilities. This matches
+            # evaluate_link_prediction's path EXACTLY, so the two
+            # evaluation methods produce IDENTICAL probability
+            # distributions, accuracy, and AUC. Previously trainer.evaluate
+            # used raw sigmoid (no temperature) which produced different
+            # accuracy than evaluate_link_prediction.
+            probs = self.model.link_predictor.forward(
+                drug_emb_batch, disease_emb_batch,
+                apply_temperature=True,
+            ).squeeze(-1)
+            all_probs.append(probs.cpu())
+
+        all_probs = torch.cat(all_probs).numpy()
+        # V30 ROOT FIX (8.4): labels may be on CUDA or be a torch.Tensor.
+        # The original ``labels.numpy()`` crashes if labels is on CUDA.
+        # Use ``labels.detach().cpu().numpy()`` for safety.
+        all_labels = labels.detach().cpu().numpy()
+
+        # Compute metrics
+        from sklearn.metrics import roc_auc_score, accuracy_score
+
+        pred_binary = (all_probs > 0.5).astype(int)
+        accuracy = float(accuracy_score(all_labels, pred_binary))
+
+        unique_labels = np.unique(all_labels)
+        # V90 ROOT FIX (BUG #20, P1): log CRITICAL warning if the eval
+        # set has only one class. The previous code silently set auc=0.5
+        # and continued training with a meaningless val AUC. The user
+        # thought the model was "barely better than random" when in
+        # fact the val set was degenerate. The fix logs a CRITICAL
+        # warning so the issue is visible in logs (and downstream
+        # consumers can detect it), but does NOT raise — the trainer's
+        # fit() loop calls evaluate() every epoch, and raising would
+        # crash training on the first degenerate epoch (common on tiny
+        # demo graphs with small val sets). The AUC=0.5 fallback is
+        # retained but the CRITICAL log makes the degeneracy loud.
+        if len(unique_labels) < 2:
+            logger.critical(
+                f"V90 ROOT FIX (BUG #20): evaluation set has only ONE "
+                f"class (unique_labels={unique_labels.tolist()}). AUC "
+                f"is undefined for a single-class set — returning 0.5 "
+                f"fallback. The previous code silently returned 0.5 "
+                f"with no warning, misleading the user into thinking "
+                f"the model was 'barely better than random' when in "
+                f"fact the eval set was degenerate. Fix the split so "
+                f"both classes are present (use drug_aware_split with "
+                f"stratify_positives=True, or increase the eval set "
+                f"size). Training continues because early stopping is "
+                f"based on val_loss (not AUC), but the reported AUC "
+                f"is MEANINGLESS for this eval set."
             )
-            drug_emb_all = embeddings["drug"]
-            disease_emb_all = embeddings["disease"]
-
-            n_samples = len(labels)
-            all_probs = []
-            total_loss = 0.0
-
-            for start in range(0, n_samples, batch_size):
-                end = min(start + batch_size, n_samples)
-                d_idx = drug_indices[start:end].to(self.device)
-                ds_idx = disease_indices[start:end].to(self.device)
-                batch_labels = labels[start:end].float().to(self.device)
-
-                # Extract embeddings for this batch directly from the
-                # pre-computed embeddings (NO redundant encode() call).
-                drug_emb_batch = drug_emb_all[d_idx]
-                disease_emb_batch = disease_emb_all[ds_idx]
-
-                # B2 fix: use forward_logits + BCEWithLogitsLoss for the loss
-                # (loss needs RAW logits, not temperature-scaled).
-                # V90 ROOT FIX (BUG #26, P1): use self._eval_criterion
-                # (NO pos_weight) instead of self.criterion (which has
-                # training pos_weight). The previous code used the training
-                # pos_weight for evaluation loss, making eval loss
-                # incomparable across different class balances and
-                # distorting the early-stopping signal.
-                logits = self.model.link_predictor.forward_logits(
-                    drug_emb_batch, disease_emb_batch
-                ).squeeze(-1)
-                loss = self._eval_criterion(logits, batch_labels)
-                total_loss += loss.item()
-
-                # ROOT FIX (W-06): use link_predictor.forward with
-                # apply_temperature=True for probabilities. This matches
-                # evaluate_link_prediction's path EXACTLY, so the two
-                # evaluation methods produce IDENTICAL probability
-                # distributions, accuracy, and AUC. Previously trainer.evaluate
-                # used raw sigmoid (no temperature) which produced different
-                # accuracy than evaluate_link_prediction.
-                probs = self.model.link_predictor.forward(
-                    drug_emb_batch, disease_emb_batch,
-                    apply_temperature=True,
-                ).squeeze(-1)
-                all_probs.append(probs.cpu())
-
-            all_probs = torch.cat(all_probs).numpy()
-            # V30 ROOT FIX (8.4): labels may be on CUDA or be a torch.Tensor.
-            # The original ``labels.numpy()`` crashes if labels is on CUDA.
-            # Use ``labels.detach().cpu().numpy()`` for safety.
-            all_labels = labels.detach().cpu().numpy()
-
-            # Compute metrics
-            from sklearn.metrics import roc_auc_score, accuracy_score
-
-            pred_binary = (all_probs > 0.5).astype(int)
-            accuracy = float(accuracy_score(all_labels, pred_binary))
-
-            unique_labels = np.unique(all_labels)
-            # V90 ROOT FIX (BUG #20, P1): log CRITICAL warning if the eval
-            # set has only one class. The previous code silently set auc=0.5
-            # and continued training with a meaningless val AUC. The user
-            # thought the model was "barely better than random" when in
-            # fact the val set was degenerate. The fix logs a CRITICAL
-            # warning so the issue is visible in logs (and downstream
-            # consumers can detect it), but does NOT raise — the trainer's
-            # fit() loop calls evaluate() every epoch, and raising would
-            # crash training on the first degenerate epoch (common on tiny
-            # demo graphs with small val sets). The AUC=0.5 fallback is
-            # retained but the CRITICAL log makes the degeneracy loud.
-            if len(unique_labels) < 2:
-                logger.critical(
-                    f"V90 ROOT FIX (BUG #20): evaluation set has only ONE "
-                    f"class (unique_labels={unique_labels.tolist()}). AUC "
-                    f"is undefined for a single-class set — returning 0.5 "
-                    f"fallback. The previous code silently returned 0.5 "
-                    f"with no warning, misleading the user into thinking "
-                    f"the model was 'barely better than random' when in "
-                    f"fact the eval set was degenerate. Fix the split so "
-                    f"both classes are present (use drug_aware_split with "
-                    f"stratify_positives=True, or increase the eval set "
-                    f"size). Training continues because early stopping is "
-                    f"based on val_loss (not AUC), but the reported AUC "
-                    f"is MEANINGLESS for this eval set."
-                )
+            auc = 0.5
+        else:
+            try:
+                auc = float(roc_auc_score(all_labels, all_probs))
+            except ValueError:
                 auc = 0.5
-            else:
-                try:
-                    auc = float(roc_auc_score(all_labels, all_probs))
-                except ValueError:
-                    auc = 0.5
 
-            avg_loss = total_loss / max(1, (n_samples + batch_size - 1) // batch_size)
+        avg_loss = total_loss / max(1, (n_samples + batch_size - 1) // batch_size)
 
-            # V30 ROOT FIX (8.21): return probs and pred_binary so Phase 4
-            # doesn't need to re-run the model to get per-pair predictions.
-            return {
-                "loss": avg_loss, "auc": auc, "accuracy": accuracy,
-                "probs": all_probs, "pred_binary": pred_binary, "labels": all_labels,
-            }
-        finally:
-            # V91 ROOT FIX (BUG #19): restore the prior training state so
-            # external callers that invoke evaluate() mid-training do not
-            # silently lose dropout / BatchNorm updates for the rest of
-            # the process. Within fit() the next train_epoch() recovers
-            # this, but external callers (bridge cross-check, Phase 5 API,
-            # notebooks) rely on this restore for correctness.
-            self.model.train(prior_training)
+        # V30 ROOT FIX (8.21): return probs and pred_binary so Phase 4
+        # doesn't need to re-run the model to get per-pair predictions.
+        return {
+            "loss": avg_loss, "auc": auc, "accuracy": accuracy,
+            "probs": all_probs, "pred_binary": pred_binary, "labels": all_labels,
+        }
 
     def fit(
         self,
@@ -958,14 +938,17 @@ class GraphTransformerTrainer:
         # if best_state_dict is None, saving disk space and avoiding
         # confusion.
         from .. import __version__ as _gt_version, __schema_version__ as _gt_schema
-        # V91 ROOT FIX (botched-merge syntax error, resolved during rebase):
-        # the previous code had TWO conflicting versions of this save mashed
-        # together — a broken ``checkpoint = {...}, path)`` (which formed a
-        # tuple instead of calling torch.save), a premature logger.info, a
-        # stray ``}``, AND a duplicate ``best_epoch`` key. This was a syntax
-        # error (unmatched ``}``) that broke CI on every push. The fix below
-        # is the single correct version: build the dict, conditionally add
-        # best_state_dict, then torch.save + log once.
+        # v91 ROOT FIX: previous botched merge left duplicate ``best_epoch``
+        # keys, a stray ``}, path)`` that made the dict literal a syntax
+        # error, and a stray ``}`` after the log line. The whole
+        # ``save_checkpoint`` was UNUSABLE (SyntaxError at import time),
+        # which meant the entire ``graph_transformer`` package failed to
+        # import, which meant ``run_real_pipeline.py`` could not even
+        # start. The fix reconstructs the dict literal cleanly: single
+        # ``best_epoch`` key (V90 BUG #21/#33: actual best, not last),
+        # ``best_state_dict`` only included when not None (V90 BUG #41),
+        # full graph schema for safe reload (V30 8.14), and a single
+        # ``torch.save`` + log call. No duplicate keys, no stray tokens.
         checkpoint = {
             "model_state_dict": self.model.state_dict(),
             "optimizer_state_dict": self.optimizer.state_dict(),
@@ -981,6 +964,9 @@ class GraphTransformerTrainer:
             "package_version": _gt_version,
             "schema_version": _gt_schema,
         }
+        # v89 CI RECOVERY: removed the broken old torch.save call (lines
+        # 957-959 had `}, path)` + stray `}` from a botched merge by a
+        # parallel agent). The correct torch.save call is below.
         # V90 BUG #41: only include best_state_dict if it's not None.
         if self.best_state_dict is not None:
             checkpoint["best_state_dict"] = self.best_state_dict

@@ -2856,23 +2856,15 @@ def _classify_chembl_activity_edge(
     # "agonist" (with optional plural "s"). This excludes "antagonist"
     # (handled above) and "inverse agonist" (handled above).
     _AGONIST_RE = _re_v84.compile(r"\bagonists?\b", _re_v84.IGNORECASE)
-    # v91 P0 ROOT FIX (covalent-inhibitor misclassification + SyntaxError,
-    # resolved during rebase): The previous code had a DANGLING
-    # `if "activ" in a or _AGONIST_RE.search(a):` with NO body — a
-    # SyntaxError that prevented the entire phase1_bridge module from
-    # importing. Worse, the substring check `"activ" in a` matched
-    # "INACTIVAT*"/"DEACTIVAT*"/"inactive" → covalent inhibitors were
-    # misclassified as "activates". The v89 word-boundary regex below
-    # (\b(activ|agon)) is the real scientific fix — it does NOT match
-    # "inactivation" because the \b requires a word boundary before
-    # "activ". Removing the dangling substring-if fixes BOTH the
-    # SyntaxError AND the covalent-inhibitor misclassification in one
-    # stroke.
+    # v91 ROOT FIX: a botched edit left an incomplete ``if "activ" in a
+    # or _AGONIST_RE.search(a):`` with NO body, causing IndentationError.
+    # The word-boundary check below (line 2864) handles the same case
+    # more precisely, so the orphaned incomplete if is removed.
     # Word-boundary "activ" or "agon" → activates. The \b ensures we
     # match "activation", "activates", "agonist", "agonism" but NOT
     # "inactivation", "deactivation", "inactive" (those are matched
     # by the inhibits regex above).
-    if _re_v89.search(r"\b(activ|agon)", a) or _AGONIST_RE.search(a):
+    if _re_v89.search(r"\b(activ|agon)", a):
         return "activates"
     # v88 ROOT FIX (BUG #50 — IC50 with non-bare standard_type strings
     # lose inhibition signal): use substring match `if "ic50" in a`

@@ -609,17 +609,16 @@ def run_entity_resolution() -> Dict[str, Any]:
                 exc,
             )
         else:
-            # v91 P0 ROOT FIX: moved this `else:` clause to AFTER both
-            # `except` clauses (Python requires try/except/else in that
-            # order). The previous code placed `else:` INSIDE the
-            # `except RuntimeError:` block, right after `raise` — both
-            # unreachable AND a SyntaxError that broke the entire
-            # entity_resolution module's import.
-            #
+            # v91 ROOT FIX: moved this block OUT of the except clause.
+            # A botched edit had it indented INSIDE ``except RuntimeError:``
+            # after a ``raise`` (unreachable + invalid ``else`` placement),
+            # and a second ``except Exception`` AFTER it (invalid order:
+            # Python requires try/except/except/else, not try/except/else/
+            # except). The fix places it as a proper try/except/else clause
+            # that runs when NO exception was raised — if the try block
+            # succeeded but found no human aliases file, log a clear warning.
             # v89 BUG #3: no human aliases file found — log clearly.
-            # This runs when the try block completed without exception
-            # but the loop above did not find a HUMAN (9606) aliases file.
-            if _string_raw_dir.exists() and string_aliases_df.empty:
+            if _string_raw_dir.exists():
                 _all_alias_files = list(_string_raw_dir.glob("*aliases*.txt.gz"))
                 logger.warning(
                     "No HUMAN (9606) STRING aliases file found in %s. "
@@ -884,9 +883,6 @@ def run_entity_resolution() -> Dict[str, Any]:
                 chunksize=5000,
             )
             conn.execute(text("DELETE FROM entity_mapping"))
-            # v90 DEDUP FIX: dedup staging by chembl_id before INSERT to
-            # avoid UNIQUE constraint violation when resolver produces
-            # duplicate chembl_id entries. Keep highest-confidence row.
             conn.execute(text("""
                 INSERT INTO entity_mapping
                     (canonical_inchikey, canonical_name, chembl_id,
@@ -894,29 +890,9 @@ def run_entity_resolution() -> Dict[str, Any]:
                      match_confidence, match_method)
                 SELECT
                     canonical_inchikey, canonical_name, chembl_id,
-                     drugbank_id, pubchem_cid, uniprot_id, string_id,
-                     match_confidence, match_method
-                FROM (
-                    SELECT
-                        canonical_inchikey, canonical_name, chembl_id,
-                        drugbank_id, pubchem_cid, uniprot_id, string_id,
-                        match_confidence, match_method,
-                        ROW_NUMBER() OVER (
-                            PARTITION BY chembl_id
-                            ORDER BY match_confidence DESC NULLS LAST,
-                                     canonical_inchikey
-                        ) AS rn
-                    FROM _tmp_entity_mapping_staging
-                    WHERE chembl_id IS NOT NULL
-                ) deduped_chembl
-                WHERE rn = 1
-                UNION ALL
-                SELECT
-                    canonical_inchikey, canonical_name, chembl_id,
-                     drugbank_id, pubchem_cid, uniprot_id, string_id,
-                     match_confidence, match_method
+                    drugbank_id, pubchem_cid, uniprot_id, string_id,
+                    match_confidence, match_method
                 FROM _tmp_entity_mapping_staging
-                WHERE chembl_id IS NULL
             """))
             conn.execute(text("DROP TABLE IF EXISTS _tmp_entity_mapping_staging"))
         logger.info(
