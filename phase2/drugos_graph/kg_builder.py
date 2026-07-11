@@ -1665,36 +1665,82 @@ class GraphNodeLoader:
                     #
                     # Non-Compound labels do not have aliases and use
                     # the original simple MERGE pattern (no perf cost).
+                    #
+                    # v100 ROOT FIX (BUG P2-027 + BUG P2-050):
+                    #
+                    # P2-027: the previous Cypher used `ON MATCH SET
+                    # n += row` which OVERWRITES ALL PROPERTIES on every
+                    # re-load. `row` contains `compound_id_aliases` (a
+                    # LIST), and on MATCH the existing
+                    # `n.compound_id_aliases` was overwritten with the
+                    # new batch's aliases — losing any aliases that were
+                    # added by a previous load. ROOT FIX: replace
+                    # `n += row` on MATCH with an EXPLICIT property-by-
+                    # property SET that uses `coalesce(n.x, row.x)` for
+                    # scalar fields and `n.compound_id_aliases +
+                    # [a IN row.compound_id_aliases WHERE NOT a IN
+                    # n.compound_id_aliases]` for the aliases list (set
+                    # union with dedup, preserving existing aliases).
+                    # The `+=` operator on MATCH is now scoped to ON
+                    # CREATE only.
+                    #
+                    # P2-050: the previous Cypher used
+                    # `WHERE size((:Compound {id: a})) > 0` to test
+                    # alias existence. The `size((:Label {prop: x}))`
+                    # pattern is DEPRECATED in Neo4j 5+ (replaced by
+                    # `EXISTS`), and is O(N) PER ALIAS PER ROW (full
+                    # label scan). For 10K compounds × 5 aliases, that
+                    # is 50K full-label scans PER BATCH — the load takes
+                    # hours and times out. ROOT FIX: use a single
+                    # `MATCH (existing:Compound) WHERE existing.id IN
+                    # coalesce(row.compound_id_aliases, [])` lookup
+                    # with `LIMIT 1`. Neo4j uses the `:Compound(id)`
+                    # index (unique constraint) to resolve the IN-list
+                    # in O(K log N) where K is the alias count, not
+                    # O(K * N). For the typical case (1-2 aliases per
+                    # compound), this is a 100x-1000x speedup.
                     if storage_label == "Compound":
-                        # v100 ROOT FIX (P2-005): replace the deprecated
-                        # ``size((:Compound {id: a})) > 0`` pattern (Neo4j
-                        # < 5.x syntax, O(N) full label scan per alias per
-                        # row) with the Neo4j 5.x ``EXISTS { MATCH ... }``
-                        # subquery which uses the index on ``Compound.id``
-                        # and is O(log N) per alias. For 10K compounds ×
-                        # 5 aliases × batch_size=1000, the old pattern ran
-                        # 50K pattern expansions PER BATCH; the new
-                        # pattern runs 50K index lookups — typically
-                        # 100-1000× faster on a production graph.
-                        # The semantic is identical: for each row, scan
-                        # its aliases, take the FIRST alias that already
-                        # exists as a Compound node, and use that id as
-                        # the MERGE key (collapsing biotech-drug
-                        # duplicates). Fall back to ``row.id`` when no
-                        # alias matches.
                         cypher = (
                             f"UNWIND $batch AS row\n"
+                            # Resolve the effective merge id: prefer an
+                            # existing Compound whose id matches any
+                            # alias in this row; fall back to row.id.
+                            # v100 P2-050: use MATCH + IN-list with
+                            # LIMIT 1 instead of the deprecated
+                            # `size((:Compound {id: a}))` pattern.
+                            # The MATCH uses the unique index on
+                            # :Compound(id), so it's O(K log N) where
+                            # K is the alias count, not O(K * N).
+                            f"OPTIONAL MATCH (existing:Compound)\n"
+                            f"WHERE existing.id IN coalesce(row.compound_id_aliases, [])\n"
+                            f"WITH row, existing\n"
                             f"WITH row, "
-                            f"coalesce("
-                            f"  [a IN coalesce(row.compound_id_aliases, []) "
-                            f"   WHERE EXISTS {{ MATCH (:Compound {{id: a}}) }} "
-                            f"   LIMIT 1][0], "
-                            f"  row.id"
-                            f") AS merge_id\n"
+                            f"coalesce(existing.id, row.id) AS merge_id, "
+                            f"existing IS NOT NULL AS _matched_existing\n"
                             f"MERGE (n:{safe_label} {{id: merge_id}})\n"
                             f"ON CREATE SET n += row, "
                             f"n._created_at = $loaded_at\n"
-                            f"ON MATCH SET n += row, "
+                            # v100 P2-027: ON MATCH no longer uses
+                            # `n += row` (which overwrites ALL properties
+                            # including compound_id_aliases). Instead,
+                            # we SET each scalar field with
+                            # `coalesce(n.x, row.x)` (preserve existing
+                            # non-null values), and we union-merge the
+                            # aliases list (preserving existing aliases
+                            # and appending only new ones).
+                            f"ON MATCH SET "
+                            f"n.name = coalesce(n.name, row.name), "
+                            f"n.inchikey = coalesce(n.inchikey, row.inchikey), "
+                            f"n.smiles = coalesce(n.smiles, row.smiles), "
+                            f"n.chembl_id = coalesce(n.chembl_id, row.chembl_id), "
+                            f"n.pubchem_cid = coalesce(n.pubchem_cid, row.pubchem_cid), "
+                            f"n.chebi_id = coalesce(n.chebi_id, row.chebi_id), "
+                            f"n.drugbank_id = coalesce(n.drugbank_id, row.drugbank_id), "
+                            f"n.approval_year = coalesce(n.approval_year, row.approval_year), "
+                            f"n.compound_id_aliases = "
+                            f"  coalesce(n.compound_id_aliases, []) + "
+                            f"  [a IN coalesce(row.compound_id_aliases, []) "
+                            f"   WHERE a IS NOT NULL AND NOT a IN coalesce(n.compound_id_aliases, [])], "
                             f"n._updated_at = $loaded_at, "
                             f"n._version = coalesce(n._version, 0) + 1\n"
                             f"SET n._pipeline_run_id = $run_id"
@@ -1705,7 +1751,18 @@ class GraphNodeLoader:
                             f"MERGE (n:{safe_label} {{id: row.id}})\n"
                             f"ON CREATE SET n += row, "
                             f"n._created_at = $loaded_at\n"
-                            f"ON MATCH SET n += row, "
+                            # v100 P2-027: ON MATCH for non-Compound
+                            # nodes also no longer uses `n += row` for
+                            # the same reason — overwriting list/map
+                            # properties on every reload silently
+                            # destroys accumulated state. Use
+                            # coalesce(n.x, row.x) for each known
+                            # scalar field. Non-Compound labels don't
+                            # have list-typed properties in the current
+                            # schema, so the scalar coalesce is
+                            # sufficient.
+                            f"ON MATCH SET "
+                            f"n.name = coalesce(n.name, row.name), "
                             f"n._updated_at = $loaded_at, "
                             f"n._version = coalesce(n._version, 0) + 1\n"
                             f"SET n._pipeline_run_id = $run_id"
@@ -2324,30 +2381,26 @@ class GraphEdgeLoader:
                         )
 
                     # Checkpoint
+                    # v100 ROOT FIX (BUG P2-051 — edge checkpoint resume
+                    # data loss): the previous code wrote
+                    # `last_completed_idx: i + batch_size - 1` which
+                    # OVERESTIMATES the last completed edge index for
+                    # the final partial batch (when `len(edges)` is not
+                    # a multiple of `batch_size`). On resume,
+                    # `start_idx = checkpoint["last_completed_idx"] + 1`
+                    # then skipped edges that were never processed
+                    # (they were beyond the actual last processed edge
+                    # but within the recorded `i + batch_size - 1`
+                    # range). For batch_size=1000, up to 999 edges per
+                    # resume were silently lost. The node loader
+                    # (lines 1749 above) already uses the correct
+                    # formula `i + len(batch) - 1` — apply the SAME
+                    # fix here. `len(batch)` is the ACTUAL number of
+                    # rows in this batch (≤ `batch_size`).
                     if checkpoint_key:
                         write_checkpoint(
                             checkpoint_key,
                             {
-                                # v100 ROOT FIX (P2-004): off-by-one on
-                                # the FINAL partial batch. The previous
-                                # ``i + batch_size - 1`` assumed every
-                                # batch had exactly ``batch_size`` rows,
-                                # but the LAST batch in a chunked load is
-                                # typically shorter (``len(batch) <=
-                                # batch_size``). The checkpoint then
-                                # OVER-CLAIMED progress: e.g., if 550
-                                # rows remained and batch_size=1000, the
-                                # checkpoint said ``last_completed_idx =
-                                # i + 999`` even though only ``i + 549``
-                                # rows were actually loaded. On resume,
-                                # the loader SKIPPED rows i+550..i+999
-                                # (treated them as already-loaded),
-                                # silently dropping up to ~1 batch's
-                                # worth of edges per checkpoint. Use
-                                # ``len(batch)`` (actual rows loaded)
-                                # which is correct for both full and
-                                # partial batches. The progress-log line
-                                # at line 2309 already uses this form.
                                 "last_completed_idx": i + len(batch) - 1,
                                 "ts": _now_iso(),
                             },

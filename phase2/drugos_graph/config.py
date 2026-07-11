@@ -2881,6 +2881,37 @@ def get_neo4j_config() -> Neo4jConfig:
 REVERSE_EDGE_PREFIX: str = "rev_"
 
 
+# v100 ROOT FIX (BUG P2-031 + P2-054): one-shot dead-code warning for
+# PyGConfig.num_neighbors. Module-level flag ensures the warning fires
+# at most once per process even if many PyGConfig instances are created.
+_NUM_NEIGHBORS_DEAD_WARNED: bool = False
+
+
+def _warn_num_neighbors_dead() -> None:
+    """Emit a one-shot warning that ``PyGConfig.num_neighbors`` is dead code.
+
+    v100 ROOT FIX (BUG P2-031 + P2-054): the ``num_neighbors`` field on
+    ``PyGConfig`` is declared but NEVER consumed by any consumer module
+    (no GraphSAGE / GAT neighbor sampler is wired in). Operators who set
+    it expecting it to take effect get NO behavior change. This guard
+    emits a single ``logger.warning`` per process the first time it is
+    called, so the dead-code status is LOUD instead of silent. The field
+    itself is kept (removing it would break the dataclass constructor for
+    callers that pass it explicitly).
+    """
+    global _NUM_NEIGHBORS_DEAD_WARNED
+    if _NUM_NEIGHBORS_DEAD_WARNED:
+        return
+    _NUM_NEIGHBORS_DEAD_WARNED = True
+    logger.warning(
+        "PyGConfig.num_neighbors is currently DEAD CODE — it is declared "
+        "but NOT consumed by any module (no GraphSAGE/GAT neighbor sampler "
+        "is wired in). Setting it has NO effect on training, evaluation, "
+        "or reproducibility. This warning fires once per process. "
+        "(v100 ROOT FIX BUG P2-031 + P2-054)"
+    )
+
+
 @dataclass(frozen=True)
 class PyGConfig:
     """PyG graph construction and training settings.
@@ -2930,11 +2961,19 @@ class PyGConfig:
         "Compound", "treats", "Disease"
     )
 
-    # Neighbor sampling
-    # WIRING: These fields are currently NOT used by any consumer module.
-    # They are placeholders for future GraphSAGE / GAT neighbor sampling.
-    # If implemented, they WOULD affect reproducibility — hence the seed
-    # field above also covers this (issue 2.7).
+    # ─── DEAD CODE — Neighbor sampling (BUG P2-031 + P2-054) ───────────
+    # v100 ROOT FIX (BUG P2-031 + P2-054): this field is DEAD CODE.
+    # It is declared but NEVER consumed by any consumer module. No
+    # GraphSAGE / GAT neighbor sampler is wired in, so setting
+    # ``num_neighbors`` has NO effect on training, evaluation, or
+    # reproducibility. The field is KEPT (removing it would break the
+    # dataclass constructor for callers that pass it explicitly). A
+    # one-shot runtime warning is emitted from ``__post_init__`` via
+    # ``_warn_num_neighbors_dead()`` whenever a non-default value is
+    # observed, so operators who set it get a LOUD signal instead of
+    # silent acceptance. If a neighbor sampler is ever implemented,
+    # this field WILL affect reproducibility — the ``seed`` field
+    # above already covers that future case (issue 2.7).
     num_neighbors: List[int] = field(
         default_factory=lambda: [30, 20]
     )
@@ -3021,6 +3060,12 @@ class PyGConfig:
                 object.__setattr__(
                     self, _field_name, _cast_fn(_os.environ[_env_key])
                 )
+
+        # v100 ROOT FIX (BUG P2-031 + P2-054): num_neighbors is dead
+        # code. Warn once per process if an operator set it to a
+        # non-default value expecting it to take effect.
+        if self.num_neighbors != [30, 20]:
+            _warn_num_neighbors_dead()
 
 
 # ─── Phase C.3 — TransEConfig ────────────────────────────────────────────────
@@ -5085,8 +5130,53 @@ class AUCBelowThresholdError(Exception):
     drug repurposing predictions.
 
     Fixes audit issue 2.6 — explicit AUC enforcement error.
+
+    v100 ROOT FIX (BUG P2-058): the exception now carries structured
+    ``actual_auc`` and ``threshold`` attributes (previously it was a
+    bare ``pass`` subclass that only ever received an ad-hoc message
+    string). ``assert_auc_meets_threshold`` constructs the exception
+    with these structured values whenever it raises in
+    STRICT / STANDARD / CLINICAL / REGULATORY (i.e. production)
+    enforcement mode, giving operators a non-ignorable signal. In
+    RELAXED (dev) mode the function still returns ``False`` without
+    raising. The constructor remains backward-compatible with the
+    legacy single-string form ``AUCBelowThresholdError("msg")`` used
+    by existing callers and tests.
+
+    Attributes
+    ----------
+    actual_auc : float or None
+        The computed AUC that failed the threshold. ``None`` when the
+        legacy single-string constructor form is used.
+    threshold : float or None
+        The threshold that ``actual_auc`` failed to meet. ``None`` when
+        the legacy single-string constructor form is used.
+    message : str
+        The human-readable message (also passed to ``Exception.__init__``).
     """
-    pass
+
+    # v100 ROOT FIX (BUG P2-058)
+    def __init__(self, actual_auc=None, threshold=None, msg=None):
+        # Backward-compat: legacy callers (and tests) construct the
+        # exception with a single message string, e.g.
+        # ``AUCBelowThresholdError("AUC 0.65 below threshold 0.78")``.
+        # Detect that form and delegate to the default Exception
+        # behavior so those callers keep working without changes.
+        if isinstance(actual_auc, str) and threshold is None and msg is None:
+            self.actual_auc = None
+            self.threshold = None
+            self.message = actual_auc
+            super().__init__(actual_auc)
+            return
+        self.actual_auc = actual_auc
+        self.threshold = threshold
+        if msg is None:
+            msg = (
+                f"AUC {actual_auc:.4f} is below the required threshold "
+                f"{threshold:.4f}."
+            )
+        self.message = msg
+        super().__init__(msg)
 
 
 def get_target_auc() -> float:
@@ -5146,8 +5236,17 @@ def assert_auc_meets_threshold(
     ------
     AUCBelowThresholdError
         If AUC is below threshold and enforcement level is STANDARD,
-        CLINICAL, or REGULATORY. In RELAXED mode no exception is raised;
-        callers must read the return value.
+        CLINICAL, or REGULATORY (i.e. "strict" / production mode). In
+        RELAXED (dev) mode no exception is raised; callers must read
+        the return value.
+
+        v100 ROOT FIX (BUG P2-058): the raised ``AUCBelowThresholdError``
+        now carries structured ``actual_auc`` and ``threshold``
+        attributes (previously it only held an ad-hoc message string),
+        so operators and downstream handlers can programmatically
+        inspect the offending values. The exception is constructed with
+        ``actual_auc`` and ``threshold`` populated at every raise site
+        in this function.
     """
     if threshold is None:
         threshold = get_target_auc()
@@ -5201,7 +5300,10 @@ def assert_auc_meets_threshold(
             AUCEnforcementLevel.CLINICAL,
             AUCEnforcementLevel.REGULATORY,
         ):
-            raise AUCBelowThresholdError(msg)
+            # v100 ROOT FIX (BUG P2-058): raise with structured fields.
+            raise AUCBelowThresholdError(
+                actual_auc=actual_auc, threshold=threshold, msg=msg
+            )
         # RELAXED mode: return False (does not meet threshold).
         return False
 
@@ -5223,7 +5325,10 @@ def assert_auc_meets_threshold(
                 AUCEnforcementLevel.REGULATORY,
             ):
                 audit_log("AUC_BELOW_THRESHOLD", details=msg)
-            raise AUCBelowThresholdError(msg)
+            # v100 ROOT FIX (BUG P2-058): raise with structured fields.
+            raise AUCBelowThresholdError(
+                actual_auc=actual_auc, threshold=threshold, msg=msg
+            )
     return meets
 
 

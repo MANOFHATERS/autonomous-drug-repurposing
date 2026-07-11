@@ -179,9 +179,16 @@ def _log_bridge_fallback(
     backend: str = "csv",
     exception_type: Optional[str] = None,
     exception_message: Optional[str] = None,
+    raised: Optional[bool] = None,  # v100 ROOT FIX (BUG P2-030)
     extra: Optional[Dict[str, Any]] = None,
 ) -> None:
-    """Write a structured audit record for a bridge fallback."""
+    """Write a structured audit record for a bridge fallback.
+
+    The ``raised`` field (v100 ROOT FIX, BUG P2-030) records whether the
+    caller re-raised after emitting this audit record, so downstream
+    readers can distinguish a true CSV fallback from a misleading
+    "falling back" log that was actually followed by a raise.
+    """
     try:
         from datetime import datetime, timezone
         _audit_dir = (
@@ -198,6 +205,7 @@ def _log_bridge_fallback(
             "database_url_set": _DATABASE_URL_SET,
             "exception_type": exception_type,
             "exception_message": (exception_message or "")[:500],
+            "raised": raised,  # v100 ROOT FIX (BUG P2-030)
             "extra": extra or {},
         }
         log_path = _audit_dir / "bridge_fallbacks.jsonl"
@@ -2360,22 +2368,36 @@ def read_phase1_outputs(
             # ROOT FIX: apply the SAME classification logic here so the
             # second silent fallback layer is also discriminating.
             failure_mode = _classify_db_failure(exc)
+            # v100 ROOT FIX (BUG P2-030): the previous single logger.error
+            # below claimed "falling back to CSV reader" even when the code
+            # was about to re-raise (prod non-schema, or dev without
+            # DRUGOS_ALLOW_CSV_FALLBACK=1). The misleading "falling back"
+            # claim is now split: (a) this logger.error records ONLY the
+            # failure fact, and (b) the "falling back to CSV" info log
+            # further down fires ONLY when the fallback is actually taken
+            # (i.e. after BOTH raise guards below have passed).
             logger.error(
-                "Phase1 bridge: PostgreSQL read failed (%s): %s: %s — "
-                "falling back to CSV reader. In production this is fatal "
-                "ONLY for db_unreachable/auth_failed/unknown modes; "
-                "schema_missing falls back to CSV so the pipeline can "
-                "still produce a graph while migrations are run. "
-                "In production with a non-schema failure, Phase 1's "
-                "database work is being discarded.",
+                "Phase1 bridge: PostgreSQL read failed (%s): %s: %s.",
                 failure_mode, type(exc).__name__, exc,
             )
+            # v100 ROOT FIX (BUG P2-030): compute up-front whether the
+            # upcoming raise guards will re-raise, so the structured
+            # audit record can carry a `raised` flag that distinguishes
+            # a true CSV fallback from a misleading log followed by a
+            # raise. The two guards below mirror these conditions —
+            # keep them in sync.
+            _allow_csv_fallback = os.environ.get("DRUGOS_ALLOW_CSV_FALLBACK", "") == "1"
+            _will_raise = (
+                (_PRODUCTION_ENV and failure_mode != "schema_missing")
+                or (failure_mode != "schema_missing" and not _allow_csv_fallback)
+            )
             _log_bridge_fallback(
-                "read_phase1_outputs_postgres_read",
+                "read_phase1_outputs_postgres_failed",
                 f"postgres_read_failed:{failure_mode}",
                 backend="csv",
                 exception_type=type(exc).__name__,
                 exception_message=str(exc),
+                raised=_will_raise,
                 extra={"failure_mode": failure_mode},
             )
             if _PRODUCTION_ENV and failure_mode != "schema_missing":
@@ -2385,12 +2407,19 @@ def read_phase1_outputs(
                 # root cause. Schema_missing is NOT re-raised — it's a
                 # configuration issue (migrations not applied) and the
                 # CSV fallback lets the pipeline still produce a graph.
+                # v100 ROOT FIX (BUG P2-030): the misleading "falling
+                # back" log above was split so the fallback claim only
+                # fires when the fallback actually happens; this branch
+                # re-raises instead of falling back.
                 raise
             # v88 ROOT FIX (BUG #28 — second silent fallback layer):
             # apply the same DRUGOS_ALLOW_CSV_FALLBACK=1 opt-in gate here.
             if failure_mode != "schema_missing":
-                _allow_csv_fallback = os.environ.get("DRUGOS_ALLOW_CSV_FALLBACK", "") == "1"
                 if not _allow_csv_fallback:
+                    # v100 ROOT FIX (BUG P2-030): the misleading "falling
+                    # back" log above was split so the fallback claim only
+                    # fires when the fallback actually happens; this branch
+                    # re-raises RuntimeError instead of falling back.
                     raise RuntimeError(
                         f"phase1_bridge: PostgreSQL read failed "
                         f"(failure_mode={failure_mode}) and prefer_postgres=True. "
@@ -2399,6 +2428,15 @@ def read_phase1_outputs(
                         f"Set DRUGOS_ALLOW_CSV_FALLBACK=1 to allow. "
                         f"Original error: {type(exc).__name__}: {exc}"
                     ) from exc
+            # v100 ROOT FIX (BUG P2-030): the CSV fallback is actually
+            # taken only once BOTH raise guards above have passed. Emit
+            # the "falling back to CSV reader" info log HERE (not at the
+            # top of the except block) so the fallback claim only fires
+            # when the fallback is genuinely about to happen.
+            logger.info(
+                "Phase1 bridge: falling back to CSV reader (failure_mode=%s).",
+                failure_mode,
+            )
             if failure_mode == "schema_missing":
                 logger.warning(
                     "Phase1 bridge: schema_missing in "

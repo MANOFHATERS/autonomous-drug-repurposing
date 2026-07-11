@@ -1157,6 +1157,25 @@ def build_training_data(
     # Anything else is silently skipped (the contract is best-effort).
     import pandas as _pd  # local alias to avoid module-level import cycle
 
+    # v100 ROOT FIX (BUG P2-057): the 30-line schema-version-check block
+    # below (from `expected = SCHEMA_VERSION` through the trailing `else`
+    # branch) is currently DEAD CODE. No upstream caller — neither the
+    # Phase 1 bridge nor the DRKG loader — ever sets `_schema_version` on
+    # the drkg_df (neither as `df.attrs["_schema_version"]` nor as a
+    # column named `_schema_version`); this was confirmed by audit
+    # finding P2-012. The block therefore always falls through: for a
+    # DataFrame with no `_schema_version` column AND no `attrs` entry,
+    # both the case-(b) and case-(c) sub-branches are skipped; for a
+    # non-DataFrame without the attribute, the `else` branch's
+    # `hasattr` check returns False. In every real call path the block
+    # silently does nothing. The block is RETAINED intentionally as a
+    # forward-compatibility safety net: if a future Phase 1 bridge
+    # version starts setting `df.attrs["_schema_version"] = "1.0"` (or
+    # emits a `_schema_version` column on the DRKG DataFrame), this
+    # block will AUTOMATICALLY start enforcing the version match and
+    # log a warning on mismatch. Until then, the block is a no-op. The
+    # block's logic is intentionally UNCHANGED — only this explanatory
+    # comment is added.
     expected = SCHEMA_VERSION
     if isinstance(drkg_df, _pd.DataFrame):
         # Case (b): column on the DataFrame.
@@ -1360,6 +1379,7 @@ def temporal_split_pairs(
     positive_pairs: List[Dict],
     cutoff_year: int = DEFAULT_CUTOFF_YEAR,
     approval_years: Optional[Dict[Tuple[str, str], int]] = None,
+    split_mode: str = "drug_first_approval",
 ) -> Dict[str, Any]:
     """Split positive pairs by approval year for temporal evaluation.
 
@@ -1379,18 +1399,65 @@ def temporal_split_pairs(
     When approval_years is None or empty, falls back to deterministic
     random split using SEED from config (IDE-001).
 
+    KNOWN LIMITATION (v100 ROOT FIX BUG P2-042):
+    The default split_mode="drug_first_approval" (v88 BUG #34) assigns each
+    (drug, disease) pair to a split based on the drug's FIRST approval year
+    across ALL diseases. This guarantees no drug appears in both train and
+    test (no drug-level leakage in that direction). HOWEVER, it also means
+    the test set NEVER contains a drug the model has already seen in
+    training — the model's drug embeddings for test drugs are randomly
+    initialized, so the test AUC reflects ZERO extrapolation to new drugs.
+    Concrete example: a drug approved in 2018 for Disease X (train) and in
+    2022 for Disease Y is placed in TRAIN for BOTH pairs (because
+    drug_first_approval=2018 <= cutoff-2=2018); Disease Y never makes it to
+    test. The reported AUC thus measures performance on completely-unseen
+    drugs, NOT on new indications for known drugs. For the drug-repurposing
+    use case (predicting new indications for APPROVED drugs), use
+    split_mode="pair_level".
+
+    Split modes (v100 ROOT FIX BUG P2-042):
+      - "drug_first_approval" (default, v88 BUG #34): split by the drug's
+        FIRST approval year across all diseases. No drug appears in both
+        train and test. Test AUC measures extrapolation to NEW DRUGS.
+        Backward-compatible default.
+      - "pair_level": split by the (drug, disease) pair's OWN approval
+        year. The same drug may appear in train (for disease X) and test
+        (for disease Y). Test AUC measures extrapolation to NEW
+        INDICATIONS for known drugs — the drug-repurposing use case.
+
     Args:
         positive_pairs: Positive example dicts with 'drug_id' and 'disease_id'.
         cutoff_year: Year boundary for temporal split.
         approval_years: Optional {(drug_id, disease_id): year} mapping.
+        split_mode: (v100 ROOT FIX BUG P2-042) "drug_first_approval"
+            (default) splits by the drug's first approval year across all
+            diseases — backward compatible with v88 BUG #34. "pair_level"
+            splits by the (drug, disease) pair's own approval year —
+            stricter; allows the same drug in train and test for different
+            diseases (tests new-indication extrapolation).
 
-    Returns:
-        Dict with 'train', 'val', 'test' lists and '_split_metadata' dict
-        containing split methodology details. (DSN-004)
+    Returns
+    -------
+    dict
+        Dictionary with keys:
+        - "train": list of train pair dicts
+        - "val": list of val pair dicts
+        - "test": list of test pair dicts
+        - "dropped": list of pair dicts that had no approval_year and were
+          excluded from all three splits (v28 ROOT FIX P2-B-10; v100 P2-028
+          documentation). Each pair dict retains its original drug_id /
+          disease_id / approval_year=None for audit.
+        - "_split_metadata": dict of split metadata (method, cutoff_year,
+          seed, counts, ratios).
 
     Raises:
         ValueError: If cutoff_year is outside reasonable range. (CFG-005)
     """
+    # v100 ROOT FIX (BUG P2-028): the Returns section above now documents
+    # the "dropped" key that v28 (P2-B-10) added to the return dict.
+    # v100 ROOT FIX (BUG P2-042): the docstring above adds a KNOWN
+    # LIMITATION block, a Split modes section, and the new split_mode
+    # parameter (Args). The split-decision block below honors split_mode.
     t0 = time.time()
 
     # CFG-005: Validate cutoff_year
@@ -1551,11 +1618,27 @@ def temporal_split_pairs(
         drug_id_v88 = pair.get("drug_id", "")
         drug_year = drug_first_approval.get(drug_id_v88)
 
-        if drug_year is None and year is None:
+        # v100 ROOT FIX (BUG P2-042): honor split_mode.
+        # - "drug_first_approval" (default, v88 BUG #34): split by the
+        #   drug's FIRST approval year across all diseases. Guarantees
+        #   no drug appears in both train and test, but the test set
+        #   then never contains a drug the model has already learned
+        #   (zero extrapolation to new drugs — see KNOWN LIMITATION in
+        #   the docstring).
+        # - "pair_level": split by the (drug, disease) pair's OWN
+        #   approval year. The same drug may appear in train (disease X)
+        #   and test (disease Y) — tests temporal extrapolation to NEW
+        #   INDICATIONS for known drugs (the drug-repurposing use case).
+        if split_mode == "pair_level":
+            split_year = year
+        else:  # "drug_first_approval" (default; v88 BUG #34 logic)
+            split_year = drug_year if drug_year is not None else year
+
+        if split_year is None:
             no_year.append(pair)
-        elif (drug_year if drug_year is not None else year) <= cutoff_year - 2:
+        elif split_year <= cutoff_year - 2:
             train.append(pair)
-        elif (drug_year if drug_year is not None else year) <= cutoff_year:
+        elif split_year <= cutoff_year:
             val.append(pair)
         else:
             test.append(pair)
