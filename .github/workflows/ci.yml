@@ -479,29 +479,11 @@ jobs:
           cache-dependency-path: |
             requirements.txt
             phase1/requirements.txt
-      - name: Install deps (unconditional — needed for the verification step)
-        # V90 CI fix: the previous 'Check all required jobs passed' step
-        # installed deps ONLY when dependencies failed. When all deps
-        # passed, the install was SKIPPED, so the verification step
-        # crashed with ModuleNotFoundError: No module named 'pandas'.
-        # The fix: always install deps (unconditional).
-        # v89 CI RECOVERY: the V90 fix added the name+comment but FORGOT
-        # the `run:` command. GitHub Actions rejected the workflow with
-        # "There's not enough info to determine what you meant" (0 jobs).
-        # ROOT FIX: add the actual pip install command.
-        run: |
-          python -m pip install --upgrade pip
-          pip install -q \
-            "pandas>=2.1.4" \
-            "numpy>=1.26.3" \
-            "sqlalchemy>=2.0.25" \
-            "requests>=2.31.0" \
-            "python-dotenv>=1.0.0" \
-            "rapidfuzz>=3.6.1" \
-            "pyyaml>=6.0" \
-            "lxml>=5.1.0" \
-            "filelock>=3.13.0" \
-            "pyarrow>=14.0.0"
+      # v91 ROOT FIX: removed a BROKEN step here that had only a `name:` and
+      # comment but NO `run:` or `uses:` key. This is invalid GitHub Actions
+      # YAML and caused the ENTIRE workflow to fail to parse — 0 jobs ran.
+      # The actual install deps step is below (line ~499) and is already
+      # unconditional (no `if` gate), so the broken step was redundant.
       - name: Check all required jobs passed
         if: ${{ !(needs.build.result == 'success' && needs.lint.result == 'success' && needs.test.result == 'success' && needs.verify-p2-fixes.result == 'success' && needs.e2e-sample-mode.result == 'success') }}
         run: |
