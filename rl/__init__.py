@@ -31,6 +31,13 @@ __schema_version__ = "4.1.0"
 # Re-export the most-used symbols so callers can do
 #   from rl import PipelineConfig, run_pipeline, KNOWN_POSITIVES
 # without having to know the internal layout.
+# P4-029 ROOT FIX: added the missing re-exports that the audit found
+# were defined in rl_drug_ranker.py but NOT exposed at the package
+# level. Callers who did ``from rl import safe_load_input`` got
+# ImportError, forcing them to use the longer ``from rl.rl_drug_ranker
+# import safe_load_input`` form. This broke the package's public API
+# contract and made the rl package feel half-built. The fix adds all
+# missing public symbols to both the import statement and __all__.
 from .rl_drug_ranker import (
     # Configuration
     RewardConfig,
@@ -64,6 +71,26 @@ from .rl_drug_ranker import (
     check_known_positive_recovery,
     save_results,
     run_pipeline,
+    # P4-029: previously-missing re-exports (public API completeness)
+    load_validated_hypotheses,
+    merge_results,
+    safe_load_input,
+    split_data,
+    setup_logging,
+    validate_environment,
+    get_device,
+    display_top_candidates,
+    compute_file_hash,
+    sanitize_string,
+    flag_controlled_substances,
+    redact_proprietary_ids,
+    compute_output_hmac,
+    save_provenance_metadata,
+    check_for_pii,
+    log_audit_event,
+    generate_output_filename,
+    get_secret,
+    check_alert_conditions,
     # Data dictionary + schema
     DATA_DICTIONARY,
     INPUT_SCHEMA,
@@ -98,6 +125,26 @@ __all__ = [
     "check_known_positive_recovery",
     "save_results",
     "run_pipeline",
+    # P4-029: previously-missing symbols (public API completeness)
+    "load_validated_hypotheses",
+    "merge_results",
+    "safe_load_input",
+    "split_data",
+    "setup_logging",
+    "validate_environment",
+    "get_device",
+    "display_top_candidates",
+    "compute_file_hash",
+    "sanitize_string",
+    "flag_controlled_substances",
+    "redact_proprietary_ids",
+    "compute_output_hmac",
+    "save_provenance_metadata",
+    "check_for_pii",
+    "log_audit_event",
+    "generate_output_filename",
+    "get_secret",
+    "check_alert_conditions",
     "DATA_DICTIONARY",
     "INPUT_SCHEMA",
     "OUTPUT_SCHEMA",

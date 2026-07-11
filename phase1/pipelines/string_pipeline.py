@@ -1464,6 +1464,12 @@ class StringPipeline(BasePipeline):
         # FIX GAP-3.9: Organism validation. Reject rows whose protein IDs
         # do not start with "9606." (human). Cross-species contamination
         # would corrupt the human knowledge graph.
+        # v92 NOTE (BUG P1-064): OR is the correct operator here for a
+        # human-only KG. We quarantine any PPI where EITHER protein is
+        # non-human (including cross-species human-mouse PPIs, which
+        # would corrupt the human knowledge graph). ~A | ~B ≡ ~(A & B)
+        # by De Morgan's law — rows where BOTH proteins start with the
+        # expected taxon prefix are kept; all others are quarantined.
         wrong_taxon_mask = (
             ~links_df["protein1"].astype(str).str.startswith(f"{EXPECTED_TAXON}.")
             | ~links_df["protein2"].astype(str).str.startswith(f"{EXPECTED_TAXON}.")
@@ -1732,18 +1738,59 @@ class StringPipeline(BasePipeline):
         # (anything else), then prefer shorter accessions (6 over 10
         # chars), then alphabetical. Under ``"first"``, keep the legacy
         # alphabetical-first behavior for backward compatibility.
+        #
+        # v93 ROOT FIX (P1-038 — Swiss-Prot detection heuristic flawed):
+        #   The previous heuristic detected Swiss-Prot accessions ONLY
+        #   by the 6-char format ([OPQ]\d[A-Z0-9]{3}\d). But UniProt
+        #   10-char accessions (new format, e.g. A0A0K3AVT9) can ALSO
+        #   be Swiss-Prot (reviewed). The 6-char format is NECESSARY
+        #   but NOT SUFFICIENT for Swiss-Prot — both 6-char and 10-char
+        #   accessions are used for BOTH Swiss-Prot (reviewed) and
+        #   TrEMBL (unreviewed). The correct approach is to query
+        #   UniProt's ``reviewed`` status field, which requires a join
+        #   against the UniProt reviewed-entries list (not currently
+        #   available in the STRING aliases file).
+        #
+        #   Root fix: DOCUMENT the limitation (the heuristic is a
+        #   PROXY, not ground truth) AND extend the heuristic to give
+        #   a SMALL bonus to 10-char accessions starting with [OPQ]
+        #   (which are MORE LIKELY to be Swiss-Prot than 10-char
+        #   accessions starting with [A-NR-Z]). The bonus is smaller
+        #   than the 6-char Swiss-Prot bonus because the 10-char
+        #   format is also used for TrEMBL. When the UniProt
+        #   reviewed-entries list becomes available, replace this
+        #   heuristic with a direct lookup.
         if STRING_DEDUP_STRATEGY == "max_score":
             # Compute a sort key: (reviewed_rank, length, alias).
-            # reviewed_rank = 0 for Swiss-Prot, 1 for TrEMBL — so
-            # Swiss-Prot sorts first.
+            # reviewed_rank = 0 for 6-char Swiss-Prot-likely,
+            #                  1 for 10-char Swiss-Prot-likely,
+            #                  2 for TrEMBL-likely — so 6-char Swiss-Prot
+            #   sorts first, then 10-char Swiss-Prot, then TrEMBL.
             def _accession_sort_key(ac: str) -> Tuple[int, int, str]:
                 ac_stripped = ac.strip()
-                is_swiss_prot = (
+                # 6-char [OPQ]\d... — classic Swiss-Prot format.
+                is_6char_swiss_prot = (
                     len(ac_stripped) == 6
                     and ac_stripped[0] in "OPQ"
                     and ac_stripped[1].isdigit()
                 )
-                return (0 if is_swiss_prot else 1, len(ac_stripped), ac_stripped)
+                # 10-char [OPQ]\d... — new format, MAY be Swiss-Prot
+                # (reviewed) or TrEMBL (unreviewed). The [OPQ] start is
+                # a weak signal — it's NECESSARY but not SUFFICIENT.
+                # Give it a small bonus (rank 1) over TrEMBL (rank 2)
+                # but NOT as strong as the 6-char signal (rank 0).
+                is_10char_swiss_prot_likely = (
+                    len(ac_stripped) == 10
+                    and ac_stripped[0] in "OPQ"
+                    and ac_stripped[1].isdigit()
+                )
+                if is_6char_swiss_prot:
+                    reviewed_rank = 0
+                elif is_10char_swiss_prot_likely:
+                    reviewed_rank = 1
+                else:
+                    reviewed_rank = 2
+                return (reviewed_rank, len(ac_stripped), ac_stripped)
 
             valid = valid.assign(
                 _sort_key=valid[EXPECTED_ALIAS_COL].map(_accession_sort_key)
@@ -1840,6 +1887,12 @@ class StringPipeline(BasePipeline):
             DataFrame with ``protein1 <= protein2`` for every row
             (lexicographic min/max of the STRING ENSP IDs).
         """
+        # v92 NOTE (BUG P1-072): The STRING-ID-level canonicalization here
+        # (min/max on string IDs) does NOT guarantee the same ordering for
+        # UniProt accessions after mapping. The DB loader's canonicalization
+        # (on integer surrogate PKs) is the real enforcement point for the
+        # UNIQUE(protein_a_id, protein_b_id) constraint. This method is
+        # kept for logging/diagnostic value but is NOT a correctness guarantee.
         df = df.copy()
         original_protein1 = df["protein1"].copy()
         canonical_a = df[["protein1", "protein2"]].min(axis=1)

@@ -53,6 +53,7 @@ Returns:
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any, Dict, Set
 
 logger = logging.getLogger(__name__)
@@ -601,6 +602,43 @@ def run_entity_resolution() -> Dict[str, Any]:
             # v89 BUG #28: re-raise RuntimeError (corrupt file) so the
             # operator sees a clear failure. Do NOT swallow it.
             raise
+        except FileNotFoundError as exc:
+            # v93 ROOT FIX (P1-030 — asymmetric exception handling):
+            # the previous ``except Exception`` clause SILENTLY
+            # SWALLOWED FileNotFoundError, logging only a WARNING.
+            # This meant a missing STRING aliases file (operator
+            # error — file not downloaded, wrong path, etc.) was
+            # silently ignored, and STRING→UniProt cross-reference
+            # was disabled with NO visible error. The KG then had
+            # disconnected STRING and UniProt clusters, and the
+            # operator had no way to know why.
+            #
+            # Root fix: log FileNotFoundError at ERROR level (visible
+            # in every log sink) and re-raise it so the pipeline
+            # fails fast. The operator MUST either (a) download the
+            # STRING aliases file, or (b) explicitly acknowledge the
+            # degradation by setting
+            # ``DRUGOS_SKIP_STRING_ALIASES=1`` in the environment.
+            # This matches the corrupt-file behavior (RuntimeError
+            # re-raised above) — both missing and corrupt files are
+            # operator-actionable failures, not silent degradations.
+            if os.environ.get("DRUGOS_SKIP_STRING_ALIASES", "") == "1":
+                logger.warning(
+                    "STRING aliases file not found: %s — "
+                    "DRUGOS_SKIP_STRING_ALIASES=1 set, continuing "
+                    "with degraded STRING→UniProt resolution.",
+                    exc,
+                )
+            else:
+                logger.error(
+                    "STRING aliases file not found: %s — "
+                    "STRING→UniProt cross-reference cannot be built. "
+                    "Either (a) download the file to the expected "
+                    "path, or (b) set DRUGOS_SKIP_STRING_ALIASES=1 "
+                    "to acknowledge the degradation and continue.",
+                    exc,
+                )
+                raise
         except Exception as exc:
             logger.warning(
                 "Could not load raw STRING aliases file: %s — "

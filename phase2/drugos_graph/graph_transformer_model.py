@@ -247,7 +247,20 @@ class GraphTransformerModel(nn.Module):
         # sigmoid logits (higher = more plausible), so
         # score_higher_is_better = True. This makes the BUG #43 fix
         # in train_transe robust to class renames.
-        self.score_higher_is_better = True
+        #
+        # v100 ROOT FIX (pre-existing crash — property has no setter):
+        # The line `self.score_higher_is_better = True` below
+        # PREVIOUSLY crashed with `AttributeError: property
+        # 'score_higher_is_better' of 'GraphTransformerModel' object
+        # has no setter` because line ~657 declares this name as a
+        # read-only @property (no @score_higher_is_better.setter). The
+        # property already returns True unconditionally, so the
+        # __init__ assignment was both redundant AND a hard crash on
+        # every model construction. ROOT FIX: remove the assignment —
+        # the property at line ~657 is the single source of truth.
+        # This was found by running the v100 real-code verification
+        # script (verify_v100_real_code.py) which constructs a real
+        # GraphTransformerModel instance.
 
         # Relation triple → index.
         # v35 ROOT FIX (H-13 / M-1): the previous code keyed decoders by
@@ -359,30 +372,56 @@ class GraphTransformerModel(nn.Module):
         self._pre_ln = nn.ModuleDict({
             nt: nn.LayerNorm(d) for nt in self.node_types
         })
-        self._post_ln = nn.ModuleDict({
-            nt: nn.LayerNorm(d) for nt in self.node_types
-        })
+        # v100 ROOT FIX (BUG P2-040 + BUG P2-055 — remove dead _post_ln):
+        # The v43 ROOT FIX (P1) removed _post_ln from the residual path
+        # in encode() (standard Pre-LN per Xiong et al. 2020). But the
+        # _post_ln ModuleDict was still declared here in __init__ and
+        # extended by _ensure_pre_post_ln_for_node_types, so it remained
+        # a registered submodule. Its parameters:
+        #   1. consumed GPU memory and parameter count without contributing
+        #      to the forward pass (dead weight),
+        #   2. got saved into checkpoints (silently bloating file size),
+        #   3. received zero gradients via autograd (PyTorch logs a
+        #      warning when parameters have no gradient in .step()).
+        # ROOT FIX: remove the _post_ln ModuleDict entirely. The
+        # _ensure_pre_post_ln_for_node_types method is renamed to
+        # _ensure_pre_ln_for_node_types and only extends _pre_ln.
+        # The encode() method's hasattr check is updated to only check
+        # _pre_ln (see that fix below).
 
         # Track device for later tensor placement.
         self._device = torch.device("cpu")
 
-    def _ensure_pre_post_ln_for_node_types(
+    def _ensure_pre_ln_for_node_types(
         self, node_types: List[str],
     ) -> None:
-        """v36 ROOT FIX (Chain 7): extend _pre_ln/_post_ln for new node types.
+        """v36 ROOT FIX (Chain 7) + v100 ROOT FIX (P2-040/P2-055):
+        Extend _pre_ln for new node types.
 
         Call this AFTER ``resize_node_embeddings`` adds new node types
         (rare; usually the node-type set is fixed at construction). The
         new LayerNorms are created on the model's current device so
         ``model.to(device)`` is not required to be re-called.
+
+        v100: this method previously also extended _post_ln, which was
+        dead code (see P2-040). The _post_ln extension was removed.
         """
         d = self.config.embedding_dim
         for nt in node_types:
             if nt not in self._pre_ln:
                 ln_pre = nn.LayerNorm(d).to(self._device)
-                ln_post = nn.LayerNorm(d).to(self._device)
                 self._pre_ln[nt] = ln_pre
-                self._post_ln[nt] = ln_post
+
+    # v100 backward-compat alias: some callers may still reference the
+    # old name. Keep a thin wrapper that forwards to the new name so
+    # external code does not break.
+    def _ensure_pre_post_ln_for_node_types(self, node_types: List[str]) -> None:
+        """Backward-compat wrapper — calls _ensure_pre_ln_for_node_types.
+
+        v100: the old method extended both _pre_ln and _post_ln. The
+        _post_ln ModuleDict was removed (dead code — see P2-040).
+        """
+        return self._ensure_pre_ln_for_node_types(node_types)
 
     # -- Node-embedding table management ---------------------------------
     @staticmethod
@@ -412,13 +451,38 @@ class GraphTransformerModel(nn.Module):
             parts = ("_unknown_src", triple, "_unknown_dst")
         else:
             parts = tuple(str(p) for p in triple)
-        raw = "_".join(parts)
+        # v100 ROOT FIX (BUG P2-029 — decoder key collision):
+        # The previous code joined parts with "_" then collapsed runs
+        # of underscores. This made the mapping NON-INJECTIVE:
+        #   ("Compound", "treats", "Disease")
+        #     -> "Compound_treats_Disease"
+        #   ("Compound_treats", "", "Disease")
+        #     -> "Compound_treats__Disease" -> (collapse) -> "Compound_treats_Disease"
+        # Both triples produced the SAME key, so the second relation's
+        # decoder silently overwrote the first's weights in the
+        # ModuleDict — corrupting training for whichever relation was
+        # registered first.
+        #
+        # ROOT FIX: use length-prefixed encoding so the concatenation
+        # is injective. Each part is encoded as `<len>_<part>` so the
+        # boundary between parts is unambiguous:
+        #   ("Compound", "treats", "Disease")
+        #     -> "8_Compound_6_treats_7_Disease"
+        #   ("Compound_treats", "", "Disease")
+        #     -> "15_Compound_treats_0__7_Disease"
+        # The empty-string part encodes as "0_" (length 0, no chars),
+        # which is distinct from any non-empty part. Two triples with
+        # different (src, rel, dst) tuples now ALWAYS produce different
+        # keys, so the ModuleDict can never silently overwrite one
+        # relation's decoder with another's.
+        raw = "_".join(f"{len(p)}_{p}" for p in parts)
         sanitized = "".join(
             c if (c.isalnum() or c == "_") else "_" for c in raw
         )
-        # Collapse runs of underscores for readability.
-        while "__" in sanitized:
-            sanitized = sanitized.replace("__", "_")
+        # NOTE: do NOT collapse runs of underscores here — the
+        # length-prefix encoding relies on the underscore positions
+        # being preserved. Collapsing them would re-introduce the
+        # collision bug (see P2-029).
         if not sanitized or sanitized[0].isdigit():
             sanitized = "r_" + sanitized
         return "r_" + sanitized if not sanitized.startswith("r_") else sanitized
@@ -746,12 +810,18 @@ class GraphTransformerModel(nn.Module):
         # (defensive — if a future refactor removes the eager init,
         # this assert fails loudly instead of silently corrupting
         # training).
-        if not hasattr(self, "_pre_ln") or not hasattr(self, "_post_ln"):
+        #
+        # v100 ROOT FIX (BUG P2-040/P2-055 — remove dead _post_ln check):
+        # The previous code checked `hasattr(self, "_pre_ln") or hasattr(self,
+        # "_post_ln")` and the error message mentioned both. _post_ln is
+        # now removed entirely (see __init__ v100 fix). The check is
+        # scoped to _pre_ln only.
+        if not hasattr(self, "_pre_ln"):
             raise RuntimeError(
-                "graph_transformer_model.encode(): _pre_ln / _post_ln "
-                "ModuleDicts are missing. They must be created in "
-                "__init__ (v36 Chain 7 root fix). If you see this, "
-                "a refactor removed the eager init — restore it."
+                "graph_transformer_model.encode(): _pre_ln ModuleDict "
+                "is missing. It must be created in __init__ (v36 Chain 7 "
+                "root fix, v100 P2-040 cleanup). If you see this, a "
+                "refactor removed the eager init — restore it."
             )
 
         # Apply HGT layers with Pre-LN residual connections.
@@ -759,9 +829,8 @@ class GraphTransformerModel(nn.Module):
             # Pre-LN: normalise the input to each sublayer.
             # FIX-P1-D-9 (root): the previous ``if nt in self._pre_ln
             # else h`` fallback was dead code. The v36 fix (Chain 7)
-            # eagerly creates ``_pre_ln`` and ``_post_ln`` for ALL
-            # node types in ``__init__`` (see lines 341-347) AND
-            # extends them via ``_ensure_pre_post_ln_for_node_types``
+            # eagerly creates ``_pre_ln`` for ALL node types in ``__init__``
+            # AND extends it via ``_ensure_pre_ln_for_node_types``
             # whenever a new node type is added at runtime. The
             # ``else`` branch (parameter-free pass-through) was the
             # EXACT bug the v36 fix was supposed to eliminate — it
@@ -791,6 +860,13 @@ class GraphTransformerModel(nn.Module):
                     # cause gradient explosion in early training. Fix:
                     # use standard Pre-LN — residual + sublayer, NO post-LN.
                     #   h_dict[nt] = h_dict[nt] + self.dropout(new_h[nt])
+                    #
+                    # v100 ROOT FIX (P2-040/P2-055): the _post_ln reference
+                    # in the comment above is now historical context only —
+                    # the _post_ln ModuleDict was removed from __init__
+                    # entirely (it was dead code, holding parameters that
+                    # never received gradients). The forward path is
+                    # unchanged (it never called _post_ln after v43).
                     h_dict[nt] = h_dict[nt] + self.dropout(new_h[nt])
 
         return h_dict
@@ -801,7 +877,7 @@ class GraphTransformerModel(nn.Module):
         h_emb: torch.Tensor,
         rel_indices: torch.Tensor,
         t_emb: torch.Tensor,
-        rel_names: List[str],
+        rel_names: Optional[List[str]] = None,
     ) -> torch.Tensor:
         """Score (head, relation, tail) triples — returns LOGITS.
 
@@ -825,11 +901,12 @@ class GraphTransformerModel(nn.Module):
             ``self._relation_embeddings``.
         t_emb : torch.Tensor
             Tail embeddings, shape ``(B, d)``.
-        rel_names : list of str
-            Relation NAME per triple, shape ``(B,)``. Used for logging
-            only — the actual decoder lookup is by the full
-            ``(src_type, rel_name, dst_type)`` triple via the relation
-            index, NOT the bare name. See v36 ROOT FIX (Chain 8).
+        rel_names : list of str, optional
+            Accepted for backward compatibility. NOT read by this
+            method — the decoder lookup is by the relation index, not
+            the bare name. Omit in new code. (v100 P2-025/P2-056: was
+            previously a required positional arg whose value was never
+            used; now Optional with default None.)
 
         Returns
         -------
@@ -842,6 +919,10 @@ class GraphTransformerModel(nn.Module):
             ``self.decoders`` receive NaN — callers MUST filter NaN
             entries before computing the loss (see P2C-005).
         """
+        # v100 P2-025/P2-056: rel_names is intentionally not read.
+        # The decoder lookup below uses rel_indices which uniquely
+        # identifies the (src, rel, dst) triple via self.relation_types.
+        del rel_names  # explicit unused-marker for type checkers
         r_emb = self._relation_embeddings(rel_indices)
         # v35 ROOT FIX (H-2 / L-8): pre-allocate the scores tensor with
         # gradient attachment so backprop can flow through it. The

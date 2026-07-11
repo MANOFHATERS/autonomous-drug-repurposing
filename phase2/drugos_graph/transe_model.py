@@ -597,15 +597,23 @@ class TransEModel(nn.Module):
                         device=self.entity_embeddings.weight.device,
                     )
                 )
-            # Relation embeddings always use Xavier init — node_features
-            # only carries entity-level information.
-            nn.init.xavier_uniform_(self.relation_embeddings.weight)
+            # P2-023 ROOT FIX: relation_embeddings Xavier init was
+            # duplicated in BOTH branches of the if/else. Factored
+            # out below (single source of truth). The entity branch
+            # above only initializes entity_embeddings from
+            # node_features; relation_embeddings still need Xavier.
         else:
             # Xavier initialization — standard for KGE models.
             # RATIONALE: Xavier uniform preserves variance across layers
             # and prevents gradient vanishing/explosion at initialization.
             nn.init.xavier_uniform_(self.entity_embeddings.weight)
-            nn.init.xavier_uniform_(self.relation_embeddings.weight)
+
+        # P2-023 ROOT FIX: relation_embeddings always use Xavier init
+        # (node_features only carries entity-level information, so
+        # relation_embeddings are NEVER initialized from node_features).
+        # This call is now made ONCE after the if/else (previously it
+        # was duplicated in both branches).
+        nn.init.xavier_uniform_(self.relation_embeddings.weight)
 
         # FIX C4.1: Use NORM_CLAMP_MIN (named constant, not magic 1e-9).
         # Normalize entity embeddings (TransE convention: ||e||_2 = 1).
@@ -955,10 +963,41 @@ class TransEModel(nn.Module):
                 )
 
         cfg = ckpt.get("config", {})
+        # P2-011 ROOT FIX: validate cfg has the required keys BEFORE
+        # constructing the model. The previous code defaulted to
+        # num_entities=0 and num_relations=0 when the checkpoint's
+        # config dict was missing or empty. TransEModel.__init__
+        # raises TransEInitError for num_entities < 1. So loading a
+        # corrupted/legacy checkpoint raised TransEInitError instead
+        # of the intended CheckpointIntegrityError — operators got a
+        # misleading error message ("num_entities must be >= 1")
+        # instead of the real diagnosis ("checkpoint missing config
+        # — re-train"). The fix validates the required keys are
+        # present and raises CheckpointIntegrityError with a clear
+        # remediation message if absent.
+        _required_cfg_keys = ("num_entities", "num_relations", "embedding_dim")
+        _missing_cfg_keys = [
+            k for k in _required_cfg_keys
+            if not isinstance(cfg, dict) or cfg.get(k) is None
+        ]
+        if _missing_cfg_keys or not isinstance(cfg, dict) or not cfg:
+            raise CheckpointIntegrityError(
+                f"Checkpoint at {path} is missing required config keys: "
+                f"{_missing_cfg_keys}. The checkpoint's 'config' dict must "
+                f"contain num_entities, num_relations, and embedding_dim. "
+                f"This usually indicates a corrupted or legacy checkpoint — "
+                f"re-train the model to produce a valid checkpoint. "
+                f"(P2-011 root fix)",
+                context={
+                    "path": str(path),
+                    "missing_keys": _missing_cfg_keys,
+                    "cfg_keys_present": list(cfg.keys()) if isinstance(cfg, dict) else [],
+                },
+            )
         model = cls(
-            num_entities=cfg.get("num_entities", 0),
-            num_relations=cfg.get("num_relations", 0),
-            embedding_dim=cfg.get("embedding_dim", 256),
+            num_entities=cfg["num_entities"],
+            num_relations=cfg["num_relations"],
+            embedding_dim=cfg["embedding_dim"],
             config=cfg if cfg else None,  # v38 ROOT FIX (Issue #21): restore config
         )
         model.load_state_dict(

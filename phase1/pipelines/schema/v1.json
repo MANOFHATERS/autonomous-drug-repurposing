@@ -233,7 +233,7 @@
         "score": {"type": ["number", "null"], "minimum": 0.0, "maximum": 1.0},
         "score_type": {"type": ["string", "null"], "enum": ["omim_mapping_key", null]},
         "score_method": {"type": ["string", "null"]},
-        "confidence_tier": {"type": ["string", "null"], "enum": ["weak", "moderate", "strong", null]},
+        "confidence_tier": {"type": ["string", "null"], "enum": ["sub_weak", "weak", "strong", null]},
         "confidence_tier_method": {"type": ["string", "null"]},
         "evidence_strength": {"type": ["string", "null"], "enum": ["robust", "moderate", "limited", "unsupported", null]},
         "normalized_score": {"type": ["number", "null"], "minimum": 0.0, "maximum": 1.0},

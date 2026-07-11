@@ -124,20 +124,31 @@ logger = logging.getLogger(__name__)
 import sqlite3 as _sqlite3_module
 from decimal import Decimal as _Decimal_type
 
+# v93 ROOT FIX (P1-040 — mutating stdlib _sqlite3_module private attr):
+#   The previous code set ``_sqlite3_module._drugos_decimal_adapter_registered
+#   = True`` — a PRIVATE attribute on the stdlib ``sqlite3`` module. This is
+#   a GLOBAL SIDE EFFECT that persists across module reloads and affects ALL
+#   sqlite3 connections in the process, not just this module's connections.
+#   It also pollutes the stdlib module's namespace with a non-standard
+#   attribute that other libraries (or future Python versions) may not
+#   expect. Root fix: use ONLY the module-level ``_DECIMAL_ADAPTER_REGISTERED``
+#   flag (defined below) to track registration state. Do NOT mutate the
+#   stdlib module. The flag is reset on module reload (Python re-executes
+#   the module), so re-registration is safe.
 _DECIMAL_ADAPTER_REGISTERED: bool = False
 try:
     # register_adapter is idempotent-safe only if the SAME adapter function
     # is passed; we guard with a module-level flag to avoid re-registration
-    # on hot-reload.
-    if not getattr(_sqlite3_module, "_drugos_decimal_adapter_registered", False):
+    # on hot-reload. The flag is process-local (not on the stdlib module).
+    if not _DECIMAL_ADAPTER_REGISTERED:
         _sqlite3_module.register_adapter(_Decimal_type, float)
-        _sqlite3_module._drugos_decimal_adapter_registered = True  # type: ignore[attr-defined]
         _DECIMAL_ADAPTER_REGISTERED = True
         logger.debug(
             "SQLite Decimal→float adapter registered process-wide "
-            "(P1C-021 root fix). Numeric columns on SQLite store float64; "
-            "PostgreSQL preserves Decimal precision. Tests MUST use "
-            "pytest.approx for numeric assertions."
+            "(P1C-021 root fix, v93 P1-040 — no stdlib mutation). "
+            "Numeric columns on SQLite store float64; PostgreSQL "
+            "preserves Decimal precision. Tests MUST use pytest.approx "
+            "for numeric assertions."
         )
 except Exception as _adapter_exc:  # noqa: BLE001 — never fatal
     logger.warning(
@@ -231,11 +242,32 @@ class _CircuitBreaker:
 
     @property
     def state(self) -> str:
-        """Current breaker state."""
+        """Current breaker state (PURE OBSERVATION — does NOT mutate).
+
+        P1-006 ROOT FIX (v100 forensic): the previous implementation
+        transitioned OPEN → HALF_OPEN inside this property when the
+        recovery_timeout had elapsed. That made the property a MUTATOR
+        disguised as an accessor — any monitoring/observability code
+        that read ``breaker.state`` inadvertently triggered the
+        transition, racing with ``allow_request()`` and potentially
+        leaving the breaker in a half-reserved state. The canonical
+        ``_circuit_breaker.py`` (BUG #12 P1) claimed to fix this exact
+        bug but the duplicate in ``database/connection.py`` was never
+        removed — the "consolidation" claim was false.
+
+        ROOT FIX: this property is now PURE OBSERVATION. It returns the
+        current ``_state`` without transitioning. The OPEN → HALF_OPEN
+        transition happens ONLY inside ``allow_request()``, which is
+        the single authorized mutator for the state machine. Monitoring
+        code can now safely read ``breaker.state`` for observability
+        without breaking the circuit breaker.
+
+        Note: callers that previously relied on the side effect of
+        ``state`` transitioning OPEN → HALF_OPEN will now see "OPEN"
+        until the next ``allow_request()`` call. This is the CORRECT
+        behavior — observability must never mutate state.
+        """
         with self._lock:
-            if self._state == "OPEN":
-                if time.monotonic() - self._last_failure_time > self.recovery_timeout:
-                    self._state = "HALF_OPEN"
             return self._state
 
     def record_success(self) -> None:

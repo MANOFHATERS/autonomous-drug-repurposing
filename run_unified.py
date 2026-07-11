@@ -462,7 +462,12 @@ def main(argv: Optional[list] = None) -> int:
         phase1_succeeded = False
         # --- Tier 1: full sample-mode run with API calls ---
         try:
-            import subprocess as _sp
+            # v100 ROOT FIX (R-001): drop the `as _sp` alias so the
+            # except-clause at line 501 (`subprocess.SubprocessError`)
+            # can resolve the name. Previously only `_sp` was bound,
+            # which made the except-clause itself raise NameError and
+            # mask the real Tier-1 exception.
+            import subprocess
             import sys as _sys
             _phase1_root = str(HERE / "phase1")
             log.info(
@@ -480,7 +485,7 @@ def main(argv: Optional[list] = None) -> int:
             # hours when API calls were slow/unreachable. Tier 1 is a
             # "best effort" — if it can't complete in 60s, Tier 2 takes
             # over (embedded samples always succeed in <5s).
-            _proc = _sp.run(
+            _proc = subprocess.run(
                 [_sys.executable, "-m", "pipelines", "all"],
                 cwd=_phase1_root,
                 capture_output=True, text=True, timeout=60,
@@ -507,7 +512,10 @@ def main(argv: Optional[list] = None) -> int:
         # --- Tier 2: embedded samples (no API calls) ---
         if not phase1_succeeded:
             try:
-                import subprocess as _sp
+                # v100 ROOT FIX (R-001): same fix as Tier 1 — drop the
+                # `as _sp` alias so `subprocess.SubprocessError` in the
+                # except-clause below can resolve.
+                import subprocess
                 import sys as _sys
                 _phase1_root = str(HERE / "phase1")
                 log.info(
@@ -516,7 +524,7 @@ def main(argv: Optional[list] = None) -> int:
                     "biologically valid real IDs). This ALWAYS succeeds "
                     "if the phase1 package imports cleanly."
                 )
-                _proc = _sp.run(
+                _proc = subprocess.run(
                     [_sys.executable, "-m", "pipelines", "samples"],
                     cwd=_phase1_root,
                     capture_output=True, text=True, timeout=300,
@@ -876,7 +884,25 @@ def main(argv: Optional[list] = None) -> int:
                  "Step 12 (validation) → V1 launch criteria")
         log.info("-" * 70)
         try:
-            from drugos_graph.run_pipeline import run_full_pipeline
+            # v100 ROOT FIX (R-007): replace the Phase-2-only
+            # `drugos_graph.run_pipeline.run_full_pipeline` call (which
+            # only builds the KG + trains TransE + validates) with the
+            # Phase-3+4 `GTRLBridge.run_full_pipeline` (which trains the
+            # Graph Transformer + runs the RL ranker + emits the final
+            # candidates CSV + scientific-validation verdict).
+            #
+            # The previous call returned a dict whose `v1_criteria`
+            # field was produced by Phase-2-only checks (no GT AUC, no
+            # RL AUC, no KP recovery — the project's headline metrics).
+            # The new call returns `Tuple[pd.DataFrame, Dict[str, Any]]`
+            # where the dict carries the real scientific-validation gate
+            # (gt_test_auc, rl_auc, kp_recovery_rate, overall_pass).
+            #
+            # `staged_obj` (set at line 711 from `result["staged"]`)
+            # is the real Phase 1→2 staged graph already loaded above.
+            # Passing it via `phase1_staged_data` makes GTRLBridge train
+            # on the REAL KG instead of a synthetic demo graph.
+            from graph_transformer.gt_rl_bridge import GTRLBridge
             # v73 ROOT FIX (T-010 — env-var Neo4j path caused double-load):
             #   The previous predicate checked ONLY the CLI arg for Neo4j
             #   URI presence. If the operator set the DRUGOS_NEO4J_URI env
@@ -890,51 +916,62 @@ def main(argv: Optional[list] = None) -> int:
             #   duplicate edges, upsert collisions. The duplicate load
             #   doubled write latency and corrupted edge counts.
             #
-            #   ROOT FIX: use ``neo4j_connected`` (set at line 474 ONLY
+            #   ROOT FIX: use ``neo4j_connected`` (set at line 622 ONLY
             #   when ``_build_real_neo4j`` succeeded) as the predicate.
             #   ``neo4j_connected=True`` means the bridge already loaded
-            #   the graph into Neo4j, so ``run_full_pipeline`` MUST skip
-            #   its own Neo4j load (use the in-memory / RecordingGraphBuilder
-            #   path internally for the PyG/TransE stages). When
-            #   ``neo4j_connected=False`` (env var unset AND localhost
-            #   connection failed → RecordingGraphBuilder fallback),
-            #   ``skip_neo4j=False`` is harmless — there is no Neo4j to
-            #   skip, and ``run_full_pipeline`` falls back to its own
-            #   in-memory builder internally. This single-flag predicate
+            #   the graph into Neo4j, so the GTRLBridge path uses the
+            #   in-memory RecordingGraphBuilder fallback for the PyG
+            #   stages. When ``neo4j_connected=False``, there is no Neo4j
+            #   to skip — also harmless. This single-flag predicate
             #   correctly handles ALL three Neo4j modes:
-            #     (a) --neo4j-uri CLI arg → neo4j_connected=True
-            #         → skip_neo4j=True ✓
-            #     (b) DRUGOS_NEO4J_URI env var → neo4j_connected=True
-            #         → skip_neo4j=True ✓ (was the bug)
-            #     (c) No Neo4j available → neo4j_connected=False
-            #         → skip_neo4j=False ✓ (harmless, no-op)
-            pipeline_result = run_full_pipeline(
-                data_source="phase1",
-                skip_neo4j=neo4j_connected,
-                skip_download=args.skip_download,
-                phase1_processed_dir=args.phase1_dir,
+            #     (a) --neo4j-uri CLI arg → neo4j_connected=True ✓
+            #     (b) DRUGOS_NEO4J_URI env var → neo4j_connected=True ✓
+            #     (c) No Neo4j available → neo4j_connected=False ✓
+            _bridge = GTRLBridge()
+            _candidates_df, pipeline_result = _bridge.run_full_pipeline(
+                phase1_staged_data=staged_obj,
+                allow_invalid_output=args.allow_invalid_output if hasattr(args, "allow_invalid_output") else False,
             )
             log.info("-" * 70)
             log.info("PIPELINE RESULT")
             log.info("-" * 70)
-            # Pipeline result is a dict; pretty-print the key fields.
+            # v100 ROOT FIX (R-007): GTRLBridge.run_full_pipeline returns a
+            # dict whose top-level keys differ from the old Phase-2-only
+            # runner. The scientific-validation verdict lives under
+            # `scientific_validation` (with `overall_pass`, `gt_test_auc`,
+            # `rl_auc`, `kp_recovery_rate`), not `v1_criteria`. We still
+            # tolerate the old `v1_criteria` key for backward compatibility.
             for k, v in pipeline_result.items():
                 if k == "v1_criteria":
                     log.info("  V1 launch criteria: %s", v)
+                elif k == "scientific_validation":
+                    log.info("  Scientific validation: %s", v)
                 elif isinstance(v, dict):
                     # Summarize each step's dict result.
                     short = {sk: sv for sk, sv in v.items()
                              if sk in ("skipped", "reason", "held_out_auc",
                                        "best_val_auc", "model_saved",
                                        "passed", "n_nodes", "n_edges",
-                                       "n_triples", "elapsed_s")}
+                                       "n_triples", "elapsed_s",
+                                       "gt_test_auc", "rl_auc",
+                                       "kp_recovery_rate", "overall_pass")}
                     log.info("  %s: %s", k, short)
                 else:
                     log.info("  %s: %s", k, v)
-            # If V1 launch criteria returned a verdict, reflect it in exit.
+            # If V1 launch criteria OR scientific validation returned a
+            # verdict, reflect it in exit code 4.
             v1 = pipeline_result.get("v1_criteria") or {}
+            sci = pipeline_result.get("scientific_validation") or {}
             if isinstance(v1, dict) and v1.get("passed") is False:
                 log.error("V1 LAUNCH CRITERIA NOT MET — see report above.")
+                return 4
+            if isinstance(sci, dict) and sci.get("overall_pass") is False:
+                log.error(
+                    "SCIENTIFIC VALIDATION FAILED — gt_test_auc=%s, "
+                    "rl_auc=%s, kp_recovery_rate=%s. See report above.",
+                    sci.get("gt_test_auc"), sci.get("rl_auc"),
+                    sci.get("kp_recovery_rate"),
+                )
                 return 4
             log.info("=" * 70)
             log.info("FULL PIPELINE COMPLETE — V1 criteria satisfied")

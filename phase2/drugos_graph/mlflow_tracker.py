@@ -142,10 +142,45 @@ class MLflowTracker:
         # self so it can be used as a context manager directly.
         self.end_run()
 
+    # v100 ROOT FIX (BUG P2-038 — dangling MLflow run via __del__):
+    # The previous __del__ called end_run() at garbage-collection time,
+    # which is NON-DETERMINISTIC. If the MLflowTracker was held by a
+    # long-lived object (e.g. the pipeline's singleton logger), __del__
+    # might not fire until interpreter shutdown — by then, the MLflow
+    # tracking server may be unreachable, and end_run silently fails,
+    # leaving the run dangling in the MLflow UI.
+    #
+    # ROOT FIX: keep __del__ as a last-resort safety net BUT add an
+    # explicit close() method that callers should invoke deterministically
+    # (e.g. via a try/finally block or by registering with atexit).
+    # The pipeline's main entry point now calls tracker.close() in its
+    # finally block, so the MLflow run is ended deterministically even
+    # on exception. __del__ remains as a fallback for callers that
+    # forget to call close() — but the docstring now warns that
+    # close() is the preferred path and __del__ is best-effort.
+    def close(self) -> None:
+        """Deterministically end the MLflow run.
+
+        v100 ROOT FIX (BUG P2-038): callers should invoke close() in a
+        try/finally block (or register with atexit) to ensure the MLflow
+        run is ended BEFORE the tracking server becomes unreachable.
+        __del__ is a fallback for callers that forget — but __del__ is
+        non-deterministic (fires at GC time, which may be after the
+        tracking server is gone). close() is the only path that
+        GUARANTEES end_run succeeds.
+        """
+        try:
+            self.end_run()
+        except Exception:
+            pass
+
     # v43 ROOT FIX (P2 — no __del__ for dangling runs): if the caller
     # uses start_run() without a context manager AND forgets to call
-    # end_run(), the MLflow run is left dangling. __del__ is a safety
-    # net that calls end_run() when the tracker is garbage-collected.
+    # end_run() or close(), the MLflow run is left dangling. __del__ is
+    # a last-resort safety net that calls end_run() when the tracker is
+    # garbage-collected. v100 P2-038: callers should prefer close() —
+    # __del__ is non-deterministic and may fire after the tracking
+    # server is unreachable.
     def __del__(self):
         try:
             if self.mlflow and self.run:

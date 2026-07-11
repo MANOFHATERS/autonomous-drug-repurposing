@@ -782,8 +782,21 @@ class DrugRepurposingGraphTransformer(nn.Module):
         state_dict mismatches. The E12 fix restores ALL fields from
         the checkpoint config (with backward-compatible defaults for
         checkpoints saved before E13).
+
+        V92 ROOT FIX (BUG P3-011): feature-detect the ``weights_only``
+        parameter for ``torch.load``. It was added in PyTorch 1.13;
+        older PyTorch raises ``TypeError: load() got an unexpected
+        keyword argument 'weights_only'``. This is common in enterprise
+        pharma IT environments that pin to older PyTorch for stability.
+        The fix uses ``inspect.signature`` to check whether the
+        parameter exists before passing it.
         """
-        checkpoint = torch.load(path, map_location=device, weights_only=True)
+        # V92 ROOT FIX (BUG P3-011): feature-detect weights_only.
+        import inspect
+        if "weights_only" in inspect.signature(torch.load).parameters:
+            checkpoint = torch.load(path, map_location=device, weights_only=True)
+        else:
+            checkpoint = torch.load(path, map_location=device)
         config = checkpoint["config"]
         model = cls(
             feature_dims=config["feature_dims"],

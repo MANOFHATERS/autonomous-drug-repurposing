@@ -14,11 +14,18 @@ interface RegisterBody {
 }
 
 // Allowed role values. The user's role determines what UI sections they can see.
+// V100 ROOT FIX (BUG #12, P0 CRITICAL): the previous list included "admin",
+// which allowed ANY unauthenticated attacker to self-register as admin by
+// POSTing {"role":"admin"}. With admin role, the attacker gained full admin
+// access: call /api/admin/users (returns ALL users across ALL orgs),
+// promote/demote ANY user, view ALL audit logs — a cross-tenant PHI/PII leak.
+// Root fix: "admin" and "owner" are REMOVED from the self-registration
+// allowlist. Only an existing admin can promote a user to admin/owner via
+// the dedicated admin endpoint (which requires admin RBAC).
 const ALLOWED_ROLES = [
   "researcher",
   "data-scientist",
   "pi",
-  "admin",
   "business-dev",
   "developer",
   "viewer",

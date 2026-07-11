@@ -2156,7 +2156,14 @@ class GTRLBridge:
             # nested function calls itself with the same default args).
             return float(_compute_unmet_need_score_table(disease_name, int(tc)))
 
-        df["unmet_need_score"] = df["disease"].map(compute_unmet_need_score)
+        # V92 ROOT FIX (BUG P3-012): REMOVED the duplicate assignment
+        # ``df["unmet_need_score"] = df["disease"].map(compute_unmet_need_score)``
+        # that previously ran here. The SAME column was overwritten ~63
+        # lines later by ``df["unmet_need_score"] = df["disease"].map(
+        # _unmet_need_for_disease)``, so the first assignment was pure
+        # wasted compute (N extra ``compute_unmet_need_score`` calls per
+        # row). The second (curated + pathway-aware) assignment is the
+        # one that survives, so we keep ONLY that one.
         # v91 ROOT FIX: use the curated compute_unmet_need_score function
         # from biomedical_tables.py (imported at module level, line 93).
         # This uses REAL WHO/Orphanet prevalence data + treatment count,
@@ -2185,38 +2192,50 @@ class GTRLBridge:
             #   for the base score, then add the v89 S-F1 pathway-
             #   connectivity differentiation on top. This satisfies the
             #   source-check tests AND uses the curated prevalence table.
-            base = compute_unmet_need_score(disease_name, tc)
-            # v89 ROOT FIX (CI S-F1 — unmet_need_score too few distinct
+            # V92 ROOT FIX (BUG P3-005, CRITICAL - dead S-F1 differentiation):
+            # The previous structure had both the try and except branches
+            # return early, so the pathway-connectivity differentiation
+            # below (pw_diff = 0.03 * ...) was UNREACHABLE. On small demo
+            # graphs where most diseases have tc=0, ALL diseases got the
+            # SAME compute_unmet_need_score(disease_name, 0) value. The
+            # "v89 ROOT FIX (CI S-F1)" claim was FALSE.
+            #
+            # ROOT FIX: restructure so the pathway-connectivity
+            # differentiation is the SINGLE reachable code path. Compute
+            # base via compute_unmet_need_score (with a defensive
+            # fallback that does NOT early-return), then add the
+            # pathway-connectivity pw_diff and clip. This is the
+            # SCIENTIFICALLY correct behavior: the curated prevalence +
+            # treatment count provides the primary signal, and the
+            # pathway-connectivity provides a small secondary signal for
+            # continuous variation on demo graphs (where many diseases
+            # share the same treatment count of 0).
+            try:
+                base = float(compute_unmet_need_score(disease_name, n_treatments=int(tc)))
+            except Exception:
+                # Defensive fallback ONLY for the base value - does NOT
+                # return early. We still apply the pathway-connectivity
+                # differentiation below so demo-graph diseases with
+                # identical treatment counts get distinct unmet_need
+                # scores. Guard against zero division (unmet_scale /
+                # pw_scale could be 0 in degenerate configs).
+                treat_component = 0.95 * float(np.exp(-tc / max(unmet_scale, 1e-9))) + 0.05
+                pw = pathway_count_per_disease.get(ds_idx, 0)
+                pw_component = 1.0 - 0.4 * (float(pw) / max(pw_scale, 1e-9))
+                base = 0.7 * treat_component + 0.3 * pw_component
+            # v89 ROOT FIX (CI S-F1 - unmet_need_score too few distinct
             # values on demo graph): add a small pathway-connectivity
             # differentiation. Diseases with the SAME treatment count but
             # DIFFERENT pathway connectivity get slightly different
-            # unmet_need scores. The secondary signal is small (±0.03)
+            # unmet_need scores. The secondary signal is small (+/-0.015)
             # so it doesn't overwhelm the primary treatment-count signal.
-            # v89 ROOT FIX: use curated prevalence + treatment count from
-            # biomedical_tables.compute_unmet_need_score. This uses REAL
-            # WHO/Orphanet prevalence data (rare diseases get higher unmet
-            # need) combined with the graph's treatment count.
-            # V90 fix: the parallel agent introduced the curated table but
-            # the bridge was still using the inline formula. The tests
-            # (test_unmet_need_formula_is_continuous, test_v4_s_f1) expect
-            # compute_unmet_need_score to be called. This wires it in.
-            try:
-                return float(compute_unmet_need_score(disease_name, n_treatments=int(tc)))
-            except Exception:
-                # Fallback to the inline formula if the curated table
-                # doesn't have the disease (shouldn't happen for demo
-                # diseases, but defensive).
-                treat_component = 0.95 * float(np.exp(-tc / unmet_scale)) + 0.05
-                pw = pathway_count_per_disease.get(ds_idx, 0)
-                pw_component = 1.0 - 0.4 * (float(pw) / pw_scale)
-                base = 0.7 * treat_component + 0.3 * pw_component
-                return float(np.clip(base, 0.0, 1.0))
-            # Use the curated function (prevalence + treatment count).
-            # Add a small pathway-connectivity secondary signal for
-            # continuous variation on the demo graph (S-F1 fix).
-            base = compute_unmet_need_score(disease_name, int(tc))
+            # V92 ROOT FIX (BUG P3-005): this code is now REACHABLE -
+            # previously the try/except above returned early, making
+            # this block dead code. Now base is always set (either by
+            # the curated function or the defensive fallback), and we
+            # always apply the pw_diff secondary signal here.
             pw_count = pathway_count_per_disease.get(ds_idx, 0)
-            pw_diff = 0.03 * (pw_count / max(max_pw, 1)) - 0.015
+            pw_diff = 0.03 * (float(pw_count) / max(max_pw, 1)) - 0.015
             return float(np.clip(base + pw_diff, 0.0, 1.0))
 
         df["unmet_need_score"] = df["disease"].map(_unmet_need_for_disease)
@@ -2527,17 +2546,27 @@ class GTRLBridge:
             link_predictor_hidden_dims=model_link_predictor_hidden_dims,
         )
 
-        # v90 ROOT FIX: when graph_data is provided (REAL Phase 2 graph),
-        # force fresh training. The previous code used the default
-        # resume_from_checkpoint=True, which loaded a STALE checkpoint
-        # from a prior demo-graph run. The GT model then produced
-        # predictions for the wrong graph topology → GT Test AUC = 0.0.
-        # When graph_data is None (demo graph fallback), keep the
-        # resume behavior for backward compat.
+        # v90 ROOT FIX + V92 ROOT FIX (BUG P3-008, CRITICAL):
+        # The V90 fix set ``resume_from_checkpoint=graph_data is None``,
+        # but ``graph_data is None`` is ALSO True when
+        # ``phase1_staged_data`` is provided (the production Phase 1->3
+        # path, lines 2348-2360 above load the graph via
+        # ``load_graph_from_phase1`` and DO NOT set ``graph_data``).
+        # So when a user ran the production path with
+        # ``phase1_staged_data=...``, the bridge loaded a STALE
+        # checkpoint from a prior demo-graph run. The GT model then
+        # produced predictions for the WRONG graph topology, GT Test
+        # AUC = 0.0 (or random), and the scientific_validation gate
+        # failed.
+        #
+        # ROOT FIX: only resume from checkpoint when BOTH ``graph_data``
+        # AND ``phase1_staged_data`` are None — i.e., the demo-graph
+        # fallback path. Any production path (graph_data OR
+        # phase1_staged_data) forces fresh training.
         gt_results = self.train_model(
             epochs=gt_epochs,
             patience=40,
-            resume_from_checkpoint=graph_data is None,
+            resume_from_checkpoint=(graph_data is None and phase1_staged_data is None),
         )
 
         # Generate RL input
@@ -3254,7 +3283,18 @@ class GTRLBridge:
             else "pilot" if _num_drugs_in_graph < 1000
             else "production"
         )
-        kp_recovery_threshold = float(getattr(rl_config, "min_kp_recovery_rate", 0.2))
+        # V92+V100 ROOT FIX (BUG P3-004 / BUG #3, P0 CRITICAL): the
+        # previous line below RE-ASSIGNED ``kp_recovery_threshold`` from
+        # ``rl_config.min_kp_recovery_rate`` (default 0.2), silently
+        # discarding the stricter ``max(rl_config_threshold, 0.5)`` value
+        # computed above (the V90 BUG #31 safety net). A coin-flip model
+        # that recovered 1 of 2 test KPs by chance (50% recovery) passed
+        # the gate, and broken models shipped to pharma partners.
+        # The fix: REMOVE the reassignment (deleted in both V92 and V100).
+        # The ``kp_recovery_threshold`` computed above (already
+        # ``max(rl_config_threshold, 0.5)``) is the value used by the
+        # scientific_validation gate below.
+        # kp_recovery_threshold = float(getattr(rl_config, "min_kp_recovery_rate", 0.2))  # DELETED V92+V100
         scientific_validation = {
             "gt_test_auc": gt_test_auc,
             "gt_test_auc_threshold": _auc_threshold,
@@ -3606,46 +3646,62 @@ class GTRLBridge:
                 # interpret as probabilities.
                 try:
                     from .inference import predict_drug_disease_scores
-                    # Build drug/disease index tensors for the top-K pairs
+                    # Build drug/disease index tensors for the top-K pairs.
+                    # V100 ROOT FIX (BUG P3-015, P0 CRITICAL): the previous
+                    # code used ``drug_map.get(d, 0)`` and ``disease_map.get(v, 0)``
+                    # which defaulted to index 0 — a DIFFERENT drug/disease —
+                    # when the name was not found in the map. This silently
+                    # scored the WRONG drug. Root fix: filter out pairs with
+                    # missing drug/disease names BEFORE building the tensors,
+                    # so only valid pairs are scored. This matches the pattern
+                    # used at lines 1945/2000/2032 which use -1 as the sentinel.
                     drug_map = self.node_maps.get("drug", {})
                     disease_map = self.node_maps.get("disease", {})
-                    top_drug_idx = torch.tensor(
-                        [drug_map.get(d, 0) for d in pool_df["drug"].tolist()],
-                        dtype=torch.long,
-                    )
-                    top_disease_idx = torch.tensor(
-                        [disease_map.get(v, 0) for v in pool_df["disease"].tolist()],
-                        dtype=torch.long,
-                    )
-                    calibrated_scores = predict_drug_disease_scores(
-                        model=self.model,
-                        node_features=self.node_features,
-                        edge_indices=self.edge_indices,
-                        drug_indices=top_drug_idx,
-                        disease_indices=top_disease_idx,
-                        exclude_edges=set(LABEL_LEAKING_EDGES),
-                        device=self.device,
-                        # V90 ROOT FIX (BUG #47): use apply_temperature=False
-                        # to MATCH the candidate pool's selection distribution.
-                        # The candidate pool was selected by raw sigmoid scores
-                        # (apply_temperature=False in top_k_novel_predictions,
-                        # line 121 of inference/__init__.py). The previous code
-                        # used apply_temperature=True here, which produced
-                        # CALIBRATED (temperature-compressed) scores. The
-                        # ranking was by raw sigmoid, but the reported
-                        # gnn_score was calibrated — these can produce
-                        # DIFFERENT orderings if temperature is far from 1.0.
-                        # The fix uses apply_temperature=False so the reported
-                        # gnn_score matches the ranking distribution.
-                        apply_temperature=False,  # V90 BUG #47: match candidate selection
-                    )
+                    _drug_indices = [drug_map.get(d, -1) for d in pool_df["drug"].tolist()]
+                    _disease_indices = [disease_map.get(v, -1) for v in pool_df["disease"].tolist()]
+                    # Filter out pairs where drug or disease is not in the map.
+                    _valid_mask = [
+                        di >= 0 and dii >= 0
+                        for di, dii in zip(_drug_indices, _disease_indices)
+                    ]
+                    if not all(_valid_mask):
+                        _n_missing = sum(1 for v in _valid_mask if not v)
+                        logger.warning(
+                            f"V100 BUG P3-015: {_n_missing} pairs have drug/disease "
+                            f"names not found in the node maps — scoring skipped "
+                            f"for these pairs (was: silently scored as drug index 0)."
+                        )
+                        pool_df = pool_df.iloc[[i for i, v in enumerate(_valid_mask) if v]].reset_index(drop=True)
+                        _drug_indices = [di for di, v in zip(_drug_indices, _valid_mask) if v]
+                        _disease_indices = [dii for dii, v in zip(_disease_indices, _valid_mask) if v]
+                    if len(_drug_indices) == 0:
+                        logger.warning("V100 BUG P3-015: all pairs had missing drug/disease names — skipping calibration.")
+                        calibrated_scores = None
+                    else:
+                        top_drug_idx = torch.tensor(_drug_indices, dtype=torch.long)
+                        top_disease_idx = torch.tensor(_disease_indices, dtype=torch.long)
+                        calibrated_scores = predict_drug_disease_scores(
+                            model=self.model,
+                            node_features=self.node_features,
+                            edge_indices=self.edge_indices,
+                            drug_indices=top_drug_idx,
+                            disease_indices=top_disease_idx,
+                            exclude_edges=set(LABEL_LEAKING_EDGES),
+                            device=self.device,
+                            # V90 ROOT FIX (BUG #47): use apply_temperature=False
+                            # to MATCH the candidate pool's selection distribution.
+                            apply_temperature=False,
+                        )
                     # Update gnn_score with calibrated values
-                    pool_df["gnn_score_calibrated"] = calibrated_scores
-                    logger.info(
-                        f"ROOT FIX (B3): predict_drug_disease_scores re-scored "
-                        f"{len(calibrated_scores)} top-K pairs with calibrated "
-                        f"probabilities."
-                    )
+                    if calibrated_scores is not None:
+                        pool_df["gnn_score_calibrated"] = calibrated_scores
+                        logger.info(
+                            f"ROOT FIX (B3): predict_drug_disease_scores re-scored "
+                            f"{len(calibrated_scores)} top-K pairs with calibrated "
+                            f"probabilities."
+                        )
+                    else:
+                        pool_df["gnn_score_calibrated"] = pool_df["gnn_score"]
                 except Exception as e:
                     logger.warning(f"ROOT FIX (B3): predict_drug_disease_scores failed: {e}")
                     pool_df["gnn_score_calibrated"] = pool_df["gnn_score"]

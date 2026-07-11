@@ -530,6 +530,12 @@ class _CircuitBreaker:
     and refuses further calls for ``reset_timeout`` seconds.  After the
     timeout, it enters ``half_open`` state: one call is allowed; if it
     succeeds, the breaker closes; if it fails, the breaker re-opens.
+
+    v92 ROOT FIX (BUG P1-073): Added ``_half_open_probe_in_flight`` flag
+    and single-probe gate to ``is_open()`` so that only ONE call is
+    allowed in half_open state. Previously, every ``is_open()`` call in
+    half_open returned False (allowing the call), so multiple concurrent
+    callers could flood through during recovery.
     """
 
     def __init__(
@@ -543,9 +549,24 @@ class _CircuitBreaker:
         self._last_failure_time = 0.0
         self._state = "closed"
         self._lock = threading.Lock()
+        # v92 ROOT FIX (BUG P1-073): track whether a half-open probe is
+        # in flight. Only ONE call is allowed in half_open state.
+        self._half_open_probe_in_flight = False
 
     def record_failure(self) -> None:
         with self._lock:
+            # v92 ROOT FIX: check half_open FIRST (before threshold) and
+            # clear the probe-in-flight flag.
+            if self._state == "half_open":
+                self._state = "open"
+                self._half_open_probe_in_flight = False
+                self._last_failure_time = time.time()
+                logger.warning(
+                    "[disgenet] Circuit breaker re-OPENED after failed "
+                    "half-open probe — refusing calls for %.1fs",
+                    self._reset_timeout,
+                )
+                return
             self._failure_count += 1
             self._last_failure_time = time.time()
             if self._failure_count >= self._failure_threshold:
@@ -562,14 +583,33 @@ class _CircuitBreaker:
         with self._lock:
             self._failure_count = 0
             self._state = "closed"
+            # v92 ROOT FIX: clear the probe-in-flight flag on success.
+            self._half_open_probe_in_flight = False
 
     def is_open(self) -> bool:
+        """Return True if the breaker is open and calls should be refused.
+
+        v92 ROOT FIX (BUG P1-073): implement single-probe gate for
+        half_open state. Only the FIRST call after the reset timeout
+        is allowed (the probe). Subsequent calls are refused until the
+        probe completes (record_success or record_failure).
+        """
         with self._lock:
             if self._state == "open":
                 if time.time() - self._last_failure_time > self._reset_timeout:
                     self._state = "half_open"
-                    return False
+                    self._half_open_probe_in_flight = False
+                    # Allow the first probe call.
+                    self._half_open_probe_in_flight = True
+                    return False  # allow this call (the probe)
                 return True
+            if self._state == "half_open":
+                # v92 ROOT FIX: if a probe is already in flight, refuse.
+                if self._half_open_probe_in_flight:
+                    return True  # refuse — wait for probe to complete
+                # No probe in flight — allow this call as the new probe.
+                self._half_open_probe_in_flight = True
+                return False
             return False
 
 
@@ -639,7 +679,7 @@ def _classify_confidence(score: float) -> str:
     Returns
     -------
     str
-        Tier label (``"weak"``, ``"moderate"``, or ``"strong"``).
+        Tier label (``"sub_weak"``, ``"weak"``, or ``"strong"``).
     """
     return classify_confidence(score, tiers=CONFIDENCE_TIERS)
 
@@ -1845,27 +1885,45 @@ class DisGeNETPipeline(BasePipeline):
                         )
 
                 # SEC-17 / REL-21 / REL-7: Status-code handling.
+                #
+                # v93 ROOT FIX (P1-041 — 4xx errors are NOT transient):
+                #   The previous code called ``_CIRCUIT_BREAKER.record_failure()``
+                #   for 401, 403, 404, and 400. But 4xx errors (except 429) are
+                #   PERMANENT — they indicate a misconfigured API key (401/403),
+                #   a wrong endpoint URL (404), or a malformed request (400).
+                #   These are NOT transient failures that the circuit breaker
+                #   should protect against. Recording them as failures means a
+                #   misconfigured ``DISGENET_API_KEY`` trips the circuit
+                #   breaker after ``failure_threshold`` (5) attempts — blocking
+                #   ALL DisGeNET API calls until the breaker resets. The
+                #   operator then has to wait for the reset timeout even after
+                #   fixing the config. Root fix: do NOT call ``record_failure()``
+                #   for 4xx (except 429, which IS retryable as a rate-limit).
+                #   4xx errors raise immediately so the operator sees the
+                #   config error without tripping the breaker.
                 if resp.status_code in (401,):
-                    _CIRCUIT_BREAKER.record_failure()
+                    # 401 — API key invalid/expired. NOT transient.
                     raise RuntimeError(
                         "DisGeNET API returned 401 — DISGENET_API_KEY is "
                         "invalid or expired. Get a new key at "
                         "https://api.disgenet.com/api/v1/"
                     )
                 if resp.status_code == 403:
-                    _CIRCUIT_BREAKER.record_failure()
+                    # 403 — API key invalid or insufficient permissions.
+                    # NOT transient.
                     raise RuntimeError(
                         "DisGeNET API returned 403 — API key invalid or "
                         "insufficient permissions. Check DISGENET_API_KEY."
                     )
                 if resp.status_code == 404:
-                    _CIRCUIT_BREAKER.record_failure()
+                    # 404 — endpoint not found. NOT transient (config error).
                     raise RuntimeError(
                         "DisGeNET API endpoint not found — check "
                         "DISGENET_API_URL."
                     )
                 if resp.status_code == 400:
-                    _CIRCUIT_BREAKER.record_failure()
+                    # 400 — Bad Request. NOT transient (client error).
+                    # v93 P1-041: do NOT trip the circuit breaker.
                     body_preview = bytes(body[:500]).decode(
                         "utf-8", errors="replace"
                     )
@@ -1887,7 +1945,14 @@ class DisGeNETPipeline(BasePipeline):
                     self._interruptible_sleep(wait)
                     continue
                 if resp.status_code >= 400:
-                    _CIRCUIT_BREAKER.record_failure()
+                    # v93 P1-041: separate 4xx (non-transient) from 5xx
+                    # (transient). Only 5xx should trip the circuit breaker.
+                    if resp.status_code >= 500:
+                        # 5xx — server error, transient.
+                        _CIRCUIT_BREAKER.record_failure()
+                    # 4xx (other than 401/403/404/400/429 handled above) —
+                    # e.g. 405, 406, 410, 451. NOT transient. Do NOT trip
+                    # the circuit breaker.
                     body_preview = bytes(body[:500]).decode(
                         "utf-8", errors="replace"
                     )
@@ -2005,15 +2070,27 @@ class DisGeNETPipeline(BasePipeline):
         # — pure exponential with NO jitter. If multiple workers retry
         # simultaneously (e.g. the parallel GDA fetcher), they retry in
         # lockstep and re-trigger the rate limit ("thundering herd").
-        # Add ±50% uniform jitter (full-jitter variant) so concurrent
-        # workers retry at staggered offsets, spreading load on the API.
+        #
+        # P1-018 ROOT FIX (v100 forensic — JITTER WAS NOT ACTUALLY JITTER):
+        # The previous "fix" added ``jitter = _random.uniform(0, capped * 0.5)``
+        # and returned ``capped + jitter``. That made the wait fall in
+        # ``[capped, capped * 1.5]`` — it NEVER slept less than ``capped``.
+        # That's NOT jitter (which by definition must spread wait times
+        # AROUND a center); it's "capped plus a positive offset". All
+        # concurrent workers still slept at least ``capped``, defeating
+        # the thundering-herd mitigation. ROOT FIX: use centered ±50%
+        # jitter — ``_random.uniform(capped * 0.5, capped * 1.5)`` — so
+        # wait times spread in ``[capped * 0.5, capped * 1.5]`` with mean
+        # ``capped``. Concurrent workers now retry at staggered offsets,
+        # spreading load on the API. (Full-jitter variant
+        # ``_random.uniform(0, capped)`` would also work but has higher
+        # variance; centered ±50% is the AWS "equal jitter" compromise.)
         raw = DISGENET_API_BACKOFF_BASE ** attempt
         capped = min(raw, float(DISGENET_API_BACKOFF_MAX_SECONDS))
         # ``random`` is imported lazily here so module-level import cost
         # is unaffected and tests can monkey-patch if needed.
         import random as _random
-        jitter = _random.uniform(0, capped * 0.5)
-        return capped + jitter
+        return _random.uniform(capped * 0.5, capped * 1.5)
 
     @staticmethod
     def _interruptible_sleep(seconds: float) -> None:

@@ -1,4 +1,20 @@
-"""Real end-to-end pipeline runner for V28 demo.
+"""Real end-to-end pipeline runner — Phase 1 → 2 → 3 → 4 (GT + RL).
+
+v100 ROOT FIX (R-006): the previous version of this script did NOT
+wire Phase 1 or Phase 2 — it called ``GTRLBridge.run_full_pipeline``
+with the default ``num_drugs=25, num_diseases=18`` synthetic demo
+graph and called itself "real". The script name was a lie.
+
+This fix adds REAL Phase 1 → Phase 2 wiring as the DEFAULT path:
+  1. ``ensure_phase1_data`` (writes embedded sample CSVs if missing)
+  2. ``run_phase1_to_phase2`` (the real bridge — same one
+     ``run_full_platform.py`` uses)
+  3. ``GTRLBridge.run_full_pipeline(phase1_staged_data=staged, ...)``
+     — trains GT and RL on the REAL Phase 2 staged graph
+
+The synthetic demo path is preserved as an OPT-IN via ``--demo`` for
+quick debugging without Phase 1/2 setup. ``--demo`` prints a loud
+warning that the output is from a synthetic graph, not real data.
 
 ROOT FIX (X-03): the previous version unconditionally set
 ``allow_invalid_output=True``, which DISABLED the scientific-validation
@@ -22,6 +38,7 @@ import argparse
 import logging
 import os
 import sys
+from pathlib import Path
 
 # Ensure project root is on sys.path
 _ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -37,40 +54,54 @@ logging.basicConfig(
 from graph_transformer.gt_rl_bridge import GTRLBridge
 
 
+def _ensure_phase1_data(phase1_dir: Path) -> dict:
+    """Phase 1: ensure the processed_data CSVs exist (mirror run_full_platform)."""
+    logging.info("=" * 70)
+    logging.info("PHASE 1: Data Ingestion")
+    logging.info("=" * 70)
+    if not phase1_dir.exists() or not any(phase1_dir.glob("*.csv*")):
+        logging.info("Phase 1 dir %s is empty — writing embedded samples.", phase1_dir)
+        from pipelines._embedded_samples import write_all_samples
+        write_all_samples(str(phase1_dir))
+    csvs = sorted(phase1_dir.glob("*.csv*"))
+    logging.info("Phase 1: %d CSV files present in %s", len(csvs), phase1_dir)
+    return {csv.stem: csv for csv in csvs}
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Run the full GT+RL drug repurposing pipeline."
     )
     parser.add_argument(
+        # v100 ROOT FIX (R-006): --demo preserves the old synthetic-graph
+        # behavior for quick debugging. The default is now REAL Phase 1+2.
+        "--demo", action="store_true",
+        help="Use the synthetic demo graph (25 drugs × 18 diseases) "
+             "instead of real Phase 1+2 data. DEBUGGING ONLY — the "
+             "output is NOT real repurposing candidates.",
+    )
+    parser.add_argument(
+        "--phase1-dir", type=str, default=os.path.join(_ROOT, "phase1", "processed_data"),
+        help="Directory containing Phase 1 processed CSVs (default: phase1/processed_data)",
+    )
+    parser.add_argument(
         "--num-drugs", type=int, default=25,
-        help="Number of drug nodes in the demo graph (default: 25)",
+        help="(DEMO MODE ONLY) Number of drug nodes in the synthetic graph (default: 25)",
     )
     parser.add_argument(
         "--num-diseases", type=int, default=18,
-        help="Number of disease nodes in the demo graph (default: 18)",
+        help="(DEMO MODE ONLY) Number of disease nodes in the synthetic graph (default: 18)",
     )
     parser.add_argument(
         # v90 ROOT FIX (BUG #46): the previous default was 80, but the
         # bridge's run_full_pipeline default is 500. The CLI override
         # made GT train for only 80 epochs (6x shorter than intended).
-        # The V30 fix at line 354 says "increased epochs from 300 to 500"
-        # but the CLI made it 80. The fix aligns the CLI default with
-        # the bridge default (500). Users who want fewer epochs for
-        # debugging can pass --gt-epochs 80 explicitly.
         "--gt-epochs", type=int, default=500,
         help="GT training epochs (default: 500, aligned with bridge default)",
     )
     parser.add_argument(
         # v90 ROOT FIX (BUG #45): the previous default was 5000, but
-        # PipelineConfig.timesteps defaults to 50000. The CLI override
-        # made PPO train for only 5000 timesteps (10x shorter than
-        # intended). The V30 docstring at line 806 says "increased from
-        # 30000 to 50000 for better convergence" but the CLI override
-        # made it 5000, which is 10x SHORTER than the documented value.
-        # PPO didn't converge, AUC was ~0.5, and the pipeline failed
-        # validation. The fix aligns the CLI default with the config
-        # default (50000). Users who want fewer timesteps for debugging
-        # can pass --rl-timesteps 5000 explicitly.
+        # PipelineConfig.timesteps defaults to 50000.
         "--rl-timesteps", type=int, default=50000,
         help="RL training timesteps (default: 50000, aligned with PipelineConfig.timesteps)",
     )
@@ -83,8 +114,7 @@ def main() -> None:
         "--allow-invalid-output", action="store_true",
         help="Bypass the scientific-validation safety net and produce "
              "candidates even when validation fails. DEBUGGING ONLY — "
-             "do not use for pharma partner demos. (X-03 fix: was the "
-             "default; now opt-in.)",
+             "do not use for pharma partner demos.",
     )
     args = parser.parse_args()
 
@@ -97,42 +127,69 @@ def main() -> None:
         seed=42,
     )
 
-    # ROOT FIX (X-03): default to STRICT mode (allow_invalid_output=False).
-    # The bridge will RAISE RuntimeError if scientific validation fails,
-    # making the failure LOUD instead of silently shipping garbage.
     if args.allow_invalid_output:
         logging.warning(
             "ROOT FIX (X-03): --allow-invalid-output flag is set. "
-            "The scientific-validation safety net is DISABLED. The "
-            "bridge will produce candidates even if GT AUC < 0.85, "
-            "RL AUC < 0.5, or KP recovery < 20%. These candidates "
-            "may be RANDOM — do NOT use them for pharma partner demos."
+            "The scientific-validation safety net is DISABLED."
+        )
+
+    # v100 ROOT FIX (R-006): REAL Phase 1+2 path (default) vs DEMO path
+    # (--demo). The real path loads Phase 1 CSVs → Phase 2 bridge →
+    # passes the staged graph to GTRLBridge so GT/RL train on REAL data.
+    phase1_staged_data = None
+    if not args.demo:
+        try:
+            phase1_dir = Path(args.phase1_dir)
+            _ensure_phase1_data(phase1_dir)
+            logging.info("=" * 70)
+            logging.info("BRIDGE: Phase 1 → Phase 2 (run_phase1_to_phase2)")
+            logging.info("=" * 70)
+            from drugos_graph.phase1_bridge import run_phase1_to_phase2
+            bridge_result = run_phase1_to_phase2(
+                phase1_processed_dir=str(phase1_dir),
+                prefer_postgres=False,
+            )
+            staged = bridge_result["staged"]
+            summary = bridge_result["summary"]
+            logging.info(
+                "Bridge: nodes_staged=%d, edges_staged=%d, sources_read=%d",
+                summary["nodes_staged"], summary["edges_staged"],
+                len(summary["sources_read"]),
+            )
+            if summary["nodes_staged"] == 0:
+                logging.error(
+                    "Phase 1+2 produced 0 staged nodes. Aborting. "
+                    "Run with --demo to fall back to the synthetic graph."
+                )
+                sys.exit(2)
+            phase1_staged_data = staged
+        except Exception as e:
+            logging.error(
+                "Real Phase 1+2 path failed: %s. Aborting. "
+                "Run with --demo to fall back to the synthetic graph.", e,
+            )
+            raise
+    else:
+        logging.warning(
+            "=" * 70 + "\n"
+            "DEMO MODE (--demo flag): using a SYNTHETIC 25-drug × 18-disease\n"
+            "graph. The output is NOT real repurposing candidates — it is\n"
+            "for debugging the GT+RL training loop only.\n" + "=" * 70
         )
 
     candidates_df, results = bridge.run_full_pipeline(
+        # When phase1_staged_data is provided, num_drugs/num_diseases are
+        # ignored (the bridge loads the real graph instead of generating
+        # a demo graph). They're only used in --demo mode.
         num_drugs=args.num_drugs,
         num_diseases=args.num_diseases,
         gt_epochs=args.gt_epochs,
         rl_timesteps=args.rl_timesteps,
         rl_top_n=args.rl_top_n,
         allow_invalid_output=args.allow_invalid_output,
-        # V31 ROOT FIX (P0-1): use a 3-LAYER model so the GT model can
-        # capture the full drug→protein→pathway→disease (3-hop) pattern.
-        # The V30 demo-scale (32, 1, 2) had only 1 layer — the drug node
-        # could only see its direct protein neighbors (1-hop), NOT the
-        # pathway (2-hop) or disease (3-hop) connectivity. With 3 layers:
-        #   Layer 1: drug ← proteins; protein ← pathways; pathway ← diseases
-        #   Layer 2: drug ← proteins(with pathway info); pathway ← diseases
-        #   Layer 3: drug ← proteins(with pathway+disease info)
-        # After 3 layers, the drug embedding encodes the full 3-hop
-        # connectivity to diseases. The link predictor can then score
-        # drug-disease pairs based on whether they share pathway
-        # connectivity.
-        #
-        # We use small embeddings (32) with 3 layers and higher dropout
-        # (0.25) to prevent overfitting on the ~200 training pairs.
-        # 4 heads give the attention mechanism enough capacity to
-        # distinguish meaningful edges from noise.
+        phase1_staged_data=phase1_staged_data,
+        # V31 ROOT FIX (P0-1): 3-LAYER GT model so the drug node can see
+        # the full drug→protein→pathway→disease (3-hop) pattern.
         gt_embedding_dim=32,
         gt_num_layers=3,
         gt_num_heads=4,

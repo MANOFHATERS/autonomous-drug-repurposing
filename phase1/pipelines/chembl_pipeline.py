@@ -82,8 +82,9 @@ pubchem_cid         int | None
 molecular_formula   str | None
 molecular_weight    float | None    > 0
 smiles              str | None
-is_fda_approved     bool            Proxy: ``max_phase == 4``
-max_phase           int | None      0-4 (0=preclinical, 4=approved)
+is_fda_approved     bool | None     Unknown until FDA Orange Book join (v93 fix)
+is_globally_approved bool           Proxy: ``max_phase == 4`` (any regulator)
+max_phase           int | None      0-4 (0=preclinical, 4=approved by any regulator)
 drug_type           str             One of ``DrugType`` enum values
 mechanism_of_action str | None
 ==================  ==============  ========================================
@@ -458,12 +459,21 @@ class ChEMBLPipeline(BasePipeline):
 
     Scientific Proxies (documented for audit trail)
     ------------------------------------------------
-    - ``is_fda_approved = (max_phase == 4)``: ChEMBL ``max_phase=4`` means
-      "Phase 4 trial reached" = globally approved (any regulator), NOT
-      FDA-specific. The proxy is documented in the manifest's
-      ``approval_basis`` field. Alternative: query
-      ``/molecule.json?approved_drugs=TRUE`` (S16) — not currently used
-      because max_phase=4 is the more conservative filter.
+    - ``is_globally_approved = (max_phase == 4)``: ChEMBL ``max_phase=4``
+      means "Phase 4 trial reached" = globally approved by ANY regulator
+      (FDA, EMA, PMDA, etc.), NOT FDA-specific. This is the accurate
+      ChEMBL semantic and is stored in ``is_globally_approved``.
+    - ``is_fda_approved``: V100 ROOT FIX (BUG #5, P0 CRITICAL) /
+      v93 ROOT FIX (P1-027 audit). The previous code set
+      ``is_fda_approved = (max_phase == 4)`` which CONFLATED global
+      approval with FDA approval — EMA-only drugs were falsely labeled
+      FDA-approved, bypassing the RL ranker's FDA safety filter. The
+      fix: ``is_fda_approved`` is ``None`` (unknown) for
+      ``max_phase == 4`` drugs until an FDA Orange Book join is wired in,
+      ``False`` for ``max_phase < 4``, and ``True`` ONLY when the
+      ``approved_by`` field contains "FDA". This is the honest answer.
+      Downstream consumers (RL ranker) MUST use ``is_globally_approved``
+      for approval-based filtering, NOT ``is_fda_approved``.
     - ``Natural product`` → ``small_molecule``: scientifically lossy
       (vancomycin is a glycopeptide). Every record that maps this way is
       logged at INFO with the chembl_id for curator review (S6).
@@ -690,8 +700,14 @@ class ChEMBLPipeline(BasePipeline):
             if mol_path and mol_path.exists():
                 if mol_path.suffix == ".jsonl":
                     # Parse JSONL into a list of dicts, then use _parse_molecules
+                    # v93 ROOT FIX (P1-043): explicit encoding="utf-8" — the
+                    # ChEMBL API returns UTF-8 JSONL with non-ASCII drug names
+                    # (e.g. "α-Tocopherol", "caf feína"). The default encoding
+                    # is locale.getpreferredencoding() (CP1252 on Windows,
+                    # UTF-8 on Linux). On Windows, non-ASCII names raised
+                    # UnicodeDecodeError, silently dropping the record.
                     mol_records = []
-                    with open(mol_path) as f:
+                    with open(mol_path, encoding="utf-8") as f:
                         for line in f:
                             mol_records.append(_json.loads(line))
                     drugs_df = self._parse_molecules(mol_records)
@@ -703,8 +719,10 @@ class ChEMBLPipeline(BasePipeline):
                 # Persist activities
                 if act_path and act_path.exists():
                     if act_path.suffix == ".jsonl":
+                        # v93 ROOT FIX (P1-043): explicit encoding="utf-8"
+                        # (see mol_path block above for rationale).
                         act_records = []
-                        with open(act_path) as f:
+                        with open(act_path, encoding="utf-8") as f:
                             for line in f:
                                 act_records.append(_json.loads(line))
                         activities_df = _pd.DataFrame(act_records)
@@ -934,18 +952,18 @@ class ChEMBLPipeline(BasePipeline):
                     f"or as plain CSV ({plain_exc}). The ChEMBL API may be "
                     f"down or rate-limiting. Try again later."
                 ) from plain_exc
-        # v90 ROOT FIX (BUG #10): auto-detect compression from file
-        # extension instead of hardcoding compression="gzip". The v50
-        # path now writes .csv.gz (BUG #1 fix), but defensive coding
-        # ensures a plain .csv file (e.g. from a manual download or
-        # API error page) is still readable without BadGzipFile.
-        _compression = "gzip" if raw_path.suffix == ".gz" else None
-        drugs_df = pd.read_csv(
-            raw_path,
-            compression=_compression,
-            low_memory=False,
-            encoding="utf-8",
-        )
+        # P1-001 ROOT FIX (v100 forensic): the previous code UNCONDITIONALLY
+        # re-read the file here with compression="gzip" if the suffix was
+        # ".gz", OVERWRITING the drugs_df produced by the try/except above.
+        # When the ChEMBL API returned a non-gzip body (rate-limit HTML,
+        # maintenance page, JSON error) saved to a .csv.gz path, the first
+        # try/except correctly fell back to a plain-CSV read — but this
+        # second read then raised BadGzipFile and crashed the pipeline.
+        # The first try/except block was effectively dead code. ROOT FIX:
+        # remove the second unconditional read entirely; the try/except
+        # above already handles both gzip and plain-CSV cases correctly.
+        # (Parallel V100 fix BUG #18 applied the same root fix — kept
+        # this comment for the more detailed forensic trail.)
         initial_count = len(drugs_df)
         logger.info(
             "[%s] Loaded %d raw drug records from %s",

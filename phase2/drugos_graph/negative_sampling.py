@@ -123,6 +123,8 @@ from .config import (
     PACKAGE_VERSION,
     PIPELINE_VERSION,
 )
+# P2-016 root fix: import DrugOSDataError for regulatory-mode shortfall raise.
+from .exceptions import DrugOSDataError
 
 logger = logging.getLogger(__name__)
 
@@ -396,16 +398,51 @@ class NegativeSampler:
         self.max_cache_size = max_cache_size
 
         # Fix 7.1: Seeded RNG for reproducibility
+        # P2-017 ROOT FIX: the original code only validated `seed`
+        # (the explicit per-instance arg). When `seed is None`, it
+        # fell through to `np.random.default_rng(SEED)` — but if SEED
+        # itself was None (e.g., DRUGOS_SEED env var unset AND the
+        # config fallback returned None), `default_rng(None)` creates
+        # an UNSEEDED Generator (OS-entropy-seeded, non-deterministic).
+        # The `except (TypeError, ValueError)` clause never fires
+        # because `default_rng(None)` does not raise. The NegativeSampler
+        # then claims reproducibility (`self.seed = SEED = None`) but
+        # actually uses OS entropy — an FDA 21 CFR Part 11 violation.
+        # The fix: validate SEED is not None before calling default_rng.
         self.seed = seed
         if seed is not None:
             self._rng = np.random.default_rng(seed)
-        else:
+        elif SEED is not None:
+            # Module-level SEED fallback — validate it's not None.
             try:
                 self._rng = np.random.default_rng(SEED)
                 self.seed = SEED
             except (TypeError, ValueError):  # v85 FORENSIC ROOT FIX (BUG #51)
                 self._rng = None
                 self.seed = None
+        else:
+            # P2-017 ROOT FIX: SEED is None — cannot guarantee
+            # reproducibility. In regulatory mode, this is a hard
+            # violation. Otherwise, fall back to None and warn loudly.
+            _regulatory = (
+                os.environ.get("DRUGOS_REGULATORY_MODE", "0") == "1"
+                or os.environ.get("DRUGOS_DETERMINISTIC_MODE", "0") == "1"
+            )
+            if _regulatory:
+                raise RuntimeError(
+                    "NegativeSampler: SEED is None and no explicit seed "
+                    "provided. In regulatory mode (DRUGOS_REGULATORY_MODE=1), "
+                    "this is an FDA 21 CFR Part 11 reproducibility "
+                    "violation. Set DRUGOS_SEED env var or pass seed= "
+                    "explicitly. (P2-017 root fix)"
+                )
+            self._rng = None
+            self.seed = None
+            logger.warning(
+                "NegativeSampler: SEED is None — RNG will be unseeded "
+                "and results will NOT be reproducible. Set DRUGOS_SEED "
+                "env var to fix. (P2-017 root fix)"
+            )
 
         # Fix 16.3: Cache eviction counter
         self._total_evicted: int = 0
@@ -939,6 +976,55 @@ class NegativeSampler:
         # Fix 8.4: Batch rejection sampling
         batch_size = min(num_negatives, 1000)
 
+        # P2-007 ROOT FIX: Bernoulli degree-weighting for random_sampling.
+        # The legacy random_sampling used pure uniform sampling over
+        # drugs and diseases. Biomedical KGs have heavy-tailed degree
+        # distributions (TP53, EGFR, "disease" hub nodes with thousands
+        # of edges). Uniform sampling under-represents hub nodes as
+        # negatives — but the rejection filter then rejects the FEWER
+        # valid negatives for high-degree drugs (because most of their
+        # disease pairs are positives). Net effect: low-degree drugs
+        # are over-sampled as negatives, high-degree drugs are
+        # under-sampled. The KGNegativeSampler class correctly uses
+        # Bernoulli degree-weighting per Wang et al. 2014 — but this
+        # legacy random_sampling (used by combined_sampling for the
+        # random strategy, which gets 50% of the budget by default)
+        # did NOT.
+        #
+        # Root fix: build degree-weighted probability arrays once,
+        # cache on the instance, and use rng.choice(p=probs) instead
+        # of rng.integers(). Mirrors KGNegativeSampler's
+        # _bernoulli_probs_cache pattern.
+        if not hasattr(self, "_p2_007_drug_probs"):
+            _drug_degrees = np.zeros(n_drugs, dtype=np.float64)
+            _disease_degrees = np.zeros(n_diseases, dtype=np.float64)
+            _drug_idx = {d: i for i, d in enumerate(self.all_drug_ids)}
+            _disease_idx = {d: i for i, d in enumerate(self.all_disease_ids)}
+            for (d, dis) in self._rejection_pairs:
+                if d in _drug_idx:
+                    _drug_degrees[_drug_idx[d]] += 1.0
+                if dis in _disease_idx:
+                    _disease_degrees[_disease_idx[dis]] += 1.0
+            # Add uniform smoothing (epsilon) so zero-degree entities
+            # still have non-zero probability. Mirrors KGNegativeSampler.
+            _eps = 1.0
+            self._p2_007_drug_probs = (
+                _drug_degrees + _eps
+            ) / (_drug_degrees.sum() + _eps * n_drugs)
+            self._p2_007_disease_probs = (
+                _disease_degrees + _eps
+            ) / (_disease_degrees.sum() + _eps * n_diseases)
+            logger.info(
+                "P2-007 root fix: built Bernoulli degree-weighted "
+                "probabilities for random_sampling — "
+                "drug_degree_max=%.0f, disease_degree_max=%.0f, "
+                "drug_probs_sum=%.4f, disease_probs_sum=%.4f. "
+                "Mirrors KGNegativeSampler (Wang et al. 2014).",
+                float(_drug_degrees.max()), float(_disease_degrees.max()),
+                float(self._p2_007_drug_probs.sum()),
+                float(self._p2_007_disease_probs.sum()),
+            )
+
         while len(negatives) < num_negatives and attempts < max_attempts:
             actual_batch = min(
                 batch_size,
@@ -948,8 +1034,20 @@ class NegativeSampler:
             if actual_batch <= 0:
                 break
 
-            drug_indices = rng.integers(0, n_drugs, size=actual_batch)
-            disease_indices = rng.integers(0, n_diseases, size=actual_batch)
+            # P2-007 ROOT FIX: use degree-weighted choice instead of
+            # uniform integers. rng.choice with p=probs samples indices
+            # proportional to degree, so hubs (TP53, etc.) are sampled
+            # as negatives in proportion to their degree — preventing
+            # the systematic under-representation of hub pairs that
+            # depressed AUC on hub-heavy test sets.
+            drug_indices = rng.choice(
+                n_drugs, size=actual_batch, replace=True,
+                p=self._p2_007_drug_probs,
+            )
+            disease_indices = rng.choice(
+                n_diseases, size=actual_batch, replace=True,
+                p=self._p2_007_disease_probs,
+            )
 
             for drug_idx, disease_idx in zip(drug_indices, disease_indices):
                 attempts += 1
@@ -995,6 +1093,44 @@ class NegativeSampler:
                 "collision_rate": collision_rate,
             },
         )
+
+        # P2-016 ROOT FIX: log CRITICAL (not INFO) when shortfall > 10%.
+        # Small/dense graphs (dev fixtures, sub-graph experiments) hit
+        # high collision rates and the loop terminates with
+        # len(negatives) < num_negatives. Downstream build_training_data
+        # warns if < 90% of target, but proceeds anyway. The model then
+        # trains on FEWER negatives than the configured neg_ratio, with
+        # no hard enforcement. AUC is computed against a smaller
+        # negative pool — easier to distinguish — silently inflated.
+        # The fix: emit a CRITICAL log (and an explicit error in
+        # regulatory mode) when shortfall > 10%, so operators cannot
+        # miss the silent AUC inflation. We do NOT raise by default in
+        # non-regulatory mode because small dev fixtures legitimately
+        # cannot satisfy the target on dense sub-graphs.
+        shortfall = num_negatives - len(negatives)
+        shortfall_pct = shortfall / max(num_negatives, 1)
+        if shortfall_pct > 0.10:
+            _regulatory = (
+                os.environ.get("DRUGOS_REGULATORY_MODE", "0") == "1"
+                or os.environ.get("DRUGOS_DETERMINISTIC_MODE", "0") == "1"
+            )
+            logger.critical(
+                "P2-016 root fix: random_sampling shortfall of %d/%d "
+                "negatives (%.1f%%). Model will train on fewer negatives "
+                "than the configured neg_ratio — AUC may be silently "
+                "inflated due to smaller negative pool. Consider "
+                "increasing max_attempts, decreasing neg_ratio, or "
+                "expanding the drug/disease pools. (regulatory_mode=%s)",
+                shortfall, num_negatives, shortfall_pct * 100,
+                _regulatory,
+            )
+            if _regulatory:
+                raise DrugOSDataError(
+                    f"random_sampling shortfall {shortfall}/{num_negatives} "
+                    f"({shortfall_pct*100:.1f}%) exceeds 10% threshold in "
+                    f"regulatory mode. AUC results would be silently "
+                    f"inflated. (P2-016 root fix)"
+                )
 
         # Fix 8.3: Log cache memory warning
         cache_pct = len(self.negative_cache) / max(self.max_cache_size, 1) * 100
@@ -1413,12 +1549,33 @@ class NegativeSampler:
 
     def combined_sampling(
         self,
-        drug_disease_map: Dict[str, List[str]] = None,
-        disease_atc_map: Dict[str, Any] = None,
-        failed_trials: List[Dict] = None,
+        # v100 ROOT FIX (BUG P2-035): type-hint correctness fix (NOT a
+        # runtime bug — the defaults are None, not mutable objects, so
+        # there is no mutable-default-arg bug here). The previous type
+        # hints said `Dict[str, List[str]]`, `Dict[str, Any]`, and
+        # `List[Dict]` — but the defaults are None, so the ACTUAL type
+        # is `Optional[Dict[...]]` / `Optional[List[...]]`. The lie
+        # confused static analysis (mypy/pyright reported spurious
+        # "None is not assignable to Dict" errors at call sites that
+        # relied on the default) and misled callers about whether they
+        # must pass a non-None value. Corrected to Optional[...].
+        drug_disease_map: Optional[Dict[str, List[str]]] = None,
+        disease_atc_map: Optional[Dict[str, Any]] = None,
+        failed_trials: Optional[List[Dict]] = None,
         total_negatives: int = MIN_NEGATIVE_PAIRS,
-        strategy_weights: Dict[str, float] = None,
-        **_extra: Any,
+        strategy_weights: Optional[Dict[str, float]] = None,
+        # v100 ROOT FIX (BUG P2-041): the `**_extra: Any` parameter was
+        # REMOVED. The previous "v36 ROOT FIX (Chain 9)" added `**_extra`
+        # to absorb KGNegativeSampler-style kwargs (`relation_idx`,
+        # `head_type`, `tail_type`) that `train_transe` passes — but
+        # NegativeSampler is the COMPOUND-DISEASE-ONLY sampler and
+        # silently produced `(Compound, Disease)` negatives even when a
+        # caller asked for `(Gene, interacts_with, Gene)` negatives.
+        # That is a SCIENTIFIC correctness bug: the API LIED rather
+        # than raising. Now the function raises `TypeError` on
+        # unexpected kwargs — the correct behavior — and callers who
+        # need type-constrained KG sampling must use
+        # `KGNegativeSampler.combined_sampling` directly.
     ) -> List[Dict]:
         """Generate negatives using all three strategies with weighted allocation.
 
@@ -1426,13 +1583,22 @@ class NegativeSampler:
         cross-strategy duplicates. Future optimization: per-strategy caches
         with post-hoc deduplication for parallel execution. (Fix 8.5)
 
-        v36 ROOT FIX (Chain 9): added ``**_extra`` to absorb the
-        KGNegativeSampler-style kwargs (``relation_idx``, ``head_type``,
-        ``tail_type``) that ``train_transe`` passes. NegativeSampler
-        ignores these — it always samples ``(Compound, Disease)`` pairs
-        — but at least the API call no longer raises ``TypeError``.
-        Callers who actually want type-constrained KG sampling should
-        use ``KGNegativeSampler`` directly.
+        v100 ROOT FIX (BUG P2-041): the ``**_extra`` absorption was
+        removed because it silently produced type-wrong negatives for
+        non-treats relations. A caller that passed
+        ``head_type="Gene", tail_type="Gene"`` to this method
+        (NegativeSampler.combined_sampling) used to silently get
+        ``(Compound, Disease)`` negatives — wrong for
+        ``(Gene, interacts_with, Gene)`` triples. The previous
+        ``v36 ROOT FIX (Chain 9): added **_extra`` note claimed this
+        was acceptable because "NegativeSampler ignores these" — but
+        silently ignoring a type constraint is a SCIENTIFIC bug, not
+        a graceful API. The fix REMOVES ``**_extra`` so the function
+        now raises ``TypeError`` if a caller passes unexpected kwargs
+        (``relation_idx``, ``head_type``, ``tail_type``), because
+        ``NegativeSampler`` is the COMPOUND-DISEASE-ONLY sampler.
+        Callers needing type-constrained sampling should use
+        ``KGNegativeSampler.combined_sampling`` instead.
 
         Args:
             drug_disease_map: For strategy (b).
@@ -2352,15 +2518,24 @@ class KGNegativeSampler:
                 # duplicates), but they do NOT contribute to the degree
                 # distribution that shapes the bernoulli sampling
                 # probabilities.
-                _head_degrees = np.zeros(len(head_pool), dtype=np.float64)
-                _tail_degrees = np.zeros(len(tail_pool), dtype=np.float64)
+                #
+                # v100 ROOT FIX (dead degree-build loop): the loop that
+                # previously lived here (building `_head_degrees` /
+                # `_tail_degrees` from `self.known_triples` and the
+                # `_head_idx_map` / `_tail_idx_map`) was immediately
+                # OVERWRITTEN by the v88 train-only loop below (which
+                # rebuilds `_train_head_degrees` / `_train_tail_degrees`
+                # from the SAME `self.known_triples` using the SAME
+                # idx maps, then reassigns `_head_degrees = _train_head_degrees`).
+                # The first loop's `_head_degrees` / `_tail_degrees`
+                # computations were DEAD CODE — wasted work that
+                # produced the same values only to be discarded. ROOT
+                # FIX: deleted the dead first loop; kept ONLY the
+                # `_head_idx_map` / `_tail_idx_map` construction (which
+                # the train-only loop depends on) and the train-only
+                # loop itself.
                 _head_idx_map = {e: i for i, e in enumerate(head_pool)}
                 _tail_idx_map = {e: i for i, e in enumerate(tail_pool)}
-                for (h, r, t) in self.known_triples:
-                    if h in _head_idx_map:
-                        _head_degrees[_head_idx_map[h]] += 1.0
-                    if t in _tail_idx_map:
-                        _tail_degrees[_tail_idx_map[t]] += 1.0
                 # v88 ROOT FIX (BUG #42 — Bernoulli cache leaks held-out
                 # degree info into training): rebuild a TRAIN-ONLY degree
                 # distribution from `self.known_triples` (train-only)
@@ -2495,8 +2670,35 @@ class KGNegativeSampler:
                 # v43 Chain 6: use Bernoulli (degree-weighted) sampling
                 # if probs are cached for this (head_type, tail_type)
                 # pair; otherwise fall back to uniform.
+                #
+                # v100 ROOT FIX (cache-key mismatch): the cache is
+                # POPULATED at line ~2418 with the 3-tuple key
+                # `_cache_key_ht = (head_type, tail_type, _ho_sig)`
+                # (built at line ~2361, where
+                # `_ho_sig = frozenset(_held_out_entities) if
+                # _held_out_entities else None`), but this LOOKUP
+                # previously used a 2-tuple `(head_type, tail_type)`.
+                # The lookup ALWAYS returned None, making the entire
+                # bernoulli-degree-weighted sampling path dead code
+                # (the sampler silently fell back to uniform — the
+                # Wang et al. 2014 Bernoulli scheme was never actually
+                # applied, biasing the model to push embeddings AWAY
+                # from hubs, making predictions for clinically-relevant
+                # targets WORSE than for obscure ones). ROOT FIX: build
+                # `_ho_sig` the same way as line ~2358 and use the SAME
+                # 3-tuple key `(head_type, tail_type, _ho_sig)` for the
+                # lookup. (`_held_out_entities` is built once at
+                # line ~2272 and is invariant within this call, so
+                # rebuilding the frozenset here matches the populate
+                # path exactly.)
+                _ho_sig = (
+                    frozenset(_held_out_entities)
+                    if _held_out_entities
+                    else None
+                )
+                _cache_key_ht = (head_type, tail_type, _ho_sig)
                 _cached_probs = (
-                    self._bernoulli_probs_cache.get((head_type, tail_type))
+                    self._bernoulli_probs_cache.get(_cache_key_ht)
                     if _sampling_method == "bernoulli"
                     and hasattr(self, "_bernoulli_probs_cache")
                     else None

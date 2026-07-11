@@ -179,9 +179,16 @@ def _log_bridge_fallback(
     backend: str = "csv",
     exception_type: Optional[str] = None,
     exception_message: Optional[str] = None,
+    raised: Optional[bool] = None,  # v100 ROOT FIX (BUG P2-030)
     extra: Optional[Dict[str, Any]] = None,
 ) -> None:
-    """Write a structured audit record for a bridge fallback."""
+    """Write a structured audit record for a bridge fallback.
+
+    The ``raised`` field (v100 ROOT FIX, BUG P2-030) records whether the
+    caller re-raised after emitting this audit record, so downstream
+    readers can distinguish a true CSV fallback from a misleading
+    "falling back" log that was actually followed by a raise.
+    """
     try:
         from datetime import datetime, timezone
         _audit_dir = (
@@ -198,6 +205,7 @@ def _log_bridge_fallback(
             "database_url_set": _DATABASE_URL_SET,
             "exception_type": exception_type,
             "exception_message": (exception_message or "")[:500],
+            "raised": raised,  # v100 ROOT FIX (BUG P2-030)
             "extra": extra or {},
         }
         log_path = _audit_dir / "bridge_fallbacks.jsonl"
@@ -717,6 +725,44 @@ class RecordingGraphBuilder:
 # ---------------------------------------------------------------------------
 # 3. Phase1StagedData — the structured intermediate
 # ---------------------------------------------------------------------------
+# P2-014 ROOT FIX: define a typed dict-subclass that carries the backend
+# label as an ATTRIBUTE (not a string-valued dict key). The previous
+# contract returned ``Dict[str, pd.DataFrame]`` but silently inserted a
+# STRING value at key ``"_phase1_backend"`` — a type-system lie. Any
+# downstream iteration site that forgot the ``if key == "_phase1_backend":
+# continue`` guard would crash with
+# ``AttributeError: 'str' object has no attribute 'empty'``. The fix
+# preserves backward compat (the legacy key is still set for callers
+# that pop it) but the canonical API is the ``.backend`` attribute,
+# which is type-safe and cannot collide with DataFrame iteration.
+class _Phase1BridgeResult(dict):
+    """Typed dict-subclass carrying the Phase 1 backend label as an attribute.
+
+    Inherits from ``dict`` so all existing call sites (``items()``,
+    ``get()``, ``pop()``, ``len()``, ``in``, etc.) work unchanged.
+    Adds a ``.backend`` attribute that records which backend
+    (PostgreSQL or CSV) produced the frames — type-safe and
+    iteration-safe.
+
+    For backward compat, the legacy ``"_phase1_backend"`` key is ALSO
+    set on the dict (so callers using ``frames.pop("_phase1_backend",
+    default)`` continue to work). New code should prefer ``.backend``.
+    """
+
+    __slots__ = ("backend",)
+
+    def __init__(self, *args, backend: str = "", **kwargs):
+        super().__init__(*args, **kwargs)
+        # Use object.__setattr__ because __slots__ + dict subclass can
+        # be picky about attribute assignment order.
+        object.__setattr__(self, "backend", backend)
+        # Backward-compat: also expose via the legacy key. Downstream
+        # iteration sites MUST continue to guard with
+        # ``if key == "_phase1_backend": continue`` (the legacy guard
+        # is preserved at all known call sites).
+        super().__setitem__("_phase1_backend", backend)
+
+
 @dataclass
 class Phase1StagedData:
     """Structured Phase 2 node/edge dicts produced from Phase 1 CSVs.
@@ -2260,7 +2306,7 @@ def _read_phase1_from_postgres() -> Dict[str, pd.DataFrame]:
 def read_phase1_outputs(
     phase1_processed_dir: Optional[Path | str] = None,
     prefer_postgres: bool = True,
-) -> Dict[str, pd.DataFrame]:
+) -> "_Phase1BridgeResult":
     """Read Phase 1's outputs into a dict of DataFrames.
 
     v29 ROOT FIX (Phase1↔Phase2 100% connection): the reader now prefers
@@ -2275,9 +2321,10 @@ def read_phase1_outputs(
       2. Otherwise, read CSVs from ``phase1_processed_dir`` (the legacy
          v28 behaviour — preserved for dev/CI without a database).
 
-    The chosen backend is recorded on the returned DataFrames via the
-    special ``"_phase1_backend"`` attribute on the dict, so downstream
-    code (and tests) can verify which path was taken.
+    The chosen backend is recorded on the returned object via the
+    ``.backend`` attribute (P2-014 root fix — type-safe), AND via the
+    legacy ``"_phase1_backend"`` dict key (backward compat with callers
+    that pop it). New code should prefer ``.backend``.
 
     Parameters
     ----------
@@ -2303,8 +2350,11 @@ def read_phase1_outputs(
             "Phase 1 ORM models are the source of truth for Phase 2."
         )
         try:
-            out = _read_phase1_from_postgres()
-            out["_phase1_backend"] = _PHASE1_BACKEND_POSTGRES  # type: ignore[assignment]
+            _pg_out = _read_phase1_from_postgres()
+            # P2-014 ROOT FIX: wrap in _Phase1BridgeResult so the
+            # backend label is a type-safe attribute (not a string
+            # masquerading as a DataFrame in a Dict[str, DataFrame]).
+            out = _Phase1BridgeResult(_pg_out, backend=_PHASE1_BACKEND_POSTGRES)
             return out
         except Exception as exc:
             # v61 ROOT FIX (silent break point #2 — forensic deep fix):
@@ -2318,22 +2368,36 @@ def read_phase1_outputs(
             # ROOT FIX: apply the SAME classification logic here so the
             # second silent fallback layer is also discriminating.
             failure_mode = _classify_db_failure(exc)
+            # v100 ROOT FIX (BUG P2-030): the previous single logger.error
+            # below claimed "falling back to CSV reader" even when the code
+            # was about to re-raise (prod non-schema, or dev without
+            # DRUGOS_ALLOW_CSV_FALLBACK=1). The misleading "falling back"
+            # claim is now split: (a) this logger.error records ONLY the
+            # failure fact, and (b) the "falling back to CSV" info log
+            # further down fires ONLY when the fallback is actually taken
+            # (i.e. after BOTH raise guards below have passed).
             logger.error(
-                "Phase1 bridge: PostgreSQL read failed (%s): %s: %s — "
-                "falling back to CSV reader. In production this is fatal "
-                "ONLY for db_unreachable/auth_failed/unknown modes; "
-                "schema_missing falls back to CSV so the pipeline can "
-                "still produce a graph while migrations are run. "
-                "In production with a non-schema failure, Phase 1's "
-                "database work is being discarded.",
+                "Phase1 bridge: PostgreSQL read failed (%s): %s: %s.",
                 failure_mode, type(exc).__name__, exc,
             )
+            # v100 ROOT FIX (BUG P2-030): compute up-front whether the
+            # upcoming raise guards will re-raise, so the structured
+            # audit record can carry a `raised` flag that distinguishes
+            # a true CSV fallback from a misleading log followed by a
+            # raise. The two guards below mirror these conditions —
+            # keep them in sync.
+            _allow_csv_fallback = os.environ.get("DRUGOS_ALLOW_CSV_FALLBACK", "") == "1"
+            _will_raise = (
+                (_PRODUCTION_ENV and failure_mode != "schema_missing")
+                or (failure_mode != "schema_missing" and not _allow_csv_fallback)
+            )
             _log_bridge_fallback(
-                "read_phase1_outputs_postgres_read",
+                "read_phase1_outputs_postgres_failed",
                 f"postgres_read_failed:{failure_mode}",
                 backend="csv",
                 exception_type=type(exc).__name__,
                 exception_message=str(exc),
+                raised=_will_raise,
                 extra={"failure_mode": failure_mode},
             )
             if _PRODUCTION_ENV and failure_mode != "schema_missing":
@@ -2343,12 +2407,19 @@ def read_phase1_outputs(
                 # root cause. Schema_missing is NOT re-raised — it's a
                 # configuration issue (migrations not applied) and the
                 # CSV fallback lets the pipeline still produce a graph.
+                # v100 ROOT FIX (BUG P2-030): the misleading "falling
+                # back" log above was split so the fallback claim only
+                # fires when the fallback actually happens; this branch
+                # re-raises instead of falling back.
                 raise
             # v88 ROOT FIX (BUG #28 — second silent fallback layer):
             # apply the same DRUGOS_ALLOW_CSV_FALLBACK=1 opt-in gate here.
             if failure_mode != "schema_missing":
-                _allow_csv_fallback = os.environ.get("DRUGOS_ALLOW_CSV_FALLBACK", "") == "1"
                 if not _allow_csv_fallback:
+                    # v100 ROOT FIX (BUG P2-030): the misleading "falling
+                    # back" log above was split so the fallback claim only
+                    # fires when the fallback actually happens; this branch
+                    # re-raises RuntimeError instead of falling back.
                     raise RuntimeError(
                         f"phase1_bridge: PostgreSQL read failed "
                         f"(failure_mode={failure_mode}) and prefer_postgres=True. "
@@ -2357,6 +2428,15 @@ def read_phase1_outputs(
                         f"Set DRUGOS_ALLOW_CSV_FALLBACK=1 to allow. "
                         f"Original error: {type(exc).__name__}: {exc}"
                     ) from exc
+            # v100 ROOT FIX (BUG P2-030): the CSV fallback is actually
+            # taken only once BOTH raise guards above have passed. Emit
+            # the "falling back to CSV reader" info log HERE (not at the
+            # top of the except block) so the fallback claim only fires
+            # when the fallback is genuinely about to happen.
+            logger.info(
+                "Phase1 bridge: falling back to CSV reader (failure_mode=%s).",
+                failure_mode,
+            )
             if failure_mode == "schema_missing":
                 logger.warning(
                     "Phase1 bridge: schema_missing in "
@@ -2526,8 +2606,10 @@ def read_phase1_outputs(
                     "this source before invoking the bridge.",
                     key, p,
                 )
-    out["_phase1_backend"] = _PHASE1_BACKEND_CSV  # type: ignore[assignment]
-    return out
+    # P2-014 ROOT FIX: wrap the CSV-frames dict in _Phase1BridgeResult
+    # so the backend label is a type-safe .backend attribute (not a
+    # string masquerading as a DataFrame in a Dict[str, DataFrame]).
+    return _Phase1BridgeResult(out, backend=_PHASE1_BACKEND_CSV)
 
 
 # ---------------------------------------------------------------------------
@@ -5696,8 +5778,17 @@ def run_phase1_to_phase2(
     frames = read_phase1_outputs(
         phase1_processed_dir, prefer_postgres=prefer_postgres,
     )
-    # frames is a dict that ALSO carries a "_phase1_backend" marker key.
-    backend = frames.pop("_phase1_backend", _PHASE1_BACKEND_CSV)
+    # P2-014 ROOT FIX: prefer the type-safe ``.backend`` attribute
+    # (canonical API). Fall back to the legacy ``"_phase1_backend"``
+    # dict key for backward compat with any caller that constructs a
+    # plain dict (e.g. unit tests that mock read_phase1_outputs).
+    backend = getattr(frames, "backend", None)
+    if not backend:
+        backend = frames.pop("_phase1_backend", _PHASE1_BACKEND_CSV)
+    else:
+        # Still pop the legacy key so downstream iteration over
+        # frames.items() does not see a string value at that key.
+        frames.pop("_phase1_backend", None)
     staged = stage_phase1_to_phase2(
         frames, run_id=run_id, phase1_processed_dir=phase1_processed_dir
     )

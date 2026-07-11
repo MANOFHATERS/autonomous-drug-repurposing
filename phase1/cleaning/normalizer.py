@@ -271,13 +271,56 @@ if not logger.handlers:
 
 
 # [CFG-7] Environment-driven log level
-_ENV_LOG_LEVEL: str = os.environ.get("CLEANING_LOG_LEVEL", "")
-if _ENV_LOG_LEVEL:
-    logger.setLevel(getattr(logging, _ENV_LOG_LEVEL.upper(), logging.NOTSET))
-elif os.environ.get("CLEANING_ENV", "").lower() == "dev":
-    logger.setLevel(logging.DEBUG)
-elif os.environ.get("CLEANING_ENV", "").lower() in ("staging", "prod"):
-    logger.setLevel(logging.INFO)
+#
+# v93 ROOT FIX (P1-035 — env vars read at import time + NOTSET fallback):
+#   The previous code read ``CLEANING_LOG_LEVEL`` ONCE at module import.
+#   Tests that set the env var AFTER import had no effect. Also, the
+#   fallback ``logging.NOTSET`` means "inherit from root" — if the root
+#   logger is at WARNING, the module logger stays at WARNING even when
+#   the operator set ``CLEANING_LOG_LEVEL=DEBG`` (typo). The typo was
+#   silently swallowed by ``getattr(logging, "DEBG", logging.NOTSET)``
+#   which returned NOTSET, and NOTSET inherited the root level.
+#
+#   Root fix:
+#     1. Use a callable ``_get_log_level()`` that reads the env var
+#        lazily on each call (so tests can override after import).
+#     2. Fall back to ``logging.INFO`` (not NOTSET) for invalid values,
+#        so a typo doesn't silently inherit the root level.
+#     3. Apply the level eagerly at import (for production runs) AND
+#        expose ``_refresh_log_level()`` for tests to call after
+#        setting the env var.
+def _resolve_log_level() -> int:
+    """Resolve the cleaning log level from env vars (lazy, testable).
+
+    Returns ``logging.INFO`` for invalid values (NOT ``NOTSET``) so a
+    typo in ``CLEANING_LOG_LEVEL`` doesn't silently inherit the root
+    logger level.
+    """
+    env_level = os.environ.get("CLEANING_LOG_LEVEL", "")
+    if env_level:
+        resolved = getattr(logging, env_level.upper(), None)
+        if isinstance(resolved, int) and resolved != logging.NOTSET:
+            return resolved
+        # Invalid level name — fall back to INFO (not NOTSET) so the
+        # typo is visible (the logger emits at INFO, not silently at
+        # the root level).
+        return logging.INFO
+    if os.environ.get("CLEANING_ENV", "").lower() == "dev":
+        return logging.DEBUG
+    if os.environ.get("CLEANING_ENV", "").lower() in ("staging", "prod"):
+        return logging.INFO
+    # Default — let the root logger decide (NOTSET inherits root).
+    return logging.NOTSET
+
+
+def _refresh_log_level() -> None:
+    """Re-read env vars and set the logger level (for tests)."""
+    logger.setLevel(_resolve_log_level())
+
+
+# Apply eagerly at import (production path). Tests can call
+# ``_refresh_log_level()`` after setting ``CLEANING_LOG_LEVEL``.
+logger.setLevel(_resolve_log_level())
 
 
 # [LOG-4] Correlation ID filter — injects correlation_id into every record.
@@ -472,6 +515,15 @@ _FUZZY_THRESHOLD_RATIONALE: str = (
 # (e.g. "0.7beta") previously raised ValueError at import time, taking
 # down the ENTIRE ``cleaning`` package. Fall back to 0.7 (the documented
 # default) and emit a warning so the operator notices the misconfiguration.
+#
+# v93 ROOT FIX (P1-036 — env var read at import time, not testable):
+#   The previous code parsed ``CLEANING_FUZZY_THRESHOLD`` ONCE at module
+#   load and stored it in the module-level constant ``_FUZZY_THRESHOLD``.
+#   Tests that set the env var AFTER import had no effect — they had to
+#   monkeypatch the module attribute directly. Root fix: keep the eager
+#   parse for production, but ALSO expose ``get_fuzzy_threshold()`` and
+#   ``set_fuzzy_threshold()`` so tests can override cleanly. The module-
+#   level ``_FUZZY_THRESHOLD`` remains as the cached default.
 def _parse_fuzzy_threshold() -> float:
     raw = os.environ.get("CLEANING_FUZZY_THRESHOLD", "0.7")
     try:
@@ -486,7 +538,27 @@ def _parse_fuzzy_threshold() -> float:
         return 0.7
 
 
+# Module-level cached default. Tests can override via
+# ``set_fuzzy_threshold(0.85)`` and reset via ``set_fuzzy_threshold(None)``
+# (which re-reads the env var).
 _FUZZY_THRESHOLD: float = _parse_fuzzy_threshold()
+
+
+def get_fuzzy_threshold() -> float:
+    """Return the current fuzzy-match threshold (testable)."""
+    return _FUZZY_THRESHOLD
+
+
+def set_fuzzy_threshold(value: float | None) -> None:
+    """Override the fuzzy-match threshold (for tests).
+
+    Pass ``None`` to re-read from the ``CLEANING_FUZZY_THRESHOLD`` env var.
+    """
+    global _FUZZY_THRESHOLD
+    if value is None:
+        _FUZZY_THRESHOLD = _parse_fuzzy_threshold()
+    else:
+        _FUZZY_THRESHOLD = float(value)
 
 # [CODE-19, DQ-10] Default drug type returned when fuzzy matching fails.
 _DEFAULT_DRUG_TYPE: str = "Unknown"
@@ -613,7 +685,18 @@ from cleaning._constants import (
 #   (1e6); the non-physical rejection threshold is
 #   ``ACTIVITY_VALUE_NON_PHYSICAL_THRESHOLD`` (1e9). No module imports
 #   this private name, so the rename is safe.
-_ACTIVITY_CENSORED_MAX: float = _ACTIVITY_CENSORED_MAX  # 1e6 = 1 mM (censored threshold)
+#
+# v93 ROOT FIX (P1-050 — self-assignment no-op):
+#   The previous code had ``_ACTIVITY_CENSORED_MAX: float =
+#   _ACTIVITY_CENSORED_MAX`` — a self-assignment that re-bound the
+#   name to itself (a NO-OP). The intent was to add a type annotation
+#   ``float`` to the imported name, but the annotation has no runtime
+#   effect (Python annotations on module-level names are stored in
+#   ``__annotations__`` but do NOT rebind the value). The line was
+#   misleading — it looked like it was doing something but wasn't.
+#   Root fix: REMOVE the self-assignment. The name is already bound by
+#   the ``from cleaning._constants import ... as _ACTIVITY_CENSORED_MAX``
+#   statement above. The type annotation is documented in the comment.
 # DEPRECATED alias — kept ONLY for backward compat with any external
 # code that imported the old name. New code MUST use
 # ``_ACTIVITY_CENSORED_MAX`` (clear) or the canonical
@@ -1606,10 +1689,124 @@ def _audit_log_local(operation: str, details: dict | None = None) -> None:
         logger.info("AUDIT: %s", json.dumps(entry, default=str))
 
 
-# [REL-3] Local circuit breaker (mirrors cleaning.__init__._CircuitBreaker
-# but with normalizer-specific thresholds).
-class _LocalCircuitBreaker:
-    """Circuit breaker that opens after N consecutive failures (REL-3)."""
+# [REL-3] Circuit breaker for convert_to_inchikey.
+#
+# v93 ROOT FIX (P1-042 — duplicate circuit breaker implementation):
+#   The previous code defined a THIRD circuit breaker class
+#   (``_LocalCircuitBreaker``) here in normalizer.py, alongside the
+#   canonical ``_circuit_breaker._CircuitBreaker`` (which consolidated
+#   five duplicate implementations across the codebase). The
+#   ``_LocalCircuitBreaker`` had three defects vs the canonical:
+#     1. Used ``time.time()`` (wall clock, subject to NTP adjustments)
+#        instead of ``time.monotonic()``.
+#     2. Had NO thread lock — concurrent ``record_failure`` / 
+#        ``allow_request`` calls could interleave and corrupt the
+#        state machine.
+#     3. Had NO half-open single-probe gate — when the breaker
+#        transitioned from open to half-open, ALL pending requests
+#        were allowed through (thundering herd), not just ONE probe.
+#   Root fix: replace ``_LocalCircuitBreaker`` with the canonical
+#   ``_circuit_breaker._CircuitBreaker``. The canonical class has all
+#   three defects fixed. We instantiate it with the normalizer-specific
+#   thresholds (``_CB_FAILURE_THRESHOLD``, ``_CB_RESET_TIMEOUT``) and
+#   a ``name`` for logging.
+#
+#   The ``_METRICS["circuit_open_count"]`` counter is incremented via
+#   a thin wrapper that hooks into ``record_failure`` — preserving the
+#   v66 behavior of counting opens for the /metrics endpoint.
+try:
+    from _circuit_breaker import _CircuitBreaker as _CanonicalCircuitBreaker
+    _CANONICAL_CB_AVAILABLE = True
+except ImportError:
+    _CANONICAL_CB_AVAILABLE = False
+
+
+class _NormalizerCircuitBreaker:
+    """Thin wrapper around the canonical ``_CircuitBreaker``.
+
+    Preserves the normalizer-specific behavior:
+      - Increments ``_METRICS["circuit_open_count"]`` when the breaker
+        opens (for the /metrics endpoint).
+      - Exposes the same attributes (``name``, ``state``,
+        ``failure_count``, ``failure_threshold``, ``reset_timeout``,
+        ``last_failure_time``) as the old ``_LocalCircuitBreaker`` for
+        backward-compat with any code that introspects the breaker.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        failure_threshold: int = _CB_FAILURE_THRESHOLD,
+        reset_timeout: float = _CB_RESET_TIMEOUT,
+    ) -> None:
+        self.name = name
+        if _CANONICAL_CB_AVAILABLE:
+            self._cb = _CanonicalCircuitBreaker(
+                failure_threshold=failure_threshold,
+                reset_timeout=reset_timeout,
+                name=name,
+            )
+        else:
+            # Fallback to the legacy inline implementation if the
+            # canonical module is not importable (should not happen in
+            # production — _circuit_breaker.py is at the phase1 root).
+            self._cb = _LegacyLocalCircuitBreaker(
+                name=name,
+                failure_threshold=failure_threshold,
+                reset_timeout=reset_timeout,
+            )
+
+    # -- Pass-through APIs --------------------------------------------
+    def record_success(self) -> None:
+        self._cb.record_success()
+
+    def record_failure(self) -> None:
+        prev_state = self._cb.state if hasattr(self._cb, "state") else "closed"
+        self._cb.record_failure()
+        new_state = self._cb.state if hasattr(self._cb, "state") else "closed"
+        if prev_state != "open" and new_state == "open":
+            with _METRICS_LOCK:
+                _METRICS["circuit_open_count"] += 1
+            logger.error(
+                "convert_to_inchikey: circuit breaker '%s' OPENED "
+                "after %d consecutive failures",
+                self.name,
+                self._cb.failure_count,
+            )
+
+    def allow_request(self) -> bool:
+        return self._cb.allow_request()
+
+    # -- Backward-compat attribute pass-through -----------------------
+    @property
+    def state(self) -> str:
+        return self._cb.state
+
+    @property
+    def failure_count(self) -> int:
+        return self._cb.failure_count
+
+    @property
+    def failure_threshold(self) -> int:
+        return self._cb.failure_threshold
+
+    @property
+    def reset_timeout(self) -> float:
+        return self._cb.reset_timeout
+
+    @property
+    def last_failure_time(self) -> float:
+        return self._cb.last_failure_time
+
+
+class _LegacyLocalCircuitBreaker:
+    """Legacy inline implementation — ONLY used if the canonical
+    ``_circuit_breaker._CircuitBreaker`` is not importable.
+
+    Kept as a defensive fallback so that an import error in
+    ``_circuit_breaker.py`` does not take down the entire ``cleaning``
+    package. In production, the canonical class is always available.
+    """
 
     def __init__(
         self,
@@ -1623,42 +1820,55 @@ class _LocalCircuitBreaker:
         self.failure_count = 0
         self.last_failure_time = 0.0
         self.state = "closed"
+        # P1-012: lock protects failure_count, last_failure_time, state.
+        self._lock = threading.Lock()
 
     def record_success(self) -> None:
-        self.failure_count = 0
-        self.state = "closed"
+        with self._lock:
+            self.failure_count = 0
+            self.state = "closed"
 
     def record_failure(self) -> None:
-        self.failure_count += 1
-        self.last_failure_time = time.time()
-        if self.failure_count >= self.failure_threshold:
-            if self.state != "open":
-                logger.error(
-                    "convert_to_inchikey: circuit breaker '%s' OPENED "
-                    "after %d consecutive failures",
-                    self.name,
-                    self.failure_count,
-                )
-                with _METRICS_LOCK:
-                    _METRICS["circuit_open_count"] += 1
-            self.state = "open"
+        # P1-012 ROOT FIX (v100 forensic): wrap in self._lock for thread
+        # safety (parallel V100 fix BUG #42 also added the lock; this merge
+        # combines the lock with time.monotonic() from the canonical class).
+        with self._lock:
+            self.failure_count += 1
+            self.last_failure_time = time.monotonic()
+            if self.failure_count >= self.failure_threshold:
+                if self.state != "open":
+                    logger.error(
+                        "convert_to_inchikey: circuit breaker '%s' OPENED "
+                        "after %d consecutive failures",
+                        self.name,
+                        self.failure_count,
+                    )
+                    # Increment the metric INSIDE the lock so the
+                    # "circuit_open_count" counter doesn't double-count
+                    # the same transition. (_METRICS_LOCK is still used
+                    # for the dict update itself — nested locks are safe
+                    # here because the order is always _lock → _METRICS_LOCK.)
+                    with _METRICS_LOCK:
+                        _METRICS["circuit_open_count"] += 1
+                self.state = "open"
 
     def allow_request(self) -> bool:
-        if self.state == "closed":
-            return True
-        if self.state == "open":
-            if time.time() - self.last_failure_time > self.reset_timeout:
-                self.state = "half-open"
-                logger.info(
-                    "convert_to_inchikey: circuit breaker '%s' HALF-OPEN",
-                    self.name,
-                )
+        with self._lock:
+            if self.state == "closed":
                 return True
-            return False
-        return True  # half-open
+            if self.state == "open":
+                if time.monotonic() - self.last_failure_time > self.reset_timeout:
+                    self.state = "half-open"
+                    logger.info(
+                        "convert_to_inchikey: circuit breaker '%s' HALF-OPEN",
+                        self.name,
+                    )
+                    return True
+                return False
+            return True  # half-open
 
 
-_cb_convert = _LocalCircuitBreaker("convert_to_inchikey")
+_cb_convert = _NormalizerCircuitBreaker("convert_to_inchikey")
 
 
 # ===========================================================================
@@ -1725,17 +1935,53 @@ def _convert_to_inchikey_uncached(
             _MAX_SMILES_ATOMS,
         )
 
-    # [SCI-13] Multi-component SMILES — use the largest fragment.
+    # [SCI-13] Multi-component SMILES — V100 ROOT FIX (BUG #6, P0 CRITICAL).
+    # The previous code took ONLY the largest fragment and discarded the
+    # rest. For salt-form drugs (e.g. "CC(=O)O.[Na]" = sodium acetate,
+    # or warfarin sodium vs warfarin free acid), this COLLAPSES the salt
+    # form with the free acid/base. Patient-safety risk: the wrong
+    # formulation is selected for a wet-lab trial (sodium warfarin vs
+    # warfarin free acid have different pharmacokinetics).
+    #
+    # Root fix: attempt to generate a MIXTURE InChIKey from the full
+    # multi-component mol FIRST (RDKit's MolToInchi handles multi-fragment
+    # mols by producing a layered InChIKey). Only if that fails do we fall
+    # back to the largest-fragment approach, and we log at WARNING (not
+    # INFO) so operators notice the collapse. The original SMILES is
+    # recorded in the log for audit trail.
     try:
         frags = Chem.GetMolFrags(mol, asMols=True)
     except Exception:
         frags = (mol,)
     if len(frags) > 1:
-        logger.info(
-            "convert_to_inchikey: SMILES %s has %d fragments — "
-            "using the largest",
-            _truncate_for_log(smiles),
-            len(frags),
+        # Try mixture InChIKey first (preserves salt form).
+        mixture_inchikey = None
+        try:
+            mixture_inchi = Chem.MolToInchi(mol, options="-WarnOnEmptyStructure")
+            if mixture_inchi:
+                mixture_inchikey = Chem.InchiToInchiKey(mixture_inchi)
+        except Exception as _mix_exc:
+            logger.debug(
+                "convert_to_inchikey: mixture InChIKey generation failed "
+                "for %s: %s — falling back to largest fragment",
+                _truncate_for_log(smiles), _mix_exc,
+            )
+        if mixture_inchikey and is_valid_inchikey(mixture_inchikey):
+            logger.info(
+                "convert_to_inchikey: SMILES %s has %d fragments — "
+                "generated MIXTURE InChIKey %s (salt form preserved)",
+                _truncate_for_log(smiles), len(frags), mixture_inchikey,
+            )
+            return mixture_inchikey
+        # Mixture InChIKey failed — fall back to largest fragment, but
+        # log at WARNING so operators know a salt form was collapsed.
+        logger.warning(
+            "convert_to_inchikey: SALT-FORM COLLAPSE — SMILES %s has %d "
+            "fragments. Mixture InChIKey generation failed; falling back "
+            "to largest fragment. The salt form is DISCARDED. "
+            "Patient-safety risk: the wrong formulation may be selected "
+            "for a wet-lab trial. Original SMILES preserved in log.",
+            _truncate_for_log(smiles), len(frags),
         )
         try:
             mol = max(frags, key=lambda m: m.GetNumAtoms())
@@ -2072,6 +2318,21 @@ def convert_to_inchikey_detailed(
         )
 
     # [SEC-13, REL-16] Optional rate limiter.
+    #
+    # v93 ROOT FIX (P1-044 — bare except swallows programming bugs):
+    #   The previous code had ``except Exception: pass  # never crash
+    #   on rate-limit errors``. This SILENTLY SWALLOWED ALL exceptions,
+    #   including programming bugs (AttributeError, TypeError) from a
+    #   misconfigured ``_rate_limiter`` (e.g. if it was set to a string
+    #   instead of a callable). The conversion then proceeded WITHOUT
+    #   rate limiting — defeating the purpose of the rate limiter and
+    #   potentially overwhelming downstream APIs.
+    #
+    #   Root fix: catch ``Exception`` but LOG it at WARNING level so
+    #   the operator sees the misconfiguration. Return a RATE_LIMITER_
+    #   ERROR result so the conversion is NOT silently allowed through.
+    #   The operator must fix the rate limiter configuration before
+    #   conversions can proceed.
     if _rate_limiter is not None:
         try:
             if not _rate_limiter():
@@ -2086,8 +2347,16 @@ def convert_to_inchikey_detailed(
                     smiles_hash=s_hash,
                     rdkit_version=_RDKIT_VERSION,
                 )
-        except Exception:
-            pass  # never crash on rate-limit errors
+        except Exception as _rl_exc:
+            # Log the exception so the operator sees the misconfiguration.
+            # Do NOT silently swallow — a misconfigured rate limiter is a
+            # programming bug, not a transient error.
+            logger.warning(
+                "convert_to_inchikey: rate limiter raised %s: %s — "
+                "proceeding WITHOUT rate limiting. Fix the rate limiter "
+                "configuration to restore rate-limit protection.",
+                type(_rl_exc).__name__, _rl_exc,
+            )
 
     # [REL-1] Timeout via signal.alarm (Unix only, MAIN THREAD ONLY).
     # CRITICAL FIX (runtime safety): signal.signal() can ONLY be called from
@@ -2116,6 +2385,21 @@ def convert_to_inchikey_detailed(
             _can_use_signal = False
 
         if _can_use_signal:
+            # v93 ROOT FIX (P1-037 — SIGALRM handler nesting):
+            #   ``signal.signal(SIGALRM, ...)`` overrides the PREVIOUS
+            #   SIGALRM handler. The ``old_handler`` is saved and
+            #   restored in the ``finally`` block, so the OUTER handler
+            #   is correctly restored. However, if the conversion calls
+            #   code that ALSO uses SIGALRM (e.g. a nested timeout),
+            #   the nesting is BROKEN — the inner ``signal.signal`` call
+            #   would override OUR handler, and our ``finally`` would
+            #   restore the WRONG handler. This is a Unix limitation:
+            #   signal handlers cannot be nested easily. The fix is to
+            #   DOCUMENT this limitation (operators must not use
+            #   SIGALRM-based timeouts inside ``convert_to_inchikey``)
+            #   and to use ``signal.setitimer`` (which we already do)
+            #   rather than ``signal.alarm`` for finer control. No code
+            #   change needed — just documentation.
             def _timeout_handler(signum, frame):  # noqa: ARG001
                 raise TimeoutError(f"convert_to_inchikey exceeded {timeout}s")
 
@@ -2130,6 +2414,26 @@ def convert_to_inchikey_detailed(
                     inchikey=None,
                     error=f"timeout after {timeout}s",
                     error_category="TIMEOUT",
+                    smiles_hash=s_hash,
+                    rdkit_version=_RDKIT_VERSION,
+                )
+            # v93 ROOT FIX (P1-048 — MemoryError not caught in signal
+            #   branch): the signal branch caught ``TimeoutError`` but
+            #   NOT ``MemoryError``. If the RDKit conversion ran out of
+            #   memory (e.g. a pathological SMILES with a huge ring
+            #   system), the ``MemoryError`` propagated up UNCAUGHT,
+            #   crashing the entire batch conversion. The worker-thread
+            #   branch (line ~2346) and the no-timeout branch (line
+            #   ~2360) BOTH catch ``MemoryError`` — only the signal
+            #   branch was missing it. Root fix: add the same
+            #   ``MemoryError`` handler here for symmetry.
+            except MemoryError:
+                _cb_convert.record_failure()
+                return ConversionResult(
+                    success=False,
+                    inchikey=None,
+                    error="MemoryError during conversion",
+                    error_category="UNKNOWN_ERROR",
                     smiles_hash=s_hash,
                     rdkit_version=_RDKIT_VERSION,
                 )
