@@ -632,12 +632,14 @@ class RewardConfig:
             PPO still collapsed. The v2 fix introduces ``high_action_bonus``
             so that finding a good candidate pays ~10x the cost of missing
             one, AND ``correct_rejection_reward`` is dropped to 0.0 so the
-            agent has no incentive to default to LOW:
+            agent has no incentive to default to LOW.
+            v90 P0 ROOT FIX (BUG #33): stale EV analysis used 8.0 — the
+            actual default is 5.0. Recomputed:
                 EV(always LOW)  = 0.15 * (-1.0 * 1.0) + 0.85 * 0.0    = -0.150
-                EV(always HIGH) = 0.15 * (0.5 * 8.0) + 0.85 * (-1.0)  = -0.250
-                EV(perfect)     = 0.15 * (0.5 * 8.0) + 0.85 * 0.0     = +0.600
-            The gap between "perfect" (+0.600/pair) and "always LOW"
-            (-0.150/pair) is now 0.750/pair -- a strong learning signal
+                EV(always HIGH) = 0.15 * (0.5 * 5.0) + 0.85 * (-1.0)  = -0.475
+                EV(perfect)     = 0.15 * (0.5 * 5.0) + 0.85 * 0.0     = +0.375
+            The gap between "perfect" (+0.375/pair) and "always LOW"
+            (-0.150/pair) is now 0.525/pair -- a strong learning signal
             that PPO can ascend in a few thousand timesteps.
     """
 
@@ -695,27 +697,23 @@ class RewardConfig:
     # ROOT B20 FIX (v2): dropped to 0.0.
     correct_rejection_reward: float = 0.0
     validated_bonus: float = 0.1
-    # V4 S-F2 fix: high_action_bonus=12.0 (was 8.0 in the original
-    # docstring, 12.0 in actual code). The V2/V3 docstring claimed
-    # ``high_action_bonus=8.0`` and computed EV(always HIGH) = -0.250,
-    # but the actual default was 12.0, giving EV(always HIGH) = +0.050
-    # -- a mild incentive to say HIGH even without learning. The V4
-    # docstring now matches the actual default (12.0) and the EV
-    # analysis is recomputed correctly.
+    # v90 P0 ROOT FIX (BUG #32): updated stale docstring. The previous
+    # docstring claimed high_action_bonus=12.0 and computed
+    # EV(always HIGH) = +0.050, but the actual default is 5.0 (per the
+    # S-04/X-06 fix). The EV analysis is recomputed with the correct 5.0:
     #
     # EV analysis (15% good pairs, avg good reward = 0.5):
     #   EV(always LOW)  = 0.15 * (-0.5 * 1.0) + 0.85 * 0.0   = -0.075
-    #   EV(always HIGH) = 0.15 * (0.5 * 12.0) + 0.85 * (-1.0) = +0.050
-    #   EV(perfect)     = 0.15 * (0.5 * 12.0) + 0.85 * 0.0    = +0.900
-    # The gap between "perfect" (+0.900/pair) and "always LOW"
-    # (-0.075/pair) is 0.975/pair -- a strong gradient for PPO.
+    #   EV(always HIGH) = 0.15 * (0.5 * 5.0) + 0.85 * (-1.0)  = -0.475
+    #   EV(perfect)     = 0.15 * (0.5 * 5.0) + 0.85 * 0.0     = +0.375
+    # The gap between "perfect" (+0.375/pair) and "always LOW"
+    # (-0.075/pair) is 0.450/pair -- a strong gradient for PPO.
     #
-    # Note: EV(always HIGH) = +0.050 is mildly positive, which means
-    # the agent has a slight default incentive to say HIGH. PPO must
-    # learn to suppress HIGH on bad pairs (reward=-1.0) to climb from
-    # +0.050 to +0.900. The V4 B-F3 fix (synergy reward + uncertainty
-    # penalty) makes this learning problem non-trivial: the agent
-    # must integrate ALL features, not just check 2 gates.
+    # EV(always HIGH) = -0.475 is strongly negative, so the agent MUST
+    # learn to discriminate (cannot default to always-HIGH). The V4
+    # B-F3 fix (synergy reward + uncertainty penalty) makes this
+    # learning problem non-trivial: the agent must integrate ALL
+    # features, not just check 2 gates.
     #
     # ROOT FIX (S-04 / X-06): lowered from 12.0 to 5.0 to PREVENT PPO
     # collapse to "always HIGH for KP drugs" (the compound failure mode
@@ -744,6 +742,17 @@ class RewardConfig:
     # -0.475 is strongly negative, so the agent MUST learn to discriminate
     # (cannot default to always-HIGH). The collapse risk is eliminated.
     high_action_bonus: float = 5.0
+    # v90 P0 ROOT FIX (BUG #18): BAD_HIGH_PENALTY_SCALE was a hardcoded
+    # magic number (0.05) inside step(), making it impossible to tune
+    # without code changes. Moved to RewardConfig as a configurable field.
+    # The EV trade-off: with bad_high_penalty_scale=0.05, a bad-pair HIGH
+    # costs -0.05 (vs -1.0 without scaling). This prevents PPO from
+    # collapsing to "always LOW" on sparse-good-pair data (~2.5% good).
+    #   EV(always HIGH) = 0.025 * (0.5 * 5.0) + 0.975 * (-1.0 * 0.05) = +0.014
+    #   EV(always LOW)  = 0.025 * (-0.5 * 1.0) + 0.975 * 0.0 = -0.013
+    # EV(HIGH) > EV(LOW), so PPO has incentive to explore HIGH, then learn
+    # to discriminate. Tune via reward.bad_high_penalty_scale in YAML.
+    bad_high_penalty_scale: float = 0.05
 
     def __post_init__(self) -> None:
         """Validate config on construction."""
@@ -891,6 +900,15 @@ class PipelineConfig:
     # v89 P0: minimum RL AUC to pass validation. Kept at 0.5 (better
     # than random) per the bridge's existing behavior.
     rl_auc_threshold: float = 0.5
+    # v90 P0 ROOT FIX (BUG #8): PPO hyperparams were NOT actually
+    # configurable. getattr(cfg, 'ppo_gamma', 0.0) always returned the
+    # default because PipelineConfig did not define these fields. A user
+    # who set ppo_gamma: 0.9 in YAML got TypeError (unknown field) or
+    # silent ignore. Now they are first-class config fields.
+    ppo_gamma: float = 0.0  # V30 (10.29): 0.0 for contextual bandit
+    ppo_ent_coef: float = 0.01
+    ppo_clip_range: float = 0.2
+    ppo_net_arch: Optional[Dict[str, List[int]]] = None  # default: dict(pi=[128,64], vf=[64,32])
 
     @classmethod
     def from_env(cls) -> "PipelineConfig":
@@ -1077,10 +1095,54 @@ class RewardFunction:
         # V30 ROOT FIX (10.10): gnn_score mean/std for z-score normalization
         self._gnn_score_mean: Optional[float] = None
         self._gnn_score_std: Optional[float] = None
+        # v90 P0 ROOT FIX (BUG #25): cache _kp_set ONCE in __init__ instead
+        # of recomputing it on every compute() call (~50K times during
+        # training). KNOWN_POSITIVES is a module-level constant — the set
+        # never changes during a run.
+        self._kp_set: Set[Tuple[str, str]] = set(
+            (d.lower(), v.lower()) for d, v in KNOWN_POSITIVES
+        )
+        # v90 P0 ROOT FIX (BUG #26): cache the effective reward weights
+        # (after gnn_score cap) so they can be recorded in metadata for
+        # provenance. Previously the metadata recorded the RAW config
+        # weights (gnn_score: 0.35) but the runtime used 0.04 — a
+        # provenance lie that broke reproducibility.
+        self._effective_reward_weights: Dict[str, float] = self._compute_effective_weights()
 
     def set_validated_hypotheses(self, validated: Set[Tuple[str, str]]) -> None:
         """Inject validated hypothesis set for the data flywheel."""
         self._validated_hypotheses = validated or set()
+
+    def get_effective_reward_weights(self) -> Dict[str, float]:
+        """Return the effective reward weights (after gnn_score cap).
+
+        v90 P0 ROOT FIX (BUG #26): exposes the runtime effective weights
+        for metadata provenance. The config may set gnn_score: 0.35, but
+        the runtime caps it at 0.04 and redistributes the excess. This
+        method returns the ACTUAL weights used at runtime, so metadata
+        can record them for reproducibility (21 CFR Part 11 audit trail).
+        """
+        return dict(self._effective_reward_weights)
+
+    def _compute_effective_weights(self) -> Dict[str, float]:
+        """Compute effective reward weights after gnn_score cap."""
+        effective_weights = dict(self.config.reward_weights)
+        GNN_SCORE_MAX_WEIGHT = 0.04
+        if effective_weights.get(GNN_SCORE_COL, 0) > GNN_SCORE_MAX_WEIGHT:
+            old_weight = effective_weights[GNN_SCORE_COL]
+            effective_weights[GNN_SCORE_COL] = GNN_SCORE_MAX_WEIGHT
+            other_sum = sum(
+                w for c, w in effective_weights.items()
+                if c != GNN_SCORE_COL
+            )
+            if other_sum > 0:
+                excess = old_weight - GNN_SCORE_MAX_WEIGHT
+                for c in effective_weights:
+                    if c != GNN_SCORE_COL:
+                        effective_weights[c] += excess * (
+                            effective_weights[c] / other_sum
+                        )
+        return effective_weights
 
     def set_adaptive_threshold(self, gnn_scores: np.ndarray) -> None:
         """ROOT FIX (C16/D3): compute and set adaptive gnn_hard_reject threshold.
@@ -1262,20 +1324,10 @@ class RewardFunction:
         # has a bug (e.g., the v89 Compound #3 label leakage), the RL
         # ranker is no longer forced to amplify it.
         # ------------------------------------------------------------------
-        effective_weights = dict(cfg.reward_weights)
-        # v89 P0: cap gnn_score weight at 0.04 (was 0.20). This is the
-        # user-specified "< 0.05" threshold.
+        effective_weights = self._effective_reward_weights
+        # v90 P0: cap is now applied in __init__ via _compute_effective_weights()
+        # and cached. This avoids recomputing on every compute() call.
         GNN_SCORE_MAX_WEIGHT = 0.04
-        if effective_weights.get(GNN_SCORE_COL, 0) > GNN_SCORE_MAX_WEIGHT:
-            old_weight = effective_weights[GNN_SCORE_COL]
-            effective_weights[GNN_SCORE_COL] = GNN_SCORE_MAX_WEIGHT
-            # Redistribute the excess to the other features proportionally.
-            other_sum = sum(w for c, w in effective_weights.items() if c != GNN_SCORE_COL)
-            if other_sum > 0:
-                excess = old_weight - GNN_SCORE_MAX_WEIGHT
-                for c in effective_weights:
-                    if c != GNN_SCORE_COL:
-                        effective_weights[c] += excess * (effective_weights[c] / other_sum)
 
         # V30 (10.10): z-score normalize gnn_score before weighting, so
         # low-variance gnn_score distributions still produce meaningful
@@ -1361,7 +1413,7 @@ class RewardFunction:
         pair_key = (drug_name, disease_name)
         # V30 (10.25): only apply the bonus if the pair is NOT in KNOWN_POSITIVES.
         # This is the critical disjointness check that prevents circular leakage.
-        _kp_set = set((d.lower(), v.lower()) for d, v in KNOWN_POSITIVES)
+        _kp_set = self._kp_set  # v90 BUG #25: cached in __init__
         if pair_key in self._validated_hypotheses and pair_key not in _kp_set:
             reward += cfg.validated_bonus
 
@@ -1852,12 +1904,40 @@ def generate_fake_data(
         MARKET_COL:          rng.beta(2, 3, n_pairs),
         CONFIDENCE_COL:      rng.beta(3, 4, n_pairs),
         PATHWAY_COL:         rng.beta(2, 4, n_pairs),
-        PATENT_COL:          rng.beta(3, 2, n_pairs),
+        # v90 P0 ROOT FIX (BUG #12): PATENT_COL, EFFICACY_COL, and ADME_COL
+        # are DRUG-LEVEL properties (per the DATA_DICTIONARY: "same value
+        # for all disease pairs of the same drug"). The previous code
+        # generated them as PER-PAIR random noise (rng.beta per row),
+        # meaning the same drug had different patent/efficacy/adme values
+        # across its disease pairs — scientifically wrong. The bridge's
+        # _compute_drug_level_features computes them correctly per-drug.
+        # Fix: compute per-drug values ONCE, then map each row's drug to
+        # its value. This makes the standalone RL pipeline consistent
+        # with the bridge pipeline.
+        PATENT_COL:          [0.0] * n_pairs,  # placeholder, filled below
         RARE_DISEASE_COL:    rng.integers(0, 2, n_pairs).astype(float),
         UNMET_NEED_COL:      rng.beta(2, 3, n_pairs),
-        EFFICACY_COL:        rng.beta(2, 5, n_pairs),
-        ADME_COL:            rng.beta(5, 2, n_pairs),
+        EFFICACY_COL:        [0.0] * n_pairs,  # placeholder, filled below
+        ADME_COL:            [0.0] * n_pairs,  # placeholder, filled below
     })
+
+    # v90 P0 ROOT FIX (BUG #12): compute per-drug values for PATENT_COL,
+    # EFFICACY_COL, and ADME_COL. These are drug-level properties — the
+    # same drug gets the same value regardless of which disease it's
+    # paired with. This matches the bridge's _compute_drug_level_features
+    # and the DATA_DICTIONARY documentation.
+    unique_drug_names = list(set(drugs))
+    drug_patent = {d: float(np.clip(rng.beta(3, 2), 0.0, 1.0)) for d in unique_drug_names}
+    drug_efficacy = {d: float(np.clip(rng.beta(2, 5), 0.0, 1.0)) for d in unique_drug_names}
+    drug_adme = {d: float(np.clip(rng.beta(5, 2), 0.0, 1.0)) for d in unique_drug_names}
+    data[PATENT_COL] = [drug_patent[d] for d in drugs]
+    data[EFFICACY_COL] = [drug_efficacy[d] for d in drugs]
+    data[ADME_COL] = [drug_adme[d] for d in drugs]
+    logger.info(
+        f"v90 BUG #12: computed per-drug patent/efficacy/adme for "
+        f"{len(unique_drug_names)} unique drugs (drug-level properties, "
+        f"not per-pair random)."
+    )
 
     # Inject known positives so the recovery test can pass on standalone data.
     # ROOT FIX (E4): inject KPs at RANDOM indices instead of always at
@@ -2193,16 +2273,54 @@ class DrugRankingEnv(gym.Env):
         n_features = len(self._effective_feature_cols)
 
         self.action_space = spaces.Discrete(2)
+        # v90 P0 ROOT FIX (BUG #21): observation_space bounds must match
+        # VecNormalize output. VecNormalize(norm_obs=True) normalizes obs
+        # to z-scores (mean 0, std 1), which can be OUTSIDE [0, 1]
+        # (e.g., a feature 3 std above mean becomes ~3.0). The previous
+        # low=0.0, high=1.0 bounds were WRONG — any downstream consumer
+        # reading env.observation_space got incorrect bounds, and some
+        # SB3 internals might clip to [0,1], corrupting normalized obs.
+        # Fix: use (-inf, +inf) to match the actual normalized values.
         self.observation_space = spaces.Box(
-            low=0.0, high=1.0,
+            low=-np.inf, high=np.inf,
             shape=(n_features,),
             dtype=np.float32,
         )
 
         self._features_array = self.data[self._effective_feature_cols].values.astype(np.float32)
-        np.clip(self._features_array, 0.0, 1.0, out=self._features_array)
+        # v90 P0 ROOT FIX (BUG #24): do NOT clip disease context features.
+        # The previous np.clip(self._features_array, 0.0, 1.0, out=...)
+        # clipped ALL features including disease_pair_count, which is
+        # min-max normalized in the train env. If a test disease has a
+        # HIGHER pair count than the train max, the normalized value
+        # would be > 1, and clipping to 1.0 LOSES the information that
+        # this disease is an outlier. Fix: clip only the core FEATURE_COLS
+        # (which are genuinely in [0,1] by definition), NOT the disease
+        # context features (which are normalized and may exceed [0,1]
+        # for outlier diseases).
+        core_feature_mask = np.array([
+            col in self.config.reward.feature_cols
+            for col in self._effective_feature_cols
+        ], dtype=bool)
+        if core_feature_mask.any():
+            np.clip(
+                self._features_array[:, core_feature_mask],
+                0.0, 1.0,
+                out=self._features_array[:, core_feature_mask],
+            )
 
         self.high_ranked: List[Dict[str, Any]] = []
+        # v90 P0 ROOT FIX (BUG #19): the ranker was a FILTER, not a RANKER.
+        # Only pairs where action==1 (policy_prob > 0.5) were added to
+        # high_ranked. If the policy never outputs > 0.5 (VecNormalize
+        # bug, or PPO collapse to always-LOW), high_ranked is EMPTY and
+        # Top-N is EMPTY. A real ranker sorts ALL pairs by policy_prob
+        # and returns the top N regardless of the 0.5 threshold.
+        # Fix: add all_ranked buffer that stores EVERY pair with its
+        # policy_prob. get_top_candidates sorts all_ranked by policy_prob
+        # and returns top N. The 0.5 threshold is used ONLY for the
+        # is_known_positive recovery test (via the action field).
+        self.all_ranked: List[Dict[str, Any]] = []
         # V4 B-F2 fix: the caller (evaluate_agent, compute_auc) sets
         # this BEFORE calling step(). It holds the agent's policy
         # probability for action HIGH on the current observation. The
@@ -2252,6 +2370,8 @@ class DrugRankingEnv(gym.Env):
         # F5 fix: removed dead start_idx option — always start from 0
         self.current_idx = 0
         self.high_ranked = []
+        # v90 BUG #19: reset all_ranked buffer too
+        self.all_ranked = []
         # ROOT FIX (FORENSIC-AUDIT-I23): reset _current_policy_prob to
         # prevent stale values from the previous episode leaking into
         # the first step of the new episode.
@@ -2269,32 +2389,33 @@ class DrugRankingEnv(gym.Env):
         greater than EV(always-HIGH), so PPO collapsed to "always LOW"
         and ranked 0 candidates HIGH.
 
-        ROOT FIX (FORENSIC-AUDIT-I36): corrected the docstring. The
-        actual default ``high_action_bonus`` is 12.0 (not 8.0 as the
-        previous docstring claimed). The EV analysis is recomputed with
-        the correct value:
+        ROOT FIX (FORENSIC-AUDIT-I36): v90 P0 ROOT FIX (BUG #32) —
+        corrected the docstring to match the actual default
+        ``high_action_bonus`` = 5.0 (not 12.0 as the previous docstring
+        claimed, and not 8.0 as the V2 docstring claimed). The EV
+        analysis is recomputed with the correct 5.0:
 
-        With high_action_bonus=12.0, ranking a GOOD candidate HIGH pays
-        ~12x the raw reward, while dropping ``correct_rejection_reward``
+        With high_action_bonus=5.0, ranking a GOOD candidate HIGH pays
+        ~5x the raw reward, while dropping ``correct_rejection_reward``
         to 0.0 so the agent has no consolation prize for default-LOW.
         New table:
 
-            Rank good (r>0) HIGH  ->  +r * high_action_bonus   (e.g. +6.0)
+            Rank good (r>0) HIGH  ->  +r * high_action_bonus   (e.g. +2.5)
             Reject good (r>0) LOW ->  -r * low_action_penalty  (e.g. -0.5)
             Rank bad  (r=-1) HIGH ->  +r                       (e.g. -1.0)
             Reject bad  (r=-1) LOW ->  +|r| * correct_rejection_reward  (= 0.0)
 
         EV analysis (15% good pairs, avg good reward = 0.5):
             EV(always LOW)  = 0.15 * (-0.5) + 0.85 * 0.0   = -0.075
-            EV(always HIGH) = 0.15 * 6.0  + 0.85 * (-1.0)  = +0.050
-            EV(perfect)     = 0.15 * 6.0  + 0.85 * 0.0     = +0.900
+            EV(always HIGH) = 0.15 * 2.5  + 0.85 * (-1.0)  = -0.475
+            EV(perfect)     = 0.15 * 2.5  + 0.85 * 0.0     = +0.375
 
-        The gap between "perfect" (+0.900/pair) and "always LOW"
-        (-0.075/pair) is 0.975/pair -- PPO can ascend this gradient.
-        NOTE: EV(always HIGH) = +0.050 is mildly positive, so the agent
-        has a slight default incentive to say HIGH. PPO must learn to
-        suppress HIGH on bad pairs (reward=-1.0) to climb from +0.050
-        to +0.900.
+        The gap between "perfect" (+0.375/pair) and "always LOW"
+        (-0.075/pair) is 0.450/pair -- PPO can ascend this gradient.
+        v90 BUG #32: EV(always HIGH) = -0.475 is strongly negative, so
+        the agent has NO default incentive to say HIGH. PPO must learn
+        to discriminate good from bad pairs to climb from -0.475 to
+        +0.375.
         """
         if self.current_idx >= self.n_pairs:
             logger.warning("step() called after episode done. Returning zero obs.")
@@ -2333,8 +2454,12 @@ class DrugRankingEnv(gym.Env):
         # (+0.125) is still substantial, so PPO can climb the gradient.
         # The 0.05 factor is the "bad_high_penalty_scale" — a new config
         # field that controls how much the bad-pair HIGH penalty is scaled.
-        BAD_HIGH_PENALTY_SCALE = 0.05  # V30 (10.12): prevents PPO LOW collapse
         cfg = self.config.reward
+        # v90 P0 ROOT FIX (BUG #18): BAD_HIGH_PENALTY_SCALE is now a
+        # configurable RewardConfig field (bad_high_penalty_scale), not
+        # a hardcoded magic number. This makes it tunable via YAML config
+        # without code changes.
+        BAD_HIGH_PENALTY_SCALE = cfg.bad_high_penalty_scale
         if action == 1:
             if reward > 0:
                 final_reward = float(reward) * cfg.high_action_bonus
@@ -2365,6 +2490,20 @@ class DrugRankingEnv(gym.Env):
                 **{col: float(row[col]) for col in self.config.reward.feature_cols
                    if col in row.index},
             })
+        # v90 P0 ROOT FIX (BUG #19): store ALL pairs in all_ranked,
+        # regardless of action. This makes the ranker a REAL ranker:
+        # get_top_candidates sorts by policy_prob and returns top N.
+        # Previously, if the policy never output > 0.5, high_ranked was
+        # EMPTY and Top-N was EMPTY (a filter, not a ranker).
+        self.all_ranked.append({
+            DRUG_COL: row[DRUG_COL],
+            DISEASE_COL: row[DISEASE_COL],
+            REWARD_COL: float(reward),
+            "policy_prob": float(self._current_policy_prob),
+            "action": int(action),
+            **{col: float(row[col]) for col in self.config.reward.feature_cols
+               if col in row.index},
+        })
         # Reset for next step (caller must set it again before next step)
         self._current_policy_prob = 0.0
 
@@ -2448,22 +2587,29 @@ class DrugRankingEnv(gym.Env):
         ranking policy, not the hand-coded reward function. The reward
         is still stored for transparency/auditability.
         """
-        if not self.high_ranked:
+        # v90 P0 ROOT FIX (BUG #19): use all_ranked (ALL pairs) instead
+        # of high_ranked (only action=1 pairs). The previous code was a
+        # FILTER, not a RANKER: if the policy never output > 0.5,
+        # high_ranked was EMPTY and Top-N was EMPTY. A real ranker sorts
+        # ALL pairs by policy_prob and returns top N regardless of the
+        # 0.5 threshold. The 0.5 threshold is used ONLY for the
+        # is_known_positive recovery test (via the action field).
+        if not self.all_ranked:
             return []
-        df = pd.DataFrame(self.high_ranked)
+        df = pd.DataFrame(self.all_ranked)
         # V4 B-F2 fix: sort by policy_prob (agent's learned ranking),
         # NOT by REWARD_COL (hand-coded reward function). Falls back
         # to REWARD_COL if policy_prob is not present (legacy data).
         if "policy_prob" in df.columns and df["policy_prob"].notna().any():
             df = df.sort_values("policy_prob", ascending=False).head(top_n)
             logger.info(
-                f"V4 B-F2 fix: ranked top-{top_n} by RL policy probability "
-                f"(agent's learned ranking, not hand-coded reward)."
+                f"v90 BUG #19: ranked top-{top_n} from ALL {len(self.all_ranked)} "
+                f"pairs by RL policy probability (real ranker, not filter)."
             )
         else:
             df = df.sort_values(REWARD_COL, ascending=False).head(top_n)
             logger.warning(
-                "V4 B-F2: policy_prob not found in high_ranked buffer. "
+                "V4 B-F2: policy_prob not found in all_ranked buffer. "
                 "Falling back to reward-based ranking. This should not "
                 "happen if evaluate_agent was used."
             )
@@ -2663,21 +2809,17 @@ def train_agent(
                 from stable_baselines3.common.policies import ActorCriticPolicy
                 import torch.nn as nn  # for activation function spec
 
-                # ROOT FIX (S-08 / X-06): ENLARGED policy + value network
-                # from [128, 128, 64] to [256, 256, 128]. The audit's
-                # finding S-08 was that policy_prob was nearly constant
-                # across the top 10 candidates — the network was too small
-                # to learn a differentiated mapping from features to action
-                # probabilities. With the S-04 monotonic reward fix and
-                # the S-05 removal of KP signal injection, the agent now
-                # has a clean monotonic signal to learn from. The larger
-                # network can represent finer-grained policy differences,
-                # producing real variance in policy_prob so the top-N
-                # ranking reflects the agent's learned policy (B-F2 fix)
-                # rather than data-ordering artifacts.
-                policy_kwargs = dict(
-                    net_arch=dict(pi=[256, 256, 128], vf=[256, 256, 128]),
-                )
+                # v90 P0 ROOT FIX (BUG #30): REMOVED the dead first
+                # policy_kwargs assignment (was dict(net_arch=dict(pi=[256,
+                # 256, 128], vf=[256, 256, 128]))). It was immediately
+                # overwritten by the second assignment below
+                # (policy_kwargs = dict(net_arch=_ppo_net_arch)). The
+                # S-08/X-06 comment block described the [256,256,128]
+                # network but the ACTUAL network is [128,64]/[64,32]
+                # (from _ppo_net_arch). Dead code + misleading comments
+                # removed. The actual network architecture is set below
+                # via _ppo_net_arch, which defaults to dict(pi=[128,64],
+                # vf=[64,32]) or can be overridden via config.ppo_net_arch.
 
                 # ROOT FIX (S-03): wrap the env in NormalizeReward to
                 # normalize the reward signal to zero mean and unit
@@ -2769,7 +2911,12 @@ def train_agent(
                         vec_env,
                         norm_obs=True,
                         norm_reward=True,
-                        clip_reward=10.0,
+                        # v90 P0 ROOT FIX (BUG #20): clip_reward=10.0 was
+                        # dead — actual rewards are in [-0.05, +2.5], well
+                        # within [-10, +10], so the clip NEVER fired. Set
+                        # to 5.0 (a meaningful bound that matches the
+                        # actual reward range with headroom).
+                        clip_reward=5.0,
                         gamma=_ppo_gamma,  # V30 (10.29): 0.0 for contextual bandit
                     )
                     # V31 ROOT FIX (P1-9): track the VecNormalize wrapper so
@@ -3165,7 +3312,8 @@ def split_data(
     seed: int = 42,
     drug_aware: bool = True,
     ensure_known_positives_in_test: bool = True,
-) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    return_oversampled: bool = False,
+) -> Union[Tuple[pd.DataFrame, pd.DataFrame], Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]]:
     """Split drug-disease pairs into train/test.
 
     FIX (C4): the original used ``sklearn.train_test_split`` which
@@ -3304,8 +3452,15 @@ def split_data(
             jitter_rng = np.random.default_rng(seed + 100)
             for _ in range(4):  # 4 more copies = 5x total
                 jittered = train_kps.copy()
-                # Add small noise to continuous feature columns only
+                # Add small noise to continuous feature columns only.
+                # v90 P0 ROOT FIX (BUG #22): EXCLUDE RARE_DISEASE_COL
+                # (binary 0/1) from jitter. Adding Gaussian noise to a
+                # binary feature makes it non-binary (0 -> 0.005, 1 -> 0.998),
+                # which degrades policy learning. The policy sees them as
+                # continuous values instead of the clean 0/1 signal.
                 for col in FEATURE_COLS:
+                    if col == RARE_DISEASE_COL:
+                        continue  # binary feature — no jitter
                     if col in jittered.columns:
                         noise = jitter_rng.normal(0, 0.01, size=len(jittered))
                         jittered[col] = np.clip(jittered[col].astype(float) + noise, 0.0, 1.0)
@@ -3347,6 +3502,8 @@ def split_data(
             "All pairs are known positives; train set is empty. "
             "(This only happens in tiny synthetic demos.)"
         )
+        if return_oversampled:
+            return train_df, test_df, kp_oversampled
         return train_df, test_df
 
     # Split the remaining pairs (drug-aware if requested).
@@ -3358,6 +3515,10 @@ def split_data(
         train_df = train_df.reset_index(drop=True)
         test_df = pd.concat([random_test_df, known_test_df], ignore_index=True)
         # ROOT FIX (FORENSIC-AUDIT-I14): add oversampled train KPs to train only
+        if return_oversampled:
+            # v90 BUG #15: return kp_oversampled separately so the caller
+            # can do the val split BEFORE adding oversampled KPs.
+            return train_df, test_df.reset_index(drop=True), kp_oversampled
         if len(kp_oversampled) > 0:
             train_df = pd.concat([train_df, kp_oversampled], ignore_index=True).reset_index(drop=True)
         return train_df, test_df.reset_index(drop=True)
@@ -3443,6 +3604,18 @@ def split_data(
     # ROOT FIX (FORENSIC-AUDIT-I14): Add oversampled TRAIN KPs to the
     # train set ONLY. The test KPs are already in test_df (1x each, no
     # oversampling). There is NO overlap between train and test KPs.
+    # v90 P0 ROOT FIX (BUG #15): when return_oversampled=True, return
+    # kp_oversampled SEPARATELY (not added to train_df). The caller
+    # (run_pipeline) does the val split on train_df FIRST, then adds
+    # kp_oversampled to train_proper. This prevents oversampled KPs from
+    # leaking into val_for_threshold (which would contaminate the
+    # adaptive threshold computation with training data).
+    if return_oversampled:
+        logger.info(
+            f"v90 BUG #15: returning kp_oversampled separately ({len(kp_oversampled)} rows). "
+            f"Caller must add to train_proper AFTER val split."
+        )
+        return train_df, test_df, kp_oversampled
     if len(kp_oversampled) > 0:
         train_df = pd.concat([train_df, kp_oversampled], ignore_index=True).reset_index(drop=True)
         logger.info(
@@ -3597,8 +3770,18 @@ def compute_auc(
             set_adaptive_threshold=False,
         )
     else:
+        # v90 P0 ROOT FIX (BUG #23): the standalone path (reward_fn=None)
+        # previously built a new DrugRankingEnv that called
+        # set_adaptive_threshold(test_data[gnn_score]) — computing the
+        # 20th percentile from TEST data. This is test-data leakage into
+        # the reward gate, inflating/deflating AUC. Fix: pass
+        # set_adaptive_threshold=False so the env uses the config's FIXED
+        # gnn_hard_reject (0.2) instead of computing from test data.
+        # The warning above still fires to recommend passing reward_fn
+        # from the train env for production-grade AUC.
         env_test = DrugRankingEnv(
-            test_data, config=cfg, disease_context_stats=disease_context_stats
+            test_data, config=cfg, disease_context_stats=disease_context_stats,
+            set_adaptive_threshold=False,
         )
 
     obs, _ = env_test.reset()
@@ -3866,18 +4049,47 @@ def load_validated_hypotheses(path: str = VALIDATED_HYPOTHESES_PATH) -> Set[Tupl
     Returns set of (drug_lower, disease_lower) tuples. Used to boost reward
     for pairs that have been validated by pharma partners, enabling the
     data flywheel described in project doc Section 10.
+
+    v90 P0 ROOT FIX (BUG #11): the previous version searched ONLY the
+    single ``path`` argument (default "validated_hypotheses.csv" relative
+    to CWD). If the pipeline was run from a different CWD (common in
+    production — systemd, Docker, Kubernetes), the search returned an
+    empty set, WIPING the correctly-loaded module-level constant
+    (VALIDATED_HYPOTHESES, which uses a 3-path search). The fix: use
+    the SAME 3-path search as _load_validated_hypotheses (relative,
+    next-to-module, CWD). This ensures the flywheel works regardless
+    of CWD.
     """
-    if not os.path.exists(path):
-        logger.info(f"No validated hypotheses file at {path}")
-        return set()
-    try:
-        df = pd.read_csv(path)
-        validated = set(zip(df[DRUG_COL].str.lower(), df[DISEASE_COL].str.lower()))
-        logger.info(f"Loaded {len(validated)} validated hypotheses from {path}")
-        return validated
-    except Exception as e:
-        logger.warning(f"Failed to load validated hypotheses from {path}: {e}")
-        return set()
+    # v90 BUG #11: use 3-path search (same as _load_validated_hypotheses)
+    candidate_paths = [
+        path,
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), os.path.basename(path)),
+        os.path.join(os.getcwd(), os.path.basename(path)),
+    ]
+    for candidate in candidate_paths:
+        if not os.path.exists(candidate):
+            continue
+        try:
+            df = pd.read_csv(candidate)
+            if DRUG_COL not in df.columns or DISEASE_COL not in df.columns:
+                logger.warning(
+                    f"validated_hypotheses.csv at {candidate} missing "
+                    f"'drug' or 'disease' column. Skipping."
+                )
+                continue
+            validated = set(zip(
+                df[DRUG_COL].astype(str).str.lower().str.strip(),
+                df[DISEASE_COL].astype(str).str.lower().str.strip(),
+            ))
+            logger.info(f"Loaded {len(validated)} validated hypotheses from {candidate}")
+            return validated
+        except Exception as e:
+            logger.warning(f"Failed to load validated hypotheses from {candidate}: {e}")
+    logger.info(
+        "No validated hypotheses file found (searched 3 paths). "
+        "No reward bonus will be applied."
+    )
+    return set()
 
 
 # ============================================================================
@@ -4537,7 +4749,10 @@ def run_pipeline(config: PipelineConfig) -> Tuple[List[RankedCandidate], Pipelin
         raise
 
     data, quarantined = preprocess_data(data, config)
-    metrics.n_pairs_processed = len(data)
+    # v90 P0 ROOT FIX (BUG #17): n_pairs_processed will be updated AFTER
+    # the train/test split to reflect the actual pairs the agent processed
+    # (train_proper + test), not the full dataset before split.
+    metrics.n_pairs_processed = len(data)  # initial, updated after split
 
     # v3 root fix: wire validate_canonical_ids (was dead code in V2).
     # If id_mapping_path is set, merge canonical ID columns
@@ -4553,13 +4768,18 @@ def run_pipeline(config: PipelineConfig) -> Tuple[List[RankedCandidate], Pipelin
     generate_data_quality_report(data, config.reward)
 
     # C4 fix: drug-aware split (default True)
-    train_df, test_df = split_data(
+    # v90 P0 ROOT FIX (BUG #15): use return_oversampled=True so kp_oversampled
+    # is returned SEPARATELY (not mixed into train_df). This allows the val
+    # split (below) to operate on train_df WITHOUT oversampled KPs, preventing
+    # training-data leakage into the adaptive threshold computation.
+    train_df, test_df, kp_oversampled = split_data(
         data,
         test_size=config.test_size,
         seed=config.seed,
         drug_aware=config.drug_aware_split,
+        return_oversampled=True,
     )
-    logger.info(f"Split: {len(train_df)} train / {len(test_df)} test")
+    logger.info(f"Split: {len(train_df)} train / {len(test_df)} test / {len(kp_oversampled)} oversampled KPs (separate)")
 
     validated_set = load_validated_hypotheses()
 
@@ -4611,25 +4831,58 @@ def run_pipeline(config: PipelineConfig) -> Tuple[List[RankedCandidate], Pipelin
     # set, because the model has memorized it. Use a held-out val set.
     VAL_FRACTION_FOR_THRESHOLD = 0.15
     if len(train_df) >= 10:
-        # Use sklearn.train_test_split with a SEPARATE seed (config.seed + 999)
-        # so the val split is deterministic and does not interfere with
-        # the drug-aware split seed (config.seed).
-        from sklearn.model_selection import train_test_split as _tts
-        train_proper_df, val_for_threshold_df = _tts(
-            train_df,
-            test_size=VAL_FRACTION_FOR_THRESHOLD,
-            random_state=config.seed + 999,
-        )
-        train_proper_df = train_proper_df.reset_index(drop=True)
-        val_for_threshold_df = val_for_threshold_df.reset_index(drop=True)
+        # v90 P0 ROOT FIX (BUG #14): the val split was PAIR-WISE
+        # (sklearn.train_test_split), NOT drug-aware. The same drug
+        # could appear in BOTH train_proper and val_for_threshold. The
+        # W-04 fix's stated goal was "compute the threshold on data the
+        # agent has NOT memorized" — but the pair-wise split means the
+        # threshold sees drugs the agent IS trained on. Fix: use a
+        # DRUG-AWARE sequential split (sort drugs by first appearance,
+        # take first 85% as train_proper, last 15% as val_for_threshold).
+        # This mirrors the drug-aware sequential fallback in split_data.
+        # v90 P0 ROOT FIX (BUG #15): the val split now operates on
+        # train_df WITHOUT oversampled KPs (kp_oversampled is returned
+        # separately and added to train_proper AFTER the split). This
+        # prevents oversampled KP copies from leaking into
+        # val_for_threshold and contaminating the threshold computation.
+        _val_rng = np.random.default_rng(config.seed + 999)
+        _unique_drugs_val = list(train_df[DRUG_COL].unique())
+        _val_rng.shuffle(_unique_drugs_val)
+        _unique_drugs_val = np.array(_unique_drugs_val, dtype=object)
+        _n_val_drugs = max(1, int(VAL_FRACTION_FOR_THRESHOLD * len(_unique_drugs_val)))
+        _val_drugs = set(_unique_drugs_val[:_n_val_drugs].tolist())
+        _train_drugs = set(_unique_drugs_val[_n_val_drugs:].tolist())
+        _train_mask = train_df[DRUG_COL].isin(_train_drugs)
+        _val_mask = train_df[DRUG_COL].isin(_val_drugs)
+        # Fallback: if drug-aware split produces empty side, use sequential
+        if _train_mask.sum() == 0 or _val_mask.sum() == 0:
+            _seen_order = []
+            _seen_set = set()
+            for _d in train_df[DRUG_COL].tolist():
+                if _d not in _seen_set:
+                    _seen_set.add(_d)
+                    _seen_order.append(_d)
+            _n_total_v = len(_seen_order)
+            _n_train_v = max(1, int((1.0 - VAL_FRACTION_FOR_THRESHOLD) * _n_total_v))
+            _train_drugs = set(_seen_order[:_n_train_v])
+            _val_drugs = set(_seen_order[_n_train_v:])
+            _train_mask = train_df[DRUG_COL].isin(_train_drugs)
+            _val_mask = train_df[DRUG_COL].isin(_val_drugs)
+        train_proper_df = train_df[_train_mask].reset_index(drop=True)
+        val_for_threshold_df = train_df[_val_mask].reset_index(drop=True)
+        # v90 BUG #15: add oversampled KPs to train_proper AFTER the val split
+        if len(kp_oversampled) > 0:
+            train_proper_df = pd.concat(
+                [train_proper_df, kp_oversampled], ignore_index=True
+            ).reset_index(drop=True)
         logger.info(
-            f"ROOT FIX (W-04): split train_df ({len(train_df)} pairs) into "
-            f"train_proper ({len(train_proper_df)}) + val_for_threshold "
-            f"({len(val_for_threshold_df)}). The adaptive gnn threshold "
-            f"will be computed on val_for_threshold (held-out from PPO "
-            f"training), NOT on train_proper. This eliminates the "
-            f"distribution shift between train-time and test-time "
-            f"thresholds (W-04 audit finding)."
+            f"v90 BUG #14/#15: DRUG-AWARE val split of train_df ({len(train_df)} pairs) "
+            f"into train_proper ({len(train_proper_df)}, includes {len(kp_oversampled)} "
+            f"oversampled KPs added AFTER split) + val_for_threshold "
+            f"({len(val_for_threshold_df)}, NO oversampled KPs). The adaptive "
+            f"gnn threshold will be computed on val_for_threshold (held-out "
+            f"drugs, no KP leakage), eliminating both the drug-memorization "
+            f"and oversampled-KP-leakage bugs."
         )
     else:
         # Edge case: train_df is too small to split (tiny synthetic
@@ -4637,7 +4890,12 @@ def run_pipeline(config: PipelineConfig) -> Tuple[List[RankedCandidate], Pipelin
         # val_for_threshold (preserves backward compatibility). Log a
         # WARNING so the user knows the threshold is computed on train
         # data (W-04 not fully fixed on this tiny graph).
-        train_proper_df = train_df
+        train_proper_df = train_df.copy()
+        # v90 BUG #15: still add oversampled KPs to train_proper
+        if len(kp_oversampled) > 0:
+            train_proper_df = pd.concat(
+                [train_proper_df, kp_oversampled], ignore_index=True
+            ).reset_index(drop=True)
         val_for_threshold_df = train_df
         logger.warning(
             f"ROOT FIX (W-04): train_df has only {len(train_df)} pairs, "
@@ -4647,6 +4905,11 @@ def run_pipeline(config: PipelineConfig) -> Tuple[List[RankedCandidate], Pipelin
             f"graph). The adaptive threshold will be computed on train "
             f"data, which may cause distribution shift at test time."
         )
+
+    # v90 P0 ROOT FIX (BUG #17): update n_pairs_processed to reflect
+    # the ACTUAL pairs the agent processed (train_proper + test), not
+    # the full dataset before split.
+    metrics.n_pairs_processed = len(train_proper_df) + len(test_df)
 
     # ROOT FIX (W-04): set the adaptive threshold on reward_fn using
     # the HELD-OUT validation set, BEFORE constructing the train env.
@@ -4738,7 +5001,14 @@ def run_pipeline(config: PipelineConfig) -> Tuple[List[RankedCandidate], Pipelin
             vec_normalize=vec_normalize,
         )
 
-    metrics.n_ranked_high = len(candidates)
+    # v90 P0 ROOT FIX (BUG #16): n_ranked_high should be the TRUE count
+    # of pairs the agent ranked HIGH (action=1), NOT len(candidates)
+    # which is capped at top_n. The previous code reported min(top_n,
+    # len(high_ranked)) instead of the true count. If 50 pairs were
+    # ranked HIGH but top_n=10, the metric said 10. Fix: use the actual
+    # high_ranked buffer size from the eval env.
+    _eval_env = test_env if len(test_df) > 0 else train_env
+    metrics.n_ranked_high = len(_eval_env.high_ranked)
 
     # Compute AUC on held-out test (B13 fix: uses KNOWN_POSITIVES as label)
     # V4 B-F1 fix: uses policy probabilities, not binary actions.
@@ -4818,7 +5088,14 @@ def run_pipeline(config: PipelineConfig) -> Tuple[List[RankedCandidate], Pipelin
         "model_checkpoint": checkpoint_path or "none",
         "seed": config.seed,
         "timesteps": config.timesteps,
-        "reward_weights": config.reward.reward_weights,
+        # v90 P0 ROOT FIX (BUG #26): record the EFFECTIVE reward weights
+        # (after gnn_score cap) instead of the raw config weights. The
+        # config sets gnn_score: 0.35, but the runtime caps it at 0.04
+        # and redistributes the excess. The previous metadata recorded
+        # the raw config (0.35), breaking reproducibility — a regulator
+        # auditing the output saw 0.35 but the actual reward used 0.04.
+        "reward_weights": reward_fn.get_effective_reward_weights(),
+        "reward_weights_config_raw": config.reward.reward_weights,  # original config before cap
         "feature_cols": config.reward.feature_cols,
         "thresholds": {
             "safety_hard_reject": config.reward.safety_hard_reject,
@@ -4827,12 +5104,22 @@ def run_pipeline(config: PipelineConfig) -> Tuple[List[RankedCandidate], Pipelin
             "low_action_penalty": config.reward.low_action_penalty,
             "high_action_bonus": config.reward.high_action_bonus,
             "correct_rejection_reward": config.reward.correct_rejection_reward,
+            "bad_high_penalty_scale": config.reward.bad_high_penalty_scale,  # v90 BUG #18
         },
+        # v90 P0 ROOT FIX (BUG #10): record ALL actual PPO hyperparams
+        # for provenance (21 CFR Part 11 audit trail). The previous
+        # metadata only recorded lr/n_steps/batch_size/n_epochs, missing
+        # gamma, ent_coef, clip_range, net_arch. A regulator could not
+        # reproduce the run. Now all hyperparams are recorded.
         "ppo_hyperparams": {
             "learning_rate": config.ppo_learning_rate,
             "n_steps": config.ppo_n_steps,
             "batch_size": config.ppo_batch_size,
             "n_epochs": config.ppo_n_epochs,
+            "gamma": config.ppo_gamma,
+            "ent_coef": config.ppo_ent_coef,
+            "clip_range": config.ppo_clip_range,
+            "net_arch": config.ppo_net_arch or dict(pi=[128, 64], vf=[64, 32]),
         },
         "auc": None,
         "auc_defined": False,  # V4 S-F3 fix: distinguish None (undefined) from 0.5 (random)
@@ -4905,15 +5192,28 @@ def run_pipeline(config: PipelineConfig) -> Tuple[List[RankedCandidate], Pipelin
     # so no invalid candidates reach disk.
     scientific_validation = {
         "gt_test_auc": config.gt_test_auc,
+        # v90 P0 ROOT FIX (BUG #4): drop the `if ... is not None else None`.
+        # When gt_test_auc is None (bridge didn't set it, or GT training
+        # failed), gt_test_auc_pass must be False (not None). The previous
+        # `else None` caused the if/elif ladder below to SILENTLY SKIP
+        # the None case — neither checks_passed nor checks_failed got
+        # the entry. overall_pass could be True with NO GT AUC at all.
+        # A pharma partner would receive candidates backed by an
+        # unvalidated graph transformer. Fix: None AUC → False → fails.
         "gt_test_auc_pass": (
             config.gt_test_auc is not None
             and config.gt_test_auc > config.gt_test_auc_threshold
-        ) if config.gt_test_auc is not None else None,
+        ),
         "gt_test_auc_threshold": config.gt_test_auc_threshold,
         "rl_auc": auc,
+        # v90 P0 ROOT FIX (BUG #3): same fix as BUG #4. When auc is None
+        # (degenerate test set — 0 known positives or single class),
+        # rl_auc_pass must be False (not None). The previous `else None`
+        # silently skipped the AUC check, allowing the pipeline to pass
+        # validation with NO AUC. Fix: None AUC → False → fails.
         "rl_auc_pass": (
             auc is not None and auc > config.rl_auc_threshold
-        ) if auc is not None else None,
+        ),
         "rl_auc_threshold": config.rl_auc_threshold,
         "kp_recovery_rate": recovery["recovery_rate"],
         "kp_recovery_pass": recovery["recovery_rate"] >= config.min_kp_recovery_rate,

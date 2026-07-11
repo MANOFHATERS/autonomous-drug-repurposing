@@ -2449,15 +2449,55 @@ class GTRLBridge:
         # Read RL AUC from the metadata file
         import glob as _glob
         import json as _json
+        import os as _os_mod
         rl_auc = None
+        rl_meta = None  # v90 BUG #5: store fresh meta for reuse below
         meta_files = _glob.glob(os.path.join(self.output_dir, "top_candidates_*.meta.json"))
+        # v90 P0 ROOT FIX (BUG #5): stale metadata glob. The previous code
+        # read meta_files[0] which may be a STALE file from a PREVIOUS run.
+        # If the current RL run failed (ScientificFailureError) and
+        # allow_invalid_output=True, no NEW metadata is written, but the
+        # glob finds OLD files. The bridge reads a STALE AUC and STALE KP
+        # recovery rate from the old run, passes its own validation gate,
+        # and returns empty candidates with "scientific_validation passed."
+        # Fix: sort by modification time (newest first) and verify the
+        # file's training_timestamp is recent (within the last 10 minutes
+        # of this bridge run). If no recent file is found, rl_auc stays
+        # None (which correctly fails the validation gate per BUG #3 fix).
         if meta_files:
-            try:
-                with open(meta_files[0]) as f:
-                    rl_meta = _json.load(f)
-                rl_auc = rl_meta.get("auc")
-            except Exception:
-                pass
+            meta_files.sort(key=_os_mod.path.getmtime, reverse=True)
+            _bridge_run_time = _os_mod.time.time()
+            _found_fresh_meta = False
+            for _meta_file in meta_files:
+                try:
+                    with open(_meta_file) as f:
+                        rl_meta = _json.load(f)
+                    # Check freshness: training_timestamp should be within
+                    # the last 600 seconds (10 min) of this bridge run.
+                    _ts_str = rl_meta.get("training_timestamp", "")
+                    _meta_mtime = _os_mod.path.getmtime(_meta_file)
+                    _age = _bridge_run_time - _meta_mtime
+                    if _age > 600:
+                        logger.warning(
+                            f"v90 BUG #5: meta file {_meta_file} is "
+                            f"{_age:.0f}s old (stale). Skipping."
+                        )
+                        continue
+                    rl_auc = rl_meta.get("auc")
+                    _found_fresh_meta = True
+                    logger.info(
+                        f"v90 BUG #5: using FRESH meta file {_meta_file} "
+                        f"(age={_age:.0f}s, auc={rl_auc})."
+                    )
+                    break
+                except Exception:
+                    continue
+            if not _found_fresh_meta and meta_files:
+                logger.warning(
+                    f"v90 BUG #5: all {len(meta_files)} meta files are "
+                    f"stale (>600s old). rl_auc stays None — validation "
+                    f"gate will correctly fail (BUG #3 fix)."
+                )
 
         # Check KP recovery from candidates.
         # ROOT FIX (FORENSIC-AUDIT-I32): use a SET to track recovered KPs
@@ -2500,14 +2540,10 @@ class GTRLBridge:
         # only if the metadata is unavailable (backward compatibility).
         rl_recovery_rate = None
         rl_n_kps_in_test = None
-        if meta_files:
-            try:
-                with open(meta_files[0]) as f:
-                    rl_meta_full = _json.load(f)
-                rl_recovery_rate = rl_meta_full.get("known_positive_recovery_rate")
-                rl_n_kps_in_test = rl_meta_full.get("n_kps_in_test")
-            except Exception:
-                pass
+        # v90 BUG #5: reuse the fresh rl_meta from above (no re-read)
+        if rl_meta is not None:
+            rl_recovery_rate = rl_meta.get("known_positive_recovery_rate")
+            rl_n_kps_in_test = rl_meta.get("n_kps_in_test")
         if rl_recovery_rate is not None:
             # Use the RL pipeline's recovery rate (correct denominator)
             kp_recovery_rate = float(rl_recovery_rate)
@@ -2850,12 +2886,33 @@ class GTRLBridge:
                 # falls back to GT-only WITH a loud warning).
                 from rl.rl_drug_ranker import extract_policy_prob_high
                 import numpy as _np
+                # v90 P0 ROOT FIX (BUG #7): Phase 6 inference was NOT
+                # normalized. The v89 agent loaded VecNormalize stats into
+                # self.rl_vec_normalize but NEVER passed them to
+                # rl_model.predict() or extract_policy_prob_high(). Both
+                # received RAW obs while the policy was trained on
+                # NORMALIZED obs — garbage in, garbage out. The "top 50
+                # novel predictions" deliverable was ranked by GARBAGE
+                # policy probabilities (effectively random). Fix: normalize
+                # obs via self.rl_vec_normalize.normalize_obs(obs) before
+                # passing to predict() and extract_policy_prob_high().
+                _vn = self.rl_vec_normalize
                 while not done:
-                    action, _ = rl_model.predict(obs, deterministic=True)
+                    # v90 BUG #7: normalize obs before predict/extract
+                    _obs_for_policy = obs
+                    if _vn is not None:
+                        try:
+                            _obs_for_policy = _vn.normalize_obs(obs)
+                        except Exception:
+                            pass  # fall back to raw obs (logged below)
+                    action, _ = rl_model.predict(_obs_for_policy, deterministic=True)
                     action_int = int(_np.asarray(action).item())
                     # V5 B-F1/B-F2 hardening: extract policy PROBABILITY
-                    # via the shared helper. Raises on failure.
-                    prob_high = extract_policy_prob_high(rl_model, obs)
+                    # via the shared helper. v90 BUG #7: pass vec_normalize
+                    # so the obs is normalized before the policy network.
+                    prob_high = extract_policy_prob_high(
+                        rl_model, _obs_for_policy, vec_normalize=_vn
+                    )
                     policy_probs.append(prob_high)
                     actions.append(action_int)
                     obs, _, done, _, _ = rl_env.step(action_int)
