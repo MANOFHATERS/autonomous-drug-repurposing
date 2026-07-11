@@ -3149,7 +3149,22 @@ def validate_gda_scores(
                     _increment_metric(
                         "omim_categorical_scores_mapped", n_categorical
                     )
-            except Exception as exc:  # noqa: BLE001
+            except (TypeError, ValueError) as exc:
+                # v84 FORENSIC ROOT FIX (BUG #30): narrowed from broad
+                # ``except Exception``. The previous code caught ALL
+                # exceptions — including programming bugs (AttributeError,
+                # KeyError, IndexError) — and silently fell back to
+                # "standard clipping". When the fallback ran, integer
+                # scores 1/2/3/4 were ALL clipped to 1.0 (since they're
+                # all ≤ 1), making EVERY OMIM association appear
+                # maximally confirmed. The RL ranker would then treat
+                # every OMIM GDA as top-confidence — a patient-safety
+                # risk for drug repurposing.
+                # ROOT FIX: catch ONLY the expected data-type / value
+                # errors from the categorical mapping arithmetic. Any
+                # other exception (programming bug) PROPAGATES so it
+                # surfaces immediately instead of silently corrupting
+                # every OMIM score to 1.0.
                 logger.warning(
                     "validate_gda_scores: OMIM categorical mapping "
                     "failed (%s) — falling back to standard clipping. "

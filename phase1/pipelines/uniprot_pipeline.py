@@ -1370,7 +1370,17 @@ class UniProtPipeline(BasePipeline):
                 # unchanged. The original v50 file is preserved for audit.
                 normalized_tsv = self._normalize_v50_to_raw_tsv(prot_path)
                 return normalized_tsv
-        except Exception as exc:
+        except (OSError, ValueError, pd.errors.ParserError) as exc:
+            # v84 FORENSIC ROOT FIX (BUG #31): narrowed from broad
+            # ``except Exception``. The previous code caught ALL failures
+            # from ``_normalize_v50_to_raw_tsv`` — including programming
+            # bugs (AttributeError, KeyError) — and silently fell back to
+            # the v49 path. A bug in the v50 normalization was masked as
+            # "v50 failed, using v49" — the pipeline ALWAYS fell back to
+            # v49, which may be stale or broken, with no visible warning.
+            # ROOT FIX: catch ONLY the expected I/O, value, and parse
+            # errors. Programming bugs propagate so they surface during
+            # development instead of silently degrading to v49 forever.
             logger.warning(
                 "[%s] v50 downloader failed (%s) — falling back to v49 path",
                 self.source_name, exc,
