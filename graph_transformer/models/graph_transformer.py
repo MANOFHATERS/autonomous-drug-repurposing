@@ -375,6 +375,30 @@ class DrugRepurposingGraphTransformer(nn.Module):
 
         return result
 
+    # v84 FORENSIC ROOT FIX (BUG #12 — declare score_direction on the
+    # GraphTransformer so the eval path can read it directly instead of
+    # substring-matching the class name). The GraphTransformer uses a
+    # link predictor that outputs logits → sigmoid probabilities; higher
+    # score = more plausible drug-disease pair. Direction is "higher_better".
+    @property
+    def score_direction(self) -> str:
+        """Scoring convention: 'higher_better' for GraphTransformer.
+
+        The link predictor outputs logits → sigmoid probabilities.
+        Higher score = more plausible drug-disease pair. The eval path
+        uses this to set `higher_is_better=True` for AUC computation.
+        """
+        return "higher_better"
+
+    @property
+    def score_higher_is_better(self) -> bool:
+        """Legacy boolean form of score_direction. True for GraphTransformer.
+
+        Deprecated: prefer `score_direction` (str). Kept for backward
+        compat with code that reads the boolean form.
+        """
+        return True
+
     def forward_logits(
         self,
         node_features: Dict[str, torch.Tensor],
