@@ -1041,13 +1041,24 @@ class BiomedicalGraphBuilder:
                 f"need more positives."
             )
 
-        # ROOT FIX (S-05): _enrich_features_with_graph_signal is now a
-        # NO-OP (the previous implementation was the bug — it created an
-        # artificial correlation that did not generalize to production
-        # features). The call is kept for API backward-compatibility
-        # but does nothing. The GT model now learns PURELY from graph
-        # topology (edges), not from feature-engineered alignment.
-        builder._enrich_features_with_graph_signal(rng)
+        # V90 ROOT FIX (BUG #39): REMOVED the call to
+        # ``builder._enrich_features_with_graph_signal(rng)``. The method
+        # is a documented NO-OP (the S-05 / X-01 / X-09 fix removed its
+        # body because the enrichment created an artificial correlation
+        # between drug and disease features that did NOT generalize to
+        # production). The CALL was kept for "API backward-compatibility"
+        # but no external caller invokes it — only this build_demo_graph
+        # method called it, and it did nothing.
+        #
+        # The audit's BUG #39 finding: "Wasted function call. Misleading
+        # code. A reviewer sees the call and assumes it does something,
+        # but it doesn't."
+        #
+        # The fix: remove the call. The method definition is KEPT (in
+        # case any external subclass overrides it), but the call from
+        # build_demo_graph is removed. This eliminates the wasted
+        # function call and the misleading impression that feature
+        # enrichment is happening.
 
         # V30 ROOT FIX (3.2/3.3): sync _edge_lists from _edge_sets BEFORE
         # building reverse edges (otherwise reverse-edge synthesis runs on

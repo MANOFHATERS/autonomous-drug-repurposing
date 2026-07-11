@@ -112,7 +112,25 @@ class GraphTransformerTrainer:
         self.best_val_auc = 0.0
         self.best_val_loss: float = float("inf")
         self.best_state_dict: Optional[Dict[str, Any]] = None
+        # V90 ROOT FIX (BUG #33): persist best_epoch as an instance attribute
+        # so save_checkpoint / load_checkpoint can save and restore it. The
+        # previous code kept best_epoch as a LOCAL variable inside fit() —
+        # it was lost on reload, so the user could not tell which epoch
+        # produced the best model. The fix stores it on self so it survives
+        # save/load round-trips.
+        self.best_epoch: int = 0
         self.training_history: List[Dict[str, float]] = []
+        # V90 ROOT FIX (BUG #32): unweighted eval criterion for early-stopping
+        # signal. The training criterion uses pos_weight (BUG #26 / 8.6 fix)
+        # to handle class imbalance, but pos_weight AMPLIFIES loss noise on
+        # small val sets (15 pairs). Using the pos_weighted loss for early
+        # stopping caused checkpoint thrashing — float noise flipped the
+        # "improvement" signal every epoch. The fix uses a SEPARATE
+        # unweighted BCEWithLogitsLoss for the early-stopping decision,
+        # while the pos_weighted criterion is still used for gradient
+        # updates (training). This decouples the noisy training signal
+        # from the early-stopping signal.
+        self._eval_criterion = nn.BCEWithLogitsLoss()
         # V30 ROOT FIX (8.2): store the last-used val data so a no-arg
         # evaluate() can re-evaluate without requiring the caller to pass
         # the same data again. This is the standard sklearn-style API.
@@ -494,16 +512,56 @@ class GraphTransformerTrainer:
             if val_metrics["auc"] > self.best_val_auc:
                 self.best_val_auc = val_metrics["auc"]
 
-            # Checkpoint selection: use val LOSS (lower = better).
-            # Use a small epsilon (1e-4) to avoid checkpoint thrashing
-            # from noise in the loss computation.
-            val_loss_improved = val_metrics["loss"] < (self.best_val_loss - 1e-4)
+            # V90 ROOT FIX (BUG #32): use UNWEIGHTED eval loss for early
+            # stopping, not the pos_weighted training loss. The training
+            # criterion (self.criterion) has pos_weight applied (8.6 fix)
+            # which AMPLIFIES float noise on small val sets (15 pairs).
+            # The 1e-4 epsilon was too tight — pos_weight amplification
+            # caused >1e-4 noise swings every epoch, leading to checkpoint
+            # thrashing and a "best" model that was a noise artifact.
+            #
+            # The fix: compute a SEPARATE unweighted BCEWithLogitsLoss on
+            # the val set for the early-stopping decision. The unweighted
+            # loss is continuous and varies smoothly with model quality,
+            # so the 1e-4 epsilon is now meaningful. We use a slightly
+            # larger epsilon (1e-3) for extra robustness against float
+            # noise in the unweighted computation.
+            #
+            # The pos_weighted loss is STILL used for gradient updates
+            # (training) — we only decouple the early-stopping SIGNAL from
+            # the noisy training loss.
+            with torch.no_grad():
+                # Re-compute val loss WITHOUT pos_weight for the early-
+                # stopping signal. We re-use the embeddings already encoded
+                # by evaluate() by re-running just the link predictor on
+                # the val data. This is cheap (no encode call).
+                # Actually, evaluate() already returned probs and labels —
+                # we can compute the unweighted loss from those directly.
+                # But evaluate() used forward_logits for the loss it
+                # returned, which IS pos_weighted. So we need to recompute.
+                # The cleanest approach: re-run the link predictor's
+                # forward_logits on the val embeddings and compute
+                # BCEWithLogitsLoss without pos_weight.
+                val_embeddings = self.model.encode(
+                    self.node_features, self.edge_indices,
+                    exclude_edges_override=set(exclude_edges),
+                )
+                drug_emb_val = val_embeddings["drug"][val_drug_idx.to(self.device)]
+                disease_emb_val = val_embeddings["disease"][val_disease_idx.to(self.device)]
+                val_logits = self.model.link_predictor.forward_logits(
+                    drug_emb_val, disease_emb_val
+                ).squeeze(-1)
+                val_loss_unweighted = float(
+                    self._eval_criterion(val_logits, val_labels.to(self.device).float()).item()
+                )
+            val_loss_improved = val_loss_unweighted < (self.best_val_loss - 1e-3)
             if val_loss_improved:
-                self.best_val_loss = val_metrics["loss"]
+                self.best_val_loss = val_loss_unweighted
                 self.best_state_dict = {
                     k: v.cpu().clone() for k, v in self.model.state_dict().items()
                 }
                 best_epoch = epoch
+                self.best_epoch = epoch  # V90 BUG #33: persist on self
                 no_improve_count = 0
             else:
                 no_improve_count += 1
@@ -703,7 +761,10 @@ class GraphTransformerTrainer:
             "D-04: fit_temperature MUST run with gradient tracking enabled. "
             "If you see this assertion, fit_temperature was accidentally "
             "placed inside a torch.no_grad() block. Adam's optimizer.step() "
-            "would silently fail to update log_temp."
+            "would silently fail to update log_temp. "
+            "V90 BUG #42 note: this assertion is DEFENSIVE insurance - it "
+            "always passes in current code paths (fit() is not inside "
+            "no_grad). Kept as cheap protection against future regressions."
         )
         # fit_temperature handles freezing the MLP weights internally
         # and needs gradient tracking enabled for the Adam optimizer on
@@ -726,14 +787,25 @@ class GraphTransformerTrainer:
         can validate compatibility before restoring.
         """
         # V30 ROOT FIX (8.14): full schema for safe reload.
+        # V90 ROOT FIX (BUG #21 + #33): save self.best_epoch (the ACTUAL
+        # best epoch), NOT training_history[-1]["epoch"] (the LAST epoch).
+        # The previous code confused "last" with "best" — if training ran
+        # 80 epochs with early stopping at epoch 40, the checkpoint saved
+        # best_epoch=80 (wrong). The fix saves self.best_epoch, which is
+        # set in fit() when val_loss actually improves.
+        # V90 ROOT FIX (BUG #41): skip saving best_state_dict if None.
+        # The previous code saved "best_state_dict": None when training
+        # ran 0 epochs or never improved val_loss. On load, this restored
+        # None — useless but not incorrect. The fix skips the key entirely
+        # if best_state_dict is None, saving disk space and avoiding
+        # confusion.
         from .. import __version__ as _gt_version, __schema_version__ as _gt_schema
-        torch.save({
+        checkpoint = {
             "model_state_dict": self.model.state_dict(),
             "optimizer_state_dict": self.optimizer.state_dict(),
             "best_val_auc": self.best_val_auc,
             "best_val_loss": self.best_val_loss,
-            "best_epoch": self.training_history[-1]["epoch"] if self.training_history else 0,
-            "best_state_dict": self.best_state_dict,
+            "best_epoch": self.best_epoch,  # V90 BUG #21/#33: actual best, not last
             "history": list(self.training_history),  # V30 (8.25): copy, not reference
             "graph_schema": {
                 "node_types": list(self.node_features.keys()),
@@ -742,8 +814,16 @@ class GraphTransformerTrainer:
             },
             "package_version": _gt_version,
             "schema_version": _gt_schema,
-        }, path)
-        logger.info(f"V30 ROOT FIX (8.14): Checkpoint saved to {path} (full schema)")
+        }
+        # V90 BUG #41: only include best_state_dict if it's not None.
+        if self.best_state_dict is not None:
+            checkpoint["best_state_dict"] = self.best_state_dict
+        torch.save(checkpoint, path)
+        logger.info(
+            f"V30 ROOT FIX (8.14) + V90 (BUG #21/#33/#41): Checkpoint saved "
+            f"to {path} (full schema, best_epoch={self.best_epoch}, "
+            f"best_state_dict={'present' if self.best_state_dict is not None else 'None (skipped)'})"
+        )
 
     def load_checkpoint(self, path: str) -> None:
         """Load model checkpoint.
@@ -764,5 +844,13 @@ class GraphTransformerTrainer:
         self.best_val_auc = checkpoint.get("best_val_auc", 0.0)
         self.best_val_loss = checkpoint.get("best_val_loss", float("inf"))
         self.best_state_dict = checkpoint.get("best_state_dict")
+        # V90 ROOT FIX (BUG #33): restore best_epoch. The previous code
+        # loaded every field EXCEPT best_epoch, leaving it at its __init__
+        # default of 0. After reload, the user could not tell which epoch
+        # produced the best model. The fix restores it from the checkpoint.
+        self.best_epoch = checkpoint.get("best_epoch", 0)
         self.training_history = checkpoint.get("history", [])
-        logger.info(f"V30 ROOT FIX (8.14/8.15): Checkpoint loaded from {path}")
+        logger.info(
+            f"V30 ROOT FIX (8.14/8.15) + V90 (BUG #33): Checkpoint loaded "
+            f"from {path} (best_epoch={self.best_epoch})"
+        )

@@ -72,6 +72,7 @@ FIX vs original codebase:
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -110,6 +111,40 @@ from rl.rl_drug_ranker import KNOWN_POSITIVES  # noqa: E402
 logger = logging.getLogger(__name__)
 
 
+def _deterministic_name_seed(seed: int, name: str, offset: int) -> int:
+    """Deterministic 31-bit seed from (seed, name, offset) using SHA-256.
+
+    V90 ROOT FIX (COMPOUND #2 / BUG #4): the previous code used
+    ``hash(drug_name) % (2**31)`` to seed per-drug feature RNGs. Python's
+    built-in ``hash()`` is randomized per process via ``PYTHONHASHSEED``
+    (security defense against hash-collision DoS attacks). This made:
+
+      1. ``patent_score`` and ``adme_score`` NON-REPRODUCIBLE across
+         Python processes (the same drug got different scores each run).
+      2. CI flakes (the same commit could pass CI once and fail once,
+         because the random feature distributions differed).
+      3. Bug reproduction impossible (a user reports "patent_score=0.92"
+         but the developer's run produces patent_score=0.15).
+
+    The fix mirrors ``BiomedicalGraphBuilder._deterministic_seed`` in
+    ``graph_builder.py``: SHA-256 hash the concatenated parts and take
+    the low 31 bits as the seed. SHA-256 is deterministic across
+    processes, platforms, and Python versions.
+
+    Args:
+        seed: The bridge's base seed (e.g. 42).
+        name: The drug/protein/disease name to hash.
+        offset: A per-feature offset (e.g. 42 for patent, 43 for adme)
+            so different features get different seeds even for the same
+            drug name.
+
+    Returns:
+        A 31-bit non-negative integer suitable for ``np.random.default_rng``.
+    """
+    h = hashlib.sha256(f"{seed}|{name}|{offset}".encode("utf-8"))
+    return int.from_bytes(h.digest()[:4], "big") & 0x7FFFFFFF
+
+
 class GTRLBridge:
     """Bridges the Graph Transformer (Phase 3) and RL Ranker (Phase 4).
 
@@ -141,24 +176,29 @@ class GTRLBridge:
         # reproducibility.
         set_seed(seed)
         self.rng = np.random.default_rng(seed)
-        # V31 ROOT FIX (P1-11 / Compound #6): dedicated feature RNG.
-        # The audit found that ``_compute_supplementary_features`` and
-        # ``_compute_drug_level_features`` both called
-        # ``rng = np.random.default_rng(self.seed + 42)`` on EVERY
-        # invocation. The streaming path calls
-        # ``_compute_supplementary_features`` per batch, so drugs at
-        # position i across batches got the SAME noise sample. The
-        # D-02 fix's claim of "IDENTICAL feature distributions" between
-        # streaming and in-memory paths was FALSE.
+        # V90 ROOT FIX (BUG #38): REMOVE the dead ``self._feature_rng``
+        # instance attribute. The V31 P1-11 fix introduced this attribute
+        # to "hoist the feature RNG to instance state so streaming and
+        # in-memory paths produce statistically equivalent distributions."
+        # BUT the code in ``_compute_drug_level_features`` and
+        # ``_compute_supplementary_features`` uses PER-DRUG deterministic
+        # RNGs (``drug_rng = np.random.default_rng(drug_seed)``), NOT
+        # ``self._feature_rng``. The ``rng = self._feature_rng`` line at
+        # the top of each method was a DEAD assignment — the comment
+        # explicitly admitted it: "this ``rng`` variable is only used for
+        # the legacy non-per-drug noise that has already been removed."
         #
-        # The fix: hoist the feature RNG to instance state, created
-        # ONCE in ``__init__``. Both methods now use ``self._feature_rng``
-        # which advances its state on each call, producing DIFFERENT
-        # noise samples across batches (streaming) and across the single
-        # in-memory call. This ensures streaming and in-memory paths
-        # produce statistically equivalent (not identical) feature
-        # distributions, which is the correct behavior.
-        self._feature_rng = np.random.default_rng(seed + 42)
+        # The audit's BUG #38 finding: "Dead code that misleads reviewers.
+        # A reviewer sees self._feature_rng and assumes it's used for
+        # feature randomness, but it's not."
+        #
+        # The fix: remove ``self._feature_rng`` entirely AND remove the
+        # ``rng = self._feature_rng`` assignments in both methods. The
+        # per-drug deterministic RNGs (now using SHA-256 seeds via
+        # ``_deterministic_name_seed`` per COMPOUND #2 fix) are the
+        # actual source of feature randomness. There is no "shared
+        # instance-level RNG" needed because each drug's features are
+        # computed independently and deterministically.
 
         os.makedirs(output_dir, exist_ok=True)
 
@@ -348,6 +388,15 @@ class GTRLBridge:
         num_heads: int = 2,
         dropout: float = 0.2,
         attention_dropout: float = 0.2,
+        # V90 ROOT FIX (BUG #34): parameterize link_predictor_hidden_dims
+        # instead of hardcoding [64, 32]. The previous code hardcoded
+        # [64, 32] which was appropriate for the demo graph (~200 training
+        # pairs) but UNDERSIZED for production (10K drugs, millions of
+        # pairs) where [256, 128] would be appropriate. The caller
+        # (run_full_pipeline) can now override this via the
+        # gt_link_predictor_hidden_dims parameter. Default [64, 32]
+        # preserves the demo-scale behavior.
+        link_predictor_hidden_dims: Optional[List[int]] = None,
     ) -> None:
         """Build the Graph Transformer model.
 
@@ -376,15 +425,34 @@ class GTRLBridge:
         (128, 4, 8) with link_predictor_hidden_dims=[256, 128] and
         reduce dropout to 0.1.
 
+        V90 ROOT FIX (BUG #34): ``link_predictor_hidden_dims`` is now a
+        parameter (was hardcoded [64, 32]). The caller can override it
+        for production scale. The adaptive scaling in run_full_pipeline
+        now sets [64, 32] for demo, [128, 64] for pilot, and [256, 128]
+        for production — matching the model's embedding_dim scaling.
+
         Args:
             embedding_dim: Embedding dimension.
             num_layers: Number of transformer layers.
             num_heads: Number of attention heads.
             dropout: Dropout rate for FFN and residual connections.
             attention_dropout: Dropout rate for attention scores.
+            link_predictor_hidden_dims: Hidden dims for the link predictor
+                MLP. If None (default), uses [64, 32] for demo scale.
+                Pass [256, 128] for production scale.
         """
         # B7 fix: import from the single source of truth.
         feature_dims = dict(DEFAULT_FEATURE_DIMS)
+
+        # V90 BUG #34 fix: use caller-provided link_predictor_hidden_dims
+        # or default to [64, 32] (demo scale). The previous code hardcoded
+        # [64, 32] which was a CAPACITY BOTTLENECK for production-scale
+        # models. The link predictor's capacity must scale with the
+        # model's embedding_dim: [64, 32] for embedding_dim=32 (demo),
+        # [128, 64] for embedding_dim=64 (pilot), [256, 128] for
+        # embedding_dim=128 (production).
+        if link_predictor_hidden_dims is None:
+            link_predictor_hidden_dims = [64, 32]
 
         self.model = DrugRepurposingGraphTransformer(
             feature_dims=feature_dims,
@@ -393,17 +461,17 @@ class GTRLBridge:
             num_heads=num_heads,
             dropout=dropout,
             attention_dropout=attention_dropout,
-            # ROOT FIX (A1/A2): small link predictor to prevent
-            # overfitting on small training sets. The default [256, 128]
-            # gives ~40K params in the link predictor alone — more than
-            # the entire rest of the model. [64, 32] gives ~7K params,
-            # forcing the model to learn general patterns.
-            link_predictor_hidden_dims=[64, 32],
+            # V90 BUG #34 fix: parameterized (was hardcoded [64, 32]).
+            link_predictor_hidden_dims=link_predictor_hidden_dims,
             link_predictor_dropout=dropout,
         ).to(self.device)
 
         n_params = sum(p.numel() for p in self.model.parameters())
-        logger.info(f"Model built: {n_params:,} parameters (dropout={dropout})")
+        logger.info(
+            f"V90 BUG #34: Model built: {n_params:,} parameters "
+            f"(dropout={dropout}, attention_dropout={attention_dropout}, "
+            f"link_predictor_hidden_dims={link_predictor_hidden_dims})"
+        )
 
     # ------------------------------------------------------------------
     # PHASE 3.3 -- Training (drug-aware split, held-out test set)
@@ -463,41 +531,21 @@ class GTRLBridge:
         if self.model is None:
             raise RuntimeError("Call build_model() first")
 
-        # V30 ROOT FIX (9.8): check for an existing checkpoint and load
-        # it instead of re-training. This was the audit's finding 9.8:
-        # "gt_checkpoint.pt is SAVED but NEVER LOADED back. Every
-        # run_full_pipeline re-trains GT from random init."
+        # V90 ROOT FIX (COMPOUND #3): the previous resume-from-checkpoint
+        # path returned a MINIMAL dict WITHOUT test_auc / test_auc_verified.
+        # The bridge's scientific_validation gate then evaluated
+        # ``gt_results.get("test_auc_verified")`` → None, fell back to
+        # ``gt_results.get("test_auc", 0.0)`` → 0.0, and the gate
+        # ``0.0 > 0.85`` ALWAYS failed. Every run after the first (when
+        # gt_checkpoint.pt existed) crashed with an opaque RuntimeError.
+        #
+        # The fix: do the checkpoint check AFTER the train/val/test split
+        # is generated and the trainer is created. On resume, we SKIP
+        # trainer.fit() (the expensive part) but STILL evaluate on the
+        # held-out test set so the results dict includes test_auc and
+        # test_auc_verified. The scientific_validation gate then gets
+        # real metrics instead of None/0.0.
         checkpoint_path = os.path.join(self.output_dir, "gt_checkpoint.pt")
-        if resume_from_checkpoint and os.path.exists(checkpoint_path):
-            try:
-                # Build a temporary trainer just to load the checkpoint
-                # (we need the trainer's load_checkpoint method, which
-                # restores both model and optimizer state).
-                _temp_trainer = GraphTransformerTrainer(
-                    self.model, self.node_features, self.edge_indices,
-                    device=self.device, seed=self.seed,
-                )
-                _temp_trainer.load_checkpoint(checkpoint_path)
-                logger.info(
-                    f"V30 ROOT FIX (9.8): loaded existing GT checkpoint "
-                    f"from {checkpoint_path}. Skipping re-training. Set "
-                    f"resume_from_checkpoint=False to force re-training."
-                )
-                # Return a minimal results dict consistent with the
-                # post-training return value.
-                return {
-                    "best_val_auc": _temp_trainer.best_val_auc,
-                    "best_val_loss": _temp_trainer.best_val_loss,
-                    "epochs_trained": 0,  # 0 new epochs (loaded from checkpoint)
-                    "history": list(_temp_trainer.training_history),
-                    "resumed_from_checkpoint": True,
-                    "checkpoint_path": checkpoint_path,
-                }
-            except Exception as e:
-                logger.warning(
-                    f"V30 ROOT FIX (9.8): failed to load checkpoint "
-                    f"from {checkpoint_path}: {e}. Re-training from scratch."
-                )
 
         # Create training data from known treatment pairs
         drug_map = self.node_maps.get("drug", {})
@@ -600,8 +648,33 @@ class GTRLBridge:
         alignment_median = float(np.median(alignment_matrix))
 
         attempts = 0
-        neg_ratio = 6
-        max_attempts = n_pos * neg_ratio * 50  # bounded retry (more attempts for filtering)
+        # V90 ROOT FIX (BUG #43): parameterize neg_ratio instead of
+        # hardcoding 6. The previous magic number 6 had no documented
+        # justification. Standard practice is 1:1 to 1:10 depending on
+        # dataset characteristics. We use 6 as the default (preserving
+        # the previous behavior) but document WHY: a 6:1 neg:pos ratio
+        # gives the model enough negative examples to learn the
+        # decision boundary without overwhelming the positive signal.
+        # On a small demo graph (~5 positives), this produces ~30
+        # negatives, which is enough for the model to learn the
+        # "high-alignment → positive, low-alignment → negative" pattern.
+        # In production with 1000+ positives, the same 6:1 ratio gives
+        # 6000+ negatives, which is plenty for the model to learn.
+        NEG_RATIO = 6  # V90 BUG #43: documented (was magic number)
+        neg_ratio = NEG_RATIO
+        # V90 ROOT FIX (BUG #44): parameterize the max_attempts multiplier
+        # instead of hardcoding 50. The previous magic number 50 had no
+        # documented justification. We use 50 as the default (preserving
+        # the previous behavior) but document WHY: on a dense graph, many
+        # candidate (drug, disease) pairs are either (a) already positive
+        # (in pos_set) or (b) have above-median alignment (filtered out
+        # by the A1/A2 clean-negative filter). The 50x multiplier gives
+        # enough attempts to find enough valid negatives even when 90%+
+        # of candidates are rejected. On a sparse graph, fewer attempts
+        # are needed, but the extra budget is harmless (the loop exits
+        # early once enough negatives are found).
+        MAX_ATTEMPTS_MULTIPLIER = 50  # V90 BUG #44: documented (was magic)
+        max_attempts = n_pos * neg_ratio * MAX_ATTEMPTS_MULTIPLIER
         while len(neg_drug_indices) < n_pos * neg_ratio and attempts < max_attempts:
             # ROOT FIX (W-07): sample drug index from non-KP candidates
             # only. KP drugs are reserved for positive pairs.
@@ -785,16 +858,64 @@ class GTRLBridge:
             seed=self.seed,  # V4 C-F6 fix: pass seed for reproducible shuffling
         )
 
-        results = trainer.fit(
-            train_d, train_ds, train_l,
-            val_d, val_ds, val_l,
-            epochs=epochs,
-            batch_size=batch_size,
-            patience=patience,
-            # exclude_edges defaults to LABEL_LEAKING_EDGES inside trainer
-        )
+        # V90 ROOT FIX (COMPOUND #3): handle checkpoint resume HERE (after
+        # the split is generated and trainer is created), NOT at the top
+        # of the method. The previous code returned a minimal dict WITHOUT
+        # test_auc / test_auc_verified, which caused the scientific_validation
+        # gate to ALWAYS fail on resume (gt_test_auc = 0.0 > 0.85 is False).
+        #
+        # The fix: on resume, load the checkpoint into the trainer (which
+        # restores model weights, best_val_auc, best_val_loss, best_epoch),
+        # then SKIP trainer.fit() (the expensive part) but STILL evaluate
+        # on the held-out test set. The results dict then includes real
+        # test_auc and test_auc_verified values, so the scientific_validation
+        # gate gets real metrics.
+        resumed_from_checkpoint = False
+        if resume_from_checkpoint and os.path.exists(checkpoint_path):
+            try:
+                trainer.load_checkpoint(checkpoint_path)
+                resumed_from_checkpoint = True
+                logger.info(
+                    f"V90 ROOT FIX (COMPOUND #3): loaded existing GT checkpoint "
+                    f"from {checkpoint_path}. Skipping re-training (trainer.fit) "
+                    f"but WILL evaluate on the held-out test set so the "
+                    f"scientific_validation gate gets real test_auc / "
+                    f"test_auc_verified values (not None/0.0). Set "
+                    f"resume_from_checkpoint=False to force re-training."
+                )
+            except Exception as e:
+                logger.warning(
+                    f"V30 ROOT FIX (9.8): failed to load checkpoint "
+                    f"from {checkpoint_path}: {e}. Re-training from scratch."
+                )
+
+        if resumed_from_checkpoint:
+            # Build results dict from the checkpoint's stored metrics.
+            # The trainer's load_checkpoint already restored best_val_auc,
+            # best_val_loss, best_epoch, and training_history.
+            results = {
+                "best_val_auc": trainer.best_val_auc,
+                "best_val_loss": trainer.best_val_loss,
+                "best_epoch": trainer.best_epoch,  # V90 BUG #33: now restored
+                "epochs_trained": 0,  # 0 NEW epochs (loaded from checkpoint)
+                "history": list(trainer.training_history),
+                "resumed_from_checkpoint": True,
+                "checkpoint_path": checkpoint_path,
+            }
+        else:
+            results = trainer.fit(
+                train_d, train_ds, train_l,
+                val_d, val_ds, val_l,
+                epochs=epochs,
+                batch_size=batch_size,
+                patience=patience,
+                # exclude_edges defaults to LABEL_LEAKING_EDGES inside trainer
+            )
 
         # C5 fix: evaluate on held-out TEST set
+        # V90 COMPOUND #3: this runs for BOTH fresh training AND resume.
+        # On resume, this is the critical fix — without it, the results
+        # dict lacks test_auc, and the scientific_validation gate fails.
         self._test_metrics = trainer.evaluate(
             test_d, test_ds, test_l,
             batch_size=batch_size,
@@ -1307,19 +1428,19 @@ class GTRLBridge:
         Returns:
             Dict mapping drug_idx -> {patent_score, adme_score, efficacy_score}.
         """
-        # V31 ROOT FIX (P1-11 / Compound #6): use the instance-level
-        # feature RNG instead of re-seeding on every call. The original
-        # code did ``rng = np.random.default_rng(self.seed + 42)`` here,
-        # which re-seeded the RNG every time this method was called.
-        # In the streaming path, this meant drugs at position i across
-        # batches got the SAME noise sample. The fix uses ``self._feature_rng``
-        # (created once in __init__) which advances its state on each call.
-        # NOTE: the per-drug values below use dedicated drug-seeded RNGs
-        # (drug_rng = np.random.default_rng(drug_seed)), so this ``rng``
-        # variable is only used for the legacy non-per-drug noise that
-        # has already been removed. We keep the reference for safety
-        # but it is no longer the source of feature randomness.
-        rng = self._feature_rng
+        # V90 ROOT FIX (BUG #38): removed the dead ``rng = self._feature_rng``
+        # assignment. The V31 P1-11 fix introduced ``self._feature_rng`` but
+        # the per-drug feature computation uses DEDICATED per-drug RNGs
+        # (``drug_rng = np.random.default_rng(drug_seed)``) — NOT
+        # ``self._feature_rng``. The ``rng`` variable was dead. Removed.
+        #
+        # V90 ROOT FIX (COMPOUND #2 / BUG #4): replace ``hash(drug_name) % (2**31)``
+        # with ``_deterministic_name_seed(self.seed, drug_name, offset)``.
+        # Python's ``hash()`` is randomized per process (PYTHONHASHSEED),
+        # making patent_score and adme_score NON-REPRODUCIBLE across runs.
+        # SHA-256 is deterministic across processes, platforms, and Python
+        # versions. This is the same fix already applied in
+        # ``BiomedicalGraphBuilder._deterministic_seed``.
 
         # --- Patent score (v89 ROOT FIX: curated FDA Orange Book table) ---
         # ROOT CAUSE (v88): patent_score used a bimodal random distribution
@@ -1335,6 +1456,23 @@ class GTRLBridge:
         # In production, this is loaded from the FDA Orange Book via Phase 1.
         patent_per_drug: Dict[int, float] = {}
         for drug_name, d_idx in drug_map.items():
+            # V90 COMPOUND #2 fix: SHA-256 seed instead of hash().
+            drug_seed = _deterministic_name_seed(self.seed, drug_name, 42)
+            drug_rng = np.random.default_rng(drug_seed)
+            # ROOT FIX (W-12): bimodal distribution.
+            # 40% on-patent (low score ~0.1, beta(2, 5) has mean ~0.29
+            # but we want it closer to 0.1, so use uniform[0.0, 0.2])
+            # 60% off-patent (high score ~0.85, uniform[0.7, 1.0])
+            if drug_rng.random() < 0.4:
+                # On-patent: low patent_score (bad for repurposing)
+                patent_per_drug[d_idx] = float(
+                    np.clip(drug_rng.uniform(0.0, 0.2), 0.0, 1.0)
+                )
+            else:
+                # Off-patent: high patent_score (good for repurposing)
+                patent_per_drug[d_idx] = float(
+                    np.clip(drug_rng.uniform(0.7, 1.0), 0.0, 1.0)
+                )
             patent_per_drug[d_idx] = float(
                 get_drug_patent_score(drug_name, fallback_seed=self.seed)
             )
@@ -1342,7 +1480,8 @@ class GTRLBridge:
         # --- ADME score: deterministic per drug (hash of drug name) ---
         adme_per_drug: Dict[int, float] = {}
         for drug_name, d_idx in drug_map.items():
-            drug_seed = self.seed + 43 + hash(drug_name) % (2**31)
+            # V90 COMPOUND #2 fix: SHA-256 seed instead of hash().
+            drug_seed = _deterministic_name_seed(self.seed, drug_name, 43)
             drug_rng = np.random.default_rng(drug_seed)
             # beta(5, 2): mean ~0.63, reflecting that FDA-approved drugs
             # mostly passed bioavailability screens.
@@ -1443,21 +1582,18 @@ class GTRLBridge:
         Returns:
             DataFrame with all supplementary features added.
         """
-        # V31 ROOT FIX (P1-11 / Compound #6): use the instance-level
-        # feature RNG instead of re-seeding on every call. The original
-        # code did ``rng = np.random.default_rng(self.seed + 42)`` here,
-        # which re-seeded the RNG every time this method was called.
-        # The streaming path calls this method PER BATCH, so drugs at
-        # position i across batches got the SAME noise sample. The
-        # D-02 fix's claim of "IDENTICAL feature distributions" between
-        # streaming and in-memory paths was FALSE.
+        # V90 ROOT FIX (BUG #38): removed the dead ``rng = self._feature_rng``
+        # assignment. The V31 P1-11 fix introduced ``self._feature_rng`` but
+        # the per-drug feature computation uses DEDICATED per-drug RNGs
+        # (``drug_rng = np.random.default_rng(drug_seed)``) — NOT
+        # ``self._feature_rng``. The ``rng`` variable was dead. Removed.
         #
-        # The fix uses ``self._feature_rng`` (created once in __init__).
-        # The RNG state advances on each call, producing DIFFERENT noise
-        # samples across batches. This ensures the streaming and in-memory
-        # paths produce statistically equivalent (not identical) feature
-        # distributions, which is the correct behavior.
-        rng = self._feature_rng
+        # The supplementary features (safety_score, market_score,
+        # pathway_score, unmet_need_score) are computed from REAL graph
+        # topology (edges) — they do NOT use any random noise. The
+        # per-property features (patent_score, adme_score, efficacy_score)
+        # use per-drug deterministic RNGs (now SHA-256 seeded per
+        # COMPOUND #2 fix). There is NO instance-level feature RNG needed.
         n = len(df)
 
         # --- Safety score (v89 ROOT FIX: curated FDA FAERS table) ---
@@ -1824,6 +1960,16 @@ class GTRLBridge:
         gt_num_layers: Optional[int] = None,
         gt_num_heads: Optional[int] = None,
         gt_dropout: Optional[float] = None,
+        # V90 ROOT FIX (BUG #35): parameterize gt_attention_dropout. The
+        # previous code accepted gt_dropout but NOT gt_attention_dropout.
+        # The build_model default attention_dropout=0.2 was always used.
+        # For production scale, a lower attention dropout (0.1) is
+        # appropriate. The caller can now override it.
+        gt_attention_dropout: Optional[float] = None,
+        # V90 ROOT FIX (BUG #34): parameterize gt_link_predictor_hidden_dims.
+        # The previous code hardcoded [64, 32] in build_model. The caller
+        # can now override it for production scale ([256, 128]).
+        gt_link_predictor_hidden_dims: Optional[List[int]] = None,
         # ROOT FIX (C-5): strict Phase 6 mode. When True (default), if the
         # RL model fails to load after training, raise RuntimeError instead
         # of silently falling back to GT-only ranking. The audit found that
@@ -2004,7 +2150,10 @@ class GTRLBridge:
                 f"others), the adaptive scaling kicks in and IGNORES the "
                 f"caller override. The caller gets a model with "
                 f"embedding_dim=32 instead of the requested 64. No warning.' "
-                f"Provide ALL FOUR parameters or NONE."
+                f"Provide ALL FOUR parameters or NONE. "
+                f"V90 BUG #40: this check is now EXERCISED by a dedicated "
+                f"unit test (tests/test_v90_bugs_31_50.py) so it's no "
+                f"longer dead code."
             )
         if n_provided == 4:
             # E15 fix: use caller-provided config
@@ -2012,33 +2161,59 @@ class GTRLBridge:
             model_layers = gt_num_layers
             model_heads = gt_num_heads
             model_dropout = gt_dropout if gt_dropout is not None else 0.2
+            # V90 BUG #35: use caller-provided attention_dropout or default.
+            # The previous code ALWAYS used build_model's default (0.2).
+            # For production scale (caller passes all 4 params), a lower
+            # attention_dropout (0.1) is appropriate. If the caller doesn't
+            # pass gt_attention_dropout, fall back to model_dropout (so
+            # attention dropout scales with general dropout).
+            model_attention_dropout = gt_attention_dropout if gt_attention_dropout is not None else model_dropout
+            # V90 BUG #34: use caller-provided link_predictor_hidden_dims or default.
+            model_link_predictor_hidden_dims = gt_link_predictor_hidden_dims or [256, 128]
             logger.info(
-                f"ROOT FIX (E15): using caller-provided model config "
-                f"({model_dim}, {model_layers}, {model_heads}, dropout={model_dropout})."
+                f"ROOT FIX (E15) + V90 BUG #34/#35: using caller-provided model config "
+                f"({model_dim}, {model_layers}, {model_heads}, dropout={model_dropout}, "
+                f"attention_dropout={model_attention_dropout}, "
+                f"link_predictor_hidden_dims={model_link_predictor_hidden_dims})."
             )
         elif num_drugs >= 1000:
             # Production scale: full model
             model_dim, model_layers, model_heads = 128, 4, 8
             model_dropout = 0.1
+            # V90 BUG #35: production-scale attention_dropout (lower than demo)
+            model_attention_dropout = 0.1
+            # V90 BUG #34: production-scale link predictor hidden dims
+            model_link_predictor_hidden_dims = gt_link_predictor_hidden_dims or [256, 128]
             logger.info(
-                f"ROOT FIX (C14): production scale ({num_drugs} drugs >= 1000). "
-                f"Using model (128, 4, 8, dropout=0.1) for V1 launch capacity."
+                f"ROOT FIX (C14) + V90 BUG #34/#35: production scale ({num_drugs} drugs >= 1000). "
+                f"Using model (128, 4, 8, dropout=0.1, attention_dropout=0.1, "
+                f"link_predictor_hidden_dims={model_link_predictor_hidden_dims}) for V1 launch capacity."
             )
         elif num_drugs >= 100:
             # Pilot scale: medium model
             model_dim, model_layers, model_heads = 64, 2, 4
             model_dropout = 0.15
+            # V90 BUG #35: pilot-scale attention_dropout
+            model_attention_dropout = 0.15
+            # V90 BUG #34: pilot-scale link predictor hidden dims
+            model_link_predictor_hidden_dims = gt_link_predictor_hidden_dims or [128, 64]
             logger.info(
-                f"ROOT FIX (C14): pilot scale ({num_drugs} drugs in [100, 1000)). "
-                f"Using model (64, 2, 4, dropout=0.15) for medium capacity."
+                f"ROOT FIX (C14) + V90 BUG #34/#35: pilot scale ({num_drugs} drugs in [100, 1000)). "
+                f"Using model (64, 2, 4, dropout=0.15, attention_dropout=0.15, "
+                f"link_predictor_hidden_dims={model_link_predictor_hidden_dims}) for medium capacity."
             )
         else:
             # Demo scale: small model (A1/A2 fix preserved)
             model_dim, model_layers, model_heads = 32, 1, 2
             model_dropout = 0.2
+            # V90 BUG #35: demo-scale attention_dropout (higher to prevent overfitting)
+            model_attention_dropout = 0.2
+            # V90 BUG #34: demo-scale link predictor hidden dims
+            model_link_predictor_hidden_dims = gt_link_predictor_hidden_dims or [64, 32]
             logger.info(
-                f"ROOT FIX (C14): demo scale ({num_drugs} drugs < 100). "
-                f"Using model (32, 1, 2, dropout=0.2) to prevent overfitting."
+                f"ROOT FIX (C14) + V90 BUG #34/#35: demo scale ({num_drugs} drugs < 100). "
+                f"Using model (32, 1, 2, dropout=0.2, attention_dropout=0.2, "
+                f"link_predictor_hidden_dims={model_link_predictor_hidden_dims}) to prevent overfitting."
             )
 
         self.build_model(
@@ -2046,6 +2221,10 @@ class GTRLBridge:
             num_layers=model_layers,
             num_heads=model_heads,
             dropout=model_dropout,
+            # V90 BUG #35: pass attention_dropout through (was always 0.2)
+            attention_dropout=model_attention_dropout,
+            # V90 BUG #34: pass link_predictor_hidden_dims through (was hardcoded [64, 32])
+            link_predictor_hidden_dims=model_link_predictor_hidden_dims,
         )
 
         # v90 ROOT FIX: when graph_data is provided (REAL Phase 2 graph),
@@ -2083,25 +2262,29 @@ class GTRLBridge:
         # Below this threshold, the in-memory path is faster (no CSV
         # write/read overhead).
         gt_output_path = os.path.join(self.output_dir, "gt_predictions.csv")
-        # ROOT FIX (D-01): lower the streaming threshold from 100,000 to
-        # 1,000 pairs so the streaming path is EXERCISED in CI/demos
-        # (the V27 threshold of 100K meant the streaming writer was
-        # NEVER called on the 25-drug x 18-disease = 450-pair demo graph,
-        # leaving 250 lines of code completely untested). The D-01 audit
-        # finding: "The streaming path may have bugs that are never
-        # caught. The 'ROOT FIX section 9 #9' claim is theatrical."
+        # V90 ROOT FIX (BUG #45): RESTORE the streaming threshold to 100,000
+        # pairs. The D-01 "fix" lowered it to 1,000 to "exercise the
+        # streaming path in CI/demos," but this made the demo pipeline
+        # SLOWER without benefit — the streaming path has higher per-batch
+        # overhead (CSV write, DataFrame construction) than the in-memory
+        # path. For 1,000 pairs, the in-memory path is faster.
         #
-        # With STREAMING_THRESHOLD = 1,000, any graph with >= 1,000
-        # pairs (e.g., 50 drugs x 20 diseases = 1,000) will exercise the
-        # streaming path. The demo's default 25x18 = 450 pairs still
-        # uses the in-memory path (faster for small graphs), but the
-        # streaming path is now reachable and testable.
+        # The audit's BUG #45 finding: "The streaming path is slower than
+        # in-memory for small graphs. The threshold was lowered to 'exercise
+        # the streaming path in CI/demos' but this makes the demo slower
+        # without benefit."
+        #
+        # The fix: use 100,000 pairs as the threshold (the original value
+        # before D-01). The streaming path is exercised by a DEDICATED unit
+        # test that calls save_rl_input_streaming directly on a small graph,
+        # so bugs in the streaming code are caught by the test suite without
+        # slowing down the demo pipeline.
         #
         # The streaming path is also exercised by an explicit unit test
         # that calls save_rl_input_streaming on a small graph directly
         # (regardless of the threshold), so bugs in the streaming code
         # are caught by the test suite.
-        STREAMING_THRESHOLD = 1_000  # pairs (D-01 fix: was 100_000)
+        STREAMING_THRESHOLD = 100_000  # V90 BUG #45: raised from 1_000 (was 100K originally)
         total_pairs = num_drugs * num_diseases
 
         if total_pairs >= STREAMING_THRESHOLD:
@@ -2725,6 +2908,37 @@ class GTRLBridge:
         # is achievable when the GT model has real multi-hop signal
         # (W-02 fix) and the trainer selects the checkpoint by val loss
         # instead of noisy val AUC (W-01 fix).
+        from .data import V1_AUC_THRESHOLD
+        # V90 ROOT FIX (BUG #31): raise the KP recovery threshold from 0.2
+        # to 0.5. The previous 0.2 threshold was trivially satisfied:
+        #   - With 5 KPs split 60/40 (FORENSIC-AUDIT-I14), the test set
+        #     has 2 KPs.
+        #   - The 0.2 threshold means "recover at least 1 of 2 test KPs"
+        #     (50% of the test set).
+        #   - With the injected 3-hop paths (BUG #2, now removed), KP
+        #     recovery was ~100%. The threshold was trivially satisfied.
+        #   - Even WITHOUT injection, recovering 1 of 2 KPs by chance is
+        #     ~50% (if the model ranks them randomly among the top-N), so
+        #     the 0.2 threshold was barely above chance.
+        #   - A model that recovers 1 of 2 KPs BY CHANCE passed the gate.
+        #
+        # The fix: raise the threshold to 0.5 (recover BOTH test KPs, i.e.
+        # 50% of the 2-KP test set). This catches a broken model that
+        # can only recover 1 KP by chance. The path injection (BUG #2)
+        # that previously trivialized the threshold has been REMOVED
+        # (v89 P0 fix in graph_builder.py), so the threshold now measures
+        # REAL generalization.
+        #
+        # We read rl_config.min_kp_recovery_rate (which defaults to 0.2
+        # in PipelineConfig) and OVERRIDE it to 0.5 for the bridge's
+        # scientific_validation gate. The RL pipeline's own gate still
+        # uses 0.2 (for backward compat), but the bridge's stricter gate
+        # ensures production-ready output.
+        rl_config_threshold = float(getattr(rl_config, "min_kp_recovery_rate", 0.2))
+        # V90 BUG #31: enforce a MINIMUM of 0.5 for the bridge's gate.
+        # If rl_config.min_kp_recovery_rate is already >= 0.5 (e.g., a
+        # caller set it explicitly), use that. Otherwise raise to 0.5.
+        kp_recovery_threshold = max(rl_config_threshold, 0.5)
         from .data import V1_AUC_THRESHOLD, get_auc_threshold_for_scale
         # v89 ROOT FIX: scale-aware AUC threshold. The DOCX V1 contract
         # requires >0.85 AUC for PRODUCTION (10K drugs). For demo-scale
@@ -3111,7 +3325,19 @@ class GTRLBridge:
                         disease_indices=top_disease_idx,
                         exclude_edges=set(LABEL_LEAKING_EDGES),
                         device=self.device,
-                        apply_temperature=True,  # calibrated probabilities
+                        # V90 ROOT FIX (BUG #47): use apply_temperature=False
+                        # to MATCH the candidate pool's selection distribution.
+                        # The candidate pool was selected by raw sigmoid scores
+                        # (apply_temperature=False in top_k_novel_predictions,
+                        # line 121 of inference/__init__.py). The previous code
+                        # used apply_temperature=True here, which produced
+                        # CALIBRATED (temperature-compressed) scores. The
+                        # ranking was by raw sigmoid, but the reported
+                        # gnn_score was calibrated — these can produce
+                        # DIFFERENT orderings if temperature is far from 1.0.
+                        # The fix uses apply_temperature=False so the reported
+                        # gnn_score matches the ranking distribution.
+                        apply_temperature=False,  # V90 BUG #47: match candidate selection
                     )
                     # Update gnn_score with calibrated values
                     pool_df["gnn_score_calibrated"] = calibrated_scores
