@@ -700,7 +700,10 @@ def main() -> int:
 
     try:
         # ─── Phase 1 ────────────────────────────────────────────────
-        ensure_phase1_data(Path(args.phase1_dir))
+        # v100 ROOT FIX (R-005): capture the return value of
+        # ``ensure_phase1_data`` so the summary print below can reference
+        # ``len(phase1_csvs)`` instead of raising ``NameError``.
+        phase1_csvs = ensure_phase1_data(Path(args.phase1_dir))
 
         # ─── Bridge ──────────────────────────────────────────────────
         builder, staged = run_bridge(Path(args.phase1_dir))

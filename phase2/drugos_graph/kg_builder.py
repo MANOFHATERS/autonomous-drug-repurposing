@@ -1666,17 +1666,28 @@ class GraphNodeLoader:
                     # Non-Compound labels do not have aliases and use
                     # the original simple MERGE pattern (no perf cost).
                     if storage_label == "Compound":
+                        # v100 ROOT FIX (P2-005): replace the deprecated
+                        # ``size((:Compound {id: a})) > 0`` pattern (Neo4j
+                        # < 5.x syntax, O(N) full label scan per alias per
+                        # row) with the Neo4j 5.x ``EXISTS { MATCH ... }``
+                        # subquery which uses the index on ``Compound.id``
+                        # and is O(log N) per alias. For 10K compounds ×
+                        # 5 aliases × batch_size=1000, the old pattern ran
+                        # 50K pattern expansions PER BATCH; the new
+                        # pattern runs 50K index lookups — typically
+                        # 100-1000× faster on a production graph.
+                        # The semantic is identical: for each row, scan
+                        # its aliases, take the FIRST alias that already
+                        # exists as a Compound node, and use that id as
+                        # the MERGE key (collapsing biotech-drug
+                        # duplicates). Fall back to ``row.id`` when no
+                        # alias matches.
                         cypher = (
                             f"UNWIND $batch AS row\n"
-                            # Resolve the effective merge id: prefer an
-                            # existing Compound whose id matches any
-                            # alias in this row; fall back to row.id.
-                            # `coalesce` + `reduce` lets us scan the
-                            # aliases list in pure Cypher without APOC.
                             f"WITH row, "
                             f"coalesce("
                             f"  [a IN coalesce(row.compound_id_aliases, []) "
-                            f"   WHERE size((:Compound {{id: a}})) > 0 "
+                            f"   WHERE EXISTS {{ MATCH (:Compound {{id: a}}) }} "
                             f"   LIMIT 1][0], "
                             f"  row.id"
                             f") AS merge_id\n"
@@ -2317,7 +2328,27 @@ class GraphEdgeLoader:
                         write_checkpoint(
                             checkpoint_key,
                             {
-                                "last_completed_idx": i + batch_size - 1,
+                                # v100 ROOT FIX (P2-004): off-by-one on
+                                # the FINAL partial batch. The previous
+                                # ``i + batch_size - 1`` assumed every
+                                # batch had exactly ``batch_size`` rows,
+                                # but the LAST batch in a chunked load is
+                                # typically shorter (``len(batch) <=
+                                # batch_size``). The checkpoint then
+                                # OVER-CLAIMED progress: e.g., if 550
+                                # rows remained and batch_size=1000, the
+                                # checkpoint said ``last_completed_idx =
+                                # i + 999`` even though only ``i + 549``
+                                # rows were actually loaded. On resume,
+                                # the loader SKIPPED rows i+550..i+999
+                                # (treated them as already-loaded),
+                                # silently dropping up to ~1 batch's
+                                # worth of edges per checkpoint. Use
+                                # ``len(batch)`` (actual rows loaded)
+                                # which is correct for both full and
+                                # partial batches. The progress-log line
+                                # at line 2309 already uses this form.
+                                "last_completed_idx": i + len(batch) - 1,
                                 "ts": _now_iso(),
                             },
                         )

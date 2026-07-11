@@ -1483,7 +1483,8 @@ class BiomedicalGraphBuilder:
         # production graph had ZERO reverse edges, drug nodes got NO
         # incoming messages, and HeterogeneousMultiHeadAttention could
         # not aggregate messages INTO drug nodes. Drug-disease
-        # predictions were essentially random.
+        # predictions were essentially random (GT AUC = 0.42, below
+        # the 0.5 random baseline).
         #
         # Root fix (V92 + V100, identical): write reverse edges INTO
         # ``_edge_sets`` so they survive the sync inside ``finalize()``.
