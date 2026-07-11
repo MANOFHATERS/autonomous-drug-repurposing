@@ -12,6 +12,21 @@
 #   3. Test — pytest on Phase 1 + Phase 2 test suites
 #   4. P2/Chain-1 verification — all 11 P2 fixes + Chain-1 at runtime
 #   5. E2E — sample-mode pipeline run with bridge 100%-connection proof
+#   6. ci-success — aggregation gate (the SINGLE required status check
+#      for branch protection — all 5 jobs must pass for this to be green)
+#
+# v84 FORENSIC ROOT FIX — removed two `|| true` false-pass traps:
+#   - Line 145 (test job): `pytest ... || true` ALWAYS exited 0 even if
+#     every test failed. The CI showed green regardless of test results.
+#   - Line 433 (bridge test step): same `|| true` pattern on the 27-test
+#     bridge integration suite.
+#   Both escape hatches were EXACTLY the false-pass pattern the user
+#   complained about: "every session every ai tells its 100 percent
+#   integrated but see the reality". The `|| true` was the mechanism
+#   that enabled the lie. Removed — tests now actually gate the merge.
+#   Verified locally: Phase 1 tests = 107 passed / 4 skipped / 0 failed;
+#   bridge tests = 27 passed / 0 failed. The escape hatches were
+#   unnecessary AND dangerous.
 #
 name: CI
 
@@ -136,13 +151,15 @@ jobs:
           DATABASE_URL: "sqlite:///:memory:"
         run: |
           echo "=== Tests: Phase 1 forensic + root fixes + DAG + entity resolution ==="
+          # v84 FORENSIC ROOT FIX: removed `|| true` — tests now ACTUALLY gate
+          # the merge. Verified locally: 107 passed, 4 skipped, 0 failed.
           python -m pytest \
             phase1/tests/v79_forensic/ \
             phase1/tests/test_v76_root_fixes.py \
             phase1/tests/test_v75_root_fixes.py \
             phase1/tests/test_dag_structure.py \
             phase1/tests/test_entity_resolution.py \
-            -v --tb=short --no-header || true
+            -v --tb=short --no-header
 
   # ── Job 4: P2 + Chain-1 fix verification ──
   verify-p2-fixes:
@@ -428,9 +445,13 @@ jobs:
           DISGENET_USE_API: "false"
           DRUGOS_DOWNLOAD_MODE: "sample"
         run: |
+          # v84 FORENSIC ROOT FIX: removed `|| true` — the 27-test bridge
+          # suite now ACTUALLY gates the merge. Verified locally: 27 passed,
+          # 0 failed. This is the single most important test in the repo
+          # (proves Phase 1 ↔ Phase 2 100% connection).
           python -m pytest \
             phase2/tests/test_phase1_phase2_bridge.py \
-            -v --tb=short --no-header || true
+            -v --tb=short --no-header
 
       - name: E2E — run Phase 1→Phase 2 bridge (real KG, treats > 0)
         env:
@@ -460,3 +481,34 @@ jobs:
           print("=== E2E PASSED: Phase 1↔Phase 2 100% connected ===")
           print("=== treats edges > 0: V1 launch criterion VERIFIED ===")
           PY
+
+  # ── Job 6: CI Success aggregation gate ──────────────────────────────
+  # This is the SINGLE required status check for branch protection.
+  # Configure GitHub branch protection to require "CI Success" and ONLY
+  # this check. All 5 real jobs (build, lint, test, verify-p2-fixes,
+  # e2e-sample-mode) must pass for this to be green. This avoids the
+  # "which check do I require?" confusion when there are 5+ jobs.
+  ci-success:
+    name: CI Success (required for merge)
+    runs-on: ubuntu-latest
+    needs: [build, lint, test, verify-p2-fixes, e2e-sample-mode]
+    if: always()
+    timeout-minutes: 1
+    steps:
+      - name: Verify all 5 jobs passed
+        run: |
+          echo "Job results:"
+          echo "  build:           ${{ needs.build.result }}"
+          echo "  lint:            ${{ needs.lint.result }}"
+          echo "  test:            ${{ needs.test.result }}"
+          echo "  verify-p2-fixes: ${{ needs.verify-p2-fixes.result }}"
+          echo "  e2e-sample-mode: ${{ needs.e2e-sample-mode.result }}"
+          if [[ "${{ needs.build.result }}" != "success" || \
+                "${{ needs.lint.result }}" != "success" || \
+                "${{ needs.test.result }}" != "success" || \
+                "${{ needs.verify-p2-fixes.result }}" != "success" || \
+                "${{ needs.e2e-sample-mode.result }}" != "success" ]]; then
+            echo "::error::One or more CI jobs did not pass — merge blocked."
+            exit 1
+          fi
+          echo "=== ALL 5 CI JOBS PASSED — merge allowed ==="
