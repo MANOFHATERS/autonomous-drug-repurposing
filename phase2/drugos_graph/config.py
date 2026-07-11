@@ -2056,7 +2056,7 @@ GEO_SKIP_RECORD_COUNT_GUARD: bool = (
 # ROOT FIX: make DRUGOS_ENV an ALIAS of DRUGOS_ENVIRONMENT (same value,
 # same default). ENVIRONMENT is also aliased below. Now there is ONE
 # source of truth: DRUGOS_ENVIRONMENT.
-DRUGOS_ENV: str = os.environ.get("DRUGOS_ENVIRONMENT", os.environ.get("DRUGOS_ENV", "dev"))
+DRUGOS_ENV: str = os.environ.get("DRUGOS_ENVIRONMENT", os.environ.get("DRUGOS_ENV", "production"))
 
 
 def get_geo_series_path(series_id: str | None = None) -> Path:
@@ -3299,7 +3299,7 @@ class TransEConfig:
         default_factory=lambda: int(
             os.environ.get(
                 "DRUGOS_TRANSE_MIN_TRAIN_TRIPLES",
-                "5" if os.environ.get("DRUGOS_ENVIRONMENT", "dev").lower()
+                "5" if os.environ.get("DRUGOS_ENVIRONMENT", "production").lower()
                 not in ("prod", "production")
                 else "100",
             )
@@ -3314,7 +3314,7 @@ class TransEConfig:
         default_factory=lambda: int(
             os.environ.get(
                 "DRUGOS_TRANSE_MIN_VAL_TRIPLES",
-                "2" if os.environ.get("DRUGOS_ENVIRONMENT", "dev").lower()
+                "2" if os.environ.get("DRUGOS_ENVIRONMENT", "production").lower()
                 not in ("prod", "production")
                 else "30",
             )
@@ -4358,7 +4358,7 @@ DRUGOS_DEPLOYMENT_CONTEXT: str = os.environ.get(
 # Fixes FIX[(12.13)] — environment selector (dev/staging/prod). In
 # ``prod``, ``validate_xsd=True`` and ``cross_check_regulatory=True``
 # by default; in ``dev``, both are False for speed.
-DRUGOS_ENVIRONMENT: str = os.environ.get("DRUGOS_ENVIRONMENT", "dev")
+DRUGOS_ENVIRONMENT: str = os.environ.get("DRUGOS_ENVIRONMENT", "production")
 
 # DRUGBANK_STRICT_VERSION
 # Fixes FIX[(14.11)] FIX[(G.16)] — when "1", refuse to parse if the
@@ -5127,7 +5127,7 @@ def assert_auc_meets_threshold(
         # (the default), which raised AUCBelowThresholdError on the toy
         # fixture's AUC 0.67 < 0.85 → V1 launch criteria always failed.
         # Production (DRUGOS_ENVIRONMENT=production) keeps STANDARD.
-        _dev_mode = os.environ.get("DRUGOS_ENVIRONMENT", "dev").lower() not in ("prod", "production")
+        _dev_mode = os.environ.get("DRUGOS_ENVIRONMENT", "production").lower() not in ("prod", "production")
         if _dev_mode and not STRICT_AUC_ENFORCEMENT:
             enforcement_level = AUCEnforcementLevel.RELAXED
         elif _dev_mode:
@@ -5237,7 +5237,7 @@ def check_auc_meets_threshold(
     if threshold is None:
         threshold = get_target_auc()
     if enforcement_level is None:
-        _dev_mode = os.environ.get("DRUGOS_ENVIRONMENT", "dev").lower() not in ("prod", "production")
+        _dev_mode = os.environ.get("DRUGOS_ENVIRONMENT", "production").lower() not in ("prod", "production")
         if _dev_mode and not STRICT_AUC_ENFORCEMENT:
             enforcement_level = AUCEnforcementLevel.RELAXED
         elif _dev_mode:
@@ -5836,7 +5836,7 @@ def _get_dev_mode() -> bool:
     call, so runtime changes are respected. New code should call this
     function instead of referencing the ``_DEV_MODE`` constant.
     """
-    return os.environ.get("DRUGOS_ENVIRONMENT", "dev").lower() not in (
+    return os.environ.get("DRUGOS_ENVIRONMENT", "production").lower() not in (
         "prod", "production", "stage", "staging",
     )
 
@@ -6880,7 +6880,7 @@ def apply_config_overrides(overrides: dict[str, Any] | None = None) -> None:
 # ROOT FIX: make ENVIRONMENT an alias of DRUGOS_ENVIRONMENT (same
 # default "dev"). The ENVIRONMENT_CONFIGS dict below now keys on
 # "dev" / "staging" / "prod" (matching DRUGOS_ENVIRONMENT values).
-ENVIRONMENT: str = os.environ.get("DRUGOS_ENVIRONMENT", "dev")
+ENVIRONMENT: str = os.environ.get("DRUGOS_ENVIRONMENT", "production")
 
 # v29 ROOT FIX (audit I-5): ENVIRONMENT_CONFIGS + apply_environment_config
 # was dead code. Removed/deprecated.

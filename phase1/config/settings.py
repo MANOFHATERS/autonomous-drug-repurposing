@@ -358,7 +358,7 @@ class _DeprecatedSetting:
 # (audit TOP-2).
 _raw_environment: str = (
     os.getenv("DRUGOS_ENVIRONMENT")
-    or os.getenv("ENVIRONMENT", "development")
+    or os.getenv("ENVIRONMENT", "production")
 ).lower()
 _ENV_NORMALIZATION: dict[str, str] = {
     "dev": "development",
@@ -370,6 +370,30 @@ _ENV_NORMALIZATION: dict[str, str] = {
     "production": "production",
 }
 ENVIRONMENT: str = _ENV_NORMALIZATION.get(_raw_environment, _raw_environment)
+
+# v89 P0 ROOT FIX (DRUGOS_ENVIRONMENT default = production):
+# The previous default was "development", which silently enabled 11+
+# DRUGOS_ALLOW_* escape hatches that disable patient-safety guards.
+# A developer running ``python3 run_real_pipeline.py`` without setting
+# DRUGOS_ENVIRONMENT would get dev mode by default, with all safety
+# nets off. This is the "ship withdrawn drugs as safe" compound bug
+# chain documented in the v89 audit.
+#
+# The fix: default to "production". Operators who want dev mode must
+# EXPLICITLY set DRUGOS_ENVIRONMENT=development. This is the
+# "production should be opt-out, not opt-in" principle from the audit.
+#
+# CI/test environments that need dev mode should set
+# DRUGOS_ENVIRONMENT=development in their CI config (the .github/
+# workflows/*.yml files already do this where needed).
+if not os.getenv("DRUGOS_ENVIRONMENT") and not os.getenv("ENVIRONMENT"):
+    logger_production_default = __import__("logging").getLogger(__name__)
+    logger_production_default.info(
+        "v89 P0 ROOT FIX: DRUGOS_ENVIRONMENT not set — defaulting to "
+        "'production' (was 'development'). All DRUGOS_ALLOW_* escape "
+        "hatches are now REFUSED by default. To enable dev mode, "
+        "explicitly set DRUGOS_ENVIRONMENT=development."
+    )
 
 BASE_DIR: Path = Path(_getenv("PROJECT_ROOT", str(Path(__file__).parent.parent)))
 

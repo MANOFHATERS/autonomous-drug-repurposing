@@ -1876,8 +1876,16 @@ def _read_phase1_from_postgres() -> Dict[str, pd.DataFrame]:
                 .join(_m.Drug, _m.DrugProteinInteraction.drug_id == _m.Drug.id)
                 .join(_m.Protein, _m.DrugProteinInteraction.protein_id == _m.Protein.id)
                 .where(_m.DrugProteinInteraction.source == "chembl")
-                # v88 ROOT FIX (BUG #38 — non-human proteins pollute the
-                # human KG): filter to human proteins (ncbi_taxid == 9606).
+                # v88+v89 ROOT FIX (BUG #38 — non-human proteins pollute
+                # the human KG): filter to HUMAN proteins only
+                # (ncbi_taxid == 9606). For a HUMAN drug repurposing
+                # platform, only human protein targets are clinically
+                # actionable — a drug's activity against a mouse homolog
+                # does NOT predict its activity against the human homolog
+                # (cross-species binding affinity can differ by 10-100x).
+                # This filter is the LAST line of defense: even if non-
+                # human proteins leak into the DB, this query excludes
+                # them from the KG.
                 .where(_m.Protein.ncbi_taxid == 9606)
             )
             chembl_act_df = pd.read_sql(chembl_act_stmt, conn)
@@ -2718,16 +2726,21 @@ def _classify_chembl_activity_edge(
     a = (activity_type or "").lower().strip()
     if not a:
         return "targets"
-    # v88 ROOT FIX (BUG #36 — covalent inhibitors misclassified as
-    # activators): check "inactivat" BEFORE "activ" so INACTIVATION
-    # (ChEMBL's label for covalent inhibition) routes to "inhibits".
-    if "inactivat" in a:
+    # v88+v89 ROOT FIX (BUG #36 — covalent inhibitors misclassified as
+    # activators): use WORD-BOUNDARY regex to ensure "activ" matches only
+    # at the START of a word. "Inactivation" contains the substring
+    # "activ" but is an INHIBITORY process — the assay measures loss of
+    # target activity. Misclassifying it as "activates" feeds the KG
+    # wrong directionality. Check inactivation/deactivation/inhibit/
+    # antagonist FIRST (before the "activ" check would misclassify them).
+    import re as _re_v89
+    if _re_v89.search(r"\b(inactiv|deactiv|inhibit|antagon)", a):
         return "inhibits"
-    # Direct-label cases — ChEMBL's standard_type field is sometimes the
-    # bare word "Inhibition" or "Activation".
-    if "inhibit" in a or "antagon" in a:
-        return "inhibits"
-    if "activ" in a or "agon" in a:
+    # Word-boundary "activ" or "agon" → activates. The \b ensures we
+    # match "activation", "activates", "agonist", "agonism" but NOT
+    # "inactivation", "deactivation", "inactive" (those are matched
+    # by the inhibits regex above).
+    if _re_v89.search(r"\b(activ|agon)", a):
         return "activates"
     # v88 ROOT FIX (BUG #50 — IC50 with non-bare standard_type strings
     # lose inhibition signal): use substring match `if "ic50" in a`

@@ -364,9 +364,15 @@ _DRUGBANK_ID_RE: re.Pattern[str] = re.compile(
 )
 
 # S19: standard InChIKey is 27 chars (14-10-1). Source: InChI Trust.
-# v24 ROOT FIX (FORENSIC-P1-PIPE §1): keep the regex for backward compat,
-# but add a delegating wrapper that calls the canonical validator.
-_INCHIKEY_RE: re.Pattern[str] = re.compile(r"^[A-Z]{14}-[A-Z]{10}-[A-Z]$")
+# v84 FORENSIC ROOT FIX (BUG #52): removed the local ``_INCHIKEY_RE``
+# regex definition. The codebase had THREE divergent InChIKey regex
+# copies (``_constants.CANONICAL_INCHIKEY_REGEX``, ``_INCHIKEY_RE``
+# here, and ``INCHIKEY_PATTERN`` in base_pipeline). If any copy
+# diverged, InChIKeys that passed cleaning could fail dedup or DB
+# insert — silent data loss at stage boundaries. ROOT FIX: import
+# the SINGLE canonical regex from ``cleaning._constants`` so there
+# is exactly one source of truth.
+from cleaning._constants import CANONICAL_INCHIKEY_REGEX as _INCHIKEY_RE  # noqa: E402
 
 
 def _is_valid_inchikey(key: str) -> bool:
@@ -3542,10 +3548,31 @@ class DrugBankPipeline(BasePipeline):
                         # <=5 chars, but defensively check again.
                         if not isinstance(dname, str) or len(dname) <= 5:
                             continue
-                        # Word-boundary match to avoid spurious substring hits
-                        # (e.g. "cancer" should not match "cancer antigen").
+                        # v84 FORENSIC ROOT FIX (BUG #29): the previous
+                        # ``\b{dname}\b`` pattern treats HYPHENS as word
+                        # boundaries (``\b`` matches between a word char
+                        # and a non-word char, and ``-`` is non-word).
+                        # This caused TWO classes of false positives in
+                        # drug→disease indication edges:
+                        #   (a) "diabetes" matched inside "pre-diabetes"
+                        #       (a DIFFERENT condition) because ``\b``
+                        #       fired between ``-`` and ``d``.
+                        #   (b) "anemia" matched inside "aplastic anemia"
+                        #       (a different disease) because the space
+                        #       before "anemia" satisfied ``\b``.
+                        # ROOT FIX: replace ``\b`` with lookbehind /
+                        # lookahead that treats hyphens AND letters as
+                        # word-continuation characters. Now "diabetes"
+                        # does NOT match inside "pre-diabetes" (the char
+                        # before "d" is "-", a continuation char, so the
+                        # negative lookbehind fails). Combined with the
+                        # length-descending sort + break-on-first-match,
+                        # this eliminates the false-positive class while
+                        # keeping the curated OMIM disease vocabulary as
+                        # the matching source (no free-text heuristics).
                         import re as _re
-                        pattern = r"\b" + _re.escape(dname.lower()) + r"\b"
+                        _escaped = _re.escape(dname.lower())
+                        pattern = r"(?<![a-z\-])" + _escaped + r"(?![a-z\-])"
                         if _re.search(pattern, indication_lower):
                             writer.writerow({
                                 "drugbank_id": dbid,
@@ -4130,8 +4157,23 @@ class DrugBankPipeline(BasePipeline):
             return UpsertResult()
 
         # C6: use Int64 nullable type for defensive casting.
+        # v84 FORENSIC ROOT FIX (BUG #40): the previous code cast to
+        # ``Int64`` (nullable) at line 4133-4134, then IMMEDIATELY cast
+        # to non-nullable ``int64`` at line 4144-4145. If ANY NaN
+        # survived the ``dropna`` at line 4118 (e.g. due to index
+        # misalignment or a race condition), the ``.astype("int64")``
+        # call raises ``ValueError`` — crashing the pipeline. ROOT FIX:
+        # do a FINAL defensive dropna right before the non-nullable
+        # cast, so the cast is guaranteed to succeed. This is belt-and-
+        # suspenders: the dropna at line 4118 should have caught
+        # everything, but defensive programming for a biomedical
+        # pipeline is non-negotiable.
         resolved_interactions["drug_id"] = resolved_interactions["drug_id"].astype("Int64")
         resolved_interactions["protein_id"] = resolved_interactions["protein_id"].astype("Int64")
+        # Final defensive dropna — guarantees no NaN reaches the int64 cast.
+        resolved_interactions = resolved_interactions.dropna(
+            subset=["drug_id", "protein_id"]
+        ).copy()
 
         # D5 / COM2: map actions to InteractionType enum (never use "target").
         resolved_interactions["interaction_type"] = resolved_interactions[

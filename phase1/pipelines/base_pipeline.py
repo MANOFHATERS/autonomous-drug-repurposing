@@ -352,7 +352,19 @@ _REDACT_OMIM_APIKEY_HEADER_RE = re.compile(
 # match-set as this constant. UNIPROT_ID_PATTERN (below) is also covered
 # by the same consistency check and is actively imported by
 # disgenet_pipeline.py:206 / string_pipeline.py:152.
-INCHIKEY_PATTERN: re.Pattern[str] = re.compile(r"^[A-Z]{14}-[A-Z]{10}-[A-Z]$")
+# v84 FORENSIC ROOT FIX (BUG #52): ``INCHIKEY_PATTERN`` is now an ALIAS
+# to ``cleaning._constants.CANONICAL_INCHIKEY_REGEX`` — the SINGLE source
+# of truth. The codebase previously had THREE divergent InChIKey regex
+# copies (``_constants.CANONICAL_INCHIKEY_REGEX``, ``_INCHIKEY_RE`` in
+# drugbank_pipeline, and this ``INCHIKEY_PATTERN``). If any copy
+# diverged, InChIKeys that passed cleaning could fail dedup or DB
+# insert — silent data loss at stage boundaries. The alias preserves
+# backward compatibility for the many modules that import
+# ``INCHIKEY_PATTERN`` from this module, while guaranteeing there is
+# exactly one regex definition. The schema/v1.json consistency check
+# in ``_verify_pattern_consistency()`` still validates that the
+# schema-declared pattern matches this regex.
+from cleaning._constants import CANONICAL_INCHIKEY_REGEX as INCHIKEY_PATTERN  # noqa: E402
 
 #: UniProt ID pattern — UniProt knowledgebase identifier spec (SCI-3.12).
 # v38 ROOT FIX (Phase 1 Issue #8): the previous pattern was
@@ -1175,13 +1187,23 @@ class BasePipeline(ABC):
                 self.downloaded_paths = raw_paths
 
                 if count_records and raw_paths:
-                    records_downloaded = sum(
+                    # v84 FORENSIC ROOT FIX (BUG #41): the previous code
+                    # called ``self._count_records(p)`` TWICE per path —
+                    # once in the ``sum()`` at line 1178, and again in
+                    # the ``any()`` check at line 1182-1185. For a 2GB
+                    # STRING file, this DOUBLED the counting time
+                    # (minutes of wall-clock). ROOT FIX: compute each
+                    # file's count ONCE, store in a list, then derive
+                    # both the total and the sentinel check from the
+                    # stored list.
+                    _per_file_counts = [
                         self._count_records(p) for p in raw_paths
-                    )
+                    ]
+                    records_downloaded = sum(_per_file_counts)
                     # If any individual count failed, propagate the sentinel
                     if any(
-                        self._count_records(p) == SENTINEL_COUNT_FAILED
-                        for p in raw_paths
+                        c == SENTINEL_COUNT_FAILED
+                        for c in _per_file_counts
                     ):
                         logger.warning(
                             "[%s] One or more record counts failed; "
@@ -1435,9 +1457,13 @@ class BasePipeline(ABC):
                         "schema_version": SCHEMA_VERSION,
                         "validation_errors": validation_errors,
                         "dq_metrics": dq_metrics,
-                        "records_downloaded": records_downloaded,
-                        "records_cleaned": records_cleaned,
-                        "records_loaded": records_loaded,
+                        # v84 FORENSIC ROOT FIX (BUG #44): removed the
+                        # duplicate ``records_downloaded`` /
+                        # ``records_cleaned`` / ``records_loaded`` keys.
+                        # These were ALREADY passed as positional args to
+                        # ``_write_run_log`` at lines 1419-1421, so the
+                        # audit JSON had each field twice — redundant and
+                        # confusing for any consumer parsing the JSON.
                     },
                 )
             except Exception as audit_exc:

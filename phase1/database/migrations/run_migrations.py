@@ -171,12 +171,21 @@ REQUIRED_COLUMNS: dict[str, list[tuple[str, str]]] = {
         ("function_desc", "VARCHAR(10000)"),
     ],
     "drugs": [
-        ("is_fda_approved", "BOOLEAN DEFAULT 0"),
+        ("is_fda_approved", "BOOLEAN DEFAULT FALSE"),
         ("max_phase", "INTEGER"),
         ("drug_type", "VARCHAR(50)"),
         ("mechanism_of_action", "TEXT"),
         # LIFE-SAFETY CRITICAL: withdrawn drug tracking columns
-        ("is_withdrawn", "BOOLEAN NOT NULL DEFAULT 0"),
+        # v89 ROOT FIX (BUG #23 — standardize on DEFAULT FALSE):
+        #   The previous ``DEFAULT 0`` is a non-portable integer literal
+        #   that happens to work on SQLite (no native BOOLEAN type) and
+        #   PostgreSQL (implicit cast) but is REJECTED by strict-mode
+        #   MySQL/MariaDB. ``DEFAULT FALSE`` is the SQL-standard boolean
+        #   literal and works on ALL dialects. This aligns the fallback
+        #   with migration 001 (which uses ``DEFAULT FALSE``) and the ORM
+        #   (which uses ``server_default='0'`` — functionally equivalent
+        #   on SQLite/PostgreSQL). Three-way drift eliminated.
+        ("is_withdrawn", "BOOLEAN NOT NULL DEFAULT FALSE"),
         ("clinical_status", "VARCHAR(30)"),
         ("cas_number", "VARCHAR(20)"),
         ("logp", "FLOAT"),
@@ -205,7 +214,7 @@ REQUIRED_COLUMNS: dict[str, list[tuple[str, str]]] = {
         ("confidence_score", "FLOAT"),
         ("source_version", "VARCHAR(50)"),
         ("source_fetch_date", "TIMESTAMP"),
-        ("entity_resolved", "BOOLEAN DEFAULT 0"),
+        ("entity_resolved", "BOOLEAN DEFAULT FALSE"),
         ("pipeline_run_id", "INTEGER"),
     ],
     "protein_protein_interactions": [

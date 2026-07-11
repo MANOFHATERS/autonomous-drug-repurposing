@@ -1,5 +1,6 @@
-# Combined .gitignore (merged from HEAD + fix branch)
+# Combined .gitignore
 .venv/
+venv/
 __pycache__/
 *.pyc
 *.pyo
@@ -11,10 +12,11 @@ phase1/raw_data/
 *.egg-info/
 .ruff_cache/
 .env
-venv/
 mlflow.db
 *.pt
 *.pkl
 phase2/data/processed/*.json
 phase2/logs/
-phase1/processed_data/
+output_real_run/
+output_v89/
+checkpoints/

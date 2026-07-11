@@ -740,7 +740,26 @@ class ChEMBLPipeline(BasePipeline):
                 # Update sha for audit
                 self._sha256_raw = _compute_file_sha256(drugs_csv)
                 return drugs_csv
-        except Exception as exc:
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            # v84 FORENSIC ROOT FIX (BUG #38): narrowed from broad
+            # ``except Exception``. The previous code caught ALL
+            # failures from the v50 downloader — including programming
+            # bugs (AttributeError, KeyError) — and silently fell back
+            # to the v49 path. A bug in ``download_chembl_full`` or
+            # ``_parse_molecules`` was masked as "v50 failed, using
+            # v49" — the pipeline ALWAYS fell back to v49, which may
+            # be stale or broken, with no visible warning.
+            # ROOT FIX: catch ONLY the expected I/O, value, and JSON
+            # parse errors. If ``requests`` is available, also catch
+            # ``requests.RequestException``. Programming bugs propagate
+            # so they surface during development instead of silently
+            # degrading to v49 forever.
+            _exc_types = (OSError, ValueError, json.JSONDecodeError)
+            if requests is not None:
+                _exc_types = (OSError, ValueError, json.JSONDecodeError,
+                              requests.RequestException)
+            if not isinstance(exc, _exc_types):
+                raise
             logger.warning(
                 "[%s] v50 downloader failed (%s) — falling back to v49 path",
                 self.source_name, exc,
@@ -876,6 +895,40 @@ class ChEMBLPipeline(BasePipeline):
             initial_count,
             raw_path,
         )
+
+        # v84 FORENSIC ROOT FIX (BUG #50 — COMPOUND): data quality
+        # schema check. The compound bug chain was:
+        #   v50 downloader catches all exceptions (BUG #38 fixed) →
+        #   falls back to embedded samples → writes JSONL to a .csv
+        #   file → clean() reads garbage → falls back to v49 path →
+        #   reports "success" with wrong/missing data.
+        # ROOT FIX: validate the DataFrame schema immediately after
+        # load. If the expected ChEMBL columns are missing (e.g.
+        # ``chembl_id``, ``name``, ``max_phase``), raise a
+        # ``DataQualityError`` instead of silently processing garbage.
+        # This breaks the compound degradation chain at the FIRST
+        # stage where bad data enters the pipeline.
+        _expected_chembl_cols = {"chembl_id", "name", "max_phase"}
+        _actual_cols = set(drugs_df.columns)
+        _missing_critical = _expected_chembl_cols - _actual_cols
+        if _missing_critical and not drugs_df.empty:
+            raise ValueError(
+                f"[{self.source_name}] Data quality check FAILED: raw "
+                f"drugs CSV is missing critical columns "
+                f"{_missing_critical}. Expected at least "
+                f"{_expected_chembl_cols}, got {_actual_cols}. This "
+                f"indicates the v50 downloader produced a malformed "
+                f"file (e.g. JSONL written as CSV). Refusing to "
+                f"process garbage data — fix the downloader."
+            )
+        # Check for empty DataFrame (another silent-degradation signal).
+        if drugs_df.empty:
+            logger.warning(
+                "[%s] Data quality check: raw drugs CSV is EMPTY. "
+                "Proceeding with clean() but the output will have 0 "
+                "drugs — the KG will be missing all ChEMBL compounds.",
+                self.source_name,
+            )
 
         # Step 1: Generate InChIKey from SMILES where missing (C24, C25, C26).
         drugs_df = self._step_generate_inchikeys(drugs_df)

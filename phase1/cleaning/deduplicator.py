@@ -541,6 +541,18 @@ _UNIT_CONVERSIONS_TO_NM: dict[str, float] = {
     "mol/L": 1.0e9, "umol/L": 1.0e3, "nmol/L": 1.0, "mmol/L": 1.0e6,
     "pmol/L": 1.0e-3, "fmol/L": 1.0e-6,
 }
+# v84 FORENSIC ROOT FIX (BUG #33): pre-computed casefolded lookup.
+# The previous code did an O(n) linear scan over ALL 14 entries for
+# EVERY unit lookup that missed the exact-case dict. On the 4M-row
+# STRING PPI dataset with mixed-case units, this was 4M × 14 = 56M
+# string comparisons — making the deduplicator unusably slow (hours
+# on large datasets, potentially timing out the pipeline). This
+# pre-computed dict gives O(1) case-insensitive lookup with zero
+# per-call overhead. Correctness is identical; only performance
+# changes (O(n) → O(1) per lookup).
+_UNIT_CONVERSIONS_TO_NM_CASEFOLDED: dict[str, float] = {
+    k.casefold(): v for k, v in _UNIT_CONVERSIONS_TO_NM.items()
+}
 
 
 # ===========================================================================
@@ -1242,14 +1254,11 @@ def _normalize_unit_to_nm(value: float, unit: str | None) -> tuple[float, str | 
     u = unit.strip()
     if not u:
         return (value, "empty_unit")
-    # Case-insensitive lookup
+    # Case-insensitive lookup — O(1) via pre-computed casefolded dict
+    # (v84 FORENSIC ROOT FIX for BUG #33: was O(n) linear scan).
     factor = _UNIT_CONVERSIONS_TO_NM.get(u)
     if factor is None:
-        # Try casefold fallback
-        for k, v in _UNIT_CONVERSIONS_TO_NM.items():
-            if k.casefold() == u.casefold():
-                factor = v
-                break
+        factor = _UNIT_CONVERSIONS_TO_NM_CASEFOLDED.get(u.casefold())
     if factor is None:
         return (value, f"unknown_unit:{u}")
     return (value * factor, None)

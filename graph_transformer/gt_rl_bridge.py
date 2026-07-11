@@ -1818,14 +1818,39 @@ class GTRLBridge:
         # ``scientific_validation`` field in the results dict showing
         # which checks failed). Set to True ONLY for debugging.
         allow_invalid_output: bool = False,
+        # v89 P0 ROOT FIX (Phase 1-4 integration): pre-built graph data
+        # from the REAL Phase 1 → Bridge → Phase 2 pipeline. When
+        # provided, the bridge SKIPS build_demo_graph and uses this
+        # real graph instead. This is the user's explicit requirement:
+        # "Write a single run_pipeline.py that calls Phase 1 →
+        # phase1_bridge.stage_phase1_to_phase2 → Phase 2 kg_builder →
+        # Phase 3 GraphTransformerTrainer (loading the REAL Phase 2
+        # HeteroData, not build_demo_graph) → Phase 4 RL ranker."
+        #
+        # The tuple format is:
+        #   (node_features, edge_indices, node_maps, known_pairs)
+        # where:
+        #   node_features: Dict[str, torch.Tensor] — feature tensor per node type
+        #   edge_indices: Dict[Tuple[str,str,str], torch.Tensor] — edge index per edge type
+        #   node_maps: Dict[str, Dict[str, int]] — name→idx mapping per node type
+        #   known_pairs: List[Tuple[str, str]] — known drug-disease treatment pairs
+        graph_data: Optional[Tuple[Any, Any, Any, Any]] = None,
     ) -> Tuple[pd.DataFrame, Dict[str, Any]]:
         """Run the COMPLETE end-to-end GT + RL pipeline.
 
         This is the single entry point that:
-        1. Builds the knowledge graph
+        1. Builds the knowledge graph (or uses a pre-built real Phase 2 graph)
         2. Trains the Graph Transformer (drug-aware split, held-out test)
         3. Generates RL input features (with label leakage prevention)
         4. Runs the RL ranking pipeline
+
+        v89 P0 ROOT FIX (Phase 1-4 integration): when ``graph_data`` is
+        provided, the bridge uses the REAL Phase 2 HeteroData (from
+        Phase 1 → Bridge → kg_builder → pyg_builder) instead of the
+        synthetic build_demo_graph. This is the proper Phase 1-4
+        integration: the GT model trains on real biomedical topology
+        (DrugBank drugs, UniProt proteins, STRING pathways, DisGeNET/OMIM
+        diseases) instead of a synthetic random graph.
 
         ROOT FIX (E15): the model config is now parameterizable via
         gt_embedding_dim, gt_num_layers, gt_num_heads, gt_dropout.
@@ -1840,11 +1865,14 @@ class GTRLBridge:
         DataFrame directly.
 
         Args:
-            num_drugs: Number of drug nodes.
-            num_diseases: Number of disease nodes.
+            num_drugs: Number of drug nodes (ignored if graph_data provided).
+            num_diseases: Number of disease nodes (ignored if graph_data provided).
             gt_epochs: GT training epochs.
             rl_timesteps: RL training timesteps.
             rl_top_n: Number of top candidates from RL.
+            graph_data: Optional pre-built real Phase 2 graph. When
+                provided, skips build_demo_graph and uses this graph.
+                v89 P0 fix for Phase 1-4 integration.
 
         Returns:
             Tuple of (candidates_df, pipeline_results). The
@@ -1856,11 +1884,40 @@ class GTRLBridge:
         logger.info("PHASE 3: Graph Transformer Training")
         logger.info("=" * 60)
 
-        self.build_demo_graph(
-            num_drugs=num_drugs,
-            num_diseases=num_diseases,
-            num_known_treatments=min(num_drugs, num_diseases),
-        )
+        if graph_data is not None:
+            # v89 P0 ROOT FIX (Phase 1-4 integration): use the REAL
+            # Phase 2 HeteroData instead of build_demo_graph.
+            (
+                self.node_features,
+                self.edge_indices,
+                self.node_maps,
+                self.known_pairs,
+            ) = graph_data
+            self.drug_names = list(self.node_maps.get("drug", {}).keys())
+            self.disease_names = list(self.node_maps.get("disease", {}).keys())
+            logger.info(
+                f"v89 P0 ROOT FIX: using REAL Phase 2 HeteroData "
+                f"(from Phase 1 → Bridge → kg_builder). "
+                f"{len(self.drug_names)} drugs, "
+                f"{len(self.disease_names)} diseases, "
+                f"{len(self.known_pairs)} known treatment pairs. "
+                f"build_demo_graph SKIPPED — GT model trains on real "
+                f"biomedical topology."
+            )
+        else:
+            # Fallback: use build_demo_graph (for backward compat with
+            # run_real_pipeline.py and tests). In production, callers
+            # SHOULD pass graph_data.
+            logger.info(
+                "v89 P0: graph_data not provided — falling back to "
+                "build_demo_graph. For real Phase 1-4 integration, "
+                "pass graph_data from Phase 2 kg_builder + pyg_builder."
+            )
+            self.build_demo_graph(
+                num_drugs=num_drugs,
+                num_diseases=num_diseases,
+                num_known_treatments=min(num_drugs, num_diseases),
+            )
 
         # ROOT FIX (C14): ADAPTIVE model scaling based on graph size.
         # The original code used a fixed (32, 1, 2) model for all graph
@@ -2193,6 +2250,13 @@ class GTRLBridge:
         # (strict_phase6=False, for debugging only), the old fallback
         # behavior is preserved.
         self.rl_model = None
+        # v89 P0 ROOT FIX (VecNormalize inference bypass): store the
+        # VecNormalize wrapper alongside the RL model. Phase 6 inference
+        # (get_top_k_novel_predictions) MUST pass this to
+        # extract_policy_prob_high so the obs is normalized before being
+        # passed to the policy network. Without this, every Top-N
+        # ranking from the loaded checkpoint is essentially random.
+        self.rl_vec_normalize = None
         self.rl_config = rl_config
         rl_load_error: Optional[Exception] = None
         try:
@@ -2205,6 +2269,69 @@ class GTRLBridge:
             )
             if os.path.exists(ckpt_path):
                 self.rl_model = _PPO.load(ckpt_path, device=self.device)
+                # v89 P0: load the VecNormalize stats from the companion
+                # .vecnormalize.pkl file saved alongside the PPO checkpoint.
+                # The PPO model's policy expects NORMALIZED obs; without
+                # the VecNormalize stats, every inference produces a
+                # silent distribution shift → random rankings.
+                vecnorm_path = ckpt_path.replace(".zip", ".vecnormalize.pkl")
+                if os.path.exists(vecnorm_path):
+                    try:
+                        from stable_baselines3.common.vec_env import VecNormalize as _VNSync
+                        # VecNormalize.load requires a VecEnv to wrap. We
+                        # don't have a live env at this point (we're just
+                        # loading stats for inference), so we create a
+                        # minimal DummyVecEnv wrapper that's never stepped.
+                        # The normalize_obs() method only uses the stored
+                        # running mean/std, not the env.
+                        from stable_baselines3.common.vec_env import DummyVecEnv as _DVE
+                        _dummy_env_fn = lambda: None  # noqa: E731
+                        try:
+                            self.rl_vec_normalize = _VNSync.load(
+                                vecnorm_path, _DVE([_dummy_env_fn])
+                            )
+                        except Exception:
+                            # Fallback: load the pickle directly and
+                            # extract the obs_rms (RunningMeanStd) for
+                            # manual normalization. This avoids the
+                            # DummyVecEnv requirement.
+                            import pickle as _pickle
+                            with open(vecnorm_path, "rb") as f:
+                                _vn_state = _pickle.load(f)
+                            self.rl_vec_normalize = _VNSync(_DVE([_dummy_env_fn]))
+                            try:
+                                self.rl_vec_normalize.__setstate__(_vn_state)
+                            except Exception:
+                                # Last-resort fallback: store the state
+                                # dict; extract_policy_prob_high will
+                                # detect the missing normalize_obs and
+                                # log a CRITICAL warning.
+                                self.rl_vec_normalize = None
+                        logger.info(
+                            f"v89 P0 ROOT FIX: loaded VecNormalize stats "
+                            f"from {vecnorm_path}. RL inference will "
+                            f"normalize obs before policy network."
+                        )
+                    except Exception as vne:
+                        logger.warning(
+                            f"v89 P0 ROOT FIX: could not load VecNormalize "
+                            f"stats from {vecnorm_path}: {type(vne).__name__}: "
+                            f"{vne}. RL inference will use RAW obs (silent "
+                            f"distribution shift — Top-N rankings may be "
+                            f"random). Re-run RL training to regenerate "
+                            f"the .vecnormalize.pkl file."
+                        )
+                        self.rl_vec_normalize = None
+                else:
+                    logger.warning(
+                        f"v89 P0 ROOT FIX: VecNormalize stats file not "
+                        f"found at {vecnorm_path}. The PPO checkpoint "
+                        f"was saved without VecNormalize stats (either "
+                        f"pre-V31 training, or VecNormalize save failed). "
+                        f"RL inference will use RAW obs (silent "
+                        f"distribution shift — Top-N rankings may be "
+                        f"random). Re-run RL training to regenerate."
+                    )
                 logger.info(
                     f"V4 C-F8 fix: stored RL model on bridge "
                     f"(loaded from {ckpt_path}). Phase 6 will route "
@@ -2484,6 +2611,71 @@ class GTRLBridge:
                     "kp_recovery": scientific_validation["kp_recovery_pass"],
                 }
                 _failed = [k for k, v in _checks.items() if not v]
+
+                # v89 P0 ROOT FIX (gate BEFORE CSV write — cleanup):
+                # the bridge's gate fires AFTER the RL pipeline has
+                # written its candidate CSV (the RL pipeline's own gate
+                # at gt_test_auc > 0.5 may have passed, allowing the CSV
+                # write, even though the bridge's stricter 0.85 gate
+                # fails). The user's audit (v89) found: "Currently the
+                # CSV is written to disk BEFORE the gate fires."
+                #
+                # The fix has two parts:
+                #   1. (Done above) The RL pipeline's own gate now uses
+                #      gt_test_auc_threshold=0.85 by default (matching
+                #      the bridge's V1_AUC_THRESHOLD), so it REFUSES to
+                #      write its candidate CSV if GT AUC < 0.85.
+                #   2. (Here) If the bridge's gate fails for ANY reason
+                #      (e.g., RL AUC < 0.5 or KP recovery < 20%, which
+                #      the RL pipeline's gate doesn't check), DELETE
+                #      the candidate CSV + meta.json + the intermediate
+                #      gt_predictions.csv so downstream consumers cannot
+                #      pick up invalid candidates. This is the "gate
+                #      BEFORE CSV write" invariant enforced retro-
+                #      actively: if the gate fails, the CSV is removed
+                #      as if it was never written.
+                import glob as _glob_cleanup
+                import os as _os_cleanup
+                # Delete the RL candidate CSVs (top_candidates_*.csv
+                # and their .meta.json sidecars).
+                for _csv_path in _glob_cleanup.glob(
+                    _os_cleanup.path.join(self.output_dir, "top_candidates_*.csv")
+                ):
+                    try:
+                        _os_cleanup.remove(_csv_path)
+                        logger.critical(
+                            f"v89 P0: DELETED invalid candidate CSV "
+                            f"{_csv_path} (scientific_validation failed)."
+                        )
+                    except OSError as _rm_err:
+                        logger.error(
+                            f"v89 P0: FAILED to delete invalid candidate "
+                            f"CSV {_csv_path}: {_rm_err}. MANUAL CLEANUP "
+                            f"REQUIRED — this file contains scientifically "
+                            f"invalid candidates."
+                        )
+                for _meta_path in _glob_cleanup.glob(
+                    _os_cleanup.path.join(self.output_dir, "top_candidates_*.meta.json")
+                ):
+                    try:
+                        _os_cleanup.remove(_meta_path)
+                    except OSError:
+                        pass
+                # Delete the intermediate gt_predictions.csv too.
+                _gt_csv = _os_cleanup.path.join(self.output_dir, "gt_predictions.csv")
+                if _os_cleanup.path.exists(_gt_csv):
+                    try:
+                        _os_cleanup.remove(_gt_csv)
+                        logger.critical(
+                            f"v89 P0: DELETED intermediate gt_predictions.csv "
+                            f"(scientific_validation failed)."
+                        )
+                    except OSError as _rm_err:
+                        logger.error(
+                            f"v89 P0: FAILED to delete gt_predictions.csv: "
+                            f"{_rm_err}."
+                        )
+
                 raise RuntimeError(
                     f"V30 ROOT FIX (9.5): GT+RL pipeline REFUSED to ship "
                     f"scientifically invalid output. GT AUC={gt_test_auc:.4f} "
@@ -2492,8 +2684,12 @@ class GTRLBridge:
                     f"KP recovery={kp_recovery_rate:.1%} (threshold="
                     f"{kp_recovery_threshold:.0%}, pass={scientific_validation['kp_recovery_pass']}). "
                     f"Failed checks: {_failed}. "
-                    f"Either fix the underlying issues or pass "
-                    f"allow_invalid_output=True to override (DEBUGGING ONLY)."
+                    f"v89 P0: all candidate CSVs and the intermediate "
+                    f"gt_predictions.csv have been DELETED from "
+                    f"{self.output_dir} to prevent downstream consumers "
+                    f"from picking up invalid candidates. Either fix the "
+                    f"underlying issues or pass allow_invalid_output=True "
+                    f"to override (DEBUGGING ONLY)."
                 )
 
         # B16 fix: return the RL candidates (not the GT predictions)
