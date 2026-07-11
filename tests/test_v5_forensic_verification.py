@@ -311,6 +311,102 @@ def test_bf4_market_score_orphan_favoring():
     from graph_transformer.data.biomedical_tables import get_disease_prevalence
 
     df_disease_set = set(df["disease"].tolist())
+    # Compute pathway counts per disease and check that low-pathway diseases
+    # get a HIGH market score (orphan bonus)
+    disrupted = bridge.edge_indices.get(("pathway", "disrupted_in", "disease"))
+    pw_count = {}
+    if disrupted is not None and disrupted.numel() > 0:
+        for ds_idx in disrupted[1].tolist():
+            pw_count[ds_idx] = pw_count.get(ds_idx, 0) + 1
+
+    # Sort diseases by pathway count
+    # ROOT FIX (V27): only iterate over diseases that are ACTUALLY IN the
+    # df. The V26 test iterated over ALL diseases in disease_map, but the
+    # df only contains the first 10. If a KP disease (e.g., "inflammation")
+    # was added at the end of disease_map and happened to have the lowest
+    # pathway count, ``rare_disease`` would be a disease NOT in the df,
+    # causing ``df[df["disease"] == rare_disease]["market_score"].iloc[0]``
+    # to fail with "single positional indexer is out-of-bounds" (empty df).
+    #
+    # ROOT FIX (v92): the previous test used pathway count (pw) as a proxy
+    # for disease rarity — "low pw = rare = high market_score". This was
+    # the v88 assumption. The v89 ROOT FIX replaced market_score with
+    # curated WHO/Orphanet prevalence data (compute_market_score), so
+    # rarity is now determined by ACTUAL prevalence, not pathway count.
+    # The test now uses ``compute_rare_disease_flag`` (the same curated
+    # function the bridge uses) to pick a rare disease and a common
+    # disease, then asserts the rare disease has a higher market_score
+    # (orphan drug value). This aligns the test with the v89 scientific
+    # fix instead of the v88 pathway-count proxy.
+    from graph_transformer.data.biomedical_tables import (
+        compute_rare_disease_flag, is_rare_disease,
+    )
+    df_disease_set = set(df["disease"].tolist())
+    disease_rarity = []
+    for d_name, ds_idx in disease_map.items():
+        if d_name in df_disease_set:  # V27 fix: only include diseases in the df
+            disease_pw.append((d_name, pw_count.get(ds_idx, 0)))
+    disease_pw.sort(key=lambda x: x[1])
+
+    # V90 fix: the v89 curated market_score table uses WHO/Orphanet
+    # prevalence data, NOT pathway count. So the pathway-count correlation
+    # check is no longer valid. Instead, check that the curated table
+    # produces meaningful variation (rare diseases like cystic fibrosis
+    # should get higher market scores than common diseases like hypertension).
+    # The > 2 distinct values check above already verifies non-constancy.
+    # We skip the pathway-count correlation check since market_score no
+    # longer derives from pathway count.
+    if len(disease_pw) >= 2:
+        # Check that at least one rare disease (by curated prevalence) gets
+        # a higher market score than at least one common disease.
+        # This is a weaker but still meaningful check.
+        market_scores = [float(df[df["disease"] == d]["market_score"].iloc[0]) for d, _ in disease_pw]
+        market_range = max(market_scores) - min(market_scores)
+        check(
+            "B-F4: market_score has meaningful variation (range > 0.1)",
+            market_range > 0.1,
+            f"range={market_range:.3f}, min={min(market_scores):.3f}, max={max(market_scores):.3f}",
+            rarity_flag = compute_rare_disease_flag(d_name)
+            disease_rarity.append((d_name, int(rarity_flag), ds_idx))
+    # Sort: rare diseases (flag=1) first, common diseases (flag=0) last
+    disease_rarity.sort(key=lambda x: (-x[1], x[2]))
+
+    if len(disease_rarity) >= 2:
+        # Pick the rarest disease (highest rarity_flag) and the most common
+        rare_disease = disease_rarity[0][0]
+        common_disease = disease_rarity[-1][0]
+        rare_market = float(df[df["disease"] == rare_disease]["market_score"].iloc[0])
+        common_market = float(df[df["disease"] == common_disease]["market_score"].iloc[0])
+        # Only assert if the two diseases actually have different rarity
+        # (if all diseases in the demo graph are common, the check is
+        # vacuously true — skip it).
+        rare_flag = disease_rarity[0][1]
+        common_flag = disease_rarity[-1][1]
+        if rare_flag != common_flag:
+            check(
+                "B-F4: rare disease (curated prevalence) has higher market_score than common disease",
+                rare_market > common_market,
+                f"rare({rare_disease}, rare_flag={rare_flag})={rare_market:.3f}, "
+                f"common({common_disease}, rare_flag={common_flag})={common_market:.3f}",
+            )
+        else:
+            # All diseases in the demo graph have the same rarity flag —
+            # skip the comparison (vacuously true) but log for visibility.
+            print(f"  SKIP  B-F4: all {len(disease_rarity)} demo diseases have "
+                  f"the same rarity flag ({rare_flag}) — comparison vacuous.")
+
+    # v91 ROOT FIX: the v89 ROOT FIX changed compute_market_score from a
+    # pathway-count-based formula to a PREVALENCE-based formula (curated
+    # WHO/Orphanet data). The old test used pathway count as a proxy for
+    # rarity (low pw = rare → high market_score), but this proxy is no
+    # longer valid: a disease can have low pathway count but be COMMON
+    # (e.g., atrial fibrillation: pw=0, prevalence=400 → market_score=0.384).
+    # The fix: sort diseases by PREVALENCE (the actual input to
+    # compute_market_score), not pathway count. Low-prevalence (rare)
+    # diseases should have HIGHER market_score than high-prevalence
+    # (common) diseases — this is the orphan-drug-opportunity principle.
+    from graph_transformer.data.biomedical_tables import get_disease_prevalence
+    df_disease_set = set(df["disease"].tolist())
     disease_prev = []
     for d_name in disease_map.keys():
         if d_name in df_disease_set:
@@ -324,6 +420,11 @@ def test_bf4_market_score_orphan_favoring():
     if len(disease_prev) >= 2:
         # rare_disease = lowest prevalence (actually rare)
         # common_disease = highest prevalence (actually common)
+            # Treat None (unknown) as mid-prevalence for sorting stability
+            disease_prev.append((d_name, prev if prev is not None else 50.0))
+    disease_prev.sort(key=lambda x: x[1])  # ascending: rare first
+
+    if len(disease_prev) >= 2:
         rare_disease = disease_prev[0][0]
         common_disease = disease_prev[-1][0]
         rare_market = float(df[df["disease"] == rare_disease]["market_score"].iloc[0])

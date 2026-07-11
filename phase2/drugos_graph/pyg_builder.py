@@ -3049,3 +3049,173 @@ if __name__ == "__main__":
     print(f"\nHeteroData Summary:")
     print(f"  Total nodes: {summary['total_nodes']:,}")
     print(f"  Total edges: {summary['total_edges']:,}")
+
+
+# ===========================================================================
+# v85 P0 ROOT FIX — build_pyg_hetero_data (Phase 2→3 bridge function)
+# ===========================================================================
+# The run_pipeline.py (line 166) imports ``build_pyg_hetero_data`` from
+# this module. The function DID NOT EXIST — the entire 4-phase pipeline
+# was dead on arrival (ImportError at runtime). This function converts
+# Phase 2 node/edge dicts into the format the GT-RL bridge expects,
+# with critical node-type name mapping (Compound→drug, Disease→disease).
+
+_PHASE2_TO_GT_NODE_TYPE: Dict[str, str] = {
+    "Compound": "drug",
+    "Disease": "disease",
+    "Gene": "gene",
+    "Protein": "protein",
+    "Pathway": "pathway",
+    "ClinicalOutcome": "clinical_outcome",
+    "MedDRA_Term": "meddra_term",
+}
+
+_GT_TO_PHASE2_NODE_TYPE: Dict[str, str] = {
+    v: k for k, v in _PHASE2_TO_GT_NODE_TYPE.items()
+}
+
+
+def build_pyg_hetero_data(
+    nodes: List[Dict[str, Any]],
+    edges: List[Dict[str, Any]],
+    config: Optional["PyGConfig"] = None,
+) -> Tuple[HeteroData, Dict[str, Dict[str, int]], List[Tuple[str, str]]]:
+    """Build PyG HeteroData from Phase 2 node/edge dicts.
+
+    This is the CRITICAL Phase 2→3 bridge function that run_pipeline.py
+    imports. It converts the stage_phase1_to_phase2 output (lists of
+    node/edge dicts) into the HeteroData + node_maps + known_pairs
+    format that gt_rl_bridge.GTRLBridge expects.
+
+    Key design: maps Capitalized Phase 2 node types ("Compound",
+    "Disease") to the lowercase names the GT-RL bridge expects
+    ("drug", "disease"). Without this, every key lookup in the
+    bridge fails with KeyError or empty dict.
+
+    Parameters
+    ----------
+    nodes : list[dict]
+        Phase 2 node dicts with "label" and "id" keys.
+    edges : list[dict]
+        Phase 2 edge dicts with "source_label", "target_label",
+        "relation", "source_id", "target_id" keys.
+    config : PyGConfig, optional
+        Builder configuration.
+
+    Returns
+    -------
+    hetero_data : HeteroData
+        PyG graph with lowercase node type keys.
+    node_maps : dict[str, dict[str, int]]
+        ID→index mappings with lowercase keys.
+    known_pairs : list[tuple[str, str]]
+        Known drug-treats-disease pairs.
+    """
+    if not nodes:
+        raise ValueError(
+            "build_pyg_hetero_data received empty nodes list — "
+            "cannot build a graph. Check Phase 1 outputs."
+        )
+
+    builder = PyGBuilder(config=config or PyGConfig())
+
+    # Step 1: Build entity_maps from node dicts with Phase2→GT mapping
+    entity_maps: Dict[str, Dict[str, int]] = {}
+    _phase2_nodes_by_type: Dict[str, List[Dict]] = {}
+
+    for node in nodes:
+        p2_label = node.get("label")
+        if not p2_label:
+            logger.warning(
+                "build_pyg_hetero_data: node missing 'label', skipping"
+            )
+            continue
+        gt_label = _PHASE2_TO_GT_NODE_TYPE.get(p2_label, p2_label.lower())
+        if gt_label not in entity_maps:
+            entity_maps[gt_label] = {}
+            _phase2_nodes_by_type[gt_label] = []
+        _phase2_nodes_by_type[gt_label].append(node)
+
+    # Assign contiguous indices (deterministic order)
+    for gt_label in sorted(entity_maps.keys()):
+        type_nodes = _phase2_nodes_by_type[gt_label]
+        type_nodes_sorted = sorted(type_nodes, key=lambda n: n.get("id", ""))
+        id_map: Dict[str, int] = {}
+        for idx, node in enumerate(type_nodes_sorted):
+            node_id = node.get("id")
+            if node_id:
+                id_map[str(node_id)] = idx
+        entity_maps[gt_label] = id_map
+
+    logger.info(
+        "build_pyg_hetero_data: node types: %s",
+        {k: len(v) for k, v in entity_maps.items()},
+    )
+
+    if not entity_maps:
+        raise ValueError(
+            "build_pyg_hetero_data: no valid node types found. "
+            f"Expected: {list(_PHASE2_TO_GT_NODE_TYPE.keys())}"
+        )
+
+    # Step 2: Build edge_maps with name mapping
+    edge_maps: Dict[Tuple[str, str, str], Tuple[List[int], List[int]]] = {}
+
+    for edge in edges:
+        p2_src = edge.get("source_label", "")
+        p2_dst = edge.get("target_label", "")
+        relation = edge.get("relation", "")
+        if not (p2_src and p2_dst and relation):
+            continue
+
+        gt_src = _PHASE2_TO_GT_NODE_TYPE.get(p2_src, p2_src.lower())
+        gt_dst = _PHASE2_TO_GT_NODE_TYPE.get(p2_dst, p2_dst.lower())
+        edge_key = (gt_src, relation, gt_dst)
+
+        src_id = str(edge.get("source_id", ""))
+        dst_id = str(edge.get("target_id", ""))
+        src_idx = entity_maps.get(gt_src, {}).get(src_id)
+        dst_idx = entity_maps.get(gt_dst, {}).get(dst_id)
+
+        if src_idx is None or dst_idx is None:
+            continue
+
+        if edge_key not in edge_maps:
+            edge_maps[edge_key] = ([], [])
+        edge_maps[edge_key][0].append(src_idx)
+        edge_maps[edge_key][1].append(dst_idx)
+
+    logger.info(
+        "build_pyg_hetero_data: edge types: %s",
+        {f"({k[0]},{k[1]},{k[2]})": len(v[0]) for k, v in edge_maps.items()},
+    )
+
+    # Step 3: Build HeteroData via PyGBuilder
+    hetero_data = builder.build_from_drkg(entity_maps, edge_maps)
+
+    # Step 4: Extract known drug→disease pairs
+    known_pairs: List[Tuple[str, str]] = []
+    drug_id_map = entity_maps.get("drug", {})
+    disease_id_map = entity_maps.get("disease", {})
+    drug_idx_to_id = {v: k for k, v in drug_id_map.items()}
+    disease_idx_to_id = {v: k for k, v in disease_id_map.items()}
+
+    for edge_key in edge_maps:
+        if edge_key[1] == "treats" and edge_key[0] in ("drug", "compound") \
+                and edge_key[2] in ("disease",):
+            src_indices, dst_indices = edge_maps[edge_key]
+            for si, di in zip(src_indices, dst_indices):
+                drug_id = drug_idx_to_id.get(si)
+                disease_id = disease_idx_to_id.get(di)
+                if drug_id and disease_id:
+                    pair = (drug_id, disease_id)
+                    if pair not in known_pairs:
+                        known_pairs.append(pair)
+
+    logger.info(
+        "build_pyg_hetero_data: %d known drug-treats-disease pairs",
+        len(known_pairs),
+    )
+
+    node_maps = entity_maps
+    return hetero_data, node_maps, known_pairs

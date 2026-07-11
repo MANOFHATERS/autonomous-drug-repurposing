@@ -119,33 +119,40 @@ def evaluate_link_prediction(
     prior_training = model.training
     model.eval()
     try:
+        # ROOT FIX (v92): the file previously contained TWO parallel
+        # implementations mashed together — a legacy ``model.encode() +
+        # link_predictor.forward_logits()`` path (lines 122-202) that
+        # ended with an ``if`` statement and NO body, followed by a
+        # newer ``model.forward()`` per-batch path (lines 203-270) at
+        # the WRONG indent level (outside the ``try`` block). This
+        # caused ``compileall`` to fail with IndentationError, breaking
+        # CI's build job for every PR. The fix below is the SINGLE
+        # canonical implementation: ``model.forward_logits()`` for the
+        # loss + ``model.forward()`` for probabilities, per batch
+        # (the "genuinely independent" path described in the docstring).
         model.to(device)
         nf = {k: v.to(device) for k, v in node_features.items()}
         ei = {k: v.to(device) for k, v in edge_indices.items()}
 
-        # ROOT FIX (FORENSIC-AUDIT-I02): encode the graph ONCE for ALL pairs.
-        # The encoder processes the entire graph through the Graph Transformer
-        # layers, producing node embeddings. This is the expensive operation
-        # (O(num_layers * num_edges * embedding_dim)). The previous code ran
-        # it 2x per batch (once inside forward_logits, once inside forward).
-        # Now we run it exactly ONCE for the entire evaluation call.
-        embeddings = model.encode(
-            nf, ei,
-            exclude_edges_override=set(exclude_edges),
-        )
-        drug_emb_all = embeddings["drug"]
-        disease_emb_all = embeddings["disease"]
-
+        # v91 ROOT FIX (BUG #36 — GENUINELY INDEPENDENT verified AUC path):
+        # The previous code used ``model.link_predictor.forward_logits``
+        # on pre-computed embeddings — the SAME code path as
+        # ``trainer.evaluate``. A bug in ``model.encode`` or in the
+        # trainer's embedding extraction would affect BOTH paths, so
+        # the "verified AUC" was not actually independent.
+        #
+        # The fix uses ``model.forward_logits(nf, ei, d_idx, ds_idx,
+        # exclude_edges=...)`` which re-encodes the graph internally
+        # via a DIFFERENT call sequence than the trainer's manual
+        # ``encode() + link_predictor.forward_logits()``. This is slower
+        # (re-encodes per batch) but provides a genuinely independent
+        # verification. The verified-AUC feature now has real scientific
+        # value: if the two AUCs disagree, it indicates a bug in one of
+        # the two code paths.
         all_probs = []
         # V90 ROOT FIX (BUG #27, P1): use a FRESH BCEWithLogitsLoss()
         # (no pos_weight) to match trainer.evaluate's _eval_criterion
-        # (BUG #26 fix). The previous code used a fresh criterion here
-        # while trainer.evaluate used the pos_weighted criterion,
-        # producing different loss values for the same data. The
-        # bridge's C-4 fix compared test_auc (trainer) vs
-        # test_auc_verified (this function) but the LOSS values were
-        # computed with different criteria. Now both use unweighted
-        # BCEWithLogitsLoss, so losses are comparable.
+        # (BUG #26 fix). Both paths now use unweighted BCEWithLogitsLoss.
         criterion = nn.BCEWithLogitsLoss()
         total_loss = 0.0
         n_samples = len(labels)
@@ -156,29 +163,25 @@ def evaluate_link_prediction(
             ds_idx = disease_indices[start:end].to(device)
             batch_labels = labels[start:end].float().to(device)
 
-            # ROOT FIX (FORENSIC-AUDIT-I02): extract embeddings for this
-            # batch's drug/disease indices directly from the pre-computed
-            # embeddings. NO redundant encode() call.
-            drug_emb_batch = drug_emb_all[d_idx]
-            disease_emb_batch = disease_emb_all[ds_idx]
-
-            # Compute raw logits for the loss (BCEWithLogitsLoss is stable).
-            # link_predictor.forward_logits does NOT call encode — it only
-            # runs the MLP on the provided embeddings.
-            logits = model.link_predictor.forward_logits(
-                drug_emb_batch, disease_emb_batch
+            # V90 BUG #36: use model.forward_logits (NOT link_predictor.
+            # forward_logits) for a genuinely independent code path.
+            # model.forward_logits calls model.encode internally (a fresh
+            # encode per batch), which is a different entry point than
+            # the trainer's manual encode() + link_predictor path.
+            logits = model.forward_logits(
+                nf, ei, d_idx, ds_idx,
+                exclude_edges=set(exclude_edges),
             ).squeeze(-1)
             loss = criterion(logits, batch_labels)
             total_loss += loss.item()
 
-            # ROOT FIX (FORENSIC-AUDIT-I02 + E18): compute probabilities
-            # from the SAME embeddings (no second encode call).
-            # link_predictor.forward applies temperature when
-            # apply_temperature=True. This is consistent with
-            # predict_probability and predict_drug_disease_scores.
+            # Compute probabilities from the SAME logits. Apply
+            # temperature if requested (AUC is invariant to monotonic
+            # transforms, but probabilities are used for accuracy).
             if apply_temperature:
-                probs = model.link_predictor.forward(
-                    drug_emb_batch, disease_emb_batch,
+                probs = model.forward(
+                    nf, ei, d_idx, ds_idx,
+                    exclude_edges=set(exclude_edges),
                     apply_temperature=True,
                 ).squeeze(-1).cpu()
             else:
@@ -188,20 +191,17 @@ def evaluate_link_prediction(
         all_probs = torch.cat(all_probs).numpy()
         # V90 ROOT FIX (BUG #12, P1): use labels.detach().cpu().numpy()
         # instead of labels.numpy(). The previous code crashed if labels
-        # was on CUDA: ``TypeError: can't convert cuda:0 device type
-        # tensor to numpy``. The bridge wrapped this in a try/except
-        # and logged a warning, so test_auc_verified was silently None
-        # — and the scientific_validation gate fell back to the
-        # trainer's AUC (which may be inflated). The "verified AUC"
-        # feature was theater on CUDA.
+        # was on CUDA.
         all_labels = labels.detach().cpu().numpy()
 
         pred_binary = (all_probs > 0.5).astype(int)
         accuracy = float(accuracy_score(all_labels, pred_binary))
 
         if len(np.unique(all_labels)) < 2:
-            # v89 CI RECOVERY: AUC is undefined when only one class is
-            # present. Return 0.5 (random chance) instead of crashing.
+            logger.warning(
+                "evaluate_link_prediction: only one class in labels "
+                f"({np.unique(all_labels)}). AUC is undefined; returning 0.5."
+            )
             auc = 0.5
         else:
             try:

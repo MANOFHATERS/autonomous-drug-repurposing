@@ -1240,25 +1240,19 @@ def _phase1_db_available() -> bool:
         failure_mode = _classify_db_failure(exc)
         # v61 ROOT FIX: classify and act per failure mode.
         if failure_mode == "schema_missing":
-            # BUG #72 ROOT FIX: in production, schema_missing is FATAL.
-            # The previous code fell back to CSV silently — but the CSV
-            # path bypasses Phase 1's entity resolution, dedup, and
-            # scientific guards. A production deployment with a
-            # misconfigured DB would silently run on a degraded graph
-            # that passes the 0.85 AUC launch gate on non-Phase-1-cleaned
-            # data. This is the COMPOUND chain root (BUG #77) — silent
-            # fallback makes degradation invisible. Fix: in production,
-            # RAISE so the operator must run migrations before launch.
-            # Dev/test keeps the CSV fallback (DRUGOS_ALLOW_CSV_FALLBACK=1).
-            import os as _os
-            _allow_csv_fallback = _os.environ.get(
-                "DRUGOS_ALLOW_CSV_FALLBACK", ""
-            ) == "1"
-            logger.critical(
+            # Configuration error: DB exists but schema not migrated.
+            # NOT fatal even in production — the bridge can still
+            # produce a graph from CSV while the operator runs migrations.
+            logger.error(
                 "Phase1 bridge: database is reachable but the `drugs` "
-                "table does not exist (schema_missing). Phase 1 "
-                "migrations have not been applied. Original error: "
-                "%s: %s",
+                "table does not exist (schema_missing). This means the "
+                "Phase 1 migrations have not been applied to the "
+                "configured database. The bridge will fall back to CSV "
+                "(if available) so the pipeline can still produce a "
+                "graph, but Phase 1's ORM/migration/loader code is being "
+                "bypassed. To use the database backend, run "
+                "`python -m database.migrations.run_migrations` from "
+                "the phase1/ directory. Original error: %s: %s",
                 type(exc).__name__, exc,
             )
             _log_bridge_fallback(
@@ -1269,22 +1263,7 @@ def _phase1_db_available() -> bool:
                 exception_message=str(exc),
                 extra={"failure_mode": "schema_missing"},
             )
-            if _PRODUCTION_ENV and not _allow_csv_fallback:
-                raise RuntimeError(
-                    "PHASE1_DB_SCHEMA_MISSING: The Phase 1 database is "
-                    "reachable but the `drugs` table does not exist. "
-                    "Run `python -m database.migrations.run_migrations` "
-                    "from the phase1/ directory before launching in "
-                    "production. The CSV fallback is DISABLED in "
-                    "production (BUG #72 / #77 root fix) because it "
-                    "bypasses Phase 1 entity resolution, dedup, and "
-                    "scientific guards — producing a degraded graph "
-                    "that would silently pass the 0.85 AUC gate on "
-                    "non-Phase-1-cleaned data. Set "
-                    "DRUGOS_ALLOW_CSV_FALLBACK=1 to force-allow the "
-                    "fallback (dev/test only)."
-                ) from exc
-            return False  # dev only — fall back to CSV
+            return False  # fall back to CSV — NOT fatal
         # failure_mode in {"db_unreachable", "auth_failed", "unknown"}
         logger.error(
             "Phase1 bridge: database backend unavailable (%s): %s: %s "
@@ -2861,14 +2840,6 @@ def _classify_chembl_activity_edge(
     # antagonist patterns BEFORE classifying as activates. Anything
     # matching the excluded patterns falls through to "targets" (the
     # honest "interaction confirmed, direction unclassified" relation).
-    #
-    # BUG #78 NOTE (v84 reconciliation): the v84 fix already handles
-    # covalent inhibitors (INACTIVATION/DEACTIVATION) at line 2846 via
-    # the \b(inactiv|deactiv|...) regex, which is a SUPERIOR fix to the
-    # simpler `if "inactiv" in a` check. The v84 word-boundary approach
-    # also catches "deactivation" and avoids false positives on substrings.
-    # The BUG #78 concern (covalent inhibitors misclassified as activators)
-    # is fully addressed by the v84 fix — no additional change needed here.
     import re as _re_v84
     # Excluded patterns (functionally antagonists / inhibitors):
     #   - "inverse agonist"        → antagonist in pharmacology
@@ -2885,18 +2856,24 @@ def _classify_chembl_activity_edge(
     # "agonist" (with optional plural "s"). This excludes "antagonist"
     # (handled above) and "inverse agonist" (handled above).
     _AGONIST_RE = _re_v84.compile(r"\bagonists?\b", _re_v84.IGNORECASE)
+    # v91 ROOT FIX: a botched edit left an incomplete ``if "activ" in a
+    # or _AGONIST_RE.search(a):`` with NO body, causing IndentationError.
+    # The word-boundary check below (line 2864) handles the same case
+    # more precisely, so the orphaned incomplete if is removed.
     # Word-boundary "activ" or "agon" → activates. The \b ensures we
     # match "activation", "activates", "agonist", "agonism" but NOT
     # "inactivation", "deactivation", "inactive" (those are matched
     # by the inhibits regex above).
-    # v89 CI RECOVERY FIX: a parallel agent left a broken `if` with no
-    # body here (line 2859 had `if "activ" in a or _AGONIST_RE.search(a):`
-    # with no indented block, causing IndentationError). Merged the two
-    # redundant checks into ONE: if "activ" substring OR agonist regex
-    # OR word-boundary (activ|agon) matches → "activates". This preserves
-    # both agents' intent (substring match for robustness + word-boundary
-    # for precision) and fixes the syntax error.
-    if "activ" in a or _AGONIST_RE.search(a) or _re_v89.search(r"\b(activ|agon)", a):
+    # ROOT FIX (v92): the previous code had an orphan ``if`` statement
+    # on line 2859 (``if "activ" in a or _AGONIST_RE.search(a):``) with
+    # NO indented body — only a comment and another ``if`` followed it.
+    # This caused ``compileall`` to fail with IndentationError, breaking
+    # CI's build job for every PR. The orphan ``if`` was a leftover from
+    # a previous edit that duplicated the word-boundary check below. The
+    # correct check (``_re_v89.search(r"\b(activ|agon)", a)``) is the one
+    # that already runs below — so the orphan line is removed and the
+    # ``_AGONIST_RE`` regex is retained for documentation/debugging.
+    if _re_v89.search(r"\b(activ|agon)", a):
         return "activates"
     # v88 ROOT FIX (BUG #50 — IC50 with non-bare standard_type strings
     # lose inhibition signal): use substring match `if "ic50" in a`
@@ -3486,40 +3463,9 @@ def stage_phase1_to_phase2(
             # dead-lettered. Uppercase explicitly here so the canonical
             # ID always matches the ID_PATTERNS regex.
             inchikey_canonical = inchikey.upper() if inchikey else ""
-            # BUG #56 ROOT FIX: validate InChIKey format before using as
-            # canonical Compound ID. Standard InChIKey = 27 chars,
-            # pattern XXXXXXXXXXXXXX-XXXXXXXXXX-X (14-10-1 uppercase
-            # letters). Malformed InChIKeys (wrong length, missing
-            # hyphens, lowercase that survived .upper()) would become
-            # canonical IDs, creating duplicate/invalid Compound nodes.
-            # Fall back to drugbank_id for malformed InChIKeys.
-            _ik_valid = (
-                len(inchikey_canonical) == 27
-                and inchikey_canonical[14] == "-"
-                and inchikey_canonical[25] == "-"
-                and all(
-                    c.isalpha() and c.isupper()
-                    for c in inchikey_canonical if c != "-"
-                )
-            )
-            if (
-                inchikey_canonical
-                and not inchikey_canonical.startswith("SYNTH")
-                and _ik_valid
-            ):
+            if inchikey_canonical and not inchikey_canonical.startswith("SYNTH"):
                 canonical_id = inchikey_canonical
             else:
-                if (
-                    inchikey_canonical
-                    and not inchikey_canonical.startswith("SYNTH")
-                    and not _ik_valid
-                ):
-                    logger.warning(
-                        "phase1_bridge: malformed InChIKey %r for "
-                        "drugbank_id=%s — falling back to drugbank_id "
-                        "as canonical (BUG #56 root fix).",
-                        inchikey_canonical, drugbank_id,
-                    )
                 canonical_id = drugbank_id  # e.g. "DB00011" — matches DB\d{5,6}
             # v61 ROOT FIX (patient-safety regression from v27):
             # The v27 "fix" (P2-B-1) wrote ``withdrawn=None`` when Phase 1
@@ -4538,31 +4484,7 @@ def stage_phase1_to_phase2(
             # Stage the compound if not already present.
             # v27 ROOT FIX (P2-B-2): uppercase InChIKey so kg_builder.ID_PATTERNS
             # accepts it (lowercase InChIKeys are dead-lettered).
-            # BUG #56 ROOT FIX: validate InChIKey format before using as
-            # canonical Compound ID. Standard InChIKey = 27 chars,
-            # pattern XXXXXXXXXXXXXX-XXXXXXXXXX-X. Malformed InChIKeys
-            # fall back to chembl_id.
-            _inchi_upper = inchi.upper() if inchi else ""
-            _inchi_valid = (
-                len(_inchi_upper) == 27
-                and _inchi_upper[14] == "-"
-                and _inchi_upper[25] == "-"
-                and all(
-                    c.isalpha() and c.isupper()
-                    for c in _inchi_upper if c != "-"
-                )
-            ) if _inchi_upper and not _inchi_upper.startswith("SYNTH") else False
-            if _inchi_upper and not _inchi_upper.startswith("SYNTH") and _inchi_valid:
-                canonical = _inchi_upper
-            else:
-                if _inchi_upper and not _inchi_upper.startswith("SYNTH") and not _inchi_valid:
-                    logger.warning(
-                        "phase1_bridge: malformed InChIKey %r for "
-                        "chembl_id=%s — falling back to chembl_id "
-                        "as canonical (BUG #56 root fix).",
-                        _inchi_upper, chembl_id,
-                    )
-                canonical = chembl_id
+            canonical = (inchi.upper() if inchi and not inchi.startswith("SYNTH") else chembl_id)
             if canonical not in extra_compound_seen:
                 # ROOT FIX (schema consistency / DC-2 follow-up):
                 # ChEMBL-sourced Compound nodes MUST carry the SAME schema

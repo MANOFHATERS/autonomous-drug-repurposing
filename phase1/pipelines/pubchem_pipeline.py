@@ -733,7 +733,7 @@ def _extract_formal_charge(smiles: Optional[str]) -> Optional[int]:
             mol = Chem.MolFromSmiles(smiles)
             if mol is not None:
                 return int(Chem.GetFormalCharge(mol))
-        except Exception:  # noqa: BLE001 — RDKit errors are opaque
+        except (ImportError, ValueError, RuntimeError):  # noqa: BLE001 — RDKit errors are opaque  # v85 FORENSIC ROOT FIX (BUG #51)
             pass
     # Heuristic fallback — count +/- inside atom brackets.
     # ``[NH4+]`` → +1; ``[Cl-]`` → -1; ``[Ca+2]`` → +2; ``[O-2]`` → -2.
@@ -1017,7 +1017,7 @@ class PubChemPipeline(BasePipeline):
             enrichment_path = downloaded.get("enrichment")
             if enrichment_path and enrichment_path.exists():
                 return enrichment_path
-        except Exception as exc:
+        except (OSError, ValueError, ConnectionError, TimeoutError) as exc:  # v85 FORENSIC ROOT FIX (BUG #51)
             logger.warning(
                 "[%s] v50 downloader failed (%s) — falling back to v49 path",
                 self.source_name, exc,
@@ -1507,7 +1507,7 @@ class PubChemPipeline(BasePipeline):
                 # Compute the SHA-256 of the file for the dead-letter entry.
                 try:
                     batch_sha = self._compute_sha256(batch_file)
-                except Exception:  # noqa: BLE001
+                except (OSError, ValueError):  # noqa: BLE001  # v85 FORENSIC ROOT FIX (BUG #51)
                     batch_sha = None
                 # Best-effort: dead-letter any InChIKey whose batch_idx
                 # matches this file's index.  The mapping is approximate
@@ -1701,7 +1701,7 @@ class PubChemPipeline(BasePipeline):
                 continue
             try:
                 cas_number = self._fetch_cas_for_cid(int(cid))
-            except Exception as exc:  # noqa: BLE001 — enrichment must not abort
+            except (OSError, ValueError, ConnectionError, TimeoutError) as exc:  # noqa: BLE001 — enrichment must not abort  # v85 FORENSIC ROOT FIX (BUG #51)
                 logger.warning(
                     "[%s] enrich_cas: CAS lookup failed for CID=%s: %s",
                     self.source_name,
@@ -1868,7 +1868,7 @@ class PubChemPipeline(BasePipeline):
                             _mw_decimals.append(None)
                         else:
                             _mw_decimals.append(_Decimal_v39(str(_v)))
-                    except Exception:
+                    except (ValueError, TypeError, ArithmeticError):  # v85 FORENSIC ROOT FIX (BUG #51)
                         _mw_decimals.append(None)
                 load_dict["molecular_weight"] = _mw_decimals
             load_df = pd.DataFrame(load_dict)
@@ -1913,8 +1913,7 @@ class PubChemPipeline(BasePipeline):
                     self.source_name,
                     drugs_updated,
                 )
-            except Exception as exc:
-                # CODE-23: full-context logging on loader failure.
+            except (OSError, RuntimeError, ValueError) as exc:  # v85 FORENSIC ROOT FIX (BUG #51)
                 logger.error(
                     "[%s] bulk_update_drugs_from_pubchem failed: %s. "
                     "DataFrame shape=%s, first 5 inchikeys=%s",
@@ -1951,7 +1950,7 @@ class PubChemPipeline(BasePipeline):
                 )
                 if _PUBCHEM_RECORDS_LOADED is not None:
                     _PUBCHEM_RECORDS_LOADED.set(props_result.inserted)
-            except Exception as exc:
+            except (OSError, RuntimeError, ValueError) as exc:  # v85 FORENSIC ROOT FIX (BUG #51)
                 logger.error(
                     "[%s] bulk_upsert_pubchem_compound_properties failed: %s. "
                     "DataFrame shape=%s, first 5 inchikeys=%s",
@@ -1990,7 +1989,7 @@ class PubChemPipeline(BasePipeline):
                 _exc_info = _sys.exc_info()
                 try:
                     _session_cm.__exit__(*_exc_info)
-                except Exception as _cleanup_exc:  # noqa: BLE001
+                except (OSError, RuntimeError, ValueError) as _cleanup_exc:  # noqa: BLE001  # v85 FORENSIC ROOT FIX (BUG #51)
                     # v39 ROOT FIX (P1 #26): the previous code silently
                     # swallowed ALL errors from __exit__ — including
                     # rollback failures that should be surfaced. The
@@ -2040,7 +2039,7 @@ class PubChemPipeline(BasePipeline):
         """
         try:
             self._write_dead_letters_file()
-        except Exception as exc:  # noqa: BLE001 — don't crash teardown
+        except (OSError, RuntimeError, ValueError) as exc:  # noqa: BLE001 — don't crash teardown  # v85 FORENSIC ROOT FIX (BUG #51)
             logger.warning(
                 "[%s] Could not write dead-letter file: %s",
                 self.source_name,
@@ -2211,7 +2210,7 @@ class PubChemPipeline(BasePipeline):
             for future in as_completed(futures):
                 try:
                     future.result()
-                except Exception as exc:  # noqa: BLE001
+                except (OSError, RuntimeError, ValueError) as exc:  # noqa: BLE001  # v85 FORENSIC ROOT FIX (BUG #51)
                     logger.error(
                         "[%s] Batch worker failed: %s",
                         self.source_name,
@@ -2946,7 +2945,7 @@ class PubChemPipeline(BasePipeline):
                         transformations_applied.append(
                             "computed_canonical_smiles_from_isomeric_via_rdkit"
                         )
-                except Exception:
+                except (ImportError, ValueError, RuntimeError):  # v85 FORENSIC ROOT FIX (BUG #51)
                     # RDKit not available or parse failed — leave None.
                     pass
 

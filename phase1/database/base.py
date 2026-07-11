@@ -44,7 +44,7 @@ import re
 from pathlib import Path
 from typing import Optional
 
-from sqlalchemy import Boolean, DateTime, Integer, MetaData, func
+from sqlalchemy import Boolean, DateTime, Integer, MetaData, func, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 # ---------------------------------------------------------------------------
@@ -184,8 +184,15 @@ class SoftDeleteMixin:
     """
 
     is_deleted: Mapped[bool] = mapped_column(
+        # v90 ROOT FIX (BUG #23): `server_default=text("FALSE")` instead of
+        #   the non-portable `server_default="0"`. The SoftDeleteMixin is
+        #   applied to Drug + Protein (the two primary entity tables); any
+        #   column-type drift here propagates to BOTH tables. Aligning with
+        #   migration 001 line 540 (`is_deleted BOOLEAN NOT NULL DEFAULT
+        #   FALSE`) byte-for-byte so create_all() and migration 001 emit
+        #   identical DDL for `is_deleted` on every dialect.
         Boolean,
-        server_default="0",
+        server_default=text("FALSE"),
         nullable=False,
     )
     deleted_at: Mapped[Optional[datetime.datetime]] = mapped_column(

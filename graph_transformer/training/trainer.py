@@ -938,6 +938,33 @@ class GraphTransformerTrainer:
         # if best_state_dict is None, saving disk space and avoiding
         # confusion.
         from .. import __version__ as _gt_version, __schema_version__ as _gt_schema
+        # ROOT FIX (v92): the previous code had three syntax errors that
+        # broke ``compileall`` and CI's build job for every PR:
+        #   1. Line 957 ended with ``}, path)`` — a leftover from an
+        #      inline ``torch.save({...}, path)`` that was refactored to
+        #      a named ``checkpoint`` dict but the ``, path)`` was never
+        #      removed. This is invalid Python (tuple expression with no
+        #      opening paren).
+        #   2. Line 948 was a DUPLICATE ``best_epoch`` key (the same key
+        #      was already on line 946). flake8 F601 — silently keeps
+        #      only the last value, which happened to be identical, but
+        #      it's a code smell indicating a botched merge.
+        #   3. Line 959 had a stray ``}`` — another leftover from the
+        #      botched refactor.
+        # The fix below is the SINGLE canonical checkpoint dict. The
+        # actual ``torch.save(checkpoint, path)`` call already exists
+        # below (line 963 in the original).
+        # v91 ROOT FIX: previous botched merge left duplicate ``best_epoch``
+        # keys, a stray ``}, path)`` that made the dict literal a syntax
+        # error, and a stray ``}`` after the log line. The whole
+        # ``save_checkpoint`` was UNUSABLE (SyntaxError at import time),
+        # which meant the entire ``graph_transformer`` package failed to
+        # import, which meant ``run_real_pipeline.py`` could not even
+        # start. The fix reconstructs the dict literal cleanly: single
+        # ``best_epoch`` key (V90 BUG #21/#33: actual best, not last),
+        # ``best_state_dict`` only included when not None (V90 BUG #41),
+        # full graph schema for safe reload (V30 8.14), and a single
+        # ``torch.save`` + log call. No duplicate keys, no stray tokens.
         checkpoint = {
             "model_state_dict": self.model.state_dict(),
             "optimizer_state_dict": self.optimizer.state_dict(),
