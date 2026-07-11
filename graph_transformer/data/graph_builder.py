@@ -13,6 +13,7 @@ FIX vs original codebase (B8):
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 from typing import Dict, List, Optional, Tuple
 
@@ -26,6 +27,39 @@ from . import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _deterministic_seed(*parts: str) -> int:
+    """Deterministic 31-bit seed from string parts using SHA-256.
+
+    ROOT FIX (v89 P0): Python's built-in ``hash()`` is randomized per
+    process via ``PYTHONHASHSEED`` for security (defense against hash-
+    collision DoS attacks). This means ``hash("aspirin")`` returns a
+    DIFFERENT integer in every Python process. The previous code used
+    ``hash(drug_name) + hash(disease_name)`` to seed the multi-hop path
+    RNG, which made:
+
+      1. Graph topology NON-REPRODUCIBLE across processes (different
+         drug-protein-pathway-disease paths injected each run).
+      2. Train/test splits NON-REPRODUCIBLE (the demo graph differs
+         between the training run and the evaluation run).
+      3. CI flakes (the same commit could pass CI once and fail once,
+         because the random graph topology differed).
+      4. Bug reproduction impossible (a user reports "GT AUC = 0.27"
+         but the developer's run produces a different graph and gets
+         AUC = 0.85).
+
+    The fix: SHA-256 hash the concatenated parts and take the low 31
+    bits as the seed. SHA-256 is deterministic across processes,
+    platforms, and Python versions. The 31-bit mask keeps the value
+    in the valid range for ``np.random.default_rng`` (which accepts
+    any non-negative int up to 2**63-1, but 31 bits is plenty of
+    entropy for a per-pair seed and matches the previous ``% (2**31)``
+    behavior).
+    """
+    h = hashlib.sha256("|".join(str(p) for p in parts).encode("utf-8"))
+    # Take first 4 bytes (32 bits), mask to 31 bits (non-negative).
+    return int.from_bytes(h.digest()[:4], "big") & 0x7FFFFFFF
 
 
 class BiomedicalGraphBuilder:
@@ -832,50 +866,33 @@ class BiomedicalGraphBuilder:
         for drug_name, disease_name in injected_pairs:
             builder.add_edge("drug", "treats", "disease", drug_name, disease_name)
             known_pairs.append((drug_name, disease_name))
-            # V30: NO multi-hop injection. The model learns from natural
-            # topology (random drug→protein, protein→pathway, pathway→disease
-            # edges created above). This is the HONEST signal.
-
-            # V31 ROOT FIX (P0-1 / KP Recovery): inject a multi-hop
-            # biological plausibility path for KP drugs WITHOUT adding
-            # the "treats" label edge (that was already added above).
+            # v89 P0 ROOT FIX (Compound #3 / AUC fraud chain): REMOVED the
+            # 3-hop path injection (drug→inhibits→protein→part_of→pathway→
+            # disrupted_in→disease) for KNOWN POSITIVES.
             #
-            # SCIENTIFIC RATIONALE: in a REAL biomedical knowledge graph
-            # (Phase 1-2, built from DrugBank + STRING + DisGeNET),
-            # known-positive drugs like aspirin have REAL biological
-            # paths: aspirin → COX-1 → inflammatory pathway →
-            # inflammation. The "treats" edge (aspirin → inflammation)
-            # is the LABEL; the multi-hop path is the BIOLOGICAL EVIDENCE.
+            # The previous V31 "fix" REINTRODUCED the exact label leakage
+            # that V30 had removed. The audit (v89) confirmed:
+            #   - For every KP, a GUARANTEED drug→protein→pathway→disease
+            #     path was injected.
+            #   - LABEL_LEAKING_EDGES only strips the direct "treats" edge
+            #     during training, NOT the injected 3-hop path.
+            #   - The GT model trivially learned "3-hop path exists →
+            #     positive" → val AUC = 1.0 (perfect, fraudulent).
+            #   - The scientific-validation gate (GT AUC > 0.85) passed
+            #     trivially because the leakage inflated the AUC.
             #
-            # The V30 fix removed ALL multi-hop injection (Compound #3)
-            # because the W-02 code injected paths for RANDOM pairs
-            # (noise). But removing paths for KPs too left the held-out
-            # KP drugs with NO graph signal → the model couldn't score
-            # them → KP recovery = 0%.
+            # The model MUST learn from NATURAL TOPOLOGY only — the random
+            # drug→protein, protein→pathway, pathway→disease edges created
+            # above. This is the HONEST signal. Demo AUC will be lower
+            # (the model has no leakage crutch), but this is the TRUE
+            # measure of the model's generalization ability.
             #
-            # The V31 fix injects REAL biological plausibility paths
-            # (drug → protein → pathway → disease) for KPs. This is NOT
-            # label leakage — the "treats" edge is still the prediction
-            # target. The multi-hop path is the TOPOLOGICAL EVIDENCE the
-            # model uses to predict the treatment. The model learns from
-            # training positives that "path exists → high score", then
-            # applies this to KP drugs (which have paths but whose
-            # "treats" edges are held out from training).
-            #
-            # This is EXACTLY how the system works in production: the
-            # graph contains topology (paths from DrugBank/STRING), and
-            # the model predicts which drug-disease pairs are treatments
-            # based on the topology.
-            if len(protein_names) > 0 and len(pathway_names) > 0:
-                kp_path_seed = (hash(drug_name) + hash(disease_name) + 7) % (2**31)
-                kp_path_rng = np.random.default_rng(kp_path_seed)
-                kp_protein = str(kp_path_rng.choice(protein_names))
-                kp_pathway = str(kp_path_rng.choice(pathway_names))
-                builder.add_edge("drug", "inhibits", "protein", drug_name, kp_protein)
-                builder.add_edge("protein", "part_of", "pathway", kp_protein, kp_pathway)
-                builder.add_edge(
-                    "pathway", "disrupted_in", "disease", kp_pathway, disease_name
-                )
+            # In production, the real Phase 1→2 pipeline injects REAL
+            # topology from DrugBank + STRING + DisGeNET (not synthetic
+            # 3-hop paths for KPs). The KP drugs have REAL biological
+            # paths in the production KG because they are REAL drugs with
+            # REAL mechanisms — not because the demo builder synthesizes
+            # them.
 
         # ------------------------------------------------------------------
         # V31 ROOT FIX (P0-1 / Compound #3): inject CURATED TRAINING
@@ -928,58 +945,39 @@ class BiomedicalGraphBuilder:
             builder.add_edge("drug", "treats", "disease", drug_name, disease_name)
             training_positives_added += 1
 
-            # V31 ROOT FIX (P0-1 continued): inject a GUARANTEED multi-hop
-            # biological plausibility path (drug -> protein -> pathway ->
-            # disease) for EACH training positive. This simulates what a
-            # REAL biomedical knowledge graph (Phase 1-2, built from
-            # DrugBank + STRING + DisGeNET) would contain: drugs that
-            # treat a disease share protein targets and pathway
-            # connectivity with that disease.
+            # v89 P0 ROOT FIX (Compound #3 / AUC fraud chain): REMOVED the
+            # 3-hop path injection for TRAINING POSITIVES too.
             #
-            # CRITICAL DIFFERENCE from the V30 W-02 fix that was REMOVED:
-            #   - W-02 (REMOVED) injected paths for RANDOM pairs and KPs.
-            #     This trained the model on noise (Compound #3 fix).
-            #   - V31 injects paths ONLY for REAL DrugBank/RepoDB training
-            #     positives. This simulates real biomedical topology.
+            # The V31 "fix" injected a GUARANTEED drug→protein→pathway→
+            # disease path for EACH training positive. This is the SAME
+            # label leakage as the KP injection above: the model learned
+            # "3-hop path exists → positive" trivially, then generalized
+            # this rule to the held-out KPs (which also had injected
+            # paths, before the v89 fix above removed them).
             #
-            # The KPs (held out by C-3 fix) do NOT get path injection,
-            # so the recovery test remains a TRUE generalization measure.
-            # The model must learn the GENERAL pattern "drugs that share
-            # pathway connectivity with a disease tend to treat it" from
-            # the training positives, then apply it to the held-out KPs.
+            # The audit (v89) confirmed the compound bug chain:
+            #   graph_builder.py injects 3-hop path for every training
+            #   positive → LABEL_LEAKING_EDGES only strips direct treats
+            #   edge, not the path → GT model learns "3-hop path exists
+            #   → positive" → val AUC = 1.0 → scientific-validation gate
+            #   passes trivially → ship garbage to pharma partners.
             #
-            # If the drug already has drug->protein edges from the random
-            # generator above, we ADD one more (to a NEW protein) that
-            # connects to a pathway that connects to the target disease.
-            # This guarantees at least one learnable multi-hop path per
-            # training positive.
-            if len(protein_names) > 0 and len(pathway_names) > 0:
-                # Pick a protein and pathway deterministically (seeded by
-                # the drug+disease names) so the path is reproducible.
-                path_seed = (hash(drug_name) + hash(disease_name)) % (2**31)
-                path_rng = np.random.default_rng(path_seed)
-                protein = str(path_rng.choice(protein_names))
-                pathway = str(path_rng.choice(pathway_names))
-                # drug -> inhibits -> protein
-                builder.add_edge("drug", "inhibits", "protein", drug_name, protein)
-                # protein -> part_of -> pathway
-                builder.add_edge("protein", "part_of", "pathway", protein, pathway)
-                # pathway -> disrupted_in -> disease
-                builder.add_edge(
-                    "pathway", "disrupted_in", "disease", pathway, disease_name
-                )
+            # The training positives are STILL added as "treats" edges
+            # (the line above this comment block), so the GT model has
+            # real positive signal. But NO synthetic 3-hop path is
+            # injected. The model must learn from NATURAL topology.
 
         if training_positives_added > 0:
             logger.info(
-                f"V31 ROOT FIX (P0-1): injected {training_positives_added} "
-                f"CURATED TRAINING POSITIVES (real DrugBank/RepoDB drug-"
-                f"disease pairs, NON-KP drugs) as 'treats' edges, EACH with "
-                f"a guaranteed drug->protein->pathway->disease multi-hop "
-                f"biological plausibility path (simulating real biomedical "
-                f"KG topology). The GT model now has REAL learnable signal. "
-                f"KPs remain held out (C-3 fix) for the recovery test — "
-                f"they do NOT get path injection, so the recovery test "
-                f"remains a TRUE generalization measure."
+                f"v89 P0 ROOT FIX (Compound #3): injected "
+                f"{training_positives_added} CURATED TRAINING POSITIVES "
+                f"(real DrugBank/RepoDB drug-disease pairs, NON-KP drugs) "
+                f"as 'treats' edges ONLY. NO synthetic 3-hop path "
+                f"injection (the V31 injection was label leakage — "
+                f"LABEL_LEAKING_EDGES only strips the direct treats edge, "
+                f"not the injected path, so the model learned '3-hop path "
+                f"exists → positive' trivially and val AUC = 1.0). The "
+                f"model now learns from NATURAL topology only."
             )
 
         # V30 ROOT FIX (3.10): REMOVED the random "known positives"

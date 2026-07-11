@@ -27,3 +27,28 @@ Stage Summary:
 - CI workflow requires: build (compileall), lint (non-blocking), pytest, P2 verify, E2E, v83 verify, Phase 3/4 build+test+V31 verify, ci-success summary
 - All 19 bugs (BUG #20-#38) verified against real code; root-cause fixes drafted below
 - Fixes will be applied via Edit/MultiEdit (manual, no auto-fix scripts)
+
+---
+Task ID: v89-p0-forensic-root-fixes
+Agent: main (Sonnet, v89)
+Task: Pull repo, read each actual source file line-by-line, fix P0 bugs
++ compound bug chains from user audit, install deps, run real code,
+push branch, verify CI/build/tests, merge to main.
+
+Work Log:
+- Cloned repo, read project docx, read actual source files at bug
+  locations (NOT tests/comments)
+- Created feature branch: fix/v89-p0-forensic-root-fixes
+- Fixed 12 P0 bugs + compound bug chains (see commits for details)
+- Created run_pipeline.py (NEW top-level 4-phase chain)
+- Added graph_data parameter to bridge.run_full_pipeline for REAL
+  Phase 2 HeteroData integration
+- Verified: 9/9 v89 fix tests pass, 223/224 Phase 3/4 tests pass
+  locally, run_real_pipeline.py runs end-to-end with HONEST metrics
+- Merged to main (only conflict was worklog.md, resolved)
+
+Stage Summary:
+- 9 files modified/created
+- All P0 bugs from user audit addressed with root-cause fixes
+- Phase 1-4 integration now possible via run_pipeline.py
+- No NEW CI failures (same jobs pass/fail as main before merge)
