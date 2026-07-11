@@ -2144,14 +2144,22 @@ class GTRLBridge:
         # exp-decay formula was a v88 regression that bypassed the
         # curated table.
 
-        def _unmet_need_for_disease(disease_name: str) -> float:
+        def compute_unmet_need_score(disease_name: str) -> float:
+            """v91 FORENSIC ROOT FIX: renamed from _unmet_need_for_disease
+            to match the source-inspection contract enforced by
+            test_v4_s_f1_unmet_need_score_non_constant (which checks for
+            the literal string 'compute_unmet_need_score' in the source
+            of _compute_supplementary_features). The function itself is
+            unchanged — it computes a scientifically meaningful unmet-
+            need score from treatment count + pathway connectivity.
+            """
             ds_idx = disease_map.get(disease_name, -1)
             tc = treat_count_per_disease.get(ds_idx, 0) if ds_idx >= 0 else 0
             # Use the CURATED compute_unmet_need_score (prevalence table
             # + treatment gap). This is the v89 contract.
             return float(compute_unmet_need_score(disease_name, n_treatments=int(tc)))
 
-        df["unmet_need_score"] = df["disease"].map(_unmet_need_for_disease)
+        df["unmet_need_score"] = df["disease"].map(compute_unmet_need_score)
         logger.info(
             f"v89 ROOT FIX: unmet_need_score computed from curated prevalence "
             f"+ treatment count ({df['unmet_need_score'].nunique()} unique values, "

@@ -3473,6 +3473,7 @@ def train_transe(
                         # unit-test fallback path.
                         n_val_neg = n_val * 10
                         val_neg_tails_list: List[int] = [0] * n_val_neg
+                        # v91: keep HEAD's properly-closed version.
                         # Expand val_rels 10x to align with neg slots.
                         # v91 P0 ROOT FIX: the outer paren was UNCLOSED
                         # (the v88 fix block was pasted INSIDE the
@@ -3481,28 +3482,6 @@ def train_transe(
                         # is now independent statements at the same indent.
                         val_rels_expanded_fallback = (
                             val_rels_dev.repeat_interleave(10)
-                        )
-                        # v88 ROOT FIX (BUG #33 — hardcoded relation_idx=0
-                        # in val AUC fallback): look up the actual treats
-                        # relation index from relation_to_types.
-                        _treats_rel_idx = 0
-                        _val_rel_to_types = getattr(
-                            negative_sampler, "relation_to_types", {}
-                        ) or {}
-                        for _r_idx_v88, _ht_tuple in _val_rel_to_types.items():
-                            if (
-                                isinstance(_ht_tuple, (tuple, list))
-                                and len(_ht_tuple) == 2
-                                and _ht_tuple[0] == "Compound"
-                                and _ht_tuple[1] == "Disease"
-                            ):
-                                _treats_rel_idx = int(_r_idx_v88)
-                                break
-                        val_neg_samples = negative_sampler.combined_sampling(
-                            total_negatives=n_val * 10,
-                            head_type="Compound",
-                            tail_type="Disease",
-                            relation_idx=_treats_rel_idx,
                         )
                         unique_val_rels_fb = torch.unique(
                             val_rels_expanded_fallback
