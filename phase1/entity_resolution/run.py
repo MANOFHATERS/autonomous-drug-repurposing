@@ -408,18 +408,30 @@ def run_entity_resolution() -> Dict[str, Any]:
         # drop_duplicates on chembl_id, keeping the first occurrence.
         engine = get_engine()
         with engine.begin() as conn:
-            # V90 CI fix: deduplicate on chembl_id (and other unique keys)
-            _dedup_cols = [c for c in ["chembl_id", "drugbank_id", "pubchem_cid"]
-                           if c in save_df.columns]
-            if _dedup_cols:
+            # V90 CI fix: deduplicate on chembl_id (the UNIQUE-constrained
+            # column) BEFORE inserting. The previous fix deduplicated on
+            # the COMBINATION of (chembl_id, drugbank_id, pubchem_cid),
+            # but the UNIQUE constraint is on chembl_id ALONE — so two
+            # rows with the same chembl_id but different drugbank_id
+            # still caused a UNIQUE violation. The fix: deduplicate on
+            # chembl_id only, keeping the first occurrence. Rows with
+            # NULL/empty chembl_id are NOT deduplicated (SQLite allows
+            # multiple NULLs in a UNIQUE column).
+            if "chembl_id" in save_df.columns:
                 n_before = len(save_df)
-                save_df = save_df.drop_duplicates(subset=_dedup_cols, keep="first")
+                # Only deduplicate rows where chembl_id is non-null &
+                # non-empty. Keep first occurrence.
+                has_chembl = save_df["chembl_id"].notna() & (save_df["chembl_id"].astype(str).str.strip() != "")
+                chembl_rows = save_df[has_chembl].drop_duplicates(subset=["chembl_id"], keep="first")
+                non_chembl_rows = save_df[~has_chembl]
+                save_df = pd.concat([chembl_rows, non_chembl_rows], ignore_index=True)
                 n_after = len(save_df)
                 if n_before != n_after:
                     logger.warning(
                         "V90 CI fix: deduplicated entity_mapping staging "
-                        "data on %s: %d -> %d rows (removed %d duplicates)",
-                        _dedup_cols, n_before, n_after, n_before - n_after,
+                        "data on chembl_id: %d -> %d rows (removed %d "
+                        "duplicates with the same chembl_id)",
+                        n_before, n_after, n_before - n_after,
                     )
             save_df.to_sql(
                 "_tmp_entity_mapping_staging",
