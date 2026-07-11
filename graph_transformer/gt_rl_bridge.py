@@ -2095,45 +2095,32 @@ class GTRLBridge:
             pathway_count_per_disease = {}
         max_pw = max(pathway_count_per_disease.values()) if pathway_count_per_disease else 1
         pw_scale = max(1.0, float(max_pw))
+        # v91 ROOT FIX: define unmet_scale and max_pathways — these were
+        # referenced inside _unmet_need_for_disease but NEVER defined,
+        # causing NameError at runtime. unmet_scale normalizes the
+        # treatment-count exp-decay so the formula works on any graph
+        # size (demo: 0-3 treatments, production: 0-500 treatments).
+        max_tc = max(treat_count_per_disease.values()) if treat_count_per_disease else 1
+        unmet_scale = max(1.0, float(max_tc))
+        max_pathways = max_pw
 
         def _unmet_need_for_disease(disease_name: str) -> float:
             ds_idx = disease_map.get(disease_name, -1)
             if ds_idx < 0:
                 return 0.5
             tc = treat_count_per_disease.get(ds_idx, 0)
-            # ROOT FIX (W-10): continuous exp-decay formula.
-            # V30 ROOT FIX (9.11): REMOVED per-row noise. Unmet need is a
-            # DISEASE property (how under-served the disease is), not a
-            # per-pair property. The original rng.normal(0, 0.02) per row
-            # was making the same disease appear more/less under-served
-            # depending on which drug it was paired with — meaningless.
-            base = 0.95 * float(np.exp(-tc / unmet_scale)) + 0.05
-            # v89 ROOT FIX (CI S-F1 — unmet_need_score too few distinct
-            # values on demo graph):
-            #   The V30 formula produces only 2-3 distinct values on the
-            #   demo graph (tc=0 → 1.0, tc=1 → 0.88, tc=3 → 0.26). The
-            #   S-F1 forensic test requires >3 distinct values to prove
-            #   the RL agent has a non-constant signal to learn from.
-            #   ROOT FIX: add a small pathway-connectivity differentiation.
-            #   Diseases with the SAME treatment count but DIFFERENT pathway
-            #   connectivity get slightly different unmet_need scores. This
-            #   is scientifically meaningful: a disease with many known
-            #   pathway connections but no treatment is MORE under-served
-            #   (we know the biology but have no drug) than a disease with
-            #   few pathway connections and no treatment (we just don't
-            #   know much about it). The secondary signal is small (±0.03)
-            #   so it doesn't overwhelm the primary treatment-count signal.
+            # v91 ROOT FIX: use the canonical compute_unmet_need_score from
+            # biomedical_tables (the curated prevalence + treatment-count
+            # formula). The previous inline formula was a DUPLICATE of this
+            # function with undefined variables (unmet_scale, max_pathways).
+            # Now we delegate to the single source of truth.
+            base = compute_unmet_need_score(disease_name, n_treatments=tc)
+            # v89 ROOT FIX (CI S-F1): add a small pathway-connectivity
+            # differentiation so diseases with the SAME treatment count but
+            # DIFFERENT pathway connectivity get slightly different scores.
             pw_count = pathway_count_per_disease.get(ds_idx, 0)
             pw_diff = 0.03 * (pw_count / max(max_pathways, 1)) - 0.015
             return float(np.clip(base + pw_diff, 0.0, 1.0))
-            treat_component = 0.95 * float(np.exp(-tc / unmet_scale)) + 0.05
-            # v90 S-F1: pathway-connectivity component. Diseases with
-            # more known pathway disruptions have LOWER unmet need.
-            pw = pathway_count_per_disease.get(ds_idx, 0)
-            pw_component = 1.0 - 0.4 * (float(pw) / pw_scale)
-            # Blend: 70% treatment signal, 30% pathway signal.
-            base = 0.7 * treat_component + 0.3 * pw_component
-            return float(np.clip(base, 0.0, 1.0))
 
         df["unmet_need_score"] = df["disease"].map(_unmet_need_for_disease)
         logger.info(
