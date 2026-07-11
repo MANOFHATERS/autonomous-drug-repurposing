@@ -18,3 +18,5 @@ mlflow.db
 phase2/data/processed/*.json
 phase2/logs/
 phase1/processed_data/
+output_real_run/
+output_v89/
