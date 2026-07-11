@@ -21,16 +21,14 @@ Schedule: Every Sunday at 02:00 UTC  (``0 2 * * 0``)
 from __future__ import annotations
 
 import logging
-import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
-# Ensure project root is on sys.path so pipeline imports work inside Airflow
+# v89 ROOT FIX (BUG #39): shared sys.path bootstrap — was duplicated
+# verbatim in all 8 DAG files. Extracted to dags/_dags_init.py.
 # ---------------------------------------------------------------------------
-_PROJECT_ROOT = str(Path(__file__).resolve().parent.parent)
-if _PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, _PROJECT_ROOT)
+from dags._dags_init import ensure_project_root  # noqa: F401
 
 from airflow.decorators import dag, task
 from airflow.operators.branch import BranchPythonOperator
@@ -39,9 +37,36 @@ from airflow.utils.trigger_rule import TriggerRule
 
 # v83 P1-14: import the shared retry policy so the master DAG uses the
 # SAME retry parameters (5min + exponential backoff) as the 7 standalone DAGs.
-from dags._retry_policy import DEFAULT_RETRY_ARGS
+# v89 ROOT FIX (BUG #24): also import fail_fast_on_http_4xx so it can be
+# applied to _trigger_phase2 (was missing — inconsistent with the
+# documented "apply @fail_fast_on_http_4xx to EVERY @task" policy).
+from dags._retry_policy import DEFAULT_RETRY_ARGS, fail_fast_on_http_4xx
 
 logger = logging.getLogger(__name__)
+
+# v89 ROOT FIX (BUG #27 — fragile runtime import inside _check_drugbank_xml):
+# The previous code did ``from config.settings import DRUGBANK_XML_PATH``
+# INSIDE the ``_check_drugbank_xml`` branch callable. That import runs
+# at TASK EXECUTION time (in the Airflow worker). If the worker's
+# sys.path / CWD is different from expected, the task raises ImportError
+# — which (with retries=2) retries 2 more times before failing the DAG.
+# ROOT FIX: move the import to the TOP of the module (after sys.path
+# setup), so it runs at DAG PARSE time. If config.settings is not
+# importable, the DAG fails to parse — Airflow marks the DAG as
+# "import error" in the UI, which is far more diagnosable than a
+# runtime ImportError 2 retries later. The ``try/except`` wraps the
+# import so a missing config doesn't kill DAG parsing for the OTHER
+# 6 pipelines that don't need DRUGBANK_XML_PATH.
+try:
+    from config.settings import DRUGBANK_XML_PATH
+except Exception as _exc:  # noqa: BLE001 — config import must never kill DAG parse
+    logger.warning(
+        "v89 BUG #27: could not import DRUGBANK_XML_PATH from config.settings "
+        "at DAG parse time (%s). The DrugBank XML branch will fall back to "
+        "'skip_drugbank' at runtime. Fix config.settings to enable DrugBank.",
+        _exc,
+    )
+    DRUGBANK_XML_PATH = ""  # sentinel — _check_drugbank_xml will skip
 
 # ---------------------------------------------------------------------------
 # v29 ROOT FIX (audit O-12): XCom used for large dataframes — anti-pattern.
@@ -119,7 +144,8 @@ TASK_TIMEOUT = timedelta(hours=7)
 #   3. Preserve the v75 ROOT FIX (T-024): SLA == execution_timeout == 7h
 #      (aligned, no false-positive advisory).
 #   4. Preserve ``retries=2`` (from DEFAULT_RETRY_ARGS) — same as standalone.
-from dags._retry_policy import DEFAULT_RETRY_ARGS, fail_fast_on_http_4xx
+# v89: DEFAULT_RETRY_ARGS and fail_fast_on_http_4xx are imported ONCE at
+# the top of this module (line 43) — no duplicate import here.
 
 DEFAULT_ARGS = {
     **DEFAULT_RETRY_ARGS,
@@ -153,15 +179,45 @@ DEFAULT_ARGS = {
 # Branch helper — DrugBank XML gate
 # ---------------------------------------------------------------------------
 
+# v89 ROOT FIX (BUG #36 — fragile coupling between branch return values
+# and task_ids):
+#   The previous code returned the hardcoded strings "download_drugbank"
+#   and "skip_drugbank" from ``_check_drugbank_xml``. These strings had
+#   to EXACTLY match the task_id parameters of the downstream tasks.
+#   If a future refactor renamed the ``download_drugbank`` function
+#   (whose TaskFlow task_id is auto-generated from the function name),
+#   the branch return value would become a DANGLING reference —
+#   BranchPythonOperator raises AirflowException at RUNTIME, with no
+#   compile-time check.
+#
+#   ROOT FIX: define the task_ids as module-level constants. Use them
+#   in (a) the branch function's return values, (b) the EmptyOperator's
+#   task_id parameter, and (c) a parse-time assertion (inside
+#   ``master_pipeline``) that the TaskFlow-generated task_id of
+#   ``download_drugbank`` matches the constant. The assertion catches
+#   any rename at DAG PARSE time instead of at runtime.
+_DRUGBANK_DOWNLOAD_TASK_ID: str = "download_drugbank"
+_DRUGBANK_SKIP_TASK_ID: str = "skip_drugbank"
+
+
 def _check_drugbank_xml(**context) -> str:
     """Return the task-id to branch into based on DrugBank XML availability.
 
     DrugBank requires a paid license; the XML must be pre-positioned
     manually.  If the file is missing we gracefully skip the pipeline so the
     rest of the DAG can continue.
-    """
-    from config.settings import DRUGBANK_XML_PATH
 
+    v89 ROOT FIX (BUG #27): DRUGBANK_XML_PATH is now imported at module
+    top level (not inside this function), so import failures surface at
+    DAG parse time, not at task execution time after 2 retries.
+
+    v89 ROOT FIX (BUG #36): returns the module-level constant
+    ``_DRUGBANK_DOWNLOAD_TASK_ID`` / ``_DRUGBANK_SKIP_TASK_ID`` instead
+    of hardcoded strings, so a rename of the downstream task_id is
+    caught at parse time by the assertion in ``master_pipeline``.
+    """
+    # v89 BUG #27: DRUGBANK_XML_PATH is now a module-level name (imported
+    # at the top of this file). No runtime import here.
     # v43 ROOT FIX (P1 — _check_drugbank_xml crashes on invalid path):
     # The previous code did Path(DRUGBANK_XML_PATH) then .exists() +
     # .stat() with no try/except. If DRUGBANK_XML_PATH is set to an
@@ -169,26 +225,26 @@ def _check_drugbank_xml(**context) -> str:
     # raises ValueError and .stat() raises OSError — crashing the
     # branch task and (with retries=2) the entire DAG. The intent was
     # to gracefully skip DrugBank. Fix: wrap in try/except and return
-    # "skip_drugbank" on any error.
+    # the skip task_id on any error.
     try:
         xml_path = Path(DRUGBANK_XML_PATH)
         if xml_path.exists() and xml_path.stat().st_size > 0:
             logger.info("DrugBank XML found at %s — will run pipeline", xml_path)
-            return "download_drugbank"
+            return _DRUGBANK_DOWNLOAD_TASK_ID
     except (OSError, ValueError) as exc:
         logger.warning(
             "DrugBank XML path %r is invalid or unreadable (%s) — "
             "skipping pipeline. To enable: fix DRUGBANK_XML_PATH env var.",
             DRUGBANK_XML_PATH, exc,
         )
-        return "skip_drugbank"
+        return _DRUGBANK_SKIP_TASK_ID
 
     logger.warning(
         "DrugBank XML not found at %s — skipping pipeline. "
         "To enable: download from https://go.drugbank.com/ and set "
         "DRUGBANK_XML_PATH env var.", xml_path,
     )
-    return "skip_drugbank"
+    return _DRUGBANK_SKIP_TASK_ID
 
 
 # ---------------------------------------------------------------------------
@@ -410,6 +466,21 @@ def load_uniprot() -> None:
 
 
 @task(retries=0, execution_timeout=TASK_TIMEOUT, trigger_rule=TriggerRule.ALL_SUCCESS)
+# v89 ROOT FIX (BUG #24 — inconsistent application of fail-fast policy):
+#   The comment at lines 99-118 (v83 DAG-2) says "Apply
+#   ``@fail_fast_on_http_4xx`` to EVERY @task below so 4xx errors
+#   immediately raise ``AirflowFailException`` and skip retries".
+#   But ``_trigger_phase2`` was MISSING the decorator. While
+#   ``_trigger_phase2`` invokes a subprocess (not a direct HTTP call),
+#   the Phase 2 pipeline (``run_unified.py`` / ``python -m
+#   drugos_graph``) makes HTTP calls to download data, call Neo4j's
+#   REST API, etc. If the subprocess exits with a 4xx-derived error
+#   (e.g. CalledProcessError wrapping a 401 from Neo4j auth), the
+#   error was NOT converted to AirflowFailException — it was retried
+#   (but retries=0 makes this moot). ROOT FIX: add the decorator for
+#   consistency with the documented policy. The decorator's behavior
+#   on non-4xx exceptions (re-raise unchanged) is preserved.
+@fail_fast_on_http_4xx
 def _trigger_phase2() -> None:
     """v29 ROOT FIX (audit O-2 — master DAG always reports success).
 
@@ -448,6 +519,7 @@ def _trigger_phase2() -> None:
     Neo4j required), so it can run in any environment. Operators who
     want a real Neo4j load set ``DRUGOS_NEO4J_URI``.
     """
+    import importlib.util
     import os
     import subprocess
     import sys as _sys
@@ -457,6 +529,37 @@ def _trigger_phase2() -> None:
     run_unified = _project_root / "run_unified.py"
 
     if not run_unified.exists():
+        # v89 ROOT FIX (BUG #26 — fallback path doesn't verify
+        # ``drugos_graph`` is importable):
+        #   The previous code fell back to ``python -m drugos_graph``
+        #   when ``run_unified.py`` was missing, but did NOT verify
+        #   that ``drugos_graph`` was actually importable. If NEITHER
+        #   ``run_unified.py`` existed NOR ``drugos_graph`` was
+        #   installed, ``subprocess.run(cmd, check=True)`` raised
+        #   ``FileNotFoundError`` (or ``ModuleNotFoundError`` from the
+        #   subprocess), which was caught by the ``except Exception``
+        #   block and re-raised. The error message ("Phase 2 invocation
+        #   raised FileNotFoundError") didn't tell the operator HOW to
+        #   fix it.
+        #
+        #   ROOT FIX: pre-flight check via ``importlib.util.find_spec``.
+        #   If the package isn't importable, raise a clear RuntimeError
+        #   with the exact remediation: install ``drugos_graph`` OR
+        #   position ``run_unified.py`` at the project root. This
+        #   surfaces the root cause BEFORE the subprocess starts, so
+        #   the operator sees the fix in the task log immediately.
+        if importlib.util.find_spec("drugos_graph") is None:
+            raise RuntimeError(
+                "Phase 2 invocation failed pre-flight check: "
+                "neither 'run_unified.py' exists at the project root "
+                f"({run_unified}) NOR the 'drugos_graph' package is "
+                "importable. Remediation: either (a) install the "
+                "'drugos_graph' package (pip install -e . from the "
+                "project root), or (b) position 'run_unified.py' at "
+                f"the project root ({_project_root}). The master DAG "
+                "cannot proceed to Phase 2 without one of these. "
+                "(v89 BUG #26)"
+            )
         # Fallback: invoke via ``python -m drugos_graph``.
         cmd = [
             _sys.executable, "-m", "drugos_graph",
@@ -607,14 +710,14 @@ def master_pipeline() -> None:
         python_callable=_check_drugbank_xml,
     )
 
-    skip_drugbank = EmptyOperator(task_id="skip_drugbank")
+    skip_drugbank = EmptyOperator(task_id=_DRUGBANK_SKIP_TASK_ID)
 
     drugbank_done = EmptyOperator(
         task_id="drugbank_done",
         # v43 ROOT FIX (P0 — DAG produces ZERO data when DrugBank XML is
         # missing): the previous ALL_SUCCESS trigger rule treated a
         # SKIPPED branch as non-success. When DRUGBANK_XML_PATH is
-        # absent, _check_drugbank_xml returns "skip_drugbank" →
+        # absent, _check_drugbank_xml returns _DRUGBANK_SKIP_TASK_ID →
         # download_drugbank is SKIPPED → drugbank_done with ALL_SUCCESS
         # is also SKIPPED → resolve is SKIPPED → all *_load tasks are
         # SKIPPED → trigger_phase2 is SKIPPED. The DAG reports GREEN
@@ -639,6 +742,22 @@ def master_pipeline() -> None:
     # ── Primary download tasks ──────────────────────────────────────────
     chembl = download_chembl()
     drugbank = download_drugbank()
+    # v89 ROOT FIX (BUG #36 — parse-time assertion that the TaskFlow-
+    # generated task_id matches the branch return value):
+    #   ``_check_drugbank_xml`` returns ``_DRUGBANK_DOWNLOAD_TASK_ID``
+    #   ("download_drugbank"). The TaskFlow API auto-generates the
+    #   task_id from the function name (also "download_drugbank"). If a
+    #   future refactor renames the function, the branch return value
+    #   becomes a DANGLING reference — BranchPythonOperator raises
+    #   AirflowException at RUNTIME. This assertion catches the
+    #   mismatch at DAG PARSE time, so the DAG shows up as "import
+    #   error" in the Airflow UI instead of failing mid-run.
+    assert drugbank.task_id == _DRUGBANK_DOWNLOAD_TASK_ID, (
+        f"BUG #36 regression: download_drugbank task_id is "
+        f"{drugbank.task_id!r} but _check_drugbank_xml returns "
+        f"{_DRUGBANK_DOWNLOAD_TASK_ID!r}. Update "
+        f"_DRUGBANK_DOWNLOAD_TASK_ID or the function name to match."
+    )
     uniprot = download_uniprot()
     string = download_string()
 
@@ -854,5 +973,7 @@ def master_pipeline() -> None:
     pubchem_load >> trigger_phase2
 
 
-# Instantiate the DAG
-master_dag = master_pipeline()
+# v89 ROOT FIX (BUG #40): consistent DAG-instance naming convention.
+# Was ``master_dag = master_pipeline()`` — different from the standalone
+# DAGs' ``<name>_dag_instance``. All 8 DAG files now use ``dag = ...``.
+dag = master_pipeline()

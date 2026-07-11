@@ -124,6 +124,29 @@ LOAD_PASS = [
     ("pubchem", PubChemPipeline),
 ]
 
+# v89 ROOT FIX (BUG #31 — derived constants must be explicit, not
+# filtered ad-hoc at the call site):
+#   The previous code did ``load_pass_no_pubchem = [(n, c) for n, c
+#   in LOAD_PASS if n != "pubchem"]`` inline at the C.1 call site, AND
+#   ``[("pubchem", PubChemPipeline)]`` inline at the C.3 call site.
+#   These were DERIVED from LOAD_PASS but the derivation was hidden in
+#   the middle of the ``__main__`` block. A future maintainer adding a
+#   new source to LOAD_PASS would have to know to update the inline
+#   filter at C.1 — easy to forget, producing a maintenance hazard.
+#
+#   ROOT FIX: define ``LOAD_PASS_NO_PUBCHEM`` and ``PUBCHEM_LOAD`` as
+#   MODULE-LEVEL constants, derived from LOAD_PASS. The derivation is
+#   now visible at the top of the file (next to LOAD_PASS itself), and
+#   the ``__main__`` block references the constants by name. Adding a
+#   new source to LOAD_PASS automatically updates LOAD_PASS_NO_PUBCHEM.
+LOAD_PASS_NO_PUBCHEM = [
+    (name, cls) for name, cls in LOAD_PASS if name != "pubchem"
+]
+# PubChem's load is split out because PubChem's download (C.2) must run
+# BETWEEN the other loads — PubChem's enrichment lookup queries the
+# ``drugs`` table, so the drug-loading sources must be loaded first.
+PUBCHEM_LOAD = [("pubchem", PubChemPipeline)]
+
 
 def run_pipeline(args):
     """Run a pipeline in the given phase.
@@ -289,10 +312,11 @@ if __name__ == "__main__":
     # C.1: Load all sources EXCEPT PubChem first. PubChem's load
     # queries the drugs table (enrichment lookup), so the drug-loading
     # sources must be loaded before PubChem.
+    # v89 ROOT FIX (BUG #31): use the module-level derived constant
+    # ``LOAD_PASS_NO_PUBCHEM`` instead of an inline list comprehension.
     print("\n[C.1] Loading all sources except PubChem...")
-    load_pass_no_pubchem = [(n, c) for n, c in LOAD_PASS if n != "pubchem"]
     load_results_no_pubchem = list(
-        map(run_pipeline, _with_run_ids(load_pass_no_pubchem, "load"))
+        map(run_pipeline, _with_run_ids(LOAD_PASS_NO_PUBCHEM, "load"))
     )
     all_results.extend(load_results_no_pubchem)
     for name, ok, err, run_id in load_results_no_pubchem:
@@ -316,8 +340,10 @@ if __name__ == "__main__":
             overall_failed = True
 
     print("\n[C.3] PubChem load...")
+    # v89 ROOT FIX (BUG #31): use the module-level constant
+    # ``PUBCHEM_LOAD`` instead of an inline list literal.
     pubchem_load_results = list(
-        map(run_pipeline, _with_run_ids([("pubchem", PubChemPipeline)], "load"))
+        map(run_pipeline, _with_run_ids(PUBCHEM_LOAD, "load"))
     )
     all_results.extend(pubchem_load_results)
     for name, ok, err, run_id in pubchem_load_results:

@@ -592,6 +592,14 @@ METHOD_CONFIDENCE: Dict[str, float] = _MonitoredDict({
     "gene_name_organism": 0.75,    # v29: was 0.85 — sit between
                                     # name_normalized and fuzzy
     "protein_name_fuzzy": 0.60,    # v29: was 0.90 — inversion fix
+    # v89 ROOT FIX (BUG #32): smiles_canonical now in the canonical
+    # METHOD_CONFIDENCE dict (was only registered at runtime by
+    # drug_resolver.py:1979). Having it here means the dict-based
+    # lookup returns the SAME value (0.75) even if drug_resolver.py
+    # is never imported. The value matches the MatchConfidence enum
+    # member (base.py:SMILES_CANONICAL = 0.75) so all three lookup
+    # paths (enum, dict, runtime registration) return the same value.
+    "smiles_canonical": 0.75,
 })
 
 #: Snapshot of the original module-load values (FIX #10).

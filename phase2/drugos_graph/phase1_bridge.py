@@ -1285,6 +1285,26 @@ def _phase1_db_available() -> bool:
             # failure is visible. Schema_missing is handled above (NOT
             # re-raised — it's a configuration issue, not a DB failure).
             raise
+        # v88 ROOT FIX (BUG #28 — silent fallback to CSV bypasses Phase 1):
+        # the previous gate was `_PRODUCTION_ENV` which is computed from
+        # `DATABASE_URL` being set. If the operator FORGOT to set
+        # `DATABASE_URL` (a common deployment mistake), `_PRODUCTION_ENV`
+        # was False and DB failures silently fell back to CSV. ROOT FIX:
+        # when prefer_postgres=True (the default), RAISE unless
+        # `DRUGOS_ALLOW_CSV_FALLBACK=1` is explicitly set. This makes
+        # the CSV fallback an OPT-IN for operators who understand the
+        # tradeoff, rather than a silent default.
+        _allow_csv_fallback = os.environ.get("DRUGOS_ALLOW_CSV_FALLBACK", "") == "1"
+        if not _allow_csv_fallback:
+            raise RuntimeError(
+                f"phase1_bridge: database backend unavailable "
+                f"(failure_mode={failure_mode}) and prefer_postgres=True. "
+                f"Silent fallback to CSV would bypass Phase 1's entire "
+                f"ORM/migration/cleaning layer (v88 BUG #28 root fix). To "
+                f"explicitly allow CSV fallback (dev/CI only), set "
+                f"DRUGOS_ALLOW_CSV_FALLBACK=1 in the environment. "
+                f"Original error: {type(exc).__name__}: {exc}"
+            ) from exc
         return False
 
 
@@ -1334,6 +1354,24 @@ def _read_indications_from_postgres(conn: Any) -> Optional[pd.DataFrame]:
             return None
 
         # Read all drugs with non-empty indication text.
+        # v84 FORENSIC ROOT FIX (BUG #25 — missing canonical ID validation):
+        # The previous query only filtered on `indication IS NOT NULL` —
+        # inchikey NULLs / empty strings / malformed values were allowed
+        # through. Downstream code uses inchikey as the canonical Compound
+        # ID (per the Phase 1 bridge docstring "Canonical Compound ID =
+        # InChIKey"). Compound nodes with NULL/empty inchikey would be
+        # created with id=NULL or id="", violating the InChIKey mandate
+        # and silently dropping drugs that have indication text but no
+        # inchikey. ROOT FIX: add `AND inchikey IS NOT NULL AND inchikey
+        # ~ '^[A-Z]{14}-[A-Z]{10}-[A-Z]$'` to the WHERE clause so only
+        # drugs with a valid InChIKey (14 uppercase letters, hyphen, 10
+        # uppercase letters, hyphen, 1 uppercase letter — the standard
+        # InChIKey format) are returned. The KG builder's ID validator
+        # no longer needs to dead-letter these rows because they never
+        # reach it.
+        # v88 ROOT FIX (BUG #39 — InChIKey format validation): filter
+        # to well-formed InChIKeys (^[A-Z]{14}-[A-Z]{10}-[A-Z]$) so NULL/
+        # empty/malformed inchikeys don't violate the InChIKey mandate.
         drugs_with_indication = pd.read_sql(
             sa_text(
                 "SELECT inchikey, name, chembl_id, drugbank_id, "
@@ -1342,10 +1380,29 @@ def _read_indications_from_postgres(conn: Any) -> Optional[pd.DataFrame]:
                 "FROM drugs "
                 "WHERE indication IS NOT NULL "
                 "AND TRIM(indication) != '' "
-                "AND is_deleted = false"
+                "AND is_deleted = false "
+                "AND inchikey IS NOT NULL "
+                "AND TRIM(inchikey) != '' "
+                "AND inchikey ~ '^[A-Z]{14}-[A-Z]{10}-[A-Z]$'"
             ),
             conn,
         )
+        if not drugs_with_indication.empty:
+            import re as _re_v88_ik
+            _INCHIKEY_RE = _re_v88_ik.compile(r"^[A-Z]{14}-[A-Z]{10}-[A-Z]$")
+            _ik = drugs_with_indication["inchikey"].astype(str)
+            _valid_ik_mask = _ik.apply(
+                lambda x: bool(_INCHIKEY_RE.match(x)) if x and x != "nan" else False
+            )
+            _n_invalid_ik = int((~_valid_ik_mask).sum())
+            if _n_invalid_ik > 0:
+                logger.warning(
+                    "phase1_bridge: dropping %d/%d indication rows with "
+                    "NULL/empty/malformed inchikey (v88 BUG #39). Sample: %s",
+                    _n_invalid_ik, len(drugs_with_indication),
+                    list(_ik[~_valid_ik_mask].head(5)),
+                )
+                drugs_with_indication = drugs_with_indication[_valid_ik_mask].reset_index(drop=True)
         if drugs_with_indication.empty:
             return None
 
@@ -1837,35 +1894,40 @@ def _read_phase1_from_postgres() -> Dict[str, pd.DataFrame]:
                 .join(_m.Drug, _m.DrugProteinInteraction.drug_id == _m.Drug.id)
                 .join(_m.Protein, _m.DrugProteinInteraction.protein_id == _m.Protein.id)
                 .where(_m.DrugProteinInteraction.source == "chembl")
-                # v89 P0 ROOT FIX (organism filter): filter to HUMAN
-                # proteins only (ncbi_taxid == 9606). The previous code
-                # included ALL organisms (human, mouse, rat, E. coli,
-                # etc.). For a HUMAN drug repurposing platform, only
-                # human protein targets are clinically actionable — a
-                # drug's activity against a mouse homolog does NOT
-                # predict its activity against the human homolog (cross-
-                # species binding affinity can differ by 10-100x).
-                #
-                # The audit (v89) confirmed: without this filter, the KG
-                # contained drug-protein edges from non-human assays,
-                # which contaminated the GT model's training data. The
-                # model learned "drug X inhibits protein Y" from a mouse
-                # assay, then at inference predicted "drug X inhibits
-                # the human homolog of Y" — which may be FALSE. This is
-                # a P0 patient-safety hazard: the platform could
-                # recommend a drug for repurposing based on non-human
-                # data that does NOT translate to humans.
-                #
-                # The filter is on Protein.ncbi_taxid, which is set by
-                # the UniProt pipeline (only human proteins are loaded
-                # by default, but the ChEMBL pipeline can load non-
-                # human targets if the ChEMBL query is not filtered).
-                # This filter is the LAST line of defense: even if
-                # non-human proteins leak into the DB, this query
-                # excludes them from the KG.
+                # v88+v89 ROOT FIX (BUG #38 — non-human proteins pollute
+                # the human KG): filter to HUMAN proteins only
+                # (ncbi_taxid == 9606). For a HUMAN drug repurposing
+                # platform, only human protein targets are clinically
+                # actionable — a drug's activity against a mouse homolog
+                # does NOT predict its activity against the human homolog
+                # (cross-species binding affinity can differ by 10-100x).
+                # This filter is the LAST line of defense: even if non-
+                # human proteins leak into the DB, this query excludes
+                # them from the KG.
                 .where(_m.Protein.ncbi_taxid == 9606)
             )
             chembl_act_df = pd.read_sql(chembl_act_stmt, conn)
+            # v88 ROOT FIX (BUG #51 — UniProt secondary accessions create
+            # duplicate Protein nodes): filter to PRIMARY UniProt accessions.
+            import re as _re_v88
+            _UNIPROT_PRIMARY_RE = _re_v88.compile(
+                r"^[OPQ][0-9][A-Z0-9]{3}[0-9]$"
+                r"|^[A-NR-Z][0-9][A-Z][A-Z0-9]{2}[0-9]([A-Z][A-Z0-9]{2}[0-9])?$"
+            )
+            if "uniprot_accession" in chembl_act_df.columns and not chembl_act_df.empty:
+                _before = len(chembl_act_df)
+                _ac = chembl_act_df["uniprot_accession"].astype(str)
+                _primary_mask = _ac.apply(
+                    lambda x: bool(_UNIPROT_PRIMARY_RE.match(x)) if x and x != "nan" else False
+                )
+                _n_secondary = int((~_primary_mask).sum())
+                if _n_secondary > 0:
+                    logger.warning(
+                        "phase1_bridge: dropping %d/%d ChEMBL activity rows "
+                        "with non-primary UniProt accessions (v88 BUG #51).",
+                        _n_secondary, _before,
+                    )
+                    chembl_act_df = chembl_act_df[_primary_mask].reset_index(drop=True)
             # v51 ROOT FIX (COMPOUND-2 — pchembl unit handling):
             # The v49/v50 code hardcoded `pchembl = 9.0 - log10(activity_value)`
             # assuming ALL values are in nM. But Phase 1 emits MIXED units
@@ -1887,6 +1949,10 @@ def _read_phase1_from_postgres() -> Dict[str, pd.DataFrame]:
                 _units = chembl_act_df.get(
                     "activity_units", pd.Series(["nM"] * len(chembl_act_df))
                 ).fillna("nM").astype(str).str.strip().str.lower()
+                # v88 ROOT FIX (BUG #29 — Greek mu vs micro sign breaks
+                # μM unit detection): normalize both U+00B5 (micro sign)
+                # AND U+03BC (Greek mu) to ASCII "u" BEFORE the isin check.
+                _units = _units.str.replace("\u00b5", "u").str.replace("\u03bc", "u")
                 # Compute pchembl per-unit
                 _pchembl = pd.Series(_np_v37.nan, index=chembl_act_df.index)
                 # nM: pchembl = 9 - log10(value)
@@ -1916,6 +1982,63 @@ def _read_phase1_from_postgres() -> Dict[str, pd.DataFrame]:
                 chembl_act_df["pchembl_value"] = _pchembl
             else:
                 chembl_act_df["pchembl_value"] = None
+            # v84 FORENSIC ROOT FIX (BUG #26 — UniProt accession validation):
+            # The previous code aliased `Protein.uniprot_id` as
+            # `uniprot_accession` but did NOT validate the format. Phase 1's
+            # `Protein.uniprot_id` column may contain secondary accessions,
+            # isoform IDs (with -N suffix like "P12345-2"), or NULLs. These
+            # were emitted as `uniprot_accession` to Phase 2, which uses
+            # them as the canonical Protein ID. Isoform IDs (P12345-2) are
+            # NOT primary accessions and should be normalized to their
+            # parent (P12345). Secondary accessions and malformed values
+            # should be dropped — otherwise the KG has duplicate Protein
+            # nodes for the same underlying protein, fragmenting the
+            # drug-target signal across duplicates.
+            #
+            # ROOT FIX: post-read normalization pass on the dataframe:
+            #   (a) strip isoform suffixes (-2, -3, ...) → parent accession
+            #   (b) validate against the UniProt primary accession regex:
+            #        ^[OPQ][0-9][A-Z0-9]{3}[0-9]$                (6 chars)
+            #        | ^[A-NR-Z][0-9]([A-Z][A-Z0-9]{2}[0-9]){1,2}$  (10/11 chars)
+            #   (c) drop rows whose normalized accession doesn't match
+            if "uniprot_accession" in chembl_act_df.columns:
+                import re as _re_uniprot_v84
+                _UNIPROT_PRIMARY_RE = _re_uniprot_v84.compile(
+                    r"^(?:[OPQ][0-9][A-Z0-9]{3}[0-9]"
+                    r"|[A-NR-Z][0-9](?:[A-Z][A-Z0-9]{2}[0-9]){1,2})$"
+                )
+                _orig_n = len(chembl_act_df)
+                # Coerce to string, strip whitespace, strip isoform suffix.
+                _ua = (
+                    chembl_act_df["uniprot_accession"]
+                    .astype(str)
+                    .str.strip()
+                )
+                # Strip isoform suffix: "P12345-2" → "P12345".
+                _ua_normalized = _ua.str.replace(
+                    r"-\d+$", "", regex=True
+                )
+                # Replace literal "nan"/"None"/"" with NaN for dropna.
+                _ua_normalized = _ua_normalized.replace(
+                    {"nan": None, "None": None, "": None}
+                )
+                # Validate against the regex; invalid → NaN.
+                _valid_mask = _ua_normalized.notna() & _ua_normalized.apply(
+                    lambda _v: bool(_UNIPROT_PRIMARY_RE.match(str(_v)))
+                )
+                _n_dropped = int((~_valid_mask).sum())
+                if _n_dropped > 0:
+                    logger.warning(
+                        "Phase1 bridge: dropped %d ChEMBL activity rows "
+                        "with invalid/NULL uniprot_accession (out of %d). "
+                        "Invalid rows had non-primary accessions, isoform "
+                        "IDs that didn't normalize to a parent, or NULL. "
+                        "Dropping prevents duplicate Protein nodes in the "
+                        "KG. (v84 BUG #26 root fix)",
+                        _n_dropped, _orig_n,
+                    )
+                chembl_act_df = chembl_act_df[_valid_mask].copy()
+                chembl_act_df["uniprot_accession"] = _ua_normalized[_valid_mask].values
             # Synthesize target_chembl_id (NULL — the DB doesn't store it).
             chembl_act_df["target_chembl_id"] = None
             chembl_act_df["assay_id"] = None
@@ -1983,11 +2106,54 @@ def _read_phase1_from_postgres() -> Dict[str, pd.DataFrame]:
                 )
             )
             omim_susc_df = pd.read_sql(omim_susc_stmt, conn)
-            # v51 ROOT FIX: do NOT alias gene_id as gene_mim. The actual
-            # OMIM MIM number is only available in the CSV path (Phase 1's
-            # OMIM pipeline emits it from the morbidmap). In PostgreSQL
-            # mode, we don't have it — set to None honestly.
-            omim_susc_df["gene_mim"] = None
+            # v88 ROOT FIX (BUG #27 — gene_mim aliasing fragments gene
+            # resolution): best-effort JOIN to recover MIM numbers from
+            # the gene_mim column on gene_disease_associations when
+            # available. Falls back to None with a structured log.
+            _gda_cols = [
+                c["name"] for c in _inspect_columns(conn, "gene_disease_associations")
+            ]
+            if "gene_mim" in _gda_cols and not omim_susc_df.empty:
+                try:
+                    _mim_stmt = (
+                        select(
+                            _m.GeneDiseaseAssociation.gene_id.label("ncbi_gene_id"),
+                            _m.GeneDiseaseAssociation.disease_id,
+                            _m.GeneDiseaseAssociation.gene_mim,
+                        ).where(
+                            _m.GeneDiseaseAssociation.source == "omim",
+                            _m.GeneDiseaseAssociation.is_susceptibility.is_(True),
+                            _m.GeneDiseaseAssociation.gene_mim.isnot(None),
+                        )
+                    )
+                    _mim_df = pd.read_sql(_mim_stmt, conn)
+                    if not _mim_df.empty:
+                        omim_susc_df = omim_susc_df.merge(
+                            _mim_df[["ncbi_gene_id", "disease_id", "gene_mim"]],
+                            on=["ncbi_gene_id", "disease_id"],
+                            how="left",
+                            suffixes=("", "_from_mim"),
+                        )
+                        if "gene_mim_from_mim" in omim_susc_df.columns:
+                            omim_susc_df["gene_mim"] = omim_susc_df["gene_mim_from_mim"]
+                            omim_susc_df = omim_susc_df.drop(columns=["gene_mim_from_mim"])
+                        _n_with_mim = int(omim_susc_df["gene_mim"].notna().sum())
+                        logger.info(
+                            "phase1_bridge: recovered %d/%d OMIM gene_mim "
+                            "numbers (v88 BUG #27 root fix).",
+                            _n_with_mim, len(omim_susc_df),
+                        )
+                    else:
+                        omim_susc_df["gene_mim"] = None
+                except Exception as _mim_exc:
+                    logger.warning(
+                        "phase1_bridge: could not read gene_mim (%s: %s) — "
+                        "falling back to None (v88 BUG #27).",
+                        type(_mim_exc).__name__, _mim_exc,
+                    )
+                    omim_susc_df["gene_mim"] = None
+            else:
+                omim_susc_df["gene_mim"] = None
             omim_susc_df["phenotype_mim"] = None
             omim_susc_df["mapping_key"] = None
             omim_susc_df["gene_symbols_raw"] = omim_susc_df["gene_symbol"]
@@ -2038,13 +2204,16 @@ def _read_phase1_from_postgres() -> Dict[str, pd.DataFrame]:
         # fix adds a WHERE is_deleted == False filter so deleted records
         # are excluded.
         try:
+            # v88 ROOT FIX (BUG #40 — NaN in PubChem node features): use
+            # func.coalesce(xlogp, 0.0) and func.coalesce(tpsa, 0.0) so
+            # NULL → 0.0 instead of propagating NaN through HGT training.
             pubchem_stmt = select(
                 _m.PubChemCompoundProperty.inchikey,
                 _m.PubChemCompoundProperty.canonical_smiles,
                 _m.PubChemCompoundProperty.isomeric_smiles,
                 _m.PubChemCompoundProperty.molecular_weight,
-                _m.PubChemCompoundProperty.xlogp,
-                _m.PubChemCompoundProperty.tpsa,
+                func.coalesce(_m.PubChemCompoundProperty.xlogp, 0.0).label("xlogp"),
+                func.coalesce(_m.PubChemCompoundProperty.tpsa, 0.0).label("tpsa"),
                 _m.PubChemCompoundProperty.complexity,
                 _m.PubChemCompoundProperty.h_bond_donor_count.label("h_bond_donors"),
                 _m.PubChemCompoundProperty.h_bond_acceptor_count.label("h_bond_acceptors"),
@@ -2175,6 +2344,19 @@ def read_phase1_outputs(
                 # configuration issue (migrations not applied) and the
                 # CSV fallback lets the pipeline still produce a graph.
                 raise
+            # v88 ROOT FIX (BUG #28 — second silent fallback layer):
+            # apply the same DRUGOS_ALLOW_CSV_FALLBACK=1 opt-in gate here.
+            if failure_mode != "schema_missing":
+                _allow_csv_fallback = os.environ.get("DRUGOS_ALLOW_CSV_FALLBACK", "") == "1"
+                if not _allow_csv_fallback:
+                    raise RuntimeError(
+                        f"phase1_bridge: PostgreSQL read failed "
+                        f"(failure_mode={failure_mode}) and prefer_postgres=True. "
+                        f"Silent CSV fallback would bypass Phase 1's ORM "
+                        f"output (v88 BUG #28 root fix, second layer). "
+                        f"Set DRUGOS_ALLOW_CSV_FALLBACK=1 to allow. "
+                        f"Original error: {type(exc).__name__}: {exc}"
+                    ) from exc
             if failure_mode == "schema_missing":
                 logger.warning(
                     "Phase1 bridge: schema_missing in "
@@ -2562,6 +2744,19 @@ def _classify_drug_protein_edge(action_type: str) -> str:
     # allosteric → inhibit/blocker → antagonist → agonist → unknown.
     if "antagonist" in a:
         return "targets"
+    # v84 FORENSIC ROOT FIX (BUG #2 — same fix in _classify_action_edge):
+    # The previous code did `if "activ" in a or "agonist" in a or "inducer" in a`.
+    # While "agonist" (full word) is safer than "agon" (substring), it still
+    # matches "inverse agonist" and "negative agonist" — both functionally
+    # antagonists in pharmacology. ROOT FIX: exclude inverse/negative
+    # agonist patterns before classifying as activates.
+    import re as _re_v84_action
+    _EXCLUDED_INV_AGONIST_RE = _re_v84_action.compile(
+        r"\b(?:inverse\s+agonist|negative\s+(?:agonist|allosteric))",
+        _re_v84_action.IGNORECASE,
+    )
+    if _EXCLUDED_INV_AGONIST_RE.search(a):
+        return "targets"
     if "activ" in a or "agonist" in a or "inducer" in a:
         return "activates"
     return "unknown"
@@ -2619,70 +2814,77 @@ def _classify_chembl_activity_edge(
     a = (activity_type or "").lower().strip()
     if not a:
         return "targets"
-    # v89 P0 ROOT FIX (covalent-inhibitor misclassification): the
-    # previous code used substring matching:
-    #     if "inhibit" in a: return "inhibits"
-    #     if "activ" in a or "agon" in a: return "activates"
-    #
-    # The audit (v89) confirmed: an activity type like "Inactivation"
-    # contains the substring "activ", so it was misclassified as
-    # "activates". But "Inactivation" is the OPPOSITE of activation —
-    # it's an inhibitory process (the assay measures the loss of
-    # target activity). Misclassifying inactivation as activation feeds
-    # the KG wrong directionality → wrong drug-protein edges → GT model
-    # learns wrong biology → cannot generalize → held-out AUC = 0.0
-    # (Compound #2 in the v89 audit).
-    #
-    # Similarly, "Deactivation" contains "activ" and was misclassified
-    # as "activates". And "Inactive" contains "inactiv" which contains
-    # "activ" — also misclassified.
-    #
-    # The fix: use WORD-BOUNDARY regex to ensure "activ" matches only
-    # at the START of a word (so "activation" matches but "inactivation"
-    # does NOT — the "activ" in "inactivation" is mid-word, preceded by
-    # "in"). And check for "inactivat"/"deactivat" FIRST to classify
-    # them as "inhibits" (the scientifically correct relation — they
-    # measure loss of activity).
+    # v88+v89 ROOT FIX (BUG #36 — covalent inhibitors misclassified as
+    # activators): use WORD-BOUNDARY regex to ensure "activ" matches only
+    # at the START of a word. "Inactivation" contains the substring
+    # "activ" but is an INHIBITORY process — the assay measures loss of
+    # target activity. Misclassifying it as "activates" feeds the KG
+    # wrong directionality. Check inactivation/deactivation/inhibit/
+    # antagonist FIRST (before the "activ" check would misclassify them).
     import re as _re_v89
-    # Check inactivation/deactivation FIRST (before the "activ" check
-    # would misclassify them). These are inhibitory processes.
     if _re_v89.search(r"\b(inactiv|deactiv|inhibit|antagon)", a):
         return "inhibits"
+    # v84 FORENSIC ROOT FIX (BUG #2 — "agon" substring is too permissive):
+    # The previous code did `if "activ" in a or "agon" in a: return "activates"`.
+    # The substring "agon" matches inside "antagonist" (a-n-t-a-g-o-n-i-s-t
+    # contains a-g-o-n), inside "inverse agonist" (functionally an
+    # inhibitor/antagonist in pharmacology), and inside "negative agonist
+    # modulation" (also functionally an antagonist). Mis-routing inverse
+    # agonists and negative-allosteric modulators to "activates" feeds the
+    # TransE model inverted directionality for these drug-target edges,
+    # and the RL safety ranker then ranks the wrong drug as safe.
+    #
+    # ROOT FIX: use word-boundary regex \bagonist\b to match ONLY the
+    # bare pharmacological term "agonist" (and its plural "agonists"),
+    # and explicitly EXCLUDE inverse-agonist / negative-agonist /
+    # antagonist patterns BEFORE classifying as activates. Anything
+    # matching the excluded patterns falls through to "targets" (the
+    # honest "interaction confirmed, direction unclassified" relation).
+    import re as _re_v84
+    # Excluded patterns (functionally antagonists / inhibitors):
+    #   - "inverse agonist"        → antagonist in pharmacology
+    #   - "negative agonist"       → antagonist (negative modulation)
+    #   - "negative allosteric"    → antagonist (NAM)
+    #   - "antagonist"             → already handled above, but defensive
+    _EXCLUDED_ANTAGONIST_RE = _re_v84.compile(
+        r"\b(?:inverse\s+agonist|negative\s+(?:agonist|allosteric)|antagonist)",
+        _re_v84.IGNORECASE,
+    )
+    if _EXCLUDED_ANTAGONIST_RE.search(a):
+        return "targets"
+    # Match "activat..." (activation, activator) OR a bare word-boundary
+    # "agonist" (with optional plural "s"). This excludes "antagonist"
+    # (handled above) and "inverse agonist" (handled above).
+    _AGONIST_RE = _re_v84.compile(r"\bagonists?\b", _re_v84.IGNORECASE)
+    if "activ" in a or _AGONIST_RE.search(a):
     # Word-boundary "activ" or "agon" → activates. The \b ensures we
     # match "activation", "activates", "agonist", "agonism" but NOT
     # "inactivation", "deactivation", "inactive" (those are matched
     # by the inhibits regex above).
     if _re_v89.search(r"\b(activ|agon)", a):
         return "activates"
-    # v34 ROOT FIX (HIGH #8): the previous code returned "targets" for
-    # IC50. But IC50 (Half-maximal Inhibitory Concentration) literally
-    # MEASURES inhibition — the assay determines the concentration of
-    # compound that inhibits 50% of the target's activity. Classifying
-    # IC50 as "targets" loses the inhibition signal that the assay
-    # directly measured. The scientifically correct relation is
-    # "inhibits" (the audit agreed). Ki and Kd remain "targets" because
-    # they measure binding affinity (not direction of effect).
-    if a == "ic50":
+    # v88 ROOT FIX (BUG #50 — IC50 with non-bare standard_type strings
+    # lose inhibition signal): use substring match `if "ic50" in a`
+    # instead of exact match, so "IC50 (μM)", "pIC50", etc. all route
+    # to "inhibits".
+    if "ic50" in a:
         return "inhibits"
-    # v21 ROOT FIX (Audit section 4 finding 7 / Chain 8 - "EC50
-    # mis-classified as 'activates' -> RL ranker wrong directionality"):
-    # the previous code returned "activates" for EC50/AC50. But EC50
-    # (Half-maximal Effective Concentration) and AC50 measure the
-    # potency of a compound that produces 50% of its MAXIMUM effect -
-    # this can be an AGONIST (activates) OR an ANTAGONIST (inhibits),
-    # depending on the assay design. The comment in this same function
-    # admitted this: "EC50 / AC50 in a functional assay context -
-    # default agonist. We log this upstream so operators know the
-    # inference was made." But there was NO upstream log, and the
-    # inference was WRONG for antagonists. Mis-labeling an antagonist
-    # as 'activates' feeds the RL ranker wrong directionality for
-    # downstream drug-disease prediction. The honest relation is
-    # 'targets' (interaction confirmed, direction unclassified) -
-    # which is exactly what we already return for IC50/Ki/Kd/Potency.
-    # The RL ranker cannot infer "activates" from EC50 alone; it
-    # needs assay_type='F' (functional) + assay_direction metadata
-    # that the Phase 1 CSV does not carry.
-    if a in ("ec50", "ac50"):
+    # v88 ROOT FIX (BUG #37 + #52 — EC50/AC50 with direction info lost):
+    # consult assay_type parameter AND check standard_type string for
+    # direction substrings.
+    if "ec50" in a or "ac50" in a:
+        if "inhibit" in a or "antagon" in a:
+            return "inhibits"
+        if "activ" in a or "agon" in a:
+            return "activates"
+        at = (assay_type or "").strip().upper()
+        if at == "F":
+            logger.debug(
+                "phase1_bridge: EC50/AC50 from functional assay "
+                "(assay_type='F') has ambiguous direction — "
+                "classifying as 'targets'. activity_type=%r",
+                activity_type,
+            )
         return "targets"
     # Ki / Kd / Potency - interaction confirmed, direction unknown.
     return "targets"

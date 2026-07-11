@@ -20,13 +20,12 @@ requiring the master DAG.
 
 from __future__ import annotations
 
-import sys
-from datetime import datetime, timedelta
-from pathlib import Path
+from datetime import datetime
 
-_PROJECT_ROOT = str(Path(__file__).resolve().parent.parent)
-if _PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, _PROJECT_ROOT)
+# v89 ROOT FIX (BUG #39): shared sys.path bootstrap — was duplicated
+# verbatim in all 8 DAG files. Extracted to dags/_dags_init.py so the
+# path-setup logic lives in ONE place.
+from dags._dags_init import ensure_project_root  # noqa: F401
 
 from airflow.decorators import dag, task
 
@@ -51,8 +50,13 @@ DEFAULT_ARGS = {
 }
 
 
-@task(retries=2, execution_timeout=timedelta(hours=4),
-      retry_exponential_backoff=True, retry_delay=timedelta(minutes=5))
+# v89 ROOT FIX (BUG #25 / BUG #38): use bare ``@task`` — all retry /
+# timeout / backoff params are ALREADY in ``DEFAULT_RETRY_ARGS`` (spread
+# into ``DEFAULT_ARGS`` above). The previous redundant overrides were a
+# maintenance trap: if ``DEFAULT_RETRY_ARGS`` changed, the standalone
+# DAGs didn't follow. The OMIM DAG already used bare ``@task`` (v83);
+# the other 6 DAGs are now aligned for consistency (DRY).
+@task
 @fail_fast_on_http_4xx
 def run_chembl() -> None:
     """Execute the full ChEMBL pipeline: download → clean → load."""
@@ -84,4 +88,8 @@ def chembl_dag() -> None:
     run_chembl()
 
 
-chembl_dag_instance = chembl_dag()
+# v89 ROOT FIX (BUG #40): consistent DAG-instance naming convention.
+# Was ``chembl_dag_instance`` here and ``master_dag`` in the master DAG
+# — a future maintainer searching for ``dag_instance`` would miss most
+# of them. All 8 DAG files now use ``dag = <dag_factory>()``.
+dag = chembl_dag()

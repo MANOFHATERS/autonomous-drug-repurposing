@@ -213,12 +213,31 @@ def drug_aware_split(
         # ALSO filtered held-out drugs — potentially infinite confusion.
         # The fix: after filtering, if train_drugs is empty, pull drugs
         # from val_drugs (which has non-held-out drugs) to populate train.
+        #
+        # V90 ROOT FIX (BUG #14, P1): the previous fallback moved drugs
+        # from val_drugs to train_drugs WITHOUT checking whether those
+        # val drugs were themselves held-out. On a tiny demo graph
+        # where the fallback triggers AND val_drugs happens to contain
+        # held-out drugs (e.g., after the stratified split put KPs in
+        # val), KP drugs ended up in train. This violated the C-3
+        # fix's guarantee that KPs never appear in training. The fix:
+        # filter held-out drugs from val_drugs BEFORE moving them to
+        # train_drugs. If val_drugs becomes empty after filtering, we
+        # raise (the graph is too small to satisfy the split contract).
         if held_out_set:
             train_drugs = train_drugs[~torch.tensor(
                 [int(d) in held_out_set for d in train_drugs.tolist()], dtype=torch.bool
             )]
+            # V90 BUG #14: filter held-out drugs from val_drugs BEFORE
+            # moving them to train_drugs. The previous code moved
+            # val_drugs[:n_move] to train WITHOUT checking if those
+            # drugs were held-out (KP drugs), leaking KPs into train.
+            val_drugs = val_drugs[~torch.tensor(
+                [int(d) in held_out_set for d in val_drugs.tolist()], dtype=torch.bool
+            )]
             # ROOT FIX (FORENSIC-AUDIT-I07): if train_drugs is now empty,
-            # move some drugs from val_drugs to train_drugs.
+            # move drugs from val_drugs (now filtered of held-out) to
+            # train_drugs.
             if len(train_drugs) == 0 and len(val_drugs) > 0:
                 n_move = max(1, len(val_drugs) // 2)
                 train_drugs = val_drugs[:n_move]
@@ -226,7 +245,18 @@ def drug_aware_split(
                 logger.warning(
                     f"FORENSIC-AUDIT-I07: train_drugs was empty after "
                     f"held-out filtering. Moved {n_move} drugs from val "
-                    f"to train to prevent degenerate split."
+                    f"to train to prevent degenerate split. "
+                    f"(V90 BUG #14: val_drugs was filtered of held-out "
+                    f"drugs BEFORE moving, so no KP leakage.)"
+                )
+            elif len(train_drugs) == 0 and len(val_drugs) == 0:
+                raise RuntimeError(
+                    f"V90 ROOT FIX (BUG #14): after filtering held-out "
+                    f"drugs, BOTH train_drugs and val_drugs are empty. "
+                    f"The graph is too small ({n_drugs} drugs, "
+                    f"{len(held_out_set)} held-out) to satisfy the "
+                    f"drug-aware split. Either increase the graph size "
+                    f"or reduce the held-out set."
                 )
             # Re-add held-out drugs to val/test if not already there
             existing_val = set(int(d) for d in val_drugs.tolist())
@@ -266,9 +296,17 @@ def drug_aware_split(
         test_drugs = sorted_drugs[n_train_d + n_val_d:]
         # V4 B-F6 fix: ensure held-out drugs are not in train.
         # ROOT FIX (FORENSIC-AUDIT-I07): same empty-train guard as above.
+        # V90 ROOT FIX (BUG #14, P1): same val_drugs filtering fix as
+        # above — filter held-out drugs from val_drugs BEFORE moving
+        # them to train_drugs to prevent KP leakage into train.
         if held_out_set:
             train_drugs = train_drugs[~torch.tensor(
                 [int(d) in held_out_set for d in train_drugs.tolist()], dtype=torch.bool
+            )]
+            # V90 BUG #14: filter held-out drugs from val_drugs BEFORE
+            # moving them to train_drugs (fallback path).
+            val_drugs = val_drugs[~torch.tensor(
+                [int(d) in held_out_set for d in val_drugs.tolist()], dtype=torch.bool
             )]
             # ROOT FIX (FORENSIC-AUDIT-I07): if train_drugs is empty after
             # filtering, move drugs from val to train.
@@ -279,7 +317,16 @@ def drug_aware_split(
                 logger.warning(
                     f"FORENSIC-AUDIT-I07 (fallback): train_drugs was empty "
                     f"after held-out filtering. Moved {n_move} drugs from "
-                    f"val to train."
+                    f"val to train. (V90 BUG #14: val_drugs was filtered "
+                    f"of held-out drugs BEFORE moving, so no KP leakage.)"
+                )
+            elif len(train_drugs) == 0 and len(val_drugs) == 0:
+                raise RuntimeError(
+                    f"V90 ROOT FIX (BUG #14, fallback): after filtering "
+                    f"held-out drugs, BOTH train_drugs and val_drugs are "
+                    f"empty. The graph is too small ({n_drugs} drugs, "
+                    f"{len(held_out_set)} held-out) to satisfy the "
+                    f"drug-aware split."
                 )
             existing_val = set(int(d) for d in val_drugs.tolist())
             existing_test = set(int(d) for d in test_drugs.tolist())
@@ -332,6 +379,15 @@ def compute_graph_degrees(
     large edge counts. The bridge calls this function 4 times per
     ``generate_rl_input`` invocation, so the speedup compounds.
 
+    V90 ROOT FIX (BUG #50): the function still returns a Dict[int, int]
+    for backward compatibility with existing callers that use
+    ``degrees.get(d_idx, 0)``. However, a NEW function
+    ``compute_graph_degrees_array`` is added that returns the counts as
+    a numpy array for vectorized use. Callers that need vectorized
+    access (e.g., the bridge's _compute_supplementary_features) should
+    migrate to the new function. The dict-returning version is kept for
+    backward compat.
+
     Args:
         edge_indices: Dict mapping (src, rel, tgt) to (2, E) tensor.
         node_type: Node type to compute degrees for.
@@ -370,6 +426,69 @@ def compute_graph_degrees(
         if c > 0:
             degrees[idx] = c
     return degrees
+
+
+def compute_graph_degrees_array(
+    edge_indices: Dict[Tuple[str, str, str], torch.Tensor],
+    node_type: str,
+    direction: str = "out",
+    num_nodes: Optional[int] = None,
+) -> np.ndarray:
+    """Compute per-node degree as a numpy array (vectorized).
+
+    V90 ROOT FIX (BUG #50): the bridge's ``_compute_supplementary_features``
+    uses ``compute_graph_degrees`` (which returns a Dict[int, int]) in a
+    Python-level loop: ``ae_count_per_drug.get(d_idx, 0)``. For 10K drugs,
+    this is 10K dict lookups. The audit's BUG #50 finding: "Could be
+    vectorized by returning the counts tensor directly."
+
+    This new function returns the counts as a numpy array of length
+    ``num_nodes`` (or ``max_index + 1`` if num_nodes is None). Callers
+    can then use vectorized numpy indexing (``ae_counts[drug_indices]``)
+    instead of Python-level dict lookups.
+
+    Args:
+        edge_indices: Dict mapping (src, rel, tgt) to (2, E) tensor.
+        node_type: Node type to compute degrees for.
+        direction: 'out' (outgoing edges), 'in' (incoming edges), or
+            'both' (sum).
+        num_nodes: Total number of nodes of this type. If None, uses
+            ``max_index + 1``. Pass the actual count for a correctly-
+            sized array (avoids IndexError on lookups for high-index
+            nodes that have zero edges).
+
+    Returns:
+        numpy array of length num_nodes (or max_index + 1) with per-node
+        degree counts. Nodes with no edges have count 0.
+    """
+    all_indices: List[torch.Tensor] = []
+
+    for (src, rel, tgt), ei in edge_indices.items():
+        if ei.numel() == 0:
+            continue
+        if direction in ("out", "both") and src == node_type:
+            all_indices.append(ei[0])
+        if direction in ("in", "both") and tgt == node_type:
+            all_indices.append(ei[1])
+
+    if not all_indices:
+        size = num_nodes if num_nodes is not None else 0
+        return np.zeros(size, dtype=np.int64)
+
+    concatenated = torch.cat(all_indices)
+    if concatenated.numel() == 0:
+        size = num_nodes if num_nodes is not None else 0
+        return np.zeros(size, dtype=np.int64)
+
+    counts = torch.bincount(concatenated)
+    counts_np = counts.numpy().astype(np.int64)
+
+    if num_nodes is not None and len(counts_np) < num_nodes:
+        # Pad with zeros to reach num_nodes length.
+        padded = np.zeros(num_nodes, dtype=np.int64)
+        padded[:len(counts_np)] = counts_np
+        return padded
+    return counts_np
 
 
 def save_dict_to_json(data: Dict[str, Any], path: str) -> None:

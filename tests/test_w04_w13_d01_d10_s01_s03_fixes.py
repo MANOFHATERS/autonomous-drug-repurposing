@@ -27,6 +27,7 @@ import os
 import sys
 import unittest
 from unittest.mock import patch
+import pytest
 
 import numpy as np
 import pandas as pd
@@ -155,20 +156,26 @@ class TestW07KPDrugsExcludedFromNegatives(unittest.TestCase):
     """W-07: KP drugs excluded from negative sampling in train_model."""
 
     def test_train_model_excludes_kp_drugs(self):
-        """train_model should sample negatives from non_kp_drug_indices only."""
+        """train_model should sample negatives from non_kp_drug_indices only.
+        
+        V90 ROOT FIX (BUG #5): the split logic was extracted into
+        ``_compute_training_split()`` so the resume_from_checkpoint
+        path can compute the SAME test split. We check BOTH methods' source.
+        """
         import inspect
         from graph_transformer.gt_rl_bridge import GTRLBridge
-        source = inspect.getsource(GTRLBridge.train_model)
+        source = (inspect.getsource(GTRLBridge.train_model)
+                  + inspect.getsource(GTRLBridge._compute_training_split))
         self.assertIn(
             "kp_drug_indices",
             source,
-            "W-07: train_model should define kp_drug_indices to exclude "
-            "KP drugs from negative sampling.",
+            "W-07: train_model or _compute_training_split should define "
+            "kp_drug_indices to exclude KP drugs from negative sampling.",
         )
         self.assertIn(
             "non_kp_drug_indices",
             source,
-            "W-07: train_model should sample negatives from "
+            "W-07: should sample negatives from "
             "non_kp_drug_indices (not range(num_drugs)).",
         )
         self.assertIn(
@@ -244,53 +251,43 @@ class TestW08RareDiseaseFlagPerDisease(unittest.TestCase):
 
 
 class TestW09RareThresholdAbsolute(unittest.TestCase):
-    """W-09: rare_disease_flag uses absolute pathway threshold (not relative)."""
+    """v89 ROOT FIX: rare_disease_flag uses curated WHO/Orphanet prevalence data.
+
+    The v88 W-09 fix used an absolute pathway threshold (RARE_DISEASE_PATHWAY_THRESHOLD=2).
+    The v89 fix replaces this with curated disease prevalence data from WHO/Orphanet.
+    FDA/EU defines rare disease as prevalence <5 per 10K population. This is
+    scientifically correct — disease rarity is defined by PREVALENCE, not by
+    graph topology (pathway count).
+    """
 
     def test_compute_supplementary_features_uses_absolute_threshold(self):
-        """_compute_supplementary_features should use RARE_DISEASE_PATHWAY_THRESHOLD."""
+        """v89: _compute_supplementary_features should use compute_rare_disease_flag
+        from the curated biomedical_tables module (not graph-topology-derived)."""
         import inspect
         from graph_transformer.gt_rl_bridge import GTRLBridge
         source = inspect.getsource(GTRLBridge._compute_supplementary_features)
         self.assertIn(
-            "RARE_DISEASE_PATHWAY_THRESHOLD",
+            "compute_rare_disease_flag",
             source,
-            "W-09: _compute_supplementary_features should define "
-            "RARE_DISEASE_PATHWAY_THRESHOLD (absolute count, not relative).",
-        )
-        self.assertIn(
-            "ROOT FIX (W-09)",
-            source,
-            "W-09: _compute_supplementary_features should have a ROOT FIX (W-09) comment.",
-        )
-        # The old V27 formula (max_pathways // 3) should NOT be used
-        # for the threshold. (It may appear in the comment explaining
-        # what was wrong.)
-        # We check that the threshold is assigned from the constant.
-        self.assertIn(
-            "rare_threshold = RARE_DISEASE_PATHWAY_THRESHOLD",
-            source,
-            "W-09: rare_threshold should be assigned from the absolute constant.",
+            "v89: _compute_supplementary_features should use compute_rare_disease_flag "
+            "from the curated WHO/Orphanet prevalence table (not RARE_DISEASE_PATHWAY_THRESHOLD).",
         )
 
 
 class TestW10UnmetNeedContinuous(unittest.TestCase):
-    """W-10: unmet_need_score uses continuous exp-decay formula."""
+    """v89 ROOT FIX: unmet_need_score uses curated prevalence + treatment count."""
 
     def test_unmet_need_formula_is_continuous(self):
-        """_compute_supplementary_features should use exp-decay for unmet_need."""
+        """v89: _compute_supplementary_features should use compute_unmet_need_score
+        from the curated biomedical_tables module."""
         import inspect
         from graph_transformer.gt_rl_bridge import GTRLBridge
         source = inspect.getsource(GTRLBridge._compute_supplementary_features)
         self.assertIn(
-            "np.exp(-tc / unmet_scale)",
+            "compute_unmet_need_score",
             source,
-            "W-10: unmet_need should use the continuous exp-decay formula "
-            "0.95 * exp(-tc / scale) + 0.05, not the V27 piecewise formula.",
-        )
-        self.assertIn(
-            "ROOT FIX (W-10)",
-            source,
-            "W-10: _compute_supplementary_features should have a ROOT FIX (W-10) comment.",
+            "v89: unmet_need should use compute_unmet_need_score from the curated "
+            "prevalence table (not the v88 exp-decay formula).",
         )
 
     def test_unmet_need_produces_continuous_values(self):
@@ -372,27 +369,25 @@ class TestW11DrugAwareSequentialFallback(unittest.TestCase):
 
 
 class TestW12PatentScoreBimodal(unittest.TestCase):
-    """W-12: patent_score from bimodal distribution (40/60 on/off-patent)."""
+    """v89 ROOT FIX: patent_score from curated FDA Orange Book table.
+
+    The v88 W-12 fix used a bimodal random distribution (40% on-patent, 60%
+    off-patent) seeded by drug name hash. This gave RANDOM patent scores with
+    no relation to real patent status. The v89 fix uses curated FDA Orange Book
+    data: each drug has a real patent score based on its actual patent status.
+    """
 
     def test_patent_score_bimodal_distribution(self):
-        """_compute_drug_level_features should produce bimodal patent_score."""
+        """v89: _compute_drug_level_features should use get_drug_patent_score
+        from the curated FDA Orange Book table."""
         import inspect
         from graph_transformer.gt_rl_bridge import GTRLBridge
         source = inspect.getsource(GTRLBridge._compute_drug_level_features)
         self.assertIn(
-            "ROOT FIX (W-12)",
+            "get_drug_patent_score",
             source,
-            "W-12: _compute_drug_level_features should have a ROOT FIX (W-12) comment.",
-        )
-        self.assertIn(
-            "uniform(0.0, 0.2)",
-            source,
-            "W-12: patent_score should use uniform(0.0, 0.2) for on-patent drugs.",
-        )
-        self.assertIn(
-            "uniform(0.7, 1.0)",
-            source,
-            "W-12: patent_score should use uniform(0.7, 1.0) for off-patent drugs.",
+            "v89: patent_score should use get_drug_patent_score from the curated "
+            "FDA Orange Book table (not bimodal random distribution).",
         )
 
 
@@ -417,24 +412,31 @@ class TestW13ComputeAucWarnsStandalone(unittest.TestCase):
 
 
 class TestD01StreamingThresholdLowered(unittest.TestCase):
-    """D-01: streaming threshold lowered to 1,000 (exercisable in demos)."""
+    """D-01 / V90 BUG #45: streaming threshold restored to 100,000.
 
-    def test_streaming_threshold_is_1000(self):
-        """run_full_pipeline should use STREAMING_THRESHOLD = 1_000."""
+    The D-01 "fix" lowered the threshold to 1,000 to "exercise the
+    streaming path in CI/demos," but BUG #45 found this made the demo
+    pipeline SLOWER without benefit. The V90 fix restored it to 100,000
+    (the original value). The streaming path is exercised by a dedicated
+    unit test instead.
+    """
+
+    def test_streaming_threshold_is_100000(self):
+        """run_full_pipeline should use STREAMING_THRESHOLD = 100_000 (V90 BUG #45)."""
         import inspect
         from graph_transformer.gt_rl_bridge import GTRLBridge
         source = inspect.getsource(GTRLBridge.run_full_pipeline)
         self.assertIn(
-            "STREAMING_THRESHOLD = 1_000",
+            "STREAMING_THRESHOLD = 100_000",
             source,
-            "D-01: run_full_pipeline should use STREAMING_THRESHOLD = 1_000 "
-            "(was 100_000 in V27, which never exercised the streaming path "
-            "on demo graphs).",
+            "V90 BUG #45: run_full_pipeline should use STREAMING_THRESHOLD = 100_000 "
+            "(was 1_000 in D-01 which made the demo slower; restored to 100_000 "
+            "because the streaming path is slower than in-memory for small graphs).",
         )
         self.assertIn(
-            "ROOT FIX (D-01)",
+            "V90 BUG #45",
             source,
-            "D-01: run_full_pipeline should have a ROOT FIX (D-01) comment.",
+            "V90 BUG #45: run_full_pipeline should have a V90 BUG #45 comment.",
         )
 
 
@@ -506,16 +508,22 @@ class TestS01DrugAwareSplitAllSizes(unittest.TestCase):
     """S-01: GT uses drug_aware_split on ALL graph sizes (no pair-wise)."""
 
     def test_train_model_uses_drug_aware_split(self):
-        """train_model should call drug_aware_split for all graph sizes."""
+        """train_model should call drug_aware_split for all graph sizes.
+        
+        V90 ROOT FIX (BUG #5): the split logic was extracted into
+        ``_compute_training_split()``. We check BOTH methods' source.
+        """
         import inspect
         from graph_transformer.gt_rl_bridge import GTRLBridge
-        source = inspect.getsource(GTRLBridge.train_model)
+        source = (inspect.getsource(GTRLBridge.train_model)
+                  + inspect.getsource(GTRLBridge._compute_training_split))
         # The pair-wise split (torch.randperm on pairs) should NOT be
         # in the active code path.
         self.assertIn(
             "drug_aware_split(",
             source,
-            "S-01: train_model should call drug_aware_split() for all graph sizes.",
+            "S-01: train_model or _compute_training_split should call "
+            "drug_aware_split() for all graph sizes.",
         )
         self.assertIn(
             "ROOT FIX (C-3)",

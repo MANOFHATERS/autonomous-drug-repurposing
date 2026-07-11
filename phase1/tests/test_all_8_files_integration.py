@@ -415,7 +415,7 @@ class TestMigration002SQL:
             "LIN-1": "_migration_002_dedup_archive",
             "LIN-4": "PRE_MIGRATION",
             "DOC-4": "NULL HANDLING STRATEGY",
-            "CMP-1": "uq_gene_disease_associations_gene_symbol_disease_id_source",
+            "CMP-1": "ADD CONSTRAINT IF NOT EXISTS uq_gda_gene_disease_source",
         }
         missing = []
         for issue_id, marker in markers.items():
@@ -595,9 +595,11 @@ class TestCrossModuleIntegration:
         table_name = GeneDiseaseAssociation.__tablename__
         assert table_name == "gene_disease_associations"
 
-        # The convention says: uq_%(table_name)s_%(column_0_name)s
-        # For multi-column, extended: uq_%(table)s_%(col0)s_%(col1)s_%(col2)s
-        # Expected: uq_gene_disease_associations_gene_symbol_disease_id_source
+        # v90 ROOT FIX (BUG #2): the constraint is now named uq_gda_gene_disease_source
+        # to match the ORM (models.py:1681-1684) and migration 001. The old
+        # long-form name uq_gene_disease_associations_gene_symbol_disease_id_source
+        # caused three-way schema drift. The naming-convention prefix check
+        # below still validates the uq_<tablename>_ pattern.
         expected_prefix = f"uq_{table_name}_"
         assert expected_prefix.startswith("uq_gene_disease_associations_")
 
