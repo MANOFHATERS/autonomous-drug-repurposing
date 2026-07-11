@@ -817,7 +817,7 @@ class Drug(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
             #   is medium (catches length + hyphen position + case), and
             #   no layer is weaker than the one above it for the common
             #   failure modes.
-            "(LENGTH(inchikey) = 27 AND SUBSTR(inchikey, 15, 1) = '-' AND SUBSTR(inchikey, 26, 1) = '-' AND inchikey = UPPER(inchikey)) OR inchikey LIKE 'SYNTH%'",
+            "(LENGTH(inchikey) = 27 AND SUBSTR(inchikey, 15, 1) = '-' AND SUBSTR(inchikey, 26, 1) = '-' AND inchikey = UPPER(inchikey)) OR (inchikey LIKE 'SYNTH%' AND LENGTH(inchikey) <= 27)",
             name="chk_drugs_inchikey_format",
         ),
         # [SCI-02] Clinical phase range
@@ -1548,7 +1548,14 @@ class ProteinProteinInteraction(Base, IDMixin, TimestampMixin):
     # True when protein_a_id == protein_b_id (self-interaction / homodimer).
     # Biologically critical: EGFR dimerization, p53 tetramerization, etc.
     is_homodimer: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, default=False, server_default="0",
+        # P1-005 ROOT FIX (v100 forensic): the v90 ROOT FIX (BUG #23) claimed
+        # to unify EVERY boolean column to server_default=text("FALSE") but
+        # MISSED is_homodimer — it kept the non-portable server_default="0".
+        # On strict-mode MySQL/MariaDB, DEFAULT 0 for a BOOLEAN column is
+        # rejected; on SQLite/PostgreSQL it works but creates three-way
+        # schema drift versus every other boolean column. ROOT FIX: align
+        # is_homodimer with the rest of the schema (text("FALSE")).
+        Boolean, nullable=False, default=False, server_default=text("FALSE"),
     )
     # [IDEM-01] Pipeline run tracking
     pipeline_run_id: Mapped[Optional[int]] = mapped_column(

@@ -303,7 +303,7 @@ df = validate_gda_scores(
 
 ### DB CHECK constraints (enforced by `gene_disease_associations` table)
 
-- `confidence_tier IN ('weak', 'moderate', 'strong')` — never `"high"`
+- `confidence_tier IN ('sub_weak', 'weak', 'strong')` — never `"high"` or `"moderate"` (P1-004 v100: aligned with Piñero 2020 §2.3 — sub_weak is the sub-floor band [0.0, 0.06), weak is the published weak band [0.06, 0.3), strong is [0.3, 1.0])
 - `disease_id_type IN ('omim', 'disgenet', 'doid', 'mesh', 'umls', 'hpo')`
 - `disease_type IN ('disease', 'phenotype', 'group')`
 - `evidence_strength IN ('robust', 'moderate', 'limited', 'unsupported')`

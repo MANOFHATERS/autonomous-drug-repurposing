@@ -942,19 +942,18 @@ class ChEMBLPipeline(BasePipeline):
                     f"or as plain CSV ({plain_exc}). The ChEMBL API may be "
                     f"down or rate-limiting. Try again later."
                 ) from plain_exc
-        # V100 ROOT FIX (BUG #18, P0 CRITICAL): the previous code had a
-        # SECOND unconditional ``pd.read_csv`` here (lines 950-956 of the
-        # pre-V100 code) that OVERWROTE ``drugs_df``. The second read used
-        # ``compression="gzip"`` if the suffix was ``.gz`` — so if the
-        # first read succeeded by falling back to plain CSV (because the
-        # file is actually plain text despite a ``.gz`` suffix, e.g. an
-        # API rate-limit HTML page), the second read raised
-        # ``BadGzipFile`` and the pipeline CRASHED. The "v90 ROOT FIX
-        # (BUG #10)" comment claimed to fix compression detection but
-        # actually INTRODUCED this bug. Root fix: DELETE the second
-        # unconditional read entirely. The first read (above) already
-        # handles both gzip and plain-CSV correctly with a proper
-        # fallback chain.
+        # P1-001 ROOT FIX (v100 forensic): the previous code UNCONDITIONALLY
+        # re-read the file here with compression="gzip" if the suffix was
+        # ".gz", OVERWRITING the drugs_df produced by the try/except above.
+        # When the ChEMBL API returned a non-gzip body (rate-limit HTML,
+        # maintenance page, JSON error) saved to a .csv.gz path, the first
+        # try/except correctly fell back to a plain-CSV read — but this
+        # second read then raised BadGzipFile and crashed the pipeline.
+        # The first try/except block was effectively dead code. ROOT FIX:
+        # remove the second unconditional read entirely; the try/except
+        # above already handles both gzip and plain-CSV cases correctly.
+        # (Parallel V100 fix BUG #18 applied the same root fix — kept
+        # this comment for the more detailed forensic trail.)
         initial_count = len(drugs_df)
         logger.info(
             "[%s] Loaded %d raw drug records from %s",

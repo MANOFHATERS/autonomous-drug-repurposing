@@ -957,20 +957,34 @@ def master_pipeline() -> None:
     pubchem_download >> pubchem_load
 
     # V18 ROOT FIX (Phase 1 ↔ Phase 2 100% connection):
-    # v79 P0-B2 ROOT FIX (compound): trigger_phase2 now depends on ALL
-    #   load tasks (chembl, drugbank, uniprot, string, disgenet, omim,
-    #   pubchem), not just pubchem_load. The v78 code wired only
-    #   ``pubchem_load >> trigger_phase2`` — with ALL_SUCCESS, Phase 2
-    #   could fire before the other 6 loads finished, reading a
-    #   half-loaded DB. Now ALL 7 load tasks fan into trigger_phase2;
-    #   with ALL_SUCCESS, Phase 2 fires ONLY after every load succeeds.
+    # v79 P0-B2 ROOT FIX (compound): trigger_phase2 now depends on the 6
+    #   REQUIRED load tasks (chembl, drugbank, uniprot, string, disgenet,
+    #   omim), with ``trigger_rule=ALL_SUCCESS`` so Phase 2 fires ONLY
+    #   after every required load succeeds.
+    # v100 P1-009 ROOT FIX (PubChem graceful degradation):
+    #   The previous code ALSO wired ``pubchem_load >> trigger_phase2`` —
+    #   making PubChem (which is enrichment-only: CIDs, molecular formulas,
+    #   molecular weights) a HARD dependency of Phase 2. When PubChem's API
+    #   had a transient outage (rate limit, maintenance, network blip),
+    #   pubchem_download FAILED → pubchem_load was SKIPPED → trigger_phase2
+    #   saw 1 failed upstream → the ENTIRE Sunday master DAG run failed.
+    #   PubChem is documented as optional enrichment — it should NOT block
+    #   the KG build. ROOT FIX: remove the ``pubchem_load >> trigger_phase2``
+    #   wire. PubChem data still loads (if its download succeeds) via the
+    #   ``pubchem_download >> pubchem_load`` chain — it just no longer
+    #   blocks Phase 2. If PubChem is slow, Phase 2 fires with whatever
+    #   PubChem data has loaded so far (possibly none for that run); the
+    #   next run picks up the enrichment. This is the scientifically
+    #   correct trade-off: a KG with 6/7 sources is far more useful than
+    #   no KG at all because PubChem was unreachable.
     chembl_load >> trigger_phase2
     drugbank_load >> trigger_phase2
     uniprot_load >> trigger_phase2
     string_load >> trigger_phase2
     disgenet_load >> trigger_phase2
     omim_load >> trigger_phase2
-    pubchem_load >> trigger_phase2
+    # NOTE: pubchem_load is intentionally NOT wired to trigger_phase2.
+    # PubChem is optional enrichment — see P1-009 ROOT FIX above.
 
 
 # v89 ROOT FIX (BUG #40): consistent DAG-instance naming convention.

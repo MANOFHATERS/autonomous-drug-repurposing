@@ -1609,7 +1609,29 @@ def _audit_log_local(operation: str, details: dict | None = None) -> None:
 # [REL-3] Local circuit breaker (mirrors cleaning.__init__._CircuitBreaker
 # but with normalizer-specific thresholds).
 class _LocalCircuitBreaker:
-    """Circuit breaker that opens after N consecutive failures (REL-3)."""
+    """Circuit breaker that opens after N consecutive failures (REL-3).
+
+    P1-012 ROOT FIX (v100 forensic — THREAD SAFETY):
+    The previous implementation had NO synchronization on
+    ``record_success``, ``record_failure``, or ``allow_request`` — even
+    though ``convert_to_inchikeys`` uses a ThreadPoolExecutor with up to
+    32 workers, all calling ``_cb_convert.allow_request()`` and
+    ``_cb_convert.record_failure()`` concurrently. The races:
+      - ``self.failure_count += 1`` is read-modify-write — lost updates
+        under concurrent record_failure() calls (the count would
+        undercount, delaying the OPEN transition).
+      - ``self.state = "open"`` raced with itself, causing multiple
+        "circuit breaker OPENED" log messages and multiple
+        ``_METRICS["circuit_open_count"]`` increments for a single
+        transition.
+      - ``allow_request`` half-open transition raced — multiple workers
+        could each transition OPEN → HALF_OPEN and each think they were
+        THE probe, defeating single-probe semantics.
+    ROOT FIX: add a ``threading.Lock`` and protect ALL state mutations
+    and state reads. This matches the pattern in
+    ``database/connection.py:_CircuitBreaker`` (which already uses a
+    lock — see P1-006 fix for that breaker's separate observability bug).
+    """
 
     def __init__(
         self,
@@ -1623,39 +1645,49 @@ class _LocalCircuitBreaker:
         self.failure_count = 0
         self.last_failure_time = 0.0
         self.state = "closed"
+        # P1-012: lock protects failure_count, last_failure_time, state.
+        self._lock = threading.Lock()
 
     def record_success(self) -> None:
-        self.failure_count = 0
-        self.state = "closed"
+        with self._lock:
+            self.failure_count = 0
+            self.state = "closed"
 
     def record_failure(self) -> None:
-        self.failure_count += 1
-        self.last_failure_time = time.time()
-        if self.failure_count >= self.failure_threshold:
-            if self.state != "open":
-                logger.error(
-                    "convert_to_inchikey: circuit breaker '%s' OPENED "
-                    "after %d consecutive failures",
-                    self.name,
-                    self.failure_count,
-                )
-                with _METRICS_LOCK:
-                    _METRICS["circuit_open_count"] += 1
-            self.state = "open"
+        with self._lock:
+            self.failure_count += 1
+            self.last_failure_time = time.time()
+            if self.failure_count >= self.failure_threshold:
+                if self.state != "open":
+                    logger.error(
+                        "convert_to_inchikey: circuit breaker '%s' OPENED "
+                        "after %d consecutive failures",
+                        self.name,
+                        self.failure_count,
+                    )
+                    # Increment the metric INSIDE the lock so the
+                    # "circuit_open_count" counter doesn't double-count
+                    # the same transition. (_METRICS_LOCK is still used
+                    # for the dict update itself — nested locks are safe
+                    # here because the order is always _lock → _METRICS_LOCK.)
+                    with _METRICS_LOCK:
+                        _METRICS["circuit_open_count"] += 1
+                self.state = "open"
 
     def allow_request(self) -> bool:
-        if self.state == "closed":
-            return True
-        if self.state == "open":
-            if time.time() - self.last_failure_time > self.reset_timeout:
-                self.state = "half-open"
-                logger.info(
-                    "convert_to_inchikey: circuit breaker '%s' HALF-OPEN",
-                    self.name,
-                )
+        with self._lock:
+            if self.state == "closed":
                 return True
-            return False
-        return True  # half-open
+            if self.state == "open":
+                if time.time() - self.last_failure_time > self.reset_timeout:
+                    self.state = "half-open"
+                    logger.info(
+                        "convert_to_inchikey: circuit breaker '%s' HALF-OPEN",
+                        self.name,
+                    )
+                    return True
+                return False
+            return True  # half-open
 
 
 _cb_convert = _LocalCircuitBreaker("convert_to_inchikey")

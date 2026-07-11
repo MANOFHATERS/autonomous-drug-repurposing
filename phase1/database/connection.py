@@ -231,11 +231,32 @@ class _CircuitBreaker:
 
     @property
     def state(self) -> str:
-        """Current breaker state."""
+        """Current breaker state (PURE OBSERVATION — does NOT mutate).
+
+        P1-006 ROOT FIX (v100 forensic): the previous implementation
+        transitioned OPEN → HALF_OPEN inside this property when the
+        recovery_timeout had elapsed. That made the property a MUTATOR
+        disguised as an accessor — any monitoring/observability code
+        that read ``breaker.state`` inadvertently triggered the
+        transition, racing with ``allow_request()`` and potentially
+        leaving the breaker in a half-reserved state. The canonical
+        ``_circuit_breaker.py`` (BUG #12 P1) claimed to fix this exact
+        bug but the duplicate in ``database/connection.py`` was never
+        removed — the "consolidation" claim was false.
+
+        ROOT FIX: this property is now PURE OBSERVATION. It returns the
+        current ``_state`` without transitioning. The OPEN → HALF_OPEN
+        transition happens ONLY inside ``allow_request()``, which is
+        the single authorized mutator for the state machine. Monitoring
+        code can now safely read ``breaker.state`` for observability
+        without breaking the circuit breaker.
+
+        Note: callers that previously relied on the side effect of
+        ``state`` transitioning OPEN → HALF_OPEN will now see "OPEN"
+        until the next ``allow_request()`` call. This is the CORRECT
+        behavior — observability must never mutate state.
+        """
         with self._lock:
-            if self._state == "OPEN":
-                if time.monotonic() - self._last_failure_time > self.recovery_timeout:
-                    self._state = "HALF_OPEN"
             return self._state
 
     def record_success(self) -> None:

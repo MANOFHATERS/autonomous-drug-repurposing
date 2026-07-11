@@ -639,7 +639,7 @@ def _classify_confidence(score: float) -> str:
     Returns
     -------
     str
-        Tier label (``"weak"``, ``"moderate"``, or ``"strong"``).
+        Tier label (``"sub_weak"``, ``"weak"``, or ``"strong"``).
     """
     return classify_confidence(score, tiers=CONFIDENCE_TIERS)
 
@@ -2005,15 +2005,27 @@ class DisGeNETPipeline(BasePipeline):
         # — pure exponential with NO jitter. If multiple workers retry
         # simultaneously (e.g. the parallel GDA fetcher), they retry in
         # lockstep and re-trigger the rate limit ("thundering herd").
-        # Add ±50% uniform jitter (full-jitter variant) so concurrent
-        # workers retry at staggered offsets, spreading load on the API.
+        #
+        # P1-018 ROOT FIX (v100 forensic — JITTER WAS NOT ACTUALLY JITTER):
+        # The previous "fix" added ``jitter = _random.uniform(0, capped * 0.5)``
+        # and returned ``capped + jitter``. That made the wait fall in
+        # ``[capped, capped * 1.5]`` — it NEVER slept less than ``capped``.
+        # That's NOT jitter (which by definition must spread wait times
+        # AROUND a center); it's "capped plus a positive offset". All
+        # concurrent workers still slept at least ``capped``, defeating
+        # the thundering-herd mitigation. ROOT FIX: use centered ±50%
+        # jitter — ``_random.uniform(capped * 0.5, capped * 1.5)`` — so
+        # wait times spread in ``[capped * 0.5, capped * 1.5]`` with mean
+        # ``capped``. Concurrent workers now retry at staggered offsets,
+        # spreading load on the API. (Full-jitter variant
+        # ``_random.uniform(0, capped)`` would also work but has higher
+        # variance; centered ±50% is the AWS "equal jitter" compromise.)
         raw = DISGENET_API_BACKOFF_BASE ** attempt
         capped = min(raw, float(DISGENET_API_BACKOFF_MAX_SECONDS))
         # ``random`` is imported lazily here so module-level import cost
         # is unaffected and tests can monkey-patch if needed.
         import random as _random
-        jitter = _random.uniform(0, capped * 0.5)
-        return capped + jitter
+        return _random.uniform(capped * 0.5, capped * 1.5)
 
     @staticmethod
     def _interruptible_sleep(seconds: float) -> None:

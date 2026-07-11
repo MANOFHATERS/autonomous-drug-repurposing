@@ -2382,17 +2382,48 @@ def dedup_by_inchikey(
                                 .str.slice(stop=26) + "S"
                             )
                             # Lineage column (traceable merge)
+                            # P1-021 ROOT FIX (v100 forensic — STEREO
+                            # COLLAPSE was silent at INFO level):
+                            # The previous code logged this collapse at
+                            # INFO level, which is filtered out by
+                            # default in production (root logger = WARNING).
+                            # An operator running the Sunday master DAG
+                            # would NEVER see that stereo-specific drugs
+                            # (thalidomide enantiomers, warfarin, etc.)
+                            # were being collapsed onto their canonical
+                            # form — a patient-safety risk because the
+                            # collapsed node loses stereochemistry
+                            # information that may be clinically
+                            # meaningful (e.g. one enantiomer is
+                            # teratogenic, the other is not). ROOT FIX:
+                            # log at WARNING level so the collapse is
+                            # visible in every log sink, and rename the
+                            # lineage column to ``_stereo_collapsed``
+                            # (in addition to keeping ``_version_char_normalized``
+                            # for backward compat) so downstream consumers
+                            # can explicitly filter on stereo collapse.
                             working["_version_char_normalized"] = _norm_mask
+                            working["_stereo_collapsed"] = _norm_mask
                             _incr_metric(
                                 f"{func_name}_version_char_normalized",
                                 int(_norm_mask.sum()),
                             )
-                            logger.info(
+                            _incr_metric(
+                                f"{func_name}_stereo_collapsed",
+                                int(_norm_mask.sum()),
+                            )
+                            logger.warning(
                                 "%s: dedup_by_version_char=True — normalized "
                                 "%d non-standard ('N') InChIKey(s) to standard "
                                 "('S') for dedup grouping. Sample prefixes: %s. "
-                                "NOTE: this collapses tautomeric/isotopic/metal "
-                                "forms onto the canonical form (caller opt-in).",
+                                "WARNING: this COLLAPSES tautomeric/isotopic/"
+                                "metal-specific forms onto the canonical form "
+                                "(caller opt-in). Stereo-specific drugs "
+                                "(thalidomide enantiomers, warfarin) may be "
+                                "merged into a single node — the "
+                                "_stereo_collapsed lineage column is set to "
+                                "True for these rows so downstream consumers "
+                                "can detect and (if needed) re-split them.",
                                 func_name,
                                 int(_norm_mask.sum()),
                                 list(mismatches.index[:10]),
@@ -2445,12 +2476,41 @@ def dedup_by_inchikey(
             # `_dedup_sentinel_key` (NOT to `inchikey`). The original
             # NaN value stays in `inchikey` so downstream consumers see
             # the real (NaN) value and can handle it appropriately.
-            if "_dedup_sentinel_key" not in working.columns:
-                working["_dedup_sentinel_key"] = working["inchikey"].astype(object)
-            working.loc[nan_mask, "_dedup_sentinel_key"] = [
-                f"__NULL_UNIQUE_{i}__" for i in range(n_nan)
-            ]
-            transformations.append("preserve_null_inchikeys")
+            # P1-017 ROOT FIX (v100 forensic — n_nan length mismatch):
+            # The previous code computed ``n_nan`` ONCE at the top of
+            # this block, then used ``[f"__NULL_UNIQUE_{i}__" for i in
+            # range(n_nan)]`` to assign sentinels to ``nan_mask`` rows.
+            # But the ``drop`` and ``quarantine`` branches above REMOVE
+            # rows from ``working`` — so by the time we reach this
+            # ``keep_all`` branch, ``working`` has changed but
+            # ``n_nan`` and ``nan_mask`` still reflect the PRE-drop
+            # state. The sentinel list length (n_nan) no longer matches
+            # the number of True values in ``nan_mask`` (which was
+            # computed against the PRE-drop DataFrame) → pandas raises
+            # ``ValueError: length mismatch``.
+            # The ``keep_all`` branch is the ELSE — it only runs when
+            # ``null_inchikey_handler`` is NOT ``drop`` or ``quarantine``.
+            # In that case, ``working`` is UNCHANGED from the top of the
+            # block, so ``n_nan`` and ``nan_mask`` are still consistent.
+            # BUT the original code structured the if/elif/else such
+            # that ``n_nan`` and ``nan_mask`` were computed BEFORE the
+            # branch — meaning a future refactor that reorders the
+            # branches or adds a new branch that mutates ``working``
+            # would silently reintroduce the length-mismatch bug.
+            # ROOT FIX: recompute ``nan_mask`` and ``n_nan`` HERE
+            # (inside the keep_all branch) so the sentinel assignment
+            # is always consistent with the current state of ``working``.
+            # This is defensive against future refactors and matches
+            # the pattern used in ``validate_gda_scores`` (P1-014 fix).
+            nan_mask = working["inchikey"].isna()
+            n_nan = int(nan_mask.sum())
+            if n_nan > 0:
+                if "_dedup_sentinel_key" not in working.columns:
+                    working["_dedup_sentinel_key"] = working["inchikey"].astype(object)
+                working.loc[nan_mask, "_dedup_sentinel_key"] = [
+                    f"__NULL_UNIQUE_{i}__" for i in range(n_nan)
+                ]
+                transformations.append("preserve_null_inchikeys")
 
     # [DES-3] [IDEM-2] Sort by the dedup key, then completeness descending, then
     # original index ascending (deterministic tie-breaking).

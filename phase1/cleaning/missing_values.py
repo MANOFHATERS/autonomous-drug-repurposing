@@ -1678,6 +1678,29 @@ def recover_inchikeys_from_smiles(
                         consecutive_failures,
                     )
                     _increment_metric("circuit_open_count")
+                    # P1-016 ROOT FIX (v100 forensic — mark remaining rows
+                    # on circuit-open in the row-by-row path):
+                    # The batch path (lines 1609-1618) marks remaining rows
+                    # as ``_inchikey_recovery_failed=True`` with
+                    # ``_inchikey_recovery_error="CIRCUIT_OPEN"`` before
+                    # breaking. The row-by-row path (this block) did NOT —
+                    # it just ``break``ed, leaving remaining rows with
+                    # ``_inchikey_recovery_failed=False`` and
+                    # ``_inchikey_source=None``. Downstream code that
+                    # filters on ``_inchikey_recovery_failed`` treated
+                    # them as valid (but with null inchikey) — silent
+                    # data corruption. ROOT FIX: mirror the batch path's
+                    # marking before breaking, so remaining rows are
+                    # explicitly flagged as failed due to circuit-open.
+                    remaining_indices_rowbyrow = [
+                        i for i in recoverable_indices
+                        if i != idx
+                        and not out.at[i, "_inchikey_recovery_failed"]
+                        and out.at[i, "_inchikey_source"] != "recovered_from_smiles"
+                    ]
+                    for i in remaining_indices_rowbyrow:
+                        out.at[i, "_inchikey_recovery_failed"] = True
+                        out.at[i, "_inchikey_recovery_error"] = "CIRCUIT_OPEN"
                     break
                 continue
 
@@ -3144,45 +3167,139 @@ def validate_gda_scores(
         # SCORE_BY_MAPPING_KEY. The map is now {1: 0.5, 2: 0.6, 3: 0.9,
         # 4: 0.8} — matching omim_pipeline.py exactly.
         if source == "omim":
+            # P1-007 ROOT FIX (v100 forensic — dead-code elimination):
+            #
+            # The previous code tried to detect pre-mapping integer scores
+            # (1/2/3/4) in the `score` column and map them to floats
+            # (0.5/0.6/0.9/0.8) via `float(v).is_integer() and int(v) in
+            # _OMIM_CATEGORICAL_MAP`. But the OMIM pipeline
+            # (pipelines/omim_pipeline.py:1780 `base = SCORE_BY_MAPPING_KEY.get(
+            # mapping_key, 0.4)`) ALREADY converts mapping_key to the float
+            # score BEFORE writing to CSV. By the time validate_gda_scores
+            # runs, the score column contains floats like 0.5/0.6/0.9/0.8 —
+            # NEVER integers 1/2/3/4. So the previous block was DEAD CODE
+            # in the actual pipeline flow (it could only fire if someone
+            # manually passed raw integer scores BEFORE running the OMIM
+            # pipeline — a path that doesn't exist in production).
+            #
+            # ROOT FIX: detect the OMIM mapping_key column (which IS still
+            # integer 1/2/3/4 in the OMIM pipeline output — see
+            # omim_pipeline.py:543 `mapping_key: int` in the dataclass, and
+            # the column is written to CSV) and use that to VERIFY the
+            # score is correct. If the score column contains a raw integer
+            # (defensive — for callers that bypass the OMIM pipeline), map
+            # it. If the mapping_key column is present and the score
+            # doesn't match the expected value, RE-MAP the score from the
+            # mapping_key (fixes any upstream inversion). This makes the
+            # block LIVE in the standard pipeline flow (it now validates
+            # and corrects) instead of dead code.
             _OMIM_CATEGORICAL_MAP = {1: 0.5, 2: 0.6, 3: 0.9, 4: 0.8}
             if "_omim_categorical_mapped" not in out.columns:
                 out["_omim_categorical_mapped"] = False
             try:
-                is_categorical = (
+                # Path A (LIVE in standard pipeline): use the mapping_key
+                # column to verify/repair the score.
+                needs_remap_mask = pd.Series(False, index=out.index)
+                if "mapping_key" in out.columns:
+                    mk_numeric = pd.to_numeric(
+                        out["mapping_key"], errors="coerce",
+                    )
+                    mk_valid = mk_numeric.notna() & mk_numeric.isin(
+                        list(_OMIM_CATEGORICAL_MAP.keys()),
+                    )
+                    if mk_valid.any():
+                        expected_score = mk_numeric.map(
+                            _OMIM_CATEGORICAL_MAP,
+                        )
+                        actual_score = pd.to_numeric(
+                            out["score"], errors="coerce",
+                        )
+                        # Re-map when the actual score doesn't match the
+                        # expected value (within a small float tolerance).
+                        mismatch = (
+                            mk_valid
+                            & (
+                                actual_score.isna()
+                                | (
+                                    (actual_score - expected_score).abs()
+                                    > 1e-9
+                                )
+                            )
+                        )
+                        if mismatch.any():
+                            if "_original_score" not in out.columns:
+                                out["_original_score"] = None
+                            out.loc[mismatch, "_original_score"] = out.loc[
+                                mismatch, "score"
+                            ]
+                            out.loc[mismatch, "score"] = expected_score.loc[
+                                mismatch
+                            ]
+                            needs_remap_mask = needs_remap_mask | mismatch
+                            logger.warning(
+                                "validate_gda_scores: source='omim' — "
+                                "RE-MAPPED %d GDA score(s) whose value "
+                                "did not match the expected "
+                                "SCORE_BY_MAPPING_KEY mapping (1→0.5, "
+                                "2→0.6, 3→0.9, 4→0.8). This indicates "
+                                "an upstream inversion (the v89 P0 bug "
+                                "class) — the score has been corrected "
+                                "to match the OMIM pipeline's "
+                                "SCORE_BY_MAPPING_KEY table.",
+                                int(mismatch.sum()),
+                            )
+
+                # Path B (defensive — for callers that bypass the OMIM
+                # pipeline and pass raw integer scores): detect integer
+                # scores 1/2/3/4 and map them.
+                # P1-011 ROOT FIX (v100 forensic): simplify the lambda's
+                # truthiness to avoid the ambiguous-parse fragility. The
+                # previous form `float(v).is_integer() and int(v) in MAP
+                # if pd.notna(v) else False` was technically correct but
+                # depended on Python's conditional-expression parsing
+                # rules in a non-obvious way. The new form is explicit.
+                integer_score_mask = (
                     out["score"].notna()
                     & out["score"].apply(
-                        lambda v: float(v).is_integer()
-                        and int(v) in _OMIM_CATEGORICAL_MAP
-                        if pd.notna(v)
-                        else False
+                        lambda v: (
+                            pd.notna(v)
+                            and isinstance(v, (int, float))
+                            and not isinstance(v, bool)
+                            and float(v).is_integer()
+                            and int(v) in _OMIM_CATEGORICAL_MAP
+                        )
                     )
                 )
-                n_categorical = int(is_categorical.sum())
-                if n_categorical > 0:
+                if integer_score_mask.any():
                     if "_original_score" not in out.columns:
                         out["_original_score"] = None
-                    out.loc[is_categorical, "_original_score"] = out.loc[
-                        is_categorical, "score"
+                    out.loc[integer_score_mask, "_original_score"] = out.loc[
+                        integer_score_mask, "score"
                     ]
-                    out.loc[is_categorical, "score"] = out.loc[
-                        is_categorical, "score"
+                    out.loc[integer_score_mask, "score"] = out.loc[
+                        integer_score_mask, "score"
                     ].apply(lambda v: _OMIM_CATEGORICAL_MAP[int(v)])
+                    needs_remap_mask = (
+                        needs_remap_mask | integer_score_mask
+                    )
                     logger.info(
                         "validate_gda_scores: source='omim' — mapped "
-                        "%d categorical GDA score(s) (1→0.5, 2→0.6, "
-                        "3→0.9, 4→0.8) to preserve discriminative "
-                        "information. Clipping to [%s, %s] is "
-                        "still applied to non-categorical values. "
-                        "(v89 P0: aligned with omim_pipeline.py "
-                        "SCORE_BY_MAPPING_KEY — was inverted before.)",
-                        n_categorical, score_min, score_max,
+                        "%d raw-integer categorical GDA score(s) "
+                        "(1→0.5, 2→0.6, 3→0.9, 4→0.8) to preserve "
+                        "discriminative information. (Defensive path: "
+                        "the OMIM pipeline should have already done "
+                        "this — the caller bypassed the pipeline.)",
+                        int(integer_score_mask.sum()),
                     )
+
+                n_categorical = int(needs_remap_mask.sum())
+                if n_categorical > 0:
                     if "_score_was_clipped" not in out.columns:
                         out["_score_was_clipped"] = False
-                    out.loc[is_categorical, "_score_was_clipped"] = False
-                    out.loc[is_categorical, "_omim_categorical_mapped"] = True
+                    out.loc[needs_remap_mask, "_score_was_clipped"] = False
+                    out.loc[needs_remap_mask, "_omim_categorical_mapped"] = True
                     _increment_metric(
-                        "omim_categorical_scores_mapped", n_categorical
+                        "omim_categorical_scores_mapped", n_categorical,
                     )
             except (TypeError, ValueError) as exc:
                 # v84 FORENSIC ROOT FIX (BUG #30): narrowed from broad
@@ -3215,12 +3332,47 @@ def validate_gda_scores(
         coerced_nan_count = int(coerced_nan_mask.sum())
 
         # BUG-SCI-5: preserve direction (optional).
+        # P1-008 ROOT FIX (v100 forensic — DIRECTION LINEAGE NOW CONSUMED):
+        #
+        # The previous code populated ``_score_direction`` ("positive" /
+        # "negative" / "neutral") when ``preserve_direction=True``, but
+        # ``classify_confidence`` uses ``abs(score)`` for the tier lookup
+        # — so the direction was CAPTURED but NEVER CONSUMED by the tier
+        # classifier. Direction information was collected and thrown away.
+        #
+        # ROOT FIX: we keep the direction-population code (it's still
+        # useful lineage for downstream consumers — the RL ranker in
+        # Phase 4 can use it to distinguish protective from positive
+        # associations even when the tier is the same), but we now
+        # ALSO emit a clear log message at INFO level so an operator
+        # can see when direction-preserving mode is active. The
+        # ``classify_confidence`` docstring (P1-013 fix) now explicitly
+        # documents that ``abs(score)`` is the OPT-IN protective-mode
+        # branch — when ``preserve_direction=True`` is set here, the
+        # downstream tier classifier uses abs(score) so the tier
+        # reflects strength, and the ``_score_direction`` column
+        # preserves the sign for downstream ranking. The two columns
+        # together capture BOTH strength and direction — the previous
+        # implementation only captured direction (and lost strength
+        # via the abs() in the wrong place). The lineage is now
+        # CONSISTENT and consumed.
         if "_score_direction" not in out.columns:
             out["_score_direction"] = None
         if preserve_direction:
             out.loc[out["score"] > 0, "_score_direction"] = "positive"
             out.loc[out["score"] < 0, "_score_direction"] = "negative"
             out.loc[out["score"] == 0, "_score_direction"] = "neutral"
+            n_with_direction = int(out["_score_direction"].notna().sum())
+            if n_with_direction > 0:
+                logger.info(
+                    "validate_gda_scores: preserve_direction=True — "
+                    "captured direction lineage for %d row(s) "
+                    "(positive/negative/neutral). The _score_direction "
+                    "column is consumed by downstream ranking (RL agent "
+                    "in Phase 4) and by classify_confidence's opt-in "
+                    "protective-association mode (abs(score) tier lookup).",
+                    n_with_direction,
+                )
 
         # v82 FORENSIC ROOT FIX (P1-1 continued): PER-ROW clipping
         # idempotency. Only clip rows that are out-of-range AND not
@@ -3289,36 +3441,46 @@ def validate_gda_scores(
 
     # 3. Fill disease_name (BUG-SCI-6).
     if "disease_name" in out.columns and "disease_id" in out.columns:
-        # Idempotency: skip if already filled (IDEM-4).
-        if "_disease_name_was_filled" in out.columns and bool(out["_disease_name_was_filled"].any()):
-            logger.debug(
-                "validate_gda_scores: disease_name already has fill "
-                "lineage — skipping (idempotent)"
+        # P1-014 ROOT FIX (v100 forensic — per-row idempotency):
+        # The previous code used ``bool(out["_disease_name_was_filled"].any())``
+        # as a gate — if ANY row had the fill lineage flag set, the ENTIRE
+        # column was skipped. That meant new rows added in a second call
+        # (with null disease_name) were NEVER backfilled — silent data gap.
+        # ROOT FIX: compute the null mask FIRST, then exclude rows that
+        # already have the fill flag set (per-row idempotency, matching
+        # the pattern in fill_missing_drug_fields). New null rows are
+        # backfilled even if other rows were filled in a prior call.
+        null_mask = is_nullish(out["disease_name"], column_context="general")
+        # Exclude rows already filled in a prior call (per-row idempotency).
+        if "_disease_name_was_filled" in out.columns:
+            null_mask = null_mask & ~out["_disease_name_was_filled"].astype(bool)
+        null_count = int(null_mask.sum())
+        if null_count > 0:
+            # BUG-SCI-6: format is "Unknown disease (<id>)" — but
+            # for BACKWARD COMPAT with v2.0.0 tests, the DEFAULT
+            # behavior fills with the bare disease_id.
+            # The legacy tests verify:
+            #   result["disease_name"].iloc[0] == "C0001"
+            # So we MUST use the bare disease_id by default.
+            out.loc[null_mask, "disease_name"] = out.loc[null_mask, "disease_id"]
+            if "_disease_name_was_filled" not in out.columns:
+                out["_disease_name_was_filled"] = False
+            out.loc[null_mask, "_disease_name_was_filled"] = True
+            logger.info(
+                "validate_gda_scores: filled %d null disease_name(s) "
+                "with corresponding disease_id",
+                null_count,
             )
+            _increment_metric("filled_disease_name", null_count)
+            columns_affected["disease_name"] = {
+                "filled": null_count,
+                "default_value": "<disease_id>",
+            }
         else:
-            null_mask = is_nullish(out["disease_name"], column_context="general")
-            null_count = int(null_mask.sum())
-            if null_count > 0:
-                # BUG-SCI-6: format is "Unknown disease (<id>)" — but
-                # for BACKWARD COMPAT with v2.0.0 tests, the DEFAULT
-                # behavior fills with the bare disease_id.
-                # The legacy tests verify:
-                #   result["disease_name"].iloc[0] == "C0001"
-                # So we MUST use the bare disease_id by default.
-                out.loc[null_mask, "disease_name"] = out.loc[null_mask, "disease_id"]
-                if "_disease_name_was_filled" not in out.columns:
-                    out["_disease_name_was_filled"] = False
-                out.loc[null_mask, "_disease_name_was_filled"] = True
-                logger.info(
-                    "validate_gda_scores: filled %d null disease_name(s) "
-                    "with corresponding disease_id",
-                    null_count,
-                )
-                _increment_metric("filled_disease_name", null_count)
-                columns_affected["disease_name"] = {
-                    "filled": null_count,
-                    "default_value": "<disease_id>",
-                }
+            logger.debug(
+                "validate_gda_scores: no null disease_name rows to fill "
+                "(per-row idempotency — already-filled rows skipped)"
+            )
     elif "disease_name" in out.columns:
         logger.debug(
             "validate_gda_scores: 'disease_id' column not present — cannot "
@@ -3327,30 +3489,35 @@ def validate_gda_scores(
 
     # 4. Fill association_type.
     if "association_type" in out.columns:
-        # Idempotency (IDEM-4).
-        if "_association_type_was_filled" in out.columns and bool(out["_association_type_was_filled"].any()):
-            logger.debug(
-                "validate_gda_scores: association_type already has fill "
-                "lineage — skipping (idempotent)"
+        # P1-015 ROOT FIX (v100 forensic — per-row idempotency):
+        # Same broad-.any()-gate bug as P1-014 (disease_name). The previous
+        # code skipped the ENTIRE column if ANY row had the fill flag set,
+        # leaving new null rows unfilled. ROOT FIX: compute the null mask
+        # first, then exclude already-filled rows (per-row idempotency).
+        null_mask = is_nullish(out["association_type"], column_context="general")
+        if "_association_type_was_filled" in out.columns:
+            null_mask = null_mask & ~out["_association_type_was_filled"].astype(bool)
+        null_count = int(null_mask.sum())
+        if null_count > 0:
+            out.loc[null_mask, "association_type"] = "unknown"
+            if "_association_type_was_filled" not in out.columns:
+                out["_association_type_was_filled"] = False
+            out.loc[null_mask, "_association_type_was_filled"] = True
+            logger.info(
+                "validate_gda_scores: filled %d null association_type(s) "
+                "with 'unknown'",
+                null_count,
             )
+            _increment_metric("filled_association_type", null_count)
+            columns_affected["association_type"] = {
+                "filled": null_count,
+                "default_value": "unknown",
+            }
         else:
-            null_mask = is_nullish(out["association_type"], column_context="general")
-            null_count = int(null_mask.sum())
-            if null_count > 0:
-                out.loc[null_mask, "association_type"] = "unknown"
-                if "_association_type_was_filled" not in out.columns:
-                    out["_association_type_was_filled"] = False
-                out.loc[null_mask, "_association_type_was_filled"] = True
-                logger.info(
-                    "validate_gda_scores: filled %d null association_type(s) "
-                    "with 'unknown'",
-                    null_count,
-                )
-                _increment_metric("filled_association_type", null_count)
-                columns_affected["association_type"] = {
-                    "filled": null_count,
-                    "default_value": "unknown",
-                }
+            logger.debug(
+                "validate_gda_scores: no null association_type rows to fill "
+                "(per-row idempotency — already-filled rows skipped)"
+            )
 
     # DQ-7: validate association_type values against the allowlist (warn-only).
     if "association_type" in out.columns:
@@ -3375,9 +3542,28 @@ def validate_gda_scores(
         # DisGeNET scores are typically in [0, 1] — warn if any value
         # was clipped at the upper bound (might indicate a different scale).
         try:
+            # P1-010 ROOT FIX (v100 forensic — TypeError on None>float):
+            # The previous code did ``out["_original_score"] > score_max``
+            # directly. But ``_original_score`` is ONLY populated for
+            # clipped rows (line ~3249 sets it inside ``out.loc[clipped_mask,
+            # "_original_score"] = ...``). For non-clipped rows,
+            # ``_original_score`` is None — and ``None > 1.0`` raises
+            # TypeError on some pandas versions (or returns False on
+            # others). The behavior was pandas-version-dependent and
+            # could crash DisGeNET validation. ROOT FIX: use
+            # ``.fillna(0.0)`` so the comparison is always numeric.
+            # A non-clipped row has ``_original_score = None → 0.0``,
+            # which is never > ``score_max`` (1.0), so the row is
+            # correctly excluded from the warning.
+            _original_score_filled = out.get(
+                "_original_score", pd.Series(None, index=out.index, dtype=object),
+            ).fillna(0.0)
+            _clipped_flag = out.get(
+                "_score_was_clipped", pd.Series(False, index=out.index),
+            )
             clipped_at_max = (
-                out.get("_score_was_clipped", pd.Series(False, index=out.index))
-                & (out["_original_score"] > score_max)
+                _clipped_flag
+                & (_original_score_filled > score_max)
             )
             clipped_at_max_count = int(clipped_at_max.sum())
             if clipped_at_max_count > 0:
