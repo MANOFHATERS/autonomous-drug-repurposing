@@ -204,7 +204,7 @@ from database.loaders import (
     resolve_gene_symbol_to_uniprot,
 )
 from database.models import GeneDiseaseAssociation, PMID_LIST_LENGTH
-from pipelines.base_pipeline import BasePipeline, UNIPROT_ID_PATTERN
+from pipelines.base_pipeline import BasePipeline, UNIPROT_ID_PATTERN, DownloadError
 
 # ---------------------------------------------------------------------------
 # Module logger
@@ -1098,9 +1098,23 @@ class DisGeNETPipeline(BasePipeline):
                 else:
                     self._source_format = DisGeNETSourceFormat.TSV
                     path = self._download_static()
-            except (OSError, ValueError, ConnectionError, TimeoutError) as exc:  # v85 FORENSIC ROOT FIX (BUG #51)
+            except (OSError, ValueError, ConnectionError, TimeoutError, DownloadError) as exc:  # v85 FORENSIC ROOT FIX (BUG #51) + v92 fix
                 # v83 P0-C13: in sample mode, fall back to embedded samples
                 # instead of raising. In full mode, re-raise.
+                #
+                # ROOT FIX (v92): added ``DownloadError`` to the catch list.
+                # ``DownloadError`` inherits from ``PipelineError`` →
+                # ``Exception`` (NOT from ``OSError``), so the previous
+                # catch list ``(OSError, ValueError, ConnectionError,
+                # TimeoutError)`` did NOT catch it. When DisGeNET's
+                # deprecated static URL returns HTTP 401 (which it does
+                # now — the URL was deprecated in 2024 and redirects to
+                # the API which requires a key), ``_download_with_retries``
+                # raises ``DownloadError`` (after all retries are
+                # exhausted). This propagated up and crashed the E2E
+                # sample-mode pipeline, breaking CI's E2E job. The fix
+                # adds ``DownloadError`` so the sample-mode fallback
+                # fires correctly.
                 if _download_mode == "sample":
                     logger.warning(
                         "[disgenet] Live download failed in sample mode (%s: %s) "
