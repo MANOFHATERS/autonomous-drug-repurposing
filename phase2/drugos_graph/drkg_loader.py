@@ -1312,6 +1312,31 @@ def parse_drkg_tsv(
     df["tail_type"] = tail_parsed[0]
     df["tail_id"] = tail_parsed[1]
 
+    # BUG #74 ROOT FIX: validate DRKG entity ID format with regex
+    # ^\w+::[\w:]+$. The structural split above catches missing-separator
+    # cases but does NOT validate the format — malformed IDs like
+    # "Compound:DB00945" (single colon, would produce head_type="Compound"
+    # and head_id="DB00945" but the original was malformed) or IDs with
+    # spaces/special chars would pass through and become canonical node
+    # IDs, fragmenting entity resolution. Validate per-row and flag
+    # malformed rows for the downstream dead-letter filter (line ~1721).
+    import re as _re
+    _DRKG_ID_PATTERN = _re.compile(r"^\w+::[\w:]+$")
+    _malformed_entity_mask = (
+        ~df["head_entity"].astype(str).str.match(_DRKG_ID_PATTERN)
+        | ~df["tail_entity"].astype(str).str.match(_DRKG_ID_PATTERN)
+    )
+    _n_malformed_ids = int(_malformed_entity_mask.sum())
+    if _n_malformed_ids > 0:
+        logger.warning(
+            "drkg_loader: %d rows have malformed entity IDs (do not "
+            "match ^\\w+::[\\w:]+$ pattern). These rows will be "
+            "filtered downstream (BUG #74 root fix). Sample: %s",
+            _n_malformed_ids,
+            df.loc[_malformed_entity_mask, ["head_entity", "tail_entity"]]
+            .head(3).to_dict("records"),
+        )
+
     # ── BUG 1.5 / BUG 4.4: parse relation via config.split_drkg_relation ─
     # Vectorised via .apply() so malformed rows are caught per-row and
     # sent to the dead-letter queue (mirror uniprot_loader's pattern).

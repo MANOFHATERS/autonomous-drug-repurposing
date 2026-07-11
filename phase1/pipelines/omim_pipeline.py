@@ -881,7 +881,7 @@ class OMIMPipeline(BasePipeline):
             self._download_method_used = "morbidmap"
             self._source_url_sanitised = OMIM_DOWNLOADS_URL_SANITISED
             return path
-        except Exception as exc:
+        except (OSError, ValueError, ConnectionError, TimeoutError) as exc:  # v85 FORENSIC ROOT FIX (BUG #51)
             # v83 P0-C12: in sample mode, fall back to embedded samples
             # instead of raising. In full mode, re-raise (the operator
             # needs to know the download failed).
@@ -1978,7 +1978,7 @@ class OMIMPipeline(BasePipeline):
                 quoting=csv_mod.QUOTE_ALL,
             )
             os.replace(tmp_path, output_path)
-        except Exception:
+        except (OSError, csv_mod.Error, ValueError):  # v85 FORENSIC ROOT FIX (BUG #51)
             try:
                 if tmp_path.exists():
                     tmp_path.unlink()
@@ -2030,7 +2030,7 @@ class OMIMPipeline(BasePipeline):
         # Compute the input fingerprint (BUG-7.5, BUG-16.2).
         try:
             self._input_fingerprint = _fingerprint_df(df)
-        except Exception:
+        except (OSError, ValueError):  # v85 FORENSIC ROOT FIX (BUG #51)
             self._input_fingerprint = ""
 
         manifest = {
@@ -2068,7 +2068,7 @@ class OMIMPipeline(BasePipeline):
             tmp.write_text(json.dumps(manifest, indent=2, default=str), encoding="utf-8")
             os.replace(tmp, manifest_path)
             logger.info("[omim] Manifest written: %s", manifest_path)
-        except Exception:
+        except (OSError, ValueError, json.JSONDecodeError):  # v85 FORENSIC ROOT FIX (BUG #51)
             try:
                 if tmp.exists():
                     tmp.unlink()
@@ -2163,7 +2163,7 @@ class OMIMPipeline(BasePipeline):
                     "[omim] Dead-letter DB: %d records queued (reason=%s)",
                     len(objects), reason,
                 )
-        except Exception as exc:
+        except (OSError, RuntimeError, ValueError) as exc:  # v85 FORENSIC ROOT FIX (BUG #51)
             logger.error(
                 "[omim] Dead-letter DB write failed: %s",
                 self._sanitize_error_message(str(exc)),
@@ -2191,7 +2191,7 @@ class OMIMPipeline(BasePipeline):
         try:
             content = df.to_csv(index=False).encode("utf-8")
             return hashlib.sha256(content).hexdigest()
-        except Exception:
+        except (OSError, ValueError):  # v85 FORENSIC ROOT FIX (BUG #51)
             return ""
 
     # ------------------------------------------------------------------
@@ -2228,7 +2228,7 @@ class OMIMPipeline(BasePipeline):
             valid_cols = {c.key for c in mapper.columns}
             # Exclude auto-managed columns.
             valid_cols -= {"id", "created_at", "updated_at"}
-        except Exception:
+        except (ImportError, OSError, ValueError):  # v85 FORENSIC ROOT FIX (BUG #51)
             # Fallback: use the known GDA model column list.
             valid_cols = {
                 "gene_symbol", "uniprot_id", "disease_id", "disease_id_type",
@@ -2464,7 +2464,7 @@ class OMIMPipeline(BasePipeline):
                     input_checksum=input_checksum,
                     dedup_already_done=True,  # DQ-6 / SCI-37
                 )
-            except Exception as exc:
+            except (OSError, RuntimeError, ValueError) as exc:  # v85 FORENSIC ROOT FIX (BUG #51)
                 logger.error(
                     "[omim] bulk_upsert_gda failed: %s",
                     self._sanitize_error_message(str(exc)),
@@ -2480,7 +2480,7 @@ class OMIMPipeline(BasePipeline):
                 try:
                     from sqlalchemy import text as _sa_text
                     sess.execute(_sa_text("SELECT 1"))
-                except Exception as sess_exc:
+                except (OSError, RuntimeError, ValueError) as sess_exc:  # v85 FORENSIC ROOT FIX (BUG #51)
                     logger.error(
                         "[omim] Session is poisoned — rolling back: %s",
                         self._sanitize_error_message(str(sess_exc)),
@@ -2606,7 +2606,7 @@ class OMIMPipeline(BasePipeline):
                     "records_marked_disgenet_overlap", marked_count,
                     tags={"source": "omim"},
                 )
-        except Exception as exc:
+        except (OSError, RuntimeError, ValueError) as exc:  # v85 FORENSIC ROOT FIX (BUG #51)
             # Non-fatal — log and continue. The OMIM rows are still loaded;
             # they're just not marked. Downstream ML can still filter.
             logger.warning(
@@ -2689,7 +2689,7 @@ class OMIMPipeline(BasePipeline):
             )
             status = "load_success"
             return records_loaded
-        except Exception as exc:
+        except (OSError, RuntimeError, ValueError) as exc:  # v85 FORENSIC ROOT FIX (BUG #51)
             status = "failed"
             raw_msg = str(exc) if str(exc) else type(exc).__name__
             error_message = self._sanitize_error_message(raw_msg)
@@ -2728,7 +2728,7 @@ class OMIMPipeline(BasePipeline):
                         "records_loaded": records_loaded,
                     },
                 )
-            except Exception as audit_exc:
+            except (OSError, RuntimeError, ValueError) as audit_exc:  # v85 FORENSIC ROOT FIX (BUG #51)
                 logger.error(
                     "[omim] Audit log write failed: %s",
                     self._sanitize_error_message(str(audit_exc)),
@@ -3050,7 +3050,7 @@ def _download_hgnc_crosswalk(dest_path: Path) -> Path:
                 dest_path.name, dest_path.stat().st_size,
             )
             return dest_path
-        except Exception as exc:
+        except (OSError, ValueError, ConnectionError, TimeoutError) as exc:  # v85 FORENSIC ROOT FIX (BUG #51)
             last_exc = exc
             # Clean up partial download.
             try:
@@ -3151,7 +3151,7 @@ def _load_hgnc_crosswalk() -> dict[str, dict[str, str]]:
             _load_hgnc_crosswalk.cache_clear()
             # Re-try the load — the file should exist now.
             return _load_hgnc_crosswalk()
-        except Exception as exc:
+        except (OSError, ValueError, pd.errors.ParserError) as exc:  # v85 FORENSIC ROOT FIX (BUG #51)
             logger.warning(
                 "[omim] HGNC auto-download failed (%s). Falling back "
                 "to embedded ~50-entry crosswalk. To enable full "

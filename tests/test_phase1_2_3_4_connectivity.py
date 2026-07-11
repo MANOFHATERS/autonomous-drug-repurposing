@@ -64,10 +64,27 @@ if _PHASE2_ROOT not in sys.path:
 # Fixtures — generate Phase 1 sample data + run the Phase 1→2 bridge ONCE
 # ---------------------------------------------------------------------------
 
-@pytest.fixture(scope="module")
+@pytest.fixture(scope="session")
 def phase1_processed_dir(tmp_path_factory: pytest.TempPathFactory) -> str:
-    """Generate Phase 1 sample data (embedded CSVs, no API calls)."""
-    phase1_dir = tmp_path_factory.mktemp("phase1_processed_data")
+    """Generate Phase 1 sample data (embedded CSVs, no API calls).
+
+    v91 ROOT FIX: changed scope from "module" to "session" so the data
+    is generated ONCE per test session. The previous module scope caused
+    test-isolation errors when run with other test modules — each module
+    re-ran `pipelines samples`, and if another test had modified the
+    processed_data dir, the re-generation failed with errors.
+    """
+    # Check if the default dir already has CSVs (from a previous fixture
+    # call or from CI setup). If so, reuse it — don't regenerate.
+    default_dir = os.path.join(_PHASE1_ROOT, "processed_data")
+    if os.path.isdir(default_dir):
+        existing_csvs = [
+            f for f in os.listdir(default_dir)
+            if f.endswith(".csv") or f.endswith(".csv.gz")
+        ]
+        if existing_csvs:
+            return default_dir
+
     env = dict(os.environ)
     env["DRUGOS_DOWNLOAD_MODE"] = "sample"
     env["DISGENET_USE_API"] = "false"
@@ -90,14 +107,13 @@ def phase1_processed_dir(tmp_path_factory: pytest.TempPathFactory) -> str:
         )
 
     # The samples command writes to phase1/processed_data/, not our temp
-    # dir. Copy or use the default location.
-    default_dir = os.path.join(_PHASE1_ROOT, "processed_data")
+    # dir. Use the default location.
     if os.path.isdir(default_dir):
         return default_dir
     pytest.skip("Phase 1 processed_data not found after sample generation")
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture(scope="session")
 def staged_data(phase1_processed_dir: str) -> Any:
     """Run the Phase 1→2 bridge to produce Phase1StagedData from REAL CSVs."""
     from drugos_graph.phase1_bridge import (

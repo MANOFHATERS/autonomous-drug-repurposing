@@ -74,7 +74,23 @@ def _safe_gene_id_from_mim(gene_mim: Any, gene_symbol: str) -> Optional[str]:
     try:
         # v37 ROOT FIX (Issue #7): prefix with MIM: to namespace-disambiguate
         # from bare NCBI Gene IDs.
-        return f"MIM:{int(float(raw))}"
+        mim_int = int(float(raw))
+        # BUG #64 ROOT FIX: validate MIM number is exactly 6 digits.
+        # OMIM MIM numbers are 6-digit integers (e.g., 134934 for FGFR3).
+        # Without validation, allele variants like "134934.001" are
+        # truncated to 134934 by int(float()) — but non-standard inputs
+        # (5-digit or 7-digit numbers) would create malformed Gene node
+        # IDs, fragmenting gene resolution. Validate strictly: the 6-digit
+        # range is [100000, 999999]. Fall back to SYM: prefix for
+        # non-6-digit values so malformed MIMs never become canonical IDs.
+        if not (100000 <= mim_int <= 999999):
+            logger.warning(
+                "omim_loader: gene_mim=%r is not a 6-digit MIM number "
+                "(parsed as %d); falling back to SYM:%s",
+                raw, mim_int, gene_symbol,
+            )
+            return f"SYM:{gene_symbol}" if gene_symbol else None
+        return f"MIM:{mim_int}"
     except (TypeError, ValueError):
         logger.warning(
             "omim_loader: non-numeric gene_mim=%r; falling back to SYM:%s",
