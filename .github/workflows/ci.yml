@@ -210,26 +210,36 @@ jobs:
               print(f"::error::staged_graph.json not found at {sg}")
               sys.exit(1)
           data = json.loads(sg.read_text())
-          edges = data.get("edges", {})
-          # The edge key may be serialized as a string in different formats
-          # depending on JSON encoder. Check both.
-          treats = (
-              edges.get('("Compound", "treats", "Disease")')
-              or edges.get('["Compound", "treats", "Disease"]')
-              or edges.get('Compound|treats|Disease')
-              or []
+          # The JSON has TWO views:
+          #   - node_counts_by_type / edge_counts_by_type (summary dicts)
+          #   - nodes / edges (full data, keyed by type/edge-type)
+          # Use the summary dicts — they're always present and use the
+          # canonical key formats.
+          node_counts = data.get("node_counts_by_type", {})
+          edge_counts = data.get("edge_counts_by_type", {})
+          # Try multiple key formats (the JSON uses "->" arrow notation
+          # in edge_counts_by_type, but "edge_types_present" uses tuple
+          # notation). Check both for robustness.
+          treats_count = (
+              edge_counts.get("Compound->treats->Disease", 0)
+              or edge_counts.get('("Compound", "treats", "Disease")', 0)
+              or edge_counts.get('["Compound", "treats", "Disease"]', 0)
+              or 0
           )
-          nodes = data.get("nodes", {})
-          compound_count = len(nodes.get("compound_nodes", []))
-          disease_count = len(nodes.get("disease_nodes", []))
+          compound_count = node_counts.get("Compound", 0)
+          disease_count = node_counts.get("Disease", 0)
           print(f"Compound nodes: {compound_count}")
           print(f"Disease nodes:  {disease_count}")
-          print(f"Treats edges:   {len(treats)}")
-          if len(treats) < 1:
+          print(f"Treats edges:   {treats_count}")
+          print(f"Total nodes staged: {data.get('nodes_staged', '?')}")
+          print(f"Total edges staged: {data.get('edges_staged', '?')}")
+          if treats_count < 1:
               print("::error::V1 launch criterion failed — zero Compound-treats-Disease edges")
+              print(f"::error::edge_counts_by_type = {edge_counts}")
               sys.exit(1)
           if compound_count < 1:
               print("::error::Zero Compound nodes staged — Phase 1 → Phase 2 link broken")
+              print(f"::error::node_counts_by_type = {node_counts}")
               sys.exit(1)
           print("V1 launch criterion (>=1 treats edge) satisfied in dry-run mode.")
           PY
