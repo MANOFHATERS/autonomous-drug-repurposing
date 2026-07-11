@@ -23,8 +23,19 @@ import traceback
 from pathlib import Path
 
 # Ensure phase1 is on sys.path
-PHASE1 = Path(__file__).resolve().parents[1] / "repo" / "autonomous-drug-repurposing" / "phase1"
-sys.path.insert(0, str(PHASE1))
+# When run from /home/z/my-project/scripts/verify_v93_fixes.py:
+#   parents[1] = /home/z/my-project, then /repo/autonomous-drug-repurposing/phase1
+# When run from phase1/tests/v93_forensic/verify_v93_all_26_bugs.py (committed):
+#   parents[3] = autonomous-drug-repurposing repo root, then /phase1
+_SCRIPT_PATH = Path(__file__).resolve()
+_CANDIDATE_PATHS = [
+    _SCRIPT_PATH.parents[1] / "repo" / "autonomous-drug-repurposing" / "phase1",
+    _SCRIPT_PATH.parents[3] / "phase1",  # committed location
+    _SCRIPT_PATH.parents[0] / "phase1",  # if run from repo root
+]
+PHASE1 = next((p for p in _CANDIDATE_PATHS if p.exists()), _CANDIDATE_PATHS[0])
+if str(PHASE1) not in sys.path:
+    sys.path.insert(0, str(PHASE1))
 
 # Disable dev-mode DB auto-default to avoid config warnings during import
 os.environ.setdefault("DRUGOS_DEV_ALLOW_DEFAULT_DB", "1")
