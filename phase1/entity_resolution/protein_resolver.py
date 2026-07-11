@@ -788,6 +788,29 @@ class ProteinResolver(Resolver):
         self._name_index: Dict[str, str] = {}
         # D8-5: multi-valued name index.
         self._name_index_multi: Dict[str, List[str]] = {}
+        # v89 FORENSIC ROOT FIX (BUG #15 P1 — single-valued gene_index and
+        #   string_to_uniprot silently picked FIRST match):
+        #   Both ``_gene_index`` and ``_string_to_uniprot`` are single-
+        #   valued dicts. When multiple UniProt accessions map to the
+        #   same STRING ID (rare but possible for cross-references) or
+        #   the same (gene, organism) pair (possible for readthrough
+        #   transcripts, isoforms, or gene duplications), the FIRST one
+        #   registered won (line 1889-1891: ``if key not in
+        #   self._gene_index: self._gene_index[key] = base_uid``). The
+        #   resolver silently picked the first match without alerting on
+        #   ambiguity. For genes with multiple UniProt entries (e.g. TP53
+        #   has P04637 + isoforms), STRING records were always merged
+        #   into the FIRST registered entry. The other entries never
+        #   received STRING cross-references. The KG's PPI subgraph was
+        #   incomplete.
+        #   ROOT FIX: maintain multi-valued indices
+        #   ``_gene_index_multi`` and ``_string_to_uniprot_multi`` (like
+        #   ``_name_index_multi`` in drug_resolver). When looking up,
+        #   if there are MULTIPLE candidates, log a WARNING and return
+        #   None (refuse to match) so the resolver falls through to
+        #   other matching strategies or creates a new entry.
+        self._gene_index_multi: Dict[Tuple[str, str], List[str]] = {}
+        self._string_to_uniprot_multi: Dict[str, List[str]] = {}
         self._dead_letter: List[dict] = []
         self._audit_trail: Dict[str, List[dict]] = {}
         self._stats: ResolverStats = ResolverStats()
@@ -1615,9 +1638,59 @@ class ProteinResolver(Resolver):
                 return
 
         self._stats.inc("records_ingested")
+        # v89 FORENSIC ROOT FIX (BUG #4 P0 — UniProt accessions NOT uppercased):
+        #   UniProt accessions are CASE-SENSITIVE per the UniProt spec
+        #   (must be UPPERCASE, e.g. "P04637" not "p04637"). The
+        #   validation regex ``_UNIPROT_ACCESSION_RE`` requires uppercase,
+        #   but validation only fires when ``strict_mode=True`` (default
+        #   is ``False`` per ``ResolverConfig.bulk_strict_validation``).
+        #   When strict mode is off (the production default), a lowercase
+        #   UniProt accession like "p04637" passes validation, is stored
+        #   as-is in ``self.mapping["p04637"]``, and is NEVER normalized
+        #   to "P04637". A subsequent record with the correct "P04637"
+        #   would create a SEPARATE entry. The alias-uniprot index
+        #   (line 1216: ``_au = str(alias_uniprot_id).strip().upper()``)
+        #   DOES uppercase for lookup, but the actual storage key
+        #   ``base_uid`` (line 1882: ``self.mapping[base_uid] = entry``)
+        #   does NOT. This produced DUPLICATE canonical entries for the
+        #   same protein — corrupting TransE embeddings and drug-target
+        #   edge connectivity.
+        #   ROOT FIX: normalize ``uniprot_id`` to uppercase + strip
+        #   IMMEDIATELY after retrieval. ``base_uid`` (derived from
+        #   ``uniprot_id`` at line 1668) inherits the uppercase
+        #   normalization, so ALL ``self.mapping[base_uid]`` operations
+        #   use the uppercase key. This is the SAME normalization the
+        #   alias-uniprot index already uses — now consistent end-to-end.
         uniprot_id = record.get("uniprot_id", "")
+        if isinstance(uniprot_id, str):
+            uniprot_id = uniprot_id.strip().upper()
+        elif uniprot_id is not None:
+            uniprot_id = str(uniprot_id).strip().upper()
+        else:
+            uniprot_id = ""
         if not uniprot_id:
+            # v89 FORENSIC ROOT FIX (BUG #11 P1 — empty uniprot_id silently
+            #   dropped without dead-letter):
+            #   The previous code incremented ``records_rejected`` and
+            #   ``return``ed — the record vanished silently. The operator
+            #   saw ``records_rejected=1`` but could NOT diagnose WHICH
+            #   protein was lost or WHY. For a patient-safety pharma
+            #   platform, silent data loss is unacceptable.
+            #   ROOT FIX: append to the dead-letter queue with a clear
+            #   error message BEFORE returning. The operator can inspect
+            #   ``self._dead_letter`` to see the rejected record.
+            self._dead_letter.append({
+                "record": record,
+                "source": "uniprot",
+                "errors": ["empty uniprot_id"],
+                "stage": "add_uniprot_records",
+            })
             self._stats.inc("records_rejected")
+            self._stats.inc("dead_lettered")
+            logger.warning(
+                "add_uniprot_records: record %d rejected — empty uniprot_id "
+                "(added to dead-letter queue for diagnosis)", idx,
+            )
             return
 
         # FIX SCI-06: cross-reference UniProt accession vs organism.
@@ -1646,6 +1719,53 @@ class ProteinResolver(Resolver):
                 self._stats.inc("organism_mismatches")
                 return
         else:
+            # v89 FORENSIC ROOT FIX (BUG #6 P0 — organism filter was
+            #   "decorative" for >99.9% of records):
+            #   The override table has ~80 baseline + ~250 auto-loaded
+            #   entries. UniProt Swiss-Prot has ~560,000 entries. So for
+            #   >99.9% of records, the organism was NEVER validated —
+            #   the code logged a DEBUG message and accepted whatever
+            #   organism the record claimed. Combined with BUG #2 (STRING
+            #   →UniProt mispairing) and BUG #3 (no organism filter on
+            #   alias file selection), this produced systemic cross-
+            #   species protein mixing. Mouse/rat/fly proteins were
+            #   silently labeled "Homo sapiens" and merged into human
+            #   PPI subgraphs. Drug-target edges connected human drugs
+            #   to non-human protein targets — a patient-safety hazard.
+            #   ROOT FIX: when ``require_organism_override=True`` (a
+            #   config flag that already exists at base.py:455 but
+            #   defaulted to False and was never consulted), REFUSE to
+            #   accept a UniProt record whose organism cannot be
+            #   validated against the override table. Dead-letter it so
+            #   the operator sees the gap and can extend the crosswalk.
+            #   This makes the organism filter ENFORCED in production
+            #   (operators set the flag via the
+            #   ``ENTITY_RESOLUTION_REQUIRE_ORGANISM_OVERRIDE`` env var)
+            #   while keeping the lenient default for dev/test.
+            if getattr(self._config, "require_organism_override", False):
+                logger.warning(
+                    "add_uniprot_records: organism for %s NOT validated "
+                    "against UniProt canonical mapping (not in effective "
+                    "overrides; require_organism_override=True). "
+                    "Dead-lettering to prevent cross-species contamination. "
+                    "Set UNIPROT_ORGANISM_CROSSWALK_PATH env var or call "
+                    "load_uniprot_organism_crosswalk() to extend the "
+                    "override table.",
+                    uniprot_id,
+                )
+                self._dead_letter.append({
+                    "record": record,
+                    "source": "uniprot",
+                    "errors": [
+                        f"uniprot_id {uniprot_id} not in organism override "
+                        f"table; require_organism_override=True refuses "
+                        f"unvalidated organisms"
+                    ],
+                    "stage": "add_uniprot_records",
+                })
+                self._stats.inc("records_rejected")
+                self._stats.inc("organism_not_validated")
+                return
             logger.debug(
                 "add_uniprot_records: organism for %s not validated against "
                 "UniProt canonical mapping (not in effective overrides; "
@@ -1886,8 +2006,14 @@ class ProteinResolver(Resolver):
             # FIX SCI-02: preserve gene-symbol case in index key.
             # FIX SCI-03: normalize organism for index key.
             key = (gene_symbol, self._normalize_organism(organism or self._config.default_organism))
+            # v89 BUG #15: maintain multi-valued index alongside the
+            # single-valued one. The single-valued index keeps the
+            # FIRST registered uid (backward compat for existing lookups);
+            # the multi-valued index tracks ALL uids so lookups can
+            # detect ambiguity.
             if key not in self._gene_index:
                 self._gene_index[key] = base_uid
+            self._gene_index_multi.setdefault(key, []).append(base_uid)
 
         norm_name = normalize_name(gene_symbol or gene_name or "")
         if norm_name:
@@ -1897,7 +2023,12 @@ class ProteinResolver(Resolver):
             ).append(base_uid)
 
         if string_id:
+            # v89 BUG #15: maintain multi-valued index alongside the
+            # single-valued one. The single-valued index keeps the LAST
+            # registered uid (backward compat); the multi-valued index
+            # tracks ALL uids so lookups can detect ambiguity.
             self._string_to_uniprot[string_id] = base_uid
+            self._string_to_uniprot_multi.setdefault(string_id, []).append(base_uid)
 
         self._append_audit(base_uid, {
             "action": "create",
@@ -1997,14 +2128,65 @@ class ProteinResolver(Resolver):
             organism = self._normalize_organism(organism_raw)
             gene_symbol = self._normalize_gene_symbol(gene_symbol_raw)
 
+            # v89 FORENSIC ROOT FIX (BUG #15 P1 — ambiguous lookups silently
+            #   picked FIRST match):
+            #   The previous lookups used single-valued dicts
+            #   ``_string_to_uniprot`` and ``_gene_index``. When multiple
+            #   UniProt accessions map to the same STRING ID or the same
+            #   (gene, organism) pair, the FIRST one registered won. The
+            #   resolver silently picked the first match without alerting
+            #   on ambiguity. For genes with multiple UniProt entries
+            #   (e.g. TP53 has P04637 + isoforms), STRING records were
+            #   always merged into the FIRST registered entry — the KG's
+            #   PPI subgraph was incomplete.
+            #   ROOT FIX: consult the multi-valued indices
+            #   ``_string_to_uniprot_multi`` and ``_gene_index_multi``
+            #   FIRST. If there are MULTIPLE distinct candidates, log a
+            #   WARNING and refuse to match (return None) so the resolver
+            #   falls through to other matching strategies or creates a
+            #   new provisional entry. Only use the single-valued index
+            #   when the multi-valued index has exactly ONE candidate.
             # 1. Direct STRING → UniProt mapping.
-            uniprot_id = self._string_to_uniprot.get(string_id)
+            uniprot_id = None
+            _multi_candidates = self._string_to_uniprot_multi.get(string_id) or []
+            # Deduplicate while preserving order.
+            _seen = set()
+            _multi_candidates = [u for u in _multi_candidates if not (u in _seen or _seen.add(u))]
+            if len(_multi_candidates) > 1:
+                logger.warning(
+                    "add_string_records: STRING ID %s maps to MULTIPLE "
+                    "UniProt accessions (%s) — ambiguous, refusing to "
+                    "match by STRING ID alone. Creating provisional entry.",
+                    string_id, _multi_candidates,
+                )
+                self._stats.inc("ambiguous_string_to_uniprot")
+                uniprot_id = None
+            elif len(_multi_candidates) == 1:
+                uniprot_id = _multi_candidates[0]
+            else:
+                uniprot_id = self._string_to_uniprot.get(string_id)
 
             # 2. Gene name + organism match.
             if uniprot_id is None and gene_symbol:
                 # FIX SCI-02: use normalized gene symbol (preserving case).
                 key = (gene_symbol, self._normalize_organism(organism or self._config.default_organism))
-                uniprot_id = self._gene_index.get(key)
+                _multi_gene_candidates = self._gene_index_multi.get(key) or []
+                _seen = set()
+                _multi_gene_candidates = [u for u in _multi_gene_candidates if not (u in _seen or _seen.add(u))]
+                if len(_multi_gene_candidates) > 1:
+                    logger.warning(
+                        "add_string_records: (gene=%s, organism=%s) maps "
+                        "to MULTIPLE UniProt accessions (%s) — ambiguous, "
+                        "refusing to match by gene+organism alone. "
+                        "Creating provisional entry.",
+                        gene_symbol, organism, _multi_gene_candidates,
+                    )
+                    self._stats.inc("ambiguous_gene_organism")
+                    uniprot_id = None
+                elif len(_multi_gene_candidates) == 1:
+                    uniprot_id = _multi_gene_candidates[0]
+                else:
+                    uniprot_id = self._gene_index.get(key)
 
             if uniprot_id is not None and uniprot_id in self.mapping:
                 self._merge_string_into_canonical(uniprot_id, record)
@@ -2513,129 +2695,151 @@ class ProteinResolver(Resolver):
             try:
                 if hasattr(string_df, "empty") and hasattr(string_df, "columns"):
                     if not string_df.empty and "uniprot_id" in string_df.columns:
+                        # v89 FORENSIC ROOT FIX (BUG #18 P1 — string_derived
+                        #   organism default "Homo sapiens" for unknowns):
+                        #   The previous code created a string_derived entry
+                        #   for EVERY UniProt ID in string_df that was not
+                        #   already in self.mapping. The organism was
+                        #   resolved via 3 sources:
+                        #     1. UniProt organism override table (~250 entries)
+                        #     2. Per-row organism column in string_df
+                        #     3. STRING ID taxonomy prefix (Source 3)
+                        #   If NONE of these fired, the organism defaulted
+                        #   to ``self._config.default_organism`` ("Homo
+                        #   sapiens"). In run.py, string_protein_df is built
+                        #   with ONLY uniprot_id + string_id columns (no
+                        #   organism). Source 1 only fires for ~250 known
+                        #   accessions. Source 3 fires only if string_id is
+                        #   populated AND has a valid taxonomy prefix AND
+                        #   that prefix is in ``_ORGANISM_ALIASES``. For any
+                        #   STRING-derived UniProt ID not in the override
+                        #   table and without a valid string_id pairing, the
+                        #   organism defaulted to "Homo sapiens" — non-human
+                        #   proteins were mislabeled as human.
+                        #   ROOT FIX: REFUSE to create a string_derived
+                        #   entry when the organism cannot be determined
+                        #   from ANY of the 3 sources. Dead-letter the
+                        #   UniProt ID so the operator sees the gap. This
+                        #   prevents non-human proteins from being silently
+                        #   labeled "Homo sapiens" and merged into human PPI
+                        #   subgraphs. The operator can extend the override
+                        #   table or fix the string_id pairing to resolve
+                        #   the dead-lettered entries.
+                        _string_derived_skipped = 0
                         for uid in string_df["uniprot_id"].dropna().unique():
                             uid_str = str(uid).strip()
-                            if uid_str and uid_str not in self.mapping:
-                                now_iso = self._now_iso()
-                                # v49 ROOT FIX (P1-021 — protein_resolver
-                                # labels ALL string_derived entries as
-                                # "Homo sapiens" without organism cross-check):
-                                # The v48 code unconditionally used
-                                # `self._config.default_organism` ("Homo
-                                # sapiens") for every string_derived entry.
-                                # STRING's protein.aliases file contains
-                                # proteins from MANY organisms (the file is
-                                # per-organism, but if a non-human file is
-                                # loaded or a cross-contamination happens,
-                                # non-human proteins get mislabeled as human).
-                                # ROOT FIX: cross-check against the
-                                # UniProt organism override table first;
-                                # fall back to a per-row organism column
-                                # in string_df if present; only use the
-                                # default_organism if neither source
-                                # provides an organism.
-                                _resolved_organism = self._config.default_organism
-                                # Source 1: UniProt organism override table
-                                # (populated from
-                                # data/uniprot_organism_crosswalk.yaml via
-                                # the module-level
-                                # _get_effective_uniprot_organism_overrides()
-                                # function — same source used by
-                                # add_uniprot_records for cross-validation).
-                                try:
-                                    _effective_overrides = (
-                                        _get_effective_uniprot_organism_overrides()
-                                    )
-                                except Exception:
-                                    _effective_overrides = {}
-                                if uid_str in _effective_overrides:
-                                    _resolved_organism = _effective_overrides[uid_str]
-                                # Source 2: per-row organism column in
-                                # string_df (set by STRING pipeline when it
-                                # knows the organism from the filename).
-                                elif (
-                                    "organism" in string_df.columns
-                                    and "uniprot_id" in string_df.columns
-                                ):
-                                    _row_match = string_df.loc[
-                                        string_df["uniprot_id"].astype(str).str.strip()
-                                        == uid_str,
-                                        "organism",
-                                    ].dropna()
-                                    if not _row_match.empty:
-                                        _row_org = str(_row_match.iloc[0]).strip()
-                                        if _row_org:
-                                            _resolved_organism = _row_org
-                                # v82 FORENSIC ROOT FIX (P1-5 — STRING-derived
-                                # organism default "Homo sapiens" for unknown
-                                # UniProt IDs):
-                                #   The v49 ROOT FIX only helped if the UniProt
-                                #   ID was in the override table (~250 entries)
-                                #   OR if string_df had an organism column. In
-                                #   run.py, string_protein_df is built with ONLY
-                                #   a uniprot_id column (no organism). So for
-                                #   any STRING-derived UniProt ID not in the
-                                #   override table, the organism defaulted to
-                                #   "Homo sapiens" — non-human proteins were
-                                #   mislabeled as human. Cross-species PPI edges
-                                #   connected mouse proteins to human diseases.
-                                #
-                                #   ROOT FIX: Source 3 — infer the organism
-                                #   from the STRING ID taxonomy prefix. STRING
-                                #   IDs have the format ``<taxid>.<protein_id>``
-                                #   (e.g. "9606.ENSP00000269305" = human,
-                                #   "10090.ENSMUSP0000001" = mouse). We extract
-                                #   the taxid prefix and look it up in
-                                #   ``_ORGANISM_ALIASES`` (which already maps
-                                #   common taxids to organism names). This
-                                #   handles the case where string_df has a
-                                #   ``string_id`` column but no ``organism``
-                                #   column.
-                                elif "string_id" in string_df.columns and "uniprot_id" in string_df.columns:
-                                    _sid_match = string_df.loc[
-                                        string_df["uniprot_id"].astype(str).str.strip()
-                                        == uid_str,
-                                        "string_id",
-                                    ].dropna()
-                                    if not _sid_match.empty:
-                                        _sid = str(_sid_match.iloc[0]).strip()
-                                        if _sid and "." in _sid:
-                                            _taxid = _sid.split(".")[0]
-                                            _taxid_org = _ORGANISM_ALIASES.get(_taxid)
-                                            if _taxid_org:
-                                                _resolved_organism = _taxid_org
-                                self.mapping[uid_str] = {
-                                    "uniprot_id": uid_str,
-                                    "gene_symbol": None,
-                                    "gene_name": None,
-                                    "organism": _resolved_organism,
-                                    "sequence": None,
-                                    "protein_name": None,
-                                    "string_id": None,
-                                    "chembl_target_id": None,
-                                    "canonical_name": uid_str,
-                                    "sources": ["string_derived"],
-                                    "match_method": "string_derived",
-                                    # P1-ER-5 ROOT FIX: replaced the hardcoded
-                                    # 0.5 with compute_match_confidence so the
-                                    # score is sourced from the same registry
-                                    # as every other match_method in the file.
-                                    "match_confidence": compute_match_confidence("string_derived"),
-                                    "created_at": now_iso,
-                                    "resolved_at": now_iso,
-                                    "resolver_version": MAPPING_SCHEMA_VERSION,
-                                    "input_checksum": "",
-                                    "canonical_checksum": "",
-                                    "isoforms": [],
-                                    "deprecated_by": None,
-                                    "provisional": True,
-                                }
-                                self._append_audit(uid_str, {
-                                    "action": "create",
+                            if not uid_str or uid_str in self.mapping:
+                                continue
+                            # v89 BUG #4: normalize to uppercase for
+                            # consistency with add_uniprot_records.
+                            uid_str = uid_str.upper()
+                            if uid_str in self.mapping:
+                                continue
+                            now_iso = self._now_iso()
+                            _resolved_organism = None  # must be determined
+                            _organism_source = None
+                            # Source 1: UniProt organism override table.
+                            try:
+                                _effective_overrides = (
+                                    _get_effective_uniprot_organism_overrides()
+                                )
+                            except Exception:
+                                _effective_overrides = {}
+                            if uid_str in _effective_overrides:
+                                _resolved_organism = _effective_overrides[uid_str]
+                                _organism_source = "uniprot_override"
+                            # Source 2: per-row organism column in string_df.
+                            if _resolved_organism is None and "organism" in string_df.columns:
+                                _row_match = string_df.loc[
+                                    string_df["uniprot_id"].astype(str).str.strip().str.upper()
+                                    == uid_str,
+                                    "organism",
+                                ].dropna()
+                                if not _row_match.empty:
+                                    _row_org = str(_row_match.iloc[0]).strip()
+                                    if _row_org:
+                                        _resolved_organism = _row_org
+                                        _organism_source = "string_df_organism_column"
+                            # Source 3: STRING ID taxonomy prefix.
+                            if _resolved_organism is None and "string_id" in string_df.columns:
+                                _sid_match = string_df.loc[
+                                    string_df["uniprot_id"].astype(str).str.strip().str.upper()
+                                    == uid_str,
+                                    "string_id",
+                                ].dropna()
+                                if not _sid_match.empty:
+                                    _sid = str(_sid_match.iloc[0]).strip()
+                                    if _sid and "." in _sid:
+                                        _taxid = _sid.split(".")[0]
+                                        _taxid_org = _ORGANISM_ALIASES.get(_taxid)
+                                        if _taxid_org:
+                                            _resolved_organism = _taxid_org
+                                            _organism_source = "string_id_taxonomy_prefix"
+                            # v89 BUG #18: REFUSE to create a string_derived
+                            # entry if the organism could not be determined.
+                            if _resolved_organism is None:
+                                logger.warning(
+                                    "build_mapping: cannot determine organism "
+                                    "for STRING-derived UniProt ID %s — refusing "
+                                    "to create string_derived entry (would "
+                                    "default to 'Homo sapiens' and risk cross-"
+                                    "species contamination). Dead-lettering. "
+                                    "Extend the UniProt organism override "
+                                    "table or fix the string_id pairing to "
+                                    "resolve.",
+                                    uid_str,
+                                )
+                                self._dead_letter.append({
+                                    "record": {"uniprot_id": uid_str, "source": "string_derived"},
                                     "source": "string_derived",
-                                    "method": "string_derived",
-                                    "organism": _resolved_organism,
+                                    "errors": [
+                                        "organism could not be determined from "
+                                        "override table, string_df organism "
+                                        "column, or STRING ID taxonomy prefix — "
+                                        "refusing to default to 'Homo sapiens'"
+                                    ],
+                                    "stage": "build_mapping_string_derived",
                                 })
+                                self._stats.inc("records_rejected")
+                                self._stats.inc("string_derived_organism_unknown")
+                                _string_derived_skipped += 1
+                                continue
+                            self.mapping[uid_str] = {
+                                "uniprot_id": uid_str,
+                                "gene_symbol": None,
+                                "gene_name": None,
+                                "organism": _resolved_organism,
+                                "sequence": None,
+                                "protein_name": None,
+                                "string_id": None,
+                                "chembl_target_id": None,
+                                "canonical_name": uid_str,
+                                "sources": ["string_derived"],
+                                "match_method": "string_derived",
+                                "match_confidence": compute_match_confidence("string_derived"),
+                                "created_at": now_iso,
+                                "resolved_at": now_iso,
+                                "resolver_version": MAPPING_SCHEMA_VERSION,
+                                "input_checksum": "",
+                                "canonical_checksum": "",
+                                "isoforms": [],
+                                "deprecated_by": None,
+                                "provisional": True,
+                            }
+                            self._append_audit(uid_str, {
+                                "action": "create",
+                                "source": "string_derived",
+                                "method": "string_derived",
+                                "organism": _resolved_organism,
+                                "organism_source": _organism_source,
+                            })
+                        if _string_derived_skipped:
+                            logger.warning(
+                                "build_mapping: skipped %d STRING-derived "
+                                "entries with unknown organism (dead-lettered "
+                                "to prevent cross-species contamination)",
+                                _string_derived_skipped,
+                            )
                 else:
                     logger.warning(
                         "build_mapping: string_df is not a recognized DataFrame "

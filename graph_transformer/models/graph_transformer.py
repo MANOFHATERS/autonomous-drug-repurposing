@@ -151,8 +151,19 @@ class DrugRepurposingGraphTransformer(nn.Module):
         self.num_heads = num_heads
         self.edge_types = list(edge_types) if edge_types is not None else list(DEFAULT_EDGE_TYPES)
         self.node_types = list(node_types) if node_types is not None else list(DEFAULT_NODE_TYPES)
-        # Default to the label-leaking edge set if not specified.
-        self.exclude_edges = set(exclude_edges) if exclude_edges is not None else set(LABEL_LEAKING_EDGES)
+        # V90 ROOT FIX (BUG #48): use frozenset consistently for exclude_edges.
+        # The previous code converted the input to a mutable set, while
+        # LABEL_LEAKING_EDGES (the default source) is an immutable frozenset.
+        # The type mismatch was confusing — a reviewer couldn't tell if the
+        # model's exclude_edges was mutable or not. The fix uses frozenset
+        # consistently: the default is frozenset(LABEL_LEAKING_EDGES), and
+        # any caller-provided iterable is converted to frozenset. This
+        # makes the immutability contract explicit and prevents accidental
+        # mutation of self.exclude_edges.
+        if exclude_edges is None:
+            self.exclude_edges = frozenset(LABEL_LEAKING_EDGES)
+        else:
+            self.exclude_edges = frozenset(exclude_edges)
         # ROOT FIX (E12/E13): store ALL config fields for save/load round-trip
         self.ffn_hidden_dim = ffn_hidden_dim
         self.dropout = dropout

@@ -242,6 +242,13 @@ class GraphTransformerModel(nn.Module):
         self.relation_types = [tuple(r) for r in relation_types]
         d = self.config.embedding_dim
 
+        # v88 ROOT FIX (BUG #43 — expose score_higher_is_better for
+        # explicit duck-typing in train_transe): HGT's decoder produces
+        # sigmoid logits (higher = more plausible), so
+        # score_higher_is_better = True. This makes the BUG #43 fix
+        # in train_transe robust to class renames.
+        self.score_higher_is_better = True
+
         # Relation triple → index.
         # v35 ROOT FIX (H-13 / M-1): the previous code keyed decoders by
         # the relation name alone (via ``_sanitize_relation_key(rel)``).

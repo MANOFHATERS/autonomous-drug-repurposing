@@ -144,7 +144,16 @@ class _TokenBucket:
         )
         self._tokens: float = self.capacity
         self._last_refill: float = time.monotonic()
-        self._lock = threading.Lock()
+        # v84 FORENSIC ROOT FIX (BUG #35): use threading.Condition
+        # instead of a plain Lock. The previous code called
+        # ``time.sleep()`` WHILE HOLDING ``self._lock`` — every other
+        # thread waiting for a token was blocked for the ENTIRE sleep
+        # duration (up to 60s on a rate-limit wait). This serialized
+        # ALL requests, defeating the token-bucket's purpose. A
+        # Condition's ``wait()`` RELEASES the lock while sleeping and
+        # RE-ACQUIRES it before returning, so other threads can refill
+        # / acquire concurrently.
+        self._cond = threading.Condition()
 
     def acquire(self, timeout: float | None = None) -> bool:
         """Block until a token is available, then consume it.
@@ -153,7 +162,7 @@ class _TokenBucket:
         was reached before one became available.
         """
         deadline = (time.monotonic() + timeout) if timeout is not None else None
-        with self._lock:
+        with self._cond:
             while True:
                 now = time.monotonic()
                 elapsed = now - self._last_refill
@@ -163,6 +172,8 @@ class _TokenBucket:
                 self._last_refill = now
                 if self._tokens >= 1.0:
                     self._tokens -= 1.0
+                    # Wake up one waiter so it can re-check token availability.
+                    self._cond.notify(n=1)
                     return True
                 # Compute sleep time until next token is available.
                 deficit = 1.0 - self._tokens
@@ -171,7 +182,15 @@ class _TokenBucket:
                     remaining = deadline - now
                     if remaining <= 0 or wait > remaining:
                         return False
-                time.sleep(min(wait, 1.0))  # cap each sleep at 1s for responsiveness
+                    wait = min(wait, remaining)
+                # v84 ROOT FIX (BUG #35): ``wait()`` RELEASES the lock
+                # while sleeping, allowing other threads to enter the
+                # critical section (refill tokens, acquire, or also
+                # wait). The previous ``time.sleep()`` held the lock,
+                # serializing all threads for the full sleep duration.
+                # Cap each wait at 1s for responsiveness so we re-check
+                # token availability promptly after refill.
+                self._cond.wait(timeout=min(wait, 1.0))
 
 
 class _CircuitBreaker:
@@ -588,9 +607,29 @@ class RateLimitedHttpClient:
                             from email.utils import parsedate_to_datetime
                             import datetime as _dt
                             _ra_dt = parsedate_to_datetime(_retry_after_raw)
-                            _now_dt = _dt.datetime.now(_ra_dt.tzinfo)
+                            # v84 FORENSIC ROOT FIX (BUG #37): if
+                            # ``parsedate_to_datetime`` returns a NAIVE
+                            # datetime (tzinfo=None — happens for some
+                            # HTTP-date formats without a timezone
+                            # suffix), the subtraction
+                            # ``_ra_dt - _now_dt`` raises ``TypeError``
+                            # when ``_now_dt`` is aware. The previous
+                            # code's broad ``except Exception`` caught
+                            # this and silently set ``_retry_after =
+                            # None``, ignoring the server's requested
+                            # backoff and falling back to a potentially
+                            # shorter exponential backoff. ROOT FIX:
+                            # default to UTC if the parsed datetime is
+                            # naive, so the comparison always works and
+                            # the server's Retry-After is honored.
+                            _ra_tz = _ra_dt.tzinfo
+                            if _ra_tz is None:
+                                from datetime import timezone as _tz
+                                _ra_tz = _tz.utc
+                                _ra_dt = _ra_dt.replace(tzinfo=_ra_tz)
+                            _now_dt = _dt.datetime.now(_ra_tz)
                             _retry_after = max(0.0, (_ra_dt - _now_dt).total_seconds())
-                        except Exception:
+                        except (TypeError, ValueError, OverflowError):
                             _retry_after = None
                     if _retry_after is not None:
                         # Cap at 60s to avoid extremely long waits.

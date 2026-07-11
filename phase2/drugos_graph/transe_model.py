@@ -522,6 +522,11 @@ class TransEModel(nn.Module):
         # and V1 launch criterion ``auc_meets_threshold`` always failed
         # (held_out_auc=-1.0). Save both as attributes here.
         self.num_entities = int(num_entities)
+        # v88 ROOT FIX (BUG #43 — expose score_higher_is_better for
+        # explicit duck-typing in train_transe): TransE's score function
+        # is ||h+r-t||_1 (LOWER = more plausible), so
+        # score_higher_is_better = False.
+        self.score_higher_is_better = False
         self.num_relations = int(num_relations)
         self.embedding_dim = int(embedding_dim)
         self.entity_embeddings = nn.Embedding(num_entities, embedding_dim)
@@ -2325,6 +2330,26 @@ def train_transe(
         _model_class_name, _model_higher_is_better,
     )
 
+    # v88 ROOT FIX (BUG #46 + #47 — gate ALL three sampler fallback
+    # modes behind the production check): apply the SAME production guard
+    # to train_transe as _evaluate_triples has. This prevents the compound
+    # chain (BUG #47) where a misconfigured sampler produces garbage val
+    # AUC that passes the launch gate.
+    _env_mode_v88 = os.environ.get("DRUGOS_ENVIRONMENT", "dev").lower()
+    _is_production_v88 = _env_mode_v88 in ("prod", "production")
+    _flag_1_v88 = os.environ.get("DRUGOS_ALLOW_NO_SAMPLER", "") == "1"
+    _flag_2_v88 = os.environ.get("DRUGOS_DEV_ALLOW_NO_SAMPLER", "") == "1"
+    _allow_no_sampler_v88 = _flag_1_v88 and _flag_2_v88 and not _is_production_v88
+    if _flag_1_v88 and _is_production_v88:
+        logger.critical(
+            "PRODUCTION_ESCAPE_HATCH_REFUSED (train_transe): "
+            "DRUGOS_ALLOW_NO_SAMPLER=1 is set but DRUGOS_ENVIRONMENT=%s. "
+            "Refusing to honor the escape hatch — all three sampler "
+            "fallback modes in train_transe will RAISE in production. "
+            "(v88 BUG #46+#47 root fix)",
+            _env_mode_v88,
+        )
+
     # v28 ROOT FIX (audit ML-13): the module docstring (line ~124)
     # promises "torch.use_deterministic_algorithms(True) is set when
     # config.seed is not None" — but the previous code gated this on
@@ -2958,7 +2983,21 @@ def train_transe(
             # NO_SAMPLER=1 unit-test mode). This is a 50-100× speedup
             # on production-scale training runs without changing the
             # filter semantics.
-            if _known and not negative_sampler:
+            # v88 ROOT FIX (BUG #31): run the per-batch filter
+            # unconditionally when _known is populated. The
+            # `negative_sampler` pre-filters at pool construction,
+            # but the pool contains ENTITIES, not triples — a
+            # random (h, t) pair from the pool can coincidentally
+            # be a known positive. Operators can set
+            # DRUGOS_SKIP_PER_BATCH_NEG_FILTER=1 to restore the old
+            # behavior for production-scale training where the filter
+            # becomes a bottleneck.
+            import os as _os_v88_31
+            _skip_per_batch_filter = _os_v88_31.environ.get(
+                "DRUGOS_SKIP_PER_BATCH_NEG_FILTER", "0"
+            ) == "1"
+            _run_filter = _known and not (_skip_per_batch_filter and negative_sampler)
+            if _run_filter:
                 # Build a per-batch lookup of (h, r, t) for the current
                 # batch's positives so we can detect negatives that
                 # collide with ANY positive triple (not just the one
@@ -3044,28 +3083,13 @@ def train_transe(
                 #     here so a future higher_better model fails FAST
                 #     (clear AssertionError on the first batch) instead
                 #     of silently training backwards.
-                assert getattr(config, "score_direction", "lower_better") == "lower_better", (
-                    f"TransE training loss assumes score_direction="
-                    f"'lower_better' (score = -||h + r - t||). Got "
-                    f"score_direction={config.score_direction!r}. A "
-                    f"'higher_better' model requires a different loss "
-                    f"formula (e.g. -(neg - pos).clamp(min=0)); "
-                    f"drop-in substitution will silently train "
-                    f"BACKWARDS. (v28 audit ML-9)"
-                )
-                # Expand pos_scores to match neg_scores' shape (1 pos
-                # per num_negatives negatives, via repeat_interleave).
+                # v28 ROOT FIX (audit ML-9): explicit TransE margin loss.
+                # v88 ROOT FIX (BUG #43 — assertion checks wrong field, HGT
+                # trains backwards): check the MODEL's actual
+                # `score_higher_is_better` attribute (duck-typed above as
+                # `_model_higher_is_better`). If the model is higher_better
+                # (HGT), use the inverted loss formula.
                 pos_expanded = pos_scores.repeat_interleave(_num_negatives)
-                # v39 ROOT FIX (P2 #22): assert shape compatibility BEFORE
-                # the subtraction. The previous code did
-                # ``pos_expanded - neg_scores`` with NO shape assertion —
-                # if a future refactor broke the negative count invariant
-                # (e.g. negative sampler returned fewer negatives than
-                # expected), the subtraction would broadcast silently
-                # instead of erroring, producing garbage gradients.
-                # The fix: assert the shapes match. If they don't, raise
-                # a clear error so the operator knows the negative sampler
-                # is broken.
                 if pos_expanded.shape[0] != neg_scores.shape[0]:
                     raise RuntimeError(
                         f"TransE training shape mismatch: pos_expanded has "
@@ -3076,13 +3100,18 @@ def train_transe(
                         f"{len(pos_scores) * _num_negatives}. The negative "
                         f"sampler may be broken. (v39 P2 #22 fix)"
                     )
-                # Explicit TransE margin loss:
-                #   loss = max(0, pos - neg + margin).mean()
-                # Equivalent to MarginRankingLoss(target=-1) but
-                # readable and assertion-protected.
-                loss = (
-                    pos_expanded - neg_scores + config.margin
-                ).clamp(min=0).mean()
+                if _model_higher_is_better:
+                    # HGT-style: higher score = more plausible.
+                    # Loss = max(0, neg - pos + margin).
+                    loss = (
+                        neg_scores - pos_expanded + config.margin
+                    ).clamp(min=0).mean()
+                else:
+                    # TransE-style: lower score = more plausible.
+                    # Loss = max(0, pos - neg + margin).
+                    loss = (
+                        pos_expanded - neg_scores + config.margin
+                    ).clamp(min=0).mean()
 
                 # FIX R6.2: NaN/Inf check BEFORE backward pass.
                 if torch.isnan(loss) or torch.isinf(loss):
@@ -3304,9 +3333,9 @@ def train_transe(
                                 # validation negatives can NEVER silently
                                 # pass the 0.85 launch gate.
                                 import os as _os
-                                _allow_no_sampler = _os.environ.get(
-                                    "DRUGOS_ALLOW_NO_SAMPLER", ""
-                                ) == "1"
+                                # v88 ROOT FIX (BUG #46): use the two-flag +
+                                # production guard `_allow_no_sampler_v88`.
+                                _allow_no_sampler = _allow_no_sampler_v88
                                 if not _allow_no_sampler:
                                     logger.critical(
                                         "VAL_AUC_HARD_FAIL: relation_idx=%d "
@@ -3353,7 +3382,12 @@ def train_transe(
                             # Use a fresh Python-level random sampler so we
                             # don't depend on torch RNG state.
                             import random as _random
-                            _val_rng = _random.Random(int(config.seed) + epoch + 1)
+                            # v88 ROOT FIX (BUG #45 — val RNG reseeded per
+                            # epoch biases best-model selection): seed the
+                            # val RNG ONCE with `config.seed + 1` (constant
+                            # across epochs) so val negatives are IDENTICAL
+                            # across epochs.
+                            _val_rng = _random.Random(int(config.seed) + 1)
                             if len(tail_pool) >= n_slots:
                                 chosen = _val_rng.sample(tail_pool, n_slots)
                             else:
@@ -3381,9 +3415,9 @@ def train_transe(
                         # in production (same DRUGOS_ALLOW_NO_SAMPLER=1
                         # escape hatch as the no-sampler path).
                         import os as _os
-                        _allow_no_sampler = _os.environ.get(
-                            "DRUGOS_ALLOW_NO_SAMPLER", ""
-                        ) == "1"
+                        # v88 ROOT FIX (BUG #46): use the two-flag +
+                        # production guard `_allow_no_sampler_v88`.
+                        _allow_no_sampler = _allow_no_sampler_v88
                         if not _allow_no_sampler:
                             logger.critical(
                                 "VAL_AUC_HARD_FAIL: negative_sampler is "
@@ -3442,6 +3476,27 @@ def train_transe(
                         # Expand val_rels 10x to align with neg slots.
                         val_rels_expanded_fallback = (
                             val_rels_dev.repeat_interleave(10)
+                        # v88 ROOT FIX (BUG #33 — hardcoded relation_idx=0
+                        # in val AUC fallback): look up the actual treats
+                        # relation index from relation_to_types.
+                        _treats_rel_idx = 0
+                        _val_rel_to_types = getattr(
+                            negative_sampler, "relation_to_types", {}
+                        ) or {}
+                        for _r_idx_v88, _ht_tuple in _val_rel_to_types.items():
+                            if (
+                                isinstance(_ht_tuple, (tuple, list))
+                                and len(_ht_tuple) == 2
+                                and _ht_tuple[0] == "Compound"
+                                and _ht_tuple[1] == "Disease"
+                            ):
+                                _treats_rel_idx = int(_r_idx_v88)
+                                break
+                        val_neg_samples = negative_sampler.combined_sampling(
+                            total_negatives=n_val * 10,
+                            head_type="Compound",
+                            tail_type="Disease",
+                            relation_idx=_treats_rel_idx,
                         )
                         unique_val_rels_fb = torch.unique(
                             val_rels_expanded_fallback
@@ -3504,9 +3559,9 @@ def train_transe(
                     # ``DRUGOS_ALLOW_NO_SAMPLER=1`` to opt out of the
                     # hard requirement.
                     import os as _os
-                    _allow_no_sampler = _os.environ.get(
-                        "DRUGOS_ALLOW_NO_SAMPLER", ""
-                    ) == "1"
+                    # v88 ROOT FIX (BUG #46): use the two-flag +
+                    # production guard `_allow_no_sampler_v88`.
+                    _allow_no_sampler = _allow_no_sampler_v88
                     if not _allow_no_sampler:
                         logger.critical(
                             "VAL_AUC_HARD_FAIL: no negative_sampler "

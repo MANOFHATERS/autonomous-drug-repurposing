@@ -1028,6 +1028,14 @@ class PyGBuilder(GraphBuilderProtocol):
                         torch.zeros(0, dtype=torch.long)
                     )
 
+                # v88 ROOT FIX (BUG #41 — missing edge_type in HeteroData
+                # for HGTConv): set edge_type = torch.zeros(...) after
+                # edge_index so HGTConv can map each edge to its relation.
+                if edge_index.size(1) > 0:
+                    data[src_type, rel_name, dst_type].edge_type = torch.zeros(
+                        edge_index.size(1), dtype=torch.long
+                    )
+
                 # FIX(issue-13): edge index bounds validation.
                 if edge_index.numel() > 0:
                     num_src = data[src_type].num_nodes
@@ -1217,6 +1225,21 @@ class PyGBuilder(GraphBuilderProtocol):
 
             matched = int(valid_mask.sum())
             unmatched = num_compounds - matched
+
+            # v88 ROOT FIX (BUG #30 — NaN/dead embeddings when no
+            # ChemBERTa features match): when matched == 0, initialize
+            # ALL rows with Xavier-style random normal * 0.1 so the
+            # embeddings are non-zero and learnable.
+            if matched == 0 and num_compounds > 0:
+                _rng_v88 = np.random.default_rng(self.config.seed)
+                ordered = _rng_v88.normal(
+                    loc=0.0, scale=0.1, size=(num_compounds, feat_dim)
+                ).astype(np.float32)
+                self.logger.warning(
+                    f"add_chemberta_features: 0/{num_compounds} "
+                    f"compounds matched ChemBERTa embeddings — using "
+                    f"Xavier-style random init (v88 BUG #30 root fix)."
+                )
 
             # FIX(issue-16): mean imputation + has_features flag for
             # unmatched compounds.
@@ -2520,9 +2543,16 @@ class PyGBuilder(GraphBuilderProtocol):
                                 [pos_edge_index, neg_edge_index], dim=1
                             )
                             combined_labels = torch.cat([pos_labels, neg_labels])
+                            # v88 ROOT FIX (BUG #48 — PyG HeteroData built
+                            # with mismatched edge_index): set
+                            #   edge_index = pos_edge_index (positives only)
+                            #   edge_label_index = combined_edge_index
+                            # Negative edges should NOT be in the message-
+                            # passing graph; they should only be in
+                            # edge_label_index for scoring.
                             split_data[
                                 target_edge_type
-                            ].edge_index = combined_edge_index
+                            ].edge_index = pos_edge_index
                             split_data[target_edge_type].edge_label = combined_labels
                             split_data[
                                 target_edge_type

@@ -253,10 +253,17 @@ class TestChain5NegativeScores:
         with pytest.raises(ValueError, match="score=.*> 1"):
             classify_confidence(1.5)
 
-    def test_allow_negative_false_is_deprecated(self):
-        """Passing allow_negative=False must emit DeprecationWarning."""
+    def test_allow_negative_param_removed(self):
+        """v84 BUG #49: the allow_negative parameter is removed entirely.
+
+        Negative scores in [-1, 0) are ALWAYS classified as 'weak' (the
+        lowest tier). The _score_direction lineage column preserves the
+        sign for downstream ranking. Passing allow_negative=... now raises
+        TypeError since the parameter no longer exists.
+        """
         from cleaning.confidence import classify_confidence
-        with pytest.warns(DeprecationWarning, match="deprecated"):
-            # Positive score with allow_negative=False — should NOT crash,
-            # but should warn.
+        # Negative score classifies as "weak" (no crash, no warning).
+        assert classify_confidence(-0.5) == "weak"
+        # Passing the removed parameter raises TypeError.
+        with pytest.raises(TypeError, match="allow_negative"):
             classify_confidence(0.5, allow_negative=False)
