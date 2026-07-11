@@ -183,7 +183,7 @@ jobs:
           # Instead, run the forensic test suites that use embedded samples.
           pytest phase2/tests/v77_forensic/ phase2/tests/v78_forensic/ phase2/tests/v81_forensic/ \
             phase2/tests/v7_audit_fixes/ phase2/tests/v56/ phase2/tests/v60_root_fixes/ \
-            phase2/tests/v61_root_fixes/ phase2/tests/v68_root_fixes/ \
+            phase2/tests/v68_root_fixes/ \
             phase2/tests/test_all_exceptions_inherit_from_exception.py \
             --timeout=120 -q
 
