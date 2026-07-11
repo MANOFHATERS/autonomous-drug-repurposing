@@ -1,13 +1,21 @@
 #!/usr/bin/env python3
 """
 v63 ROOT FIX VERIFICATION — Runtime verification of all 18 P0 issues.
+
+R-STUB-005 root fix: the previous version had HERE = "/home/z/my-project/work"
+hardcoded. The repo is NOT at that path — every open() failed, every check
+logged [FAIL], and the script always exited 1. The 18 "P0 issues" it
+claimed to verify were NEVER actually checked. The verification
+infrastructure was a stub. The path is now derived from this file's
+location so the script works on any clone.
 """
 from __future__ import annotations
 import sys, os, re
 
-HERE = "/home/z/my-project/work"
-sys.path.insert(0, f"{HERE}/phase1")
-sys.path.insert(0, f"{HERE}/phase2")
+# R-STUB-005: derive HERE from this file's location instead of hardcoding.
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(HERE, "phase1"))
+sys.path.insert(0, os.path.join(HERE, "phase2"))
 
 passed = 0
 failed = 0

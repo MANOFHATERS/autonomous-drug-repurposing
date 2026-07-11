@@ -76,53 +76,25 @@ for p in (str(PHASE2_ROOT), str(PHASE1_ROOT)):
         sys.path.insert(0, p)
 
 
-# FIX TOP-14 (FIX-CFG-ML audit): set the global RNG seed as the FIRST
-# importable side-effect of run_unified.py. The Phase 2 config defines
-# SEED=42 and propagates it to TransEConfig.seed / EvaluationConfig.seed /
-# PyGConfig.seed, but until set_global_seed() is actually CALLED, the
-# global ``random`` / ``numpy.random`` / ``torch`` RNG state at process
-# start is whatever Python seeded it with — non-deterministic. This made
-# model init non-deterministic (PyTorch ``nn.Embedding`` init consumes
-# the global RNG), so two ``python run_unified.py`` runs with the same
-# config could produce different held-out AUCs. Calling set_global_seed()
-# here at import time (before any model is constructed) makes the entire
-# pipeline deterministic given the same CONFIG_HASH. Synchronized with
-# phase2/drugos_graph/run_pipeline.py:run_full_pipeline (which also calls
-# set_global_seed as its first line) — DO NOT diverge (audit TOP-14).
-# v54 ROOT FIX (ROOT-3 — set_global_seed bare except):
-# The v48 code used `except Exception` which catches BOTH ImportError
-# (config module missing — CRITICAL) AND RuntimeError (seed failed —
-# WARNING). This conflated two different failure modes. ROOT FIX:
-# split into two except clauses:
-#   1. ImportError → ERROR (the phase2 package is broken/inaccessible)
-#   2. Exception → WARNING (seed-setting is best-effort, non-blocking)
-# Also: if the seed is NOT set, set a module-level flag so downstream
-# code can detect non-deterministic mode.
+# R-025 root fix: the previous code called set_global_seed(42) at
+# module import time. phase2/drugos_graph/run_pipeline.py:run_full_pipeline
+# ALSO calls set_global_seed(42) as its first action. That double
+# seed-setting is harmless but redundant and confused readers about
+# which call actually mattered. The import-time call has been removed;
+# run_full_pipeline's own seed-setting is authoritative. The flag below
+# is retained for any downstream code that introspected it.
 _GLOBAL_SEED_SET: bool = False
 try:
-    from drugos_graph.config import set_global_seed as _set_global_seed
-
-    _set_global_seed(42)
+    from drugos_graph.config import set_global_seed as _set_global_seed  # noqa: F401
     _GLOBAL_SEED_SET = True
 except ImportError as _seed_import_exc:
     import logging as _logging
-
     _logging.getLogger("unified").error(
-        "set_global_seed(42) FAILED — cannot import drugos_graph.config "
-        "(%s). The phase2 package is missing or broken. Pipeline will "
-        "run but model init is NON-DETERMINISTIC. This is a CRITICAL "
-        "regression: ensure phase2/drugos_graph/ is on sys.path "
-        "(audit TOP-14, v54 ROOT-3 fix).",
+        "Cannot import drugos_graph.config.set_global_seed (%s). "
+        "The phase2 package is missing or broken. Pipeline will run but "
+        "model init is NON-DETERMINISTIC. Ensure phase2/drugos_graph/ "
+        "is on sys.path.",
         _seed_import_exc,
-    )
-except (RuntimeError, OSError, ValueError) as _seed_exc:  # noqa: BLE001 — best-effort, do not block
-    import logging as _logging
-
-    _logging.getLogger("unified").warning(
-        "set_global_seed(42) failed (%s) — pipeline will run but model "
-        "init is non-deterministic. This is a regression: phase2/drugos_"
-        "graph/config.py must define set_global_seed (audit TOP-14).",
-        _seed_exc,
     )
 
 
@@ -474,16 +446,15 @@ def main(argv: Optional[list] = None) -> int:
             _env["DRUGOS_DOWNLOAD_MODE"] = _env.get(
                 "DRUGOS_DOWNLOAD_MODE", "sample"
             )
-            # v61 ROOT FIX: Tier 1 has a SHORT timeout (60s) so it fails
-            # fast and Tier 2 (embedded samples) kicks in quickly. The
-            # full 7200s timeout was making run_unified.py hang for 2
-            # hours when API calls were slow/unreachable. Tier 1 is a
-            # "best effort" — if it can't complete in 60s, Tier 2 takes
-            # over (embedded samples always succeed in <5s).
+            # R-033 root fix: 60s GUARANTEED Tier 1 would fail on any
+            # real hardware — `python -m pipelines all` makes API calls
+            # to 7 external sources and easily exceeds 60s. 600s (10 min)
+            # is long enough for a real attempt but short enough that
+            # operators do not wait hours for the fallback.
             _proc = _sp.run(
                 [_sys.executable, "-m", "pipelines", "all"],
                 cwd=_phase1_root,
-                capture_output=True, text=True, timeout=60,
+                capture_output=True, text=True, timeout=600,
                 env=_env,
             )
             if _proc.returncode == 0 and args.phase1_dir.exists():
@@ -498,7 +469,10 @@ def main(argv: Optional[list] = None) -> int:
                     "(embedded samples, no API calls). stderr tail: %s",
                     _proc.returncode, (_proc.stderr or "")[-500:],
                 )
-        except (subprocess.SubprocessError, OSError, ValueError) as _tier1_exc:
+        # R-INT-007 root fix: previous except referenced `subprocess.SubprocessError`
+        # but `subprocess` was imported as `_sp` inside the try block — NameError
+        # prevented Tier 2 fallback from ever running. Use `_sp.SubprocessError`.
+        except (_sp.SubprocessError, OSError, ValueError) as _tier1_exc:
             log.warning(
                 "Tier 1 exception: %s — falling back to Tier 2.",
                 _tier1_exc,
@@ -596,68 +570,47 @@ def main(argv: Optional[list] = None) -> int:
         or os.environ.get("NEO4J_PASSWORD")
         or "neo4j"
     )
-    # v36: if no URI was given on CLI or env, try the default localhost
-    # address. This makes ``python run_unified.py`` "just work" if the
-    # operator has Neo4j running locally with default credentials.
-    if not neo4j_uri:
-        neo4j_uri = "bolt://localhost:7687"
+    # R-020 root fix: the previous "auto-detect" was theater — on a fresh
+    # laptop without Neo4j it ALWAYS tried bolt://localhost:7687 first,
+    # ALWAYS failed (ConnectionError), ALWAYS fell back to RecordingGraphBuilder.
+    # The 5-second connection timeout added latency to every run. Now: if no
+    # URI is provided, go STRAIGHT to RecordingGraphBuilder with a clear log.
+    neo4j_connected = False
+    builder = None
+    if neo4j_uri:
+        try:
+            log.info("Neo4j mode: connecting to %s", neo4j_uri)
+            builder = _build_real_neo4j(neo4j_uri, neo4j_user, neo4j_password)
+            neo4j_connected = True
+            log.info("Neo4j connection ESTABLISHED — KG will be persisted.")
+        except (OSError, ValueError, ConnectionError) as exc:
+            log.warning(
+                "Neo4j connection to %s failed: %s. Falling back to "
+                "RecordingGraphBuilder (in-memory). To enable Neo4j: "
+                "start Neo4j locally and pass --neo4j-uri or set DRUGOS_NEO4J_URI.",
+                neo4j_uri, exc,
+            )
+    else:
         log.info(
-            "v36 Neo4j auto-detect: no --neo4j-uri or DRUGOS_NEO4J_URI "
-            "set — trying default %s (user=%s). Set DRUGOS_NEO4J_URI to "
-            "override.",
-            neo4j_uri, neo4j_user,
+            "No --neo4j-uri or DRUGOS_NEO4J_URI set — using "
+            "RecordingGraphBuilder (in-memory). The staged graph WILL "
+            "be persisted to disk as staged_graph.json. To use Neo4j, "
+            "pass --neo4j-uri bolt://localhost:7687."
         )
 
-    neo4j_connected = False
-    try:
-        log.info("Neo4j mode: connecting to %s", neo4j_uri)
-        builder = _build_real_neo4j(neo4j_uri, neo4j_user, neo4j_password)
-        neo4j_connected = True
-        log.info("Neo4j connection ESTABLISHED — KG will be persisted.")
-    except (OSError, ValueError, ConnectionError) as exc:
-        log.warning(
-            "Neo4j connection to %s failed: %s. Falling back to "
-            "RecordingGraphBuilder (in-memory). The staged graph WILL "
-            "be persisted to disk as staged_graph.json (v34 fallback) "
-            "but will NOT be in Neo4j. To enable Neo4j persistence: "
-            "(1) start Neo4j locally (``docker run -p 7687:7687 -e "
-            "NEO4J_AUTH=neo4j/password neo4j``), (2) set "
-            "DRUGOS_NEO4J_URI=bolt://localhost:7687, (3) set "
-            "DRUGOS_NEO4J_USER=neo4j, (4) set "
-            "DRUGOS_NEO4J_PASSWORD=password. (v36 Neo4j persistence fix)",
-            neo4j_uri, exc,
-        )
-        from drugos_graph.phase1_bridge import RecordingGraphBuilder
+    # R-031: use the package-level re-export instead of the deep submodule path.
+    if builder is None:
+        from drugos_graph import RecordingGraphBuilder
         builder = RecordingGraphBuilder()
-        # In production, this is a launch-blocking condition.
-        # v75 ROOT FIX (T-032 — exit code 3 contract mismatch):
-        #   The exit code contract (lines 43-56) was updated to document
-        #   that exit code 3 fires whenever the runner is in production
-        #   mode AND no Neo4j is reachable — whether --neo4j-uri was
-        #   explicitly supplied OR auto-detected from DRUGOS_NEO4J_URI
-        #   env var OR the default bolt://localhost:7687 fallback. The
-        #   v74 docstring's stale qualifier (which restricted exit 3 to
-        #   only the explicit-CLI-arg case) was inaccurate: the v36
-        #   ROOT FIX auto-detect path (line 566) meant the connection
-        #   attempt ALWAYS happens, so the explicit-CLI-arg qualifier
-        #   never matched reality. The inline log message below is also
-        #   updated to reflect that the failure can happen on ANY of
-        #   the three Neo4j URI sources (CLI arg, env var, default
-        #   localhost).
+        # In production, missing Neo4j is a launch-blocking condition (T-032).
         _env = os.environ.get("DRUGOS_ENVIRONMENT", "dev").lower()
         if _env in ("prod", "production"):
             log.error(
-                "!!! PRODUCTION BLOCKER (v36 Neo4j persistence, v75 T-032) !!! "
-                "DRUGOS_ENVIRONMENT=%s but Neo4j connection failed (URI=%s). "
-                "The KG will NOT be persisted to Neo4j — only the "
-                "in-memory RecordingGraphBuilder will be used. This "
-                "is a launch-blocking condition for production. "
-                "Either start Neo4j or set DRUGOS_ALLOW_NO_NEO4J=1 "
-                "to acknowledge. Exit code 3 will be returned (per the "
-                "updated EXIT CODES contract at lines 43-56 — applies "
-                "to CLI-supplied, env-var-auto-detected, AND default-"
-                "localhost Neo4j URIs alike).",
-                _env, neo4j_uri,
+                "PRODUCTION BLOCKER: DRUGOS_ENVIRONMENT=%s but no Neo4j "
+                "connection is available (URI=%s). The KG will NOT be "
+                "persisted to Neo4j. Either start Neo4j or set "
+                "DRUGOS_ALLOW_NO_NEO4J=1 to acknowledge.",
+                _env, neo4j_uri or "(none)",
             )
             if os.environ.get("DRUGOS_ALLOW_NO_NEO4J") != "1":
                 return 3
@@ -674,30 +627,9 @@ def main(argv: Optional[list] = None) -> int:
 
     summary: Dict[str, Any] = result["summary"]
 
-    # v34 ROOT FIX (NEO4J PERSISTENCE): the previous code used
-    # RecordingGraphBuilder (in-memory) by default and NEVER persisted
-    # the staged graph to disk. On process exit, all 67 nodes and 68
-    # edges were lost. The user explicitly complained: "All data lives
-    # in RecordingGraphBuilder (in-memory). Nothing persists. No Neo4j
-    # writes." The fix: ALWAYS persist the staged graph to disk as a
-    # JSON file (phase2/data/processed/staged_graph.json) so the data
-    # survives process exit. This is NOT a replacement for Neo4j — it's
-    # a fallback for dry-run mode + a debug artifact for production.
-    # When --neo4j-uri is set, the bridge ALSO writes to Neo4j (above).
-    #
-    # v75 ROOT FIX (T-033 — ``'_persist_path' in dir()`` unreliable):
-    #   The v74 except handler at line 692 used
-    #   ``_persist_path if '_persist_path' in dir() else 'staged_graph.json'``
-    #   to fall back to a placeholder filename when the exception fired
-    #   before ``_persist_path`` was assigned. ``dir()`` with no args
-    #   returns the names in the CURRENT scope (local, then enclosing,
-    #   then global, then builtin) — it WORKS in this case but is
-    #   unusual and fragile (a future refactor that moves the except
-    #   handler into a different scope could break it). The Pythonic
-    #   pattern is to initialize ``_persist_path = None`` BEFORE the
-    #   try block and check ``if _persist_path is not None``. This
-    #   makes the intent explicit and survives refactoring.
-    _persist_path = None  # v75 T-033: explicit None init before try
+    # R-032: trimmed 15-line comment block down to its essence.
+    # Persist the staged graph to disk so it survives process exit.
+    _persist_path = None  # explicit None init before try
     try:
         from drugos_graph.phase1_bridge import Phase1StagedData
         staged_obj: Phase1StagedData = result["staged"]
