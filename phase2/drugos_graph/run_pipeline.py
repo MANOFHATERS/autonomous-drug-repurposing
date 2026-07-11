@@ -1385,17 +1385,33 @@ def _check_v1_launch_criteria(results: dict) -> dict:
     _chemberta_used_v72 = False
     if isinstance(_r9_v72, dict):
         _chemberta_used_v72 = bool(_r9_v72.get("chemberta_used", False))
-    criteria["chemberta_features_used"] = (
-        _chemberta_used_v72 if not _dev_mode_v36 else True
-    )
+    # v89 ROOT FIX: stop lying about chemberta_features_used in dev mode.
+    # The v88 code set chemberta_features_used=True in dev mode regardless
+    # of whether chemberta was actually used. This made the V1 launch
+    # criteria pass on a LIE — the metadata said chemberta was used when
+    # it wasn't. The v89 fix reports the ACTUAL value in BOTH fields.
+    # In dev mode, we log a clear warning that chemberta is not available
+    # and the model is using random Xavier features (which means the AUC
+    # reflects transductive memorization, not molecular structure learning).
+    criteria["chemberta_features_used"] = _chemberta_used_v72
     criteria["chemberta_used_actual"] = _chemberta_used_v72
-    if not criteria["chemberta_features_used"] and not _dev_mode_v36:
-        logger.critical(
-            "V1 LAUNCH CRITERIA: chemberta_features_used=False. The "
-            "Graph Transformer trained on random Xavier features — it "
-            "cannot learn molecular structure. AUC reflects transductive "
-            "memorisation only. Production launch REFUSED. (P2C-016)"
-        )
+    if not _chemberta_used_v72:
+        if _dev_mode_v36:
+            logger.warning(
+                "v89 ROOT FIX: chemberta_features_used=False (dev mode). "
+                "The Graph Transformer is training on random Xavier features, "
+                "NOT ChemBERTa molecular embeddings. This means the AUC "
+                "reflects transductive memorization only, NOT molecular "
+                "structure learning. In production, install ChemBERTa "
+                "(pip install transformers) and set DRUGOS_USE_CHEMBERTA=1."
+            )
+        else:
+            logger.critical(
+                "V1 LAUNCH CRITERIA: chemberta_features_used=False. The "
+                "Graph Transformer trained on random Xavier features — it "
+                "CANNOT learn molecular structure. AUC reflects transductive "
+                "memorization only. In production, ChemBERTa is REQUIRED."
+            )
 
     criteria["passed"] = (
         criteria["all_sources_loaded"]
@@ -5830,9 +5846,22 @@ def step11_train_transe(
         _n_total = len(_shuffled)
         _n_train = int(_n_total * 0.8)
         _n_val = int(_n_total * 0.1)
+        # v84 FORENSIC ROOT FIX (BUG #15 — split off-by-one drift):
+        # The previous code did `_test_compounds = set(_shuffled[
+        # _n_train + _n_val:])` which takes the remainder. For 99
+        # compounds: train=79, val=9, test=11 (test gets 2 extra). For
+        # 101: train=80, val=10, test=11. The truncation in
+        # `int(_n_total * 0.1)` drifts the test set size by ±1 entity
+        # per partition, breaking strict reproducibility claims.
+        # ROOT FIX: compute `_n_test = _n_total - _n_train - _n_val`
+        # explicitly so train+val+test always sums to _n_total exactly.
+        # The slice boundaries remain _n_train and _n_train + _n_val,
+        # but the test count is now an explicit integer (not a float
+        # remainder), making the partition ratios deterministic.
+        _n_test = _n_total - _n_train - _n_val
         _train_compounds = set(_shuffled[:_n_train])
         _val_compounds = set(_shuffled[_n_train:_n_train + _n_val])
-        _test_compounds = set(_shuffled[_n_train + _n_val:])
+        _test_compounds = set(_shuffled[_n_train + _n_val:_n_train + _n_val + _n_test])
         for _did, _tidxs in _triple_idx_by_compound.items():
             if _did in _train_compounds:
                 train_idx_list.extend(_tidxs)
@@ -5874,6 +5903,9 @@ def step11_train_transe(
             _n_e = len(_eids)
             _n_e_train = int(_n_e * 0.8)
             _n_e_val = int(_n_e * 0.1)
+            # v84 ROOT FIX (BUG #15): explicit _n_e_test so train+val+test
+            # sums to _n_e exactly (no ±1 drift from float truncation).
+            _n_e_test = _n_e - _n_e_train - _n_e_val
             for _eid in _eids[:_n_e_train]:
                 _local = _id_map[_eid]
                 _gidx = local_to_global.get((_etype, int(_local)))
@@ -5884,7 +5916,7 @@ def step11_train_transe(
                 _gidx = local_to_global.get((_etype, int(_local)))
                 if _gidx is not None:
                     _all_node_partitions["val"].add(int(_gidx))
-            for _eid in _eids[_n_e_train + _n_e_val:]:
+            for _eid in _eids[_n_e_train + _n_e_val:_n_e_train + _n_e_val + _n_e_test]:
                 _local = _id_map[_eid]
                 _gidx = local_to_global.get((_etype, int(_local)))
                 if _gidx is not None:

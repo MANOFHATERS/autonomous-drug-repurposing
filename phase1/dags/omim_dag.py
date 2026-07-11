@@ -30,13 +30,10 @@ v89 FORENSIC ROOT FIX (BUG #8 P1 — Sunday Morning Pile-Up):
 
 from __future__ import annotations
 
-import sys
-from datetime import datetime, timedelta
-from pathlib import Path
+from datetime import datetime
 
-_PROJECT_ROOT = str(Path(__file__).resolve().parent.parent)
-if _PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, _PROJECT_ROOT)
+# v89 ROOT FIX (BUG #39): shared sys.path bootstrap (see dags/_dags_init.py).
+from dags._dags_init import ensure_project_root  # noqa: F401
 
 from airflow.decorators import dag, task
 
@@ -61,15 +58,12 @@ DEFAULT_ARGS = {
 }
 
 
-# v83 FORENSIC ROOT FIX (P2-13): the previous ``@task`` decorator
-# redundantly re-specified ``retries=2, execution_timeout=4h,
-# retry_exponential_backoff=True, retry_delay=5min`` — ALL of which are
-# already in ``DEFAULT_RETRY_ARGS`` (spread into ``DEFAULT_ARGS`` at line
-# 45 above). The redundant overrides were a maintenance trap: if
-# ``DEFAULT_RETRY_ARGS`` changed, the DAGs didn't follow. ROOT FIX: use
-# a bare ``@task`` — Airflow inherits all retry/timeout params from
-# ``DEFAULT_ARGS``. The ``@fail_fast_on_http_4xx`` decorator is retained
-# (it's the actual functional enhancement, not a redundant override).
+# v83 FORENSIC ROOT FIX (P2-13) + v89 ROOT FIX (BUG #25 / BUG #38):
+# bare ``@task`` — all retry / timeout / backoff params are inherited
+# from ``DEFAULT_ARGS`` (spread from ``DEFAULT_RETRY_ARGS``). The
+# ``@fail_fast_on_http_4xx`` decorator is retained (it's the actual
+# functional enhancement, not a redundant override). All 7 standalone
+# DAGs now use this same pattern.
 @task
 @fail_fast_on_http_4xx
 def run_omim() -> None:
@@ -98,4 +92,5 @@ def omim_dag() -> None:
     run_omim()
 
 
-omim_dag_instance = omim_dag()
+# v89 ROOT FIX (BUG #40): consistent DAG-instance naming convention.
+dag = omim_dag()

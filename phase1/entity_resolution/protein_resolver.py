@@ -788,6 +788,33 @@ class ProteinResolver(Resolver):
         self._name_index: Dict[str, str] = {}
         # D8-5: multi-valued name index.
         self._name_index_multi: Dict[str, List[str]] = {}
+        # v89 ROOT FIX (BUG #35 — case-folding gene symbols defeats
+        # species distinction for fuzzy matching):
+        #   ``normalize_name`` lowercases its input. Gene symbols like
+        #   ``TP53`` (human) and ``Tp53`` (mouse) both normalize to
+        #   ``tp53``. The single-valued ``_name_index["tp53"]`` maps
+        #   to the FIRST registered uid (human OR mouse, depending on
+        #   ingestion order). The multi-valued
+        #   ``_name_index_multi["tp53"]`` contains BOTH uids, but the
+        #   primary lookup in ``_fuzzy_match`` uses the single-valued
+        #   index. The organism filter is the only protection against
+        #   cross-species fuzzy matches, and it's unreliable (BUG #6
+        #   in the original audit — organism override table covers
+        #   only ~250 of ~560,000 UniProt accessions).
+        #
+        #   ROOT FIX: add a SEPARATE ``_gene_symbol_index`` that
+        #   preserves gene-symbol case. This index is keyed by the
+        #   EXACT gene symbol (e.g. ``TP53``, ``Tp53``) — case-
+        #   sensitive — so human and mouse symbols are DISTINCT keys.
+        #   Fuzzy matching on gene symbols can use this index instead
+        #   of the case-folded ``_name_index``, preserving species
+        #   distinction even when the organism filter fails. The
+        #   index is populated in ``_ingest_uniprot_record`` and
+        #   ``_create_provisional_from_string`` alongside the existing
+        #   ``_gene_index`` (which is keyed by (gene, organism) tuple
+        #   and is already case-sensitive).
+        self._gene_symbol_index: Dict[str, str] = {}
+        self._gene_symbol_index_multi: Dict[str, List[str]] = {}
         # v89 FORENSIC ROOT FIX (BUG #15 P1 — single-valued gene_index and
         #   string_to_uniprot silently picked FIRST match):
         #   Both ``_gene_index`` and ``_string_to_uniprot`` are single-
@@ -2015,6 +2042,22 @@ class ProteinResolver(Resolver):
                 self._gene_index[key] = base_uid
             self._gene_index_multi.setdefault(key, []).append(base_uid)
 
+        # v89 ROOT FIX (BUG #35): populate the case-preserving gene
+        # symbol index. ``_gene_index`` above is keyed by
+        # (gene_symbol, organism) — case-sensitive on gene_symbol, but
+        # requires the organism to be known. ``_name_index`` below is
+        # case-folded (``normalize_name`` lowercases), so ``TP53`` and
+        # ``Tp53`` collide. The new ``_gene_symbol_index`` is keyed by
+        # the EXACT gene symbol (case-sensitive, organism-agnostic) —
+        # human ``TP53`` and mouse ``Tp53`` are DISTINCT keys. This
+        # preserves species distinction even when the organism filter
+        # fails (BUG #6). Fuzzy matching on gene symbols can consult
+        # this index instead of the case-folded ``_name_index``.
+        if gene_symbol:
+            if gene_symbol not in self._gene_symbol_index:
+                self._gene_symbol_index[gene_symbol] = base_uid
+            self._gene_symbol_index_multi.setdefault(gene_symbol, []).append(base_uid)
+
         norm_name = normalize_name(gene_symbol or gene_name or "")
         if norm_name:
             self._name_index[norm_name] = base_uid
@@ -2631,6 +2674,7 @@ class ProteinResolver(Resolver):
         string_aliases_df: Optional[Any] = None,
         string_df: Optional[Any] = None,
         *,
+        chembl_target_df: Optional[Any] = None,
         reset: bool = True,
         bundle: Optional[dict] = None,
         chunked: bool = False,
@@ -2638,7 +2682,7 @@ class ProteinResolver(Resolver):
     ) -> Any:
         """Build cross-database protein entity mapping.
 
-        Three sources are processed in order (FIX DOC-09):
+        Four sources are processed in order (FIX DOC-09 + v89 BUG #33):
         1. **uniprot_df** — loaded first as the canonical source. Each record
            creates a new canonical entry keyed by uniprot_id, or merges into
            an existing entry, or promotes a provisional entry (ARCH-02).
@@ -2650,6 +2694,15 @@ class ProteinResolver(Resolver):
            ``string_derived`` entry is created (match_method="string_derived",
            confidence=0.5). If present, the row's other fields are merged
            into the existing entry (CODE-20).
+        4. **chembl_target_df** — ChEMBL target records (v89 BUG #33 ROOT
+           FIX). Each record has a ``chembl_target_id`` and optionally a
+           ``uniprot_id`` cross-reference. Matched via UniProt ID exact
+           match or gene+organism match; unmatched records create
+           ``chembl_provisional`` entries. Previously this source was
+           registered in ``_SOURCE_INGESTORS`` but NEVER passed by
+           ``run.py``, leaving ChEMBL target IDs orphaned from the
+           canonical Protein nodes — drug-target edges from ChEMBL used
+           ChEMBL target IDs that were not linked to UniProt accessions.
 
         Returns
         -------
@@ -2679,8 +2732,62 @@ class ProteinResolver(Resolver):
         if string_aliases_df is not None:
             try:
                 if hasattr(string_aliases_df, "empty") and not string_aliases_df.empty:
-                    string_records = self._df_to_records(string_aliases_df)
-                    self.add_string_records(string_records)
+                    # v89 ROOT FIX (BUG #23 — silent schema mismatch in
+                    # STRING aliases DataFrame):
+                    #   The previous code called ``add_string_records`` on
+                    #   ``string_aliases_df`` WITHOUT validating the schema.
+                    #   If the DataFrame was non-empty but had the WRONG
+                    #   columns (e.g. a stale cached file, a schema change
+                    #   in the STRING pipeline, a misnamed column), every
+                    #   record was rejected at the validation step (line
+                    #   ~1945: ``if not string_id``) and dead-lettered.
+                    #   The operator saw only "ingesting N STRING records"
+                    #   followed by "0 matched, 0 provisional created" —
+                    #   no error, no warning about the schema mismatch.
+                    #   The KG's PPI subgraph was silently incomplete.
+                    #
+                    #   ROOT FIX: validate the DataFrame schema BEFORE
+                    #   calling ``add_string_records``. The required
+                    #   column is ``string_id`` (minimum). If missing,
+                    #   log an ERROR with the actual columns present, and
+                    #   SKIP ingestion (do NOT call add_string_records
+                    #   with malformed records — that just fills the
+                    #   dead-letter queue with confusing entries). This
+                    #   surfaces the root cause (wrong schema) to the
+                    #   operator immediately.
+                    if not hasattr(string_aliases_df, "columns"):
+                        logger.error(
+                            "build_mapping: string_aliases_df is not a "
+                            "DataFrame (has no .columns attribute). Type: "
+                            "%s. Skipping STRING aliases ingestion. The "
+                            "KG's PPI subgraph will be incomplete. "
+                            "Fix: pass a pandas DataFrame with at least "
+                            "a 'string_id' column. (v89 BUG #23)",
+                            type(string_aliases_df).__name__,
+                        )
+                    else:
+                        _alias_cols = set(string_aliases_df.columns)
+                        _required_alias_cols = {"string_id"}
+                        _missing_alias_cols = _required_alias_cols - _alias_cols
+                        if _missing_alias_cols:
+                            logger.error(
+                                "build_mapping: string_aliases_df is "
+                                "missing required column(s) %s. Available "
+                                "columns: %s. Skipping STRING aliases "
+                                "ingestion — every record would be "
+                                "rejected at the string_id validation "
+                                "step and dead-lettered, producing a "
+                                "silently-empty PPI subgraph. Fix the "
+                                "upstream caller to pass a DataFrame "
+                                "with at least a 'string_id' column "
+                                "(see entity_resolution/run.py for the "
+                                "expected schema). (v89 BUG #23)",
+                                sorted(_missing_alias_cols),
+                                sorted(_alias_cols),
+                            )
+                        else:
+                            string_records = self._df_to_records(string_aliases_df)
+                            self.add_string_records(string_records)
                 else:
                     logger.warning(
                         "build_mapping: string_aliases_df is not a recognized "
@@ -2848,6 +2955,77 @@ class ProteinResolver(Resolver):
             except AttributeError:
                 logger.warning(
                     "build_mapping: string_df has no .empty/.columns attributes"
+                )
+
+        # v89 ROOT FIX (BUG #33 — ChEMBL target data never passed to
+        # build_mapping):
+        #   The ``add_chembl_target_records`` method (line ~2030) was
+        #   registered in ``_SOURCE_INGESTORS`` but NEVER called from
+        #   ``build_mapping`` because there was no ``chembl_target_df``
+        #   parameter. ``run.py`` called ``build_mapping(uniprot_df,
+        #   string_aliases_df=..., string_df=...)`` with no ChEMBL
+        #   target data. ChEMBL target IDs (e.g. CHEMBL2366519 for
+        #   EGFR) were NOT cross-referenced with UniProt accessions.
+        #   The KG's drug-target edges from ChEMBL used ChEMBL target
+        #   IDs that were not linked to the canonical Protein nodes —
+        #   orphaned drug-target edges, incomplete KG.
+        #
+        #   ROOT FIX: add a ``chembl_target_df`` keyword parameter and
+        #   ingest it via ``add_chembl_target_records`` (same pattern as
+        #   string_aliases_df → add_string_records). ``run.py`` is
+        #   updated to load the ChEMBL activities/targets CSV and pass
+        #   it here. This connects ChEMBL target IDs to UniProt
+        #   accessions, completing the drug → target → pathway → disease
+        #   chain (Phase 1 → Phase 2 → Phase 3 → Phase 4 connectivity).
+        if chembl_target_df is not None:
+            try:
+                if hasattr(chembl_target_df, "empty") and not chembl_target_df.empty:
+                    # v89 BUG #23 pattern (applied to ChEMBL targets too):
+                    # validate the schema BEFORE ingesting. Required
+                    # column is ``chembl_target_id`` (minimum). If
+                    # missing, log an ERROR with the actual columns and
+                    # SKIP ingestion — do NOT fill the dead-letter queue
+                    # with confusing malformed records.
+                    if not hasattr(chembl_target_df, "columns"):
+                        logger.error(
+                            "build_mapping: chembl_target_df is not a "
+                            "DataFrame (has no .columns attribute). Type: "
+                            "%s. Skipping ChEMBL target ingestion. The "
+                            "KG's drug-target edges will use orphaned "
+                            "ChEMBL target IDs. Fix: pass a pandas "
+                            "DataFrame with at least a "
+                            "'chembl_target_id' column. (v89 BUG #33)",
+                            type(chembl_target_df).__name__,
+                        )
+                    else:
+                        _chembl_cols = set(chembl_target_df.columns)
+                        _required_chembl_cols = {"chembl_target_id"}
+                        _missing_chembl_cols = _required_chembl_cols - _chembl_cols
+                        if _missing_chembl_cols:
+                            logger.error(
+                                "build_mapping: chembl_target_df is "
+                                "missing required column(s) %s. Available "
+                                "columns: %s. Skipping ChEMBL target "
+                                "ingestion — every record would be "
+                                "rejected at the chembl_target_id "
+                                "validation step. Fix the upstream caller "
+                                "to pass a DataFrame with at least a "
+                                "'chembl_target_id' column. (v89 BUG #33)",
+                                sorted(_missing_chembl_cols),
+                                sorted(_chembl_cols),
+                            )
+                        else:
+                            chembl_records = self._df_to_records(chembl_target_df)
+                            self.add_chembl_target_records(chembl_records)
+                else:
+                    logger.info(
+                        "build_mapping: chembl_target_df is None or empty "
+                        "— skipping ChEMBL target ingestion (no ChEMBL "
+                        "target data available this run). (v89 BUG #33)"
+                    )
+            except AttributeError:
+                logger.warning(
+                    "build_mapping: chembl_target_df has no .empty attribute"
                 )
 
         result_df = self.to_dataframe()
@@ -3291,6 +3469,9 @@ class ProteinResolver(Resolver):
         self._string_to_uniprot = {}
         self._name_index = {}
         self._name_index_multi = {}
+        # v89 BUG #35: clear the case-preserving gene symbol index too.
+        self._gene_symbol_index = {}
+        self._gene_symbol_index_multi = {}
         self._dead_letter = []
         self._audit_trail = {}
         self._stats.reset()
@@ -3938,11 +4119,39 @@ class ProteinResolver(Resolver):
             return
 
         now_iso = self._now_iso()
+        # v89 ROOT FIX (BUG #42 — silent fallback to default_organism
+        # masks invalid organism input):
+        #   The previous code did ``"organism": organism or
+        #   self._config.default_organism``. If ``organism`` was an
+        #   empty string (from ``_normalize_organism`` returning "" for
+        #   invalid input), the ``or`` fell through to
+        #   ``default_organism`` ("Homo sapiens"). This masked invalid
+        #   organism input — the operator didn't see that the original
+        #   organism was unparseable. Cross-species contamination could
+        #   result if the original organism was non-human but unparseable.
+        #
+        #   ROOT FIX: detect the fallback case explicitly. If ``organism``
+        #   is empty/falsy AND the original ``organism_raw`` was non-empty
+        #   (i.e. the caller DID provide an organism but it was
+        #   unparseable), log a WARNING so the operator sees the invalid
+        #   input. The fallback to ``default_organism`` still happens
+        #   (preserving backward compatibility), but it's now visible.
+        _resolved_organism = organism or self._config.default_organism
+        if not organism and organism_raw and str(organism_raw).strip():
+            logger.warning(
+                "_create_provisional_from_string: STRING record "
+                "string_id=%r had unparseable organism %r — falling "
+                "back to default_organism %r. This may cause "
+                "cross-species contamination if the original organism "
+                "was non-human. Fix the upstream organism string or "
+                "extend _ORGANISM_ALIASES to recognize it. (v89 BUG #42)",
+                string_id, organism_raw, self._config.default_organism,
+            )
         entry: dict = {
             "uniprot_id": synthetic_uid,
             "gene_symbol": gene_symbol,
             "gene_name": record.get("gene_name", gene_symbol_raw),
-            "organism": organism or self._config.default_organism,
+            "organism": _resolved_organism,
             "sequence": None,
             "protein_name": record.get("protein_name"),
             "string_id": string_id,
@@ -3993,6 +4202,12 @@ class ProteinResolver(Resolver):
             key = (gene_symbol, organism or self._config.default_organism)
             if key not in self._gene_index:
                 self._gene_index[key] = synthetic_uid
+            # v89 ROOT FIX (BUG #35): also populate the case-preserving
+            # gene symbol index (organism-agnostic, case-sensitive) so
+            # fuzzy matching on gene symbols preserves species distinction.
+            if gene_symbol not in self._gene_symbol_index:
+                self._gene_symbol_index[gene_symbol] = synthetic_uid
+            self._gene_symbol_index_multi.setdefault(gene_symbol, []).append(synthetic_uid)
 
         self._string_to_uniprot[string_id] = synthetic_uid
 

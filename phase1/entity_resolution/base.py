@@ -127,8 +127,8 @@ class MatchConfidence(float, enum.Enum):
     # below NAME_NORMALIZED. The hierarchy is now:
     #   INCHIKEY_EXACT (1.0) > INCHIKEY_CONNECTIVITY (0.9) >
     #   NAME_NORMALIZED (0.8) > GENE_NAME_ORGANISM (0.75) >
-    #   FUZZY (0.65) > PROTEIN_NAME_FUZZY (0.6) > PUBCHEM_XREF (0.55) >
-    #   UNKNOWN (0.5)
+    #   SMILES_CANONICAL (0.75) > FUZZY (0.65) > PROTEIN_NAME_FUZZY (0.6)
+    #   > PUBCHEM_XREF (0.55) > UNKNOWN (0.5)
     #
     # The previous comment said "raised from 0.6 to be ≥ _FUZZY_THRESHOLD"
     # — that was a misdiagnosis. The _FUZZY_THRESHOLD (0.85) was the
@@ -165,6 +165,29 @@ class MatchConfidence(float, enum.Enum):
     # can distinguish SYNTH matches from real InChIKey matches. The
     # value (0.5) is unchanged — only the labeling is fixed.
     SYNTHETIC_KEY_MATCH = 0.5
+    # v89 ROOT FIX (BUG #32 — smiles_canonical method registered at
+    # runtime but missing from the enum):
+    #   ``drug_resolver.py:1979`` registers ``"smiles_canonical"`` with
+    #   confidence 0.75 via ``register_match_method``. This ADDS the
+    #   method to ``resolver_utils.METHOD_CONFIDENCE`` at runtime, so
+    #   ``compute_match_confidence("smiles_canonical")`` returns 0.75.
+    #   BUT the ``MatchConfidence`` enum had NO ``SMILES_CANONICAL``
+    #   member, so ``MatchConfidence.from_method("smiles_canonical")``
+    #   returned ``UNKNOWN`` (0.5) — a DIFFERENT value for the same
+    #   method. Downstream code that used the enum-based lookup got
+    #   0.5; code that used the dict-based lookup got 0.75. Filters
+    #   behaved differently depending on which lookup path they used.
+    #
+    #   ROOT FIX: add ``SMILES_CANONICAL = 0.75`` to the enum AND to
+    #   the ``from_method`` mapping (below). Now both lookup paths
+    #   return the SAME value (0.75), consistent with the runtime
+    #   registration. The value 0.75 places a canonical-SMILES match
+    #   between NAME_NORMALIZED (0.8, stronger — exact name after
+    #   normalization) and FUZZY (0.65, weaker — approximate string
+    #   similarity). A canonical-SMILES match is strong evidence of
+    #   chemical identity (same molecule) but weaker than an InChIKey
+    #   exact match (which is deterministic and source-independent).
+    SMILES_CANONICAL = 0.75
 
     @classmethod
     def from_method(cls, method: str) -> "MatchConfidence":
@@ -198,6 +221,12 @@ class MatchConfidence(float, enum.Enum):
             # own method label so they are distinguishable from real
             # InChIKey exact matches downstream.
             "synthetic_key_match": cls.SYNTHETIC_KEY_MATCH,
+            # v89 ROOT FIX (BUG #32): smiles_canonical now has its own
+            # enum member so ``from_method("smiles_canonical")`` returns
+            # ``SMILES_CANONICAL`` (0.75) instead of ``UNKNOWN`` (0.5).
+            # This matches the value registered at runtime in
+            # ``drug_resolver.py:1979`` via ``register_match_method``.
+            "smiles_canonical": cls.SMILES_CANONICAL,
         }
         if method in mapping:
             return mapping[method]

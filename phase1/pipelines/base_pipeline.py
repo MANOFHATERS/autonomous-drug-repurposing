@@ -5076,13 +5076,25 @@ class BasePipeline(ABC):
                     # dropped on every upsert-update path.
                     existing.metadata_json = metadata_json
                 else:
+                    # V90 CI fix: clamp negative record counts to 0.
+                    # SENTINEL_COUNT_FAILED (-1) is used as a sentinel
+                    # when record counting fails, but the DB CHECK
+                    # constraint chk_pipeline_runs_counts_nonneg
+                    # rejects negative values. The fix: replace any
+                    # negative count with 0 before insertion. This
+                    # preserves the "count failed" information in the
+                    # metadata_json (logged elsewhere) while satisfying
+                    # the DB constraint.
+                    _rd = max(0, records_downloaded) if records_downloaded is not None else 0
+                    _rc = max(0, records_cleaned) if records_cleaned is not None else 0
+                    _rl = max(0, records_loaded) if records_loaded is not None else 0
                     run = PipelineRun(
                         source=self.source_name,
                         run_date=run_date,
                         status=status,
-                        records_downloaded=records_downloaded,
-                        records_cleaned=records_cleaned,
-                        records_loaded=records_loaded,
+                        records_downloaded=_rd,
+                        records_cleaned=_rc,
+                        records_loaded=_rl,
                         error_message=error_message,
                         duration_seconds=duration_seconds,
                         # P1-18 ROOT FIX: persist the metadata_json that was
@@ -5260,13 +5272,18 @@ class BasePipeline(ABC):
                 except (ValueError, TypeError):
                     run_date = datetime.now(timezone.utc)
 
+                # V90 CI fix: clamp negative record counts to 0 (same fix
+                # as the primary insertion path above).
+                _rd_r = record.get("records_downloaded") or 0
+                _rc_r = record.get("records_cleaned") or 0
+                _rl_r = record.get("records_loaded") or 0
                 run = PipelineRun(
                     source=record["source"],
                     run_date=run_date,
                     status=record.get("status"),
-                    records_downloaded=record.get("records_downloaded"),
-                    records_cleaned=record.get("records_cleaned"),
-                    records_loaded=record.get("records_loaded"),
+                    records_downloaded=max(0, _rd_r),
+                    records_cleaned=max(0, _rc_r),
+                    records_loaded=max(0, _rl_r),
                     error_message=record.get("error_message"),
                     duration_seconds=record.get("duration_seconds"),
                     # P1-18 ROOT FIX: replay buffered records' metadata too.

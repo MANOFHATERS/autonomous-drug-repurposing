@@ -1354,6 +1354,21 @@ def _read_indications_from_postgres(conn: Any) -> Optional[pd.DataFrame]:
             return None
 
         # Read all drugs with non-empty indication text.
+        # v84 FORENSIC ROOT FIX (BUG #25 — missing canonical ID validation):
+        # The previous query only filtered on `indication IS NOT NULL` —
+        # inchikey NULLs / empty strings / malformed values were allowed
+        # through. Downstream code uses inchikey as the canonical Compound
+        # ID (per the Phase 1 bridge docstring "Canonical Compound ID =
+        # InChIKey"). Compound nodes with NULL/empty inchikey would be
+        # created with id=NULL or id="", violating the InChIKey mandate
+        # and silently dropping drugs that have indication text but no
+        # inchikey. ROOT FIX: add `AND inchikey IS NOT NULL AND inchikey
+        # ~ '^[A-Z]{14}-[A-Z]{10}-[A-Z]$'` to the WHERE clause so only
+        # drugs with a valid InChIKey (14 uppercase letters, hyphen, 10
+        # uppercase letters, hyphen, 1 uppercase letter — the standard
+        # InChIKey format) are returned. The KG builder's ID validator
+        # no longer needs to dead-letter these rows because they never
+        # reach it.
         # v88 ROOT FIX (BUG #39 — InChIKey format validation): filter
         # to well-formed InChIKeys (^[A-Z]{14}-[A-Z]{10}-[A-Z]$) so NULL/
         # empty/malformed inchikeys don't violate the InChIKey mandate.
@@ -1365,7 +1380,10 @@ def _read_indications_from_postgres(conn: Any) -> Optional[pd.DataFrame]:
                 "FROM drugs "
                 "WHERE indication IS NOT NULL "
                 "AND TRIM(indication) != '' "
-                "AND is_deleted = false"
+                "AND is_deleted = false "
+                "AND inchikey IS NOT NULL "
+                "AND TRIM(inchikey) != '' "
+                "AND inchikey ~ '^[A-Z]{14}-[A-Z]{10}-[A-Z]$'"
             ),
             conn,
         )
@@ -1964,6 +1982,63 @@ def _read_phase1_from_postgres() -> Dict[str, pd.DataFrame]:
                 chembl_act_df["pchembl_value"] = _pchembl
             else:
                 chembl_act_df["pchembl_value"] = None
+            # v84 FORENSIC ROOT FIX (BUG #26 — UniProt accession validation):
+            # The previous code aliased `Protein.uniprot_id` as
+            # `uniprot_accession` but did NOT validate the format. Phase 1's
+            # `Protein.uniprot_id` column may contain secondary accessions,
+            # isoform IDs (with -N suffix like "P12345-2"), or NULLs. These
+            # were emitted as `uniprot_accession` to Phase 2, which uses
+            # them as the canonical Protein ID. Isoform IDs (P12345-2) are
+            # NOT primary accessions and should be normalized to their
+            # parent (P12345). Secondary accessions and malformed values
+            # should be dropped — otherwise the KG has duplicate Protein
+            # nodes for the same underlying protein, fragmenting the
+            # drug-target signal across duplicates.
+            #
+            # ROOT FIX: post-read normalization pass on the dataframe:
+            #   (a) strip isoform suffixes (-2, -3, ...) → parent accession
+            #   (b) validate against the UniProt primary accession regex:
+            #        ^[OPQ][0-9][A-Z0-9]{3}[0-9]$                (6 chars)
+            #        | ^[A-NR-Z][0-9]([A-Z][A-Z0-9]{2}[0-9]){1,2}$  (10/11 chars)
+            #   (c) drop rows whose normalized accession doesn't match
+            if "uniprot_accession" in chembl_act_df.columns:
+                import re as _re_uniprot_v84
+                _UNIPROT_PRIMARY_RE = _re_uniprot_v84.compile(
+                    r"^(?:[OPQ][0-9][A-Z0-9]{3}[0-9]"
+                    r"|[A-NR-Z][0-9](?:[A-Z][A-Z0-9]{2}[0-9]){1,2})$"
+                )
+                _orig_n = len(chembl_act_df)
+                # Coerce to string, strip whitespace, strip isoform suffix.
+                _ua = (
+                    chembl_act_df["uniprot_accession"]
+                    .astype(str)
+                    .str.strip()
+                )
+                # Strip isoform suffix: "P12345-2" → "P12345".
+                _ua_normalized = _ua.str.replace(
+                    r"-\d+$", "", regex=True
+                )
+                # Replace literal "nan"/"None"/"" with NaN for dropna.
+                _ua_normalized = _ua_normalized.replace(
+                    {"nan": None, "None": None, "": None}
+                )
+                # Validate against the regex; invalid → NaN.
+                _valid_mask = _ua_normalized.notna() & _ua_normalized.apply(
+                    lambda _v: bool(_UNIPROT_PRIMARY_RE.match(str(_v)))
+                )
+                _n_dropped = int((~_valid_mask).sum())
+                if _n_dropped > 0:
+                    logger.warning(
+                        "Phase1 bridge: dropped %d ChEMBL activity rows "
+                        "with invalid/NULL uniprot_accession (out of %d). "
+                        "Invalid rows had non-primary accessions, isoform "
+                        "IDs that didn't normalize to a parent, or NULL. "
+                        "Dropping prevents duplicate Protein nodes in the "
+                        "KG. (v84 BUG #26 root fix)",
+                        _n_dropped, _orig_n,
+                    )
+                chembl_act_df = chembl_act_df[_valid_mask].copy()
+                chembl_act_df["uniprot_accession"] = _ua_normalized[_valid_mask].values
             # Synthesize target_chembl_id (NULL — the DB doesn't store it).
             chembl_act_df["target_chembl_id"] = None
             chembl_act_df["assay_id"] = None
@@ -2669,6 +2744,19 @@ def _classify_drug_protein_edge(action_type: str) -> str:
     # allosteric → inhibit/blocker → antagonist → agonist → unknown.
     if "antagonist" in a:
         return "targets"
+    # v84 FORENSIC ROOT FIX (BUG #2 — same fix in _classify_action_edge):
+    # The previous code did `if "activ" in a or "agonist" in a or "inducer" in a`.
+    # While "agonist" (full word) is safer than "agon" (substring), it still
+    # matches "inverse agonist" and "negative agonist" — both functionally
+    # antagonists in pharmacology. ROOT FIX: exclude inverse/negative
+    # agonist patterns before classifying as activates.
+    import re as _re_v84_action
+    _EXCLUDED_INV_AGONIST_RE = _re_v84_action.compile(
+        r"\b(?:inverse\s+agonist|negative\s+(?:agonist|allosteric))",
+        _re_v84_action.IGNORECASE,
+    )
+    if _EXCLUDED_INV_AGONIST_RE.search(a):
+        return "targets"
     if "activ" in a or "agonist" in a or "inducer" in a:
         return "activates"
     return "unknown"
@@ -2736,6 +2824,39 @@ def _classify_chembl_activity_edge(
     import re as _re_v89
     if _re_v89.search(r"\b(inactiv|deactiv|inhibit|antagon)", a):
         return "inhibits"
+    # v84 FORENSIC ROOT FIX (BUG #2 — "agon" substring is too permissive):
+    # The previous code did `if "activ" in a or "agon" in a: return "activates"`.
+    # The substring "agon" matches inside "antagonist" (a-n-t-a-g-o-n-i-s-t
+    # contains a-g-o-n), inside "inverse agonist" (functionally an
+    # inhibitor/antagonist in pharmacology), and inside "negative agonist
+    # modulation" (also functionally an antagonist). Mis-routing inverse
+    # agonists and negative-allosteric modulators to "activates" feeds the
+    # TransE model inverted directionality for these drug-target edges,
+    # and the RL safety ranker then ranks the wrong drug as safe.
+    #
+    # ROOT FIX: use word-boundary regex \bagonist\b to match ONLY the
+    # bare pharmacological term "agonist" (and its plural "agonists"),
+    # and explicitly EXCLUDE inverse-agonist / negative-agonist /
+    # antagonist patterns BEFORE classifying as activates. Anything
+    # matching the excluded patterns falls through to "targets" (the
+    # honest "interaction confirmed, direction unclassified" relation).
+    import re as _re_v84
+    # Excluded patterns (functionally antagonists / inhibitors):
+    #   - "inverse agonist"        → antagonist in pharmacology
+    #   - "negative agonist"       → antagonist (negative modulation)
+    #   - "negative allosteric"    → antagonist (NAM)
+    #   - "antagonist"             → already handled above, but defensive
+    _EXCLUDED_ANTAGONIST_RE = _re_v84.compile(
+        r"\b(?:inverse\s+agonist|negative\s+(?:agonist|allosteric)|antagonist)",
+        _re_v84.IGNORECASE,
+    )
+    if _EXCLUDED_ANTAGONIST_RE.search(a):
+        return "targets"
+    # Match "activat..." (activation, activator) OR a bare word-boundary
+    # "agonist" (with optional plural "s"). This excludes "antagonist"
+    # (handled above) and "inverse agonist" (handled above).
+    _AGONIST_RE = _re_v84.compile(r"\bagonists?\b", _re_v84.IGNORECASE)
+    if "activ" in a or _AGONIST_RE.search(a):
     # Word-boundary "activ" or "agon" → activates. The \b ensures we
     # match "activation", "activates", "agonist", "agonism" but NOT
     # "inactivation", "deactivation", "inactive" (those are matched
