@@ -2164,9 +2164,12 @@ class GTRLBridge:
                 return _compute_unmet_need_score_table(disease_name, n_treatments)
             ds_idx = disease_map.get(disease_name, -1)
             tc = treat_count_per_disease.get(ds_idx, 0) if ds_idx >= 0 else 0
-            # Use the CURATED compute_unmet_need_score (prevalence table
-            # + treatment gap). This is the v89 contract.
-            return float(compute_unmet_need_score(disease_name, n_treatments=int(tc)))
+            # v91 FORENSIC ROOT FIX: call _compute_unmet_need_score_table
+            # DIRECTLY (the imported biomedical_tables version) — NOT the
+            # nested function. Calling compute_unmet_need_score(disease_name,
+            # n_treatments=tc) would RECURSE infinitely when tc=0 (the
+            # nested function calls itself with the same default args).
+            return float(_compute_unmet_need_score_table(disease_name, int(tc)))
 
         df["unmet_need_score"] = df["disease"].map(compute_unmet_need_score)
         logger.info(
