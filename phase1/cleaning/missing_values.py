@@ -2053,7 +2053,7 @@ def handle_missing_inchikey(
 def fill_missing_drug_fields(
     df: pd.DataFrame,
     *,
-    conservative_defaults: bool = False,
+    conservative_defaults: bool = True,
     fill_map_override: Optional[dict] = None,
     reset_index: bool = False,
     return_result: bool = False,
@@ -3476,7 +3476,7 @@ def clean_drugs(
     df: pd.DataFrame,
     *,
     drop_unidentifiable: bool = True,
-    conservative_defaults: bool = False,
+    conservative_defaults: bool = True,
     converter: Optional[Callable] = None,
     fill_map_override: Optional[dict] = None,
     reset_index: bool = False,
