@@ -52,6 +52,7 @@ from __future__ import annotations
 
 import logging
 import math
+import threading
 from typing import List, Optional
 
 import torch
@@ -125,6 +126,29 @@ class DrugDiseaseLinkPredictor(nn.Module):
         # by forward() and predict_probability(). It is no longer dead
         # weight.
         self.temperature = nn.Parameter(torch.ones(1))
+
+        # V90 ROOT FIX (BUG #10, P0): per-instance RLock to serialize
+        # the eval/train toggle in predict_probability. The previous
+        # code did:
+        #     prior_training = self.training
+        #     self.eval()
+        #     ...
+        #     self.train(prior_training)
+        # without any lock. If another thread called predict_probability
+        # between self.eval() and self.train(prior_training), it saw
+        # the module in eval mode regardless of the prior state. The
+        # Phase 5 API server is supposed to handle 100 concurrent
+        # requests (V1 contract item 5) — this race condition silently
+        # produced inconsistent predictions: some inference calls ran
+        # with dropout disabled (eval mode leaked from a prior call)
+        # while others ran with dropout enabled. Predictions were
+        # non-deterministic across concurrent requests.
+        #
+        # The fix: a reentrant lock around the eval/train toggle.
+        # Reentrant because predict_probability calls forward, which
+        # does NOT itself toggle training mode (only forward_logits
+        # and forward are pure inference paths).
+        self._predict_lock = threading.RLock()
 
     def _construct_pair_features(
         self,
@@ -296,13 +320,43 @@ class DrugDiseaseLinkPredictor(nn.Module):
         Returns:
             (N,) probabilities in [0, 1].
         """
-        # V30 ROOT FIX (6.1): save and restore training state.
-        prior_training = self.training
-        self.eval()
-        with torch.no_grad():
-            probs = self.forward(drug_emb, disease_emb, apply_temperature=apply_temperature)
-        # Restore the prior training state (NOT unconditionally .train()).
-        self.train(prior_training)
+        # V90 ROOT FIX (BUG #10 + #28, P0/P2): the eval/train toggle is
+        # now thread-safe via self._predict_lock, AND we skip the
+        # save/restore when the module is already in eval mode (the
+        # common case during inference, e.g., after predict_all_pairs
+        # has already called self.eval() on the full model).
+        #
+        # BUG #10 root cause: without the lock, concurrent calls to
+        # predict_probability raced — thread A's self.eval() could
+        # happen between thread B's self.eval() and self.train(prior),
+        # leaving B in eval mode regardless of its prior state. The
+        # Phase 5 API server (100 concurrent requests) silently
+        # produced inconsistent predictions.
+        #
+        # BUG #28 root cause: predict_all_pairs already calls
+        # self.eval() on the full model. Then predict_probability
+        # called self.eval() again on the link predictor (redundant),
+        # saved prior_training = False, ran inference, and restored
+        # self.train(False) (no-op). The save/restore was wasted work
+        # on every call. For 10K×10K pairs, that's 100M redundant
+        # save/restore cycles.
+        #
+        # The combined fix: skip the toggle entirely if already in
+        # eval mode (BUG #28), and use a lock when we DO toggle
+        # (BUG #10).
+        if self.training:
+            with self._predict_lock:
+                prior_training = self.training
+                self.eval()
+                try:
+                    with torch.no_grad():
+                        probs = self.forward(drug_emb, disease_emb, apply_temperature=apply_temperature)
+                finally:
+                    self.train(prior_training)
+        else:
+            # Already in eval mode — no toggle needed (BUG #28 fix).
+            with torch.no_grad():
+                probs = self.forward(drug_emb, disease_emb, apply_temperature=apply_temperature)
         return probs.squeeze(-1)
 
     def fit_temperature(
@@ -355,15 +409,26 @@ class DrugDiseaseLinkPredictor(nn.Module):
             Optimal temperature value in [0.5, 2.0].
         """
         # Freeze MLP weights during temperature optimization
+        # V90 ROOT FIX (BUG #13, P1): wrap the optimization loop in
+        # try/finally so the MLP weights are ALWAYS unfrozen, even on
+        # exception. The previous code froze the MLP at line ~358 but
+        # only unfroze at the very end (~470). If an exception happened
+        # in between (OOM, NaN loss, CUDA error), the MLP weights
+        # STAYED frozen — a transient calibration failure permanently
+        # bricked the link predictor's trainability. The user saw
+        # "temperature calibration FAILED" in the log but didn't know
+        # the MLP was frozen. Next training run: loss didn't decrease,
+        # user was confused.
         for p in self.mlp.parameters():
             p.requires_grad_(False)
 
-        self.eval()
-        with torch.no_grad():
-            logits = self.forward_logits(drug_emb, disease_emb).squeeze(-1).detach()
-            labels_f = labels.float().detach()
+        try:
+            self.eval()
+            with torch.no_grad():
+                logits = self.forward_logits(drug_emb, disease_emb).squeeze(-1).detach()
+                labels_f = labels.float().detach()
 
-        # ROOT FIX (W-05): the V27 code used
+            # ROOT FIX (W-05): the V27 code used
         #     T_eff = 1.25 + 0.75 * torch.tanh(log_temp)
         # and claimed "tanh maps (-inf,+inf) -> (-1,1) so T_eff is
         # differentiable everywhere and gradients never vanish." This is
@@ -394,86 +459,92 @@ class DrugDiseaseLinkPredictor(nn.Module):
         # = 1 - 0.393 = 0.607 (non-vanishing), but more importantly, the
         # exp-parameterization has derivative = T (always positive), so
         # gradients NEVER vanish regardless of clamping.
-        LOG_TEMP_MIN = math.log(self.TEMPERATURE_CLAMP_MIN)  # log(0.5) = -0.693
-        LOG_TEMP_MAX = math.log(self.TEMPERATURE_CLAMP_MAX)  # log(2.0) = 0.693
+            LOG_TEMP_MIN = math.log(self.TEMPERATURE_CLAMP_MIN)  # log(0.5) = -0.693
+            LOG_TEMP_MAX = math.log(self.TEMPERATURE_CLAMP_MAX)  # log(2.0) = 0.693
 
-        log_temp = torch.zeros(1, requires_grad=True)
+            log_temp = torch.zeros(1, requires_grad=True)
         # ROOT FIX (W-05): lower lr (0.02 instead of 0.05) since exp()
         # amplifies log_temp changes. With lr=0.05 and log_temp starting
         # at 0, a single bad gradient could push log_temp to 0.5 (T=1.65)
         # in one step. lr=0.02 gives smoother convergence.
-        optimizer = torch.optim.Adam([log_temp], lr=lr * 0.4)
+            optimizer = torch.optim.Adam([log_temp], lr=lr * 0.4)
 
-        criterion = nn.BCEWithLogitsLoss()
+            criterion = nn.BCEWithLogitsLoss()
 
-        # Track best (lowest loss) T across all iterations
-        best_loss = float('inf')
-        best_T = 1.0
-        no_improve_count = 0
-        patience = 15  # early stop if loss hasn't improved in 15 iters
+            # Track best (lowest loss) T across all iterations
+            best_loss = float('inf')
+            best_T = 1.0
+            no_improve_count = 0
+            patience = 15  # early stop if loss hasn't improved in 15 iters
 
-        for iteration in range(max_iter):
-            optimizer.zero_grad()
-            # ROOT FIX (W-05): use exp parameterization. The gradient
-            # dloss/dlog_temp = dloss/dT * T, and T > 0 always, so the
-            # gradient NEVER vanishes (unlike tanh whose derivative
-            # vanishes at large |log_temp|).
-            T = torch.exp(log_temp)
-            scaled_logits = logits / T
-            loss = criterion(scaled_logits, labels_f)
-            loss.backward()
-            optimizer.step()
+            for iteration in range(max_iter):
+                optimizer.zero_grad()
+                # ROOT FIX (W-05): use exp parameterization. The gradient
+                # dloss/dlog_temp = dloss/dT * T, and T > 0 always, so the
+                # gradient NEVER vanishes (unlike tanh whose derivative
+                # vanishes at large |log_temp|).
+                T = torch.exp(log_temp)
+                scaled_logits = logits / T
+                loss = criterion(scaled_logits, labels_f)
+                loss.backward()
+                optimizer.step()
 
-            # ROOT FIX (W-05): HARD CLAMP log_temp AFTER the optimizer
-            # step. This keeps log_temp (and thus T = exp(log_temp))
-            # inside the Guo et al. 2017 standard range [0.5, 2.0]. The
-            # clamp is applied OUTSIDE the autograd graph (using
-            # ``.data``), so it does NOT interfere with gradient
-            # computation on the NEXT iteration -- gradients still flow
-            # through T = exp(log_temp) cleanly. The clamp only prevents
-            # log_temp from drifting outside the valid range; it does
-            # NOT zero gradients during the forward pass (the bug with
-            # the V27 tanh approach).
-            with torch.no_grad():
-                log_temp.data = log_temp.data.clamp(min=LOG_TEMP_MIN, max=LOG_TEMP_MAX)
+                # ROOT FIX (W-05): HARD CLAMP log_temp AFTER the optimizer
+                # step. This keeps log_temp (and thus T = exp(log_temp))
+                # inside the Guo et al. 2017 standard range [0.5, 2.0]. The
+                # clamp is applied OUTSIDE the autograd graph (using
+                # ``.data``), so it does NOT interfere with gradient
+                # computation on the NEXT iteration -- gradients still flow
+                # through T = exp(log_temp) cleanly. The clamp only prevents
+                # log_temp from drifting outside the valid range; it does
+                # NOT zero gradients during the forward pass (the bug with
+                # the V27 tanh approach).
+                with torch.no_grad():
+                    log_temp.data = log_temp.data.clamp(min=LOG_TEMP_MIN, max=LOG_TEMP_MAX)
 
-            loss_val = float(loss.item())
-            T_val = float(T.item())
+                loss_val = float(loss.item())
+                T_val = float(T.item())
 
-            # Track best T (lowest loss)
-            if loss_val < best_loss - 1e-6:
-                best_loss = loss_val
-                best_T = T_val
-                no_improve_count = 0
-            else:
-                no_improve_count += 1
+                # Track best T (lowest loss)
+                if loss_val < best_loss - 1e-6:
+                    best_loss = loss_val
+                    best_T = T_val
+                    no_improve_count = 0
+                else:
+                    no_improve_count += 1
 
-            # Early stopping: convergence reached
-            if no_improve_count >= patience:
-                logger.debug(
-                    f"fit_temperature: converged at iteration {iteration} "
-                    f"(no improvement for {patience} iters). "
-                    f"Best T={best_T:.4f}, best loss={best_loss:.6f}"
-                )
-                break
+                # Early stopping: convergence reached
+                if no_improve_count >= patience:
+                    logger.debug(
+                        f"fit_temperature: converged at iteration {iteration} "
+                        f"(no improvement for {patience} iters). "
+                        f"Best T={best_T:.4f}, best loss={best_loss:.6f}"
+                    )
+                    break
 
-        # ROOT FIX (W-05): store best_T (not final T), clamped to
-        # [0.5, 2.0] to match forward()'s inference-time clamp. The
-        # best_T is already in range due to the per-iteration clamp
-        # above, but we apply the clamp defensively in case best_T was
-        # tracked before the first clamp took effect.
-        final_T = float(max(self.TEMPERATURE_CLAMP_MIN,
-                            min(self.TEMPERATURE_CLAMP_MAX, best_T)))
-        self.temperature.data.fill_(final_T)
+            # ROOT FIX (W-05): store best_T (not final T), clamped to
+            # [0.5, 2.0] to match forward()'s inference-time clamp. The
+            # best_T is already in range due to the per-iteration clamp
+            # above, but we apply the clamp defensively in case best_T was
+            # tracked before the first clamp took effect.
+            final_T = float(max(self.TEMPERATURE_CLAMP_MIN,
+                                min(self.TEMPERATURE_CLAMP_MAX, best_T)))
+            self.temperature.data.fill_(final_T)
 
-        # Unfreeze MLP weights for any future fine-tuning
-        for p in self.mlp.parameters():
-            p.requires_grad_(True)
-
-        logger.info(
-            f"ROOT FIX (FORENSIC-AUDIT-C01): temperature calibrated to "
-            f"{final_T:.4f} (clamped to [{self.TEMPERATURE_CLAMP_MIN}, "
-            f"{self.TEMPERATURE_CLAMP_MAX}] per Guo et al. 2017). "
-            f"Best NLL loss: {best_loss:.6f}"
-        )
-        return final_T
+            logger.info(
+                f"ROOT FIX (FORENSIC-AUDIT-C01): temperature calibrated to "
+                f"{final_T:.4f} (clamped to [{self.TEMPERATURE_CLAMP_MIN}, "
+                f"{self.TEMPERATURE_CLAMP_MAX}] per Guo et al. 2017). "
+                f"Best NLL loss: {best_loss:.6f}"
+            )
+            return final_T
+        finally:
+            # V90 ROOT FIX (BUG #13, P1): ALWAYS unfreeze MLP weights,
+            # even on exception. The previous code only unfroze at the
+            # very end of the method — if an exception happened during
+            # the optimization loop (OOM, NaN loss, CUDA error), the
+            # MLP weights STAYED frozen and subsequent training runs
+            # silently failed to update them. With try/finally, the
+            # unfreeze happens regardless of how the try block exits.
+            for p in self.mlp.parameters():
+                p.requires_grad_(True)

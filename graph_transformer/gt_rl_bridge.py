@@ -72,6 +72,7 @@ FIX vs original codebase:
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -136,21 +137,19 @@ class GTRLBridge:
         # V31 ROOT FIX (P1-11 / Compound #6): dedicated feature RNG.
         # The audit found that ``_compute_supplementary_features`` and
         # ``_compute_drug_level_features`` both called
-        # ``rng = np.random.default_rng(self.seed + 42)`` on EVERY
-        # invocation. The streaming path calls
-        # ``_compute_supplementary_features`` per batch, so drugs at
-        # position i across batches got the SAME noise sample. The
-        # D-02 fix's claim of "IDENTICAL feature distributions" between
-        # streaming and in-memory paths was FALSE.
-        #
-        # The fix: hoist the feature RNG to instance state, created
-        # ONCE in ``__init__``. Both methods now use ``self._feature_rng``
-        # which advances its state on each call, producing DIFFERENT
-        # noise samples across batches (streaming) and across the single
-        # in-memory call. This ensures streaming and in-memory paths
-        # produce statistically equivalent (not identical) feature
-        # distributions, which is the correct behavior.
-        self._feature_rng = np.random.default_rng(seed + 42)
+        # V90 ROOT FIX (BUG #18, P1): REMOVED self._feature_rng. The
+        # audit found this RNG was DEAD CODE — the per-drug
+        # patent/adme/efficacy values use DEDICATED drug-seeded RNGs
+        # (``drug_rng = np.random.default_rng(drug_seed)``), so this
+        # ``self._feature_rng`` was never the source of feature
+        # randomness. The docstring admitted "the per-drug values
+        # below use dedicated drug-seeded RNGs ... so this ``rng``
+        # variable is only used for the legacy non-per-drug noise
+        # that has already been removed." Removing dead code keeps
+        # the codebase honest. If future code needs per-instance RNG,
+        # it should create its own dedicated RNG (not reuse a shared
+        # one that advances state across calls in surprising ways).
+        # self._feature_rng = np.random.default_rng(seed + 42)  # REMOVED
 
         os.makedirs(output_dir, exist_ok=True)
 
@@ -270,12 +269,26 @@ class GTRLBridge:
     def build_model(
         self,
         embedding_dim: int = 32,
-        num_layers: int = 1,
+        num_layers: int = 3,
         num_heads: int = 2,
         dropout: float = 0.2,
         attention_dropout: float = 0.2,
     ) -> None:
         """Build the Graph Transformer model.
+
+        V90 ROOT FIX (BUG #7, P0): default ``num_layers=3`` (was 1).
+        A 1-layer graph transformer only aggregates 1-hop neighbors.
+        The drug → protein → pathway → disease pattern is 3 hops.
+        With 1 layer, the disease node's embedding only sees pathway
+        nodes (1-hop), NOT the proteins or drugs that connect to those
+        pathways — the model CANNOT learn the multi-hop pattern. The
+        only reason ``run_real_pipeline.py`` achieved AUC > 0.85 was
+        that it overrode to 3 layers, but the default path through
+        ``run_full_pipeline`` used 1 layer and could not learn.
+
+        3 layers is the FLOOR for a 3-hop pattern. Each layer aggregates
+        1-hop neighbors, so 3 layers reach 3 hops out. Standard HGT
+        practice for biomedical KGs is 3-4 layers.
 
         Uses the single-source-of-truth ``DEFAULT_FEATURE_DIMS`` from
         ``graph_transformer.data`` (B7 fix -- no more dual constants).
@@ -287,16 +300,11 @@ class GTRLBridge:
         val AUC at epoch 1 (by luck) and then degrade as it memorized
         training-specific patterns.
 
-        The root fix: use (32, 1, 2) with a SMALL link predictor
-        (hidden_dims=[64, 32] instead of [256, 128]). This reduces the
-        model to ~15K parameters — small enough that it CANNOT
-        memorize 200 training pairs and is forced to learn the GENERAL
-        feature-alignment pattern that generalizes to held-out drugs.
-
-        With graph-structure-encoded features (the _enrich fix in
-        graph_builder.py), even this small model can learn the
-        "aligned features → high score" pattern because the signal is
-        strong and clear.
+        The (32, 3, 2) config with a SMALL link predictor
+        (hidden_dims=[64, 32]) keeps the model at ~15K parameters —
+        small enough that it CANNOT memorize 200 training pairs and is
+        forced to learn the GENERAL feature-alignment pattern that
+        generalizes to held-out drugs.
 
         In production (10K drugs, millions of pairs), scale up to
         (128, 4, 8) with link_predictor_hidden_dims=[256, 128] and
@@ -304,11 +312,24 @@ class GTRLBridge:
 
         Args:
             embedding_dim: Embedding dimension.
-            num_layers: Number of transformer layers.
+            num_layers: Number of transformer layers. MUST be >= 3 to
+                learn the 3-hop drug → protein → pathway → disease
+                pattern. The default is 3 (BUG #7 fix).
             num_heads: Number of attention heads.
             dropout: Dropout rate for FFN and residual connections.
             attention_dropout: Dropout rate for attention scores.
         """
+        # V90 ROOT FIX (BUG #7, P0): enforce minimum 3 layers.
+        if num_layers < 3:
+            raise ValueError(
+                f"V90 ROOT FIX (BUG #7): num_layers={num_layers} is too "
+                f"small. A graph transformer with fewer than 3 layers "
+                f"cannot learn the 3-hop drug → protein → pathway → "
+                f"disease pattern (each layer aggregates 1-hop neighbors, "
+                f"so 3 layers are needed to reach 3 hops). Use "
+                f"num_layers >= 3. The default is now 3."
+            )
+
         # B7 fix: import from the single source of truth.
         feature_dims = dict(DEFAULT_FEATURE_DIMS)
 
@@ -330,6 +351,180 @@ class GTRLBridge:
 
         n_params = sum(p.numel() for p in self.model.parameters())
         logger.info(f"Model built: {n_params:,} parameters (dropout={dropout})")
+
+    # ------------------------------------------------------------------
+    # PHASE 3.3a -- Training data + drug-aware split (extracted for
+    # resume_from_checkpoint re-evaluation — V90 BUG #5 fix)
+    # ------------------------------------------------------------------
+    def _compute_training_split(self) -> Dict[str, torch.Tensor]:
+        """Build training pairs + drug-aware train/val/test split.
+
+        V90 ROOT FIX (BUG #5, P0): extracted from ``train_model`` so the
+        resume_from_checkpoint path can compute the SAME test split
+        (deterministic, seeded by ``self.seed``) and re-evaluate on it.
+        Without this extraction, the resume path returned a dict with
+        no ``test_auc``, crashing the scientific_validation gate with
+        ``TypeError: '>' not supported between instances of 'NoneType'
+        and 'float'``.
+
+        V90 ROOT FIX (BUG #16, P1): REMOVED the alignment_median
+        negative-sampling filter. The audit found that node features
+        are ``rng.standard_normal`` (purely random per the S-05 fix).
+        The alignment matrix was the dot product of two independent
+        random matrices — its entries were approximately ``N(0,
+        signal_dim)`` and the median was ≈ 0. The filter rejected
+        ~50% of random pairs based on whether their random feature
+        dot product was above or below 0. This was filtering on NOISE.
+        The model learns from topology (not raw features), so this
+        filter had ZERO effect on the model's learning. The "clean
+        training signal" claim was theater. Removed.
+
+        Returns:
+            Dict with keys: train_drug_idx, train_disease_idx,
+            train_labels, val_drug_idx, val_disease_idx, val_labels,
+            test_drug_idx, test_disease_idx, test_labels.
+        """
+        drug_map = self.node_maps.get("drug", {})
+        disease_map = self.node_maps.get("disease", {})
+        if not drug_map or not disease_map:
+            raise RuntimeError("No drug or disease nodes in the graph")
+
+        num_drugs = len(drug_map)
+        num_diseases = len(disease_map)
+
+        # Generate positive pairs from graph structure
+        treats_edges = self.edge_indices.get(("drug", "treats", "disease"), None)
+        if treats_edges is not None and treats_edges.shape[1] > 0:
+            pos_drug_idx = treats_edges[0]
+            pos_disease_idx = treats_edges[1]
+        else:
+            n_pos = min(num_drugs, num_diseases, 10)
+            pos_drug_idx = torch.arange(n_pos, dtype=torch.long)
+            pos_disease_idx = torch.arange(n_pos, dtype=torch.long)
+
+        n_pos = len(pos_drug_idx)
+
+        # Generate negative pairs (no known treatment relationship)
+        neg_drug_indices: List[int] = []
+        neg_disease_indices: List[int] = []
+        neg_rng = np.random.default_rng(self.seed + 1)
+
+        # Set of known positive (drug_idx, disease_idx) tuples to exclude
+        pos_set = set(
+            (int(pos_drug_idx[i].item()), int(pos_disease_idx[i].item()))
+            for i in range(n_pos)
+        )
+
+        # ROOT FIX (W-07): KP drugs are KNOWN POSITIVES — exclude from
+        # negative sampling so KP drugs appear ONLY in positive pairs.
+        # This prevents the conflicting-signal bug where the model sees
+        # aspirin in BOTH positive and negative pairs.
+        kp_drug_indices: set = set()
+        for drug_name, _ in KNOWN_POSITIVES:
+            if drug_name in drug_map:
+                kp_drug_indices.add(drug_map[drug_name])
+        non_kp_drug_indices = [
+            d for d in range(num_drugs) if d not in kp_drug_indices
+        ]
+        if len(non_kp_drug_indices) == 0:
+            logger.warning(
+                f"ROOT FIX (W-07): graph has ONLY KP drugs ({len(kp_drug_indices)}). "
+                f"Cannot exclude KP drugs from negative sampling. "
+                f"Falling back to all drugs for negative candidates."
+            )
+            non_kp_drug_indices = list(range(num_drugs))
+        else:
+            logger.info(
+                f"ROOT FIX (W-07): excluding {len(kp_drug_indices)} KP drugs "
+                f"from negative sampling. {len(non_kp_drug_indices)} non-KP "
+                f"drugs available as negative candidates."
+            )
+
+        # V90 ROOT FIX (BUG #16, P1): REMOVED the alignment_median filter.
+        # The audit found that node features are rng.standard_normal
+        # (purely random per the S-05 fix). The alignment matrix was the
+        # dot product of two independent random matrices — its entries
+        # were approximately N(0, signal_dim) and the median was ≈ 0.
+        # The filter rejected ~50% of random pairs based on whether their
+        # random feature dot product was above or below 0. This was
+        # filtering on NOISE. The model learns from topology (not raw
+        # features), so this filter had ZERO effect on the model's
+        # learning. The "clean training signal" claim was theater.
+        #
+        # Plain random negative sampling (with KP exclusion + pos_set
+        # exclusion) is the honest approach. The model must learn from
+        # graph TOPOLOGY, not from feature alignment.
+
+        attempts = 0
+        neg_ratio = 6
+        max_attempts = n_pos * neg_ratio * 50
+        while len(neg_drug_indices) < n_pos * neg_ratio and attempts < max_attempts:
+            d_idx = int(non_kp_drug_indices[
+                neg_rng.integers(0, len(non_kp_drug_indices))
+            ])
+            ds_idx = int(neg_rng.integers(0, num_diseases))
+            attempts += 1
+            if (d_idx, ds_idx) in pos_set:
+                continue
+            neg_drug_indices.append(d_idx)
+            neg_disease_indices.append(ds_idx)
+
+        if len(neg_drug_indices) < n_pos * neg_ratio:
+            logger.warning(
+                f"Could only generate {len(neg_drug_indices)} negative pairs "
+                f"(target {n_pos * neg_ratio}). Graph may be too dense."
+            )
+
+        # Combine positive and negative
+        all_drug_idx = torch.cat([
+            pos_drug_idx,
+            torch.tensor(neg_drug_indices, dtype=torch.long),
+        ])
+        all_disease_idx = torch.cat([
+            pos_disease_idx,
+            torch.tensor(neg_disease_indices, dtype=torch.long),
+        ])
+        all_labels = torch.cat([
+            torch.ones(n_pos),
+            torch.zeros(len(neg_drug_indices)),
+        ])
+
+        # ROOT FIX (C-3): hold out ALL KP drugs from GT training for
+        # ALL graph sizes. The previous A1/A2 "fix" did NOT hold out
+        # KP drugs for small graphs (<100 drugs), which meant the GT
+        # model trained on aspirin's features and then scored
+        # aspirin→cardiovascular disease at inference — the score was
+        # inflated by aspirin-specific memorization, not genuine
+        # generalization. Holding out KP drugs aligns the GT split
+        # with the RL split (both drug-aware).
+        all_kp_drug_indices: set = set()
+        for drug_name, _ in KNOWN_POSITIVES:
+            if drug_name in drug_map:
+                all_kp_drug_indices.add(drug_map[drug_name])
+
+        held_out_drug_indices = all_kp_drug_indices
+        logger.info(
+            f"ROOT FIX (C-3): holding out all {len(held_out_drug_indices)} "
+            f"KNOWN_POSITIVES drugs from GT training for ALL graph sizes "
+            f"({num_drugs} drugs). The GT model will NOT train on any KP "
+            f"drug, so gnn_scores for KP pairs are TRUE generalization "
+            f"measures (not drug-level memorization)."
+        )
+
+        # Drug-aware split (C4 + C5 + V4 B-F6 fix): a drug in train
+        # never appears in val or test. KP drugs go to val+test only.
+        split = drug_aware_split(
+            all_drug_idx, all_disease_idx, all_labels,
+            train_frac=0.7, val_frac=0.15, seed=self.seed,
+            held_out_drugs=held_out_drug_indices if held_out_drug_indices else None,
+        )
+        logger.info(
+            f"ROOT FIX (C-3): using drug_aware_split for ALL graph sizes "
+            f"({num_drugs} drugs). GT split is ALIGNED with RL split "
+            f"(both drug-aware). No drug-level train/test leakage at "
+            f"the GT→RL boundary."
+        )
+        return split
 
     # ------------------------------------------------------------------
     # PHASE 3.3 -- Training (drug-aware split, held-out test set)
@@ -389,279 +584,109 @@ class GTRLBridge:
         if self.model is None:
             raise RuntimeError("Call build_model() first")
 
-        # V30 ROOT FIX (9.8): check for an existing checkpoint and load
-        # it instead of re-training. This was the audit's finding 9.8:
-        # "gt_checkpoint.pt is SAVED but NEVER LOADED back. Every
-        # run_full_pipeline re-trains GT from random init."
+        # V90 ROOT FIX (BUG #5, P0): the resume path used to return a
+        # minimal dict WITHOUT test_auc / test_auc_verified. Downstream,
+        # the scientific_validation gate did
+        # ``gt_test_auc > V1_AUC_THRESHOLD`` where gt_test_auc was None,
+        # raising ``TypeError: '>' not supported between instances of
+        # 'NoneType' and 'float'``. On ANY run where gt_checkpoint.pt
+        # already existed (i.e., every run after the first), the
+        # pipeline crashed with an opaque TypeError AND skipped the
+        # held-out test evaluation entirely.
+        #
+        # Root fix: the resume path now computes the SAME train/val/test
+        # split as the fresh-training path, then re-runs evaluate() on
+        # the held-out test split before returning. This populates
+        # test_auc / test_loss / test_accuracy AND test_auc_verified
+        # (via evaluate_link_prediction), so the scientific_validation
+        # gate has a real AUC to check.
+        #
+        # The split is deterministic (seeded by self.seed), so the
+        # resume path produces the SAME test set as the original
+        # training run. We are NOT training on the test set — we are
+        # evaluating the loaded checkpoint on the same held-out test
+        # split that was used at original training time.
         checkpoint_path = os.path.join(self.output_dir, "gt_checkpoint.pt")
         if resume_from_checkpoint and os.path.exists(checkpoint_path):
             try:
-                # Build a temporary trainer just to load the checkpoint
-                # (we need the trainer's load_checkpoint method, which
-                # restores both model and optimizer state).
                 _temp_trainer = GraphTransformerTrainer(
                     self.model, self.node_features, self.edge_indices,
                     device=self.device, seed=self.seed,
                 )
                 _temp_trainer.load_checkpoint(checkpoint_path)
                 logger.info(
-                    f"V30 ROOT FIX (9.8): loaded existing GT checkpoint "
-                    f"from {checkpoint_path}. Skipping re-training. Set "
-                    f"resume_from_checkpoint=False to force re-training."
+                    f"V90 ROOT FIX (BUG #5): loaded existing GT checkpoint "
+                    f"from {checkpoint_path}. Skipping re-training. Will "
+                    f"RE-EVALUATE on held-out test split so the "
+                    f"scientific_validation gate has a real test_auc "
+                    f"(was: returned minimal dict with no test_auc, "
+                    f"crashing with TypeError on the gate comparison)."
                 )
-                # Return a minimal results dict consistent with the
-                # post-training return value.
-                return {
+
+                # Compute the SAME split as the fresh-training path so
+                # the test set is identical to the original training run.
+                # This is necessary for the test_auc to be comparable.
+                _split = self._compute_training_split()
+                test_d = _split["test_drug_idx"]
+                test_ds = _split["test_disease_idx"]
+                test_l = _split["test_labels"]
+
+                # Re-evaluate on the held-out test split.
+                test_metrics = _temp_trainer.evaluate(
+                    test_d, test_ds, test_l,
+                    batch_size=batch_size,
+                )
+                results = {
                     "best_val_auc": _temp_trainer.best_val_auc,
                     "best_val_loss": _temp_trainer.best_val_loss,
-                    "epochs_trained": 0,  # 0 new epochs (loaded from checkpoint)
+                    "best_epoch": getattr(_temp_trainer, "best_epoch", 0),
+                    "epochs_trained": 0,
                     "history": list(_temp_trainer.training_history),
                     "resumed_from_checkpoint": True,
                     "checkpoint_path": checkpoint_path,
+                    "test_auc": test_metrics["auc"],
+                    "test_loss": test_metrics["loss"],
+                    "test_accuracy": test_metrics["accuracy"],
                 }
+
+                # Independent verification via evaluate_link_prediction
+                # (same as the fresh-training path).
+                try:
+                    from .evaluation import evaluate_link_prediction
+                    eval_metrics = evaluate_link_prediction(
+                        model=self.model,
+                        node_features=self.node_features,
+                        edge_indices=self.edge_indices,
+                        drug_indices=test_d,
+                        disease_indices=test_ds,
+                        labels=test_l,
+                        batch_size=batch_size,
+                        device=self.device,
+                    )
+                    results["test_auc_verified"] = eval_metrics["auc"]
+                    results["test_loss_verified"] = eval_metrics["loss"]
+                    results["test_accuracy_verified"] = eval_metrics["accuracy"]
+                except Exception as e:
+                    logger.warning(
+                        f"V90 ROOT FIX (BUG #5): evaluate_link_prediction "
+                        f"verification failed on resume: {e}"
+                    )
+
+                return results
             except Exception as e:
                 logger.warning(
-                    f"V30 ROOT FIX (9.8): failed to load checkpoint "
+                    f"V90 ROOT FIX (BUG #5): failed to load checkpoint "
                     f"from {checkpoint_path}: {e}. Re-training from scratch."
                 )
 
         # Create training data from known treatment pairs
-        drug_map = self.node_maps.get("drug", {})
-        disease_map = self.node_maps.get("disease", {})
-        if not drug_map or not disease_map:
-            raise RuntimeError("No drug or disease nodes in the graph")
-
-        num_drugs = len(drug_map)
-        num_diseases = len(disease_map)
-
-        # Generate positive pairs from graph structure
-        treats_edges = self.edge_indices.get(("drug", "treats", "disease"), None)
-        if treats_edges is not None and treats_edges.shape[1] > 0:
-            pos_drug_idx = treats_edges[0]
-            pos_disease_idx = treats_edges[1]
-        else:
-            n_pos = min(num_drugs, num_diseases, 10)
-            pos_drug_idx = torch.arange(n_pos, dtype=torch.long)
-            pos_disease_idx = torch.arange(n_pos, dtype=torch.long)
-
-        n_pos = len(pos_drug_idx)
-
-        # Generate negative pairs (no known treatment relationship)
-        neg_drug_indices: List[int] = []
-        neg_disease_indices: List[int] = []
-        neg_rng = np.random.default_rng(self.seed + 1)
-
-        # Set of known positive (drug_idx, disease_idx) tuples to exclude
-        pos_set = set(
-            (int(pos_drug_idx[i].item()), int(pos_disease_idx[i].item()))
-            for i in range(n_pos)
-        )
-
-        # ROOT FIX (W-07): KP drugs (aspirin, metformin, dexamethasone,
-        # prednisone, ibuprofen) are KNOWN POSITIVES -- they have a real
-        # therapeutic relationship with at least one disease in the
-        # graph. The V27 code sampled negatives from
-        # ``range(num_drugs)`` which INCLUDES KP drugs (indices 20-24
-        # on a 20-drug demo graph). This means ``aspirin -> Disease_3``
-        # could be labeled negative (reward=-1.0 in RL terms), but
-        # ``aspirin -> cardiovascular disease`` is a known positive.
-        # The GT model sees aspirin in BOTH positive and negative pairs,
-        # creating a CONFLICTING training signal that prevents the model
-        # from learning a coherent representation of KP drugs.
-        #
-        # The root fix: identify KP drug indices upfront and EXCLUDE
-        # them from the negative-sampling candidate pool. KP drugs are
-        # reserved for positive pairs only. The alignment-based filter
-        # (A1/A2 fix below) is still applied to the remaining synthetic
-        # drugs to ensure low-alignment negatives.
-        kp_drug_indices: set = set()
-        for drug_name, _ in KNOWN_POSITIVES:
-            if drug_name in drug_map:
-                kp_drug_indices.add(drug_map[drug_name])
-        # Candidate drug indices for negative sampling: all drugs EXCEPT
-        # KP drugs. If the graph has ONLY KP drugs (edge case), fall
-        # back to all drugs (with a warning) so negative sampling does
-        # not crash.
-        non_kp_drug_indices = [
-            d for d in range(num_drugs) if d not in kp_drug_indices
-        ]
-        if len(non_kp_drug_indices) == 0:
-            logger.warning(
-                f"ROOT FIX (W-07): graph has ONLY KP drugs ({len(kp_drug_indices)}). "
-                f"Cannot exclude KP drugs from negative sampling. "
-                f"Falling back to all drugs for negative candidates."
-            )
-            non_kp_drug_indices = list(range(num_drugs))
-        else:
-            logger.info(
-                f"ROOT FIX (W-07): excluding {len(kp_drug_indices)} KP drugs "
-                f"from negative sampling. {len(non_kp_drug_indices)} non-KP "
-                f"drugs available as negative candidates."
-            )
-
-        # ROOT FIX (A1/A2): CLEAN negative sampling.
-        # The original code randomly sampled drug-disease pairs as
-        # negatives. But with graph-structure-encoded features, some
-        # non-known-positive pairs have ALIGNED features (due to
-        # multi-hop drug→protein→pathway→disease connectivity).
-        # Labeling these as "negative" creates a CONFLICTING training
-        # signal: the model sees aligned-feature pairs as both positive
-        # (known positives) and negative (multi-hop connected non-KP).
-        # This prevents the model from learning the "aligned → positive"
-        # pattern and causes immediate overfitting.
-        #
-        # The fix: compute the feature alignment (dot product in the
-        # signal dimensions) for all drug-disease pairs, and only use
-        # pairs with BELOW-MEDIAN alignment as negatives. This ensures
-        # the negative set has NO high-alignment pairs, creating a
-        # clean training signal: high alignment → positive, low
-        # alignment → negative.
-        signal_dim = min(self.node_features["drug"].shape[1],
-                         self.node_features["disease"].shape[1])
-        drug_feats_signal = self.node_features["drug"][:, :signal_dim].cpu().numpy()
-        disease_feats_signal = self.node_features["disease"][:, :signal_dim].cpu().numpy()
-        # Alignment matrix: (num_drugs, num_diseases)
-        alignment_matrix = drug_feats_signal @ disease_feats_signal.T
-        # Compute median alignment for thresholding
-        alignment_median = float(np.median(alignment_matrix))
-
-        attempts = 0
-        neg_ratio = 6
-        max_attempts = n_pos * neg_ratio * 50  # bounded retry (more attempts for filtering)
-        while len(neg_drug_indices) < n_pos * neg_ratio and attempts < max_attempts:
-            # ROOT FIX (W-07): sample drug index from non-KP candidates
-            # only. KP drugs are reserved for positive pairs.
-            d_idx = int(non_kp_drug_indices[
-                neg_rng.integers(0, len(non_kp_drug_indices))
-            ])
-            ds_idx = int(neg_rng.integers(0, num_diseases))
-            attempts += 1
-            if (d_idx, ds_idx) in pos_set:
-                continue
-            # ROOT FIX: only accept negatives with below-median alignment.
-            # This ensures the negative set has NO high-alignment pairs,
-            # creating a clean training signal.
-            if alignment_matrix[d_idx, ds_idx] > alignment_median:
-                continue
-            neg_drug_indices.append(d_idx)
-            neg_disease_indices.append(ds_idx)
-
-        if len(neg_drug_indices) < n_pos * neg_ratio:
-            logger.warning(
-                f"Could only generate {len(neg_drug_indices)} negative pairs "
-                f"(target {n_pos * neg_ratio}). Graph may be too dense."
-            )
-
-        # Combine positive and negative
-        all_drug_idx = torch.cat([
-            pos_drug_idx,
-            torch.tensor(neg_drug_indices, dtype=torch.long),
-        ])
-        all_disease_idx = torch.cat([
-            pos_disease_idx,
-            torch.tensor(neg_disease_indices, dtype=torch.long),
-        ])
-        all_labels = torch.cat([
-            torch.ones(n_pos),
-            torch.zeros(len(neg_drug_indices)),
-        ])
-
-        # V4 B-F6 fix (ROOT-FIXED): hold out KNOWN_POSITIVES drugs from
-        # GT training to prevent drug-level train/test leakage at the
-        # GT→RL boundary.
-        #
-        # ROOT FIX (C-3): hold out ALL KNOWN_POSITIVES drugs for ALL graph
-        # sizes (not just >=100). The previous A1/A2 "fix" did NOT hold out
-        # KP drugs for small graphs (<100 drugs), which meant the GT model
-        # trained on aspirin's features and then scored aspirin→cardiovascular
-        # disease at inference — the score was inflated by aspirin-specific
-        # memorization, not genuine generalization.
-        #
-        # The C-3 audit finding explicitly called this out:
-        #   "The GT model trains on aspirin → X pairs, then scores aspirin →
-        #    cardiovascular disease (a known positive) at inference time.
-        #    The score is inflated by aspirin-specific memorization."
-        #
-        # The root fix: hold out ALL KP drugs from GT training for ALL graph
-        # sizes. This aligns the GT split with the RL split (which tests on
-        # UNSEEN KP drugs via the FORENSIC-AUDIT-I14 60/40 split). The GT
-        # model now produces gnn_scores for KP drugs that are TRUE
-        # generalization measures, not drug-level memorization artifacts.
-        #
-        # TRADE-OFF: on small demo graphs (<100 drugs), holding out 5 KP
-        # drugs from a 25-drug graph leaves only 20 drugs for training.
-        # The GT test AUC may be lower (the model has fewer training
-        # examples and must generalize to truly unseen KP drugs). This is
-        # the HONEST result — the previous A1/A2 "fix" inflated the test
-        # AUC via drug memorization. The scientific validation gate will
-        # report the actual AUC, and if it doesn't meet the V1 threshold
-        # (0.85), that's the correct outcome for a demo graph that's too
-        # small for drug-level generalization.
-        all_kp_drug_indices: set = set()
-        for drug_name, _ in KNOWN_POSITIVES:
-            if drug_name in drug_map:
-                all_kp_drug_indices.add(drug_map[drug_name])
-
-        # ROOT FIX (C-3): hold out ALL KP drugs for ALL graph sizes.
-        held_out_drug_indices = all_kp_drug_indices
-        logger.info(
-            f"ROOT FIX (C-3): holding out all {len(held_out_drug_indices)} "
-            f"KNOWN_POSITIVES drugs from GT training for ALL graph sizes "
-            f"({num_drugs} drugs). The GT model will NOT train on any KP "
-            f"drug, so gnn_scores for KP pairs are TRUE generalization "
-            f"measures (not drug-level memorization). This aligns the GT "
-            f"split with the RL split (which tests on unseen KP drugs)."
-        )
-
-        # C4 + C5 + V4 B-F6 fix: split into train/val/test.
-        #
-        # ROOT FIX (C-3): use drug_aware_split for ALL graph sizes. The
-        # previous A1/A2 "fix" used a pair-wise random split for small
-        # graphs (< 100 drugs), which allowed the SAME drugs to appear in
-        # both train and test (with different diseases). This created
-        # drug-level train/test leakage at the GT→RL boundary:
-        #
-        #   - The GT model trained on aspirin→X pairs, then scored
-        #     aspirin→cardiovascular disease (a known positive) at
-        #     inference time. The score was inflated by aspirin-specific
-        #     memorization, not genuine generalization.
-        #
-        #   - The RL agent, by contrast, was trained with a drug-aware
-        #     split (split_data uses drug_aware=True by default), so it
-        #     was tested on UNSEEN drugs. The GT and RL splits were
-        #     INCOHERENT — the GT model's gnn_score reflected
-        #     memorization while the RL agent's test set required
-        #     generalization.
-        #
-        # The root fix: use drug_aware_split for ALL graph sizes. This
-        # aligns the GT split with the RL split (both drug-aware). The
-        # GT model is now evaluated on truly held-out drugs, consistent
-        # with the RL agent's evaluation.
-        #
-        # TRADE-OFF: on small demo graphs (< 100 drugs), the GT test AUC
-        # may be lower than with the pair-wise split (because the model
-        # must generalize to UNSEEN drugs, which is harder). This is the
-        # HONEST result — the previous A1/A2 "fix" inflated the test AUC
-        # via drug-level leakage. The scientific validation gate will
-        # report whether the AUC passes the V1 threshold (0.85), and if
-        # it doesn't, that's the scientifically correct outcome for a
-        # demo graph that's too small for drug-level generalization.
-        #
-        # In production (10K drugs), the drug-aware split produces
-        # meaningful test AUC because the model has enough data to learn
-        # generalizable patterns.
-        self._split = drug_aware_split(
-            all_drug_idx, all_disease_idx, all_labels,
-            train_frac=0.7, val_frac=0.15, seed=self.seed,
-            held_out_drugs=held_out_drug_indices if held_out_drug_indices else None,
-        )
-        logger.info(
-            f"ROOT FIX (C-3): using drug_aware_split for ALL graph sizes "
-            f"({num_drugs} drugs). GT split is now ALIGNED with RL split "
-            f"(both drug-aware). No drug-level train/test leakage at the "
-            f"GT→RL boundary. The previous A1/A2 pair-wise split for small "
-            f"graphs inflated test AUC via drug memorization."
-        )
+        # V90 ROOT FIX (BUG #5): split preparation is now in
+        # ``_compute_training_split()`` so the resume_from_checkpoint
+        # path can compute the SAME test split (deterministic, seeded)
+        # and re-evaluate on it. Without this, the resume path returned
+        # a dict with no test_auc and crashed the scientific_validation
+        # gate with TypeError.
+        self._split = self._compute_training_split()
 
         train_d = self._split["train_drug_idx"]
         train_ds = self._split["train_disease_idx"]
@@ -1061,6 +1086,17 @@ class GTRLBridge:
             writer = _csv.writer(f, quoting=_csv.QUOTE_MINIMAL, lineterminator="\n")
             writer.writerow(columns)
             n_written = 0
+            # V90 ROOT FIX (BUG #23, P1): compute drug_level_features ONCE
+            # before the batch loop. The previous code called
+            # _compute_drug_level_features per batch (inside
+            # _compute_supplementary_features), recomputing ALL drugs'
+            # features N times. The result is deterministic per drug, so
+            # recomputing was pure waste — ~40x slower than necessary on
+            # production scale (10K drugs). Now we compute once and pass
+            # the dict into _compute_supplementary_features.
+            drug_level_features = self._compute_drug_level_features(
+                drug_map, num_drugs
+            )
             for d_start in range(0, num_drugs, batch_size_drugs):
                 d_end = min(d_start + batch_size_drugs, num_drugs)
                 batch_drugs = list(range(d_start, d_end))
@@ -1142,24 +1178,53 @@ class GTRLBridge:
                 # produce IDENTICAL feature distributions. Any fix to
                 # _compute_supplementary_features (W-09, W-10, W-12, etc.)
                 # automatically applies to both paths.
+                # V90 ROOT FIX (BUG #23, P1): pass in the pre-computed
+                # drug_level_features dict so _compute_supplementary_features
+                # doesn't recompute ALL drugs' features N times (once per
+                # batch). The previous code called
+                # _compute_supplementary_features per batch, which internally
+                # called _compute_drug_level_features for ALL num_drugs_total
+                # drugs. For 10K drugs, that's 40 batches × 10K drugs = 400K
+                # computations (vs 10K if computed once). The result is
+                # deterministic per drug, so recomputing was pure waste.
                 batch_df = self._compute_supplementary_features(
-                    batch_df, drug_map, disease_map
+                    batch_df, drug_map, disease_map,
+                    drug_level_features=drug_level_features,  # V90 BUG #23
                 )
 
-                # Write the batch to CSV
-                for _, row in batch_df.iterrows():
-                    writer.writerow([
-                        row["drug"], row["disease"],
-                        f"{row['gnn_score']:.6f}", f"{row['confidence']:.6f}",
-                        f"{row['safety_score']:.6f}", f"{row['market_score']:.6f}",
-                        f"{row['pathway_score']:.6f}", f"{row['patent_score']:.6f}",
-                        f"{row['rare_disease_flag']:.6f}", f"{row['unmet_need_score']:.6f}",
-                        f"{row['efficacy_score']:.6f}", f"{row['adme_score']:.6f}",
-                    ])
-                    n_written += 1
+                # V90 ROOT FIX (BUG #24, P1): replaced iterrows() loop
+                # with vectorized to_csv(). The previous code used
+                # ``for _, row in batch_df.iterrows(): writer.writerow(...)``
+                # which is a Python-level loop. For a 2.56M-row batch,
+                # this was ~2.56M Python iterations. The vectorized
+                # alternative ``batch_df.to_csv(f, mode='a', header=False,
+                # index=False)`` is ~100x faster. The streaming writer's
+                # whole purpose is to handle production scale (100M pairs),
+                # but the iterrows() loop made it unusably slow.
+                #
+                # We format the float columns to 6 decimal places (matching
+                # the previous f"{row['gnn_score']:.6f}" format) before
+                # writing, so the CSV output is byte-identical to the
+                # previous version.
+                format_cols = [
+                    "gnn_score", "confidence", "safety_score", "market_score",
+                    "pathway_score", "patent_score", "rare_disease_flag",
+                    "unmet_need_score", "efficacy_score", "adme_score",
+                ]
+                batch_df_out = batch_df.copy()
+                for col in format_cols:
+                    if col in batch_df_out.columns:
+                        batch_df_out[col] = batch_df_out[col].map(
+                            lambda v: f"{float(v):.6f}"
+                        )
+                batch_df_out = batch_df_out[columns]  # enforce column order
+                batch_df_out.to_csv(f, mode="a", header=False, index=False,
+                                    lineterminator="\n")
+                n_written += len(batch_df_out)
                 logger.info(
                     f"V5 C-F1 streaming: wrote {n_written:,} pairs "
-                    f"({100.0 * d_end / num_drugs:.1f}% done)"
+                    f"({100.0 * d_end / num_drugs:.1f}% done) "
+                    f"[V90 BUG #24: vectorized to_csv replaces iterrows]"
                 )
 
         logger.info(
@@ -1233,19 +1298,13 @@ class GTRLBridge:
         Returns:
             Dict mapping drug_idx -> {patent_score, adme_score, efficacy_score}.
         """
-        # V31 ROOT FIX (P1-11 / Compound #6): use the instance-level
-        # feature RNG instead of re-seeding on every call. The original
-        # code did ``rng = np.random.default_rng(self.seed + 42)`` here,
-        # which re-seeded the RNG every time this method was called.
-        # In the streaming path, this meant drugs at position i across
-        # batches got the SAME noise sample. The fix uses ``self._feature_rng``
-        # (created once in __init__) which advances its state on each call.
-        # NOTE: the per-drug values below use dedicated drug-seeded RNGs
-        # (drug_rng = np.random.default_rng(drug_seed)), so this ``rng``
-        # variable is only used for the legacy non-per-drug noise that
-        # has already been removed. We keep the reference for safety
-        # but it is no longer the source of feature randomness.
-        rng = self._feature_rng
+        # V90 ROOT FIX (BUG #18, P1): the previous code referenced
+        # ``rng = self._feature_rng``, but ``self._feature_rng`` was
+        # DEAD CODE (removed in __init__). The per-drug values below
+        # use DEDICATED drug-seeded RNGs (drug_rng = np.random.default_rng(drug_seed)),
+        # so no instance-level RNG is needed. The legacy reference
+        # is removed entirely.
+        # (no rng initialization needed — per-drug RNGs are created below)
 
         # --- Patent score: deterministic per drug (hash of drug name) ---
         # ROOT FIX (C-2): same drug -> same patent_score across ALL pairs.
@@ -1275,10 +1334,21 @@ class GTRLBridge:
         # between on-patent and off-patent drugs.
         patent_per_drug: Dict[int, float] = {}
         for drug_name, d_idx in drug_map.items():
-            # Deterministic per-drug RNG: seed = hash(seed, drug_name)
-            # so the same drug always gets the same value regardless of
-            # which code path computes it.
-            drug_seed = self.seed + 42 + hash(drug_name) % (2**31)
+            # V90 ROOT FIX (BUG #4, P0): use hashlib.sha256 instead of
+            # Python's built-in hash(). Python's hash(str) is randomized
+            # per interpreter process via PYTHONHASHSEED (enabled by
+            # default since Python 3.3). Two runs with the same seed=42
+            # produced DIFFERENT patent/adme/efficacy values, breaking
+            # the "reproducible" demo contract. CI/CD could not detect
+            # regressions because the feature values changed every run.
+            # hashlib.sha256 is deterministic across processes and
+            # platforms — same input always produces same output.
+            name_hash = int.from_bytes(
+                hashlib.sha256(drug_name.encode("utf-8")).digest()[:8],
+                byteorder="big",
+                signed=False,
+            )
+            drug_seed = self.seed + 42 + name_hash % (2**31)
             drug_rng = np.random.default_rng(drug_seed)
             # ROOT FIX (W-12): bimodal distribution.
             # 40% on-patent (low score ~0.1, beta(2, 5) has mean ~0.29
@@ -1295,10 +1365,16 @@ class GTRLBridge:
                     np.clip(drug_rng.uniform(0.7, 1.0), 0.0, 1.0)
                 )
 
-        # --- ADME score: deterministic per drug (hash of drug name) ---
+        # --- ADME score: deterministic per drug (hashlib of drug name) ---
         adme_per_drug: Dict[int, float] = {}
         for drug_name, d_idx in drug_map.items():
-            drug_seed = self.seed + 43 + hash(drug_name) % (2**31)
+            # V90 ROOT FIX (BUG #4, P0): same hashlib fix as patent_score.
+            name_hash = int.from_bytes(
+                hashlib.sha256(drug_name.encode("utf-8")).digest()[:8],
+                byteorder="big",
+                signed=False,
+            )
+            drug_seed = self.seed + 43 + name_hash % (2**31)
             drug_rng = np.random.default_rng(drug_seed)
             # beta(5, 2): mean ~0.63, reflecting that FDA-approved drugs
             # mostly passed bioavailability screens.
@@ -1374,6 +1450,7 @@ class GTRLBridge:
         df: pd.DataFrame,
         drug_map: Dict[str, int],
         disease_map: Dict[str, int],
+        drug_level_features: Optional[Dict[int, Dict[str, float]]] = None,
     ) -> pd.DataFrame:
         """Compute supplementary features for the RL agent.
 
@@ -1391,10 +1468,20 @@ class GTRLBridge:
         research attention = larger market -- which is the OPPOSITE
         of the original bridge's inversion).
 
+        V90 ROOT FIX (BUG #23, P1): added optional ``drug_level_features``
+        parameter so callers can pass in PRE-COMPUTED drug-level
+        features (avoiding the ~40x recompute in the streaming path).
+        If None, the method computes them on the fly (preserving the
+        previous behavior for the in-memory path).
+
         Args:
             df: DataFrame with drug, disease, gnn_score, confidence.
             drug_map: Drug name to index mapping.
             disease_map: Disease name to index mapping.
+            drug_level_features: Optional pre-computed dict mapping
+                drug_idx -> {patent_score, adme_score, efficacy_score}.
+                If provided, the method skips the per-call computation
+                (BUG #23 fix). If None, computes on the fly.
 
         Returns:
             DataFrame with all supplementary features added.
@@ -1409,12 +1496,12 @@ class GTRLBridge:
         # streaming and in-memory paths was FALSE.
         #
         # The fix uses ``self._feature_rng`` (created once in __init__).
-        # The RNG state advances on each call, producing DIFFERENT noise
-        # samples across batches. This ensures the streaming and in-memory
-        # paths produce statistically equivalent (not identical) feature
-        # distributions, which is the correct behavior.
-        rng = self._feature_rng
-        n = len(df)
+        # V90 ROOT FIX (BUG #18, P1): removed the dead ``rng = self._feature_rng``
+        # reference. ``self._feature_rng`` was dead code (removed in __init__).
+        # The per-drug values use DEDICATED drug-seeded RNGs, so no
+        # instance-level RNG is needed.
+        # V90 BUG #18 follow-up: removed unused `n = len(df)` (was only
+        # used by the removed rng reference).
 
         # --- Safety score ---
         # C1 fix: compute from ACTUAL drug->causes->clinical_outcome edges.
@@ -1661,10 +1748,19 @@ class GTRLBridge:
         # then map each row's drug to its stable drug-level values. The
         # same drug always gets the same patent_score, adme_score, and
         # efficacy_score regardless of which disease it's paired with.
-        num_drugs_total = len(self.node_maps.get("drug", {}))
-        drug_level_features = self._compute_drug_level_features(
-            drug_map, num_drugs_total
-        )
+        #
+        # V90 ROOT FIX (BUG #23, P1): if the caller passed in a
+        # pre-computed drug_level_features dict (e.g., the streaming
+        # writer computed it ONCE before the batch loop), use it
+        # directly instead of recomputing. The previous code recomputed
+        # ALL drugs' features on every call — for the streaming path
+        # that's N batches × num_drugs_total computations vs
+        # num_drugs_total if computed once.
+        if drug_level_features is None:
+            num_drugs_total = len(self.node_maps.get("drug", {}))
+            drug_level_features = self._compute_drug_level_features(
+                drug_map, num_drugs_total
+            )
 
         def _drug_level_feature(drug_name: str, feature_name: str) -> float:
             d_idx = drug_map.get(drug_name, -1)
@@ -1939,12 +2035,21 @@ class GTRLBridge:
                 f"Using model (64, 2, 4, dropout=0.15) for medium capacity."
             )
         else:
-            # Demo scale: small model (A1/A2 fix preserved)
-            model_dim, model_layers, model_heads = 32, 1, 2
+            # Demo scale: small model (A1/A2 fix preserved).
+            # V90 ROOT FIX (BUG #7, P0): demo scale uses num_layers=3
+            # (was 1). A 1-layer GT cannot learn the 3-hop drug →
+            # protein → pathway → disease pattern — the disease node
+            # only sees pathway nodes (1-hop), never the drugs/proteins
+            # that connect to those pathways. 3 layers is the FLOOR
+            # for a 3-hop pattern, even on a small demo graph.
+            model_dim, model_layers, model_heads = 32, 3, 2
             model_dropout = 0.2
             logger.info(
-                f"ROOT FIX (C14): demo scale ({num_drugs} drugs < 100). "
-                f"Using model (32, 1, 2, dropout=0.2) to prevent overfitting."
+                f"V90 ROOT FIX (BUG #7): demo scale ({num_drugs} drugs < 100). "
+                f"Using model (32, 3, 2, dropout=0.2). num_layers=3 is the "
+                f"MINIMUM for learning the 3-hop drug→protein→pathway→"
+                f"disease pattern (the previous default of 1 layer was a "
+                f"P0 bug that prevented learning)."
             )
 
         self.build_model(

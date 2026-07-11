@@ -109,7 +109,7 @@ def test_c1_distribution_match():
     with tempfile.TemporaryDirectory() as tmpdir:
         bridge = GTRLBridge(output_dir=tmpdir, device="cpu", seed=42)
         bridge.build_demo_graph(num_drugs=15, num_diseases=10)
-        bridge.build_model(embedding_dim=32, num_layers=1, num_heads=2)
+        bridge.build_model(embedding_dim=32, num_layers=3, num_heads=2)
 
         # Short training to get a model with non-trivial weights
         bridge.train_model(epochs=10, patience=5)
@@ -164,7 +164,7 @@ def test_c2_patent_score_is_drug_level():
     with tempfile.TemporaryDirectory() as tmpdir:
         bridge = GTRLBridge(output_dir=tmpdir, device="cpu", seed=42)
         bridge.build_demo_graph(num_drugs=15, num_diseases=10)
-        bridge.build_model(embedding_dim=32, num_layers=1, num_heads=2)
+        bridge.build_model(embedding_dim=32, num_layers=3, num_heads=2)
         bridge.train_model(epochs=5, patience=3)
 
         df = bridge.generate_rl_input()
@@ -191,7 +191,7 @@ def test_c2_adme_score_is_drug_level():
     with tempfile.TemporaryDirectory() as tmpdir:
         bridge = GTRLBridge(output_dir=tmpdir, device="cpu", seed=42)
         bridge.build_demo_graph(num_drugs=15, num_diseases=10)
-        bridge.build_model(embedding_dim=32, num_layers=1, num_heads=2)
+        bridge.build_model(embedding_dim=32, num_layers=3, num_heads=2)
         bridge.train_model(epochs=5, patience=3)
 
         df = bridge.generate_rl_input()
@@ -216,7 +216,7 @@ def test_c2_efficacy_score_is_drug_level():
     with tempfile.TemporaryDirectory() as tmpdir:
         bridge = GTRLBridge(output_dir=tmpdir, device="cpu", seed=42)
         bridge.build_demo_graph(num_drugs=15, num_diseases=10)
-        bridge.build_model(embedding_dim=32, num_layers=1, num_heads=2)
+        bridge.build_model(embedding_dim=32, num_layers=3, num_heads=2)
         bridge.train_model(epochs=5, patience=3)
 
         df = bridge.generate_rl_input()
@@ -252,7 +252,7 @@ def test_c2_efficacy_score_not_confounded():
     with tempfile.TemporaryDirectory() as tmpdir:
         bridge = GTRLBridge(output_dir=tmpdir, device="cpu", seed=42)
         bridge.build_demo_graph(num_drugs=15, num_diseases=10)
-        bridge.build_model(embedding_dim=32, num_layers=1, num_heads=2)
+        bridge.build_model(embedding_dim=32, num_layers=3, num_heads=2)
         bridge.train_model(epochs=5, patience=3)
 
         df = bridge.generate_rl_input()
@@ -288,7 +288,7 @@ def test_c2_streaming_path_also_drug_level():
     with tempfile.TemporaryDirectory() as tmpdir:
         bridge = GTRLBridge(output_dir=tmpdir, device="cpu", seed=42)
         bridge.build_demo_graph(num_drugs=15, num_diseases=10)
-        bridge.build_model(embedding_dim=32, num_layers=1, num_heads=2)
+        bridge.build_model(embedding_dim=32, num_layers=3, num_heads=2)
         bridge.train_model(epochs=5, patience=3)
 
         streaming_path = os.path.join(tmpdir, "streaming.csv")
@@ -332,7 +332,7 @@ def test_c3_gt_uses_drug_aware_split_for_all_sizes():
     with tempfile.TemporaryDirectory() as tmpdir:
         bridge = GTRLBridge(output_dir=tmpdir, device="cpu", seed=42)
         bridge.build_demo_graph(num_drugs=20, num_diseases=15)
-        bridge.build_model(embedding_dim=32, num_layers=1, num_heads=2)
+        bridge.build_model(embedding_dim=32, num_layers=3, num_heads=2)
         bridge.train_model(epochs=5, patience=3)
 
         # After training, self._split should be populated
@@ -578,7 +578,7 @@ def test_c5_get_top_k_raises_without_rl_model():
     with tempfile.TemporaryDirectory() as tmpdir:
         bridge = GTRLBridge(output_dir=tmpdir, device="cpu", seed=42)
         bridge.build_demo_graph(num_drugs=15, num_diseases=10)
-        bridge.build_model(embedding_dim=32, num_layers=1, num_heads=2)
+        bridge.build_model(embedding_dim=32, num_layers=3, num_heads=2)
         bridge.train_model(epochs=5, patience=3)
 
         # Call get_top_k_novel_predictions WITHOUT rl_model (strict=True default)
@@ -597,7 +597,7 @@ def test_c5_get_top_k_non_strict_falls_back():
     with tempfile.TemporaryDirectory() as tmpdir:
         bridge = GTRLBridge(output_dir=tmpdir, device="cpu", seed=42)
         bridge.build_demo_graph(num_drugs=15, num_diseases=10)
-        bridge.build_model(embedding_dim=32, num_layers=1, num_heads=2)
+        bridge.build_model(embedding_dim=32, num_layers=3, num_heads=2)
         bridge.train_model(epochs=5, patience=3)
 
         # Non-strict mode: should NOT raise, should return GT-only ranking

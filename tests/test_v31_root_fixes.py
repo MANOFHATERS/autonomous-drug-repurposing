@@ -27,6 +27,7 @@ import warnings
 import numpy as np
 import pandas as pd
 import torch
+import pytest
 
 # Ensure project root is on sys.path
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -125,6 +126,16 @@ def test_v31_kp_multi_hop_paths_injected():
           f"(multi-hop path injection working).")
 
 
+@pytest.mark.skip(
+    reason="V90 ROOT FIX (BUG #18, P1): self._feature_rng was REMOVED as "
+           "dead code. The per-drug patent/adme/efficacy values use DEDICATED "
+           "drug-seeded RNGs (drug_rng = np.random.default_rng(drug_seed)), "
+           "so self._feature_rng was never the source of feature randomness. "
+           "The V31 docstring admitted 'this rng variable is only used for "
+           "the legacy non-per-drug noise that has already been removed.' "
+           "This test verified the dead code existed; it is now intentionally "
+           "skipped because the dead code has been removed."
+)
 def test_v31_feature_rng_instance_level():
     """P1-11: verify the feature RNG is instance-level (not re-seeded per call)."""
     from graph_transformer.gt_rl_bridge import GTRLBridge
@@ -214,11 +225,14 @@ def test_v31_pipeline_imports_clean():
     from graph_transformer.inference import top_k_novel_predictions, predict_drug_disease_scores
     from rl.rl_drug_ranker import train_agent, run_pipeline, PipelineConfig
 
-    # Verify GTRLBridge has _feature_rng
+    # V90 ROOT FIX (BUG #18): _feature_rng was REMOVED as dead code.
+    # The bridge no longer has this attribute. The per-drug values use
+    # dedicated drug-seeded RNGs.
     bridge = GTRLBridge(output_dir=tempfile.mkdtemp(), seed=42)
-    assert hasattr(bridge, '_feature_rng')
+    assert not hasattr(bridge, '_feature_rng'), \
+        "V90 BUG #18: _feature_rng should be REMOVED (dead code)"
 
-    print("  PASS: All V31 modules import cleanly. GTRLBridge has _feature_rng.")
+    print("  PASS: All V31 modules import cleanly. V90 BUG #18: _feature_rng removed.")
 
 
 def test_v31_end_to_end_smoke():
@@ -237,11 +251,12 @@ def test_v31_end_to_end_smoke():
         assert n_treats > 5, \
             f"Expected >5 treats edges (KPs + training positives), got {n_treats}"
 
-        # Verify the feature RNG is instance-level
-        assert hasattr(bridge, '_feature_rng')
+        # V90 ROOT FIX (BUG #18): _feature_rng was REMOVED as dead code.
+        assert not hasattr(bridge, '_feature_rng'), \
+            "V90 BUG #18: _feature_rng should be REMOVED (dead code)"
 
     print(f"  PASS: End-to-end smoke test passed. Graph has {n_treats} treats edges "
-          f"(KPs + training positives). Feature RNG is instance-level.")
+          f"(KPs + training positives). V90 BUG #18: _feature_rng removed.")
 
 
 def run_all_tests():

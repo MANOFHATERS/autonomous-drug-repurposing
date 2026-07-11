@@ -41,29 +41,40 @@ def predict_drug_disease_scores(
     if exclude_edges is None:
         exclude_edges = set(LABEL_LEAKING_EDGES)
 
+    # V90 ROOT FIX (BUG #19, P1): save prior training state and restore
+    # in finally. The previous code called ``model.eval()`` and NEVER
+    # restored training mode. If predict_drug_disease_scores was called
+    # mid-training (by a background thread, an API server, or an
+    # interactive notebook), it silently disabled dropout and BatchNorm
+    # updates for the rest of the process.
+    prior_training = model.training
     model.eval()
-    model.to(device)
-    nf = {k: v.to(device) for k, v in node_features.items()}
-    ei = {k: v.to(device) for k, v in edge_indices.items()}
+    try:
+        model.to(device)
+        nf = {k: v.to(device) for k, v in node_features.items()}
+        ei = {k: v.to(device) for k, v in edge_indices.items()}
 
-    all_probs: List[torch.Tensor] = []
-    n = len(drug_indices)
+        all_probs: List[torch.Tensor] = []
+        n = len(drug_indices)
 
-    for start in range(0, n, batch_size):
-        end = min(start + batch_size, n)
-        d_idx = drug_indices[start:end].to(device)
-        ds_idx = disease_indices[start:end].to(device)
-        # V4 B-F5 fix: pass apply_temperature through to model.forward,
-        # which applies sigmoid(logits / temperature). The original code
-        # accepted apply_temperature but never used it (dead parameter).
-        probs = model(
-            nf, ei, d_idx, ds_idx,
-            exclude_edges=exclude_edges,
-            apply_temperature=apply_temperature,
-        )
-        all_probs.append(probs.cpu())
+        for start in range(0, n, batch_size):
+            end = min(start + batch_size, n)
+            d_idx = drug_indices[start:end].to(device)
+            ds_idx = disease_indices[start:end].to(device)
+            # V4 B-F5 fix: pass apply_temperature through to model.forward,
+            # which applies sigmoid(logits / temperature). The original code
+            # accepted apply_temperature but never used it (dead parameter).
+            probs = model(
+                nf, ei, d_idx, ds_idx,
+                exclude_edges=exclude_edges,
+                apply_temperature=apply_temperature,
+            )
+            all_probs.append(probs.cpu())
 
-    return torch.cat(all_probs).numpy()
+        return torch.cat(all_probs).numpy()
+    finally:
+        # V90 ROOT FIX (BUG #19): restore the prior training state.
+        model.train(prior_training)
 
 
 @torch.no_grad()

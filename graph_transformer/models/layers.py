@@ -177,13 +177,24 @@ class HeterogeneousMultiHeadAttention(nn.Module):
         # bounds the total message magnitude regardless of how many edge
         # types a node receives from. This is the same scheme used by
         # Heterogeneous Graph Attention Networks (HAN, Wang et al. 2019).
-        # The divisor is a constant buffer computed once at init time.
-        num_edge_types = max(1, len(self.edge_types))
-        self.register_buffer(
-            "cross_type_norm",
-            torch.tensor(1.0 / math.sqrt(num_edge_types)),
-            persistent=False,  # not part of state_dict (constant)
-        )
+        #
+        # V90 ROOT FIX (BUG #17, P1): the divisor is now computed
+        # DYNAMICALLY per forward call from the edge types that
+        # actually have edges in the current graph (counted at the
+        # start of forward). The previous code computed it ONCE at
+        # init time from ``len(self.edge_types)`` (14 for the canonical
+        # schema), but due to BUG #1, only the 7 forward edge types
+        # had data; the 7 reverse types were empty. Each present edge
+        # type's message was scaled by 1/sqrt(14) ≈ 0.267, so the
+        # total edge message was 7 * 0.267 = 1.87. If the divisor had
+        # been 1/sqrt(7) (the actual number of contributing types),
+        # the total would have been 7/sqrt(7) = 2.65. The current
+        # scheme under-weighted edge messages by 1.87/2.65 = 0.71,
+        # giving self-loops (weight 0.5) disproportionate influence.
+        # The fix: count active edge types per forward call and use
+        # 1/sqrt(active_count). This is computed lazily (no buffer)
+        # so it adapts to graph sparsity.
+        self._static_num_edge_types = max(1, len(self.edge_types))
 
         self.attn_dropout = nn.Dropout(dropout)
 
@@ -227,6 +238,19 @@ class HeterogeneousMultiHeadAttention(nn.Module):
 
         # Initialize message accumulator
         messages = torch.zeros(N, self.num_heads * self.head_dim, device=device)
+
+        # V90 ROOT FIX (BUG #17, P1): compute cross_type_norm DYNAMICALLY
+        # from the number of edge types that ACTUALLY have edges in this
+        # forward call. The previous code used a static buffer with
+        # 1/sqrt(14) (all canonical edge types), but on sparse graphs
+        # only 7 (or fewer) edge types have data. Under-weighting edge
+        # messages by ~30% gave self-loops disproportionate influence.
+        active_edge_type_count = 0
+        for edge_idx_check in edge_indices.values():
+            if edge_idx_check.numel() > 0:
+                active_edge_type_count += 1
+        active_count = max(1, active_edge_type_count)
+        cross_type_norm = 1.0 / math.sqrt(active_count)
 
         # ROOT FIX (FORENSIC-AUDIT-I05): self-loops via a SEPARATE projection
         # with a LEARNABLE weight. The previous code applied ``out_proj`` to
@@ -307,7 +331,7 @@ class HeterogeneousMultiHeadAttention(nn.Module):
             messages.scatter_add_(
                 0,
                 tgt_nodes.unsqueeze(-1).expand_as(weighted_V_flat),
-                weighted_V_flat * gate * self.cross_type_norm,
+                weighted_V_flat * gate * cross_type_norm,  # V90 BUG #17: dynamic norm
             )
 
         # ROOT FIX (FORENSIC-AUDIT-I05): output projection applied ONCE
@@ -366,8 +390,19 @@ class HeterogeneousMultiHeadAttention(nn.Module):
         # max scores. This keeps the numerical-stability property (no
         # -inf in subtraction) AND keeps the gradient flowing for
         # negative attention scores.
+        #
+        # V90 ROOT FIX (BUG #29, P2): use ``torch.isneginf`` instead of
+        # ``torch.isinf``. The previous ``torch.isinf`` caught BOTH
+        # +inf and -inf. The intent was to replace -inf (sentinel for
+        # "no incoming edges") with 0. But if a real attention score
+        # was +inf (from overflow, e.g., NaN inputs that bypass the
+        # earlier torch.isnan check), it was also replaced with 0,
+        # silently masking the overflow. The subtraction
+        # ``scores - scores_max[indices]`` then produced a wrong value.
+        # The fix uses ``torch.isneginf`` which catches ONLY -inf,
+        # preserving +inf as a visible signal of numerical overflow.
         scores_max = torch.where(
-            torch.isinf(scores_max),
+            torch.isneginf(scores_max),
             torch.zeros_like(scores_max),
             scores_max,
         )
@@ -509,7 +544,37 @@ class GraphTransformerLayer(nn.Module):
         )
 
         # FFN
-        self.ffn = TransformerFFN(
+        # V90 ROOT FIX (BUG #30, P2): PER-NODE-TYPE FFN via ModuleDict.
+        # The previous code used a SINGLE TransformerFFN instance shared
+        # across all node types. Drug, protein, pathway, disease, and
+        # clinical_outcome embeddings all passed through the SAME FFN
+        # weights. Standard HGT (Wang et al. 2019) uses per-node-type
+        # FFNs (or at least per-node-type projections). Sharing the FFN
+        # means the model cannot learn node-type-specific transformations
+        # — a drug's representation is transformed by the same weights
+        # as a disease's, which is biologically unprincipled.
+        #
+        # The fix: create a ModuleDict of per-node-type FFNs. If
+        # ``node_types`` is None, default to the canonical 5 node types
+        # so the state_dict is stable. The forward() method indexes by
+        # node type string. Unknown node types fall back to a shared
+        # "default" FFN (with a warning) so the model degrades
+        # gracefully if a production graph adds a new node type.
+        if node_types is None:
+            node_types = [
+                "drug", "protein", "pathway", "disease", "clinical_outcome"
+            ]
+        self._ffn_node_types = list(node_types)
+        self.ffn = nn.ModuleDict({
+            ntype: TransformerFFN(
+                embedding_dim=embedding_dim,
+                hidden_dim=ffn_hidden_dim,
+                dropout=dropout,
+            )
+            for ntype in self._ffn_node_types
+        })
+        # Fallback FFN for unknown node types (graceful degradation).
+        self._default_ffn = TransformerFFN(
             embedding_dim=embedding_dim,
             hidden_dim=ffn_hidden_dim,
             dropout=dropout,
@@ -590,10 +655,26 @@ class GraphTransformerLayer(nn.Module):
             node_embeddings = attn_out
 
         # Pre-norm FFN
+        # V90 ROOT FIX (BUG #30, P2): apply per-node-type FFN. The
+        # previous code used ``self.ffn(v)`` with a SINGLE shared FFN
+        # for all node types. Now we index by node type so each type
+        # gets its own learned transformation. Unknown node types fall
+        # back to the shared _default_ffn (with a warning) so the model
+        # degrades gracefully if a production graph adds a new node type.
         normed = self._apply_norm(self.norm2, node_embeddings)
-        ffn_out = {
-            k: self.ffn(v) for k, v in normed.items()
-        }
+        ffn_out = {}
+        for k, v in normed.items():
+            if k in self.ffn:
+                ffn_out[k] = self.ffn[k](v)
+            else:
+                logger.warning(
+                    f"V90 ROOT FIX (BUG #30): node type '{k}' has no "
+                    f"per-type FFN (known: {self._ffn_node_types}). "
+                    f"Falling back to shared _default_ffn. Add '{k}' "
+                    f"to node_types in the model constructor for a "
+                    f"node-type-specific FFN."
+                )
+                ffn_out[k] = self._default_ffn(v)
 
         if self.residual_connections:
             node_embeddings = {
