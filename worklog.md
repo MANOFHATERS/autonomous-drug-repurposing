@@ -188,3 +188,40 @@ Stage Summary:
 - Phase 1 ↔ Phase 2 connection 100% verified end-to-end: 12 CSVs → 64 nodes → 52 edges → 8 edge types → KG builder.
 - All 814 tests pass with zero regressions.
 - Final deliverable: /home/z/my-project/download/v77_FORENSIC_ROOT_FIXED_codebase.zip
+
+---
+Task ID: v89-p0-forensic-root-fixes
+Agent: main (Sonnet, v89)
+Task: Pull repo, read each actual source file line-by-line, fix P0 bugs
++ compound bug chains from user audit, install deps, run real code,
+push branch, verify CI/build/tests, merge to main.
+
+Work Log:
+- Cloned repo (MANOFHATERS/autonomous-drug-repurposing) to /home/z/my-project/adr
+- Read project docx (Team_Cosmic_Build_Process_Updated.docx)
+- Read actual source files at bug locations (NOT tests/comments):
+  graph_builder.py, rl_drug_ranker.py, phase1_bridge.py, omim_pipeline.py,
+  missing_values.py, gt_rl_bridge.py, settings.py, config.py
+- Created feature branch: fix/v89-p0-forensic-root-fixes
+- Fixed 12 P0 bugs + compound bug chains (see worklog_v89.md for details):
+  1. Removed 3-hop path injection in graph_builder.py (AUC fraud chain)
+  2. Replaced hash() with hashlib.sha256 (_deterministic_seed helper)
+  3. Fixed VecNormalize inference bypass in rl_drug_ranker.py
+  4. Defensive off-by-one fix in compute_auc
+  5. Fixed covalent-inhibitor misclassification (word-boundary regex)
+  6. Added organism filter (Protein.ncbi_taxid == 9606)
+  7. Fixed OMIM score inversion (validator now matches pipeline)
+  8. Moved scientific-validation gate before CSV write (delete on fail)
+  9. Reduced gnn_score weight to 0.04 + removed gnn_factor gate
+  10. DRUGOS_ENVIRONMENT default = "production"
+  11. Fixed validated_hypotheses.csv disjointness (real pharma pairs)
+  12. Rewrote _is_rare_disease with real US prevalence data
+- Created run_pipeline.py (NEW top-level 4-phase chain)
+- Added graph_data parameter to bridge.run_full_pipeline for REAL
+  Phase 2 HeteroData integration
+
+Stage Summary:
+- 9 files modified/created, 770+ insertions, 226 deletions
+- All P0 bugs from user audit addressed with root-cause fixes
+- Phase 1-4 integration now possible via run_pipeline.py
+- Next: install deps, run real code, push, verify CI, merge

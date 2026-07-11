@@ -1818,14 +1818,39 @@ class GTRLBridge:
         # ``scientific_validation`` field in the results dict showing
         # which checks failed). Set to True ONLY for debugging.
         allow_invalid_output: bool = False,
+        # v89 P0 ROOT FIX (Phase 1-4 integration): pre-built graph data
+        # from the REAL Phase 1 → Bridge → Phase 2 pipeline. When
+        # provided, the bridge SKIPS build_demo_graph and uses this
+        # real graph instead. This is the user's explicit requirement:
+        # "Write a single run_pipeline.py that calls Phase 1 →
+        # phase1_bridge.stage_phase1_to_phase2 → Phase 2 kg_builder →
+        # Phase 3 GraphTransformerTrainer (loading the REAL Phase 2
+        # HeteroData, not build_demo_graph) → Phase 4 RL ranker."
+        #
+        # The tuple format is:
+        #   (node_features, edge_indices, node_maps, known_pairs)
+        # where:
+        #   node_features: Dict[str, torch.Tensor] — feature tensor per node type
+        #   edge_indices: Dict[Tuple[str,str,str], torch.Tensor] — edge index per edge type
+        #   node_maps: Dict[str, Dict[str, int]] — name→idx mapping per node type
+        #   known_pairs: List[Tuple[str, str]] — known drug-disease treatment pairs
+        graph_data: Optional[Tuple[Any, Any, Any, Any]] = None,
     ) -> Tuple[pd.DataFrame, Dict[str, Any]]:
         """Run the COMPLETE end-to-end GT + RL pipeline.
 
         This is the single entry point that:
-        1. Builds the knowledge graph
+        1. Builds the knowledge graph (or uses a pre-built real Phase 2 graph)
         2. Trains the Graph Transformer (drug-aware split, held-out test)
         3. Generates RL input features (with label leakage prevention)
         4. Runs the RL ranking pipeline
+
+        v89 P0 ROOT FIX (Phase 1-4 integration): when ``graph_data`` is
+        provided, the bridge uses the REAL Phase 2 HeteroData (from
+        Phase 1 → Bridge → kg_builder → pyg_builder) instead of the
+        synthetic build_demo_graph. This is the proper Phase 1-4
+        integration: the GT model trains on real biomedical topology
+        (DrugBank drugs, UniProt proteins, STRING pathways, DisGeNET/OMIM
+        diseases) instead of a synthetic random graph.
 
         ROOT FIX (E15): the model config is now parameterizable via
         gt_embedding_dim, gt_num_layers, gt_num_heads, gt_dropout.
@@ -1840,11 +1865,14 @@ class GTRLBridge:
         DataFrame directly.
 
         Args:
-            num_drugs: Number of drug nodes.
-            num_diseases: Number of disease nodes.
+            num_drugs: Number of drug nodes (ignored if graph_data provided).
+            num_diseases: Number of disease nodes (ignored if graph_data provided).
             gt_epochs: GT training epochs.
             rl_timesteps: RL training timesteps.
             rl_top_n: Number of top candidates from RL.
+            graph_data: Optional pre-built real Phase 2 graph. When
+                provided, skips build_demo_graph and uses this graph.
+                v89 P0 fix for Phase 1-4 integration.
 
         Returns:
             Tuple of (candidates_df, pipeline_results). The
@@ -1856,11 +1884,40 @@ class GTRLBridge:
         logger.info("PHASE 3: Graph Transformer Training")
         logger.info("=" * 60)
 
-        self.build_demo_graph(
-            num_drugs=num_drugs,
-            num_diseases=num_diseases,
-            num_known_treatments=min(num_drugs, num_diseases),
-        )
+        if graph_data is not None:
+            # v89 P0 ROOT FIX (Phase 1-4 integration): use the REAL
+            # Phase 2 HeteroData instead of build_demo_graph.
+            (
+                self.node_features,
+                self.edge_indices,
+                self.node_maps,
+                self.known_pairs,
+            ) = graph_data
+            self.drug_names = list(self.node_maps.get("drug", {}).keys())
+            self.disease_names = list(self.node_maps.get("disease", {}).keys())
+            logger.info(
+                f"v89 P0 ROOT FIX: using REAL Phase 2 HeteroData "
+                f"(from Phase 1 → Bridge → kg_builder). "
+                f"{len(self.drug_names)} drugs, "
+                f"{len(self.disease_names)} diseases, "
+                f"{len(self.known_pairs)} known treatment pairs. "
+                f"build_demo_graph SKIPPED — GT model trains on real "
+                f"biomedical topology."
+            )
+        else:
+            # Fallback: use build_demo_graph (for backward compat with
+            # run_real_pipeline.py and tests). In production, callers
+            # SHOULD pass graph_data.
+            logger.info(
+                "v89 P0: graph_data not provided — falling back to "
+                "build_demo_graph. For real Phase 1-4 integration, "
+                "pass graph_data from Phase 2 kg_builder + pyg_builder."
+            )
+            self.build_demo_graph(
+                num_drugs=num_drugs,
+                num_diseases=num_diseases,
+                num_known_treatments=min(num_drugs, num_diseases),
+            )
 
         # ROOT FIX (C14): ADAPTIVE model scaling based on graph size.
         # The original code used a fixed (32, 1, 2) model for all graph

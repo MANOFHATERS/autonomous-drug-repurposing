@@ -1141,7 +1141,30 @@ class RewardFunction:
         return self.compute(row)
 
     def compute(self, row: pd.Series) -> float:
-        """Core reward computation: monotonic weighted sum * gnn_factor * safety_factor.
+        """Core reward computation: monotonic weighted sum * safety_factor.
+
+        v89 P0 ROOT FIX (Compound #4 — circular RL distillation of GT):
+        the previous reward was ``weighted_sum * gnn_factor * safety_factor``
+        where ``gnn_factor = gnn / threshold``. This multiplicative gate
+        made the RL agent a CIRCULAR distillation of the GT model: any
+        pair GT scored low (gnn < threshold) got reward scaled to near-
+        zero, regardless of safety/market/pathway/efficacy. The RL agent
+        was forced to slavishly follow GT's ranking — Phase 4 added no
+        independent signal. If GT had a bug (e.g., the v89 Compound #3
+        label leakage), RL amplified that bias.
+
+        The v89 fix REMOVES the gnn_factor gate entirely. The new reward
+        is purely additive (gnn_score contributes only via its 0.04
+        weight in weighted_sum — a tie-breaker, not a gate):
+
+            reward = weighted_sum * safety_factor + validated_bonus
+
+        where:
+          - weighted_sum = Σ weights[col] * row[col]  (monotonic in each feature)
+          - gnn_score weight capped at 0.04 (was 0.20) — weakest feature
+          - safety_factor = 0.5 if safety < warning else 1.0  (the ONLY
+            multiplicative gate — patient-safety invariant: withdrawn
+            drugs get reward halved)
 
         ROOT FIX (S-04 / X-06): the previous reward function was NON-MONOTONIC
         because the synergy bonus (0.15 * gnn * pathway * safety) and the
@@ -1157,15 +1180,11 @@ class RewardFunction:
         So the reward was non-monotonic in gnn_score, which PPO with a
         dead value head (S-03) and limited timesteps could NOT learn.
 
-        The fix removes the synergy bonus and uncertainty penalty entirely.
-        The reward is now MONOTONIC in every feature:
+        The S-04/X-06 fix removed the synergy bonus and uncertainty penalty.
+        The v89 fix additionally removed the gnn_factor gate. The reward
+        is now MONOTONIC in every feature:
 
-            reward = weighted_sum * gnn_factor * safety_factor + validated_bonus
-
-        where:
-          - weighted_sum = Σ weights[col] * row[col]  (monotonic in each feature)
-          - gnn_factor = min(1, gnn / threshold)      (monotonic in gnn)
-          - safety_factor = 0.5 if safety < warning else 1.0  (monotonic in safety)
+            reward = weighted_sum * safety_factor + validated_bonus
 
         PPO can learn a monotonic function far more easily than a
         non-monotonic one, especially with limited timesteps and a
@@ -3232,8 +3251,15 @@ def split_data(
         kp_df['_is_known'] = True
         # Merge to find known positives (vectorized)
         merged = data_pairs_lower.merge(kp_df, on=[DRUG_COL, DISEASE_COL], how='left')
-        # F10 fix: use infer_objects to avoid FutureWarning on fillna
-        is_known_mask = merged['_is_known'].infer_objects(copy=False).fillna(False).values
+        # v89 P0 compat fix (pandas 3.0+ / Python 3.16+): the previous
+        # code used `infer_objects(copy=False).fillna(False).values` which
+        # returned an object-dtype array on some pandas versions. Applying
+        # `~` to an object-dtype array of bools produces bitwise complement
+        # of ints (~True = -2, ~False = -1), which pandas then interprets
+        # as a COLUMN INDEXER (KeyError: "None of [Index([-1, -1, ...])]").
+        # The fix: explicitly cast to bool dtype via `.to_numpy(dtype=bool)`
+        # so `~` produces a proper boolean negation.
+        is_known_mask = merged['_is_known'].fillna(False).to_numpy(dtype=bool)
         all_known_df = data[is_known_mask].copy()
         remaining_df = data[~is_known_mask].copy()
 
