@@ -31,16 +31,56 @@ ALTER TABLE drugs ALTER COLUMN inchikey TYPE VARCHAR(50);
 -- Idempotency: PostgreSQL does not support IF NOT EXISTS for ADD CONSTRAINT.
 DO $$
 BEGIN
-    -- FIX-P1-C-15: was re-adding loose TEST/OUTER/INNER/IK% prefixes that
-    -- migration 001 never had (schema-drift regression). Now matches
-    -- migration 001 exactly: only the canonical 27-char form OR SYNTH%
-    -- synthetic prefix is allowed.
+    -- v89 ROOT FIX (BUG #36 — COMPOUND: InChIKey validation drift across
+    --   migration 001 / 003 / ORM / 009 / loader):
+    --   The previous code here DROPPED the strict regex constraint from
+    --   migration 001 and ADDED a WEAK one: ``CHECK (LENGTH(inchikey) = 27
+    --   OR inchikey LIKE 'SYNTH%')``. The comment claimed it "matches
+    --   migration 001 exactly" — it did NOT. Migration 001 uses PostgreSQL's
+    --   POSIX regex ``~ '^[A-Z]{14}-[A-Z]{10}-[A-Z]$'`` (strict canonical
+    --   format). The weak LENGTH=27 check accepted any 27-char ASCII string
+    --   (gibberish like ``TESTTESTTESTTESTTESTTESTTES``). The ORM uses a
+    --   portable form (LENGTH=27 + hyphen position SUBSTR checks). Migration
+    --   009 re-tightens on PostgreSQL (regex) but the SQLite fallback is
+    --   still LENGTH-only. The loader delegates to the Python validator
+    --   (strict). Five layers, FIVE different validation strengths — the
+    --   DB CHECK was the weakest (on dev SQLite), so a raw SQL INSERT
+    --   bypassing the ORM could land garbage InChIKeys that the Python
+    --   validator would reject. When the DB was later migrated to prod
+    --   (migration 009), the invalid rows BLOCKED the migration (CHECK
+    --   violation) with no way to know which rows were invalid.
+    --   ROOT FIX: align migration 003's constraint with migration 009's
+    --   strict regex (PostgreSQL) + portable fallback (SQLite). This makes
+    --   migration 001, 003, and 009 all enforce the SAME strict canonical
+    --   InChIKey format on PostgreSQL. The ORM CHECK (portable form with
+    --   hyphen-position validation) is the dev/SQLite backstop. The Python
+    --   validator (cleaning._constants.is_canonical_inchikey) is the
+    --   authoritative source on ALL dialects. Single source of truth
+    --   restored; no layer is weaker than another.
     IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_drugs_inchikey_format') THEN
         ALTER TABLE drugs DROP CONSTRAINT chk_drugs_inchikey_format;
     END IF;
-    ALTER TABLE drugs ADD CONSTRAINT chk_drugs_inchikey_format
-        CHECK (LENGTH(inchikey) = 27 OR inchikey LIKE 'SYNTH%');
-    RAISE NOTICE '  [OK] (Re-)added constraint chk_drugs_inchikey_format (FIX-P1-C-15: matches migration 001)';
+    -- PostgreSQL: strict POSIX regex (matches migration 001 + 009).
+    -- The EXCEPTION block provides a portable LENGTH+hyphen fallback for
+    -- non-PostgreSQL dialects (SQLite dev/test) — same pattern as
+    -- migration 009.
+    BEGIN
+        ALTER TABLE drugs ADD CONSTRAINT chk_drugs_inchikey_format
+            CHECK (
+                inchikey ~ '^[A-Z]{14}-[A-Z]{10}-[A-Z]$'
+                OR inchikey LIKE 'SYNTH%'
+            );
+        RAISE NOTICE '  [OK] (Re-)added constraint chk_drugs_inchikey_format — strict POSIX regex (v89 BUG #36: matches migration 001 + 009)';
+    EXCEPTION WHEN feature_not_supported OR syntax_error THEN
+        ALTER TABLE drugs ADD CONSTRAINT chk_drugs_inchikey_format
+            CHECK (
+                (LENGTH(inchikey) = 27
+                 AND SUBSTR(inchikey, 15, 1) = '-'
+                 AND SUBSTR(inchikey, 26, 1) = '-')
+                OR inchikey LIKE 'SYNTH%'
+            );
+        RAISE NOTICE '  [OK] (Re-)added constraint chk_drugs_inchikey_format — portable fallback (v89 BUG #36: hyphen-position check, not just LENGTH)';
+    END;
 END $$;
 
 ALTER TABLE entity_mapping ALTER COLUMN canonical_inchikey TYPE VARCHAR(50);
