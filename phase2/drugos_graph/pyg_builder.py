@@ -1220,6 +1220,26 @@ class PyGBuilder(GraphBuilderProtocol):
             ordered = np.zeros((num_compounds, feat_dim), dtype=np.float32)
 
             smiles_np = smiles_embeddings.numpy() if device.type == "cpu" else smiles_embeddings.cpu().numpy()
+            # BUG #73 ROOT FIX: ChemBERTa embeddings for invalid SMILES
+            # strings can produce NaN/Inf (tokenizer failure, model
+            # overflow). NaN propagates through HGT training -> NaN loss
+            # -> training crash. Replace NaN/Inf with 0.0 BEFORE assigning
+            # to the node feature matrix so a corrupt embedding never
+            # poisons the GNN. This is defensive defense-in-depth: the
+            # chemberta_encoder already raises on NaN at encode time, but
+            # a caller could bypass that by loading pre-computed
+            # embeddings from disk.
+            if not np.all(np.isfinite(smiles_np)):
+                _n_bad = int(np.sum(~np.isfinite(smiles_np).any(axis=1)))
+                logger.warning(
+                    "pyg_builder.add_chemberta_features: %d compound(s) "
+                    "had NaN/Inf ChemBERTa embeddings - replaced with "
+                    "zero vectors (BUG #73 root fix).",
+                    _n_bad,
+                )
+                smiles_np = np.nan_to_num(
+                    smiles_np, nan=0.0, posinf=0.0, neginf=0.0,
+                )
             if valid_mask.any():
                 ordered[node_indices[valid_mask]] = smiles_np[valid_mask]
 
@@ -1567,6 +1587,8 @@ class PyGBuilder(GraphBuilderProtocol):
         self,
         data: HeteroData,
         target_edge_type: Optional[Tuple[str, str, str]] = None,
+        *,
+        node_disjoint: bool = False,
     ) -> Tuple[HeteroData, HeteroData, HeteroData]:
         """Split the graph for drug-disease link prediction.
 
@@ -1622,6 +1644,22 @@ class PyGBuilder(GraphBuilderProtocol):
             - Issue 84: post-transform structural validation
         """
         with self._timed("split_for_link_prediction"):
+            # BUG #54 ROOT FIX: for GNN models (HGT, GraphTransformer), an
+            # edge-disjoint split (RandomLinkSplit) causes message-passing
+            # leakage — the same node appears in both train and test, so
+            # the GNN "sees" test node neighborhoods during training,
+            # inflating AUC by 0.1-0.3 (Hu et al. 2020). When
+            # node_disjoint=True, delegate to node_disjoint_split which
+            # partitions NODES (not edges) so no node appears in more
+            # than one split. TransE callers use node_disjoint=False
+            # (default) — TransE scores triples in isolation and benefits
+            # from seeing every triple at training time. The production
+            # pipeline should pass node_disjoint=True for all HGT/Graph
+            # Transformer training (Phase 3 per the DOCX).
+            if node_disjoint:
+                return self.node_disjoint_split(
+                    data, target_edge_type=target_edge_type,
+                )
             self.logger.debug(
                 f"split_for_link_prediction called with "
                 f"target_edge_type={target_edge_type}"
