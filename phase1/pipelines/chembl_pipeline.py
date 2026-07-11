@@ -113,6 +113,7 @@ target_type           str | None      "SINGLE PROTEIN", "PROTEIN COMPLEX", ...
 from __future__ import annotations
 
 import hashlib
+import gzip
 import json
 import logging
 
@@ -713,8 +714,15 @@ class ChEMBLPipeline(BasePipeline):
                 else:
                     activities_df = _pd.DataFrame()
                 # Persist to raw_dir
-                drugs_csv = self.raw_dir / "chembl_drugs.csv"
-                drugs_df.to_csv(drugs_csv, index=False)
+                # v90 ROOT FIX (BUG #1): the previous code wrote
+                # `chembl_drugs.csv` (PLAIN CSV, no gzip) but clean()
+                # reads with `compression="gzip"` → BadGzipFile on every
+                # v50 pipeline run. The v49 path writes `.csv.gz` with
+                # gzip. ROOT FIX: write to `chembl_drugs.csv.gz` with
+                # gzip compression, matching the v49 canonical filename
+                # and the clean() expectations.
+                drugs_csv = self.raw_dir / "chembl_drugs.csv.gz"
+                drugs_df.to_csv(drugs_csv, index=False, compression="gzip")
                 if not activities_df.empty:
                     # v57 ROOT FIX (P1-013 — ChEMBL v50 filename mismatch):
                     #   The previous code wrote `chembl_activities_clean.csv`
@@ -738,7 +746,10 @@ class ChEMBLPipeline(BasePipeline):
                         self.source_name, len(activities_df), activities_gz_path,
                     )
                 # Update sha for audit
-                self._sha256_raw = _compute_file_sha256(drugs_csv)
+                # ROOT FIX: _compute_file_sha256 is an instance method (line 4337),
+                # not a module-level function. The bare call was a pre-existing
+                # NameError that crashed the E2E sample-mode CI job.
+                self._sha256_raw = self._compute_file_sha256(drugs_csv)
                 return drugs_csv
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             # v84 FORENSIC ROOT FIX (BUG #38): narrowed from broad
@@ -882,9 +893,15 @@ class ChEMBLPipeline(BasePipeline):
         logger.info("[%s] clean() starting (raw_path=%s)", self.source_name, raw_path)
 
         # Read the raw drugs CSV (gzipped, UTF-8 — INT-6, INT-7).
+        # v90 ROOT FIX (BUG #10): auto-detect compression from file
+        # extension instead of hardcoding compression="gzip". The v50
+        # path now writes .csv.gz (BUG #1 fix), but defensive coding
+        # ensures a plain .csv file (e.g. from a manual download or
+        # API error page) is still readable without BadGzipFile.
+        _compression = "gzip" if raw_path.suffix == ".gz" else None
         drugs_df = pd.read_csv(
             raw_path,
-            compression="gzip",
+            compression=_compression,
             low_memory=False,
             encoding="utf-8",
         )
@@ -1159,9 +1176,13 @@ class ChEMBLPipeline(BasePipeline):
         )
 
         # Step 1: Read raw activities CSV.
+        # v90 ROOT FIX (BUG #10): auto-detect compression from file
+        # extension instead of hardcoding compression="gzip". The v50
+        # path writes .csv.gz, but a plain .csv should still work.
+        _compression = "gzip" if activities_raw_path.suffix == ".gz" else None
         activities_df = pd.read_csv(
             activities_raw_path,
-            compression="gzip",
+            compression=_compression,
             low_memory=False,
             encoding="utf-8",
         )
@@ -1236,7 +1257,15 @@ class ChEMBLPipeline(BasePipeline):
                     "[%s] clean_activities: using drugs.csv drug set (%d drugs)",
                     self.source_name, len(valid_chembl_ids),
                 )
-            except Exception as exc:
+            # v90 ROOT FIX (BUG #18): narrowed from broad
+            # ``except Exception`` which caught programming bugs
+            # (AttributeError from wrong column name, KeyError from
+            # missing column) and silently skipped the drug filter,
+            # allowing activities for molecules NOT in our drugs table
+            # to pass through → load() fails with "more than 50%
+            # unresolved drug_id". Root fix: catch ONLY expected I/O
+            # and data errors. Programming bugs propagate.
+            except (OSError, ValueError, pd.errors.EmptyDataError) as exc:
                 logger.warning(
                     "[%s] Could not read drugs.csv for activity filter (%s) — "
                     "proceeding without filter (may cause load() to fail "
@@ -1546,7 +1575,15 @@ class ChEMBLPipeline(BasePipeline):
             total_loaded += int(drugs_result.inserted + drugs_result.updated)
 
             # Step 4: Validate drug count (S18, DQ-13).
-            drug_count = len(df)
+            # v90 ROOT FIX (BUG #16): use drugs_upserted (actual DB
+            # writes) instead of len(df) (input row count) for the
+            # quality gate. len(df) counts ALL input rows including
+            # duplicates, invalid InChIKeys, and rows that failed
+            # upsert — using it as the quality gate passes the check
+            # even when zero rows were actually committed to the DB
+            # (e.g. flush failure). The correct metric is the actual
+            # number of rows that made it into the DB.
+            drug_count = self._metrics.get("drugs_upserted", 0)
             if drug_count < CHEMBL_EXPECTED_DRUG_COUNT_MIN:
                 # In test environments with CHEMBL_MAX_ROWS set very low,
                 # the count validation will fail. Allow override via env.
@@ -3815,7 +3852,15 @@ class ChEMBLPipeline(BasePipeline):
                 # v82 P0-D4b: preserve the censor metadata.
                 norm_censored.append(bool(result.censored))
                 norm_censor_dir.append(result.censor_direction)
-            except Exception as exc:  # noqa: BLE001 — never crash on a single row
+            # v90 ROOT FIX (BUG #17): narrowed from broad
+            # ``except Exception`` which caught programming bugs
+            # (TypeError, AttributeError, NameError) and silently
+            # inserted None, masking real code failures. Root fix:
+            # catch ONLY expected data-quality exceptions (ValueError
+            # from invalid numeric conversion, TypeError from None
+            # inputs, ArithmeticError from overflow). Programming bugs
+            # propagate so they surface during development.
+            except (ValueError, TypeError, ArithmeticError) as exc:  # noqa: BLE001
                 logger.warning(
                     "[%s] normalize_activity_value failed for value=%r units=%r: %s",
                     self.source_name, v, u, exc,

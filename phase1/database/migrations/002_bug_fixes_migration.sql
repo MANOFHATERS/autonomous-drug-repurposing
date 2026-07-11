@@ -592,7 +592,7 @@ BEGIN
 
     -- [SCI-2, DQ-2] Step 2: Delete rows with NULL disease_id.
     -- A gene-disease association with no disease ID is scientifically meaningless.
-    -- Delete rather than corrupt with empty string (which violates chk_gda_disease_id).
+    -- Delete rather than corrupt with empty string (which violates chk_gda_disease_id_nonempty).
     -- First archive, then delete.
     INSERT INTO _migration_002_dedup_archive (source_table, original_id, archived_data, deletion_reason)
     SELECT 'gene_disease_associations', id, row_to_json(gda)::jsonb,
@@ -1103,9 +1103,24 @@ BEGIN
     RAISE NOTICE 'Migration 002: Created GDA COALESCE unique index';
 
     -- [COD-4, CMP-1] Add the constraint with correct naming convention.
-    -- NAMING_CONVENTION: uq_%(table_name)s_%(column_0_name)s
-    -- Extended for multi-column: uq_%(table)s_%(col0)s_%(col1)s_%(col2)s
-    -- Drop old constraint name (uq_gda_gene_disease_source) first.
+    -- v90 ROOT FIX (BUG #2 — P0 three-way schema drift):
+    --   The previous code DROPPED ``uq_gda_gene_disease_source`` (the
+    --   ORM-matching name from migration 001 + models.py) and ADDed a
+    --   NEW constraint with a DIFFERENT name
+    --   ``uq_gene_disease_associations_gene_symbol_disease_id_source``.
+    --   After migration 002, the constraint name NO LONGER MATCHED the
+    --   ORM. ``Base.metadata.create_all()`` on a fresh DB creates
+    --   ``uq_gda_gene_disease_source``; migration 002 renamed it. Three-
+    --   way schema drift: dev (ORM-created), prod (migration-created),
+    --   and post-002 prod all had different constraint names for the
+    --   same logical unique key. Any code or operator that referenced
+    --   the constraint by name (e.g. ``ON CONFLICT ON CONSTRAINT
+    --   uq_gda_gene_disease_source``) silently failed after migration 002.
+    --   ROOT FIX: KEEP the ORM-matching name ``uq_gda_gene_disease_source``.
+    --   Just DROP IF EXISTS (cleans up any stale state) + re-ADD with the
+    --   SAME name. The ORM (models.py:1681-1684) and migration 001
+    --   (line ~1112) both use this exact name — aligning all three
+    --   sources eliminates the drift.
     ALTER TABLE gene_disease_associations
         DROP CONSTRAINT IF EXISTS uq_gda_gene_disease_source;
 
@@ -1117,10 +1132,10 @@ BEGIN
     -- gene_symbols (SQL treats NULLs as distinct for uniqueness). The
     -- COALESCE index above is the real enforcement mechanism.
     ALTER TABLE gene_disease_associations
-        ADD CONSTRAINT IF NOT EXISTS uq_gene_disease_associations_gene_symbol_disease_id_source
+        ADD CONSTRAINT IF NOT EXISTS uq_gda_gene_disease_source
         UNIQUE (gene_symbol, disease_id, source);
 
-    RAISE NOTICE 'Migration 002: Created GDA unique constraint (plain columns, for ORM compatibility)';
+    RAISE NOTICE 'Migration 002: Re-created GDA unique constraint (ORM-matching name uq_gda_gene_disease_source)';
 
     -- v74 ROOT FIX (T-017 continued): the DROP+CREATE cycle for
     -- ``uq_entity_mapping_inchikey`` was REMOVED above. Migration 001
@@ -1154,7 +1169,7 @@ BEGIN
     -- dedup-constraint window. Without the lock, a race condition between
     -- DELETE and ADD CONSTRAINT could allow duplicate inserts to slip in.
 
-    COMMENT ON CONSTRAINT uq_gene_disease_associations_gene_symbol_disease_id_source
+    COMMENT ON CONSTRAINT uq_gda_gene_disease_source
         ON gene_disease_associations IS
         'Unique constraint on GDA natural key (gene_symbol, disease_id, source). '
         'Matches the ON CONFLICT target in database/loaders.py. '
@@ -1232,7 +1247,7 @@ BEGIN
     SELECT COUNT(*) > 0 INTO _constraint_exists
     FROM pg_indexes
     WHERE tablename = 'gene_disease_associations'
-      AND indexname = 'uq_gene_disease_associations_gene_symbol_disease_id_source';
+      AND indexname = 'uq_gda_gene_disease_source';
     IF NOT _constraint_exists THEN
         RAISE WARNING 'Post-validation: GDA plain-column unique constraint not found (may be OK if COALESCE index exists)';
     ELSE

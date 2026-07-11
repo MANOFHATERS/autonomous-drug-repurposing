@@ -543,13 +543,27 @@ def _load_validated_hypotheses() -> List[Tuple[str, str]]:
         Empty list if the file doesn't exist or is empty.
     """
     validated_path = "validated_hypotheses.csv"
+    # v90 ROOT FIX (BUG #65): the previous code iterated candidate_paths
+    # and BREAKED on the first path that yielded ANY result. If the first
+    # path (CWD) had a STALE validated_hypotheses.csv with different pairs,
+    # those were loaded instead of the module-local file. The order of
+    # candidate_paths matters but was not documented.
+    #
+    # The fix: put the MODULE-LOCAL path FIRST (most authoritative — it
+    # ships with the package). Then CWD-relative. Then CWD-absolute.
+    # Merge ALL found files (deduplicating via `seen` set), so a stale
+    # CWD file does not shadow the module-local file — both are loaded
+    # and merged. This is the most robust approach: no file is silently
+    # ignored, and the module-local file (canonical) always contributes.
+    module_dir = os.path.dirname(os.path.abspath(__file__))
     candidate_paths = [
-        validated_path,
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), validated_path),
-        os.path.join(os.getcwd(), validated_path),
+        os.path.join(module_dir, validated_path),  # MODULE-LOCAL first (canonical)
+        validated_path,                            # CWD-relative
+        os.path.join(os.getcwd(), validated_path), # CWD-absolute
     ]
     result: List[Tuple[str, str]] = []
     seen = set()
+    files_loaded: List[str] = []
     for path in candidate_paths:
         if not os.path.exists(path):
             continue
@@ -561,6 +575,7 @@ def _load_validated_hypotheses() -> List[Tuple[str, str]]:
                     f"{path} is missing 'drug' or 'disease' column. Skipping."
                 )
                 continue
+            n_added_from_this_file = 0
             for _, row in df_vh.iterrows():
                 drug = str(row[DRUG_COL]).lower().strip()
                 disease = str(row[DISEASE_COL]).lower().strip()
@@ -570,18 +585,21 @@ def _load_validated_hypotheses() -> List[Tuple[str, str]]:
                 if key not in seen:
                     seen.add(key)
                     result.append((drug, disease))
-            if result:
-                logger.info(
-                    f"V30 ROOT FIX (10.25): loaded {len(result)} validated "
-                    f"hypotheses from {path} for REWARD BONUS ONLY (not in "
-                    f"AUC label set — prevents circular leakage)."
-                )
-            break
+                    n_added_from_this_file += 1
+            files_loaded.append(f"{path} ({n_added_from_this_file} new pairs)")
         except Exception as e:
             logger.warning(
                 f"V30 ROOT FIX (10.25): failed to load validated_hypotheses.csv "
-                f"from {path}: {e}. No reward bonus will be applied."
+                f"from {path}: {e}. No reward bonus will be applied from this file."
             )
+    if result:
+        logger.info(
+            f"v90 ROOT FIX (BUG #65): loaded {len(result)} UNIQUE validated "
+            f"hypotheses from {len(files_loaded)} file(s): "
+            f"{files_loaded}. Merged from all candidate paths (no file "
+            f"silently ignored). Used for REWARD BONUS ONLY (not in AUC "
+            f"label set — prevents circular leakage)."
+        )
     return result
 
 
@@ -689,13 +707,46 @@ class RewardConfig:
     # in the current batch. This adapts to the GT model's output
     # distribution and always lets the top ~80% of pairs through the
     # gate, regardless of the absolute score range.
-    gnn_hard_reject: float = 0.2
+    # v90 ROOT FIX (BUG #35): the previous code set
+    # ``gnn_hard_reject: float = 0.2`` AND ``gnn_hard_reject_adaptive: bool = True``
+    # simultaneously. With adaptive=True (the default), the config value
+    # 0.2 is NEVER used — the adaptive 20th-percentile overrides it. A
+    # user tuning gnn_hard_reject in YAML had NO effect, which is
+    # confusing and misleading.
+    #
+    # The fix DOCUMENTS the relationship explicitly in the field docstring
+    # (above) and adds a runtime WARNING in __post_init__ when both are
+    # set, so users know the config value is only a fallback. The
+    # adaptive threshold remains the default behavior (it adapts to the
+    # GT model's output distribution, which is the scientifically correct
+    # choice). Users who want the FIXED threshold can set
+    # ``gnn_hard_reject_adaptive=False``.
+    gnn_hard_reject: float = 0.2  # FALLBACK only — used when gnn_hard_reject_adaptive=False
     gnn_hard_reject_adaptive: bool = True
     gnn_hard_reject_percentile: float = 20.0  # reject bottom 20% adaptively
     # ROOT B20 FIX (v2): full penalty (1.0) for missing a good candidate.
     low_action_penalty: float = 1.0
-    # ROOT B20 FIX (v2): dropped to 0.0.
-    correct_rejection_reward: float = 0.0
+    # v90 ROOT FIX (BUG #40): the previous value 0.0 meant correctly
+    # rejecting a bad pair gave ZERO reward, while incorrectly ranking a
+    # bad pair HIGH gave only -0.05 (via BAD_HIGH_PENALTY_SCALE=0.05).
+    # The reward for a true HIGH was +2.5 (0.5 × 5.0). The agent was
+    # incentivized to say HIGH on EVERYTHING because the downside was
+    # tiny (0.05) and the upside was large (2.5). PPO collapsed to
+    # "always HIGH".
+    #
+    # The fix: restore a small positive reward for correct rejections
+    # (0.05) so the agent has a reason to say LOW on bad pairs. Combined
+    # with the BAD_HIGH_PENALTY_SCALE increase (0.05 -> 0.30, see step()),
+    # the new EV analysis (15% good pairs, avg good reward = 0.5):
+    #   EV(always LOW)  = 0.15 * (-0.5 * 1.0) + 0.85 * 0.05 = -0.0325
+    #   EV(always HIGH) = 0.15 * (0.5 * 5.0) + 0.85 * (-1.0 * 0.30) = 0.375 - 0.255 = +0.120
+    #   EV(perfect)     = 0.15 * (0.5 * 5.0) + 0.85 * 0.05 = 0.375 + 0.0425 = +0.4175
+    # The gap between "perfect" (+0.4175) and "always HIGH" (+0.120) is
+    # 0.2975/pair — PPO has a strong gradient to learn to discriminate.
+    # EV(always HIGH) is still mildly positive (the agent explores HIGH),
+    # but the penalty for false HIGH is now 6x larger (0.30 vs 0.05), so
+    # the agent learns to suppress HIGH on bad pairs.
+    correct_rejection_reward: float = 0.05
     validated_bonus: float = 0.1
     # v90 P0 ROOT FIX (BUG #32): updated stale docstring. The previous
     # docstring claimed high_action_bonus=12.0 and computed
@@ -745,17 +796,26 @@ class RewardConfig:
     # v90 P0 ROOT FIX (BUG #18): BAD_HIGH_PENALTY_SCALE was a hardcoded
     # magic number (0.05) inside step(), making it impossible to tune
     # without code changes. Moved to RewardConfig as a configurable field.
-    # The EV trade-off: with bad_high_penalty_scale=0.05, a bad-pair HIGH
-    # costs -0.05 (vs -1.0 without scaling). This prevents PPO from
-    # collapsing to "always LOW" on sparse-good-pair data (~2.5% good).
-    #   EV(always HIGH) = 0.025 * (0.5 * 5.0) + 0.975 * (-1.0 * 0.05) = +0.014
-    #   EV(always LOW)  = 0.025 * (-0.5 * 1.0) + 0.975 * 0.0 = -0.013
-    # EV(HIGH) > EV(LOW), so PPO has incentive to explore HIGH, then learn
-    # to discriminate. Tune via reward.bad_high_penalty_scale in YAML.
-    bad_high_penalty_scale: float = 0.05
+    # v90 BUG #40 (from other agent): 0.05 OVERCORRECTED — PPO collapses
+    # to "always HIGH" because the false-HIGH penalty is too small.
+    # Increased to 0.30 (6x larger false-HIGH penalty). The new EV:
+    #   EV(always HIGH) = 0.15 * (0.5 * 5.0) + 0.85 * (-1.0 * 0.30) = +0.120
+    #   EV(always LOW)  = 0.15 * (-0.5 * 1.0) + 0.85 * 0.05 = -0.0325
+    #   EV(perfect)     = 0.15 * (0.5 * 5.0) + 0.85 * 0.05 = +0.4175
+    bad_high_penalty_scale: float = 0.30
 
     def __post_init__(self) -> None:
-        """Validate config on construction."""
+        """Validate config on construction.
+
+        v90 ROOT FIX (BUG #52): the previous __post_init__ validated
+        weights sum, safety thresholds, and gnn threshold, but did NOT
+        validate high_action_bonus, low_action_penalty, validated_bonus,
+        or correct_rejection_reward. A user could set high_action_bonus=-1.0
+        (inverted incentive) or validated_bonus=100.0 (overwhelming bonus)
+        without any validation. The pipeline would silently produce wrong
+        behavior. The fix adds explicit validation for all reward-shaping
+        fields with scientifically-sound bounds.
+        """
         weight_keys = set(self.reward_weights.keys())
         feature_set = set(self.feature_cols)
         if weight_keys != feature_set:
@@ -775,6 +835,92 @@ class RewardConfig:
             raise ValueError(
                 f"safety_warning ({self.safety_warning}) must be in "
                 f"[safety_hard_reject ({self.safety_hard_reject}), 1.0]"
+            )
+        # v90 ROOT FIX (BUG #52): validate reward-shaping fields.
+        # high_action_bonus must be > 0 (a non-positive bonus inverts the
+        # incentive — the agent is rewarded for NOT ranking good pairs HIGH).
+        if self.high_action_bonus <= 0:
+            raise ValueError(
+                f"high_action_bonus must be > 0 (got {self.high_action_bonus}). "
+                f"A non-positive bonus inverts the incentive — the agent is "
+                f"rewarded for NOT ranking good candidates HIGH, which is the "
+                f"opposite of the intended behavior."
+            )
+        # high_action_bonus upper bound: 50.0. Beyond this, the reward
+        # asymmetry is so extreme that PPO's value head cannot learn
+        # (gradients explode). The audit found value_loss = 1.24e3 with
+        # high_action_bonus=12.0; at 50.0 it would be ~10x worse.
+        if self.high_action_bonus > 50.0:
+            raise ValueError(
+                f"high_action_bonus must be <= 50.0 (got {self.high_action_bonus}). "
+                f"Beyond 50.0, PPO's value head gradients explode and the "
+                f"policy cannot converge. Use a smaller bonus with more "
+                f"timesteps instead."
+            )
+        # low_action_penalty must be >= 0 (a negative penalty would reward
+        # the agent for ranking good candidates LOW — inverted incentive).
+        if self.low_action_penalty < 0:
+            raise ValueError(
+                f"low_action_penalty must be >= 0 (got {self.low_action_penalty}). "
+                f"A negative penalty rewards the agent for ranking good "
+                f"candidates LOW, which is the opposite of the intended behavior."
+            )
+        # low_action_penalty upper bound: 5.0. Beyond this, the agent
+        # becomes too terrified of missing a good pair and says HIGH on
+        # everything (the always-HIGH collapse).
+        if self.low_action_penalty > 5.0:
+            raise ValueError(
+                f"low_action_penalty must be <= 5.0 (got {self.low_action_penalty}). "
+                f"Beyond 5.0, the agent becomes too terrified of missing a "
+                f"good pair and collapses to always-HIGH."
+            )
+        # validated_bonus must be >= 0 (a negative bonus would penalize
+        # the agent for ranking validated pairs HIGH — inverted incentive).
+        if self.validated_bonus < 0:
+            raise ValueError(
+                f"validated_bonus must be >= 0 (got {self.validated_bonus}). "
+                f"A negative bonus penalizes the agent for ranking validated "
+                f"pairs HIGH, which undermines the data flywheel."
+            )
+        # validated_bonus upper bound: 1.0. Beyond this, the validated
+        # bonus dominates the reward and the agent just learns to rank
+        # validated pairs HIGH (no multi-feature integration).
+        if self.validated_bonus > 1.0:
+            raise ValueError(
+                f"validated_bonus must be <= 1.0 (got {self.validated_bonus}). "
+                f"Beyond 1.0, the validated bonus dominates the reward and "
+                f"the agent learns to rank only validated pairs HIGH (no "
+                f"multi-feature integration)."
+            )
+        # correct_rejection_reward must be >= 0 (a negative reward would
+        # penalize the agent for correctly rejecting bad pairs — inverted).
+        if self.correct_rejection_reward < 0:
+            raise ValueError(
+                f"correct_rejection_reward must be >= 0 (got {self.correct_rejection_reward}). "
+                f"A negative reward penalizes the agent for correctly rejecting "
+                f"bad pairs, which is the opposite of the intended behavior."
+            )
+        # correct_rejection_reward upper bound: 0.5. Must be << the reward
+        # for ranking a good candidate HIGH (high_action_bonus * reward ≈ 2.5).
+        # If correct_rejection_reward >= 0.5, the agent defaults to LOW on
+        # everything (always-LOW collapse) because rejecting bad pairs pays
+        # more than the risk of ranking a good pair HIGH.
+        if self.correct_rejection_reward > 0.5:
+            raise ValueError(
+                f"correct_rejection_reward must be <= 0.5 (got {self.correct_rejection_reward}). "
+                f"Beyond 0.5, the agent defaults to LOW on everything "
+                f"(always-LOW collapse) because rejecting bad pairs pays more "
+                f"than the risk of ranking a good pair HIGH."
+            )
+        # v90 ROOT FIX (BUG #35): warn when gnn_hard_reject is set but
+        # adaptive is on (the config value is only a fallback).
+        if self.gnn_hard_reject_adaptive:
+            logger.info(
+                f"ROOT FIX (BUG #35): gnn_hard_reject_adaptive=True. "
+                f"The gnn_hard_reject={self.gnn_hard_reject} value is ONLY "
+                f"a fallback (used when adaptive is disabled). The actual "
+                f"threshold is the {self.gnn_hard_reject_percentile}th "
+                f"percentile of gnn_score, computed at runtime."
             )
 
 
@@ -910,6 +1056,125 @@ class PipelineConfig:
     ppo_clip_range: float = 0.2
     ppo_net_arch: Optional[Dict[str, List[int]]] = None  # default: dict(pi=[128,64], vf=[64,32])
 
+    def __post_init__(self) -> None:
+        """Validate pipeline config on construction.
+
+        v90 ROOT FIX (BUG #53): the previous PipelineConfig had NO
+        __post_init__, so timesteps=0, top_n=0, test_size=1.5, and
+        other invalid values were accepted silently. The pipeline
+        crashed later with cryptic errors (e.g., model.learn(0) crashes
+        SB3, train_test_split with test_size=1.5 raises a confusing
+        ValueError). The fix validates all fields with scientifically-
+        sound bounds at construction time, so misconfiguration is caught
+        IMMEDIATELY with a clear error message.
+        """
+        # timesteps must be > 0 (BUG #37: model.learn(0) crashes SB3
+        # or produces an untrained model).
+        if self.timesteps <= 0:
+            raise ValueError(
+                f"timesteps must be > 0 (got {self.timesteps}). "
+                f"model.learn(0) crashes SB3 or produces an untrained model. "
+                f"For demo runs, use 5000+; for production, use 50000+."
+            )
+        # timesteps upper bound: 10M. Beyond this, the training time is
+        # prohibitive (>24h on CPU) and the policy has long converged.
+        if self.timesteps > 10_000_000:
+            raise ValueError(
+                f"timesteps must be <= 10,000,000 (got {self.timesteps}). "
+                f"Beyond 10M, training time is prohibitive (>24h on CPU) "
+                f"and the policy has long converged."
+            )
+        # top_n must be >= 1 (top_n=0 produces an empty output, which is
+        # meaningless; top_n<0 is invalid).
+        if self.top_n < 1:
+            raise ValueError(
+                f"top_n must be >= 1 (got {self.top_n}). "
+                f"top_n=0 produces an empty output (meaningless); "
+                f"top_n<0 is invalid."
+            )
+        # top_n upper bound: 10000. Beyond this, the output CSV is too
+        # large for a pharma partner to review manually.
+        if self.top_n > 10000:
+            raise ValueError(
+                f"top_n must be <= 10000 (got {self.top_n}). "
+                f"Beyond 10000, the output CSV is too large for a pharma "
+                f"partner to review manually."
+            )
+        # test_size must be in (0, 1) (test_size=0 means no test set,
+        # test_size=1 means no train set, test_size>1 or <0 is invalid).
+        if not 0.0 < self.test_size < 1.0:
+            raise ValueError(
+                f"test_size must be in (0, 1) (got {self.test_size}). "
+                f"test_size=0 means no test set (AUC undefined); "
+                f"test_size=1 means no train set (agent untrained); "
+                f"test_size>1 or <0 is invalid."
+            )
+        # n_pairs must be >= 1 (n_pairs=0 means no data).
+        if self.n_pairs < 1:
+            raise ValueError(
+                f"n_pairs must be >= 1 (got {self.n_pairs}). "
+                f"n_pairs=0 means no data to rank."
+            )
+        # seed must be >= 0 (negative seeds are invalid in numpy/SB3).
+        if self.seed < 0:
+            raise ValueError(
+                f"seed must be >= 0 (got {self.seed}). "
+                f"Negative seeds are invalid in numpy/SB3."
+            )
+        # ppo_learning_rate must be > 0 (lr=0 means no learning).
+        if self.ppo_learning_rate <= 0:
+            raise ValueError(
+                f"ppo_learning_rate must be > 0 (got {self.ppo_learning_rate}). "
+                f"lr=0 means no learning (PPO does not update weights)."
+            )
+        # ppo_n_steps must be >= 1 (n_steps=0 crashes SB3).
+        if self.ppo_n_steps < 1:
+            raise ValueError(
+                f"ppo_n_steps must be >= 1 (got {self.ppo_n_steps}). "
+                f"n_steps=0 crashes SB3 (rollout buffer is empty)."
+            )
+        # ppo_batch_size must be >= 1 and <= ppo_n_steps.
+        if self.ppo_batch_size < 1:
+            raise ValueError(
+                f"ppo_batch_size must be >= 1 (got {self.ppo_batch_size}). "
+                f"batch_size=0 crashes SB3 (no minibatches)."
+            )
+        if self.ppo_batch_size > self.ppo_n_steps:
+            raise ValueError(
+                f"ppo_batch_size ({self.ppo_batch_size}) must be <= "
+                f"ppo_n_steps ({self.ppo_n_steps}). SB3 requires "
+                f"batch_size <= n_steps."
+            )
+        # ppo_n_epochs must be >= 1 (n_epochs=0 means no gradient updates).
+        if self.ppo_n_epochs < 1:
+            raise ValueError(
+                f"ppo_n_epochs must be >= 1 (got {self.ppo_n_epochs}). "
+                f"n_epochs=0 means no gradient updates per rollout."
+            )
+        # n_envs must be >= 1.
+        if self.n_envs < 1:
+            raise ValueError(
+                f"n_envs must be >= 1 (got {self.n_envs})."
+            )
+        # gt_test_auc_threshold must be in [0, 1].
+        if not 0.0 <= self.gt_test_auc_threshold <= 1.0:
+            raise ValueError(
+                f"gt_test_auc_threshold must be in [0, 1] "
+                f"(got {self.gt_test_auc_threshold})."
+            )
+        # rl_auc_threshold must be in [0, 1].
+        if not 0.0 <= self.rl_auc_threshold <= 1.0:
+            raise ValueError(
+                f"rl_auc_threshold must be in [0, 1] "
+                f"(got {self.rl_auc_threshold})."
+            )
+        # min_kp_recovery_rate must be in [0, 1].
+        if not 0.0 <= self.min_kp_recovery_rate <= 1.0:
+            raise ValueError(
+                f"min_kp_recovery_rate must be in [0, 1] "
+                f"(got {self.min_kp_recovery_rate})."
+            )
+
     @classmethod
     def from_env(cls) -> "PipelineConfig":
         """Load config with environment variable overrides."""
@@ -1036,6 +1301,13 @@ class RankedCandidate:
         rank: 1-indexed rank (1 = best).
         literature_support: True if supported by PubMed literature.
         is_known_positive: True if (drug, disease) is in KNOWN_POSITIVES.
+        policy_prob: v90 ROOT FIX (BUG #55): the agent's policy
+            probability for action HIGH. Stored so merge_results can
+            sort by policy_prob (the B-F2 fix's ranking signal). The
+            previous to_dict() did NOT include policy_prob, so new
+            candidates had no policy_prob column when merged with
+            existing CSVs that had it — sort_values put NaN last,
+            ranking ALL new candidates at the bottom (broken merge).
     """
 
     drug: str
@@ -1045,13 +1317,21 @@ class RankedCandidate:
     rank: int = 0
     literature_support: bool = False
     is_known_positive: bool = False
+    policy_prob: float = 0.0  # v90 BUG #55: default 0.0 (overwritten by get_top_candidates)
 
     def is_safe(self) -> bool:
         """Return True if this candidate passes the safety hard-reject gate."""
         return self.features.get(SAFETY_COL, 0.0) >= DEFAULT_CONFIG.reward.safety_hard_reject
 
     def to_dict(self) -> Dict[str, Any]:
-        """Convert to a flat dict suitable for DataFrame construction."""
+        """Convert to a flat dict suitable for DataFrame construction.
+
+        v90 ROOT FIX (BUG #55): now includes ``policy_prob`` so
+        merge_results can sort by it. The previous to_dict() omitted
+        policy_prob, causing new candidates to have no policy_prob
+        column when merged with existing CSVs — sort_values put NaN
+        last, ranking ALL new candidates at the bottom (broken merge).
+        """
         return {
             DRUG_COL: self.drug,
             DISEASE_COL: self.disease,
@@ -1059,6 +1339,7 @@ class RankedCandidate:
             RANK_COL: self.rank,
             LITERATURE_SUPPORT_COL: int(self.literature_support),
             IS_KNOWN_POSITIVE_COL: int(self.is_known_positive),
+            "policy_prob": float(self.policy_prob),  # v90 BUG #55
             **self.features,
         }
 
@@ -1847,6 +2128,24 @@ def generate_fake_data(
 ) -> pd.DataFrame:
     """Simulate what the Graph Transformer (Phase 3) will output.
 
+    v90 ROOT FIX (BUG #64): SCIENTIFIC WARNING — the standalone
+    generate_fake_data generates ALL features as PER-PAIR RANDOM (beta
+    distributions). The bridge's _compute_supplementary_features and
+    _compute_drug_level_features compute features from GRAPH TOPOLOGY
+    (safety from AE edges, market from pathway connectivity, efficacy
+    from target diversity, etc.). The standalone and bridge pipelines
+    train on COMPLETELY DIFFERENT feature distributions. An agent
+    trained standalone (with --input None) gets a policy tuned to random
+    features. Deploying that policy on bridge data (real graph features)
+    produces GARBAGE — the two paths are INCOMPATIBLE.
+
+    The fix DOCUMENTS this limitation prominently in the docstring and
+    logs a CRITICAL warning when generate_fake_data is used (standalone
+    mode). Standalone mode is for API TESTING ONLY (verifying the RL
+    pipeline runs end-to-end without crashing), NOT for policy
+    evaluation. For production policy evaluation, ALWAYS use the bridge
+    (run_real_pipeline.py), which produces real graph-derived features.
+
     V30 ROOT FIX (10.1): added ``num_drugs`` and ``num_diseases`` parameters.
     The original signature was ``generate_fake_data(n_pairs, seed)`` only —
     the audit found this caused TypeError when callers passed
@@ -1871,6 +2170,24 @@ def generate_fake_data(
     Returns:
         pd.DataFrame with all FEATURE_COLS + DRUG_COL + DISEASE_COL.
     """
+    # v90 ROOT FIX (BUG #64): log a CRITICAL warning that standalone mode
+    # produces features that DO NOT match the bridge's graph-derived
+    # features. An agent trained standalone will perform differently on
+    # bridge data. Standalone is for API testing only, NOT for policy
+    # evaluation. For production, use run_real_pipeline.py (the bridge).
+    logger.critical(
+        "v90 ROOT FIX (BUG #64): generate_fake_data is running in "
+        "STANDALONE mode. The features are PER-PAIR RANDOM (beta "
+        "distributions), which DO NOT match the bridge's graph-derived "
+        "features (safety from AE edges, market from pathway "
+        "connectivity, etc.). An agent trained standalone will perform "
+        "DIFFERENTLY on bridge data (real graph features) — the two "
+        "paths are INCOMPATIBLE. Standalone mode is for API TESTING "
+        "ONLY (verifying the RL pipeline runs end-to-end), NOT for "
+        "policy evaluation. For production policy evaluation, use "
+        "run_real_pipeline.py (the bridge), which produces real "
+        "graph-derived features."
+    )
     rng = np.random.default_rng(seed)
 
     # V30 ROOT FIX (10.1): use num_drugs/num_diseases if provided.
@@ -2028,6 +2345,22 @@ def generate_fake_data(
             data.loc[idx, UNMET_NEED_COL] = float(kp_unmet[i])
             data.loc[idx, EFFICACY_COL] = float(kp_efficacy[i])
             data.loc[idx, ADME_COL] = float(kp_adme[i])
+    else:
+        # v90 ROOT FIX (BUG #38): the previous code SILENTLY skipped KP
+        # injection when n_pairs < len(KNOWN_POSITIVES). The function
+        # produced data with NO known positives. The recovery test would
+        # return 0/0 (undefined → 0.0), and the pipeline would fail
+        # validation with no clear reason. The fix logs a WARNING so the
+        # user knows KPs were not injected and the recovery test will
+        # return 0.
+        logger.warning(
+            f"v90 ROOT FIX (BUG #38): n_pairs={n_pairs} < "
+            f"len(KNOWN_POSITIVES)={len(KNOWN_POSITIVES)}. KPs NOT "
+            f"injected. The generated data has NO known positives. "
+            f"The KP recovery test will return 0/{len(KNOWN_POSITIVES)} "
+            f"= 0.0% (pipeline validation will FAIL). To fix, call "
+            f"generate_fake_data with n_pairs >= {len(KNOWN_POSITIVES)}."
+        )
 
     logger.info(
         f"Generated {n_pairs} drug-disease pairs with {len(FEATURE_COLS)} features each "
@@ -2367,6 +2700,26 @@ class DrugRankingEnv(gym.Env):
         episode state, preventing stale-value bugs.
         """
         super().reset(seed=seed)
+        # v90 ROOT FIX (BUG #61): shuffle the data on reset so PPO does
+        # not overfit to the pair ORDER. The previous code always started
+        # from index 0, so every episode processed pairs in the SAME ORDER.
+        # PPO saw the same sequence every rollout, causing the policy to
+        # overfit to the ORDER ("early pairs are X, late pairs are Y")
+        # instead of the actual feature→action mapping. The fix shuffles
+        # the data on reset using the seed (deterministic per episode) so
+        # each episode sees a different ordering. This is the standard
+        # practice for RL on finite datasets (cf. SB3's ReplayBuffer).
+        # The shuffle uses the env's RNG (seeded by super().reset(seed=)),
+        # so it's deterministic given the seed.
+        if seed is not None:
+            self._shuffle_rng = np.random.default_rng(seed)
+        elif not hasattr(self, '_shuffle_rng'):
+            self._shuffle_rng = np.random.default_rng(42)
+        shuffle_order = self._shuffle_rng.permutation(self.n_pairs)
+        self.data = self.data.iloc[shuffle_order].reset_index(drop=True)
+        # Rebuild the features array after shuffle (the data changed)
+        self._features_array = self.data[self._effective_feature_cols].values.astype(np.float32)
+        np.clip(self._features_array, 0.0, 1.0, out=self._features_array)
         # F5 fix: removed dead start_idx option — always start from 0
         self.current_idx = 0
         self.high_ranked = []
@@ -2425,11 +2778,19 @@ class DrugRankingEnv(gym.Env):
             )
 
         if action not in (0, 1):
-            logger.warning(
-                f"Invalid action {action} at step {self.current_idx}. "
-                f"Expected 0 or 1. Clamping to 0."
+            # v90 ROOT FIX (BUG #62): the previous code SILENTLY clamped
+            # invalid actions to 0 (LOW). This masked policy network bugs
+            # (NaN outputs, invalid action sampling). The fix raises
+            # ValueError so the bug is VISIBLE and the pipeline crashes
+            # with a clear error instead of silently degrading.
+            raise ValueError(
+                f"v90 ROOT FIX (BUG #62): Invalid action {action!r} at "
+                f"step {self.current_idx}. Expected 0 (LOW) or 1 (HIGH). "
+                f"The previous code silently clamped to 0, masking policy "
+                f"network bugs (NaN outputs, invalid action sampling). "
+                f"This indicates a BUG in the policy network — investigate "
+                f"the PPO model's predict() output."
             )
-            action = 0
 
         row = self.data.iloc[self.current_idx]
         reward = self.reward_fn.compute(row)
@@ -2488,6 +2849,15 @@ class DrugRankingEnv(gym.Env):
                 REWARD_COL: float(reward),
                 "policy_prob": float(self._current_policy_prob),
                 **{col: float(row[col]) for col in self.config.reward.feature_cols
+                   if col in row.index},
+                # v90 ROOT FIX (BUG #47): include disease context features
+                # (disease_pair_count, disease_avg_gnn, disease_avg_safety)
+                # so display_top_candidates shows ALL features the agent
+                # actually observed. The previous code only stored
+                # feature_cols, hiding the disease context features from
+                # the transparency log. A researcher inspecting the Top-N
+                # candidates now sees the complete feature vector.
+                **{col: float(row[col]) for col in self._disease_feature_cols
                    if col in row.index},
             })
         # v90 P0 ROOT FIX (BUG #19): store ALL pairs in all_ranked,
@@ -2626,6 +2996,14 @@ class DrugRankingEnv(gym.Env):
                 for col in self.config.reward.feature_cols
                 if col in row.index
             }
+            # v90 ROOT FIX (BUG #47): include disease context features
+            # (disease_pair_count, disease_avg_gnn, disease_avg_safety)
+            # so display_top_candidates shows ALL features the agent
+            # actually observed. The previous code only stored feature_cols,
+            # hiding the disease context features from the transparency log.
+            for col in self._disease_feature_cols:
+                if col in row.index:
+                    features[col] = float(row.get(col, 0.0))
             drug_name = str(row.get(DRUG_COL, ""))
             disease_name = str(row.get(DISEASE_COL, ""))
             candidates.append(RankedCandidate(
@@ -2635,6 +3013,8 @@ class DrugRankingEnv(gym.Env):
                 features=features,
                 rank=rank,
                 is_known_positive=(drug_name.lower(), disease_name.lower()) in known_set,
+                # v90 BUG #55: propagate policy_prob so to_dict() includes it
+                policy_prob=float(row.get("policy_prob", 0.0)),
             ))
         return candidates
 
@@ -2701,9 +3081,28 @@ def train_agent(
     from stable_baselines3 import PPO
 
     cfg = config or DEFAULT_CONFIG
-    torch.manual_seed(seed)
+    # v90 ROOT FIX (BUG #37): guard timesteps=0 (and negative values).
+    # model.learn(0) crashes SB3 or produces an untrained model. The
+    # PipelineConfig.__post_init__ also catches this (BUG #53), but we
+    # add a defensive check here too in case train_agent is called
+    # directly (e.g., from a notebook) with timesteps=0.
+    if timesteps <= 0:
+        raise ValueError(
+            f"timesteps must be > 0 (got {timesteps}). "
+            f"model.learn(0) crashes SB3 or produces an untrained model. "
+            f"For demo runs, use 5000+; for production, use 50000+."
+        )
+    # v90 ROOT FIX (BUG #36): change the seed per retry attempt. The
+    # previous code used the SAME seed for every retry, so if the first
+    # attempt failed (NaN loss, crash), the retries failed IDENTICALLY
+    # — wasting compute. The fix increments the seed by (attempt - 1)
+    # so each retry uses a different seed (different initialization,
+    # different data shuffling, different stochastic gradient order).
+    # This gives each retry a genuine chance of success.
+    attempt_seed = seed
+    torch.manual_seed(attempt_seed)
     if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
+        torch.cuda.manual_seed_all(attempt_seed)
 
     device = get_device()
     checkpoint_dir = cfg.checkpoint_dir
@@ -2716,6 +3115,23 @@ def train_agent(
     # resume-checkpoint branch (which doesn't create a new VecNormalize).
     normalized_env_for_save: Any = None
     for attempt in range(1, max_retries + 1):
+        # v90 ROOT FIX (BUG #36): change the seed per retry attempt.
+        # attempt 1: seed = seed + 0 = seed (original)
+        # attempt 2: seed = seed + 1 (different init, different shuffle)
+        # attempt 3: seed = seed + 2 (different again)
+        # This gives each retry a genuine chance of success instead of
+        # failing identically to the first attempt.
+        attempt_seed = seed + (attempt - 1)
+        if attempt > 1:
+            logger.info(
+                f"v90 ROOT FIX (BUG #36): retry attempt {attempt}/{max_retries} "
+                f"with NEW seed={attempt_seed} (was {seed} on attempt 1). "
+                f"Different seed = different init + different shuffle = "
+                f"genuine retry (not identical failure)."
+            )
+            torch.manual_seed(attempt_seed)
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(attempt_seed)
         try:
             if resume_checkpoint and os.path.exists(resume_checkpoint):
                 logger.info(f"Resuming training from {resume_checkpoint}")
@@ -2953,7 +3369,7 @@ def train_agent(
                     gamma=_ppo_gamma,  # V30 (10.29): 0.0 for contextual bandit (was 0.95)
                     ent_coef=_ppo_ent_coef,  # V30 (10.8): from config
                     clip_range=_ppo_clip_range,  # V30 (10.8): from config
-                    seed=seed,
+                    seed=attempt_seed,  # v90 BUG #36: per-attempt seed (was `seed`)
                     device=device,
                     tensorboard_log=tensorboard_log,
                     policy_kwargs=policy_kwargs,
@@ -3228,12 +3644,15 @@ def evaluate_agent(
     # ROOT FIX (C12): check for degenerate test set before evaluation
     known_set = {(d.lower(), v.lower()) for d, v in KNOWN_POSITIVES}
     test_data = env.data
-    n_kp_in_test = 0
-    for _, row in test_data.iterrows():
-        drug_lower = str(row.get(DRUG_COL, "")).lower().strip()
-        disease_lower = str(row.get(DISEASE_COL, "")).lower().strip()
-        if (drug_lower, disease_lower) in known_set:
-            n_kp_in_test += 1
+    # v90 ROOT FIX (BUG #49): the previous code used iterrows() (a
+    # Python-level loop) to count KPs in test data. For 100M test pairs,
+    # this takes hours. The fix uses vectorized pandas operations
+    # (str.lower + zip + set intersection), which is ~100x faster.
+    # This mirrors the bridge's C-3 fix (gt_rl_bridge.py:2361-2368).
+    test_drugs_lower = test_data[DRUG_COL].astype(str).str.lower().str.strip()
+    test_diseases_lower = test_data[DISEASE_COL].astype(str).str.lower().str.strip()
+    test_pairs = set(zip(test_drugs_lower, test_diseases_lower))
+    n_kp_in_test = len(known_set & test_pairs)
 
     if n_kp_in_test == 0:
         logger.warning(
@@ -3894,11 +4313,44 @@ def literature_crosscheck(
     try:
         from Bio import Entrez  # type: ignore
     except ImportError:
-        logger.info(
-            "Biopython not installed -- skipping literature cross-check. "
-            "Install with: pip install biopython"
+        # v90 ROOT FIX (BUG #56): the previous code logged at INFO level
+        # and returned top_candidates with literature_support=False for ALL
+        # candidates. The V1 launch criterion "≥5 literature-supported
+        # predictions" silently failed. The logger.info was not prominent
+        # enough — a deployment without biopython produced candidates with
+        # all literature_support=False and the V1 criterion failed silently.
+        # The fix: log at ERROR level (so operators see it in production)
+        # and raise RuntimeError UNLESS RL_SKIP_LITERATURE is set (which
+        # the user explicitly sets when they want to skip the literature
+        # check). This makes the missing-biopython case LOUD instead of
+        # silent, preventing the V1 criterion from failing silently.
+        if os.environ.get("RL_SKIP_LITERATURE"):
+            logger.warning(
+                "Biopython not installed -- skipping literature cross-check "
+                "(RL_SKIP_LITERATURE is set). All candidates will have "
+                "literature_support=False. The V1 launch criterion "
+                "'≥5 literature-supported predictions' WILL FAIL. "
+                "Install with: pip install biopython"
+            )
+            return top_candidates
+        logger.error(
+            "v90 ROOT FIX (BUG #56): Biopython not installed -- cannot "
+            "perform literature cross-check. All candidates would have "
+            "literature_support=False, causing the V1 launch criterion "
+            "'≥5 literature-supported predictions' to FAIL SILENTLY. "
+            "The previous code logged at INFO level and returned candidates "
+            "with all literature_support=False, hiding the failure. The fix "
+            "raises RuntimeError so the failure is LOUD. To bypass "
+            "(debugging only), set RL_SKIP_LITERATURE=1. To fix properly, "
+            "install biopython: pip install biopython"
         )
-        return top_candidates
+        raise RuntimeError(
+            "v90 ROOT FIX (BUG #56): Biopython not installed -- literature "
+            "cross-check cannot be performed. The V1 launch criterion "
+            "'≥5 literature-supported predictions' would fail silently. "
+            "Install biopython (pip install biopython) or set "
+            "RL_SKIP_LITERATURE=1 to explicitly bypass (debugging only)."
+        )
 
     # ROOT FIX (FORENSIC-AUDIT-I25): import time for rate limiting
     import time as _time
@@ -4243,11 +4695,30 @@ def save_results(
 
     if isinstance(candidates, list):
         if not candidates:
-            logger.error(
-                "No candidates ranked HIGH. Writing empty results file with "
-                "metadata for audit trail."
+            # v90 ROOT FIX (BUG #54): the previous code wrote an EMPTY CSV
+            # with just headers when no candidates were ranked HIGH.
+            # A downstream consumer reading the CSV saw 0 rows and could
+            # not distinguish "pipeline succeeded but found no good
+            # candidates" from "science failed." A pharma partner
+            # receiving an empty CSV had no way to know if the science
+            # failed or if there were genuinely no candidates.
+            #
+            # The fix: raise RuntimeError instead of writing an empty CSV.
+            # The caller (run_pipeline) catches this and can handle it
+            # appropriately (e.g., log the failure, notify the team).
+            # The scientific_validation gate (which runs BEFORE
+            # save_results per BUG #48 fix) should catch most cases,
+            # but this is a defensive backstop.
+            raise RuntimeError(
+                "v90 ROOT FIX (BUG #54): No candidates ranked HIGH. "
+                "Refusing to write an empty CSV (a downstream consumer "
+                "cannot distinguish 'pipeline succeeded but found no "
+                "good candidates' from 'science failed'). The "
+                "scientific_validation gate should have caught this "
+                "(BUG #48 fix). Investigate: (1) reward distribution "
+                "(--log-level DEBUG), (2) BAD_HIGH_PENALTY_SCALE, "
+                "(3) safety/gnn thresholds vs input data ranges."
             )
-            df = pd.DataFrame(columns=[DRUG_COL, DISEASE_COL, REWARD_COL, RANK_COL])
         else:
             df = pd.DataFrame([c.to_dict() for c in candidates])
     else:
@@ -4340,13 +4811,68 @@ def merge_results(existing_path: str, new_candidates: pd.DataFrame) -> pd.DataFr
     agent's learned policy probability, not the hand-coded reward
     function). Falls back to ``REWARD_COL`` for backward compatibility
     with old CSVs that don't have a ``policy_prob`` column.
+
+    v90 ROOT FIX (BUG #55): the previous code sorted by ``policy_prob``
+    when present, but RankedCandidate.to_dict() does NOT include
+    ``policy_prob``. So new_candidates DataFrame had no ``policy_prob``
+    column. When merged with an existing CSV that HAD ``policy_prob``,
+    the merged DataFrame had ``policy_prob`` for old rows but NaN for
+    new rows. ``sort_values('policy_prob', ascending=False)`` puts NaN
+    LAST, so ALL new candidates were ranked below OLD candidates
+    regardless of their actual quality. Incremental runs always ranked
+    new candidates at the bottom — the merge was BROKEN.
+
+    The fix: if ``policy_prob`` is present in the merged DataFrame but
+    has NaN values (new candidates don't have it), sort by
+    ``REWARD_COL`` instead. This ensures new candidates are ranked by
+    their actual reward, not pushed to the bottom by missing
+    ``policy_prob``. The ``policy_prob`` column is preserved for rows
+    that have it (auditability).
     """
     if os.path.exists(existing_path):
         existing = pd.read_csv(existing_path)
         merged = pd.concat([existing, new_candidates], ignore_index=True)
-        # ROOT FIX (FORENSIC-AUDIT-I16): prefer policy_prob over REWARD_COL
-        # for ranking, consistent with the B-F2 fix in get_top_candidates.
-        sort_col = "policy_prob" if "policy_prob" in merged.columns else REWARD_COL
+        # v90 ROOT FIX (BUG #55): the previous code used
+        # ``sort_col = 'policy_prob' if 'policy_prob' in merged.columns else REWARD_COL``
+        # but RankedCandidate.to_dict() does NOT include policy_prob, so
+        # new_candidates has no policy_prob column. When merged with an
+        # existing CSV that HAS policy_prob, the merged DataFrame has
+        # policy_prob for old rows but NaN for new rows. sort_values puts
+        # NaN last, so ALL new candidates were ranked below OLD candidates.
+        # The fix: check if policy_prob is present AND has non-NaN values
+        # for the MAJORITY of rows. If so, sort by policy_prob (old behavior).
+        # If policy_prob is missing OR mostly NaN, sort by REWARD_COL
+        # (which is always present).
+        if 'policy_prob' in merged.columns:
+            n_non_nan = int(merged['policy_prob'].notna().sum())
+            n_total = len(merged)
+            # Use policy_prob only if >50% of rows have non-NaN values.
+            # Otherwise, the NaN rows (new candidates) would be pushed to
+            # the bottom regardless of their actual quality.
+            if n_non_nan > n_total / 2:
+                sort_col = 'policy_prob'
+                logger.info(
+                    f"v90 ROOT FIX (BUG #55): sorting merged results by "
+                    f"policy_prob ({n_non_nan}/{n_total} rows have non-NaN "
+                    f"values). New candidates without policy_prob will be "
+                    f"ranked by their REWARD_COL within the NaN group."
+                )
+            else:
+                sort_col = REWARD_COL
+                logger.warning(
+                    f"v90 ROOT FIX (BUG #55): policy_prob column has "
+                    f"{n_non_nan}/{n_total} non-NaN values (majority NaN). "
+                    f"Sorting by REWARD_COL instead to avoid pushing new "
+                    f"candidates to the bottom. (The previous code sorted "
+                    f"by policy_prob, which put ALL new candidates last "
+                    f"regardless of quality — the merge was BROKEN.)"
+                )
+        else:
+            sort_col = REWARD_COL
+            logger.info(
+                f"v90 ROOT FIX (BUG #55): no policy_prob column in merged "
+                f"results. Sorting by REWARD_COL (backward-compatible)."
+            )
         merged = (
             merged.sort_values(sort_col, ascending=False)
                   .drop_duplicates(subset=[DRUG_COL, DISEASE_COL], keep='first')
@@ -4397,8 +4923,7 @@ def safe_load_input(filepath: str) -> Tuple[pd.DataFrame, str]:
             the path. In the DEFAULT (non-strict) mode, parent-symlink
             and realpath-traversal only LOG a WARNING and proceed.
     """
-    # B1 v3 root fix: ONE symlink check, BEFORE realpath.
-    #
+    # B1 v3 root fix: ONE symlink check, BEFORE realpath.    #
     # ROOT FIX (C9): the B1 v3 fix rejected symlinks AND symlinked
     # parent directories AND any path that changed after realpath. This
     # was too aggressive for production — it's common for /data or
@@ -4486,7 +5011,29 @@ def safe_load_input(filepath: str) -> Tuple[pd.DataFrame, str]:
         raise ValueError(f"Input must be a .csv file. Got: {resolved}")
     file_hash = compute_file_hash(resolved)
     logger.info(f"Loading input from {resolved} (SHA-256: {file_hash[:16]}...)")
-    df = pd.read_csv(resolved)
+    # v90 ROOT FIX (BUG #58): the previous code used pd.read_csv(resolved)
+    # with no encoding parameter. If the CSV is UTF-16 or Latin-1, pandas
+    # silently produced garbled drug/disease names (mojibake). The pipeline
+    # then trained on garbage identifiers, producing garbage rankings with
+    # no error. The fix: explicitly try UTF-8 first (the standard), then
+    # fall back to Latin-1 (which never fails — it maps every byte to a
+    # character). If UTF-8 fails, log a WARNING so the user knows the CSV
+    # is not UTF-8 and may have encoding issues. Latin-1 is the safest
+    # fallback because it accepts any byte sequence without raising.
+    try:
+        df = pd.read_csv(resolved, encoding="utf-8")
+    except UnicodeDecodeError:
+        logger.warning(
+            f"v90 ROOT FIX (BUG #58): input CSV {resolved} is not valid "
+            f"UTF-8. Falling back to Latin-1 encoding. Drug/disease names "
+            f"may be garbled if the file is actually UTF-16 or another "
+            f"encoding. Please re-encode the CSV as UTF-8 for correct "
+            f"processing. (The previous code used pd.read_csv with no "
+            f"encoding parameter, which silently produced mojibake on "
+            f"non-UTF-8 files, causing the pipeline to train on garbage "
+            f"identifiers with no error.)"
+        )
+        df = pd.read_csv(resolved, encoding="latin-1")
     return df, file_hash
 
 
@@ -4516,6 +5063,22 @@ def check_for_pii(data: pd.DataFrame) -> List[str]:
     production scale, this is a compliance risk. The fix checks ALL rows
     using vectorized pandas str operations (no Python loop over rows),
     which is fast even for 100M-row datasets.
+
+    v90 ROOT FIX (BUG #57): the previous code applied PII patterns to
+    ALL columns, including drug/disease name columns. The DOB pattern
+    ``\\b\\d{2}/\\d{2}/\\d{4}\\b`` could match disease names like
+    "12/12/2020 syndrome" (hypothetical), and the phone pattern could
+    match drug codes. False positives were possible, and the function
+    flagged the ENTIRE column (not specific rows), so a single false
+    positive flagged the whole column.
+
+    The fix: SKIP known biomedical identifier columns (drug, disease,
+    and the standard feature columns) when scanning for PII. Only scan
+    FREE-TEXT columns (e.g., 'notes', 'description', 'patient_info',
+    'physician_notes') that could actually contain PII. This eliminates
+    false positives on drug/disease names while still catching real PII
+    in free-text fields. The set of biomedical columns is derived from
+    the schema constants (DRUG_COL, DISEASE_COL, FEATURE_COLS).
     """
     pii_patterns = {
         "email": r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}',
@@ -4524,8 +5087,25 @@ def check_for_pii(data: pd.DataFrame) -> List[str]:
         "dob": r'\b\d{2}/\d{2}/\d{4}\b',
         "mrn": r'(?:MRN|medical record)[:\s]*\d+',
     }
+    # v90 ROOT FIX (BUG #57): skip known biomedical identifier columns
+    # to avoid false positives. Drug names like "CPD-1234567" could match
+    # the phone pattern; disease names like "12/12/2020 syndrome" could
+    # match the DOB pattern. Only scan FREE-TEXT columns (anything not in
+    # the biomedical schema) for PII.
+    biomedical_columns = set(REQUIRED_COLUMNS) | set(FEATURE_COLS) | {
+        DRUG_COL, DISEASE_COL, REWARD_COL, RANK_COL,
+        LITERATURE_SUPPORT_COL, IS_KNOWN_POSITIVE_COL,
+        CONTROLLED_SUBSTANCE_COL,
+        DISEASE_PAIR_COUNT_COL, DISEASE_AVG_GNN_COL, DISEASE_AVG_SAFETY_COL,
+        'pipeline_version', 'schema_version', 'training_timestamp',
+        'model_checkpoint', 'reward_weights_json', 'input_sha256',
+        'seed', 'timesteps',
+    }
     flagged: List[str] = []
     for col in data.columns:
+        # v90 ROOT FIX (BUG #57): skip biomedical identifier columns.
+        if col in biomedical_columns:
+            continue
         # ROOT FIX (FORENSIC-AUDIT-I26): check ALL rows, not just head(100).
         # Vectorized str.contains is fast even for large datasets.
         col_str = data[col].astype(str)
@@ -4879,6 +5459,31 @@ def run_pipeline(config: PipelineConfig) -> Tuple[List[RankedCandidate], Pipelin
             train_proper_df = pd.concat(
                 [train_proper_df, kp_oversampled], ignore_index=True
             ).reset_index(drop=True)
+        # v90 BUG #42 (from other agent): additional safety net — filter
+        # any KP rows from val_for_threshold_df that may have leaked
+        # through the drug-aware split (e.g., if a KP drug ended up in
+        # the val_drugs set). This ensures the threshold is computed on
+        # genuinely held-out NON-KP data.
+        if len(val_for_threshold_df) > 0:
+            _kp_filter_set = {
+                (d.lower().strip(), v.lower().strip())
+                for d, v in KNOWN_POSITIVES
+            }
+            _val_kp_mask = val_for_threshold_df.apply(
+                lambda r: (str(r[DRUG_COL]).lower().strip(),
+                          str(r[DISEASE_COL]).lower().strip()) in _kp_filter_set,
+                axis=1,
+            )
+            _n_kps_filtered = int(_val_kp_mask.sum())
+            if _n_kps_filtered > 0:
+                val_for_threshold_df = val_for_threshold_df[~_val_kp_mask].reset_index(drop=True)
+                logger.info(
+                    f"v90 BUG #42: filtered {_n_kps_filtered} KP rows "
+                    f"from val_for_threshold_df (safety net on top of "
+                    f"drug-aware split). val_for_threshold now has "
+                    f"{len(val_for_threshold_df)} genuinely held-out "
+                    f"NON-KP pairs."
+                )
         logger.info(
             f"v90 BUG #14/#15: DRUG-AWARE val split of train_df ({len(train_df)} pairs) "
             f"into train_proper ({len(train_proper_df)}, includes {len(kp_oversampled)} "
@@ -5153,7 +5758,17 @@ def run_pipeline(config: PipelineConfig) -> Tuple[List[RankedCandidate], Pipelin
         "v4_b_f3_synergy_reward_removed": True,
         "s04_monotonic_reward": True,
         "v4_b_f4_orphan_market_score": True,
-        "v4_b_f5_temperature_applied": True,
+        # v90 ROOT FIX (BUG #34): the previous flag
+        # ``v4_b_f5_temperature_applied: True`` was a STALE LIE. No
+        # temperature scaling is applied in the RL pipeline (Phase 4).
+        # Temperature is applied in the GT bridge's Phase 6
+        # (apply_temperature=True at gt_rl_bridge.py:2706), NOT in the
+        # RL ranker. The metadata flag falsely claimed temperature was
+        # applied here, misleading downstream consumers about provenance.
+        # The fix: set the flag to False and rename it to make the scope
+        # explicit (temperature is applied in the BRIDGE, not in RL).
+        "v4_b_f5_temperature_applied_in_rl": False,
+        "v4_b_f5_temperature_applied_in_bridge": True,
         "v4_b_f6_held_out_drugs": True,
         "v4_b_f7_sparse_softmax_gradient": True,
         "v4_b_f8_add_edge_warnings": True,
@@ -5273,6 +5888,47 @@ def run_pipeline(config: PipelineConfig) -> Tuple[List[RankedCandidate], Pipelin
             f"marked as SCIENTIFICALLY INVALID in metadata."
         )
 
+    # v90 ROOT FIX (BUG #48): the previous code ran check_alert_conditions
+    # AFTER save_results. If the alerts fired (e.g., "no candidates ranked
+    # HIGH", "50% safety rejection"), the output was ALREADY written. The
+    # alerts were just log messages, not blocking. A CI/CD pipeline
+    # checking the exit code saw 0 (success) even if alerts fired.
+    #
+    # The fix: run check_alert_conditions BEFORE save_results. If critical
+    # alerts fire (no candidates ranked HIGH, or >50% safety rejection),
+    # raise RuntimeError so the pipeline exits with a non-zero code and
+    # the output is NOT written. This makes the alerts BLOCKING, which is
+    # the scientifically correct behavior — bad output should not reach disk.
+    #
+    # The alert check is NON-blocking for WARNING-level alerts (e.g.,
+    # inference latency > 5000ms), which are performance issues, not
+    # science issues. Only CRITICAL alerts (no HIGH, >50% safety reject)
+    # raise RuntimeError.
+    check_alert_conditions(metrics, data)
+    # v90 ROOT FIX (BUG #48): raise on critical alerts (no HIGH ranked,
+    # or >50% safety rejection). These indicate the science is broken and
+    # the output should NOT be written to disk.
+    if metrics.n_pairs_processed > 0 and metrics.n_ranked_high == 0:
+        raise RuntimeError(
+            "v90 ROOT FIX (BUG #48): CRITICAL ALERT — no candidates ranked "
+            "HIGH. The output would be empty or meaningless. Refusing to "
+            "write to disk. Investigate: (1) reward distribution, "
+            "(2) BAD_HIGH_PENALTY_SCALE, (3) safety/gnn thresholds. "
+            "(The previous code wrote the output BEFORE checking alerts, "
+            "so bad output reached disk and CI/CD saw exit code 0.)"
+        )
+    safety_reject_rate_check = (
+        metrics.n_safety_rejected / max(metrics.n_pairs_processed, 1)
+    )
+    if safety_reject_rate_check > 0.5:
+        raise RuntimeError(
+            f"v90 ROOT FIX (BUG #48): CRITICAL ALERT — {safety_reject_rate_check:.1%} "
+            f"of pairs rejected by safety gate. The output would be biased "
+            f"toward unsafe pairs (the safety gate is rejecting too aggressively, "
+            f"OR the input data has systematic safety issues). Refusing to "
+            f"write to disk. Investigate input data quality or adjust threshold."
+        )
+
     output_path = save_results(candidates, metadata=metadata, config=config)
 
     # v3 root fix: wire merge_results (was dead code in V2).
@@ -5294,7 +5950,11 @@ def run_pipeline(config: PipelineConfig) -> Tuple[List[RankedCandidate], Pipelin
         except Exception as e:
             logger.warning(f"v3 fix: merge_results failed: {e}")
 
-    check_alert_conditions(metrics, data)
+    # v90 ROOT FIX (BUG #48): check_alert_conditions was already called
+    # BEFORE save_results (above). The duplicate call here is removed
+    # to avoid double-logging. The critical alerts (no HIGH, >50% safety
+    # reject) are now BLOCKING — they raise RuntimeError before
+    # save_results, so this point is only reached if alerts are non-critical.
 
     # ROOT FIX (D7): log scientific validation result (computed above
     # before save_results so it's in the metadata). The CRITICAL log

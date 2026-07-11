@@ -265,6 +265,72 @@ class GTRLBridge:
         )
 
     # ------------------------------------------------------------------
+    # ROOT FIX (Phase 1+2+3+4 100% Connection):
+    # load_graph_from_phase1 — load a REAL graph from Phase 1→2 output
+    # ------------------------------------------------------------------
+    # This is the alternative to ``build_demo_graph()``. Instead of
+    # generating a SYNTHETIC random graph with hardcoded drug names, it
+    # accepts the ``Phase1StagedData`` produced by the Phase 1→2 bridge
+    # (``phase2.drugos_graph.phase1_bridge.stage_phase1_to_phase2()``)
+    # and builds a REAL graph from the actual biomedical data that
+    # Phase 1 ingested from the 7 public sources.
+    #
+    # The user's forensic audit found that Phase 3+4 were 0% connected
+    # to Phase 1+2: ``run_full_pipeline()`` ALWAYS called
+    # ``build_demo_graph()``, and there was NO code path to load a real
+    # graph. This method + the ``phase1_staged_data`` parameter on
+    # ``run_full_pipeline()`` close that gap.
+    # ------------------------------------------------------------------
+    def load_graph_from_phase1(self, staged_data: Any) -> None:
+        """Load a REAL knowledge graph from Phase 1→2 staged data.
+
+        Replaces ``build_demo_graph()`` when the caller has REAL Phase 1
+        data (the production path). The staged data is the output of
+        ``phase2.drugos_graph.phase1_bridge.stage_phase1_to_phase2()``,
+        which reads Phase 1's processed CSVs (DrugBank, OMIM, ChEMBL,
+        etc.) and converts them into Phase 2 node/edge dicts.
+
+        After this call, ``self.node_features``, ``self.edge_indices``,
+        ``self.node_maps``, ``self.known_pairs``, ``self.drug_names``,
+        and ``self.disease_names`` are populated with REAL data — ready
+        for ``build_model()`` and ``train_model()``.
+
+        Args:
+            staged_data: A ``Phase1StagedData`` (or duck-typed object)
+                with ``compound_nodes``, ``protein_nodes``,
+                ``pathway_nodes``, ``disease_nodes``,
+                ``clinical_outcome_nodes``, and ``edges``.
+
+        Raises:
+            ValueError: If the staged data has zero drug or disease
+                nodes (propagated from
+                ``BiomedicalGraphBuilder.from_phase1_staged_data``).
+        """
+        logger.info(
+            "ROOT FIX (Phase 1+2+3+4): loading REAL knowledge graph "
+            "from Phase 1→2 staged data (NOT synthetic demo graph)."
+        )
+
+        (
+            self.node_features,
+            self.edge_indices,
+            self.node_maps,
+            self.known_pairs,
+        ) = BiomedicalGraphBuilder.from_phase1_staged_data(
+            staged_data, seed=self.seed
+        )
+
+        self.drug_names = list(self.node_maps.get("drug", {}).keys())
+        self.disease_names = list(self.node_maps.get("disease", {}).keys())
+
+        logger.info(
+            f"REAL graph loaded: {len(self.drug_names)} drugs, "
+            f"{len(self.disease_names)} diseases, "
+            f"{len(self.known_pairs)} REAL known treatment pairs "
+            f"(from Phase 1→2 staged data)."
+        )
+
+    # ------------------------------------------------------------------
     # PHASE 3.2 -- Model construction
     # ------------------------------------------------------------------
     def build_model(
@@ -1762,6 +1828,29 @@ class GTRLBridge:
         # clearly low unmet_need.
         unmet_scale = max(2.0, float(max_treats) * 0.5)
 
+        # v90 ROOT FIX (S-F1): add a disease-connectivity component to
+        # unmet_need_score. On small demo graphs (15 diseases), most
+        # diseases have tc=0 (no treatments), so the exp-decay formula
+        # produces 1.0 for ALL of them → only 3 distinct values. The
+        # RL agent cannot learn from a constant feature.
+        #
+        # Fix: blend the treatment-count signal with a pathway-
+        # connectivity signal. Diseases connected to MORE pathways
+        # (via protein→part_of→pathway→disrupted_in→disease) have
+        # LOWER unmet need (more biological research has been done).
+        # This produces continuous variation even when tc=0 for all
+        # diseases.
+        disrupted_ei = self.edge_indices.get(("pathway", "disrupted_in", "disease"))
+        if disrupted_ei is not None and disrupted_ei.numel() > 0:
+            pathway_count_per_disease = compute_graph_degrees(
+                {("pathway", "disrupted_in", "disease"): disrupted_ei},
+                "disease", direction="in"
+            )
+        else:
+            pathway_count_per_disease = {}
+        max_pw = max(pathway_count_per_disease.values()) if pathway_count_per_disease else 1
+        pw_scale = max(1.0, float(max_pw))
+
         def _unmet_need_for_disease(disease_name: str) -> float:
             ds_idx = disease_map.get(disease_name, -1)
             if ds_idx < 0:
@@ -1773,7 +1862,13 @@ class GTRLBridge:
             # per-pair property. The original rng.normal(0, 0.02) per row
             # was making the same disease appear more/less under-served
             # depending on which drug it was paired with — meaningless.
-            base = 0.95 * float(np.exp(-tc / unmet_scale)) + 0.05
+            treat_component = 0.95 * float(np.exp(-tc / unmet_scale)) + 0.05
+            # v90 S-F1: pathway-connectivity component. Diseases with
+            # more known pathway disruptions have LOWER unmet need.
+            pw = pathway_count_per_disease.get(ds_idx, 0)
+            pw_component = 1.0 - 0.4 * (float(pw) / pw_scale)
+            # Blend: 70% treatment signal, 30% pathway signal.
+            base = 0.7 * treat_component + 0.3 * pw_component
             return float(np.clip(base, 0.0, 1.0))
 
         df["unmet_need_score"] = df["disease"].map(_unmet_need_for_disease)
@@ -1821,20 +1916,18 @@ class GTRLBridge:
         # v89 P0 ROOT FIX (Phase 1-4 integration): pre-built graph data
         # from the REAL Phase 1 → Bridge → Phase 2 pipeline. When
         # provided, the bridge SKIPS build_demo_graph and uses this
-        # real graph instead. This is the user's explicit requirement:
-        # "Write a single run_pipeline.py that calls Phase 1 →
-        # phase1_bridge.stage_phase1_to_phase2 → Phase 2 kg_builder →
-        # Phase 3 GraphTransformerTrainer (loading the REAL Phase 2
-        # HeteroData, not build_demo_graph) → Phase 4 RL ranker."
-        #
+        # real graph instead.
         # The tuple format is:
         #   (node_features, edge_indices, node_maps, known_pairs)
-        # where:
-        #   node_features: Dict[str, torch.Tensor] — feature tensor per node type
-        #   edge_indices: Dict[Tuple[str,str,str], torch.Tensor] — edge index per edge type
-        #   node_maps: Dict[str, Dict[str, int]] — name→idx mapping per node type
-        #   known_pairs: List[Tuple[str, str]] — known drug-disease treatment pairs
         graph_data: Optional[Tuple[Any, Any, Any, Any]] = None,
+        # ROOT FIX (Phase 1+2+3+4 100% Connection): when provided,
+        # the bridge loads a REAL knowledge graph from Phase 1→2
+        # staged data (via ``load_graph_from_phase1``) instead of
+        # generating a SYNTHETIC demo graph. This is the production
+        # path: Phase 1 CSVs → Phase 2 bridge → Phase 3 GT training →
+        # Phase 4 RL ranking, all on REAL data. Takes priority over
+        # graph_data when both are provided.
+        phase1_staged_data: Optional[Any] = None,
     ) -> Tuple[pd.DataFrame, Dict[str, Any]]:
         """Run the COMPLETE end-to-end GT + RL pipeline.
 
@@ -1884,7 +1977,25 @@ class GTRLBridge:
         logger.info("PHASE 3: Graph Transformer Training")
         logger.info("=" * 60)
 
-        if graph_data is not None:
+        # ROOT FIX (Phase 1+2+3+4 100% Connection): priority order:
+        #   1. phase1_staged_data (Phase1StagedData object — highest level,
+        #      converts internally via load_graph_from_phase1)
+        #   2. graph_data (pre-built tuple — lower level, direct assignment)
+        #   3. build_demo_graph (synthetic fallback — DEMO/TEST only)
+        if phase1_staged_data is not None:
+            logger.info(
+                "ROOT FIX (Phase 1+2+3+4): using REAL Phase 1→2 staged "
+                "data — the GT model will train on the actual biomedical "
+                "knowledge graph built from Phase 1's 7 data sources."
+            )
+            self.load_graph_from_phase1(phase1_staged_data)
+            num_drugs = len(self.drug_names)
+            num_diseases = len(self.disease_names)
+            logger.info(
+                f"ROOT FIX (Phase 1+2+3+4): REAL graph has {num_drugs} "
+                f"drugs and {num_diseases} diseases."
+            )
+        elif graph_data is not None:
             # v89 P0 ROOT FIX (Phase 1-4 integration): use the REAL
             # Phase 2 HeteroData instead of build_demo_graph.
             (
@@ -1896,7 +2007,7 @@ class GTRLBridge:
             self.drug_names = list(self.node_maps.get("drug", {}).keys())
             self.disease_names = list(self.node_maps.get("disease", {}).keys())
             logger.info(
-                f"v89 P0 ROOT FIX: using REAL Phase 2 HeteroData "
+                f"v89 P0 ROOT FIX: using REAL Phase 2 graph data "
                 f"(from Phase 1 → Bridge → kg_builder). "
                 f"{len(self.drug_names)} drugs, "
                 f"{len(self.disease_names)} diseases, "
@@ -1905,13 +2016,11 @@ class GTRLBridge:
                 f"biomedical topology."
             )
         else:
-            # Fallback: use build_demo_graph (for backward compat with
-            # run_real_pipeline.py and tests). In production, callers
-            # SHOULD pass graph_data.
-            logger.info(
-                "v89 P0: graph_data not provided — falling back to "
-                "build_demo_graph. For real Phase 1-4 integration, "
-                "pass graph_data from Phase 2 kg_builder + pyg_builder."
+            logger.warning(
+                "ROOT FIX (Phase 1+2+3+4): NO real graph data provided. "
+                "Falling back to SYNTHETIC demo graph (build_demo_graph). "
+                "For real Phase 1-4 integration, pass phase1_staged_data "
+                "or graph_data."
             )
             self.build_demo_graph(
                 num_drugs=num_drugs,
@@ -2011,7 +2120,18 @@ class GTRLBridge:
             dropout=model_dropout,
         )
 
-        gt_results = self.train_model(epochs=gt_epochs, patience=40)
+        # v90 ROOT FIX: when graph_data is provided (REAL Phase 2 graph),
+        # force fresh training. The previous code used the default
+        # resume_from_checkpoint=True, which loaded a STALE checkpoint
+        # from a prior demo-graph run. The GT model then produced
+        # predictions for the wrong graph topology → GT Test AUC = 0.0.
+        # When graph_data is None (demo graph fallback), keep the
+        # resume behavior for backward compat.
+        gt_results = self.train_model(
+            epochs=gt_epochs,
+            patience=40,
+            resume_from_checkpoint=graph_data is None,
+        )
 
         # Generate RL input
         logger.info("=" * 60)
@@ -2385,20 +2505,56 @@ class GTRLBridge:
         # AUC so downstream consumers can detect discrepancies. The
         # ``gt_test_auc`` field uses the VERIFIED AUC when available (the
         # same value used by the scientific_validation gate).
-        _gt_trainer_auc = gt_results.get("test_auc", 0.0)
+        # v90 ROOT FIX (BUG #43): the previous code used
+        # ``gt_results.get("test_auc", 0.0)`` which defaults to 0.0 if
+        # test_auc is missing. If the trainer crashed and didn't produce
+        # test_auc, the discrepancy was computed as |0.0 - verified_auc|
+        # = verified_auc, which could be 0.7+. This looked like a HUGE
+        # discrepancy but was actually just a MISSING VALUE. The fix uses
+        # ``gt_results.get("test_auc")`` (returns None if missing) and
+        # checks for None before computing the discrepancy. If either
+        # value is None, the discrepancy is None (not a misleading number).
+        _gt_trainer_auc_raw = gt_results.get("test_auc")  # None if missing
         _gt_verified_auc = gt_results.get("test_auc_verified")
-        _gt_auc_for_results = (
-            _gt_verified_auc if _gt_verified_auc is not None else _gt_trainer_auc
-        )
+        # For the primary gt_test_auc, fall back to 0.0 ONLY if BOTH are
+        # missing (backward compat with old checkpoints that don't produce
+        # either). If trainer is None but verified is present, use verified.
+        if _gt_trainer_auc_raw is not None:
+            _gt_trainer_auc = float(_gt_trainer_auc_raw)
+        else:
+            _gt_trainer_auc = None
+        if _gt_verified_auc is not None:
+            _gt_verified_auc = float(_gt_verified_auc)
+        # Choose the primary AUC: prefer verified, fall back to trainer,
+        # fall back to 0.0 only if both are missing (legacy compat).
+        if _gt_verified_auc is not None:
+            _gt_auc_for_results = _gt_verified_auc
+        elif _gt_trainer_auc is not None:
+            _gt_auc_for_results = _gt_trainer_auc
+        else:
+            _gt_auc_for_results = 0.0
+        # v90 ROOT FIX (BUG #43): compute discrepancy ONLY when BOTH
+        # values are present. If either is None (missing), the discrepancy
+        # is None (not a misleading |0.0 - verified| = verified).
+        if _gt_trainer_auc is not None and _gt_verified_auc is not None:
+            _gt_discrepancy = abs(_gt_trainer_auc - _gt_verified_auc)
+        else:
+            _gt_discrepancy = None
+            if _gt_trainer_auc is None and _gt_verified_auc is not None:
+                logger.warning(
+                    f"v90 ROOT FIX (BUG #43): trainer test_auc is MISSING "
+                    f"but verified AUC is {_gt_verified_auc:.4f}. The "
+                    f"discrepancy is set to None (not |0.0 - "
+                    f"{_gt_verified_auc:.4f}| = {_gt_verified_auc:.4f}, "
+                    f"which would be misleading). The trainer likely "
+                    f"crashed before computing test_auc — investigate."
+                )
         results = {
             "gt_best_val_auc": gt_results["best_val_auc"],
             "gt_test_auc": _gt_auc_for_results,
-            "gt_test_auc_trainer": _gt_trainer_auc,
+            "gt_test_auc_trainer": _gt_trainer_auc if _gt_trainer_auc is not None else 0.0,
             "gt_test_auc_verified": _gt_verified_auc,
-            "gt_test_auc_discrepancy": (
-                abs(_gt_trainer_auc - _gt_verified_auc)
-                if _gt_verified_auc is not None else None
-            ),
+            "gt_test_auc_discrepancy": _gt_discrepancy,
             "gt_epochs_trained": gt_results["epochs_trained"],
             "rl_pairs_processed": metrics.n_pairs_processed,
             "rl_ranked_high": metrics.n_ranked_high,
@@ -2432,19 +2588,37 @@ class GTRLBridge:
         # The fix: use the VERIFIED AUC (test_auc_verified) when available,
         # falling back to trainer AUC only when verified is None (older
         # checkpoint or evaluation path that doesn't compute it).
-        gt_test_auc_trainer = gt_results.get("test_auc", 0.0)
+        # v90 ROOT FIX (BUG #43): use .get() without default 0.0 to detect
+        # missing values (None) instead of masking them as 0.0.
+        gt_test_auc_trainer_raw = gt_results.get("test_auc")  # None if missing
         gt_test_auc_verified = gt_results.get("test_auc_verified")
-        gt_test_auc = (
-            gt_test_auc_verified
-            if gt_test_auc_verified is not None
-            else gt_test_auc_trainer
+        # For the scientific validation gate, fall back to 0.0 only if BOTH
+        # are missing (legacy compat). If trainer is None but verified is
+        # present, use verified (and vice versa).
+        if gt_test_auc_verified is not None:
+            gt_test_auc = float(gt_test_auc_verified)
+        elif gt_test_auc_trainer_raw is not None:
+            gt_test_auc = float(gt_test_auc_trainer_raw)
+        else:
+            gt_test_auc = 0.0
+        # For logging, use the raw values (None-safe)
+        gt_test_auc_trainer = (
+            float(gt_test_auc_trainer_raw) if gt_test_auc_trainer_raw is not None else 0.0
         )
         if gt_test_auc_verified is not None:
             logger.info(
                 f"V30 ROOT FIX (9.4): using VERIFIED AUC={gt_test_auc_verified:.4f} "
                 f"(not trainer AUC={gt_test_auc_trainer:.4f}) for the scientific "
                 f"validation gate. Discrepancy: "
-                f"{abs(gt_test_auc_verified - gt_test_auc_trainer):.4f}."
+                f"{abs(float(gt_test_auc_verified) - gt_test_auc_trainer):.4f}."
+            )
+        elif gt_test_auc_trainer_raw is None:
+            logger.warning(
+                f"v90 ROOT FIX (BUG #43): BOTH trainer test_auc and verified "
+                f"test_auc are MISSING. The scientific validation gate will "
+                f"use gt_test_auc=0.0 (which will FAIL the 0.85 threshold). "
+                f"The trainer likely crashed before computing test_auc — "
+                f"investigate the GT training logs."
             )
         # Read RL AUC from the metadata file
         import glob as _glob
@@ -2558,11 +2732,29 @@ class GTRLBridge:
             # Fallback: old computation (all KPs denominator) — only used
             # if the RL metadata is unavailable. This is the LEGACY
             # behavior and will cap recovery at 40% on the demo.
+            # v90 ROOT FIX (BUG #44): the previous code logged a WARNING
+            # here, but the fallback uses ALL KPs as the denominator
+            # (len(_KP) = 5), while the RL split puts only ~40% of KPs
+            # in the test set. So the max recovery is 2/5 = 40%, reported
+            # as "40% recovery" — misleading. The bridge might FAIL
+            # validation (40% < 20%? No, 40% > 20%, so it passes) based
+            # on a WRONG denominator. The fix upgrades the log to CRITICAL
+            # so operators know the recovery rate CANNOT BE TRUSTED in
+            # this fallback path. The rate is still computed (backward
+            # compat) but consumers are warned it's based on the wrong
+            # denominator.
             kp_recovery_rate = len(recovered_kps) / len(_KP) if _KP else 0.0
-            logger.warning(
-                f"ROOT FIX (C-3): RL metadata unavailable, using legacy "
-                f"recovery denominator (all {len(_KP)} KPs). Recovery "
-                f"capped at {len(recovered_kps)}/{len(_KP)}."
+            logger.critical(
+                f"v90 ROOT FIX (BUG #44): RL metadata UNAVAILABLE. The "
+                f"recovery rate ({kp_recovery_rate:.1%}) is computed with "
+                f"the WRONG DENOMINATOR (all {len(_KP)} KPs, not just "
+                f"test-set KPs). The RL split puts only ~40% of KPs in "
+                f"the test set, so the max recovery is "
+                f"{int(0.4 * len(_KP))}/{len(_KP)} = 40%. A rate of "
+                f"40% actually means 100% of test KPs were recovered. "
+                f"DO NOT TRUST this recovery rate for validation decisions. "
+                f"Investigate why RL metadata is unavailable (the RL "
+                f"pipeline likely crashed before writing metadata)."
             )
 
         # ROOT FIX (FORENSIC-AUDIT-C07): V1-contract-grade thresholds.

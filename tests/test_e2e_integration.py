@@ -703,8 +703,14 @@ def test_b20_low_action_penalty_increased():
     _report("B20 v2: low_action_penalty is 1.0 (was 0.5 in v1, 0.1 originally)",
             cfg.low_action_penalty == 1.0,
             f"got {cfg.low_action_penalty}")
-    _report("B20 v2: correct_rejection_reward is 0.0 (was 0.05)",
-            cfg.correct_rejection_reward == 0.0,
+    # v90 ROOT FIX (BUG #40): correct_rejection_reward is now 0.05 (was 0.0).
+    # The previous value 0.0 meant correctly rejecting a bad pair gave ZERO
+    # reward, while incorrectly ranking a bad pair HIGH gave only -0.05 (via
+    # BAD_HIGH_PENALTY_SCALE=0.05). The agent was incentivized to say HIGH on
+    # EVERYTHING. The fix restores 0.05 so the agent has a reason to say LOW
+    # on bad pairs.
+    _report("v90 BUG #40: correct_rejection_reward is 0.05 (was 0.0, caused always-HIGH collapse)",
+            cfg.correct_rejection_reward == 0.05,
             f"got {cfg.correct_rejection_reward}")
     _report("S-04: high_action_bonus is 5.0 (was 12.0; S-04 lowered to prevent PPO collapse)",
             cfg.high_action_bonus == 5.0,

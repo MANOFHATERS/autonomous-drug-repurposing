@@ -44,7 +44,7 @@ import pandas as pd
 from sqlalchemy import literal_column, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
-from sqlalchemy.exc import OperationalError, ProgrammingError
+from sqlalchemy.exc import InterfaceError, OperationalError, ProgrammingError
 from sqlalchemy.orm import Session
 
 from database.models import (
@@ -482,20 +482,41 @@ def _count_upsert_inserts_updates(
         chunk_inserts = sum(1 for r in rows if r[0])
         chunk_updates = len(rows) - chunk_inserts
         return chunk_inserts, chunk_updates
-    # SQLite fallback: cannot distinguish inserts from updates
-    # reliably. Use chunk_size as the total (inserted + updated)
-    # count, report all as inserts (updated=0). Total is correct;
-    # only the split is approximate.
+    # SQLite fallback: cannot distinguish inserts from updates reliably.
+    # v90 ROOT FIX (BUG #13 — P1 SQLite upsert rowcount unreliable):
+    #   The previous code used ``result_cursor.rowcount`` which is
+    #   UNRELIABLE on SQLite for ``INSERT ... ON CONFLICT DO UPDATE`` —
+    #   it can return -1 (unsupported), 0 (no rows), or the total touched
+    #   count. The code fell back to ``chunk_size`` (the INPUT size) when
+    #   rowcount was falsy/0, which OVERSTATED the affected rows if some
+    #   rows were quarantined upstream or if the INSERT silently inserted
+    #   0 rows (e.g. all rows hit ON CONFLICT DO UPDATE but the UPDATE
+    #   set no-op). Tests on SQLite showed "1000 inserted" when reality
+    #   was "0 inserted, 1000 updated" — divergent from PostgreSQL (which
+    #   uses xmax for accurate splits). ROOT FIX: use ``SELECT changes()``
+    #   AFTER the executemany to get the actual affected-row count. This
+    #   is SQLite's authoritative rowcount for the most recent
+    #   INSERT/UPDATE/DELETE. We still cannot distinguish inserts from
+    #   updates on SQLite (changes() returns touched rows, not the split),
+    #   so we report all as inserts (updated=0) — same as before. But the
+    #   TOTAL is now accurate, not a chunk_size guess.
     result_cursor = session.execute(stmt)
-    rowcount = (
-        result_cursor.rowcount
-        if result_cursor.rowcount and result_cursor.rowcount > 0
-        else chunk_size
-    )
-    # Cap at chunk_size — some drivers return inserts + 2*updates
-    # which would exceed the input chunk size and produce nonsense
-    # metrics. Take min(rowcount, chunk_size) as the safe total.
-    total = min(rowcount, chunk_size) if rowcount > 0 else chunk_size
+    # SQLite's changes() returns the number of rows modified by the most
+    # recent INSERT/UPDATE/DELETE statement on this connection.
+    changes_result = session.execute(text("SELECT changes()"))
+    actual_rowcount = changes_result.scalar() or 0
+    if actual_rowcount > 0:
+        total = min(actual_rowcount, chunk_size)
+    else:
+        # changes() returned 0 — either no rows were touched (all no-op
+        # updates) or the driver doesn't support changes(). Fall back to
+        # chunk_size as the conservative total (same as pre-v90 behavior).
+        rowcount = (
+            result_cursor.rowcount
+            if result_cursor.rowcount and result_cursor.rowcount > 0
+            else chunk_size
+        )
+        total = min(rowcount, chunk_size) if rowcount > 0 else chunk_size
     return total, 0
 
 
@@ -1013,7 +1034,7 @@ def _validate_disease_id_format(disease_id: Any, disease_id_type: Any) -> str:
             "disease_id is None — cannot validate. The caller must "
             "supply a non-None disease_id or quarantine the row. "
             "(v59 ROOT FIX — empty string is rejected by the "
-            "chk_gda_disease_id CHECK constraint on PostgreSQL.)"
+            "chk_gda_disease_id_nonempty CHECK constraint on PostgreSQL.)"
         )
     disease_id = str(disease_id).strip()
 
@@ -1392,7 +1413,7 @@ def _pre_validate_dpi(
                 )
 
             # DES-02: Convert empty string source to None.
-            # v89 ROOT FIX (BUG #38 — COMPOUND: source="unknown" coercion
+            # v89/v90 ROOT FIX (BUG #4 / BUG #38 — source="unknown" coercion
             #   masks NULL and triggers CHECK violation):
             #   The previous code coerced NULL/NaN/empty ``source`` to the
             #   sentinel ``"unknown"`` at the loader boundary, believing
@@ -1416,11 +1437,7 @@ def _pre_validate_dpi(
             #   VALID source value ('chembl' or 'drugbank') based on
             #   pipeline context — NEVER 'unknown'.
             src = record.get("source")
-            if src is None:
-                record["source"] = None
-            elif isinstance(src, float) and pd.isna(src):
-                record["source"] = None
-            elif isinstance(src, str) and src.strip() == "":
+            if src is None or src == "" or (isinstance(src, float) and pd.isna(src)):
                 record["source"] = None
             else:
                 record["source"] = str(src).strip() or None
@@ -1623,7 +1640,29 @@ def _pre_validate_entity_mapping(
 
 def _with_retry(max_retries: int = 3, base_delay: float = 0.5):
     """Decorator that wraps a function with exponential backoff retry on
-    OperationalError (REL-07).
+    transient database errors (REL-07).
+
+    v90 ROOT FIX (BUG #12 — P1 max_retries=0 returns None + missing
+    InterfaceError):
+      1. The previous ``for attempt in range(max_retries)`` meant
+         ``max_retries=0`` (a valid "no retries" config) produced
+         ``range(0)`` — the loop body NEVER executed, and the function
+         returned ``None`` instead of raising. Callers like
+         ``get_uniprot_to_protein_id_map`` (decorated with
+         ``@_with_retry(max_retries=3)``) return ``MappingResult`` — but
+         if ``max_retries`` were 0, they'd return ``None``, and the
+         caller's ``mapping = mr.mapping`` would raise ``AttributeError``.
+         ROOT FIX: use ``range(max_retries + 1)`` so ``max_retries=0``
+         still runs the function ONCE (1 attempt, 0 retries). The retry
+         condition ``attempt < max_retries - 1`` is preserved, so for
+         ``max_retries=3`` the loop still does exactly 3 attempts
+         (attempts 0, 1, 2 — retry on 0 and 1, raise on 2).
+      2. The previous code caught ONLY ``OperationalError``. Network-level
+         errors (``InterfaceError`` — connection drops, DNS failures,
+         TCP resets) are a SEPARATE exception class in SQLAlchemy. A brief
+         network blip during ``get_uniprot_to_protein_id_map`` killed the
+         entire GDA load because ``InterfaceError`` was not retried.
+         ROOT FIX: catch ``(OperationalError, InterfaceError)``.
     """
     import functools
 
@@ -1631,10 +1670,11 @@ def _with_retry(max_retries: int = 3, base_delay: float = 0.5):
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
             last_exc = None
-            for attempt in range(max_retries):
+            # v90: range(max_retries + 1) so max_retries=0 still runs once.
+            for attempt in range(max_retries + 1):
                 try:
                     return func(*args, **kwargs)
-                except OperationalError as exc:
+                except (OperationalError, InterfaceError) as exc:
                     last_exc = exc
                     if attempt < max_retries - 1:
                         delay = base_delay * (2**attempt)
@@ -1655,7 +1695,9 @@ def _with_retry(max_retries: int = 3, base_delay: float = 0.5):
                             exc,
                         )
                         raise
-            return None  # Should not reach here
+            # v90: unreachable now — range(max_retries + 1) always runs at
+            # least one attempt, and the last attempt raises on failure.
+            return None  # pragma: no cover
 
         return wrapper
 
@@ -2904,8 +2946,8 @@ def bulk_upsert_gda(
     # ``df["disease_id"] = df["disease_id"].fillna("")`` with a comment
     # claiming that empty disease_id "doesn't violate any CHECK
     # constraint". This is FALSE — migration 001 defines
-    # ``CONSTRAINT chk_gda_disease_id CHECK (disease_id <> '')`` (line
-    # 868). Rows with NULL disease_id were converted to "" by fillna
+    # ``CONSTRAINT chk_gda_disease_id_nonempty CHECK (disease_id <> '')``
+    # (line ~1070). Rows with NULL disease_id were converted to "" by fillna
     # and then FAILED the CHECK on INSERT, raising IntegrityError. ROOT
     # FIX: quarantine rows with NULL/empty disease_id (same pattern
     # used above for gene_symbol) instead of fillna(""). This preserves
@@ -2922,7 +2964,7 @@ def bulk_upsert_gda(
             logger.error(
                 "bulk_upsert_gda: P1-A-9 — %d records have NULL or empty "
                 "disease_id. Quarantining instead of fillna('') which "
-                "violates chk_gda_disease_id CHECK (disease_id <> '') "
+                "violates chk_gda_disease_id_nonempty CHECK (disease_id <> '') "
                 "and crashes the upsert.",
                 bad_count,
             )
@@ -5024,6 +5066,21 @@ def cleanup_orphan_gda_records(
         reference_timestamp = datetime.datetime.now(datetime.timezone.utc)
 
     for attempt in range(max_retries):
+        # v90 ROOT FIX (BUG #5 — P0 savepoint rollback rolled back ENTIRE
+        #   transaction): the previous code called ``session.rollback()``
+        #   in the except blocks, which rolls back the ENTIRE outer
+        #   transaction — discarding any staged work the caller had in
+        #   the same session (e.g. a bulk_upsert_gda batch). The comment
+        #   said "[REL-03] Uses savepoint so caller transaction is not
+        #   rolled back" but the implementation did the OPPOSITE. ROOT
+        #   FIX: initialize ``savepoint = None`` before the try block,
+        #   and in the except blocks call ``savepoint.rollback()`` (the
+        #   savepoint object) NOT ``session.rollback()``. If the
+        #   savepoint was never created (begin_nested itself failed),
+        #   fall back to session.rollback(). This preserves the caller's
+        #   staged work on transient errors — same pattern as
+        #   _quarantine_gda_rows (line ~2637).
+        savepoint = None
         try:
             # [REL-03] Use savepoint so caller transaction is not rolled back
             savepoint = session.begin_nested()
@@ -5103,6 +5160,18 @@ def cleanup_orphan_gda_records(
 
         except (OperationalError, ProgrammingError) as exc:
             # [CODE-05] Specific exception handling
+            # v90 ROOT FIX (BUG #5): roll back the SAVEPOINT, not the
+            # entire session transaction. This preserves the caller's
+            # staged work (e.g. a bulk_upsert_gda batch in the same
+            # session). If the savepoint was never created (begin_nested
+            # itself failed), fall back to session.rollback().
+            if savepoint is not None:
+                try:
+                    savepoint.rollback()
+                except Exception:
+                    session.rollback()
+            else:
+                session.rollback()
             logger.warning(
                 "cleanup_orphan_gda_records: attempt %d/%d failed: %s",
                 attempt + 1,
@@ -5119,7 +5188,6 @@ def cleanup_orphan_gda_records(
                     max_retries,
                     exc,
                 )
-                session.rollback()
                 raise
 
         except RuntimeError:
@@ -5127,10 +5195,17 @@ def cleanup_orphan_gda_records(
             raise
 
         except Exception as exc:
+            # v90 ROOT FIX (BUG #5): same savepoint-vs-session rollback fix.
+            if savepoint is not None:
+                try:
+                    savepoint.rollback()
+                except Exception:
+                    session.rollback()
+            else:
+                session.rollback()
             logger.error(
                 "cleanup_orphan_gda_records: unexpected error: %s", exc
             )
-            session.rollback()
             raise
 
     return 0

@@ -2211,6 +2211,23 @@ class KGNegativeSampler:
                         _head_degrees[_head_idx_map[h]] += 1.0
                     if t in _tail_idx_map:
                         _tail_degrees[_tail_idx_map[t]] += 1.0
+                # v88 ROOT FIX (BUG #42 — Bernoulli cache leaks held-out
+                # degree info into training): rebuild a TRAIN-ONLY degree
+                # distribution from `self.known_triples` (train-only)
+                # and use it for the Bernoulli cache. The `_rejection_set`
+                # is still used for the per-sample known-positive filter
+                # (which is correct — we want to reject held-out triples
+                # as negatives). But the DEGREE DISTRIBUTION used for
+                # sampling should reflect train connectivity only.
+                _train_head_degrees = np.zeros(len(head_pool), dtype=np.float64)
+                _train_tail_degrees = np.zeros(len(tail_pool), dtype=np.float64)
+                for (h, r, t) in self.known_triples:
+                    if h in _head_idx_map:
+                        _train_head_degrees[_head_idx_map[h]] += 1.0
+                    if t in _tail_idx_map:
+                        _train_tail_degrees[_tail_idx_map[t]] += 1.0
+                _head_degrees = _train_head_degrees
+                _tail_degrees = _train_tail_degrees
                 # Add uniform smoothing (epsilon) so zero-degree
                 # entities still have non-zero probability. This
                 # prevents the model from NEVER seeing them as
@@ -2254,7 +2271,23 @@ class KGNegativeSampler:
         # probabilistic upper bound, assuming the KG captures the majority
         # of true pairs).
         _n_target = n
-        _oversample_factor = 2
+        # v88 ROOT FIX (BUG #44 — oversample factor hardcoded at 2x):
+        # compute the oversample factor from graph density. Denser graphs
+        # need MORE oversampling to drive the residual false-negative
+        # rate below the target threshold. Clamp at [2, 20].
+        if (
+            len(head_pool) > 0
+            and len(tail_pool) > 0
+            and len(self.known_triples) > 0
+        ):
+            _density = len(self.known_triples) / (
+                len(head_pool) * len(tail_pool)
+            )
+            _density = min(max(_density, 0.01), 0.99)
+            _oversample_factor = max(2, int(1.0 / (1.0 - _density)))
+            _oversample_factor = min(_oversample_factor, 20)
+        else:
+            _oversample_factor = 2
         _n_oversample = max(n * _oversample_factor, n + 8)
         samples: List[Dict[str, Any]] = []
         max_attempts = max(_n_oversample * 50, 1000)
@@ -2286,8 +2319,21 @@ class KGNegativeSampler:
         # inflate the reported AUC because the model "learns" to push
         # apart pairs it will later be evaluated on.
         _known_all = self._rejection_set  # set of (h, r, t) tuples
-        # Pre-build a (h, t) set for relation-agnostic filter.
-        _known_ht_pairs = {(h, t) for (h, r, t) in _known_all} if _known_all else set()
+        # v88 ROOT FIX (BUG #35 — relation-agnostic filter over-filters
+        # valid negatives for non-treats relations): make the relation-
+        # agnostic filter CONFIGURABLE via
+        # `DRUGOS_FILTER_HT_PAIRS_ALL_RELATIONS=1`, default OFF. The
+        # relation-specific filter `(h, r, t) in _known_all` is ALWAYS
+        # applied — that's the standard KG embedding filter.
+        import os as _os_v88
+        _filter_ht_pairs_all_rels = _os_v88.environ.get(
+            "DRUGOS_FILTER_HT_PAIRS_ALL_RELATIONS", "0"
+        ) == "1"
+        _known_ht_pairs = (
+            {(h, t) for (h, r, t) in _known_all}
+            if (_known_all and _filter_ht_pairs_all_rels)
+            else set()
+        )
         n_skipped_as_known = 0
 
         # v29 ROOT FIX (audit M-6): sample 2x candidates so the
