@@ -255,7 +255,10 @@ jobs:
           phenotype = 'Cystic fibrosis, 219700 (3), autosomal recessive'
           parsed_name, mim, mk, mod = OMIMPipeline._parse_phenotype_field(phenotype)
           pattern = _extract_inheritance_pattern(parsed_name)
-          stripped = _strip_inheritance_pattern(parsed_name, pattern)
+          # v83 P1-1: _strip_inheritance_pattern takes 1 arg (name) — uses
+          # regex sub internally. The 2-arg form was my original v83 P1-1
+          # but the rebase kept COMP-5's 1-arg signature.
+          stripped = _strip_inheritance_pattern(parsed_name)
           check('P1-1 disease_name clean', stripped == 'Cystic fibrosis', f'got {stripped!r}')
           check('P1-1 inheritance_pattern extracted', pattern == 'autosomal recessive')
 

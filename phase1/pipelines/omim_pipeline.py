@@ -1310,15 +1310,16 @@ class OMIMPipeline(BasePipeline):
                 lambda s: _extract_inheritance_pattern(s) if isinstance(s, str) else None
             )
             # Strip the inheritance pattern from phenotype_name so disease_name
-            # (assigned at Step 18 from phenotype_name) is clean. Pass BOTH
-            # the name and the extracted pattern so the strip function knows
-            # exactly what to remove (defence-in-depth: the function re-runs
-            # the regex to find the exact match span).
-            df["phenotype_name"] = df.apply(
-                lambda r: _strip_inheritance_pattern(r["phenotype_name"], r["inheritance_pattern"])
-                if isinstance(r.get("phenotype_name"), str) and r.get("inheritance_pattern")
-                else r.get("phenotype_name"),
-                axis=1,
+            # (assigned at Step 18 from phenotype_name) is clean.
+            # v83 P1-1: the parallel-agent COMP-5 version of
+            # _strip_inheritance_pattern takes a SINGLE arg (the name) and
+            # uses regex sub to remove the pattern. My v83 P1-1 version took
+            # 2 args (name + pattern) — but the rebase kept COMP-5's 1-arg
+            # signature. ROOT FIX: call with 1 arg to match the merged
+            # signature. The function re-runs the regex internally so the
+            # pattern arg was redundant anyway.
+            df["phenotype_name"] = df["phenotype_name"].apply(
+                lambda s: _strip_inheritance_pattern(s) if isinstance(s, str) else s
             )
 
         # Step 12: BUG-3.16 — pre-dedup before scoring.
