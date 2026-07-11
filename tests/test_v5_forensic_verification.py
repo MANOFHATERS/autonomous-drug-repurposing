@@ -289,14 +289,23 @@ def test_bf4_market_score_orphan_favoring():
     )
 
     # Compute pathway counts per disease and check that low-pathway diseases
-    # get a HIGH market score (orphan bonus)
+    # get a HIGH market score (orphan bonus).
+    #
+    # v90 ROOT FIX (B-F4 test bug): the previous test assumed low pathway
+    # count = rare disease = high market_score. But the v89 market_score
+    # formula uses PREVALENCE (not pathway count) as the rarity proxy.
+    # A common disease like "atrial fibrillation" can have pw=0 (no
+    # pathway edges in the demo graph) but HIGH prevalence → LOW
+    # market_score. The test's assertion (pw=0 → high market_score)
+    # was invalid. ROOT FIX: use the ACTUAL prevalence (the same signal
+    # the formula uses) as the rarity proxy. Sort diseases by prevalence;
+    # the lowest-prevalence disease should have the highest market_score.
     disrupted = bridge.edge_indices.get(("pathway", "disrupted_in", "disease"))
     pw_count = {}
     if disrupted is not None and disrupted.numel() > 0:
         for ds_idx in disrupted[1].tolist():
             pw_count[ds_idx] = pw_count.get(ds_idx, 0) + 1
 
-    # Sort diseases by pathway count
     # ROOT FIX (V27): only iterate over diseases that are ACTUALLY IN the
     # df. The V26 test iterated over ALL diseases in disease_map, but the
     # df only contains the first 10. If a KP disease (e.g., "inflammation")
@@ -305,22 +314,36 @@ def test_bf4_market_score_orphan_favoring():
     # causing ``df[df["disease"] == rare_disease]["market_score"].iloc[0]``
     # to fail with "single positional indexer is out-of-bounds" (empty df).
     df_disease_set = set(df["disease"].tolist())
-    disease_pw = []
+
+    # v90 ROOT FIX (B-F4): use prevalence (the formula's actual rarity
+    # signal) instead of pathway count (an invalid proxy). Import the
+    # prevalence lookup from biomedical_tables (same module the formula
+    # uses — single source of truth).
+    try:
+        from graph_transformer.data.biomedical_tables import get_disease_prevalence
+    except ImportError:
+        get_disease_prevalence = lambda d: None  # noqa: E731
+
+    disease_prev = []
     for d_name, ds_idx in disease_map.items():
         if d_name in df_disease_set:  # V27 fix: only include diseases in the df
-            disease_pw.append((d_name, pw_count.get(ds_idx, 0)))
-    disease_pw.sort(key=lambda x: x[1])
+            prev = get_disease_prevalence(d_name)
+            # Treat None (unknown) as max prevalence (common) so known
+            # rare diseases sort first.
+            prev_val = prev if prev is not None else float('inf')
+            disease_prev.append((d_name, prev_val, prev))
+    disease_prev.sort(key=lambda x: x[1])
 
-    if len(disease_pw) >= 2:
-        rare_disease = disease_pw[0][0]
-        common_disease = disease_pw[-1][0]
+    if len(disease_prev) >= 2:
+        rare_disease = disease_prev[0][0]
+        common_disease = disease_prev[-1][0]
         rare_market = float(df[df["disease"] == rare_disease]["market_score"].iloc[0])
         common_market = float(df[df["disease"] == common_disease]["market_score"].iloc[0])
         check(
-            "B-F4: rare disease (low pw) has higher market_score than common disease",
+            "B-F4: rare disease (low prevalence) has higher market_score than common disease",
             rare_market > common_market,
-            f"rare({rare_disease}, pw={disease_pw[0][1]})={rare_market:.3f}, "
-            f"common({common_disease}, pw={disease_pw[-1][1]})={common_market:.3f}",
+            f"rare({rare_disease}, prev={disease_prev[0][2]})={rare_market:.3f}, "
+            f"common({common_disease}, prev={disease_prev[-1][2]})={common_market:.3f}",
         )
 
 
