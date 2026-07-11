@@ -306,6 +306,7 @@ def run_schema_adapter(
     ``adapt_phase2_to_phase3``. This is the REAL integration point that
     the v89 run_pipeline.py was missing (it called a non-existent
     ``build_pyg_hetero_data`` function).
+    """
     return staged, builder
 
 
