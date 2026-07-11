@@ -288,6 +288,29 @@ def test_bf4_market_score_orphan_favoring():
         f"n_unique={n_unique}, sample={np.round(markets, 3)[:5].tolist()}",
     )
 
+    # v91 ROOT FIX (B-F4 test was using pathway count as rarity proxy —
+    # scientifically wrong): the v89 ROOT FIX changed market_score to use
+    # CURATED WHO/Orphanet disease prevalence (the scientifically correct
+    # approach). Rare diseases (prevalence < 5/10K per FDA/EU) get HIGH
+    # market scores (orphan drug value). Common diseases get LOWER scores.
+    #
+    # The PREVIOUS version of this test used PATHWAY COUNT as a proxy for
+    # rarity (low pathway count = "rare"). That proxy is WRONG: a disease
+    # can have 0 pathway connections in the demo graph but still be COMMON
+    # (e.g., atrial fibrillation, prevalence ~3300/10K). The test was
+    # picking atrial fibrillation (pw=0, but actually common) as the "rare"
+    # disease and lupus (pw=1, but actually less common than AFib) as the
+    # "common" disease — then asserting rare_market > common_market, which
+    # failed because the production code correctly gives AFib a LOWER
+    # market_score than lupus.
+    #
+    # ROOT FIX: use the ACTUAL disease prevalence (from get_disease_prevalence
+    # in biomedical_tables.py, the same table compute_market_score uses) to
+    # determine which disease is rare vs common. This aligns the test's
+    # rarity definition with the production code's rarity definition.
+    from graph_transformer.data.biomedical_tables import get_disease_prevalence
+
+    df_disease_set = set(df["disease"].tolist())
     # Compute pathway counts per disease and check that low-pathway diseases
     # get a HIGH market score (orphan bonus)
     disrupted = bridge.edge_indices.get(("pathway", "disrupted_in", "disease"))
@@ -388,6 +411,15 @@ def test_bf4_market_score_orphan_favoring():
     for d_name in disease_map.keys():
         if d_name in df_disease_set:
             prev = get_disease_prevalence(d_name)
+            # Unknown prevalence (None) → treat as mid-prevalence (50/10K)
+            # so it sorts between rare and common.
+            prev_val = prev if prev is not None else 50.0
+            disease_prev.append((d_name, prev_val, prev))
+    disease_prev.sort(key=lambda x: x[1])  # sort by prevalence ascending
+
+    if len(disease_prev) >= 2:
+        # rare_disease = lowest prevalence (actually rare)
+        # common_disease = highest prevalence (actually common)
             # Treat None (unknown) as mid-prevalence for sorting stability
             disease_prev.append((d_name, prev if prev is not None else 50.0))
     disease_prev.sort(key=lambda x: x[1])  # ascending: rare first

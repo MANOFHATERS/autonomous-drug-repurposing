@@ -2169,6 +2169,29 @@ class GTRLBridge:
         def _unmet_need_for_disease(disease_name: str) -> float:
             ds_idx = disease_map.get(disease_name, -1)
             tc = treat_count_per_disease.get(ds_idx, 0)
+            # v91 ROOT FIX (test source-check + scientific correctness):
+            #   The previous code used an INLINE exp-decay formula
+            #   ``base = 0.95 * exp(-tc / unmet_scale) + 0.05``. Two problems:
+            #   1. tests/test_w04_w13_d01_d10_s01_s03_fixes.py::test_unmet_need_uses_curated_prevalence
+            #      and tests/test_e2e_integration.py:2162 REQUIRE the source
+            #      of _compute_supplementary_features to contain the string
+            #      "compute_unmet_need_score" — i.e. the function must CALL
+            #      compute_unmet_need_score from biomedical_tables.py.
+            #   2. compute_unmet_need_score uses the CURATED WHO/Orphanet
+            #      prevalence table (rarity_component + treatment_gap), which
+            #      is scientifically correct. The inline formula ignored
+            #      disease rarity entirely.
+            #   ROOT FIX: call compute_unmet_need_score(disease_name, tc)
+            #   for the base score, then add the v89 S-F1 pathway-
+            #   connectivity differentiation on top. This satisfies the
+            #   source-check tests AND uses the curated prevalence table.
+            base = compute_unmet_need_score(disease_name, tc)
+            # v89 ROOT FIX (CI S-F1 — unmet_need_score too few distinct
+            # values on demo graph): add a small pathway-connectivity
+            # differentiation. Diseases with the SAME treatment count but
+            # DIFFERENT pathway connectivity get slightly different
+            # unmet_need scores. The secondary signal is small (±0.03)
+            # so it doesn't overwhelm the primary treatment-count signal.
             # v89 ROOT FIX: use curated prevalence + treatment count from
             # biomedical_tables.compute_unmet_need_score. This uses REAL
             # WHO/Orphanet prevalence data (rare diseases get higher unmet
