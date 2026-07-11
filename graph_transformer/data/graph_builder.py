@@ -1474,10 +1474,24 @@ class BiomedicalGraphBuilder:
                 )
 
         # ─── Finalize: build reverse edges + tensorize ──────────────
-        builder._sync_edge_lists()
-        builder._edge_lists = BiomedicalGraphBuilder._build_reverse_edges(
-            builder._edge_lists
-        )
+        # V92 ROOT FIX (BUG P3-001, CRITICAL): the previous code called
+        # the DEPRECATED ``_build_reverse_edges`` staticmethod which
+        # writes reverse edges into ``_edge_lists``. But ``finalize()``
+        # immediately calls ``_sync_edge_lists()`` (line 317) which
+        # OVERWRITES ``_edge_lists`` from ``_edge_sets`` (forward-only).
+        # All 7 reverse edge types were silently DISCARDED — the
+        # production graph had ZERO reverse edges, drug nodes had no
+        # incoming edges, and HeterogeneousMultiHeadAttention could not
+        # aggregate messages INTO drug nodes. Drug-disease predictions
+        # were essentially random.
+        #
+        # The V90 root fix for ``build_demo_graph`` (line 1205) already
+        # uses ``_build_reverse_edges_into_sets`` (writes into
+        # ``_edge_sets`` so reverse edges survive ``_sync_edge_lists``).
+        # This fix propagates the SAME root-cause fix to the production
+        # Phase 1→3 path. ``finalize()`` performs the ``_sync_edge_lists``
+        # internally, so we do NOT call it manually here.
+        builder._build_reverse_edges_into_sets(builder._edge_sets)
         node_features, edge_indices, node_maps = builder.finalize()
 
         total_nodes = sum(nodes_registered_by_type.values())
