@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+<<<<<<< HEAD
 import { requireRoleOrSend, badRequest, requireCsrfOrSend } from "@/lib/api-helpers";
 import { issueApiKey, listApiKeys } from "@/lib/services/api-keys";
 
@@ -22,6 +23,14 @@ import { issueApiKey, listApiKeys } from "@/lib/services/api-keys";
 
 export async function GET() {
   const auth = await requireRoleOrSend("developer", "admin", "owner");
+=======
+import { requireAuthRole, badRequest } from "@/lib/api-helpers";
+import { issueApiKey, listApiKeys } from "@/lib/services/api-keys";
+
+/** FE-010 ROOT FIX: API key management restricted to developer/admin/owner. */
+export async function GET() {
+  const auth = await requireAuthRole("developer");
+>>>>>>> fix/v101-forensic-root-fixes-20-critical-bugs
   if (auth.user === null) return auth.response;
   if (!auth.user.orgId) return badRequest("No active organization");
   // FE-022 partial: list only the calling user's keys unless they are
@@ -32,11 +41,15 @@ export async function GET() {
 }
 
 export async function POST(req: NextRequest) {
+<<<<<<< HEAD
   // CSRF — FE-025.
   const csrf = await requireCsrfOrSend();
   if (csrf.response) return csrf.response;
 
   const auth = await requireRoleOrSend("developer", "admin", "owner");
+=======
+  const auth = await requireAuthRole("developer");
+>>>>>>> fix/v101-forensic-root-fixes-20-critical-bugs
   if (auth.user === null) return auth.response;
   if (!auth.user.orgId) return badRequest("No active organization");
   let body: { name: string };

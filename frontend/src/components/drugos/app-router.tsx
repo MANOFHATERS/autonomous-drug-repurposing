@@ -1485,6 +1485,7 @@ function FeaturePage({ slug }: { slug: string }) {
       <Card className="mb-16 overflow-hidden">
         <div className="h-64 sm:h-80 bg-gradient-to-br from-[#5B4FCF]/5 to-[#5B4FCF]/10 flex items-center justify-center">
           <div className="text-center">
+<<<<<<< HEAD
             {/* FE-027 unblock: feature.icon may be undefined; coerce to a
                 safe fallback so tsc is satisfied and the page never crashes. */}
             {(() => {
@@ -1492,6 +1493,11 @@ function FeaturePage({ slug }: { slug: string }) {
               const IconComp = (Icon as any)?.type ?? Icon;
               return <IconComp className="w-16 h-16 text-[#5B4FCF]/30 mx-auto mb-4" />;
             })()}
+=======
+            <div className="w-16 h-16 text-[#5B4FCF]/30 mx-auto mb-4 flex items-center justify-center">
+              {feature?.icon}
+            </div>
+>>>>>>> fix/v101-forensic-root-fixes-20-critical-bugs
             <p className="text-muted-foreground">Interactive Demo Preview</p>
           </div>
         </div>

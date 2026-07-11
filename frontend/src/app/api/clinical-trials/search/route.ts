@@ -42,6 +42,7 @@ function clampOffset(raw: string | null): number {
 export async function GET(req: NextRequest) {
   const condition = req.nextUrl.searchParams.get("condition") || "";
   const intervention = req.nextUrl.searchParams.get("intervention") || "";
+<<<<<<< HEAD
   const rawStatus = (req.nextUrl.searchParams.get("status") || "ALL").toUpperCase();
   if (!ALLOWED_STATUSES.has(rawStatus)) {
     return badRequest(`Invalid status. Allowed: ${[...ALLOWED_STATUSES].join(", ")}`);
@@ -49,6 +50,14 @@ export async function GET(req: NextRequest) {
   const status = rawStatus as "RECRUITING" | "ACTIVE_NOT_RECRUITING" | "COMPLETED" | "ALL";
   const limit = clampLimit(req.nextUrl.searchParams.get("limit"));
   const offset = clampOffset(req.nextUrl.searchParams.get("offset"));
+=======
+  const status = (req.nextUrl.searchParams.get("status") || "ALL") as any;
+  const limit = parseInt(req.nextUrl.searchParams.get("limit") || "20", 10);
+  // FE-015: CT.gov v2 is cursor-only. The client must pass back the
+  // opaque `pageToken` returned by the previous response — NOT a numeric
+  // offset. We accept `pageToken` as a query param.
+  const pageToken = req.nextUrl.searchParams.get("pageToken") || undefined;
+>>>>>>> fix/v101-forensic-root-fixes-20-critical-bugs
 
   if (!condition && !intervention) {
     return badRequest("At least one of 'condition' or 'intervention' is required");
@@ -59,7 +68,7 @@ export async function GET(req: NextRequest) {
       intervention: intervention || undefined,
       status,
       limit,
-      offset,
+      pageToken,
     });
     return NextResponse.json(result);
   } catch (e: any) {

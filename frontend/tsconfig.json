@@ -39,8 +39,14 @@
   "exclude": [
     "node_modules",
     "examples",
+<<<<<<< HEAD
     "uploaded_code",
     "src_backup",
     "prisma_backup"
+=======
+    "tests/e2e",
+    "uploaded_code",
+    "scripts"
+>>>>>>> fix/v101-forensic-root-fixes-20-critical-bugs
   ]
 }

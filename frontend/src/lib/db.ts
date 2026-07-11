@@ -47,6 +47,14 @@ function buildPrismaOptions(): ConstructorParameters<typeof PrismaClient>[0] {
 
 export const db =
   (shouldUseGlobalCache ? globalForPrisma.prisma : undefined) ??
+<<<<<<< HEAD
   new PrismaClient(buildPrismaOptions())
+=======
+  new PrismaClient(
+    process.env.NODE_ENV === 'test'
+      ? { datasources: { db: { url: process.env.DATABASE_URL } } }
+      : { datasources: { db: { url: process.env.DATABASE_URL } } }
+  )
+>>>>>>> fix/v101-forensic-root-fixes-20-critical-bugs
 
 if (shouldUseGlobalCache) globalForPrisma.prisma = db

@@ -531,8 +531,13 @@ function SubscriptionScreen() {
                 <p className="text-sm text-muted-foreground">Your current plan · {currentPlan.seats} seat{currentPlan.seats === 1 ? '' : 's'}</p>
               </div>
               <div className="text-right">
+<<<<<<< HEAD
                 <p className="text-3xl font-bold">${((currentPlan.priceCents ?? 0) / 100).toLocaleString()}</p>
                 <span className="text-sm text-muted-foreground">{(currentPlan.priceCents ?? 0) === 0 ? 'forever' : '/month'}</span>
+=======
+                <p className="text-3xl font-bold">${(currentPlan.price || 0).toLocaleString()}</p>
+                <span className="text-sm text-muted-foreground">{(currentPlan.price || 0) === 0 ? 'forever' : '/month'}</span>
+>>>>>>> fix/v101-forensic-root-fixes-20-critical-bugs
               </div>
             </div>
             <div>
@@ -564,8 +569,13 @@ function SubscriptionScreen() {
                     {isCurrent && <Badge style={{ backgroundColor: PRIMARY, color: 'white' }}>Current</Badge>}
                   </CardTitle>
                   <div className="mt-1">
+<<<<<<< HEAD
                     <span className="text-2xl font-bold">${((plan.priceCents ?? 0) / 100).toLocaleString()}</span>
                     <span className="text-sm text-muted-foreground">{(plan.priceCents ?? 0) === 0 ? ' forever' : '/month'}</span>
+=======
+                    <span className="text-2xl font-bold">${(plan.price / 100).toLocaleString()}</span>
+                    <span className="text-sm text-muted-foreground">{plan.price === 0 ? ' forever' : '/month'}</span>
+>>>>>>> fix/v101-forensic-root-fixes-20-critical-bugs
                   </div>
                 </CardHeader>
                 <CardContent>
@@ -587,7 +597,11 @@ function SubscriptionScreen() {
                     onClick={() => handleChangePlan(plan.id)}
                     style={!isCurrent ? { backgroundColor: PRIMARY } : undefined}
                   >
+<<<<<<< HEAD
                     {changing === plan.id ? 'Switching…' : isCurrent ? 'Current Plan' : ((plan.priceCents ?? 0) === 0 ? 'Downgrade' : 'Upgrade')}
+=======
+                    {changing === plan.id ? 'Switching…' : isCurrent ? 'Current Plan' : (plan.price === 0 ? 'Downgrade' : 'Upgrade')}
+>>>>>>> fix/v101-forensic-root-fixes-20-critical-bugs
                   </Button>
                 </CardFooter>
               </Card>

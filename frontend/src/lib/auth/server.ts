@@ -27,6 +27,7 @@ import { randomBytes } from "crypto";
 import { cookies, headers } from "next/headers";
 import { db } from "@/lib/db";
 
+<<<<<<< HEAD
 // ---------------------------------------------------------------------------
 // JWT secret — ROOT FIX for FE-008 / FE-024
 // ---------------------------------------------------------------------------
@@ -65,10 +66,81 @@ function resolveJwtSecret(): string {
     );
   }
   return raw;
+=======
+// FE-008 ROOT FIX: No hardcoded fallback. In production, missing or short
+// JWT_SECRET fails fast — we never sign tokens with a publicly known key.
+// A 32-byte (256-bit) minimum matches OWASP recommendations for HS256.
+//
+// The previous code (`process.env.JWT_SECRET || "dev-only-insecure-secret-change-me"`)
+// meant that a production deploy with a missing env var would silently sign
+// every JWT with a hardcoded string published in the source — full account
+// takeover for any attacker who reads the repo.
+function resolveJwtSecret(): string {
+  const secret = process.env.JWT_SECRET;
+  if (!secret || secret.length < 32) {
+    if (process.env.NODE_ENV === "production") {
+      throw new Error(
+        "JWT_SECRET must be set to a >=32-char random string in production. " +
+        "Generate one with: openssl rand -base64 48"
+      );
+    }
+    // Dev-only deterministic secret. Logged loudly so it's obvious.
+    if (!process.env.JWT_SECRET) {
+      console.warn(
+        "[SECURITY] JWT_SECRET not set — using dev-only secret. " +
+        "DO NOT use in production. Set JWT_SECRET to a >=32-char random string."
+      );
+    }
+    return "dev-only-insecure-secret-change-me-MINIMUM-32-CHARS-FOR-HS256!!";
+  }
+  return secret;
+>>>>>>> fix/v101-forensic-root-fixes-20-critical-bugs
 }
 
 const JWT_SECRET = resolveJwtSecret();
 const JWT_ISSUER = "drugos";
+
+// FE-004 ROOT FIX: Short-lived MFA challenge token. Issued by /api/auth/login
+// when password verification succeeds but the user has mfaEnabled=true. The
+// client must POST this token + a TOTP code to /api/auth/2fa/login-verify to
+// obtain real access+refresh tokens. The challenge token CANNOT be used for
+// anything except the 2FA verify endpoint — its `type` is "mfa_challenge",
+// not "access".
+const MFA_CHALLENGE_TTL_SECONDS = 5 * 60; // 5 minutes
+export function signMfaChallengeToken(payload: {
+  userId: string;
+  email: string;
+}): string {
+  const jwtPayload = {
+    sub: payload.userId,
+    email: payload.email,
+    type: "mfa_challenge" as const,
+  };
+  return jwt.sign(jwtPayload, JWT_SECRET, {
+    issuer: JWT_ISSUER,
+    expiresIn: MFA_CHALLENGE_TTL_SECONDS,
+    algorithm: "HS256",
+  });
+}
+
+export function verifyMfaChallengeToken(token: string): {
+  userId: string;
+  email: string;
+} | null {
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET, {
+      issuer: JWT_ISSUER,
+      algorithms: ["HS256"],
+    }) as { sub: string; email: string; type: string };
+    if (!decoded || decoded.type !== "mfa_challenge" || !decoded.sub) {
+      return null;
+    }
+    return { userId: decoded.sub, email: decoded.email };
+  } catch {
+    return null;
+  }
+}
+
 const ACCESS_TOKEN_TTL_SECONDS = 15 * 60; // 15 minutes
 const REFRESH_TOKEN_TTL_DAYS = 30;
 

@@ -37,8 +37,13 @@ export function DiseaseSearchBar({
       .filter(
         (d) =>
           d.name.toLowerCase().includes(lower) ||
+<<<<<<< HEAD
           (d.synonyms ?? []).some((s) => s.toLowerCase().includes(lower)) ||
           (d.category ?? '').toLowerCase().includes(lower)
+=======
+          (d.synonyms || []).some((s) => s.toLowerCase().includes(lower)) ||
+          (d.category || '').toLowerCase().includes(lower)
+>>>>>>> fix/v101-forensic-root-fixes-20-critical-bugs
       )
       .slice(0, 6);
   }, [query]);

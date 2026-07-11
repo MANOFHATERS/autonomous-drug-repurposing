@@ -293,6 +293,7 @@ export function getScreensByCategory(category: string): ScreenMeta[] {
   return screens.filter(s => s.category === category);
 }
 
+<<<<<<< HEAD
 // FE-027 unblock: alias referenced by screens/core-screen.tsx and
 // dashboard-screen.tsx. Some components import `getScreenMeta` instead of
 // `getScreenById`.
@@ -307,3 +308,46 @@ export const sidebarCategories: ScreenCategory[] = screenCategories.map((cat) =>
   icon: cat.icon,
   items: screens.filter((s) => s.category === cat.id),
 }));
+=======
+// ---------------------------------------------------------------------------
+// FE-012 + FE-013 ROOT FIX: Backward-compat aliases.
+//
+// app-shell.tsx and placeholder-screen.tsx imported `sidebarCategories`,
+// `ScreenCategory`, and `getScreenMeta` — none of which were exported by
+// this file. The build silently passed because next.config.ts had
+// `typescript.ignoreBuildErrors: true`, but at runtime the imports
+// resolved to `undefined` and the components crashed.
+//
+// Root fix: `sidebarCategories` is now a properly-grouped structure where
+// each category has an `items` array of ScreenMeta objects. This matches
+// what app-shell.tsx and placeholder-screen.tsx expect.
+// ---------------------------------------------------------------------------
+
+export interface ScreenCategory {
+  id: string;
+  label: string;
+  icon: string;
+  items: ScreenMeta[];
+}
+
+/**
+ * Build sidebarCategories by grouping all screens by their `category` field.
+ * Each category object has the category metadata plus an `items` array of
+ * screens in that category.
+ */
+function buildSidebarCategories(): ScreenCategory[] {
+  return screenCategories.map((cat) => ({
+    id: cat.id,
+    label: cat.label,
+    icon: cat.icon,
+    items: screens.filter((s) => s.category === cat.id),
+  }));
+}
+
+export const sidebarCategories: ScreenCategory[] = buildSidebarCategories();
+
+/** Alias for getScreenById — used by placeholder-screen.tsx and dashboard-screen.tsx. */
+export function getScreenMeta(id: string): ScreenMeta | undefined {
+  return getScreenById(id);
+}
+>>>>>>> fix/v101-forensic-root-fixes-20-critical-bugs

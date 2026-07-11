@@ -45,6 +45,12 @@ import {
 } from 'recharts';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useDrugOSNav } from './nav-context';
+// FE-001 ROOT FIX: Real API hooks replace direct mock-data imports.
+import {
+  useDiseaseSearch, useDrugSearch, useDrugSafety, useClinicalTrialsSearch,
+  useLiteratureSearch, useKnowledgeGraph, useBuildEvidencePackage, useRlCandidates,
+  LoadingSpinner, ErrorDisplay,
+} from './use-api-data';
 import {
   diseases, drugCandidates, clinicalTrials, graphNodes, graphEdges,
   trendingDiseases, recentQueries, savedQueries, usageMetrics,
@@ -156,16 +162,21 @@ function DiseaseSearchScreen() {
   const [therapeuticArea, setTherapeuticArea] = useState('all');
   const [geneticOnly, setGeneticOnly] = useState(false);
 
+  // FE-001 ROOT FIX: Replace mock-data autocomplete with real /api/diseases/search
+  // (backed by NLM MeSH). The previous code filtered a local `diseases` array
+  // of 8 mock entries — researchers could never find real diseases. Now we
+  // query the real MeSH database via the API.
+  const { data: diseaseResults, loading: diseasesLoading, error: diseasesError } = useDiseaseSearch(query, 2);
+
   const suggestions = useMemo(() => {
-    if (query.length < 2) return [];
-    const q = query.toLowerCase();
-    return diseases.filter(d =>
-      d.name.toLowerCase().includes(q) ||
-      d.icdCode.toLowerCase().includes(q) ||
-      d.meshTerm.toLowerCase().includes(q) ||
-      d.therapeuticArea.toLowerCase().includes(q)
-    ).slice(0, 8);
-  }, [query]);
+    if (!diseaseResults?.items) return [];
+    return diseaseResults.items.slice(0, 8).map(d => ({
+      id: d.descriptorUI,
+      name: d.descriptorName,
+      icdCode: d.descriptorUI, // MeSH descriptor UI (no ICD code from MeSH)
+      therapeuticArea: d.scopeNote ? d.scopeNote.slice(0, 60) + '...' : '',
+    }));
+  }, [diseaseResults]);
 
   const filteredTrending = useMemo(() => {
     let items = trendingDiseases;
@@ -176,23 +187,32 @@ function DiseaseSearchScreen() {
     return items;
   }, [therapeuticArea]);
 
-  const handleSelectDisease = (diseaseId: string) => {
-    navigate({ page: 'app', section: 'results', id: diseaseId });
+  const handleSelectDisease = (diseaseId: string, diseaseName?: string) => {
+    // FE-001: pass the disease name (not just id) so SearchResultsScreen can
+    // query the real API by name.
+    navigate({ page: 'app', section: 'results', id: diseaseId, name: diseaseName });
   };
 
   const handleSearch = () => {
     if (query.trim()) {
-      const match = diseases.find(d => d.name.toLowerCase().includes(query.toLowerCase()));
+      // Try to match against the real API results first.
+      const match = diseaseResults?.items?.find(d =>
+        d.descriptorName.toLowerCase().includes(query.toLowerCase())
+      );
       if (match) {
-        navigate({ page: 'app', section: 'results', id: match.id });
+        handleSelectDisease(match.descriptorUI, match.descriptorName);
+      } else {
+        // No MeSH match — navigate with the raw query so SearchResultsScreen
+        // can do a drug search by disease name.
+        handleSelectDisease('search:' + encodeURIComponent(query), query);
       }
     }
   };
 
   const quickStartTemplates = [
-    { name: "Huntington's Disease", id: 'D001', icon: '🧬' },
-    { name: "Alzheimer's Disease", id: 'D002', icon: '🧠' },
-    { name: 'Pancreatic Cancer', id: 'D006', icon: '🎯' },
+    { name: "Huntington's Disease", id: 'search:Huntington%27s%20Disease', icon: '🧬' },
+    { name: "Alzheimer's Disease", id: 'search:Alzheimer%27s%20Disease', icon: '🧠' },
+    { name: 'Pancreatic Cancer', id: 'search:Pancreatic%20Cancer', icon: '🎯' },
   ];
 
   const therapeuticAreas = [...new Set(diseases.map(d => d.therapeuticArea))];
@@ -210,19 +230,24 @@ function DiseaseSearchScreen() {
               value={query}
               onChange={e => setQuery(e.target.value)}
               onKeyDown={e => e.key === 'Enter' && handleSearch()}
-              placeholder="Search diseases, ICD codes, genes, pathways..."
+              placeholder="Search diseases (real MeSH database)..."
               className="pl-12 pr-28 h-12 text-base border-2 border-primary/20 focus:border-primary rounded-xl shadow-lg shadow-primary/5"
             />
             <Button onClick={handleSearch} className="absolute right-1.5 top-1.5 h-9 px-5 rounded-lg" style={{ backgroundColor: PRIMARY }}>
               Search
             </Button>
-            {/* Autocomplete dropdown */}
-            {suggestions.length > 0 && (
+            {/* Autocomplete dropdown — real MeSH results */}
+            {(suggestions.length > 0 || diseasesLoading) && (
               <div className="absolute z-50 w-full mt-1 bg-popover border border-border rounded-xl shadow-xl overflow-hidden">
+                {diseasesLoading && (
+                  <div className="px-4 py-2.5 text-sm text-muted-foreground flex items-center gap-2">
+                    <RefreshCw className="h-3 w-3 animate-spin" /> Searching MeSH...
+                  </div>
+                )}
                 {suggestions.map(d => (
                   <button
                     key={d.id}
-                    onClick={() => handleSelectDisease(d.id)}
+                    onClick={() => handleSelectDisease(d.id, d.name)}
                     className="flex items-center justify-between w-full px-4 py-2.5 text-sm hover:bg-accent text-left transition-colors"
                   >
                     <div>
@@ -232,6 +257,11 @@ function DiseaseSearchScreen() {
                     <Badge variant="secondary" className="text-xs font-mono">{d.icdCode}</Badge>
                   </button>
                 ))}
+              </div>
+            )}
+            {diseasesError && query.length >= 2 && (
+              <div className="absolute z-50 w-full mt-1 bg-popover border border-red-200 rounded-xl shadow-xl p-3 text-xs text-red-700">
+                Failed to search MeSH: {diseasesError.message}
               </div>
             )}
           </div>
@@ -246,7 +276,7 @@ function DiseaseSearchScreen() {
           <h3 className="text-sm font-semibold text-muted-foreground mb-3">Quick Start</h3>
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
             {quickStartTemplates.map(t => (
-              <Card key={t.id} className="cursor-pointer hover:shadow-md hover:border-primary/30 transition-all" onClick={() => handleSelectDisease(t.id)}>
+              <Card key={t.id} className="cursor-pointer hover:shadow-md hover:border-primary/30 transition-all" onClick={() => handleSelectDisease(t.id, t.name)}>
                 <CardContent className="p-4 flex items-center gap-3">
                   <span className="text-2xl">{t.icon}</span>
                   <span className="font-medium text-sm">{t.name}</span>
@@ -271,7 +301,7 @@ function DiseaseSearchScreen() {
                 return (
                   <button
                     key={q.id}
-                    onClick={() => disease && handleSelectDisease(disease.id)}
+                    onClick={() => disease && handleSelectDisease(disease.id, disease.name)}
                     className="flex items-center justify-between w-full p-2.5 rounded-lg hover:bg-accent text-left text-sm transition-colors"
                   >
                     <div>
@@ -301,7 +331,7 @@ function DiseaseSearchScreen() {
                 return (
                   <button
                     key={i}
-                    onClick={() => disease && handleSelectDisease(disease.id)}
+                    onClick={() => disease && handleSelectDisease(disease.id, disease.name)}
                     className="flex items-center justify-between w-full p-2.5 rounded-lg hover:bg-accent text-left text-sm transition-colors"
                   >
                     <div className="flex items-center gap-2">
@@ -373,7 +403,7 @@ function DiseaseSearchScreen() {
               .filter(d => therapeuticArea === 'all' || d.therapeuticArea === therapeuticArea)
               .filter(d => !geneticOnly || d.geneticBasis)
               .map(d => (
-                <Card key={d.id} className="cursor-pointer hover:shadow-md hover:border-primary/30 transition-all" onClick={() => handleSelectDisease(d.id)}>
+                <Card key={d.id} className="cursor-pointer hover:shadow-md hover:border-primary/30 transition-all" onClick={() => handleSelectDisease(d.id, d.name)}>
                   <CardContent className="p-4">
                     <div className="flex items-center justify-between mb-2">
                       <h4 className="font-medium text-sm">{d.name}</h4>
@@ -410,9 +440,54 @@ function Progress({ value, max }: { value: number; max: number }) {
 
 function SearchResultsScreen() {
   const { navigate, currentRoute } = useDrugOSNav();
+  // FE-001 ROOT FIX: accept the disease name from the DiseaseSearchScreen
+  // (passed via navigate({ name })) and use it to query the real RL ranker
+  // via /api/rl. Falls back to mock candidates if RL service not deployed.
   const diseaseId = currentRoute.id || 'D001';
-  const disease = diseases.find(d => d.id === diseaseId) || diseases[0];
-  const candidates = drugCandidates.filter(c => c.diseaseId === diseaseId);
+  const diseaseName = (currentRoute as any).name ||
+    (diseaseId.startsWith('search:') ? decodeURIComponent(diseaseId.slice(7)) : diseaseId);
+  const disease = diseases.find(d => d.id === diseaseId) ||
+    diseases.find(d => d.name === diseaseName) || {
+      id: diseaseId,
+      name: diseaseName,
+      icdCode: '—',
+      description: '',
+    } as Disease;
+
+  // Call the real RL ranker endpoint. Returns 503 if RL_SERVICE_URL or
+  // RL_LOCAL_CSV is not set — in that case we fall back to mock candidates
+  // and show a banner.
+  const { data: rlData, loading: rlLoading, error: rlError } = useRlCandidates({
+    disease: diseaseName,
+    limit: 50,
+  });
+
+  // Map RL candidates to the DrugCandidate shape the UI expects.
+  const realCandidates: DrugCandidate[] = (rlData?.candidates || []).map((rc: any, i: number) => ({
+    id: `rl-${i}`,
+    drugName: rc.drug,
+    brandNames: [],
+    genericName: rc.drug,
+    diseaseId,
+    diseaseName: rc.disease,
+    compositeScore: Math.round((rc.overallScore || 0) * 100),
+    kgScore: Math.round((rc.plausibilityScore || 0) * 100),
+    safetyScore: Math.round((rc.safetyScore || 0) * 100),
+    clinicalScore: Math.round((rc.efficacyScore || 0) * 100),
+    molSimScore: 0,
+    safetyTier: (rc.safetyScore || 0) >= 0.7 ? 'green' : (rc.safetyScore || 0) >= 0.4 ? 'yellow' : 'red',
+    mechanism: `RL reward: ${rc.reward?.toFixed(3) || '—'}, policy_prob: ${rc.policyProb?.toFixed(3) || '—'}`,
+    clinicalPhase: rc.literatureSupport ? 'Literature-supported' : 'Novel',
+    ipStatus: 'Unknown',
+    targets: [],
+    pathways: [],
+    rank: rc.rank,
+  }));
+
+  // Fall back to mock candidates if the RL service is not deployed.
+  const mockCandidates = drugCandidates.filter(c => c.diseaseId === diseaseId);
+  const candidates = realCandidates.length > 0 ? realCandidates : mockCandidates;
+  const usingMock = realCandidates.length === 0;
 
   const [filterTier, setFilterTier] = useState<string>('all');
   const [filterPhase, setFilterPhase] = useState<string>('all');
@@ -470,6 +545,24 @@ function SearchResultsScreen() {
           </div>
         }
       />
+      {/* FE-001 ROOT FIX: Real RL ranker integration banner */}
+      {rlLoading && (
+        <div className="mb-4 text-xs text-muted-foreground flex items-center gap-2">
+          <RefreshCw className="h-3 w-3 animate-spin" /> Querying Phase 4 RL ranker for {diseaseName}...
+        </div>
+      )}
+      {rlData && realCandidates.length > 0 && (
+        <div className="mb-4 text-xs text-emerald-700 p-2 border border-emerald-200 rounded bg-emerald-50">
+          <strong>Live RL predictions:</strong> {realCandidates.length} candidates from the Phase 4 RL ranker
+          (source: {rlData.source}).
+        </div>
+      )}
+      {usingMock && (
+        <div className="mb-4 text-xs text-amber-700 p-2 border border-amber-200 rounded bg-amber-50">
+          <strong>Showing demo data.</strong> The Phase 4 RL ranker is not deployed.
+          Set <code>RL_SERVICE_URL</code> or <code>RL_LOCAL_CSV</code> to see real RL predictions.
+        </div>
+      )}
 
       {/* Filter Bar */}
       <div className="flex flex-wrap items-center gap-2 mb-4">
@@ -1062,10 +1155,22 @@ function KnowledgeGraphScreen() {
   const [evidenceThreshold, setEvidenceThreshold] = useState(0.3);
   const [positions, setPositions] = useState<Map<string, { x: number; y: number }>>(() => new Map(graphNodes.map(n => [n.id, { x: n.x * 1.2, y: n.y * 0.7 + 50 }])));
 
-  const filteredNodes = graphNodes.filter(n => nodeFilters[n.type]);
-  const filteredEdges = graphEdges.filter(e => {
-    const src = graphNodes.find(n => n.id === e.source);
-    const tgt = graphNodes.find(n => n.id === e.target);
+  // FE-001 + FE-003 ROOT FIX: Call the real /api/knowledge-graph endpoint.
+  // The previous code rendered mock graphNodes/graphEdges. Now we call the
+  // real KG service (returns 503 if KG_SERVICE_URL is not set, which we
+  // surface honestly). When the KG service IS deployed, we merge the real
+  // nodes/edges with the mock ones for display.
+  const { data: kgData, loading: kgLoading, error: kgError } = useKnowledgeGraph({
+    drug: searchQuery.length >= 2 ? searchQuery : undefined,
+  });
+
+  const realNodes = kgData?.nodes || [];
+  const realEdges = kgData?.edges || [];
+
+  const filteredNodes = [...graphNodes, ...realNodes].filter(n => nodeFilters[n.type]);
+  const filteredEdges = [...graphEdges, ...realEdges].filter(e => {
+    const src = [...graphNodes, ...realNodes].find(n => n.id === e.source);
+    const tgt = [...graphNodes, ...realNodes].find(n => n.id === e.target);
     return e.evidence >= evidenceThreshold && src && tgt && nodeFilters[src.type] && nodeFilters[tgt.type];
   });
 
@@ -1090,6 +1195,22 @@ function KnowledgeGraphScreen() {
   return (
     <FadeIn>
       <PageHeader title="Knowledge Graph Explorer" description="Explore relationships between drugs, diseases, genes, proteins, and pathways" />
+      {kgLoading && (
+        <div className="mb-3 text-xs text-muted-foreground flex items-center gap-2">
+          <RefreshCw className="h-3 w-3 animate-spin" /> Querying Neo4j knowledge graph service...
+        </div>
+      )}
+      {kgError && (
+        <div className="mb-3 text-xs text-amber-700 p-2 border border-amber-200 rounded bg-amber-50">
+          <strong>KG service status:</strong> {kgError.message} — showing demo graph data.
+          Set <code>KG_SERVICE_URL</code> to connect the real Neo4j Phase 2 service.
+        </div>
+      )}
+      {kgData && realNodes.length > 0 && (
+        <div className="mb-3 text-xs text-emerald-700 p-2 border border-emerald-200 rounded bg-emerald-50">
+          <strong>Live Neo4j data:</strong> {realNodes.length} nodes, {realEdges.length} edges from the KG service.
+        </div>
+      )}
 
       <div className="flex flex-col lg:flex-row gap-4">
         {/* Sidebar */}
@@ -1220,26 +1341,52 @@ function ClinicalTrialsScreen() {
   const [statusFilter, setStatusFilter] = useState('all');
   const [selectedTrial, setSelectedTrial] = useState<ClinicalTrial | null>(null);
 
+  // FE-001 ROOT FIX: Real ClinicalTrials.gov v2 API integration. The previous
+  // code rendered a local `clinicalTrials` mock array of 5 hardcoded entries.
+  // Now we query the real CT.gov database (15,000+ trials) via the API.
+  // The search input is debounced by the hook (300ms).
+  const { data: trialsData, loading: trialsLoading, error: trialsError } = useClinicalTrialsSearch({
+    condition: search.trim() || undefined,
+    limit: 50,
+  });
+
+  // Map the real API response to the UI's ClinicalTrial shape.
+  const realTrials: ClinicalTrial[] = useMemo(() => {
+    if (!trialsData?.items) return [];
+    return trialsData.items.map((t: any) => ({
+      id: t.nctId,
+      nctId: t.nctId,
+      title: t.title,
+      phase: t.phase || 'N/A',
+      status: t.status,
+      enrollment: t.enrollment,
+      startDate: t.startDate,
+      completionDate: t.completionDate,
+      drugName: (t.interventions || []).join(', '),
+      disease: (t.conditions || []).join(', '),
+      outcome: t.briefSummary || '',
+    }));
+  }, [trialsData]);
+
   const filtered = useMemo(() => {
-    return clinicalTrials.filter(t => {
-      const matchSearch = !search || t.title.toLowerCase().includes(search.toLowerCase()) || t.nctId.toLowerCase().includes(search.toLowerCase()) || t.drugName.toLowerCase().includes(search.toLowerCase());
+    return realTrials.filter(t => {
       const matchPhase = phaseFilter === 'all' || t.phase === phaseFilter;
       const matchStatus = statusFilter === 'all' || t.status === statusFilter;
-      return matchSearch && matchPhase && matchStatus;
+      return matchPhase && matchStatus;
     });
-  }, [search, phaseFilter, statusFilter]);
+  }, [realTrials, phaseFilter, statusFilter]);
 
-  const phases = [...new Set(clinicalTrials.map(t => t.phase))];
-  const statuses = [...new Set(clinicalTrials.map(t => t.status))];
+  const phases = [...new Set(realTrials.map(t => t.phase))];
+  const statuses = [...new Set(realTrials.map(t => t.status))];
 
   return (
     <FadeIn>
-      <PageHeader title="Clinical Trial Search" description="Search ClinicalTrials.gov data for drug repurposing trials" />
+      <PageHeader title="Clinical Trial Search" description="Search ClinicalTrials.gov data for drug repurposing trials (real API)" />
 
       <div className="flex flex-wrap items-center gap-2 mb-4">
         <div className="relative flex-1 max-w-md">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-          <Input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search by title, NCT ID, or drug name..." className="pl-9" />
+          <Input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search by disease (e.g., Huntington's)..." className="pl-9" />
         </div>
         <Select value={phaseFilter} onValueChange={setPhaseFilter}>
           <SelectTrigger className="w-36"><SelectValue placeholder="Phase" /></SelectTrigger>
@@ -1253,21 +1400,31 @@ function ClinicalTrialsScreen() {
 
       <Card>
         <CardContent className="p-0">
-          <Table>
-            <TableHeader><TableRow className="bg-muted/50"><TableHead>NCT ID</TableHead><TableHead>Title</TableHead><TableHead>Phase</TableHead><TableHead>Status</TableHead><TableHead>Enrollment</TableHead><TableHead>Dates</TableHead></TableRow></TableHeader>
-            <TableBody>
-              {filtered.map(t => (
-                <TableRow key={t.id} className="cursor-pointer hover:bg-muted/30" onClick={() => setSelectedTrial(selectedTrial?.id === t.id ? null : t)}>
-                  <TableCell><span className="font-mono text-xs text-primary">{t.nctId}</span></TableCell>
-                  <TableCell className="max-w-[300px]"><span className="text-sm line-clamp-2">{t.title}</span></TableCell>
-                  <TableCell><Badge variant="secondary" className="text-xs">{t.phase}</Badge></TableCell>
-                  <TableCell><Badge className="text-xs">{t.status}</Badge></TableCell>
-                  <TableCell className="text-sm">{t.enrollment}</TableCell>
-                  <TableCell className="text-xs text-muted-foreground">{t.startDate} → {t.completionDate}</TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
+          {trialsLoading && <LoadingSpinner label="Searching ClinicalTrials.gov..." />}
+          {trialsError && <ErrorDisplay error={trialsError} />}
+          {!trialsLoading && !trialsError && (
+            <Table>
+              <TableHeader><TableRow className="bg-muted/50"><TableHead>NCT ID</TableHead><TableHead>Title</TableHead><TableHead>Phase</TableHead><TableHead>Status</TableHead><TableHead>Enrollment</TableHead><TableHead>Dates</TableHead></TableRow></TableHeader>
+              <TableBody>
+                {filtered.map(t => (
+                  <TableRow key={t.id} className="cursor-pointer hover:bg-muted/30" onClick={() => setSelectedTrial(selectedTrial?.id === t.id ? null : t)}>
+                    <TableCell><span className="font-mono text-xs text-primary">{t.nctId}</span></TableCell>
+                    <TableCell className="max-w-[300px]"><span className="text-sm line-clamp-2">{t.title}</span></TableCell>
+                    <TableCell><Badge variant="secondary" className="text-xs">{t.phase}</Badge></TableCell>
+                    <TableCell><Badge className="text-xs">{t.status}</Badge></TableCell>
+                    <TableCell className="text-sm">{t.enrollment ?? '—'}</TableCell>
+                    <TableCell className="text-xs text-muted-foreground">{t.startDate || '—'} → {t.completionDate || '—'}</TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          )}
+          {!trialsLoading && !trialsError && filtered.length === 0 && !search && (
+            <div className="text-center py-12 text-muted-foreground text-sm">
+              <Search className="h-8 w-8 mx-auto mb-2 opacity-50" />
+              <p>Enter a disease name to search ClinicalTrials.gov</p>
+            </div>
+          )}
         </CardContent>
       </Card>
 
@@ -1279,10 +1436,10 @@ function ClinicalTrialsScreen() {
               <div><span className="text-muted-foreground">NCT ID:</span> <span className="font-mono">{selectedTrial.nctId}</span></div>
               <div><span className="text-muted-foreground">Phase:</span> <Badge variant="secondary">{selectedTrial.phase}</Badge></div>
               <div><span className="text-muted-foreground">Status:</span> <Badge>{selectedTrial.status}</Badge></div>
-              <div><span className="text-muted-foreground">Enrollment:</span> {selectedTrial.enrollment}</div>
+              <div><span className="text-muted-foreground">Enrollment:</span> {selectedTrial.enrollment ?? '—'}</div>
             </div>
             <div><span className="text-muted-foreground">Drug:</span> {selectedTrial.drugName} · <span className="text-muted-foreground">Disease:</span> {selectedTrial.disease}</div>
-            <div><span className="text-muted-foreground">Outcome:</span> {selectedTrial.outcome}</div>
+            {selectedTrial.outcome && <div><span className="text-muted-foreground">Summary:</span> {selectedTrial.outcome.slice(0, 300)}...</div>}
           </CardContent>
         </Card>
       )}
@@ -1296,12 +1453,20 @@ function ClinicalTrialsScreen() {
 
 function SafetyProfileScreen() {
   const [selectedDrug, setSelectedDrug] = useState<string>(drugCandidates[0].drugName);
+  const [drugSearch, setDrugSearch] = useState('');
   const candidate = drugCandidates.find(c => c.drugName === selectedDrug) || drugCandidates[0];
   const admet = admetProfiles.find(a => a.drugName === selectedDrug);
   const offTargets = offTargetPredictions.filter(o => o.drugName === selectedDrug);
   const interactions = drugInteractions.filter(d => d.drug1 === selectedDrug);
   const [ddiQuery, setDdiQuery] = useState('');
   const uniqueDrugNames = [...new Set(drugCandidates.map(c => c.drugName))];
+
+  // FE-001 ROOT FIX: Real openFDA adverse event data. The previous code
+  // showed mock safety scores that had ZERO relationship to real FDA data.
+  // Now we fetch the real adverse event report count, serious report count,
+  // and top reactions from the FDA Adverse Event Reporting System (FAERS)
+  // via the /api/safety/[drug] endpoint.
+  const { data: safetyData, loading: safetyLoading, error: safetyError } = useDrugSafety(selectedDrug);
 
   const ddiResults = useMemo(() => {
     if (!ddiQuery.trim()) return [];
@@ -1311,22 +1476,78 @@ function SafetyProfileScreen() {
     );
   }, [ddiQuery, selectedDrug]);
 
+  // Also search real drugs via RxNorm when the user types in the drug search.
+  const { data: drugSearchResults } = useDrugSearch(drugSearch, 3);
+  const realDrugOptions = drugSearchResults?.items?.map(d => d.name) || [];
+
   return (
     <FadeIn>
-      <PageHeader title="Safety Profile Dashboard" description="Comprehensive safety analysis for drug candidates" />
+      <PageHeader title="Safety Profile Dashboard" description="Comprehensive safety analysis (real FDA adverse event data via openFDA)" />
 
-      <div className="mb-4">
+      <div className="mb-4 flex items-center gap-2">
+        <div className="relative flex-1 max-w-md">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+          <Input
+            value={drugSearch || selectedDrug}
+            onChange={e => {
+              setDrugSearch(e.target.value);
+              setSelectedDrug(e.target.value);
+            }}
+            placeholder="Search for a drug (real RxNorm)..."
+            className="pl-9"
+          />
+          {realDrugOptions.length > 0 && drugSearch.length >= 3 && (
+            <div className="absolute z-50 w-full mt-1 bg-popover border border-border rounded-xl shadow-xl overflow-hidden max-h-60 overflow-y-auto">
+              {realDrugOptions.slice(0, 8).map(name => (
+                <button
+                  key={name}
+                  onClick={() => { setSelectedDrug(name); setDrugSearch(''); }}
+                  className="flex items-center w-full px-4 py-2 text-sm hover:bg-accent text-left"
+                >
+                  {name}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
         <Select value={selectedDrug} onValueChange={setSelectedDrug}>
           <SelectTrigger className="w-64"><SelectValue /></SelectTrigger>
           <SelectContent>{uniqueDrugNames.map(d => <SelectItem key={d} value={d}>{d}</SelectItem>)}</SelectContent>
         </Select>
       </div>
 
+      {/* Real openFDA safety stats */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-6">
-        <StatCard icon={ShieldCheck} value={candidate.safetyScore} label="Safety Score" color={ACCENT_GREEN} />
-        <StatCard icon={AlertTriangle} value={offTargets.length} label="Off-Target Predictions" color={ACCENT_ORANGE} />
-        <StatCard icon={AlertCircle} value={interactions.length} label="Drug Interactions" color={ACCENT_RED} />
+        <StatCard icon={ShieldCheck} value={safetyData?.totalReports ?? '—'} label="FDA Adverse Event Reports" color={ACCENT_GREEN} />
+        <StatCard icon={AlertTriangle} value={safetyData?.seriousReports ?? '—'} label="Serious Reports" color={ACCENT_ORANGE} />
+        <StatCard icon={AlertCircle} value={safetyData?.topReactions?.length ?? 0} label="Top Reactions Reported" color={ACCENT_RED} />
       </div>
+
+      {safetyLoading && <LoadingSpinner label="Fetching openFDA adverse event data..." />}
+      {safetyError && <ErrorDisplay error={safetyError} />}
+
+      {safetyData && (
+        <Card className="mb-6">
+          <CardHeader className="pb-3">
+            <CardTitle className="text-sm">Top Reported Adverse Events (FDA FAERS)</CardTitle>
+          </CardHeader>
+          <CardContent>
+            {safetyData.topReactions && safetyData.topReactions.length > 0 ? (
+              <div className="space-y-2">
+                {safetyData.topReactions.slice(0, 10).map((r, i) => (
+                  <div key={i} className="flex items-center justify-between text-sm">
+                    <span>{r.term}</span>
+                    <Badge variant="secondary">{r.count} reports</Badge>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="text-sm text-muted-foreground">No adverse event reports found for this drug.</p>
+            )}
+            <p className="text-xs text-muted-foreground mt-4 italic">{safetyData.disclaimer}</p>
+          </CardContent>
+        </Card>
+      )}
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <Card>
@@ -1501,6 +1722,13 @@ function EvidenceBuilderScreen() {
   const [template, setTemplate] = useState('internal');
   const uniqueDrugNames = [...new Set(drugCandidates.map(c => c.drugName))];
 
+  // FE-001 ROOT FIX: Real evidence package builder. The previous code had
+  // a "Build Evidence Package" button that did nothing — it was just a
+  // styled <Button> with no onClick. Now we call the real
+  // /api/evidence-package endpoint which assembles a bundle from PubMed,
+  // ClinicalTrials.gov, and openFDA data.
+  const { data: builtPackage, loading: building, error: buildError, build } = useBuildEvidencePackage();
+
   const availableEvidence = evidenceItems.filter(e => e.drugName === selectedDrug);
   const diseaseEvidence = evidenceItems.filter(e => e.disease === selectedDisease);
 
@@ -1510,6 +1738,14 @@ function EvidenceBuilderScreen() {
       if (next.has(id)) next.delete(id); else next.add(id);
       return next;
     });
+  };
+
+  const handleBuild = () => {
+    build({
+      drug: selectedDrug,
+      disease: selectedDisease,
+      notes: `Template: ${template}. Selected evidence: ${[...selectedEvidence].join(', ')}`,
+    }).catch(() => { /* error already in state */ });
   };
 
   const templates = [
@@ -1523,7 +1759,7 @@ function EvidenceBuilderScreen() {
 
   return (
     <FadeIn>
-      <PageHeader title="Evidence Package Builder" description="Build comprehensive evidence packages for drug repurposing" />
+      <PageHeader title="Evidence Package Builder" description="Build comprehensive evidence packages (real PubMed + CT.gov + openFDA)" />
 
       <div className="flex flex-wrap items-center gap-3 mb-6">
         <Select value={selectedDrug} onValueChange={setSelectedDrug}>
@@ -1597,11 +1833,43 @@ function EvidenceBuilderScreen() {
 
           {/* Actions */}
           <div className="space-y-2">
-            <Button className="w-full" style={{ backgroundColor: PRIMARY }}>
-              <Eye className="h-4 w-4 mr-2" /> Preview Package
+            <Button className="w-full" style={{ backgroundColor: PRIMARY }} onClick={handleBuild} disabled={building}>
+              {building ? (
+                <>
+                  <RefreshCw className="h-4 w-4 mr-2 animate-spin" /> Building...
+                </>
+              ) : (
+                <>
+                  <Package className="h-4 w-4 mr-2" /> Build Evidence Package
+                </>
+              )}
             </Button>
+            {buildError && (
+              <div className="text-xs text-red-600 p-2 border border-red-200 rounded">
+                {buildError.message}
+              </div>
+            )}
+            {builtPackage && (
+              <div className="text-xs text-emerald-700 p-2 border border-emerald-200 rounded bg-emerald-50">
+                Built package with {(builtPackage as any).package?.literature?.total || 0} literature articles,
+                {' '}{(builtPackage as any).package?.clinicalTrials?.total || 0} clinical trials,
+                {' '}{(builtPackage as any).package?.safety?.totalReports || 0} safety reports.
+                <div className="mt-1">
+                  <button
+                    onClick={() => {
+                      const blob = new Blob([(builtPackage as any).markdown || ''], { type: 'text/markdown' });
+                      const url = URL.createObjectURL(blob);
+                      window.open(url, '_blank');
+                    }}
+                    className="text-primary hover:underline"
+                  >
+                    Download markdown
+                  </button>
+                </div>
+              </div>
+            )}
             <Button variant="outline" className="w-full">
-              <Package className="h-4 w-4 mr-2" /> Build Evidence Package
+              <Eye className="h-4 w-4 mr-2" /> Preview Package
             </Button>
           </div>
         </div>

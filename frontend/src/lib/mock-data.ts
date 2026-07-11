@@ -18,6 +18,7 @@ export interface Disease {
   prevalence: string;
   description: string;
   geneticBasis: boolean;
+<<<<<<< HEAD
   // FE-027 unblock: fields referenced by disease-search-bar.tsx and
   // screens/core-screen.tsx. These are optional because not every mock
   // disease entry populates them.
@@ -28,6 +29,14 @@ export interface Disease {
   clinicalTrialCount?: number;
   orphaCode?: string;
   evidenceCount?: number;
+=======
+  // FE-011: optional fields used by DiseaseSearchBar and dashboard.
+  synonyms?: string[];
+  category?: string;
+  candidateCount?: number;
+  clinicalTrialCount?: number;
+  icd10?: string;
+>>>>>>> fix/v101-forensic-root-fixes-20-critical-bugs
 }
 
 export interface DrugCandidate {
@@ -45,6 +54,9 @@ export interface DrugCandidate {
   clinicalPhase: string;
   ipStatus: string;
   diseaseId: string;
+  // FE-001: added diseaseName + rank for real RL candidate mapping.
+  diseaseName?: string;
+  rank?: number;
   targets: string[];
   pathways: string[];
   // FE-027 unblock: fields referenced by candidate-table.tsx,
@@ -89,8 +101,14 @@ export interface GraphNode {
   type: 'drug' | 'disease' | 'gene' | 'protein' | 'pathway';
   x: number;
   y: number;
+<<<<<<< HEAD
   // FE-027 unblock: field referenced by knowledge-graph-viewer.tsx.
   size?: number;
+=======
+  // FE-011: optional fields used by knowledge-graph-viewer.
+  size?: number;
+  description?: string;
+>>>>>>> fix/v101-forensic-root-fixes-20-critical-bugs
 }
 
 export interface GraphEdge {
@@ -515,6 +533,7 @@ export const drugInteractions: DrugInteraction[] = [
 // === TYPE EXPORTS ===
 export type SafetyTier = DrugCandidate['safetyTier'];
 
+<<<<<<< HEAD
 // FE-027 unblock: aliases referenced by knowledge-graph-viewer.tsx and
 // pathway-viz.tsx. Some components import these names instead of
 // graphNodes/graphEdges. We export them as aliases so the imports resolve.
@@ -573,11 +592,42 @@ export function getScoreBreakdown(candidate: DrugCandidate | string): ScoreBreak
 // shell — the real per-user stats come from /api/auth/me and /api/rl.
 export const dashboardStats = {
   totalCandidates: 247,
+=======
+// ---------------------------------------------------------------------------
+// FE-011 ROOT FIX: Dashboard summary data.
+//
+// The previous dashboard-screen.tsx imported dashboardStats, recentActivity,
+// milestones, monthlyQueryTrend, and safetyTierDistribution — none of which
+// were exported here. The build silently passed (typescript.ignoreBuildErrors
+// was true in next.config.ts) but the dashboard crashed at runtime.
+//
+// These are still MOCK values — the dashboard screens that display them are
+// marked as "dashboard" (analytics overview) and are NOT the core drug-
+// repurposing screens that FE-001 fixes. The core screens (DiseaseSearch,
+// CandidateDetail, KnowledgeGraph, ClinicalTrials, Safety, EvidenceBuilder)
+// are being migrated to real API calls in core-screens.tsx.
+//
+// For the dashboard overview tiles, the production path is to add a
+// /api/dashboard/stats endpoint that aggregates from the DB. Until then,
+// these explicit mock values are clearly labeled and used only for layout.
+// ---------------------------------------------------------------------------
+
+export interface DashboardStats {
+  totalCandidates: number;
+  clinicalTrials: number;
+  queriesThisMonth: number;
+  reportsGenerated: number;
+}
+
+export const dashboardStats: DashboardStats = {
+  totalCandidates: 274,
+>>>>>>> fix/v101-forensic-root-fixes-20-critical-bugs
   clinicalTrials: 89,
   queriesThisMonth: 342,
   reportsGenerated: 87,
 };
 
+<<<<<<< HEAD
 export const recentActivity = [
   { id: 'ra1', type: 'query', user: 'Dr. Sarah Chen', action: 'searched', target: "Huntington's Disease", timestamp: '2026-07-11T10:00:00Z' },
   { id: 'ra2', type: 'candidate', user: 'James Miller', action: 'saved', target: 'Memantine → HD', timestamp: '2026-07-11T09:30:00Z' },
@@ -612,3 +662,121 @@ export const safetyTierDistribution = [
   { tier: 'Yellow', count: 78, fill: '#D4853A' },
   { tier: 'Red', count: 27, fill: '#C0392B' },
 ];
+=======
+export interface RecentActivityItem {
+  id: string;
+  user: string;
+  action: string;
+  target: string;
+  type: 'query' | 'candidate' | 'report' | 'safety' | 'team' | 'data';
+  timestamp: string;
+}
+
+export const recentActivity: RecentActivityItem[] = [
+  { id: '1', user: 'Dr. Sarah Chen', action: 'searched for', target: 'Huntington\'s disease', type: 'query', timestamp: new Date(Date.now() - 5 * 60 * 1000).toISOString() },
+  { id: '2', user: 'Dr. James Park', action: 'generated report for', target: 'Memantine + HD', type: 'report', timestamp: new Date(Date.now() - 22 * 60 * 1000).toISOString() },
+  { id: '3', user: 'Dr. Sarah Chen', action: 'flagged safety concern on', target: 'Fingolimod', type: 'safety', timestamp: new Date(Date.now() - 47 * 60 * 1000).toISOString() },
+  { id: '4', user: 'Dr. Aisha Patel', action: 'added candidate', target: 'Riluzole for ALS', type: 'candidate', timestamp: new Date(Date.now() - 90 * 60 * 1000).toISOString() },
+  { id: '5', user: 'Dr. James Park', action: 'imported data from', target: 'ClinicalTrials.gov', type: 'data', timestamp: new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString() },
+  { id: '6', user: 'Dr. Sarah Chen', action: 'invited', target: 'rohan@org.io', type: 'team', timestamp: new Date(Date.now() - 5 * 60 * 60 * 1000).toISOString() },
+  { id: '7', user: 'Dr. Aisha Patel', action: 'searched for', target: 'Multiple sclerosis', type: 'query', timestamp: new Date(Date.now() - 7 * 60 * 60 * 1000).toISOString() },
+  { id: '8', user: 'Dr. Sarah Chen', action: 'generated report for', target: 'Metformin + Cancer', type: 'report', timestamp: new Date(Date.now() - 9 * 60 * 60 * 1000).toISOString() },
+];
+
+export interface Milestone {
+  id: string;
+  title: string;
+  status: 'completed' | 'in_progress' | 'overdue' | 'pending';
+  progress: number;
+  assignee: string;
+  project: string;
+  dueDate: string;
+}
+
+export const milestones: Milestone[] = [
+  { id: '1', title: 'Phase 1: ChEMBL ingestion', status: 'completed', progress: 100, assignee: 'Rohan', project: 'Data Pipeline', dueDate: '2026-07-15' },
+  { id: '2', title: 'Phase 2: Neo4j graph build', status: 'in_progress', progress: 68, assignee: 'Rohan', project: 'Knowledge Graph', dueDate: '2026-07-22' },
+  { id: '3', title: 'Phase 3: GNN training (subgraph)', status: 'in_progress', progress: 42, assignee: 'Manoj', project: 'Graph Transformer', dueDate: '2026-07-29' },
+  { id: '4', title: 'Phase 4: RL agent PPO training', status: 'pending', progress: 0, assignee: 'Manoj', project: 'RL Ranker', dueDate: '2026-08-05' },
+  { id: '5', title: 'Phase 5: API + Dashboard launch', status: 'pending', progress: 10, assignee: 'Aseem', project: 'V1 Launch', dueDate: '2026-08-12' },
+  { id: '6', title: 'Wet-lab validation (partner)', status: 'overdue', progress: 25, assignee: 'Aseem', project: 'Partnership', dueDate: '2026-07-08' },
+];
+
+export interface MonthlyQueryTrend {
+  month: string;
+  queries: number;
+}
+
+export const monthlyQueryTrend: MonthlyQueryTrend[] = [
+  { month: 'Jan', queries: 145 },
+  { month: 'Feb', queries: 198 },
+  { month: 'Mar', queries: 232 },
+  { month: 'Apr', queries: 287 },
+  { month: 'May', queries: 312 },
+  { month: 'Jun', queries: 342 },
+  { month: 'Jul', queries: 289 },
+];
+
+export interface SafetyTierDistribution {
+  tier: string;
+  count: number;
+  fill: string;
+}
+
+export const safetyTierDistribution: SafetyTierDistribution[] = [
+  { tier: 'Green', count: 142, fill: '#1D9E75' },
+  { tier: 'Yellow', count: 87, fill: '#D4A53A' },
+  { tier: 'Orange', count: 34, fill: '#D4853A' },
+  { tier: 'Red', count: 11, fill: '#C0392B' },
+];
+
+// ---------------------------------------------------------------------------
+// FE-011 ROOT FIX: Backward-compat aliases for knowledge-graph-viewer.tsx.
+// The component imported KnowledgeGraphNode/KnowledgeGraphEdge and
+// knowledgeGraphNodes/knowledgeGraphEdges — none of which existed.
+// ---------------------------------------------------------------------------
+
+export type KnowledgeGraphNode = GraphNode;
+export type KnowledgeGraphEdge = GraphEdge;
+export const knowledgeGraphNodes = graphNodes;
+export const knowledgeGraphEdges = graphEdges;
+
+// ---------------------------------------------------------------------------
+// FE-011 ROOT FIX: pathwayData export for pathway-viz.tsx.
+// ---------------------------------------------------------------------------
+
+export interface PathwayNode {
+  id: string;
+  label: string;
+  type: 'receptor' | 'kinase' | 'transcription' | 'effector' | 'drug';
+  x: number;
+  y: number;
+}
+
+export interface PathwayEdge {
+  source: string;
+  target: string;
+  label: string;
+  type?: 'activation' | 'binding' | 'inhibition';
+}
+
+export const pathwayData = {
+  name: 'Drug → Target → Pathway → Disease',
+  nodes: [
+    { id: 'drug', label: 'Drug', type: 'drug' as const, x: 80, y: 200 },
+    { id: 'rec1', label: 'Receptor', type: 'receptor' as const, x: 240, y: 200 },
+    { id: 'kin1', label: 'Kinase', type: 'kinase' as const, x: 400, y: 120 },
+    { id: 'kin2', label: 'Kinase 2', type: 'kinase' as const, x: 400, y: 280 },
+    { id: 'tf1', label: 'TF', type: 'transcription' as const, x: 560, y: 200 },
+    { id: 'eff1', label: 'Effector', type: 'effector' as const, x: 720, y: 200 },
+  ],
+  edges: [
+    { source: 'drug', target: 'rec1', label: 'binds', type: 'binding' as const },
+    { source: 'rec1', target: 'kin1', label: 'phosphorylates', type: 'activation' as const },
+    { source: 'rec1', target: 'kin2', label: 'phosphorylates', type: 'activation' as const },
+    { source: 'kin1', target: 'tf1', label: 'activates', type: 'activation' as const },
+    { source: 'kin2', target: 'tf1', label: 'activates', type: 'activation' as const },
+    { source: 'tf1', target: 'eff1', label: 'transcribes', type: 'activation' as const },
+  ],
+};
+>>>>>>> fix/v101-forensic-root-fixes-20-critical-bugs

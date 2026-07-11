@@ -1,5 +1,6 @@
 import type { NextConfig } from "next";
 
+<<<<<<< HEAD
 /**
  * ROOT FIXES for FE-026, FE-027, FE-039.
  *
@@ -96,6 +97,23 @@ const nextConfig: NextConfig = {
       "./node_modules/@prisma/client/**/*",
       "./prisma/**/*",
     ],
+=======
+const nextConfig: NextConfig = {
+  // Note: output: "standalone" is enabled for production Docker/Node deployments.
+  // Disable it locally if you just want `next dev` / `next start` to work without
+  // copying the .next/standalone folder around.
+  output: "standalone",
+  // FE-011/FE-012/FE-013 ROOT FIX: typescript.ignoreBuildErrors was previously
+  // `true`, which let broken imports (sidebarCategories, ScreenCategory,
+  // getScreenMeta, dashboardStats, Pill, etc.) silently pass the build. At
+  // runtime the components crashed because the imports resolved to undefined.
+  //
+  // Production-grade code MUST fail the build on type errors. If there are
+  // legitimate `@ts-expect-error` annotations, they are still respected —
+  // `ignoreBuildErrors: false` only fails the build on UNEXPECTED type errors.
+  typescript: {
+    ignoreBuildErrors: false,
+>>>>>>> fix/v101-forensic-root-fixes-20-critical-bugs
   },
 };
 

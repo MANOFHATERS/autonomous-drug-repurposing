@@ -12,7 +12,11 @@ import {
   FileText, Database, Server, Activity, Info, Save, Upload,
   ChevronLeft, Check, Minus, PlusCircle, AlertCircle, ShieldCheck,
   Building, UserCog, MapPin, Palette, Plug, BellRing, ScrollText,
+<<<<<<< HEAD
   Calculator, Gauge, Workflow, Percent, ShoppingCart, Network as Sitemap,
+=======
+  Calculator, Gauge, Workflow, Percent, ShoppingCart,
+>>>>>>> fix/v101-forensic-root-fixes-20-critical-bugs
   ToggleRight, FolderLock, KeyRound, ScanSearch, Cookie, Archive,
   BookMarked, Play, Webhook, Braces, Upload as UploadIcon,
   Settings2, User, Smartphone, Headphones, Ticket, Library,

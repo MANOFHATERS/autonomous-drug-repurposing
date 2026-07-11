@@ -1,6 +1,12 @@
 // DrugOS Backend Schema
-// SQLite-backed persistence for users, organizations, projects, billing,
+// PostgreSQL-backed persistence for users, organizations, projects, billing,
 // collaboration, evidence packages, audit logs, notifications, and API keys.
+//
+// PRODUCTION STORAGE: PostgreSQL (per project docx: "Storage: PostgreSQL + S3").
+// SQLite is forbidden in production because it lacks row-level locks, type
+// enforcement, and concurrent-write semantics required for a multi-tenant
+// pharma platform handling PHI/PII.
+//
 // NOTE: Knowledge graph nodes/edges, raw dataset tables, and RL model artifacts
 // are intentionally NOT modeled here — those are owned by the standalone ML
 // services (Neo4j graph, Airflow data pipeline, Stable-Baselines3 RL agent).
@@ -10,7 +16,13 @@ generator client {
 }
 
 datasource db {
-  provider = "sqlite"
+  // FE-019 ROOT FIX: Switched from sqlite to postgresql. The project doc
+  // (Team_Cosmic_Build_Process_Updated.docx, Section 9 "Technology Stack")
+  // explicitly requires "Storage: PostgreSQL + S3". SQLite cannot enforce
+  // type constraints, doesn't support concurrent writes (single-writer lock),
+  // and has different concurrency semantics — production under load would
+  // corrupt.
+  provider = "postgresql"
   url      = env("DATABASE_URL")
 }
 
@@ -25,12 +37,18 @@ model User {
   name              String?
   role              String        @default("researcher") // researcher | admin | owner | billing | viewer | data-scientist | pi | business-dev | developer
   title             String?       // e.g. "Principal Scientist"
-  bio               String?       // user-provided bio
+  bio               String?
   status            String        @default("active")     // active | suspended | pending_approval
   mfaSecret         String?
   mfaEnabled        Boolean       @default(false)
   emailVerified     Boolean       @default(false)
   academicVerified  Boolean       @default(false)
+  // FE-009 ROOT FIX: Brute-force protection. After 5 failed logins within
+  // the lockout window, the account is locked until `lockedUntil`. The
+  // `failedLoginCount` resets on successful login or when the lockout
+  // window expires.
+  failedLoginCount  Int           @default(0)
+  lockedUntil       DateTime?
   lastLoginAt       DateTime?
   createdAt         DateTime      @default(now())
   updatedAt         DateTime      @updatedAt
@@ -43,6 +61,9 @@ model User {
   evidencePackages        EvidencePackage[]
   billingInvoices         BillingInvoice[]
   refreshTokens           RefreshToken[]
+
+  @@index([status])
+  @@index([role])
 }
 
 model Organization {
@@ -60,6 +81,9 @@ model Organization {
   apiKeys           ApiKey[]
   billingInvoices   BillingInvoice[]
   subscription      Subscription?
+
+  @@index([plan])
+  @@index([status])
 }
 
 model OrganizationMember {
@@ -74,6 +98,7 @@ model OrganizationMember {
   organization   Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
 
   @@unique([userId, organizationId])
+  @@index([organizationId])
 }
 
 model RefreshToken {
@@ -87,6 +112,7 @@ model RefreshToken {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
+  @@index([expiresAt])
 }
 
 // ---------------------------------------------------------------------------
@@ -123,6 +149,12 @@ model Project {
   comments        Comment[]
   activities      ProjectActivity[]
   evidencePackages EvidencePackage[]
+
+  // FE-018 ROOT FIX: Missing index on organizationId — every org-scoped
+  // project list query was a full table scan.
+  @@index([organizationId])
+  @@index([ownerId])
+  @@index([status])
 }
 
 model Hypothesis {
@@ -168,6 +200,12 @@ model Hypothesis {
 
   project          Project          @relation(fields: [projectId], references: [id], onDelete: Cascade)
   evidencePackages EvidencePackage[]
+
+  // FE-018 ROOT FIX: Missing index on projectId.
+  @@index([projectId])
+  @@index([drugName])
+  @@index([diseaseName])
+  @@index([status])
 }
 
 model Comment {
@@ -179,6 +217,10 @@ model Comment {
   createdAt  DateTime @default(now())
 
   project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  // FE-018 ROOT FIX: Missing index on projectId.
+  @@index([projectId])
+  @@index([createdAt])
 }
 
 model ProjectActivity {
@@ -190,6 +232,10 @@ model ProjectActivity {
   createdAt  DateTime @default(now())
 
   project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  // FE-018 ROOT FIX: Missing index on projectId.
+  @@index([projectId])
+  @@index([createdAt])
 }
 
 // ---------------------------------------------------------------------------
@@ -227,6 +273,10 @@ model BillingInvoice {
 
   organization Organization @relation(fields: [organizationId], references: [id])
   user         User?         @relation(fields: [userId], references: [id])
+
+  @@index([organizationId])
+  @@index([status])
+  @@index([dueDate])
 }
 
 // ---------------------------------------------------------------------------
@@ -251,6 +301,11 @@ model EvidencePackage {
   project    Project?    @relation(fields: [projectId], references: [id])
   hypothesis Hypothesis? @relation(fields: [hypothesisId], references: [id])
   user       User?       @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@index([drugName])
+  @@index([diseaseName])
+  @@index([status])
 }
 
 // ---------------------------------------------------------------------------
@@ -262,19 +317,28 @@ model ApiKey {
   organizationId  String
   userId          String
   name            String
-  hashedKey       String   // we store only the hash, never the raw key
+  hashedKey       String   @unique // FE-018: enforced unique + indexed
   prefix          String   // first 8 chars shown in UI for identification
   lastUsedAt      DateTime?
   revokedAt       DateTime?
   createdAt       DateTime @default(now())
 
   organization Organization @relation(fields: [organizationId], references: [id])
+<<<<<<< HEAD
   user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   // FE-022 root fix: index on (organizationId, userId, revokedAt) so the
   // per-user list/revoke queries are O(log n) instead of O(n).
   @@index([organizationId, userId, revokedAt])
   @@index([hashedKey])
+=======
+  user         User         @relation(fields: [userId], references: [id])
+
+  // FE-018 ROOT FIX: missing indexes added for org/user/revokedAt lookups.
+  @@index([organizationId])
+  @@index([userId])
+  @@index([revokedAt])
+>>>>>>> fix/v101-forensic-root-fixes-20-critical-bugs
 }
 
 // ---------------------------------------------------------------------------
@@ -293,6 +357,7 @@ model Notification {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
+  @@index([readAt])
 }
 
 model AuditLog {
@@ -310,6 +375,9 @@ model AuditLog {
 
   @@index([userId])
   @@index([action])
+  // FE-018 ROOT FIX: Missing index on createdAt — audit log queries by
+  // time range were full table scans.
+  @@index([createdAt])
 }
 
 // ---------------------------------------------------------------------------
@@ -320,6 +388,7 @@ model WebhookEndpoint {
   id              String   @id @default(cuid())
   organizationId  String
   url             String
+<<<<<<< HEAD
   // FE-017 ROOT FIX: previously `secret String` stored the webhook signing
   // secret in plaintext. Anyone with DB read access (a backup, a DBA, a
   // SQL injection) could forge valid webhook deliveries. The root fix
@@ -336,8 +405,20 @@ model WebhookEndpoint {
   // sender, not the receiver).
   secretHash      String
   secretPrefix    String   // first 8 chars shown in UI for identification
+=======
+  // FE-017 ROOT FIX: Webhook signing secrets are now stored as AES-256-GCM
+  // ciphertext (format: "v1:<base64 iv>:<base64 ciphertext>:<base64 tag>").
+  // The plaintext secret is NEVER persisted. Encryption/decryption is handled
+  // by lib/crypto.ts using WEBHOOK_SECRET_KEY (32-byte key, env var). This
+  // means a DB backup leak does NOT expose signing secrets — an attacker
+  // would also need the KMS/env var to forge webhook deliveries.
+  secretEncrypted String
+>>>>>>> fix/v101-forensic-root-fixes-20-critical-bugs
   events          String   @default("*") // comma-separated event types
   enabled         Boolean  @default(true)
   lastTriggeredAt DateTime?
   createdAt       DateTime @default(now())
+
+  @@index([organizationId])
+  @@index([enabled])
 }

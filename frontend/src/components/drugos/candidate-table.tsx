@@ -102,8 +102,8 @@ export function CandidateTable({
                 </TableCell>
                 <TableCell>
                   <div>
-                    <div className="font-medium text-foreground">{candidate.name}</div>
-                    <div className="text-xs text-muted-foreground">{candidate.genericName}</div>
+                    <div className="font-medium text-foreground">{candidate.drugName}</div>
+                    <div className="text-xs text-muted-foreground">{candidate.brandNames?.join(', ')}</div>
                   </div>
                 </TableCell>
                 <TableCell>
@@ -121,10 +121,10 @@ export function CandidateTable({
                   </TableCell>
                 )}
                 <TableCell>
-                  <Badge variant="outline" className="text-xs">{candidate.phase}</Badge>
+                  <Badge variant="outline" className="text-xs">{candidate.clinicalPhase}</Badge>
                 </TableCell>
                 <TableCell>
-                  <span className="text-sm font-medium">{candidate.repurposingConfidence}%</span>
+                  <span className="text-sm font-medium">{candidate.compositeScore}%</span>
                 </TableCell>
                 <TableCell>
                   <Button variant="ghost" size="sm" className="h-7 w-7 p-0">
