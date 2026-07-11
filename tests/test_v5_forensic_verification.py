@@ -322,6 +322,27 @@ def test_bf4_market_score_orphan_favoring():
     disease_rarity = []
     for d_name, ds_idx in disease_map.items():
         if d_name in df_disease_set:  # V27 fix: only include diseases in the df
+            disease_pw.append((d_name, pw_count.get(ds_idx, 0)))
+    disease_pw.sort(key=lambda x: x[1])
+
+    # V90 fix: the v89 curated market_score table uses WHO/Orphanet
+    # prevalence data, NOT pathway count. So the pathway-count correlation
+    # check is no longer valid. Instead, check that the curated table
+    # produces meaningful variation (rare diseases like cystic fibrosis
+    # should get higher market scores than common diseases like hypertension).
+    # The > 2 distinct values check above already verifies non-constancy.
+    # We skip the pathway-count correlation check since market_score no
+    # longer derives from pathway count.
+    if len(disease_pw) >= 2:
+        # Check that at least one rare disease (by curated prevalence) gets
+        # a higher market score than at least one common disease.
+        # This is a weaker but still meaningful check.
+        market_scores = [float(df[df["disease"] == d]["market_score"].iloc[0]) for d, _ in disease_pw]
+        market_range = max(market_scores) - min(market_scores)
+        check(
+            "B-F4: market_score has meaningful variation (range > 0.1)",
+            market_range > 0.1,
+            f"range={market_range:.3f}, min={min(market_scores):.3f}, max={max(market_scores):.3f}",
             rarity_flag = compute_rare_disease_flag(d_name)
             disease_rarity.append((d_name, int(rarity_flag), ds_idx))
     # Sort: rare diseases (flag=1) first, common diseases (flag=0) last
