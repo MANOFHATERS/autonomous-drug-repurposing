@@ -284,12 +284,6 @@ def test_v31_end_to_end_smoke():
 
     print(f"  PASS: End-to-end smoke test passed. Graph has {n_treats} treats edges "
           f"(KPs + training positives). V90 BUG #18: _feature_rng removed.")
-        # V90 BUG #38: _feature_rng must NOT exist (dead code removed).
-        assert not hasattr(bridge, '_feature_rng'), \
-            "V90 BUG #38: _feature_rng must be REMOVED (dead code)"
-
-    print(f"  PASS: End-to-end smoke test passed. Graph has {n_treats} treats edges "
-          f"(KPs + training positives). V90 BUG #38: _feature_rng removed.")
 
 
 def run_all_tests():

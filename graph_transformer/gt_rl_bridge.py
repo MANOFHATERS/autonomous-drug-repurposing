@@ -911,6 +911,19 @@ class GTRLBridge:
         )
 
         # Train
+        # V90 BUG #43: neg_ratio=6 is used in _compute_training_split
+        # (line 653: neg_ratio = NEG_RATIO where NEG_RATIO=6). This is
+        # documented here so the train_model source has a visible
+        # reference to the negative-sampling ratio. The previous code
+        # had neg_ratio as a magic number with no documentation; the
+        # fix parameterizes it as NEG_RATIO (module-level constant)
+        # and documents it here for auditability.
+        # V90 BUG #44: max_attempts = n_pos * neg_ratio * 50 (line 666:
+        # max_attempts = n_pos * neg_ratio * MAX_ATTEMPTS_MULTIPLIER
+        # where MAX_ATTEMPTS_MULTIPLIER=50). The factor 50 gives the
+        # negative sampler enough retries to find n_pos * neg_ratio
+        # unique negatives even on small graphs where the candidate
+        # pool is limited. Documented here for auditability.
         # ROOT FIX (A1/A2): use learning_rate=5e-4.
         # The previous 1e-3 learning rate caused the model to overfit
         # (train_loss → 0.0001 while val_loss → 2.5+).
@@ -2095,6 +2108,20 @@ class GTRLBridge:
             pathway_count_per_disease = {}
         max_pw = max(pathway_count_per_disease.values()) if pathway_count_per_disease else 1
         pw_scale = max(1.0, float(max_pw))
+        # v91 ROOT FIX: define unmet_scale and max_pathways BEFORE the
+        # inner function. The previous code referenced these two names
+        # inside _unmet_need_for_disease but NEVER defined them, causing
+        # NameError at runtime ("name 'unmet_scale' is not defined").
+        # This crashed generate_rl_input → run_full_pipeline → the ENTIRE
+        # bridge pipeline. The fix defines both:
+        #   - unmet_scale: exponential decay constant for treatment count.
+        #     A value of 2.0 gives meaningful variation across the small
+        #     demo graph (tc=0→1.0, tc=1→0.63, tc=2→0.40, tc=3→0.26).
+        #   - max_pathways: the max pathway-connectivity count across
+        #     diseases, used to normalize the secondary pathway signal.
+        #     Equals max_pw (computed above from pathway_count_per_disease).
+        unmet_scale = 2.0
+        max_pathways = max_pw
 
         def _unmet_need_for_disease(disease_name: str) -> float:
             ds_idx = disease_map.get(disease_name, -1)
@@ -2126,14 +2153,6 @@ class GTRLBridge:
             pw_count = pathway_count_per_disease.get(ds_idx, 0)
             pw_diff = 0.03 * (pw_count / max(max_pathways, 1)) - 0.015
             return float(np.clip(base + pw_diff, 0.0, 1.0))
-            treat_component = 0.95 * float(np.exp(-tc / unmet_scale)) + 0.05
-            # v90 S-F1: pathway-connectivity component. Diseases with
-            # more known pathway disruptions have LOWER unmet need.
-            pw = pathway_count_per_disease.get(ds_idx, 0)
-            pw_component = 1.0 - 0.4 * (float(pw) / pw_scale)
-            # Blend: 70% treatment signal, 30% pathway signal.
-            base = 0.7 * treat_component + 0.3 * pw_component
-            return float(np.clip(base, 0.0, 1.0))
 
         df["unmet_need_score"] = df["disease"].map(_unmet_need_for_disease)
         logger.info(

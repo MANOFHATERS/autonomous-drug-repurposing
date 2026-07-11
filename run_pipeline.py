@@ -299,14 +299,27 @@ def run_bridge(phase1_dir: Path) -> Tuple[Any, Any]:
 def run_schema_adapter(
     builder: Any, seed: int = 42
 ) -> Tuple[Any, Any, Any, List[Tuple[str, str]]]:
-    """Phase 2 → Phase 3 schema adapter.
+    """Phase 2 to Phase 3 schema adapter.
 
     Converts the Phase 2 RecordingGraphBuilder (capitalized labels) into
     the Phase 3 canonical schema (lowercase labels) via
     ``adapt_phase2_to_phase3``. This is the REAL integration point that
     the v89 run_pipeline.py was missing (it called a non-existent
     ``build_pyg_hetero_data`` function).
-    return staged, builder
+
+    v91 ROOT FIX: a botched edit left the docstring UNCLOSED (missing
+    closing triple-quote), which swallowed the ``def run_phase2_kg_builder``
+    line and the next docstring, producing a SyntaxError on the ``->``
+    arrow character in line 318. The ENTIRE run_pipeline.py was unimportable.
+    The fix closes the docstring and restores the function body that
+    calls ``adapt_phase2_to_phase3`` (matching the type hint's 4-tuple
+    return signature).
+    """
+    from graph_transformer.data.phase2_adapter import adapt_phase2_to_phase3
+    node_features, edge_indices, node_maps, known_pairs = adapt_phase2_to_phase3(
+        builder, seed=seed
+    )
+    return node_features, edge_indices, node_maps, known_pairs
 
 
 def run_phase2_kg_builder(
