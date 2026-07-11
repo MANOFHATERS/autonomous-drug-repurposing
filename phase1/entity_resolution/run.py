@@ -584,6 +584,26 @@ def run_entity_resolution() -> Dict[str, Any]:
                 save_df[c] = None
         save_df = save_df[model_cols]
 
+        # ROOT FIX (E2E CI): deduplicate on chembl_id before persisting.
+        # The entity_mapping table has a UNIQUE constraint on chembl_id,
+        # but the resolution process can produce multiple rows with the
+        # same chembl_id (e.g. from different sources mapping to the same
+        # ChEMBL compound). Without dedup, the INSERT fails with
+        # sqlite3.IntegrityError: UNIQUE constraint failed.
+        # Keep the first row per chembl_id (deterministic by save_df order).
+        # Rows with NULL chembl_id are kept (NULL is not subject to UNIQUE).
+        n_before = len(save_df)
+        if "chembl_id" in save_df.columns:
+            chembl_non_null = save_df["chembl_id"].notna()
+            dup_mask = chembl_non_null & save_df["chembl_id"].duplicated(keep="first")
+            if dup_mask.any():
+                logger.warning(
+                    "Deduplicating %d rows with duplicate chembl_id "
+                    "(keeping first occurrence). %d rows remain.",
+                    int(dup_mask.sum()), n_before - int(dup_mask.sum()),
+                )
+                save_df = save_df[~dup_mask].copy()
+
         # Transactional: temp table + DELETE/INSERT — atomic, rolls back on failure.
         # v9 ROOT FIX (audit F3.5): TRUNCATE TABLE is PostgreSQL-specific
         # syntax. On SQLite-backed dev/test environments it raises
