@@ -284,12 +284,13 @@ def test_v31_end_to_end_smoke():
 
     print(f"  PASS: End-to-end smoke test passed. Graph has {n_treats} treats edges "
           f"(KPs + training positives). V90 BUG #18: _feature_rng removed.")
-        # V90 BUG #38: _feature_rng must NOT exist (dead code removed).
-        assert not hasattr(bridge, '_feature_rng'), \
-            "V90 BUG #38: _feature_rng must be REMOVED (dead code)"
-
-    print(f"  PASS: End-to-end smoke test passed. Graph has {n_treats} treats edges "
-          f"(KPs + training positives). V90 BUG #38: _feature_rng removed.")
+    # ROOT FIX (v92): removed duplicate assert + duplicate print that
+    # were at the WRONG indent level (indent 8 after the ``with`` block
+    # had already closed at indent 4). This caused ``compileall`` to
+    # fail with IndentationError: unexpected indent (line 288), breaking
+    # CI's Phase 3/4 build job for every PR. The duplicate code was a
+    # botched merge of BUG #18 → BUG #38 (both made the same assertion
+    # about ``_feature_rng`` being removed).
 
 
 def run_all_tests():

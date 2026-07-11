@@ -304,24 +304,52 @@ def test_bf4_market_score_orphan_favoring():
     # pathway count, ``rare_disease`` would be a disease NOT in the df,
     # causing ``df[df["disease"] == rare_disease]["market_score"].iloc[0]``
     # to fail with "single positional indexer is out-of-bounds" (empty df).
+    #
+    # ROOT FIX (v92): the previous test used pathway count (pw) as a proxy
+    # for disease rarity — "low pw = rare = high market_score". This was
+    # the v88 assumption. The v89 ROOT FIX replaced market_score with
+    # curated WHO/Orphanet prevalence data (compute_market_score), so
+    # rarity is now determined by ACTUAL prevalence, not pathway count.
+    # The test now uses ``compute_rare_disease_flag`` (the same curated
+    # function the bridge uses) to pick a rare disease and a common
+    # disease, then asserts the rare disease has a higher market_score
+    # (orphan drug value). This aligns the test with the v89 scientific
+    # fix instead of the v88 pathway-count proxy.
+    from graph_transformer.data.biomedical_tables import (
+        compute_rare_disease_flag, is_rare_disease,
+    )
     df_disease_set = set(df["disease"].tolist())
-    disease_pw = []
+    disease_rarity = []
     for d_name, ds_idx in disease_map.items():
         if d_name in df_disease_set:  # V27 fix: only include diseases in the df
-            disease_pw.append((d_name, pw_count.get(ds_idx, 0)))
-    disease_pw.sort(key=lambda x: x[1])
+            rarity_flag = compute_rare_disease_flag(d_name)
+            disease_rarity.append((d_name, int(rarity_flag), ds_idx))
+    # Sort: rare diseases (flag=1) first, common diseases (flag=0) last
+    disease_rarity.sort(key=lambda x: (-x[1], x[2]))
 
-    if len(disease_pw) >= 2:
-        rare_disease = disease_pw[0][0]
-        common_disease = disease_pw[-1][0]
+    if len(disease_rarity) >= 2:
+        # Pick the rarest disease (highest rarity_flag) and the most common
+        rare_disease = disease_rarity[0][0]
+        common_disease = disease_rarity[-1][0]
         rare_market = float(df[df["disease"] == rare_disease]["market_score"].iloc[0])
         common_market = float(df[df["disease"] == common_disease]["market_score"].iloc[0])
-        check(
-            "B-F4: rare disease (low pw) has higher market_score than common disease",
-            rare_market > common_market,
-            f"rare({rare_disease}, pw={disease_pw[0][1]})={rare_market:.3f}, "
-            f"common({common_disease}, pw={disease_pw[-1][1]})={common_market:.3f}",
-        )
+        # Only assert if the two diseases actually have different rarity
+        # (if all diseases in the demo graph are common, the check is
+        # vacuously true — skip it).
+        rare_flag = disease_rarity[0][1]
+        common_flag = disease_rarity[-1][1]
+        if rare_flag != common_flag:
+            check(
+                "B-F4: rare disease (curated prevalence) has higher market_score than common disease",
+                rare_market > common_market,
+                f"rare({rare_disease}, rare_flag={rare_flag})={rare_market:.3f}, "
+                f"common({common_disease}, rare_flag={common_flag})={common_market:.3f}",
+            )
+        else:
+            # All diseases in the demo graph have the same rarity flag —
+            # skip the comparison (vacuously true) but log for visibility.
+            print(f"  SKIP  B-F4: all {len(disease_rarity)} demo diseases have "
+                  f"the same rarity flag ({rare_flag}) — comparison vacuous.")
 
 
 # ----------------------------------------------------------------------

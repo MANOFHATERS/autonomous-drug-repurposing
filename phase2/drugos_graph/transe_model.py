@@ -3474,8 +3474,16 @@ def train_transe(
                         n_val_neg = n_val * 10
                         val_neg_tails_list: List[int] = [0] * n_val_neg
                         # Expand val_rels 10x to align with neg slots.
-                        val_rels_expanded_fallback = (
-                            val_rels_dev.repeat_interleave(10)
+                        # ROOT FIX (v92): the previous code opened a paren
+                        # ``val_rels_expanded_fallback = (`` but never closed
+                        # it — the next ~20 lines (comment + assignment +
+                        # for-loop + sampling call) were swallowed into the
+                        # unclosed paren, causing ``compileall`` to fail with
+                        # SyntaxError: '(' was never closed. This broke CI's
+                        # build job for every PR. The fix: close the
+                        # assignment on a single line so the subsequent
+                        # statements run as intended.
+                        val_rels_expanded_fallback = val_rels_dev.repeat_interleave(10)
                         # v88 ROOT FIX (BUG #33 — hardcoded relation_idx=0
                         # in val AUC fallback): look up the actual treats
                         # relation index from relation_to_types.

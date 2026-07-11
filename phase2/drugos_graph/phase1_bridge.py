@@ -2856,11 +2856,19 @@ def _classify_chembl_activity_edge(
     # "agonist" (with optional plural "s"). This excludes "antagonist"
     # (handled above) and "inverse agonist" (handled above).
     _AGONIST_RE = _re_v84.compile(r"\bagonists?\b", _re_v84.IGNORECASE)
-    if "activ" in a or _AGONIST_RE.search(a):
     # Word-boundary "activ" or "agon" → activates. The \b ensures we
     # match "activation", "activates", "agonist", "agonism" but NOT
     # "inactivation", "deactivation", "inactive" (those are matched
     # by the inhibits regex above).
+    # ROOT FIX (v92): the previous code had an orphan ``if`` statement
+    # on line 2859 (``if "activ" in a or _AGONIST_RE.search(a):``) with
+    # NO indented body — only a comment and another ``if`` followed it.
+    # This caused ``compileall`` to fail with IndentationError, breaking
+    # CI's build job for every PR. The orphan ``if`` was a leftover from
+    # a previous edit that duplicated the word-boundary check below. The
+    # correct check (``_re_v89.search(r"\b(activ|agon)", a)``) is the one
+    # that already runs below — so the orphan line is removed and the
+    # ``_AGONIST_RE`` regex is retained for documentation/debugging.
     if _re_v89.search(r"\b(activ|agon)", a):
         return "activates"
     # v88 ROOT FIX (BUG #50 — IC50 with non-bare standard_type strings

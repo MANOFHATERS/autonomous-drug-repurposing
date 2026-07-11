@@ -597,12 +597,18 @@ def run_entity_resolution() -> Dict[str, Any]:
                         "Loaded STRING aliases from raw file %s: %d UniProt mappings",
                         _alias_file.name, len(string_aliases_df),
                     )
-        except RuntimeError:
-            # v89 BUG #28: re-raise RuntimeError (corrupt file) so the
-            # operator sees a clear failure. Do NOT swallow it.
-            raise
             else:
                 # v89 BUG #3: no human aliases file found — log clearly.
+                # This is the else branch of ``if _alias_files:`` above.
+                # ROOT FIX (v92): the previous code placed this ``else:``
+                # block INSIDE the ``except RuntimeError:`` clause after a
+                # ``raise`` statement, which is invalid Python syntax
+                # (``else`` cannot follow ``raise`` inside ``except``).
+                # This caused ``compileall`` to fail with SyntaxError on
+                # line 604, breaking CI's build job for every PR. The fix
+                # moves the ``else:`` to its correct position — the
+                # ``else`` of ``if _alias_files:`` — so the warning fires
+                # when no HUMAN (9606) STRING aliases file is found.
                 if _string_raw_dir.exists():
                     _all_alias_files = list(_string_raw_dir.glob("*aliases*.txt.gz"))
                     logger.warning(
@@ -616,6 +622,10 @@ def run_entity_resolution() -> Dict[str, Any]:
                         len(_all_alias_files),
                         [f.name for f in _all_alias_files[:5]],
                     )
+        except RuntimeError:
+            # v89 BUG #28: re-raise RuntimeError (corrupt file) so the
+            # operator sees a clear failure. Do NOT swallow it.
+            raise
         except Exception as exc:
             logger.warning(
                 "Could not load raw STRING aliases file: %s — "
