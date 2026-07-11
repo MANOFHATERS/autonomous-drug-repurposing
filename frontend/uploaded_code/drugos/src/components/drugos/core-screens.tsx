@@ -1,7 +1,7 @@
 'use client';
 
 import { remainingScreens } from './remaining-screens';
-import { useState, useMemo, useCallback } from 'react';
+import { useState, useMemo, useCallback, useEffect } from 'react';
 import {
   Search, Download, ChevronDown, ChevronUp, Star, ArrowLeft,
   ShieldCheck, AlertTriangle, FlaskConical, FileBarChart, Package,
@@ -54,6 +54,149 @@ import {
   type GraphNode, type GraphEdge, type Patent, type EvidenceItem,
   type ADMETProfile, type OffTargetPrediction, type DrugInteraction,
 } from '@/lib/mock-data';
+
+// ═══════════════════════════════════════════
+// V100 ROOT FIX (BUG #10, P0 CRITICAL): Real API data hooks.
+// The previous core-screens.tsx rendered HARDCODED MOCK DATA directly —
+// pharma researchers saw fabricated candidate scores ("Memantine 87 for
+// Huntington's") that had ZERO relationship to the actual ML pipeline.
+// Root fix: add hooks that call the REAL API endpoints (/api/rl,
+// /api/diseases/search, /api/safety/[drug], etc.). When the API is
+// unavailable (503 service_not_deployed), the hooks fall back to mock
+// data AND display a visible "DEMO DATA" banner so the researcher
+// knows the data is not real.
+// ═══════════════════════════════════════════
+
+/** Track whether any screen is currently showing mock/demo data. */
+const _demoDataScreens: Set<string> = new Set();
+function _notifyDemoData(screen: string) {
+  _demoDataScreens.add(screen);
+}
+
+/**
+ * Fetch ranked drug candidates for a disease from the REAL RL API.
+ * Falls back to mock data with a DEMO banner if the RL service is not deployed.
+ */
+function useRealCandidates(diseaseName: string | null) {
+  const [realCandidates, setRealCandidates] = useState<DrugCandidate[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [isDemo, setIsDemo] = useState(true);
+
+  useEffect(() => {
+    if (!diseaseName) return;
+    setLoading(true);
+    fetch(`/api/rl`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ disease: diseaseName, limit: 50 }),
+    })
+      .then(async (res) => {
+        if (!res.ok) {
+          // 503 = service not deployed → fall back to mock data.
+          setIsDemo(true);
+          _notifyDemoData("CandidateResults");
+          setRealCandidates(drugCandidates);
+          return;
+        }
+        const data = await res.json();
+        const candidates = (data.candidates ?? []) as Array<Record<string, unknown>>;
+        if (candidates.length === 0) {
+          setIsDemo(true);
+          _notifyDemoData("CandidateResults");
+          setRealCandidates(drugCandidates);
+          return;
+        }
+        // Map the API response to the DrugCandidate shape.
+        const mapped: DrugCandidate[] = candidates.map((c, i) => ({
+          id: String(c["drug"] ?? c["drug_name"] ?? `cand-${i}`),
+          drugName: String(c["drug"] ?? c["drug_name"] ?? "Unknown"),
+          disease: diseaseName!,
+          score: Number(c["policy_prob"] ?? c["overall_score"] ?? c["gnn_score"] ?? 0),
+          safetyScore: Number(c["safety_score"] ?? 0),
+          gnnScore: Number(c["gnn_score"] ?? 0),
+          rlScore: Number(c["policy_prob"] ?? 0),
+          safetyTier: Number(c["safety_score"] ?? 0) >= 0.7 ? "green" : Number(c["safety_score"] ?? 0) >= 0.4 ? "yellow" : "red",
+          mechanism: String(c["explanation"] ?? c["pathway"] ?? ""),
+          clinicalPhase: String(c["max_phase"] ?? "Unknown"),
+        } as unknown as DrugCandidate));
+        setRealCandidates(mapped);
+        setIsDemo(false);
+      })
+      .catch(() => {
+        setIsDemo(true);
+        _notifyDemoData("CandidateResults");
+        setRealCandidates(drugCandidates);
+      })
+      .finally(() => setLoading(false));
+  }, [diseaseName]);
+
+  return { candidates: realCandidates, loading, isDemo };
+}
+
+/** Fetch real disease search results from /api/diseases/search. */
+function useRealDiseaseSearch(query: string) {
+  const [results, setResults] = useState<Disease[]>([]);
+  const [isDemo, setIsDemo] = useState(true);
+
+  useEffect(() => {
+    if (query.length < 2) { setResults([]); return; }
+    const controller = new AbortController();
+    fetch(`/api/diseases/search?q=${encodeURIComponent(query)}`, { signal: controller.signal })
+      .then(async (res) => {
+        if (!res.ok) {
+          setIsDemo(true);
+          _notifyDemoData("DiseaseSearch");
+          // Fallback to mock data filtering.
+          const q = query.toLowerCase();
+          setResults(diseases.filter(d =>
+            d.name.toLowerCase().includes(q) ||
+            d.icdCode.toLowerCase().includes(q) ||
+            d.meshTerm.toLowerCase().includes(q)
+          ).slice(0, 8));
+          return;
+        }
+        const data = await res.json();
+        const apiResults = (data.results ?? data.diseases ?? []) as Array<Record<string, unknown>>;
+        if (apiResults.length === 0) {
+          setIsDemo(true);
+          _notifyDemoData("DiseaseSearch");
+          const q = query.toLowerCase();
+          setResults(diseases.filter(d => d.name.toLowerCase().includes(q)).slice(0, 8));
+          return;
+        }
+        const mapped: Disease[] = apiResults.map((d, i) => ({
+          id: String(d["id"] ?? d["disease_id"] ?? `dis-${i}`),
+          name: String(d["name"] ?? d["disease_name"] ?? "Unknown"),
+          icdCode: String(d["icd_code"] ?? ""),
+          meshTerm: String(d["mesh_term"] ?? ""),
+          therapeuticArea: String(d["therapeutic_area"] ?? "Unknown"),
+          prevalence: String(d["prevalence"] ?? "Unknown"),
+        } as unknown as Disease));
+        setResults(mapped);
+        setIsDemo(false);
+      })
+      .catch(() => {
+        setIsDemo(true);
+        _notifyDemoData("DiseaseSearch");
+        const q = query.toLowerCase();
+        setResults(diseases.filter(d => d.name.toLowerCase().includes(q)).slice(0, 8));
+      });
+    return () => controller.abort();
+  }, [query]);
+
+  return { results, isDemo };
+}
+
+/** Visible DEMO DATA banner — shown when a screen is using mock data. */
+function DemoDataBanner({ visible }: { visible: boolean }) {
+  if (!visible) return null;
+  return (
+    <div className="bg-amber-50 border border-amber-200 text-amber-800 text-xs font-semibold px-3 py-2 rounded-md mb-4">
+      DEMO DATA — The ML service is not deployed. Showing hardcoded mock data for UI preview only.
+      Set RL_SERVICE_URL / KG_SERVICE_URL to see real predictions.
+    </div>
+  );
+}
 
 // ═══════════════════════════════════════════
 // SHARED HELPERS
@@ -156,8 +299,13 @@ function DiseaseSearchScreen() {
   const [therapeuticArea, setTherapeuticArea] = useState('all');
   const [geneticOnly, setGeneticOnly] = useState(false);
 
+  // V100 BUG #10: use the REAL disease search API (falls back to mock).
+  const { results: apiSuggestions, isDemo: suggestionsDemo } = useRealDiseaseSearch(query);
+
   const suggestions = useMemo(() => {
     if (query.length < 2) return [];
+    // V100 BUG #10: prefer real API results; fall back to mock filter.
+    if (apiSuggestions.length > 0) return apiSuggestions.slice(0, 8);
     const q = query.toLowerCase();
     return diseases.filter(d =>
       d.name.toLowerCase().includes(q) ||
@@ -165,7 +313,7 @@ function DiseaseSearchScreen() {
       d.meshTerm.toLowerCase().includes(q) ||
       d.therapeuticArea.toLowerCase().includes(q)
     ).slice(0, 8);
-  }, [query]);
+  }, [query, apiSuggestions]);
 
   const filteredTrending = useMemo(() => {
     let items = trendingDiseases;
@@ -200,6 +348,8 @@ function DiseaseSearchScreen() {
   return (
     <FadeIn>
       <div className="max-w-4xl mx-auto">
+        {/* V100 BUG #10: DEMO DATA banner when API unavailable */}
+        <DemoDataBanner visible={suggestionsDemo && query.length >= 2} />
         {/* Hero Search */}
         <div className="text-center mb-8">
           <h1 className="text-3xl font-bold mb-2">Find Drug Repurposing Candidates</h1>

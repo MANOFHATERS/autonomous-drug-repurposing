@@ -103,6 +103,19 @@ services:
       - ./config:/opt/airflow/config
       - ./raw_data:/opt/airflow/raw_data
       - ./processed_data:/opt/airflow/processed_data
+      # V100 ROOT FIX (BUG #19, P0 CRITICAL): the previous volume list was
+      # MISSING ./data, ./exporters, and ./scripts. This caused:
+      #   (a) Airflow tasks that `from exporters.neo4j_exporter import ...`
+      #       (the master DAG's trigger_phase2 path) failed with
+      #       ModuleNotFoundError.
+      #   (b) protein_resolver.py at module import time tried to auto-load
+      #       phase1/data/uniprot_organism_crosswalk.yaml — that file was
+      #       unreachable from inside the Airflow container, silently
+      #       disabling organism cross-validation (mouse proteins
+      #       mislabeled as human).
+      - ./data:/opt/airflow/data
+      - ./exporters:/opt/airflow/exporters
+      - ./scripts:/opt/airflow/scripts
     depends_on:
       setup:
         condition: service_healthy
@@ -222,6 +235,19 @@ services:
       - ./config:/opt/airflow/config
       - ./raw_data:/opt/airflow/raw_data
       - ./processed_data:/opt/airflow/processed_data
+      # V100 ROOT FIX (BUG #19, P0 CRITICAL): the previous volume list was
+      # MISSING ./data, ./exporters, and ./scripts. This caused:
+      #   (a) Airflow tasks that `from exporters.neo4j_exporter import ...`
+      #       (the master DAG's trigger_phase2 path) failed with
+      #       ModuleNotFoundError.
+      #   (b) protein_resolver.py at module import time tried to auto-load
+      #       phase1/data/uniprot_organism_crosswalk.yaml — that file was
+      #       unreachable from inside the Airflow container, silently
+      #       disabling organism cross-validation (mouse proteins
+      #       mislabeled as human).
+      - ./data:/opt/airflow/data
+      - ./exporters:/opt/airflow/exporters
+      - ./scripts:/opt/airflow/scripts
     ports:
       - "8080:8080"
     depends_on:
@@ -270,6 +296,19 @@ services:
       - ./config:/opt/airflow/config
       - ./raw_data:/opt/airflow/raw_data
       - ./processed_data:/opt/airflow/processed_data
+      # V100 ROOT FIX (BUG #19, P0 CRITICAL): the previous volume list was
+      # MISSING ./data, ./exporters, and ./scripts. This caused:
+      #   (a) Airflow tasks that `from exporters.neo4j_exporter import ...`
+      #       (the master DAG's trigger_phase2 path) failed with
+      #       ModuleNotFoundError.
+      #   (b) protein_resolver.py at module import time tried to auto-load
+      #       phase1/data/uniprot_organism_crosswalk.yaml — that file was
+      #       unreachable from inside the Airflow container, silently
+      #       disabling organism cross-validation (mouse proteins
+      #       mislabeled as human).
+      - ./data:/opt/airflow/data
+      - ./exporters:/opt/airflow/exporters
+      - ./scripts:/opt/airflow/scripts
     depends_on:
       postgres:
         condition: service_healthy

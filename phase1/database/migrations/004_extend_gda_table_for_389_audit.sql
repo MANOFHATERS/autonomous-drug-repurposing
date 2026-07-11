@@ -164,11 +164,14 @@ ALTER TABLE gene_disease_associations ADD CONSTRAINT chk_gda_disease_type
     CHECK (disease_type IS NULL OR disease_type IN
            ('disease', 'phenotype', 'group'));
 
--- [SCI-11] confidence_tier must be a known label when non-NULL
+-- [SCI-11] confidence_tier must be a known label when non-NULL.
+-- V100 ROOT FIX (BUG #4): aligned to Piñero et al. 2020 §2.3 actual
+-- vocabulary — sub_weak / weak / strong. The [0.06, 0.3) band is "weak"
+-- (not "moderate" as the previous code wrongly labeled it).
 ALTER TABLE gene_disease_associations DROP CONSTRAINT IF EXISTS chk_gda_confidence_tier;
 ALTER TABLE gene_disease_associations ADD CONSTRAINT chk_gda_confidence_tier
     CHECK (confidence_tier IS NULL OR confidence_tier IN
-           ('weak', 'moderate', 'strong'));
+           ('sub_weak', 'weak', 'strong'));
 
 -- [SCI-24] evidence_strength must be a known label when non-NULL
 ALTER TABLE gene_disease_associations DROP CONSTRAINT IF EXISTS chk_gda_evidence_strength;

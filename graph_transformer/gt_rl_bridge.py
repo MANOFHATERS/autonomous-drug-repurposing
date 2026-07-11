@@ -3254,7 +3254,16 @@ class GTRLBridge:
             else "pilot" if _num_drugs_in_graph < 1000
             else "production"
         )
-        kp_recovery_threshold = float(getattr(rl_config, "min_kp_recovery_rate", 0.2))
+        # V100 ROOT FIX (BUG #3, P0 CRITICAL): the previous line below
+        # SILENTLY re-lowered ``kp_recovery_threshold`` from the V90 BUG #31
+        # fix (max(rl_config_threshold, 0.5)) back to the raw
+        # ``rl_config.min_kp_recovery_rate`` (default 0.2). With gamma=0.2,
+        # a coin-flip model that recovers 1 of 2 test KPs by chance (50%
+        # recovery) passes the gate, and broken models ship to pharma
+        # partners. The reassignment is DELETED — the threshold computed
+        # at line ~3241 (max(rl_config_threshold, 0.5)) is the source of
+        # truth and MUST NOT be overwritten.
+        # kp_recovery_threshold = float(getattr(rl_config, "min_kp_recovery_rate", 0.2))  # DELETED V100
         scientific_validation = {
             "gt_test_auc": gt_test_auc,
             "gt_test_auc_threshold": _auc_threshold,
@@ -3606,46 +3615,62 @@ class GTRLBridge:
                 # interpret as probabilities.
                 try:
                     from .inference import predict_drug_disease_scores
-                    # Build drug/disease index tensors for the top-K pairs
+                    # Build drug/disease index tensors for the top-K pairs.
+                    # V100 ROOT FIX (BUG P3-015, P0 CRITICAL): the previous
+                    # code used ``drug_map.get(d, 0)`` and ``disease_map.get(v, 0)``
+                    # which defaulted to index 0 — a DIFFERENT drug/disease —
+                    # when the name was not found in the map. This silently
+                    # scored the WRONG drug. Root fix: filter out pairs with
+                    # missing drug/disease names BEFORE building the tensors,
+                    # so only valid pairs are scored. This matches the pattern
+                    # used at lines 1945/2000/2032 which use -1 as the sentinel.
                     drug_map = self.node_maps.get("drug", {})
                     disease_map = self.node_maps.get("disease", {})
-                    top_drug_idx = torch.tensor(
-                        [drug_map.get(d, 0) for d in pool_df["drug"].tolist()],
-                        dtype=torch.long,
-                    )
-                    top_disease_idx = torch.tensor(
-                        [disease_map.get(v, 0) for v in pool_df["disease"].tolist()],
-                        dtype=torch.long,
-                    )
-                    calibrated_scores = predict_drug_disease_scores(
-                        model=self.model,
-                        node_features=self.node_features,
-                        edge_indices=self.edge_indices,
-                        drug_indices=top_drug_idx,
-                        disease_indices=top_disease_idx,
-                        exclude_edges=set(LABEL_LEAKING_EDGES),
-                        device=self.device,
-                        # V90 ROOT FIX (BUG #47): use apply_temperature=False
-                        # to MATCH the candidate pool's selection distribution.
-                        # The candidate pool was selected by raw sigmoid scores
-                        # (apply_temperature=False in top_k_novel_predictions,
-                        # line 121 of inference/__init__.py). The previous code
-                        # used apply_temperature=True here, which produced
-                        # CALIBRATED (temperature-compressed) scores. The
-                        # ranking was by raw sigmoid, but the reported
-                        # gnn_score was calibrated — these can produce
-                        # DIFFERENT orderings if temperature is far from 1.0.
-                        # The fix uses apply_temperature=False so the reported
-                        # gnn_score matches the ranking distribution.
-                        apply_temperature=False,  # V90 BUG #47: match candidate selection
-                    )
+                    _drug_indices = [drug_map.get(d, -1) for d in pool_df["drug"].tolist()]
+                    _disease_indices = [disease_map.get(v, -1) for v in pool_df["disease"].tolist()]
+                    # Filter out pairs where drug or disease is not in the map.
+                    _valid_mask = [
+                        di >= 0 and dii >= 0
+                        for di, dii in zip(_drug_indices, _disease_indices)
+                    ]
+                    if not all(_valid_mask):
+                        _n_missing = sum(1 for v in _valid_mask if not v)
+                        logger.warning(
+                            f"V100 BUG P3-015: {_n_missing} pairs have drug/disease "
+                            f"names not found in the node maps — scoring skipped "
+                            f"for these pairs (was: silently scored as drug index 0)."
+                        )
+                        pool_df = pool_df.iloc[[i for i, v in enumerate(_valid_mask) if v]].reset_index(drop=True)
+                        _drug_indices = [di for di, v in zip(_drug_indices, _valid_mask) if v]
+                        _disease_indices = [dii for dii, v in zip(_disease_indices, _valid_mask) if v]
+                    if len(_drug_indices) == 0:
+                        logger.warning("V100 BUG P3-015: all pairs had missing drug/disease names — skipping calibration.")
+                        calibrated_scores = None
+                    else:
+                        top_drug_idx = torch.tensor(_drug_indices, dtype=torch.long)
+                        top_disease_idx = torch.tensor(_disease_indices, dtype=torch.long)
+                        calibrated_scores = predict_drug_disease_scores(
+                            model=self.model,
+                            node_features=self.node_features,
+                            edge_indices=self.edge_indices,
+                            drug_indices=top_drug_idx,
+                            disease_indices=top_disease_idx,
+                            exclude_edges=set(LABEL_LEAKING_EDGES),
+                            device=self.device,
+                            # V90 ROOT FIX (BUG #47): use apply_temperature=False
+                            # to MATCH the candidate pool's selection distribution.
+                            apply_temperature=False,
+                        )
                     # Update gnn_score with calibrated values
-                    pool_df["gnn_score_calibrated"] = calibrated_scores
-                    logger.info(
-                        f"ROOT FIX (B3): predict_drug_disease_scores re-scored "
-                        f"{len(calibrated_scores)} top-K pairs with calibrated "
-                        f"probabilities."
-                    )
+                    if calibrated_scores is not None:
+                        pool_df["gnn_score_calibrated"] = calibrated_scores
+                        logger.info(
+                            f"ROOT FIX (B3): predict_drug_disease_scores re-scored "
+                            f"{len(calibrated_scores)} top-K pairs with calibrated "
+                            f"probabilities."
+                        )
+                    else:
+                        pool_df["gnn_score_calibrated"] = pool_df["gnn_score"]
                 except Exception as e:
                     logger.warning(f"ROOT FIX (B3): predict_drug_disease_scores failed: {e}")
                     pool_df["gnn_score_calibrated"] = pool_df["gnn_score"]

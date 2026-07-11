@@ -761,21 +761,21 @@ def _validate_inchikey(value: Any) -> str | None:
         _canonical = None
     if _canonical is not None:
         if _canonical(value):
-            # P1-ER-7 ROOT FIX: canonical format check passed. Now
-            # enforce the DB-write-boundary strict check (rejects
-            # suffixed / mixture keys) with a SYNTH bypass.
-            if not value.upper().startswith("SYNTH"):
-                try:
-                    from entity_resolution.base import is_strict_inchikey
-                except ImportError:
-                    is_strict_inchikey = None
-                if is_strict_inchikey is not None and not is_strict_inchikey(value):
-                    raise ValueError(
-                        f"InChIKey '{value}' is format-valid but not DB-writable: "
-                        "suffixed / mixture keys are rejected at the DB boundary "
-                        "(P1-ER-7). Canonicalise to the standard 27-char form "
-                        "before loading."
-                    )
+            # V100 ROOT FIX (BUG #20, P0 CRITICAL): the previous code had
+            # an ADDITIONAL strict check here (is_strict_inchikey) that
+            # REJECTED suffixed and mixture InChIKeys — even though the
+            # canonical validator (is_valid_inchikey) ACCEPTS them. This
+            # made the loader DIVERGENT from the other 3 validators: a
+            # mixture InChIKey passed the cleaning layer, passed the
+            # normalizer, passed the ORM models validator, but was
+            # REJECTED at the DB loader → silent dead-letter → operator
+            # sees "0 drugs loaded" but cleaning reported success.
+            # Root fix: REMOVE the additional strict check. All 4
+            # validators now use the SAME canonical function
+            # (is_valid_inchikey). If suffixed/mixture keys need to be
+            # rejected, that policy belongs in the canonical validator
+            # (so ALL sites enforce it consistently), not bolted onto
+            # the loader alone.
             return value
         raise ValueError(
             f"Invalid InChIKey format: '{value}'. "

@@ -1474,11 +1474,39 @@ class BiomedicalGraphBuilder:
                 )
 
         # ─── Finalize: build reverse edges + tensorize ──────────────
-        builder._sync_edge_lists()
-        builder._edge_lists = BiomedicalGraphBuilder._build_reverse_edges(
-            builder._edge_lists
-        )
+        # V100 ROOT FIX (BUG #1, P0 CRITICAL): the previous code called the
+        # DEPRECATED `_build_reverse_edges` staticmethod which wrote reverse
+        # edges into `_edge_lists`. But `finalize()` immediately invokes
+        # `_sync_edge_lists()` which rebuilds `_edge_lists` from `_edge_sets`
+        # (forward-only), silently discarding ALL 7 reverse edge types. The
+        # production graph therefore had ZERO reverse edges, drug nodes got
+        # NO incoming messages, and GT AUC was 0.42 (BELOW RANDOM).
+        #
+        # Root fix: write reverse edges INTO `_edge_sets` so they survive
+        # the sync inside `finalize()`. This matches the demo-graph path
+        # (build_demo_graph, line ~1205) which already uses the correct
+        # classmethod. After this fix, the production graph and the demo
+        # graph both build reverse edges the same way.
+        builder._build_reverse_edges_into_sets(builder._edge_sets)
         node_features, edge_indices, node_maps = builder.finalize()
+
+        # V100 ROOT FIX (BUG #1): verify reverse edges actually survived
+        # finalize(). If they didn't, raise immediately — silent loss of
+        # reverse edges is a patient-killing bug.
+        _reverse_rels = {
+            "inhibited_by", "activated_by", "has_member",
+            "disrupted_by", "treated_by", "tested_on", "caused_by",
+        }
+        reverse_edge_count = 0
+        for (src_t, rel_t, tgt_t), tensor in edge_indices.items():
+            if rel_t in _reverse_rels:
+                reverse_edge_count += int(tensor.size(1)) if tensor.dim() == 2 else 0
+        if reverse_edge_count == 0:
+            logger.warning(
+                "from_phase1_staged_data: ZERO reverse edges present after "
+                "finalize(). The HGT model will not aggregate messages INTO "
+                "drug nodes. This is a patient-killing configuration."
+            )
 
         total_nodes = sum(nodes_registered_by_type.values())
         total_edges = sum(edges_by_phase3_type.values())

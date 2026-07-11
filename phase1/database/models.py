@@ -1940,10 +1940,13 @@ class GeneDiseaseAssociation(Base, IDMixin, TimestampMixin):
             "('disease', 'phenotype', 'group')",
             name="chk_gda_disease_type",
         ),
-        # [SCI-11] confidence_tier must be a known label when non-NULL
+        # [SCI-11] confidence_tier must be a known label when non-NULL.
+        # V100 ROOT FIX (BUG #4): aligned to Piñero et al. 2020 §2.3 actual
+        # vocabulary — sub_weak / weak / strong. The [0.06, 0.3) band is
+        # "weak" (not "moderate" as the previous code wrongly labeled it).
         CheckConstraint(
             "confidence_tier IS NULL OR confidence_tier IN "
-            "('weak', 'moderate', 'strong')",
+            "('sub_weak', 'weak', 'strong')",
             name="chk_gda_confidence_tier",
         ),
         # [SCI-24] evidence_strength must be a known label when non-NULL

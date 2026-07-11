@@ -1335,12 +1335,15 @@ weak-evidence floor). Must be > ``DISGENET_MIN_SCORE`` to be meaningful."""
 # removed (no publication supports it).
 DISGENET_CONFIDENCE_TIERS_JSON: str = _getenv(
     "DISGENET_CONFIDENCE_TIERS",
-    default='[[0.0,"weak"],[0.06,"moderate"],[0.3,"strong"]]',
+    default='[[0.0,"sub_weak"],[0.06,"weak"],[0.3,"strong"]]',
 )
 """JSON-encoded list of [threshold, label] pairs for confidence tier
-classification.  Default follows Piñero et al. 2020:
-``[[0.0,"weak"],[0.06,"moderate"],[0.3,"strong"]]``.  Thresholds must be
-sorted ascending; labels must be non-empty strings."""
+classification.  V100 ROOT FIX (BUG #4): default follows Piñero et al.
+2020 §2.3 ACTUAL vocabulary:
+``[[0.0,"sub_weak"],[0.06,"weak"],[0.3,"strong"]]``. The [0.06, 0.3)
+band is the WEAK-evidence band (not "moderate" as the previous code
+wrongly labeled it). Thresholds must be sorted ascending; labels must
+be non-empty strings."""
 
 # SCI-17 / CONF-3: PMID cap.
 # The GeneDiseaseAssociation.pmid_list column is String(2000).  Each PMID is

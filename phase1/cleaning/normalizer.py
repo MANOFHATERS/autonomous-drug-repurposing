@@ -1725,17 +1725,53 @@ def _convert_to_inchikey_uncached(
             _MAX_SMILES_ATOMS,
         )
 
-    # [SCI-13] Multi-component SMILES — use the largest fragment.
+    # [SCI-13] Multi-component SMILES — V100 ROOT FIX (BUG #6, P0 CRITICAL).
+    # The previous code took ONLY the largest fragment and discarded the
+    # rest. For salt-form drugs (e.g. "CC(=O)O.[Na]" = sodium acetate,
+    # or warfarin sodium vs warfarin free acid), this COLLAPSES the salt
+    # form with the free acid/base. Patient-safety risk: the wrong
+    # formulation is selected for a wet-lab trial (sodium warfarin vs
+    # warfarin free acid have different pharmacokinetics).
+    #
+    # Root fix: attempt to generate a MIXTURE InChIKey from the full
+    # multi-component mol FIRST (RDKit's MolToInchi handles multi-fragment
+    # mols by producing a layered InChIKey). Only if that fails do we fall
+    # back to the largest-fragment approach, and we log at WARNING (not
+    # INFO) so operators notice the collapse. The original SMILES is
+    # recorded in the log for audit trail.
     try:
         frags = Chem.GetMolFrags(mol, asMols=True)
     except Exception:
         frags = (mol,)
     if len(frags) > 1:
-        logger.info(
-            "convert_to_inchikey: SMILES %s has %d fragments — "
-            "using the largest",
-            _truncate_for_log(smiles),
-            len(frags),
+        # Try mixture InChIKey first (preserves salt form).
+        mixture_inchikey = None
+        try:
+            mixture_inchi = Chem.MolToInchi(mol, options="-WarnOnEmptyStructure")
+            if mixture_inchi:
+                mixture_inchikey = Chem.InchiToInchiKey(mixture_inchi)
+        except Exception as _mix_exc:
+            logger.debug(
+                "convert_to_inchikey: mixture InChIKey generation failed "
+                "for %s: %s — falling back to largest fragment",
+                _truncate_for_log(smiles), _mix_exc,
+            )
+        if mixture_inchikey and is_valid_inchikey(mixture_inchikey):
+            logger.info(
+                "convert_to_inchikey: SMILES %s has %d fragments — "
+                "generated MIXTURE InChIKey %s (salt form preserved)",
+                _truncate_for_log(smiles), len(frags), mixture_inchikey,
+            )
+            return mixture_inchikey
+        # Mixture InChIKey failed — fall back to largest fragment, but
+        # log at WARNING so operators know a salt form was collapsed.
+        logger.warning(
+            "convert_to_inchikey: SALT-FORM COLLAPSE — SMILES %s has %d "
+            "fragments. Mixture InChIKey generation failed; falling back "
+            "to largest fragment. The salt form is DISCARDED. "
+            "Patient-safety risk: the wrong formulation may be selected "
+            "for a wet-lab trial. Original SMILES preserved in log.",
+            _truncate_for_log(smiles), len(frags),
         )
         try:
             mol = max(frags, key=lambda m: m.GetNumAtoms())

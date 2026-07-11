@@ -458,12 +458,20 @@ class ChEMBLPipeline(BasePipeline):
 
     Scientific Proxies (documented for audit trail)
     ------------------------------------------------
-    - ``is_fda_approved = (max_phase == 4)``: ChEMBL ``max_phase=4`` means
-      "Phase 4 trial reached" = globally approved (any regulator), NOT
-      FDA-specific. The proxy is documented in the manifest's
-      ``approval_basis`` field. Alternative: query
-      ``/molecule.json?approved_drugs=TRUE`` (S16) — not currently used
-      because max_phase=4 is the more conservative filter.
+    - ``is_globally_approved = (max_phase == 4)``: ChEMBL ``max_phase=4``
+      means "Phase 4 trial reached" = globally approved by ANY regulator
+      (FDA, EMA, PMDA, etc.), NOT FDA-specific. This is the accurate
+      ChEMBL semantic and is stored in ``is_globally_approved``.
+    - ``is_fda_approved``: V100 ROOT FIX (BUG #5, P0 CRITICAL). The
+      previous code set ``is_fda_approved = (max_phase == 4)`` which
+      CONFLATED global approval with FDA approval — EMA-only drugs were
+      falsely labeled FDA-approved, bypassing the RL ranker's FDA safety
+      filter. The fix: ``is_fda_approved`` is ``None`` (unknown) for
+      ``max_phase == 4`` drugs until an FDA Orange Book join is wired in,
+      ``False`` for ``max_phase < 4``, and ``True`` ONLY when the
+      ``approved_by`` field contains "FDA". This is the honest answer.
+      Downstream consumers (RL ranker) MUST use ``is_globally_approved``
+      for approval-based filtering, NOT ``is_fda_approved``.
     - ``Natural product`` → ``small_molecule``: scientifically lossy
       (vancomycin is a glycopeptide). Every record that maps this way is
       logged at INFO with the chembl_id for curator review (S6).
@@ -934,18 +942,19 @@ class ChEMBLPipeline(BasePipeline):
                     f"or as plain CSV ({plain_exc}). The ChEMBL API may be "
                     f"down or rate-limiting. Try again later."
                 ) from plain_exc
-        # v90 ROOT FIX (BUG #10): auto-detect compression from file
-        # extension instead of hardcoding compression="gzip". The v50
-        # path now writes .csv.gz (BUG #1 fix), but defensive coding
-        # ensures a plain .csv file (e.g. from a manual download or
-        # API error page) is still readable without BadGzipFile.
-        _compression = "gzip" if raw_path.suffix == ".gz" else None
-        drugs_df = pd.read_csv(
-            raw_path,
-            compression=_compression,
-            low_memory=False,
-            encoding="utf-8",
-        )
+        # V100 ROOT FIX (BUG #18, P0 CRITICAL): the previous code had a
+        # SECOND unconditional ``pd.read_csv`` here (lines 950-956 of the
+        # pre-V100 code) that OVERWROTE ``drugs_df``. The second read used
+        # ``compression="gzip"`` if the suffix was ``.gz`` — so if the
+        # first read succeeded by falling back to plain CSV (because the
+        # file is actually plain text despite a ``.gz`` suffix, e.g. an
+        # API rate-limit HTML page), the second read raised
+        # ``BadGzipFile`` and the pipeline CRASHED. The "v90 ROOT FIX
+        # (BUG #10)" comment claimed to fix compression detection but
+        # actually INTRODUCED this bug. Root fix: DELETE the second
+        # unconditional read entirely. The first read (above) already
+        # handles both gzip and plain-CSV correctly with a proper
+        # fallback chain.
         initial_count = len(drugs_df)
         logger.info(
             "[%s] Loaded %d raw drug records from %s",

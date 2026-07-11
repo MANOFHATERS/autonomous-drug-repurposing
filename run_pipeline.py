@@ -323,9 +323,16 @@ def run_schema_adapter(
 
 
 def run_phase2_kg_builder(
-    staged: Any, builder: Any
+    staged: Any, builder: Any, seed: int = 42
 ) -> Tuple[Any, Any, Any, List[Tuple[str, str]]]:
     """Phase 2: Build the real biomedical KG from the staged data.
+
+    V100 ROOT FIX (BUG #15, P0 CRITICAL): the previous function signature
+    was ``def run_phase2_kg_builder(staged, builder)`` — NO ``seed``
+    parameter. But the function body used ``seed=seed`` at line 346,
+    causing ``NameError: name 'seed' is not defined`` on EVERY call.
+    The pipeline ALWAYS crashed at this point. Root fix: add ``seed``
+    to the signature with a default of 42.
 
     v90 ROOT FIX: uses the REAL APIs:
       1. bridge_to_pyg_maps(builder) → (entity_maps, edge_maps)
@@ -701,15 +708,27 @@ def main() -> int:
             logger.error("Phase 1 + Bridge produced 0 nodes. Aborting.")
             return 1
 
-        # ─── Phase 2 → Phase 3 Schema Adapter ────────────────────────
-        graph_data = run_schema_adapter(builder, seed=args.seed)
-        staged, builder = run_bridge(Path(args.phase1_dir))
-        if staged.total_nodes == 0:
-            logger.error("Phase 1 + Bridge produced 0 nodes. Aborting.")
-            return 1
+        # V100 ROOT FIX (BUG #15, P0 CRITICAL): the previous code had
+        # THREE catastrophic bugs in this block:
+        #   (a) A DEAD call to ``run_schema_adapter(builder, seed=args.seed)``
+        #       whose result (graph_data) was immediately OVERWRITTEN by
+        #       the next line — wasted compute + misleading.
+        #   (b) A DUPLICATE call to ``run_bridge(Path(args.phase1_dir))``
+        #       that re-read Phase 1 data a second time (wasteful).
+        #   (c) A SWAP of the return values: ``staged, builder = run_bridge(...)``
+        #       but ``run_bridge`` returns ``(builder, staged)``. This meant
+        #       ``staged`` was actually the builder object and ``builder``
+        #       was actually the staged data. The downstream call
+        #       ``run_phase2_kg_builder(staged, builder)`` then received
+        #       the WRONG object types, crashing with
+        #       ``AttributeError: 'Phase1StagedData' object has no attribute 'node_loads'``.
+        # Root fix: remove the dead schema_adapter call, remove the
+        # duplicate bridge call, and use the CORRECT (builder, staged)
+        # tuple from the FIRST bridge call above. Pass ``seed`` to
+        # ``run_phase2_kg_builder``.
 
         # ─── Phase 2: Build real KG ─────────────────────────────────
-        graph_data = run_phase2_kg_builder(staged, builder)
+        graph_data = run_phase2_kg_builder(staged, builder, seed=args.seed)
         node_features, edge_indices, node_maps, known_pairs = graph_data
         if len(node_maps.get("drug", {})) == 0:
             logger.error("Schema adapter produced 0 drug nodes. Aborting.")

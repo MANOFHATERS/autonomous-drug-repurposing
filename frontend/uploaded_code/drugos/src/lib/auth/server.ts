@@ -12,14 +12,33 @@
 
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
-import { randomBytes } from "crypto";
+import { randomBytes, createHmac, timingSafeEqual } from "crypto";
 import { cookies } from "next/headers";
 import { db } from "@/lib/db";
 
-const JWT_SECRET = process.env.JWT_SECRET || "dev-only-insecure-secret-change-me";
+// V100 ROOT FIX (BUG FE-008, P0 CRITICAL): the previous code had a weak
+// fallback `"dev-only-insecure-secret-change-me"` when JWT_SECRET was not
+// set. In production, an attacker who knows this public fallback (it's in
+// the source code / git history) can forge any JWT and take over any
+// account. Root fix: NO fallback. If JWT_SECRET is missing or too short
+// (<32 chars), the server REFUSES to start (throws immediately). This is
+// a hard failure — better to crash than to issue forgeable tokens.
+const JWT_SECRET_RAW = process.env.JWT_SECRET;
+if (!JWT_SECRET_RAW || JWT_SECRET_RAW.length < 32) {
+  throw new Error(
+    "JWT_SECRET environment variable must be set to a cryptographically " +
+    "random string of at least 32 characters. Refusing to start with a " +
+    "weak/missing secret (V100 BUG FE-008 fix)."
+  );
+}
+const JWT_SECRET: string = JWT_SECRET_RAW;
 const JWT_ISSUER = "drugos";
 const ACCESS_TOKEN_TTL_SECONDS = 15 * 60; // 15 minutes
 const REFRESH_TOKEN_TTL_DAYS = 30;
+// V100 BUG #11: MFA challenge tokens are short-lived (5 min) JWTs that
+// carry just enough to identify the user who passed password verification
+// but has NOT yet completed the TOTP challenge.
+const MFA_CHALLENGE_TTL_SECONDS = 5 * 60; // 5 minutes
 
 export interface AccessTokenPayload {
   sub: string; // user id
@@ -245,4 +264,117 @@ export function requireRole(user: AuthenticatedUser | null, ...roles: string[]):
   if (!user) return false;
   if (roles.length === 0) return true;
   return roles.includes(user.role);
+}
+
+// ---------------------------------------------------------------------------
+// V100 ROOT FIX (BUG #11, P0 CRITICAL): MFA / 2FA — TOTP verification +
+// short-lived MFA challenge tokens.
+//
+// The previous login route verified the password and immediately issued
+// access+refresh tokens WITHOUT checking `user.mfaEnabled`. 2FA was purely
+// cosmetic — account takeover with password alone. The entire TOTP setup
+// was dead code on the auth path.
+//
+// Root fix: after password verification, if `user.mfaEnabled === true`,
+// the login route returns `{ error: "mfa_required", mfaToken: <challenge> }`
+// instead of issuing access/refresh tokens. A separate
+// `POST /api/auth/2fa/login-verify` endpoint accepts the challenge token
+// + TOTP code, verifies the code against `user.mfaSecret`, and ONLY then
+// issues the real access/refresh tokens.
+// ---------------------------------------------------------------------------
+
+export interface MfaChallengePayload {
+  sub: string; // user id
+  email: string;
+  type: "mfa_challenge";
+}
+
+/** Issue a short-lived MFA challenge token (5 min TTL). */
+export function signMfaChallengeToken(userId: string, email: string): string {
+  const payload: MfaChallengePayload = { sub: userId, email, type: "mfa_challenge" };
+  return jwt.sign(payload, JWT_SECRET, {
+    issuer: JWT_ISSUER,
+    expiresIn: MFA_CHALLENGE_TTL_SECONDS,
+    algorithm: "HS256",
+  });
+}
+
+/** Verify an MFA challenge token. Returns the userId or null. */
+export function verifyMfaChallengeToken(token: string): { userId: string; email: string } | null {
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET, {
+      issuer: JWT_ISSUER,
+      algorithms: ["HS256"],
+    }) as MfaChallengePayload;
+    if (!decoded || decoded.type !== "mfa_challenge" || !decoded.sub) return null;
+    return { userId: decoded.sub, email: decoded.email };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Verify a 6-digit TOTP code against a base32-encoded secret.
+ * Implements RFC 6238 TOTP using HMAC-SHA1 (the standard TOTP algorithm).
+ * Uses a ±1 time-step window to tolerate clock skew.
+ *
+ * @param token 6-digit TOTP code from the user's authenticator app.
+ * @param secretBase32 Base32-encoded secret stored in `user.mfaSecret`.
+ * @returns true if the code is valid within the current ±1 window.
+ */
+export function verifyTotp(token: string, secretBase32: string): boolean {
+  if (!token || !secretBase32) return false;
+  const code = token.replace(/\s/g, "");
+  if (!/^\d{6}$/.test(code)) return false;
+  const key = base32Decode(secretBase32);
+  if (!key || key.length === 0) return false;
+  // RFC 6238: 30-second time step, T0 = 0.
+  const timeStep = 30;
+  const now = Math.floor(Date.now() / 1000);
+  const counter = Math.floor(now / timeStep);
+  // Check ±1 window for clock skew.
+  for (const offset of [-1, 0, 1]) {
+    const expected = hotp(key, counter + offset);
+    if (timingSafeEqual(Buffer.from(expected), Buffer.from(code))) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** HMAC-based One-Time Password (RFC 4226) — the building block of TOTP. */
+function hotp(key: Buffer, counter: number): string {
+  const buf = Buffer.alloc(8);
+  // counter is a 64-bit big-endian integer
+  buf.writeBigUInt64BE(BigInt(counter));
+  const hmac = createHmac("sha1", key).update(buf).digest();
+  const offset = hmac[hmac.length - 1] & 0x0f;
+  const bin =
+    ((hmac[offset] & 0x7f) << 24) |
+    ((hmac[offset + 1] & 0xff) << 16) |
+    ((hmac[offset + 2] & 0xff) << 8) |
+    (hmac[offset + 3] & 0xff);
+  const code = bin % 1_000_000;
+  return code.toString().padStart(6, "0");
+}
+
+/** Minimal RFC 4648 base32 decoder (no padding required). */
+function base32Decode(input: string): Buffer | null {
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+  const clean = input.toUpperCase().replace(/=+$/, "").replace(/\s/g, "");
+  if (!clean) return null;
+  let bits = 0;
+  let value = 0;
+  const output: number[] = [];
+  for (const ch of clean) {
+    const idx = alphabet.indexOf(ch);
+    if (idx === -1) return null;
+    value = (value << 5) | idx;
+    bits += 5;
+    if (bits >= 8) {
+      bits -= 8;
+      output.push((value >> bits) & 0xff);
+    }
+  }
+  return Buffer.from(output);
 }
