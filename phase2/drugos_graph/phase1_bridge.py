@@ -2856,12 +2856,18 @@ def _classify_chembl_activity_edge(
     # "agonist" (with optional plural "s"). This excludes "antagonist"
     # (handled above) and "inverse agonist" (handled above).
     _AGONIST_RE = _re_v84.compile(r"\bagonists?\b", _re_v84.IGNORECASE)
-    if "activ" in a or _AGONIST_RE.search(a):
     # Word-boundary "activ" or "agon" → activates. The \b ensures we
     # match "activation", "activates", "agonist", "agonism" but NOT
     # "inactivation", "deactivation", "inactive" (those are matched
     # by the inhibits regex above).
-    if _re_v89.search(r"\b(activ|agon)", a):
+    # v89 CI RECOVERY FIX: a parallel agent left a broken `if` with no
+    # body here (line 2859 had `if "activ" in a or _AGONIST_RE.search(a):`
+    # with no indented block, causing IndentationError). Merged the two
+    # redundant checks into ONE: if "activ" substring OR agonist regex
+    # OR word-boundary (activ|agon) matches → "activates". This preserves
+    # both agents' intent (substring match for robustness + word-boundary
+    # for precision) and fixes the syntax error.
+    if "activ" in a or _AGONIST_RE.search(a) or _re_v89.search(r"\b(activ|agon)", a):
         return "activates"
     # v88 ROOT FIX (BUG #50 — IC50 with non-bare standard_type strings
     # lose inhibition signal): use substring match `if "ic50" in a`
