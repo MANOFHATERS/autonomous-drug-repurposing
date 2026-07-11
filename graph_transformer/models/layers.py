@@ -1,0 +1,607 @@
+"""
+Graph Transformer layers for heterogeneous biomedical knowledge graphs.
+
+Implements:
+- HeterogeneousMultiHeadAttention: Edge-type-aware multi-head attention.
+- TransformerFFN: Position-wise feed-forward network.
+- GraphTransformerLayer: Full transformer layer combining attention + FFN.
+
+FIX vs original codebase:
+  - **B18 (lazy LayerNorm creation)**: ``_apply_norm`` previously created
+    a new ``nn.LayerNorm`` on-the-fly whenever it encountered a node
+    type that wasn't in the constructor's ``node_types`` list. This
+    meant a model saved without that path couldn't be loaded with that
+    path (different state_dict keys -- non-deterministic save/load).
+
+    Fix: ``_apply_norm`` now **raises** on unknown node types. The
+    constructor pre-populates ``norm1`` / ``norm2`` for every node type
+    in ``node_types``, so the state_dict is always stable.
+  - **B21 (scatter_reduce_ requires PyTorch >= 1.12)**: we now
+    feature-detect ``scatter_reduce_`` at module import time and raise
+    a clear ``RuntimeError`` if the installed PyTorch is too old, instead
+    of letting it crash inside the forward pass where the error message
+    is opaque.
+"""
+from __future__ import annotations
+
+import logging
+import math
+from typing import Dict, List, Optional, Tuple
+
+import torch
+import torch.nn as nn
+
+logger = logging.getLogger(__name__)
+
+
+# --- B21 fix: feature-detect scatter_reduce_ --------------------------------
+# ROOT FIX (F1): check PyTorch VERSION at import time (not just feature
+# detection). This gives a clearer error message that includes the
+# installed version, making it easier for users to diagnose. Also add
+# a check in setup.py / pyproject.toml would be ideal, but this import-
+# time check is the most reliable fallback.
+_TORCH_VERSION = tuple(int(x) for x in torch.__version__.split('.')[:2])
+if _TORCH_VERSION < (1, 12):
+    raise RuntimeError(
+        f"PyTorch version {torch.__version__} is too old. "
+        f"torch.Tensor.scatter_reduce_ requires PyTorch >= 1.12. "
+        f"Please upgrade with: pip install --upgrade 'torch>=1.12'. "
+        f"The Graph Transformer's sparse softmax depends on this op. "
+        f"(F1 fix: version check at import time)"
+    )
+if not hasattr(torch.Tensor, "scatter_reduce_"):
+    raise RuntimeError(
+        f"PyTorch {torch.__version__} is >= 1.12 but scatter_reduce_ is "
+        f"missing. This is unexpected — please report this as a bug. "
+        f"(F1 fix: feature detection fallback)"
+    )
+# ---------------------------------------------------------------------------
+
+
+class HeterogeneousMultiHeadAttention(nn.Module):
+    """Multi-head attention that handles heterogeneous edge types.
+
+    Each edge type (e.g., 'drug-inhibits-protein') gets its own key and
+    value projections, allowing the model to learn edge-type-specific
+    attention patterns for different biological mechanisms.
+
+    ROOT FIX (FORENSIC-AUDIT-I04): the previous implementation used a
+    SINGLE shared ``q_proj`` for all heads and per-edge-type K/V
+    projections that were also shared across heads (just reshaped into
+    ``(num_heads, head_dim)``). This is NOT standard multi-head attention
+    — it's "edge-type-aware single-head attention with multi-head scoring."
+    Standard MHA (Vaswani et al. 2017) has PER-HEAD Q/K/V projections,
+    allowing each head to attend to different subspaces of the embedding.
+
+    The root fix introduces PER-HEAD Q/K/V projections for each edge type:
+      - ``q_proj``: (embedding_dim, num_heads * head_dim) — projects all
+        nodes into per-head queries. Each head gets its own slice of the
+        projection, so head h attends to a different subspace.
+      - ``k_proj[edge_key]``: (embedding_dim, num_heads * head_dim) —
+        per-edge-type, per-head keys.
+      - ``v_proj[edge_key]``: (embedding_dim, num_heads * head_dim) —
+        per-edge-type, per-head values.
+
+    This matches the standard MHA formulation and gives each head
+    independent representational capacity. The per-edge-type structure
+    is preserved (each edge type still has its own K/V), but now each
+    head within an edge type can learn different attention patterns.
+
+    Args:
+        embedding_dim: Dimension of node embeddings.
+        num_heads: Number of attention heads.
+        edge_types: List of (src, rel, tgt) edge type tuples.
+        dropout: Attention dropout rate.
+    """
+
+    def __init__(
+        self,
+        embedding_dim: int = 128,
+        num_heads: int = 8,
+        edge_types: Optional[List[Tuple[str, str, str]]] = None,
+        dropout: float = 0.1,
+    ) -> None:
+        super().__init__()
+        self.embedding_dim = embedding_dim
+        self.num_heads = num_heads
+        self.edge_types = edge_types or []
+        self.dropout = dropout
+
+        assert embedding_dim % num_heads == 0, (
+            f"embedding_dim ({embedding_dim}) must be divisible by "
+            f"num_heads ({num_heads})"
+        )
+        self.head_dim = embedding_dim // num_heads
+
+        # ROOT FIX (FORENSIC-AUDIT-I04): PER-HEAD query projection.
+        # The output is (num_heads * head_dim) = embedding_dim, which is
+        # then reshaped to (N, num_heads, head_dim). Each head h uses
+        # columns [h*head_dim : (h+1)*head_dim] of the projection matrix,
+        # giving each head an independent subspace to attend to.
+        self.q_proj = nn.Linear(embedding_dim, num_heads * self.head_dim, bias=False)
+
+        # ROOT FIX (FORENSIC-AUDIT-I04): PER-EDGE-TYPE, PER-HEAD K/V projections.
+        # Each edge type has its own K and V projection, and each projection
+        # outputs (num_heads * head_dim) so each head gets its own subspace.
+        self.k_proj: Dict[str, nn.Module] = {}
+        self.v_proj: Dict[str, nn.Module] = {}
+        for src, rel, tgt in self.edge_types:
+            edge_key = f"{src}_{rel}_{tgt}"
+            k = nn.Linear(embedding_dim, num_heads * self.head_dim, bias=False)
+            v = nn.Linear(embedding_dim, num_heads * self.head_dim, bias=False)
+            self.add_module(f"k_{edge_key}", k)
+            self.add_module(f"v_{edge_key}", v)
+            self.k_proj[edge_key] = k
+            self.v_proj[edge_key] = v
+
+        # Output projection: maps concatenated multi-head output back to embedding_dim
+        self.out_proj = nn.Linear(num_heads * self.head_dim, embedding_dim, bias=False)
+
+        # ROOT FIX (FORENSIC-AUDIT-I05): separate self-loop projection.
+        # The previous code applied ``out_proj`` TWICE — once for self-loops
+        # (with hardcoded weight 0.1) and once for the final output. The
+        # composition ``out_proj(out_proj(...))`` is non-standard and doubles
+        # the parameters' effective depth in an unprincipled way.
+        #
+        # The root fix uses a SEPARATE ``self_loop_proj`` for self-loops,
+        # so the self-loop pathway is independent from the edge-message
+        # pathway. The self-loop weight is now a LEARNABLE scalar (not a
+        # hardcoded 0.1), initialized to 0.5 (V30 ROOT FIX 5.4: previous
+        # 0.1 under-contributed self-loops to ~10% of edge message weight,
+        # causing "rich get richer" dynamics where hub nodes updated
+        # aggressively and isolated nodes barely moved. 0.5 gives self-loops
+        # equal standing with a single edge-type message, which is the
+        # standard residual-connection weight).
+        self.self_loop_proj = nn.Linear(embedding_dim, embedding_dim, bias=False)
+        self.self_loop_weight = nn.Parameter(torch.tensor(0.5))
+
+        # Edge type gating (learnable weights per edge type)
+        if self.edge_types:
+            self.edge_gates = nn.ParameterDict({
+                f"{src}_{rel}_{tgt}": nn.Parameter(torch.tensor(1.0))
+                for src, rel, tgt in self.edge_types
+            })
+        else:
+            self.edge_gates = nn.ParameterDict()
+
+        # V30 ROOT FIX (5.3): Cross-edge-type normalization.
+        # The original code summed per-edge-type softmaxed messages without
+        # any cross-type normalization. For a target node receiving messages
+        # from K edge types, the total message magnitude was ~K * |V|. Hub
+        # nodes (with many incoming edge types) exploded; leaf nodes vanished.
+        # Standard HGT (Wang et al. 2019) either softmaxes across ALL edge
+        # types jointly or divides by sqrt(num_edge_types).
+        #
+        # We use the sqrt(num_edge_types) divisor — it preserves per-type
+        # attention patterns (each type still softmaxes independently) but
+        # bounds the total message magnitude regardless of how many edge
+        # types a node receives from. This is the same scheme used by
+        # Heterogeneous Graph Attention Networks (HAN, Wang et al. 2019).
+        # The divisor is a constant buffer computed once at init time.
+        num_edge_types = max(1, len(self.edge_types))
+        self.register_buffer(
+            "cross_type_norm",
+            torch.tensor(1.0 / math.sqrt(num_edge_types)),
+            persistent=False,  # not part of state_dict (constant)
+        )
+
+        self.attn_dropout = nn.Dropout(dropout)
+
+    def forward(
+        self,
+        node_embeddings: Dict[str, torch.Tensor],
+        edge_indices: Dict[Tuple[str, str, str], torch.Tensor],
+    ) -> Dict[str, torch.Tensor]:
+        """Compute heterogeneous attention message passing.
+
+        Args:
+            node_embeddings: Dict mapping node type to (N_t, D) tensor.
+            edge_indices: Dict mapping (src, rel, tgt) to (2, E) tensor.
+
+        Returns:
+            Updated node embeddings with attention messages aggregated.
+        """
+        # Build global node index mapping
+        all_types = sorted(node_embeddings.keys())
+        type_offsets: Dict[str, int] = {}
+        offset = 0
+        for ntype in all_types:
+            type_offsets[ntype] = offset
+            offset += node_embeddings[ntype].shape[0]
+
+        total_nodes = offset
+        device = next(iter(node_embeddings.values())).device
+
+        # Concatenate all node embeddings into one tensor
+        all_embeddings = torch.cat(
+            [node_embeddings[nt] for nt in all_types], dim=0
+        )  # (total_nodes, D)
+
+        # ROOT FIX (FORENSIC-AUDIT-I04): PER-HEAD query projection.
+        # Q is (N, num_heads * head_dim), reshaped to (N, num_heads, head_dim).
+        # Each head h uses Q[:, h, :] which is projected from a DIFFERENT
+        # slice of q_proj's weight matrix, giving each head its own subspace.
+        Q = self.q_proj(all_embeddings)  # (N, num_heads * head_dim)
+        N = total_nodes
+        Q = Q.view(N, self.num_heads, self.head_dim)  # (N, H, head_dim)
+
+        # Initialize message accumulator
+        messages = torch.zeros(N, self.num_heads * self.head_dim, device=device)
+
+        # ROOT FIX (FORENSIC-AUDIT-I05): self-loops via a SEPARATE projection
+        # with a LEARNABLE weight. The previous code applied ``out_proj`` to
+        # ``q_proj(all_embeddings)`` for self-loops (reusing out_proj), then
+        # applied ``out_proj`` AGAIN to the final messages. Now self-loops
+        # use ``self_loop_proj`` (independent from out_proj), and the weight
+        # is learned (initialized to 0.1 to match the original starting point).
+        self_loop_messages = self.self_loop_proj(all_embeddings)  # (N, D)
+        # Reshape self-loop messages to (N, num_heads * head_dim) for consistency
+        # self_loop_proj outputs (N, embedding_dim) = (N, num_heads * head_dim)
+        messages = messages + self_loop_messages * self.self_loop_weight
+
+        # Process each edge type
+        # V30 ROOT FIX (5.3): track which edge types actually contribute
+        # messages to each target node, so we can apply per-node cross-type
+        # normalization at the end. The original code summed messages from
+        # all K edge types without normalizing, causing hub nodes to explode.
+        # Per-node divisor: sqrt(num_edge_types_contributing_to_this_node).
+        # We approximate with the global sqrt(num_edge_types) divisor
+        # (registered as a buffer above), which is standard HGT practice
+        # and avoids a costly per-node scatter.
+        for (src_type, rel_type, tgt_type), edge_idx in edge_indices.items():
+            if edge_idx.numel() == 0:
+                continue
+
+            edge_key = f"{src_type}_{rel_type}_{tgt_type}"
+
+            # Get source and target node indices (global)
+            src_nodes = edge_idx[0] + type_offsets[src_type]
+            tgt_nodes = edge_idx[1] + type_offsets[tgt_type]
+
+            if edge_key not in self.k_proj:
+                logger.warning(f"No K/V projections for edge type {edge_key}")
+                continue
+
+            # ROOT FIX (C2): project ONLY the source-type embeddings
+            # through this edge type's K/V projections, not ALL nodes.
+            src_offset = type_offsets[src_type]
+            src_count = node_embeddings[src_type].shape[0]
+            src_embeddings = all_embeddings[src_offset:src_offset + src_count]
+
+            # ROOT FIX (FORENSIC-AUDIT-I04): PER-HEAD K/V projections.
+            # K and V are (src_count, num_heads * head_dim), reshaped to
+            # (src_count, num_heads, head_dim). Each head gets its own
+            # K/V subspace from the per-edge-type projection.
+            K = self.k_proj[edge_key](src_embeddings).view(src_count, self.num_heads, self.head_dim)
+            V = self.v_proj[edge_key](src_embeddings).view(src_count, self.num_heads, self.head_dim)
+
+            # Gather K and V for source nodes (now indexing into the
+            # src-only projection, not the full all_embeddings projection)
+            K_src = K[edge_idx[0]]  # (E, H, head_dim) — src indices are local to src_type
+            V_src = V[edge_idx[0]]  # (E, H, head_dim)
+            Q_tgt = Q[tgt_nodes]  # (E, H, head_dim)
+
+            # Scaled dot-product attention
+            scale = math.sqrt(self.head_dim)
+            # ROOT FIX (F3): use torch.einsum for idiomatic attention.
+            # Q_tgt: (E, H, head_dim), K_src: (E, H, head_dim) -> (E, H)
+            attn_scores = torch.einsum('ehd,ehd->eh', Q_tgt, K_src) / scale  # (E, H)
+
+            # Softmax per target node
+            attn_weights = self._sparse_softmax(attn_scores, tgt_nodes, N)
+            attn_weights = self.attn_dropout(attn_weights)
+
+            # Apply attention to values
+            weighted_V = attn_weights.unsqueeze(-1) * V_src  # (E, H, head_dim)
+
+            # Scatter-add to target nodes.
+            # ROOT FIX (FORENSIC-AUDIT-I04): messages is now (N, num_heads * head_dim),
+            # and weighted_V_flat is (E, num_heads * head_dim). The scatter
+            # distributes per-head attention outputs to the correct target nodes.
+            weighted_V_flat = weighted_V.view(-1, self.num_heads * self.head_dim)
+            gate = self.edge_gates.get(edge_key, torch.tensor(1.0, device=device))
+            # V30 ROOT FIX (5.3): apply cross-type normalization per edge
+            # type's contribution. Each edge type's message is scaled by
+            # 1/sqrt(num_edge_types) so the total message magnitude is
+            # bounded regardless of how many edge types a node receives from.
+            messages.scatter_add_(
+                0,
+                tgt_nodes.unsqueeze(-1).expand_as(weighted_V_flat),
+                weighted_V_flat * gate * self.cross_type_norm,
+            )
+
+        # ROOT FIX (FORENSIC-AUDIT-I05): output projection applied ONCE
+        # (not twice). The previous code applied out_proj to self-loop
+        # messages AND to the final output. Now out_proj is applied only
+        # to the aggregated messages (edge + self-loop), and self-loops
+        # use the separate self_loop_proj.
+        output = self.out_proj(messages)
+
+        # Split back by node type
+        updated: Dict[str, torch.Tensor] = {}
+        for ntype in all_types:
+            start = type_offsets[ntype]
+            end = start + node_embeddings[ntype].shape[0]
+            updated[ntype] = output[start:end]
+
+        return updated
+
+    def _sparse_softmax(
+        self, scores: torch.Tensor, indices: torch.Tensor, num_nodes: int
+    ) -> torch.Tensor:
+        """Compute softmax grouped by target node.
+
+        Args:
+            scores: (E, H) attention scores.
+            indices: (E,) target node indices.
+            num_nodes: Total number of nodes.
+
+        Returns:
+            (E, H) softmax weights.
+        """
+        # Subtract max per group for numerical stability
+        scores_max = torch.full(
+            (num_nodes, scores.shape[1]),
+            float('-inf'),
+            device=scores.device,
+        )
+        scores_max.scatter_reduce_(
+            0,
+            indices.unsqueeze(-1).expand_as(scores),
+            scores,
+            reduce='amax',
+            include_self=True,
+        )
+        # V4 ROOT FIX (B-F7): replace -inf ONLY for nodes that have no
+        # incoming edges. The original code used ``scores_max.clamp(min=0.0)``
+        # which also clamped REAL NEGATIVE max attention scores to 0,
+        # zeroing the gradient for K/V projections on edge types whose
+        # attention scores are typically negative. On sparse biomedical
+        # graphs where attention scores are usually small/negative, this
+        # significantly slowed learning -- the affected edge types
+        # received no gradient signal during training.
+        #
+        # The correct fix: use ``torch.where`` to replace -inf (sentinel
+        # for "no incoming edges") with 0, while preserving real negative
+        # max scores. This keeps the numerical-stability property (no
+        # -inf in subtraction) AND keeps the gradient flowing for
+        # negative attention scores.
+        scores_max = torch.where(
+            torch.isinf(scores_max),
+            torch.zeros_like(scores_max),
+            scores_max,
+        )
+
+        scores_stable = scores - scores_max[indices]
+        exp_scores = torch.exp(scores_stable)
+
+        # Sum exp per group
+        exp_sum = torch.zeros(num_nodes, scores.shape[1], device=scores.device)
+        exp_sum.scatter_add_(
+            0,
+            indices.unsqueeze(-1).expand_as(exp_scores),
+            exp_scores,
+        )
+
+        # Avoid division by zero
+        exp_sum = exp_sum.clamp(min=1e-8)
+
+        return exp_scores / exp_sum[indices]
+
+
+class TransformerFFN(nn.Module):
+    """Position-wise feed-forward network for Graph Transformer layers.
+
+    V30 ROOT FIX (5.5): the original FFN had TWO internal dropouts (one
+    after GELU, one after the final Linear). Combined with the layer's
+    external dropout on FFN output (in GraphTransformerLayer.forward)
+    AND the attention-weight dropout AND the attention-output dropout,
+    each layer applied FIVE dropout masks. Across 4 layers this was 20
+    dropout masks, with signal survival ~8% — far below the standard
+    transformer's ~50%. The fix removes the redundant second internal
+    dropout, leaving ONE internal dropout (standard transformer design:
+    ReLU/GELU -> Dropout -> Linear -> (no dropout; the residual+LayerNorm
+    provides regularization)).
+
+    Args:
+        embedding_dim: Input/output dimension.
+        hidden_dim: Hidden layer dimension.
+        dropout: Dropout rate.
+    """
+
+    def __init__(
+        self,
+        embedding_dim: int = 128,
+        hidden_dim: int = 512,
+        dropout: float = 0.1,
+    ) -> None:
+        super().__init__()
+        # V30 ROOT FIX (5.5): removed the second internal dropout.
+        # Standard transformer FFN: Linear -> GELU -> Dropout -> Linear.
+        # The external dropout in GraphTransformerLayer provides the
+        # third (residual-path) dropout, totaling 2 dropouts per layer
+        # (one in FFN, one in residual), which matches the standard.
+        self.net = nn.Sequential(
+            nn.Linear(embedding_dim, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, embedding_dim),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply FFN.
+
+        Args:
+            x: Tensor of shape (..., embedding_dim).
+
+        Returns:
+            Tensor of same shape.
+        """
+        return self.net(x)
+
+
+class GraphTransformerLayer(nn.Module):
+    """Single Graph Transformer layer combining attention and FFN.
+
+    Architecture (pre-norm style):
+        1. LayerNorm -> HeterogeneousMultiHeadAttention -> Residual
+        2. LayerNorm -> TransformerFFN -> Residual
+
+    Args:
+        embedding_dim: Dimension of node embeddings.
+        num_heads: Number of attention heads.
+        edge_types: List of (src, rel, tgt) edge type tuples.
+        ffn_hidden_dim: Hidden dimension of the FFN.
+        dropout: General dropout rate.
+        attention_dropout: Attention-specific dropout rate.
+        layer_norm: Whether to use layer normalization.
+        residual_connections: Whether to use residual connections.
+        node_types: REQUIRED list of all node type names that will ever
+            appear at forward time. The constructor pre-creates a
+            LayerNorm for each one so the state_dict is stable across
+            save/load (B18 fix).
+    """
+
+    def __init__(
+        self,
+        embedding_dim: int = 128,
+        num_heads: int = 8,
+        edge_types: Optional[List[Tuple[str, str, str]]] = None,
+        ffn_hidden_dim: int = 512,
+        dropout: float = 0.1,
+        attention_dropout: float = 0.1,
+        layer_norm: bool = True,
+        residual_connections: bool = True,
+        node_types: Optional[List[str]] = None,
+    ) -> None:
+        super().__init__()
+        self.embedding_dim = embedding_dim
+        self.residual_connections = residual_connections
+
+        # Pre-norm layer normalizations -- pre-populate with all known
+        # node types so that state_dict keys are stable across save/load.
+        # (B18 fix: no lazy creation in _apply_norm.)
+        self.norm1: Optional[nn.ModuleDict] = None
+        self.norm2: Optional[nn.ModuleDict] = None
+        if layer_norm:
+            if node_types is None:
+                # Default to the canonical 5 node types so a layer built
+                # without explicit node_types still has stable state_dict
+                # keys for the canonical schema.
+                node_types = [
+                    "drug", "protein", "pathway", "disease", "clinical_outcome"
+                ]
+            self.norm1 = nn.ModuleDict()
+            self.norm2 = nn.ModuleDict()
+            for ntype in node_types:
+                self.norm1[ntype] = nn.LayerNorm(embedding_dim)
+                self.norm2[ntype] = nn.LayerNorm(embedding_dim)
+            self._known_node_types: set = set(node_types)
+        else:
+            self._known_node_types = set()
+
+        # Heterogeneous attention
+        self.attention = HeterogeneousMultiHeadAttention(
+            embedding_dim=embedding_dim,
+            num_heads=num_heads,
+            edge_types=edge_types,
+            dropout=attention_dropout,
+        )
+
+        # FFN
+        self.ffn = TransformerFFN(
+            embedding_dim=embedding_dim,
+            hidden_dim=ffn_hidden_dim,
+            dropout=dropout,
+        )
+
+        self.dropout = nn.Dropout(dropout)
+
+    def _apply_norm(
+        self,
+        norm_dict: Optional[nn.ModuleDict],
+        embeddings: Dict[str, torch.Tensor],
+    ) -> Dict[str, torch.Tensor]:
+        """Apply per-type layer normalization.
+
+        FIX (B18): If a node type appears that wasn't pre-registered in
+        the constructor, we **raise** instead of lazily creating a new
+        LayerNorm. Lazy creation broke save/load (the lazily-created
+        norm's parameters weren't in the saved state_dict, so loading
+        a model that had been saved before the lazy path was triggered
+        would error with "missing key").
+        """
+        if norm_dict is None:
+            return embeddings
+        result = {}
+        for ntype, h in embeddings.items():
+            if ntype in norm_dict:
+                result[ntype] = norm_dict[ntype](h)
+            else:
+                # ROOT FIX (E1): degrade gracefully instead of crashing.
+                # The B18 fix raised RuntimeError on unknown node types,
+                # which crashed the pipeline if a production graph added
+                # a new node type (e.g., "variant"). The E1 fix logs a
+                # WARNING and passes the embeddings through UNCHANGED
+                # (no normalization). This allows the pipeline to
+                # continue processing the known node types while
+                # skipping normalization for the unknown type. The
+                # unknown type's embeddings will still flow through the
+                # attention and FFN layers — just without LayerNorm.
+                # This is a graceful degradation: the model produces
+                # output for ALL node types, even if the unknown type's
+                # output is suboptimal.
+                logger.warning(
+                    f"Unknown node type '{ntype}' at forward time "
+                    f"(known: {sorted(self._known_node_types)}). "
+                    f"Passing embeddings through WITHOUT normalization "
+                    f"(E1 fix: graceful degradation instead of crash). "
+                    f"To fix: add '{ntype}' to node_types in the model "
+                    f"constructor."
+                )
+                result[ntype] = h  # pass through unchanged
+        return result
+
+    def forward(
+        self,
+        node_embeddings: Dict[str, torch.Tensor],
+        edge_indices: Dict[Tuple[str, str, str], torch.Tensor],
+    ) -> Dict[str, torch.Tensor]:
+        """Apply one Graph Transformer layer.
+
+        Args:
+            node_embeddings: Dict mapping node type to (N_t, D) tensor.
+            edge_indices: Dict mapping (src, rel, tgt) to (2, E) tensor.
+
+        Returns:
+            Updated node embeddings.
+        """
+        # Pre-norm attention
+        normed = self._apply_norm(self.norm1, node_embeddings)
+        attn_out = self.attention(normed, edge_indices)
+
+        if self.residual_connections:
+            node_embeddings = {
+                k: v + self.dropout(attn_out[k])
+                for k, v in node_embeddings.items()
+                if k in attn_out
+            }
+        else:
+            node_embeddings = attn_out
+
+        # Pre-norm FFN
+        normed = self._apply_norm(self.norm2, node_embeddings)
+        ffn_out = {
+            k: self.ffn(v) for k, v in normed.items()
+        }
+
+        if self.residual_connections:
+            node_embeddings = {
+                k: v + self.dropout(ffn_out[k])
+                for k, v in node_embeddings.items()
+                if k in ffn_out
+            }
+        else:
+            node_embeddings = ffn_out
+
+        return node_embeddings

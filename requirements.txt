@@ -53,3 +53,20 @@ psutil>=5.9
 # The bridge module (phase2/drugos_graph/phase1_bridge.py) has no
 # dependencies beyond pandas (already listed above). It is intentionally
 # lightweight so the bridge works in CI environments without torch/neo4j.
+
+# ─── Phase 3: Graph Transformer (link prediction on KG) ───────────────────
+# torch + scikit-learn are already declared in Phase 2 above and reused.
+# Phase 3 (graph_transformer/) only needs torch + sklearn + pandas + numpy,
+# all of which are already installed. No new deps required.
+
+# ─── Phase 4: RL Hypothesis Ranker ─────────────────────────────────────────
+# rl/rl_drug_ranker.py defines DrugRankingEnv(gym.Env) at class-definition
+# time, so gymnasium MUST be installed before the module can be imported
+# (it is NOT lazy-loaded — see B22 fix in rl_drug_ranker.py docstring).
+# stable-baselines3 is lazy-imported inside gt_rl_bridge / rl_drug_ranker
+# only when train_agent() is actually called, but we list it here so the
+# full RL pipeline can run end-to-end without a second pip install.
+gymnasium>=0.29
+stable-baselines3>=2.2
+# pytest is needed by the Phase 3/4 test suites (tests/test_*.py).
+pytest>=7.4
