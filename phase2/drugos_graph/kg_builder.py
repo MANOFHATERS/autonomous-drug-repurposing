@@ -952,10 +952,18 @@ def _whitelist_filter(
         # is_globally_approved) so the coalesce pattern works. Drop None
         # for all other fields (preserving the v36 Neo4j property-erasure
         # fix for non-safety fields).
+        # v85 FORENSIC ROOT FIX (BUG-SCI-3): added "toxicity" to the
+        # safety-critical None fields. The module docstring explicitly
+        # states that the RL safety ranker uses "withdrawn, terminated,
+        # illicit, toxicity, and sensitive" properties. But "toxicity"
+        # was MISSING from this frozenset — so a drug with toxicity=None
+        # had that property DROPPED by _whitelist_filter, and the RL
+        # ranker interpreted the missing property as "not toxic" (safe).
+        # This is the exact patient-harm pathway the docstring warns about.
         _SAFETY_CRITICAL_NONE_FIELDS = frozenset({
             "withdrawn", "terminated", "illicit",
             "fda_approved", "is_fda_approved", "is_withdrawn",
-            "is_globally_approved", "sensitive",
+            "is_globally_approved", "sensitive", "toxicity",
         })
         if v is None:
             if k in _SAFETY_CRITICAL_NONE_FIELDS:

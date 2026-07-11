@@ -328,9 +328,9 @@ def run_phase2_kg_builder(
     """Phase 2: Build the real biomedical KG from the staged data.
 
     v90 ROOT FIX: uses the REAL APIs:
-      1. bridge_to_pyg_maps(builder) → (entity_maps, edge_maps)
-      2. Label normalization (Compound→drug, Disease→disease, ...)
-      3. PyGBuilder.build_from_drkg() → PyG HeteroData
+      1. bridge_to_pyg_maps(builder) -> (entity_maps, edge_maps)
+      2. Label normalization (Compound->drug, Disease->disease, ...)
+      3. PyGBuilder.build_from_drkg() -> PyG HeteroData
       4. known_pairs extracted from (drug, treats, disease) edges
 
     Returns (node_features, edge_indices, node_maps, known_pairs) in
@@ -777,6 +777,9 @@ def main() -> int:
         logger.critical(f"Pipeline RuntimeError: {e}", exc_info=True)
         return 4
     except Exception as e:
+        # Top-level catch-all for main() — this is the ONE appropriate
+        # broad catch per BUG #51 audit. Logs with exc_info=True so
+        # programming bugs are NEVER swallowed silently.
         logger.critical(f"Unexpected exception: {e}", exc_info=True)
         return 5
 
