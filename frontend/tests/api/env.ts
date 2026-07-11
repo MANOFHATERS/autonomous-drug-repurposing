@@ -5,6 +5,7 @@
 
 const path = require("path");
 
-process.env.NODE_ENV = "test";
+// NODE_ENV is typed as read-only in newer @types/node; cast to any to assign.
+(process.env as Record<string, string | undefined>).NODE_ENV = "test";
 process.env.DATABASE_URL = `file:${path.join(process.cwd(), "db", "test.db")}`;
 process.env.JWT_SECRET = "test-secret-only-not-for-production-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
