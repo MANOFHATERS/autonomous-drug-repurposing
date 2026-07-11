@@ -2095,6 +2095,11 @@ class GTRLBridge:
             pathway_count_per_disease = {}
         max_pw = max(pathway_count_per_disease.values()) if pathway_count_per_disease else 1
         pw_scale = max(1.0, float(max_pw))
+        # v100 ROOT FIX: define unmet_scale for the exp-decay formula below.
+        # The previous code referenced `unmet_scale` but never defined it,
+        # causing NameError at runtime. Scale=3.0 gives good differentiation:
+        # tc=0 → 1.0, tc=3 → 0.72, tc=10 → 0.38.
+        unmet_scale = 3.0
 
         def _unmet_need_for_disease(disease_name: str) -> float:
             ds_idx = disease_map.get(disease_name, -1)
@@ -2124,16 +2129,8 @@ class GTRLBridge:
             #   know much about it). The secondary signal is small (±0.03)
             #   so it doesn't overwhelm the primary treatment-count signal.
             pw_count = pathway_count_per_disease.get(ds_idx, 0)
-            pw_diff = 0.03 * (pw_count / max(max_pathways, 1)) - 0.015
+            pw_diff = 0.03 * (pw_count / max(max_pw, 1)) - 0.015
             return float(np.clip(base + pw_diff, 0.0, 1.0))
-            treat_component = 0.95 * float(np.exp(-tc / unmet_scale)) + 0.05
-            # v90 S-F1: pathway-connectivity component. Diseases with
-            # more known pathway disruptions have LOWER unmet need.
-            pw = pathway_count_per_disease.get(ds_idx, 0)
-            pw_component = 1.0 - 0.4 * (float(pw) / pw_scale)
-            # Blend: 70% treatment signal, 30% pathway signal.
-            base = 0.7 * treat_component + 0.3 * pw_component
-            return float(np.clip(base, 0.0, 1.0))
 
         df["unmet_need_score"] = df["disease"].map(_unmet_need_for_disease)
         logger.info(

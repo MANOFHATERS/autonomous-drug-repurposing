@@ -200,74 +200,14 @@ def evaluate_link_prediction(
         accuracy = float(accuracy_score(all_labels, pred_binary))
 
         if len(np.unique(all_labels)) < 2:
-    model.to(device)
-    nf = {k: v.to(device) for k, v in node_features.items()}
-    ei = {k: v.to(device) for k, v in edge_indices.items()}
-
-    # V90 BUG #36: GENUINELY INDEPENDENT path. The previous code manually
-    # called model.encode() then link_predictor.forward_logits/forward —
-    # the SAME code path as trainer.evaluate. The fix uses model.forward()
-    # which is a different entry point (it calls encode + link_predictor
-    # internally, but via a different call sequence). To make this truly
-    # independent, we call model.forward() PER BATCH (re-encoding each
-    # time). This is SLOWER than encoding once, but for the VERIFIED check
-    # we want independence, not speed. A bug in model.encode would affect
-    # both paths, but a bug in the trainer's manual embedding extraction
-    # (e.g., wrong indexing, wrong device) would be caught here.
-    all_probs = []
-    criterion = nn.BCEWithLogitsLoss()  # unweighted (BUG #32: eval should be unweighted)
-    total_loss = 0.0
-    n_samples = len(labels)
-
-    for start in range(0, n_samples, batch_size):
-        end = min(start + batch_size, n_samples)
-        d_idx = drug_indices[start:end].to(device)
-        ds_idx = disease_indices[start:end].to(device)
-        batch_labels = labels[start:end].float().to(device)
-
-        # V90 BUG #36: use model.forward_logits (NOT link_predictor.forward_logits)
-        # for the loss. model.forward_logits calls model.encode internally
-        # (a fresh encode per batch — slower but independent). Then use
-        # model.forward for probabilities (also a fresh encode).
-        # This is a DIFFERENT code path than trainer.evaluate, which
-        # encodes ONCE and then calls link_predictor methods directly.
-        logits = model.forward_logits(
-            nf, ei, d_idx, ds_idx,
-            exclude_edges=set(exclude_edges),
-        )
-        loss = criterion(logits, batch_labels)
-        total_loss += loss.item()
-
-        # V90 BUG #36: use model.forward for probabilities (independent
-        # from trainer's link_predictor.forward path).
-        probs = model.forward(
-            nf, ei, d_idx, ds_idx,
-            exclude_edges=set(exclude_edges),
-            apply_temperature=apply_temperature,
-        ).cpu()
-        all_probs.append(probs)
-
-    all_probs = torch.cat(all_probs).numpy()
-    all_labels = labels.numpy()
-
-    pred_binary = (all_probs > 0.5).astype(int)
-    accuracy = float(accuracy_score(all_labels, pred_binary))
-
-    if len(np.unique(all_labels)) < 2:
-        auc = 0.5
-    else:
-        try:
-            auc = float(roc_auc_score(all_labels, all_probs))
-        except ValueError:
             auc = 0.5
         else:
             try:
                 auc = float(roc_auc_score(all_labels, all_probs))
             except ValueError:
                 auc = 0.5
-
         avg_loss = total_loss / max(1, (n_samples + batch_size - 1) // batch_size)
-        return {"loss": avg_loss, "auc": auc, "accuracy": accuracy}
+        return {"loss": avg_loss, "auc": auc, "accuracy": accuracy, "probs": all_probs, "pred_binary": pred_binary}
     finally:
         # V90 ROOT FIX (BUG #19): restore the prior training state.
         model.train(prior_training)

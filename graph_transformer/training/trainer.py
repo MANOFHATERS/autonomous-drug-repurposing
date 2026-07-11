@@ -954,8 +954,6 @@ class GraphTransformerTrainer:
             },
             "package_version": _gt_version,
             "schema_version": _gt_schema,
-        }, path)
-        logger.info(f"V30 ROOT FIX (8.14): Checkpoint saved to {path} (full schema, best_epoch={self.best_epoch})")
         }
         # V90 BUG #41: only include best_state_dict if it's not None.
         if self.best_state_dict is not None:

@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import numpy as np
 import torch
@@ -1078,38 +1078,6 @@ class BiomedicalGraphBuilder:
 
         if training_positives_added > 0:
             logger.info(
-                f"V90 ROOT FIX (BUG #3, P0): injected {training_positives_added} "
-                f"CURATED TRAINING POSITIVES (real DrugBank/RepoDB drug-disease "
-                f"pairs, NON-KP drugs) as 'treats' edges ONLY. NO multi-hop "
-                f"path injection (BUG #3 fix removed it). The GT model now "
-                f"learns from the NATURAL topology (random drug->protein, "
-                f"protein->pathway, pathway->disease edges) — if the natural "
-                f"topology is insufficient, the demo graph is too small."
-
-            # v89 P0 ROOT FIX (Compound #3 / AUC fraud chain): REMOVED the
-            # 3-hop path injection for TRAINING POSITIVES too.
-            #
-            # The V31 "fix" injected a GUARANTEED drug→protein→pathway→
-            # disease path for EACH training positive. This is the SAME
-            # label leakage as the KP injection above: the model learned
-            # "3-hop path exists → positive" trivially, then generalized
-            # this rule to the held-out KPs (which also had injected
-            # paths, before the v89 fix above removed them).
-            #
-            # The audit (v89) confirmed the compound bug chain:
-            #   graph_builder.py injects 3-hop path for every training
-            #   positive → LABEL_LEAKING_EDGES only strips direct treats
-            #   edge, not the path → GT model learns "3-hop path exists
-            #   → positive" → val AUC = 1.0 → scientific-validation gate
-            #   passes trivially → ship garbage to pharma partners.
-            #
-            # The training positives are STILL added as "treats" edges
-            # (the line above this comment block), so the GT model has
-            # real positive signal. But NO synthetic 3-hop path is
-            # injected. The model must learn from NATURAL topology.
-
-        if training_positives_added > 0:
-            logger.info(
                 f"v89 P0 ROOT FIX (Compound #3): injected "
                 f"{training_positives_added} CURATED TRAINING POSITIVES "
                 f"(real DrugBank/RepoDB drug-disease pairs, NON-KP drugs) "
@@ -1438,19 +1406,154 @@ class BiomedicalGraphBuilder:
                     f"({src_label}, {rel}, {dst_label}))."
                 )
 
+        # ─── DERIVE (pathway, disrupted_in, disease) edges ──────────
+        # v100 ROOT FIX (CRITICAL — pathway_score=0.0 bug):
+        #
+        # The Phase 1→2 bridge produces Gene→encodes→Protein,
+        # Gene→associated_with→Disease, Gene→susceptible_to→Disease,
+        # and Protein→participates_in→Pathway edges. It does NOT
+        # produce Pathway→disrupted_in→Disease edges directly.
+        #
+        # The GT model's pathway_score (computed in gt_rl_bridge.py)
+        # REQUIRES (pathway, disrupted_in, disease) edges to count
+        # multi-hop drug→protein→pathway→disease paths. Without these
+        # edges, pathway_score=0.0 for ALL pairs — exactly the audit
+        # finding "Top-5 shipped candidates have pathway_score=0.0
+        # for ALL 5 (docx promises pathways as a deliverable)".
+        #
+        # The scientifically correct derivation: a pathway is
+        # "disrupted in" a disease if any of its member proteins' genes
+        # are associated with that disease. Chain:
+        #   Gene G --encodes--> Protein P --participates_in--> Pathway W
+        #   Gene G --associated_with/susceptible_to--> Disease D
+        #   => Pathway W --disrupted_in--> Disease D
+        #
+        # We use the bridge's REAL encodes edges (not gene_symbol name
+        # matching, which is fragile). This is MORE correct than the
+        # phase2_adapter.py derivation which uses name matching.
+        gene_id_to_protein_name: Dict[str, str] = {}
+        for edge in edges_staged.get(("Gene", "encodes", "Protein"), []):
+            g_id = str(edge.get("src_id", edge.get("source_id", ""))).strip()
+            p_id = str(edge.get("dst_id", edge.get("target_id", ""))).strip()
+            p_name = phase2_id_to_phase3_name.get(("protein", p_id))
+            if g_id and p_name:
+                gene_id_to_protein_name[g_id] = p_name
+
+        # v100 ROOT FIX (pathway_score=0.0 FALLBACK): if the bridge
+        # produced ZERO encodes edges (common in sample data), fall back
+        # to gene_symbol → protein name matching. This mirrors the
+        # phase2_adapter.py derivation logic. A gene's gene_symbol often
+        # matches the protein's name/symbol (e.g., gene "TNF" → protein
+        # "TNF"). This is less precise than encodes edges but FAR better
+        # than zero pathway→disease edges (which makes pathway_score=0.0
+        # for ALL pairs — the audit's #1 scientific validity finding).
+        if not gene_id_to_protein_name:
+            # Build protein name → protein_name lookup (case-insensitive)
+            protein_name_by_upper: Dict[str, str] = {}
+            for edge in edges_staged.get(("Protein", "participates_in", "Pathway"), []):
+                p_id = str(edge.get("src_id", edge.get("source_id", ""))).strip()
+                p_name = phase2_id_to_phase3_name.get(("protein", p_id))
+                if p_name:
+                    protein_name_by_upper[p_name.strip().upper()] = p_name
+            # Also check all registered proteins (not just those in pathways)
+            for (p3_type, p2_id), p3_name in list(phase2_id_to_phase3_name.items()):
+                if p3_type == "protein":
+                    upper = p3_name.strip().upper()
+                    if upper and upper not in protein_name_by_upper:
+                        protein_name_by_upper[upper] = p3_name
+
+            # Match gene_symbol → protein name (case-insensitive)
+            n_matched_by_symbol = 0
+            for gene in getattr(staged_data, "gene_nodes", []):
+                g_id = str(gene.get("id", "")).strip()
+                gene_symbol = str(gene.get("gene_symbol", gene.get("symbol", gene.get("name", "")))).strip().upper()
+                if not g_id or not gene_symbol:
+                    continue
+                p_name = protein_name_by_upper.get(gene_symbol)
+                if p_name:
+                    gene_id_to_protein_name[g_id] = p_name
+                    n_matched_by_symbol += 1
+            if n_matched_by_symbol > 0:
+                logger.info(
+                    f"from_phase1_staged_data: v100 FALLBACK — matched "
+                    f"{n_matched_by_symbol} genes to proteins via "
+                    f"gene_symbol → protein name (encodes edges were "
+                    f"absent in the staged data)."
+                )
+
+        protein_name_to_pathway_names: Dict[str, Set[str]] = {}
+        for edge in edges_staged.get(("Protein", "participates_in", "Pathway"), []):
+            p_id = str(edge.get("src_id", edge.get("source_id", ""))).strip()
+            w_id = str(edge.get("dst_id", edge.get("target_id", ""))).strip()
+            p_name = phase2_id_to_phase3_name.get(("protein", p_id))
+            w_name = phase2_id_to_phase3_name.get(("pathway", w_id))
+            if p_name and w_name:
+                protein_name_to_pathway_names.setdefault(p_name, set()).add(w_name)
+
+        derived_pw_disease = 0
+        for gene_rel in ("associated_with", "susceptible_to"):
+            for edge in edges_staged.get(("Gene", gene_rel, "Disease"), []):
+                g_id = str(edge.get("src_id", edge.get("source_id", ""))).strip()
+                d_id = str(edge.get("dst_id", edge.get("target_id", ""))).strip()
+                p_name = gene_id_to_protein_name.get(g_id)
+                d_name = phase2_id_to_phase3_name.get(("disease", d_id))
+                if not p_name or not d_name:
+                    continue
+                for w_name in protein_name_to_pathway_names.get(p_name, set()):
+                    if builder.add_edge("pathway", "disrupted_in", "disease", w_name, d_name):
+                        derived_pw_disease += 1
+
+        if derived_pw_disease > 0:
+            edges_by_phase3_type[("pathway", "disrupted_in", "disease")] = derived_pw_disease
+            logger.info(
+                f"from_phase1_staged_data: v100 ROOT FIX — derived "
+                f"{derived_pw_disease} (pathway, disrupted_in, disease) "
+                f"edges from Gene→encodes→Protein→participates_in→Pathway "
+                f"+ Gene→associated_with/susceptible_to→Disease chains. "
+                f"pathway_score will now be NON-ZERO (fixes the audit "
+                f"finding 'pathway_score=0.0 for ALL 5')."
+            )
+        else:
+            logger.warning(
+                f"from_phase1_staged_data: derived ZERO (pathway, "
+                f"disrupted_in, disease) edges. pathway_score will be "
+                f"0.0 for all pairs. This means the staged data has no "
+                f"Gene→encodes→Protein→participates_in→Pathway chains "
+                f"connected to Gene→Disease associations. Check that "
+                f"Phase 1 produced STRING PPI data and DisGeNET/OMIM "
+                f"gene-disease associations."
+            )
+
         # ─── Finalize: build reverse edges + tensorize ──────────────
-        builder._sync_edge_lists()
-        builder._edge_lists = BiomedicalGraphBuilder._build_reverse_edges(
-            builder._edge_lists
-        )
+        # v100 ROOT FIX (CRITICAL — reverse edges discarded bug):
+        #
+        # The previous code called the DEPRECATED _build_reverse_edges
+        # staticmethod which writes into _edge_lists. But finalize()
+        # immediately calls _sync_edge_lists() which rebuilds
+        # _edge_lists from _edge_sets (forward-only), DISCARDING all
+        # 7 reverse edge types. The drug node type received NO incoming
+        # edges → the GT model could not learn a drug-side representation
+        # of the drug-disease pattern.
+        #
+        # build_demo_graph was fixed in v90 to use
+        # _build_reverse_edges_into_sets (writes into _edge_sets, which
+        # survives _sync_edge_lists). from_phase1_staged_data (the REAL
+        # production path) was NOT fixed — until now.
+        builder._build_reverse_edges_into_sets(builder._edge_sets)
         node_features, edge_indices, node_maps = builder.finalize()
 
         total_nodes = sum(nodes_registered_by_type.values())
         total_edges = sum(edges_by_phase3_type.values())
+        n_reverse = sum(
+            v.shape[1] for k, v in edge_indices.items()
+            if k not in edges_by_phase3_type
+        )
         logger.info(
             f"from_phase1_staged_data: REAL graph built from Phase 1→2 "
             f"staged data — {total_nodes} nodes ({nodes_registered_by_type}), "
             f"{total_edges} forward edges ({len(edges_by_phase3_type)} types), "
+            f"{n_reverse} reverse edges (v100 fix: now preserved), "
+            f"{derived_pw_disease} derived pathway→disease edges, "
             f"{len(known_pairs)} REAL known treatment pairs (from "
             f"Compound→treats→Disease edges)."
         )
