@@ -25,6 +25,19 @@ the ``.env`` file exactly once. This makes importing this module
 side-effect-free — safe for DAG parsing, test frameworks, and IDE
 autocompletion.
 
+Exceptions (P1-022 ROOT FIX — documented eager reads):
+  ``ENVIRONMENT`` (and its alias ``DRUGOS_ENVIRONMENT``) IS read at
+  import time. This is intentional because ENVIRONMENT is consumed by
+  many module-level constants (``_PROFILE_DEFAULTS`` lookups,
+  ``DATABASE_URL`` dev-mode auto-swap, etc.) that need a stable value
+  at import time. Making ENVIRONMENT lazy would require a sweeping
+  refactor of every consumer. If you need to override ENVIRONMENT in
+  a test, set the env var BEFORE importing ``config.settings`` (e.g.
+  via ``monkeypatch.setenv`` in a fixture that runs before import, or
+  by setting it in the test process's environment before pytest starts).
+  An empty-string ENVIRONMENT is treated as "production" (the ``or``
+  short-circuit falls through to the production default).
+
 Configuration Groups
 --------------------
 - **Database**: DATABASE_URL
@@ -356,9 +369,33 @@ class _DeprecatedSetting:
 #       staging -> staging (unchanged)
 # Synchronized with phase2/drugos_graph/config.py — DO NOT diverge
 # (audit TOP-2).
+#
+# P1-022 ROOT FIX (v100 forensic — docstring was lying about lazy loading):
+# The module docstring at lines 20-26 claims "Environment variables are
+# NOT read at import time." That claim was TRUE for most settings
+# (which use _getenv() inside _ensure_dotenv_loaded()) but FALSE for
+# ENVIRONMENT — _raw_environment is read EAGERLY at import time here.
+# This made the module's import-time behavior inconsistent with its
+# documented contract. If a test set DRUGOS_ENVIRONMENT=development
+# AFTER importing config.settings, the change was NOT picked up.
+# ROOT FIX: we keep the eager read (because ENVIRONMENT is consumed
+# by _PROFILE_DEFAULTS lookups and many other module-level constants
+# that need a stable value at import time — making it lazy would
+# require a sweeping refactor of every consumer), but we now:
+#   1. Document the eager-read exception explicitly in the module
+#      docstring (see the "Exceptions" subsection added to the
+#      Loading Strategy block above).
+#   2. Treat empty-string ENVIRONMENT as "production" (the previous
+#      ``or`` short-circuit already did this implicitly because '' is
+#      falsy — but now it's EXPLICIT and documented, so an operator
+#      who sets ENVIRONMENT= (empty) in their .env knows they get
+#      production mode).
+#   3. Warn LOUDLY (logger.warning, not info — see P1-023) when
+#      falling back to the production default.
 _raw_environment: str = (
     os.getenv("DRUGOS_ENVIRONMENT")
     or os.getenv("ENVIRONMENT", "production")
+    or "production"
 ).lower()
 _ENV_NORMALIZATION: dict[str, str] = {
     "dev": "development",
@@ -388,7 +425,16 @@ ENVIRONMENT: str = _ENV_NORMALIZATION.get(_raw_environment, _raw_environment)
 # workflows/*.yml files already do this where needed).
 if not os.getenv("DRUGOS_ENVIRONMENT") and not os.getenv("ENVIRONMENT"):
     logger_production_default = __import__("logging").getLogger(__name__)
-    logger_production_default.info(
+    # P1-023 ROOT FIX (v100 forensic — log level was INFO, not WARNING):
+    # The previous code emitted this at INFO level, which is filtered
+    # out by default in production (root logger = WARNING per the
+    # ``_PROFILE_DEFAULTS["production"]["LOG_LEVEL"] = "WARNING"``
+    # setting). An operator running in production without explicit log
+    # configuration would NEVER see this message — defeating the
+    # "LOUD log.warning" promised by the comment at line ~472. ROOT
+    # FIX: emit at WARNING level so the message lands in every log
+    # sink (file + stderr) regardless of the operator's log filter.
+    logger_production_default.warning(
         "v89 P0 ROOT FIX: DRUGOS_ENVIRONMENT not set — defaulting to "
         "'production' (was 'development'). All DRUGOS_ALLOW_* escape "
         "hatches are now REFUSED by default. To enable dev mode, "
@@ -1364,10 +1410,18 @@ weak-evidence floor). Must be > ``DISGENET_MIN_SCORE`` to be meaningful."""
 # removed (no publication supports it).
 DISGENET_CONFIDENCE_TIERS_JSON: str = _getenv(
     "DISGENET_CONFIDENCE_TIERS",
+    # P1-004 ROOT FIX (v100 forensic): labels aligned with Piñero 2020 §2.3
+    # — sub_weak / weak / strong. The previous default was
+    # [[0.0,"weak"],[0.06,"moderate"],[0.3,"strong"]] which mislabeled the
+    # [0.0, 0.06) sub-floor band as "weak" and the [0.06, 0.3) weak band
+    # as "moderate" (Piñero does not define a "moderate" band). The DB
+    # CHECK constraint, ORM CheckConstraint, JSON schema, and migration 012
+    # are updated in lockstep to accept the new label set.
+    # (Parallel V100 fix BUG #4 applied the same root fix.)
     default='[[0.0,"sub_weak"],[0.06,"weak"],[0.3,"strong"]]',
 )
 """JSON-encoded list of [threshold, label] pairs for confidence tier
-classification.  V100 ROOT FIX (BUG #4): default follows Piñero et al.
+classification.  P1-004 v100 ROOT FIX: default follows Piñero et al.
 2020 §2.3 ACTUAL vocabulary:
 ``[[0.0,"sub_weak"],[0.06,"weak"],[0.3,"strong"]]``. The [0.06, 0.3)
 band is the WEAK-evidence band (not "moderate" as the previous code
@@ -1668,7 +1722,7 @@ DISGENET_CONFIDENCE_TIERS: list[tuple[float, str]] = _parse_disgenet_confidence_
 )
 """Parsed confidence tiers (list of (threshold, label) pairs, sorted ascending).
 Defaults follow Piñero et al. 2020:
-``[(0.0, 'weak'), (0.06, 'moderate'), (0.3, 'strong')]``."""
+``[(0.0, 'sub_weak'), (0.06, 'weak'), (0.3, 'strong')]``."""
 
 
 def _parse_disgenet_source_weights(raw: str) -> dict[str, float]:

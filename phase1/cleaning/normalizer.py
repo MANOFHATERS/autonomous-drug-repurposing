@@ -1820,39 +1820,52 @@ class _LegacyLocalCircuitBreaker:
         self.failure_count = 0
         self.last_failure_time = 0.0
         self.state = "closed"
+        # P1-012: lock protects failure_count, last_failure_time, state.
+        self._lock = threading.Lock()
 
     def record_success(self) -> None:
-        self.failure_count = 0
-        self.state = "closed"
+        with self._lock:
+            self.failure_count = 0
+            self.state = "closed"
 
     def record_failure(self) -> None:
-        self.failure_count += 1
-        self.last_failure_time = time.monotonic()
-        if self.failure_count >= self.failure_threshold:
-            if self.state != "open":
-                logger.error(
-                    "convert_to_inchikey: circuit breaker '%s' OPENED "
-                    "after %d consecutive failures",
-                    self.name,
-                    self.failure_count,
-                )
-                with _METRICS_LOCK:
-                    _METRICS["circuit_open_count"] += 1
-            self.state = "open"
+        # P1-012 ROOT FIX (v100 forensic): wrap in self._lock for thread
+        # safety (parallel V100 fix BUG #42 also added the lock; this merge
+        # combines the lock with time.monotonic() from the canonical class).
+        with self._lock:
+            self.failure_count += 1
+            self.last_failure_time = time.monotonic()
+            if self.failure_count >= self.failure_threshold:
+                if self.state != "open":
+                    logger.error(
+                        "convert_to_inchikey: circuit breaker '%s' OPENED "
+                        "after %d consecutive failures",
+                        self.name,
+                        self.failure_count,
+                    )
+                    # Increment the metric INSIDE the lock so the
+                    # "circuit_open_count" counter doesn't double-count
+                    # the same transition. (_METRICS_LOCK is still used
+                    # for the dict update itself — nested locks are safe
+                    # here because the order is always _lock → _METRICS_LOCK.)
+                    with _METRICS_LOCK:
+                        _METRICS["circuit_open_count"] += 1
+                self.state = "open"
 
     def allow_request(self) -> bool:
-        if self.state == "closed":
-            return True
-        if self.state == "open":
-            if time.monotonic() - self.last_failure_time > self.reset_timeout:
-                self.state = "half-open"
-                logger.info(
-                    "convert_to_inchikey: circuit breaker '%s' HALF-OPEN",
-                    self.name,
-                )
+        with self._lock:
+            if self.state == "closed":
                 return True
-            return False
-        return True  # half-open
+            if self.state == "open":
+                if time.monotonic() - self.last_failure_time > self.reset_timeout:
+                    self.state = "half-open"
+                    logger.info(
+                        "convert_to_inchikey: circuit breaker '%s' HALF-OPEN",
+                        self.name,
+                    )
+                    return True
+                return False
+            return True  # half-open
 
 
 _cb_convert = _NormalizerCircuitBreaker("convert_to_inchikey")

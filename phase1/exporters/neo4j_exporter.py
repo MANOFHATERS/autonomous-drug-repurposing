@@ -381,11 +381,41 @@ def check_neo4j_readiness(pg_session) -> dict:
             try:
                 _bind = pg_session.bind
                 if _bind is not None:
-                    from sqlalchemy import inspect as _sa_inspect
-                    _meta = _sa_inspect(_bind).default_schema_name
-                    # Try to get the table from the metadata; fall back
-                    # to an unqualified TableClause if not found.
-                    _table_obj = _sa_table(t)
+                    from sqlalchemy import (
+                        MetaData,
+                        Table,
+                        inspect as _sa_inspect,
+                    )
+                    _meta_name = _sa_inspect(_bind).default_schema_name
+                    # P1-002 ROOT FIX (v100 forensic): the previous code
+                    # computed _meta (default_schema_name) but NEVER used
+                    # it — it always created an UNQUALIFIED _sa_table(t),
+                    # which fails on PostgreSQL when the table is in a
+                    # non-default schema or search_path is misconfigured.
+                    # This caused check_neo4j_readiness to return ready=False
+                    # even on a fully-populated DB, blocking the master DAG's
+                    # _trigger_phase2. ROOT FIX: introspect the actual Table
+                    # object from the SQLAlchemy metadata via reflect() with
+                    # the resolved schema name, so the rendered SQL carries
+                    # the schema qualification (e.g. "public.drugs" not just
+                    # "drugs"). Fall back to the unqualified TableClause
+                    # only if reflection fails (SQLite, no bind, etc.).
+                    try:
+                        _md = MetaData(schema=_meta_name)
+                        _table_obj = Table(
+                            t, _md, autoload_with=_bind,
+                        )
+                    except Exception:
+                        # Reflection failed (e.g. SQLite, missing table,
+                        # permission denied on pg_catalog). Fall back to
+                        # an explicit schema-qualified TableClause so the
+                        # rendered SQL is "schema.table" not "table".
+                        if _meta_name:
+                            _table_obj = _sa_table(
+                                t, schema=_meta_name,
+                            )
+                        else:
+                            _table_obj = _sa_table(t)
             except Exception:
                 _table_obj = _sa_table(t)
             if _table_obj is None:

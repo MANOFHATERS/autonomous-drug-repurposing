@@ -2360,9 +2360,56 @@ def bulk_upsert_dpi(
     # empty strings DIRECTLY to Python ``None`` (not NaN), and removes
     # the redundant ``.where()`` call. The ``pd.NA`` → ``None`` conversion
     # happens at the SQLAlchemy layer during parameter binding.
+    #
+    # P1-019 ROOT FIX (v100 forensic — NULL source_id dedup gap):
+    # The DB UniqueConstraint ``uq_dpi_drug_protein_source`` on (drug_id,
+    # protein_id, source, source_id) uses NULLS DISTINCT semantics on
+    # PostgreSQL 15+ and SQLite — so two rows with the SAME (drug_id,
+    # protein_id, source) but NULL source_id are NOT considered duplicates
+    # by the DB. The KG would silently accumulate duplicate DPI edges
+    # whenever a source omits source_id (common for older ChEMBL records).
+    # ROOT FIX: add an APPLICATION-LEVEL dedup pass that treats NULL
+    # source_id as a sentinel for dedup purposes (matching the pattern
+    # in ``cleaning/deduplicator.py:2447`` for NaN InChIKeys). We add a
+    # temporary ``_dedup_key`` column where NULL source_id becomes the
+    # literal string ``"__NULL_SOURCE_ID__"`` so duplicate rows collapse
+    # together. After dedup, the temporary column is dropped so the
+    # real ``source_id`` column retains NULL (per DES-04 contract).
     if "source_id" in df.columns:
         _empty_mask = df["source_id"].astype(str).str.strip() == ""
         df.loc[_empty_mask, "source_id"] = None
+        # Build a composite dedup key that treats NULL source_id as a
+        # sentinel so duplicate (drug_id, protein_id, source, NULL)
+        # rows collapse. We only do this when the relevant columns are
+        # all present — otherwise we fall through and let the DB
+        # constraint handle what it can.
+        _dedup_cols_present = all(
+            c in df.columns
+            for c in ("drug_id", "protein_id", "source")
+        )
+        if _dedup_cols_present:
+            _source_id_for_key = df["source_id"].fillna(
+                "__NULL_SOURCE_ID__"
+            ).astype(str)
+            _dedup_key = (
+                df["drug_id"].astype(str) + "|"
+                + df["protein_id"].astype(str) + "|"
+                + df["source"].astype(str) + "|"
+                + _source_id_for_key
+            )
+            _before = len(df)
+            df = df.assign(_dpi_dedup_key=_dedup_key).drop_duplicates(
+                subset=["_dpi_dedup_key"], keep="first",
+            ).drop(columns=["_dpi_dedup_key"])
+            _dropped = _before - len(df)
+            if _dropped > 0:
+                logger.info(
+                    "bulk_upsert_dpi: P1-019 — dropped %d duplicate DPI "
+                    "row(s) with NULL source_id (DB UNIQUE constraint "
+                    "treats NULL as distinct; application-level dedup "
+                    "closes the gap).",
+                    _dropped,
+                )
 
     batch_size = _calculate_safe_batch_size(
         DrugProteinInteraction, batch_size
@@ -3016,7 +3063,37 @@ def bulk_upsert_gda(
                 "bulk_upsert_gda: failed to write quarantine for %d "
                 "rows: %s", len(bad_rows), q_exc,
             )
-        df = df[~bad_mask].copy()
+        # P1-020 ROOT FIX (v100 forensic — early return instead of
+        # processing an empty DataFrame):
+        # The previous code did ``df = df[~bad_mask].copy()`` here. But
+        # ``bad_mask = df["gene_symbol"].isna()`` was ALL True (every row
+        # has NaN because we just set the column to None), so
+        # ``df[~bad_mask]`` was EMPTY. The function then continued
+        # processing an empty DataFrame — running through the disease_id
+        # check, the chunk loop, the upsert, etc. — producing confusing
+        # "0 inserted, N quarantined" output. The ``result.total_input``
+        # was set later (line ~3189) to ``len(df)`` (the ORIGINAL count)
+        # but ``result.inserted`` was 0 and ``result.quarantined`` was
+        # never explicitly set to ``total``. An operator monitoring the
+        # pipeline saw "0 inserted" without a clear indication that ALL
+        # rows were quarantined because of the missing column — leading
+        # to debugging time spent looking at the wrong layer. ROOT FIX:
+        # explicitly set ``result.quarantined = len(df)`` and
+        # ``return result`` here so the function exits cleanly with an
+        # unambiguous audit trail.
+        _n_total = len(df)
+        result.total_input = _n_total
+        result.quarantined = _n_total
+        logger.warning(
+            "bulk_upsert_gda: P1-020 — input dataframe missing gene_symbol "
+            "column; quarantined all %d row(s) and returning early (no "
+            "upsert attempted).",
+            _n_total,
+        )
+        return result
+        # (The previous ``df = df[~bad_mask].copy()`` line is removed —
+        # it would have produced an empty DataFrame and continued
+        # processing, masking the real failure mode.)
 
     # v42 ROOT FIX (P1-A-9): the previous code did
     # ``df["disease_id"] = df["disease_id"].fillna("")`` with a comment

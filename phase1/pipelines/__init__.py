@@ -1294,20 +1294,26 @@ def get_filtering_thresholds() -> dict[str, dict[str, Any]]:
             ),
         },
         "CONFIDENCE_TIERS": {
-            "value": [(0.0, "weak"), (0.06, "moderate"), (0.3, "strong")],
+            "value": [(0.0, "sub_weak"), (0.06, "weak"), (0.3, "strong")],
             "file": "disgenet_pipeline.py (389-fix, SCI-11) + cleaning/confidence.py",
             "rationale": (
                 "Tiers classify GDA confidence for downstream weighting. "
-                "Aligned to Piñero et al. 2020 §2.3: [0.0, 0.06) = weak "
-                "(sub-floor), [0.06, 0.3) = moderate (weak evidence band), "
-                "[0.3, 1.0] = strong evidence. The previous 0.7 → 'very_high' "
-                "tier is removed (no publication supports it). "
-                "v43 ROOT FIX (Chain 3): labels unified to "
-                "weak/moderate/strong across cleaning.confidence, "
-                "config.settings, SQL CHECK chk_gda_confidence_tier, and "
-                "ORM CheckConstraint — previously cleaning.confidence used "
-                "'sub_weak' which failed the SQL CHECK and silently "
-                "dead-lettered low-confidence GDA rows."
+                "Aligned to Piñero et al. 2020 §2.3: [0.0, 0.06) = sub_weak "
+                "(sub-floor, below the published weak-evidence floor), "
+                "[0.06, 0.3) = weak (the actual published weak-evidence "
+                "band), [0.3, 1.0] = strong evidence. The previous 0.7 → "
+                "'very_high' tier is removed (no publication supports it). "
+                "v100 P1-004 ROOT FIX (SCIENTIFIC MISLABEL): the previous "
+                "labels were ('weak', 'moderate', 'strong') — but Piñero "
+                "2020 §2.3 does NOT define a 'moderate' band. The previous "
+                "code mislabeled [0.0, 0.06) as 'weak' (Piñero: sub-weak) "
+                "and [0.06, 0.3) as 'moderate' (Piñero: weak), inflating "
+                "the perceived confidence of every weak-evidence GDA edge "
+                "— a patient-safety risk. ROOT FIX: rename to "
+                "('sub_weak', 'weak', 'strong') in lockstep across "
+                "cleaning.confidence, config.settings, SQL CHECK "
+                "chk_gda_confidence_tier (migration 012), ORM "
+                "CheckConstraint, and pipelines/schema/v1.json."
             ),
         },
         "MAPPING_KEY_CONFIRMED": {

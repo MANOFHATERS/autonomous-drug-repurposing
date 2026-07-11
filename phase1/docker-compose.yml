@@ -103,16 +103,18 @@ services:
       - ./config:/opt/airflow/config
       - ./raw_data:/opt/airflow/raw_data
       - ./processed_data:/opt/airflow/processed_data
-      # V100 ROOT FIX (BUG #19, P0 CRITICAL): the previous volume list was
-      # MISSING ./data, ./exporters, and ./scripts. This caused:
-      #   (a) Airflow tasks that `from exporters.neo4j_exporter import ...`
-      #       (the master DAG's trigger_phase2 path) failed with
-      #       ModuleNotFoundError.
-      #   (b) protein_resolver.py at module import time tried to auto-load
-      #       phase1/data/uniprot_organism_crosswalk.yaml — that file was
-      #       unreachable from inside the Airflow container, silently
-      #       disabling organism cross-validation (mouse proteins
-      #       mislabeled as human).
+      # P1-003 ROOT FIX (v100 forensic): the previous volume list was
+      # INCOMPLETE — ./data, ./exporters, and ./scripts were NOT mounted.
+      # Airflow tasks that did `from exporters.neo4j_exporter import ...`
+      # (e.g. master DAG's _trigger_phase2) or
+      # `from scripts.download_parallel import ...` failed with
+      # ModuleNotFoundError. Worse, protein_resolver.py at module-import
+      # time tried to auto-load phase1/data/uniprot_organism_crosswalk.yaml
+      # — that file was unreachable from inside the container, silently
+      # disabling organism cross-validation (mouse proteins mislabeled as
+      # human — patient-safety risk). ROOT FIX: mount all three missing
+      # directories on every airflow service so imports and config loads
+      # resolve correctly.
       - ./data:/opt/airflow/data
       - ./exporters:/opt/airflow/exporters
       - ./scripts:/opt/airflow/scripts
@@ -235,16 +237,9 @@ services:
       - ./config:/opt/airflow/config
       - ./raw_data:/opt/airflow/raw_data
       - ./processed_data:/opt/airflow/processed_data
-      # V100 ROOT FIX (BUG #19, P0 CRITICAL): the previous volume list was
-      # MISSING ./data, ./exporters, and ./scripts. This caused:
-      #   (a) Airflow tasks that `from exporters.neo4j_exporter import ...`
-      #       (the master DAG's trigger_phase2 path) failed with
-      #       ModuleNotFoundError.
-      #   (b) protein_resolver.py at module import time tried to auto-load
-      #       phase1/data/uniprot_organism_crosswalk.yaml — that file was
-      #       unreachable from inside the Airflow container, silently
-      #       disabling organism cross-validation (mouse proteins
-      #       mislabeled as human).
+      # P1-003 ROOT FIX (v100 forensic): mirror the missing mounts added
+      # to airflow-init on every airflow service so webserver-launched
+      # tasks see exporters/, scripts/, and data/ (uniprot crosswalk).
       - ./data:/opt/airflow/data
       - ./exporters:/opt/airflow/exporters
       - ./scripts:/opt/airflow/scripts
@@ -296,16 +291,12 @@ services:
       - ./config:/opt/airflow/config
       - ./raw_data:/opt/airflow/raw_data
       - ./processed_data:/opt/airflow/processed_data
-      # V100 ROOT FIX (BUG #19, P0 CRITICAL): the previous volume list was
-      # MISSING ./data, ./exporters, and ./scripts. This caused:
-      #   (a) Airflow tasks that `from exporters.neo4j_exporter import ...`
-      #       (the master DAG's trigger_phase2 path) failed with
-      #       ModuleNotFoundError.
-      #   (b) protein_resolver.py at module import time tried to auto-load
-      #       phase1/data/uniprot_organism_crosswalk.yaml — that file was
-      #       unreachable from inside the Airflow container, silently
-      #       disabling organism cross-validation (mouse proteins
-      #       mislabeled as human).
+      # P1-003 ROOT FIX (v100 forensic): the scheduler is what actually
+      # executes DAG tasks under LocalExecutor — including _trigger_phase2
+      # which imports exporters.neo4j_exporter and protein_resolver (which
+      # loads phase1/data/uniprot_organism_crosswalk.yaml at import time).
+      # Without these three mounts, the scheduler's tasks hit
+      # ModuleNotFoundError and silent organism-validation degradation.
       - ./data:/opt/airflow/data
       - ./exporters:/opt/airflow/exporters
       - ./scripts:/opt/airflow/scripts
