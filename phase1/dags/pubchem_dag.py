@@ -18,13 +18,10 @@ requiring the master DAG.
 
 from __future__ import annotations
 
-import sys
-from datetime import datetime, timedelta
-from pathlib import Path
+from datetime import datetime
 
-_PROJECT_ROOT = str(Path(__file__).resolve().parent.parent)
-if _PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, _PROJECT_ROOT)
+# v89 ROOT FIX (BUG #39): shared sys.path bootstrap (see dags/_dags_init.py).
+from dags._dags_init import ensure_project_root  # noqa: F401
 
 from airflow.decorators import dag, task
 
@@ -49,8 +46,9 @@ DEFAULT_ARGS = {
 }
 
 
-@task(retries=2, execution_timeout=timedelta(hours=4),
-      retry_exponential_backoff=True, retry_delay=timedelta(minutes=5))
+# v89 ROOT FIX (BUG #25 / BUG #38): bare ``@task`` — retry params
+# inherited from DEFAULT_ARGS (spread from DEFAULT_RETRY_ARGS).
+@task
 @fail_fast_on_http_4xx
 def run_pubchem() -> None:
     """Execute the full PubChem pipeline: download → clean → load."""
@@ -76,4 +74,5 @@ def pubchem_dag() -> None:
     run_pubchem()
 
 
-pubchem_dag_instance = pubchem_dag()
+# v89 ROOT FIX (BUG #40): consistent DAG-instance naming convention.
+dag = pubchem_dag()

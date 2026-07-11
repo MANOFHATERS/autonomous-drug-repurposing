@@ -804,3 +804,17 @@ class DrugRepurposingGraphTransformer(nn.Module):
         model.to(device)
         logger.info(f"Model loaded from {path} (full config restored per E12 fix)")
         return model
+
+
+# v89 ROOT FIX (CI V31-5 — GraphTransformerModel import error):
+# The CI workflow's V31 verification step does:
+#   from graph_transformer.models.graph_transformer import GraphTransformerModel
+# but the actual class is named ``DrugRepurposingGraphTransformer``. This
+# naming mismatch caused the V31-5 check to fail with ImportError.
+# ROOT FIX: add ``GraphTransformerModel`` as a backward-compatible alias
+# for ``DrugRepurposingGraphTransformer``. Both names now refer to the
+# same class. Existing code using ``DrugRepurposingGraphTransformer``
+# continues to work; new code (and the CI V31-5 check) can use the
+# shorter ``GraphTransformerModel`` name. This connects Phase 3 (Graph
+# Transformer) to the CI verification suite.
+GraphTransformerModel = DrugRepurposingGraphTransformer
