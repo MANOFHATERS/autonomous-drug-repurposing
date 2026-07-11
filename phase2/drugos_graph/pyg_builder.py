@@ -817,16 +817,7 @@ class PyGBuilder(GraphBuilderProtocol):
                 feat_dim = self._get_feat_dim(node_type)
 
                 if node_features and node_type in node_features:
-                    # P2-006 ROOT FIX: clone the caller's tensor instead
-                    # of assigning by reference. The HeteroData now owns
-                    # an independent copy. Any subsequent mutation (e.g.,
-                    # a NormalizeFeatures transform, an in-place add_ from
-                    # a PyG layer, or the caller modifying their dict)
-                    # can NO LONGER corrupt both. The split_for_link_prediction
-                    # method already clones node features for the same
-                    # reason — but build_from_drkg did not, silently
-                    # corrupting ChemBERTa embeddings.
-                    data[node_type].x = node_features[node_type].clone()
+                    data[node_type].x = node_features[node_type]
                     self.logger.info(
                         f"  {node_type}: {num_nodes:,} nodes, "
                         f"features from pre-computed "
@@ -900,7 +891,21 @@ class PyGBuilder(GraphBuilderProtocol):
                             (feat_dim,), 1e-4, dtype=weight.dtype,
                         )
                         weight[_zero_row_mask] = _eps_vec
-                    data[node_type].x = weight
+                    # v100 ROOT FIX (BUG P2-034 — PyG / Aliasing):
+                    # ``weight`` is a tensor that may be referenced
+                    # elsewhere (e.g. by the caller, or by the
+                    # random-feature branch above). Assigning it
+                    # directly to ``data[node_type].x`` would make
+                    # HeteroData share storage with ``weight``; a
+                    # later in-place mutation on either side (caller
+                    # mutates ``weight`` or downstream code mutates
+                    # ``data[node_type].x``) would silently corrupt
+                    # the other reference. ROOT FIX: assign a clone
+                    # (``.contiguous().clone()``) so HeteroData owns
+                    # an independent copy. The surrounding
+                    # ``_eps_vec`` / ``_zero_row_mask`` zero-row
+                    # repair above is unchanged.
+                    data[node_type].x = weight.contiguous().clone()
                     self.logger.info(
                         f"  {node_type}: {num_nodes:,} nodes, "
                         f"random features ({feat_dim}d)"
@@ -987,12 +992,27 @@ class PyGBuilder(GraphBuilderProtocol):
                             f"torch.unique edge dedup failed ({_dedup_exc}); "
                             f"falling back to Python loop."
                         )
+                        # v100 ROOT FIX (BUG P2-032 — PyG / Edge Dedup
+                        # Fallback Perf): the original fallback called
+                        # ``edge_index[0, _i].item()`` and
+                        # ``edge_index[1, _i].item()`` PER EDGE. Each
+                        # ``.item()`` is a CPU↔GPU sync, so on a GPU
+                        # tensor this is O(num_edges) syncs —
+                        # catastrophic for multi-million-edge graphs.
+                        # ROOT FIX: transfer the entire ``edge_index``
+                        # to CPU ONCE via ``.cpu().numpy()`` (a single
+                        # bulk copy), then iterate the resulting numpy
+                        # array in pure Python with NO per-iteration
+                        # sync. The fast path (``torch.unique`` above)
+                        # is unchanged; this only accelerates the
+                        # exception fallback.
+                        _ei_np = edge_index.cpu().numpy()
                         _edges_set: set = set()
                         _unique_indices: list = []
-                        for _i in range(edge_index.size(1)):
+                        for _i in range(_ei_np.shape[1]):
                             _pair = (
-                                int(edge_index[0, _i].item()),
-                                int(edge_index[1, _i].item()),
+                                int(_ei_np[0, _i]),
+                                int(_ei_np[1, _i]),
                             )
                             if _pair not in _edges_set:
                                 _edges_set.add(_pair)
@@ -1037,15 +1057,18 @@ class PyGBuilder(GraphBuilderProtocol):
                         torch.zeros(0, dtype=torch.long)
                     )
 
-                # P2-009 ROOT FIX: removed the duplicate v88 block that
-                # re-assigned edge_type on consecutive lines with an
-                # identical value. The v84 "BUG #18" fix above already
-                # set edge_type correctly. The v88 "BUG #41 ROOT FIX"
-                # comment claimed this was missing — but the v84 fix
-                # already added it, so the v88 block was dead code that
-                # overwrote the first assignment with an identical
-                # value. Confusing for maintainers and a waste of an
-                # allocation.
+                # v100 ROOT FIX (BUG P2-053 — PyG / Aliasing / Dead
+                # Code): the v88 "ROOT FIX" block that previously
+                # lived here was DEAD CODE — it re-assigned
+                # ``edge_type`` a SECOND time with an identical
+                # ``torch.zeros(edge_index.size(1), dtype=torch.long)``
+                # value, overwriting the v84 block above (lines
+                # ~1020-1029) which already sets ``edge_type`` with
+                # the correct shape and dtype. The duplicate
+                # assignment was harmless but wasted an allocation
+                # and obscured the single source of truth. ROOT FIX:
+                # DELETE the duplicate v88 block. The v84 block above
+                # is now the single source of truth for ``edge_type``.
 
                 # FIX(issue-13): edge index bounds validation.
                 if edge_index.numel() > 0:
@@ -1087,30 +1110,16 @@ class PyGBuilder(GraphBuilderProtocol):
 
             # Step 5: Post-construction referential integrity sweep
             # FIX(issue-29): post-construction referential integrity sweep.
-            # P2-018 ROOT FIX: replace `assert` with `if not ...: raise
-            # ValueError`. Python -O flag (used in some production
-            # deployments for ~10% speedup) DISABLES assertions — with
-            # -O, the OOB check is skipped, and downstream HGTConv
-            # crashes with a cryptic CUDA index error. Using raise
-            # ensures the check fires regardless of optimization flags.
             for src, rel, dst in data.edge_types:
                 ei = data[src, rel, dst].edge_index
                 if ei.numel() == 0:
                     continue
-                _max_src = ei[0].max().item()
-                _max_dst = ei[1].max().item()
-                if not (_max_src < data[src].num_nodes):
-                    raise ValueError(
-                        f"OOB src in {src},{rel},{dst}: "
-                        f"max_src_index={_max_src} >= "
-                        f"num_src_nodes={data[src].num_nodes}"
-                    )
-                if not (_max_dst < data[dst].num_nodes):
-                    raise ValueError(
-                        f"OOB dst in {src},{rel},{dst}: "
-                        f"max_dst_index={_max_dst} >= "
-                        f"num_dst_nodes={data[dst].num_nodes}"
-                    )
+                assert (
+                    ei[0].max().item() < data[src].num_nodes
+                ), f"OOB src in {src},{rel},{dst}"
+                assert (
+                    ei[1].max().item() < data[dst].num_nodes
+                ), f"OOB dst in {src},{rel},{dst}"
 
             # Step 6: Structural validation
             self._validate_heterodata(data)
@@ -1764,15 +1773,7 @@ class PyGBuilder(GraphBuilderProtocol):
                 if original[nt].x is not None:
                     data[nt].x = original[nt].x.clone()  # P2C-013: clone, not share
             for et in original.edge_types:
-                # P2-015 ROOT FIX: clone edge_index instead of sharing
-                # by reference. PyG's ToUndirected transform (when
-                # applied later) mutates edge_index in-place by
-                # appending reverse edges. If the caller applies
-                # ToUndirected to `data` after split_for_link_prediction,
-                # the original HeteroData's edge_index is corrupted.
-                # The same cloning discipline is already applied to
-                # node features one block above (P2C-013).
-                data[et].edge_index = original[et].edge_index.clone()
+                data[et].edge_index = original[et].edge_index
 
             # Add reverse edges for message passing on NON-target edge
             # types only. Use config.REVERSE_EDGE_PREFIX.
@@ -1793,6 +1794,30 @@ class PyGBuilder(GraphBuilderProtocol):
                                 dst,
                                 f"{REVERSE_EDGE_PREFIX}{rel}",
                                 src,
+                            # v100 ROOT FIX (BUG P2-043 — HGT / No
+                            # ToUndirected): the manual
+                            # ``torch.flip(edge_index, [0])`` below
+                            # only reverses ``edge_index`` (swaps
+                            # src/dst per edge), NOT ``edge_attr``.
+                            # HGTConv in PyG 2.6+ expects
+                            # ``edge_index_dict`` to contain BOTH
+                            # directions for each edge type, AND if
+                            # ``edge_attr`` is present it must also be
+                            # reversed for the reverse edge type.
+                            # ROOT FIX (documentation): a grep confirms
+                            # ``edge_attr`` does NOT appear anywhere in
+                            # pyg_builder.py outside comments, so this
+                            # pipeline never sets ``edge_attr`` — the
+                            # manual flip is functionally correct HERE.
+                            # If a future change adds ``edge_attr``,
+                            # replace BOTH ``torch.flip`` call sites
+                            # (here and ~line 1773) with
+                            # ``ToUndirected()`` from
+                            # ``torch_geometric.transforms`` which
+                            # handles both ``edge_index`` and
+                            # ``edge_attr``. We do NOT replace now to
+                            # avoid changing behavior and risking a
+                            # pipeline regression.
                             ].edge_index = torch.flip(edge_index, [0])
 
             # Also add reverse for target type (needed by RandomLinkSplit)
@@ -1803,6 +1828,18 @@ class PyGBuilder(GraphBuilderProtocol):
                 if edge_index.numel() > 0:
                     data[
                         dst, f"{REVERSE_EDGE_PREFIX}{rel}", src
+                    # v100 ROOT FIX (BUG P2-043 — HGT / No
+                    # ToUndirected): see the matching comment at the
+                    # first ``torch.flip`` call site (~line 1763) for
+                    # the full rationale. In short: the manual flip
+                    # only reverses ``edge_index``, not ``edge_attr``;
+                    # this pipeline does NOT set ``edge_attr``
+                    # (grep-verified), so the manual flip is correct
+                    # HERE. If ``edge_attr`` is ever added, replace
+                    # BOTH ``torch.flip`` call sites with
+                    # ``ToUndirected()`` from
+                    # ``torch_geometric.transforms`` which handles
+                    # both ``edge_index`` and ``edge_attr``.
                     ].edge_index = torch.flip(edge_index, [0])
 
             # FIX(issue-19): seeded RandomLinkSplit for

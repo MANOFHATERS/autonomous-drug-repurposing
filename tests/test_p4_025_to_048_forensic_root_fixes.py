@@ -224,15 +224,17 @@ def test_p4_031_withdrawn_drug_matches_salt_forms_and_suffixes():
     """P4-031: withdrawn drug check must match salt forms, suffixes, combinations.
     
     Note: after merging with V100's indication-specific logic, the canonical
-    helpers are _is_withdrawn_drug_global() and _get_indication_specific_withdrawal().
-    The backward-compat _is_withdrawn_drug() combines both.
+    helpers are _is_withdrawn_for_indication(drug, disease) which internally
+    uses _is_withdrawn_drug_global() and _get_indication_specific_withdrawal()
+    with substring matching (P4-031 fix).
     """
     from rl.rl_drug_ranker import (
         _is_withdrawn_drug, _is_withdrawn_drug_global,
         _get_indication_specific_withdrawal,
-        WITHDRAWN_DRUGS_GLOBAL,
+        _is_withdrawn_for_indication,
+        WITHDRAWN_DRUGS, WITHDRAWN_INDICATIONS,
     )
-    # V100 split thalidomide into indication-specific (pregnancy only).
+    # V100 has thalidomide in indication-specific (pregnancy only).
     # Rofecoxib stays globally withdrawn. We test P4-031's substring
     # matching against globally-withdrawn drugs (rofecoxib).
     # Exact match
@@ -260,6 +262,20 @@ def test_p4_031_withdrawn_drug_matches_salt_forms_and_suffixes():
         "P4-031 FAIL: salt form not matched for indication-specific withdrawal"
     )
     assert "pregnancy" in contra_salt
+    # _is_withdrawn_for_indication API tests
+    assert _is_withdrawn_for_indication("thalidomide", "pregnancy")
+    assert _is_withdrawn_for_indication("thalidomide", "morning sickness")
+    # Thalidomide + multiple myeloma: should NOT be rejected (indication-specific)
+    assert not _is_withdrawn_for_indication("thalidomide", "multiple myeloma"), (
+        "P4-031/V100 FAIL: thalidomide+multiple myeloma should NOT be rejected"
+    )
+    # P4-031 substring on _is_withdrawn_for_indication
+    assert _is_withdrawn_for_indication("thalidomide hydrochloride", "pregnancy"), (
+        "P4-031 FAIL: salt form + contraindicated disease should match"
+    )
+    assert _is_withdrawn_for_indication("rofecoxib hcl", "arthritis"), (
+        "P4-031 FAIL: global drug salt form should match for any disease"
+    )
     # Backward-compat _is_withdrawn_drug still works
     assert _is_withdrawn_drug("rofecoxib")
     assert _is_withdrawn_drug("thalidomide")  # indication-specific (any)

@@ -5,6 +5,10 @@ v63 ROOT FIX VERIFICATION — Runtime verification of all 18 P0 issues.
 from __future__ import annotations
 import sys, os, re
 
+# v100 ROOT FIX (R-008): use repo-relative path so the script is portable
+# across developer machines, CI runners, and production containers. The
+# previous hardcoded `/home/z/my-project/work` only worked on one
+# developer's laptop and broke everywhere else.
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, f"{HERE}/phase1")
 sys.path.insert(0, f"{HERE}/phase2")

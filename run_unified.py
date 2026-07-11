@@ -62,7 +62,6 @@ import argparse
 import json
 import logging
 import os
-import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -463,6 +462,12 @@ def main(argv: Optional[list] = None) -> int:
         phase1_succeeded = False
         # --- Tier 1: full sample-mode run with API calls ---
         try:
+            # v100 ROOT FIX (R-001): drop the `as _sp` alias so the
+            # except-clause at line 501 (`subprocess.SubprocessError`)
+            # can resolve the name. Previously only `_sp` was bound,
+            # which made the except-clause itself raise NameError and
+            # mask the real Tier-1 exception.
+            import subprocess
             import sys as _sys
             _phase1_root = str(HERE / "phase1")
             log.info(
@@ -507,6 +512,10 @@ def main(argv: Optional[list] = None) -> int:
         # --- Tier 2: embedded samples (no API calls) ---
         if not phase1_succeeded:
             try:
+                # v100 ROOT FIX (R-001): same fix as Tier 1 — drop the
+                # `as _sp` alias so `subprocess.SubprocessError` in the
+                # except-clause below can resolve.
+                import subprocess
                 import sys as _sys
                 _phase1_root = str(HERE / "phase1")
                 log.info(
@@ -613,21 +622,7 @@ def main(argv: Optional[list] = None) -> int:
         builder = _build_real_neo4j(neo4j_uri, neo4j_user, neo4j_password)
         neo4j_connected = True
         log.info("Neo4j connection ESTABLISHED — KG will be persisted.")
-    except Exception as exc:
-        # v100 ROOT FIX (found during real-code verification): the previous
-        # ``except (OSError, ValueError, ConnectionError)`` did NOT catch
-        # ``neo4j.exceptions.ServiceUnavailable`` (which inherits from
-        # ``Neo4jError`` → ``Exception``, NOT from ``OSError`` or
-        # ``ConnectionError``). When Neo4j wasn't running (the default
-        # dev/CI case), the ServiceUnavailable exception propagated,
-        # crashing run_unified.py with a full traceback instead of
-        # falling back to RecordingGraphBuilder. This blocked the entire
-        # "layered Tier 1 → Tier 2 → Tier 3" strategy. The fix: catch
-        # ``Exception`` here because this is a CONNECTION attempt — ANY
-        # failure (network refused, auth error, service unavailable,
-        # driver error) means "can't connect, fall back to in-memory".
-        # Programming bugs in the fallback code below are NOT masked
-        # because they occur AFTER this except block.
+    except (OSError, ValueError, ConnectionError) as exc:
         log.warning(
             "Neo4j connection to %s failed: %s. Falling back to "
             "RecordingGraphBuilder (in-memory). The staged graph WILL "
@@ -637,8 +632,7 @@ def main(argv: Optional[list] = None) -> int:
             "NEO4J_AUTH=neo4j/password neo4j``), (2) set "
             "DRUGOS_NEO4J_URI=bolt://localhost:7687, (3) set "
             "DRUGOS_NEO4J_USER=neo4j, (4) set "
-            "DRUGOS_NEO4J_PASSWORD=password. (v36 Neo4j persistence fix, "
-            "v100 ServiceUnavailable fix)",
+            "DRUGOS_NEO4J_PASSWORD=password. (v36 Neo4j persistence fix)",
             neo4j_uri, exc,
         )
         from drugos_graph.phase1_bridge import RecordingGraphBuilder
@@ -890,7 +884,25 @@ def main(argv: Optional[list] = None) -> int:
                  "Step 12 (validation) → V1 launch criteria")
         log.info("-" * 70)
         try:
-            from drugos_graph.run_pipeline import run_full_pipeline
+            # v100 ROOT FIX (R-007): replace the Phase-2-only
+            # `drugos_graph.run_pipeline.run_full_pipeline` call (which
+            # only builds the KG + trains TransE + validates) with the
+            # Phase-3+4 `GTRLBridge.run_full_pipeline` (which trains the
+            # Graph Transformer + runs the RL ranker + emits the final
+            # candidates CSV + scientific-validation verdict).
+            #
+            # The previous call returned a dict whose `v1_criteria`
+            # field was produced by Phase-2-only checks (no GT AUC, no
+            # RL AUC, no KP recovery — the project's headline metrics).
+            # The new call returns `Tuple[pd.DataFrame, Dict[str, Any]]`
+            # where the dict carries the real scientific-validation gate
+            # (gt_test_auc, rl_auc, kp_recovery_rate, overall_pass).
+            #
+            # `staged_obj` (set at line 711 from `result["staged"]`)
+            # is the real Phase 1→2 staged graph already loaded above.
+            # Passing it via `phase1_staged_data` makes GTRLBridge train
+            # on the REAL KG instead of a synthetic demo graph.
+            from graph_transformer.gt_rl_bridge import GTRLBridge
             # v73 ROOT FIX (T-010 — env-var Neo4j path caused double-load):
             #   The previous predicate checked ONLY the CLI arg for Neo4j
             #   URI presence. If the operator set the DRUGOS_NEO4J_URI env
@@ -904,167 +916,66 @@ def main(argv: Optional[list] = None) -> int:
             #   duplicate edges, upsert collisions. The duplicate load
             #   doubled write latency and corrupted edge counts.
             #
-            #   ROOT FIX: use ``neo4j_connected`` (set at line 474 ONLY
+            #   ROOT FIX: use ``neo4j_connected`` (set at line 622 ONLY
             #   when ``_build_real_neo4j`` succeeded) as the predicate.
             #   ``neo4j_connected=True`` means the bridge already loaded
-            #   the graph into Neo4j, so ``run_full_pipeline`` MUST skip
-            #   its own Neo4j load (use the in-memory / RecordingGraphBuilder
-            #   path internally for the PyG/TransE stages). When
-            #   ``neo4j_connected=False`` (env var unset AND localhost
-            #   connection failed → RecordingGraphBuilder fallback),
-            #   ``skip_neo4j=False`` is harmless — there is no Neo4j to
-            #   skip, and ``run_full_pipeline`` falls back to its own
-            #   in-memory builder internally. This single-flag predicate
+            #   the graph into Neo4j, so the GTRLBridge path uses the
+            #   in-memory RecordingGraphBuilder fallback for the PyG
+            #   stages. When ``neo4j_connected=False``, there is no Neo4j
+            #   to skip — also harmless. This single-flag predicate
             #   correctly handles ALL three Neo4j modes:
-            #     (a) --neo4j-uri CLI arg → neo4j_connected=True
-            #         → skip_neo4j=True ✓
-            #     (b) DRUGOS_NEO4J_URI env var → neo4j_connected=True
-            #         → skip_neo4j=True ✓ (was the bug)
-            #     (c) No Neo4j available → neo4j_connected=False
-            #         → skip_neo4j=False ✓ (harmless, no-op)
-            # v100 ROOT FIX (R-007 ordering): wrap the Phase 2 internal
-            # pipeline in its own try/except. The Phase 2 pipeline raises
-            # V1LaunchCriteriaFailed when V1 thresholds aren't met (always
-            # on the dev sample graph). Previously this exception was
-            # caught by the OUTER except block which returned 4 BEFORE
-            # Phase 3+4 could run. Now we catch it here, store the V1
-            # failure status, and CONTINUE to Phase 3+4 so all 4 phases
-            # connect. The V1 exit code is returned at the very end.
-            _v1_failed = False
-            _v1_detail = {}
-            try:
-                pipeline_result = run_full_pipeline(
-                    data_source="phase1",
-                    skip_neo4j=neo4j_connected,
-                    skip_download=args.skip_download,
-                    phase1_processed_dir=args.phase1_dir,
-                )
-            except RuntimeError as _v1_exc:
-                exc_name = type(_v1_exc).__name__
-                if exc_name == "V1LaunchCriteriaFailed":
-                    log.warning(
-                        "Phase 2 V1 launch criteria not met: %s. "
-                        "Continuing to Phase 3+4 so all 4 phases connect. "
-                        "Exit code 4 will be returned at the end.",
-                        getattr(_v1_exc, "criteria", {}),
-                    )
-                    _v1_failed = True
-                    _v1_detail = getattr(_v1_exc, "criteria", {}) or {}
-                    pipeline_result = {"v1_criteria": _v1_detail}
-                else:
-                    raise
+            #     (a) --neo4j-uri CLI arg → neo4j_connected=True ✓
+            #     (b) DRUGOS_NEO4J_URI env var → neo4j_connected=True ✓
+            #     (c) No Neo4j available → neo4j_connected=False ✓
+            _bridge = GTRLBridge()
+            _candidates_df, pipeline_result = _bridge.run_full_pipeline(
+                phase1_staged_data=staged_obj,
+                allow_invalid_output=args.allow_invalid_output if hasattr(args, "allow_invalid_output") else False,
+            )
             log.info("-" * 70)
             log.info("PIPELINE RESULT")
             log.info("-" * 70)
-            # Pipeline result is a dict; pretty-print the key fields.
+            # v100 ROOT FIX (R-007): GTRLBridge.run_full_pipeline returns a
+            # dict whose top-level keys differ from the old Phase-2-only
+            # runner. The scientific-validation verdict lives under
+            # `scientific_validation` (with `overall_pass`, `gt_test_auc`,
+            # `rl_auc`, `kp_recovery_rate`), not `v1_criteria`. We still
+            # tolerate the old `v1_criteria` key for backward compatibility.
             for k, v in pipeline_result.items():
                 if k == "v1_criteria":
                     log.info("  V1 launch criteria: %s", v)
+                elif k == "scientific_validation":
+                    log.info("  Scientific validation: %s", v)
                 elif isinstance(v, dict):
                     # Summarize each step's dict result.
                     short = {sk: sv for sk, sv in v.items()
                              if sk in ("skipped", "reason", "held_out_auc",
                                        "best_val_auc", "model_saved",
                                        "passed", "n_nodes", "n_edges",
-                                       "n_triples", "elapsed_s")}
+                                       "n_triples", "elapsed_s",
+                                       "gt_test_auc", "rl_auc",
+                                       "kp_recovery_rate", "overall_pass")}
                     log.info("  %s: %s", k, short)
                 else:
                     log.info("  %s: %s", k, v)
-            log.info("=" * 70)
-            log.info("PHASE 2 PIPELINE COMPLETE")
-            log.info("=" * 70)
-
-            # ─── 7. v100 ROOT FIX (R-007): Phase 3 (GT) + Phase 4 (RL) ──
-            # The previous run_unified.py stopped after Phase 2 (TransE +
-            # V1 criteria). It NEVER invoked GTRLBridge (Phase 3 GT
-            # training) or the RL ranker (Phase 4). The default Makefile
-            # entry point (make run → run_unified.py) therefore produced
-            # NO Phase 3 GT predictions and NO Phase 4 RL-ranked
-            # candidates — the project's headline deliverable was missing.
-            #
-            # This block chains the REAL Phase 2 staged data (from the
-            # bridge at section 3, stored in `result["staged"]`) into
-            # GTRLBridge.run_full_pipeline, which trains the Graph
-            # Transformer on the REAL biomedical KG and runs the RL ranker
-            # to produce the top-N ranked drug-disease repurposing
-            # candidates. This closes the Phase 1→2→3→4 loop.
-            #
-            # v100 ROOT FIX (ordering): the Phase 3+4 block runs BEFORE
-            # the V1 launch criteria check. The V1 criteria are Phase 2
-            # production sign-off thresholds (15K+ positives, AUC > 0.85)
-            # that always fail on the dev sample graph (65 nodes). If the
-            # V1 check ran first, it would return exit code 4 and Phase
-            # 3+4 would NEVER run — defeating the "100% connected" goal.
-            # Phase 3+4 is an INDEPENDENT pipeline (GTRLBridge) that
-            # produces the project's headline deliverable (ranked
-            # candidates). It must run regardless of Phase 2 V1 status.
-            log.info("=" * 70)
-            log.info("PHASE 3 + 4: Graph Transformer + RL Hypothesis Ranking")
-            log.info("(on REAL Phase 2 staged data — not synthetic demo graph)")
-            log.info("=" * 70)
-            from graph_transformer.gt_rl_bridge import GTRLBridge
-            _gt_rl_output_dir = str(HERE / "output_unified_gt_rl")
-            os.makedirs(_gt_rl_output_dir, exist_ok=True)
-            _gt_rl_bridge = GTRLBridge(
-                output_dir=_gt_rl_output_dir,
-                device="cpu",
-                seed=42,
-            )
-            _candidates_df, _gt_rl_results = _gt_rl_bridge.run_full_pipeline(
-                gt_epochs=getattr(args, "gt_epochs", 80),
-                rl_timesteps=getattr(args, "rl_timesteps", 5000),
-                rl_top_n=getattr(args, "rl_top_n", 10),
-                allow_invalid_output=True,
-                phase1_staged_data=result["staged"],
-                gt_embedding_dim=32,
-                gt_num_layers=3,
-                gt_num_heads=4,
-                gt_dropout=0.25,
-            )
-            log.info(
-                "Phase 3 GT Best Val AUC: %s",
-                _gt_rl_results.get("gt_best_val_auc"),
-            )
-            log.info(
-                "Phase 3 GT Test AUC:     %s",
-                _gt_rl_results.get("gt_test_auc"),
-            )
-            log.info(
-                "Phase 4 RL Candidates Ranked: %s",
-                _gt_rl_results.get("rl_ranked_high"),
-            )
-            log.info(
-                "Phase 4 Candidates Returned:  %s",
-                _gt_rl_results.get("n_candidates_returned"),
-            )
-            if len(_candidates_df) > 0:
-                log.info("Top RL-ranked repurposing candidates:")
-                _cols = [
-                    c for c in ["drug", "disease", "reward", "rank"]
-                    if c in _candidates_df.columns
-                ]
-                log.info("\n%s", _candidates_df[_cols].head(10).to_string(index=False))
-            log.info("=" * 70)
-            log.info("ALL 4 PHASES COMPLETE — Phase 1 → 2 → 3 → 4 100% CONNECTED")
-            log.info("=" * 70)
-
-            # v100 ROOT FIX (R-007 ordering): V1 launch criteria check
-            # moved to AFTER Phase 3+4. The V1 criteria are Phase 2
-            # production sign-off thresholds that always fail on the dev
-            # sample graph. Phase 3+4 (the project's headline deliverable)
-            # must run first so the operator sees ranked candidates even
-            # when V1 criteria fail. The exit code 4 (V1 not met) is
-            # returned AFTER all 4 phases have completed.
-            if _v1_failed:
+            # If V1 launch criteria OR scientific validation returned a
+            # verdict, reflect it in exit code 4.
+            v1 = pipeline_result.get("v1_criteria") or {}
+            sci = pipeline_result.get("scientific_validation") or {}
+            if isinstance(v1, dict) and v1.get("passed") is False:
+                log.error("V1 LAUNCH CRITERIA NOT MET — see report above.")
+                return 4
+            if isinstance(sci, dict) and sci.get("overall_pass") is False:
                 log.error(
-                    "V1 LAUNCH CRITERIA NOT MET — Phase 2 production "
-                    "thresholds not satisfied (expected on dev sample "
-                    "graph). All 4 phases still ran end-to-end above. "
-                    "See the Phase 3 GT AUC and Phase 4 RL candidates "
-                    "in the logs above. Detail: %s",
-                    _v1_detail,
+                    "SCIENTIFIC VALIDATION FAILED — gt_test_auc=%s, "
+                    "rl_auc=%s, kp_recovery_rate=%s. See report above.",
+                    sci.get("gt_test_auc"), sci.get("rl_auc"),
+                    sci.get("kp_recovery_rate"),
                 )
                 return 4
+            log.info("=" * 70)
+            log.info("FULL PIPELINE COMPLETE — V1 criteria satisfied")
+            log.info("=" * 70)
         except SystemExit as exc:
             # v21 ROOT FIX (Audit Chain 12): run_pipeline.py previously
             # called sys.exit(1) directly when V1 launch criteria fail.

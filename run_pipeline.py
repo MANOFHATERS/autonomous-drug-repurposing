@@ -670,10 +670,8 @@ def main() -> int:
     try:
         # ─── Phase 1 ────────────────────────────────────────────────
         # v100 ROOT FIX (R-005): capture the return value of
-        # ensure_phase1_data (a dict of CSV paths) into ``phase1_csvs``
-        # so the summary print at the end of main() can reference it.
-        # The previous code discarded the return value, causing
-        # NameError: name 'phase1_csvs' is not defined at the summary.
+        # ``ensure_phase1_data`` so the summary print below can reference
+        # ``len(phase1_csvs)`` instead of raising ``NameError``.
         phase1_csvs = ensure_phase1_data(Path(args.phase1_dir))
 
         # ─── Bridge ──────────────────────────────────────────────────

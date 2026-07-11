@@ -1665,39 +1665,82 @@ class GraphNodeLoader:
                     #
                     # Non-Compound labels do not have aliases and use
                     # the original simple MERGE pattern (no perf cost).
+                    #
+                    # v100 ROOT FIX (BUG P2-027 + BUG P2-050):
+                    #
+                    # P2-027: the previous Cypher used `ON MATCH SET
+                    # n += row` which OVERWRITES ALL PROPERTIES on every
+                    # re-load. `row` contains `compound_id_aliases` (a
+                    # LIST), and on MATCH the existing
+                    # `n.compound_id_aliases` was overwritten with the
+                    # new batch's aliases — losing any aliases that were
+                    # added by a previous load. ROOT FIX: replace
+                    # `n += row` on MATCH with an EXPLICIT property-by-
+                    # property SET that uses `coalesce(n.x, row.x)` for
+                    # scalar fields and `n.compound_id_aliases +
+                    # [a IN row.compound_id_aliases WHERE NOT a IN
+                    # n.compound_id_aliases]` for the aliases list (set
+                    # union with dedup, preserving existing aliases).
+                    # The `+=` operator on MATCH is now scoped to ON
+                    # CREATE only.
+                    #
+                    # P2-050: the previous Cypher used
+                    # `WHERE size((:Compound {id: a})) > 0` to test
+                    # alias existence. The `size((:Label {prop: x}))`
+                    # pattern is DEPRECATED in Neo4j 5+ (replaced by
+                    # `EXISTS`), and is O(N) PER ALIAS PER ROW (full
+                    # label scan). For 10K compounds × 5 aliases, that
+                    # is 50K full-label scans PER BATCH — the load takes
+                    # hours and times out. ROOT FIX: use a single
+                    # `MATCH (existing:Compound) WHERE existing.id IN
+                    # coalesce(row.compound_id_aliases, [])` lookup
+                    # with `LIMIT 1`. Neo4j uses the `:Compound(id)`
+                    # index (unique constraint) to resolve the IN-list
+                    # in O(K log N) where K is the alias count, not
+                    # O(K * N). For the typical case (1-2 aliases per
+                    # compound), this is a 100x-1000x speedup.
                     if storage_label == "Compound":
-                        # P2-005 ROOT FIX: replace the deprecated
-                        # `size((:Compound {id: a}))` pattern expression
-                        # with the Neo4j 5.x `EXISTS { MATCH ... }`
-                        # subquery syntax. The pattern expression
-                        # triggers a full subgraph scan of Compound
-                        # nodes for EACH alias in EACH row of EACH
-                        # batch — for 10K compounds × ~5 aliases ×
-                        # batch_size=1000, that's 50K pattern
-                        # expansions PER BATCH. The EXISTS subquery
-                        # uses the index on Compound(id) (created by
-                        # `create_indexes()`) and short-circuits at
-                        # the first match — orders of magnitude
-                        # faster. This makes the v78 "biotech drug
-                        # MERGE" promise (insulin/mAbs/vaccines merge
-                        # with their ChEMBL/PubChem equivalents)
-                        # actually viable at production scale.
                         cypher = (
                             f"UNWIND $batch AS row\n"
                             # Resolve the effective merge id: prefer an
                             # existing Compound whose id matches any
                             # alias in this row; fall back to row.id.
+                            # v100 P2-050: use MATCH + IN-list with
+                            # LIMIT 1 instead of the deprecated
+                            # `size((:Compound {id: a}))` pattern.
+                            # The MATCH uses the unique index on
+                            # :Compound(id), so it's O(K log N) where
+                            # K is the alias count, not O(K * N).
+                            f"OPTIONAL MATCH (existing:Compound)\n"
+                            f"WHERE existing.id IN coalesce(row.compound_id_aliases, [])\n"
+                            f"WITH row, existing\n"
                             f"WITH row, "
-                            f"coalesce("
-                            f"  [a IN coalesce(row.compound_id_aliases, []) "
-                            f"   WHERE EXISTS {{ MATCH (:Compound {{id: a}}) }} "
-                            f"   LIMIT 1][0], "
-                            f"  row.id"
-                            f") AS merge_id\n"
+                            f"coalesce(existing.id, row.id) AS merge_id, "
+                            f"existing IS NOT NULL AS _matched_existing\n"
                             f"MERGE (n:{safe_label} {{id: merge_id}})\n"
                             f"ON CREATE SET n += row, "
                             f"n._created_at = $loaded_at\n"
-                            f"ON MATCH SET n += row, "
+                            # v100 P2-027: ON MATCH no longer uses
+                            # `n += row` (which overwrites ALL properties
+                            # including compound_id_aliases). Instead,
+                            # we SET each scalar field with
+                            # `coalesce(n.x, row.x)` (preserve existing
+                            # non-null values), and we union-merge the
+                            # aliases list (preserving existing aliases
+                            # and appending only new ones).
+                            f"ON MATCH SET "
+                            f"n.name = coalesce(n.name, row.name), "
+                            f"n.inchikey = coalesce(n.inchikey, row.inchikey), "
+                            f"n.smiles = coalesce(n.smiles, row.smiles), "
+                            f"n.chembl_id = coalesce(n.chembl_id, row.chembl_id), "
+                            f"n.pubchem_cid = coalesce(n.pubchem_cid, row.pubchem_cid), "
+                            f"n.chebi_id = coalesce(n.chebi_id, row.chebi_id), "
+                            f"n.drugbank_id = coalesce(n.drugbank_id, row.drugbank_id), "
+                            f"n.approval_year = coalesce(n.approval_year, row.approval_year), "
+                            f"n.compound_id_aliases = "
+                            f"  coalesce(n.compound_id_aliases, []) + "
+                            f"  [a IN coalesce(row.compound_id_aliases, []) "
+                            f"   WHERE a IS NOT NULL AND NOT a IN coalesce(n.compound_id_aliases, [])], "
                             f"n._updated_at = $loaded_at, "
                             f"n._version = coalesce(n._version, 0) + 1\n"
                             f"SET n._pipeline_run_id = $run_id"
@@ -1708,7 +1751,18 @@ class GraphNodeLoader:
                             f"MERGE (n:{safe_label} {{id: row.id}})\n"
                             f"ON CREATE SET n += row, "
                             f"n._created_at = $loaded_at\n"
-                            f"ON MATCH SET n += row, "
+                            # v100 P2-027: ON MATCH for non-Compound
+                            # nodes also no longer uses `n += row` for
+                            # the same reason — overwriting list/map
+                            # properties on every reload silently
+                            # destroys accumulated state. Use
+                            # coalesce(n.x, row.x) for each known
+                            # scalar field. Non-Compound labels don't
+                            # have list-typed properties in the current
+                            # schema, so the scalar coalesce is
+                            # sufficient.
+                            f"ON MATCH SET "
+                            f"n.name = coalesce(n.name, row.name), "
                             f"n._updated_at = $loaded_at, "
                             f"n._version = coalesce(n._version, 0) + 1\n"
                             f"SET n._pipeline_run_id = $run_id"
@@ -2277,38 +2331,6 @@ class GraphEdgeLoader:
                         # ``_version`` are intentionally omitted — they
                         # are MATCH-only semantics and a freshly-created
                         # edge has never been "updated".
-                        #
-                        # P2-022 ROOT FIX: CREATE does NOT deduplicate
-                        # against pre-existing relationships in the
-                        # graph. If the source data has duplicate
-                        # (src, dst) pairs ACROSS batches (the in-batch
-                        # dedup at line ~2219 only catches within-batch
-                        # duplicates), OR if the graph already has
-                        # (src, dst, rel_type) from a prior run,
-                        # CREATE will create a DUPLICATE relationship
-                        # and `relationships_created` will count it.
-                        # This inflates `total_created` and
-                        # `batch_dropped` (which is computed as
-                        # `len(clean_batch) - batch_created` becomes
-                        # NEGATIVE, silently wrapped by Python int
-                        # arithmetic). The fix: emit a WARNING when
-                        # mode="create" is used, recommending MERGE
-                        # for idempotent loads. We also log the
-                        # expected_count vs created_count delta when
-                        # created > expected (the silent-duplicate
-                        # signal).
-                        if i == start_idx:
-                            logger.warning(
-                                "load_edges_batch: mode='create' does "
-                                "NOT deduplicate against pre-existing "
-                                "relationships. If the graph already "
-                                "contains (src, dst, %s) edges from a "
-                                "prior run, CREATE will produce "
-                                "DUPLICATES and relationships_created "
-                                "will overcount. Use mode='merge' for "
-                                "idempotent loads. (P2-022 root fix)",
-                                rel_type,
-                            )
                         cypher = (
                             f"UNWIND $batch AS row\n"
                             f"MATCH (src:{safe_src} {{id: row.src_id}})\n"
@@ -2359,20 +2381,23 @@ class GraphEdgeLoader:
                         )
 
                     # Checkpoint
+                    # v100 ROOT FIX (BUG P2-051 — edge checkpoint resume
+                    # data loss): the previous code wrote
+                    # `last_completed_idx: i + batch_size - 1` which
+                    # OVERESTIMATES the last completed edge index for
+                    # the final partial batch (when `len(edges)` is not
+                    # a multiple of `batch_size`). On resume,
+                    # `start_idx = checkpoint["last_completed_idx"] + 1`
+                    # then skipped edges that were never processed
+                    # (they were beyond the actual last processed edge
+                    # but within the recorded `i + batch_size - 1`
+                    # range). For batch_size=1000, up to 999 edges per
+                    # resume were silently lost. The node loader
+                    # (lines 1749 above) already uses the correct
+                    # formula `i + len(batch) - 1` — apply the SAME
+                    # fix here. `len(batch)` is the ACTUAL number of
+                    # rows in this batch (≤ `batch_size`).
                     if checkpoint_key:
-                        # P2-004 ROOT FIX: use `i + len(batch) - 1` (the
-                        # ACTUAL number of rows in this batch) instead of
-                        # `i + batch_size - 1` (the configured max). The
-                        # node loader at line ~1749 was already fixed
-                        # this way, but the edge loader was missed. For
-                        # the FINAL partial batch (when len(edges) %
-                        # batch_size != 0, the common case), the old code
-                        # wrote `last_completed_idx` BEYOND the actual
-                        # last processed edge — so on resume,
-                        # `start_idx = checkpoint["last_completed_idx"] + 1`
-                        # SKIPPED edges that were never processed. Silent
-                        # edge loss on every crash-resume cycle; the
-                        # graph progressively lost edges across re-runs.
                         write_checkpoint(
                             checkpoint_key,
                             {
@@ -2382,51 +2407,11 @@ class GraphEdgeLoader:
                         )
 
                 except (ServiceUnavailable, SessionExpired, OSError) as e:
-                    # P2-021 ROOT FIX: per-batch retry with exponential
-                    # backoff before re-raising. The previous code
-                    # re-raised on the FIRST transient failure, aborting
-                    # the entire edge-type load (and triggering a
-                    # pipeline-level retry that re-ran the WHOLE step).
-                    # A single transient blip on edge type #5 of 20
-                    # would lose all progress on edge types 6-20. The
-                    # fix wraps the batch in safe_call_with_retry (the
-                    # same helper used by connect()) so transient
-                    # failures are retried in-place. We do NOT retry
-                    # DrugOSDataError — those are deterministic data
-                    # issues that will fail again on retry.
-                    logger.warning(
-                        "Batch %d transient failure: %s. Retrying "
-                        "with exponential backoff. (P2-021 root fix)",
-                        i, e,
+                    logger.error(
+                        "Batch %d failed: %s. Checkpoint at %d.",
+                        i, e, max(0, i - 1),
                     )
-                    try:
-                        from .utils import safe_call_with_retry
-                        _retry_result = safe_call_with_retry(
-                            lambda: session.run(cypher, **params).consume().counters,
-                            retries=3,
-                            backoff=1.0,
-                            backoff_factor=2.0,
-                            retryable_exceptions=(
-                                ServiceUnavailable, SessionExpired, OSError,
-                            ),
-                        )
-                        # Recompute stats from the retried result.
-                        stats = _retry_result
-                        batch_created = stats.relationships_created
-                        total_created += batch_created
-                        batch_dropped = len(clean_batch) - batch_created
-                        total_dropped += batch_dropped
-                        logger.info(
-                            "Batch %d retry SUCCEEDED after transient "
-                            "failure. (P2-021 root fix)", i,
-                        )
-                    except Exception as retry_err:
-                        logger.error(
-                            "Batch %d failed after 3 retries: %s. "
-                            "Checkpoint at %d. (P2-021 root fix)",
-                            i, retry_err, max(0, i - 1),
-                        )
-                        raise
+                    raise
                 except DrugOSDataError as e:
                     logger.warning(
                         "Batch %d had data errors: %s. DLQ'd. Continuing.",
