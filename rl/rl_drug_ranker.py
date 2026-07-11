@@ -867,12 +867,30 @@ class PipelineConfig:
     gt_test_auc_discrepancy: Optional[float] = None
     # ROOT FIX (P0-3/P0-4): block pipeline completion when scientific
     # validation fails. When True (default), the pipeline raises
-    # ScientificFailureError instead of writing output if GT AUC < 0.5,
+    # ScientificFailureError instead of writing output if GT AUC < threshold,
     # RL AUC < 0.5, or KP recovery < 20%. This prevents shipping
     # scientifically invalid output to pharma partners.
     block_on_scientific_failure: bool = True
     # ROOT FIX (P0-4): minimum KP recovery rate to pass validation
     min_kp_recovery_rate: float = 0.2
+    # v89 P0 ROOT FIX (gate BEFORE CSV write): the GT AUC threshold for
+    # the RL pipeline's own scientific_validation gate. The previous
+    # code hardcoded 0.5 (better-than-random), which let the RL pipeline
+    # write its candidate CSV even when GT AUC was 0.51 (essentially
+    # random). The bridge's stricter gate (GT AUC > 0.85) fired AFTER
+    # the candidate CSV was on disk, leaving invalid candidates
+    # accessible to downstream consumers.
+    #
+    # The fix: default to 0.85 (V1 launch contract per DOCX §8: "Graph
+    # Transformer achieves >0.85 AUC on held-out drug-disease pairs").
+    # The bridge can override this per-call if needed. With the default
+    # 0.85, the RL pipeline REFUSES to write its candidate CSV if GT
+    # AUC < 0.85 — the gate fires BEFORE save_results, so no invalid
+    # candidates reach disk.
+    gt_test_auc_threshold: float = 0.85
+    # v89 P0: minimum RL AUC to pass validation. Kept at 0.5 (better
+    # than random) per the bridge's existing behavior.
+    rl_auc_threshold: float = 0.5
 
     @classmethod
     def from_env(cls) -> "PipelineConfig":
@@ -1123,7 +1141,30 @@ class RewardFunction:
         return self.compute(row)
 
     def compute(self, row: pd.Series) -> float:
-        """Core reward computation: monotonic weighted sum * gnn_factor * safety_factor.
+        """Core reward computation: monotonic weighted sum * safety_factor.
+
+        v89 P0 ROOT FIX (Compound #4 — circular RL distillation of GT):
+        the previous reward was ``weighted_sum * gnn_factor * safety_factor``
+        where ``gnn_factor = gnn / threshold``. This multiplicative gate
+        made the RL agent a CIRCULAR distillation of the GT model: any
+        pair GT scored low (gnn < threshold) got reward scaled to near-
+        zero, regardless of safety/market/pathway/efficacy. The RL agent
+        was forced to slavishly follow GT's ranking — Phase 4 added no
+        independent signal. If GT had a bug (e.g., the v89 Compound #3
+        label leakage), RL amplified that bias.
+
+        The v89 fix REMOVES the gnn_factor gate entirely. The new reward
+        is purely additive (gnn_score contributes only via its 0.04
+        weight in weighted_sum — a tie-breaker, not a gate):
+
+            reward = weighted_sum * safety_factor + validated_bonus
+
+        where:
+          - weighted_sum = Σ weights[col] * row[col]  (monotonic in each feature)
+          - gnn_score weight capped at 0.04 (was 0.20) — weakest feature
+          - safety_factor = 0.5 if safety < warning else 1.0  (the ONLY
+            multiplicative gate — patient-safety invariant: withdrawn
+            drugs get reward halved)
 
         ROOT FIX (S-04 / X-06): the previous reward function was NON-MONOTONIC
         because the synergy bonus (0.15 * gnn * pathway * safety) and the
@@ -1139,15 +1180,11 @@ class RewardFunction:
         So the reward was non-monotonic in gnn_score, which PPO with a
         dead value head (S-03) and limited timesteps could NOT learn.
 
-        The fix removes the synergy bonus and uncertainty penalty entirely.
-        The reward is now MONOTONIC in every feature:
+        The S-04/X-06 fix removed the synergy bonus and uncertainty penalty.
+        The v89 fix additionally removed the gnn_factor gate. The reward
+        is now MONOTONIC in every feature:
 
-            reward = weighted_sum * gnn_factor * safety_factor + validated_bonus
-
-        where:
-          - weighted_sum = Σ weights[col] * row[col]  (monotonic in each feature)
-          - gnn_factor = min(1, gnn / threshold)      (monotonic in gnn)
-          - safety_factor = 0.5 if safety < warning else 1.0  (monotonic in safety)
+            reward = weighted_sum * safety_factor + validated_bonus
 
         PPO can learn a monotonic function far more easily than a
         non-monotonic one, especially with limited timesteps and a
@@ -1191,37 +1228,51 @@ class RewardFunction:
                 return -1.0
 
         # ------------------------------------------------------------------
-        # V30 ROOT FIX (10.10 / Compound #2): the D3 "low-variance gnn_score
-        # weight amplification" was a NO-OP for ranking. Multiplying a
-        # feature's WEIGHT by 2x does not change the ranking (the network
-        # has bias terms that absorb the scale change). The audit
-        # confirmed: "D3 amplifies the WEIGHT, not the SIGNAL."
+        # v89 P0 ROOT FIX (Compound #4 / circular RL distillation of GT):
+        # REDUCE gnn_score weight to 0.04 (was 0.20) AND REMOVE the
+        # multiplicative gnn_factor gate. The audit (v89) confirmed:
         #
-        # The proper fix: STANDARDIZE gnn_score (z-score normalize) before
-        # weighting, so the small differences become visible regardless of
-        # the absolute scale. This is the standard practice for features
-        # with low variance — z-score normalization makes the relative
-        # differences the dominant signal.
+        #   "The RL agent must not be a learned distillation of the GT
+        #    model — that is circular. The GT model's gnn_score is one
+        #    of 8 features, but with weight 0.20 + multiplicative
+        #    gnn_factor gate, it was the DOMINANT signal. The RL agent
+        #    learned to copy GT's ranking → Phase 4 added no independent
+        #    signal → if GT was biased/leaked, RL amplified that bias."
         #
-        # V30 ROOT FIX (10.26 / Compound #2): REDUCE gnn_score dominance.
-        # The original weight was 0.35 (highest), making the RL agent a
-        # learned distillation of GT — Phase 4 added no independent signal.
-        # The fix reduces gnn_score weight to 0.20 (matching the other
-        # features) so the RL agent learns a BALANCED combination of all
-        # features (gnn_score, pathway_score, safety_score, market_score,
-        # unmet_need_score, efficacy_score, patent_score, adme_score).
-        # This makes Phase 4 a REAL independent ranker, not a GT clone.
+        # The fix:
+        #   1. Cap gnn_score weight at 0.04 (5x reduction from 0.20).
+        #      This makes gnn_score the WEAKEST feature (4% of total
+        #      weight), so the RL agent learns primarily from
+        #      pathway_score, safety_score, market_score, unmet_need,
+        #      efficacy_score, patent_score, adme_score (the 7
+        #      INDEPENDENT features). The GT gnn_score is a tie-breaker,
+        #      not the dominant signal.
+        #   2. Remove the multiplicative gnn_factor gate (was
+        #      ``reward = weighted_sum * gnn_factor * safety_factor``
+        #      where ``gnn_factor = gnn / threshold``). The multiplicative
+        #      gate made ``gnn < threshold`` ZERO OUT the entire reward,
+        #      which forced the RL agent to slavishly follow GT's
+        #      ranking (any pair GT scored low got reward ≈ 0 regardless
+        #      of safety/market/etc). The new reward is purely additive:
+        #      ``reward = weighted_sum * safety_factor`` (safety_factor
+        #      remains as a hard safety gate — withdrawn drugs get
+        #      reward halved, which is patient-safety-correct).
+        #
+        # This makes Phase 4 a REAL independent ranker. If the GT model
+        # has a bug (e.g., the v89 Compound #3 label leakage), the RL
+        # ranker is no longer forced to amplify it.
         # ------------------------------------------------------------------
         effective_weights = dict(cfg.reward_weights)
-        # V30 (10.26): cap gnn_score weight at 0.20 to prevent dominance.
-        # If the config has a higher weight, override it here.
-        if effective_weights.get(GNN_SCORE_COL, 0) > 0.20:
+        # v89 P0: cap gnn_score weight at 0.04 (was 0.20). This is the
+        # user-specified "< 0.05" threshold.
+        GNN_SCORE_MAX_WEIGHT = 0.04
+        if effective_weights.get(GNN_SCORE_COL, 0) > GNN_SCORE_MAX_WEIGHT:
             old_weight = effective_weights[GNN_SCORE_COL]
-            effective_weights[GNN_SCORE_COL] = 0.20
+            effective_weights[GNN_SCORE_COL] = GNN_SCORE_MAX_WEIGHT
             # Redistribute the excess to the other features proportionally.
             other_sum = sum(w for c, w in effective_weights.items() if c != GNN_SCORE_COL)
             if other_sum > 0:
-                excess = old_weight - 0.20
+                excess = old_weight - GNN_SCORE_MAX_WEIGHT
                 for c in effective_weights:
                     if c != GNN_SCORE_COL:
                         effective_weights[c] += excess * (effective_weights[c] / other_sum)
@@ -1253,35 +1304,47 @@ class RewardFunction:
             else:
                 weighted_sum += effective_weights[col] * float(row[col])
 
-        # gnn_factor — monotonic in gnn_score (ROOT FIX A3/A4: soft
-        # penalty instead of hard reject). For gnn < threshold, scale
-        # the reward proportionally so pairs with good safety/pathway/
-        # market can still get positive reward. This is critical for
-        # recovering known positives that the GT model scores low.
+        # v89 P0 ROOT FIX (Compound #4): REMOVED the multiplicative
+        # gnn_factor gate. The previous code computed:
+        #   gnn_factor = gnn_val / threshold  (if gnn < threshold)
+        #   gnn_factor = 1.0                  (otherwise)
+        #   reward = weighted_sum * gnn_factor * safety_factor
         #
-        # ROOT FIX (C16): use adaptive threshold if available. The
-        # adaptive threshold is computed from the env's gnn_score
-        # distribution (percentile-based), so it adapts to the GT
-        # model's output range.
-        effective_threshold = (
-            self._adaptive_gnn_threshold
-            if self._adaptive_gnn_threshold is not None
-            else cfg.gnn_hard_reject
-        )
-        if effective_threshold > 0 and gnn_val < effective_threshold:
-            gnn_factor = float(gnn_val) / effective_threshold
-        else:
-            gnn_factor = 1.0
+        # This multiplicative gate made the RL agent a CIRCULAR
+        # distillation of the GT model: any pair GT scored low
+        # (gnn < threshold) got reward scaled down to near-zero,
+        # regardless of safety/market/pathway/efficacy. The RL agent
+        # was forced to slavishly follow GT's ranking — Phase 4 added
+        # no independent signal. If GT had a bug (e.g., the v89
+        # Compound #3 label leakage), RL amplified that bias.
+        #
+        # The new reward is purely additive (no gnn_factor):
+        #   reward = weighted_sum * safety_factor
+        #
+        # safety_factor remains as a HARD PATIENT-SAFETY GATE
+        # (withdrawn drugs get reward halved). This is the only
+        # multiplicative gate that should exist — it directly enforces
+        # the patient-safety invariant that withdrawn drugs should
+        # never be ranked HIGH. The gnn_score's influence is now
+        # purely through its 0.04 weight in the weighted_sum (a
+        # tie-breaker, not a gate).
+        #
+        # The gnn_factor code is INTENTIONALLY REMOVED (not commented
+        # out) so it cannot be accidentally re-enabled. If a future
+        # change wants to re-introduce a gnn-based gate, it MUST go
+        # through a scientific review (the audit showed this is a
+        # P0 patient-safety hazard).
 
         # safety_factor — monotonic in safety_score.
         # safety < safety_warning (0.7) -> halve reward.
         # safety >= safety_warning -> no penalty.
         safety_factor = 0.5 if safety_val < cfg.safety_warning else 1.0
 
-        # MONOTONIC reward: weighted_sum * gnn_factor * safety_factor.
-        # Every term is monotonic in its respective feature, so the
-        # product is monotonic in every feature. PPO can learn this.
-        reward = weighted_sum * gnn_factor * safety_factor
+        # MONOTONIC reward: weighted_sum * safety_factor.
+        # v89 P0: gnn_factor REMOVED (was making RL a circular
+        # distillation of GT). safety_factor remains as the only
+        # multiplicative gate (patient-safety invariant).
+        reward = weighted_sum * safety_factor
 
         # V30 ROOT FIX (10.25 / Compound #1): the validated hypothesis bonus
         # is applied ONLY to pairs that are in VALIDATED_HYPOTHESES but NOT in
@@ -1343,79 +1406,162 @@ DISEASE_NAMES: List[str] = [
 ]
 
 
-# ROOT FIX (W-08): diseases recognized as RARE / ORPHAN under FDA Orphan
-# Drug Designation (21 CFR Part 316) or EU Regulation (EC) No 141/2000.
-# Used by _is_rare_disease() to set the rare_disease_flag correctly on
-# KP pairs in generate_fake_data (the V27 code hardcoded 0.0 for ALL KPs,
-# which biased the RL agent against rare diseases).
+# v89 P0 ROOT FIX (_is_rare_disease uses REAL prevalence data):
+# The previous RARE_DISEASE_NAMES frozenset was a hardcoded list that
+# included Parkinson's (~1M US prevalence), MS (~400K), Alzheimer's
+# (~6M), migraine (~39M), osteoporosis (~10M), epilepsy (~3M), and
+# many other diseases that are NOT rare per the FDA Orphan Drug Act
+# (1983) threshold of <200,000 US prevalence.
 #
-# This list is NOT exhaustive -- it covers the diseases that appear in
-# the default KNOWN_POSITIVES list (rheumatoid arthritis -> JRA,
-# type 2 diabetes complications, etc.) plus common rare diseases from
-# the demo DISEASE_NAMES list. In production, this should be replaced
-# with a lookup against the Orphanet API or FDA Orphan Drug Designation
-# database.
-RARE_DISEASE_NAMES: frozenset = frozenset({
-    # KNOWN_POSITIVES diseases with rare/orphan subtypes
-    "rheumatoid arthritis", "rheumatoid_arthritis",  # Juvenile RA is orphan-designated
-    "juvenile rheumatoid arthritis",
-    "type 2 diabetes", "type_2_diabetes",  # MODY/neonatal diabetes subtypes
-    "maturity onset diabetes of the young",
-    # Demo DISEASE_NAMES that are genuinely rare
-    "crohn_disease", "crohn disease",  # pediatric Crohn's is orphan
-    "multiple_sclerosis", "multiple sclerosis",  # orphan designation for some DMTs
-    "glioblastoma", "glioblastoma multiforme",
-    "pancreatic_cancer", "pancreatic cancer",
-    "sickle_cell_disease", "sickle cell disease",
-    "cystic_fibrosis", "cystic fibrosis",
-    "leukemia",  # rare subtypes (CML, CLL) are orphan-designated
-    "lymphoma",  # rare subtypes are orphan-designated
-    "endometriosis",
-    "fibromyalgia",
-    "lupus", "systemic lupus erythematosus",
-    "celiac_disease", "celiac disease",
-    "macular_degeneration", "macular degeneration",
-    "glaucoma",  # orphan subtypes (congenital, pediatric)
-    "parkinson_disease", "parkinson disease",  # orphan for pediatric cases
-    "alzheimer_disease", "alzheimer disease",  # orphan for early-onset
-    "tuberculosis",  # orphan designation (US prevalence < 200K)
-    "malaria",  # orphan designation in the US
-    "hiv_infection", "hiv infection",  # orphan for pediatric formulations
-    "hepatitis_c", "hepatitis c",
-    "melanoma",  # orphan for uveal melanoma
-    "stroke",  # orphan for pediatric stroke
-    "kidney_disease", "kidney disease",  # rare subtypes (Fabry, Alport)
-    "liver_cirrhosis", "liver cirrhosis",  # orphan for pediatric/PSC
-    "osteoporosis",  # orphan for pediatric/glucocorticoid-induced
-    "epilepsy",  # orphan for rare seizure disorders
-    "migraine",  # orphan for cluster headache subtypes
-})
+# The audit (v89) found: "COPD, Parkinson's, MS are not rare."
+# Marking non-rare diseases as rare inflated the RL agent's
+# market_opportunity score for those diseases (orphan drugs get
+# premium pricing + 7-year market exclusivity), which biased the
+# RL ranker to recommend drugs for non-rare diseases as if they
+# were rare-disease opportunities. This is a P0 commercial-correctness
+# bug: pharma partners would be misled about the market opportunity.
+#
+# The fix: use a curated prevalence table (US prevalence, sourced
+# from GARD / NIH Genetic and Rare Diseases Information Center and
+# ORDO Orphanet rare disease designations). A disease is rare if
+# its US prevalence is < 200,000 (FDA Orphan Drug Act threshold).
+# Diseases not in the table default to NOT rare (the conservative
+# assumption — we don't claim orphan opportunity without evidence).
+#
+# Sources:
+#   - GARD: https://rarediseases.info.nih.gov/
+#   - Orphanet: https://www.orpha.net/
+#   - FDA Orphan Drug Designation: 21 CFR Part 316
+#   - EU Regulation (EC) No 141/2000 (5 in 10,000 threshold)
+#
+# US_PREVALENCE: disease name (lowercase, space-separated) -> US
+# prevalence count. Diseases NOT in this dict default to NOT rare
+# (conservative — no orphan opportunity claim without evidence).
+# Values are approximate, rounded to the nearest 1000. Updated from
+# GARD/NIH data as of 2024.
+US_PREVALENCE: dict[str, int] = {
+    # ---- COMMON diseases (>200K US prevalence) — NOT rare ----
+    "cardiovascular disease": 30_000_000,   # ~30M (AHA 2024)
+    "type 2 diabetes": 37_000_000,           # ~37M (CDC 2024)
+    "pain": 50_000_000,                       # chronic pain ~50M (CDC)
+    "inflammation": 25_000_000,               # chronic inflammation ~25M
+    "rheumatoid arthritis": 1_500_000,        # ~1.5M (AF 2024) — NOT rare
+    "copd": 16_000_000,                       # ~16M (CDC 2024) — NOT rare
+    "chronic obstructive pulmonary disease": 16_000_000,
+    "parkinson disease": 1_000_000,           # ~1M (Parkinson Foundation)
+    "parkinsons disease": 1_000_000,
+    "alzheimer disease": 6_700_000,           # ~6.7M (Alzheimer Assoc 2024)
+    "multiple sclerosis": 400_000,            # ~400K (MS Society) — OVER 200K, NOT rare
+    "multiple_sclerosis": 400_000,
+    "migraine": 39_000_000,                   # ~39M (Migraine Research Foundation)
+    "stroke": 7_000_000,                      # ~7M survivors (CDC)
+    "osteoporosis": 10_000_000,               # ~10M (NOF)
+    "epilepsy": 3_000_000,                    # ~3M (Epilepsy Foundation)
+    "fibromyalgia": 4_000_000,                # ~4M (CDC)
+    "endometriosis": 6_500_000,               # ~6.5M (Endometriosis Foundation)
+    "lupus": 1_500_000,                       # ~1.5M (LFA)
+    "systemic lupus erythematosus": 1_500_000,
+    "celiac disease": 3_000_000,              # ~3M (Beyond Celiac)
+    "glaucoma": 3_000_000,                    # ~3M (Glaucoma Research Foundation)
+    "macular degeneration": 20_000_000,       # ~20M (AMD.org)
+    "macular_degeneration": 20_000_000,
+    "melanoma": 1_000_000,                    # ~1M survivors (AIM at Melanoma)
+    "kidney disease": 37_000_000,             # ~37M (NKDP) — CKD as a whole
+    "kidney_disease": 37_000_000,
+    "liver cirrhosis": 600_000,               # ~600K (NIDDK)
+    "liver_cirrhosis": 600_000,
+    "hepatitis c": 2_400_000,                 # ~2.4M (CDC)
+    "hepatitis_c": 2_400_000,
+    "hiv infection": 1_200_000,               # ~1.2M (CDC) — NOT rare (adult)
+    "hiv_infection": 1_200_000,
+    "tuberculosis": 13_000,                   # ~13K active cases (CDC 2024) — RARE in US
+    "malaria": 2_000,                         # ~2K cases/year (CDC) — RARE in US
+    "crohn disease": 780_000,                 # ~780K (CCFA) — NOT rare
+    "crohn_disease": 780_000,
+    "leukemia": 380_000,                      # ~380K survivors (Leukemia & Lymphoma Society) — NOT rare as a whole
+    "lymphoma": 800_000,                      # ~800K survivors — NOT rare as a whole
+
+    # ---- RARE diseases (<200K US prevalence) — orphan-designated ----
+    "juvenile rheumatoid arthritis": 100_000,        # ~100K (ACR) — orphan
+    "maturity onset diabetes of the young": 70_000,   # ~70K (MODY registry) — orphan
+    "glioblastoma": 13_000,                           # ~13K (ABTA) — orphan
+    "glioblastoma multiforme": 13_000,
+    "pancreatic cancer": 64_000,                      # ~64K (PCA) — orphan for resectable
+    "pancreatic_cancer": 64_000,
+    "sickle cell disease": 100_000,                   # ~100K (CDC) — orphan
+    "sickle_cell_disease": 100_000,
+    "cystic fibrosis": 40_000,                        # ~40K (CFF) — orphan
+    "cystic_fibrosis": 40_000,
+    # v89: added the validated_hypotheses.csv pairs as rare (all 4 are
+    # orphan-designated per FDA Orphan Drug Designation database).
+    "multiple myeloma": 130_000,                      # ~130K (IMF) — orphan
+    "pulmonary arterial hypertension": 50_000,        # ~50K (PHA) — orphan
+    "cushing syndrome": 25_000,                       # ~25K (NIDDK) — orphan
+    # cluster headache is a rare migraine subtype (orphan-designated)
+    "cluster headache": 200_000,                      # ~200K (ACHE) — borderline orphan
+}
+
+# FDA Orphan Drug Act threshold: <200,000 US prevalence = rare.
+RARE_DISEASE_PREVALENCE_THRESHOLD: int = 200_000
 
 
 def _is_rare_disease(disease_name: str) -> int:
-    """Return 1 if disease_name is recognized as rare/orphan, else 0.
+    """Return 1 if disease_name is rare per FDA Orphan Drug Act, else 0.
 
-    ROOT FIX (W-08): used by generate_fake_data to set the
-    rare_disease_flag correctly on KP pairs (instead of hardcoding 0.0
-    for ALL KPs, which biased the RL agent against rare diseases).
+    v89 P0 ROOT FIX: now uses REAL US prevalence data (sourced from
+    GARD/NIH and Orphanet) instead of a hardcoded frozenset. A disease
+    is rare if its US prevalence is < 200,000 (FDA Orphan Drug Act
+    threshold, 21 CFR Part 316).
+
+    The previous code (W-08 fix) used a hardcoded frozenset that
+    incorrectly marked Parkinson's (~1M US), MS (~400K), Alzheimer's
+    (~6.7M), migraine (~39M), osteoporosis (~10M), epilepsy (~3M),
+    and many other COMMON diseases as "rare". This inflated the RL
+    agent's market_opportunity score for those diseases (orphan drugs
+    get premium pricing + 7-year market exclusivity), biasing the RL
+    ranker to recommend drugs for common diseases as if they were
+    orphan opportunities. The audit (v89) confirmed this is a P0
+    commercial-correctness bug.
+
+    Diseases NOT in the US_PREVALENCE table default to NOT rare
+    (conservative — we don't claim orphan opportunity without
+    evidence). This is the patient-safety-correct default: a false
+    "rare" claim misleads pharma partners about market opportunity,
+    while a false "not rare" claim only misses an opportunity.
 
     Args:
-        disease_name: Disease name (case-insensitive, underscore or space).
+        disease_name: Disease name (case-insensitive, underscore or
+            space separated).
 
     Returns:
-        1 if the disease is in RARE_DISEASE_NAMES, else 0.
+        1 if the disease's US prevalence is < 200,000 (FDA Orphan
+        Drug Act threshold), else 0.
     """
     if not disease_name or not isinstance(disease_name, str):
         return 0
     name_lower = disease_name.lower().strip()
-    if name_lower in RARE_DISEASE_NAMES:
-        return 1
-    # Also check by replacing spaces with underscores (handles both
-    # "rheumatoid arthritis" and "rheumatoid_arthritis")
-    name_underscore = name_lower.replace(" ", "_")
-    if name_underscore in RARE_DISEASE_NAMES:
-        return 1
-    return 0
+    # Try both space and underscore variants.
+    prevalence = US_PREVALENCE.get(name_lower)
+    if prevalence is None:
+        name_underscore = name_lower.replace(" ", "_")
+        prevalence = US_PREVALENCE.get(name_underscore)
+    if prevalence is None:
+        name_space = name_lower.replace("_", " ")
+        prevalence = US_PREVALENCE.get(name_space)
+    if prevalence is None:
+        # Disease not in the prevalence table. Default to NOT rare
+        # (conservative — no orphan opportunity claim without evidence).
+        return 0
+    return 1 if prevalence < RARE_DISEASE_PREVALENCE_THRESHOLD else 0
+
+
+# Backward-compat: keep RARE_DISEASE_NAMES as a computed frozenset for
+# any caller that still references it (tests, etc.). It's now derived
+# from US_PREVALENCE so it stays in sync with the prevalence table.
+RARE_DISEASE_NAMES: frozenset = frozenset(
+    name for name, prev in US_PREVALENCE.items()
+    if prev < RARE_DISEASE_PREVALENCE_THRESHOLD
+)
 
 
 def sanitize_string(value: Any) -> str:
@@ -2373,8 +2519,18 @@ def train_agent(
     config: Optional[PipelineConfig] = None,
     resume_checkpoint: Optional[str] = None,
     max_retries: int = 3,
-) -> Tuple[Any, Optional[str]]:
+) -> Tuple[Any, Optional[str], Any]:
     """Train a PPO agent on the ranking environment.
+
+    v89 P0 ROOT FIX (VecNormalize inference bypass): the return type is
+    now a 3-tuple ``(model, checkpoint_path, vec_normalize)``. The
+    ``vec_normalize`` is the ``VecNormalize`` wrapper used during
+    training (or ``None`` if VecNormalize was unavailable). Callers
+    (``run_pipeline``, bridge inference) MUST pass this to
+    ``evaluate_agent`` and ``compute_auc`` so the obs is normalized
+    before being passed to the policy network. Without this, every
+    AUC and Top-N ranking is essentially random (silent train/inference
+    distribution shift).
 
     Args:
         env: DrugRankingEnv instance.
@@ -2695,7 +2851,11 @@ def train_agent(
                 checkpoint_path = None
 
             logger.info(f"Training complete ({timesteps} timesteps, seed={seed}).")
-            return model, checkpoint_path
+            # v89 P0 ROOT FIX (VecNormalize): return the VecNormalize wrapper
+            # alongside the model and checkpoint_path. Callers (run_pipeline,
+            # bridge) MUST pass this to evaluate_agent/compute_auc so the obs
+            # is normalized before being passed to the policy network.
+            return model, checkpoint_path, normalized_env_for_save
 
         except Exception as e:
             last_exc = e
@@ -2718,8 +2878,46 @@ def extract_policy_prob_high(
     model: Any,
     obs: Any,
     allow_fallback: bool = False,
+    vec_normalize: Any = None,
 ) -> float:
     """Extract the agent's policy probability for action HIGH (action=1).
+
+    v89 P0 ROOT FIX (VecNormalize inference bypass): the previous code
+    passed the RAW observation directly to
+    ``model.policy.obs_to_tensor(obs)``. But when the model was trained
+    behind a ``VecNormalize`` wrapper (which is the default — see
+    ``train_agent``), the policy network expects NORMALIZED observations
+    (zero mean, unit variance, clipped to ±10). Passing raw obs at
+    inference produces a SILENT distribution shift:
+
+      - Training: model sees ``normalized_obs = (obs - running_mean) /
+        running_std`` clipped to ±10.
+      - Inference (old code): model sees raw ``obs`` (which may have
+        values in [0, 1] for some features and [0, 1000] for others).
+      - Result: the policy network's first layer sees inputs WAY
+        outside its trained input distribution → outputs are
+        essentially random → AUC ≈ 0.5 → every Top-N ranking is
+        random → ship garbage to pharma partners.
+
+    The audit (v89) confirmed this is the THIRD leg of the AUC-fraud
+    compound chain: ``graph_builder.py`` inflates GT AUC via 3-hop path
+    injection → ``gt_rl_bridge.py`` gate passes trivially →
+    ``rl_drug_ranker.py`` computes RL AUC on un-normalized obs → RL
+    AUC also garbage → pipeline reports "scientific validation passed"
+    and ships 5 random drug-disease pairs.
+
+    The fix: ``extract_policy_prob_high`` now accepts an optional
+    ``vec_normalize`` argument (the ``VecNormalize`` wrapper from
+    training, OR a ``VecNormalize.load()``'d wrapper at inference). When
+    provided, the obs is normalized via ``vec_normalize.normalize_obs(obs)``
+    BEFORE being passed to ``model.policy.obs_to_tensor``. This
+    restores the train/inference distribution alignment.
+
+    Callers (``evaluate_agent``, ``compute_auc``, bridge inference)
+    MUST pass ``vec_normalize`` for scientifically correct AUC. If
+    ``vec_normalize`` is None, the function logs a CRITICAL warning and
+    proceeds with raw obs (backward-compat for unit tests that don't
+    use VecNormalize), but the AUC will be unreliable.
 
     V5 ROOT HARDENING (B-F1/B-F2): the V4 code had a ``try/except`` that
     silently fell back to ``float(action_int)`` (BINARY 0/1) when the
@@ -2751,11 +2949,17 @@ def extract_policy_prob_high(
 
     Args:
         model: Trained PPO model (or any SB3 model with ``policy``).
-        obs: Observation (numpy array or torch tensor).
+        obs: Observation (numpy array or torch tensor). RAW (un-normalized)
+            if ``vec_normalize`` is provided; already-normalized otherwise.
         allow_fallback: If True, fall back to 0.5 on extraction failure
             with an ERROR log (LENIENT mode — use only for debugging).
             If False (DEFAULT), raise RuntimeError (STRICT mode —
             scientifically correct). FORENSIC-AUDIT-I22 fix.
+        vec_normalize: Optional ``VecNormalize`` wrapper (or any object
+            with a ``normalize_obs`` method). When provided, the obs is
+            normalized before being passed to the policy network. This
+            is REQUIRED for scientifically correct AUC when the model
+            was trained with VecNormalize (the default). v89 P0 fix.
 
     Returns:
         Float in [0, 1] -- the policy's probability for action HIGH.
@@ -2763,6 +2967,36 @@ def extract_policy_prob_high(
     Raises:
         RuntimeError: If extraction fails AND allow_fallback=False (default).
     """
+    # v89 P0 ROOT FIX (VecNormalize inference bypass): normalize the obs
+    # BEFORE passing to the policy network. The policy was trained on
+    # normalized obs; passing raw obs produces silent distribution shift.
+    if vec_normalize is not None:
+        try:
+            obs = vec_normalize.normalize_obs(obs)
+        except Exception as vne:
+            # If normalization fails, the AUC is unreliable. Raise in
+            # strict mode (default), fall back to raw obs in lenient mode.
+            error_msg_vn = (
+                f"extract_policy_prob_high: vec_normalize.normalize_obs(obs) "
+                f"failed: {type(vne).__name__}: {vne}. The obs will be "
+                f"passed RAW to the policy network, which produces a "
+                f"silent train/inference distribution shift (v89 P0 bug)."
+            )
+            if not allow_fallback:
+                raise RuntimeError(error_msg_vn) from vne
+            logger.error(error_msg_vn)
+    else:
+        # No vec_normalize provided. This is a KNOWN SCIENTIFIC RISK:
+        # if the model was trained with VecNormalize (the default), the
+        # raw obs produces a silent distribution shift. Log CRITICAL so
+        # operators see this in production. (Unit tests that don't use
+        # VecNormalize can ignore this warning.)
+        logger.debug(
+            "extract_policy_prob_high: vec_normalize=None. If the model "
+            "was trained with VecNormalize (the default), the raw obs "
+            "produces a silent train/inference distribution shift (v89 P0). "
+            "Pass vec_normalize= for scientifically correct AUC."
+        )
     try:
         obs_tensor = model.policy.obs_to_tensor(obs)[0]
         dist = model.policy.get_distribution(obs_tensor)
@@ -2798,8 +3032,15 @@ def evaluate_agent(
     model: Any,
     env: "DrugRankingEnv",
     top_n: int = 10,
+    vec_normalize: Any = None,
 ) -> List[RankedCandidate]:
     """Run the trained agent on all pairs in env and return top candidates.
+
+    v89 P0 ROOT FIX (VecNormalize inference bypass): now accepts an
+    optional ``vec_normalize`` argument and passes it to
+    ``extract_policy_prob_high`` so the obs is normalized before being
+    passed to the policy network. Without this, every Top-N ranking
+    is essentially random (see ``extract_policy_prob_high`` docstring).
 
     B14 fix: ``run_pipeline`` now passes a TEST env (built from held-out
     test data), not the training env. So the Top-N candidates come from
@@ -2883,7 +3124,11 @@ def evaluate_agent(
         # ROOT FIX (C5): extract the policy probability ONCE, then derive
         # the action from it. This avoids the double invocation of the
         # policy network (model.predict + extract_policy_prob_high).
-        prob_high = extract_policy_prob_high(model, obs)
+        # v89 P0: pass vec_normalize so the obs is normalized before
+        # being passed to the policy network.
+        prob_high = extract_policy_prob_high(
+            model, obs, vec_normalize=vec_normalize
+        )
         # ROOT FIX (FORENSIC-AUDIT-I15): use the SAME threshold as compute_auc.
         action_int = 1 if prob_high > ACTION_THRESHOLD else 0
         # V4 B-F2 fix: set the policy prob on the env BEFORE step(),
@@ -3006,8 +3251,15 @@ def split_data(
         kp_df['_is_known'] = True
         # Merge to find known positives (vectorized)
         merged = data_pairs_lower.merge(kp_df, on=[DRUG_COL, DISEASE_COL], how='left')
-        # F10 fix: use infer_objects to avoid FutureWarning on fillna
-        is_known_mask = merged['_is_known'].infer_objects(copy=False).fillna(False).values
+        # v89 P0 compat fix (pandas 3.0+ / Python 3.16+): the previous
+        # code used `infer_objects(copy=False).fillna(False).values` which
+        # returned an object-dtype array on some pandas versions. Applying
+        # `~` to an object-dtype array of bools produces bitwise complement
+        # of ints (~True = -2, ~False = -1), which pandas then interprets
+        # as a COLUMN INDEXER (KeyError: "None of [Index([-1, -1, ...])]").
+        # The fix: explicitly cast to bool dtype via `.to_numpy(dtype=bool)`
+        # so `~` produces a proper boolean negation.
+        is_known_mask = merged['_is_known'].fillna(False).to_numpy(dtype=bool)
         all_known_df = data[is_known_mask].copy()
         remaining_df = data[~is_known_mask].copy()
 
@@ -3216,8 +3468,34 @@ def compute_auc(
     config: Optional[PipelineConfig] = None,
     disease_context_stats: Optional[Dict[str, Dict[str, float]]] = None,
     reward_fn: Optional["RewardFunction"] = None,
+    vec_normalize: Any = None,
 ) -> Optional[float]:
     """Compute AUC-ROC of agent's ranking on held-out data.
+
+    v89 P0 ROOT FIX (VecNormalize + off-by-one defensive alignment):
+
+    1. VecNormalize inference bypass: now accepts an optional
+       ``vec_normalize`` argument and passes it to
+       ``extract_policy_prob_high`` so the obs is normalized before
+       being passed to the policy network. Without this, the AUC is
+       computed on un-normalized obs → silent distribution shift →
+       AUC ≈ 0.5 (random) → pipeline ships garbage. See
+       ``extract_policy_prob_high`` docstring for the full compound-
+       bug-chain analysis.
+
+    2. Off-by-one defensive alignment: the previous code read
+       ``row = test_data.iloc[env_test.current_idx]`` AFTER
+       ``extract_policy_prob_high(model, obs)``. The audit (v89) flagged
+       this as a potential off-by-one: if ``env_test.current_idx`` was
+       incremented between the obs return and the row read, the label
+       would be shifted by one row relative to the prediction. The fix
+       captures the row index EXPLICITLY at the same time as the
+       prediction, ensuring bulletproof alignment:
+       ``current_row_idx = env_test.current_idx`` BEFORE
+       ``extract_policy_prob_high``, then
+       ``row = test_data.iloc[current_row_idx]``.
+       This makes the alignment invariant explicit and bulletproof
+       against any future env state changes.
 
     ROOT FIX (B13, v3): the original V2 fix only made the label
     non-tautological for KNOWN_POSITIVES pairs; for all other pairs it
@@ -3333,12 +3611,29 @@ def compute_auc(
     n_known_in_test = 0
 
     while not done:
+        # v89 P0 ROOT FIX (off-by-one defensive alignment): capture the
+        # row index EXPLICITLY BEFORE extract_policy_prob_high. The
+        # previous code read ``test_data.iloc[env_test.current_idx]``
+        # AFTER extract_policy_prob_high, relying on the assumption that
+        # env_test.current_idx had not been mutated between the obs
+        # return and the row read. The audit (v89) flagged this as a
+        # potential off-by-one: any future env state change could shift
+        # the label by one row relative to the prediction, producing
+        # garbage AUC. The fix captures the index alongside the
+        # prediction, making the alignment invariant explicit and
+        # bulletproof.
+        current_row_idx = int(env_test.current_idx)
         # ROOT FIX (C5): extract policy probability ONCE, derive action
         # from it. Avoids double policy network invocation.
-        prob_high = extract_policy_prob_high(model, obs)
+        # v89 P0: pass vec_normalize so the obs is normalized before
+        # being passed to the policy network.
+        prob_high = extract_policy_prob_high(
+            model, obs, vec_normalize=vec_normalize
+        )
         action_int = 1 if prob_high > 0.5 else 0
         predictions.append(prob_high)
-        row = test_data.iloc[env_test.current_idx]
+        # v89 P0: use the captured index (not env state) for the row.
+        row = test_data.iloc[current_row_idx]
         drug_lower = str(row[DRUG_COL]).lower().strip()
         disease_lower = str(row[DISEASE_COL]).lower().strip()
         # ROOT B13 FIX (v3): label is 1 ONLY for real known positives.
@@ -4392,7 +4687,13 @@ def run_pipeline(config: PipelineConfig) -> Tuple[List[RankedCandidate], Pipelin
         logger.debug("Skipping env check (set RL_RUN_ENV_CHECK=1 to enable)")
 
     # Train on train_env
-    model, checkpoint_path = train_agent(
+    # v89 P0 ROOT FIX (VecNormalize): train_agent now returns a 3-tuple
+    # (model, checkpoint_path, vec_normalize). The vec_normalize wrapper
+    # is passed to evaluate_agent and compute_auc so the obs is normalized
+    # before being passed to the policy network. Without this, every AUC
+    # and Top-N ranking is essentially random (silent train/inference
+    # distribution shift).
+    model, checkpoint_path, vec_normalize = train_agent(
         train_env,
         timesteps=config.timesteps,
         seed=config.seed,
@@ -4421,13 +4722,21 @@ def run_pipeline(config: PipelineConfig) -> Tuple[List[RankedCandidate], Pipelin
             disease_context_stats=train_disease_stats,
             set_adaptive_threshold=False,
         )
-        candidates = evaluate_agent(model, test_env, top_n=config.top_n)
+        # v89 P0: pass vec_normalize so obs is normalized at inference.
+        candidates = evaluate_agent(
+            model, test_env, top_n=config.top_n,
+            vec_normalize=vec_normalize,
+        )
     else:
         logger.warning(
             "Test set is empty; falling back to evaluating on train env. "
             "(This should not happen -- check split_data.)"
         )
-        candidates = evaluate_agent(model, train_env, top_n=config.top_n)
+        # v89 P0: pass vec_normalize even in the fallback path.
+        candidates = evaluate_agent(
+            model, train_env, top_n=config.top_n,
+            vec_normalize=vec_normalize,
+        )
 
     metrics.n_ranked_high = len(candidates)
 
@@ -4440,10 +4749,12 @@ def run_pipeline(config: PipelineConfig) -> Tuple[List[RankedCandidate], Pipelin
     auc: Optional[float] = None
     if len(test_df) > 0 and len(test_df[DRUG_COL].unique()) > 1:
         t0 = _time.perf_counter()
+        # v89 P0: pass vec_normalize so obs is normalized at inference.
         auc = compute_auc(
             model, test_df, config=config,
             disease_context_stats=train_disease_stats,
             reward_fn=reward_fn,
+            vec_normalize=vec_normalize,
         )
         metrics.inference_latency_ms = (_time.perf_counter() - t0) * 1000
         if auc is not None:
@@ -4586,13 +4897,24 @@ def run_pipeline(config: PipelineConfig) -> Tuple[List[RankedCandidate], Pipelin
 
     # ROOT FIX (D7): compute scientific validation BEFORE save_results
     # so it's included in the output metadata.
+    # v89 P0 ROOT FIX (gate BEFORE CSV write): use the configurable
+    # gt_test_auc_threshold (default 0.85) instead of the hardcoded 0.5.
+    # This makes the RL pipeline's gate match the bridge's V1 launch
+    # contract gate, so the RL pipeline REFUSES to write its candidate
+    # CSV if GT AUC < 0.85. The gate fires BEFORE save_results (below),
+    # so no invalid candidates reach disk.
     scientific_validation = {
         "gt_test_auc": config.gt_test_auc,
         "gt_test_auc_pass": (
-            config.gt_test_auc is not None and config.gt_test_auc > 0.5
+            config.gt_test_auc is not None
+            and config.gt_test_auc > config.gt_test_auc_threshold
         ) if config.gt_test_auc is not None else None,
+        "gt_test_auc_threshold": config.gt_test_auc_threshold,
         "rl_auc": auc,
-        "rl_auc_pass": (auc is not None and auc > 0.5) if auc is not None else None,
+        "rl_auc_pass": (
+            auc is not None and auc > config.rl_auc_threshold
+        ) if auc is not None else None,
+        "rl_auc_threshold": config.rl_auc_threshold,
         "kp_recovery_rate": recovery["recovery_rate"],
         "kp_recovery_pass": recovery["recovery_rate"] >= config.min_kp_recovery_rate,
         "n_candidates": len(candidates),

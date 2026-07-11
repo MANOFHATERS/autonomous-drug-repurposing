@@ -155,6 +155,33 @@ BEGIN;
 --   - GDA dedup: CTE with ROW_NUMBER + DELETE
 --   - Entity dedup: CTE with ROW_NUMBER + DELETE
 --   - Constraint creation: ALTER TABLE / CREATE INDEX
+--
+-- v89 ROOT FIX (BUG #34 — CREATE INDEX CONCURRENTLY warning was buried):
+--   ⚠️  PRODUCTION OPERATOR WARNING — READ BEFORE APPLYING TO PROD  ⚠️
+--   This migration creates several indexes via ``CREATE INDEX IF NOT EXISTS``
+--   (see Section 7). On PostgreSQL, ``CREATE INDEX`` acquires an ACCESS
+--   EXCLUSIVE lock on the table, blocking ALL reads and writes for the
+--   duration of the index build. On a 10M-row ``gene_disease_associations``
+--   table, this can cause 30-60 seconds of downtime.
+--
+--   ``CREATE INDEX CONCURRENTLY`` (which does NOT block reads/writes) CANNOT
+--   be used inside a transaction — and this migration is wrapped in
+--   ``BEGIN/COMMIT`` (line 22), plus the Python migration runner wraps the
+--   entire file in ``engine.begin()``. So CONCURRENTLY is impossible here.
+--
+--   MITIGATION for production databases with >1M rows:
+--   1. BEFORE applying this migration, manually run the index-creation
+--      statements with ``CONCURRENTLY`` on the production DB:
+--         CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_gda_gene ...
+--         CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_gda_disease ...
+--         (etc. — see Section 7 for the full list)
+--   2. Then apply this migration — the ``CREATE INDEX IF NOT EXISTS``
+--      statements become no-ops (indexes already exist from step 1).
+--   3. For databases with <1M rows, the lock duration is <2 seconds and
+--      this mitigation is unnecessary.
+--
+--   This warning was previously buried at the bottom of the file (line ~1338)
+--   where operators missed it. Moved to the header per BUG #34.
 -- ============================================================================
 
 
@@ -282,7 +309,15 @@ END $$;
 -- [LOG-5] EXCEPTION blocks with diagnostics for each column addition.
 -- [LOG-1] RAISE NOTICE for each operation.
 
-SAVEPOINT sp_column_additions;
+-- v89 ROOT FIX (BUG #22): removed redundant SAVEPOINT sp_column_additions.
+-- The DO $$ block below has its own implicit EXCEPTION handler (PL/pgSQL
+-- DO blocks create an implicit sub-transaction). The explicit SAVEPOINT
+-- was DEAD CODE — it provided no additional protection beyond the DO
+-- block's implicit sub-transaction. Under the Python migration runner
+-- (which wraps everything in engine.begin()), the file's BEGIN becomes
+-- a savepoint, and SAVEPOINT sp_column_additions became a NESTED
+-- savepoint (level 2). Removing it eliminates the misleading "safety"
+-- and the fragile pairing. The DO block handles its own atomicity.
 
 DO $$
 DECLARE
@@ -410,7 +445,8 @@ COMMENT ON COLUMN proteins.function_desc IS
     'caps function descriptions to prevent unbounded storage). NULL means no '
     'functional description available. Added by migration 002.';
 
-RELEASE SAVEPOINT sp_column_additions;
+-- v89 ROOT FIX (BUG #22): removed redundant RELEASE SAVEPOINT
+-- sp_column_additions (matching SAVEPOINT removed above).
 
 
 -- =====================================================================
@@ -420,7 +456,8 @@ RELEASE SAVEPOINT sp_column_additions;
 -- represent a valid hypothesis that was incorrectly flagged as duplicate.
 -- =====================================================================
 
-SAVEPOINT sp_archive_setup;
+-- v89 ROOT FIX (BUG #22): removed redundant SAVEPOINT sp_archive_setup
+-- (DO block has its own implicit sub-transaction).
 
 DO $$
 BEGIN
@@ -443,7 +480,8 @@ BEGIN
     RAISE NOTICE 'Migration 002: Dedup archive table ready';
 END $$;
 
-RELEASE SAVEPOINT sp_archive_setup;
+-- v89 ROOT FIX (BUG #22): removed redundant RELEASE SAVEPOINT
+-- sp_archive_setup (matching SAVEPOINT removed above).
 
 
 -- =====================================================================
@@ -530,7 +568,8 @@ END $$;
 -- [SCI-1, SCI-2, SCI-3, SCI-4, DQ-1, DQ-2, DQ-3]
 -- =====================================================================
 
-SAVEPOINT sp_null_cleanup;
+-- v89 ROOT FIX (BUG #22): removed redundant SAVEPOINT sp_null_cleanup
+-- (DO blocks have their own implicit sub-transaction).
 
 DO $$
 DECLARE
@@ -642,7 +681,8 @@ BEGIN
                  _deleted_empty_sentinel, _preserved_null_gene;
 END $$;
 
-RELEASE SAVEPOINT sp_null_cleanup;
+-- v89 ROOT FIX (BUG #22): removed redundant RELEASE SAVEPOINT
+-- sp_null_cleanup (matching SAVEPOINT removed above).
 
 
 -- =====================================================================
@@ -655,7 +695,8 @@ RELEASE SAVEPOINT sp_null_cleanup;
 -- [DQ-6] Merges pmid_lists from duplicates into surviving row.
 -- =====================================================================
 
-SAVEPOINT sp_gda_dedup;
+-- v89 ROOT FIX (BUG #22): removed redundant SAVEPOINT sp_gda_dedup
+-- (DO blocks have their own implicit sub-transaction).
 
 -- [PERF-2] Temporary composite index for dedup performance.
 -- PostgreSQL's query planner can use this for the window function.
@@ -795,7 +836,8 @@ END $$;
 -- created in Section 8 will cover the same columns.
 DROP INDEX IF EXISTS ix_gda_dedup_temp;
 
-RELEASE SAVEPOINT sp_gda_dedup;
+-- v89 ROOT FIX (BUG #22): removed redundant RELEASE SAVEPOINT
+-- sp_gda_dedup (matching SAVEPOINT removed above).
 
 
 -- =====================================================================
@@ -805,7 +847,8 @@ RELEASE SAVEPOINT sp_gda_dedup;
 -- Second pass: dedup by canonical_name for NULL inchikey rows
 -- =====================================================================
 
-SAVEPOINT sp_entity_dedup;
+-- v89 ROOT FIX (BUG #22): removed redundant SAVEPOINT sp_entity_dedup
+-- (DO blocks have their own implicit sub-transaction).
 
 DO $$
 DECLARE
@@ -972,7 +1015,8 @@ BEGIN
                  _em_before, _em_after, _em_inchikey_dupes, _em_name_dupes, NOW();
 END $$;
 
-RELEASE SAVEPOINT sp_entity_dedup;
+-- v89 ROOT FIX (BUG #22): removed redundant RELEASE SAVEPOINT
+-- sp_entity_dedup (matching SAVEPOINT removed above).
 
 
 -- =====================================================================
@@ -982,7 +1026,8 @@ RELEASE SAVEPOINT sp_entity_dedup;
 -- [COD-2, DES-2, COD-4, CMP-1, DOC-3, DES-4, INT-5]
 -- =====================================================================
 
-SAVEPOINT sp_constraints;
+-- v89 ROOT FIX (BUG #22): removed redundant SAVEPOINT sp_constraints
+-- (DO blocks have their own implicit sub-transaction).
 
 DO $$
 DECLARE
@@ -1124,7 +1169,8 @@ BEGIN
     -- exploited to delete legitimate data through crafted empty-string duplicates.
 END $$;
 
-RELEASE SAVEPOINT sp_constraints;
+-- v89 ROOT FIX (BUG #22): removed redundant RELEASE SAVEPOINT
+-- sp_constraints (matching SAVEPOINT removed above).
 
 
 -- =====================================================================
@@ -1336,10 +1382,10 @@ DO $$ BEGIN
 END $$;
 
 -- [PERF-5] NOTE: CREATE INDEX CONCURRENTLY cannot be used inside a transaction.
--- The Python migration runner wraps all SQL in engine.begin(), so
--- CONCURRENTLY is not possible here. For production databases with >1M
--- rows, run CREATE INDEX CONCURRENTLY manually before applying this migration.
--- This is a known limitation to be resolved with the Alembic migration.
+-- v89 ROOT FIX (BUG #34): the full production operator warning has been MOVED
+-- to this file's header comment block (search for "PRODUCTION OPERATOR WARNING"
+-- at the top of the file). This bottom note is retained as a cross-reference.
+-- See header for the complete mitigation procedure for >1M-row production DBs.
 -- [INT-4] When this project migrates to Alembic (Phase 2), these DO $$
 -- blocks will be replaced by Alembic op.execute() calls with dialect-specific
 -- branching, enabling true cross-dialect support.

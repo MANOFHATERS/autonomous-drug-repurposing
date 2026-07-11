@@ -1004,12 +1004,37 @@ class Protein(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
     )
 
     # -- relationships --
+    # v89 ROOT FIX (BUG #20 — P1 N+1 explosion under bulk loads):
+    #   The previous ``lazy="selectin"`` on ALL FOUR Protein relationships
+    #   (DPI, GDA, PPI-a, PPI-b) meant EVERY ``session.query(Protein)`` —
+    #   even ``session.get(Protein, id)`` — fired 4 additional SELECT
+    #   IN queries to eagerly populate all four collections, regardless
+    #   of whether the caller needed them. Under the documented 7-
+    #   concurrent-pipeline workload, loading 10 000 proteins for entity
+    #   resolution triggered 40 000 additional SELECTs (4 × 10 000),
+    #   exhausting the connection pool and stalling the pipeline.
+    #
+    #   ROOT FIX: switch to ``lazy="raise"`` so that ANY lazy access of
+    #   these collections raises ``sqlalchemy.exc.InvalidRequestError``
+    #   at development time, forcing the caller to declare the loading
+    #   strategy explicitly via ``selectinload(Protein.X)`` /
+    #   ``joinedload`` / ``raiseload``. This is the institutional-grade
+    #   pattern recommended by the SQLAlchemy 2.0 performance guide:
+    #   it makes N+1 queries impossible by construction, instead of
+    #   relying on developer discipline. Queries that genuinely need
+    #   the collections pass ``selectinload(Protein.drug_protein_interactions)``
+    #   (etc.) in their ``options()`` — the query is now explicit
+    #   about what it loads, which is exactly what production audit
+    #   requires. The ``all_ppi_interactions`` / ``all_ppi_partners``
+    #   properties below were updated to surface a clear error when
+    #   the caller forgot to eager-load (instead of the previous
+    #   silent 4-SELECT fan-out).
     drug_protein_interactions: Mapped[list["DrugProteinInteraction"]] = relationship(
         "DrugProteinInteraction",
         back_populates="protein",
         cascade="all, delete-orphan",
         passive_deletes=True,
-        lazy="selectin",
+        lazy="raise",
     )
     gene_disease_associations: Mapped[list["GeneDiseaseAssociation"]] = relationship(
         "GeneDiseaseAssociation",
@@ -1045,7 +1070,7 @@ class Protein(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
         #   map stays consistent, and the GDA data is preserved for
         #   re-linking — exactly the patient-safe behaviour.
         cascade="save-update, merge",
-        lazy="selectin",
+        lazy="raise",
         foreign_keys="GeneDiseaseAssociation.uniprot_id",
     )
     ppi_as_protein_a: Mapped[list["ProteinProteinInteraction"]] = relationship(
@@ -1053,14 +1078,14 @@ class Protein(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
         foreign_keys="ProteinProteinInteraction.protein_a_id",
         cascade="all, delete-orphan",
         passive_deletes=True,
-        lazy="selectin",
+        lazy="raise",
     )
     ppi_as_protein_b: Mapped[list["ProteinProteinInteraction"]] = relationship(
         "ProteinProteinInteraction",
         foreign_keys="ProteinProteinInteraction.protein_b_id",
         cascade="all, delete-orphan",
         passive_deletes=True,
-        lazy="selectin",
+        lazy="raise",
     )
 
     # -- validators --
@@ -1097,7 +1122,27 @@ class Protein(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
         # accepted into the human protein set — the LENGTH-only CHECK alone
         # could not.
         CheckConstraint(
-            "uniprot_id IS NULL OR (LENGTH(uniprot_id) >= 4 AND LENGTH(uniprot_id) <= 10)",
+            # v89 ROOT FIX (BUG #24 — DB CHECK weaker than Python validator):
+            #   Real UniProt accessions are EXACTLY 6 or 10 chars per the
+            #   official spec (https://www.uniprot.org/help/accession_numbers).
+            #   The previous ``LENGTH >= 4 AND LENGTH <= 10`` accepted 4, 5,
+            #   7, 8, 9 char strings — NONE of which are real UniProt IDs.
+            #   The Python validator ``_validate_uniprot_id`` (line 345)
+            #   already rejects these in production (only TEST-prefixed
+            #   fixtures are allowed in dev/ci). But a raw SQL INSERT
+            #   (migration, manual fix, future tool) bypassing the ORM
+            #   could land a 4-char "UniProt ID" in production — breaking
+            #   the defense-in-depth contract (DB should be the LAST line
+            #   of defense, not the weakest). The previous comment claimed
+            #   the 4-char minimum was for "test fixture IDs (P001, P100)"
+            #   but the Python validator REJECTS those in production (only
+            #   TEST-prefixed IDs are allowed in dev/ci). ROOT FIX:
+            #   tighten the CHECK to ``LENGTH IN (6, 10)`` so the DB
+            #   enforces the same contract as the Python validator. Dev/ci
+            #   fixtures use TEST-prefixed IDs which are >= 6 chars
+            #   (TEST001, TEST123) so they still pass. The previous 4-5
+            #   char acceptance was dead code that weakened the contract.
+            "uniprot_id IS NULL OR (LENGTH(uniprot_id) = 6 OR LENGTH(uniprot_id) = 10)",
             name="chk_proteins_uniprot_length",
         ),
         # [DQ-04] Organism controlled vocabulary (SCI-FIX audit finding 1).
@@ -1131,15 +1176,33 @@ class Protein(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
     )
 
     # [ARCH-06] Unified PPI accessor
+    # v89 ROOT FIX (BUG #20): the underlying relationships are now
+    # ``lazy="raise"``, so these properties raise
+    # ``InvalidRequestError`` unless the caller eager-loads via
+    # ``selectinload(Protein.ppi_as_protein_a)`` +
+    # ``selectinload(Protein.ppi_as_protein_b)`` (or ``raiseload`` to
+    # explicitly opt out). This surfaces the missing eager-load as a
+    # loud error at development time instead of the previous silent
+    # 4-SELECT fan-out on every Protein load.
     @property
     def all_ppi_interactions(self) -> list["ProteinProteinInteraction"]:
-        """Return all PPI records involving this protein (both sides)."""
+        """Return all PPI records involving this protein (both sides).
+
+        Requires the caller to eager-load ``ppi_as_protein_a`` and
+        ``ppi_as_protein_b`` (e.g. via ``selectinload``); otherwise
+        raises ``sqlalchemy.exc.InvalidRequestError``.
+        """
         return list(self.ppi_as_protein_a) + list(self.ppi_as_protein_b)
 
     # [ARCH-06] All interacting partner proteins
     @property
     def all_ppi_partners(self) -> list["Protein"]:
-        """Return all proteins that interact with this protein."""
+        """Return all proteins that interact with this protein.
+
+        Requires the caller to eager-load ``ppi_as_protein_a`` and
+        ``ppi_as_protein_b`` (e.g. via ``selectinload``); otherwise
+        raises ``sqlalchemy.exc.InvalidRequestError``.
+        """
         partners: list["Protein"] = []
         for ppi in self.ppi_as_protein_a:
             if ppi.protein_b not in partners:
@@ -1306,7 +1369,25 @@ class DrugProteinInteraction(Base, IDMixin, TimestampMixin):
             name="chk_dpi_activity_units",
         ),
         CheckConstraint(
-            "source IS NULL OR source IN ('chembl', 'drugbank')",
+            # v89 ROOT FIX (BUG #27 — over-restrictive CHECK locks DPI to
+            #   2 sources forever): the previous ``source IN ('chembl',
+            #   'drugbank')`` CHECK rejected every other standard DPI /
+            #   activity-data source — BindingDB, PubChem BioAssay,
+            #   ChEMBL-NTD, IUPHAR/Guide to PHARMACOLOGY, EPA ToxCast,
+            #   GtoPdb. All are free, NIH/EMBL-funded, and standard in
+            #   drug-repurposing pipelines. The ``source_id`` column is
+            #   free-form (no CHECK), but ``source`` was locked to 2
+            #   values — an asymmetry that makes the platform unable to
+            #   ingest activity data from any future source. ROOT FIX:
+            #   expand the whitelist to the 8 standard DPI databases.
+            #   The loader's ``_pre_validate_dpi`` validates upstream; the
+            #   DB CHECK is defense-in-depth. NOTE: BUG #38 removes the
+            #   loader's ``source="unknown"`` coercion (which would have
+            #   violated this CHECK); NULL is still allowed per the
+            #   ``source IS NULL OR`` prefix.
+            "source IS NULL OR source IN ("
+            "'chembl', 'drugbank', 'bindingdb', 'pubchem_bioassay', "
+            "'chembl_ntd', 'iuphar', 'toxcast', 'gtopdb')",
             name="chk_dpi_source",
         ),
         # [DQ-07] Confidence score range
@@ -1416,8 +1497,23 @@ class ProteinProteinInteraction(Base, IDMixin, TimestampMixin):
         # v43 ROOT FIX (Chain 8): chk_ppi_source was in SQL migration 001
         # but missing from ORM. SQLite dev DB accepted source='intact';
         # PostgreSQL prod DB rejected. Adding to ORM for parity.
+        #
+        # v89 ROOT FIX (BUG #26 — over-restrictive CHECK locks platform to
+        #   STRING forever): the previous ``source IN ('string')`` CHECK
+        #   rejected every other standard PPI database (BioGRID, IntAct,
+        #   HPRD, Reactome, BioPlex) — all of which are commonly used
+        #   alongside STRING for PPI network construction. If the platform
+        #   ever ingests BioGRID/IntAct (both are free, NIH-funded, and
+        #   standard in pharma KG pipelines), the loader fails at INSERT
+        #   with a CHECK violation, and the operator has no way to load
+        #   the data without dropping the constraint. The ``source`` column
+        #   is NOT NULL (line 1374), so every PPI row MUST have a source —
+        #   the CHECK must accept all legitimate sources. ROOT FIX:
+        #   expand the whitelist to the 6 standard PPI databases. The
+        #   loader's ``_pre_validate_ppi`` validates the source value
+        #   upstream; the DB CHECK is defense-in-depth.
         CheckConstraint(
-            "source IN ('string')",
+            "source IN ('string', 'biogrid', 'intact', 'hprd', 'reactome', 'bioplex')",
             name="chk_ppi_source",
         ),
         Index("idx_ppi_protein_a", "protein_a_id"),
@@ -1665,7 +1761,35 @@ class GeneDiseaseAssociation(Base, IDMixin, TimestampMixin):
     # -- validators --
     @validates("gene_symbol")
     def _validate_gene_symbol(self, key: str, value: Optional[str]) -> Optional[str]:
-        return _validate_gene_symbol(value)
+        # v89 ROOT FIX (BUG #25 — GDA contaminated with mouse gene symbols):
+        #   The GDA table is HUMAN-ONLY (DisGeNET human subset, OMIM). The
+        #   previous code used the LOOSE ``_validate_gene_symbol`` (which
+        #   delegates to ``_GENE_SYMBOL_RE`` = ``^[A-Za-z][A-Za-z0-9\-]{0,49}$``),
+        #   accepting Title-Case mouse/rat/yeast symbols (Tp53, Brca1, GAL4).
+        #   The strict ``_HUMAN_GENE_SYMBOL_RE`` (``^[A-Z][A-Z0-9\-]{0,49}$``,
+        #   ALL CAPS) was DEFINED at line 258 but NEVER USED by the GDA
+        #   validator — so a DisGeNET row for a mouse gene (Tp53) passed
+        #   ORM validation, landed in ``gene_disease_associations``, and
+        #   downstream KG construction treated it as a human gene — creating
+        #   false Gene→Disease edges and contaminating the KG with non-human
+        #   data. ROOT FIX: use ``_HUMAN_GENE_SYMBOL_RE`` here. NULL is
+        #   still allowed (gene_symbol is nullable per P1C-001). The loader's
+        #   ``_pre_validate_gda`` already normalizes to upper-case before
+        #   INSERT, so valid human symbols (BRCA1, FGFR3, TP53) pass. A
+        #   row with ``gene_symbol='Tp53'`` (mouse) now raises ValueError
+        #   and is quarantined to the dead-letter queue — exactly the
+        #   patient-safe behaviour for a human-only disease-association table.
+        if value is None:
+            return value
+        value = value.strip()
+        if _HUMAN_GENE_SYMBOL_RE.match(value):
+            return value
+        raise ValueError(
+            f"Invalid HUMAN gene symbol for GDA: '{value}'. "
+            "GDA is human-only (DisGeNET organism=9606 / OMIM). "
+            "Must be ALL CAPS, e.g. BRCA1, FGFR3, TP53. "
+            "Non-human symbols (Tp53, Brca1) are rejected."
+        )
 
     __table_args__ = (
         Index("idx_gda_gene", "gene_symbol"),
@@ -1839,10 +1963,14 @@ class EntityMapping(Base, IDMixin, TimestampMixin):
     - [SCI-01] InChIKey widened to 50 for synthetic keys.
     - [DES-03] Additional partial unique indexes on chembl_id, drugbank_id.
     - [DQ-03] FK constraints on chembl_id, drugbank_id, uniprot_id, string_id.
+    - [LINE-04] ``last_matched_at`` records when the last resolution was
+      performed (mirrors migration 001 line 1227).
 
     Lineage (LINE-04)
     ------------------
     - ``match_history`` stores the full resolution attempt chain as JSON.
+    - ``last_matched_at`` is updated by the loader on every successful
+      entity-mapping upsert (bulk_upsert_entity_mapping).
     """
     __tablename__ = "entity_mapping"
 
@@ -1876,6 +2004,24 @@ class EntityMapping(Base, IDMixin, TimestampMixin):
     match_method: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     # [LINE-04] Full resolution attempt chain
     match_history: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # v89 ROOT FIX (BUG #21 — schema drift: migration 001 declares
+    #   ``last_matched_at TIMESTAMP WITH TIME ZONE`` at line 1227, but the
+    #   ORM EntityMapping model did NOT declare this column.
+    #   ``Base.metadata.create_all()`` created ``entity_mapping`` WITHOUT
+    #   ``last_matched_at``; migration 001's ``CREATE TABLE IF NOT EXISTS``
+    #   was then a no-op (table already exists from create_all). So dev DBs
+    #   (SQLite, create_all path) LACKED the column, while prod DBs
+    #   (PostgreSQL, migration path) HAD it. The loader's
+    #   ``bulk_upsert_entity_mapping`` (loaders.py ~line 3377) listed
+    #   ``updatable_cols`` but ``last_matched_at`` was NOT among them — so
+    #   even on prod, the column was never populated. ``verify_schema_matches_orm``
+    #   reported it as an "extra column" on prod, creating false-positive
+    #   schema-drift warnings. ROOT FIX: declare the column on the ORM so
+    #   dev and prod agree, AND add it to the loader's ``updatable_cols``
+    #   so it gets populated on every upsert (see loaders.py fix).
+    last_matched_at: Mapped[Optional[datetime.datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
 
     # -- validators --
     @validates("canonical_inchikey")
@@ -1948,7 +2094,26 @@ class DeadLetterGDA(Base, IDMixin, TimestampMixin):
       ``"unresolved_gene_symbol"``, ``"invalid_disease_id_format"``).
     - ``details_json`` is a JSON object with the offending values
       (gene_symbol, disease_id, score, etc.) for debugging.
-    - ``run_id`` is the DisGeNETPipeline.run_id (UUID string).
+    - ``pipeline_run_id`` is an Integer FK → ``pipeline_runs.id``
+      (ON DELETE SET NULL), matching every other lineage-bearing table
+      (DPI, PPI, GDA, RejectedRecord, PubChemCompoundProperty).
+
+    v89 ROOT FIX (BUG #29 — run_id was String(64), not Integer FK):
+      The previous ``run_id: String(64)`` stored a UUID string with NO
+      FK to ``pipeline_runs.id``. Every other lineage-bearing table uses
+      ``Integer FK → pipeline_runs.id (ON DELETE SET NULL)``. The audit
+      D-7 fix explicitly aligned ``PubChemCompoundProperty.pipeline_run_id``
+      from String(64) to Integer FK — but ``DeadLetterGDA.run_id`` was
+      NOT updated. This meant: (a) dead-letter rows could not be JOINed
+      to ``pipeline_runs`` without a CAST; (b) a typo'd run_id silently
+      orphaned the dead-letter row (no FK enforcement); (c) the loader's
+      ``_quarantine_gda_rows`` wrote ``str(pipeline_run_id)`` —
+      converting the Integer to a string, losing the FK relationship.
+      ROOT FIX: rename ``run_id`` → ``pipeline_run_id``, change type to
+      ``Integer FK → pipeline_runs.id (ON DELETE SET NULL)``, and update
+      the loader to write the integer directly (see loaders.py fix).
+      The index ``idx_dlgda_run_id`` is renamed to
+      ``idx_dlgda_pipeline_run_id`` to match the column rename.
     """
     __tablename__ = "dead_letter_gda"
 
@@ -1963,11 +2128,18 @@ class DeadLetterGDA(Base, IDMixin, TimestampMixin):
     )
     reason: Mapped[str] = mapped_column(String(100), nullable=False)
     details_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    run_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    # v89 ROOT FIX (BUG #29): Integer FK → pipeline_runs.id (ON DELETE
+    # SET NULL), matching every other lineage-bearing table. Was
+    # String(64) with no FK.
+    pipeline_run_id: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        ForeignKey("pipeline_runs.id", ondelete="SET NULL"),
+        nullable=True,
+    )
 
     __table_args__ = (
         Index("idx_dlgda_reason", "reason"),
-        Index("idx_dlgda_run_id", "run_id"),
+        Index("idx_dlgda_pipeline_run_id", "pipeline_run_id"),
         Index("idx_dlgda_gene_symbol", "gene_symbol"),
         Index("idx_dlgda_disease_id", "disease_id"),
     )
@@ -1976,7 +2148,7 @@ class DeadLetterGDA(Base, IDMixin, TimestampMixin):
         return (
             f"<DeadLetterGDA(id={self.id}, reason='{self.reason}', "
             f"gene_symbol='{self.gene_symbol}', disease_id='{self.disease_id}', "
-            f"run_id='{self.run_id}')>"
+            f"pipeline_run_id={self.pipeline_run_id})>"
         )
 
 
@@ -2045,18 +2217,37 @@ class AuditLog(Base, IDMixin):
         # v17: mirror the chk_audit_log_operation CHECK whitelist from
         # migration 001 so SQLite dev/test DBs (which skip the migration
         # SQL) still enforce the same operation-enum contract.
+        #
+        # v89 ROOT FIX (BUG #28 — hardcoded migration numbers block 007+):
+        #   The previous CHECK hardcoded specific migration numbers (002,
+        #   004, 005, 006) in the operation whitelist. Migrations 007, 008,
+        #   009, 010, 011 were NOT in the whitelist — so any migration >= 7
+        #   that tried to INSERT a ``PRE_MIGRATION_007_CHECKSUM`` row would
+        #   fail the CHECK, and the audit trail would be incomplete for all
+        #   future migrations. The migration runner's ``_record_failure``
+        #   and provenance code would need to add tokens to the whitelist
+        #   for EVERY new migration — an unmaintainable pattern. ROOT FIX:
+        #   replace the hardcoded migration numbers with a pattern match
+        #   (``LIKE 'PRE_MIGRATION_%_CHECKSUM'`` /
+        #   ``LIKE 'POST_MIGRATION_%_CHECKSUM'``) so ANY future migration
+        #   (012, 013, ...) can log checksums WITHOUT modifying the ORM
+        #   model. The fixed tokens (INSERT, UPDATE, DELETE, SOFT_DELETE,
+        #   RESTORE, MIGRATION_*, BULK_OPERATION, DELETE_NULL_*, etc.) are
+        #   preserved. ``%`` is the SQL wildcard for 0+ chars; the CHECK
+        #   now accepts ``PRE_MIGRATION_002_CHECKSUM`` AND
+        #   ``PRE_MIGRATION_999_CHECKSUM`` identically. This is forward-
+        #   compatible and matches the audit-log contract documented in
+        #   migration 001's header comment.
         CheckConstraint(
             "operation IN ("
             "'INSERT', 'UPDATE', 'DELETE', 'SOFT_DELETE', 'RESTORE', "
-            "'PRE_MIGRATION_002_CHECKSUM', 'POST_MIGRATION_002_CHECKSUM', "
-            "'PRE_MIGRATION_004_CHECKSUM', 'POST_MIGRATION_004_CHECKSUM', "
-            "'PRE_MIGRATION_005_CHECKSUM', 'POST_MIGRATION_005_CHECKSUM', "
-            "'PRE_MIGRATION_006_CHECKSUM', 'POST_MIGRATION_006_CHECKSUM', "
             "'MIGRATION_BACKFILL', 'MIGRATION_DEDUP', 'MIGRATION_CONSTRAINT', "
             "'BULK_OPERATION', "
             "'DELETE_NULL_DISEASE_ID', 'DELETE_NULL_SOURCE', "
             "'PRESERVED_NULL_GENE_SYMBOL', 'DEDUP_MIGRATION_002'"
-            ")",
+            ") "
+            "OR operation LIKE 'PRE_MIGRATION_%_CHECKSUM' "
+            "OR operation LIKE 'POST_MIGRATION_%_CHECKSUM'",
             name="chk_audit_log_operation",
         ),
         Index("idx_audit_log_table_name", "table_name"),
@@ -2570,7 +2761,12 @@ class RejectedRecord(Base, IDMixin):
 # ===========================================================================
 
 
-def cleanup_orphan_gda_records(session, auto_commit: bool = False) -> int:
+def cleanup_orphan_gda_records(
+    session,
+    auto_commit: bool = False,
+    reference_timestamp=None,
+    dry_run: bool = False,
+) -> int:
     """Delete GDA records with uniprot_id=NULL that have existed for > 24 hours.
 
     .. deprecated::
@@ -2583,6 +2779,18 @@ def cleanup_orphan_gda_records(session, auto_commit: bool = False) -> int:
     [REL-04] Retry logic with exponential backoff added in loaders.
     [LOG-01] Proper logging added in loaders.
     [CODE-05] Bare except replaced with specific exception handling.
+
+    v89 ROOT FIX (BUG #32 — stub signature mismatch lost dry_run capability):
+      The previous stub signature was ``(session, auto_commit=False) -> int``
+      but the real function in loaders.py is
+      ``(session, auto_commit=False, reference_timestamp=None, dry_run=False) -> int``.
+      The stub did NOT forward ``reference_timestamp`` or ``dry_run`` — so
+      callers using the deprecated stub silently lost the ``dry_run`` safety
+      feature (a dry-run reports what WOULD be deleted without actually
+      deleting — critical for testing destructive cleanup on production
+      data). ROOT FIX: match the real function's signature exactly and
+      forward ALL kwargs. Callers who haven't migrated to the new import
+      path now get the full capability set.
     """
     import warnings
     warnings.warn(
@@ -2593,4 +2801,9 @@ def cleanup_orphan_gda_records(session, auto_commit: bool = False) -> int:
         stacklevel=2,
     )
     from database.loaders import cleanup_orphan_gda_records as _real_cleanup
-    return _real_cleanup(session, auto_commit=auto_commit)
+    return _real_cleanup(
+        session,
+        auto_commit=auto_commit,
+        reference_timestamp=reference_timestamp,
+        dry_run=dry_run,
+    )

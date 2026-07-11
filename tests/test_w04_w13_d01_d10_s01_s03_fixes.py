@@ -182,19 +182,42 @@ class TestW08RareDiseaseFlagPerDisease(unittest.TestCase):
     """W-08: rare_disease_flag set based on actual disease (not all KP=0)."""
 
     def test_is_rare_disease_helper_exists(self):
-        """rl_drug_ranker should expose _is_rare_disease() helper."""
+        """rl_drug_ranker should expose _is_rare_disease() helper.
+
+        v89 P0 ROOT FIX: _is_rare_disease now uses REAL US prevalence
+        data (GARD/NIH/Orphanet) with FDA Orphan Drug Act threshold
+        (<200K = rare). The previous W-08 fix used a hardcoded frozenset
+        that incorrectly marked common diseases (Parkinson's ~1M,
+        Alzheimer's ~6.7M, migraine ~39M, RA ~1.5M) as "rare" because
+        they have rare SUBTYPES (e.g., JRA is orphan-designated even
+        though adult RA is not). The v89 fix correctly distinguishes:
+        "rheumatoid arthritis" (NOT rare, 1.5M US) vs "juvenile
+        rheumatoid arthritis" (rare, 100K US, orphan-designated).
+        """
         from rl.rl_drug_ranker import _is_rare_disease, RARE_DISEASE_NAMES
-        # Rheumatoid arthritis should be flagged rare (JRA is orphan)
-        self.assertEqual(_is_rare_disease("rheumatoid arthritis"), 1)
-        self.assertEqual(_is_rare_disease("Rheumatoid Arthritis"), 1)
-        self.assertEqual(_is_rare_disease("rheumatoid_arthritis"), 1)
+        # v89: rheumatoid arthritis is NOT rare (1.5M US prevalence,
+        # well over the 200K FDA Orphan Drug Act threshold). Only JRA
+        # (juvenile subtype, ~100K) is rare.
+        self.assertEqual(_is_rare_disease("rheumatoid arthritis"), 0)
+        self.assertEqual(_is_rare_disease("Rheumatoid Arthritis"), 0)
+        self.assertEqual(_is_rare_disease("rheumatoid_arthritis"), 0)
+        # v89: juvenile rheumatoid arthritis IS rare (~100K US, orphan)
+        self.assertEqual(_is_rare_disease("juvenile rheumatoid arthritis"), 1)
+        # v89: cystic fibrosis IS rare (~40K US, orphan)
+        self.assertEqual(_is_rare_disease("cystic fibrosis"), 1)
+        # v89: sickle cell disease IS rare (~100K US, orphan)
+        self.assertEqual(_is_rare_disease("sickle cell disease"), 1)
+        # v89: Parkinson's is NOT rare (~1M US) — was incorrectly rare before
+        self.assertEqual(_is_rare_disease("parkinson disease"), 0)
+        # v89: MS is NOT rare (~400K US, over 200K threshold) — was incorrectly rare before
+        self.assertEqual(_is_rare_disease("multiple sclerosis"), 0)
         # Pain should NOT be flagged rare (common condition)
         self.assertEqual(_is_rare_disease("pain"), 0)
         self.assertEqual(_is_rare_disease("cardiovascular disease"), 0)
         # Empty/None should return 0
         self.assertEqual(_is_rare_disease(""), 0)
         self.assertEqual(_is_rare_disease(None), 0)
-        # The set should be non-empty
+        # The set should be non-empty (v89: derived from US_PREVALENCE)
         self.assertGreater(len(RARE_DISEASE_NAMES), 5)
 
     def test_generate_fake_data_uses_is_rare_disease(self):
