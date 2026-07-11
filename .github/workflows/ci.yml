@@ -479,12 +479,11 @@ jobs:
           cache-dependency-path: |
             requirements.txt
             phase1/requirements.txt
-      - name: Install deps (unconditional — needed for the verification step)
-        # V90 CI fix: the previous 'Check all required jobs passed' step
-        # installed deps ONLY when dependencies failed. When all deps
-        # passed, the install was SKIPPED, so the verification step
-        # crashed with ModuleNotFoundError: No module named 'pandas'.
-        # The fix: always install deps (unconditional).
+      # V90 CI fix: the previous 'Check all required jobs passed' step
+      # installed deps ONLY when dependencies failed. When all deps
+      # passed, the install was SKIPPED, so the verification step
+      # crashed with ModuleNotFoundError: No module named 'pandas'.
+      # The fix: always install deps (unconditional).
       - name: Check all required jobs passed
         if: ${{ !(needs.build.result == 'success' && needs.lint.result == 'success' && needs.test.result == 'success' && needs.verify-p2-fixes.result == 'success' && needs.e2e-sample-mode.result == 'success') }}
         run: |
