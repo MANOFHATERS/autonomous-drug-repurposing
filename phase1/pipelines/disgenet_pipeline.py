@@ -204,7 +204,7 @@ from database.loaders import (
     resolve_gene_symbol_to_uniprot,
 )
 from database.models import GeneDiseaseAssociation, PMID_LIST_LENGTH
-from pipelines.base_pipeline import BasePipeline, UNIPROT_ID_PATTERN
+from pipelines.base_pipeline import BasePipeline, UNIPROT_ID_PATTERN, DownloadError
 
 # ---------------------------------------------------------------------------
 # Module logger
@@ -1066,6 +1066,32 @@ class DisGeNETPipeline(BasePipeline):
         # v83 P0-C13: sample-mode embedded fallback.
         _download_mode = os.environ.get("DRUGOS_DOWNLOAD_MODE", "sample").lower().strip()
 
+        # v91 ROOT FIX (E2E sample-mode 401 failure on CI):
+        #   The previous code only short-circuited to the embedded sample
+        #   when DISGENET_USE_API=true AND no API key. When DISGENET_USE_API=false
+        #   (the CI default), it fell through to _download_static() which uses
+        #   DISGENET_URL — and DISGENET_URL was remapped to the API endpoint
+        #   (https://api.disgenet.com/api/v1/gda/summary) because the static
+        #   URL was deprecated in 2024. The API endpoint returns 401 without
+        #   an API key. The except block at line 1101 SHOULD have caught the
+        #   DownloadError and fallen back to _write_embedded_sample(), but on
+        #   GitHub Actions runners the 401 propagated past the except block
+        #   (likely a subtle interaction with the _download_with_retries
+        #   finally block raising a masking exception).
+        #   ROOT FIX: in sample mode, go DIRECTLY to the embedded sample
+        #   without even TRYING the network. Sample mode exists precisely
+        #   so the platform runs end-to-end on a laptop / CI runner without
+        #   network access or API keys. There is no reason to attempt a
+        #   live download in sample mode. This eliminates the 401 entirely.
+        if _download_mode == "sample":
+            logger.info(
+                "[disgenet] DRUGOS_DOWNLOAD_MODE=sample — using embedded sample "
+                "GDA dataset directly (skipping live download). Set "
+                "DRUGOS_DOWNLOAD_MODE=full + DISGENET_API_KEY for the complete "
+                "DisGeNET corpus."
+            )
+            return self._write_embedded_sample()
+
         # SCI-27 / CONF-18: No silent fallback to deprecated static URL.
         # v83 P0-C13: in sample mode, fall back to embedded samples when
         # the API key is missing (instead of raising). In full mode,
@@ -1098,7 +1124,7 @@ class DisGeNETPipeline(BasePipeline):
                 else:
                     self._source_format = DisGeNETSourceFormat.TSV
                     path = self._download_static()
-            except (OSError, ValueError, ConnectionError, TimeoutError) as exc:  # v85 FORENSIC ROOT FIX (BUG #51)
+            except (OSError, ValueError, ConnectionError, TimeoutError, RuntimeError, requests.exceptions.RequestException, DownloadError) as exc:  # v85 FORENSIC ROOT FIX (BUG #51) + v91 P0 ROOT FIX (401 from deprecated static URL — DownloadError is the custom wrapper raised by _download_with_retries)
                 # v83 P0-C13: in sample mode, fall back to embedded samples
                 # instead of raising. In full mode, re-raise.
                 if _download_mode == "sample":

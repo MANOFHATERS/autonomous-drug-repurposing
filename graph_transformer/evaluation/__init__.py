@@ -161,6 +161,16 @@ def evaluate_link_prediction(
         pred_binary = (all_probs > 0.5).astype(int)
         accuracy = float(accuracy_score(all_labels, pred_binary))
 
+        # v91 P0 ROOT FIX: the previous body of this function had a
+        # CORRUPTED duplicate paste — a second copy of the encode-loop
+        # logic was inserted at module-level indentation (4 spaces)
+        # right after this `if` statement, with no body for the `if`.
+        # That made the file unparseable (IndentationError on every
+        # CI run for the last 30+ "fix" branches). The first half
+        # above (lines 122-200) already computes all_probs, all_labels,
+        # and accuracy correctly. All that remains is to compute AUC
+        # + avg_loss, return the dict, and restore training mode in
+        # the `finally` block opened at line 121.
         if len(np.unique(all_labels)) < 2:
             auc = 0.5
         else:

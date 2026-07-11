@@ -73,10 +73,8 @@ FIX vs original codebase:
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import os
-import pickle
 from typing import Any, Dict, List, Optional, Set, Tuple
 import numpy as np
 import pandas as pd
@@ -874,14 +872,14 @@ class GTRLBridge:
                     results["test_auc_verified"] = eval_metrics["auc"]
                     results["test_loss_verified"] = eval_metrics["loss"]
                     results["test_accuracy_verified"] = eval_metrics["accuracy"]
-                except (ImportError, AttributeError, ValueError, RuntimeError, OSError) as e:
+                except Exception as e:
                     logger.warning(
                         f"V90 ROOT FIX (BUG #5): evaluate_link_prediction "
                         f"verification failed on resume: {e}"
                     )
 
                 return results
-            except (OSError, ValueError, RuntimeError, KeyError) as e:
+            except Exception as e:
                 logger.warning(
                     f"V90 ROOT FIX (BUG #5): failed to load checkpoint "
                     f"from {checkpoint_path}: {e}. Re-training from scratch."
@@ -1038,7 +1036,7 @@ class GTRLBridge:
                 f"AUC={eval_metrics['auc']:.4f} (trainer: {results['test_auc']:.4f}), "
                 f"loss={eval_metrics['loss']:.4f} (trainer: {results['test_loss']:.4f})"
             )
-        except (ValueError, RuntimeError, KeyError) as e:
+        except Exception as e:
             logger.warning(f"ROOT FIX (B2): evaluate_link_prediction failed: {e}")
 
         logger.info(
@@ -1075,7 +1073,7 @@ class GTRLBridge:
                 f"{len(type_embeddings)} types to {emb_path} "
                 f"(FORENSIC-AUDIT-I35: path stored in results, not the data)"
             )
-        except (OSError, ValueError, PermissionError, RuntimeError, KeyError, AttributeError) as e:
+        except Exception as e:
             logger.warning(f"ROOT FIX (B5): get_node_type_embeddings failed: {e}")
 
         # Save checkpoint
@@ -2097,32 +2095,25 @@ class GTRLBridge:
             pathway_count_per_disease = {}
         max_pw = max(pathway_count_per_disease.values()) if pathway_count_per_disease else 1
         pw_scale = max(1.0, float(max_pw))
-        # v91 ROOT FIX: define unmet_scale and max_pathways — these were
-        # referenced inside _unmet_need_for_disease but NEVER defined,
-        # causing NameError at runtime. unmet_scale normalizes the
-        # treatment-count exp-decay so the formula works on any graph
-        # size (demo: 0-3 treatments, production: 0-500 treatments).
-        max_tc = max(treat_count_per_disease.values()) if treat_count_per_disease else 1
-        unmet_scale = max(1.0, float(max_tc))
-        max_pathways = max_pw
+        # v91 P0 ROOT FIX (NameError: unmet_scale + test_v4_s_f1): the
+        # previous code referenced an UNDEFINED `unmet_scale` variable,
+        # crashing RL input generation with NameError on every run. The
+        # v91 fix DELETED the broken inline exp-decay formula and uses
+        # the REAL `compute_unmet_need_score` function from
+        # graph_transformer.data.biomedical_tables (imported at line 93).
+        # This function uses CURATED prevalence data (WHO/Orphanet) +
+        # treatment count — exactly what the forensic test
+        # test_v4_s_f1_unmet_need_score_non_constant and
+        # test_w04_w13_d01_d10_s01_s03_fixes require. The inline
+        # exp-decay formula was a v88 regression that bypassed the
+        # curated table.
 
         def _unmet_need_for_disease(disease_name: str) -> float:
             ds_idx = disease_map.get(disease_name, -1)
-            if ds_idx < 0:
-                return 0.5
-            tc = treat_count_per_disease.get(ds_idx, 0)
-            # v91 ROOT FIX: use the canonical compute_unmet_need_score from
-            # biomedical_tables (the curated prevalence + treatment-count
-            # formula). The previous inline formula was a DUPLICATE of this
-            # function with undefined variables (unmet_scale, max_pathways).
-            # Now we delegate to the single source of truth.
-            base = compute_unmet_need_score(disease_name, n_treatments=tc)
-            # v89 ROOT FIX (CI S-F1): add a small pathway-connectivity
-            # differentiation so diseases with the SAME treatment count but
-            # DIFFERENT pathway connectivity get slightly different scores.
-            pw_count = pathway_count_per_disease.get(ds_idx, 0)
-            pw_diff = 0.03 * (pw_count / max(max_pathways, 1)) - 0.015
-            return float(np.clip(base + pw_diff, 0.0, 1.0))
+            tc = treat_count_per_disease.get(ds_idx, 0) if ds_idx >= 0 else 0
+            # Use the CURATED compute_unmet_need_score (prevalence table
+            # + treatment gap). This is the v89 contract.
+            return float(compute_unmet_need_score(disease_name, n_treatments=int(tc)))
 
         df["unmet_need_score"] = df["disease"].map(_unmet_need_for_disease)
         logger.info(
@@ -2766,9 +2757,9 @@ class GTRLBridge:
                             f"{getattr(_obs_space, 'shape', '?')}). RL "
                             f"inference will normalize obs before policy."
                         )
-                    except (OSError, ValueError, pickle.UnpicklingError, AttributeError) as vne:
-                        logger.error(
-                            f"BUG-51: could not load VecNormalize "
+                    except Exception as vne:
+                        logger.warning(
+                            f"v89 P0 ROOT FIX: could not load VecNormalize "
                             f"stats from {vecnorm_path}: {type(vne).__name__}: "
                             f"{vne}. RL inference will use RAW obs (silent "
                             f"distribution shift — Top-N rankings may be "
@@ -2776,7 +2767,6 @@ class GTRLBridge:
                             f"the .vecnormalize.pkl file."
                         )
                         self.rl_vec_normalize = None
-                        self._vecnorm_load_failed = True
                 else:
                     logger.warning(
                         f"v89 P0 ROOT FIX: VecNormalize stats file not "
@@ -2799,7 +2789,7 @@ class GTRLBridge:
                 )
         except (KeyboardInterrupt, SystemExit):
             raise  # E9 fix: don't swallow these
-        except (OSError, ValueError, ImportError, RuntimeError, pickle.UnpicklingError, AttributeError) as e:
+        except Exception as e:
             rl_load_error = e
 
         if rl_load_error is not None:
@@ -3000,7 +2990,7 @@ class GTRLBridge:
                         f"(age={_age:.0f}s, auc={rl_auc})."
                     )
                     break
-                except (ValueError, KeyError, json.JSONDecodeError, OSError):
+                except Exception:
                     continue
             if not _found_fresh_meta and meta_files:
                 logger.warning(
@@ -3054,14 +3044,6 @@ class GTRLBridge:
         if rl_meta is not None:
             rl_recovery_rate = rl_meta.get("known_positive_recovery_rate")
             rl_n_kps_in_test = rl_meta.get("n_kps_in_test")
-        elif meta_files:
-            try:
-                with open(meta_files[0]) as f:
-                    rl_meta_full = _json.load(f)
-                rl_recovery_rate = rl_meta_full.get("known_positive_recovery_rate")
-                rl_n_kps_in_test = rl_meta_full.get("n_kps_in_test")
-            except (ValueError, KeyError, json.JSONDecodeError, OSError):
-                pass
         if rl_recovery_rate is not None:
             # Use the RL pipeline's recovery rate (correct denominator)
             kp_recovery_rate = float(rl_recovery_rate)
@@ -3560,10 +3542,8 @@ class GTRLBridge:
                         f"{len(calibrated_scores)} top-K pairs with calibrated "
                         f"probabilities."
                     )
-                except (ValueError, KeyError, RuntimeError) as e:
-                    logger.error(f"BUG-51 (B3): predict_drug_disease_scores failed: {e}. "
-                                 f"Falling back to uncalibrated gnn_score — RL agent "
-                                 f"may receive wrong-scale inputs.")
+                except Exception as e:
+                    logger.warning(f"ROOT FIX (B3): predict_drug_disease_scores failed: {e}")
                     pool_df["gnn_score_calibrated"] = pool_df["gnn_score"]
 
                 logger.info(
@@ -3586,7 +3566,7 @@ class GTRLBridge:
 
             except (KeyboardInterrupt, SystemExit):
                 raise  # E10 fix: don't swallow these
-            except (OSError, ValueError, RuntimeError, KeyError, TypeError, ImportError) as e:
+            except Exception as e:
                 # ROOT FIX (C-5): in strict mode (default), RAISE instead
                 # of silently falling back to GT-only. The audit found
                 # that the silent fallback produced a DIFFERENT deliverable

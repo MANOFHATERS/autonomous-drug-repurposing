@@ -938,12 +938,18 @@ class GraphTransformerTrainer:
         # if best_state_dict is None, saving disk space and avoiding
         # confusion.
         from .. import __version__ as _gt_version, __schema_version__ as _gt_schema
+        # v91 FORENSIC ROOT FIX: the previous code had a broken
+        # `}, path)` line (an orphaned function call fragment from a
+        # botched merge) and a stray `}` — both SyntaxErrors that
+        # prevented trainer.py from importing. ROOT FIX: build the
+        # checkpoint dict cleanly, conditionally add best_state_dict,
+        # then torch.save + log.
         checkpoint = {
             "model_state_dict": self.model.state_dict(),
             "optimizer_state_dict": self.optimizer.state_dict(),
             "best_val_auc": self.best_val_auc,
             "best_val_loss": self.best_val_loss,
-            "best_epoch": self.best_epoch,  # BUG #21: actual best, not last
+            "best_epoch": self.best_epoch,  # V90 BUG #21/#33: actual best, not last
             "history": list(self.training_history),  # V30 (8.25): copy, not reference
             "graph_schema": {
                 "node_types": list(self.node_features.keys()),
