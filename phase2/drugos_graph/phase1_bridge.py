@@ -1837,6 +1837,33 @@ def _read_phase1_from_postgres() -> Dict[str, pd.DataFrame]:
                 .join(_m.Drug, _m.DrugProteinInteraction.drug_id == _m.Drug.id)
                 .join(_m.Protein, _m.DrugProteinInteraction.protein_id == _m.Protein.id)
                 .where(_m.DrugProteinInteraction.source == "chembl")
+                # v89 P0 ROOT FIX (organism filter): filter to HUMAN
+                # proteins only (ncbi_taxid == 9606). The previous code
+                # included ALL organisms (human, mouse, rat, E. coli,
+                # etc.). For a HUMAN drug repurposing platform, only
+                # human protein targets are clinically actionable — a
+                # drug's activity against a mouse homolog does NOT
+                # predict its activity against the human homolog (cross-
+                # species binding affinity can differ by 10-100x).
+                #
+                # The audit (v89) confirmed: without this filter, the KG
+                # contained drug-protein edges from non-human assays,
+                # which contaminated the GT model's training data. The
+                # model learned "drug X inhibits protein Y" from a mouse
+                # assay, then at inference predicted "drug X inhibits
+                # the human homolog of Y" — which may be FALSE. This is
+                # a P0 patient-safety hazard: the platform could
+                # recommend a drug for repurposing based on non-human
+                # data that does NOT translate to humans.
+                #
+                # The filter is on Protein.ncbi_taxid, which is set by
+                # the UniProt pipeline (only human proteins are loaded
+                # by default, but the ChEMBL pipeline can load non-
+                # human targets if the ChEMBL query is not filtered).
+                # This filter is the LAST line of defense: even if
+                # non-human proteins leak into the DB, this query
+                # excludes them from the KG.
+                .where(_m.Protein.ncbi_taxid == 9606)
             )
             chembl_act_df = pd.read_sql(chembl_act_stmt, conn)
             # v51 ROOT FIX (COMPOUND-2 — pchembl unit handling):
@@ -2592,11 +2619,40 @@ def _classify_chembl_activity_edge(
     a = (activity_type or "").lower().strip()
     if not a:
         return "targets"
-    # Direct-label cases — ChEMBL's standard_type field is sometimes the
-    # bare word "Inhibition" or "Activation".
-    if "inhibit" in a:
+    # v89 P0 ROOT FIX (covalent-inhibitor misclassification): the
+    # previous code used substring matching:
+    #     if "inhibit" in a: return "inhibits"
+    #     if "activ" in a or "agon" in a: return "activates"
+    #
+    # The audit (v89) confirmed: an activity type like "Inactivation"
+    # contains the substring "activ", so it was misclassified as
+    # "activates". But "Inactivation" is the OPPOSITE of activation —
+    # it's an inhibitory process (the assay measures the loss of
+    # target activity). Misclassifying inactivation as activation feeds
+    # the KG wrong directionality → wrong drug-protein edges → GT model
+    # learns wrong biology → cannot generalize → held-out AUC = 0.0
+    # (Compound #2 in the v89 audit).
+    #
+    # Similarly, "Deactivation" contains "activ" and was misclassified
+    # as "activates". And "Inactive" contains "inactiv" which contains
+    # "activ" — also misclassified.
+    #
+    # The fix: use WORD-BOUNDARY regex to ensure "activ" matches only
+    # at the START of a word (so "activation" matches but "inactivation"
+    # does NOT — the "activ" in "inactivation" is mid-word, preceded by
+    # "in"). And check for "inactivat"/"deactivat" FIRST to classify
+    # them as "inhibits" (the scientifically correct relation — they
+    # measure loss of activity).
+    import re as _re_v89
+    # Check inactivation/deactivation FIRST (before the "activ" check
+    # would misclassify them). These are inhibitory processes.
+    if _re_v89.search(r"\b(inactiv|deactiv|inhibit|antagon)", a):
         return "inhibits"
-    if "activ" in a or "agon" in a:
+    # Word-boundary "activ" or "agon" → activates. The \b ensures we
+    # match "activation", "activates", "agonist", "agonism" but NOT
+    # "inactivation", "deactivation", "inactive" (those are matched
+    # by the inhibits regex above).
+    if _re_v89.search(r"\b(activ|agon)", a):
         return "activates"
     # v34 ROOT FIX (HIGH #8): the previous code returned "targets" for
     # IC50. But IC50 (Half-maximal Inhibitory Concentration) literally
