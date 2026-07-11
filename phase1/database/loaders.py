@@ -518,7 +518,7 @@ def _df_to_dicts(df: pd.DataFrame) -> list[dict]:
                 cleaned_record[key] = None
             elif isinstance(value, float) and pd.isna(value):
                 cleaned_record[key] = None
-            elif hasattr(value, "NA") and value is pd.NA:
+            elif value is pd.NA:
                 cleaned_record[key] = None
             elif isinstance(value, type(pd.NaT)) and pd.isna(value):
                 cleaned_record[key] = None
@@ -549,7 +549,7 @@ def _df_chunk_to_dicts(
                     cleaned[key] = None
                 elif isinstance(value, float) and pd.isna(value):
                     cleaned[key] = None
-                elif hasattr(value, "NA") and value is pd.NA:
+                elif value is pd.NA:
                     cleaned[key] = None
                 elif isinstance(value, type(pd.NaT)) and pd.isna(value):
                     cleaned[key] = None
@@ -1392,20 +1392,38 @@ def _pre_validate_dpi(
                 )
 
             # DES-02: Convert empty string source to None.
-            # v35 ROOT FIX (issue 30): coerce NULL / NaN source to the
-            # ``'unknown'`` sentinel at the loader boundary so the SQL
-            # NOT NULL constraint on ``source`` (migration 001) never
-            # fires and downstream consumers (entity resolution, graph
-            # builder SOURCE_PRIORITY_MAP lookup) always see a real
-            # string. Without this, a NULL source would either be
-            # rejected at insert time (DB error) or silently propagate
-            # as ``None`` and break the ``SOURCE_PRIORITY_MAP.get(source)``
-            # lookup (returns the default, losing the license/attribution).
+            # v89 ROOT FIX (BUG #38 — COMPOUND: source="unknown" coercion
+            #   masks NULL and triggers CHECK violation):
+            #   The previous code coerced NULL/NaN/empty ``source`` to the
+            #   sentinel ``"unknown"`` at the loader boundary, believing
+            #   this prevented a NOT NULL violation. But ``source`` IS
+            #   nullable (models.py line 1249: ``nullable=True``), and the
+            #   DB CHECK ``chk_dpi_source`` (models.py line 1371) is
+            #   ``source IS NULL OR source IN ('chembl', 'drugbank', ...)``.
+            #   The coercion ``None → "unknown"`` turned a value the DB
+            #   would have ACCEPTED (NULL) into a value the DB REJECTS
+            #   ("unknown" is not in the whitelist) — causing the entire
+            #   chunk to fail with a CHECK violation, fall back to row-by-
+            #   row inserts (which ALSO fail), and dead-letter every row
+            #   with error "CHECK constraint failed: chk_dpi_source".
+            #   The dead-letter entries recorded source='unknown' (the
+            #   POST-coercion value), HIDING the loader's bug — operators
+            #   concluded the data had source='unknown' (which IS invalid)
+            #   and tried to fix the data, when the real fix was to NOT
+            #   coerce NULL to "unknown". ROOT FIX: let NULL stay NULL
+            #   (the CHECK allows it). Empty string → None. NaN → None.
+            #   If a non-NULL default is desired in the future, use a
+            #   VALID source value ('chembl' or 'drugbank') based on
+            #   pipeline context — NEVER 'unknown'.
             src = record.get("source")
-            if src is None or src == "" or (isinstance(src, float) and pd.isna(src)):
-                record["source"] = "unknown"
+            if src is None:
+                record["source"] = None
+            elif isinstance(src, float) and pd.isna(src):
+                record["source"] = None
+            elif isinstance(src, str) and src.strip() == "":
+                record["source"] = None
             else:
-                record["source"] = str(src).strip() or "unknown"
+                record["source"] = str(src).strip() or None
 
             # DES-04: Convert empty string source_id to None
             sid = record.get("source_id")
@@ -2603,8 +2621,18 @@ def _quarantine_gda_rows(
                         source=row_dict.get("source"),
                         reason=reason,
                         details_json=json.dumps(row_dict, default=str),
-                        run_id=(
-                            str(pipeline_run_id) if pipeline_run_id is not None else None
+                        # v89 ROOT FIX (BUG #29 — loader side): write the
+                        # integer pipeline_run_id directly, NOT
+                        # str(pipeline_run_id). The model column is now
+                        # ``Integer FK → pipeline_runs.id`` (see models.py
+                        # fix). The previous ``str(pipeline_run_id)``
+                        # would now raise ``DataError: invalid input
+                        # syntax for type integer`` on PostgreSQL and
+                        # ``TypeError`` on SQLite — the FK relationship is
+                        # preserved and dead-letter rows can be JOINed to
+                        # pipeline_runs without a CAST.
+                        pipeline_run_id=(
+                            int(pipeline_run_id) if pipeline_run_id is not None else None
                         ),
                     )
                 )
@@ -2625,17 +2653,38 @@ def _quarantine_gda_rows(
                 #   flush failed; rows persisted to JSONL only" but did
                 #   NOT see that the valid GDA rows were also rolled back.
                 #   ROOT FIX: use ``session.begin_nested()`` (a SAVEPOINT)
-                #   around the ``bulk_save_objects`` + ``flush``. On
-                #   failure, roll back ONLY the savepoint (preserving the
-                #   caller's staged rows). On success, release the
-                #   savepoint (the rows stay in the outer transaction,
-                #   committed by the caller). The ``with`` context manager
-                #   auto-commits on success and auto-rolls-back on
-                #   exception; the outer try/except catches the exception
-                #   for logging (the JSONL write below still runs).
+                #   around the ``add_all`` + ``flush``. On failure, roll
+                #   back ONLY the savepoint (preserving the caller's
+                #   staged rows). On success, release the savepoint (the
+                #   rows stay in the outer transaction, committed by the
+                #   caller). The ``with`` context manager auto-commits on
+                #   success and auto-rolls-back on exception; the outer
+                #   try/except catches the exception for logging (the
+                #   JSONL write below still runs).
+                #
+                # v89 ROOT FIX (BUG #30 — bulk_save_objects bypasses
+                #   SQLAlchemy 2.0 unit-of-work):
+                #   ``session.bulk_save_objects()`` is a legacy SQLAlchemy
+                #   1.x API that bypasses the unit-of-work cascade. In
+                #   SQLAlchemy 2.0, ``session.add_all()`` + ``session.flush()``
+                #   is the recommended pattern. ``bulk_save_objects`` does
+                #   NOT fire ``@validates`` decorators, does NOT respect
+                #   relationship cascades, and does NOT populate server-
+                #   side defaults (like ``created_at`` from
+                #   ``TimestampMixin``). The ``DeadLetterGDA`` model
+                #   currently has no ``@validates``, so this was safe —
+                #   but if a future ``@validates`` is added, it would be
+                #   silently bypassed. Server-side defaults (``created_at``,
+                #   ``updated_at``) may not be populated correctly via
+                #   ``bulk_save_objects`` on some dialects (PostgreSQL
+                #   triggers fire on UPDATE, not on ``bulk_save_objects``
+                #   INSERT). ROOT FIX: use ``session.add_all(orm_objs)``
+                #   — the SQLAlchemy 2.0 canonical API. Performance
+                #   difference is negligible for dead-letter volumes
+                #   (typically <100 rows per chunk).
                 try:
                     with session.begin_nested():
-                        session.bulk_save_objects(orm_objs)
+                        session.add_all(orm_objs)
                         session.flush()
                     # If we reach here, the savepoint committed successfully.
                     logger.info(
@@ -3383,6 +3432,16 @@ def bulk_upsert_entity_mapping(
             "string_id",
             "match_confidence",
             "match_method",
+            # v89 ROOT FIX (BUG #21 — loader side): add ``last_matched_at``
+            # to updatable_cols so the column (now declared on the ORM —
+            # see models.py fix) is populated on every upsert. The
+            # previous updatable_cols omitted it, so even on prod DBs
+            # (where migration 001 created the column), it was NEVER
+            # populated — making it dead data. Now it records the
+            # timestamp of the last successful entity resolution, which
+            # is the documented contract in migration 001 line 1226:
+            # "When the last resolution was performed".
+            "last_matched_at",
             "updated_at",  # [DES-05]
         ]
         if match_history is not None:
@@ -3402,9 +3461,17 @@ def bulk_upsert_entity_mapping(
                 continue
 
             # Add lineage fields
+            # v89 ROOT FIX (BUG #21 — loader side): populate
+            # ``last_matched_at`` on every record so the column (now
+            # declared on the ORM and in updatable_cols) actually receives
+            # a value. The timestamp records when this entity-resolution
+            # match was performed — the documented contract per migration
+            # 001 line 1226.
+            _now_utc = datetime.datetime.now(datetime.timezone.utc)
             for rec in valid_chunk:
                 if match_history is not None:
                     rec["match_history"] = match_history
+                rec["last_matched_at"] = _now_utc
 
             # Split into with-ik and without-ik paths
             with_ik = [r for r in valid_chunk if r.get("canonical_inchikey") is not None]

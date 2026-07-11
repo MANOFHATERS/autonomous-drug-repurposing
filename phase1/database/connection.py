@@ -797,8 +797,28 @@ def _create_new_engine() -> Engine:
 
     # SQLAlchemy's create_engine cannot handle 'file:' URLs directly;
     # convert 'file:/path/to/db' to 'sqlite:////path/to/db'
+    # v89 ROOT FIX (BUG #31 — file: URL parsing created DB at wrong path):
+    #   The previous code did ``db_path = database_url[5:]`` (strip 'file:')
+    #   then ``f"sqlite:///{db_path}"``. For ``file:///absolute/path``,
+    #   ``database_url[5:]`` = ``//absolute/path``, and
+    #   ``f"sqlite:///{db_path}"`` = ``sqlite://///absolute/path``
+    #   (5 slashes). SQLite interprets the 4th slash as the path separator
+    #   and the 5th as part of the path — so it creates a DB at
+    #   ``//absolute/path`` (a network-style path) or ``/absolute/path``
+    #   depending on the platform, NOT at ``/absolute/path``. Operators
+    #   saw "empty database" with no error — the DB was created at the
+    #   wrong location. ROOT FIX: use ``urlparse`` to extract the path
+    #   component correctly, then construct the SQLite URL with the
+    #   standard ``sqlite:///<absolute_path>`` form (3 slashes for an
+    #   absolute path). This handles ``file:/path``, ``file:///path``,
+    #   and ``file://host/path`` correctly.
     if driver == "file" and database_url.startswith("file:"):
-        db_path = database_url[5:]  # strip 'file:'
+        _parsed_file = urlparse(database_url)
+        db_path = _parsed_file.path or ""
+        if not db_path:
+            raise ValueError(
+                f"Invalid file: URL — no path component: {database_url!r}"
+            )
         database_url = f"sqlite:///{db_path}"
         logger.debug("Converted file: URL to SQLite URL: %s", _mask_url(database_url))
 
@@ -1182,24 +1202,55 @@ def _set_session_variables(
             # parameters instead of manual chr(39) escaping. This is
             # injection-safe — the value is passed as a parameter, not
             # interpolated into the SQL string.
+            #
+            # v89 ROOT FIX (BUG #37 — COMPOUND: session variables
+            #   contaminate across pool reuse):
+            #   The previous code used ``set_config(name, value, FALSE)``
+            #   which sets a SESSION-level variable. Session-level
+            #   variables persist until the session ends — but with
+            #   connection pooling, the "session" is the underlying DB
+            #   connection, which is RETURNED TO THE POOL on
+            #   ``session.close()``. The next ``get_db_session()`` call
+            #   (possibly from a DIFFERENT pipeline) gets a connection
+            #   with STALE ``app.pipeline_name`` / ``app.run_id`` /
+            #   ``app.correlation_id`` variables. If that next call
+            #   writes to ``audit_log`` or ``pipeline_runs``, the lineage
+            #   columns reflect the PREVIOUS pipeline's identity. Under
+            #   the documented 7-concurrent-pipeline workload, cross-
+            #   contamination is near-certain — and operators cannot
+            #   reproduce because the bug depends on pool reuse order.
+            #   Regulatory audits (GDPR/HIPAA) that require "which
+            #   pipeline wrote this row" cannot trust the ``audit_log``
+            #   table. ROOT FIX: use ``set_config(name, value, TRUE)``
+            #   which sets a TRANSACTION-local variable (equivalent to
+            #   ``SET LOCAL``). Transaction-local variables are
+            #   automatically RESET to their previous value (or NULL)
+            #   on COMMIT or ROLLBACK — so when the session commits and
+            #   the connection returns to the pool, the variables are
+            #   GONE. The next checkout gets a clean connection with no
+            #   stale ``app.*`` variables. This is the PostgreSQL-
+            #   documented pattern for connection-pool-safe session
+            #   variables (see PostgreSQL docs §18.1.4: "SET LOCAL's
+            #   effects last only till the end of the current
+            #   transaction").
             from sqlalchemy import text as _sa_text_v38
             if pipeline_name:
                 session.execute(
-                    _sa_text_v38("SELECT set_config('app.pipeline_name', :val, false)"),
+                    _sa_text_v38("SELECT set_config('app.pipeline_name', :val, true)"),
                     {"val": str(pipeline_name)},
                 )
             if run_id:
                 session.execute(
-                    _sa_text_v38("SELECT set_config('app.run_id', :val, false)"),
+                    _sa_text_v38("SELECT set_config('app.run_id', :val, true)"),
                     {"val": str(run_id)},
                 )
             if correlation_id:
                 session.execute(
-                    _sa_text_v38("SELECT set_config('app.correlation_id', :val, false)"),
+                    _sa_text_v38("SELECT set_config('app.correlation_id', :val, true)"),
                     {"val": str(correlation_id)},
                 )
             session.execute(
-                _sa_text_v38("SELECT set_config('app.session_id', :val, false)"),
+                _sa_text_v38("SELECT set_config('app.session_id', :val, true)"),
                 {"val": str(session_id)},
             )
     except Exception as exc:
@@ -1757,13 +1808,26 @@ def check_connection(
 
     start_time = time.monotonic()
     try:
+        # v89 ROOT FIX (BUG #35 — engine variable undefined when
+        #   use_session_pool=True): the previous code defined ``engine``
+        #   only in the ``else`` branch (line 1766), then used
+        #   ``engine if not use_session_pool else get_engine()`` at line
+        #   1782. When ``use_session_pool=True``, ``engine`` was undefined
+        #   — the conditional relied on Python's short-circuit evaluation
+        #   to avoid the NameError. This WORKED but was fragile: any
+        #   refactor that changed the conditional order or removed the
+        #   short-circuit would raise ``NameError: name 'engine' is not
+        #   defined``. ROOT FIX: define ``engine = get_engine()`` BEFORE
+        #   the ``if use_session_pool:`` block so the variable is always
+        #   bound. The ``get_engine()`` call is cheap (returns the cached
+        #   singleton) and the code is now refactor-safe.
+        engine = get_engine()
         if use_session_pool:
             with get_db_session() as session:
                 result = session.execute(text("SELECT 1"))
                 result.close()
                 db_version = _get_db_version(session)
         else:
-            engine = get_engine()
             with engine.connect() as conn:
                 result = conn.execute(text("SELECT 1"))
                 result.close()
@@ -1779,7 +1843,7 @@ def check_connection(
 
         if detailed:
             pool_status = get_pool_status() if _engine is not None else None
-            db_name, db_user = _try_get_db_metadata(engine if not use_session_pool else get_engine())
+            db_name, db_user = _try_get_db_metadata(engine)
             return HealthCheckResult(
                 is_healthy=True,
                 latency_ms=latency_ms,
