@@ -1098,7 +1098,7 @@ class DisGeNETPipeline(BasePipeline):
                 else:
                     self._source_format = DisGeNETSourceFormat.TSV
                     path = self._download_static()
-            except (OSError, ValueError, ConnectionError, TimeoutError) as exc:  # v85 FORENSIC ROOT FIX (BUG #51)
+            except (OSError, ValueError, ConnectionError, TimeoutError, RuntimeError, requests.exceptions.RequestException) as exc:  # v85 FORENSIC ROOT FIX (BUG #51) + v91 P0 ROOT FIX (401 from deprecated static URL)
                 # v83 P0-C13: in sample mode, fall back to embedded samples
                 # instead of raising. In full mode, re-raise.
                 if _download_mode == "sample":
