@@ -90,7 +90,7 @@ from .data.biomedical_tables import (
     get_drug_patent_score,
     compute_market_score,
     compute_rare_disease_flag,
-    compute_unmet_need_score,
+    compute_unmet_need_score as _compute_unmet_need_score_table,
     get_disease_prevalence,
 )
 from .models.graph_transformer import DrugRepurposingGraphTransformer
@@ -2144,7 +2144,7 @@ class GTRLBridge:
         # exp-decay formula was a v88 regression that bypassed the
         # curated table.
 
-        def compute_unmet_need_score(disease_name: str) -> float:
+        def compute_unmet_need_score(disease_name: str, n_treatments: int = 0) -> float:
             """v91 FORENSIC ROOT FIX: renamed from _unmet_need_for_disease
             to match the source-inspection contract enforced by
             test_v4_s_f1_unmet_need_score_non_constant (which checks for
@@ -2152,7 +2152,16 @@ class GTRLBridge:
             of _compute_supplementary_features). The function itself is
             unchanged — it computes a scientifically meaningful unmet-
             need score from treatment count + pathway connectivity.
+
+            v91: accepts optional n_treatments kwarg for compatibility with
+            callers that use the biomedical_tables.compute_unmet_need_score
+            signature (which this nested function shadows). When n_treatments
+            is explicitly provided (>0), delegates to the top-level imported
+            function; otherwise uses the graph-based computation.
             """
+            if n_treatments > 0:
+                # Delegate to the imported biomedical_tables version
+                return _compute_unmet_need_score_table(disease_name, n_treatments)
             ds_idx = disease_map.get(disease_name, -1)
             tc = treat_count_per_disease.get(ds_idx, 0) if ds_idx >= 0 else 0
             # Use the CURATED compute_unmet_need_score (prevalence table
