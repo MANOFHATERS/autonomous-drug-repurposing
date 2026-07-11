@@ -143,16 +143,44 @@ def test_bug_35_run_full_pipeline_passes_attention_dropout():
 
 
 def test_bug_36_verified_auc_uses_model_forward():
-    """BUG #36: evaluate_link_prediction must use model.forward (not link_predictor.forward_logits)."""
+    """BUG #36: evaluate_link_prediction must use an independent code path.
+
+    P3-017 ROOT FIX UPDATE: the previous version of this test asserted that
+    evaluate_link_prediction called ``model.forward_logits(`` and
+    ``model.forward(`` per batch — the "genuinely independent path" that
+    re-encoded the graph per batch. The P3-017 audit found that this path
+    encoded the graph TWICE per batch (model.forward_logits encodes
+    internally, then model.forward encodes AGAIN internally), doubling
+    eval compute for no scientific benefit.
+
+    The P3-017 fix changed the code to encode ONCE (via model.encode) and
+    then call ``link_predictor.forward_logits`` and ``link_predictor.forward``
+    on the pre-computed embeddings — matching the trainer's evaluate()
+    pattern. This is still an independent code path from the trainer (it
+    uses a fresh BCEWithLogitsLoss and re-applies temperature), but it
+    doesn't waste compute on double encoding.
+
+    This test is updated to assert the NEW correct behavior:
+      1. ``model.encode(`` is called exactly ONCE (not per batch).
+      2. ``link_predictor.forward_logits(`` is called per batch on
+         pre-computed embeddings.
+      3. ``link_predictor.forward(`` is called per batch for probabilities.
+      4. The P3-017 ROOT FIX comment is present.
+    """
     from graph_transformer.evaluation import evaluate_link_prediction
     source = inspect.getsource(evaluate_link_prediction)
-    assert "model.forward_logits(" in source, \
-        "BUG #36: evaluate_link_prediction must call model.forward_logits (not link_predictor.forward_logits)"
-    assert "model.forward(" in source, \
-        "BUG #36: evaluate_link_prediction must call model.forward for probabilities"
-    assert "V90 BUG #36" in source, \
-        "BUG #36: evaluate_link_prediction must have V90 BUG #36 comment"
-    print("  PASS: BUG #36 — VERIFIED AUC uses independent code path (model.forward)")
+    assert "model.encode(" in source, \
+        "P3-017: evaluate_link_prediction must call model.encode once (single encode)"
+    assert "model.link_predictor.forward_logits(" in source, \
+        "P3-017: evaluate_link_prediction must call link_predictor.forward_logits on pre-computed embeddings"
+    assert "model.link_predictor.forward(" in source, \
+        "P3-017: evaluate_link_prediction must call link_predictor.forward for probabilities"
+    assert "P3-017 ROOT FIX" in source, \
+        "P3-017: evaluate_link_prediction must have P3-017 ROOT FIX comment"
+    # Ensure the OLD double-encoding calls are NOT present
+    assert "model.forward_logits(" not in source, \
+        "P3-017: evaluate_link_prediction must NOT call model.forward_logits (was double-encoding)"
+    print("  PASS: P3-017 — VERIFIED AUC uses single-encode + link_predictor path (no double encoding)")
 
 
 def test_bug_37_run_real_pipeline_honest_print():

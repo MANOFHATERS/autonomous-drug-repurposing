@@ -93,27 +93,34 @@ REVERSE_RELATION_MAP: Dict[str, str] = {
 # edge types (the direct treats/tested_for forward+reverse). The audit found
 # this missed INDIRECT leakage paths: if a "drug treats disease" edge is
 # excluded but the drug also has a "drug tested_for disease" edge to the
-# same disease, the model can still infer the label. The expanded set now
-# covers ALL 4 direct label-leaking relations × 2 directions = 8 edge types,
-# which is the complete set of edges that directly express a drug-disease
-# therapeutic relationship. Multi-hop leakage (via drug→protein→pathway→disease)
-# is NOT in this set because those edges carry legitimate biological signal
-# that the model SHOULD learn from — they only become leakage if a
-# guaranteed path is injected for every KP (the W-02 bug, now removed in
+# same disease, the model can still infer the label.
+#
+# P3-040 ROOT FIX (comment accuracy): the previous comment claimed the set
+# covers "ALL 4 direct label-leaking relations × 2 directions = 8 edge
+# types". That was FALSE — the frozenset contains only 4 tuples (2
+# forward + 2 reverse), not 8. The "× 2 directions" was already accounted
+# for by listing both forward and reverse tuples explicitly. The comment
+# made a reviewer think half the set was missing. We've corrected the
+# comment to match the actual contents (4 tuples: 2 forward + 2 reverse).
+# Multi-hop leakage (via drug→protein→pathway→disease) is NOT in this
+# set because those edges carry legitimate biological signal that the
+# model SHOULD learn from — they only become leakage if a guaranteed
+# path is injected for every KP (the W-02 bug, now removed in
 # graph_builder.py).
 LABEL_LEAKING_EDGES: frozenset = frozenset({
-    # Direct drug→disease therapeutic relationships (forward)
+    # Direct drug→disease therapeutic relationships (forward, 2 tuples)
     ("drug", "treats", "disease"),
     ("drug", "tested_for", "disease"),
-    # Direct disease→drug reverse relationships
+    # Direct disease→drug reverse relationships (2 tuples)
     ("disease", "treated_by", "drug"),
     ("disease", "tested_on", "drug"),
-    # V30 ROOT FIX (1.3): also exclude the bidirectional "tested_for" /
-    # "tested_on" relations. The original code only covered these via the
-    # 4-tuple above, but the audit found that callers sometimes pass
-    # exclude_edges as a list (not a frozenset) and the membership check
-    # would fail for tuple-vs-list comparisons. Including both forms here
-    # makes the exclusion bulletproof.
+    # V30 ROOT FIX (1.3): the 4-tuple set above covers BOTH directions
+    # of "treats"/"treated_by" and "tested_for"/"tested_on". Callers
+    # sometimes pass exclude_edges as a list (not a frozenset) and the
+    # membership check would fail for tuple-vs-list comparisons; the
+    # frozenset here is the canonical form, and graph_builder.py's
+    # _build_reverse_edges_into_sets converts these to the matching
+    # reverse tuples at graph-build time.
 })
 
 # Default feature dimensions per node type.
@@ -142,7 +149,18 @@ DEFAULT_FEATURE_DIMS: Dict[str, int] = {
 # get_auc_threshold_for_scale() function returns the appropriate threshold
 # based on graph size.
 V1_AUC_THRESHOLD: float = 0.85
-V1_AUC_THRESHOLD_DEMO: float = 0.50  # above-random for demo-scale graphs
+# P3-034 ROOT FIX: V1_AUC_THRESHOLD_DEMO was 0.50 — EXACTLY random.
+# A random classifier scores AUC = 0.5, so a threshold of 0.50 allowed
+# EXACTLY random models to pass the demo-scale validation gate. This
+# made the gate meaningless on demo graphs: any model (even one that
+# scored every pair identically) would pass. We raise the threshold to
+# 0.55 — above random by a small but meaningful margin. On tiny demo
+# graphs (<100 drugs, ~15 val pairs), AUC is discrete (step size 1/(n_pos*n_neg)
+# ≈ 0.07 for 5 pos / 10 neg), so 0.55 effectively means "at least 2-3
+# ranks better than random". This is the minimum bar for "the model
+# learned SOMETHING" on a demo graph. Production graphs use V1_AUC_THRESHOLD
+# (0.85) per the DOCX V1 contract.
+V1_AUC_THRESHOLD_DEMO: float = 0.55  # above-random for demo-scale graphs
 V1_AUC_THRESHOLD_PILOT: float = 0.70  # for pilot-scale (100-1000 drugs)
 
 

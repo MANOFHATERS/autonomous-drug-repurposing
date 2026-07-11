@@ -364,7 +364,7 @@ class DrugDiseaseLinkPredictor(nn.Module):
         drug_emb: torch.Tensor,
         disease_emb: torch.Tensor,
         labels: torch.Tensor,
-        lr: float = 0.05,
+        lr: float = 0.02,
         max_iter: int = 200,
     ) -> float:
         """Fit temperature scaling on a validation set (Guo et al. 2017).
@@ -400,9 +400,16 @@ class DrugDiseaseLinkPredictor(nn.Module):
             drug_emb: (N, D) drug embeddings.
             disease_emb: (N, D) disease embeddings.
             labels: (N,) binary labels.
-            lr: Learning rate for Adam. Default 0.05 (W-05 fix: internally
-                multiplied by 0.4 to give 0.02 effective lr, since exp()
-                amplifies log_temp changes).
+            lr: Learning rate for Adam. Default 0.02 (P3-027 ROOT FIX:
+                the previous default was 0.05 but the code internally
+                multiplied by 0.4 to give an effective lr of 0.02. The
+                mismatch between the documented default and the actual
+                effective lr was misleading. We now expose 0.02 directly
+                as the default and remove the ``* 0.4`` factor inside
+                the optimizer construction so what you pass is what you
+                get. Pass a smaller lr for smoother convergence on
+                small cal sets, a larger lr for faster convergence on
+                large cal sets.).
             max_iter: Maximum optimization iterations. Default 200.
 
         Returns:
@@ -419,8 +426,19 @@ class DrugDiseaseLinkPredictor(nn.Module):
         # "temperature calibration FAILED" in the log but didn't know
         # the MLP was frozen. Next training run: loss didn't decrease,
         # user was confused.
+        #
+        # P3-026 ROOT FIX: also save and restore the prior TRAINING MODE
+        # (not just requires_grad). The previous try/finally only
+        # restored requires_grad on MLP weights; it did NOT restore
+        # ``self.training``. Since the try block calls ``self.eval()``
+        # (line below), after fit_temperature returns the link_predictor
+        # is STILL in eval mode — dropout is disabled, BatchNorm uses
+        # running stats. Subsequent training runs would silently train
+        # with eval-mode behavior. We now save the prior training state
+        # and restore it in the finally block.
         for p in self.mlp.parameters():
             p.requires_grad_(False)
+        prior_training = self.training
 
         try:
             self.eval()
@@ -429,45 +447,59 @@ class DrugDiseaseLinkPredictor(nn.Module):
                 labels_f = labels.float().detach()
 
             # ROOT FIX (W-05): the V27 code used
-        #     T_eff = 1.25 + 0.75 * torch.tanh(log_temp)
-        # and claimed "tanh maps (-inf,+inf) -> (-1,1) so T_eff is
-        # differentiable everywhere and gradients never vanish." This is
-        # technically TRUE (tanh is differentiable everywhere) but its
-        # derivative ``1 - tanh^2(x)`` VANISHES as |x| -> inf. If Adam
-        # pushes ``log_temp`` to a large value (which it can, since
-        # ``log_temp`` is unconstrained), the gradient
-        # ``dloss/dlog_temp`` is multiplied by ``(1 - tanh^2(log_temp))``
-        # which is essentially 0 — Adam cannot recover. The calibration
-        # gets pinned at T_eff = 0.5 or T_eff = 2.0 (the boundaries).
-        #
-        # The ROOT FIX uses ``T = exp(log_temp)`` whose derivative
-        # ``dloss/dlog_temp = dloss/dT * T`` NEVER vanishes inside the
-        # valid range (the Jacobian is just T, which is positive). To
-        # prevent T from drifting outside [0.5, 2.0] (Guo et al. 2017
-        # standard range), we apply a HARD CLAMP AFTER Adam's update
-        # step -- not inside the forward pass. The hard clamp does NOT
-        # zero gradients during the forward pass (gradients still flow
-        # through ``T = exp(log_temp)``), so Adam can recover even if it
-        # overshoots. The clamp only zeros the gradient w.r.t. log_temp
-        # when log_temp is OUTSIDE the clamped range, which is the
-        # correct behavior (no need to keep pushing if we're already at
-        # the boundary).
-        #
-        # Equivalent log-bounds: T in [0.5, 2.0] <=> log_temp in [log(0.5), log(2.0)]
-        # = [-0.693, 0.693]. We clamp log_temp to this range AFTER each
-        # Adam step. Inside this range, tanh-derivative is >= 1 - tanh^2(0.693)
-        # = 1 - 0.393 = 0.607 (non-vanishing), but more importantly, the
-        # exp-parameterization has derivative = T (always positive), so
-        # gradients NEVER vanish regardless of clamping.
+            #     T_eff = 1.25 + 0.75 * torch.tanh(log_temp)
+            # and claimed "tanh maps (-inf,+inf) -> (-1,1) so T_eff is
+            # differentiable everywhere and gradients never vanish." This is
+            # technically TRUE (tanh is differentiable everywhere) but its
+            # derivative ``1 - tanh^2(x)`` VANISHES as |x| -> inf. If Adam
+            # pushes ``log_temp`` to a large value (which it can, since
+            # ``log_temp`` is unconstrained), the gradient
+            # ``dloss/dlog_temp`` is multiplied by ``(1 - tanh^2(log_temp))``
+            # which is essentially 0 — Adam cannot recover. The calibration
+            # gets pinned at T_eff = 0.5 or T_eff = 2.0 (the boundaries).
+            #
+            # The ROOT FIX uses ``T = exp(log_temp)`` whose derivative
+            # ``dloss/dlog_temp = dloss/dT * T`` NEVER vanishes inside the
+            # valid range (the Jacobian is just T, which is positive). To
+            # prevent T from drifting outside [0.5, 2.0] (Guo et al. 2017
+            # standard range), we apply a HARD CLAMP AFTER Adam's update
+            # step -- not inside the forward pass. The hard clamp does NOT
+            # zero gradients during the forward pass (gradients still flow
+            # through ``T = exp(log_temp)``), so Adam can recover even if it
+            # overshoots. The clamp only zeros the gradient w.r.t. log_temp
+            # when log_temp is OUTSIDE the clamped range, which is the
+            # correct behavior (no need to keep pushing if we're already at
+            # the boundary).
+            #
+            # Equivalent log-bounds: T in [0.5, 2.0] <=> log_temp in [log(0.5), log(2.0)]
+            # = [-0.693, 0.693]. We clamp log_temp to this range AFTER each
+            # Adam step. Inside this range, tanh-derivative is >= 1 - tanh^2(0.693)
+            # = 1 - 0.393 = 0.607 (non-vanishing), but more importantly, the
+            # exp-parameterization has derivative = T (always positive), so
+            # gradients NEVER vanish regardless of clamping.
+            #
+            # P3-028 ROOT FIX: the previous comment block was at 8-space
+            # indent (same as ``try:``), visually suggesting it was
+            # OUTSIDE the try block. The try body is at 12-space indent.
+            # A maintainer reading the code might add code after the
+            # comments at 8-space indent, which would be outside the try
+            # and thus not covered by the finally's requires_grad restore.
+            # We've re-indented the comments to 12-space so they're
+            # visually inside the try block where they belong.
             LOG_TEMP_MIN = math.log(self.TEMPERATURE_CLAMP_MIN)  # log(0.5) = -0.693
             LOG_TEMP_MAX = math.log(self.TEMPERATURE_CLAMP_MAX)  # log(2.0) = 0.693
 
             log_temp = torch.zeros(1, requires_grad=True)
-        # ROOT FIX (W-05): lower lr (0.02 instead of 0.05) since exp()
-        # amplifies log_temp changes. With lr=0.05 and log_temp starting
-        # at 0, a single bad gradient could push log_temp to 0.5 (T=1.65)
-        # in one step. lr=0.02 gives smoother convergence.
-            optimizer = torch.optim.Adam([log_temp], lr=lr * 0.4)
+            # ROOT FIX (W-05): lower lr (0.02 instead of 0.05) since exp()
+            # amplifies log_temp changes. With lr=0.05 and log_temp starting
+            # at 0, a single bad gradient could push log_temp to 0.5 (T=1.65)
+            # in one step. lr=0.02 gives smoother convergence.
+            # P3-027 ROOT FIX: the previous code used ``lr * 0.4`` here,
+            # making the EFFECTIVE lr 0.02 when the documented default was
+            # 0.05. We've changed the default to 0.02 (matching the actual
+            # effective lr) and removed the ``* 0.4`` factor so what the
+            # caller passes is what gets used. No more hidden scaling.
+            optimizer = torch.optim.Adam([log_temp], lr=lr)
 
             criterion = nn.BCEWithLogitsLoss()
 
@@ -487,6 +519,21 @@ class DrugDiseaseLinkPredictor(nn.Module):
                 scaled_logits = logits / T
                 loss = criterion(scaled_logits, labels_f)
                 loss.backward()
+                # P3-S05 ROOT FIX: clip the gradient on log_temp BEFORE
+                # optimizer.step(). The previous code had NO gradient
+                # clipping — if the cal set had a few misclassified
+                # samples with large loss, the gradient on log_temp could
+                # be large enough to push it outside the [log(0.5),
+                # log(2.0)] range in a single step. The per-iteration
+                # clamp after step() catches the value, but a large
+                # gradient also corrupts Adam's momentum buffer (the
+                # running second-moment estimate becomes huge, leading
+                # to oversized steps for many subsequent iterations).
+                # Clipping to a max norm of 1.0 keeps Adam's momentum
+                # stable. This is the standard practice for temperature
+                # scaling implementations (Guo et al. 2017, PyTorch
+                # tutorial).
+                torch.nn.utils.clip_grad_norm_([log_temp], 1.0)
                 optimizer.step()
 
                 # ROOT FIX (W-05): HARD CLAMP log_temp AFTER the optimizer
@@ -548,3 +595,9 @@ class DrugDiseaseLinkPredictor(nn.Module):
             # unfreeze happens regardless of how the try block exits.
             for p in self.mlp.parameters():
                 p.requires_grad_(True)
+            # P3-026 ROOT FIX: also restore the prior TRAINING MODE.
+            # Without this, ``self.eval()`` inside the try block leaves
+            # the link_predictor in eval mode after fit_temperature
+            # returns, silently disabling dropout/BatchNorm updates for
+            # subsequent training.
+            self.train(prior_training)

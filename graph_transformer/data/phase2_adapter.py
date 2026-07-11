@@ -85,7 +85,7 @@ import numpy as np
 import torch
 
 from . import DEFAULT_FEATURE_DIMS, EDGE_TYPES
-from .graph_builder import BiomedicalGraphBuilder
+from .graph_builder import BiomedicalGraphBuilder, _deterministic_seed
 
 logger = logging.getLogger(__name__)
 
@@ -239,13 +239,13 @@ def adapt_phase2_to_phase3(
         )
 
     # ─── Step 3: Build Gene → Protein mapping (by gene_symbol) ─────────
-    # This is used to derive (pathway, disrupted_in, disease) edges.
-    gene_symbol_to_protein_id: Dict[str, str] = {}
-    for gene in p2_nodes.get("Gene", []):
-        gene_symbol = str(gene.get("gene_symbol", "")).strip().upper()
-        if gene_symbol:
-            gene_symbol_to_protein_id[gene_symbol] = gene["id"]
-
+    # P3-021 ROOT FIX: removed the dead ``gene_symbol_to_protein_id`` dict
+    # that was populated but NEVER READ. The actual gene→protein mapping
+    # uses ``gene_id_to_uniprot`` below, which is built via
+    # ``protein_id_by_name`` lookup. Keeping the dead dict around made the
+    # code look like it did two things when it only did one — a maintenance
+    # trap. The mapping that IS read (``gene_id_to_uniprot``) is built
+    # directly from the Protein nodes' names.
     protein_id_by_name: Dict[str, str] = {}
     for protein in p2_nodes.get("Protein", []):
         name = str(protein.get("name", "")).strip().upper()
@@ -309,9 +309,17 @@ def adapt_phase2_to_phase3(
         if not drug_name:
             drug_name = compound["id"].lower()
         p2_id_to_p3_name[compound["id"]] = drug_name
-        feat = np.random.default_rng(seed + hash(drug_name) & 0xFFFFFFFF).standard_normal(
-            DEFAULT_FEATURE_DIMS["drug"]
-        ).astype(np.float32)
+        # P3-025 ROOT FIX: replaced ``seed + hash(drug_name) & 0xFFFFFFFF``
+        # with ``_deterministic_seed(seed, drug_name)``. Two issues with the
+        # old expression: (1) Python's ``hash()`` is randomized per process
+        # via PYTHONHASHSEED, so the same drug got DIFFERENT feature vectors
+        # across runs (non-reproducible graph topology, CI flakes). (2) The
+        # ``+`` / ``&`` operator-precedence ambiguity was technically
+        # intended (``&`` is lower precedence than ``+``), but the SHA-256
+        # approach eliminates the question entirely.
+        feat = np.random.default_rng(
+            _deterministic_seed(str(seed), drug_name)
+        ).standard_normal(DEFAULT_FEATURE_DIMS["drug"]).astype(np.float32)
         gt_builder.register_node("drug", drug_name, feat)
 
     # Register proteins (Protein → protein)
@@ -320,8 +328,9 @@ def adapt_phase2_to_phase3(
         if not protein_name:
             protein_name = protein["id"]
         p2_id_to_p3_name[protein["id"]] = protein_name
+        # P3-025 ROOT FIX: same SHA-256 deterministic seed as for drugs.
         feat = np.random.default_rng(
-            seed + hash(protein_name) & 0xFFFFFFFF
+            _deterministic_seed(str(seed), protein_name)
         ).standard_normal(DEFAULT_FEATURE_DIMS["protein"]).astype(np.float32)
         gt_builder.register_node("protein", protein_name, feat)
 
@@ -333,8 +342,9 @@ def adapt_phase2_to_phase3(
         # Use the stable pathway ID as the canonical name (pathway names
         # are descriptive, not unique-enough for indexing).
         p2_id_to_p3_name[pathway["id"]] = pathway["id"]
+        # P3-025 ROOT FIX: same SHA-256 deterministic seed as for drugs.
         feat = np.random.default_rng(
-            seed + hash(pathway["id"]) & 0xFFFFFFFF
+            _deterministic_seed(str(seed), pathway["id"])
         ).standard_normal(DEFAULT_FEATURE_DIMS["pathway"]).astype(np.float32)
         gt_builder.register_node("pathway", pathway["id"], feat)
 
@@ -343,8 +353,9 @@ def adapt_phase2_to_phase3(
         raw_name = str(disease.get("name", disease["id"])).strip()
         disease_name = _canonical_disease_name(raw_name) if raw_name else disease["id"]
         p2_id_to_p3_name[disease["id"]] = disease_name
+        # P3-025 ROOT FIX: same SHA-256 deterministic seed as for drugs.
         feat = np.random.default_rng(
-            seed + hash(disease_name) & 0xFFFFFFFF
+            _deterministic_seed(str(seed), disease_name)
         ).standard_normal(DEFAULT_FEATURE_DIMS["disease"]).astype(np.float32)
         gt_builder.register_node("disease", disease_name, feat)
 
@@ -354,8 +365,9 @@ def adapt_phase2_to_phase3(
         if not outcome_name:
             outcome_name = outcome["id"]
         p2_id_to_p3_name[outcome["id"]] = outcome_name
+        # P3-025 ROOT FIX: same SHA-256 deterministic seed as for drugs.
         feat = np.random.default_rng(
-            seed + hash(outcome_name) & 0xFFFFFFFF
+            _deterministic_seed(str(seed), outcome_name)
         ).standard_normal(
             DEFAULT_FEATURE_DIMS["clinical_outcome"]
         ).astype(np.float32)
@@ -440,16 +452,46 @@ def adapt_phase2_to_phase3(
         f"treatment pairs from (drug, treats, disease) edges."
     )
 
-    # Log which KNOWN_POSITIVES are present in the graph (for recovery test)
+    # Log which KNOWN_POSITIVES are present in the graph (for recovery test).
+    # P3-022 ROOT FIX: the previous code used ``except Exception: pass``,
+    # which silently swallowed ALL exceptions:
+    #   - ImportError (rl package not installed) → kp_set never populated,
+    #     present_kps always empty, log says "0/N KNOWN_POSITIVES present"
+    #     even when they ARE present. Misleading, hides real integration
+    #     bugs between Phase 3 and Phase 4.
+    #   - ValueError (rl package format change, e.g. 3-tuples instead of
+    #     2-tuples) → the unpacking ``for d, v in _KP`` raises, swallowed,
+    #     same misleading "0/N" log.
+    # We now catch ONLY ImportError (Phase 4 not deployed yet — log a
+    # WARNING so the user knows the integration check was skipped) and
+    # explicitly catch ValueError (data-format drift — log an ERROR so
+    # the maintainer fixes the unpacking). No bare ``except Exception``.
     try:
         from rl.rl_drug_ranker import KNOWN_POSITIVES as _KP
-        kp_set = {(d.lower(), v.lower()) for d, v in _KP}
-        present_kps = [p for p in known_pairs if p in kp_set]
-        logger.info(
-            f"adapt_phase2_to_phase3: {len(present_kps)}/{len(_KP)} "
-            f"KNOWN_POSITIVES present in the Phase 2 graph: {present_kps}"
+    except ImportError as e:
+        logger.warning(
+            f"adapt_phase2_to_phase3: Phase 4 rl package not importable "
+            f"({e}); skipping KNOWN_POSITIVES recovery check. This is "
+            f"expected when running Phase 3 standalone, but in production "
+            f"the Phase 4 ranker MUST be installed for the scientific "
+            f"validation gate to be meaningful."
         )
-    except Exception:
-        pass
+    else:
+        try:
+            kp_set = {(d.lower(), v.lower()) for d, v in _KP}
+        except (ValueError, TypeError) as e:
+            logger.error(
+                f"adapt_phase2_to_phase3: rl.KNOWN_POSITIVES format drift "
+                f"— expected 2-tuples (drug, disease), got "
+                f"{type(_KP).__name__} with elements of unexpected shape "
+                f"({e}). The recovery check is skipped. Update the "
+                f"unpacking in this block to match the new format."
+            )
+        else:
+            present_kps = [p for p in known_pairs if p in kp_set]
+            logger.info(
+                f"adapt_phase2_to_phase3: {len(present_kps)}/{len(_KP)} "
+                f"KNOWN_POSITIVES present in the Phase 2 graph: {present_kps}"
+            )
 
     return node_features, edge_indices, node_maps, known_pairs

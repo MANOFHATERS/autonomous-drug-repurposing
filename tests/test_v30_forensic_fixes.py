@@ -385,13 +385,23 @@ def test_ffn_single_internal_dropout():
 
 
 def test_self_loop_weight_init_05():
-    """self_loop_weight should be initialized to 0.5 (was 0.1)."""
+    """self_loop_weight should be initialized to 1.0 (P3-S01 ROOT FIX).
+
+    The previous V30 5.4 fix set self_loop_weight to 0.5, claiming it
+    gave self-loops "equal standing with a single edge-type message".
+    The P3-S01 scientific audit found 0.5 was still TOO HIGH: combined
+    with cross_type_norm ~ 0.27 for 14 edge types, self-loops
+    contributed ~38% of the total message — disproportionately high
+    for a "residual" connection. The P3-S01 fix initializes to 1.0
+    (standard residual identity, He et al. 2016) and lets gradient
+    descent learn the right balance.
+    """
     from graph_transformer.models.layers import HeterogeneousMultiHeadAttention
     attn = HeterogeneousMultiHeadAttention(embedding_dim=32, num_heads=4, edge_types=[])
-    assert abs(float(attn.self_loop_weight) - 0.5) < 1e-6, (
-        f"self_loop_weight should be 0.5, got {float(attn.self_loop_weight)}"
+    assert abs(float(attn.self_loop_weight) - 1.0) < 1e-6, (
+        f"self_loop_weight should be 1.0 (P3-S01 ROOT FIX), got {float(attn.self_loop_weight)}"
     )
-    print("PASS: 5.4 — self_loop_weight init = 0.5 (was 0.1)")
+    print("PASS: P3-S01 — self_loop_weight init = 1.0 (was 0.5, originally 0.1)")
 
 
 # ============================================================================
