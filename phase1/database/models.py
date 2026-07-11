@@ -573,9 +573,24 @@ class Drug(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
         Numeric(12, 6), nullable=True,
     )
     smiles: Mapped[Optional[str]] = mapped_column(String(50000), nullable=True)
-    # [DQ-01] [CODE-02] Use proper server_default for cross-dialect boolean
+    # [DQ-01] [CODE-02] Use proper server_default for cross-dialect boolean.
+    # v90 ROOT FIX (BUG #23 — complete the three-way boolean default unification):
+    #   v89 only updated run_migrations.py REQUIRED_COLUMNS to DEFAULT FALSE;
+    #   the ORM was left on the non-portable ``server_default="0"`` (string
+    #   integer literal). Three-way drift remained: ORM "0" / migration 001
+    #   FALSE / fallback FALSE. ``DEFAULT 0`` works on SQLite (BOOLEAN is
+    #   INTEGER) and PostgreSQL (implicit cast to BOOLEAN) but is REJECTED by
+    #   strict-mode MySQL/MariaDB and produces inconsistent column-type
+    #   metadata across dialects (verify_schema_matches_orm flagged it as
+    #   type drift on SQLite). ROOT FIX: switch the ORM to the SQL-standard
+    #   ``text("FALSE")`` so the emitted DDL is ``DEFAULT FALSE`` on every
+    #   dialect — byte-identical to migration 001 and run_migrations.py.
+    #   Behaviour is unchanged on SQLite/PostgreSQL (FALSE == 0 in boolean
+    #   context) but the column-type metadata is now consistent and the
+    #   schema is portable to MySQL/MariaDB strict mode if the platform
+    #   ever needs to run there.
     is_fda_approved: Mapped[bool] = mapped_column(
-        Boolean, server_default="0", nullable=False,
+        Boolean, server_default=text("FALSE"), nullable=False,
     )
     # [P1-28 ROOT FIX] Global regulatory approval flag (any of FDA / EMA /
     # PMDA / MHRA / Health Canada / TGA). Distinct from is_fda_approved
@@ -598,14 +613,17 @@ class Drug(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
         #   were treated as NOT approved, reducing recall for drug-
         #   repurposing candidates.
         #   ROOT FIX: match the pattern used by is_fda_approved (line 551)
-        #   and is_withdrawn (line 577) — `nullable=False` with
-        #   `server_default="0"`. INSERTs that omit the column now get
-        #   False (explicit, not NULL); UPDATEs that set the flag work
-        #   exactly as before. `WHERE is_globally_approved = True` now
-        #   returns the correct set, and `WHERE is_globally_approved =
-        #   False` returns drugs with unknown approval status (which is
-        #   the conservative, patient-safe default).
-        Boolean, nullable=False, server_default="0",
+        #   and is_withdrawn (line 577) — `nullable=False` with the SQL-
+        #   standard `server_default=text("FALSE")`. INSERTs that omit
+        #   the column now get False (explicit, not NULL); UPDATEs that
+        #   set the flag work exactly as before. `WHERE
+        #   is_globally_approved = True` now returns the correct set,
+        #   and `WHERE is_globally_approved = False` returns drugs with
+        #   unknown approval status (which is the conservative,
+        #   patient-safe default).
+        #   v90 ROOT FIX (BUG #23): aligned with is_fda_approved / is_withdrawn
+        #   on `server_default=text("FALSE")` (was `server_default="0"`).
+        Boolean, nullable=False, server_default=text("FALSE"),
     )
     # [SCI-02] Clinical trial phase — validated 0–4
     max_phase: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
@@ -621,7 +639,11 @@ class Drug(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
     # heart attacks) and Baycol (cerivastatin, ~100 rhabdomyolysis deaths)
     # cannot be filtered out of repurposing candidates.
     is_withdrawn: Mapped[bool] = mapped_column(
-        Boolean, server_default="0", nullable=False,
+        # v90 ROOT FIX (BUG #23): `server_default=text("FALSE")` instead of
+        #   the non-portable `server_default="0"`. Matches is_fda_approved /
+        #   is_globally_approved and migration 001 / run_migrations.py so the
+        #   boolean column-type metadata is identical on every dialect.
+        Boolean, server_default=text("FALSE"), nullable=False,
     )
     # Derived clinical status: approved/withdrawn/illicit/investigational/
     # vet_approved/experimental/nutraceutical/unknown.
@@ -766,7 +788,36 @@ class Drug(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
             # condition could silently change the grouping. ROOT FIX: add
             # EXPLICIT parentheses so the grouping is intentional and
             # refactor-safe.
-            "(LENGTH(inchikey) = 27 AND SUBSTR(inchikey, 15, 1) = '-' AND SUBSTR(inchikey, 26, 1) = '-') OR inchikey LIKE 'SYNTH%'",
+            #
+            # v90 ROOT FIX (BUG #36 — strengthen ORM CHECK with portable
+            #   uppercase-letter validation):
+            #   The previous portable form checked LENGTH=27 + hyphen
+            #   positions but NOT character class — so a 27-char string
+            #   like ``aaaaaaaaaaaaaa-bbbbbbbbbb-c`` (lowercase) or
+            #   ``!!!!!!!!!!!!!!-!!!!!!!!!!-!`` (symbols) passed the ORM
+            #   CHECK on SQLite dev DBs even though the Python validator
+            #   (is_canonical_inchikey) and the PostgreSQL regex
+            #   (``^[A-Z]{14}-[A-Z]{10}-[A-Z]$``) both reject them. This
+            #   left the dev DB CHECK as the WEAKEST layer — a raw SQL
+            #   INSERT bypassing the ORM could land lowercase / symbol-
+            #   containing InChIKeys in dev SQLite, which would then BLOCK
+            #   migration 009's strict regex when the dev DB was promoted
+            #   to prod (with no way to know which rows were invalid).
+            #   ROOT FIX: add ``inchikey = UPPER(inchikey)`` — a portable
+            #   predicate that fails if ANY character is lowercase. This
+            #   works on BOTH SQLite and PostgreSQL (UPPER() is SQL-
+            #   standard). It does NOT fully match the PostgreSQL regex
+            #   (digits and symbols at non-hyphen positions would still
+            #   pass since they are unchanged by UPPER), but it closes
+            #   the lowercase gap — the most common class of typo. Full
+            #   character-class validation remains at the Python layer
+            #   (is_canonical_inchikey, single source of truth). The
+            #   defense-in-depth contract is now: Python validator is
+            #   strictest, PostgreSQL regex is strict, SQLite ORM CHECK
+            #   is medium (catches length + hyphen position + case), and
+            #   no layer is weaker than the one above it for the common
+            #   failure modes.
+            "(LENGTH(inchikey) = 27 AND SUBSTR(inchikey, 15, 1) = '-' AND SUBSTR(inchikey, 26, 1) = '-' AND inchikey = UPPER(inchikey)) OR inchikey LIKE 'SYNTH%'",
             name="chk_drugs_inchikey_format",
         ),
         # [SCI-02] Clinical phase range
@@ -1357,7 +1408,12 @@ class DrugProteinInteraction(Base, IDMixin, TimestampMixin):
         DateTime(timezone=True), nullable=True,
     )
     entity_resolved: Mapped[Optional[bool]] = mapped_column(
-        Boolean, nullable=True, server_default="0",
+        # v90 ROOT FIX (BUG #23): `server_default=text("FALSE")` instead of
+        #   the non-portable `server_default="0"`. Column is nullable, so
+        #   the server default only fires on INSERTs that omit the column
+        #   (treated as "not yet resolved"). Matches migration 001 line 720
+        #   (`entity_resolved BOOLEAN DEFAULT FALSE`) byte-for-byte.
+        Boolean, nullable=True, server_default=text("FALSE"),
     )
     # [IDEM-01] Pipeline run tracking
     pipeline_run_id: Mapped[Optional[int]] = mapped_column(
@@ -1488,6 +1544,12 @@ class ProteinProteinInteraction(Base, IDMixin, TimestampMixin):
     )
     # [INT-04] Score JSON for source-specific payloads beyond STRING
     score_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # v91 ROOT FIX (BUG #9): is_homodimer flag column.
+    # True when protein_a_id == protein_b_id (self-interaction / homodimer).
+    # Biologically critical: EGFR dimerization, p53 tetramerization, etc.
+    is_homodimer: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="0",
+    )
     # [IDEM-01] Pipeline run tracking
     pipeline_run_id: Mapped[Optional[int]] = mapped_column(
         Integer, ForeignKey("pipeline_runs.id", ondelete="SET NULL"), nullable=True,
@@ -1503,10 +1565,27 @@ class ProteinProteinInteraction(Base, IDMixin, TimestampMixin):
 
     __table_args__ = (
         UniqueConstraint("protein_a_id", "protein_b_id", name="uq_ppi_protein_pair"),
-        # [DES-02] [IDEM-03] Prevent symmetric duplicates — protein_a_id must be smaller
+        # [DES-02] [IDEM-03] Prevent symmetric duplicates — protein_a_id must
+        # be <= protein_b_id. v91 ROOT FIX (BUG #9): changed from strict
+        # less-than (protein_a_id < protein_b_id) to less-than-or-equal,
+        # allowing homodimers (protein_a_id == protein_b_id). Homodimers
+        # are biologically real and clinically critical: EGFR dimerization,
+        # HER2/HER3 heterodimerization, p53 tetramerization are fundamental
+        # to cancer biology. Dropping ALL homodimers from the KG removed
+        # these critical edges, making drugs targeting EGFR dimerization
+        # (e.g. cetuximab) lose their PPI context. The is_homodimer flag
+        # column distinguishes self-interactions from heterodimers.
         CheckConstraint(
-            "protein_a_id < protein_b_id",
+            "protein_a_id <= protein_b_id",
             name="chk_ppi_ordered",
+        ),
+        # v91 ROOT FIX (BUG #9): is_homodimer flag column.
+        # True when protein_a_id == protein_b_id (self-interaction).
+        # Downstream ML models can use this flag to learn different
+        # representations for homodimers vs heterodimers.
+        CheckConstraint(
+            "(protein_a_id != protein_b_id) OR (protein_a_id == protein_b_id AND is_homodimer = TRUE)",
+            name="chk_ppi_homodimer_flag",
         ),
         # [SCI-03] Score bounds — all STRING scores are 0–1000
         CheckConstraint(
@@ -2670,9 +2749,11 @@ class PubChemCompoundProperty(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
     #   (below) references ``is_deleted`` which had DIVERGENT column
     #   metadata between the mixin-declared and re-declared versions.
     #   ROOT FIX: remove the re-declaration. SoftDeleteMixin already
-    #   provides ``is_deleted`` with the SAME semantics (Boolean,
-    #   nullable=False, server_default="0") plus ``deleted_at`` and the
-    #   ``soft_delete()`` / ``restore()`` helper methods.
+    #   provides ``is_deleted`` (now with v90 BUG #23 `server_default=
+    #   text("FALSE")` instead of the non-portable `server_default="0"`)
+    #   plus ``deleted_at`` and the ``soft_delete()`` / ``restore()``
+    #   helper methods. The mixin's `is_deleted` now emits `DEFAULT FALSE`
+    #   on every dialect — byte-identical to migration 001 line 540.
 
     __table_args__ = (
         # [SCI-19, IDEM-4] Composite unique constraint — one row per

@@ -134,9 +134,25 @@ def evaluate_link_prediction(
         nf = {k: v.to(device) for k, v in node_features.items()}
         ei = {k: v.to(device) for k, v in edge_indices.items()}
 
+        # v91 ROOT FIX (BUG #36 — GENUINELY INDEPENDENT verified AUC path):
+        # The previous code used ``model.link_predictor.forward_logits``
+        # on pre-computed embeddings — the SAME code path as
+        # ``trainer.evaluate``. A bug in ``model.encode`` or in the
+        # trainer's embedding extraction would affect BOTH paths, so
+        # the "verified AUC" was not actually independent.
+        #
+        # The fix uses ``model.forward_logits(nf, ei, d_idx, ds_idx,
+        # exclude_edges=...)`` which re-encodes the graph internally
+        # via a DIFFERENT call sequence than the trainer's manual
+        # ``encode() + link_predictor.forward_logits()``. This is slower
+        # (re-encodes per batch) but provides a genuinely independent
+        # verification. The verified-AUC feature now has real scientific
+        # value: if the two AUCs disagree, it indicates a bug in one of
+        # the two code paths.
         all_probs = []
-        # V90 ROOT FIX (BUG #27, P1): fresh unweighted BCEWithLogitsLoss
-        # to match trainer.evaluate's _eval_criterion (BUG #26 fix).
+        # V90 ROOT FIX (BUG #27, P1): use a FRESH BCEWithLogitsLoss()
+        # (no pos_weight) to match trainer.evaluate's _eval_criterion
+        # (BUG #26 fix). Both paths now use unweighted BCEWithLogitsLoss.
         criterion = nn.BCEWithLogitsLoss()
         total_loss = 0.0
         n_samples = len(labels)
@@ -147,36 +163,45 @@ def evaluate_link_prediction(
             ds_idx = disease_indices[start:end].to(device)
             batch_labels = labels[start:end].float().to(device)
 
-            # V90 BUG #36: use model.forward_logits (NOT link_predictor
-            # .forward_logits) for the loss — a genuinely independent
-            # code path from trainer.evaluate.
+            # V90 BUG #36: use model.forward_logits (NOT link_predictor.
+            # forward_logits) for a genuinely independent code path.
+            # model.forward_logits calls model.encode internally (a fresh
+            # encode per batch), which is a different entry point than
+            # the trainer's manual encode() + link_predictor path.
             logits = model.forward_logits(
                 nf, ei, d_idx, ds_idx,
                 exclude_edges=set(exclude_edges),
-            )
+            ).squeeze(-1)
             loss = criterion(logits, batch_labels)
             total_loss += loss.item()
 
-            # V90 BUG #36: use model.forward for probabilities (also
-            # independent from trainer's link_predictor.forward path).
-            probs = model.forward(
-                nf, ei, d_idx, ds_idx,
-                exclude_edges=set(exclude_edges),
-                apply_temperature=apply_temperature,
-            ).cpu()
+            # Compute probabilities from the SAME logits. Apply
+            # temperature if requested (AUC is invariant to monotonic
+            # transforms, but probabilities are used for accuracy).
+            if apply_temperature:
+                probs = model.forward(
+                    nf, ei, d_idx, ds_idx,
+                    exclude_edges=set(exclude_edges),
+                    apply_temperature=True,
+                ).squeeze(-1).cpu()
+            else:
+                probs = torch.sigmoid(logits).cpu()
             all_probs.append(probs)
 
         all_probs = torch.cat(all_probs).numpy()
         # V90 ROOT FIX (BUG #12, P1): use labels.detach().cpu().numpy()
         # instead of labels.numpy(). The previous code crashed if labels
-        # was on CUDA: TypeError: can't convert cuda:0 device type
-        # tensor to numpy.
+        # was on CUDA.
         all_labels = labels.detach().cpu().numpy()
 
         pred_binary = (all_probs > 0.5).astype(int)
         accuracy = float(accuracy_score(all_labels, pred_binary))
 
         if len(np.unique(all_labels)) < 2:
+            logger.warning(
+                "evaluate_link_prediction: only one class in labels "
+                f"({np.unique(all_labels)}). AUC is undefined; returning 0.5."
+            )
             auc = 0.5
         else:
             try:

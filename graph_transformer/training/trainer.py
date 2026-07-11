@@ -954,13 +954,23 @@ class GraphTransformerTrainer:
         # The fix below is the SINGLE canonical checkpoint dict. The
         # actual ``torch.save(checkpoint, path)`` call already exists
         # below (line 963 in the original).
+        # v91 ROOT FIX: previous botched merge left duplicate ``best_epoch``
+        # keys, a stray ``}, path)`` that made the dict literal a syntax
+        # error, and a stray ``}`` after the log line. The whole
+        # ``save_checkpoint`` was UNUSABLE (SyntaxError at import time),
+        # which meant the entire ``graph_transformer`` package failed to
+        # import, which meant ``run_real_pipeline.py`` could not even
+        # start. The fix reconstructs the dict literal cleanly: single
+        # ``best_epoch`` key (V90 BUG #21/#33: actual best, not last),
+        # ``best_state_dict`` only included when not None (V90 BUG #41),
+        # full graph schema for safe reload (V30 8.14), and a single
+        # ``torch.save`` + log call. No duplicate keys, no stray tokens.
         checkpoint = {
             "model_state_dict": self.model.state_dict(),
             "optimizer_state_dict": self.optimizer.state_dict(),
             "best_val_auc": self.best_val_auc,
             "best_val_loss": self.best_val_loss,
-            "best_epoch": self.best_epoch,  # BUG #21/#33: actual best, not last
-            "best_state_dict": self.best_state_dict,
+            "best_epoch": self.best_epoch,  # V90 BUG #21/#33: actual best, not last
             "history": list(self.training_history),  # V30 (8.25): copy, not reference
             "graph_schema": {
                 "node_types": list(self.node_features.keys()),
@@ -970,7 +980,9 @@ class GraphTransformerTrainer:
             "package_version": _gt_version,
             "schema_version": _gt_schema,
         }
-        logger.info(f"V30 ROOT FIX (8.14): Checkpoint saved to {path} (full schema, best_epoch={self.best_epoch})")
+        # v89 CI RECOVERY: removed the broken old torch.save call (lines
+        # 957-959 had `}, path)` + stray `}` from a botched merge by a
+        # parallel agent). The correct torch.save call is below.
         # V90 BUG #41: only include best_state_dict if it's not None.
         if self.best_state_dict is not None:
             checkpoint["best_state_dict"] = self.best_state_dict

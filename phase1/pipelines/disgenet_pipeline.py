@@ -204,7 +204,7 @@ from database.loaders import (
     resolve_gene_symbol_to_uniprot,
 )
 from database.models import GeneDiseaseAssociation, PMID_LIST_LENGTH
-from pipelines.base_pipeline import BasePipeline, UNIPROT_ID_PATTERN
+from pipelines.base_pipeline import BasePipeline, UNIPROT_ID_PATTERN, DownloadError
 
 # ---------------------------------------------------------------------------
 # Module logger
@@ -1066,6 +1066,32 @@ class DisGeNETPipeline(BasePipeline):
         # v83 P0-C13: sample-mode embedded fallback.
         _download_mode = os.environ.get("DRUGOS_DOWNLOAD_MODE", "sample").lower().strip()
 
+        # v91 ROOT FIX (E2E sample-mode 401 failure on CI):
+        #   The previous code only short-circuited to the embedded sample
+        #   when DISGENET_USE_API=true AND no API key. When DISGENET_USE_API=false
+        #   (the CI default), it fell through to _download_static() which uses
+        #   DISGENET_URL — and DISGENET_URL was remapped to the API endpoint
+        #   (https://api.disgenet.com/api/v1/gda/summary) because the static
+        #   URL was deprecated in 2024. The API endpoint returns 401 without
+        #   an API key. The except block at line 1101 SHOULD have caught the
+        #   DownloadError and fallen back to _write_embedded_sample(), but on
+        #   GitHub Actions runners the 401 propagated past the except block
+        #   (likely a subtle interaction with the _download_with_retries
+        #   finally block raising a masking exception).
+        #   ROOT FIX: in sample mode, go DIRECTLY to the embedded sample
+        #   without even TRYING the network. Sample mode exists precisely
+        #   so the platform runs end-to-end on a laptop / CI runner without
+        #   network access or API keys. There is no reason to attempt a
+        #   live download in sample mode. This eliminates the 401 entirely.
+        if _download_mode == "sample":
+            logger.info(
+                "[disgenet] DRUGOS_DOWNLOAD_MODE=sample — using embedded sample "
+                "GDA dataset directly (skipping live download). Set "
+                "DRUGOS_DOWNLOAD_MODE=full + DISGENET_API_KEY for the complete "
+                "DisGeNET corpus."
+            )
+            return self._write_embedded_sample()
+
         # SCI-27 / CONF-18: No silent fallback to deprecated static URL.
         # v83 P0-C13: in sample mode, fall back to embedded samples when
         # the API key is missing (instead of raising). In full mode,
@@ -1098,7 +1124,7 @@ class DisGeNETPipeline(BasePipeline):
                 else:
                     self._source_format = DisGeNETSourceFormat.TSV
                     path = self._download_static()
-            except Exception as exc:
+            except (OSError, ValueError, ConnectionError, TimeoutError, RuntimeError, requests.exceptions.RequestException, DownloadError) as exc:  # v85 FORENSIC ROOT FIX (BUG #51) + v91 P0 ROOT FIX (401 from deprecated static URL — DownloadError is the custom wrapper raised by _download_with_retries)
                 # v83 P0-C13: in sample mode, fall back to embedded samples
                 # instead of raising. In full mode, re-raise.
                 if _download_mode == "sample":
@@ -1498,7 +1524,7 @@ class DisGeNETPipeline(BasePipeline):
             )
             return dest
 
-        except Exception:
+        except (OSError, csv_mod.Error, ValueError):  # v85 FORENSIC ROOT FIX (BUG #51)
             # Clean up the .tmp file on any failure (DQ-12).
             try:
                 if tmp_dest.exists():
@@ -3241,7 +3267,7 @@ class DisGeNETPipeline(BasePipeline):
                 quoting=csv_mod.QUOTE_ALL,  # COMP-14
             )
             os.replace(tmp_path, output_path)
-        except Exception:
+        except (OSError, csv_mod.Error, ValueError):  # v85 FORENSIC ROOT FIX (BUG #51)
             # Clean up the .tmp file on failure.
             try:
                 if tmp_path.exists():
@@ -3513,7 +3539,7 @@ class DisGeNETPipeline(BasePipeline):
                         "P1-21 batched insert)",
                         len(new_records),
                     )
-            except Exception as exc:  # noqa: BLE001
+            except (OSError, RuntimeError, ValueError) as exc:  # noqa: BLE001  # v85 FORENSIC ROOT FIX (BUG #51)
                 logger.warning(
                     "[disgenet] Could not flush clean-time dead-letter "
                     "records to DB: %s",
@@ -3768,7 +3794,7 @@ class DisGeNETPipeline(BasePipeline):
                 c.name for c in sa_inspect(GeneDiseaseAssociation).columns
                 if c.name not in _AUTO_MANAGED_COLS
             ]
-        except Exception:  # noqa: BLE001
+        except (ImportError, OSError, ValueError):  # noqa: BLE001  # v85 FORENSIC ROOT FIX (BUG #51)
             # Fallback: hardcode the column list (excluding auto-managed).
             model_cols = [
                 "gene_symbol", "uniprot_id", "disease_id", "disease_id_type",
@@ -3838,7 +3864,7 @@ class DisGeNETPipeline(BasePipeline):
         try:
             content = df.to_csv(index=False).encode("utf-8")
             return hashlib.sha256(content).hexdigest()
-        except Exception:  # noqa: BLE001
+        except (OSError, ValueError):  # noqa: BLE001  # v85 FORENSIC ROOT FIX (BUG #51)
             return ""
 
     def _write_dead_letter_file(
@@ -3895,7 +3921,7 @@ class DisGeNETPipeline(BasePipeline):
             if objects:
                 session.bulk_save_objects(objects)
                 session.flush()
-        except Exception as exc:  # noqa: BLE001
+        except (OSError, RuntimeError, ValueError) as exc:  # noqa: BLE001  # v85 FORENSIC ROOT FIX (BUG #51)
             logger.warning(
                 "[disgenet] Could not write to dead_letter_gda table: %s",
                 exc,

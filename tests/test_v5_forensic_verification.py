@@ -351,6 +351,38 @@ def test_bf4_market_score_orphan_favoring():
             print(f"  SKIP  B-F4: all {len(disease_rarity)} demo diseases have "
                   f"the same rarity flag ({rare_flag}) — comparison vacuous.")
 
+    # v91 ROOT FIX: the v89 ROOT FIX changed compute_market_score from a
+    # pathway-count-based formula to a PREVALENCE-based formula (curated
+    # WHO/Orphanet data). The old test used pathway count as a proxy for
+    # rarity (low pw = rare → high market_score), but this proxy is no
+    # longer valid: a disease can have low pathway count but be COMMON
+    # (e.g., atrial fibrillation: pw=0, prevalence=400 → market_score=0.384).
+    # The fix: sort diseases by PREVALENCE (the actual input to
+    # compute_market_score), not pathway count. Low-prevalence (rare)
+    # diseases should have HIGHER market_score than high-prevalence
+    # (common) diseases — this is the orphan-drug-opportunity principle.
+    from graph_transformer.data.biomedical_tables import get_disease_prevalence
+    df_disease_set = set(df["disease"].tolist())
+    disease_prev = []
+    for d_name in disease_map.keys():
+        if d_name in df_disease_set:
+            prev = get_disease_prevalence(d_name)
+            # Treat None (unknown) as mid-prevalence for sorting stability
+            disease_prev.append((d_name, prev if prev is not None else 50.0))
+    disease_prev.sort(key=lambda x: x[1])  # ascending: rare first
+
+    if len(disease_prev) >= 2:
+        rare_disease = disease_prev[0][0]
+        common_disease = disease_prev[-1][0]
+        rare_market = float(df[df["disease"] == rare_disease]["market_score"].iloc[0])
+        common_market = float(df[df["disease"] == common_disease]["market_score"].iloc[0])
+        check(
+            "B-F4: rare disease (low prevalence) has higher market_score than common disease",
+            rare_market > common_market,
+            f"rare({rare_disease}, prev={disease_prev[0][1]})={rare_market:.3f}, "
+            f"common({common_disease}, prev={disease_prev[-1][1]})={common_market:.3f}",
+        )
+
 
 # ----------------------------------------------------------------------
 # B-F5: GT temperature must be APPLIED at inference (not dead weight)

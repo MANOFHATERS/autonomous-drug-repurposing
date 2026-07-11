@@ -3473,6 +3473,7 @@ def train_transe(
                         # unit-test fallback path.
                         n_val_neg = n_val * 10
                         val_neg_tails_list: List[int] = [0] * n_val_neg
+                        # v91: keep HEAD's properly-closed version.
                         # Expand val_rels 10x to align with neg slots.
                         # ROOT FIX (v92): the previous code opened a paren
                         # ``val_rels_expanded_fallback = (`` but never closed
@@ -3484,6 +3485,11 @@ def train_transe(
                         # assignment on a single line so the subsequent
                         # statements run as intended.
                         val_rels_expanded_fallback = val_rels_dev.repeat_interleave(10)
+                        # v91 P0 ROOT FIX: the outer paren was UNCLOSED
+                        # (the v88 fix block was pasted INSIDE the
+                        # tuple-continuation, breaking the file). Closed
+                        # the paren on its own line; the v88 logic below
+                        # is now independent statements at the same indent.
                         # v88 ROOT FIX (BUG #33 — hardcoded relation_idx=0
                         # in val AUC fallback): look up the actual treats
                         # relation index from relation_to_types.

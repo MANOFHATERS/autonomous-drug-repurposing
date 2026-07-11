@@ -4181,10 +4181,36 @@ def _parse_soft_file(
                                     raw_val = 0.0  # simplified
                                 else:
                                     raw_val = 0.0
-                            # Skip NaN even in non-drop strategies (fixes
-                            # GEO-5.9).
-                            if math.isnan(raw_val) and nan_strategy == "drop":
+                            # BUG #61 ROOT FIX: NaN/Inf expression values
+                            # must ALWAYS be dropped, regardless of
+                            # nan_strategy. NaN bypasses the `value < 0`
+                            # guard in _normalize_expression (NaN < 0 is
+                            # False) and math.log2(nan) = nan, so NaN
+                            # propagates through the threshold check into
+                            # edge features -> NaN loss in HGT training.
+                            # The previous code only dropped NaN when
+                            # nan_strategy == "drop"; for "zero" and
+                            # "impute_mean" it let NaN through (the
+                            # strategies replaced non-numeric STRINGS
+                            # with 0.0, but float("nan") is a valid float
+                            # that bypassed the ValueError path above).
+                            # Fix: drop NaN/Inf unconditionally BEFORE
+                            # _normalize_expression.
+                            if not math.isfinite(raw_val):
                                 metrics["records_dropped"] += 1
+                                _write_dead_letter({
+                                    "timestamp": _iso_now(),
+                                    "series_id": series_id,
+                                    "line_number": line_no,
+                                    "reason": "nan_or_inf_expression",
+                                    "record": {
+                                        "probe_id": probe_id,
+                                        "sample_id": sample_id,
+                                        "value": raw_val,
+                                    },
+                                    "parser_version": PARSER_VERSION,
+                                })
+                                metrics["records_dead_lettered"] += 1
                                 continue
                             # Resolve probe → gene → UniProt.
                             gene_id, gene_symbol = _resolve_probe_to_gene(

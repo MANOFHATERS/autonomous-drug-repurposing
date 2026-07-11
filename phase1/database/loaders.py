@@ -1486,11 +1486,14 @@ def _pre_validate_ppi(
             a_id = record.get("protein_a_id")
             b_id = record.get("protein_b_id")
             if a_id is not None and b_id is not None:
+                # v91 ROOT FIX (BUG #9): allow homodimers (a_id == b_id).
+                # Homodimers are biologically real (EGFR dimerization,
+                # p53 tetramerization). Set is_homodimer=True for
+                # self-interactions instead of quarantining them.
                 if a_id == b_id:
-                    raise ValueError(
-                        f"protein_a_id == protein_b_id ({a_id}) — "
-                        "self-interaction is not allowed"
-                    )
+                    record["is_homodimer"] = True
+                else:
+                    record["is_homodimer"] = False
                 if a_id > b_id:
                     logger.warning(
                         "%s: swapping protein_a_id(%d) > protein_b_id(%d)",
@@ -4041,7 +4044,13 @@ def _build_pubchem_compound_properties_table() -> Any:
             "enriched_at", DateTime(timezone=True),
             nullable=False, server_default=func.current_timestamp(),
         ),
-        Column("is_deleted", Boolean, default=False, server_default="0"),
+        # v90 ROOT FIX (BUG #23): `server_default=text("FALSE")` instead of
+        #   the non-portable `server_default="0"`. This Column object mirrors
+        #   the ORM PubChemCompoundProperty model — the previous "0" literal
+        #   diverged from the ORM (`server_default="0"` → now also FALSE) and
+        #   migration 005 (`is_deleted BOOLEAN NOT NULL DEFAULT FALSE`).
+        #   `text` is already imported at line 44 above.
+        Column("is_deleted", Boolean, default=False, server_default=text("FALSE")),
         Column("created_at", DateTime(timezone=True)),
         Column("updated_at", DateTime(timezone=True)),
         # V18 CD-2: align constraint NAME to ORM (was

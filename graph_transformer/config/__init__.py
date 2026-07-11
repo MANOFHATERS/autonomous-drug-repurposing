@@ -4,12 +4,28 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
-from ..data import (
-    DEFAULT_EDGE_TYPES,
-    DEFAULT_FEATURE_DIMS,
-    DEFAULT_NODE_TYPES,
-    LABEL_LEAKING_EDGES,
-)
+# v91 FORENSIC ROOT FIX: when `phase1/database/connection.py` does
+# `from config import settings`, Python can accidentally find THIS file
+# (graph_transformer/config/__init__.py) instead of phase1/config/settings.py
+# — a name collision between phase1/config/ and graph_transformer/config/.
+# When loaded as top-level `config`, the relative import `from ..data` goes
+# beyond the top-level package and raises ImportError. The fix: try the
+# relative import first (normal case when imported as graph_transformer.config),
+# fall back to an absolute import (defensive case when imported as top-level).
+try:
+    from ..data import (
+        DEFAULT_EDGE_TYPES,
+        DEFAULT_FEATURE_DIMS,
+        DEFAULT_NODE_TYPES,
+        LABEL_LEAKING_EDGES,
+    )
+except ImportError:
+    from graph_transformer.data import (
+        DEFAULT_EDGE_TYPES,
+        DEFAULT_FEATURE_DIMS,
+        DEFAULT_NODE_TYPES,
+        LABEL_LEAKING_EDGES,
+    )
 
 
 @dataclass
