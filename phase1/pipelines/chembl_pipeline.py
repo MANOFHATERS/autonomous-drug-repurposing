@@ -906,46 +906,33 @@ class ChEMBLPipeline(BasePipeline):
         # having issues. The fix: try gzip first, fall back to plain
         # CSV (without compression), and raise a clear error if both
         # fail. This makes the pipeline robust to transient API issues.
-        import gzip as _gzip
+        # v92 ROOT FIX (BUG P1-001): Removed dead try/except gzip fallback
+        # that was immediately overwritten by the extension-based read below.
+        # Merged the fallback into a single extension-based read with a
+        # compression-fallback on failure.
+        _compression = "gzip" if raw_path.suffix == ".gz" else None
         try:
             drugs_df = pd.read_csv(
                 raw_path,
-                compression="gzip",
+                compression=_compression,
                 low_memory=False,
                 encoding="utf-8",
             )
-        except (_gzip.BadGzipFile, OSError) as gz_exc:
-            logger.warning(
-                "[%s] V90 CI fix: gzip read failed (%s). Falling back to "
-                "plain CSV read (the ChEMBL API may have returned a "
-                "non-gzip response — rate limit, maintenance, etc.).",
-                self.source_name, gz_exc,
-            )
+        except Exception as read_exc:
+            # If the extension-based guess fails, try the opposite compression.
+            fallback = None if _compression == "gzip" else "gzip"
             try:
                 drugs_df = pd.read_csv(
                     raw_path,
-                    compression=None,
+                    compression=fallback,
                     low_memory=False,
                     encoding="utf-8",
                 )
-            except Exception as plain_exc:
+            except Exception as fallback_exc:
                 raise OSError(
-                    f"V90 CI fix: could not read {raw_path} as gzip ({gz_exc}) "
-                    f"or as plain CSV ({plain_exc}). The ChEMBL API may be "
-                    f"down or rate-limiting. Try again later."
-                ) from plain_exc
-        # v90 ROOT FIX (BUG #10): auto-detect compression from file
-        # extension instead of hardcoding compression="gzip". The v50
-        # path now writes .csv.gz (BUG #1 fix), but defensive coding
-        # ensures a plain .csv file (e.g. from a manual download or
-        # API error page) is still readable without BadGzipFile.
-        _compression = "gzip" if raw_path.suffix == ".gz" else None
-        drugs_df = pd.read_csv(
-            raw_path,
-            compression=_compression,
-            low_memory=False,
-            encoding="utf-8",
-        )
+                    f"Could not read {raw_path} as {_compression} ({read_exc}) "
+                    f"or as {fallback} ({fallback_exc})."
+                ) from fallback_exc
         initial_count = len(drugs_df)
         logger.info(
             "[%s] Loaded %d raw drug records from %s",

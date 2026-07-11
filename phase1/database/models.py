@@ -175,6 +175,16 @@ class ActivityType(str, enum.Enum):
     KD = "Kd"
     POTENCY = "potency"
     AC50 = "AC50"
+    # v92 ROOT FIX (BUG P1-060): added missing log-scale activity types
+    PIC50 = "pIC50"
+    PEC50 = "pEC50"
+    PKI = "pKi"
+    PKD = "pKd"
+    PKB = "pKb"
+    PED50 = "pED50"
+    PAC50 = "pAC50"
+    ED50 = "ED50"
+    KB = "Kb"
     UNKNOWN = "unknown"
 
 
@@ -326,6 +336,10 @@ def _validate_inchikey(value: Optional[str]) -> Optional[str]:
     try:
         from cleaning.normalizer import is_valid_inchikey as _canonical_is_valid_inchikey
         if _canonical_is_valid_inchikey(value):
+            # v92 ROOT FIX (BUG P1-068): normalize SYNTH keys to uppercase
+            # to prevent case-sensitivity collisions in the DB unique constraint.
+            if value.upper().startswith("SYNTH"):
+                return value.upper()
             return value
     except ImportError:
         # Fallback: replicate the canonical regex EXACTLY (no divergence).
@@ -342,7 +356,7 @@ def _validate_inchikey(value: Optional[str]) -> Optional[str]:
         if _STANDARD_INCHIKEY_RE.match(value):
             return value
         if upper.startswith("SYNTH"):
-            return value
+            return upper  # v92 ROOT FIX (BUG P1-068): normalize SYNTH keys to uppercase
     raise ValueError(
         f"Invalid InChIKey format: '{value}'. "
         "Must be 27-char standard format or start with 'SYNTH'."
@@ -817,7 +831,7 @@ class Drug(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
             #   is medium (catches length + hyphen position + case), and
             #   no layer is weaker than the one above it for the common
             #   failure modes.
-            "(LENGTH(inchikey) = 27 AND SUBSTR(inchikey, 15, 1) = '-' AND SUBSTR(inchikey, 26, 1) = '-' AND inchikey = UPPER(inchikey)) OR inchikey LIKE 'SYNTH%'",
+            "(LENGTH(inchikey) = 27 AND SUBSTR(inchikey, 15, 1) = '-' AND SUBSTR(inchikey, 26, 1) = '-' AND inchikey = UPPER(inchikey)) OR (inchikey LIKE 'SYNTH%' AND inchikey = UPPER(inchikey))",
             name="chk_drugs_inchikey_format",
         ),
         # [SCI-02] Clinical phase range
@@ -1447,7 +1461,9 @@ class DrugProteinInteraction(Base, IDMixin, TimestampMixin):
         # dev/test/prod all enforce the same constraints.
         CheckConstraint(
             "activity_type IS NULL OR activity_type IN "
-            "('IC50', 'EC50', 'Ki', 'Kd', 'potency', 'AC50', 'unknown')",
+            "('IC50', 'EC50', 'Ki', 'Kd', 'potency', 'AC50', "
+            "'pIC50', 'pEC50', 'pKi', 'pKd', 'pKb', 'pED50', 'pAC50', "
+            "'ED50', 'Kb', 'unknown')",
             name="chk_dpi_activity_type",
         ),
         CheckConstraint(
@@ -2882,54 +2898,20 @@ class RejectedRecord(Base, IDMixin):
         )
 
 
-# ===========================================================================
-# DEPRECATED: cleanup_orphan_gda_records moved to database.loaders (ARCH-01)
-# ===========================================================================
-
-
-def cleanup_orphan_gda_records(
-    session,
-    auto_commit: bool = False,
-    reference_timestamp=None,
-    dry_run: bool = False,
-) -> int:
-    """Delete GDA records with uniprot_id=NULL that have existed for > 24 hours.
-
-    .. deprecated::
-        This function has been moved to ``database.loaders.cleanup_orphan_gda_records``.
-        This stub remains for backward compatibility and will emit a
-        ``DeprecationWarning`` on every call.  Update all callers to import
-        from ``database.loaders`` instead.
-
-    [ARCH-01] Business logic moved out of the model layer (SRP).
-    [REL-04] Retry logic with exponential backoff added in loaders.
-    [LOG-01] Proper logging added in loaders.
-    [CODE-05] Bare except replaced with specific exception handling.
-
-    v89 ROOT FIX (BUG #32 — stub signature mismatch lost dry_run capability):
-      The previous stub signature was ``(session, auto_commit=False) -> int``
-      but the real function in loaders.py is
-      ``(session, auto_commit=False, reference_timestamp=None, dry_run=False) -> int``.
-      The stub did NOT forward ``reference_timestamp`` or ``dry_run`` — so
-      callers using the deprecated stub silently lost the ``dry_run`` safety
-      feature (a dry-run reports what WOULD be deleted without actually
-      deleting — critical for testing destructive cleanup on production
-      data). ROOT FIX: match the real function's signature exactly and
-      forward ALL kwargs. Callers who haven't migrated to the new import
-      path now get the full capability set.
-    """
-    import warnings
-    warnings.warn(
-        "cleanup_orphan_gda_records is deprecated in database.models. "
-        "Import from database.loaders instead. "
-        "This stub will be removed in a future version.",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    from database.loaders import cleanup_orphan_gda_records as _real_cleanup
-    return _real_cleanup(
-        session,
-        auto_commit=auto_commit,
-        reference_timestamp=reference_timestamp,
-        dry_run=dry_run,
-    )
+# v92 ROOT FIX (BUG P1-052): Replaced deprecated stub function with
+# module-level __getattr__ for lazy redirection. The old stub fired
+# DeprecationWarning on EVERY call and re-imported the real function
+# at runtime on every call. The __getattr__ hook only fires when the
+# name is actually accessed, and the import happens once.
+def __getattr__(name):
+    if name == "cleanup_orphan_gda_records":
+        import warnings
+        warnings.warn(
+            "cleanup_orphan_gda_records is deprecated in database.models. "
+            "Import from database.loaders instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        from database.loaders import cleanup_orphan_gda_records
+        return cleanup_orphan_gda_records
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

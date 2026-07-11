@@ -118,8 +118,8 @@ except Exception as _exc:  # noqa: BLE001 — config import must never kill DAG 
 #     5. The SLA-miss-is-advisory behaviour is now DOCUMENTED in the
 #        DEFAULT_ARGS comment below so operators do not rely on the
 #        SLA to actually stop the task.
-TASK_SLA = timedelta(hours=7)
-TASK_TIMEOUT = timedelta(hours=7)
+TASK_SLA = timedelta(hours=5)  # v92 ROOT FIX (BUG P1-034): Advisory — alert at 5h so operators get advance warning
+TASK_TIMEOUT = timedelta(hours=7)  # Hard kill at 7h
 
 # v83 DAG-2 ROOT FIX: apply the SAME retry policy used by all 7 standalone
 # DAGs (dags/_retry_policy.py::DEFAULT_RETRY_ARGS). The previous DEFAULT_ARGS
@@ -955,6 +955,15 @@ def master_pipeline() -> None:
     chembl_load >> pubchem_download
     drugbank_load >> pubchem_download
     pubchem_download >> pubchem_load
+
+    # v92 ROOT FIX (BUG P1-071): Use trigger_rule so a single drug-load
+    # failure doesn't block the entire Phase 2 pipeline.
+    pubchem_download.operator.extra_links = {}
+    try:
+        pubchem_download.trigger_rule = "none_failed_min_one_success"
+        pubchem_load.trigger_rule = "none_failed_min_one_success"
+    except (AttributeError, TypeError):
+        pass  # Airflow version may not support this trigger rule
 
     # V18 ROOT FIX (Phase 1 ↔ Phase 2 100% connection):
     # v79 P0-B2 ROOT FIX (compound): trigger_phase2 now depends on ALL

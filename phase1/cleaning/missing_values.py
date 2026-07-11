@@ -105,10 +105,11 @@ THREAD SAFETY (REL-7, PERF-7)
 Module-level mutable state (``_metrics``, ``_dead_letters``,
 ``_current_correlation_id``) is guarded by ``threading.RLock`` instances.
 The four public functions are stateless with respect to user input — they
-always copy the input DataFrame before mutating.  However, the
-module-level state IS shared across threads.  Use ``reset_metrics`` and
-``clear_dead_letters`` only from a single thread (typically the test
-runner or pipeline supervisor).
+always copy the input DataFrame before mutating.  ``reset_metrics`` and
+``clear_dead_letters`` acquire their respective locks and are safe to call
+from any thread, but concurrent reset + read sequences may produce
+inconsistent snapshots (e.g., a metrics dict that is partially reset).
+For deterministic test results, call them from a single thread.
 
 ================================================================================
 DATA LINEAGE (DOMAIN 16)
@@ -3143,69 +3144,12 @@ def validate_gda_scores(
         # The fix: align the validator's map with the pipeline's
         # SCORE_BY_MAPPING_KEY. The map is now {1: 0.5, 2: 0.6, 3: 0.9,
         # 4: 0.8} — matching omim_pipeline.py exactly.
-        if source == "omim":
-            _OMIM_CATEGORICAL_MAP = {1: 0.5, 2: 0.6, 3: 0.9, 4: 0.8}
-            if "_omim_categorical_mapped" not in out.columns:
-                out["_omim_categorical_mapped"] = False
-            try:
-                is_categorical = (
-                    out["score"].notna()
-                    & out["score"].apply(
-                        lambda v: float(v).is_integer()
-                        and int(v) in _OMIM_CATEGORICAL_MAP
-                        if pd.notna(v)
-                        else False
-                    )
-                )
-                n_categorical = int(is_categorical.sum())
-                if n_categorical > 0:
-                    if "_original_score" not in out.columns:
-                        out["_original_score"] = None
-                    out.loc[is_categorical, "_original_score"] = out.loc[
-                        is_categorical, "score"
-                    ]
-                    out.loc[is_categorical, "score"] = out.loc[
-                        is_categorical, "score"
-                    ].apply(lambda v: _OMIM_CATEGORICAL_MAP[int(v)])
-                    logger.info(
-                        "validate_gda_scores: source='omim' — mapped "
-                        "%d categorical GDA score(s) (1→0.5, 2→0.6, "
-                        "3→0.9, 4→0.8) to preserve discriminative "
-                        "information. Clipping to [%s, %s] is "
-                        "still applied to non-categorical values. "
-                        "(v89 P0: aligned with omim_pipeline.py "
-                        "SCORE_BY_MAPPING_KEY — was inverted before.)",
-                        n_categorical, score_min, score_max,
-                    )
-                    if "_score_was_clipped" not in out.columns:
-                        out["_score_was_clipped"] = False
-                    out.loc[is_categorical, "_score_was_clipped"] = False
-                    out.loc[is_categorical, "_omim_categorical_mapped"] = True
-                    _increment_metric(
-                        "omim_categorical_scores_mapped", n_categorical
-                    )
-            except (TypeError, ValueError) as exc:
-                # v84 FORENSIC ROOT FIX (BUG #30): narrowed from broad
-                # ``except Exception``. The previous code caught ALL
-                # exceptions — including programming bugs (AttributeError,
-                # KeyError, IndexError) — and silently fell back to
-                # "standard clipping". When the fallback ran, integer
-                # scores 1/2/3/4 were ALL clipped to 1.0 (since they're
-                # all ≤ 1), making EVERY OMIM association appear
-                # maximally confirmed. The RL ranker would then treat
-                # every OMIM GDA as top-confidence — a patient-safety
-                # risk for drug repurposing.
-                # ROOT FIX: catch ONLY the expected data-type / value
-                # errors from the categorical mapping arithmetic. Any
-                # other exception (programming bug) PROPAGATES so it
-                # surfaces immediately instead of silently corrupting
-                # every OMIM score to 1.0.
-                logger.warning(
-                    "validate_gda_scores: OMIM categorical mapping "
-                    "failed (%s) — falling back to standard clipping. "
-                    "Categorical scores (1/2/3/4) may be clipped to 1.0.",
-                    exc,
-                )
+        # v92 ROOT FIX (BUG P1-007): Removed dead OMIM categorical mapping code.
+        # The OMIM pipeline (omim_pipeline.py) maps categorical keys to float
+        # scores via SCORE_BY_MAPPING_KEY BEFORE calling validate_gda_scores.
+        # By the time this validator runs, scores are already float64 — the
+        # integer detection check (float(v).is_integer() and int(v) in _OMIM_CATEGORICAL_MAP)
+        # is never True in production. The 40-line block was pure dead code.
 
         # Track coerced-to-NaN values (CODE-14).
         coerced_nan_mask = out["score"].isna() & non_numeric_mask
@@ -3214,10 +3158,11 @@ def validate_gda_scores(
         out.loc[coerced_nan_mask, "_score_was_coerced_nan"] = True
         coerced_nan_count = int(coerced_nan_mask.sum())
 
-        # BUG-SCI-5: preserve direction (optional).
-        if "_score_direction" not in out.columns:
-            out["_score_direction"] = None
+        # v92 ROOT FIX (BUG P1-008): Only create _score_direction column when
+        # preserve_direction=True. Previously, the column was always created
+        # (full of None), wasting memory and misleading downstream consumers.
         if preserve_direction:
+            out["_score_direction"] = None
             out.loc[out["score"] > 0, "_score_direction"] = "positive"
             out.loc[out["score"] < 0, "_score_direction"] = "negative"
             out.loc[out["score"] == 0, "_score_direction"] = "neutral"

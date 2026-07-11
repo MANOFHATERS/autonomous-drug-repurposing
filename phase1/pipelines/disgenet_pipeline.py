@@ -530,6 +530,12 @@ class _CircuitBreaker:
     and refuses further calls for ``reset_timeout`` seconds.  After the
     timeout, it enters ``half_open`` state: one call is allowed; if it
     succeeds, the breaker closes; if it fails, the breaker re-opens.
+
+    v92 ROOT FIX (BUG P1-073): Added ``_half_open_probe_in_flight`` flag
+    and single-probe gate to ``is_open()`` so that only ONE call is
+    allowed in half_open state. Previously, every ``is_open()`` call in
+    half_open returned False (allowing the call), so multiple concurrent
+    callers could flood through during recovery.
     """
 
     def __init__(
@@ -543,9 +549,24 @@ class _CircuitBreaker:
         self._last_failure_time = 0.0
         self._state = "closed"
         self._lock = threading.Lock()
+        # v92 ROOT FIX (BUG P1-073): track whether a half-open probe is
+        # in flight. Only ONE call is allowed in half_open state.
+        self._half_open_probe_in_flight = False
 
     def record_failure(self) -> None:
         with self._lock:
+            # v92 ROOT FIX: check half_open FIRST (before threshold) and
+            # clear the probe-in-flight flag.
+            if self._state == "half_open":
+                self._state = "open"
+                self._half_open_probe_in_flight = False
+                self._last_failure_time = time.time()
+                logger.warning(
+                    "[disgenet] Circuit breaker re-OPENED after failed "
+                    "half-open probe — refusing calls for %.1fs",
+                    self._reset_timeout,
+                )
+                return
             self._failure_count += 1
             self._last_failure_time = time.time()
             if self._failure_count >= self._failure_threshold:
@@ -562,14 +583,33 @@ class _CircuitBreaker:
         with self._lock:
             self._failure_count = 0
             self._state = "closed"
+            # v92 ROOT FIX: clear the probe-in-flight flag on success.
+            self._half_open_probe_in_flight = False
 
     def is_open(self) -> bool:
+        """Return True if the breaker is open and calls should be refused.
+
+        v92 ROOT FIX (BUG P1-073): implement single-probe gate for
+        half_open state. Only the FIRST call after the reset timeout
+        is allowed (the probe). Subsequent calls are refused until the
+        probe completes (record_success or record_failure).
+        """
         with self._lock:
             if self._state == "open":
                 if time.time() - self._last_failure_time > self._reset_timeout:
                     self._state = "half_open"
-                    return False
+                    self._half_open_probe_in_flight = False
+                    # Allow the first probe call.
+                    self._half_open_probe_in_flight = True
+                    return False  # allow this call (the probe)
                 return True
+            if self._state == "half_open":
+                # v92 ROOT FIX: if a probe is already in flight, refuse.
+                if self._half_open_probe_in_flight:
+                    return True  # refuse — wait for probe to complete
+                # No probe in flight — allow this call as the new probe.
+                self._half_open_probe_in_flight = True
+                return False
             return False
 
 

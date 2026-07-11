@@ -213,107 +213,94 @@ class HealthCheckResult:
         return self.is_healthy
 
 
-@dataclass
-class _CircuitBreaker:
-    """Simple circuit breaker for database connection attempts (REL-005).
+# v92 ROOT FIX (BUG P1-073): Import canonical circuit breaker instead of
+# using the local duplicate that had unfixed bugs (state property mutating
+# on read, record_failure checking threshold before half_open).
+try:
+    from phase1._circuit_breaker import _CircuitBreaker
+except ImportError:
+    try:
+        from _circuit_breaker import _CircuitBreaker
+    except ImportError:
+        # Fallback: keep the local class but apply the critical fixes
+        @dataclass
+        class _CircuitBreaker:
+            """Simple circuit breaker for database connection attempts (REL-005).
 
-    States: CLOSED (normal) -> OPEN (failing) -> HALF_OPEN (probing).
-    """
+            States: CLOSED (normal) -> OPEN (failing) -> HALF_OPEN (probing).
+            """
 
-    failure_threshold: int = 5
-    recovery_timeout: float = 30.0
-    _failure_count: int = 0
-    _state: str = "CLOSED"  # CLOSED, OPEN, HALF_OPEN
-    _last_failure_time: float = 0.0
-    _lock: threading.Lock = field(default_factory=threading.Lock)
-    # P1-A8 ROOT FIX: track whether a HALF_OPEN probe is in flight.
-    _half_open_probe_in_flight: bool = False
+            failure_threshold: int = 5
+            recovery_timeout: float = 30.0
+            _failure_count: int = 0
+            _state: str = "CLOSED"  # CLOSED, OPEN, HALF_OPEN
+            _last_failure_time: float = 0.0
+            _lock: threading.Lock = field(default_factory=threading.Lock)
+            # P1-A8 ROOT FIX: track whether a HALF_OPEN probe is in flight.
+            _half_open_probe_in_flight: bool = False
 
-    @property
-    def state(self) -> str:
-        """Current breaker state."""
-        with self._lock:
-            if self._state == "OPEN":
-                if time.monotonic() - self._last_failure_time > self.recovery_timeout:
-                    self._state = "HALF_OPEN"
-            return self._state
+            @property
+            def state(self) -> str:
+                """Current breaker state (pure observer — v92 fix)."""
+                with self._lock:
+                    return self._state
 
-    def record_success(self) -> None:
-        """Record a successful operation."""
-        with self._lock:
-            self._failure_count = 0
-            self._state = "CLOSED"
-            self._half_open_probe_in_flight = False
-
-    def record_failure(self) -> None:
-        """Record a failed operation."""
-        with self._lock:
-            self._failure_count += 1
-            self._last_failure_time = time.monotonic()
-            if self._failure_count >= self.failure_threshold:
-                self._state = "OPEN"
-                logger.warning(
-                    "Database circuit breaker OPENED after %d consecutive failures",
-                    self._failure_count,
-                )
-            # P1-A8 ROOT FIX: a failed probe in HALF_OPEN trips the
-            # breaker back to OPEN and clears the probe-in-flight flag.
-            if self._state == "HALF_OPEN":
-                self._state = "OPEN"
-                self._half_open_probe_in_flight = False
-
-    def allow_request(self) -> bool:
-        """Check if a request should be allowed.
-
-        P1-A8 ROOT FIX (v82): the previous implementation returned True for
-        EVERY call in HALF_OPEN — defeating single-probe semantics. Under
-        concurrent pipelines (7 Phase 1 sources running in parallel), all
-        7 would simultaneously get "allowed" and hammer a still-recovering
-        DB, re-tripping the breaker. ROOT FIX: track whether a probe is
-        already in flight; allow exactly ONE probe in HALF_OPEN, reject
-        all others until the probe completes (success → CLOSED, failure
-        → OPEN). This is the textbook circuit-breaker HALF_OPEN semantic.
-        """
-        with self._lock:
-            current_state = self._state
-            if current_state == "OPEN":
-                # Check if recovery timeout has elapsed.
-                if time.monotonic() - self._last_failure_time > self.recovery_timeout:
-                    self._state = "HALF_OPEN"
+            def record_success(self) -> None:
+                """Record a successful operation."""
+                with self._lock:
+                    self._failure_count = 0
+                    self._state = "CLOSED"
                     self._half_open_probe_in_flight = False
-                    current_state = "HALF_OPEN"
-                else:
-                    return False
-            if current_state == "CLOSED":
-                return True
-            # HALF_OPEN: allow exactly ONE probe.
-            if self._half_open_probe_in_flight:
-                return False
-            self._half_open_probe_in_flight = True
-            return True
 
-    def reset(self) -> None:
-        """Reset the circuit breaker to CLOSED state (thread-safe).
+            def record_failure(self) -> None:
+                """Record a failed operation (v92 fix: check HALF_OPEN first)."""
+                with self._lock:
+                    # v92 ROOT FIX: check HALF_OPEN FIRST (before threshold)
+                    # and clear the probe-in-flight flag.
+                    if self._state == "HALF_OPEN":
+                        self._state = "OPEN"
+                        self._half_open_probe_in_flight = False
+                        self._last_failure_time = time.monotonic()
+                        logger.warning(
+                            "Database circuit breaker re-OPENED after failed half-open probe"
+                        )
+                        return
+                    self._failure_count += 1
+                    self._last_failure_time = time.monotonic()
+                    if self._failure_count >= self.failure_threshold:
+                        self._state = "OPEN"
+                        logger.warning(
+                            "Database circuit breaker OPENED after %d consecutive failures",
+                            self._failure_count,
+                        )
 
-        v90 ROOT FIX (BUG #11 — P1 circuit breaker reset without lock):
-          The previous ``reset_global_state()`` directly mutated
-          ``_circuit_breaker._failure_count`` and ``_circuit_breaker._state``
-          WITHOUT acquiring ``_circuit_breaker._lock``. If another thread
-          was concurrently checking ``allow_request()`` (which acquires the
-          lock), it read a torn state: ``_failure_count=0`` but ``_state``
-          still momentarily "OPEN" (or vice-versa). The breaker's invariant
-          (``_state == OPEN`` iff ``_failure_count >= threshold``) was
-          violated. Under concurrent test teardown + live pipeline, the
-          breaker could get stuck OPEN (rejecting all DB calls) or stuck
-          CLOSED (never tripping on real failures). Non-deterministic,
-          hard to reproduce. ROOT FIX: this method acquires ``_lock``
-          before mutating state, preserving the invariant.
-        """
-        with self._lock:
-            self._failure_count = 0
-            self._state = "CLOSED"
-            self._last_failure_time = 0.0
-            self._half_open_probe_in_flight = False
+            def allow_request(self) -> bool:
+                """Check if a request should be allowed."""
+                with self._lock:
+                    current_state = self._state
+                    if current_state == "OPEN":
+                        # Check if recovery timeout has elapsed.
+                        if time.monotonic() - self._last_failure_time > self.recovery_timeout:
+                            self._state = "HALF_OPEN"
+                            self._half_open_probe_in_flight = False
+                            current_state = "HALF_OPEN"
+                        else:
+                            return False
+                    if current_state == "CLOSED":
+                        return True
+                    # HALF_OPEN: allow exactly ONE probe.
+                    if self._half_open_probe_in_flight:
+                        return False
+                    self._half_open_probe_in_flight = True
+                    return True
+
+            def reset(self) -> None:
+                """Reset the circuit breaker to CLOSED state (thread-safe)."""
+                with self._lock:
+                    self._failure_count = 0
+                    self._state = "CLOSED"
+                    self._last_failure_time = 0.0
+                    self._half_open_probe_in_flight = False
 
 
 # ===========================================================================

@@ -1464,6 +1464,12 @@ class StringPipeline(BasePipeline):
         # FIX GAP-3.9: Organism validation. Reject rows whose protein IDs
         # do not start with "9606." (human). Cross-species contamination
         # would corrupt the human knowledge graph.
+        # v92 NOTE (BUG P1-064): OR is the correct operator here for a
+        # human-only KG. We quarantine any PPI where EITHER protein is
+        # non-human (including cross-species human-mouse PPIs, which
+        # would corrupt the human knowledge graph). ~A | ~B ≡ ~(A & B)
+        # by De Morgan's law — rows where BOTH proteins start with the
+        # expected taxon prefix are kept; all others are quarantined.
         wrong_taxon_mask = (
             ~links_df["protein1"].astype(str).str.startswith(f"{EXPECTED_TAXON}.")
             | ~links_df["protein2"].astype(str).str.startswith(f"{EXPECTED_TAXON}.")
@@ -1840,6 +1846,12 @@ class StringPipeline(BasePipeline):
             DataFrame with ``protein1 <= protein2`` for every row
             (lexicographic min/max of the STRING ENSP IDs).
         """
+        # v92 NOTE (BUG P1-072): The STRING-ID-level canonicalization here
+        # (min/max on string IDs) does NOT guarantee the same ordering for
+        # UniProt accessions after mapping. The DB loader's canonicalization
+        # (on integer surrogate PKs) is the real enforcement point for the
+        # UNIQUE(protein_a_id, protein_b_id) constraint. This method is
+        # kept for logging/diagnostic value but is NOT a correctness guarantee.
         df = df.copy()
         original_protein1 = df["protein1"].copy()
         canonical_a = df[["protein1", "protein2"]].min(axis=1)

@@ -196,6 +196,10 @@ except ImportError:
     # Fallback (test isolation): replicate the canonical pattern EXACTLY.
     _OMIM_DISEASE_ID_RE = _re_mod_for_disease_id.compile(r"^(?:OMIM:)?[0-9]{4,7}$")
 
+# v92 ROOT FIX (BUG P1-070): shared OMIM ID format constant to prevent
+# format divergence between DisGeNET and OMIM pipelines.
+OMIM_DISEASE_ID_FORMAT: str = "OMIM:{mim}"
+
 _DISEASE_ID_PATTERNS: dict[str, "re.Pattern[str]"] = {
     # OMIM MIM numbers: 4-7 digits, optionally prefixed with "OMIM:"
     # (BUG-3.8: OMIM pipeline emits "OMIM:" prefix to match DisGeNET's format)
@@ -776,7 +780,8 @@ def _validate_inchikey(value: Any) -> str | None:
                         "(P1-ER-7). Canonicalise to the standard 27-char form "
                         "before loading."
                     )
-            return value
+                return value
+            return value.upper()  # v92 ROOT FIX (BUG P1-069): normalize SYNTH keys to uppercase
         raise ValueError(
             f"Invalid InChIKey format: '{value}'. "
             "Must be 27-char standard format or start with 'SYNTH'."
@@ -788,7 +793,7 @@ def _validate_inchikey(value: Any) -> str | None:
     if _STANDARD_INCHIKEY_RE.match(value):
         return value
     if value.upper().startswith("SYNTH"):
-        return value
+        return value.upper()  # v92 ROOT FIX (BUG P1-069): normalize SYNTH keys to uppercase
     raise ValueError(
         f"Invalid InChIKey format: '{value}'. "
         "Must be 27-char standard format or start with 'SYNTH'."
@@ -2289,7 +2294,8 @@ def bulk_upsert_dpi(
     # Empty string source_id → None (DES-04)
     if "source_id" in df.columns:
         df["source_id"] = df["source_id"].replace("", None)
-        df["source_id"] = df["source_id"].where(df["source_id"].notna(), None)
+        # Removed no-op: df["source_id"].where(df["source_id"].notna(), None)
+        # NaN≡None in pandas object dtype; _df_chunk_to_dicts already handles this.
 
     batch_size = _calculate_safe_batch_size(
         DrugProteinInteraction, batch_size

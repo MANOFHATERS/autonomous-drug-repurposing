@@ -187,6 +187,7 @@ import json
 import logging
 import os
 import re
+import sys
 import threading
 import time
 import types
@@ -2303,8 +2304,8 @@ def dedup_by_inchikey(
                     non_null_valid.str.match(_INCHIKEY_PATTERN)
                 ]
                 if len(standard_keys) > 0:
-                    prefixes = standard_keys.str.slice(stop=25)
-                    version_chars = standard_keys.str.slice(start=26)
+                    prefixes = standard_keys.str.slice(stop=26)   # v92 ROOT FIX (BUG P1-067): 26 chars (indices 0-25), includes trailing hyphen
+                    version_chars = standard_keys.str.slice(start=26)  # version char only (index 26)
                     grouped = pd.DataFrame({
                         "prefix": prefixes,
                         "version": version_chars,
@@ -4392,7 +4393,7 @@ def health_check() -> dict[str, Any]:
         "schema_version": _OUTPUT_SCHEMA_VERSION,
         "rule_version": _RULE_VERSION,
         "logic_hash": _LOGIC_HASH,
-        "python_version": f"{__import__('sys').version_info.major}.{__import__('sys').version_info.minor}",
+        "python_version": f"{sys.version_info.major}.{sys.version_info.minor}",  # v92 ROOT FIX (BUG P1-054): use top-level sys import instead of __import__('sys') twice,
         "pandas_version": pd.__version__,
         "metrics": get_metrics(),
         "timing": timing_report(),

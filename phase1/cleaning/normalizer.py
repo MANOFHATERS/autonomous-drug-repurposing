@@ -568,6 +568,8 @@ _DEFAULT_UNIT_CONVERSIONS: dict[str, float] = {
     "mmol/L": 1e6,
     "pmol/L": 1e-3,
     "fmol/L": 1e-6,
+    # v92 ROOT FIX (BUG P1-066): added missing common pharmacology units.
+    "fM": 1e-6,         # fM → nM (femtomolar)
 }
 # Mutable underlying dict — configure_normalizer() mutates this.
 _UNIT_CONVERSIONS: dict[str, float] = dict(_DEFAULT_UNIT_CONVERSIONS)
@@ -613,13 +615,14 @@ from cleaning._constants import (
 #   (1e6); the non-physical rejection threshold is
 #   ``ACTIVITY_VALUE_NON_PHYSICAL_THRESHOLD`` (1e9). No module imports
 #   this private name, so the rename is safe.
-_ACTIVITY_CENSORED_MAX: float = _ACTIVITY_CENSORED_MAX  # 1e6 = 1 mM (censored threshold)
-# DEPRECATED alias — kept ONLY for backward compat with any external
-# code that imported the old name. New code MUST use
-# ``_ACTIVITY_CENSORED_MAX`` (clear) or the canonical
-# ``ACTIVITY_VALUE_CENSORED_THRESHOLD`` from ``cleaning._constants``.
-# This alias will be removed in v2.0.0.
-_ACTIVITY_VALUE_MAX: float = _ACTIVITY_CENSORED_MAX  # 1e6 = 1 mM (DEPRECATED — see above)
+# _ACTIVITY_CENSORED_MAX is imported from cleaning._constants at line 597.
+# v92 ROOT FIX (BUG P1-050): removed self-assignment _ACTIVITY_CENSORED_MAX = _ACTIVITY_CENSORED_MAX
+# which was a redundant re-declaration of the already-imported name.
+# v92 ROOT FIX (BUG P1-051): removed dead _ACTIVITY_VALUE_MAX deprecated alias.
+# No internal code imports _ACTIVITY_VALUE_MAX, and the name was semantically
+# misleading (suggested "max valid value" but pointed at the censored threshold,
+# not the non-physical threshold). All code should use _ACTIVITY_CENSORED_MAX
+# (censored threshold, 1e6) or _ACTIVITY_NON_PHYSICAL_MAX (rejection threshold, 1e9).
 
 # [IDEM-12] Significant figures for activity value rounding.
 _ACTIVITY_VALUE_SIG_FIGS: int = 6
@@ -640,6 +643,7 @@ _ACTIVITY_VALUE_SIG_FIGS: int = 6
 _ALLOWED_ACTIVITY_TYPES: frozenset[str] = frozenset({
     "IC50", "Ki", "Kd", "EC50", "Kb",
     "pKi", "pIC50", "pEC50", "pKd",
+    "pKb", "pED50", "pAC50",  # v92 ROOT FIX (BUG P1-060): added missing p-scale types
     "ED50", "AC50",
 })
 
@@ -1670,8 +1674,10 @@ _cb_convert = _LocalCircuitBreaker("convert_to_inchikey")
 # ===========================================================================
 
 # [CODE-17, PERF-3] LRU cache on a pure helper.  Public convert_to_inchikey
-# calls this; the cache is keyed on (smiles, options, standard) only —
-# all other kwargs (timeout, raise_on_error) do NOT affect the output.
+# calls this; the cache is keyed on (smiles, options, standard, stereo_policy)
+# — all other kwargs (timeout, raise_on_error) do NOT affect the output.
+# v92 ROOT FIX (BUG P1-062): stereo_policy added to cache key so that
+# cached results from "preserve" runs are NOT returned for "ignore" calls.
 import functools  # noqa: E402  (kept here so the cache def stays close)
 
 
@@ -1680,6 +1686,7 @@ def _convert_to_inchikey_cached(
     smiles: str,
     options: str,
     standard: bool,
+    stereo_policy: str = "preserve",
 ) -> str | None:
     """Cached SMILES → InChIKey conversion (CODE-17, PERF-3).
 
@@ -1688,15 +1695,24 @@ def _convert_to_inchikey_cached(
     """
     if not _RDKIT_AVAILABLE:
         return None
-    return _convert_to_inchikey_uncached(smiles, options, standard)
+    return _convert_to_inchikey_uncached(smiles, options, standard, stereo_policy)
 
 
 def _convert_to_inchikey_uncached(
     smiles: str,
     options: str,
     standard: bool,
+    stereo_policy: str = "preserve",
 ) -> str | None:
-    """Actual SMILES → InChIKey conversion logic (uncached)."""
+    """Actual SMILES → InChIKey conversion logic (uncached).
+
+    v92 ROOT FIX (BUG P1-062): stereo_policy is now a per-call parameter
+    instead of reading the module-level STEREO_POLICY global. This prevents
+    one configure_normalizer(stereo_policy="ignore") call from poisoning
+    ALL concurrent conversions (race condition), and ensures drugs like
+    thalidomide where (R)/(S) enantiomers have DIFFERENT pharmacology are
+    never accidentally stripped of stereo information.
+    """
     global _RDKIT_INCHI_BROKEN  # [REL-6] set on first MolToInchi AttributeError
     # [SCI-3, SCI-16] Build InChI options.
     opts = options if options is not None else _INCHI_OPTIONS_DEFAULT
@@ -1725,22 +1741,58 @@ def _convert_to_inchikey_uncached(
             _MAX_SMILES_ATOMS,
         )
 
-    # [SCI-13] Multi-component SMILES — use the largest fragment.
+    # [SCI-13] Multi-component SMILES — desalt (remove small counterions).
+    # v92 ROOT FIX (BUG P1-061): Previously, the code simply took the largest
+    # fragment, which silently discarded salt information (e.g., sodium acetate
+    # → acetate). Different salt forms of the same drug (sodium warfarin vs
+    # warfarin free acid) were collapsed to one InChIKey, which is a patient-
+    # safety risk in drug repurposing. The new logic desalts by removing only
+    # small inorganic counterions (< 10 atoms), while preserving organic co-
+    # components. When counterions are removed, the original multi-component
+    # SMILES is logged so downstream consumers can track salt information.
     try:
         frags = Chem.GetMolFrags(mol, asMols=True)
     except Exception:
         frags = (mol,)
     if len(frags) > 1:
-        logger.info(
-            "convert_to_inchikey: SMILES %s has %d fragments — "
-            "using the largest",
-            _truncate_for_log(smiles),
-            len(frags),
-        )
-        try:
-            mol = max(frags, key=lambda m: m.GetNumAtoms())
-        except Exception:
-            pass  # keep original
+        # Identify small inorganic counterions (counterions are typically < 10 atoms
+        # and contain only metals, halogens, O, H). Keep organic fragments.
+        _DESALT_ATOM_THRESHOLD = 10
+        large_frags = [f for f in frags if f.GetNumAtoms() >= _DESALT_ATOM_THRESHOLD]
+        removed_smiles = []
+        if large_frags:
+            # Desalt: keep only the large (organic) fragments
+            for f in frags:
+                if f.GetNumAtoms() < _DESALT_ATOM_THRESHOLD:
+                    try:
+                        removed_smiles.append(Chem.MolToSmiles(f, isomericSmiles=True))
+                    except Exception:
+                        removed_smiles.append(f"<{f.GetNumAtoms()} atoms>")
+            if len(large_frags) == 1:
+                mol = large_frags[0]
+            else:
+                # Multiple large fragments (drug-drug combination) — keep the largest
+                mol = max(large_frags, key=lambda m: m.GetNumAtoms())
+            logger.info(
+                "convert_to_inchikey: SMILES %s desalted — removed counterions: %s "
+                "(keeping fragment with %d atoms)",
+                _truncate_for_log(smiles),
+                removed_smiles,
+                mol.GetNumAtoms(),
+            )
+        else:
+            # All fragments are small — take the largest (rare edge case)
+            logger.warning(
+                "convert_to_inchikey: SMILES %s has %d fragments but all are < %d atoms "
+                "— using the largest fragment (salt information may be lost)",
+                _truncate_for_log(smiles),
+                len(frags),
+                _DESALT_ATOM_THRESHOLD,
+            )
+            try:
+                mol = max(frags, key=lambda m: m.GetNumAtoms())
+            except Exception:
+                pass  # keep original
 
     # [SCI-5] Tautomer canonicalization (guarded — not all RDKit builds
     # include MolStandardize).
@@ -1781,7 +1833,10 @@ def _convert_to_inchikey_uncached(
         )
 
     # [SCI-6, SCI-16] Stereo handling (preserve by default).
-    if STEREO_POLICY == "ignore":
+    # v92 ROOT FIX (BUG P1-062): use per-call stereo_policy parameter instead
+    # of module-level STEREO_POLICY global, preventing race conditions and
+    # accidental stereo stripping for drugs like thalidomide.
+    if stereo_policy == "ignore":
         try:
             Chem.RemoveStereochemistry(mol)
         except Exception:
@@ -1897,6 +1952,7 @@ def convert_to_inchikey_detailed(
     timeout: float | None = None,
     raise_on_error: bool = False,
     activity_type: str | None = None,  # ignored; for forward compat
+    stereo_policy: str | None = None,  # v92 ROOT FIX (BUG P1-062): per-call stereo policy
 ) -> ConversionResult:
     """Convert SMILES → InChIKey with full result metadata (DQ-2).
 
@@ -1927,6 +1983,9 @@ def convert_to_inchikey_detailed(
     DependencyNotAvailableError
         If RDKit is unavailable and raise_on_error=True (DESIGN-9).
     """
+    # v92 ROOT FIX (BUG P1-062): resolve stereo_policy — per-call overrides global.
+    _effective_stereo = stereo_policy if stereo_policy is not None else STEREO_POLICY
+
     # [DESIGN-10] Accept Mol objects directly.
     if smiles is None:
         return ConversionResult(
@@ -2122,7 +2181,7 @@ def convert_to_inchikey_detailed(
             old_handler = signal.signal(signal.SIGALRM, _timeout_handler)
             signal.setitimer(signal.ITIMER_REAL, timeout)
             try:
-                inchikey = _convert_to_inchikey_cached(smiles, options or "", standard)
+                inchikey = _convert_to_inchikey_cached(smiles, options or "", standard, _effective_stereo)
             except TimeoutError:
                 _cb_convert.record_failure()
                 return ConversionResult(
@@ -2145,7 +2204,7 @@ def convert_to_inchikey_detailed(
                 "in worker thread — proceeding without timeout"
             )
             try:
-                inchikey = _convert_to_inchikey_cached(smiles, options or "", standard)
+                inchikey = _convert_to_inchikey_cached(smiles, options or "", standard, _effective_stereo)
             except MemoryError:
                 _cb_convert.record_failure()
                 return ConversionResult(
@@ -2159,7 +2218,7 @@ def convert_to_inchikey_detailed(
     else:
         # No timeout requested, or Windows platform (signal.alarm unavailable).
         try:
-            inchikey = _convert_to_inchikey_cached(smiles, options or "", standard)
+            inchikey = _convert_to_inchikey_cached(smiles, options or "", standard, _effective_stereo)
         except MemoryError:
             _cb_convert.record_failure()
             return ConversionResult(
@@ -2576,7 +2635,10 @@ def is_valid_inchikey(key: str) -> bool:
         return False
     if _INCHIKEY_PATTERN.match(cleaned):
         return True
-    if cleaned.startswith("SYNTH"):
+    # v92 ROOT FIX (BUG P1-069): enforce minimum length for SYNTH keys.
+    # A 5-char string "SYNTH" is not a valid InChIKey. Require at least
+    # 7 chars (SYNTH + separator + at least 1 char identifier).
+    if cleaned.startswith("SYNTH") and len(cleaned) >= 7:
         # SYNTH is the platform's own synthetic-key namespace (produced
         # by drug_resolver.synthesize_inchikey) — legitimately accepted.
         return True
@@ -3909,7 +3971,7 @@ def normalize_activity_value(
         _is_p_scale = (
             activity_type is not None
             and isinstance(activity_type, str)
-            and activity_type.strip() in ("pKi", "pIC50", "pEC50", "pKd")
+            and activity_type.strip() in ("pKi", "pIC50", "pEC50", "pKd", "pKb", "pED50", "pAC50")
         )
         if not _is_p_scale:
             logger.debug(
@@ -4135,7 +4197,7 @@ def normalize_activity_value(
     #   we also preserve that.
     if activity_type is not None and isinstance(activity_type, str):
         _at = activity_type.strip()
-        if _at in ("pKi", "pIC50", "pEC50", "pKd"):
+        if _at in ("pKi", "pIC50", "pEC50", "pKd", "pKb", "pED50", "pAC50"):
             try:
                 # p-scale → nM: 10^(9 - pValue)
                 # pIC50=6 → 10^3 nM = 1 µM ✓

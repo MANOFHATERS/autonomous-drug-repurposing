@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run pipeline downloads in parallel (4 workers) — TWO-PHASE design.
+"""Run pipeline downloads in parallel (3 workers) — TWO-PHASE design.
 
 v75 ROOT FIX (T-025 — download_parallel.py skips entity resolution):
     The v74 ``download_parallel.py`` called ``cls(run_id=_run_id).run()``

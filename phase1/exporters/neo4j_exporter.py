@@ -383,9 +383,16 @@ def check_neo4j_readiness(pg_session) -> dict:
                 if _bind is not None:
                     from sqlalchemy import inspect as _sa_inspect
                     _meta = _sa_inspect(_bind).default_schema_name
-                    # Try to get the table from the metadata; fall back
-                    # to an unqualified TableClause if not found.
-                    _table_obj = _sa_table(t)
+                    # v92 ROOT FIX (BUG P1-002): use the schema name to
+                    # create a qualified table reference, fixing the
+                    # "relation does not exist" error on PostgreSQL.
+                    if _meta is not None:
+                        try:
+                            _table_obj = _sa_table(t, schema=_meta)
+                        except TypeError:
+                            _table_obj = _sa_table(t)
+                    else:
+                        _table_obj = _sa_table(t)
             except Exception:
                 _table_obj = _sa_table(t)
             if _table_obj is None:

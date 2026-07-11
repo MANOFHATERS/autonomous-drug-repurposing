@@ -48,8 +48,8 @@ logger = logging.getLogger(__name__)
 # Default confidence tiers — publication-aligned (Piñero et al. 2020).
 # ---------------------------------------------------------------------------
 DEFAULT_CONFIDENCE_TIERS: list[tuple[float, str]] = [
-    (0.0, "weak"),     # [0.0, 0.06)  — weak evidence (sub-floor; Piñero et al. 2020 §2.3)
-    (0.06, "moderate"),  # [0.06, 0.3) — moderate evidence (Piñero et al. 2020 §2.3 weak band)
+    (0.0, "weak"),     # [0.0, 0.06)  — sub-floor (below Piñero weak-evidence floor)
+    (0.06, "weak"),    # [0.06, 0.3)  — weak evidence (Piñero et al. 2020 §2.3)
     (0.3, "strong"),   # [0.3, 1.0]   — strong evidence (Piñero et al. 2020 §2.3)
 ]
 """Default confidence-tier thresholds (Piñero et al. 2020).
@@ -59,25 +59,17 @@ The first tier whose ``threshold <= score`` (and which is below the next
 tier's threshold) wins.  ``score = 0.0`` always falls in the first tier
 (``"weak"``).
 
-v43 ROOT FIX (Chain 3 — GDA silent dead-letter): the previous labels
-were ``"sub_weak"`` / ``"weak"`` / ``"strong"``, but the SQL CHECK
-constraint ``chk_gda_confidence_tier`` (migration 004), the ORM
-CheckConstraint (models.py), and ``DISGENET_CONFIDENCE_TIERS_JSON`` in
-config/settings.py ALL accept ONLY ``('weak', 'moderate', 'strong')``.
-A row produced via ``classify_confidence(0.05)`` returned
-``"sub_weak"`` → SQL INSERT failed with ``CheckViolation:
-chk_gda_confidence_tier`` → silent dead-letter → KG missing
-low-confidence GDA edges.
+v92 ROOT FIX (BUG P1-058): The previous code labeled the [0.06, 0.3) band
+as "moderate", which INVERTS the Piñero et al. 2020 §2.3 classification.
+Per the publication, the [0.06, 0.3) band is "weak evidence", NOT "moderate".
+The previous "moderate" label inflated perceived confidence in downstream
+ML filters — every weak-evidence GDA edge was mislabeled "moderate".
 
-This fix aligns ``DEFAULT_CONFIDENCE_TIERS`` with the SQL/ORM/config
-contract: ``"weak"`` / ``"moderate"`` / ``"strong"``. The Piñero 2020
-publication does not use the label ``"sub_weak"`` — it is an invention
-of the previous code. The [0.0, 0.06) band is still scientifically
-"below the published weak-evidence floor", but we tag it ``"weak"``
-(rather than introducing a fourth label) to keep the DB schema stable.
-
-All four sites (cleaning.confidence, config.settings, SQL CHECK, ORM
-CHECK) now agree on the canonical label set.
+This fix aligns the labels with Piñero 2020: both [0.0, 0.06) and [0.06, 0.3)
+are now "weak" (the former is sub-floor, the latter is the published weak band).
+The SQL CHECK constraint must be updated to accept ('weak', 'strong') and
+convert existing 'moderate' rows to 'weak'. The ORM CHECK in models.py also
+needs updating.
 """
 
 # The tier-method version string recorded in the GDA model's
