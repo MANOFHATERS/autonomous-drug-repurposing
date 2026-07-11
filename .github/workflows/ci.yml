@@ -7,11 +7,22 @@
 # Also triggerable manually via workflow_dispatch.
 #
 # Verifies:
-#   1. Build — compileall on every .py file (equiv to tsc --noEmit)
+#   1. Build — compileall + import sanity on every .py file
+#      (equiv to tsc --noEmit + npm run build)
 #   2. Lint — flake8 for fatal errors only (syntax, undefined names)
 #   3. Test — pytest on Phase 1 + Phase 2 test suites
 #   4. P2/Chain-1 verification — all 11 P2 fixes + Chain-1 at runtime
 #   5. E2E — sample-mode pipeline run with bridge 100%-connection proof
+#
+# v87 FORENSIC ROOT FIX — CI DISCIPLINE RULES (all agents MUST follow):
+#   * NEVER add `|| true` to any test/lint/build step. It silently masks
+#     failures and makes CI permanently GREEN even when everything is
+#     broken. The previous workflow had this bug on 2 of 5 jobs.
+#   * NEVER create a competing ci.yml. This is the ONLY workflow file.
+#     If you need to add a job, ADD IT HERE — do not create a new file.
+#   * NEVER use `continue-on-error: true` on a test/lint/build step.
+#   * If a test fails, FIX THE TEST OR FIX THE CODE — do not mask it.
+#   * Every step that runs tests MUST propagate the exit code unchanged.
 #
 name: CI
 
@@ -68,6 +79,53 @@ jobs:
           echo "=== Build check: compiling every Python file ==="
           python -m compileall -q phase1 phase2 run_unified.py
           echo "=== compileall PASSED ==="
+
+      - name: Build check — import sanity (every pipeline module loads)
+        env:
+          PYTHONPATH: phase1
+          DISGENET_USE_API: "false"
+          DRUGOS_DOWNLOAD_MODE: "sample"
+        run: |
+          echo "=== Build check: importing every Phase 1 module ==="
+          # v87: compileall only checks SYNTAX. A file can parse as valid
+          # Python but fail at import time (missing dep, circular import,
+          # NameError at module level). This step catches those by actually
+          # importing every pipeline/cleaning/entity_resolution module.
+          python - <<'PY'
+          import sys, importlib
+          sys.path.insert(0, "phase1")
+          modules = [
+              "pipelines.chembl_pipeline",
+              "pipelines.drugbank_pipeline",
+              "pipelines.uniprot_pipeline",
+              "pipelines.string_pipeline",
+              "pipelines.disgenet_pipeline",
+              "pipelines.omim_pipeline",
+              "pipelines.pubchem_pipeline",
+              "pipelines.base_pipeline",
+              "pipelines._v50_downloaders",
+              "pipelines._embedded_samples",
+              "cleaning.missing_values",
+              "cleaning.confidence",
+              "cleaning.normalizer",
+              "cleaning.deduplicator",
+              "entity_resolution.run",
+              "entity_resolution.drug_resolver",
+              "entity_resolution.protein_resolver",
+              "exporters.neo4j_exporter",
+          ]
+          failures = []
+          for m in modules:
+              try:
+                  importlib.import_module(m)
+              except Exception as e:
+                  failures.append((m, type(e).__name__, str(e)))
+          if failures:
+              for m, t, e in failures:
+                  print(f"FAIL: {m} -> {t}: {e}")
+              sys.exit(1)
+          print(f"All {len(modules)} Phase 1 modules imported OK")
+          PY
 
   # ── Job 2: Lint (equiv to npm run lint) ──
   lint:
@@ -136,13 +194,18 @@ jobs:
           DATABASE_URL: "sqlite:///:memory:"
         run: |
           echo "=== Tests: Phase 1 forensic + root fixes + DAG + entity resolution ==="
+          # v87 FORENSIC ROOT FIX: removed `|| true` that was SILENTLY MASKING
+          # every pytest failure. The previous workflow ALWAYS returned exit 0
+          # regardless of test results, so CI was permanently GREEN even when
+          # every test was broken. This defeated the entire purpose of CI.
+          # NEVER re-add `|| true` to a test step — it is forbidden in CI.
           python -m pytest \
             phase1/tests/v79_forensic/ \
             phase1/tests/test_v76_root_fixes.py \
             phase1/tests/test_v75_root_fixes.py \
             phase1/tests/test_dag_structure.py \
             phase1/tests/test_entity_resolution.py \
-            -v --tb=short --no-header || true
+            -v --tb=short --no-header
 
   # ── Job 4: P2 + Chain-1 fix verification ──
   verify-p2-fixes:
@@ -428,9 +491,13 @@ jobs:
           DISGENET_USE_API: "false"
           DRUGOS_DOWNLOAD_MODE: "sample"
         run: |
+          # v87 FORENSIC ROOT FIX: removed `|| true` that was SILENTLY MASKING
+          # bridge integration test failures. This test is THE proof that
+          # Phase 1 and Phase 2 are 100% connected. If it fails, CI MUST
+          # fail RED — never re-add `|| true` to any test step.
           python -m pytest \
             phase2/tests/test_phase1_phase2_bridge.py \
-            -v --tb=short --no-header || true
+            -v --tb=short --no-header
 
       - name: E2E — run Phase 1→Phase 2 bridge (real KG, treats > 0)
         env:
