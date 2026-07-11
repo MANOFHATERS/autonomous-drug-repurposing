@@ -619,7 +619,7 @@ def run_entity_resolution() -> Dict[str, Any]:
             # v89 BUG #3: no human aliases file found — log clearly.
             # This runs when the try block completed without exception
             # but the loop above did not find a HUMAN (9606) aliases file.
-            if _string_raw_dir.exists() and not string_aliases_df:
+            if _string_raw_dir.exists() and string_aliases_df.empty:
                 _all_alias_files = list(_string_raw_dir.glob("*aliases*.txt.gz"))
                 logger.warning(
                     "No HUMAN (9606) STRING aliases file found in %s. "
