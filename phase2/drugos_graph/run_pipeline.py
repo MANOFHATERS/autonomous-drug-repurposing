@@ -1385,17 +1385,33 @@ def _check_v1_launch_criteria(results: dict) -> dict:
     _chemberta_used_v72 = False
     if isinstance(_r9_v72, dict):
         _chemberta_used_v72 = bool(_r9_v72.get("chemberta_used", False))
-    criteria["chemberta_features_used"] = (
-        _chemberta_used_v72 if not _dev_mode_v36 else True
-    )
+    # v89 ROOT FIX: stop lying about chemberta_features_used in dev mode.
+    # The v88 code set chemberta_features_used=True in dev mode regardless
+    # of whether chemberta was actually used. This made the V1 launch
+    # criteria pass on a LIE — the metadata said chemberta was used when
+    # it wasn't. The v89 fix reports the ACTUAL value in BOTH fields.
+    # In dev mode, we log a clear warning that chemberta is not available
+    # and the model is using random Xavier features (which means the AUC
+    # reflects transductive memorization, not molecular structure learning).
+    criteria["chemberta_features_used"] = _chemberta_used_v72
     criteria["chemberta_used_actual"] = _chemberta_used_v72
-    if not criteria["chemberta_features_used"] and not _dev_mode_v36:
-        logger.critical(
-            "V1 LAUNCH CRITERIA: chemberta_features_used=False. The "
-            "Graph Transformer trained on random Xavier features — it "
-            "cannot learn molecular structure. AUC reflects transductive "
-            "memorisation only. Production launch REFUSED. (P2C-016)"
-        )
+    if not _chemberta_used_v72:
+        if _dev_mode_v36:
+            logger.warning(
+                "v89 ROOT FIX: chemberta_features_used=False (dev mode). "
+                "The Graph Transformer is training on random Xavier features, "
+                "NOT ChemBERTa molecular embeddings. This means the AUC "
+                "reflects transductive memorization only, NOT molecular "
+                "structure learning. In production, install ChemBERTa "
+                "(pip install transformers) and set DRUGOS_USE_CHEMBERTA=1."
+            )
+        else:
+            logger.critical(
+                "V1 LAUNCH CRITERIA: chemberta_features_used=False. The "
+                "Graph Transformer trained on random Xavier features — it "
+                "CANNOT learn molecular structure. AUC reflects transductive "
+                "memorization only. In production, ChemBERTa is REQUIRED."
+            )
 
     criteria["passed"] = (
         criteria["all_sources_loaded"]
