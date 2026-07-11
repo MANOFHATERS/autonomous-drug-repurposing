@@ -880,6 +880,9 @@ def run_entity_resolution() -> Dict[str, Any]:
                 chunksize=5000,
             )
             conn.execute(text("DELETE FROM entity_mapping"))
+            # v90 DEDUP FIX: dedup staging by chembl_id before INSERT to
+            # avoid UNIQUE constraint violation when resolver produces
+            # duplicate chembl_id entries. Keep highest-confidence row.
             conn.execute(text("""
                 INSERT INTO entity_mapping
                     (canonical_inchikey, canonical_name, chembl_id,
@@ -887,9 +890,29 @@ def run_entity_resolution() -> Dict[str, Any]:
                      match_confidence, match_method)
                 SELECT
                     canonical_inchikey, canonical_name, chembl_id,
-                    drugbank_id, pubchem_cid, uniprot_id, string_id,
-                    match_confidence, match_method
+                     drugbank_id, pubchem_cid, uniprot_id, string_id,
+                     match_confidence, match_method
+                FROM (
+                    SELECT
+                        canonical_inchikey, canonical_name, chembl_id,
+                        drugbank_id, pubchem_cid, uniprot_id, string_id,
+                        match_confidence, match_method,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY chembl_id
+                            ORDER BY match_confidence DESC NULLS LAST,
+                                     canonical_inchikey
+                        ) AS rn
+                    FROM _tmp_entity_mapping_staging
+                    WHERE chembl_id IS NOT NULL
+                ) deduped_chembl
+                WHERE rn = 1
+                UNION ALL
+                SELECT
+                    canonical_inchikey, canonical_name, chembl_id,
+                     drugbank_id, pubchem_cid, uniprot_id, string_id,
+                     match_confidence, match_method
                 FROM _tmp_entity_mapping_staging
+                WHERE chembl_id IS NULL
             """))
             conn.execute(text("DROP TABLE IF EXISTS _tmp_entity_mapping_staging"))
         logger.info(
