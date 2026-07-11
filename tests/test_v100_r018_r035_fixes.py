@@ -363,19 +363,34 @@ class TestRINT005SchemaAdapterConsumed(unittest.TestCase):
 
 
 class TestRINT007NoNameErrorOnSubprocess(unittest.TestCase):
-    """R-INT-007: the except clause must not reference `subprocess.SubprocessError`
-    when subprocess was imported as `_sp`."""
+    """R-INT-007: the except clause must not raise NameError on
+    `subprocess.SubprocessError`. Two valid fixes:
+      (a) `import subprocess` at module level (R-001 approach), OR
+      (b) `import subprocess as _sp` inside the try + use `_sp.SubprocessError`.
+    """
 
     def test_no_bare_subprocess_in_except(self):
         src = _read(ROOT / "run_unified.py")
-        # The pattern `except (subprocess.SubprocessError,` must NOT appear
-        # (subprocess is imported as _sp inside the try block).
+        # If `import subprocess` is at module level, then
+        # `subprocess.SubprocessError` in except is CORRECT (not a bug).
+        has_module_level_subprocess = False
+        tree = ast.parse(src)
+        for node in tree.body:
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name == "subprocess" and alias.asname is None:
+                        has_module_level_subprocess = True
+        if has_module_level_subprocess:
+            # `subprocess.SubprocessError` in except is fine.
+            return
+        # Otherwise, the except clause must NOT reference `subprocess.SubprocessError`
+        # (would NameError). Must use `_sp.SubprocessError` instead.
         self.assertNotIn(
             "except (subprocess.SubprocessError",
             src,
-            "R-INT-007: bare `subprocess.SubprocessError` reference causes NameError",
+            "R-INT-007: bare `subprocess.SubprocessError` reference causes NameError "
+            "without a module-level `import subprocess`",
         )
-        # Should use _sp.SubprocessError instead.
         self.assertIn("_sp.SubprocessError", src)
 
 

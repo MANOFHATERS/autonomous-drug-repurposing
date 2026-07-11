@@ -62,6 +62,7 @@ import argparse
 import json
 import logging
 import os
+import subprocess  # R-001/R-INT-007: top-level import so subprocess.SubprocessError resolves in except clauses
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -434,8 +435,6 @@ def main(argv: Optional[list] = None) -> int:
         phase1_succeeded = False
         # --- Tier 1: full sample-mode run with API calls ---
         try:
-            import subprocess as _sp
-            import sys as _sys
             _phase1_root = str(HERE / "phase1")
             log.info(
                 "Tier 1: invoking `python -m pipelines all` "
@@ -446,13 +445,15 @@ def main(argv: Optional[list] = None) -> int:
             _env["DRUGOS_DOWNLOAD_MODE"] = _env.get(
                 "DRUGOS_DOWNLOAD_MODE", "sample"
             )
-            # R-033 root fix: 60s GUARANTEED Tier 1 would fail on any
-            # real hardware — `python -m pipelines all` makes API calls
-            # to 7 external sources and easily exceeds 60s. 600s (10 min)
-            # is long enough for a real attempt but short enough that
-            # operators do not wait hours for the fallback.
-            _proc = _sp.run(
-                [_sys.executable, "-m", "pipelines", "all"],
+            # R-001: subprocess is imported at module level (top-level), so
+            # subprocess.SubprocessError in the except clause resolves correctly.
+            # R-033: 60s GUARANTEED Tier 1 would fail on any real hardware —
+            # `python -m pipelines all` makes API calls to 7 external sources
+            # and easily exceeds 60s. 600s (10 min) is long enough for a real
+            # attempt but short enough that operators do not wait hours for
+            # the fallback.
+            _proc = subprocess.run(
+                [sys.executable, "-m", "pipelines", "all"],
                 cwd=_phase1_root,
                 capture_output=True, text=True, timeout=600,
                 env=_env,
@@ -469,10 +470,9 @@ def main(argv: Optional[list] = None) -> int:
                     "(embedded samples, no API calls). stderr tail: %s",
                     _proc.returncode, (_proc.stderr or "")[-500:],
                 )
-        # R-INT-007 root fix: previous except referenced `subprocess.SubprocessError`
-        # but `subprocess` was imported as `_sp` inside the try block — NameError
-        # prevented Tier 2 fallback from ever running. Use `_sp.SubprocessError`.
-        except (_sp.SubprocessError, OSError, ValueError) as _tier1_exc:
+        # R-001/R-INT-007: subprocess is imported at module level, so
+        # subprocess.SubprocessError resolves correctly in this except clause.
+        except (subprocess.SubprocessError, OSError, ValueError) as _tier1_exc:
             log.warning(
                 "Tier 1 exception: %s — falling back to Tier 2.",
                 _tier1_exc,
@@ -481,8 +481,6 @@ def main(argv: Optional[list] = None) -> int:
         # --- Tier 2: embedded samples (no API calls) ---
         if not phase1_succeeded:
             try:
-                import subprocess as _sp
-                import sys as _sys
                 _phase1_root = str(HERE / "phase1")
                 log.info(
                     "Tier 2: invoking `python -m pipelines samples` "
@@ -490,8 +488,8 @@ def main(argv: Optional[list] = None) -> int:
                     "biologically valid real IDs). This ALWAYS succeeds "
                     "if the phase1 package imports cleanly."
                 )
-                _proc = _sp.run(
-                    [_sys.executable, "-m", "pipelines", "samples"],
+                _proc = subprocess.run(
+                    [sys.executable, "-m", "pipelines", "samples"],
                     cwd=_phase1_root,
                     capture_output=True, text=True, timeout=300,
                 )
@@ -512,7 +510,7 @@ def main(argv: Optional[list] = None) -> int:
                         (_proc.stdout or "")[-500:],
                         (_proc.stderr or "")[-500:],
                     )
-            except (OSError, ValueError, ImportError) as _tier2_exc:
+            except (subprocess.SubprocessError, OSError, ValueError, ImportError) as _tier2_exc:
                 log.error(
                     "Tier 2 exception: %s", _tier2_exc,
                 )
