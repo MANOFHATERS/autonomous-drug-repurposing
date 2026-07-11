@@ -284,12 +284,13 @@ def test_v31_end_to_end_smoke():
 
     print(f"  PASS: End-to-end smoke test passed. Graph has {n_treats} treats edges "
           f"(KPs + training positives). V90 BUG #18: _feature_rng removed.")
-        # V90 BUG #38: _feature_rng must NOT exist (dead code removed).
-        assert not hasattr(bridge, '_feature_rng'), \
-            "V90 BUG #38: _feature_rng must be REMOVED (dead code)"
-
-    print(f"  PASS: End-to-end smoke test passed. Graph has {n_treats} treats edges "
-          f"(KPs + training positives). V90 BUG #38: _feature_rng removed.")
+    # v91 ROOT FIX (IndentationError at line 288): removed a DUPLICATE
+    # assert+print block that was pasted at the WRONG indentation level
+    # (8-space, after the ``with`` block had already closed at 4-space).
+    # The assert was a duplicate of the one at line 282 (BUG #18 vs
+    # BUG #38 — same _feature_rng check), and the print was a duplicate
+    # of the one above. Both duplicates broke compileall for the tests/
+    # directory, failing the build-phase3-phase4 CI job.
 
 
 def run_all_tests():

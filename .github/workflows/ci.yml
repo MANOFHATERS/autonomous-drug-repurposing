@@ -479,12 +479,22 @@ jobs:
           cache-dependency-path: |
             requirements.txt
             phase1/requirements.txt
-      - name: Install deps (unconditional — needed for the verification step)
-        # V90 CI fix: the previous 'Check all required jobs passed' step
-        # installed deps ONLY when dependencies failed. When all deps
-        # passed, the install was SKIPPED, so the verification step
-        # crashed with ModuleNotFoundError: No module named 'pandas'.
-        # The fix: always install deps (unconditional).
+      # v91 ROOT FIX (CI workflow parse error — line 482):
+      #   The previous version of this file had a step here with ONLY a
+      #   `name:` and a comment, but NO `run:`, `uses:`, `with:`, or
+      #   `working-directory:` key. GitHub Actions REJECTS any step
+      #   without at least one of those keys, returning HTTP 422:
+      #     "Invalid Argument - failed to parse workflow: (Line: 482,
+      #      Col: 9): There's not enough info to determine what you
+      #      meant. Add one of these properties: cancel, run, shell,
+      #      uses, wait, wait-all, with, working-directory"
+      #   This caused EVERY CI run on main to fail with `conclusion:
+      #   failure` and `total_count: 0` jobs (workflow never started).
+      #   The user received a failure email for every push.
+      #   ROOT FIX: removed the empty step entirely. The unconditional
+      #   install intent is already satisfied by the `Install deps` step
+      #   below (it has no `if:` condition, so it always runs). The
+      #   empty step was a stale leftover from a half-written edit.
       - name: Check all required jobs passed
         if: ${{ !(needs.build.result == 'success' && needs.lint.result == 'success' && needs.test.result == 'success' && needs.verify-p2-fixes.result == 'success' && needs.e2e-sample-mode.result == 'success') }}
         run: |

@@ -2852,11 +2852,16 @@ def _classify_chembl_activity_edge(
     )
     if _EXCLUDED_ANTAGONIST_RE.search(a):
         return "targets"
-    # Match "activat..." (activation, activator) OR a bare word-boundary
-    # "agonist" (with optional plural "s"). This excludes "antagonist"
-    # (handled above) and "inverse agonist" (handled above).
-    _AGONIST_RE = _re_v84.compile(r"\bagonists?\b", _re_v84.IGNORECASE)
-    if "activ" in a or _AGONIST_RE.search(a):
+    # v91 ROOT FIX (IndentationError at line 2859): removed the orphaned
+    # ``if "activ" in a or _AGONIST_RE.search(a):`` statement that had NO
+    # body (it was a duplicate of the ``if _re_v89.search(...)`` block
+    # below). The ``_AGONIST_RE`` local variable was also removed (it was
+    # only used by the orphaned if and is not referenced anywhere else in
+    # the codebase). The ``if _re_v89.search(r"\b(activ|agon)", a)`` block
+    # below is the actual implementation — it matches "activation",
+    # "activates", "agonist", "agonism" via word-boundary regex but NOT
+    # "inactivation", "deactivation", "inactive" (those are matched by
+    # the inhibits regex above).
     # Word-boundary "activ" or "agon" → activates. The \b ensures we
     # match "activation", "activates", "agonist", "agonism" but NOT
     # "inactivation", "deactivation", "inactive" (those are matched
