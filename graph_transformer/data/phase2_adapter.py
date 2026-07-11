@@ -85,7 +85,7 @@ import numpy as np
 import torch
 
 from . import DEFAULT_FEATURE_DIMS, EDGE_TYPES
-from .graph_builder import BiomedicalGraphBuilder
+from .graph_builder import BiomedicalGraphBuilder, _deterministic_seed
 
 logger = logging.getLogger(__name__)
 
@@ -304,12 +304,19 @@ def adapt_phase2_to_phase3(
     p2_id_to_p3_name: Dict[str, str] = {}
 
     # Register drugs (Compound → drug)
+    # v100 ROOT FIX (P3-007): replace ``seed + hash(name) & 0xFFFFFFFF``
+    # with ``_deterministic_seed(seed, name)`` (SHA-256). Python's
+    # built-in ``hash()`` is randomized per process via PYTHONHASHSEED,
+    # so the previous code produced DIFFERENT feature vectors for the
+    # same drug on each run → GT model trained on different feature
+    # distributions each time → non-reproducible AUC, CI flakes. The
+    # same fix is applied to all 5 node-type loops below.
     for compound in p2_nodes.get("Compound", []):
         drug_name = _canonical_drug_name(compound.get("name", compound["id"]))
         if not drug_name:
             drug_name = compound["id"].lower()
         p2_id_to_p3_name[compound["id"]] = drug_name
-        feat = np.random.default_rng(seed + hash(drug_name) & 0xFFFFFFFF).standard_normal(
+        feat = np.random.default_rng(_deterministic_seed(seed, drug_name)).standard_normal(
             DEFAULT_FEATURE_DIMS["drug"]
         ).astype(np.float32)
         gt_builder.register_node("drug", drug_name, feat)
@@ -321,7 +328,7 @@ def adapt_phase2_to_phase3(
             protein_name = protein["id"]
         p2_id_to_p3_name[protein["id"]] = protein_name
         feat = np.random.default_rng(
-            seed + hash(protein_name) & 0xFFFFFFFF
+            _deterministic_seed(seed, protein_name)
         ).standard_normal(DEFAULT_FEATURE_DIMS["protein"]).astype(np.float32)
         gt_builder.register_node("protein", protein_name, feat)
 
@@ -334,7 +341,7 @@ def adapt_phase2_to_phase3(
         # are descriptive, not unique-enough for indexing).
         p2_id_to_p3_name[pathway["id"]] = pathway["id"]
         feat = np.random.default_rng(
-            seed + hash(pathway["id"]) & 0xFFFFFFFF
+            _deterministic_seed(seed, pathway["id"])
         ).standard_normal(DEFAULT_FEATURE_DIMS["pathway"]).astype(np.float32)
         gt_builder.register_node("pathway", pathway["id"], feat)
 
@@ -344,7 +351,7 @@ def adapt_phase2_to_phase3(
         disease_name = _canonical_disease_name(raw_name) if raw_name else disease["id"]
         p2_id_to_p3_name[disease["id"]] = disease_name
         feat = np.random.default_rng(
-            seed + hash(disease_name) & 0xFFFFFFFF
+            _deterministic_seed(seed, disease_name)
         ).standard_normal(DEFAULT_FEATURE_DIMS["disease"]).astype(np.float32)
         gt_builder.register_node("disease", disease_name, feat)
 
@@ -355,7 +362,7 @@ def adapt_phase2_to_phase3(
             outcome_name = outcome["id"]
         p2_id_to_p3_name[outcome["id"]] = outcome_name
         feat = np.random.default_rng(
-            seed + hash(outcome_name) & 0xFFFFFFFF
+            _deterministic_seed(seed, outcome_name)
         ).standard_normal(
             DEFAULT_FEATURE_DIMS["clinical_outcome"]
         ).astype(np.float32)

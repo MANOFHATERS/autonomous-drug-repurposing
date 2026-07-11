@@ -1178,8 +1178,29 @@ def build_training_data(
                     unique_versions, expected,
                 )
         # Case (c): proper pandas metadata API.
-        elif "_schema_version" in drkg_df.attrs:
-            actual = drkg_df.attrs["_schema_version"]
+        # v100 ROOT FIX (P2-012): the previous code checked ONLY the
+        # ``_schema_version`` key (with leading underscore). But the
+        # DRKG loader at ``drkg_loader.py:1791`` sets the key as
+        # ``schema_version`` (NO underscore) — so the check was silently
+        # inert: ``"_schema_version" in drkg_df.attrs`` was always False,
+        # the warning never fired, and a schema-version mismatch between
+        # the loader and the trainer would go undetected.
+        #
+        # ROOT FIX: check BOTH key spellings so the check actually works
+        # regardless of which loader wrote the metadata. The first
+        # non-None value wins. If both are present and disagree, log
+        # that too (it indicates two loaders wrote conflicting metadata).
+        elif "_schema_version" in drkg_df.attrs or "schema_version" in drkg_df.attrs:
+            _v1 = drkg_df.attrs.get("_schema_version")
+            _v2 = drkg_df.attrs.get("schema_version")
+            actual = _v1 if _v1 is not None else _v2
+            if _v1 is not None and _v2 is not None and _v1 != _v2:
+                logger.warning(
+                    "DRKG schema version keys disagree: "
+                    "_schema_version=%s vs schema_version=%s "
+                    "(expected %s). Two loaders wrote conflicting metadata.",
+                    _v1, _v2, expected,
+                )
             if actual != expected:
                 logger.warning(
                     "DRKG schema version mismatch (df.attrs): expected %s, got %s",

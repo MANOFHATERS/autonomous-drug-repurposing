@@ -1474,10 +1474,21 @@ class BiomedicalGraphBuilder:
                 )
 
         # ─── Finalize: build reverse edges + tensorize ──────────────
-        builder._sync_edge_lists()
-        builder._edge_lists = BiomedicalGraphBuilder._build_reverse_edges(
-            builder._edge_lists
-        )
+        # v100 ROOT FIX (P3-001): the previous code used the DEPRECATED
+        # ``_build_reverse_edges(builder._edge_lists)`` staticmethod,
+        # which writes the reverse edges into ``_edge_lists``. But
+        # ``builder.finalize()`` calls ``_sync_edge_lists()`` which
+        # DISCARDS ``_edge_lists`` and rebuilds it from ``_edge_sets``.
+        # Result: ALL 7 reverse-edge types were silently dropped on the
+        # production path. The GT model trained on a graph where drug
+        # nodes had no incoming edges → AUC = 0.42 (below random).
+        #
+        # The correct pattern is already used at line 1205 in a sibling
+        # function: call the classmethod ``_build_reverse_edges_into_sets``
+        # which writes the reverse edges directly into ``_edge_sets`` so
+        # they survive ``_sync_edge_lists()`` in ``finalize()``. Mirror
+        # that pattern here.
+        builder._build_reverse_edges_into_sets(builder._edge_sets)
         node_features, edge_indices, node_maps = builder.finalize()
 
         total_nodes = sum(nodes_registered_by_type.values())

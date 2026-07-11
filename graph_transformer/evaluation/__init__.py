@@ -1,10 +1,20 @@
 """Evaluation utilities for the Graph Transformer."""
 from __future__ import annotations
 
+import logging
 from typing import Any, Dict
 
 import numpy as np
 import torch
+
+# v100 ROOT FIX (P3-002): the body of this module calls ``logger.warning(...)``
+# at line 201 (the one-class-in-labels fallback branch) but the previous
+# version NEVER imported ``logging`` or defined ``logger``. The branch was
+# therefore a NameError waiting to fire — and worse, it would fire ONLY in
+# the degraded case (when the labels tensor has a single class), masking
+# the real evaluation problem. Define the module logger up-front so the
+# warning is emitted correctly.
+logger = logging.getLogger(__name__)
 
 
 @torch.no_grad()

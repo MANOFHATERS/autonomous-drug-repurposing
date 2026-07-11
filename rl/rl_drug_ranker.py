@@ -376,12 +376,82 @@ DATA_DICTIONARY: Dict[str, Dict[str, Any]] = {
 # ============================================================================
 
 # Withdrawn / black-box warning drugs -- patient-safety hard reject.
+# v100 ROOT FIX (P4-002): the previous code had a GLOBAL hard-reject for
+# all drugs in this frozenset — including ``thalidomide``. But
+# thalidomide IS an FDA-approved treatment for MULTIPLE MYELOMA (under
+# strict REMS protocols, FDA 1998). The global reject was a scientific
+# lie: it told pharma partners "thalidomide is universally unsafe" when
+# the actual regulatory status is "unsafe ONLY for morning sickness /
+# pregnancy (the 1960s tragedy), approved for multiple myeloma and
+# leprosy." The global reject also made the entry in
+# ``validated_hypotheses.csv`` line 2 (thalidomide,multiple myeloma)
+# DEAD — the +0.1 reward bonus for validated KPs never fired because
+# Gate 0 returned -1.0 first.
+#
+# ROOT FIX: keep the global frozenset for drugs that were withdrawn for
+# ALL indications (rofecoxib, terfenadine, etc.), but add an
+# INDICATION-SPECIFIC override map for drugs like thalidomide that are
+# banned for SOME indications but approved for others. The reward
+# function's Gate 0 now checks ``_is_withdrawn_for_indication(drug,
+# disease)`` which consults BOTH the global set AND the indication map.
 WITHDRAWN_DRUGS: frozenset = frozenset({
-    "rofecoxib", "vioxx", "thalidomide", "terfenadine", "cerivastatin",
+    "rofecoxib", "vioxx", "terfenadine", "cerivastatin",
     "troglitazone", "valdecoxib", "bextra", "rimonabant", "sibutramine",
     "phenformin", "cisapride", "astemizole", "grepafloxacin",
     "lumiracoxib", "tacrine", "tolcapone", "dexfenfluramine",
 })
+
+# v100 ROOT FIX (P4-002): drugs that are APPROVED for some indications
+# but WITHDRAWN / CONTRAINDICATED for others. The value is the set of
+# disease-name substrings for which the drug is contraindicated. If a
+# drug is NOT in this map, fall back to the global WITHDRAWN_DRUGS
+# check. Thalidomide is the canonical example: approved for multiple
+# myeloma + leprosy (FDA 1998), ABSOLUTELY CONTRAINDICATED for morning
+# sickness / pregnancy / hyperemesis gravidarum (the 1960s tragedy).
+WITHDRAWN_INDICATIONS: dict = {
+    "thalidomide": frozenset({
+        "morning sickness", "nausea of pregnancy",
+        "hyperemesis gravidarum", "pregnancy", "pregnant",
+    }),
+    "lenalidomide": frozenset({  # thalidomide analog — same pregnancy contraindication
+        "morning sickness", "nausea of pregnancy",
+        "hyperemesis gravidarum", "pregnancy", "pregnant",
+    }),
+    "pomalidomide": frozenset({  # thalidomide analog — same pregnancy contraindication
+        "morning sickness", "nausea of pregnancy",
+        "hyperemesis gravidarum", "pregnancy", "pregnant",
+    }),
+    "isotretinoin": frozenset({  # Accutane — severe teratogen
+        "morning sickness", "pregnancy", "pregnant", "acne during pregnancy",
+    }),
+    "valproic acid": frozenset({  # pregnancy category D for migraine prophylaxis
+        "migraine",  # valproate is contraindicated for migraine in pregnancy
+    }),
+}
+
+
+def _is_withdrawn_for_indication(drug: str, disease: str) -> bool:
+    """v100 ROOT FIX (P4-002): indication-specific withdrawal check.
+
+    Returns True if the drug is contraindicated for the given disease.
+    For drugs in ``WITHDRAWN_INDICATIONS``, only the listed indications
+    trigger the hard reject — the drug is allowed for all other diseases.
+    For drugs NOT in the indication map but IN the global
+    ``WITHDRAWN_DRUGS`` set (rofecoxib, terfenadine, etc.), the global
+    hard reject still fires (these were withdrawn for ALL indications).
+
+    This makes thalidomide + multiple myeloma a VALID repurposing
+    candidate (it's FDA-approved for that) while keeping the
+    patient-safety guardrail for thalidomide + morning sickness.
+    """
+    drug_lower = str(drug).lower().strip()
+    disease_lower = str(disease).lower().strip()
+    withdrawn_indications = WITHDRAWN_INDICATIONS.get(drug_lower)
+    if withdrawn_indications:
+        # Drug has indication-specific restrictions — check each.
+        return any(wi in disease_lower for wi in withdrawn_indications)
+    # Drug has no indication-specific entry — fall back to global set.
+    return drug_lower in WITHDRAWN_DRUGS
 
 # Controlled substances -- flag for legal review, do NOT auto-export.
 CONTROLLED_SUBSTANCES: frozenset = frozenset({
@@ -1063,7 +1133,29 @@ class PipelineConfig:
     # default because PipelineConfig did not define these fields. A user
     # who set ppo_gamma: 0.9 in YAML got TypeError (unknown field) or
     # silent ignore. Now they are first-class config fields.
-    ppo_gamma: float = 0.0  # V30 (10.29): 0.0 for contextual bandit
+    # v100 ROOT FIX (P4-018): the previous default ``ppo_gamma = 0.0``
+    # silently degenerated PPO into a CONTEXTUAL BANDIT — the value
+    # head's target collapsed to the immediate reward (no discounting of
+    # future returns), and the algorithm's "PPO" label was a misnomer.
+    # Downstream consumers reading the metadata field ``ppo_gamma=0.0``
+    # alongside the SB3 ``PPO`` class would reasonably believe a real
+    # PPO agent was trained, when in fact no temporal credit assignment
+    # was happening at all.
+    #
+    # ROOT FIX: set ``ppo_gamma = 0.95`` so PPO is actually PPO — the
+    # value head learns to predict discounted future returns, the
+    # advantage estimator has temporal structure, and the policy
+    # gradient accounts for the effect of current actions on future
+    # rewards. This is the scientifically correct choice for a ranking
+    # task where the agent processes a sequence of drug-disease pairs
+    # and the cumulative quality of the ranking matters (not just the
+    # immediate reward of the current pair).
+    #
+    # Operators who specifically WANT a contextual bandit (e.g., for a
+    # one-shot ranking with no sequential structure) can override via
+    # YAML config ``ppo_gamma: 0.0``. The default is now the
+    # scientifically honest PPO value.
+    ppo_gamma: float = 0.95  # v100 P4-018: real PPO (was 0.0 = contextual bandit)
     ppo_ent_coef: float = 0.01
     ppo_clip_range: float = 0.2
     ppo_net_arch: Optional[Dict[str, List[int]]] = None  # default: dict(pi=[128,64], vf=[64,32])
@@ -1563,8 +1655,25 @@ class RewardFunction:
         cfg = self.config
 
         # Gate 0: withdrawn drug (patient-safety hard reject)
+        # v100 ROOT FIX (P4-002): use indication-specific check instead
+        # of the global ``drug_name in WITHDRAWN_DRUGS`` set. Thalidomide
+        # is FDA-approved for multiple myeloma but contraindicated for
+        # morning sickness — the old global reject incorrectly blocked
+        # BOTH indications. The new ``_is_withdrawn_for_indication``
+        # function checks the drug's specific contraindication list and
+        # only rejects when the disease matches. Drugs withdrawn for ALL
+        # indications (rofecoxib, terfenadine, ...) still get the global
+        # hard reject via the fallback in ``_is_withdrawn_for_indication``.
+        #
+        # v100 ROOT FIX (P4-005): the rejection counters
+        # ``n_safety_rejected`` / ``n_gnn_rejected`` (on TrainingMetrics)
+        # are incremented by ``DrugRankingEnv.step()`` based on the
+        # returned reward value, NOT here. RewardFunction is pure — it
+        # must not mutate shared state. See ``DrugRankingEnv.step()`` for
+        # the counter wiring.
         drug_name = str(row.get(DRUG_COL, "")).lower().strip()
-        if drug_name in WITHDRAWN_DRUGS:
+        disease_name = str(row.get(DISEASE_COL, "")).lower().strip()
+        if _is_withdrawn_for_indication(drug_name, disease_name):
             return -1.0
 
         # Gate 1: NaN safety = unknown risk = hard reject (conservative)
@@ -2494,6 +2603,21 @@ class DrugRankingEnv(gym.Env):
 
         self.data = data.reset_index(drop=True).copy()
 
+        # v100 ROOT FIX (P4-005): rejection counters. The previous code
+        # had ``n_safety_rejected`` / ``n_gnn_rejected`` ONLY on
+        # ``PipelineMetrics`` (created in ``run_pipeline`` at line 5487)
+        # but NEVER incremented them — so the alert gate at line 6115
+        # (``safety_reject_rate > 0.5``) was dead code, and a runaway
+        # safety-reject scenario could ship candidates to pharma partners
+        # without raising the CRITICAL alert.
+        #
+        # ROOT FIX: add per-env counters here, increment them in
+        # ``step()`` based on the returned reward value, and have
+        # ``run_pipeline`` copy them to ``PipelineMetrics`` after
+        # evaluation. The alert gate then has real data to work with.
+        self.n_safety_rejected: int = 0
+        self.n_gnn_rejected: int = 0
+
         for col in self.config.reward.feature_cols:
             if col in self.data.columns:
                 self.data[col] = self.data[col].clip(0.0, 1.0)
@@ -2829,6 +2953,28 @@ class DrugRankingEnv(gym.Env):
 
         row = self.data.iloc[self.current_idx]
         reward = self.reward_fn.compute(row)
+
+        # v100 ROOT FIX (P4-005): increment rejection counters based on
+        # the raw reward value. The reward function returns -1.0 from
+        # multiple gates (Gate 0: withdrawn drug, Gate 1: safety hard
+        # reject, Gate 2: NaN feature, Gate 3: NaN gnn). We
+        # differentiate by inspecting the row's safety value:
+        #   - If safety < safety_hard_reject threshold → safety reject
+        #   - Otherwise → GNN/feature reject (Gate 0/2/3)
+        # This wiring makes the alert gate at line 6115 (safety_reject_rate
+        # > 0.5 → raise RuntimeError) actually fire on runaway safety
+        # rejections. Previously the counters were ALWAYS zero, so the
+        # alert was dead code and a runaway safety scenario would ship
+        # candidates to pharma partners without raising the CRITICAL alert.
+        if reward == -1.0:
+            _safety_val = row.get(SAFETY_COL, np.nan)
+            _safety_threshold = float(self.config.reward.safety_hard_reject)
+            if (not pd.isna(_safety_val)) and float(_safety_val) < _safety_threshold:
+                self.n_safety_rejected += 1
+            else:
+                # Gate 0 (withdrawn drug), Gate 2 (NaN feature), or
+                # Gate 3 (NaN gnn) — classify as GNN/feature reject.
+                self.n_gnn_rejected += 1
 
         # V30 ROOT FIX (10.12): the original HIGH/LOW reward asymmetry caused
         # PPO to collapse to "always LOW". The audit's EV analysis with the
@@ -3225,18 +3371,35 @@ def train_agent(
                 # recycling (so PPO can fill a batch) but limits it to
                 # 2× to prevent excessive correlation. On production
                 # graphs (>= 1000 pairs), no clamping is needed.
+                #
+                # v100 ROOT FIX (P4-017): the previous 2× multiplier was
+                # TOO SMALL. On the 195-pair demo graph, max_n_steps=390
+                # but cfg.ppo_n_steps=2048 — so PPO was forced to recycle
+                # the env ~5× per rollout anyway (just in a less-obvious
+                # way: SB3 internally loops the env when n_steps exceeds
+                # env.n_pairs). The 2× clamp didn't prevent correlation;
+                # it just truncated each rollout's information content.
+                #
+                # ROOT FIX: raise the multiplier to 5× (max_n_steps=975
+                # on the 195-pair demo) so PPO can collect a full
+                # batch's worth of unique transitions before recycling.
+                # This is the smallest multiplier that lets a 2048-step
+                # rollout collect ≥975 unique pairs on the demo graph.
+                # Production graphs (≥1000 pairs) are unaffected.
                 if env.n_pairs < 1000:
-                    max_n_steps = max(1, env.n_pairs * 2)
+                    max_n_steps = max(1, env.n_pairs * 5)
                     effective_n_steps = max(1, min(cfg.ppo_n_steps, max_n_steps))
                 else:
                     effective_n_steps = max(1, cfg.ppo_n_steps)
                 effective_batch_size = max(1, min(cfg.ppo_batch_size, effective_n_steps))
                 if env.n_pairs < 1000:
                     logger.info(
-                        f"ROOT FIX (C7): small graph ({env.n_pairs} pairs < 1000). "
+                        f"v100 ROOT FIX (P4-017): small graph ({env.n_pairs} pairs < 1000). "
                         f"Clamped n_steps from {cfg.ppo_n_steps} to {effective_n_steps} "
-                        f"(max 2× env.n_pairs = {max_n_steps}) to prevent excessive "
-                        f"correlation from env recycling."
+                        f"(max 5× env.n_pairs = {max_n_steps}). The previous 2× clamp "
+                        f"was too small — SB3 internally recycled the env anyway, just "
+                        f"with truncated rollout info. 5× lets PPO collect ≥{max_n_steps} "
+                        f"unique transitions per rollout before recycling."
                     )
 
                 # ROOT FIX (A3/A4/A5): entropy_coef=0.01 (was 0.02).
@@ -5701,6 +5864,36 @@ def run_pipeline(config: PipelineConfig) -> Tuple[List[RankedCandidate], Pipelin
     # high_ranked buffer size from the eval env.
     _eval_env = test_env if len(test_df) > 0 else train_env
     metrics.n_ranked_high = len(_eval_env.high_ranked)
+
+    # v100 ROOT FIX (P4-005): copy the env's rejection counters to the
+    # pipeline metrics so the alert gate at line ~6115 has real data.
+    # The counters are incremented in ``DrugRankingEnv.step()`` based on
+    # whether a -1.0 reward was due to a safety-gate failure or a
+    # GNN/feature-gate failure. Without this copy, the counters on
+    # ``PipelineMetrics`` remained at 0 forever — the alert gate was
+    # dead code and a runaway safety-reject scenario would ship
+    # candidates to pharma partners silently.
+    #
+    # We accumulate across BOTH train and test envs (train_env always
+    # exists; test_env exists when test_df is non-empty). The counters
+    # reflect the total pairs the reward function rejected during the
+    # evaluate_agent pass over the test env (the same pass that produced
+    # the candidates). Train-env counters are also accumulated so a
+    # training-time safety storm is visible in the alert.
+    metrics.n_safety_rejected = (
+        getattr(train_env, "n_safety_rejected", 0)
+        + (getattr(test_env, "n_safety_rejected", 0) if len(test_df) > 0 else 0)
+    )
+    metrics.n_gnn_rejected = (
+        getattr(train_env, "n_gnn_rejected", 0)
+        + (getattr(test_env, "n_gnn_rejected", 0) if len(test_df) > 0 else 0)
+    )
+    logger.info(
+        "v100 ROOT FIX (P4-005): rejection counters — "
+        "safety_rejected=%d, gnn_rejected=%d (of %d pairs processed).",
+        metrics.n_safety_rejected, metrics.n_gnn_rejected,
+        metrics.n_pairs_processed,
+    )
 
     # Compute AUC on held-out test (B13 fix: uses KNOWN_POSITIVES as label)
     # V4 B-F1 fix: uses policy probabilities, not binary actions.

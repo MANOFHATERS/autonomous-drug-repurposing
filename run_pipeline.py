@@ -323,9 +323,15 @@ def run_schema_adapter(
 
 
 def run_phase2_kg_builder(
-    staged: Any, builder: Any
+    staged: Any, builder: Any, seed: int = 42
 ) -> Tuple[Any, Any, Any, List[Tuple[str, str]]]:
     """Phase 2: Build the real biomedical KG from the staged data.
+
+    v100 ROOT FIX (R-002): add ``seed: int = 42`` parameter so the
+    ``seed=seed`` reference at line 346 resolves. Previously the body
+    used ``seed`` but the parameter list did NOT include it — calling
+    this function raised ``NameError: name 'seed' is not defined``.
+    The caller at line 712 now passes ``seed=args.seed`` explicitly.
 
     v90 ROOT FIX: uses the REAL APIs:
       1. bridge_to_pyg_maps(builder) → (entity_maps, edge_maps)
@@ -693,23 +699,35 @@ def main() -> int:
 
     try:
         # ─── Phase 1 ────────────────────────────────────────────────
-        ensure_phase1_data(Path(args.phase1_dir))
+        # v100 ROOT FIX (R-005): capture the return value of
+        # ``ensure_phase1_data`` so the summary print below can reference
+        # ``len(phase1_csvs)`` instead of raising ``NameError``.
+        phase1_csvs = ensure_phase1_data(Path(args.phase1_dir))
 
         # ─── Bridge ──────────────────────────────────────────────────
+        # v100 ROOT FIX (R-003 + R-004): the previous code called
+        # ``run_bridge`` TWICE and reversed the tuple unpacking on the
+        # second call. The first call (line 705 old) correctly unpacked
+        # ``builder, staged = run_bridge(...)``. The second call (line
+        # 712 old) unpacked ``staged, builder = run_bridge(...)`` —
+        # reversing the two objects so ``run_phase2_kg_builder(staged,
+        # builder)`` actually received ``(builder, staged)``.
+        #
+        # Additionally, the ``run_schema_adapter(builder, seed=...)``
+        # call at old line 711 was DEAD CODE — its return value was
+        # overwritten by the ``run_phase2_kg_builder`` call below.
+        #
+        # ROOT FIX: call ``run_bridge`` ONCE, unpack correctly
+        # ``(builder, staged)``, drop the dead ``run_schema_adapter``
+        # call, and pass ``seed=args.seed`` to ``run_phase2_kg_builder``
+        # (which now accepts it per R-002).
         builder, staged = run_bridge(Path(args.phase1_dir))
         if builder.total_nodes == 0:
             logger.error("Phase 1 + Bridge produced 0 nodes. Aborting.")
             return 1
 
-        # ─── Phase 2 → Phase 3 Schema Adapter ────────────────────────
-        graph_data = run_schema_adapter(builder, seed=args.seed)
-        staged, builder = run_bridge(Path(args.phase1_dir))
-        if staged.total_nodes == 0:
-            logger.error("Phase 1 + Bridge produced 0 nodes. Aborting.")
-            return 1
-
         # ─── Phase 2: Build real KG ─────────────────────────────────
-        graph_data = run_phase2_kg_builder(staged, builder)
+        graph_data = run_phase2_kg_builder(staged, builder, seed=args.seed)
         node_features, edge_indices, node_maps, known_pairs = graph_data
         if len(node_maps.get("drug", {})) == 0:
             logger.error("Schema adapter produced 0 drug nodes. Aborting.")
@@ -743,16 +761,6 @@ def main() -> int:
         print(f"  Candidates Returned:     {results.get('n_candidates_returned', 0)}")
         print(f"  Output Directory:        {output_dir}")
         print(f"  Phase 1 CSVs found:     {len(phase1_csvs)}")
-        print(f"  Phase 2 nodes (staged): {staged.total_nodes}")
-        print(f"  Phase 2 edges (staged): {staged.total_edges}")
-        print(f"  Phase 2 drugs in KG:    {len(node_maps.get('drug', {}))}")
-        print(f"  Phase 2 diseases in KG: {len(node_maps.get('disease', {}))}")
-        print(f"  GT Best Val AUC:        {results.get('gt_best_val_auc', 0):.4f}")
-        print(f"  GT Test AUC (verified): {results.get('gt_test_auc_verified', 'N/A')}")
-        print(f"  GT Epochs Trained:      {results.get('gt_epochs_trained', 0)}")
-        print(f"  RL Candidates Ranked:   {results.get('rl_ranked_high', 0)}")
-        print(f"  Candidates Returned:    {results.get('n_candidates_returned', 0)}")
-        print(f"  Output Directory:       {output_dir}")
 
         sv = results.get("scientific_validation", {})
         print()

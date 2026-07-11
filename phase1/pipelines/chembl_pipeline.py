@@ -934,18 +934,22 @@ class ChEMBLPipeline(BasePipeline):
                     f"or as plain CSV ({plain_exc}). The ChEMBL API may be "
                     f"down or rate-limiting. Try again later."
                 ) from plain_exc
-        # v90 ROOT FIX (BUG #10): auto-detect compression from file
-        # extension instead of hardcoding compression="gzip". The v50
-        # path now writes .csv.gz (BUG #1 fix), but defensive coding
-        # ensures a plain .csv file (e.g. from a manual download or
-        # API error page) is still readable without BadGzipFile.
-        _compression = "gzip" if raw_path.suffix == ".gz" else None
-        drugs_df = pd.read_csv(
-            raw_path,
-            compression=_compression,
-            low_memory=False,
-            encoding="utf-8",
-        )
+        # v100 ROOT FIX (P1-001): DELETE the redundant unconditional
+        # ``pd.read_csv`` call below. The try/except block above
+        # (lines 910-936) ALREADY handles BOTH the gzip and plain-CSV
+        # cases — the first attempt uses compression="gzip" (with
+        # BadGzipFile fallback to compression=None). The block below
+        # re-read the SAME file unconditionally, which:
+        #   1. Doubled I/O — every ChEMBL download was read from disk
+        #      TWICE (≈2× pipeline latency on the largest source).
+        #   2. Discarded the first ``drugs_df`` (the try/except result)
+        #      so any preprocessing inside the except branch was lost.
+        #   3. Re-detected compression from the file extension, which
+        #      could DISAGREE with the try/except path (e.g., a .csv.gz
+        #      file that was actually a plain CSV returned by a
+        #      rate-limited ChEMBL API would pass the try/except path
+        #      but fail the unconditional re-read with BadGzipFile).
+        # The try/except block above is the single source of truth.
         initial_count = len(drugs_df)
         logger.info(
             "[%s] Loaded %d raw drug records from %s",

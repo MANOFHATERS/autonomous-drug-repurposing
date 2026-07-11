@@ -2185,7 +2185,15 @@ class GTRLBridge:
             #   for the base score, then add the v89 S-F1 pathway-
             #   connectivity differentiation on top. This satisfies the
             #   source-check tests AND uses the curated prevalence table.
-            base = compute_unmet_need_score(disease_name, tc)
+            #
+            # v100 ROOT FIX (P3-005 continued): the previous line 2188
+            # ``base = compute_unmet_need_score(disease_name, tc)`` was
+            # an UNPROTECTED call BEFORE the try/except below. If the
+            # curated table doesn't have the disease, this call would
+            # raise and the entire function would propagate the exception
+            # — the try/except fallback 30 lines down was dead. Delete
+            # the unprotected call; the try block below handles BOTH the
+            # happy path and the fallback.
             # v89 ROOT FIX (CI S-F1 — unmet_need_score too few distinct
             # values on demo graph): add a small pathway-connectivity
             # differentiation. Diseases with the SAME treatment count but
@@ -2200,8 +2208,27 @@ class GTRLBridge:
             # the bridge was still using the inline formula. The tests
             # (test_unmet_need_formula_is_continuous, test_v4_s_f1) expect
             # compute_unmet_need_score to be called. This wires it in.
+            #
+            # v100 ROOT FIX (P3-005): the previous structure had TWO
+            # compounding defects:
+            #   1. The pathway-connectivity differentiation lived INSIDE
+            #      the ``except`` body (lines 2210-2212) — so it only ran
+            #      when the curated-table call FAILED. On the happy path
+            #      (curated table HAS the disease), the function returned
+            #      the raw base score with NO differentiation — defeating
+            #      the entire S-F1 fix.
+            #   2. The intended-correct version (lines 2217-2220, AFTER
+            #      the try block) was UNREACHABLE because both branches
+            #      of the try/except returned. Dead code.
+            #
+            # ROOT FIX: move the pathway-connectivity differentiation
+            # BEFORE the try block so it ALWAYS runs. Wrap ONLY the
+            # curated-table call in try/except (it may raise on unknown
+            # diseases). The fallback uses the inline formula. The
+            # differentiation is applied to BOTH paths so the S-F1
+            # secondary signal is always present.
             try:
-                return float(compute_unmet_need_score(disease_name, n_treatments=int(tc)))
+                base = float(compute_unmet_need_score(disease_name, n_treatments=int(tc)))
             except Exception:
                 # Fallback to the inline formula if the curated table
                 # doesn't have the disease (shouldn't happen for demo
@@ -2210,11 +2237,11 @@ class GTRLBridge:
                 pw = pathway_count_per_disease.get(ds_idx, 0)
                 pw_component = 1.0 - 0.4 * (float(pw) / pw_scale)
                 base = 0.7 * treat_component + 0.3 * pw_component
-                return float(np.clip(base, 0.0, 1.0))
-            # Use the curated function (prevalence + treatment count).
-            # Add a small pathway-connectivity secondary signal for
-            # continuous variation on the demo graph (S-F1 fix).
-            base = compute_unmet_need_score(disease_name, int(tc))
+            # S-F1 fix (UNCONDITIONAL — runs on BOTH the curated-table
+            # path and the inline-formula fallback path). Adds a small
+            # ±0.015 pathway-connectivity differentiation so diseases
+            # with the same treatment count but different pathway
+            # connectivity get distinct unmet_need scores.
             pw_count = pathway_count_per_disease.get(ds_idx, 0)
             pw_diff = 0.03 * (pw_count / max(max_pw, 1)) - 0.015
             return float(np.clip(base + pw_diff, 0.0, 1.0))
@@ -2534,10 +2561,25 @@ class GTRLBridge:
         # predictions for the wrong graph topology → GT Test AUC = 0.0.
         # When graph_data is None (demo graph fallback), keep the
         # resume behavior for backward compat.
+        #
+        # v100 ROOT FIX (P3-008): the previous predicate
+        # ``resume_from_checkpoint=graph_data is None`` was INSUFFICIENT —
+        # it would still attempt to resume from a stale checkpoint when
+        # ``graph_data is None`` BUT ``phase1_staged_data`` is provided
+        # (the production path: caller passes the real Phase 1→2 staged
+        # graph via ``phase1_staged_data`` instead of pre-built
+        # ``graph_data``). The bridge then loaded a STALE checkpoint from
+        # a prior demo-graph run and produced predictions for the wrong
+        # topology → GT Test AUC = 0.0 on the production path.
+        #
+        # ROOT FIX: extend the predicate to ALSO check
+        # ``phase1_staged_data is None``. Only resume when BOTH are None
+        # (the pure demo path with no real graph source of any kind).
+        _resume_pred = (graph_data is None and phase1_staged_data is None)
         gt_results = self.train_model(
             epochs=gt_epochs,
             patience=40,
-            resume_from_checkpoint=graph_data is None,
+            resume_from_checkpoint=_resume_pred,
         )
 
         # Generate RL input
@@ -3254,7 +3296,17 @@ class GTRLBridge:
             else "pilot" if _num_drugs_in_graph < 1000
             else "production"
         )
-        kp_recovery_threshold = float(getattr(rl_config, "min_kp_recovery_rate", 0.2))
+        # v100 ROOT FIX (P3-004): the previous line silently RE-LOWERED
+        # ``kp_recovery_threshold`` from the ``max(rl_config_threshold, 0.5)``
+        # value set at line 3241 back to ``rl_config.min_kp_recovery_rate``
+        # (default 0.2). This defeated the V90 BUG #31 floor: a 16-line-old
+        # safety gate was killed by a stray reassignment. The audit found
+        # this meant the scientific-validation ``kp_recovery_pass`` field
+        # reported True at 20% recovery — a patient-safety hazard for
+        # pharma partners who consume the candidates CSV.
+        #
+        # ROOT FIX: delete the reassignment. ``kp_recovery_threshold`` is
+        # already correctly set at line 3241 with the 0.5 floor enforced.
         scientific_validation = {
             "gt_test_auc": gt_test_auc,
             "gt_test_auc_threshold": _auc_threshold,

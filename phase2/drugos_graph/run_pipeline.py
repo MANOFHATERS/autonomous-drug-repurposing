@@ -5950,7 +5950,16 @@ def step11_train_transe(
             _edge_type_str = "unknown"
             _h_eid = global_idx_to_eid.get(_h_gidx)
             _t_eid = global_idx_to_eid.get(_t_gidx)
-            _r_idx_v88 = int(relations[_i]) if _i < len(relations) else -1
+            # v100 ROOT FIX (P2-001): the previous code referenced
+            # ``relations[_i]`` but the variable in scope is ``rels``
+            # (defined at line 5657 as ``rels: List[int] = []`` and
+            # populated at line 5676). There is NO ``relations`` variable
+            # anywhere in this function — the line raised ``NameError``
+            # the first time the cross-partition edge-printing loop was
+            # reached. The error was silent in CI because the loop only
+            # runs when ``DRUGOS_DROP_CROSS_PARTITION_EDGES=1`` is set
+            # (an obscure debug flag). Fix: use ``rels[_i]``.
+            _r_idx_v88 = int(rels[_i]) if _i < len(rels) else -1
             if _h_eid is not None and _t_eid is not None:
                 _edge_type_str = f"{_h_eid[0]}-{_r_idx_v88}->{_t_eid[0]}"
             if _h_in_train and _t_in_train:
@@ -7304,6 +7313,20 @@ def step11b_train_graph_transformer(
                 break
             if not found:
                 n_skipped_no_neg += 1
+                # v100 ROOT FIX (P2-002): append a (0, 0) padding tuple
+                # so ``_make_negatives`` ALWAYS returns
+                # ``len(positive_indices)`` items. The previous code
+                # appended NOTHING here, so ``len(negs) < len(positive_indices)``
+                # whenever any positive was skipped. The caller's padding
+                # loop then appended SCALARS (not tuples), causing
+                # ``TypeError: 'int' object is not subscriptable`` at
+                # line 7376/7377 (``[p[0] for p in batch_neg]``). The
+                # (0, 0) padding is a no-op negative — node 0 is
+                # typically the most-connected drug/disease, so the
+                # negative score is well-defined and the loss gradient
+                # is benign. The warning above still fires so operators
+                # know saturation happened.
+                negs.append((0, 0))
         if n_skipped_no_neg:
             logger.warning(
                 "Step 11b: _make_negatives skipped %d positives for "
@@ -7349,10 +7372,24 @@ def step11b_train_graph_transformer(
                 continue
             batch_train_idx = train_idx[start:end]
             # Slice negatives to match this batch.
-            batch_neg = train_negatives_all[start:end]
+            batch_neg = list(train_negatives_all[start:end])  # v100 P2-002: copy to avoid mutating
             # Pad/truncate negatives to match positives count.
+            # v100 ROOT FIX (P2-002): the previous padding appended a
+            # SCALAR (``_rng.choice(all_disease_indices)``) to ``batch_neg``,
+            # but ``batch_neg`` is a list of (h, t) TUPLES. The downstream
+            # ``[p[0] for p in batch_neg]`` then raised
+            # ``TypeError: 'int' object is not subscriptable`` whenever
+            # padding fired (i.e., whenever ``_make_negatives`` skipped
+            # positives — common on small graphs where the held-out +
+            # known-positive sets saturate). The fix: append TUPLES.
+            # We also changed ``_make_negatives`` to always return
+            # ``len(positive_indices)`` items (padding with (0, 0) for
+            # skipped positives) so this loop rarely fires — but keep
+            # the safety net for any future drift.
+            _pad_h = heads[batch_train_idx[0]] if len(batch_train_idx) > 0 else 0
             while len(batch_neg) < len(batch_train_idx):
-                batch_neg.append(_rng.choice(all_disease_indices) if all_disease_indices else 0)
+                _pad_t = int(_rng.choice(all_disease_indices)) if all_disease_indices else 0
+                batch_neg.append((_pad_h, _pad_t))
             batch_neg = batch_neg[:len(batch_train_idx)]
 
             optimizer.zero_grad()

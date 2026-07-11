@@ -323,7 +323,19 @@ class HeterogeneousMultiHeadAttention(nn.Module):
             # and weighted_V_flat is (E, num_heads * head_dim). The scatter
             # distributes per-head attention outputs to the correct target nodes.
             weighted_V_flat = weighted_V.view(-1, self.num_heads * self.head_dim)
-            gate = self.edge_gates.get(edge_key, torch.tensor(1.0, device=device))
+            # v100 ROOT FIX (P3-003): ``nn.ParameterDict.get(key, default)``
+            # is NOT implemented on some PyTorch versions (raises
+            # ``AttributeError: 'ParameterDict' object has no attribute 'get'``
+            # or ``TypeError``). Use the explicit membership-check form
+            # ``pd[key] if key in pd else default`` which works on ALL
+            # PyTorch versions. The default of ``torch.tensor(1.0)`` means
+            # "no gating" — when the edge type has no learned gate, the
+            # message is passed through unchanged.
+            gate = (
+                self.edge_gates[edge_key]
+                if edge_key in self.edge_gates
+                else torch.tensor(1.0, device=device)
+            )
             # V30 ROOT FIX (5.3): apply cross-type normalization per edge
             # type's contribution. Each edge type's message is scaled by
             # 1/sqrt(num_edge_types) so the total message magnitude is

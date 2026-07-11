@@ -101,6 +101,19 @@ services:
       - ./entity_resolution:/opt/airflow/entity_resolution
       - ./database:/opt/airflow/database
       - ./config:/opt/airflow/config
+      # v100 ROOT FIX (P1-003): the previous compose file was MISSING
+      # these three mount points. Airflow tasks that import from
+      # ``data/``, ``exporters/``, or ``scripts/`` (e.g. the
+      # ``uniprot_organism_crosswalk.yaml`` in data/, the
+      # ``neo4j_exporter.py`` in exporters/, the
+      # ``download_parallel.py`` in scripts/) failed with
+      # ``FileNotFoundError`` or ``ImportError`` when invoked from
+      # inside the airflow container. The host directories exist (see
+      # ``phase1/data/``, ``phase1/exporters/``, ``phase1/scripts/``)
+      # but were invisible to the container. Mount all three.
+      - ./data:/opt/airflow/data
+      - ./exporters:/opt/airflow/exporters
+      - ./scripts:/opt/airflow/scripts
       - ./raw_data:/opt/airflow/raw_data
       - ./processed_data:/opt/airflow/processed_data
     depends_on:
@@ -220,6 +233,10 @@ services:
       - ./entity_resolution:/opt/airflow/entity_resolution
       - ./database:/opt/airflow/database
       - ./config:/opt/airflow/config
+      # v100 ROOT FIX (P1-003): missing mounts for data/, exporters/, scripts/.
+      - ./data:/opt/airflow/data
+      - ./exporters:/opt/airflow/exporters
+      - ./scripts:/opt/airflow/scripts
       - ./raw_data:/opt/airflow/raw_data
       - ./processed_data:/opt/airflow/processed_data
     ports:
@@ -268,6 +285,19 @@ services:
       - ./entity_resolution:/opt/airflow/entity_resolution
       - ./database:/opt/airflow/database
       - ./config:/opt/airflow/config
+      # v100 ROOT FIX (P1-003): the previous compose file was MISSING
+      # these three mount points. Airflow tasks that import from
+      # ``data/``, ``exporters/``, or ``scripts/`` (e.g. the
+      # ``uniprot_organism_crosswalk.yaml`` in data/, the
+      # ``neo4j_exporter.py`` in exporters/, the
+      # ``download_parallel.py`` in scripts/) failed with
+      # ``FileNotFoundError`` or ``ImportError`` when invoked from
+      # inside the airflow container. The host directories exist (see
+      # ``phase1/data/``, ``phase1/exporters/``, ``phase1/scripts/``)
+      # but were invisible to the container. Mount all three.
+      - ./data:/opt/airflow/data
+      - ./exporters:/opt/airflow/exporters
+      - ./scripts:/opt/airflow/scripts
       - ./raw_data:/opt/airflow/raw_data
       - ./processed_data:/opt/airflow/processed_data
     depends_on:
