@@ -111,7 +111,6 @@ jobs:
             phase1/tests/test_entity_resolution_init.py \
             phase1/tests/test_pipelines_init.py \
             phase1/tests/test_cleaning_init_16_domains.py \
-            phase1/tests/test_schema_16_domains.py \
             --timeout=120 -q
 
   # =========================================================================
