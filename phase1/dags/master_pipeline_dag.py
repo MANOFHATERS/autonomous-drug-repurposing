@@ -118,7 +118,39 @@ except Exception as _exc:  # noqa: BLE001 — config import must never kill DAG 
 #     5. The SLA-miss-is-advisory behaviour is now DOCUMENTED in the
 #        DEFAULT_ARGS comment below so operators do not rely on the
 #        SLA to actually stop the task.
-TASK_SLA = timedelta(hours=7)
+# v93 ROOT FIX (P1-034 — SLA defeats its own purpose):
+#   The v75 ROOT FIX (T-024) aligned SLA and execution_timeout at 7h,
+#   claiming "exactly ONE signal at exactly ONE time". But this DEFEATS
+#   the purpose of an SLA. An SLA is meant to be an EARLY WARNING that
+#   fires BEFORE the hard kill — giving the operator a window to
+#   intervene (extend the timeout, kill a stuck task manually, page
+#   on-call). By setting SLA == timeout, the SLA miss fires at exactly
+#   7h, and the hard kill ALSO fires at exactly 7h — the operator gets
+#   no early warning, just a single "task killed" notification.
+#
+#   Root fix: set TASK_SLA = 6h (1h before the 7h kill). The SLA miss
+#   at 6h is ADVISORY — it pages the operator but does NOT stop the
+#   task. The operator has a 1h window to decide: extend the timeout
+#   (via Airflow's clear+retry with a longer timeout), kill the task
+#   manually, or let it run to the 7h hard kill. The 7h TASK_TIMEOUT
+#   remains the patient-safe failure mode (GPU state, partial
+#   checkpoints, non-deterministic sampler state would corrupt a
+#   retry — so we kill, not retry).
+#
+# Design invariants preserved:
+#     1. TASK_TIMEOUT = 7h remains the upper bound of the documented
+#        training window (6-7h on real data). A normal run completes
+#        in ≤7h; a stuck run is killed at 7h. No false positives on
+#        normal runs.
+#     2. retries=0 on _trigger_phase2 is preserved (line 462) — a
+#        timed-out Phase 2 training run must NOT be retried
+#        automatically (GPU state, partial checkpoints, and
+#        non-deterministic sampler state would corrupt the retry).
+#        The hard kill at 7h is the patient-safe failure mode.
+#     3. The SLA-miss at 6h is ADVISORY — it pages but does not stop.
+#        Operators do not rely on the SLA to stop the task; the 7h
+#        timeout does that.
+TASK_SLA = timedelta(hours=6)
 TASK_TIMEOUT = timedelta(hours=7)
 
 # v83 DAG-2 ROOT FIX: apply the SAME retry policy used by all 7 standalone

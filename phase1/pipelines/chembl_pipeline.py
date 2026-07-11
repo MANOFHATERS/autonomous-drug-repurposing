@@ -82,8 +82,9 @@ pubchem_cid         int | None
 molecular_formula   str | None
 molecular_weight    float | None    > 0
 smiles              str | None
-is_fda_approved     bool            Proxy: ``max_phase == 4``
-max_phase           int | None      0-4 (0=preclinical, 4=approved)
+is_fda_approved     bool | None     Unknown until FDA Orange Book join (v93 fix)
+is_globally_approved bool           Proxy: ``max_phase == 4`` (any regulator)
+max_phase           int | None      0-4 (0=preclinical, 4=approved by any regulator)
 drug_type           str             One of ``DrugType`` enum values
 mechanism_of_action str | None
 ==================  ==============  ========================================
@@ -458,12 +459,21 @@ class ChEMBLPipeline(BasePipeline):
 
     Scientific Proxies (documented for audit trail)
     ------------------------------------------------
-    - ``is_fda_approved = (max_phase == 4)``: ChEMBL ``max_phase=4`` means
-      "Phase 4 trial reached" = globally approved (any regulator), NOT
-      FDA-specific. The proxy is documented in the manifest's
-      ``approval_basis`` field. Alternative: query
-      ``/molecule.json?approved_drugs=TRUE`` (S16) — not currently used
-      because max_phase=4 is the more conservative filter.
+    - ``is_globally_approved = (max_phase == 4)``: ChEMBL ``max_phase=4``
+      means "Phase 4 trial reached" = globally approved (any regulator —
+      FDA, EMA, PMDA, MHRA, etc.), NOT FDA-specific. This is the real
+      ChEMBL semantic and is reflected in the ``is_globally_approved``
+      column.
+    - ``is_fda_approved = None``: ChEMBL does NOT provide FDA-specific
+      approval data. The column is left NULL (unknown) until an FDA
+      Orange Book join is wired in. Downstream code MUST treat
+      ``is_fda_approved IS NULL`` as "unknown — require manual review"
+      rather than auto-fast-tracking through the RL ranker's safety
+      filter. The previous v12 code set ``is_fda_approved =
+      bool(max_phase == 4)`` — this was a PATIENT-SAFETY BUG: EMA-only-
+      approved drugs (e.g. a drug approved in Europe but not by the FDA)
+      were falsely marked ``is_fda_approved=True``, bypassing FDA safety
+      gates downstream. (v29 ROOT FIX / SW-1, v93 P1-027 audit.)
     - ``Natural product`` → ``small_molecule``: scientifically lossy
       (vancomycin is a glycopeptide). Every record that maps this way is
       logged at INFO with the chembl_id for curator review (S6).
@@ -690,8 +700,14 @@ class ChEMBLPipeline(BasePipeline):
             if mol_path and mol_path.exists():
                 if mol_path.suffix == ".jsonl":
                     # Parse JSONL into a list of dicts, then use _parse_molecules
+                    # v93 ROOT FIX (P1-043): explicit encoding="utf-8" — the
+                    # ChEMBL API returns UTF-8 JSONL with non-ASCII drug names
+                    # (e.g. "α-Tocopherol", "caf feína"). The default encoding
+                    # is locale.getpreferredencoding() (CP1252 on Windows,
+                    # UTF-8 on Linux). On Windows, non-ASCII names raised
+                    # UnicodeDecodeError, silently dropping the record.
                     mol_records = []
-                    with open(mol_path) as f:
+                    with open(mol_path, encoding="utf-8") as f:
                         for line in f:
                             mol_records.append(_json.loads(line))
                     drugs_df = self._parse_molecules(mol_records)
@@ -703,8 +719,10 @@ class ChEMBLPipeline(BasePipeline):
                 # Persist activities
                 if act_path and act_path.exists():
                     if act_path.suffix == ".jsonl":
+                        # v93 ROOT FIX (P1-043): explicit encoding="utf-8"
+                        # (see mol_path block above for rationale).
                         act_records = []
-                        with open(act_path) as f:
+                        with open(act_path, encoding="utf-8") as f:
                             for line in f:
                                 act_records.append(_json.loads(line))
                         activities_df = _pd.DataFrame(act_records)

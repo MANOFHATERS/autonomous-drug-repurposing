@@ -1503,6 +1503,61 @@ def _pre_validate_ppi(
                     )
                     record["protein_a_id"] = b_id
                     record["protein_b_id"] = a_id
+                    # v93 ROOT FIX (P1-033): the swap reversed protein_a_id
+                    # and protein_b_id but did NOT swap any direction-
+                    # specific fields. For STRING PPIs, all score columns
+                    # (combined/experimental/database/textmining) are
+                    # SYMMETRIC — no swap needed. But ``score_json`` is
+                    # a free-form Text column for "source-specific payloads
+                    # beyond STRING" (per models.py:1559-1560). If a non-
+                    # STRING source (e.g. BioGRID, IntAct) stores direction-
+                    # specific data in score_json (e.g. ``{"activation_a_to_b":
+                    # true, "inhibition_b_to_a": false}``), the swap
+                    # SILENTLY CORRUPTS the semantics — the direction fields
+                    # now refer to the wrong protein pair.
+                    #
+                    # Root fix: detect direction-specific keys in score_json
+                    # and log a WARNING (do not auto-swap — the direction
+                    # schema is source-specific and we cannot reliably
+                    # rename keys without understanding each source's
+                    # contract). The operator must inspect and either
+                    # (a) pre-swap direction fields upstream, or
+                    # (b) mark the record as direction-agnostic before
+                    #     calling the loader.
+                    score_json = record.get("score_json")
+                    if score_json:
+                        try:
+                            sj = json.loads(score_json) if isinstance(
+                                score_json, str
+                            ) else score_json
+                            if isinstance(sj, dict):
+                                _direction_keys = [
+                                    k for k in sj.keys()
+                                    if any(
+                                        tag in str(k).lower()
+                                        for tag in (
+                                            "_a_", "_b_", "_a2b_", "_b2a_",
+                                            "_to_a", "_to_b", "_from_a",
+                                            "_from_b", "a_to_b", "b_to_a",
+                                            "direction", "source_to_target",
+                                        )
+                                    )
+                                ]
+                                if _direction_keys:
+                                    logger.warning(
+                                        "%s: PPI swap occurred but score_json "
+                                        "contains direction-specific keys %r "
+                                        "that were NOT swapped. The direction "
+                                        "semantics may now be wrong. Pre-swap "
+                                        "direction fields upstream or mark the "
+                                        "record as direction-agnostic.",
+                                        operation, _direction_keys,
+                                    )
+                        except (json.JSONDecodeError, TypeError, ValueError):
+                            # score_json is not valid JSON — leave it as-is
+                            # (the original string is preserved). This is
+                            # not corruption; the field was already opaque.
+                            pass
 
             valid.append(record)
 
@@ -2287,9 +2342,27 @@ def bulk_upsert_dpi(
 
     # DES-02 + IDEM-2: Remove fillna("") for source — use NULL consistently
     # Empty string source_id → None (DES-04)
+    #
+    # v93 ROOT FIX (P1-028): the previous code had TWO bugs:
+    #   1. ``df["source_id"].where(df["source_id"].notna(), None)`` was a
+    #      NO-OP — ``.where(cond, other)`` returns ``other`` where ``cond``
+    #      is False. ``.notna()`` is True for non-null, so ``where`` returns
+    #      the original value for non-null and ``None`` for null — but the
+    #      row was ALREADY null, so this just re-wrote NULL with NULL.
+    #   2. ``df["source_id"].replace("", None)`` on an object column
+    #      converts empty strings to ``numpy.nan`` (NOT Python ``None``).
+    #      On PostgreSQL with psycopg2, ``nan`` in a nullable column is
+    #      inserted as NULL (correct). On some SQLAlchemy versions /
+    #      dialects, ``nan`` may be inserted as the literal string "NaN"
+    #      or as 0 — silently corrupting the column.
+    #
+    # Root fix: use a single ``mask`` + ``loc`` assignment that converts
+    # empty strings DIRECTLY to Python ``None`` (not NaN), and removes
+    # the redundant ``.where()`` call. The ``pd.NA`` → ``None`` conversion
+    # happens at the SQLAlchemy layer during parameter binding.
     if "source_id" in df.columns:
-        df["source_id"] = df["source_id"].replace("", None)
-        df["source_id"] = df["source_id"].where(df["source_id"].notna(), None)
+        _empty_mask = df["source_id"].astype(str).str.strip() == ""
+        df.loc[_empty_mask, "source_id"] = None
 
     batch_size = _calculate_safe_batch_size(
         DrugProteinInteraction, batch_size
@@ -3093,6 +3166,37 @@ def bulk_upsert_gda(
             df = df.sort_values(sort_cols, ascending=ascending, kind="mergesort")
         before = len(df)
         df = df.drop_duplicates(subset=dedup_cols, keep="first")
+        # v93 ROOT FIX (P1-026 — application-level NULL gene_symbol dedup):
+        #   pandas ``drop_duplicates`` treats NaN as DISTINCT — two rows
+        #   with ``gene_symbol=NaN`` and the same ``(disease_id, source)``
+        #   are NOT deduplicated. This is the same NULLs-are-distinct
+        #   issue as the DB UNIQUE constraint. The functional UNIQUE
+        #   index on ``COALESCE(gene_symbol, '')`` (added in models.py)
+        #   catches this at the DB level on PostgreSQL, but SQLite
+        #   dev/test may not render functional indexes via SQLAlchemy
+        #   DDL. This application-level dedup is the defense-in-depth:
+        #   normalize NaN gene_symbol to a sentinel for the dedup check,
+        #   then drop duplicates. This runs BEFORE the DB insert, so the
+        #   DB constraint never sees the duplicates.
+        if "gene_symbol" in df.columns and "disease_id" in df.columns \
+                and "source" in df.columns:
+            null_gene_mask = df["gene_symbol"].isna()
+            if null_gene_mask.any():
+                # Create a temporary sentinel column for dedup only.
+                # Do NOT modify the real gene_symbol column (NULL must
+                # stay NULL for the DB insert).
+                _dedup_key = df["gene_symbol"].fillna("__NULL_GENE__")
+                _dedup_key = _dedup_key.astype(str) + "\x1f" + \
+                    df["disease_id"].astype(str) + "\x1f" + \
+                    df["source"].astype(str)
+                before_null_dedup = len(df)
+                df = df[~_dedup_key.duplicated(keep="first")]
+                if len(df) < before_null_dedup:
+                    logger.warning(
+                        "bulk_upsert_gda: NULL gene_symbol dedup removed "
+                        "%d duplicate rows (P1-026 app-level defense)",
+                        before_null_dedup - len(df),
+                    )
         if len(df) < before:
             logger.warning(
                 "bulk_upsert_gda: deduplicated %d -> %d records",

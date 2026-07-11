@@ -1,5 +1,35 @@
 #!/usr/bin/env python3
-"""Run pipeline downloads in parallel (4 workers) — TWO-PHASE design.
+"""Run pipeline downloads in parallel — TWO-PHASE design.
+
+v93 ROOT FIX (P1-031 — thread-safety / parallelism correctness):
+    The previous code used ``ThreadPoolExecutor`` with
+    ``max_workers=len(FIRST_PASS_DOWNLOAD)`` (3 workers: ChEMBL,
+    UniProt, STRING). The docstring claimed "4 workers" — wrong.
+    More importantly, ``ThreadPoolExecutor`` is NOT SAFE for these
+    pipelines because they share module-level mutable state:
+      - ``cleaning.normalizer._dead_letters`` (dead-letter queue)
+      - ``cleaning.deduplicator._dead_letters`` (dead-letter queue)
+      - ``cleaning.normalizer._METRICS`` (metrics counters)
+      - global RDKit cache (``Chem.GetDefaultInchiKey`` etc.)
+      - ``cleaning.normalizer._cb_convert`` (circuit breaker)
+    Threads share memory, so concurrent pipeline runs INTERLEAVE
+    their dead-letter entries, metrics, and cache state — producing
+    silently wrong metrics and potentially corrupting the RDKit
+    cache (race conditions on the underlying C++ objects).
+
+    ROOT FIX: switch to ``ProcessPoolExecutor``. Each worker process
+    gets its OWN copy of the module state (fresh imports, fresh
+    caches, fresh dead-letter queues). No race conditions. The
+    download+clean phase does NOT write to the shared DB (it writes
+    to per-source CSV files on disk), so process isolation is safe.
+    The load phase (Phase C) runs SEQUENTIALLY by design (see
+    ``run_load_only`` calls in the __main__ block) — no parallelism
+    needed there.
+
+    Fallback: if ``ProcessPoolExecutor`` is unavailable or fails
+    (e.g. on systems where fork is restricted), the script falls
+    back to SEQUENTIAL execution with a warning. Sequential is
+    always safe.
 
 v75 ROOT FIX (T-025 — download_parallel.py skips entity resolution):
     The v74 ``download_parallel.py`` called ``cls(run_id=_run_id).run()``
@@ -17,7 +47,7 @@ v75 ROOT FIX (T-025 — download_parallel.py skips entity resolution):
 
     ROOT FIX (master-grade, mirrors the Airflow DAG exactly):
       Phase A — DOWNLOAD + CLEAN only (no DB load):
-        FIRST_PASS  : ChEMBL, UniProt, STRING (parallel, 3 workers)
+        FIRST_PASS  : ChEMBL, UniProt, STRING (parallel via ProcessPoolExecutor)
         SECOND_PASS : DisGeNET, OMIM (sequential — see master DAG comment)
         FOURTH_PASS : DrugBank (requires manual XML, separate step)
 
@@ -265,8 +295,39 @@ if __name__ == "__main__":
 
     print(f"\n[A.1] First-pass pipelines in parallel ({len(FIRST_PASS_DOWNLOAD)} jobs)...")
     print(f"  (FIRST_PASS has {len(FIRST_PASS_DOWNLOAD)} pipelines, max_workers={len(FIRST_PASS_DOWNLOAD)})")
-    with concurrent.futures.ThreadPoolExecutor(max_workers=len(FIRST_PASS_DOWNLOAD)) as pool:
-        results = list(pool.map(run_pipeline, _with_run_ids(FIRST_PASS_DOWNLOAD, "download")))
+    # v93 ROOT FIX (P1-031): ProcessPoolExecutor (not ThreadPoolExecutor).
+    # Each worker process gets its own module state — no race conditions
+    # on shared dead-letter queues, metrics counters, or RDKit cache.
+    # Fallback to sequential execution if ProcessPoolExecutor fails
+    # (e.g. on systems where fork is restricted, or if pipeline classes
+    # are not picklable in some environment).
+    use_process_pool = os.environ.get("DRUGOS_DISABLE_PROCESS_POOL", "") != "1"
+    if use_process_pool:
+        try:
+            with concurrent.futures.ProcessPoolExecutor(
+                max_workers=len(FIRST_PASS_DOWNLOAD)
+            ) as pool:
+                results = list(pool.map(
+                    run_pipeline,
+                    _with_run_ids(FIRST_PASS_DOWNLOAD, "download"),
+                ))
+        except (NotImplementedError, OSError, BrokenProcessPool) as exc:
+            print(
+                f"  [WARN] ProcessPoolExecutor unavailable ({exc}); "
+                f"falling back to sequential execution."
+            )
+            results = [
+                run_pipeline(args)
+                for args in _with_run_ids(FIRST_PASS_DOWNLOAD, "download")
+            ]
+    else:
+        # DRUGOS_DISABLE_PROCESS_POOL=1 — operator explicitly requested
+        # sequential execution (e.g. for debugging).
+        print("  [INFO] DRUGOS_DISABLE_PROCESS_POOL=1 — sequential execution.")
+        results = [
+            run_pipeline(args)
+            for args in _with_run_ids(FIRST_PASS_DOWNLOAD, "download")
+        ]
     all_results.extend(results)
     for name, ok, err, run_id in results:
         if ok:

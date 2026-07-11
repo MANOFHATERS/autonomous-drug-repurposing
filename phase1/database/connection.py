@@ -124,20 +124,31 @@ logger = logging.getLogger(__name__)
 import sqlite3 as _sqlite3_module
 from decimal import Decimal as _Decimal_type
 
+# v93 ROOT FIX (P1-040 — mutating stdlib _sqlite3_module private attr):
+#   The previous code set ``_sqlite3_module._drugos_decimal_adapter_registered
+#   = True`` — a PRIVATE attribute on the stdlib ``sqlite3`` module. This is
+#   a GLOBAL SIDE EFFECT that persists across module reloads and affects ALL
+#   sqlite3 connections in the process, not just this module's connections.
+#   It also pollutes the stdlib module's namespace with a non-standard
+#   attribute that other libraries (or future Python versions) may not
+#   expect. Root fix: use ONLY the module-level ``_DECIMAL_ADAPTER_REGISTERED``
+#   flag (defined below) to track registration state. Do NOT mutate the
+#   stdlib module. The flag is reset on module reload (Python re-executes
+#   the module), so re-registration is safe.
 _DECIMAL_ADAPTER_REGISTERED: bool = False
 try:
     # register_adapter is idempotent-safe only if the SAME adapter function
     # is passed; we guard with a module-level flag to avoid re-registration
-    # on hot-reload.
-    if not getattr(_sqlite3_module, "_drugos_decimal_adapter_registered", False):
+    # on hot-reload. The flag is process-local (not on the stdlib module).
+    if not _DECIMAL_ADAPTER_REGISTERED:
         _sqlite3_module.register_adapter(_Decimal_type, float)
-        _sqlite3_module._drugos_decimal_adapter_registered = True  # type: ignore[attr-defined]
         _DECIMAL_ADAPTER_REGISTERED = True
         logger.debug(
             "SQLite Decimal→float adapter registered process-wide "
-            "(P1C-021 root fix). Numeric columns on SQLite store float64; "
-            "PostgreSQL preserves Decimal precision. Tests MUST use "
-            "pytest.approx for numeric assertions."
+            "(P1C-021 root fix, v93 P1-040 — no stdlib mutation). "
+            "Numeric columns on SQLite store float64; PostgreSQL "
+            "preserves Decimal precision. Tests MUST use pytest.approx "
+            "for numeric assertions."
         )
 except Exception as _adapter_exc:  # noqa: BLE001 — never fatal
     logger.warning(

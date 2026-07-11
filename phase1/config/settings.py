@@ -447,10 +447,39 @@ def _get_profile_default(key: str, fallback: str) -> str:
 
 # Default uses placeholder credentials, NOT hardcoded real ones.
 # In development, docker-compose defaults are auto-applied with a warning.
-DATABASE_URL: str = _getenv(
+#
+# v93 ROOT FIX (P1-039 — empty DATABASE_URL bypasses placeholder check):
+#   The previous code used ``_getenv("DATABASE_URL", "<default>")`` which
+#   returns the default ONLY if the env var is UNSET. If the operator
+#   explicitly sets ``DATABASE_URL=""`` (empty string) in their .env
+#   (e.g. by accident, or by copying a template without filling it in),
+#   ``_getenv`` returns "" (empty string), NOT the default. The
+#   placeholder check at line 476 (``if "REPLACE_USER" in DATABASE_URL``)
+#   does NOT fire for empty string — so the operator gets an empty
+#   DATABASE_URL that fails at connection time with a cryptic error
+#   (e.g. "could not connect to server" with no host). Root fix: treat
+#   empty/whitespace-only DATABASE_URL as equivalent to UNSET, and fall
+#   back to the default placeholder (which then triggers the existing
+#   dev-mode warnings).
+_DATABASE_URL_RAW: str = _getenv(
     "DATABASE_URL",
     "postgresql://REPLACE_USER:REPLACE_PASSWORD@localhost:5432/drug_repurposing",
 )
+if not _DATABASE_URL_RAW or not _DATABASE_URL_RAW.strip():
+    # Empty or whitespace-only — treat as unset. The placeholder default
+    # below will trigger the existing dev-mode warning at line 476.
+    _log_warn = logging.getLogger("drugos.config.settings")
+    _log_warn.warning(
+        "DATABASE_URL is set to an empty string in the environment. "
+        "Falling back to the default placeholder URL. Set DATABASE_URL "
+        "to a real connection string (or unset it to use the dev-mode "
+        "docker-compose defaults via DRUGOS_DEV_ALLOW_DEFAULT_DB=1)."
+    )
+    DATABASE_URL: str = (
+        "postgresql://REPLACE_USER:REPLACE_PASSWORD@localhost:5432/drug_repurposing"
+    )
+else:
+    DATABASE_URL = _DATABASE_URL_RAW
 
 # Auto-apply docker-compose defaults in development when placeholder is present
 # v28 ROOT FIX (audit TOP-11): previously this block silently swapped the

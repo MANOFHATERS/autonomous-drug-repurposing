@@ -1845,27 +1845,45 @@ class DisGeNETPipeline(BasePipeline):
                         )
 
                 # SEC-17 / REL-21 / REL-7: Status-code handling.
+                #
+                # v93 ROOT FIX (P1-041 — 4xx errors are NOT transient):
+                #   The previous code called ``_CIRCUIT_BREAKER.record_failure()``
+                #   for 401, 403, 404, and 400. But 4xx errors (except 429) are
+                #   PERMANENT — they indicate a misconfigured API key (401/403),
+                #   a wrong endpoint URL (404), or a malformed request (400).
+                #   These are NOT transient failures that the circuit breaker
+                #   should protect against. Recording them as failures means a
+                #   misconfigured ``DISGENET_API_KEY`` trips the circuit
+                #   breaker after ``failure_threshold`` (5) attempts — blocking
+                #   ALL DisGeNET API calls until the breaker resets. The
+                #   operator then has to wait for the reset timeout even after
+                #   fixing the config. Root fix: do NOT call ``record_failure()``
+                #   for 4xx (except 429, which IS retryable as a rate-limit).
+                #   4xx errors raise immediately so the operator sees the
+                #   config error without tripping the breaker.
                 if resp.status_code in (401,):
-                    _CIRCUIT_BREAKER.record_failure()
+                    # 401 — API key invalid/expired. NOT transient.
                     raise RuntimeError(
                         "DisGeNET API returned 401 — DISGENET_API_KEY is "
                         "invalid or expired. Get a new key at "
                         "https://api.disgenet.com/api/v1/"
                     )
                 if resp.status_code == 403:
-                    _CIRCUIT_BREAKER.record_failure()
+                    # 403 — API key invalid or insufficient permissions.
+                    # NOT transient.
                     raise RuntimeError(
                         "DisGeNET API returned 403 — API key invalid or "
                         "insufficient permissions. Check DISGENET_API_KEY."
                     )
                 if resp.status_code == 404:
-                    _CIRCUIT_BREAKER.record_failure()
+                    # 404 — endpoint not found. NOT transient (config error).
                     raise RuntimeError(
                         "DisGeNET API endpoint not found — check "
                         "DISGENET_API_URL."
                     )
                 if resp.status_code == 400:
-                    _CIRCUIT_BREAKER.record_failure()
+                    # 400 — Bad Request. NOT transient (client error).
+                    # v93 P1-041: do NOT trip the circuit breaker.
                     body_preview = bytes(body[:500]).decode(
                         "utf-8", errors="replace"
                     )
@@ -1887,7 +1905,14 @@ class DisGeNETPipeline(BasePipeline):
                     self._interruptible_sleep(wait)
                     continue
                 if resp.status_code >= 400:
-                    _CIRCUIT_BREAKER.record_failure()
+                    # v93 P1-041: separate 4xx (non-transient) from 5xx
+                    # (transient). Only 5xx should trip the circuit breaker.
+                    if resp.status_code >= 500:
+                        # 5xx — server error, transient.
+                        _CIRCUIT_BREAKER.record_failure()
+                    # 4xx (other than 401/403/404/400/429 handled above) —
+                    # e.g. 405, 406, 410, 451. NOT transient. Do NOT trip
+                    # the circuit breaker.
                     body_preview = bytes(body[:500]).decode(
                         "utf-8", errors="replace"
                     )
