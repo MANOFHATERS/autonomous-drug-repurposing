@@ -539,7 +539,6 @@ def run_entity_resolution() -> Dict[str, Any]:
                 #   case-insensitive (lowercase both sides). Skip lines
                 #   that don't have exactly 4 fields after splitting
                 #   (defensive — corrupt lines are logged and skipped).
-                import gzip
                 _alias_records = []
                 _skipped_lines = 0
                 with gzip.open(_alias_file, "rt", encoding="utf-8") as _af:
@@ -597,10 +596,6 @@ def run_entity_resolution() -> Dict[str, Any]:
                         "Loaded STRING aliases from raw file %s: %d UniProt mappings",
                         _alias_file.name, len(string_aliases_df),
                     )
-        except RuntimeError:
-            # v89 BUG #28: re-raise RuntimeError (corrupt file) so the
-            # operator sees a clear failure. Do NOT swallow it.
-            raise
             else:
                 # v89 BUG #3: no human aliases file found — log clearly.
                 if _string_raw_dir.exists():
@@ -616,6 +611,10 @@ def run_entity_resolution() -> Dict[str, Any]:
                         len(_all_alias_files),
                         [f.name for f in _all_alias_files[:5]],
                     )
+        except RuntimeError:
+            # v89 BUG #28: re-raise RuntimeError (corrupt file) so the
+            # operator sees a clear failure. Do NOT swallow it.
+            raise
         except Exception as exc:
             logger.warning(
                 "Could not load raw STRING aliases file: %s — "

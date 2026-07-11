@@ -1486,11 +1486,14 @@ def _pre_validate_ppi(
             a_id = record.get("protein_a_id")
             b_id = record.get("protein_b_id")
             if a_id is not None and b_id is not None:
+                # v91 ROOT FIX (BUG #9): allow homodimers (a_id == b_id).
+                # Homodimers are biologically real (EGFR dimerization,
+                # p53 tetramerization). Set is_homodimer=True for
+                # self-interactions instead of quarantining them.
                 if a_id == b_id:
-                    raise ValueError(
-                        f"protein_a_id == protein_b_id ({a_id}) — "
-                        "self-interaction is not allowed"
-                    )
+                    record["is_homodimer"] = True
+                else:
+                    record["is_homodimer"] = False
                 if a_id > b_id:
                     logger.warning(
                         "%s: swapping protein_a_id(%d) > protein_b_id(%d)",
