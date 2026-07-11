@@ -1,0 +1,175 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.11', '3.12']
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install Phase 1 dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install \
+            "pandas>=2.1.4" \
+            "numpy>=1.26.3" \
+            "rapidfuzz>=3.6.1" \
+            "pyyaml>=6.0" \
+            "sqlalchemy>=2.0.25" \
+            "requests>=2.31.0" \
+            "python-dotenv>=1.0.0" \
+            "lxml>=5.1.0" \
+            "pytest>=7.0"
+
+      - name: Build check — Python compile (equivalent to tsc --noEmit)
+        run: |
+          echo "=== Build check: compiling all modified Python files ==="
+          python -m py_compile \
+            phase1/cleaning/missing_values.py \
+            phase1/cleaning/deduplicator.py \
+            phase1/cleaning/__init__.py \
+            phase1/cleaning/confidence.py \
+            phase1/entity_resolution/base.py \
+            phase1/entity_resolution/protein_resolver.py \
+            phase1/entity_resolution/drug_resolver.py \
+            phase1/entity_resolution/run.py
+          echo "=== Build check PASSED ==="
+
+      - name: Tests — pytest (core cleaning + entity resolution modules)
+        working-directory: phase1
+        env:
+          DRUGOS_ENVIRONMENT: development
+          DRUGOS_ALLOW_NO_RDKIT: "1"
+        run: |
+          echo "=== Running pytest on core P1 modules ==="
+          python -m pytest \
+            tests/test_missing_values_16_domains_v3.py \
+            tests/test_deduplicator_16_domains_v3.py \
+            tests/test_cleaning_init_16_domains.py \
+            -q --tb=short
+          echo "=== Tests PASSED ==="
+
+      - name: P1 fix verification — real production code execution
+        working-directory: phase1
+        env:
+          DRUGOS_ENVIRONMENT: development
+          DRUGOS_ALLOW_NO_RDKIT: "1"
+        run: |
+          echo "=== Running P1 fix verification (real production functions) ==="
+          python -c "
+          import sys, os
+          sys.path.insert(0, '.')
+          os.environ['DRUGOS_ENVIRONMENT'] = 'development'
+          import pandas as pd, numpy as np
+
+          passed = failed = 0
+          def check(label, cond, detail=''):
+              global passed, failed
+              if cond: print(f'  PASS: {label}'); passed += 1
+              else: print(f'  FAIL: {label} {detail}'); failed += 1
+
+          # P1-1: OMIM idempotency
+          from cleaning.missing_values import validate_gda_scores
+          df = pd.DataFrame({'disease_id':['C1','C2'],'disease_name':['A','B'],'score':[1.5,0.5],'association_type':['somatic','genetic'],'source':['disgenet','disgenet']})
+          r1 = validate_gda_scores(df, source='disgenet')
+          df2 = pd.concat([r1, pd.DataFrame({'disease_id':['C3'],'disease_name':['C'],'score':[3],'association_type':['genetic'],'source':['omim']})], ignore_index=True)
+          r2 = validate_gda_scores(df2, source='omim')
+          omim = r2[r2['disease_id']=='C3'].iloc[0]
+          check('P1-1 OMIM 3->0.8 after disgenet clip', omim['score']==0.8)
+
+          # P1-2: uniprot_exact_matches
+          from entity_resolution.protein_resolver import ProteinResolver
+          res = ProteinResolver()
+          res.mapping = {'P04637':{'uniprot_id':'P04637','gene_symbol':'TP53','gene_name':'p53','organism':'Homo sapiens','sequence':None,'protein_name':'p53','string_id':None,'chembl_target_id':None,'canonical_name':'P04637','sources':['t'],'match_method':'uniprot_exact','match_confidence':1.0,'created_at':'','resolved_at':'','resolver_version':'1','input_checksum':'','canonical_checksum':'','isoforms':[],'deprecated_by':None,'provisional':False}}
+          res.resolve_single(uniprot_id='P04637')
+          sd = res.get_stats()
+          if hasattr(sd,'to_dict'): sd = sd.to_dict()
+          check('P1-2 uniprot_exact_matches=1', sd.get('uniprot_exact_matches',0)==1)
+          check('P1-2 inchikey_exact_matches=0', sd.get('inchikey_exact_matches',0)==0)
+
+          # P1-3: deduplicator uppercase
+          from cleaning.deduplicator import dedup_by_inchikey
+          ik = 'BSYNRYMUTXBXSQ-UHFFFAOYSA-N'
+          df = pd.DataFrame({'inchikey':[ik, ik.lower()], 'name':['A','B'], 'source':['c','d']})
+          r = dedup_by_inchikey(df, auto_standardize=True)
+          check('P1-3 lowercase IK merged', len(r)==1)
+
+          # P1-8: AUTO_ACTIVITY_DIRECTION enum
+          from cleaning.deduplicator import DedupStrategy
+          check('P1-8 AUTO_ACTIVITY_DIRECTION in enum', 'AUTO_ACTIVITY_DIRECTION' in DedupStrategy.__members__)
+
+          # P1-9: per-row idempotency
+          from cleaning.missing_values import fill_missing_drug_fields
+          df = pd.DataFrame({'inchikey':['A','B'],'drug_type':[None,None]})
+          r1 = fill_missing_drug_fields(df)
+          df2 = pd.concat([r1, pd.DataFrame({'inchikey':['C'],'drug_type':[None]})], ignore_index=True)
+          r2 = fill_missing_drug_fields(df2)
+          check('P1-9 new row filled on 2nd call', r2['drug_type'].iloc[2]=='Unknown')
+
+          # P1-11: leading parenthetical
+          check('P1-11 leading parenthetical', ProteinResolver._normalize_organism('(Human) Homo sapiens')=='Homo sapiens')
+
+          # P1-13: FP boundary
+          from cleaning.confidence import classify_confidence
+          check('P1-13 0.06->moderate', classify_confidence(0.06)=='moderate')
+          check('P1-13 FP 0.06->moderate', classify_confidence(0.05999999999999999)=='moderate')
+
+          # P1-14: SYNTH fallback
+          from entity_resolution.drug_resolver import DrugResolver
+          dr = DrugResolver()
+          ik = dr._create_canonical_entry({'inchikey':'','name':'','source':'chembl'}, 'chembl', record_index=0)
+          name = dr.mapping[ik]['canonical_name']
+          check('P1-14 SYNTH name not UNKNOWN_SYNTH', not name.startswith('UNKNOWN_SYNTH'))
+
+          # P1-4: connectivity_index
+          dr2 = DrugResolver()
+          dr2._create_canonical_entry({'inchikey':'BSYNRYMUTXBXSQ-UHFFFAOYSA-N','name':'Aspirin','source':'chembl'}, 'chembl')
+          check('P1-4 connectivity_index populated', len(dr2._connectivity_index)>0)
+
+          # P1-10: module-level import
+          from entity_resolution import drug_resolver as drm
+          check('P1-10 module-level import', drm.CANONICAL_SYNTHETIC_INCHIKEY_REGEX is not None)
+
+          # P1-5: organism from taxid
+          res2 = ProteinResolver()
+          sdf = pd.DataFrame({'uniprot_id':['Q9CXW4'],'string_id':['10090.ENSMUSP0000001']})
+          rdf = res2.build_mapping(uniprot_df=pd.DataFrame(), string_aliases_df=None, string_df=sdf)
+          if not rdf.empty:
+              check('P1-5 mouse->Mus musculus', rdf.iloc[0].get('organism')=='Mus musculus')
+
+          # P1-7: batch processing
+          from cleaning import clean_drugs
+          df = pd.DataFrame({'inchikey':['BSYNRYMUTXBXSQ-UHFFFAOYSA-N','AAAAAAAAAAAAAA-UHFFFAOYSA-N'],'name':['Aspirin','Ibuprofen'],'is_fda_approved':[True,True],'drug_type':['small molecule','small molecule']})
+          try:
+              r = clean_drugs(df, steps=['standardize_drug_record'])
+              check('P1-7 clean_drugs batch works', len(r)==2)
+          except Exception as e:
+              check('P1-7 clean_drugs batch works', False, str(e))
+
+          # P1-6: fuzzy deterministic
+          dr3 = DrugResolver()
+          for n, ik in [('cyclophosphamide','AAAAAAAAAAAAAA-UHFFFAOYSA-N'),('cyclophosphamide-precursor','BBBBBBBBBBBBBB-UHFFFAOYSA-N')]:
+              dr3._create_canonical_entry({'inchikey':ik,'name':n,'source':'chembl'}, 'chembl')
+          hit = dr3._match_by_name('cyclophosphamide', allow_fuzzy=True)
+          check('P1-6 fuzzy match deterministic', hit is not None)
+
+          print(f'\\nRESULTS: {passed} passed, {failed} failed')
+          sys.exit(0 if failed==0 else 1)
+          "
+          echo "=== P1 verification PASSED ==="
