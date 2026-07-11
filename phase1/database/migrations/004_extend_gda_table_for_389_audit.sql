@@ -165,13 +165,17 @@ ALTER TABLE gene_disease_associations ADD CONSTRAINT chk_gda_disease_type
            ('disease', 'phenotype', 'group'));
 
 -- [SCI-11] confidence_tier must be a known label when non-NULL.
--- V100 ROOT FIX (BUG #4): aligned to Piñero et al. 2020 §2.3 actual
--- vocabulary — sub_weak / weak / strong. The [0.06, 0.3) band is "weak"
--- (not "moderate" as the previous code wrongly labeled it).
+-- ORIGINAL (v81): ('weak', 'moderate', 'strong').
+-- NOTE: migration 012_confidence_tier_pinero_alignment.sql upgrades this
+-- constraint to ('sub_weak', 'weak', 'strong') per Piñero et al. 2020 §2.3.
+-- This migration (004) is INTENTIONALLY left with the ORIGINAL labels —
+-- editing applied migrations breaks the immutability contract (a DB that
+-- already applied 004 with the old labels won't get the upgrade path).
+-- See test_dedup_guards.py::TestMigrationImmutability.
 ALTER TABLE gene_disease_associations DROP CONSTRAINT IF EXISTS chk_gda_confidence_tier;
 ALTER TABLE gene_disease_associations ADD CONSTRAINT chk_gda_confidence_tier
     CHECK (confidence_tier IS NULL OR confidence_tier IN
-           ('sub_weak', 'weak', 'strong'));
+           ('weak', 'moderate', 'strong'));
 
 -- [SCI-24] evidence_strength must be a known label when non-NULL
 ALTER TABLE gene_disease_associations DROP CONSTRAINT IF EXISTS chk_gda_evidence_strength;
