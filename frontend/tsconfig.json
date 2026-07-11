@@ -37,6 +37,10 @@
     ".next/dev/types/**/*.ts"
   ],
   "exclude": [
-    "node_modules"
+    "node_modules",
+    "examples",
+    "uploaded_code",
+    "src_backup",
+    "prisma_backup"
   ]
 }

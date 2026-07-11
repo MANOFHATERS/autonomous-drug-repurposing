@@ -1,14 +1,17 @@
 # v91: ignore pipeline run outputs (they're regenerable)
 output_*/
-output/
 phase1/processed_data/
 *.pyc
 __pycache__/
 .pytest_cache/
 *.egg-info/
-checkpoints/
-# v100: ignore Phase 2 runtime artifacts (regenerable from pipeline runs)
-phase2/data/processed/
-phase2/logs/
-phase2/logs/audit/bridge_fallbacks.jsonl
-phase2/data/checkpoints/step01_cache.pkl
+# Don't commit build artifacts or local DBs
+frontend/.next/
+frontend/node_modules/
+frontend/dev.db
+frontend/prisma/*.db
+frontend/prisma/prisma/
+frontend/db/
+frontend/dev.log
+frontend/server.log
+.env.local

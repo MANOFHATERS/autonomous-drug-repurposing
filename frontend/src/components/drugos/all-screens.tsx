@@ -12,12 +12,12 @@ import {
   Edit, Trash2, Share2, Bookmark, Copy, User, Building,
   FlaskConical, Network, Target, Play, MessageSquare, Award, ShieldCheck, Server,
   FileCheck, Handshake, Microscope, Beaker, Atom, GitFork, Columns3, FolderKanban,
-  DollarSign, Percent, Palette, Plug, ToggleRight, Sitemap, Cookie, Archive,
+  DollarSign, Percent, Palette, Plug, ToggleRight, Network as Sitemap, Cookie, Archive,
   BookMarked, Smartphone, Headphones, Ticket, Library, MessageCircle, Lightbulb,
   RotateCcw, ShieldAlert, LogIn, UserCheck, Hourglass, Siren, Pill,
   Calculator, Gauge, Workflow, ShoppingCart, FolderLock, KeyRound, ScanSearch,
   Upload, Save, Send, Webhook, Braces, Settings2, LogOut, ArrowUpRight, ArrowDownRight,
-  Minus, CircleDot, Workflow as WorkflowIcon, LineChart as LineChartIcon
+  Minus, CircleDot, Workflow as WorkflowIcon, LineChart as LineChartIcon, MonitorSmartphone
 } from 'lucide-react'
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, ResponsiveContainer,

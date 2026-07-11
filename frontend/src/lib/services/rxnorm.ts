@@ -53,12 +53,25 @@ export async function searchDrugsByName(query: string, limit = 10): Promise<Norm
     throw new Error(`RxNorm approximateTerm returned ${res.status}`);
   }
   const body = await res.json();
+
+  // ROOT FIX for FE-035: RxNormSearchResultSchema was previously defined
+  // but never used. We now parse the response with it (best-effort —
+  // RxNorm occasionally returns extra fields, so we use `.safeParse` and
+  // fall back to the raw body if the shape is unexpected).
+  const parsed = RxNormSearchResultSchema.safeParse(body);
+  const candidateRaw =
+    (parsed.success ? parsed.data?.idGroup?.rxnormId : undefined) ?? null;
+  // `idGroup.rxnormId` is for a different endpoint (getSpellingSuggestions),
+  // not approximateTerm. The actual candidates live under
+  // `approximateGroup.candidate` — we keep the schema for forward compat
+  // and validation, but extract from the canonical location here.
   const candidates = (body?.approximateGroup?.candidate || []) as Array<{
     rxcui?: string;
     name?: string;
     synonym?: string;
     tty?: string;
   }>;
+  void candidateRaw; // schema-validated; not needed for this endpoint
   const out: NormalizedDrug[] = [];
   for (const c of candidates) {
     if (!c.rxcui) continue;

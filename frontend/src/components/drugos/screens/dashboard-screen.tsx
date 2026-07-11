@@ -17,6 +17,7 @@ import {
   FolderKanban,
   LineChart,
   Briefcase,
+  Pill,
 } from 'lucide-react';
 import { StatCard } from '@/components/drugos/stat-card';
 import { ScoreBar } from '@/components/drugos/score-bar';
@@ -36,6 +37,7 @@ import {
   monthlyQueryTrend,
   safetyTierDistribution,
 } from '@/lib/mock-data';
+import { getScreenMeta } from '@/lib/screens';
 
 interface DashboardScreenProps {
   screenId: string;

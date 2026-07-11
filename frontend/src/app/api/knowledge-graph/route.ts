@@ -1,31 +1,31 @@
 import { NextResponse } from "next/server";
-import { checkKnowledgeGraphAvailability } from "@/lib/services/ml-stubs";
+import { getKnowledgeGraphStats } from "@/lib/services/knowledge-graph-stats";
+import { requireAuth, internalError } from "@/lib/api-helpers";
 
 /**
- * Knowledge Graph query endpoint.
+ * GET /api/knowledge-graph
  *
- * The actual Neo4j graph is owned by the standalone Phase 2 service.
- * This endpoint proxies to it when KG_SERVICE_URL is set; otherwise it
- * returns an explicit "service not deployed" response with HTTP 503.
+ * ROOT FIX for FE-003: /api/knowledge-graph no longer returns 501. It now
+ * returns real Phase 2 knowledge graph statistics — per-source loaded
+ * status, node/edge counts, edge types present, checksums for audit.
  *
- * We deliberately do NOT return any mock graph data. The user explicitly
- * forbade fabricated output for systems that could affect human safety.
+ * Resolution order:
+ *   1. If KG_SERVICE_URL is set, proxy to the standalone Neo4j service
+ *      (production path).
+ *   2. Otherwise, read the local Phase 2 registry JSON at
+ *      `../phase2/data/registry.json` (dev / single-box path).
+ *   3. If neither yields data, return `source: "none"` with an empty list.
+ *
+ * SCIENTIFIC INTEGRITY: we NEVER fabricate graph statistics.
  */
 export async function GET() {
-  const availability = checkKnowledgeGraphAvailability();
-  if (!availability.available) {
-    return NextResponse.json(
-      {
-        error: "service_not_deployed",
-        service: availability.service,
-        description: availability.description,
-        reason: availability.reason,
-        documentation: "See Phase 2 of the build plan (Neo4j Knowledge Graph Construction).",
-      },
-      { status: 503 }
-    );
+  const auth = await requireAuth();
+  if (auth.user === null) return auth.response;
+
+  try {
+    const stats = await getKnowledgeGraphStats();
+    return NextResponse.json(stats);
+  } catch (e: any) {
+    return internalError(`Knowledge graph lookup failed: ${e.message}`);
   }
-  // Proxy to the real KG service — not implemented yet because the service
-  // itself is the user's responsibility. We just forward the request.
-  return NextResponse.json({ error: "not_implemented", message: "KG proxy is not yet implemented" }, { status: 501 });
 }
