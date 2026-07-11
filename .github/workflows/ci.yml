@@ -461,6 +461,18 @@ jobs:
     needs: [build, lint, test, verify-p2-fixes, e2e-sample-mode]
     if: always()
     steps:
+      # V90 CI fix: add actions/checkout — the job had working-directory:
+      # phase1 but NO checkout step, so the phase1 directory didn't exist
+      # and bash couldn't start. This was a pre-existing CI workflow bug.
+      - uses: actions/checkout@v4
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            phase1/requirements.txt
       - name: Check all required jobs passed
         if: ${{ !(needs.build.result == 'success' && needs.lint.result == 'success' && needs.test.result == 'success' && needs.verify-p2-fixes.result == 'success' && needs.e2e-sample-mode.result == 'success') }}
         run: |
