@@ -2505,20 +2505,56 @@ class GTRLBridge:
         # AUC so downstream consumers can detect discrepancies. The
         # ``gt_test_auc`` field uses the VERIFIED AUC when available (the
         # same value used by the scientific_validation gate).
-        _gt_trainer_auc = gt_results.get("test_auc", 0.0)
+        # v90 ROOT FIX (BUG #43): the previous code used
+        # ``gt_results.get("test_auc", 0.0)`` which defaults to 0.0 if
+        # test_auc is missing. If the trainer crashed and didn't produce
+        # test_auc, the discrepancy was computed as |0.0 - verified_auc|
+        # = verified_auc, which could be 0.7+. This looked like a HUGE
+        # discrepancy but was actually just a MISSING VALUE. The fix uses
+        # ``gt_results.get("test_auc")`` (returns None if missing) and
+        # checks for None before computing the discrepancy. If either
+        # value is None, the discrepancy is None (not a misleading number).
+        _gt_trainer_auc_raw = gt_results.get("test_auc")  # None if missing
         _gt_verified_auc = gt_results.get("test_auc_verified")
-        _gt_auc_for_results = (
-            _gt_verified_auc if _gt_verified_auc is not None else _gt_trainer_auc
-        )
+        # For the primary gt_test_auc, fall back to 0.0 ONLY if BOTH are
+        # missing (backward compat with old checkpoints that don't produce
+        # either). If trainer is None but verified is present, use verified.
+        if _gt_trainer_auc_raw is not None:
+            _gt_trainer_auc = float(_gt_trainer_auc_raw)
+        else:
+            _gt_trainer_auc = None
+        if _gt_verified_auc is not None:
+            _gt_verified_auc = float(_gt_verified_auc)
+        # Choose the primary AUC: prefer verified, fall back to trainer,
+        # fall back to 0.0 only if both are missing (legacy compat).
+        if _gt_verified_auc is not None:
+            _gt_auc_for_results = _gt_verified_auc
+        elif _gt_trainer_auc is not None:
+            _gt_auc_for_results = _gt_trainer_auc
+        else:
+            _gt_auc_for_results = 0.0
+        # v90 ROOT FIX (BUG #43): compute discrepancy ONLY when BOTH
+        # values are present. If either is None (missing), the discrepancy
+        # is None (not a misleading |0.0 - verified| = verified).
+        if _gt_trainer_auc is not None and _gt_verified_auc is not None:
+            _gt_discrepancy = abs(_gt_trainer_auc - _gt_verified_auc)
+        else:
+            _gt_discrepancy = None
+            if _gt_trainer_auc is None and _gt_verified_auc is not None:
+                logger.warning(
+                    f"v90 ROOT FIX (BUG #43): trainer test_auc is MISSING "
+                    f"but verified AUC is {_gt_verified_auc:.4f}. The "
+                    f"discrepancy is set to None (not |0.0 - "
+                    f"{_gt_verified_auc:.4f}| = {_gt_verified_auc:.4f}, "
+                    f"which would be misleading). The trainer likely "
+                    f"crashed before computing test_auc — investigate."
+                )
         results = {
             "gt_best_val_auc": gt_results["best_val_auc"],
             "gt_test_auc": _gt_auc_for_results,
-            "gt_test_auc_trainer": _gt_trainer_auc,
+            "gt_test_auc_trainer": _gt_trainer_auc if _gt_trainer_auc is not None else 0.0,
             "gt_test_auc_verified": _gt_verified_auc,
-            "gt_test_auc_discrepancy": (
-                abs(_gt_trainer_auc - _gt_verified_auc)
-                if _gt_verified_auc is not None else None
-            ),
+            "gt_test_auc_discrepancy": _gt_discrepancy,
             "gt_epochs_trained": gt_results["epochs_trained"],
             "rl_pairs_processed": metrics.n_pairs_processed,
             "rl_ranked_high": metrics.n_ranked_high,
@@ -2552,19 +2588,37 @@ class GTRLBridge:
         # The fix: use the VERIFIED AUC (test_auc_verified) when available,
         # falling back to trainer AUC only when verified is None (older
         # checkpoint or evaluation path that doesn't compute it).
-        gt_test_auc_trainer = gt_results.get("test_auc", 0.0)
+        # v90 ROOT FIX (BUG #43): use .get() without default 0.0 to detect
+        # missing values (None) instead of masking them as 0.0.
+        gt_test_auc_trainer_raw = gt_results.get("test_auc")  # None if missing
         gt_test_auc_verified = gt_results.get("test_auc_verified")
-        gt_test_auc = (
-            gt_test_auc_verified
-            if gt_test_auc_verified is not None
-            else gt_test_auc_trainer
+        # For the scientific validation gate, fall back to 0.0 only if BOTH
+        # are missing (legacy compat). If trainer is None but verified is
+        # present, use verified (and vice versa).
+        if gt_test_auc_verified is not None:
+            gt_test_auc = float(gt_test_auc_verified)
+        elif gt_test_auc_trainer_raw is not None:
+            gt_test_auc = float(gt_test_auc_trainer_raw)
+        else:
+            gt_test_auc = 0.0
+        # For logging, use the raw values (None-safe)
+        gt_test_auc_trainer = (
+            float(gt_test_auc_trainer_raw) if gt_test_auc_trainer_raw is not None else 0.0
         )
         if gt_test_auc_verified is not None:
             logger.info(
                 f"V30 ROOT FIX (9.4): using VERIFIED AUC={gt_test_auc_verified:.4f} "
                 f"(not trainer AUC={gt_test_auc_trainer:.4f}) for the scientific "
                 f"validation gate. Discrepancy: "
-                f"{abs(gt_test_auc_verified - gt_test_auc_trainer):.4f}."
+                f"{abs(float(gt_test_auc_verified) - gt_test_auc_trainer):.4f}."
+            )
+        elif gt_test_auc_trainer_raw is None:
+            logger.warning(
+                f"v90 ROOT FIX (BUG #43): BOTH trainer test_auc and verified "
+                f"test_auc are MISSING. The scientific validation gate will "
+                f"use gt_test_auc=0.0 (which will FAIL the 0.85 threshold). "
+                f"The trainer likely crashed before computing test_auc — "
+                f"investigate the GT training logs."
             )
         # Read RL AUC from the metadata file
         import glob as _glob
@@ -2641,11 +2695,29 @@ class GTRLBridge:
             # Fallback: old computation (all KPs denominator) — only used
             # if the RL metadata is unavailable. This is the LEGACY
             # behavior and will cap recovery at 40% on the demo.
+            # v90 ROOT FIX (BUG #44): the previous code logged a WARNING
+            # here, but the fallback uses ALL KPs as the denominator
+            # (len(_KP) = 5), while the RL split puts only ~40% of KPs
+            # in the test set. So the max recovery is 2/5 = 40%, reported
+            # as "40% recovery" — misleading. The bridge might FAIL
+            # validation (40% < 20%? No, 40% > 20%, so it passes) based
+            # on a WRONG denominator. The fix upgrades the log to CRITICAL
+            # so operators know the recovery rate CANNOT BE TRUSTED in
+            # this fallback path. The rate is still computed (backward
+            # compat) but consumers are warned it's based on the wrong
+            # denominator.
             kp_recovery_rate = len(recovered_kps) / len(_KP) if _KP else 0.0
-            logger.warning(
-                f"ROOT FIX (C-3): RL metadata unavailable, using legacy "
-                f"recovery denominator (all {len(_KP)} KPs). Recovery "
-                f"capped at {len(recovered_kps)}/{len(_KP)}."
+            logger.critical(
+                f"v90 ROOT FIX (BUG #44): RL metadata UNAVAILABLE. The "
+                f"recovery rate ({kp_recovery_rate:.1%}) is computed with "
+                f"the WRONG DENOMINATOR (all {len(_KP)} KPs, not just "
+                f"test-set KPs). The RL split puts only ~40% of KPs in "
+                f"the test set, so the max recovery is "
+                f"{int(0.4 * len(_KP))}/{len(_KP)} = 40%. A rate of "
+                f"40% actually means 100% of test KPs were recovered. "
+                f"DO NOT TRUST this recovery rate for validation decisions. "
+                f"Investigate why RL metadata is unavailable (the RL "
+                f"pipeline likely crashed before writing metadata)."
             )
 
         # ROOT FIX (FORENSIC-AUDIT-C07): V1-contract-grade thresholds.
