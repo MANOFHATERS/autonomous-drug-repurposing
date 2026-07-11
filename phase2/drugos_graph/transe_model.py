@@ -2430,6 +2430,17 @@ def train_transe(
     if _known is None:
         _known = set(zip(heads.tolist(), rels.tolist(), tails.tolist()))
 
+    # BUG #53 ROOT FIX: relation-agnostic (h, t) pair set for cross-relation
+    # negative filtering. A negative (h, r1, t) that is a known positive
+    # (h, r2, t) under a DIFFERENT relation must also be filtered —
+    # otherwise TransE training pushes apart pairs that are semantically
+    # connected, biasing the embeddings. Mirrors
+    # KGNegativeSampler._known_ht_pairs (negative_sampling.py:2354) for a
+    # uniform filter policy across the sampler and the trainer (BUG #76).
+    _known_ht_pairs: Set[Tuple[int, int]] = {
+        (_h, _t) for (_h, _r, _t) in (_known or set())
+    }
+
     # ── MLflow setup ─────────────────────────────────────────────────────
     # FIX A1.2, I15.6, I15.9: MLflowTracker integration.
     if mlflow_tracker is not None:
@@ -3014,7 +3025,7 @@ def train_transe(
                     _h = int(h_neg[_ni].item())
                     _r = int(neg_r[_ni].item())
                     _t = int(neg_t[_ni].item())
-                    if (_h, _r, _t) in _known or (_h, _r, _t) in _batch_pos_set:
+                    if (_h, _r, _t) in _known or (_h, _r, _t) in _batch_pos_set or (_h, _t) in _known_ht_pairs:
                         # Replace the corrupted endpoint with a random
                         # entity until we find one that is NOT a known
                         # triple. Cap at 10 attempts to avoid infinite
@@ -3031,7 +3042,7 @@ def train_transe(
                             else:
                                 # Tail was corrupted; replace tail.
                                 _new_triple = (_h, _r, _new_e)
-                            if _new_triple not in _known and _new_triple not in _batch_pos_set:
+                            if _new_triple not in _known and _new_triple not in _batch_pos_set and (_new_triple[0], _new_triple[2]) not in _known_ht_pairs:
                                 if corrupt_expanded[_ni]:
                                     h_neg[_ni] = _new_e
                                 else:
@@ -3474,6 +3485,13 @@ def train_transe(
                         n_val_neg = n_val * 10
                         val_neg_tails_list: List[int] = [0] * n_val_neg
                         # Expand val_rels 10x to align with neg slots.
+                        # v89 CI RECOVERY FIX: a parallel agent inserted
+                        # the BUG #33 fix code INSIDE the parentheses of
+                        # val_rels_expanded_fallback = (...), leaving the
+                        # parenthesis unclosed (SyntaxError). ROOT FIX:
+                        # close the parenthesis after repeat_interleave(10),
+                        # then the BUG #33 fix code follows as separate
+                        # statements at the same indentation level.
                         val_rels_expanded_fallback = (
                             val_rels_dev.repeat_interleave(10)
                         )
@@ -3641,7 +3659,16 @@ def train_transe(
                 # below is a 50-100× slowdown on GPU and only needed
                 # when no sampler is available (DRUGOS_ALLOW_NO_SAMPLER
                 # unit-test mode).
-                if _known and not negative_sampler and val_neg_tails.shape[0] > 0:
+                # BUG #70 ROOT FIX: filter val negatives against known_triples
+                # ALWAYS — not just when no sampler is provided. The sampler's
+                # per_relation_neg_pools were pre-filtered at construction, but
+                # per-batch random sampling from the pool can still produce
+                # train positives as val negatives. Without this per-batch
+                # filter, val AUC is slightly inflated by train-positive
+                # contamination (BUG #70). The relation-agnostic check
+                # (_h, _t) in _known_ht_pairs also catches cross-relation
+                # contamination (BUG #53 uniformity).
+                if _known and val_neg_tails.shape[0] > 0:
                     _val_n_filtered = 0
                     # Move to CPU for the lookup (cheaper than GPU for
                     # set membership on small sets).
@@ -3652,14 +3679,14 @@ def train_transe(
                         _h = int(_val_heads_cpu[_vi])
                         _r = int(_val_rels_cpu[_vi])
                         _t = int(_val_neg_tails_cpu[_vi])
-                        if (_h, _r, _t) in _known:
+                        if (_h, _r, _t) in _known or (_h, _t) in _known_ht_pairs:
                             # Replace with a non-known tail.
                             for _attempt in range(10):
                                 _new_t = int(torch.randint(
                                     0, num_entities, (1,),
                                     generator=rng, device=device,
                                 ).item())
-                                if (_h, _r, _new_t) not in _known:
+                                if (_h, _r, _new_t) not in _known and (_h, _new_t) not in _known_ht_pairs:
                                     _val_neg_tails_cpu[_vi] = _new_t
                                     _val_n_filtered += 1
                                     break
@@ -4266,6 +4293,7 @@ def predict_drug_candidates(
     top_k: int = 10,
     *,
     contraindicated_pairs: Optional[Set[Tuple[int, int]]] = None,
+    known_treats_pairs: Optional[Set[Tuple[int, int]]] = None,
     idx_to_entity: Optional[Dict[int, Tuple[str, str]]] = None,
     config: Optional[TransEConfig] = None,
 ) -> List[DrugCandidate]:
@@ -4337,6 +4365,13 @@ def predict_drug_candidates(
            S9.4 (REDACT_PII), S9.9 (audit log).
     """
     _config = config or TransEConfig()
+
+    # BUG #71 ROOT FIX: known treats pairs are EXISTING treatments, not
+    # novel repurposing candidates. They must be excluded from the ranking
+    # so pharma partners don't waste wet-lab resources re-testing known
+    # treatments. Accept an optional known_treats_pairs set and skip any
+    # (drug_idx, disease_idx) pair that is already a known treats positive.
+    _known_treats: Set[Tuple[int, int]] = set(known_treats_pairs or set())
 
     # FIX D5.1: Validate inputs.
     if not drug_indices:
@@ -4452,6 +4487,19 @@ def predict_drug_candidates(
                 zip(top_scores.tolist(), top_positions.tolist())
             ):
                 actual_drug_idx = drug_indices[pos]
+
+                # BUG #71 ROOT FIX: exclude known treats positives from
+                # the ranking — they are existing treatments, NOT novel
+                # repurposing candidates. Returning them as "novel"
+                # wastes wet-lab resources and misleads pharma partners.
+                if _known_treats and (actual_drug_idx, disease_idx) in _known_treats:
+                    logger.debug(
+                        "predict_drug_candidates: excluding known treats "
+                        "pair (drug=%d, disease=%d) from novel candidates "
+                        "(BUG #71 root fix).",
+                        actual_drug_idx, disease_idx,
+                    )
+                    continue
 
                 # FIX K3.10: Check contraindication.
                 is_contraindicated = (actual_drug_idx, disease_idx) in _contra
