@@ -738,7 +738,18 @@ class ChEMBLPipeline(BasePipeline):
                         self.source_name, len(activities_df), activities_gz_path,
                     )
                 # Update sha for audit
-                self._sha256_raw = _compute_file_sha256(drugs_csv)
+                # v90 NAME-ERROR FIX: the previous code called
+                # ``_compute_file_sha256(drugs_csv)`` as a MODULE-LEVEL
+                # function, but ``_compute_file_sha256`` is a METHOD on
+                # ``self`` (defined at line 4390). This raised
+                # ``NameError: name '_compute_file_sha256' is not defined``
+                # in CI's E2E sample-mode test (which actually invokes
+                # ``ChEMBLPipeline().run_download_and_clean_only()``).
+                # The bug was missed by unit tests because they mock
+                # ``download()`` instead of running it end-to-end.
+                # ROOT FIX: call ``self._compute_file_sha256(drugs_csv)``
+                # (matching the pattern at lines 810-811).
+                self._sha256_raw = self._compute_file_sha256(drugs_csv)
                 return drugs_csv
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             # v84 FORENSIC ROOT FIX (BUG #38): narrowed from broad
