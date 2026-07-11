@@ -531,8 +531,8 @@ function SubscriptionScreen() {
                 <p className="text-sm text-muted-foreground">Your current plan · {currentPlan.seats} seat{currentPlan.seats === 1 ? '' : 's'}</p>
               </div>
               <div className="text-right">
-                <p className="text-3xl font-bold">${(currentPlan.priceCents / 100).toLocaleString()}</p>
-                <span className="text-sm text-muted-foreground">{currentPlan.priceCents === 0 ? 'forever' : '/month'}</span>
+                <p className="text-3xl font-bold">${((currentPlan.priceCents ?? 0) / 100).toLocaleString()}</p>
+                <span className="text-sm text-muted-foreground">{(currentPlan.priceCents ?? 0) === 0 ? 'forever' : '/month'}</span>
               </div>
             </div>
             <div>
@@ -564,8 +564,8 @@ function SubscriptionScreen() {
                     {isCurrent && <Badge style={{ backgroundColor: PRIMARY, color: 'white' }}>Current</Badge>}
                   </CardTitle>
                   <div className="mt-1">
-                    <span className="text-2xl font-bold">${(plan.priceCents / 100).toLocaleString()}</span>
-                    <span className="text-sm text-muted-foreground">{plan.priceCents === 0 ? ' forever' : '/month'}</span>
+                    <span className="text-2xl font-bold">${((plan.priceCents ?? 0) / 100).toLocaleString()}</span>
+                    <span className="text-sm text-muted-foreground">{(plan.priceCents ?? 0) === 0 ? ' forever' : '/month'}</span>
                   </div>
                 </CardHeader>
                 <CardContent>
@@ -587,7 +587,7 @@ function SubscriptionScreen() {
                     onClick={() => handleChangePlan(plan.id)}
                     style={!isCurrent ? { backgroundColor: PRIMARY } : undefined}
                   >
-                    {changing === plan.id ? 'Switching…' : isCurrent ? 'Current Plan' : (plan.priceCents === 0 ? 'Downgrade' : 'Upgrade')}
+                    {changing === plan.id ? 'Switching…' : isCurrent ? 'Current Plan' : ((plan.priceCents ?? 0) === 0 ? 'Downgrade' : 'Upgrade')}
                   </Button>
                 </CardFooter>
               </Card>
@@ -1280,7 +1280,12 @@ function SecuritySettingsScreen() {
   const [twoFAErr, setTwoFAErr] = useState<string | null>(null);
   const [twoFABusy, setTwoFABusy] = useState(false);
 
-  const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
+  // FE-028 ROOT FIX: previously this was `const [auditLogs, setAuditLogs]`
+  // which shadowed the `auditLogs` import from @/lib/mock-data on line 29.
+  // The import became dead code and any code below that referenced the
+  // mock `auditLogs` got the local state instead. Renamed to `activityLogs`
+  // so both names remain accessible.
+  const [activityLogs, setActivityLogs] = useState<AuditLog[]>([]);
   const [logsLoading, setLogsLoading] = useState(true);
 
   useEffect(() => {
@@ -1289,7 +1294,7 @@ function SecuritySettingsScreen() {
     fetch('/api/auth/activity', { credentials: 'include' })
       .then(r => r.ok ? r.json() : Promise.reject(r))
       .then((r: { items: AuditLog[] }) => {
-        if (mounted) { setAuditLogs(r.items || []); setLogsLoading(false); }
+        if (mounted) { setActivityLogs(r.items || []); setLogsLoading(false); }
       })
       .catch(() => { if (mounted) setLogsLoading(false); });
     return () => { mounted = false };
@@ -1376,7 +1381,7 @@ function SecuritySettingsScreen() {
   }
 
   // Build a list of recent login events from audit logs (real data).
-  const loginEvents = auditLogs.filter(l => l.action === 'login' || l.action === 'logout' || l.action === 'register').slice(0, 5);
+  const loginEvents = activityLogs.filter(l => l.action === 'login' || l.action === 'logout' || l.action === 'register').slice(0, 5);
 
   return (
     <FadeIn><div className="space-y-6">

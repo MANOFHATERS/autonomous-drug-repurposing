@@ -228,7 +228,7 @@ function CandidateDetail() {
               <CardContent>
                 <p className="text-sm">{candidate.mechanism}</p>
                 <div className="mt-3 flex flex-wrap gap-2">
-                  {candidate.targetGenes.map((gene) => (
+                  {(candidate.targetGenes ?? []).map((gene) => (
                     <Badge key={gene} variant="secondary">{gene}</Badge>
                   ))}
                 </div>
@@ -295,7 +295,7 @@ function CandidateDetail() {
             <CardHeader className="pb-3"><CardTitle className="text-base">Adverse Effects</CardTitle></CardHeader>
             <CardContent>
               <div className="flex flex-wrap gap-2">
-                {candidate.adverseEffects.map((e) => (
+                {(candidate.adverseEffects ?? []).map((e) => (
                   <Badge key={e} variant="secondary" className="text-[#D4853A]">{e}</Badge>
                 ))}
               </div>
@@ -305,7 +305,7 @@ function CandidateDetail() {
             <CardHeader className="pb-3"><CardTitle className="text-base">Contraindications</CardTitle></CardHeader>
             <CardContent>
               <div className="flex flex-wrap gap-2">
-                {candidate.contraindications.map((c) => (
+                {(candidate.contraindications ?? []).map((c) => (
                   <Badge key={c} variant="destructive" className="text-[#C0392B]">{c}</Badge>
                 ))}
               </div>
@@ -315,7 +315,7 @@ function CandidateDetail() {
             <CardHeader className="pb-3"><CardTitle className="text-base">Drug Interactions</CardTitle></CardHeader>
             <CardContent>
               <div className="flex flex-wrap gap-2">
-                {candidate.drugInteractions.map((d) => (
+                {(candidate.drugInteractions ?? []).map((d) => (
                   <Badge key={d} variant="outline">{d}</Badge>
                 ))}
               </div>
@@ -355,14 +355,14 @@ function CandidateDetail() {
     {
       id: 'evidence',
       label: 'Evidence',
-      badge: candidate.evidenceCount,
+      badge: (candidate.evidenceCount ?? 0),
       content: (
         <Card>
           <CardHeader><CardTitle className="text-base">Evidence Summary</CardTitle></CardHeader>
           <CardContent>
-            <p className="text-sm text-muted-foreground">{candidate.evidenceCount} pieces of evidence supporting {candidate.name} for {candidate.diseaseName}</p>
+            <p className="text-sm text-muted-foreground">{(candidate.evidenceCount ?? 0)} pieces of evidence supporting {candidate.name} for {candidate.diseaseName}</p>
             <div className="mt-4 space-y-3">
-              {Array.from({length: Math.min(5, candidate.evidenceCount)}, (_, i) => (
+              {Array.from({length: Math.min(5, (candidate.evidenceCount ?? 0))}, (_, i) => (
                 <div key={i} className="p-3 border border-border rounded-lg">
                   <div className="flex items-center gap-2">
                     <Badge variant="secondary" className="text-[10px]">Source {(i % 3) + 1}</Badge>
@@ -487,7 +487,7 @@ function ClinicalTrialSearch() {
   const filtered = clinicalTrials.filter(
     (t) =>
       t.title.toLowerCase().includes(search.toLowerCase()) ||
-      t.condition.toLowerCase().includes(search.toLowerCase()) ||
+      (t.condition ?? '').toLowerCase().includes(search.toLowerCase()) ||
       t.nctId.toLowerCase().includes(search.toLowerCase())
   );
 
@@ -668,7 +668,7 @@ function DiseaseDetail() {
         <CardContent className="p-4">
           <p className="text-sm">{disease.description}</p>
           <div className="flex gap-2 mt-3">
-            {disease.synonyms.map((s) => (
+            {(disease.synonyms ?? []).map((s) => (
               <Badge key={s} variant="secondary">{s}</Badge>
             ))}
           </div>
@@ -678,7 +678,7 @@ function DiseaseDetail() {
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
         <StatCard icon={Search} value={relatedCandidates.length} label="Drug Candidates" />
         <StatCard icon={Filter} value={relatedTrials.length} label="Clinical Trials" />
-        <StatCard icon={List} value={disease.evidenceCount} label="Evidence Items" />
+        <StatCard icon={List} value={(disease.evidenceCount ?? 0)} label="Evidence Items" />
       </div>
 
       {relatedCandidates.length > 0 && (

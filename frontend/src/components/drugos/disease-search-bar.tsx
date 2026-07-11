@@ -37,8 +37,8 @@ export function DiseaseSearchBar({
       .filter(
         (d) =>
           d.name.toLowerCase().includes(lower) ||
-          d.synonyms.some((s) => s.toLowerCase().includes(lower)) ||
-          d.category.toLowerCase().includes(lower)
+          (d.synonyms ?? []).some((s) => s.toLowerCase().includes(lower)) ||
+          (d.category ?? '').toLowerCase().includes(lower)
       )
       .slice(0, 6);
   }, [query]);
@@ -118,11 +118,11 @@ export function DiseaseSearchBar({
                 >
                   <div className="flex-1 min-w-0">
                     <div className="font-medium truncate">{disease.name}</div>
-                    <div className="text-xs text-muted-foreground">{disease.category} · {disease.candidateCount} candidates</div>
+                    <div className="text-xs text-muted-foreground">{disease.category ?? disease.therapeuticArea} · {disease.candidateCount ?? 0} candidates</div>
                   </div>
                   <div className="flex items-center gap-2 ml-2">
                     <Badge variant="secondary" className="text-xs shrink-0">
-                      {disease.icd10}
+                      {disease.icd10 ?? disease.icdCode}
                     </Badge>
                     <ArrowRight className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
                   </div>

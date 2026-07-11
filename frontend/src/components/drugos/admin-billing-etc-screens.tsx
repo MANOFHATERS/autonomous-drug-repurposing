@@ -12,7 +12,7 @@ import {
   FileText, Database, Server, Activity, Info, Save, Upload,
   ChevronLeft, Check, Minus, PlusCircle, AlertCircle, ShieldCheck,
   Building, UserCog, MapPin, Palette, Plug, BellRing, ScrollText,
-  Calculator, Gauge, Workflow, Percent, ShoppingCart, Sitemap,
+  Calculator, Gauge, Workflow, Percent, ShoppingCart, Network as Sitemap,
   ToggleRight, FolderLock, KeyRound, ScanSearch, Cookie, Archive,
   BookMarked, Play, Webhook, Braces, Upload as UploadIcon,
   Settings2, User, Smartphone, Headphones, Ticket, Library,

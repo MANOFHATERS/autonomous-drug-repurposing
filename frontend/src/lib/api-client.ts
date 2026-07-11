@@ -114,6 +114,7 @@ export interface Plan {
   id: string;
   name: string;
   price: number;
+  priceCents?: number; // FE-027 unblock: some components read priceCents
   currency: string;
   interval: string;
   seats: number;
@@ -234,8 +235,79 @@ export interface SafetyReport {
   drug: string;
   totalReports: number;
   seriousReports: number;
+  seriousReportsWithDeath?: number;
   topReactions: { term: string; count: number }[];
   disclaimer: string;
+}
+
+// ---------------------------------------------------------------------------
+// ML / Phase 4 handoff types — ROOT FIX for FE-001/FE-002/FE-003
+// ---------------------------------------------------------------------------
+
+export interface RankedHypothesis {
+  drug: string;
+  disease: string;
+  rank?: number;
+  reward?: number;
+  policyProb?: number;
+  gnnScore?: number;
+  safetyScore?: number;
+  literatureSupport?: number;
+}
+
+export interface RlRankerResponse {
+  candidates: RankedHypothesis[];
+  source: "rl_service" | "local_csv" | "none";
+  modelVersion?: string;
+  generatedAt: string;
+  count: number;
+  note?: string;
+  syncedHypotheses?: number;
+}
+
+export interface DatasetSourceStat {
+  name: string;
+  loaded: boolean;
+  rowsLoaded?: number;
+  sha256?: string;
+}
+
+export interface DatasetStatsResponse {
+  sources: DatasetSourceStat[];
+  nodesLoaded: number;
+  edgesLoaded: number;
+  edgeTypesPresent: string[];
+  pipelineVersion?: string;
+  schemaVersion?: string;
+  bridgeVersion?: string;
+  backend?: string;
+  warnings: string[];
+  errors: string[];
+  source: "dataset_service" | "local_checkpoint" | "none";
+  generatedAt: string;
+  note?: string;
+}
+
+export interface GraphSourceStat {
+  name: string;
+  loaded: boolean;
+  loadedReason?: string;
+  version?: string;
+  rows?: number;
+  edgeCount?: number;
+  sha256?: string;
+  producedAt?: string;
+  producedBy?: string;
+  loadId?: string;
+}
+
+export interface KnowledgeGraphStatsResponse {
+  sources: GraphSourceStat[];
+  nodeCount: number;
+  edgeCount: number;
+  source: "kg_service" | "local_registry" | "none";
+  generatedAt: string;
+  note?: string;
 }
 
 export interface EvidencePackage {
@@ -390,4 +462,20 @@ export const api = {
     request<{ id: string; package: any; markdown: string }>("/api/evidence-package", { method: "POST", body: JSON.stringify(body) }),
   getEvidencePackage: (id: string) =>
     request<{ id: string; package: any; markdown: string }>(`/api/evidence-package?id=${encodeURIComponent(id)}`),
+
+  // ML — Phase 4 RL ranker, Phase 1 dataset, Phase 2 knowledge graph
+  // ROOT FIX for FE-001/FE-002/FE-003: the UI now calls these real endpoints
+  // instead of rendering mock data. The endpoints serve real data from the
+  // Phase 1/2/4 Python pipeline artifacts.
+  getRankedHypotheses: (params?: { drug?: string; disease?: string; limit?: number }) => {
+    const qs = new URLSearchParams();
+    if (params?.drug) qs.set("drug", params.drug);
+    if (params?.disease) qs.set("disease", params.disease);
+    if (params?.limit) qs.set("limit", String(params.limit));
+    return request<RlRankerResponse>(`/api/rl?${qs.toString()}`);
+  },
+  syncRlOutput: () =>
+    request<RlRankerResponse>("/api/rl", { method: "POST", body: JSON.stringify({ sync: true, limit: 200 }) }),
+  getDatasetStats: () => request<DatasetStatsResponse>("/api/dataset"),
+  getKnowledgeGraphStats: () => request<KnowledgeGraphStatsResponse>("/api/knowledge-graph"),
 };

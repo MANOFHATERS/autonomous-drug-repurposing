@@ -1,23 +1,34 @@
+# DrugOS Caddyfile
+#
+# ROOT FIX for FE-007 (open SSRF proxy via ?XTransformPort=).
+#
+# Previously: the :81 site had a `reverse_proxy localhost:{query.XTransformPort}`
+# block that let ANY external caller make Caddy open a TCP connection to
+# arbitrary internal ports on the host. This is a textbook open SSRF
+# proxy. With it, an attacker could:
+#   - Reach cloud-metadata endpoints (169.254.169.254) to steal IAM creds
+#   - Port-scan the internal network
+#   - Reach unauthenticated admin endpoints on localhost
+#   - Pivot through the host to other services on the VPC
+#
+# ROOT FIX: the entire `XTransformPort` handler is GONE. There is no
+# legitimate reason for an external HTTP request to dictate which internal
+# port Caddy proxies to. If you need to expose multiple internal services,
+# define one Caddy site per service with a hardcoded reverse_proxy target.
+#
+# If you genuinely need dynamic port routing (e.g., for a multi-tenant
+# preview environment), implement it with:
+#   - An explicit allowlist of allowed ports, AND
+#   - Authenticated requests (mTLS or a signed header), AND
+#   - A loopback-only listener that is never exposed to the internet.
+# Do NOT put the dynamic logic in the public Caddyfile.
+
 :81 {
-	@transform_port_query {
-		query XTransformPort=*
-	}
-
-	handle @transform_port_query {
-		reverse_proxy localhost:{query.XTransformPort} {
-			header_up Host {host}
-			header_up X-Forwarded-For {remote_host}
-			header_up X-Forwarded-Proto {scheme}
-			header_up X-Real-IP {remote_host}
-		}
-	}
-
-	handle {
-		reverse_proxy localhost:3000 {
-			header_up Host {host}
-			header_up X-Forwarded-For {remote_host}
-			header_up X-Forwarded-Proto {scheme}
-			header_up X-Real-IP {remote_host}
-		}
+	# Single hardcoded reverse_proxy target. No user-controlled port.
+	reverse_proxy localhost:3000 {
+		header_up Host {host}
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Forwarded-Proto {scheme}
+		header_up X-Real-IP {remote_host}
 	}
 }

@@ -3,9 +3,15 @@
  *
  * Uses only Node's built-in `crypto` so we don't need an external dependency.
  * Compatible with Google Authenticator, 1Password, Authy, etc.
+ *
+ * Also provides `issueMfaTicket` / `verifyMfaTicket` — short-lived JWTs that
+ * encode "the user has entered a correct password but has not yet completed
+ * 2FA". Used by the FE-004 root fix so that login with 2FA enabled does not
+ * issue session tokens until the TOTP code is verified.
  */
 
 import { createHmac, randomBytes, timingSafeEqual } from "crypto";
+import jwt from "jsonwebtoken";
 
 const BASE32_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 
@@ -102,4 +108,52 @@ export function buildOtpAuthUri(opts: {
     period: "30",
   });
   return `otpauth://totp/${label}?${params.toString()}`;
+}
+
+// ---------------------------------------------------------------------------
+// MFA login ticket — short-lived JWT that proves "password verified, 2FA
+// pending". Used by FE-004 root fix.
+// ---------------------------------------------------------------------------
+
+const MFA_TICKET_TTL_SECONDS = 5 * 60; // 5 minutes
+
+function getJwtSecret(): string {
+  // Defer to the same resolver used by auth/server.ts. We re-import lazily to
+  // avoid a circular module dependency.
+  return process.env.JWT_SECRET || (process.env.NODE_ENV === "test"
+    ? "test-only-secret-do-not-use-in-production-32-bytes-minimum-aaaa"
+    : "");
+}
+
+export interface MfaTicketPayload {
+  sub: string;
+  email: string;
+  type: "mfa_pending";
+}
+
+export function issueMfaTicket(opts: { userId: string; email: string }): string {
+  const secret = getJwtSecret();
+  if (!secret) {
+    throw new Error("FATAL: JWT_SECRET is not set — cannot issue MFA ticket.");
+  }
+  return jwt.sign(
+    { sub: opts.userId, email: opts.email, type: "mfa_pending" } as MfaTicketPayload,
+    secret,
+    { issuer: "drugos", expiresIn: MFA_TICKET_TTL_SECONDS, algorithm: "HS256" }
+  );
+}
+
+export function verifyMfaTicket(token: string): MfaTicketPayload | null {
+  const secret = getJwtSecret();
+  if (!secret) return null;
+  try {
+    const decoded = jwt.verify(token, secret, {
+      issuer: "drugos",
+      algorithms: ["HS256"],
+    }) as MfaTicketPayload;
+    if (!decoded || decoded.type !== "mfa_pending" || !decoded.sub) return null;
+    return decoded;
+  } catch {
+    return null;
+  }
 }

@@ -428,8 +428,8 @@ function SearchResultsScreen() {
     if (filterPhase !== 'all') items = items.filter(c => c.clinicalPhase === filterPhase);
     items = items.filter(c => c.compositeScore >= scoreRange[0] && c.compositeScore <= scoreRange[1]);
     items.sort((a, b) => {
-      const aVal = (a as Record<string, unknown>)[sortKey] as number;
-      const bVal = (b as Record<string, unknown>)[sortKey] as number;
+      const aVal = (a as unknown as Record<string, unknown>)[sortKey] as number;
+      const bVal = (b as unknown as Record<string, unknown>)[sortKey] as number;
       return sortDir === 'desc' ? bVal - aVal : aVal - bVal;
     });
     return items;
@@ -1867,8 +1867,8 @@ function DrugComparisonScreen() {
                   <TableRow key={row.key}>
                     <TableCell className="font-medium text-sm">{row.label}</TableCell>
                     {compared.map(c => {
-                      const val = (c as Record<string, unknown>)[row.key] as number;
-                      const max = Math.max(...compared.map(x => (x as Record<string, unknown>)[row.key] as number));
+                      const val = (c as unknown as Record<string, unknown>)[row.key] as number;
+                      const max = Math.max(...compared.map(x => (x as unknown as Record<string, unknown>)[row.key] as number));
                       return (
                         <TableCell key={c.id} className="text-center">
                           <span className={`font-bold ${val === max ? 'text-emerald-600' : ''}`}>{val}</span>
