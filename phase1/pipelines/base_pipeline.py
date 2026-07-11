@@ -166,12 +166,16 @@ try:
     from sqlalchemy import text as _sa_text
     from sqlalchemy.exc import IntegrityError as _SAIntegrityError
     from sqlalchemy.exc import OperationalError as _SAOperationalError
+    from sqlalchemy.exc import InterfaceError as _SAInterfaceError
+    from sqlalchemy.exc import ProgrammingError as _SAProgrammingError
     _HAS_SQLALCHEMY = True
 except ImportError:  # pragma: no cover
     _sa_select = None  # type: ignore[assignment]
     _sa_text = None  # type: ignore[assignment]
     _SAIntegrityError = None  # type: ignore[assignment]
     _SAOperationalError = None  # type: ignore[assignment]
+    _SAInterfaceError = None  # type: ignore[assignment]
+    _SAProgrammingError = None  # type: ignore[assignment]
     _HAS_SQLALCHEMY = False
 
 # ---------------------------------------------------------------------------
@@ -302,9 +306,24 @@ SENSITIVE_HEADER_KEYS: frozenset[str] = frozenset({
     "authorization", "cookie", "set-cookie", "x-api-key",
 })
 
-#: CSV columns whose values starting with = + - @ \t \r are escaped
+#: CSV columns whose values starting with dangerous prefixes are escaped
 #: to prevent formula injection (SEC-9.14).
-CSV_DANGEROUS_PREFIXES: tuple[str, ...] = ("=", "+", "-", "@", "\t", "\r")
+# v90 ROOT FIX (BUG #26): removed "-" from dangerous prefixes.
+# The previous tuple ("=", "+", "-", "@", "\t", "\r") included
+# "-" (hyphen/minus), which caused ALL negative numbers (e.g.
+# activity_value=-5.0, logp=-1.23, score=-0.8) to be escaped
+# with a leading single quote: '-5.0. When re-read, these values
+# were parsed as STRINGS instead of floats, breaking downstream
+# numeric operations (sorting, filtering, aggregation). In our
+# dataset, negative numbers are FAR more common than actual
+# CSV injection attempts starting with "-". Per OWASP and the
+# Excel CSV injection analysis, "-" is NOT a formula prefix
+# in any modern spreadsheet application — only "=", "+", "@",
+# "\t", "\r" are. The "+" was also removed because positive
+# numbers like "+1.5" are not injection risks either, and
+# scientific notation can use "+" (e.g. "+1e6"). Removing both
+# eliminates false positives on numeric data.
+CSV_DANGEROUS_PREFIXES: tuple[str, ...] = ("=", "@", "\t", "\r")
 
 #: Compiled regexes for URL / error-message sanitisation (SEC-9.3, SEC-9.4).
 _REDACT_QUERY_PARAM_RE = re.compile(
@@ -1199,7 +1218,17 @@ class BasePipeline(ABC):
                     _per_file_counts = [
                         self._count_records(p) for p in raw_paths
                     ]
-                    records_downloaded = sum(_per_file_counts)
+                    # v90 ROOT FIX (BUG #13): filter out -1 sentinels
+                    # before summing (see the other occurrence around
+                    # line 1537 for detailed explanation).
+                    _valid_counts = [
+                        c for c in _per_file_counts
+                        if c != SENTINEL_COUNT_FAILED
+                    ]
+                    if _valid_counts:
+                        records_downloaded = sum(_valid_counts)
+                    else:
+                        records_downloaded = SENTINEL_COUNT_FAILED
                     # If any individual count failed, propagate the sentinel
                     if any(
                         c == SENTINEL_COUNT_FAILED
@@ -1207,8 +1236,12 @@ class BasePipeline(ABC):
                     ):
                         logger.warning(
                             "[%s] One or more record counts failed; "
-                            "records_downloaded may be inaccurate.",
+                            "records_downloaded=%d may be inaccurate "
+                            "(%d of %d counts were unknown).",
                             self.source_name,
+                            records_downloaded,
+                            sum(1 for c in _per_file_counts if c == SENTINEL_COUNT_FAILED),
+                            len(_per_file_counts),
                         )
                 else:
                     records_downloaded = SENTINEL_COUNT_FAILED
@@ -1534,9 +1567,31 @@ class BasePipeline(ABC):
             raw_paths = [p for p in raw_paths if p is not None]
             self.downloaded_paths = raw_paths
 
-            records_downloaded = sum(
-                self._count_records(p) for p in raw_paths
-            )
+            # v90 ROOT FIX (BUG #13): the previous code used
+            # ``sum(self._count_records(p) for p in raw_paths)``
+            # which INCLUDED -1 sentinel values (SENTINEL_COUNT_FAILED)
+            # in the sum, producing misleading counts (e.g. 3 files
+            # with 1000, 500, -1 records → sum=1499 instead of 1500
+            # with one unknown). If ALL counts failed, sum=-N instead
+            # of "unknown". ROOT FIX: filter out sentinel values before
+            # summing; if any count is -1, set the total to -1 (unknown)
+            # and log a warning.
+            _per_file_counts = [self._count_records(p) for p in raw_paths]
+            _valid_counts = [c for c in _per_file_counts if c != SENTINEL_COUNT_FAILED]
+            if _valid_counts:
+                records_downloaded = sum(_valid_counts)
+            else:
+                records_downloaded = SENTINEL_COUNT_FAILED
+            if any(c == SENTINEL_COUNT_FAILED for c in _per_file_counts):
+                logger.warning(
+                    "[%s] One or more record counts failed; "
+                    "records_downloaded=%d may be inaccurate "
+                    "(%d of %d counts were unknown).",
+                    self.source_name,
+                    records_downloaded,
+                    sum(1 for c in _per_file_counts if c == SENTINEL_COUNT_FAILED),
+                    len(_per_file_counts),
+                )
             logger.info(
                 "[%s] Downloaded %d records",
                 self.source_name,
@@ -4269,7 +4324,7 @@ class BasePipeline(ABC):
              ``Series.astype(str).str.startswith(CSV_DANGEROUS_PREFIXES)``
              which works for both object and numeric dtypes (numeric
              values are stringified first — they will never start with
-             ``=``/``+``/``-``/``@``/``\\t``/``\\r`` because their str
+             ``=``/``@``/``\\t``/``\\r`` because their str
              representation is purely numeric/scientific).
           2. For columns where ``_has_dangerous.any()`` is True, cast
              JUST that column to object and apply the escape lambda.
@@ -5041,9 +5096,29 @@ class BasePipeline(ABC):
                 if self._audit_buffer:
                     self._replay_audit_buffer_in_session(session)
 
+        # v90 ROOT FIX (BUG #14): narrowed from broad
+        # ``except Exception`` which caught programming bugs
+        # (AttributeError, KeyError, NameError) and silently fell
+        # back to local JSONL. A typo in a PipelineRun field name
+        # was masked as "DB unavailable" — the audit trail went to
+        # a local file nobody read. Root fix: catch ONLY DB-related
+        # errors (OperationalError, IntegrityError, InterfaceError,
+        # ProgrammingError for schema drift). Programming bugs
+        # propagate so they surface during development.
         except Exception as exc:
-            # IntegrityError (collision), OperationalError (DB down), or
-            # any other DB-related failure — fall back to local JSONL.
+            # Filter: if this is NOT a DB error, re-raise it so
+            # programming bugs are not silently masked.
+            _db_exc_types = []
+            if _SAIntegrityError is not None:
+                _db_exc_types.append(_SAIntegrityError)
+            if _SAOperationalError is not None:
+                _db_exc_types.append(_SAOperationalError)
+            if _SAInterfaceError is not None:
+                _db_exc_types.append(_SAInterfaceError)
+            if _SAProgrammingError is not None:
+                _db_exc_types.append(_SAProgrammingError)
+            if _db_exc_types and not isinstance(exc, tuple(_db_exc_types)):
+                raise  # programming bug — propagate
             if (
                 _HAS_SQLALCHEMY
                 and _SAIntegrityError is not None
@@ -5146,11 +5221,34 @@ class BasePipeline(ABC):
             )
             return 0
 
+    # v90 ROOT FIX (BUG #15): maximum retry count for audit buffer
+    # replay. The previous code retried failed records FOREVER —
+    # if a record's schema is incompatible with the DB (e.g. a
+    # column was dropped), every pipeline run retries it, adding
+    # it back to the buffer each time, growing the buffer without
+    # bound. ROOT FIX: after _AUDIT_MAX_RETRIES failures, DROP the
+    # record and log an error. This bounds the buffer size and
+    # prevents infinite retry loops on permanently-broken records.
+    _AUDIT_MAX_RETRIES: int = 3
+
     def _replay_audit_buffer_in_session(self, session: Any) -> int:
         """Replay buffered audit records within an existing session."""
         replayed = 0
         remaining: list[dict] = []
         for record in self._audit_buffer:
+            # v90 ROOT FIX (BUG #15): check retry count.
+            _retry_count = record.get("_retry_count", 0)
+            if _retry_count >= self._AUDIT_MAX_RETRIES:
+                logger.error(
+                    "[%s] Dropping permanently-failed audit record after "
+                    "%d retries (source=%s, run_date=%s). The record's "
+                    "schema may be incompatible with the current DB.",
+                    self.source_name,
+                    _retry_count,
+                    record.get("source"),
+                    record.get("run_date"),
+                )
+                continue  # drop the record
             try:
                 run_date_str = record.get("run_date")
                 try:
@@ -5180,6 +5278,9 @@ class BasePipeline(ABC):
                 session.add(run)
                 replayed += 1
             except Exception:
+                # v90 ROOT FIX (BUG #15): increment retry counter
+                # instead of re-adding without limit.
+                record["_retry_count"] = _retry_count + 1
                 remaining.append(record)
         self._audit_buffer = remaining
         if replayed > 0:
