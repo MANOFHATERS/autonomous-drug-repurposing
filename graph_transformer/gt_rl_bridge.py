@@ -1909,6 +1909,10 @@ class GTRLBridge:
             pathway_count_per_disease = {}
         max_pw = max(pathway_count_per_disease.values()) if pathway_count_per_disease else 1
         pw_scale = max(1.0, float(max_pw))
+        # V90 fix: restore unmet_scale (needed by the treat_component formula below).
+        # The parallel agent's edit removed it when adding pw_scale. Both are needed.
+        max_treats = max(treat_count_per_disease.values()) if treat_count_per_disease else 1
+        unmet_scale = max(2.0, float(max_treats) * 0.5)
 
         def _unmet_need_for_disease(disease_name: str) -> float:
             ds_idx = disease_map.get(disease_name, -1)
@@ -1921,6 +1925,12 @@ class GTRLBridge:
             # per-pair property. The original rng.normal(0, 0.02) per row
             # was making the same disease appear more/less under-served
             # depending on which drug it was paired with — meaningless.
+            # v90 S-F1 (parallel agent fix): blend treatment-count signal
+            # with pathway-connectivity signal so diseases with the same
+            # treatment count get differentiated scores based on their
+            # real graph topology (pathway disruptions). This is more
+            # scientifically sound than synthetic jitter — it uses REAL
+            # biomedical signal from the knowledge graph.
             treat_component = 0.95 * float(np.exp(-tc / unmet_scale)) + 0.05
             # v90 S-F1: pathway-connectivity component. Diseases with
             # more known pathway disruptions have LOWER unmet need.
