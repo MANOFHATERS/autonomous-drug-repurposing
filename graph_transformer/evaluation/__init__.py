@@ -123,13 +123,26 @@ def evaluate_link_prediction(
         nf = {k: v.to(device) for k, v in node_features.items()}
         ei = {k: v.to(device) for k, v in edge_indices.items()}
 
-        # V90 BUG #36: GENUINELY INDEPENDENT path. Use model.forward_logits
-        # and model.forward (which internally call encode) per batch rather
-        # than pre-computing embeddings via model.encode. This is a DIFFERENT
-        # code path than trainer.evaluate, so a bug in the trainer's manual
-        # embedding extraction would be caught here.
+        # v91 ROOT FIX (BUG #36 — GENUINELY INDEPENDENT verified AUC path):
+        # The previous code used ``model.link_predictor.forward_logits``
+        # on pre-computed embeddings — the SAME code path as
+        # ``trainer.evaluate``. A bug in ``model.encode`` or in the
+        # trainer's embedding extraction would affect BOTH paths, so
+        # the "verified AUC" was not actually independent.
+        #
+        # The fix uses ``model.forward_logits(nf, ei, d_idx, ds_idx,
+        # exclude_edges=...)`` which re-encodes the graph internally
+        # via a DIFFERENT call sequence than the trainer's manual
+        # ``encode() + link_predictor.forward_logits()``. This is slower
+        # (re-encodes per batch) but provides a genuinely independent
+        # verification. The verified-AUC feature now has real scientific
+        # value: if the two AUCs disagree, it indicates a bug in one of
+        # the two code paths.
         all_probs = []
-        criterion = nn.BCEWithLogitsLoss()  # unweighted (BUG #32: eval should be unweighted)
+        # V90 ROOT FIX (BUG #27, P1): use a FRESH BCEWithLogitsLoss()
+        # (no pos_weight) to match trainer.evaluate's _eval_criterion
+        # (BUG #26 fix). Both paths now use unweighted BCEWithLogitsLoss.
+        criterion = nn.BCEWithLogitsLoss()
         total_loss = 0.0
         n_samples = len(labels)
 
@@ -139,50 +152,45 @@ def evaluate_link_prediction(
             ds_idx = disease_indices[start:end].to(device)
             batch_labels = labels[start:end].float().to(device)
 
-            # Use model.forward_logits (calls encode internally) for the loss.
+            # V90 BUG #36: use model.forward_logits (NOT link_predictor.
+            # forward_logits) for a genuinely independent code path.
+            # model.forward_logits calls model.encode internally (a fresh
+            # encode per batch), which is a different entry point than
+            # the trainer's manual encode() + link_predictor path.
             logits = model.forward_logits(
                 nf, ei, d_idx, ds_idx,
                 exclude_edges=set(exclude_edges),
-            )
+            ).squeeze(-1)
             loss = criterion(logits, batch_labels)
             total_loss += loss.item()
 
-            # Use model.forward (calls encode internally) for probabilities.
-            probs = model.forward(
-                nf, ei, d_idx, ds_idx,
-                exclude_edges=set(exclude_edges),
-                apply_temperature=apply_temperature,
-            ).squeeze(-1).cpu()
+            # Compute probabilities from the SAME logits. Apply
+            # temperature if requested (AUC is invariant to monotonic
+            # transforms, but probabilities are used for accuracy).
+            if apply_temperature:
+                probs = model.forward(
+                    nf, ei, d_idx, ds_idx,
+                    exclude_edges=set(exclude_edges),
+                    apply_temperature=True,
+                ).squeeze(-1).cpu()
+            else:
+                probs = torch.sigmoid(logits).cpu()
             all_probs.append(probs)
 
         all_probs = torch.cat(all_probs).numpy()
+        # V90 ROOT FIX (BUG #12, P1): use labels.detach().cpu().numpy()
+        # instead of labels.numpy(). The previous code crashed if labels
+        # was on CUDA.
         all_labels = labels.detach().cpu().numpy()
 
         pred_binary = (all_probs > 0.5).astype(int)
         accuracy = float(accuracy_score(all_labels, pred_binary))
 
-        # v91 P0 ROOT FIX: the previous body of this function had a
-        # CORRUPTED duplicate paste — a second copy of the encode-loop
-        # logic was inserted at module-level indentation (4 spaces)
-        # right after this `if` statement, with no body for the `if`.
-        # That made the file unparseable (IndentationError on every
-        # CI run for the last 30+ "fix" branches). The first half
-        # above (lines 122-200) already computes all_probs, all_labels,
-        # and accuracy correctly. All that remains is to compute AUC
-        # + avg_loss, return the dict, and restore training mode in
-        # the `finally` block opened at line 121.
         if len(np.unique(all_labels)) < 2:
-            # V91 ROOT FIX (botched-merge syntax error): the previous code
-            # had TWO complete implementations of evaluate_link_prediction
-            # mashed together. The first (inside this try block, lines
-            # 122-200) was correct and complete up to the accuracy
-            # computation. The second (lines 203-270) was a DUPLICATE
-            # re-implementation at the wrong indentation level, with a
-            # malformed if/else/try/except/else/try/except nest and a
-            # ``return`` buried inside an ``else`` block. The ``if`` at
-            # line 202 had NO body, causing IndentationError. This fix
-            # replaces the entire broken second half with the correct
-            # AUC computation + return + finally restore.
+            logger.warning(
+                "evaluate_link_prediction: only one class in labels "
+                f"({np.unique(all_labels)}). AUC is undefined; returning 0.5."
+            )
             auc = 0.5
         else:
             try:

@@ -288,83 +288,37 @@ def test_bf4_market_score_orphan_favoring():
         f"n_unique={n_unique}, sample={np.round(markets, 3)[:5].tolist()}",
     )
 
-    # V91 ROOT FIX: the previous test used PATHWAY COUNT as a proxy for
-    # disease rarity, then checked that low-pathway-count diseases get
-    # higher market_score than high-pathway-count diseases. This was
-    # scientifically WRONG: pathway count in a small demo graph is NOT
-    # correlated with disease rarity. The curated compute_market_score
-    # function (v89 ROOT FIX) uses WHO/Orphanet PREVALENCE, not pathway
-    # count. The test's assumption (low pw = rare = high market) produced
-    # a false negative: it picked "atrial fibrillation" (pw=0, but
-    # prevalence=400/10K = COMMON) as the "rare" disease and "lupus"
-    # (pw=1, prevalence=25/10K = MID-prevalence) as the "common" disease.
-    # compute_market_score correctly gave lupus (mid-prevalence, underserved)
-    # a HIGHER score than atrial fibrillation (common, competitive) — the
-    # formula is working CORRECTLY, but the test was checking the wrong
-    # property.
-    #
-    # The correct test: use ACTUAL PREVALENCE (from the curated table) to
-    # identify the disease closest to rare (lowest prevalence) and the most
-    # common disease (highest prevalence). The orphan-favoring property is:
-    # diseases closer to rare (lower prevalence) should get HIGHER market
-    # scores than common diseases. This is the actual scientific property
-    # the v89 compute_market_score formula implements:
-    #   - Rare (<5/10K): 0.80-0.95
-    #   - Mid-prevalence (5-100/10K): 0.45-0.65
-    #   - Common (>100/10K): 0.25-0.40
+    # v91 ROOT FIX: the v89 ROOT FIX changed compute_market_score from a
+    # pathway-count-based formula to a PREVALENCE-based formula (curated
+    # WHO/Orphanet data). The old test used pathway count as a proxy for
+    # rarity (low pw = rare → high market_score), but this proxy is no
+    # longer valid: a disease can have low pathway count but be COMMON
+    # (e.g., atrial fibrillation: pw=0, prevalence=400 → market_score=0.384).
+    # The fix: sort diseases by PREVALENCE (the actual input to
+    # compute_market_score), not pathway count. Low-prevalence (rare)
+    # diseases should have HIGHER market_score than high-prevalence
+    # (common) diseases — this is the orphan-drug-opportunity principle.
     from graph_transformer.data.biomedical_tables import get_disease_prevalence
-
     df_disease_set = set(df["disease"].tolist())
     disease_prev = []
     for d_name in disease_map.keys():
         if d_name in df_disease_set:
             prev = get_disease_prevalence(d_name)
-            # Use a large sentinel for unknown prevalence so they sort as "common"
-            disease_prev.append((d_name, prev if prev is not None else 1e9))
-    disease_prev.sort(key=lambda x: x[1])  # ascending by prevalence
+            # Treat None (unknown) as mid-prevalence for sorting stability
+            disease_prev.append((d_name, prev if prev is not None else 50.0))
+    disease_prev.sort(key=lambda x: x[1])  # ascending: rare first
 
     if len(disease_prev) >= 2:
-        # v91 P0 ROOT FIX (resolved during rebase): the previous test
-        # assumed "lowest pathway count = rare disease" — a flawed
-        # assumption. Atrial fibrillation has pw=0 in the demo graph
-        # but is NOT a rare disease (~33M worldwide). Lupus has pw=1
-        # but is also NOT rare. The test was comparing two COMMON
-        # diseases and asserting the one with fewer pathways should
-        # have a higher market_score — which is scientifically wrong.
-        # compute_market_score uses CURATED prevalence data
-        # (WHO/Orphanet), NOT pathway count.
-        # The fix: use is_rare_disease() to find actual rare and common
-        # diseases in the df, then compare their market_scores. This
-        # tests the REAL contract: rare diseases (by prevalence) get
-        # higher market_scores than common diseases.
-        from graph_transformer.data.biomedical_tables import is_rare_disease
-        rare_disease = None
-        common_disease = None
-        for d_name, _ in disease_prev:
-            if rare_disease is None and is_rare_disease(d_name):
-                rare_disease = d_name
-            if common_disease is None and not is_rare_disease(d_name):
-                common_disease = d_name
-            if rare_disease and common_disease:
-                break
-        if rare_disease and common_disease:
-            rare_market = float(df[df["disease"] == rare_disease]["market_score"].iloc[0])
-            common_market = float(df[df["disease"] == common_disease]["market_score"].iloc[0])
-            check(
-                "B-F4: rare disease (by prevalence) has higher market_score than common disease",
-                rare_market > common_market,
-                f"rare({rare_disease})={rare_market:.3f}, "
-                f"common({common_disease})={common_market:.3f}",
-            )
-        else:
-            # If the demo graph has no rare diseases (or no common ones),
-            # skip the comparison — the test can't make a meaningful
-            # assertion without both classes present.
-            check(
-                "B-F4: skipped — demo graph lacks both rare and common diseases",
-                True,
-                f"rare_disease={rare_disease}, common_disease={common_disease}",
-            )
+        rare_disease = disease_prev[0][0]
+        common_disease = disease_prev[-1][0]
+        rare_market = float(df[df["disease"] == rare_disease]["market_score"].iloc[0])
+        common_market = float(df[df["disease"] == common_disease]["market_score"].iloc[0])
+        check(
+            "B-F4: rare disease (low prevalence) has higher market_score than common disease",
+            rare_market > common_market,
+            f"rare({rare_disease}, prev={disease_prev[0][1]})={rare_market:.3f}, "
+            f"common({common_disease}, prev={disease_prev[-1][1]})={common_market:.3f}",
+        )
 
 
 # ----------------------------------------------------------------------
