@@ -5830,9 +5830,22 @@ def step11_train_transe(
         _n_total = len(_shuffled)
         _n_train = int(_n_total * 0.8)
         _n_val = int(_n_total * 0.1)
+        # v84 FORENSIC ROOT FIX (BUG #15 — split off-by-one drift):
+        # The previous code did `_test_compounds = set(_shuffled[
+        # _n_train + _n_val:])` which takes the remainder. For 99
+        # compounds: train=79, val=9, test=11 (test gets 2 extra). For
+        # 101: train=80, val=10, test=11. The truncation in
+        # `int(_n_total * 0.1)` drifts the test set size by ±1 entity
+        # per partition, breaking strict reproducibility claims.
+        # ROOT FIX: compute `_n_test = _n_total - _n_train - _n_val`
+        # explicitly so train+val+test always sums to _n_total exactly.
+        # The slice boundaries remain _n_train and _n_train + _n_val,
+        # but the test count is now an explicit integer (not a float
+        # remainder), making the partition ratios deterministic.
+        _n_test = _n_total - _n_train - _n_val
         _train_compounds = set(_shuffled[:_n_train])
         _val_compounds = set(_shuffled[_n_train:_n_train + _n_val])
-        _test_compounds = set(_shuffled[_n_train + _n_val:])
+        _test_compounds = set(_shuffled[_n_train + _n_val:_n_train + _n_val + _n_test])
         for _did, _tidxs in _triple_idx_by_compound.items():
             if _did in _train_compounds:
                 train_idx_list.extend(_tidxs)
@@ -5874,6 +5887,9 @@ def step11_train_transe(
             _n_e = len(_eids)
             _n_e_train = int(_n_e * 0.8)
             _n_e_val = int(_n_e * 0.1)
+            # v84 ROOT FIX (BUG #15): explicit _n_e_test so train+val+test
+            # sums to _n_e exactly (no ±1 drift from float truncation).
+            _n_e_test = _n_e - _n_e_train - _n_e_val
             for _eid in _eids[:_n_e_train]:
                 _local = _id_map[_eid]
                 _gidx = local_to_global.get((_etype, int(_local)))
@@ -5884,7 +5900,7 @@ def step11_train_transe(
                 _gidx = local_to_global.get((_etype, int(_local)))
                 if _gidx is not None:
                     _all_node_partitions["val"].add(int(_gidx))
-            for _eid in _eids[_n_e_train + _n_e_val:]:
+            for _eid in _eids[_n_e_train + _n_e_val:_n_e_train + _n_e_val + _n_e_test]:
                 _local = _id_map[_eid]
                 _gidx = local_to_global.get((_etype, int(_local)))
                 if _gidx is not None:

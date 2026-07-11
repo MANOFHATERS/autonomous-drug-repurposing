@@ -3461,12 +3461,34 @@ class TransEConfig:
         # We accept both values here so a future higher_better model
         # can be added with a new loss path — but the trainer (not the
         # config) is responsible for branching on this value.
+        # v84 FORENSIC ROOT FIX (BUG #13 — TransEConfig must lock
+        # score_direction to "lower_better"): the previous code accepted
+        # BOTH "lower_better" and "higher_better" in TransEConfig's
+        # __post_init__. A user could construct a TransEConfig with
+        # score_direction="higher_better", pass it to a TransE model,
+        # and only discover the incompatibility on the first batch
+        # (when the trainer's assertion fired). ROOT FIX: TransEConfig
+        # is TransE-SPECIFIC — it MUST be "lower_better" only. A
+        # "higher_better" config belongs to a different config class
+        # (e.g. a future HGTConfig). Reject "higher_better" at config
+        # construction time so the failure is immediate and the error
+        # message is actionable.
         if self.score_direction not in ("lower_better", "higher_better"):
             raise ValueError(
                 f"score_direction must be 'lower_better' or 'higher_better', "
                 f"got {self.score_direction!r}. TransE (Bordes 2013) uses "
                 f"'lower_better' (score = -||h + r - t||). "
                 f"(v28 audit ML-9: explicit model-loss contract.)"
+            )
+        if self.score_direction != "lower_better":
+            raise ValueError(
+                f"TransEConfig.score_direction must be 'lower_better' "
+                f"(TransE uses score = -||h + r - t||, lower = more "
+                f"plausible). Got {self.score_direction!r}. A "
+                f"'higher_better' model requires a different config "
+                f"class (e.g. a future HGTConfig) and a different loss "
+                f"formula — drop-in substitution into train_transe will "
+                f"silently train BACKWARDS. (v84 BUG #13 root fix)"
             )
         # v28 ML-14: validate relation_norm_mode so an invalid value
         # fails FAST at config construction, not on the first
