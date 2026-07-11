@@ -4044,7 +4044,13 @@ def _build_pubchem_compound_properties_table() -> Any:
             "enriched_at", DateTime(timezone=True),
             nullable=False, server_default=func.current_timestamp(),
         ),
-        Column("is_deleted", Boolean, default=False, server_default="0"),
+        # v90 ROOT FIX (BUG #23): `server_default=text("FALSE")` instead of
+        #   the non-portable `server_default="0"`. This Column object mirrors
+        #   the ORM PubChemCompoundProperty model — the previous "0" literal
+        #   diverged from the ORM (`server_default="0"` → now also FALSE) and
+        #   migration 005 (`is_deleted BOOLEAN NOT NULL DEFAULT FALSE`).
+        #   `text` is already imported at line 44 above.
+        Column("is_deleted", Boolean, default=False, server_default=text("FALSE")),
         Column("created_at", DateTime(timezone=True)),
         Column("updated_at", DateTime(timezone=True)),
         # V18 CD-2: align constraint NAME to ORM (was

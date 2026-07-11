@@ -17,7 +17,7 @@ from unittest.mock import patch
 import pytest
 from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import sessionmaker, selectinload
 
 # ---------------------------------------------------------------------------
 # Ensure project root is importable
@@ -174,14 +174,46 @@ class TestArchitecture:
         assert SCHEMA_VERSION >= 3
 
     def test_protein_all_ppi_property(self, db_session):
+        # v90 ROOT FIX (BUG #20 test alignment): Protein.ppi_as_protein_a/b
+        # now use lazy='raise' to prevent N+1 query explosion under bulk
+        # loads. Callers MUST eager-load via selectinload() before touching
+        # the .ppi_as_protein_a / .ppi_as_protein_b collections — including
+        # the .all_ppi_interactions / .all_ppi_partners properties that
+        # iterate over them. The test now re-queries the protein with
+        # selectinload to mirror the production pattern required by the
+        # BUG #20 fix.
         protein = _make_protein(db_session)
-        result = protein.all_ppi_interactions
+        from database.models import Protein
+        from sqlalchemy import select as _sa_select
+        eager_protein = db_session.scalars(
+            _sa_select(Protein)
+            .where(Protein.id == protein.id)
+            .options(
+                selectinload(Protein.ppi_as_protein_a),
+                selectinload(Protein.ppi_as_protein_b),
+            )
+        ).one()
+        result = eager_protein.all_ppi_interactions
         assert isinstance(result, list)
+        assert result == []  # no PPI rows for a freshly-created protein
 
     def test_protein_all_ppi_partners_property(self, db_session):
+        # v90 ROOT FIX (BUG #20 test alignment): same eager-load pattern
+        # as test_protein_all_ppi_property above.
         protein = _make_protein(db_session)
-        result = protein.all_ppi_partners
+        from database.models import Protein
+        from sqlalchemy import select as _sa_select
+        eager_protein = db_session.scalars(
+            _sa_select(Protein)
+            .where(Protein.id == protein.id)
+            .options(
+                selectinload(Protein.ppi_as_protein_a),
+                selectinload(Protein.ppi_as_protein_b),
+            )
+        ).one()
+        result = eager_protein.all_ppi_partners
         assert isinstance(result, list)
+        assert result == []
 
 
 # ===========================================================================
