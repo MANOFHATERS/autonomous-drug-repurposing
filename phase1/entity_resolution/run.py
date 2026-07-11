@@ -539,7 +539,6 @@ def run_entity_resolution() -> Dict[str, Any]:
                 #   case-insensitive (lowercase both sides). Skip lines
                 #   that don't have exactly 4 fields after splitting
                 #   (defensive — corrupt lines are logged and skipped).
-                import gzip
                 _alias_records = []
                 _skipped_lines = 0
                 with gzip.open(_alias_file, "rt", encoding="utf-8") as _af:

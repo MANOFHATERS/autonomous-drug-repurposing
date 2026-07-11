@@ -2313,13 +2313,15 @@ class StringPipeline(BasePipeline):
                set for performance — GAP-8.5).
             2. Drop rows where FK lookup fails (dead-letter the unmapped
                UniProt IDs — GAP-5.4, GAP-11.3).
-            3. Ensure ``protein_a_id < protein_b_id`` (defense-in-depth;
+            3. Ensure ``protein_a_id <= protein_b_id`` (defense-in-depth;
                ``_pre_validate_ppi`` in ``loaders.py`` also enforces this
-               and logs a WARNING for each swap — GAP-4.5).
-            4. Drop self-interactions with WARNING + dead-letter
-               (DB constraint; TODO(schema-migration): allow homodimers —
-               BUG-3.1).  ``_pre_validate_ppi`` in ``loaders.py`` also
-               quarantines them — GAP-4.4.
+               and logs a WARNING for each swap — GAP-4.5). v91 ROOT FIX
+               (BUG #9): now allows a_id == b_id (homodimers) with
+               is_homodimer=True flag.
+            4. Self-interactions (homodimers) are kept with is_homodimer=True
+               flag instead of being dropped. The DB constraint now allows
+               protein_a_id == protein_b_id. Homodimers are biologically
+               critical (EGFR dimerization, p53 tetramerization).
             5. Bulk upsert via ``bulk_upsert_ppi`` with
                ``pipeline_run_id`` and ``input_checksum`` (BUG-16.2,
                GAP-15.6, GAP-15.7).
