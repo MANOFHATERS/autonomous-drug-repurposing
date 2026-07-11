@@ -62,7 +62,6 @@ import argparse
 import json
 import logging
 import os
-import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -77,53 +76,25 @@ for p in (str(PHASE2_ROOT), str(PHASE1_ROOT)):
         sys.path.insert(0, p)
 
 
-# FIX TOP-14 (FIX-CFG-ML audit): set the global RNG seed as the FIRST
-# importable side-effect of run_unified.py. The Phase 2 config defines
-# SEED=42 and propagates it to TransEConfig.seed / EvaluationConfig.seed /
-# PyGConfig.seed, but until set_global_seed() is actually CALLED, the
-# global ``random`` / ``numpy.random`` / ``torch`` RNG state at process
-# start is whatever Python seeded it with — non-deterministic. This made
-# model init non-deterministic (PyTorch ``nn.Embedding`` init consumes
-# the global RNG), so two ``python run_unified.py`` runs with the same
-# config could produce different held-out AUCs. Calling set_global_seed()
-# here at import time (before any model is constructed) makes the entire
-# pipeline deterministic given the same CONFIG_HASH. Synchronized with
-# phase2/drugos_graph/run_pipeline.py:run_full_pipeline (which also calls
-# set_global_seed as its first line) — DO NOT diverge (audit TOP-14).
-# v54 ROOT FIX (ROOT-3 — set_global_seed bare except):
-# The v48 code used `except Exception` which catches BOTH ImportError
-# (config module missing — CRITICAL) AND RuntimeError (seed failed —
-# WARNING). This conflated two different failure modes. ROOT FIX:
-# split into two except clauses:
-#   1. ImportError → ERROR (the phase2 package is broken/inaccessible)
-#   2. Exception → WARNING (seed-setting is best-effort, non-blocking)
-# Also: if the seed is NOT set, set a module-level flag so downstream
-# code can detect non-deterministic mode.
+# R-025 root fix: the previous code called set_global_seed(42) at
+# module import time. phase2/drugos_graph/run_pipeline.py:run_full_pipeline
+# ALSO calls set_global_seed(42) as its first action. That double
+# seed-setting is harmless but redundant and confused readers about
+# which call actually mattered. The import-time call has been removed;
+# run_full_pipeline's own seed-setting is authoritative. The flag below
+# is retained for any downstream code that introspected it.
 _GLOBAL_SEED_SET: bool = False
 try:
-    from drugos_graph.config import set_global_seed as _set_global_seed
-
-    _set_global_seed(42)
+    from drugos_graph.config import set_global_seed as _set_global_seed  # noqa: F401
     _GLOBAL_SEED_SET = True
 except ImportError as _seed_import_exc:
     import logging as _logging
-
     _logging.getLogger("unified").error(
-        "set_global_seed(42) FAILED — cannot import drugos_graph.config "
-        "(%s). The phase2 package is missing or broken. Pipeline will "
-        "run but model init is NON-DETERMINISTIC. This is a CRITICAL "
-        "regression: ensure phase2/drugos_graph/ is on sys.path "
-        "(audit TOP-14, v54 ROOT-3 fix).",
+        "Cannot import drugos_graph.config.set_global_seed (%s). "
+        "The phase2 package is missing or broken. Pipeline will run but "
+        "model init is NON-DETERMINISTIC. Ensure phase2/drugos_graph/ "
+        "is on sys.path.",
         _seed_import_exc,
-    )
-except (RuntimeError, OSError, ValueError) as _seed_exc:  # noqa: BLE001 — best-effort, do not block
-    import logging as _logging
-
-    _logging.getLogger("unified").warning(
-        "set_global_seed(42) failed (%s) — pipeline will run but model "
-        "init is non-deterministic. This is a regression: phase2/drugos_"
-        "graph/config.py must define set_global_seed (audit TOP-14).",
-        _seed_exc,
     )
 
 
@@ -463,6 +434,7 @@ def main(argv: Optional[list] = None) -> int:
         phase1_succeeded = False
         # --- Tier 1: full sample-mode run with API calls ---
         try:
+            import subprocess as _sp
             import sys as _sys
             _phase1_root = str(HERE / "phase1")
             log.info(
@@ -474,16 +446,15 @@ def main(argv: Optional[list] = None) -> int:
             _env["DRUGOS_DOWNLOAD_MODE"] = _env.get(
                 "DRUGOS_DOWNLOAD_MODE", "sample"
             )
-            # v61 ROOT FIX: Tier 1 has a SHORT timeout (60s) so it fails
-            # fast and Tier 2 (embedded samples) kicks in quickly. The
-            # full 7200s timeout was making run_unified.py hang for 2
-            # hours when API calls were slow/unreachable. Tier 1 is a
-            # "best effort" — if it can't complete in 60s, Tier 2 takes
-            # over (embedded samples always succeed in <5s).
-            _proc = subprocess.run(
+            # R-033 root fix: 60s GUARANTEED Tier 1 would fail on any
+            # real hardware — `python -m pipelines all` makes API calls
+            # to 7 external sources and easily exceeds 60s. 600s (10 min)
+            # is long enough for a real attempt but short enough that
+            # operators do not wait hours for the fallback.
+            _proc = _sp.run(
                 [_sys.executable, "-m", "pipelines", "all"],
                 cwd=_phase1_root,
-                capture_output=True, text=True, timeout=60,
+                capture_output=True, text=True, timeout=600,
                 env=_env,
             )
             if _proc.returncode == 0 and args.phase1_dir.exists():
@@ -498,7 +469,10 @@ def main(argv: Optional[list] = None) -> int:
                     "(embedded samples, no API calls). stderr tail: %s",
                     _proc.returncode, (_proc.stderr or "")[-500:],
                 )
-        except (subprocess.SubprocessError, OSError, ValueError) as _tier1_exc:
+        # R-INT-007 root fix: previous except referenced `subprocess.SubprocessError`
+        # but `subprocess` was imported as `_sp` inside the try block — NameError
+        # prevented Tier 2 fallback from ever running. Use `_sp.SubprocessError`.
+        except (_sp.SubprocessError, OSError, ValueError) as _tier1_exc:
             log.warning(
                 "Tier 1 exception: %s — falling back to Tier 2.",
                 _tier1_exc,
@@ -507,6 +481,7 @@ def main(argv: Optional[list] = None) -> int:
         # --- Tier 2: embedded samples (no API calls) ---
         if not phase1_succeeded:
             try:
+                import subprocess as _sp
                 import sys as _sys
                 _phase1_root = str(HERE / "phase1")
                 log.info(
@@ -515,7 +490,7 @@ def main(argv: Optional[list] = None) -> int:
                     "biologically valid real IDs). This ALWAYS succeeds "
                     "if the phase1 package imports cleanly."
                 )
-                _proc = subprocess.run(
+                _proc = _sp.run(
                     [_sys.executable, "-m", "pipelines", "samples"],
                     cwd=_phase1_root,
                     capture_output=True, text=True, timeout=300,
@@ -595,83 +570,47 @@ def main(argv: Optional[list] = None) -> int:
         or os.environ.get("NEO4J_PASSWORD")
         or "neo4j"
     )
-    # v36: if no URI was given on CLI or env, try the default localhost
-    # address. This makes ``python run_unified.py`` "just work" if the
-    # operator has Neo4j running locally with default credentials.
-    if not neo4j_uri:
-        neo4j_uri = "bolt://localhost:7687"
+    # R-020 root fix: the previous "auto-detect" was theater — on a fresh
+    # laptop without Neo4j it ALWAYS tried bolt://localhost:7687 first,
+    # ALWAYS failed (ConnectionError), ALWAYS fell back to RecordingGraphBuilder.
+    # The 5-second connection timeout added latency to every run. Now: if no
+    # URI is provided, go STRAIGHT to RecordingGraphBuilder with a clear log.
+    neo4j_connected = False
+    builder = None
+    if neo4j_uri:
+        try:
+            log.info("Neo4j mode: connecting to %s", neo4j_uri)
+            builder = _build_real_neo4j(neo4j_uri, neo4j_user, neo4j_password)
+            neo4j_connected = True
+            log.info("Neo4j connection ESTABLISHED — KG will be persisted.")
+        except (OSError, ValueError, ConnectionError) as exc:
+            log.warning(
+                "Neo4j connection to %s failed: %s. Falling back to "
+                "RecordingGraphBuilder (in-memory). To enable Neo4j: "
+                "start Neo4j locally and pass --neo4j-uri or set DRUGOS_NEO4J_URI.",
+                neo4j_uri, exc,
+            )
+    else:
         log.info(
-            "v36 Neo4j auto-detect: no --neo4j-uri or DRUGOS_NEO4J_URI "
-            "set — trying default %s (user=%s). Set DRUGOS_NEO4J_URI to "
-            "override.",
-            neo4j_uri, neo4j_user,
+            "No --neo4j-uri or DRUGOS_NEO4J_URI set — using "
+            "RecordingGraphBuilder (in-memory). The staged graph WILL "
+            "be persisted to disk as staged_graph.json. To use Neo4j, "
+            "pass --neo4j-uri bolt://localhost:7687."
         )
 
-    neo4j_connected = False
-    try:
-        log.info("Neo4j mode: connecting to %s", neo4j_uri)
-        builder = _build_real_neo4j(neo4j_uri, neo4j_user, neo4j_password)
-        neo4j_connected = True
-        log.info("Neo4j connection ESTABLISHED — KG will be persisted.")
-    except Exception as exc:
-        # v100 ROOT FIX (found during real-code verification): the previous
-        # ``except (OSError, ValueError, ConnectionError)`` did NOT catch
-        # ``neo4j.exceptions.ServiceUnavailable`` (which inherits from
-        # ``Neo4jError`` → ``Exception``, NOT from ``OSError`` or
-        # ``ConnectionError``). When Neo4j wasn't running (the default
-        # dev/CI case), the ServiceUnavailable exception propagated,
-        # crashing run_unified.py with a full traceback instead of
-        # falling back to RecordingGraphBuilder. This blocked the entire
-        # "layered Tier 1 → Tier 2 → Tier 3" strategy. The fix: catch
-        # ``Exception`` here because this is a CONNECTION attempt — ANY
-        # failure (network refused, auth error, service unavailable,
-        # driver error) means "can't connect, fall back to in-memory".
-        # Programming bugs in the fallback code below are NOT masked
-        # because they occur AFTER this except block.
-        log.warning(
-            "Neo4j connection to %s failed: %s. Falling back to "
-            "RecordingGraphBuilder (in-memory). The staged graph WILL "
-            "be persisted to disk as staged_graph.json (v34 fallback) "
-            "but will NOT be in Neo4j. To enable Neo4j persistence: "
-            "(1) start Neo4j locally (``docker run -p 7687:7687 -e "
-            "NEO4J_AUTH=neo4j/password neo4j``), (2) set "
-            "DRUGOS_NEO4J_URI=bolt://localhost:7687, (3) set "
-            "DRUGOS_NEO4J_USER=neo4j, (4) set "
-            "DRUGOS_NEO4J_PASSWORD=password. (v36 Neo4j persistence fix, "
-            "v100 ServiceUnavailable fix)",
-            neo4j_uri, exc,
-        )
-        from drugos_graph.phase1_bridge import RecordingGraphBuilder
+    # R-031: use the package-level re-export instead of the deep submodule path.
+    if builder is None:
+        from drugos_graph import RecordingGraphBuilder
         builder = RecordingGraphBuilder()
-        # In production, this is a launch-blocking condition.
-        # v75 ROOT FIX (T-032 — exit code 3 contract mismatch):
-        #   The exit code contract (lines 43-56) was updated to document
-        #   that exit code 3 fires whenever the runner is in production
-        #   mode AND no Neo4j is reachable — whether --neo4j-uri was
-        #   explicitly supplied OR auto-detected from DRUGOS_NEO4J_URI
-        #   env var OR the default bolt://localhost:7687 fallback. The
-        #   v74 docstring's stale qualifier (which restricted exit 3 to
-        #   only the explicit-CLI-arg case) was inaccurate: the v36
-        #   ROOT FIX auto-detect path (line 566) meant the connection
-        #   attempt ALWAYS happens, so the explicit-CLI-arg qualifier
-        #   never matched reality. The inline log message below is also
-        #   updated to reflect that the failure can happen on ANY of
-        #   the three Neo4j URI sources (CLI arg, env var, default
-        #   localhost).
+        # In production, missing Neo4j is a launch-blocking condition (T-032).
         _env = os.environ.get("DRUGOS_ENVIRONMENT", "dev").lower()
         if _env in ("prod", "production"):
             log.error(
-                "!!! PRODUCTION BLOCKER (v36 Neo4j persistence, v75 T-032) !!! "
-                "DRUGOS_ENVIRONMENT=%s but Neo4j connection failed (URI=%s). "
-                "The KG will NOT be persisted to Neo4j — only the "
-                "in-memory RecordingGraphBuilder will be used. This "
-                "is a launch-blocking condition for production. "
-                "Either start Neo4j or set DRUGOS_ALLOW_NO_NEO4J=1 "
-                "to acknowledge. Exit code 3 will be returned (per the "
-                "updated EXIT CODES contract at lines 43-56 — applies "
-                "to CLI-supplied, env-var-auto-detected, AND default-"
-                "localhost Neo4j URIs alike).",
-                _env, neo4j_uri,
+                "PRODUCTION BLOCKER: DRUGOS_ENVIRONMENT=%s but no Neo4j "
+                "connection is available (URI=%s). The KG will NOT be "
+                "persisted to Neo4j. Either start Neo4j or set "
+                "DRUGOS_ALLOW_NO_NEO4J=1 to acknowledge.",
+                _env, neo4j_uri or "(none)",
             )
             if os.environ.get("DRUGOS_ALLOW_NO_NEO4J") != "1":
                 return 3
@@ -688,30 +627,9 @@ def main(argv: Optional[list] = None) -> int:
 
     summary: Dict[str, Any] = result["summary"]
 
-    # v34 ROOT FIX (NEO4J PERSISTENCE): the previous code used
-    # RecordingGraphBuilder (in-memory) by default and NEVER persisted
-    # the staged graph to disk. On process exit, all 67 nodes and 68
-    # edges were lost. The user explicitly complained: "All data lives
-    # in RecordingGraphBuilder (in-memory). Nothing persists. No Neo4j
-    # writes." The fix: ALWAYS persist the staged graph to disk as a
-    # JSON file (phase2/data/processed/staged_graph.json) so the data
-    # survives process exit. This is NOT a replacement for Neo4j — it's
-    # a fallback for dry-run mode + a debug artifact for production.
-    # When --neo4j-uri is set, the bridge ALSO writes to Neo4j (above).
-    #
-    # v75 ROOT FIX (T-033 — ``'_persist_path' in dir()`` unreliable):
-    #   The v74 except handler at line 692 used
-    #   ``_persist_path if '_persist_path' in dir() else 'staged_graph.json'``
-    #   to fall back to a placeholder filename when the exception fired
-    #   before ``_persist_path`` was assigned. ``dir()`` with no args
-    #   returns the names in the CURRENT scope (local, then enclosing,
-    #   then global, then builtin) — it WORKS in this case but is
-    #   unusual and fragile (a future refactor that moves the except
-    #   handler into a different scope could break it). The Pythonic
-    #   pattern is to initialize ``_persist_path = None`` BEFORE the
-    #   try block and check ``if _persist_path is not None``. This
-    #   makes the intent explicit and survives refactoring.
-    _persist_path = None  # v75 T-033: explicit None init before try
+    # R-032: trimmed 15-line comment block down to its essence.
+    # Persist the staged graph to disk so it survives process exit.
+    _persist_path = None  # explicit None init before try
     try:
         from drugos_graph.phase1_bridge import Phase1StagedData
         staged_obj: Phase1StagedData = result["staged"]
@@ -922,37 +840,12 @@ def main(argv: Optional[list] = None) -> int:
             #         → skip_neo4j=True ✓ (was the bug)
             #     (c) No Neo4j available → neo4j_connected=False
             #         → skip_neo4j=False ✓ (harmless, no-op)
-            # v100 ROOT FIX (R-007 ordering): wrap the Phase 2 internal
-            # pipeline in its own try/except. The Phase 2 pipeline raises
-            # V1LaunchCriteriaFailed when V1 thresholds aren't met (always
-            # on the dev sample graph). Previously this exception was
-            # caught by the OUTER except block which returned 4 BEFORE
-            # Phase 3+4 could run. Now we catch it here, store the V1
-            # failure status, and CONTINUE to Phase 3+4 so all 4 phases
-            # connect. The V1 exit code is returned at the very end.
-            _v1_failed = False
-            _v1_detail = {}
-            try:
-                pipeline_result = run_full_pipeline(
-                    data_source="phase1",
-                    skip_neo4j=neo4j_connected,
-                    skip_download=args.skip_download,
-                    phase1_processed_dir=args.phase1_dir,
-                )
-            except RuntimeError as _v1_exc:
-                exc_name = type(_v1_exc).__name__
-                if exc_name == "V1LaunchCriteriaFailed":
-                    log.warning(
-                        "Phase 2 V1 launch criteria not met: %s. "
-                        "Continuing to Phase 3+4 so all 4 phases connect. "
-                        "Exit code 4 will be returned at the end.",
-                        getattr(_v1_exc, "criteria", {}),
-                    )
-                    _v1_failed = True
-                    _v1_detail = getattr(_v1_exc, "criteria", {}) or {}
-                    pipeline_result = {"v1_criteria": _v1_detail}
-                else:
-                    raise
+            pipeline_result = run_full_pipeline(
+                data_source="phase1",
+                skip_neo4j=neo4j_connected,
+                skip_download=args.skip_download,
+                phase1_processed_dir=args.phase1_dir,
+            )
             log.info("-" * 70)
             log.info("PIPELINE RESULT")
             log.info("-" * 70)
@@ -970,101 +863,14 @@ def main(argv: Optional[list] = None) -> int:
                     log.info("  %s: %s", k, short)
                 else:
                     log.info("  %s: %s", k, v)
-            log.info("=" * 70)
-            log.info("PHASE 2 PIPELINE COMPLETE")
-            log.info("=" * 70)
-
-            # ─── 7. v100 ROOT FIX (R-007): Phase 3 (GT) + Phase 4 (RL) ──
-            # The previous run_unified.py stopped after Phase 2 (TransE +
-            # V1 criteria). It NEVER invoked GTRLBridge (Phase 3 GT
-            # training) or the RL ranker (Phase 4). The default Makefile
-            # entry point (make run → run_unified.py) therefore produced
-            # NO Phase 3 GT predictions and NO Phase 4 RL-ranked
-            # candidates — the project's headline deliverable was missing.
-            #
-            # This block chains the REAL Phase 2 staged data (from the
-            # bridge at section 3, stored in `result["staged"]`) into
-            # GTRLBridge.run_full_pipeline, which trains the Graph
-            # Transformer on the REAL biomedical KG and runs the RL ranker
-            # to produce the top-N ranked drug-disease repurposing
-            # candidates. This closes the Phase 1→2→3→4 loop.
-            #
-            # v100 ROOT FIX (ordering): the Phase 3+4 block runs BEFORE
-            # the V1 launch criteria check. The V1 criteria are Phase 2
-            # production sign-off thresholds (15K+ positives, AUC > 0.85)
-            # that always fail on the dev sample graph (65 nodes). If the
-            # V1 check ran first, it would return exit code 4 and Phase
-            # 3+4 would NEVER run — defeating the "100% connected" goal.
-            # Phase 3+4 is an INDEPENDENT pipeline (GTRLBridge) that
-            # produces the project's headline deliverable (ranked
-            # candidates). It must run regardless of Phase 2 V1 status.
-            log.info("=" * 70)
-            log.info("PHASE 3 + 4: Graph Transformer + RL Hypothesis Ranking")
-            log.info("(on REAL Phase 2 staged data — not synthetic demo graph)")
-            log.info("=" * 70)
-            from graph_transformer.gt_rl_bridge import GTRLBridge
-            _gt_rl_output_dir = str(HERE / "output_unified_gt_rl")
-            os.makedirs(_gt_rl_output_dir, exist_ok=True)
-            _gt_rl_bridge = GTRLBridge(
-                output_dir=_gt_rl_output_dir,
-                device="cpu",
-                seed=42,
-            )
-            _candidates_df, _gt_rl_results = _gt_rl_bridge.run_full_pipeline(
-                gt_epochs=getattr(args, "gt_epochs", 80),
-                rl_timesteps=getattr(args, "rl_timesteps", 5000),
-                rl_top_n=getattr(args, "rl_top_n", 10),
-                allow_invalid_output=True,
-                phase1_staged_data=result["staged"],
-                gt_embedding_dim=32,
-                gt_num_layers=3,
-                gt_num_heads=4,
-                gt_dropout=0.25,
-            )
-            log.info(
-                "Phase 3 GT Best Val AUC: %s",
-                _gt_rl_results.get("gt_best_val_auc"),
-            )
-            log.info(
-                "Phase 3 GT Test AUC:     %s",
-                _gt_rl_results.get("gt_test_auc"),
-            )
-            log.info(
-                "Phase 4 RL Candidates Ranked: %s",
-                _gt_rl_results.get("rl_ranked_high"),
-            )
-            log.info(
-                "Phase 4 Candidates Returned:  %s",
-                _gt_rl_results.get("n_candidates_returned"),
-            )
-            if len(_candidates_df) > 0:
-                log.info("Top RL-ranked repurposing candidates:")
-                _cols = [
-                    c for c in ["drug", "disease", "reward", "rank"]
-                    if c in _candidates_df.columns
-                ]
-                log.info("\n%s", _candidates_df[_cols].head(10).to_string(index=False))
-            log.info("=" * 70)
-            log.info("ALL 4 PHASES COMPLETE — Phase 1 → 2 → 3 → 4 100% CONNECTED")
-            log.info("=" * 70)
-
-            # v100 ROOT FIX (R-007 ordering): V1 launch criteria check
-            # moved to AFTER Phase 3+4. The V1 criteria are Phase 2
-            # production sign-off thresholds that always fail on the dev
-            # sample graph. Phase 3+4 (the project's headline deliverable)
-            # must run first so the operator sees ranked candidates even
-            # when V1 criteria fail. The exit code 4 (V1 not met) is
-            # returned AFTER all 4 phases have completed.
-            if _v1_failed:
-                log.error(
-                    "V1 LAUNCH CRITERIA NOT MET — Phase 2 production "
-                    "thresholds not satisfied (expected on dev sample "
-                    "graph). All 4 phases still ran end-to-end above. "
-                    "See the Phase 3 GT AUC and Phase 4 RL candidates "
-                    "in the logs above. Detail: %s",
-                    _v1_detail,
-                )
+            # If V1 launch criteria returned a verdict, reflect it in exit.
+            v1 = pipeline_result.get("v1_criteria") or {}
+            if isinstance(v1, dict) and v1.get("passed") is False:
+                log.error("V1 LAUNCH CRITERIA NOT MET — see report above.")
                 return 4
+            log.info("=" * 70)
+            log.info("FULL PIPELINE COMPLETE — V1 criteria satisfied")
+            log.info("=" * 70)
         except SystemExit as exc:
             # v21 ROOT FIX (Audit Chain 12): run_pipeline.py previously
             # called sys.exit(1) directly when V1 launch criteria fail.

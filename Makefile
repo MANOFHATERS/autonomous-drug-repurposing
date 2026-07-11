@@ -7,7 +7,9 @@
 PYTHON ?= python3
 PIP    ?= pip3
 
-.PHONY: help install test test-phase1 test-phase2 test-bridge test-all run run-full-platform run-unified run-pipeline run-real dry-run clean
+# R-030 root fix: added run-json run-neo4j run-4phase run-full-platform to .PHONY.
+# R-019 root fix: run-pipeline target removed (file renamed to run_4phase.py).
+.PHONY: help install test test-phase1 test-phase2 test-bridge test-all run run-full-platform run-unified run-4phase run-real dry-run run-json run-neo4j clean
 
 help:
 	@echo "Unified Autonomous Drug Repurposing Platform"
@@ -19,11 +21,11 @@ help:
 	@echo "Run (all 4 phases):"
 	@echo "  make run             Full 4-phase run (Phase 1+2+3+4) — DEFAULT"
 	@echo "  make run-full-platform  Same as make run (explicit name)"
+	@echo "  make run-4phase      Alternate 4-phase runner (was run_pipeline.py, R-019)"
 	@echo "  make dry-run         Same as make run (alias)"
 	@echo ""
 	@echo "Run (partial):"
 	@echo "  make run-unified     Phase 1+2 (+3+4 via --full-pipeline flag)"
-	@echo "  make run-pipeline    v90 4-phase pipeline runner"
 	@echo "  make run-real        Real data pipeline (Phase 1+2+3+4 on real KG)"
 	@echo ""
 	@echo "Test:"
@@ -37,13 +39,11 @@ help:
 
 install:
 	# v100 ROOT FIX (R-017): install ONLY the top-level requirements.txt,
-	# which already merges Phase 1 and Phase 2 dependencies. The previous
-	# Makefile installed three requirements files (top-level + phase1/ +
-	# phase2/), which pinned DIFFERENT versions of the same packages —
-	# the last-installed won, silently downgrading previously-installed
-	# packages. The sub-requirements files are kept for backwards
-	# compatibility (cd phase1 && pip install -r requirements.txt) but
-	# the Makefile entry point uses the single merged file.
+	# which already merges Phase 1, Phase 2, Phase 3, and Phase 4 dependencies.
+	# The sub-requirements files (phase1/, phase2/, graph_transformer/, rl/)
+	# are kept for backwards compatibility (cd phase1 && pip install -r
+	# requirements.txt) but the Makefile entry point uses the single merged
+	# file so there is no version-pinning conflict.
 	$(PIP) install -r requirements.txt
 	@echo ""
 	@echo "Dependencies installed. Run 'make run' for the full 4-phase pipeline."
@@ -63,8 +63,10 @@ run-full-platform:
 run-unified:
 	$(PYTHON) run_unified.py
 
-run-pipeline:
-	$(PYTHON) run_pipeline.py
+# R-019 root fix: run_pipeline.py was renamed to run_4phase.py to avoid
+# the two-files-same-name collision with phase2/drugos_graph/run_pipeline.py.
+run-4phase:
+	$(PYTHON) run_4phase.py
 
 run-real:
 	$(PYTHON) run_real_pipeline.py

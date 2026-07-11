@@ -311,6 +311,7 @@ __all__: list[str] = [
     "DrugOSGraphBuilder", "PyGBuilder", "TransEModel",
     "EntityResolver", "NegativeSampler",
     "MLflowTracker",
+    "RecordingGraphBuilder",  # R-031: package-level re-export
     # ── Package-level entry points ──
     "configure_logging", "configure",
     "import_tier", "module_load_status", "lineage_report",
@@ -356,6 +357,10 @@ _HEAVY_REEXPORTS: dict[str, tuple[str, str]] = {
     # Fixes audit issue 1.2 — export graph_queries classes from package
     "DrugOSGraphQueries":          (".graph_queries",     "DrugOSGraphQueries"),
     "DrugRepurposingCandidate":    (".graph_queries",     "DrugRepurposingCandidate"),
+    # R-031: RecordingGraphBuilder re-exported at package level so
+    # `from drugos_graph import RecordingGraphBuilder` works (matches the
+    # pattern already used for DrugOSGraphBuilder / PyGBuilder / etc.).
+    "RecordingGraphBuilder":       (".phase1_bridge",     "RecordingGraphBuilder"),
 }
 
 # Names that should be resolvable through __getattr__ (lazy modules +

@@ -69,9 +69,14 @@ EXIT CODES
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import logging
 import os
+import subprocess
 import sys
+from datetime import datetime, timezone
+from pathlib import Path
 
 # Ensure project root is on sys.path so `phase1`, `phase2`,
 # `graph_transformer`, and `rl` are all importable.
@@ -82,18 +87,74 @@ _PHASE1_ROOT = os.path.join(_ROOT, "phase1")
 if _PHASE1_ROOT not in sys.path:
     sys.path.insert(0, _PHASE1_ROOT)
 # v100 ROOT FIX: phase2/ must be on sys.path so `drugos_graph` is importable.
-# The previous code only added _ROOT and _PHASE1_ROOT, causing
-# ModuleNotFoundError: No module named 'drugos_graph' at the Phase 2 bridge import.
 _PHASE2_ROOT = os.path.join(_ROOT, "phase2")
 if _PHASE2_ROOT not in sys.path:
     sys.path.insert(0, _PHASE2_ROOT)
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
-    force=True,
-)
 log = logging.getLogger("run_full_platform")
+
+
+# ---------------------------------------------------------------------------
+# Reproducibility manifest (R-018)
+# ---------------------------------------------------------------------------
+def _git_rev_parse_head() -> str:
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=_ROOT, capture_output=True, text=True, timeout=5,
+        )
+        if out.returncode == 0:
+            return out.stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return "unknown"
+
+
+def _git_status_porcelain() -> str:
+    try:
+        out = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=_ROOT, capture_output=True, text=True, timeout=5,
+        )
+        if out.returncode == 0:
+            return out.stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return ""
+
+
+def _sha256_of_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _write_manifest(output_dir: Path, phase1_dir: Path, config: dict) -> Path:
+    manifest: dict = {
+        "written_at_utc": datetime.now(timezone.utc).isoformat(),
+        "git_commit": _git_rev_parse_head(),
+        "git_status_porcelain": _git_status_porcelain(),
+        "config": config,
+        "config_sha256": hashlib.sha256(
+            json.dumps(config, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest(),
+        "phase1_dir": str(phase1_dir),
+        "phase1_input_checksums": {},
+    }
+    if phase1_dir.exists():
+        for csv in sorted(phase1_dir.glob("*.csv*")):
+            try:
+                manifest["phase1_input_checksums"][csv.name] = _sha256_of_file(csv)
+            except OSError as exc:
+                manifest["phase1_input_checksums"][csv.name] = f"error: {exc}"
+    manifest_path = output_dir / "manifest.json"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    with open(manifest_path, "w") as f:
+        json.dump(manifest, f, indent=2, default=str)
+    log.info("R-018: reproducibility manifest written to %s", manifest_path)
+    return manifest_path
 
 
 def _ensure_phase1_data(phase1_dir: str) -> bool:
@@ -156,6 +217,12 @@ def _ensure_phase1_data(phase1_dir: str) -> bool:
 
 
 def main() -> int:
+    # R-028: configure logging inside main(), not at module import time.
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
+    )
+
     parser = argparse.ArgumentParser(
         description=(
             "Run the FULL 4-phase Autonomous Drug Repurposing Platform "
@@ -195,6 +262,11 @@ def main() -> int:
         help="GT dropout rate (default: 0.25)",
     )
     parser.add_argument(
+        # R-018 companion: seed is now CLI-overridable (was hardcoded 42).
+        "--seed", type=int, default=42,
+        help="Random seed for RNG initialization (default 42)",
+    )
+    parser.add_argument(
         "--allow-invalid-output", action="store_true",
         help="Bypass the scientific-validation safety net (DEBUGGING ONLY)",
     )
@@ -203,6 +275,26 @@ def main() -> int:
         help="Output directory (default: output_full_platform)",
     )
     args = parser.parse_args()
+
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    phase1_dir = Path(args.phase1_dir)
+
+    # R-018: write manifest BEFORE running anything.
+    _write_manifest(output_dir, phase1_dir, {
+        "runner": "run_full_platform.py",
+        "phase1_dir": str(phase1_dir),
+        "output_dir": str(output_dir),
+        "gt_epochs": args.gt_epochs,
+        "rl_timesteps": args.rl_timesteps,
+        "rl_top_n": args.rl_top_n,
+        "seed": args.seed,
+        "gt_embedding_dim": args.gt_embedding_dim,
+        "gt_num_layers": args.gt_num_layers,
+        "gt_num_heads": args.gt_num_heads,
+        "gt_dropout": args.gt_dropout,
+        "allow_invalid_output": args.allow_invalid_output,
+    })
 
     print("\n" + "=" * 78)
     print("AUTONOMOUS DRUG REPURPOSING PLATFORM — FULL 4-PHASE RUN")
@@ -290,7 +382,7 @@ def main() -> int:
     bridge = GTRLBridge(
         output_dir=args.output_dir,
         device="cpu",
-        seed=42,
+        seed=args.seed,  # R-018 companion: was hardcoded 42
     )
 
     try:
@@ -321,6 +413,8 @@ def main() -> int:
         return 3
 
     # ─── Final Report ─────────────────────────────────────────────
+    # R-021 root fix: all results[...] accesses use .get() with defaults
+    # so a missing key from the bridge does not blow up the summary print.
     print("\n" + "=" * 78)
     print("FULL 4-PHASE PIPELINE COMPLETE — SUMMARY")
     print("=" * 78)
@@ -328,15 +422,15 @@ def main() -> int:
     print(f"  Phase 2 nodes staged:    {summary['nodes_staged']}")
     print(f"  Phase 2 edges staged:    {summary['edges_staged']}")
     print(f"  Phase 2 backend:         {summary.get('backend', 'csv')}")
-    print(f"  GT drugs (real):         {len(bridge.drug_names)}")
-    print(f"  GT diseases (real):      {len(bridge.disease_names)}")
-    print(f"  GT known pairs (real):   {len(bridge.known_pairs)}")
-    print(f"  GT Best Val AUC:         {results['gt_best_val_auc']:.4f}")
-    print(f"  GT Test AUC:             {results['gt_test_auc']:.4f}")
-    print(f"  GT Epochs Trained:       {results['gt_epochs_trained']}")
-    print(f"  RL Pairs Processed:      {results['rl_pairs_processed']}")
-    print(f"  RL Candidates Ranked:    {results['rl_ranked_high']}")
-    print(f"  Candidates Returned:     {results['n_candidates_returned']}")
+    print(f"  GT drugs (real):         {len(getattr(bridge, 'drug_names', []) or [])}")
+    print(f"  GT diseases (real):      {len(getattr(bridge, 'disease_names', []) or [])}")
+    print(f"  GT known pairs (real):   {len(getattr(bridge, 'known_pairs', []) or [])}")
+    print(f"  GT Best Val AUC:         {results.get('gt_best_val_auc', 0):.4f}")
+    print(f"  GT Test AUC:             {results.get('gt_test_auc', 0):.4f}")
+    print(f"  GT Epochs Trained:       {results.get('gt_epochs_trained', 0)}")
+    print(f"  RL Pairs Processed:      {results.get('rl_pairs_processed', 0)}")
+    print(f"  RL Candidates Ranked:    {results.get('rl_ranked_high', 0)}")
+    print(f"  Candidates Returned:     {results.get('n_candidates_returned', 0)}")
     print(f"  Output Directory:        {args.output_dir}")
 
     sv = results.get("scientific_validation", {})
