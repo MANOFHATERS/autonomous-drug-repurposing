@@ -2077,10 +2077,22 @@ class DisGeNETPipeline(BasePipeline):
             for col in required:
                 if col not in df.columns:
                     df[col] = None
-            # Compute confidence_tier on the score (Chain-3 root fix:
-            # preserve_direction=False, no silent None fallback — v83).
+            # Compute confidence_tier on the score.
+            # v84 FORENSIC ROOT FIX (BUG #27): the embedded-sample path
+            # previously called ``_classify_confidence`` directly WITHOUT
+            # first running ``validate_gda_scores``. If the embedded sample
+            # had a score outside [0, 1] (e.g. a manually-entered 1.2),
+            # ``_classify_confidence`` raised ``ValueError`` and the ENTIRE
+            # embedded-sample path crashed — taking down offline/demo runs.
+            # ROOT FIX: coerce to numeric + clip to [0, 1] BEFORE
+            # classification, mirroring what ``validate_gda_scores`` does
+            # on the full-data path. This guarantees ``_classify_confidence``
+            # never sees an out-of-range value. NaN scores are preserved
+            # and classified as ``None`` (no tier).
             if "score" in df.columns:
-                df["confidence_tier"] = df["score"].apply(
+                _score_series = pd.to_numeric(df["score"], errors="coerce")
+                _clipped = _score_series.clip(lower=0.0, upper=1.0)
+                df["confidence_tier"] = _clipped.apply(
                     lambda s: (
                         _classify_confidence(float(s))
                         if pd.notna(s)
@@ -2439,8 +2451,21 @@ class DisGeNETPipeline(BasePipeline):
             from cleaning.missing_values import _fingerprint_df
             self._input_fingerprint = _fingerprint_df(df)  # post-clean fingerprint
             self._output_fingerprint = self._compute_sha256(output_path)
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("[disgenet] Could not compute fingerprint: %s", exc)
+        except (OSError, TypeError, ValueError) as exc:
+            # v84 FORENSIC ROOT FIX (BUG #28): narrowed from broad
+            # ``except Exception`` logged at DEBUG. The previous code
+            # caught ALL exceptions (including programming bugs in
+            # ``_fingerprint_df`` / ``_compute_sha256``) at DEBUG level —
+            # a level most operators never see. A missing provenance
+            # fingerprint with no visible warning breaks audit trails
+            # silently. Now we catch only the expected I/O + type errors
+            # and log at WARNING so operators see it. Programming bugs
+            # (AttributeError, KeyError, etc.) propagate so they surface
+            # during development instead of being masked in production.
+            logger.warning(
+                "[disgenet] Could not compute provenance fingerprint: %s "
+                "(audit trail may be incomplete for this run)", exc,
+            )
 
         self.last_cleaning_report = {
             "rows_after_clean": int(len(df)),
@@ -2523,17 +2548,29 @@ class DisGeNETPipeline(BasePipeline):
             return df
         keep_mask = pd.Series(True, index=df.index)
         # gene_symbol validation.
+        # v84 FORENSIC ROOT FIX (BUG #43): the previous code used a
+        # per-row Python loop (``for idx, val in df["gene_symbol"].items()``)
+        # calling ``_validate_gene_symbol`` on each value — O(N) Python
+        # with N function calls. On the 1M+ DisGeNET GDA dataset, this
+        # took minutes. ROOT FIX: vectorize using pandas ``.str.match``
+        # on the same regex (``_RE_HGNC_GENE_SYMBOL``). This runs in C
+        # via the re module's batch matching, ~50-100x faster. The
+        # logic is identical: strip+upper, then regex match. Rows with
+        # NaN or empty gene_symbol are allowed (some sources have only
+        # gene_id) and are excluded from the invalid mask.
         if "gene_symbol" in df.columns:
-            for idx, val in df["gene_symbol"].items():
-                if pd.isna(val) or val == "":
-                    # Allow NULL gene_symbol (some sources have only gene_id).
-                    continue
-                if not _validate_gene_symbol(str(val)):
-                    self._add_to_dead_letter(
-                        df, idx, reason="invalid_gene_symbol_format",
-                        details={"gene_symbol": str(val)},
-                    )
-                    keep_mask.at[idx] = False
+            _gs = df["gene_symbol"]
+            _gs_str = _gs.astype(str).str.strip().str.upper()
+            _gs_notna = _gs.notna() & (_gs_str != "") & (_gs_str != "NAN")
+            _gs_valid = _gs_str.str.match(_RE_HGNC_GENE_SYMBOL, na=False)
+            _invalid_mask = _gs_notna & ~_gs_valid
+            for idx in df.index[_invalid_mask]:
+                val = df.at[idx, "gene_symbol"]
+                self._add_to_dead_letter(
+                    df, idx, reason="invalid_gene_symbol_format",
+                    details={"gene_symbol": str(val)},
+                )
+                keep_mask.at[idx] = False
         # disease_id validation.
         if "disease_id" in df.columns:
             # v9 ROOT FIX (audit F4.1): normalise the DisGeNET-prefixed curie

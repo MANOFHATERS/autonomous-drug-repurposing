@@ -69,8 +69,10 @@ PUBCHEM_PUG_REST = "https://pubchem.ncbi.nlm.nih.gov/rest/pug"
 # as the canonical base URL. The current pipeline uses PUG REST only, but the
 # constant is now a valid, correctly-named reference for that future work.
 PUBCHEM_FTP_BASE = "https://ftp.ncbi.nlm.nih.gov/pubchem/Compound/CURRENT-Full/SDF"
-# v64 backward-compat alias (deprecated, will be removed in v65).
-PUBCHEV_FTP_BASE = PUBCHEM_FTP_BASE
+# v84 FORENSIC ROOT FIX (BUG #46): removed the ``PUBCHEV_FTP_BASE``
+# backward-compat alias (typo: 'V' instead of 'M'). No caller
+# references it (verified via grep across the entire repo). The typo
+# was misleading and the alias was dead code.
 
 # v64 ROOT FIX (P1-006): canonical User-Agent for all HTTP downloads.
 # PubChem/NCBI/UniProt/STRING all require a User-Agent header and return
@@ -186,7 +188,10 @@ def _stream_to_file(
     with requests.get(url, headers=headers, stream=True, timeout=timeout, verify=True) as resp:
         if resp.status_code == 416:  # Range Not Satisfiable — file already complete
             logger.info("Already complete: %s", dest.name)
-            tmp.rename(dest)
+            # v84 FORENSIC ROOT FIX (BUG #34): os.replace is atomic on
+            # both POSIX and Windows; Path.rename fails on Windows if
+            # dest already exists.
+            os.replace(tmp, dest)
             return dest
         resp.raise_for_status()
         # P2-8 ROOT FIX: the previous code set mode = "ab" whenever
@@ -263,7 +268,10 @@ def _stream_to_file(
             f"SHA-256 mismatch for {dest.name}: expected {expected_sha256}, got {actual_sha}"
         )
 
-    tmp.rename(dest)
+    # v84 FORENSIC ROOT FIX (BUG #34): os.replace is atomic on both
+    # POSIX and Windows. Path.rename (os.rename) fails on Windows if
+    # the destination already exists, breaking re-downloads.
+    os.replace(tmp, dest)
     logger.info("Download complete: %s (%d bytes)", dest.name, dest.stat().st_size)
     return dest
 
@@ -964,10 +972,18 @@ def download_drugbank_open_data(raw_dir: Path) -> dict[str, Path]:
     # P2-11 ROOT FIX: apply all indication updates in a single vectorized
     # pass. This avoids SettingWithCopyWarning and is more efficient than
     # per-row ``df.at[idx, ...]`` assignments inside an iterrows loop.
+    # v84 FORENSIC ROOT FIX (BUG #39): the previous "vectorized" fix was
+    # STILL a per-row loop using ``df.loc[_idx, col] = value`` — O(N)
+    # Python with 2N loc calls (10K drugs × 2 columns = 20K loc calls).
+    # This triggers ``SettingWithCopyWarning`` on some pandas versions
+    # and is slow. ROOT FIX: build a DataFrame from the updates dict
+    # and use ``df.update()`` — a single vectorized C-level operation.
     if indication_updates:
-        for _idx, (_ind, _src) in indication_updates.items():
-            drugs_df.loc[_idx, "indication"] = _ind
-            drugs_df.loc[_idx, "indication_source"] = _src
+        _updates_df = pd.DataFrame.from_dict(
+            indication_updates, orient="index",
+            columns=["indication", "indication_source"],
+        )
+        drugs_df.update(_updates_df)
 
     drugs_df.to_csv(drugs_path, index=False)
     pd.DataFrame(indications_records).to_csv(indications_path, index=False)
@@ -1004,16 +1020,8 @@ def download_drugbank_open_data(raw_dir: Path) -> dict[str, Path]:
 # explicitly opt into "raw download only" semantics.
 #
 # (Function body removed; if __name__ == "__main__" guard removed.)
-
-
-if __name__ == "__main__":
-    # v65 ROOT FIX (P1-039): direct invocation is no longer supported.
-    # Use the package-level CLI instead:
-    #   python -m pipelines run <source>
-    # Or import the download_*_full functions directly (see docstring above).
-    raise SystemExit(
-        "v65 ROOT FIX (P1-039): pipelines._v50_downloaders no longer has a "
-        "main() CLI. Use 'python -m pipelines run <source>' instead, or "
-        "import the download_*_full functions directly for raw-download-"
-        "only semantics (no BasePipeline lifecycle)."
-    )
+# v84 FORENSIC ROOT FIX (BUG #47): removed the dead
+# ``if __name__ == "__main__"`` guard that only raised ``SystemExit``.
+# The guard provided no useful functionality — it was a placeholder
+# from the v65 refactor that removed ``main()``. Dead code that adds
+# no value has no place in a production codebase.

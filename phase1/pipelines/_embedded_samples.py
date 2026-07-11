@@ -460,10 +460,21 @@ def embedded_drugbank_indications() -> pd.DataFrame:
          "doid_id": "DOID:1826", "omim_disease_id": "OMIM:137160",
          "indication": "For the treatment of seizures",
          "indication_type": "approved", "source": "drugbank_xml"},
+        # v84 FORENSIC ROOT FIX (BUG #48): corrected the Warfarin
+        # disease mapping. The previous entry said
+        # ``disease_name="Hypertension"`` (DOID:10763) but the
+        # indication said "For the prevention of thrombosis" — a
+        # CONTRADICTION. Warfarin is an anticoagulant used for
+        # thrombosis prevention, NOT hypertension. DOID:10763 IS
+        # Hypertension. This data error created a spurious
+        # Warfarin-treats-Hypertension edge in the KG. ROOT FIX:
+        # use DOID:0005049 (Thrombosis) / disease_name="Thrombosis"
+        # so the disease matches the indication text. This aligns
+        # the sample data with clinical reality.
         {"drugbank_id": "DB00682", "drug_inchikey": "PJVWKTKQMONHTF-UHFFFAOYSA-N",
          "drug_name": "Warfarin",
-         "disease_id": "DOID:10763", "disease_name": "Hypertension",
-         "doid_id": "DOID:10763", "omim_disease_id": None,
+         "disease_id": "DOID:0005049", "disease_name": "Thrombosis",
+         "doid_id": "DOID:0005049", "omim_disease_id": None,
          "indication": "For the prevention of thrombosis",
          "indication_type": "approved", "source": "drugbank_xml"},
         {"drugbank_id": "DB00191", "drug_inchikey": "XZWYZXLIPXDOLR-UHFFFAOYSA-N",
