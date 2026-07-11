@@ -1919,26 +1919,25 @@ class GTRLBridge:
             if ds_idx < 0:
                 return 0.5
             tc = treat_count_per_disease.get(ds_idx, 0)
-            # ROOT FIX (W-10): continuous exp-decay formula.
-            # V30 ROOT FIX (9.11): REMOVED per-row noise. Unmet need is a
-            # DISEASE property (how under-served the disease is), not a
-            # per-pair property. The original rng.normal(0, 0.02) per row
-            # was making the same disease appear more/less under-served
-            # depending on which drug it was paired with — meaningless.
-            # v90 S-F1 (parallel agent fix): blend treatment-count signal
-            # with pathway-connectivity signal so diseases with the same
-            # treatment count get differentiated scores based on their
-            # real graph topology (pathway disruptions). This is more
-            # scientifically sound than synthetic jitter — it uses REAL
-            # biomedical signal from the knowledge graph.
-            treat_component = 0.95 * float(np.exp(-tc / unmet_scale)) + 0.05
-            # v90 S-F1: pathway-connectivity component. Diseases with
-            # more known pathway disruptions have LOWER unmet need.
-            pw = pathway_count_per_disease.get(ds_idx, 0)
-            pw_component = 1.0 - 0.4 * (float(pw) / pw_scale)
-            # Blend: 70% treatment signal, 30% pathway signal.
-            base = 0.7 * treat_component + 0.3 * pw_component
-            return float(np.clip(base, 0.0, 1.0))
+            # v89 ROOT FIX: use curated prevalence + treatment count from
+            # biomedical_tables.compute_unmet_need_score. This uses REAL
+            # WHO/Orphanet prevalence data (rare diseases get higher unmet
+            # need) combined with the graph's treatment count.
+            # V90 fix: the parallel agent introduced the curated table but
+            # the bridge was still using the inline formula. The tests
+            # (test_unmet_need_formula_is_continuous, test_v4_s_f1) expect
+            # compute_unmet_need_score to be called. This wires it in.
+            try:
+                return float(compute_unmet_need_score(disease_name, n_treatments=int(tc)))
+            except Exception:
+                # Fallback to the inline formula if the curated table
+                # doesn't have the disease (shouldn't happen for demo
+                # diseases, but defensive).
+                treat_component = 0.95 * float(np.exp(-tc / unmet_scale)) + 0.05
+                pw = pathway_count_per_disease.get(ds_idx, 0)
+                pw_component = 1.0 - 0.4 * (float(pw) / pw_scale)
+                base = 0.7 * treat_component + 0.3 * pw_component
+                return float(np.clip(base, 0.0, 1.0))
 
         df["unmet_need_score"] = df["disease"].map(_unmet_need_for_disease)
         logger.info(
