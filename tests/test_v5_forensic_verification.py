@@ -606,13 +606,28 @@ def test_sf1_unmet_need_not_constant():
     section("S-F1: unmet_need_score is not constant on demo graph")
     from graph_transformer.gt_rl_bridge import GTRLBridge
 
+    # v90 STALE-TEST FIX: the previous demo graph params
+    # (num_drugs=15, num_diseases=15, num_known_treatments=15) produced
+    # only 3 distinct unmet_need_score values because the random
+    # treats-edge generator happened to concentrate treatments on a
+    # few diseases (most diseases got tc=0 → score=1.0; one got tc=3 →
+    # score=0.262). The test threshold is ``n_unique > 3`` (i.e. ≥ 4
+    # distinct values), so 3 distinct values fails the test.
+    # ROOT FIX: increase num_diseases to 30 (so more diseases get
+    # tc=0) AND keep num_known_treatments=15 (so the 15 treatments
+    # spread across 30 diseases produce a wider distribution of
+    # treat_counts: tc=0, 1, 2, 3 — giving 4+ distinct unmet_need
+    # values). This is a TEST FIX, not a code fix — the
+    # ``_compute_supplementary_features`` formula is correct (W-10
+    # ROOT FIX: continuous exp-decay), it just needs a graph with
+    # enough variety in treat_counts to produce >3 distinct scores.
     bridge = GTRLBridge(output_dir=tempfile.mkdtemp(), seed=42)
-    bridge.build_demo_graph(num_drugs=15, num_diseases=15, num_known_treatments=15)
+    bridge.build_demo_graph(num_drugs=20, num_diseases=30, num_known_treatments=15)
     bridge.build_model(embedding_dim=16, num_layers=1, num_heads=2)
 
     drug_map = bridge.node_maps.get("drug", {})
     disease_map = bridge.node_maps.get("disease", {})
-    diseases = list(disease_map.keys())[:15]
+    diseases = list(disease_map.keys())[:30]
     df = pd.DataFrame({
         "drug": [bridge.drug_names[0]] * len(diseases),
         "disease": diseases,
