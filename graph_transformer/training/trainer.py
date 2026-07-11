@@ -943,7 +943,7 @@ class GraphTransformerTrainer:
             "optimizer_state_dict": self.optimizer.state_dict(),
             "best_val_auc": self.best_val_auc,
             "best_val_loss": self.best_val_loss,
-            "best_epoch": self.best_epoch,  # V90 BUG #21/#33: actual best, not last
+            "best_epoch": self.best_epoch,  # BUG #21: actual best, not last
             "history": list(self.training_history),  # V30 (8.25): copy, not reference
             "graph_schema": {
                 "node_types": list(self.node_features.keys()),
@@ -953,9 +953,6 @@ class GraphTransformerTrainer:
             "package_version": _gt_version,
             "schema_version": _gt_schema,
         }
-        # v89 CI RECOVERY: removed the broken old torch.save call (lines
-        # 957-959 had `}, path)` + stray `}` from a botched merge by a
-        # parallel agent). The correct torch.save call is below.
         # V90 BUG #41: only include best_state_dict if it's not None.
         if self.best_state_dict is not None:
             checkpoint["best_state_dict"] = self.best_state_dict

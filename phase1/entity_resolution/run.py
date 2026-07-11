@@ -608,6 +608,25 @@ def run_entity_resolution() -> Dict[str, Any]:
                 "will not resolve STRING IDs to UniProt",
                 exc,
             )
+        else:
+            # v89 BUG #3: no human aliases file found — log clearly.
+            # This else clause runs only when the try block completed
+            # WITHOUT raising. If string_aliases_df is still empty here,
+            # either no 9606 aliases file was found OR the file had no
+            # UniProt entries. Warn so the operator knows.
+            if string_aliases_df.empty and _string_raw_dir.exists():
+                _all_alias_files = list(_string_raw_dir.glob("*aliases*.txt.gz"))
+                logger.warning(
+                    "No HUMAN (9606) STRING aliases file found in %s. "
+                    "Found %d non-human alias files: %s. "
+                    "REFUSING to load non-human aliases (would corrupt "
+                    "organism assignment). string_aliases_df will be "
+                    "empty — resolve_single(string_id=...) will not "
+                    "resolve STRING IDs to UniProt.",
+                    _string_raw_dir,
+                    len(_all_alias_files),
+                    [f.name for f in _all_alias_files[:5]],
+                )
 
     # v89 ROOT FIX (BUG #33 — load ChEMBL target data for protein
     # resolution):
