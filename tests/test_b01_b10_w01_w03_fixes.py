@@ -588,9 +588,26 @@ def test_w02_no_per_kp_signal_injection():
 
 
 def test_w02_kps_have_multihop_connectivity():
-    """W-02: KPs must have guaranteed multi-hop connectivity
-    (drug→protein→pathway→disease) so the GT model has real topology
-    signal to learn from."""
+    """v89 P0 ROOT FIX: KPs must NOT have guaranteed multi-hop connectivity.
+
+    The previous V31 "fix" (W-02) injected a GUARANTEED drug→protein→
+    pathway→disease path for every KP. This was the ROOT CAUSE of the
+    AUC fraud chain: LABEL_LEAKING_EDGES only strips the direct treats
+    edge, not the injected path, so the GT model learned "3-hop path
+    exists → positive" trivially → val AUC = 1.0 (fraudulent).
+
+    The v89 fix REMOVED the 3-hop path injection entirely. The GT model
+    now learns from NATURAL TOPOLOGY only (random drug→protein,
+    protein→pathway, pathway→disease edges created by the demo graph
+    builder). KPs are added as "treats" edges (the prediction target)
+    but NO synthetic 3-hop path is injected for them.
+
+    This test verifies the v89 fix: KPs should have "treats" edges
+    (the label) but should NOT have guaranteed 3-hop paths (which was
+    the leakage). The number of KPs with natural 3-hop paths should be
+    <= len(KNOWN_POSITIVES) (some may have natural paths by chance,
+    but NOT all of them — that would indicate injection).
+    """
     from graph_transformer.gt_rl_bridge import GTRLBridge
     from rl.rl_drug_ranker import KNOWN_POSITIVES
 
@@ -598,7 +615,8 @@ def test_w02_kps_have_multihop_connectivity():
         bridge = GTRLBridge(output_dir=tmpdir, seed=42)
         bridge.build_demo_graph(num_drugs=10, num_diseases=8, inject_known_positives=True)
 
-    # For each KP, verify there's a multi-hop path
+    # For each KP, check whether there's a multi-hop path (there may
+    # be some by chance from the random topology, but NOT all of them).
     drug_map = bridge.node_maps.get("drug", {})
     protein_map = bridge.node_maps.get("protein", {})
     pathway_map = bridge.node_maps.get("pathway", {})
@@ -624,14 +642,13 @@ def test_w02_kps_have_multihop_connectivity():
         for pw, d in zip(ei[0].tolist(), ei[1].tolist()):
             pathway_to_diseases.setdefault(pw, set()).add(d)
 
-    # Check each KP has at least one multi-hop path
+    # Check each KP for multi-hop path (NATURAL only — no injection).
     kps_with_paths = 0
     for drug_name, disease_name in KNOWN_POSITIVES:
         d_idx = drug_map.get(drug_name)
         ds_idx = disease_map.get(disease_name)
         if d_idx is None or ds_idx is None:
             continue
-        # Check: is there a path d_idx → protein → pathway → ds_idx?
         has_path = False
         for p_idx in drug_to_proteins.get(d_idx, set()):
             for pw_idx in protein_to_pathways.get(p_idx, set()):
@@ -643,9 +660,21 @@ def test_w02_kps_have_multihop_connectivity():
         if has_path:
             kps_with_paths += 1
 
-    assert kps_with_paths == len(KNOWN_POSITIVES), \
-        f"W-02: only {kps_with_paths}/{len(KNOWN_POSITIVES)} KPs have multi-hop paths"
-    _ok(f"W-02: all {kps_with_paths}/{len(KNOWN_POSITIVES)} KPs have guaranteed multi-hop connectivity")
+    # v89 P0: KPs should NOT all have multi-hop paths (that would
+    # indicate the 3-hop injection is still present). With the
+    # injection REMOVED, only KPs that happen to have natural paths
+    # (by chance from the random topology) will have them. The exact
+    # count depends on graph size and seed, but it should be STRICTLY
+    # LESS than len(KNOWN_POSITIVES) — if ALL KPs have paths, the
+    # injection bug is back.
+    assert kps_with_paths < len(KNOWN_POSITIVES), \
+        f"v89 P0 REGRESSION: all {kps_with_paths}/{len(KNOWN_POSITIVES)} KPs have " \
+        f"multi-hop paths — the 3-hop injection bug is BACK. The GT model " \
+        f"would learn '3-hop path exists → positive' trivially → val AUC = 1.0 " \
+        f"(fraudulent). The v89 fix REMOVED the injection; KPs should have " \
+        f"NATURAL topology only."
+    _ok(f"v89 P0: only {kps_with_paths}/{len(KNOWN_POSITIVES)} KPs have natural "
+        f"multi-hop paths (3-hop injection REMOVED — no AUC fraud)")
 
 
 def test_w02_pathway_signal_propagated_to_drugs():

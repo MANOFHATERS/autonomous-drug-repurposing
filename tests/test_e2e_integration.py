@@ -608,13 +608,28 @@ def test_b13_compute_auc_uses_known_positives():
 # ===================================================================
 
 def test_b14_run_pipeline_evaluates_on_test_env():
-    """B14 fix: run_pipeline must build a test_env for evaluate_agent."""
+    """B14 fix: run_pipeline must build a test_env for evaluate_agent.
+
+    v89 P0: the call signature changed to pass vec_normalize (the
+    VecNormalize wrapper from training) so the obs is normalized at
+    inference. The test now checks for the multi-line call pattern.
+    """
     from rl_drug_ranker import run_pipeline
     import inspect
 
     src = inspect.getsource(run_pipeline)
-    has_test_env = "test_env" in src and "evaluate_agent(model, test_env" in src
-    _report("B14: run_pipeline builds test_env for evaluate_agent", has_test_env)
+    # v89: the call is now multi-line:
+    #   candidates = evaluate_agent(
+    #       model, test_env, top_n=config.top_n,
+    #       vec_normalize=vec_normalize,
+    #   )
+    # Check for the key components: test_env exists, evaluate_agent is
+    # called with model and test_env (possibly across lines).
+    has_test_env = "test_env" in src
+    has_evaluate_call = "evaluate_agent(" in src
+    has_model_arg = "model, test_env" in src or "model,\n            test_env" in src or "model,\n                test_env" in src
+    _report("B14: run_pipeline builds test_env for evaluate_agent",
+            has_test_env and has_evaluate_call and has_model_arg)
 
 
 # ===================================================================
