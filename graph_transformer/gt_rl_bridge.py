@@ -3948,20 +3948,42 @@ class GTRLBridge:
         # V90 BUG #31 / P3-C02 safety net while using the shared constant
         # as the floor.
         try:
-            from rl.scientific_thresholds import KP_RECOVERY_THRESHOLD as _SHARED_KP_THRESHOLD
+            from rl.scientific_thresholds import (
+                KP_RECOVERY_THRESHOLD as _SHARED_KP_THRESHOLD,
+                resolve_kp_recovery_threshold as _resolve_kp_recovery_threshold,
+            )
         except ImportError:
             # Fallback for execution contexts where the rl package is
             # not importable (e.g., running gt_rl_bridge.py directly
             # without the repo root on sys.path). Use the same value as
             # the shared constant (0.5) so the behavior is identical.
             _SHARED_KP_THRESHOLD = 0.5
+
+            def _resolve_kp_recovery_threshold(config_threshold):  # type: ignore[no-redef]
+                try:
+                    cfg = float(config_threshold)
+                except (TypeError, ValueError):
+                    return _SHARED_KP_THRESHOLD
+                if cfg < 0.0 or cfg > 1.0:
+                    return _SHARED_KP_THRESHOLD
+                return max(cfg, _SHARED_KP_THRESHOLD)
+
         rl_config_threshold = float(getattr(rl_config, "min_kp_recovery_rate", _SHARED_KP_THRESHOLD))
-        # P4-013: enforce the shared constant as a MINIMUM. A caller can
-        # raise the threshold (stricter gate) but cannot lower it below
-        # the shared constant. This is the SAME semantics as the previous
-        # ``max(rl_config_threshold, 0.5)``, except the 0.5 magic number
-        # is now the shared constant.
-        kp_recovery_threshold = max(rl_config_threshold, _SHARED_KP_THRESHOLD)
+        # P4-013 ROOT FIX (v2 — Team Member 12): use the SHARED
+        # ``resolve_kp_recovery_threshold`` helper so the bridge computes
+        # the EXACT SAME threshold as the ranker. The previous "fix" left
+        # a subtle inconsistency: the ranker used
+        # ``config.min_kp_recovery_rate`` directly (no floor), while the
+        # bridge used ``max(rl_config_threshold, 0.5)``. When a caller
+        # set ``min_kp_recovery_rate=0.2``, the ranker's gate used 0.2
+        # but the bridge's gate used 0.5 — a run with kp_recovery=0.3
+        # PASSED the ranker but FAILED the bridge. The shared helper
+        # applies the SAME ``max(cfg, KP_RECOVERY_THRESHOLD)`` formula
+        # in BOTH files, so they can NEVER disagree. A CI test
+        # (tests/test_team12_p4_012_to_018_v2.py::test_p4_013_*_matches_ranker)
+        # verifies the bridge and ranker compute the same threshold for
+        # 13 different config values (0.0, 0.1, 0.2, ..., 1.0, None, NaN).
+        kp_recovery_threshold = _resolve_kp_recovery_threshold(rl_config_threshold)
         from .data import V1_AUC_THRESHOLD, get_auc_threshold_for_scale
         # v89 ROOT FIX: scale-aware AUC threshold. The DOCX V1 contract
         # requires >0.85 AUC for PRODUCTION (10K drugs). For demo-scale

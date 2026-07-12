@@ -155,32 +155,52 @@ def test_p4_013_shared_threshold_module_exists():
 
 
 def test_p4_013_both_files_use_shared_constant():
-    """P4-013: both rl_drug_ranker.py and gt_rl_bridge.py must import
-    KP_RECOVERY_THRESHOLD from the shared module. The previous code had
-    TWO independent definitions (0.2 in the ranker, 0.5 in the bridge)
-    causing the two components to DISAGREE on whether a run was valid.
+    """P4-013 (v2): both rl_drug_ranker.py and gt_rl_bridge.py must import
+    and use the SHARED ``resolve_kp_recovery_threshold`` helper from
+    ``rl.scientific_thresholds``. The previous "fix" left a subtle
+    inconsistency: the ranker used ``config.min_kp_recovery_rate`` directly
+    (no floor), while the bridge used ``max(rl_config_threshold, 0.5)``
+    (with floor). When a caller set ``min_kp_recovery_rate=0.2``, the
+    ranker's gate used 0.2 but the bridge's gate used 0.5 — they
+    DISAGREED. The v2 fix makes both files call the SAME helper, so they
+    are GUARANTEED to compute the SAME threshold for any config value.
     """
-    # Check rl_drug_ranker.py uses the shared constant.
+    # Check rl_drug_ranker.py imports the shared helper.
     ranker_src = (REPO_ROOT / "rl" / "rl_drug_ranker.py").read_text(encoding="utf-8")
-    assert "from .scientific_thresholds import KP_RECOVERY_THRESHOLD" in ranker_src or \
-           "scientific_thresholds import KP_RECOVERY_THRESHOLD" in ranker_src, (
-        "P4-013 FAILED: rl_drug_ranker.py does not import "
-        "KP_RECOVERY_THRESHOLD from the shared module. The fix must "
-        "use the shared constant so the threshold cannot drift."
+    assert (
+        "resolve_kp_recovery_threshold as _resolve_kp_recovery_threshold" in ranker_src
+        or "def _resolve_kp_recovery_threshold" in ranker_src
+    ), (
+        "P4-013 v2 FAILED: rl_drug_ranker.py must import "
+        "resolve_kp_recovery_threshold as _resolve_kp_recovery_threshold "
+        "(or define a local fallback) from rl.scientific_thresholds. The "
+        "v1 fix imported KP_RECOVERY_THRESHOLD but the gate still used "
+        "config.min_kp_recovery_rate directly — causing the ranker and "
+        "bridge to disagree when a caller set the threshold below 0.5."
     )
-    # Check gt_rl_bridge.py uses the shared constant.
+    # Check gt_rl_bridge.py imports the shared helper.
     bridge_src = (REPO_ROOT / "graph_transformer" / "gt_rl_bridge.py").read_text(encoding="utf-8")
-    assert "from rl.scientific_thresholds import KP_RECOVERY_THRESHOLD" in bridge_src or \
-           "scientific_thresholds import KP_RECOVERY_THRESHOLD" in bridge_src, (
-        "P4-013 FAILED: gt_rl_bridge.py does not import "
-        "KP_RECOVERY_THRESHOLD from the shared module. The fix must "
-        "use the shared constant so the threshold cannot drift."
+    assert (
+        "resolve_kp_recovery_threshold as _resolve_kp_recovery_threshold" in bridge_src
+        or "def _resolve_kp_recovery_threshold" in bridge_src
+    ), (
+        "P4-013 v2 FAILED: gt_rl_bridge.py must import "
+        "resolve_kp_recovery_threshold as _resolve_kp_recovery_threshold "
+        "(or define a local fallback) from rl.scientific_thresholds. The "
+        "v1 fix used max(rl_config_threshold, _SHARED_KP_THRESHOLD) directly, "
+        "which the ranker did NOT use — causing the two to disagree when "
+        "a caller set min_kp_recovery_rate below 0.5."
     )
-    # Verify the bridge no longer uses the bare 0.5 magic number in
-    # the max() call (it should use _SHARED_KP_THRESHOLD).
-    assert "_SHARED_KP_THRESHOLD" in bridge_src, (
-        "P4-013 FAILED: gt_rl_bridge.py does not use _SHARED_KP_THRESHOLD. "
-        "The fix replaces the bare 0.5 magic number with the shared constant."
+    # Both files must actually CALL the helper at the gate (not just import it).
+    assert "_resolve_kp_recovery_threshold(" in ranker_src, (
+        "P4-013 v2 FAILED: rl_drug_ranker.py must CALL "
+        "_resolve_kp_recovery_threshold(config.min_kp_recovery_rate) at the "
+        "scientific_validation gate."
+    )
+    assert "_resolve_kp_recovery_threshold(" in bridge_src, (
+        "P4-013 v2 FAILED: gt_rl_bridge.py must CALL "
+        "_resolve_kp_recovery_threshold(rl_config_threshold) at the "
+        "scientific_validation gate."
     )
 
 
