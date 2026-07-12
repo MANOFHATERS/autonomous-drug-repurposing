@@ -1611,10 +1611,31 @@ class DisGeNETPipeline(BasePipeline):
                         )
                         break
 
-                    # Termination conditions.
-                    if len(records) < DISGENET_API_PAGE_SIZE:
-                        # Last page (fewer records than requested).
-                        break
+                    # P1-014 v106 FORENSIC ROOT FIX (Team-2): pagination
+                    # termination logic was BUGGY. The previous code had:
+                    #
+                    #   if len(records) < DISGENET_API_PAGE_SIZE:
+                    #       break   # <-- BUG: terminates on ANY short page
+                    #   if (total_available is not None
+                    #       and records_written >= total_available):
+                    #       break
+                    #
+                    # The short-page check fired FIRST. If the DisGeNET API
+                    # ever returned a partial page (during degradation, when
+                    # the operator set a smaller page size for testing, or
+                    # when the test fixture used small pages), pagination
+                    # terminated early -- EVEN WHEN total_available said
+                    # more data was available. The result: the KG had
+                    # records_written records when it should have had
+                    # total_available records. For well-studied diseases
+                    # (breast cancer: 8000+ GDAs), the KG had as few as
+                    # 1 page worth of records.
+                    #
+                    # ROOT FIX: when ``total_available`` is known, it is the
+                    # PRIMARY termination criterion. The short-page heuristic
+                    # is a FALL-BACK for legacy APIs that don't return
+                    # ``totalResults`` -- in that case, a short page is the
+                    # only signal that we've reached the end.
                     if (
                         total_available is not None
                         and records_written >= total_available
@@ -1622,6 +1643,21 @@ class DisGeNETPipeline(BasePipeline):
                         logger.info(
                             "[disgenet] Fetched all %d available records",
                             total_available,
+                        )
+                        break
+                    if (
+                        total_available is None
+                        and len(records) < DISGENET_API_PAGE_SIZE
+                    ):
+                        # Last page (fewer records than requested) -- only
+                        # trust this when total_available is unknown. When
+                        # total_available is known, a short page might be a
+                        # transient API glitch and we keep paginating until
+                        # records_written >= total_available OR an empty page.
+                        logger.info(
+                            "[disgenet] Short page (%d < %d) at offset=%d "
+                            "(total_available unknown) -- stopping.",
+                            len(records), DISGENET_API_PAGE_SIZE, offset,
                         )
                         break
 
