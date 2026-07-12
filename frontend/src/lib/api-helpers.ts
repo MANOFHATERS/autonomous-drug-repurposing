@@ -144,9 +144,25 @@ export async function writeAuditLog(params: {
    * Optional organization ID. Stored in the audit log row if the
    * schema supports it; otherwise folded into metadata.
    * (Team-15 FE-045 webhook audit tests pass this field.)
+   *
+   * FE-005 ROOT FIX (v2): If the caller does NOT pass this explicitly,
+   * we auto-populate it from `params.user.orgId`. The previous version
+   * required every call site to pass `organizationId` explicitly —
+   * ZERO call sites did, so every AuditLog row was written with
+   * `organizationId: null`. The /api/audit-logs route then filtered
+   * by `organizationId: auth.user.orgId` and got an empty result for
+   * every non-owner admin (an accidental "fix" via broken behavior).
+   * Worse, an owner querying system-wide saw rows with null orgId
+   * and could not attribute them to any tenant — defeating the
+   * cross-tenant isolation the column was added for. Auto-populating
+   * from the authenticated user's orgId is the OWASP-recommended
+   * pattern: the actor's org is ALWAYS known at audit-write time.
    */
   organizationId?: string;
 }): Promise<AuditLogResult> {
+  // FE-005 ROOT FIX (v2): Resolve the effective organizationId —
+  // explicit param wins, else fall back to the authenticated user's orgId.
+  const effectiveOrgId = params.organizationId ?? params.user?.orgId ?? null;
   try {
     await db.auditLog.create({
       data: {
@@ -158,13 +174,12 @@ export async function writeAuditLog(params: {
         userAgent: params.userAgent || null,
         metadata: JSON.stringify({
           ...(params.metadata || {}),
-          ...(params.organizationId ? { organizationId: params.organizationId } : {}),
+          ...(effectiveOrgId ? { organizationId: effectiveOrgId } : {}),
         }),
-        // Pass organizationId through for schemas that have the column.
-        // Prisma will ignore this on schemas without the column, OR
-        // store it if the column exists. The team-15 test mocks the
-        // create call and checks created[0].organizationId.
-        ...(params.organizationId ? { organizationId: params.organizationId } : {}),
+        // FE-005 ROOT FIX (v2): Always populate the organizationId column
+        // when we have one. This is what makes the /api/audit-logs org
+        // filter actually work — previously every row had null orgId.
+        ...(effectiveOrgId ? { organizationId: effectiveOrgId } : {}),
       } as any,
     });
     return { ok: true };

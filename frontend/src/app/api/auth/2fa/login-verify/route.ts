@@ -8,6 +8,11 @@ import {
 } from "@/lib/auth/server";
 import { verifyTotpWithReplayCheck } from "@/lib/auth/totp";
 import { badRequest, internalError, writeAuditLog } from "@/lib/api-helpers";
+import {
+  checkTotpRateLimit,
+  recordFailedTotp,
+  clearTotpAttempts,
+} from "@/lib/auth/rate-limit";
 
 /**
  * POST /api/auth/2fa/login-verify
@@ -42,11 +47,15 @@ import { badRequest, internalError, writeAuditLog } from "@/lib/api-helpers";
  *   - TOTP verification uses constant-time comparison (timingSafeEqual).
  *   - TOTP codes cannot be replayed (lastTotpCounter monotonically
  *     advances on each successful verification).
- *   - We do NOT increment failedLoginCount on a wrong TOTP code (that
- *     counter is for password failures, not 2FA failures). 2FA brute-force
- *     is already impractical (6 digits = 1M codes, 30s window, ±1 window
- *     drift = 3M codes max). If you want 2FA rate limiting, add a separate
- *     per-user 2FA attempt counter.
+ *   - FE-003 ROOT FIX (v2): Per-user TOTP brute-force rate limiting is
+ *     ENFORCED in this route via checkTotpRateLimit / recordFailedTotp.
+ *     After 5 wrong TOTP codes within 5 minutes the account is locked
+ *     for 15 minutes. The previous version had the rate-limit primitives
+ *     in rate-limit.ts but NEVER CALLED THEM from this route — the test
+ *     file totp-rate-limit.test.ts passed because it tested the primitives
+ *     in isolation, but the actual HTTP endpoint was still brute-forceable
+ *     (1M codes / 1000 req/s = 17 minutes for full keyspace). This is
+ *     wired in NOW.
  */
 export async function POST(req: NextRequest) {
   let body: { mfaToken?: string; code?: string };
@@ -105,9 +114,37 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    // FE-003 ROOT FIX (v2): Per-user TOTP brute-force gate.
+    // BEFORE we spend a TOTP verification attempt, check whether the user
+    // is currently locked. This must come AFTER the user lookup (we need
+    // the userId) but BEFORE the TOTP verify (so a locked user cannot
+    // burn attempts). The IP-level rate limit (checkIpRateLimit) is a
+    // separate outer layer that limits raw request volume; this inner
+    // layer limits per-user TOTP guesses regardless of source IP.
+    const totpLock = checkTotpRateLimit(user.id);
+    if (totpLock.locked) {
+      await writeAuditLog({
+        user: { userId: user.id, email: user.email, role: user.role },
+        action: "login_mfa_locked",
+        resource: `user:${user.id}`,
+      });
+      return NextResponse.json(
+        {
+          error: "totp_locked",
+          message: `Too many incorrect 2FA codes. Try again in ${Math.ceil(totpLock.retryAfterSeconds / 60)} minute(s).`,
+          retryAfterSeconds: totpLock.retryAfterSeconds,
+        },
+        { status: 429, headers: { "Retry-After": String(totpLock.retryAfterSeconds) } }
+      );
+    }
+
     // FE-033: Replay-protected TOTP verification.
     const result = verifyTotpWithReplayCheck(user.mfaSecret, code, user.lastTotpCounter);
     if (!result.ok) {
+      // FE-003 ROOT FIX (v2): Record the failed attempt. This increments
+      // the per-user sliding-window counter and locks the account after
+      // TOTP_MAX_ATTEMPTS (5) wrong codes within TOTP_WINDOW_MINUTES (5).
+      const afterFail = recordFailedTotp(user.id);
       await writeAuditLog({
         user: { userId: user.id, email: user.email, role: user.role },
         action: result.reason === "replayed" ? "login_mfa_code_replayed" : "login_mfa_failed",
@@ -116,12 +153,28 @@ export async function POST(req: NextRequest) {
       const message =
         result.reason === "replayed"
           ? "This code has already been used. Wait for the next 30-second window."
-          : "Invalid 6-digit code. Try again.";
+          : afterFail.locked
+            ? `Invalid 6-digit code. 2FA is now locked for ${Math.ceil(afterFail.retryAfterSeconds / 60)} minute(s) due to too many failed attempts.`
+            : `Invalid 6-digit code. ${afterFail.attemptsRemaining} attempt(s) remaining before 2FA is locked.`;
+      const status = afterFail.locked ? 429 : 400;
+      const headers: Record<string, string> = {};
+      if (afterFail.locked) headers["Retry-After"] = String(afterFail.retryAfterSeconds);
       return NextResponse.json(
-        { error: result.reason === "replayed" ? "code_replayed" : "invalid_code", message },
-        { status: 400 }
+        {
+          error: afterFail.locked ? "totp_locked" : (result.reason === "replayed" ? "code_replayed" : "invalid_code"),
+          message,
+          attemptsRemaining: afterFail.attemptsRemaining,
+          retryAfterSeconds: afterFail.retryAfterSeconds,
+        },
+        { status, headers }
       );
     }
+
+    // FE-003 ROOT FIX (v2): Successful verification — clear the per-user
+    // TOTP attempt counter so a user who eventually gets it right doesn't
+    // carry a partial lock forward. This is the OWASP-recommended reset-
+    // on-success pattern.
+    clearTotpAttempts(user.id);
 
     // FE-033: Atomically advance lastTotpCounter. The `updateMany` with
     // `where: { lastTotpCounter: { lt: result.counter } }` ensures that

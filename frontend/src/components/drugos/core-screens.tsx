@@ -520,10 +520,26 @@ function SearchResultsScreen() {
     },
   }));
 
-  // Fall back to mock candidates if the RL service is not deployed.
-  const mockCandidates = drugCandidates.filter(c => c.diseaseId === diseaseId);
-  const candidates = realCandidates.length > 0 ? realCandidates : mockCandidates;
-  const usingMock = realCandidates.length === 0;
+  // FE-001 ROOT FIX (v2): NEVER fall back to mock drug candidates in a
+  // production pharma app. If the RL ranker is not deployed (503 from
+  // /api/rl) or returns zero candidates, we render a hard EMPTY STATE
+  // that explicitly tells the researcher "no real predictions available"
+  // and instructs them to deploy the Phase 4 RL service. The previous
+  // behavior rendered 13 hardcoded fake drugs (Memantine 87, Riluzole 84,
+  // ...) in a table that was visually indistinguishable from a real
+  // results view — a patient-safety hazard because a researcher could
+  // pursue a fabricated "Memantine for Huntington's" candidate into
+  // wet-lab validation, wasting months and $100K+.
+  //
+  // The `drugCandidates` mock import is no longer referenced by this
+  // screen for candidate rendering. It is still used elsewhere in this
+  // file (KnowledgeGraphExplorer, SafetyProfileScreen, CompareDrugsScreen)
+  // because those screens legitimately need a static reference set for
+  // UI demonstration of KG/safety/comparison affordances — but the
+  // SEARCH RESULTS screen, which is the screen a researcher uses to
+  // decide which drug to advance to wet-lab, must NEVER show mock data.
+  const candidates = realCandidates;
+  const usingMock = false; // kept for backward-compat with banner logic below
 
   const [filterTier, setFilterTier] = useState<string>('all');
   const [filterPhase, setFilterPhase] = useState<string>('all');
@@ -581,7 +597,11 @@ function SearchResultsScreen() {
           </div>
         }
       />
-      {/* FE-001 ROOT FIX: Real RL ranker integration banner */}
+      {/* FE-001 ROOT FIX (v2): Real RL ranker integration banner. The
+          previous "demo data" amber banner was an admission of guilt —
+          it sat ABOVE a table that looked identical to a real-results
+          view. Now the banner is removed and a hard EMPTY STATE is
+          rendered in place of the table when no real candidates exist. */}
       {rlLoading && (
         <div className="mb-4 text-xs text-muted-foreground flex items-center gap-2">
           <RefreshCw className="h-3 w-3 animate-spin" /> Querying Phase 4 RL ranker for {diseaseName}...
@@ -591,12 +611,6 @@ function SearchResultsScreen() {
         <div className="mb-4 text-xs text-emerald-700 p-2 border border-emerald-200 rounded bg-emerald-50">
           <strong>Live RL predictions:</strong> {realCandidates.length} candidates from the Phase 4 RL ranker
           (source: {rlData.source}).
-        </div>
-      )}
-      {usingMock && (
-        <div className="mb-4 text-xs text-amber-700 p-2 border border-amber-200 rounded bg-amber-50">
-          <strong>Showing demo data.</strong> The Phase 4 RL ranker is not deployed.
-          Set <code>RL_SERVICE_URL</code> or <code>RL_LOCAL_CSV</code> to see real RL predictions.
         </div>
       )}
 
@@ -623,7 +637,53 @@ function SearchResultsScreen() {
         <span className="text-xs text-muted-foreground">{scoreRange[0]}–{scoreRange[1]}</span>
       </div>
 
-      {/* Results Table */}
+      {/* FE-001 ROOT FIX (v2): Hard empty state when no real RL candidates.
+          This block replaces what used to be a silent fall-through to mock
+          data. We render this BEFORE the table so a researcher never sees
+          a confusing empty table — they see a clear, actionable message.
+          The empty state distinguishes three cases:
+            (a) RL service is loading → handled by the spinner banner above.
+            (b) RL service returned 503 (not deployed) → "Deploy the Phase 4
+                RL service to see real candidates."
+            (c) RL service returned 200 but zero candidates for this disease
+                → "The RL ranker found no candidates for this disease."
+          We use the rlError object to distinguish (b) from (c). */}
+      {!rlLoading && realCandidates.length === 0 && (
+        <Card className="border-2 border-dashed border-amber-300 bg-amber-50/50">
+          <CardContent className="p-8 text-center">
+            <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-amber-100">
+              <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-amber-700">
+                <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
+                <line x1="12" y1="9" x2="12" y2="13"/>
+                <line x1="12" y1="17" x2="12.01" y2="17"/>
+              </svg>
+            </div>
+            <h3 className="text-base font-semibold text-amber-900 mb-2">
+              No RL predictions available
+            </h3>
+            <p className="text-sm text-amber-800 max-w-md mx-auto mb-4">
+              {rlError
+                ? <>The Phase 4 RL ranker service is not deployed. Deploy the RL service to see real, ranked drug repurposing candidates for <strong>{diseaseName}</strong>.</>
+                : <>The Phase 4 RL ranker returned zero candidates for <strong>{diseaseName}</strong>. This may indicate the disease is not present in the RL candidate cache, or the ranker has not been run for this disease yet.</>
+              }
+            </p>
+            <div className="text-xs text-amber-700 bg-amber-100/70 rounded-md p-3 max-w-lg mx-auto text-left">
+              <div className="font-semibold mb-1">To enable real predictions:</div>
+              <ul className="list-disc list-inside space-y-0.5">
+                <li>Set <code className="bg-amber-200/60 px-1 rounded">RL_SERVICE_URL</code> to the deployed RL ranker endpoint, <em>or</em></li>
+                <li>Set <code className="bg-amber-200/60 px-1 rounded">RL_LOCAL_CSV</code> to a local RL predictions CSV file.</li>
+                <li>Run <code className="bg-amber-200/60 px-1 rounded">python run_4phase.py</code> to regenerate predictions end-to-end.</li>
+              </ul>
+            </div>
+            <div className="mt-4 text-xs text-amber-700/80 italic">
+              Mock drug candidates are never displayed on this screen — patient safety requires real predictions only.
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Results Table — only rendered when there are real candidates */}
+      {realCandidates.length > 0 && (
       <Card>
         <CardContent className="p-0">
           <Table>
@@ -707,6 +767,7 @@ function SearchResultsScreen() {
           )}
         </CardContent>
       </Card>
+      )}
     </FadeIn>
   );
 }

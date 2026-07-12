@@ -5,6 +5,8 @@ import {
   hashPassword,
   verifyPassword,
   validatePasswordPolicy,
+  revokeAllRefreshTokensForUser,
+  clearAuthCookies,
 } from "@/lib/auth/server";
 import { badRequest, internalError, writeAuditLog } from "@/lib/api-helpers";
 
@@ -66,16 +68,43 @@ export async function POST(req: NextRequest) {
       resource: user.userId,
       critical: true,
     });
-    if (!audit.ok) {
-      // The password WAS changed, but the audit log failed. We MUST
-      // revoke all sessions to force re-login — otherwise an attacker
-      // who changed the password (e.g. via session hijack) would
-      // remain logged in with no audit trail.
-      const { revokeAllRefreshTokensForUser } = await import("@/lib/auth/server");
+    // FE-004 ROOT FIX (v2): ALWAYS revoke all refresh tokens after a
+    // password change — not just when the audit log fails. This is the
+    // OWASP-recommended pattern: a password change MUST invalidate every
+    // outstanding session. Two threat models require this:
+    //   (a) Attacker stole the password and changed it → victim's old
+    //       refresh cookies (still valid for 30 days) would otherwise
+    //       keep working, giving the attacker a persistent back door
+    //       even after the victim recovers the account.
+    //   (b) User changes password because they suspect compromise →
+    //       the attacker's stolen refresh tokens would otherwise keep
+    //       working for 30 days, defeating the purpose of the change.
+    // The previous code only revoked on audit-log failure, which is the
+    // INVERSE of safe behavior — it revoked exactly when the password
+    // update had already happened but audit failed, leaving the
+    // common-path (audit succeeds) WIDE OPEN.
+    try {
       await revokeAllRefreshTokensForUser(user.userId);
-      return internalError("Password changed but audit log failed. All sessions revoked — please log in again.");
+    } catch (revErr) {
+      // Revocation failure is a security incident — log loudly. We still
+      // clear the current session's cookies below so the user is forced
+      // to re-authenticate with the new password locally; the lingering
+      // tokens will eventually expire (30-day TTL).
+      console.error("[password] refresh-token revocation failed", revErr);
     }
-    return NextResponse.json({ ok: true, message: "Password updated." });
+    // Clear the current session's cookies so the user is forced to
+    // re-authenticate with the new password. This is the user-facing
+    // signal that the password change took effect across all sessions.
+    await clearAuthCookies();
+    if (!audit.ok) {
+      // The password WAS changed AND sessions were revoked, but the
+      // audit log failed. Inform the user — they need to log in again.
+      return internalError("Password changed and all sessions revoked, but the audit log failed. Please log in again with your new password.");
+    }
+    return NextResponse.json({
+      ok: true,
+      message: "Password updated. All other sessions have been signed out — please log in again.",
+    });
   } catch (e) {
     console.error("Password update failed:", e);
     return internalError("Failed to update password.");
