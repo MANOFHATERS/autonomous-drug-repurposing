@@ -22,6 +22,27 @@ logger = logging.getLogger(__name__)
 class _SafeBatchNorm1d(nn.Module):
     """BatchNorm1d wrapper that handles batch_size=1 in train mode.
 
+    P3-025 ROOT FIX (DEAD-CODE DOCUMENTATION): this class is REACHED
+    only when ``NodeTypeProjection`` is constructed with
+    ``feature_norm="batch"``. The default model construction path
+    (``DrugRepurposingGraphTransformer.__init__`` -> ``NodeTypeProjection``)
+    does NOT pass ``feature_norm`` (it defaults to ``"none"``), and the
+    bridge's ``build_model`` does not expose a ``feature_norm`` parameter.
+    Therefore ``_SafeBatchNorm1d`` is NEVER instantiated on the default
+    demo / production code path.
+
+    It is RETAINED (not deleted) because ``feature_norm="batch"`` is a
+    PUBLIC API option of ``NodeTypeProjection`` that advanced users may
+    exercise directly (e.g., for ablation studies comparing layer vs
+    batch normalization on node features). Removing the class would
+    silently break that public API. The previous docstring did NOT
+    document this reachability gap, misleading readers into thinking
+    the class was active on the default path. This update makes the
+    situation explicit so a future developer can decide whether to
+    (a) wire ``feature_norm`` through ``DrugRepurposingGraphTransformer``
+    to actually use BatchNorm, or (b) remove the ``feature_norm="batch"``
+    branch entirely if it remains unused after a deprecation cycle.
+
     ROOT FIX (FORENSIC-AUDIT-I10): ``nn.BatchNorm1d`` raises
     ``ValueError: Expected more than 1 value per channel when training``
     when called with batch_size=1 in train mode. This happens if a user

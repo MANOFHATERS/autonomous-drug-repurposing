@@ -171,13 +171,41 @@ class DrugRepurposingGraphTransformer(nn.Module):
         self.link_predictor_hidden_dims = link_predictor_hidden_dims or [256, 128]
         self.link_predictor_dropout = link_predictor_dropout
 
-        # Validate edge types
+        # P3-024 ROOT FIX (SCIENTIFIC — STRICT ENFORCEMENT): the previous
+        # code only WARNED when len(edge_types) < 14, allowing the model
+        # to silently run with missing reverse edge types. The
+        # HeterogeneousMultiHeadAttention layer creates K/V projections
+        # ONLY for the edge types in its ``edge_types`` list; any reverse
+        # edge type NOT in the list has NO projection, and the attention
+        # forward pass SKIPS it (layers.py: "No K/V projections for edge
+        # type {edge_key}"). This means reverse edges present in the graph
+        # are SILENTLY DROPPED from message passing — drugs receive no
+        # incoming messages from reverse edges, degrading the drug-side
+        # representation. For a production drug-repurposing platform this
+        # is a SCIENTIFIC CORRECTNESS bug, not a style issue.
+        #
+        # The fix RAISES ValueError when len(edge_types) < 14. The
+        # canonical schema (7 forward + 7 reverse) is the MINIMUM for
+        # the model to receive incoming messages on ALL 5 node types.
+        # Callers who genuinely need a subset (e.g., ablation studies)
+        # must construct HeterogeneousMultiHeadAttention directly, not
+        # the top-level DrugRepurposingGraphTransformer. This matches
+        # the existing test layer tests (test_v30_forensic_fixes.py,
+        # test_v5_forensic_verification.py) which construct the LAYER
+        # with 1-2 edge types — those still work because they bypass
+        # this model-level check.
         if len(self.edge_types) < 14:
-            logger.warning(
-                f"Only {len(self.edge_types)} edge types provided. "
-                f"The canonical schema has 14 (7 forward + 7 reverse). "
-                f"Missing reverse edges may cause some node types to "
-                f"receive no incoming messages."
+            raise ValueError(
+                f"DrugRepurposingGraphTransformer requires at least 14 "
+                f"edge types (7 forward + 7 reverse) so every node type "
+                f"receives incoming messages. Got {len(self.edge_types)}: "
+                f"{self.edge_types}. The canonical schema is "
+                f"graph_transformer.data.DEFAULT_EDGE_TYPES (14 types). "
+                f"Pass edge_types=DEFAULT_EDGE_TYPES (the default) or a "
+                f"superset. For ablation studies with fewer edge types, "
+                f"construct HeterogeneousMultiHeadAttention directly. "
+                f"(P3-024 ROOT FIX: this was a WARNING that silently "
+                f"dropped reverse edges from message passing.)"
             )
 
         # Feature projection
