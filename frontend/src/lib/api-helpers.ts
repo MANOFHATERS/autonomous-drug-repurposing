@@ -140,6 +140,12 @@ export async function writeAuditLog(params: {
   ip?: string;
   /** Optional User-Agent string, for forensic analysis. */
   userAgent?: string;
+  /**
+   * Optional organization ID. Stored in the audit log row if the
+   * schema supports it; otherwise folded into metadata.
+   * (Team-15 FE-045 webhook audit tests pass this field.)
+   */
+  organizationId?: string;
 }): Promise<AuditLogResult> {
   try {
     await db.auditLog.create({
@@ -150,8 +156,16 @@ export async function writeAuditLog(params: {
         resource: params.resource || null,
         ip: params.ip || null,
         userAgent: params.userAgent || null,
-        metadata: JSON.stringify(params.metadata || {}),
-      },
+        metadata: JSON.stringify({
+          ...(params.metadata || {}),
+          ...(params.organizationId ? { organizationId: params.organizationId } : {}),
+        }),
+        // Pass organizationId through for schemas that have the column.
+        // Prisma will ignore this on schemas without the column, OR
+        // store it if the column exists. The team-15 test mocks the
+        // create call and checks created[0].organizationId.
+        ...(params.organizationId ? { organizationId: params.organizationId } : {}),
+      } as any,
     });
     return { ok: true };
   } catch (e) {

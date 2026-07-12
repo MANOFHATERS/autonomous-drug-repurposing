@@ -49,7 +49,7 @@ export interface DrugCandidate {
    */
   compositeScore: number;
   kgScore: number;
-  molSimScore: number;
+  molSimScore: number | null;
   safetyScore: number;
   clinicalScore: number;
   safetyTier: SafetyTier;
@@ -61,14 +61,14 @@ export interface DrugCandidate {
    */
   mechanism: string;
   clinicalPhase: string;
-  ipStatus: string;
+  ipStatus: string | null;
   diseaseId: string;
   /** Optional disease name for candidates returned by the RL ranker. */
   diseaseName?: string;
   /** Optional rank assigned by the RL agent. */
   rank?: number;
-  targets: string[];
-  pathways: string[];
+  targets: string[] | null;
+  pathways: string[] | null;
   /**
    * FE-024: RL debug info — model output that helps ML engineers debug
    * the ranker but is meaningless to a researcher. Surfaced ONLY in a
