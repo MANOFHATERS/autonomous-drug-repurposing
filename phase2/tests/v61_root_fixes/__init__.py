@@ -1,8 +1,8 @@
-"""v61 ROOT FIX verification tests — 3 silent break points in the bridge.
+"""v61 ROOT FIX verification tests -- 3 silent break points in the bridge.
 
 Each test verifies ONE root-cause fix from the v61 audit. Tests are
 designed to FAIL if a regression re-introduces the bug. They use NO
-network access, NO real databases — pure Python assertions on the actual
+network access, NO real databases -- pure Python assertions on the actual
 code.
 
 Issues verified:

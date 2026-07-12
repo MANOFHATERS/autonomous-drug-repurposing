@@ -191,7 +191,7 @@ This v1.1.0 release addresses all 188 forensic-audit findings from
 # This module (4133 LOC) reimplements cross-database entity resolution
 # (InChIKey canonicalization, DrugBank↔ChEMBL↔PubChem merging, UniProt
 # protein resolution) that Phase 1's ``entity_resolution.drug_resolver``
-# and ``entity_resolution.protein_resolver`` already implement — and
+# and ``entity_resolution.protein_resolver`` already implement -- and
 # have done so with stricter scientific guards (PubChem circuit breaker,
 # stereoisomer preservation, salt-form detection, organism filter, etc.).
 #
@@ -211,7 +211,7 @@ This v1.1.0 release addresses all 188 forensic-audit findings from
 #   * When the flag is False (legacy/escape-hatch), the original
 #     in-module implementation runs unchanged.
 #   * On any Phase 1 import/conversion error, the delegation falls back
-#     to the legacy implementation and logs a WARNING (defensive —
+#     to the legacy implementation and logs a WARNING (defensive --
 #     never break the pipeline).
 # ============================================================================
 
@@ -251,7 +251,7 @@ import pandas as pd
 # BUG-D-007 root fix: import id_crosswalk so the 30-entry builtin
 # crosswalk (DrugBank↔ChEMBL, UniProt↔NCBI Gene, OMIM↔DOID) is actually
 # used for cross-source canonicalization. Previously this module never
-# imported id_crosswalk, making it effectively dead code — only Compounds
+# imported id_crosswalk, making it effectively dead code -- only Compounds
 # got cross-source canonicalization (via InChIKey).
 from .id_crosswalk import (
     IDCrosswalk,
@@ -352,10 +352,10 @@ _phase1_drug_resolver_cache: Optional[Any] = None
 _phase1_protein_resolver_cache: Optional[Any] = None
 
 
-# v38 ROOT FIX (Phase 2 entity_resolver — use Phase 1 entity_mapping table):
+# v38 ROOT FIX (Phase 2 entity_resolver -- use Phase 1 entity_mapping table):
 # The previous code only delegated to Phase 1's DrugResolver/ProteinResolver
 # CLASSES (which RE-RESOLVE from scratch). It never read Phase 1's
-# ``entity_mapping`` TABLE OUTPUT — the persistent, canonicalised,
+# ``entity_mapping`` TABLE OUTPUT -- the persistent, canonicalised,
 # cross-source ID resolution result that Phase 1's entity_resolution
 # pipeline writes to PostgreSQL. This meant Phase 2 was doing DUPLICATE
 # WORK: Phase 1 already resolved entities and persisted the result, but
@@ -403,7 +403,7 @@ def _load_phase1_entity_mapping_table() -> Optional[Dict[str, "EntityMapping"]]:
         from database.models import EntityMapping as P1EntityMapping  # type: ignore[import-not-found]
         from sqlalchemy import select
     except Exception as exc:
-        # v43 ROOT FIX (P1 — entity_mapping returns None silently):
+        # v43 ROOT FIX (P1 -- entity_mapping returns None silently):
         # The previous code logged at INFO level (invisible at default
         # WARNING level). Operators had no way to verify Phase 1's
         # entity mapping was being used. Fix: log at WARNING level so
@@ -411,7 +411,7 @@ def _load_phase1_entity_mapping_table() -> Optional[Dict[str, "EntityMapping"]]:
         # module_load_status() for programmatic verification.
         logger.warning(
             "v38 I-3: Phase 1 database modules not available (%s). "
-            "Cannot load entity_mapping table — falling back to "
+            "Cannot load entity_mapping table -- falling back to "
             "re-resolve-from-scratch. To enable, ensure phase1/ is on "
             "sys.path and DATABASE_URL is set.", exc,
         )
@@ -494,7 +494,7 @@ def _load_phase1_entity_mapping_table() -> Optional[Dict[str, "EntityMapping"]]:
                 mappings[canonical_id] = em
             except Exception as exc:
                 logger.debug(
-                    "v38 I-3: could not construct EntityMapping for %s (%s) — skipping",
+                    "v38 I-3: could not construct EntityMapping for %s (%s) -- skipping",
                     canonical_id, exc,
                 )
                 continue
@@ -509,7 +509,7 @@ def _load_phase1_entity_mapping_table() -> Optional[Dict[str, "EntityMapping"]]:
 
         logger.info(
             "v38 I-3: loaded %d EntityMapping objects from Phase 1's "
-            "entity_mapping table (authoritative — Phase 2 will seed its "
+            "entity_mapping table (authoritative -- Phase 2 will seed its "
             "mapping store with these before re-resolving).",
             len(mappings),
         )
@@ -530,7 +530,7 @@ def _get_phase1_drug_resolver() -> Optional[Any]:
     """Lazily import and cache Phase 1's :class:`DrugResolver`.
 
     Returns ``None`` (and logs a warning) if Phase 1's
-    ``entity_resolution`` package cannot be imported — e.g. when the
+    ``entity_resolution`` package cannot be imported -- e.g. when the
     ``phase1`` directory is not on ``sys.path``. Callers MUST handle
     ``None`` by falling back to the legacy implementation.
     """
@@ -604,15 +604,15 @@ PUBLIC_ID_REGEX: "re.Pattern[str]" = re.compile(
 )
 
 # UniProt accession regex (D5-017 -- canonical_id format validation)
-# v43 ROOT FIX (P0 — TrEMBL accessions rejected): the previous second
+# v43 ROOT FIX (P0 -- TrEMBL accessions rejected): the previous second
 # alternative was `[A-Z][A-Z0-9]{2}[0-9]` which required each 4-char
 # group to start with a LETTER. The UniProt spec allows `[A-Z0-9]{3}`
 # (any alphanumeric, including digits) as the first 3 chars of the
 # group. A TrEMBL accession like A0A0240Z08 (digit '0' as the 6th
 # char, starting the second group '0Z08') failed the regex but is a
 # valid UniProt accession. This caused entity_resolver to reject valid
-# TrEMBL accessions → unresolved proteins → missing Gene-encodes-
-# Protein edges → fragmented graph → multi-hop queries silently return
+# TrEMBL accessions -> unresolved proteins -> missing Gene-encodes-
+# Protein edges -> fragmented graph -> multi-hop queries silently return
 # empty.
 # Fix: change `[A-Z][A-Z0-9]{2}[0-9]` to `[A-Z0-9]{3}[0-9]` (matches
 # the official UniProt accession format).
@@ -1078,16 +1078,16 @@ class EntityMapping:
         """Equality by full content (canonical_type, canonical_id, aliases, name, confidence).
 
         v17 ROOT FIX (DC-2 deepened): the previous __eq__ compared ONLY by
-        (canonical_type, canonical_id) — so any two EntityMappings with
+        (canonical_type, canonical_id) -- so any two EntityMappings with
         the same canonical ID were "equal" even if their aliases / name /
         confidence differed. This made the call site
         ``if existing == mapping:`` at line 2063 ALWAYS True (existing was
         just retrieved by canonical_id), which made the InChIKey merge
-        ``else`` branch unreachable dead code — violating the project's
+        ``else`` branch unreachable dead code -- violating the project's
         core mandate ("convert all compound IDs to a common format
         (InChIKey)"). v16 worked around this at the call site by using
         explicit content comparison, but __eq__ itself remained
-        misleading — any future code using ``mapping1 == mapping2`` would
+        misleading -- any future code using ``mapping1 == mapping2`` would
         hit the same trap. Fix __eq__ to compare the full content so the
         semantic matches the call-site workaround. __hash__ is unchanged
         (still keyed by canonical_type+canonical_id) so EntityMapping
@@ -1108,7 +1108,7 @@ class EntityMapping:
         # v17: keep hash keyed by (canonical_type, canonical_id) so that
         # EntityMapping can be used as a dict key for dedup-by-canonical-id.
         # This is intentional: two mappings with the same canonical_id but
-        # different aliases will compare unequal (==) but hash equal —
+        # different aliases will compare unequal (==) but hash equal --
         # which is the correct Python pattern for "same identity, different
         # content" (similar to how two tuples with the same first element
         # hash equal but may compare unequal).
@@ -1117,7 +1117,7 @@ class EntityMapping:
         # non-deterministic across processes (PYTHONHASHSEED randomization).
         # If EntityMapping objects are used in sets/dicts across processes
         # (e.g. multiprocessing, checkpoint save/load), the same mapping
-        # gets different hash values → dedup fails silently. ROOT FIX:
+        # gets different hash values -> dedup fails silently. ROOT FIX:
         # use hashlib.sha256 (deterministic) and convert to int.
         import hashlib as _hashlib
         _key = f"{self.canonical_type}:{self.canonical_id}".encode("utf-8")
@@ -2039,7 +2039,7 @@ class EntityResolver:
                     or canonical_id.startswith("SYM:")):
                 # v24 ROOT FIX (FORENSIC-P2-LOADERS §3): the previous
                 # comment said "accept but flag" but the code just
-                # ``pass``ed — no flag was actually added. Either
+                # ``pass``ed -- no flag was actually added. Either
                 # implement the flag (add to ``issues`` as a WARNING)
                 # or remove the misleading comment. Fix: add a
                 # non-fatal WARNING so the flag is actually visible
@@ -2051,7 +2051,7 @@ class EntityResolver:
                 # don't treat non-fatal warnings as hard errors.
                 issues.append(
                     f"Gene canonical_id {canonical_id!r} is not a "
-                    f"numeric NCBI Gene ID, ENSG, HGNC:, or SYM: — "
+                    f"numeric NCBI Gene ID, ENSG, HGNC:, or SYM: -- "
                     f"accepted with WARNING (non-fatal)."
                 )
         elif entity_type == "Protein":
@@ -2242,7 +2242,7 @@ class EntityResolver:
         """Delegate compound resolution to Phase 1's :class:`DrugResolver`.
 
         Returns ``None`` (and logs a warning) if delegation is not
-        possible — the caller MUST then fall back to the legacy
+        possible -- the caller MUST then fall back to the legacy
         in-module implementation. On success, populates
         ``self.mappings["Compound"]`` with ``EntityMapping`` objects
         translated from Phase 1's output and returns a stats dict in
@@ -2260,7 +2260,7 @@ class EntityResolver:
             seeded_count = 0
             for canonical_id, em in p1_mappings.items():
                 # Only seed if not already in the mapping store (don't
-                # overwrite existing mappings — they may have been set
+                # overwrite existing mappings -- they may have been set
                 # by a previous resolve call with higher confidence).
                 existing = self.mappings.get("Compound", {}).get(canonical_id)
                 if existing is None:
@@ -2353,7 +2353,7 @@ class EntityResolver:
             for _, row in result_df.iterrows():
                 canonical_id = str(row.get("canonical_inchikey", "") or "").strip()
                 if not canonical_id:
-                    # Phase 1 emits a row even for unresolved records —
+                    # Phase 1 emits a row even for unresolved records --
                     # count it but don't store a mapping.
                     stats["skipped_no_id"] += 1
                     continue
@@ -2372,7 +2372,7 @@ class EntityResolver:
                     aliases["pubchem_cid"] = pubchem_cid
                 # v35 ROOT FIX (V35-P2-LOADERS-FIXES M-1): the previous
                 # expression ``float(row.get("match_confidence", 0.85) or 0.85)``
-                # has a falsy bug — when the cell value is ``0.0`` (a
+                # has a falsy bug -- when the cell value is ``0.0`` (a
                 # legitimate "zero confidence" value), Python evaluates
                 # ``0.0 or 0.85`` as ``0.85`` because ``0.0`` is falsy.
                 # That silently UPGRADES zero-confidence matches to
@@ -2386,7 +2386,7 @@ class EntityResolver:
                     confidence = 0.85
                 else:
                     try:
-                        # pandas may emit NaN — treat as missing.
+                        # pandas may emit NaN -- treat as missing.
                         if isinstance(_raw_conf, float) and pd.isna(_raw_conf):
                             confidence = 0.85
                         else:
@@ -2456,10 +2456,10 @@ class EntityResolver:
                         ).append(canonical_id)
                         stats["resolved"] += 1
                     elif existing == mapping:
-                        # Idempotent re-add — count as duplicate, no-op.
+                        # Idempotent re-add -- count as duplicate, no-op.
                         stats["duplicates_detected"] += 1
                     else:
-                        # Same canonical_id, different content — conflict.
+                        # Same canonical_id, different content -- conflict.
                         stats["conflicts_detected"] += 1
                         self._dead_letter(
                             "Compound", {"drugbank_id": db_id},
@@ -2475,7 +2475,7 @@ class EntityResolver:
             )
             return stats
         except Exception as exc:
-            # Defensive: never break the pipeline — fall back to legacy.
+            # Defensive: never break the pipeline -- fall back to legacy.
             self.logger.warning(
                 "v29 I-3: Phase 1 DrugResolver delegation failed (%s). "
                 "Falling back to legacy in-module compound resolver.",
@@ -2681,7 +2681,7 @@ class EntityResolver:
             # explicit ``same_content`` comparison because __eq__ was
             # identity-only (canonical_type+canonical_id). With v17's
             # __eq__ now comparing full content (aliases, name,
-            # confidence), the workaround is no longer necessary —
+            # confidence), the workaround is no longer necessary --
             # ``existing == mapping`` returns True iff the content is
             # identical, which is exactly the "idempotent re-add" case.
             # The ``else`` branch (InChIKey merge logic) now runs
@@ -2811,13 +2811,13 @@ class EntityResolver:
 
         # v57 ROOT FIX (P2L-021) verification: this method reads ONLY the
         # ``head_type`` / ``head_id`` / ``tail_type`` / ``tail_id``
-        # columns from the DRKG DataFrame — it does NOT read the
+        # columns from the DRKG DataFrame -- it does NOT read the
         # ``relation`` / ``relation_source`` / ``relation_name`` columns.
         # The case-mismatch fix is therefore applied in ``drkg_loader.py``
         # (which lowercases the relation code tokens) and in
         # ``kg_builder.py`` (which lowercases ``rel_type`` before MERGE).
         # No additional lowercasing is needed here because the resolver
-        # never compares or builds relation strings — it only resolves
+        # never compares or builds relation strings -- it only resolves
         # entity IDs. The ``head_type`` / ``tail_type`` columns remain in
         # their canonical PascalCase form (``"Compound"`` / ``"Disease"``)
         # so the ``== "Compound"`` filter below continues to work.
@@ -3241,7 +3241,7 @@ class EntityResolver:
                         # (id_crosswalk.py), the call returns either
                         # a dict of canonical IDs or None. Log at
                         # WARNING (not DEBUG) if the lookup itself
-                        # raises — that is now a real bug, not an
+                        # raises -- that is now a real bug, not an
                         # expected failure mode.
                         try:
                             canonical = crosswalk.canonicalize("Gene", src_key, src_val)
@@ -3259,11 +3259,11 @@ class EntityResolver:
                             # raised (e.g. transient YAML lookup issue)
                             # but ``ncbi_gene_id`` would have resolved
                             # cleanly, the second alias was never
-                            # tried — the gene stayed unresolved even
+                            # tried -- the gene stayed unresolved even
                             # though a valid crosswalk entry existed.
                             # Fix: use ``continue`` so the next alias
                             # is tried. (The outer ``try/except`` for
-                            # ``_get_default_crosswalk`` itself stays —
+                            # ``_get_default_crosswalk`` itself stays --
                             # a failure THERE is genuinely fatal for
                             # all aliases, but a single
                             # ``crosswalk.canonicalize`` call failing
@@ -3305,11 +3305,11 @@ class EntityResolver:
                 # always used the raw ``gene_id`` (the DRKG source ID,
                 # e.g. ``ENSG00000168214``) as ``canonical_id`` even
                 # after the crosswalk successfully resolved an
-                # ``ncbi_gene_id`` — meaning two Gene mappings for the
+                # ``ncbi_gene_id`` -- meaning two Gene mappings for the
                 # same physical gene (one from DRKG's ENSG ID and one
                 # from a different source's NCBI Gene ID) would NOT
                 # collapse, fragmenting the Gene namespace and
-                # orphaning Gene→Protein edges keyed on ncbi_gene_id.
+                # orphaning Gene->Protein edges keyed on ncbi_gene_id.
                 # Fix: if the crosswalk / digit-detection produced an
                 # ``ncbi_gene_id``, use it as the canonical_id; only
                 # fall back to the raw gene_id when no ncbi_gene_id is
@@ -3445,7 +3445,7 @@ class EntityResolver:
         """Delegate protein resolution to Phase 1's :class:`ProteinResolver`.
 
         Returns ``None`` (and logs a warning) if delegation is not
-        possible — the caller MUST then fall back to the legacy
+        possible -- the caller MUST then fall back to the legacy
         in-module implementation. On success, populates
         ``self.mappings["Protein"]`` with ``EntityMapping`` objects
         translated from Phase 1's output and returns a stats dict in
@@ -3509,7 +3509,7 @@ class EntityResolver:
                 # whitelist; fall back to the dedicated method.
                 self.logger.warning(
                     "v29 I-3: ProteinResolver.add_source_records('uniprot') "
-                    "failed (%s) — trying add_uniprot_records() directly.",
+                    "failed (%s) -- trying add_uniprot_records() directly.",
                     exc,
                 )
                 try:
@@ -3517,7 +3517,7 @@ class EntityResolver:
                 except Exception as exc2:
                     self.logger.warning(
                         "v29 I-3: ProteinResolver.add_uniprot_records() "
-                        "also failed (%s) — falling back to legacy.", exc2,
+                        "also failed (%s) -- falling back to legacy.", exc2,
                     )
                     return None
             result_df = p1.to_dataframe()
@@ -3528,7 +3528,7 @@ class EntityResolver:
             # gene_id, organism, secondary_accessions, etc.
             now_iso = datetime.now(timezone.utc).isoformat()
             # Column names may differ between DrugResolver and
-            # ProteinResolver — read defensively via .get().
+            # ProteinResolver -- read defensively via .get().
             for _, row in result_df.iterrows():
                 canonical_id = (
                     str(row.get("canonical_uniprot_id", "") or row.get("uniprot_id", "") or "").strip()
@@ -3560,7 +3560,7 @@ class EntityResolver:
                     # Result: a Protein record with 5 secondary
                     # accessions stored as one opaque string was
                     # impossible to look up by any individual secondary
-                    # accession via the reverse index — losing every
+                    # accession via the reverse index -- losing every
                     # reverse-lookup hit. Fix: split on common
                     # separators (``;``, ``,``, whitespace) and store
                     # the resulting list (deduplicated, preserving
@@ -3664,7 +3664,7 @@ class EntityResolver:
             )
             return stats
         except Exception as exc:
-            # Defensive: never break the pipeline — fall back to legacy.
+            # Defensive: never break the pipeline -- fall back to legacy.
             self.logger.warning(
                 "v29 I-3: Phase 1 ProteinResolver delegation failed (%s). "
                 "Falling back to legacy in-module protein resolver.",
@@ -3695,14 +3695,14 @@ class EntityResolver:
         for rec in uniprot_records:
             stats["total_proteins"] += 1
 
-            # v29 ROOT FIX (audit L-7 — No organism filter): the
+            # v29 ROOT FIX (audit L-7 -- No organism filter): the
             # previous code accepted ALL organisms into the human-drug
             # KG. Mouse, rat, yeast, E. coli proteins all entered the
             # graph and were treated as human drug targets. This
-            # corrupts the KG — a drug that inhibits a mouse protein
+            # corrupts the KG -- a drug that inhibits a mouse protein
             # is NOT necessarily safe in humans. ROOT FIX: filter to
             # Homo sapiens (NCBI TaxID 9606) by default. Records
-            # without an organism field are KEPT (defensive — some
+            # without an organism field are KEPT (defensive -- some
             # UniProt entries lack the OS line). Records with a
             # non-human organism are skipped and counted.
             _rec_organism = str(rec.get("organism", "") or "").strip()
@@ -3721,7 +3721,7 @@ class EntityResolver:
                         stats["skipped_non_human_organism"] += 1
                         continue
                 except (TypeError, ValueError):
-                    pass  # can't parse — keep the record defensively
+                    pass  # can't parse -- keep the record defensively
 
             # D6-007 -- handle accession as str, list, or other
             acc_raw = rec.get("accession")
@@ -3781,7 +3781,7 @@ class EntityResolver:
             # provides a STRING (e.g. a single CSV cell with multiple
             # accessions joined by ``;`` or ``,``, as Phase 1's
             # ``uniprot_proteins.csv`` does), split on the common
-            # separators before storing — otherwise a Protein record
+            # separators before storing -- otherwise a Protein record
             # with N secondary accessions in one cell would have ONE
             # opaque string alias that never matches any individual
             # accession in the reverse index.
@@ -4485,13 +4485,13 @@ class EntityResolver:
 
         # D8-013 -- LRU cache
         # v35 ROOT FIX (V35-P2-LOADERS-FIXES M-2): the previous cache
-        # key was only ``(entity_type, id_system, external_id)`` — it did
+        # key was only ``(entity_type, id_system, external_id)`` -- it did
         # NOT include the filter parameters (exclude_needs_review,
         # min_confidence, exclude_safety_flags). Result: a first lookup
         # with strict filters that returned None (no candidate passed)
         # was cached, and a subsequent lookup with LOOSER filters for
         # the SAME (entity_type, id_system, external_id) would hit the
-        # cached None and return None again — silently hiding valid
+        # cached None and return None again -- silently hiding valid
         # candidates. Symmetrically, a loose-filter None could shadow a
         # later strict-filter valid hit (rare but possible). Fix:
         # include the filter parameters in the cache key.

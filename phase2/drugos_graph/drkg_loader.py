@@ -1,17 +1,17 @@
-"""DrugOS Graph Module — DRKG Loader (v2.0 — Institutional Grade)
+"""DrugOS Graph Module -- DRKG Loader (v2.0 -- Institutional Grade)
 =================================================================
 Downloads, validates, and parses the **Drug Repurposing Knowledge Graph
-(DRKG)** — a 5.87-million-triple biomedical knowledge graph that is the
+(DRKG)** -- a 5.87-million-triple biomedical knowledge graph that is the
 seed graph for the DrugOS Graph-Transformer + RL drug-repurposing ranker.
 
 If this loader emits wrong data, the GNN trains on wrong data, the RL
 ranker ranks the wrong drug, a clinician acts on the ranking, and a
 patient dies. This file therefore implements every guard mandated by the
-forensic audit (``drkg_loader_repair_prompt.md`` — 132 findings across
+forensic audit (``drkg_loader_repair_prompt.md`` -- 132 findings across
 16 domains).
 
 DRKG format (REAL, not fabricated):
-    TSV: drkg.tsv  — three columns, no header, UTF-8, LF line endings.
+    TSV: drkg.tsv  -- three columns, no header, UTF-8, LF line endings.
 
     Entity IDs:   "EntityType::ExternalID"
         e.g.  "Compound::DB00107"
@@ -28,7 +28,7 @@ DRKG format (REAL, not fabricated):
         N, J, U, L, Te, Md), NEVER a verb. See ``config.DRKG_RELATION_
         ABBREV_TO_NAME`` for the codebook.
 
-Public API (preserved from v1 — ``run_pipeline.py:37-43`` unchanged):
+Public API (preserved from v1 -- ``run_pipeline.py:37-43`` unchanged):
     download_drkg, parse_drkg_tsv, get_entity_type_counts,
     get_relation_type_counts, build_entity_id_maps, build_edge_index_maps,
     build_networkx_graph, get_compound_disease_subgraph,
@@ -36,10 +36,10 @@ Public API (preserved from v1 — ``run_pipeline.py:37-43`` unchanged):
     validate_drkg, load_drkg
 
 New in v2.0 (additive, backward-compatible):
-    iter_drkg_triples — chunked streaming for >50M-row DRKG variants.
-    DRKGLoader        — adapter implementing the ``Loader`` Protocol.
-    PARSER_VERSION, SCHEMA_VERSION — versioning for reproducibility.
-    DRKG_RECORD_SCHEMA — runtime schema contract assertion.
+    iter_drkg_triples -- chunked streaming for >50M-row DRKG variants.
+    DRKGLoader        -- adapter implementing the ``Loader`` Protocol.
+    PARSER_VERSION, SCHEMA_VERSION -- versioning for reproducibility.
+    DRKG_RECORD_SCHEMA -- runtime schema contract assertion.
 
 Idempotency (clinical-safety requirement):
     Two runs of ``load_drkg`` on the same ``drkg.tsv`` byte-for-byte
@@ -48,23 +48,23 @@ Idempotency (clinical-safety requirement):
     randomness, no time-of-day dependent logic. The only non-deterministic
     field is ``df.attrs['provenance']['parsed_at']`` (ISO-8601 timestamp).
 
-Errors raised (Domain 6 — Reliability):
-    DRKGDownloadError       — download failure (TLS / allowlist / size /
+Errors raised (Domain 6 -- Reliability):
+    DRKGDownloadError       -- download failure (TLS / allowlist / size /
                               SHA-256 / content-sniff / tar safety).
-    DRKGParseError          — TSV parse failure (ParserError, missing
+    DRKGParseError          -- TSV parse failure (ParserError, missing
                               columns, structural invariant).
-    DRKGDataIntegrityError  — content failure (row count, entity/relation
+    DRKGDataIntegrityError  -- content failure (row count, entity/relation
                               type count, biological triple schema,
                               entity-type uniqueness, missing entity in
                               edge-map build).
 
 Dead-letter queue: ``data/dead_letter/drkg_malformed.jsonl`` (one JSON
-line per dropped/malformed record — GAP 5.11).
+line per dropped/malformed record -- GAP 5.11).
 
 Transformation log: ``logs/transformations/drkg.jsonl`` (one JSON line
-per significant transformation — BUG 16.4).
+per significant transformation -- BUG 16.4).
 
-License: MIT — attribution propagated in ``df.attrs['license']`` and
+License: MIT -- attribution propagated in ``df.attrs['license']`` and
 ``df.attrs['attribution']`` (BUG 14.1). Per-row ``_license`` /
 ``_attribution`` columns are NOT added (5.9M-row DataFrame cost); the
 provenance dict carries them once.
@@ -76,7 +76,7 @@ References:
     https://github.com/gnn4dr-kg/awmlpedia/wiki/DRKG
 
 CHANGELOG (SCHEMA_VERSION bumps require downstream contract update):
-    v2.0.0 (2026-06-17) — Institutional-grade rewrite. Adds:
+    v2.0.0 (2026-06-17) -- Institutional-grade rewrite. Adds:
         - ``relation_human_name``, ``evidence_strength``,
           ``source_confidence``, ``head_uri``, ``tail_uri``,
           ``relation_source``, ``relation_dst_type``, ``sensitive``
@@ -90,18 +90,18 @@ CHANGELOG (SCHEMA_VERSION bumps require downstream contract update):
         - Per-row dead-letter queue + transformation log.
         - ``df.attrs['provenance']`` with all ``DRKG_PROVENANCE_KEYS``.
         - ``validate_drkg`` returns typed ``DRKGValidationResult``.
-    v1.0.0 (initial) — single ``parse_drkg_tsv`` with substring filter.
+    v1.0.0 (initial) -- single ``parse_drkg_tsv`` with substring filter.
 """
 
 from __future__ import annotations
 
 # =============================================================================
-# Section 0 — Imports
+# Section 0 -- Imports
 # =============================================================================
-# Fixes BUG 4.1 — `import sys` at module top (was inside function body).
-# Fixes BUG 4.2 — `defaultdict` imported once at module level.
-# Fixes BUG 4.8 — `from __future__ import annotations` + builtin generics.
-# Fixes BUG 14.4 — no `urlretrieve`; uses `Request` + `urlopen` + `copyfileobj`.
+# Fixes BUG 4.1 -- `import sys` at module top (was inside function body).
+# Fixes BUG 4.2 -- `defaultdict` imported once at module level.
+# Fixes BUG 4.8 -- `from __future__ import annotations` + builtin generics.
+# Fixes BUG 14.4 -- no `urlretrieve`; uses `Request` + `urlopen` + `copyfileobj`.
 
 import hashlib
 import io
@@ -177,7 +177,7 @@ from .exceptions import (
 # v57 ROOT FIX (P2L-032) verification: the audit reported that drkg_loader
 # used a STRING combined_score threshold of 800 (different from
 # string_loader's 700 and stitch_loader's 400). However, DRKG does NOT use
-# the STRING / STITCH combined_score system at all — DRKG edges are
+# the STRING / STITCH combined_score system at all -- DRKG edges are
 # unweighted (the source TSV has no score column) and DRKG's confidence
 # is derived from the source (DRUGBANK > Hetionet > GNBR > bioarx) via
 # ``_SOURCE_TO_CONFIDENCE`` (see Section 3 below). The audit's "800"
@@ -187,10 +187,10 @@ from .exceptions import (
 # and stitch_loader; drkg_loader correctly does NOT consume it.
 
 # =============================================================================
-# Section 0.1 — Module public surface (BUG 1.1)
+# Section 0.1 -- Module public surface (BUG 1.1)
 # =============================================================================
 __all__: list[str] = [
-    # Public functions (preserved from v1 — D1-003 / D15-002)
+    # Public functions (preserved from v1 -- D1-003 / D15-002)
     "download_drkg",
     "parse_drkg_tsv",
     "get_entity_type_counts",
@@ -203,7 +203,7 @@ __all__: list[str] = [
     "get_gene_disease_subgraph",
     "validate_drkg",
     "load_drkg",
-    # New public functions (GAP 8.5 — chunked streaming)
+    # New public functions (GAP 8.5 -- chunked streaming)
     "iter_drkg_triples",
     # Protocol adapter (BUG 1.2)
     "DRKGLoader",
@@ -215,9 +215,9 @@ __all__: list[str] = [
 ]
 
 # =============================================================================
-# Section 0.2 — Version constants (GAP 7.5, BUG 14.3)
+# Section 0.2 -- Version constants (GAP 7.5, BUG 14.3)
 # =============================================================================
-# Fixes GAP 7.5 — PARSER_VERSION bumps on any parse-logic change.
+# Fixes GAP 7.5 -- PARSER_VERSION bumps on any parse-logic change.
 # SCHEMA_VERSION bumps on any output-schema change (column added/removed/
 # renamed). Both are sourced from config so the loader, the pipeline runner,
 # and the MLflow tracker all log the same value.
@@ -225,11 +225,11 @@ PARSER_VERSION: Final[str] = DRKG_PARSER_VERSION    # "2.0.0"
 SCHEMA_VERSION: Final[str] = DRKG_SCHEMA_VERSION    # "2.0.0"
 
 # =============================================================================
-# Section 0.3 — Authoritative record schema (BUG 2.5, BUG 15.3)
+# Section 0.3 -- Authoritative record schema (BUG 2.5, BUG 15.3)
 # =============================================================================
 # Mirrors ``PROTEIN_NODE_SCHEMA`` in ``uniprot_loader.py``. ``parse_drkg_tsv``
 # asserts that the returned DataFrame contains every column listed here
-# before returning — a schema regression would otherwise silently break
+# before returning -- a schema regression would otherwise silently break
 # downstream consumers (``training_data.py``, ``pyg_builder.py``,
 # ``entity_resolver.py``).
 DRKG_RECORD_SCHEMA: Final[dict[str, type]] = {
@@ -256,16 +256,16 @@ DRKG_RECORD_SCHEMA: Final[dict[str, type]] = {
 }
 
 # =============================================================================
-# Section 0.4 — Logger (BUG 11.1, BUG 11.2)
+# Section 0.4 -- Logger (BUG 11.1, BUG 11.2)
 # =============================================================================
-# Fixes BUG 11.1 — lazy `%s` formatting (NO f-strings inside logger calls).
-# Fixes BUG 11.2 — structured `extra={...}` on every non-trivial log.
+# Fixes BUG 11.1 -- lazy `%s` formatting (NO f-strings inside logger calls).
+# Fixes BUG 11.2 -- structured `extra={...}` on every non-trivial log.
 logger = logging.getLogger(__name__)
 
 # =============================================================================
-# Section 0.5 — Environment variable overrides (GAP 1.7, GAP 12.6)
+# Section 0.5 -- Environment variable overrides (GAP 1.7, GAP 12.6)
 # =============================================================================
-# Fixes GAP 12.6 — env vars for dev/staging/prod deployment without code
+# Fixes GAP 12.6 -- env vars for dev/staging/prod deployment without code
 # changes. Precedence (highest to lowest): explicit param > env var > config.
 _DRUGOS_DRKG_DIR: Optional[str] = os.environ.get("DRUGOS_DRKG_DIR")
 _DRUGOS_DRKG_FORCE_DOWNLOAD: bool = (
@@ -298,9 +298,9 @@ _NETWORKX_HEADROOM_MULTIPLIER: Final[int] = 2
 
 
 # =============================================================================
-# Section 1 — Private helpers
+# Section 1 -- Private helpers
 # =============================================================================
-# Fixes GAP 1.6 — private helpers prefixed `_`, grouped at the top so the
+# Fixes GAP 1.6 -- private helpers prefixed `_`, grouped at the top so the
 # public API below is scannable. Each helper has a single responsibility
 # and a PEP 257 docstring (GAP 14.5).
 
@@ -308,7 +308,7 @@ _NETWORKX_HEADROOM_MULTIPLIER: Final[int] = 2
 def _compute_sha256(filepath: Path) -> str:
     """Compute the SHA-256 of a file (streaming, ~1 MiB chunks).
 
-    Fixes BUG 5.8 — the downloaded ``drkg.tar.gz`` is SHA-256-verified
+    Fixes BUG 5.8 -- the downloaded ``drkg.tar.gz`` is SHA-256-verified
     before extraction. Streaming (not ``file.read()``) keeps memory
     bounded for the 500 MB tarball.
 
@@ -338,7 +338,7 @@ def _iso_now() -> str:
 def _staleness_days(cfg: dict[str, Any]) -> int:
     """Return the age in days of the last download, or a large number.
 
-    Fixes GAP 5.12 — used by the freshness WARNING when the cached
+    Fixes GAP 5.12 -- used by the freshness WARNING when the cached
     DRKG tarball is older than ``expected_update_frequency_days * 1.5``.
     """
     last = cfg.get("last_downloaded_at")
@@ -358,7 +358,7 @@ _DEAD_LETTER_PATH: Final[Path] = DEAD_LETTER_DIR / "drkg_malformed.jsonl"
 def _write_dead_letter(entry: dict[str, Any]) -> None:
     """Append a malformed/dropped record to the DRKG dead-letter queue.
 
-    Fixes GAP 5.11 — every ``continue``/skip path in ``parse_drkg_tsv``
+    Fixes GAP 5.11 -- every ``continue``/skip path in ``parse_drkg_tsv``
     and ``validate_drkg`` MUST call this first, so no record is silently
     dropped. The file is ``data/dead_letter/drkg_malformed.jsonl`` (one
     JSON object per line, append-only).
@@ -379,7 +379,7 @@ def _write_dead_letter(entry: dict[str, Any]) -> None:
         }
         with _DEAD_LETTER_PATH.open("a", encoding="utf-8") as f:
             f.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
-    except OSError as exc:  # pragma: no cover — best-effort
+    except OSError as exc:  # pragma: no cover -- best-effort
         logger.error("Failed to write dead-letter entry: %s", exc)
 
 
@@ -398,7 +398,7 @@ def _log_transform(
 ) -> None:
     """Record a significant data transformation for audit traceability.
 
-    Fixes GAP 11.6 / BUG 16.4 — every non-trivial transformation (BOM
+    Fixes GAP 11.6 / BUG 16.4 -- every non-trivial transformation (BOM
     strip, comment skip, entity-type-mismatch exclusion, self-loop drop,
     duplicate quarantine, invalid-triple exclusion, SCI-1 override) is
     logged as one JSON line. This is the data-lineage audit trail:
@@ -408,7 +408,7 @@ def _log_transform(
         stage: Pipeline stage (``"parse"``, ``"validate"``,
             ``"edge_index"``, etc.).
         transformation: Short tag (``"bom_strip"``,
-            ``"entity_relation_type_mismatch"``, …).
+            ``"entity_relation_type_mismatch"``, ...).
         original: The pre-transformation value (stringified, truncated).
         result: The post-transformation value (stringified, truncated).
         row_context: Optional dict with identifying fields (head_entity,
@@ -427,7 +427,7 @@ def _log_transform(
         }
         with _TRANSFORM_LOG_PATH.open("a", encoding="utf-8") as f:
             f.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
-    except OSError as exc:  # pragma: no cover — best-effort
+    except OSError as exc:  # pragma: no cover -- best-effort
         logger.error("Failed to write transform-log entry: %s", exc)
 
 
@@ -438,7 +438,7 @@ _LOADER_STATE_PATH: Final[Path] = PROCESSED_DIR / "loader_state.json"
 def _persist_loader_state(source_name: str, state: dict[str, Any]) -> None:
     """Persist loader state (last_downloaded_at, sha256) for idempotency.
 
-    Fixes GAP 16.6 / BUG 16.2 / BUG 16.3 — after a successful download,
+    Fixes GAP 16.6 / BUG 16.2 / BUG 16.3 -- after a successful download,
     the SHA-256, size, URL, and timestamp are written to
     ``data/processed/loader_state.json`` so the next run can detect
     staleness and so downstream consumers can verify which source
@@ -459,7 +459,7 @@ def _persist_loader_state(source_name: str, state: dict[str, Any]) -> None:
         _LOADER_STATE_PATH.write_text(
             json.dumps(existing, indent=2, default=str), encoding="utf-8"
         )
-    except OSError as exc:  # pragma: no cover — best-effort
+    except OSError as exc:  # pragma: no cover -- best-effort
         logger.warning("Failed to persist loader state: %s", exc)
 
 
@@ -474,14 +474,14 @@ def _write_checkpoint(
 ) -> None:
     """Write a parse/build checkpoint for resume-after-failure.
 
-    Fixes GAP 6.8 — every ``_CHECKPOINT_EVERY`` rows, the current row
+    Fixes GAP 6.8 -- every ``_CHECKPOINT_EVERY`` rows, the current row
     count and (optionally) the partial edge-maps are persisted. On a
     subsequent run, if the source SHA-256 matches, the build can resume
     from the checkpoint instead of restarting from row 0.
 
     Args:
         rows_processed: Number of rows processed so far.
-        source_sha256: SHA-256 of the source ``drkg.tsv`` — used to
+        source_sha256: SHA-256 of the source ``drkg.tsv`` -- used to
             validate that the checkpoint applies to the current input.
         edge_maps_partial: Optional partial edge-maps (only set when
             checkpointing mid-build; None for end-of-parse checkpoints).
@@ -499,7 +499,7 @@ def _write_checkpoint(
         _CHECKPOINT_PATH.write_text(
             json.dumps(payload, indent=2, default=str), encoding="utf-8"
         )
-    except OSError as exc:  # pragma: no cover — best-effort
+    except OSError as exc:  # pragma: no cover -- best-effort
         logger.warning("Failed to write checkpoint: %s", exc)
 
 
@@ -507,7 +507,7 @@ def _write_checkpoint(
 def _validate_drkg_url(url: str) -> None:
     """Refuse to download from a URL not in the allowlist.
 
-    Fixes BUG 9.2 — guards against config injection / SSRF. The allowlist
+    Fixes BUG 9.2 -- guards against config injection / SSRF. The allowlist
     is ``config.ALLOWED_DRKG_URLS`` and can be extended without code
     changes (extend the tuple in config.py).
 
@@ -530,11 +530,11 @@ def _validate_drkg_url(url: str) -> None:
 def _get_ssl_context() -> ssl.SSLContext:
     """Return a TLS context for verifying DRKG's S3 certificate.
 
-    Fixes BUG 9.1 — ``urllib.request.urlretrieve`` does NOT verify TLS.
+    Fixes BUG 9.1 -- ``urllib.request.urlretrieve`` does NOT verify TLS.
     We use ``ssl.create_default_context`` with ``certifi``'s CA bundle if
     available, falling back to the system CA store. An optional TOFU
     certificate fingerprint can be pinned via ``DRUGOS_DRKG_CERT_PIN``
-    (advanced deployments only — see ``docs/drkg_loader_runbook.md``).
+    (advanced deployments only -- see ``docs/drkg_loader_runbook.md``).
     """
     ctx = ssl.create_default_context()
     try:
@@ -543,12 +543,12 @@ def _get_ssl_context() -> ssl.SSLContext:
     except ImportError:
         pass  # fall back to system CAs
     if _DRUGOS_DRKG_CERT_PIN:
-        # TOFU pin — log a warning so operators know verification is
+        # TOFU pin -- log a warning so operators know verification is
         # being overridden. Full fingerprint-pinning would require
         # subclassing HTTPSConnection; left as a deployment hardening
         # exercise (the allowlist + SHA-256 verify is the primary guard).
         logger.warning(
-            "DRUGOS_DRKG_CERT_PIN is set — TLS pinning is TOFU-only; "
+            "DRUGOS_DRKG_CERT_PIN is set -- TLS pinning is TOFU-only; "
             "rely on the SHA-256 verify (BUG 5.8) for integrity.",
         )
     return ctx
@@ -564,9 +564,9 @@ def _safe_members(
 ) -> list[tarfile.TarInfo]:
     """Filter tar members to a safe subset (no symlinks, no traversal).
 
-    Fixes BUG 9.4 — replaces the old ``str.startswith`` check (sibling-
+    Fixes BUG 9.4 -- replaces the old ``str.startswith`` check (sibling-
     directory collision risk) with ``Path.is_relative_to``.
-    Fixes BUG 9.5 — explicitly rejects device files, symlinks, and hard
+    Fixes BUG 9.5 -- explicitly rejects device files, symlinks, and hard
     links; on Python 3.12+ the stdlib's ``filter="data"`` does the same,
     but we use this helper on all Python versions for defence-in-depth.
 
@@ -608,7 +608,7 @@ def _safe_members(
 def _safe_tar_extract(tar_path: Path, extract_dir: Path) -> None:
     """Extract ``tar_path`` into ``extract_dir`` with full safety filters.
 
-    Fixes BUG 9.5 — uses ``filter="data"`` on Python 3.12+ and the
+    Fixes BUG 9.5 -- uses ``filter="data"`` on Python 3.12+ and the
     explicit ``_safe_members`` filter on older Pythons. Also requires
     ``backports.tarfile`` on <3.12 (declared in requirements.txt).
 
@@ -659,7 +659,7 @@ def _safe_tar_extract(tar_path: Path, extract_dir: Path) -> None:
 def _apply_strict_edge_filter(df: pd.DataFrame) -> pd.DataFrame:
     """Filter the DataFrame to biologically-valid, evidence-tagged edges.
 
-    Fixes GAP 3.9 — when ``config.STRICT_EDGE_FILTERING`` is True (the
+    Fixes GAP 3.9 -- when ``config.STRICT_EDGE_FILTERING`` is True (the
     default for clinical safety), refuse to emit text-mined ``A+``
     activator edges as if they were ``treats`` edges. This protects the
     RL safety ranker from misclassifying activators as treatments.
@@ -675,7 +675,7 @@ def _apply_strict_edge_filter(df: pd.DataFrame) -> pd.DataFrame:
             ``head_type``, ``tail_type``, ``evidence_strength`` columns).
 
     Returns:
-        Filtered DataFrame (a copy — does NOT mutate the input).
+        Filtered DataFrame (a copy -- does NOT mutate the input).
     """
     if not STRICT_EDGE_FILTERING:
         return df
@@ -707,7 +707,7 @@ def _apply_strict_edge_filter(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # =============================================================================
-# Section 2 — Download (BUG 6.1, BUG 6.2, BUG 6.3, BUG 6.4, BUG 6.5,
+# Section 2 -- Download (BUG 6.1, BUG 6.2, BUG 6.3, BUG 6.4, BUG 6.5,
 #             BUG 9.1, BUG 9.2, BUG 9.3, BUG 9.4, BUG 9.5, BUG 14.4,
 #             GAP 5.10, GAP 6.7, GAP 9.6, BUG 16.2, BUG 16.3, BUG 16.5,
 #             GUARD 9.7)
@@ -719,11 +719,11 @@ def _apply_strict_edge_filter(df: pd.DataFrame) -> pd.DataFrame:
 #   3. User-Agent header (BUG 9.3)
 #   4. Retry with exponential backoff (BUG 6.1)
 #   5. Atomic tmp + os.replace (BUG 6.3)
-#   6. Content-sniff assertion — gzip magic 0x1f 0x8b (GAP 5.10)
-#   7. Size verification — 90% lower bound, max upper bound (BUG 5.9)
+#   6. Content-sniff assertion -- gzip magic 0x1f 0x8b (GAP 5.10)
+#   7. Size verification -- 90% lower bound, max upper bound (BUG 5.9)
 #   8. SHA-256 verification (BUG 5.8) + record in config (BUG 16.3)
 #   9. Atomic extract-dir (BUG 6.4) with completeness check (BUG 6.5)
-#  10. Safe tar extraction — no symlinks, no traversal (BUG 9.4, BUG 9.5)
+#  10. Safe tar extraction -- no symlinks, no traversal (BUG 9.4, BUG 9.5)
 #  11. allow_stale graceful degradation (GAP 6.7)
 #  12. Freshness WARNING if cache is stale (GAP 5.12)
 #  13. Impact analysis on SHA change (BUG 16.5)
@@ -740,7 +740,7 @@ def _download_from_network(
 
     Implements BUG 6.1 (retry with exponential backoff), BUG 6.2 (wrapped
     DRKGDownloadError), BUG 6.3 (atomic temp-file + os.replace), BUG 9.1
-    (TLS), BUG 9.3 (User-Agent), BUG 9.4 / 9.5 (tar safety — applied by
+    (TLS), BUG 9.3 (User-Agent), BUG 9.4 / 9.5 (tar safety -- applied by
     the caller before extraction), GAP 5.10 (content-sniff assertion),
     BUG 5.9 (size verify), BUG 5.8 (SHA-256 verify), BUG 16.2 (record
     last_downloaded_at), BUG 16.3 (record sha256), BUG 16.5 (impact
@@ -757,7 +757,7 @@ def _download_from_network(
     timeout = int(cfg.get("timeout_seconds", 300))
 
     headers = {
-        # BUG 9.3 — identify ourselves to the S3 bucket so the operator
+        # BUG 9.3 -- identify ourselves to the S3 bucket so the operator
         # can correlate access-log entries with our pipeline.
         "User-Agent": "DrugOS/1.0 (drugos@example.com)",
         "Accept": "application/octet-stream, */*",
@@ -790,7 +790,7 @@ def _download_from_network(
             last_error = exc
             backoff = backoff_base * (2 ** (attempt - 1))
             logger.warning(
-                "Download attempt %d/%d failed for %s: %s — retrying in %.0fs",
+                "Download attempt %d/%d failed for %s: %s -- retrying in %.0fs",
                 attempt, max_retries, source_name, exc, backoff,
                 extra={
                     "stage": "download",
@@ -804,11 +804,11 @@ def _download_from_network(
             if attempt < max_retries:
                 time.sleep(backoff)
     else:
-        # All retries exhausted — GAP 6.7 graceful degradation.
+        # All retries exhausted -- GAP 6.7 graceful degradation.
         if allow_stale and tar_path.exists():
             age_days = _staleness_days(cfg)
             logger.critical(
-                "drkg_stale_data_used age_days=%d — download failed, "
+                "drkg_stale_data_used age_days=%d -- download failed, "
                 "falling back to cached copy per allow_stale=True.",
                 age_days,
                 extra={
@@ -920,7 +920,7 @@ def _download_from_network(
         "parser_version": PARSER_VERSION,
     })
 
-    size_mib = actual_size / (1024 * 1024)  # BUG 4.9 — MiB, not 1e6 MB
+    size_mib = actual_size / (1024 * 1024)  # BUG 4.9 -- MiB, not 1e6 MB
     logger.info(
         "Downloaded %s to %s (%.1f MiB, sha256=%s...)",
         source_name, tar_path.name, size_mib, actual_sha[:12],
@@ -972,7 +972,7 @@ def download_drkg(
     Side effects:
         - Writes ~500 MB to ``RAW_DIR`` (or ``raw_dir``) on a fresh
           download.
-        - Extracts ~1.5 GB to ``RAW_DIR / "drkg"`` (BUG 7.3 — cleans
+        - Extracts ~1.5 GB to ``RAW_DIR / "drkg"`` (BUG 7.3 -- cleans
           existing extract_dir first when ``force=True``).
         - Updates ``DATA_SOURCES['drkg']['last_downloaded_at']`` and
           ``['sha256']``.
@@ -994,7 +994,7 @@ def download_drkg(
     base_dir = Path(raw_dir) if raw_dir is not None else (
         Path(_DRUGOS_DRKG_DIR) if _DRUGOS_DRKG_DIR else RAW_DIR
     )
-    # BUG 1.3 — use config.get_data_source_path's logic, but allow the
+    # BUG 1.3 -- use config.get_data_source_path's logic, but allow the
     # raw_dir override (the config helper reads RAW_DIR directly).
     tar_path = base_dir / drkg_cfg["filename"]
     extract_dir = base_dir / "drkg"
@@ -1007,14 +1007,14 @@ def download_drkg(
             extra={"stage": "download", "cached": True,
                    "path": str(extract_dir)},
         )
-        # GAP 5.12 — freshness WARNING on cache hit.
+        # GAP 5.12 -- freshness WARNING on cache hit.
         _warn_if_stale(drkg_cfg)
         return extract_dir
 
     # ── BUG 7.3: force=True cleans extract_dir before re-extract ─────
     if force and extract_dir.exists():
         logger.info(
-            "Force re-extraction requested — removing existing %s",
+            "Force re-extraction requested -- removing existing %s",
             extract_dir,
             extra={"stage": "download", "force": True,
                    "path": str(extract_dir)},
@@ -1027,7 +1027,7 @@ def download_drkg(
             drkg_cfg, tar_path, "drkg", allow_stale,
         )
     else:
-        # Cached tarball — still apply freshness check.
+        # Cached tarball -- still apply freshness check.
         _warn_if_stale(drkg_cfg)
 
     # ── BUG 6.4: atomic extraction via tmp_extract + os.replace ──────
@@ -1043,7 +1043,7 @@ def download_drkg(
             extra={"stage": "extract", "tar_path": str(tar_path),
                    "extract_dir": str(extract_dir)},
         )
-        # BUG 9.5 — _safe_tar_extract handles the filter="data" vs
+        # BUG 9.5 -- _safe_tar_extract handles the filter="data" vs
         # explicit _safe_members split across Python versions.
         # We extract into tmp_extract first so a partial extraction
         # does not leave extract_dir in a half-populated state.
@@ -1093,7 +1093,7 @@ def download_drkg(
 def _warn_if_stale(cfg: dict[str, Any]) -> None:
     """Emit a WARNING if the cached DRKG tarball is past its freshness window.
 
-    Fixes GAP 5.12 — the DRKG publisher refreshes the dataset roughly
+    Fixes GAP 5.12 -- the DRKG publisher refreshes the dataset roughly
     annually (``expected_update_frequency_days=365``). If the cache is
     older than 1.5x that window, the operator is warned to consider
     forcing a re-download.
@@ -1103,7 +1103,7 @@ def _warn_if_stale(cfg: dict[str, Any]) -> None:
     if days > threshold:
         logger.warning(
             "DRKG cache is %d days old (expected refresh every %d days) "
-            "— consider force re-download via download_drkg(force=True).",
+            "-- consider force re-download via download_drkg(force=True).",
             days, int(cfg.get("expected_update_frequency_days", 365)),
             extra={
                 "stage": "download",
@@ -1116,7 +1116,7 @@ def _warn_if_stale(cfg: dict[str, Any]) -> None:
 
 
 # =============================================================================
-# Section 3 — Parse (BUG 1.4, BUG 1.5, BUG 4.3, BUG 4.4, BUG 4.8, BUG 5.6,
+# Section 3 -- Parse (BUG 1.4, BUG 1.5, BUG 4.3, BUG 4.4, BUG 4.8, BUG 5.6,
 #             BUG 5.7, BUG 6.6, BUG 11.3, BUG 14.1, BUG 14.2, BUG 14.3,
 #             BUG 15.1, BUG 15.2, BUG 15.3, BUG 16.1, GAP 3.7, GAP 3.8,
 #             GAP 9.6, GUARD 3.10, GUARD 11.3)
@@ -1156,12 +1156,12 @@ def parse_drkg_tsv(
             Defaults to ``config.RAW_DIR`` (GAP 1.7).
 
     Returns:
-        DataFrame with all DRKG triples. The DataFrame is a fresh copy —
+        DataFrame with all DRKG triples. The DataFrame is a fresh copy --
         callers may freely mutate it without affecting the cache.
 
     Raises:
         DRKGParseError: The TSV cannot be parsed (``pandas.errors.ParserError``
-            — BUG 6.6), the file does not exist, or the parsed schema is
+            -- BUG 6.6), the file does not exist, or the parsed schema is
             missing required columns (BUG 15.3).
         DRKGDataIntegrityError: Provenance is incomplete (BUG 16.1).
 
@@ -1191,10 +1191,10 @@ def parse_drkg_tsv(
 
     # ── BUG 7.2 / BUG 1.4 / BUG 12.3: find drkg.tsv deterministically ─
     drkg_cfg = DATA_SOURCES["drkg"]
-    tsv_name = drkg_cfg["tsv_file"]  # BUG 1.4 / BUG 12.3 — not hardcoded
+    tsv_name = drkg_cfg["tsv_file"]  # BUG 1.4 / BUG 12.3 -- not hardcoded
     tsv_path = drkg_dir / tsv_name
     if not tsv_path.exists():
-        tsv_candidates = sorted(drkg_dir.rglob(tsv_name))  # BUG 7.2 — sorted
+        tsv_candidates = sorted(drkg_dir.rglob(tsv_name))  # BUG 7.2 -- sorted
         if not tsv_candidates:
             raise DRKGParseError(
                 f"{tsv_name} not found in {drkg_dir}.",
@@ -1222,7 +1222,7 @@ def parse_drkg_tsv(
 
     # ── BUG 5.6 / BUG 5.7 / BUG 15.1 / BUG 15.2 / BUG 6.6: hardened read_csv ─
     # v68 ROOT FIX (P2L-022): removed ``comment="#"``. DRKG TSV has NO
-    # comment lines — the parameter was unnecessary and risky. If any
+    # comment lines -- the parameter was unnecessary and risky. If any
     # entity ID or relation string contained ``#`` (unlikely for current
     # DRKG but possible for future variants or user-supplied augmented
     # DRKG files), everything after ``#`` on that line was silently
@@ -1236,17 +1236,17 @@ def parse_drkg_tsv(
                 tsv_path,
                 sep="\t",
                 header=None,
-                names=list(DRKG_TSV_COLUMNS),  # BUG 12.4 — from config
-                dtype=str,                     # BUG 5.7 — strings only
-                encoding="utf-8-sig",          # BUG 15.1 — strips BOM
+                names=list(DRKG_TSV_COLUMNS),  # BUG 12.4 -- from config
+                dtype=str,                     # BUG 5.7 -- strings only
+                encoding="utf-8-sig",          # BUG 15.1 -- strips BOM
                 na_filter=False,               # empty strings stay "" (caught below)
-                skip_blank_lines=True,         # BUG 5.6 — skip blank lines
-                on_bad_lines="warn",           # GAP 5.11 — capture via warnings
-                lineterminator="\n",           # BUG 15.2 — LF, not CRLF
+                skip_blank_lines=True,         # BUG 5.6 -- skip blank lines
+                on_bad_lines="warn",           # GAP 5.11 -- capture via warnings
+                lineterminator="\n",           # BUG 15.2 -- LF, not CRLF
             )
             captured_warnings = list(caught)
     except pd.errors.ParserError as exc:
-        # BUG 6.6 — wrap ParserError in DRKGParseError.
+        # BUG 6.6 -- wrap ParserError in DRKGParseError.
         raise DRKGParseError(
             f"Failed to parse {tsv_path}: {exc}. The file may be "
             "corrupted. Check data/dead_letter/drkg_malformed.jsonl "
@@ -1316,7 +1316,7 @@ def parse_drkg_tsv(
 
     # BUG #74 ROOT FIX: validate DRKG entity ID format with regex
     # ^\w+::[\w:]+$. The structural split above catches missing-separator
-    # cases but does NOT validate the format — malformed IDs like
+    # cases but does NOT validate the format -- malformed IDs like
     # "Compound:DB00945" (single colon, would produce head_type="Compound"
     # and head_id="DB00945" but the original was malformed) or IDs with
     # spaces/special chars would pass through and become canonical node
@@ -1388,7 +1388,7 @@ def parse_drkg_tsv(
     )
 
     # ── BUG 3.5: cross-check entity_type vs relation_dst_type ─────────
-    # The third token of the relation embeds "HeadType:TailType" —
+    # The third token of the relation embeds "HeadType:TailType" --
     # compare against the parsed head_type / tail_type and dead-letter
     # any mismatch.
     #
@@ -1460,7 +1460,7 @@ def parse_drkg_tsv(
                 df = df.loc[~mismatch_mask].reset_index(drop=True)
         else:
             # v68 ROOT FIX (P2L-023): ``relation_dst_type`` has no ":"
-            # separator in ANY row — every relation string is malformed
+            # separator in ANY row -- every relation string is malformed
             # (missing the HeadType:TailType token). Dead-letter ALL rows
             # and exclude them, rather than silently passing them through.
             n_malformed = int(len(df))
@@ -1488,7 +1488,7 @@ def parse_drkg_tsv(
                     "relation_dst_type": df.at[idx, "relation_dst_type"],
                     "row_index": int(idx),
                 })
-            # Exclude ALL rows — none have a valid HeadType:TailType token.
+            # Exclude ALL rows -- none have a valid HeadType:TailType token.
             df = df.iloc[0:0].reset_index(drop=True)
 
     # ── GAP 3.7: relation_human_name column ──────────────────────────
@@ -1503,7 +1503,7 @@ def parse_drkg_tsv(
         )
         logger.warning(
             "DRKG unknown relation abbreviations: %d rows, %d distinct "
-            "(%s). These are candidates for codebook extension — see "
+            "(%s). These are candidates for codebook extension -- see "
             "config.DRKG_RELATION_ABBREV_TO_NAME.",
             n_unknown_abbrev, len(unknown_abbrevs),
             unknown_abbrevs[:10],
@@ -1551,7 +1551,7 @@ def parse_drkg_tsv(
     # string label ("verified" / "curated" / "text_mined" / "preprint" /
     # "unknown") as ``source_confidence``. Downstream SQL/Cypher
     # ``ORDER BY confidence DESC`` returns ALPHABETICAL ordering
-    # ("text_mined" < "verified" < "unknown") — silently mis-ranking
+    # ("text_mined" < "verified" < "unknown") -- silently mis-ranking
     # bioRxiv preprints above FDA-verified DRUGBANK edges. Root fix:
     #   - Preserve the original categorical label as
     #     ``source_confidence_label`` (for traceability / faceted filtering).
@@ -1562,10 +1562,10 @@ def parse_drkg_tsv(
     # canonical cross-source-fusion score; source_confidence is the
     # DRKG-specific numeric confidence).
     _DRKG_CONFIDENCE_TO_SCORE: Final[dict[str, float]] = {
-        "verified": 1.0,    # DRUGBANK / FDA labels — highest confidence
+        "verified": 1.0,    # DRUGBANK / FDA labels -- highest confidence
         "curated": 0.8,     # Hetionet curated integrations
         "text_mined": 0.5,  # GNBR / PubMed text-mined
-        "preprint": 0.3,    # bioRxiv preprints — not peer-reviewed
+        "preprint": 0.3,    # bioRxiv preprints -- not peer-reviewed
         "unknown": 0.0,     # no confidence information
     }
     df["source_confidence_label"] = df["source_confidence"]
@@ -1575,7 +1575,7 @@ def parse_drkg_tsv(
 
     # v27 ROOT FIX (P2-L-3): emit a canonical ``normalized_score`` in
     # [0,1] for cross-source fusion. DRKG does NOT have a numeric score
-    # per edge — its ``source_confidence_label`` column is a categorical
+    # per edge -- its ``source_confidence_label`` column is a categorical
     # label (verified / curated / text_mined / preprint / unknown). We
     # map these labels to canonical numeric confidences aligned with the
     # audit's recommended scoring rubric (now in ``source_confidence``).
@@ -1607,7 +1607,7 @@ def parse_drkg_tsv(
     # ── v29 ROOT FIX (audit L-5): Compound ID fragmentation ─────────
     # STITCH/SIDER/DRKG used non-InChIKey IDs. Now normalizes to
     # InChIKey via crosswalk before loading. DRKG emits Compound
-    # head_id/tail_id as DrugBank IDs (``DB00107``) — these don't
+    # head_id/tail_id as DrugBank IDs (``DB00107``) -- these don't
     # match the InChIKey-keyed Compound nodes produced by DrugBank /
     # ChEMBL / PubChem loaders, fragmenting the KG into disjoint
     # subgraphs. This block rewrites head_id (when head_type ==
@@ -1618,12 +1618,12 @@ def parse_drkg_tsv(
     # calls ``IDCrosswalk.register_compound_inchikey()`` for every
     # (compound_id, inchikey) pair it builds from DrugBank / ChEMBL /
     # PubChem records). When no mapping exists, the original ID
-    # passes through unchanged — ``merge_mappings_by_inchikey()``
+    # passes through unchanged -- ``merge_mappings_by_inchikey()``
     # in entity_resolver will eventually merge these once Phase 1
     # runs and populates the crosswalk.
     #
     # NOTE: head_uri / tail_uri are constructed BEFORE this block
-    # (above) — they retain the original FAIR identifiers.org URI
+    # (above) -- they retain the original FAIR identifiers.org URI
     # semantic (e.g. ``http://identifiers.org/drugbank:DB00107``) so
     # external FAIR-resolution services still work. Only head_id /
     # tail_id (used for KG node identity) are normalized.
@@ -1638,10 +1638,10 @@ def parse_drkg_tsv(
         try:
             from .id_crosswalk import _normalize_compound_id_to_inchikey
             _l5_available = True
-        except ImportError:  # pragma: no cover — defensive
+        except ImportError:  # pragma: no cover -- defensive
             logger.warning(
                 "DRKG parse: id_crosswalk._normalize_compound_id_to_inchikey "
-                "not available — Compound IDs will NOT be normalized to "
+                "not available -- Compound IDs will NOT be normalized to "
                 "InChIKey (v29 L-5 fix skipped).",
                 extra={"stage": "parse_l5_normalize"},
             )
@@ -1681,12 +1681,12 @@ def parse_drkg_tsv(
                     # between ``.astype(str).unique()`` and the series values),
                     # NaN values leak into ``head_id``. The downstream
                     # ``empty_mask`` check uses ``.str.len() == 0`` which
-                    # returns NaN for NaN inputs, and ``NaN == 0`` is False —
+                    # returns NaN for NaN inputs, and ``NaN == 0`` is False --
                     # so NaN-tainted rows PASS the empty filter and reach edge
                     # emission with ``head_id=NaN``. ``kg_builder`` then either
                     # crashes (TypeError on NaN) or dead-letters the row.
                     # Additionally, ``n_rewritten_head`` counted
-                    # ``NaN != original`` as a rewrite — inflating the success
+                    # ``NaN != original`` as a rewrite -- inflating the success
                     # metric and masking the failure.
                     # ROOT FIX: ``fillna(original_head)`` so unmapped IDs
                     # retain their original value. Count rewrites ONLY when
@@ -1695,7 +1695,7 @@ def parse_drkg_tsv(
                     mapped_head = mapped_head.fillna(original_head)
                     # Defensive: also restore original for any empty-string
                     # mappings (``_normalize_compound_id_to_inchikey``
-                    # returns "" for None / "nan" / "None" inputs — but the
+                    # returns "" for None / "nan" / "None" inputs -- but the
                     # original ID in that case was already bogus, so we keep
                     # the "" so the empty_mask check catches it downstream).
                     n_rewritten_head = int(
@@ -1710,7 +1710,7 @@ def parse_drkg_tsv(
                     original_tail = df.loc[tail_compound_mask, "tail_id"]
                     mapped_tail = original_tail.map(compound_id_map)
                     # v68 ROOT FIX (P2L-021): same fillna + count fix as
-                    # head_id above — prevents NaN/None tail_id from
+                    # head_id above -- prevents NaN/None tail_id from
                     # reaching edge emission.
                     mapped_tail = mapped_tail.fillna(original_tail)
                     n_rewritten_tail = int(
@@ -1736,7 +1736,7 @@ def parse_drkg_tsv(
                         },
                     )
 
-    # ── BUG 15.2: defence-in-depth — strip stray \r from all str columns
+    # ── BUG 15.2: defence-in-depth -- strip stray \r from all str columns
     for col in ("head_entity", "relation", "tail_entity",
                 "head_type", "head_id", "tail_type", "tail_id",
                 "relation_name", "relation_source", "relation_dst_type"):
@@ -1747,7 +1747,7 @@ def parse_drkg_tsv(
     # v68 ROOT FIX (P2L-021 defense-in-depth): the previous empty_mask
     # only checked ``head_entity`` / ``relation`` / ``tail_entity``. But
     # ``head_id`` / ``tail_id`` are the columns actually used by
-    # ``kg_builder`` for node identity — and they're the columns that
+    # ``kg_builder`` for node identity -- and they're the columns that
     # the v29 L-5 Compound-ID normalization rewrites. If the rewrite
     # produced NaN (now prevented by the fillna fix above) or an empty
     # string, the row would PASS this empty_mask and reach edge emission
@@ -1757,10 +1757,10 @@ def parse_drkg_tsv(
     # v70 ROOT FIX (P2L-026): the previous empty_mask used
     # ``df["head_entity"].str.len() == 0`` for the *_entity / relation
     # columns. ``.str.len()`` returns NaN for NaN inputs, and
-    # ``NaN == 0`` evaluates to False — so NaN-tainted rows PASS the
+    # ``NaN == 0`` evaluates to False -- so NaN-tainted rows PASS the
     # filter and reach edge emission with NaN entity IDs (compounding
     # P2L-021). Root fix: use ``fillna("").str.len() == 0`` which
-    # treats NaN as empty (the semantically correct behavior — a missing
+    # treats NaN as empty (the semantically correct behavior -- a missing
     # entity ID IS an empty required field, not a present one). Applied
     # uniformly across head_entity / relation / tail_entity / head_id /
     # tail_id so the mask is NaN-safe for ALL required identity columns.
@@ -1777,7 +1777,7 @@ def parse_drkg_tsv(
     if n_empty > 0:
         logger.warning(
             "DRKG parse: %d rows have empty required fields after parse "
-            "— writing to dead-letter and excluding.",
+            "-- writing to dead-letter and excluding.",
             n_empty,
             extra={"stage": "parse", "malformed_count": n_empty},
         )
@@ -1796,7 +1796,7 @@ def parse_drkg_tsv(
     if missing:
         raise DRKGParseError(
             f"DRKG parse schema violation: missing columns {missing}. "
-            f"Parser version mismatch — expected SCHEMA_VERSION="
+            f"Parser version mismatch -- expected SCHEMA_VERSION="
             f"{SCHEMA_VERSION}, got columns={sorted(df.columns)}",
             context={
                 "missing": sorted(missing),
@@ -1827,7 +1827,7 @@ def parse_drkg_tsv(
         "parsed_at": _iso_now(),
         "row_count": len(df),
     }
-    # BUG 16.1 — assert provenance completeness.
+    # BUG 16.1 -- assert provenance completeness.
     missing_prov = set(_DRKG_PROVENANCE_KEYS_TUPLE) - set(provenance.keys())
     if missing_prov:
         raise DRKGDataIntegrityError(
@@ -1910,20 +1910,20 @@ def _safe_split_relation(relation: str) -> tuple[str, str, str]:
 
 # ── Helper: source-confidence mapping (GUARD 3.10) ───────────────────────────
 # v70 ROOT FIX (P2L-024): the previous dict enumerated BOTH uppercase
-# ("DRUGBANK") and lowercase ("drugbank") variants — but NOT mixed-case
+# ("DRUGBANK") and lowercase ("drugbank") variants -- but NOT mixed-case
 # "DrugBank" (the canonical spelling used by the DrugBank parser and most
 # biomedical databases). Any future DRKG release using "DrugBank" /
 # "Hetionet" / "Gnbr" / "BIOARX" / "BioArx" etc. would fall through to
-# "unknown" — losing the "verified"/"curated"/"text_mined" status and
+# "unknown" -- losing the "verified"/"curated"/"text_mined" status and
 # corrupting downstream confidence ranking.
 #
 # Root fix: store a SINGLE canonical (lowercase) dict, and consult it
 # via a case-insensitive lookup helper. This is robust to ANY case
-# variation ("DRUGBANK", "drugbank", "DrugBank", "DrUgBaNk", …) without
+# variation ("DRUGBANK", "drugbank", "DrugBank", "DrUgBaNk", ...) without
 # requiring us to predict and enumerate every spelling the upstream
 # DRKG distributors might choose.
 _SOURCE_TO_CONFIDENCE: Final[dict[str, str]] = {
-    "drugbank":  "verified",    # FDA labels — highest confidence
+    "drugbank":  "verified",    # FDA labels -- highest confidence
     "hetionet":  "curated",     # Hetionet curated integrations
     "gnbr":      "text_mined",  # PubMed text-mined
     "bioarx":    "preprint",    # bioRxiv preprints
@@ -1931,11 +1931,11 @@ _SOURCE_TO_CONFIDENCE: Final[dict[str, str]] = {
 
 
 def _lookup_source_confidence(relation_source: object) -> str:
-    """Case-insensitive lookup of source → confidence label.
+    """Case-insensitive lookup of source -> confidence label.
 
     Returns ``"unknown"`` for missing/NaN/non-string inputs or any source
     name not present in :data:`_SOURCE_TO_CONFIDENCE`. This helper is the
-    SINGLE source of truth for source-name → confidence resolution —
+    SINGLE source of truth for source-name -> confidence resolution --
     eliminating the brittle dual-case dict that previously required manual
     enumeration of every spelling variant.
     """
@@ -1986,7 +1986,7 @@ from .schemas import DRKG_PROVENANCE_KEYS as _DRKG_PROVENANCE_KEYS_TUPLE  # noqa
 
 
 # =============================================================================
-# Section 4 — Validate (BUG 2.4, BUG 4.12, BUG 5.1, BUG 5.2, BUG 5.3,
+# Section 4 -- Validate (BUG 2.4, BUG 4.12, BUG 5.1, BUG 5.2, BUG 5.3,
 #             BUG 5.4, BUG 5.5, BUG 3.6, BUG 11.5, GAP 7.5)
 # =============================================================================
 def validate_drkg(
@@ -2002,15 +2002,15 @@ def validate_drkg(
     corrupted, truncated, or tampered dataset.
 
     The following guards RAISE on failure (clinical-safety critical):
-      * Row count vs ``expected_record_count`` (BUG 5.1 — 95% tolerance).
-      * Entity-type count vs ``EXPECTED_DRKG_ENTITY_TYPES`` (BUG 5.2 — ±1).
-      * Relation-type count vs ``EXPECTED_DRKG_RELATION_TYPES`` (BUG 5.2 — ±1).
+      * Row count vs ``expected_record_count`` (BUG 5.1 -- 95% tolerance).
+      * Entity-type count vs ``EXPECTED_DRKG_ENTITY_TYPES`` (BUG 5.2 -- ±1).
+      * Relation-type count vs ``EXPECTED_DRKG_RELATION_TYPES`` (BUG 5.2 -- ±1).
 
     The following guards WARN + dead-letter + drop (recoverable):
       * Exact-duplicate triples (BUG 5.3).
       * Self-loop triples (BUG 5.4).
       * Unknown entity types vs ``config.DRKG_NODE_TYPES`` (BUG 5.5).
-      * Biologically-invalid triples (BUG 3.6 — when STRICT_EDGE_FILTERING).
+      * Biologically-invalid triples (BUG 3.6 -- when STRICT_EDGE_FILTERING).
 
     Args:
         df: Parsed DRKG DataFrame (output of ``parse_drkg_tsv``).
@@ -2034,12 +2034,12 @@ def validate_drkg(
     results["relation_type_count"] = len(rel_counts)
     results["entity_type_breakdown"] = entity_counts
 
-    # ── Null / malformed checks (vectorised — BUG 4.12) ──────────────
+    # ── Null / malformed checks (vectorised -- BUG 4.12) ──────────────
     results["null_heads"] = int(df["head_entity"].isna().sum())
     results["null_tails"] = int(df["tail_entity"].isna().sum())
     results["null_relations"] = int(df["relation"].isna().sum())
 
-    # BUG 4.12 — vectorised malformed-entity detection (replaces Python
+    # BUG 4.12 -- vectorised malformed-entity detection (replaces Python
     # loop over 97K entities).
     all_entities = pd.concat(
         [df["head_entity"], df["tail_entity"]], ignore_index=True
@@ -2170,7 +2170,7 @@ def validate_drkg(
     results["cross_source_duplicate_triples"] = cross_source_dups
     if n_exact_dups > 0:
         logger.warning(
-            "Exact duplicate triples (same source): %d — investigating.",
+            "Exact duplicate triples (same source): %d -- investigating.",
             n_exact_dups,
             extra={"stage": "validate", "exact_dup_count": n_exact_dups},
         )
@@ -2341,14 +2341,14 @@ def validate_drkg(
 
 
 # =============================================================================
-# Section 5 — Entity & Relation maps (BUG 2.1, BUG 2.6, BUG 4.6, BUG 4.11,
+# Section 5 -- Entity & Relation maps (BUG 2.1, BUG 2.6, BUG 4.6, BUG 4.11,
 #             BUG 7.1, BUG 7.4, BUG 8.1, BUG 8.2, BUG 8.3, BUG 11.4,
 #             GAP 2.6)
 # =============================================================================
 def get_entity_type_counts(df: pd.DataFrame) -> dict[str, int]:
     """Count unique entities per type, deduplicating across head/tail columns.
 
-    Uses a vectorised ``pd.concat → drop_duplicates → groupby`` pipeline
+    Uses a vectorised ``pd.concat -> drop_duplicates -> groupby`` pipeline
     (BUG 8.1). Time complexity is O(n) with a ~2x memory factor for the
     concatenated DataFrame; for the full 5.9M-row DRKG this is ~500 MB
     transient and completes in <1s.
@@ -2362,9 +2362,9 @@ def get_entity_type_counts(df: pd.DataFrame) -> dict[str, int]:
             ``tail_type``, ``tail_id`` columns.
 
     Returns:
-        Dict mapping entity type → count of unique entities of that type.
+        Dict mapping entity type -> count of unique entities of that type.
     """
-    # BUG 8.1 — vectorised
+    # BUG 8.1 -- vectorised
     combined = pd.concat(
         [
             df[["head_type", "head_id"]].rename(
@@ -2404,7 +2404,7 @@ def _get_entity_type_counts_iterative(df: pd.DataFrame) -> dict[str, int]:
 def get_relation_type_counts(df: pd.DataFrame) -> dict[str, int]:
     """Count triples per relation type, sorted by relation string (deterministic).
 
-    Fixes BUG 4.11 — sorted by key (relation string) for reproducibility
+    Fixes BUG 4.11 -- sorted by key (relation string) for reproducibility
     across runs. Use ``df['relation'].value_counts()`` directly if you
     need count-descending order.
 
@@ -2412,17 +2412,17 @@ def get_relation_type_counts(df: pd.DataFrame) -> dict[str, int]:
         df: Parsed DRKG DataFrame with a ``relation`` column.
 
     Returns:
-        Dict mapping relation string → count, ordered by relation string
+        Dict mapping relation string -> count, ordered by relation string
         ascending.
     """
     return dict(sorted(df["relation"].value_counts().items()))
 
 
 def build_entity_id_maps(df: pd.DataFrame) -> dict[str, dict[str, int]]:
-    """Build per-type entity ID → integer index mappings.
+    """Build per-type entity ID -> integer index mappings.
 
-    Uses a chained pandas pipeline (BUG 8.3 — no 3 intermediate copies)
-    with ``sort_values(kind="stable")`` (BUG 7.1 — stable sort for
+    Uses a chained pandas pipeline (BUG 8.3 -- no 3 intermediate copies)
+    with ``sort_values(kind="stable")`` (BUG 7.1 -- stable sort for
     reproducibility). Two runs on the same DataFrame produce identical
     maps.
 
@@ -2430,10 +2430,10 @@ def build_entity_id_maps(df: pd.DataFrame) -> dict[str, dict[str, int]]:
         df: Parsed DRKG DataFrame.
 
     Returns:
-        Dict mapping entity type → ``{external_id: integer_index}``.
+        Dict mapping entity type -> ``{external_id: integer_index}``.
         Integer indices are 0-based per type.
     """
-    # BUG 8.3 — chained pipeline
+    # BUG 8.3 -- chained pipeline
     head_entities = df[["head_type", "head_id"]].rename(
         columns={"head_type": "entity_type", "head_id": "entity_id"}
     )
@@ -2446,7 +2446,7 @@ def build_entity_id_maps(df: pd.DataFrame) -> dict[str, dict[str, int]]:
         .sort_values(["entity_type", "entity_id"], kind="stable")
         .reset_index(drop=True)
     )
-    # BUG 7.1 — groupby cumcount gives deterministic 0-based indices
+    # BUG 7.1 -- groupby cumcount gives deterministic 0-based indices
     # per entity type.
     unique_entities["index"] = unique_entities.groupby(
         "entity_type", sort=True
@@ -2468,7 +2468,7 @@ def build_edge_index_maps(
     """Build edge index data per ``(head_type, relation_name, tail_type)``.
 
     Vectorised via pandas ``groupby`` (BUG 8.2). Returns IMMUTABLE tuples
-    (GAP 2.6 / GAP 15.6 — caller cannot accidentally ``.append()`` to the
+    (GAP 2.6 / GAP 15.6 -- caller cannot accidentally ``.append()`` to the
     returned lists). Edge lists are sorted by ``(src_idx, dst_idx)`` per
     type for reproducibility (BUG 7.4).
 
@@ -2478,11 +2478,11 @@ def build_edge_index_maps(
         drop_missing: If True, rows whose head/tail entity is not in
             ``entity_maps`` are logged, dead-lettered, and excluded
             (BUG 2.1). If False (default), a missing entity raises
-            ``DRKGDataIntegrityError`` (it indicates a parser bug —
+            ``DRKGDataIntegrityError`` (it indicates a parser bug --
             ``entity_maps`` should be built from the same df).
 
     Returns:
-        Dict mapping ``(src_type, rel_name, dst_type)`` →
+        Dict mapping ``(src_type, rel_name, dst_type)`` ->
         ``((src_idx, ...), (dst_idx, ...))``. Both tuples are sorted by
         ``(src_idx, dst_idx)``.
 
@@ -2499,7 +2499,7 @@ def build_edge_index_maps(
     head_keys = list(zip(df["head_type"], df["head_id"]))
     tail_keys = list(zip(df["tail_type"], df["tail_id"]))
 
-    # BUG 2.1 — no -1 sentinel. Missing keys raise unless drop_missing=True.
+    # BUG 2.1 -- no -1 sentinel. Missing keys raise unless drop_missing=True.
     # We assign an index per row only when BOTH head and tail are found;
     # rows with any missing entity are either dropped (drop_missing=True)
     # or cause a raise (drop_missing=False).
@@ -2520,7 +2520,7 @@ def build_edge_index_maps(
         if not drop_missing:
             raise DRKGDataIntegrityError(
                 f"Entity {missing_keys[0]!r} not found in entity_maps. "
-                "This indicates a parser bug — entity_maps should be "
+                "This indicates a parser bug -- entity_maps should be "
                 "built from the same df. Pass drop_missing=True to "
                 "silently exclude.",
                 context={
@@ -2530,7 +2530,7 @@ def build_edge_index_maps(
                     "stage": "edge_index",
                 },
             )
-        # BUG 11.4 — log first 10 + dead-letter all
+        # BUG 11.4 -- log first 10 + dead-letter all
         logger.warning(
             "Edge index mapping: %d missing entities (showing first 10): "
             "%s", len(missing_keys), [str(k) for k in missing_keys[:10]],
@@ -2561,13 +2561,13 @@ def build_edge_index_maps(
     df_edges = df_kept.assign(_src_idx=src_idx, _dst_idx=dst_idx)
 
     edge_maps: dict[tuple[str, str, str], tuple[tuple[int, ...], tuple[int, ...]]] = {}
-    # BUG 8.2 — vectorised groupby
+    # BUG 8.2 -- vectorised groupby
     for (ht, rn, tt), group in df_edges.groupby(
         ["head_type", "relation_name", "tail_type"], sort=True
     ):
         srcs = group["_src_idx"].tolist()
         dsts = group["_dst_idx"].tolist()
-        # BUG 7.4 — sort by (src, dst) for reproducibility
+        # BUG 7.4 -- sort by (src, dst) for reproducibility
         paired = sorted(zip(srcs, dsts))
         edge_maps[(ht, rn, tt)] = (
             tuple(s for s, _ in paired),
@@ -2595,7 +2595,7 @@ def _build_edge_index_maps_iterative(
 
     edge_maps: dict[tuple[str, str, str], tuple[list[int], list[int]]] = {}
     missing: list[tuple[str, str]] = []
-    # BUG 4.6 — parallel zip (no enumerate / index lookup in the loop body)
+    # BUG 4.6 -- parallel zip (no enumerate / index lookup in the loop body)
     for ht, hid, rn, tt, tid in zip(
         df["head_type"], df["head_id"], df["relation_name"],
         df["tail_type"], df["tail_id"],
@@ -2609,7 +2609,7 @@ def _build_edge_index_maps_iterative(
                 missing.append((tt, tid))
             if not drop_missing:
                 raise DRKGDataIntegrityError(
-                    f"Entity not found in entity_maps — pass "
+                    f"Entity not found in entity_maps -- pass "
                     f"drop_missing=True to exclude.",
                     context={"missing_count": len(missing)},
                 )
@@ -2619,7 +2619,7 @@ def _build_edge_index_maps_iterative(
             edge_maps[key] = ([], [])
         edge_maps[key][0].append(s)
         edge_maps[key][1].append(d)
-    # BUG 7.4 + GAP 2.6 — sort + immutable tuples
+    # BUG 7.4 + GAP 2.6 -- sort + immutable tuples
     result: dict[tuple[str, str, str], tuple[tuple[int, ...], tuple[int, ...]]] = {}
     for key, (srcs, dsts) in edge_maps.items():
         paired = sorted(zip(srcs, dsts))
@@ -2631,7 +2631,7 @@ def _build_edge_index_maps_iterative(
 
 
 # =============================================================================
-# Section 6 — NetworkX Construction (BUG 4.10, BUG 8.4, GAP 8.6,
+# Section 6 -- NetworkX Construction (BUG 4.10, BUG 8.4, GAP 8.6,
 #             GUARD 8.7)
 # =============================================================================
 def build_networkx_graph(df: pd.DataFrame) -> nx.MultiDiGraph:
@@ -2657,7 +2657,7 @@ def build_networkx_graph(df: pd.DataFrame) -> nx.MultiDiGraph:
 
     Raises:
         DRKGDataIntegrityError: If an entity ID appears with multiple
-            ``entity_type`` values (BUG 4.10 — data corruption).
+            ``entity_type`` values (BUG 4.10 -- data corruption).
         MemoryError: If available RAM is less than 2x the estimated peak
             (GAP 8.6).
     """
@@ -2676,7 +2676,7 @@ def build_networkx_graph(df: pd.DataFrame) -> nx.MultiDiGraph:
             )
     except ImportError:
         logger.debug(
-            "psutil not available — skipping memory guard (GAP 8.6).",
+            "psutil not available -- skipping memory guard (GAP 8.6).",
         )
 
     logger.info(
@@ -2709,7 +2709,7 @@ def build_networkx_graph(df: pd.DataFrame) -> nx.MultiDiGraph:
                     },
                 )
 
-    # Add nodes (vectorised — single pass).
+    # Add nodes (vectorised -- single pass).
     G.add_nodes_from(
         (node_id, {"entity_type": etype})
         for node_id, etype in node_type_map.items()
@@ -2764,7 +2764,7 @@ def build_networkx_graph(df: pd.DataFrame) -> nx.MultiDiGraph:
 
 
 # =============================================================================
-# Section 7 — Filtered Subgraphs (BUG 2.3, BUG 3.1, BUG 3.2, BUG 3.4,
+# Section 7 -- Filtered Subgraphs (BUG 2.3, BUG 3.1, BUG 3.2, BUG 3.4,
 #             GAP 3.9, GUARD 3.10)
 # =============================================================================
 def get_compound_disease_subgraph(
@@ -2774,7 +2774,7 @@ def get_compound_disease_subgraph(
 ) -> pd.DataFrame:
     """Extract Compound-treats-Disease triples (the core prediction target).
 
-    Fixes BUG 3.1 — the old loader filtered by ``relation_name.str.contains
+    Fixes BUG 3.1 -- the old loader filtered by ``relation_name.str.contains
     ("treat", case=False)`` which matched ZERO rows on real DRKG (the real
     abbreviation is ``CtD``). This function uses ``DRKG_TREATMENT_RELATIONS``
     from config (a frozenset, O(1) lookup) instead of a regex.
@@ -2785,7 +2785,7 @@ def get_compound_disease_subgraph(
             (defaults to ``config.DRKG_TREATMENT_RELATIONS``).
 
     Returns:
-        A copy (BUG 2.3 — caller may freely mutate) of the filtered
+        A copy (BUG 2.3 -- caller may freely mutate) of the filtered
         DataFrame, reset_index'd.
     """
     rel_set = (
@@ -2807,7 +2807,7 @@ def get_compound_gene_subgraph(
 ) -> pd.DataFrame:
     """Extract Compound-binds/affects-Gene triples.
 
-    Fixes BUG 3.2 — the old loader filtered by ``relation_name.str.contains
+    Fixes BUG 3.2 -- the old loader filtered by ``relation_name.str.contains
     ("bind|interact|target", case=False)`` which matched only the small
     ``DRUGBANK::target::`` slice. This function uses
     ``DRKG_COMPOUND_GENE_RELATIONS`` from config (sourced from
@@ -2842,7 +2842,7 @@ def get_gene_disease_subgraph(
 ) -> pd.DataFrame:
     """Extract Gene-associated_with-Disease triples.
 
-    Fixes BUG 3.4 — the old loader returned ALL Gene-Disease edges
+    Fixes BUG 3.4 -- the old loader returned ALL Gene-Disease edges
     regardless of semantics, merging biomarkers (``J``), causal (``L``),
     therapeutic-effect (``Te``), upregulated (``U``), underexpressed
     (``Y``), curator (``DaG``, ``DdG``) into one indistinguishable blob.
@@ -2881,7 +2881,7 @@ def get_gene_disease_subgraph(
 
 
 # =============================================================================
-# Section 8 — Streaming API (GAP 8.5, GUARD 8.7)
+# Section 8 -- Streaming API (GAP 8.5, GUARD 8.7)
 # =============================================================================
 def iter_drkg_triples(
     chunksize: int = 1_000_000,
@@ -2891,13 +2891,13 @@ def iter_drkg_triples(
 ) -> Iterator[pd.DataFrame]:
     """Yield DRKG triples in chunks for memory-bounded processing.
 
-    Fixes GAP 8.5 — for DRKG variants >50M rows, ``parse_drkg_tsv``
+    Fixes GAP 8.5 -- for DRKG variants >50M rows, ``parse_drkg_tsv``
     (which materialises the full DataFrame) is not viable. This generator
     uses ``pd.read_csv(chunksize=...)`` so peak memory is bounded by
     ``chunksize`` (default 1M rows ~ 250 MB).
 
     Each yielded chunk is a raw DataFrame with the three TSV columns
-    (``head_entity``, ``relation``, ``tail_entity``) — NOT the full
+    (``head_entity``, ``relation``, ``tail_entity``) -- NOT the full
     parsed schema. Apply ``parse_drkg_tsv`` per chunk if you need the
     derived columns.
 
@@ -2963,7 +2963,7 @@ def iter_drkg_triples(
 
 
 # =============================================================================
-# Section 9 — Convenience: Full Pipeline (GAP 2.7, GAP 6.7, GAP 7.6,
+# Section 9 -- Convenience: Full Pipeline (GAP 2.7, GAP 6.7, GAP 7.6,
 #             GUARD 7.7, GUARD 8.7)
 # =============================================================================
 def load_drkg(
@@ -2979,7 +2979,7 @@ def load_drkg(
     tuple[pd.DataFrame, Optional[nx.MultiDiGraph], dict[str, Any]],
     tuple[pd.DataFrame, Optional[nx.MultiDiGraph], dict[str, Any], dict[str, Any]],
 ]:
-    """Full DRKG loading pipeline: download → parse → validate → optionally build NetworkX.
+    """Full DRKG loading pipeline: download -> parse -> validate -> optionally build NetworkX.
 
     Backward-compatible with the v1 signature ``load_drkg(download=True,
     build_nx=False)`` so ``run_pipeline.py:step1_load_drkg`` continues
@@ -3029,7 +3029,7 @@ def load_drkg(
     if allow_stale is None:
         allow_stale = _DRUGOS_DRKG_ALLOW_STALE
 
-    t0 = time.perf_counter()  # GAP 11.7 — per-stage metrics
+    t0 = time.perf_counter()  # GAP 11.7 -- per-stage metrics
     if download:
         drkg_dir = download_drkg(force=force, raw_dir=raw_dir, allow_stale=allow_stale)
     else:
@@ -3122,12 +3122,12 @@ def load_drkg(
 
 
 # =============================================================================
-# Section 10 — Loader Protocol Adapter (BUG 1.2)
+# Section 10 -- Loader Protocol Adapter (BUG 1.2)
 # =============================================================================
 class DRKGLoader:
     """Adapter implementing the ``Loader`` Protocol for DRKG.
 
-    Fixes BUG 1.2 — provides a uniform ``download / parse / to_graph``
+    Fixes BUG 1.2 -- provides a uniform ``download / parse / to_graph``
     interface so ``run_pipeline`` can treat all loaders polymorphically.
     The module-level functions remain the public API; this class is a
     thin adapter that delegates to them.
@@ -3142,7 +3142,7 @@ class DRKGLoader:
         ``parse_drkg_tsv`` + ``entity_resolver.resolve_*_from_drkg``
         functions; this class is retained for the Loader Protocol
         conformance test and for any external scripts that still use
-        it. New code SHOULD NOT use ``DRKGLoader`` — call
+        it. New code SHOULD NOT use ``DRKGLoader`` -- call
         ``parse_drkg_tsv`` directly.
       * M-8 fix: the edge dict previously emitted ``"relation": rn``
         and only ``src_idx`` / ``dst_idx`` (integer indices into
@@ -3203,11 +3203,11 @@ class DRKGLoader:
 
         P0-G4 ROOT FIX (v82): the previous implementation emitted nodes
         with shape ``{"entity_type": ..., "entity_id": ..., "index": ...}``
-        — a triple-store shape with NO ``"id"`` key. But
+        -- a triple-store shape with NO ``"id"`` key. But
         ``kg_builder.load_nodes_batch`` validates ``row.get("id")`` and
         dead-letters any row missing it. The previous shape had NO
-        ``"id"`` key → every single DRKG node was silently dead-lettered
-        → DRKG (1.5M+ biomedical triples) NEVER entered the KG.
+        ``"id"`` key -> every single DRKG node was silently dead-lettered
+        -> DRKG (1.5M+ biomedical triples) NEVER entered the KG.
         ROOT FIX: emit flat dicts with ``id``, ``name``, ``source`` at
         top level (matching ``load_nodes_batch``'s contract), plus
         ``entity_type`` so callers can group by label before calling
@@ -3223,7 +3223,7 @@ class DRKGLoader:
         Returns:
             Tuple ``(nodes, edges)`` where ``nodes`` is a list of
             flat ``{id, name, source, entity_type, index}`` dicts
-            (P0-G4 fix — previously ``{entity_type, entity_id, index}``
+            (P0-G4 fix -- previously ``{entity_type, entity_id, index}``
             which was silently dead-lettered by load_nodes_batch) and
             ``edges`` is a list of ``{src_type, rel_type, dst_type,
             src_id, dst_id, src_idx, dst_idx}`` dicts.
@@ -3246,8 +3246,8 @@ class DRKGLoader:
             for eid, idx in id_map.items():
                 # P0-G4 ROOT FIX: flat dict with "id" at top level.
                 # Previously emitted {"entity_type", "entity_id", "index"}
-                # which has NO "id" key → load_nodes_batch dead-lettered
-                # every row → DRKG never entered the KG.
+                # which has NO "id" key -> load_nodes_batch dead-lettered
+                # every row -> DRKG never entered the KG.
                 nodes.append({
                     "id": eid,
                     "name": eid,
@@ -3282,7 +3282,7 @@ class DRKGLoader:
 
 
 # =============================================================================
-# Section 11 — __main__ entry (BUG 4.7)
+# Section 11 -- __main__ entry (BUG 4.7)
 # =============================================================================
 if __name__ == "__main__":  # pragma: no cover
     import sys as _sys

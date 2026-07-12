@@ -1,9 +1,9 @@
-# MIT License — Copyright (c) 2026 Team Cosmic / VentureLab — see LICENSE
+# MIT License -- Copyright (c) 2026 Team Cosmic / VentureLab -- see LICENSE
 """
 ChEMBL-specific HTTP client for the ChEMBL pipeline.
 
 v65 ROOT FIX (P1-026 + P1-027): this module's previous file name was
-``_http_client.py`` — a generic-sounding name that implied it was a
+``_http_client.py`` -- a generic-sounding name that implied it was a
 pipeline-agnostic HTTP utility. In reality the client hard-codes
 ChEMBL-specific behaviour (token-bucket parameters tuned for ChEMBL's
 rate limits, ``CHEMBL_MAX_RESPONSE_BYTES`` size cap, the ChEMBL
@@ -21,26 +21,26 @@ reliability, performance, and security issues identified in the
 
 Design goals
 ------------
-1. **Token-bucket rate limiting** (P4) — instead of sleeping a fixed amount
+1. **Token-bucket rate limiting** (P4) -- instead of sleeping a fixed amount
    before every call, the client maintains a token bucket that allows short
    bursts while keeping the long-term average under the configured rate.
-2. **Retry with exponential backoff + jitter** (R1, R3, C34, C36) — only
+2. **Retry with exponential backoff + jitter** (R1, R3, C34, C36) -- only
    retryable failures are retried (429, 5xx, ConnectionError, Timeout,
    ChunkedEncodingError, ContentDecodingError). 4xx (other than 429) fail
-   fast — they will not succeed on retry.
-3. **Circuit breaker** (R10) — after N consecutive failures, the client
+   fast -- they will not succeed on retry.
+3. **Circuit breaker** (R10) -- after N consecutive failures, the client
    enters ``OPEN`` state and fails fast for a cooldown period before
    allowing a single probe request through.
-4. **Response size cap** (SEC-5) — both ``Content-Length`` and the streamed
+4. **Response size cap** (SEC-5) -- both ``Content-Length`` and the streamed
    body are bounded by ``CHEMBL_MAX_RESPONSE_BYTES`` to prevent a malicious
    or buggy server from exhausting memory.
-5. **JSON decode error handling** (C4) — if the response body is not valid
+5. **JSON decode error handling** (C4) -- if the response body is not valid
    JSON, the first 500 chars are logged at ERROR and the request is treated
    as a retryable failure.
-6. **Observable** (L1, L2, L3, L6) — every call's URL, params, status,
+6. **Observable** (L1, L2, L3, L6) -- every call's URL, params, status,
    duration, and response size are logged at INFO/DEBUG and recorded in an
    in-memory ``api_calls`` list that the pipeline writes to its manifest.
-7. **No bare except** (Domain 6 / R8) — every catch is specific
+7. **No bare except** (Domain 6 / R8) -- every catch is specific
    (``requests.exceptions.RequestException`` subclasses).
 
 This module is deliberately self-contained: it depends only on the standard
@@ -81,7 +81,7 @@ logger = logging.getLogger(__name__)
 RETRYABLE_STATUS_CODES: frozenset[int] = frozenset({429, 500, 502, 503, 504})
 
 # Exception classes that should trigger a retry.
-# Note: 4xx (other than 429) is NOT in this list — those are permanent
+# Note: 4xx (other than 429) is NOT in this list -- those are permanent
 # failures (bad URL, unauthorised, not found, etc.) and retrying will not
 # help.
 RETRYABLE_EXCEPTIONS: tuple[type[BaseException], ...] = (
@@ -146,7 +146,7 @@ class _TokenBucket:
         self._last_refill: float = time.monotonic()
         # v84 FORENSIC ROOT FIX (BUG #35): use threading.Condition
         # instead of a plain Lock. The previous code called
-        # ``time.sleep()`` WHILE HOLDING ``self._lock`` — every other
+        # ``time.sleep()`` WHILE HOLDING ``self._lock`` -- every other
         # thread waiting for a token was blocked for the ENTIRE sleep
         # duration (up to 60s on a rate-limit wait). This serialized
         # ALL requests, defeating the token-bucket's purpose. A
@@ -205,7 +205,7 @@ class _CircuitBreaker:
 
     ROOT FIX: this class now wraps ``base_pipeline._CircuitBreaker`` with
     the ChEMBL-specific defaults (threshold=10, timeout=60s) and adds:
-      - ``source_label`` attribute — included in every log message so
+      - ``source_label`` attribute -- included in every log message so
         operators can distinguish "chembl_circuit_breaker" from
         "base_pipeline_circuit_breaker".
       - ``before_call()`` API (the ChEMBL client's preferred interface)
@@ -214,7 +214,7 @@ class _CircuitBreaker:
       - ``state`` property that delegates to the inner breaker's state.
 
     The half-open single-probe gate (v40 ROOT FIX P1 #9) is now inherited
-    from the base class — no more divergent probe semantics.
+    from the base class -- no more divergent probe semantics.
     """
 
     def __init__(
@@ -249,7 +249,7 @@ class _CircuitBreaker:
     def state(self) -> str:
         """Current breaker state (closed / open / half_open)."""
         # Delegate to the inner breaker's state tracking.
-        # The inner breaker transitions open→half_open inside is_open(),
+        # The inner breaker transitions open->half_open inside is_open(),
         # so we read _state directly after letting it update.
         inner = self._inner
         with inner._lock:
@@ -271,13 +271,13 @@ class _CircuitBreaker:
             with self._lock:
                 failures = self._consecutive_failures
             raise CircuitBreakerOpenError(
-                f"[{self.source_label}] Circuit breaker is OPEN — failing fast. "
+                f"[{self.source_label}] Circuit breaker is OPEN -- failing fast. "
                 f"Last {failures} consecutive failures. "
                 f"Will retry in {self.reset_seconds:.1f}s."
             )
 
     def record_success(self) -> None:
-        """Mark a call as successful — closes the breaker."""
+        """Mark a call as successful -- closes the breaker."""
         self._inner.record_success()
         with self._lock:
             self._consecutive_failures = 0
@@ -287,7 +287,7 @@ class _CircuitBreaker:
         )
 
     def record_failure(self) -> None:
-        """Mark a call as failed — may open the breaker."""
+        """Mark a call as failed -- may open the breaker."""
         self._inner.record_failure()
         with self._lock:
             self._consecutive_failures += 1
@@ -326,7 +326,7 @@ class RateLimitedHttpClient:
     ----------
     rate_limit_per_sec : float
         Maximum sustained request rate. Default: ``1 / CHEMBL_MIN_REQUEST_INTERVAL``
-        (so setting ``CHEMBL_MIN_REQUEST_INTERVAL=0.5`` → 2 req/sec).
+        (so setting ``CHEMBL_MIN_REQUEST_INTERVAL=0.5`` -> 2 req/sec).
     max_retries : int
         Maximum TOTAL attempts per call (1 initial + N-1 retries).
         Default: ``CHEMBL_MAX_RETRIES``. Despite the name, this is
@@ -449,7 +449,7 @@ class RateLimitedHttpClient:
             ``_parse_json`` calls ``json.loads(text)`` which can return a
             ``list`` if the JSON body is a top-level array (ChEMBL never
             emits this in practice, but the type contract must match the
-            implementation — otherwise static type checkers flag it and
+            implementation -- otherwise static type checkers flag it and
             callers that rely on ``.get()`` (dict method) would fail with
             ``AttributeError`` at runtime if a list is returned). The
             return type is now ``dict[str, Any] | list[Any]``.
@@ -468,14 +468,14 @@ class RateLimitedHttpClient:
         last_exc: Exception | None = None
 
         for attempt in range(1, self.max_retries + 1):
-            # Circuit breaker check — fails fast if OPEN.
+            # Circuit breaker check -- fails fast if OPEN.
             try:
                 self._circuit_breaker.before_call()
             except CircuitBreakerOpenError as exc:
                 self.metrics["circuit_breaker_trips"] += 1
                 raise
 
-            # Rate limit — blocks until a token is available.
+            # Rate limit -- blocks until a token is available.
             self._rate_limiter.acquire()
 
             start = time.monotonic()
@@ -495,7 +495,7 @@ class RateLimitedHttpClient:
                 # so the response body is NOT downloaded eagerly by the
                 # underlying urllib3 call. Without this, ``iter_content``
                 # in ``_read_body_bounded`` iterates over an already-
-                # downloaded buffer — meaning a malicious or buggy server
+                # downloaded buffer -- meaning a malicious or buggy server
                 # could send a 10 GB body and exhaust memory BEFORE the
                 # SEC-5 cap in ``_read_body_bounded`` ever fired. With
                 # ``stream=True`` the body is fetched incrementally and
@@ -510,7 +510,7 @@ class RateLimitedHttpClient:
                 status = resp.status_code
                 response_size = self._safe_response_size(resp)
 
-                # 2xx success — parse JSON.
+                # 2xx success -- parse JSON.
                 if 200 <= resp.status_code < 300:
                     body = self._read_body_bounded(resp)
                     parsed = self._parse_json(body, url)
@@ -521,25 +521,25 @@ class RateLimitedHttpClient:
                     )
                     return parsed
 
-                # 4xx (except 429) — fail fast, no retry.
+                # 4xx (except 429) -- fail fast, no retry.
                 if (
                     400 <= resp.status_code < 500
                     and resp.status_code != 429
                 ):
                     self.metrics["api_calls_4xx"] += 1
-                    # v43 ROOT FIX (P0 — 4xx opens circuit breaker):
+                    # v43 ROOT FIX (P0 -- 4xx opens circuit breaker):
                     # The previous code called record_failure() here,
                     # which meant 10 consecutive 404s (e.g. querying
-                    # deleted ChEMBL records — common, ChEMBL deprecates
+                    # deleted ChEMBL records -- common, ChEMBL deprecates
                     # molecules regularly) would OPEN the breaker and
                     # block ALL ChEMBL API calls for
                     # CHEMBL_CIRCUIT_BREAKER_RESET_SECONDS (default 60s).
-                    # 4xx errors are PERMANENT client errors — they will
+                    # 4xx errors are PERMANENT client errors -- they will
                     # never succeed on retry. The circuit breaker is
                     # designed for TRANSIENT failures (429 rate-limit,
                     # 5xx server errors, ConnectionError, Timeout). A
                     # batch of queries against deleted records is NOT
-                    # a transient API problem — it's expected behavior.
+                    # a transient API problem -- it's expected behavior.
                     # Treating 404s as breaker failures meant the
                     # pipeline crashed with CircuitBreakerOpenError
                     # after 10 consecutive 404s, even though the API
@@ -548,7 +548,7 @@ class RateLimitedHttpClient:
                     # Fix: do NOT call record_failure() for 4xx. Only
                     # 429/5xx (below) count toward the breaker. We DO
                     # call record_success() to keep the breaker healthy
-                    # — a 404 means the API responded correctly with
+                    # -- a 404 means the API responded correctly with
                     # "not found", which is a successful round-trip.
                     self._circuit_breaker.record_success()
                     error = (
@@ -570,7 +570,7 @@ class RateLimitedHttpClient:
                     )
                     raise HttpClientError(error)
 
-                # 429 or 5xx — retryable.
+                # 429 or 5xx -- retryable.
                 if resp.status_code == 429:
                     self.metrics["api_calls_429"] += 1
                 else:
@@ -587,7 +587,7 @@ class RateLimitedHttpClient:
                     self.max_retries,
                 )
                 last_exc = HttpClientError(error)
-                # v49 ROOT FIX (Compound-7 — ChEMBL Retry-After Asymmetry):
+                # v49 ROOT FIX (Compound-7 -- ChEMBL Retry-After Asymmetry):
                 # The v48 ChEMBL HTTP client did NOT respect the
                 # `Retry-After` HTTP header (PubChem did). This caused
                 # ChEMBL retries to fire too soon after a 429, triggering
@@ -602,14 +602,14 @@ class RateLimitedHttpClient:
                         # Try integer seconds first.
                         _retry_after = float(_retry_after_raw)
                     except ValueError:
-                        # HTTP-date format — compute seconds from now.
+                        # HTTP-date format -- compute seconds from now.
                         try:
                             from email.utils import parsedate_to_datetime
                             import datetime as _dt
                             _ra_dt = parsedate_to_datetime(_retry_after_raw)
                             # v84 FORENSIC ROOT FIX (BUG #37): if
                             # ``parsedate_to_datetime`` returns a NAIVE
-                            # datetime (tzinfo=None — happens for some
+                            # datetime (tzinfo=None -- happens for some
                             # HTTP-date formats without a timezone
                             # suffix), the subtraction
                             # ``_ra_dt - _now_dt`` raises ``TypeError``
@@ -662,7 +662,7 @@ class RateLimitedHttpClient:
                 # except clauses so this block IS reached. The v41 fix
                 # corrects the misleading comment which claimed "the
                 # previous ordering caught HttpClientError FIRST (line
-                # 500)" — there was no ``except HttpClientError`` block
+                # 500)" -- there was no ``except HttpClientError`` block
                 # at all in the original code. The actual issue was that
                 # the ``except RETRYABLE_EXCEPTIONS`` block didn't catch
                 # HttpClientError (it's not a RETRYABLE_EXCEPTION), so
@@ -670,7 +670,7 @@ class RateLimitedHttpClient:
                 # block. The v9 fix was still correct (adding the explicit
                 # catch), but the comment was misleading. The comment is
                 # now accurate.
-                # Response too large — do NOT retry (the server is sending
+                # Response too large -- do NOT retry (the server is sending
                 # too much data; retrying won't help).
                 self._circuit_breaker.record_failure()
                 self._record_call(
@@ -684,7 +684,7 @@ class RateLimitedHttpClient:
             # simply re-raised, which is exactly what Python does
             # naturally when an exception isn't caught. Keeping it
             # misled readers into thinking it had side effects (e.g.
-            # recording the failure), which it did not — non-retryable
+            # recording the failure), which it did not -- non-retryable
             # 4xx HttpClientError raised at line 491 above propagates
             # naturally out of the for loop, skipping the
             # ``# Record the failed attempt`` block below (which is the
@@ -812,7 +812,7 @@ class RateLimitedHttpClient:
         it would crash at an unrelated call site with a confusing error.
         ROOT FIX: return type is ``dict[str, Any]`` (narrowed back to the
         API contract). If ``json.loads`` returns a list, raise
-        ``HttpClientError`` with a clear message — this is a server-side
+        ``HttpClientError`` with a clear message -- this is a server-side
         protocol violation, not a normal code path.
         """
         try:
@@ -820,7 +820,7 @@ class RateLimitedHttpClient:
             parsed = json.loads(text)
             # P2-1 ROOT FIX: ChEMBL's API contract guarantees a top-level
             # object. If we get a list (or any non-dict), the server has
-            # violated the contract — reject it explicitly rather than
+            # violated the contract -- reject it explicitly rather than
             # letting it crash downstream with an inscrutable AttributeError.
             if not isinstance(parsed, dict):
                 raise HttpClientError(

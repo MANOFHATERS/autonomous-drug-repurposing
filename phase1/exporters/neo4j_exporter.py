@@ -1,12 +1,12 @@
 """
-Neo4j Knowledge Graph Exporter (Phase 1 → Phase 2 connector)
+Neo4j Knowledge Graph Exporter (Phase 1 -> Phase 2 connector)
 =============================================================
 
 This module is the Phase 1 side of the bridge that connects Phase 1's
 processed_data CSV outputs to Phase 2's Neo4j knowledge graph.
 
-PREVIOUS STATUS (Phase 1 alone): STUB — raised NotImplementedError.
-CURRENT STATUS (unified package): WORKING — delegates to
+PREVIOUS STATUS (Phase 1 alone): STUB -- raised NotImplementedError.
+CURRENT STATUS (unified package): WORKING -- delegates to
 ``drugos_graph.phase1_bridge``, which converts Phase 1 CSVs into Phase 2
 node/edge dicts and loads them via ``DrugOSGraphBuilder``.
 
@@ -15,7 +15,7 @@ The bridge is bidirectionally traceable: every node/edge carries a
 row index, so any downstream bug in the knowledge graph can be traced back
 to the exact Phase 1 row that produced it.
 
-Node types loaded (v52 ROOT FIX — P1-025: all 5 DOCX-required node types now emitted):
+Node types loaded (v52 ROOT FIX -- P1-025: all 5 DOCX-required node types now emitted):
 - Compound        (from drugbank_drugs.csv + chembl_drugs.csv, keyed by InChIKey)
 - Protein         (from drugbank_interactions.csv.gz + uniprot_proteins.csv, keyed by UniProt accession)
 - Gene            (from omim_gene_disease_associations.csv + disgenet_gda, keyed by NCBI Gene ID or gene symbol)
@@ -24,7 +24,7 @@ Node types loaded (v52 ROOT FIX — P1-025: all 5 DOCX-required node types now e
 - Pathway         (derived from STRING PPI connected components, keyed by pathway ID)
 
 The DOCX (Phase 2 section) requires ALL 5 node types: Drug/Protein/Pathway/Disease/ClinicalOutcome.
-The v48 exporter only emitted 4 (Compound/Protein/Gene/Disease) — missing Pathway and
+The v48 exporter only emitted 4 (Compound/Protein/Gene/Disease) -- missing Pathway and
 ClinicalOutcome. The v52 fix updates the docstring to reflect the actual bridge behavior
 (which already stages all 5 types since v49) and adds ClinicalOutcome/Pathway sources
 to the Phase1OutputContract's optional list.
@@ -45,7 +45,7 @@ Edge types loaded (subset of drugos_graph.config.CORE_EDGE_TYPES):
 
 USAGE
 -----
-Via the bridge (recommended — works with or without Neo4j)::
+Via the bridge (recommended -- works with or without Neo4j)::
 
     from drugos_graph.phase1_bridge import run_phase1_to_phase2
     report = run_phase1_to_phase2(
@@ -63,9 +63,9 @@ Phase 1 tests that called ``export_to_neo4j()`` expecting it to raise)::
 
 .. note::
     v29 ROOT FIX (audit O-4): the legacy ``pg_session`` parameter was
-    REMOVED — it was accepted but silently ignored, making the Phase 1 →
+    REMOVED -- it was accepted but silently ignored, making the Phase 1 ->
     Neo4j wire look like it was using PostgreSQL when it was actually
-    reading CSVs through ``phase1_bridge``. PostgreSQL → Neo4j via a
+    reading CSVs through ``phase1_bridge``. PostgreSQL -> Neo4j via a
     SQLAlchemy session is **not implemented** in this function. To export
     from PostgreSQL, set the ``DATABASE_URL`` env var and call
     ``drugos_graph.phase1_bridge.run_phase1_to_phase2`` (the bridge
@@ -96,7 +96,7 @@ _PHASE2_ROOT = _UNIFIED_ROOT / "phase2"
 
 
 # v28 FIX P1-ER-14 (MEDIUM): previously this exporter silently delegated
-# to ``phase1_bridge.run_phase1_to_phase2`` with an IMPLICIT contract —
+# to ``phase1_bridge.run_phase1_to_phase2`` with an IMPLICIT contract --
 # the bridge's CSV filenames were only discoverable by reading its source.
 # If a Phase 1 pipeline silently failed to emit one of the CSVs, the
 # bridge would log a warning and produce an empty DataFrame, then the
@@ -106,36 +106,36 @@ _PHASE2_ROOT = _UNIFIED_ROOT / "phase2"
 # ``DrugOSDataError`` before the bridge is invoked.
 @dataclass(frozen=True)
 class Phase1OutputContract:
-    """Explicit, fail-fast contract for the Phase 1 → Phase 2 bridge.
+    """Explicit, fail-fast contract for the Phase 1 -> Phase 2 bridge.
 
     Attributes
     ----------
     required:
-        Mapping of contract-key → list of candidate filenames. At
+        Mapping of contract-key -> list of candidate filenames. At
         least ONE candidate per key MUST exist on disk, otherwise
         :func:`validate_phase1_output_contract` raises
         ``DrugOSDataError``. These are the canonical Phase 1 outputs
         without which the KG build is meaningless.
     optional:
-        Mapping of contract-key → list of candidate filenames. If
+        Mapping of contract-key -> list of candidate filenames. If
         NONE of the candidates exist, a WARNING is logged but no
-        exception is raised — the bridge degrades gracefully (e.g.
-        ``drugbank_indications.csv`` absent → free-text indication
+        exception is raised -- the bridge degrades gracefully (e.g.
+        ``drugbank_indications.csv`` absent -> free-text indication
         column matching is used instead).
     """
 
     required: Dict[str, Tuple[str, ...]] = field(default_factory=lambda: {
         # The 3 canonical Phase 1 outputs that define the KG's spine.
         #
-        # v80 FORENSIC ROOT FIX (P0-C7 — KG build blocked without DrugBank):
+        # v80 FORENSIC ROOT FIX (P0-C7 -- KG build blocked without DrugBank):
         #   The previous contract ONLY accepted ``drugbank_drugs.csv`` for
         #   the "drugs" key. If DrugBank was skipped (no academic license,
         #   no XML file, network error), the contract raised
-        #   ``DrugOSDataError`` and the KG build was BLOCKED — even if
+        #   ``DrugOSDataError`` and the KG build was BLOCKED -- even if
         #   ChEMBL had successfully produced ``chembl_drugs.csv`` (or the
         #   alias ``drugs.csv``). For a platform whose DOCX explicitly
         #   says "V1 is built on free, publicly available biomedical
-        #   data — making the $0 data-cost model viable from day one",
+        #   data -- making the $0 data-cost model viable from day one",
         #   hard-requiring a license-gated source is a structural
         #   contradiction. The DrugBank academic license has been paused
         #   since May 2026 (see ``_v50_downloaders.download_drugbank_open_data``
@@ -146,7 +146,7 @@ class Phase1OutputContract:
         #   ``validate_phase1_output_contract`` already accepts ANY ONE
         #   of the candidates (it returns the first match), so ChEMBL-
         #   only deployments now build a valid KG (Compound nodes from
-        #   ChEMBL, no DrugBank-specific indications — a graceful
+        #   ChEMBL, no DrugBank-specific indications -- a graceful
         #   degradation that matches the DOCX's "free public data" V1
         #   mandate). DrugBank is preferred when available (it provides
         #   richer drug metadata + indication edges).
@@ -165,7 +165,7 @@ class Phase1OutputContract:
         "omim_gda": ("omim_gene_disease_associations.csv",),
     })
     optional: Dict[str, Tuple[str, ...]] = field(default_factory=lambda: {
-        # Auxiliary sources — bridge degrades to empty DataFrame if absent.
+        # Auxiliary sources -- bridge degrades to empty DataFrame if absent.
         # v52 ROOT FIX (P1-025): "indications" is the source for
         # ClinicalOutcome nodes + Compound-treats-Disease edges.
         # "string_ppi" is the source for Pathway nodes (derived from
@@ -243,7 +243,7 @@ def validate_phase1_output_contract(
     Returns
     -------
     dict
-        Mapping of contract-key → resolved Path for every key whose
+        Mapping of contract-key -> resolved Path for every key whose
         candidates were found on disk (REQUIRED + OPTIONAL).
 
     Raises
@@ -270,7 +270,7 @@ def validate_phase1_output_contract(
         found = next((c for c in candidates if c.exists()), None)
         if found is None:
             missing_required.append(
-                f"  • {key} — expected one of: "
+                f"  • {key} -- expected one of: "
                 + ", ".join(repr(c.name) for c in candidates)
             )
         else:
@@ -278,7 +278,7 @@ def validate_phase1_output_contract(
 
     if missing_required:
         raise DrugOSDataError(
-            "Phase 1 output contract violation — REQUIRED CSVs missing "
+            "Phase 1 output contract violation -- REQUIRED CSVs missing "
             f"under {base_dir}:\n" + "\n".join(missing_required) +
             "\nRun the corresponding Phase 1 pipeline(s) before invoking "
             "the Neo4j exporter. See Phase1OutputContract in "
@@ -292,7 +292,7 @@ def validate_phase1_output_contract(
         if found is None:
             logger.warning(
                 "Phase1OutputContract: optional source %r not found under "
-                "%s (expected one of: %s) — bridge will degrade to an "
+                "%s (expected one of: %s) -- bridge will degrade to an "
                 "empty DataFrame for this source.",
                 key, base_dir, [c.name for c in candidates],
             )
@@ -323,15 +323,15 @@ def check_neo4j_readiness(pg_session) -> dict:
     -------
     dict
         Keys:
-        - 'ready': bool — True if all tables have records
-        - 'record_counts': dict — table_name -> count for each checked table
-        - 'phase': str — current implementation status
+        - 'ready': bool -- True if all tables have records
+        - 'record_counts': dict -- table_name -> count for each checked table
+        - 'phase': str -- current implementation status
     """
     counts = {}
     # v40 ROOT FIX (P1 #50): the previous code REQUIRED entity_mapping to
     # have >0 rows, but entity_mapping is only populated by the master
     # DAG's entity_resolution task. If the DAG hadn't run, entity_mapping
-    # was empty → ready=False even if all other tables were populated.
+    # was empty -> ready=False even if all other tables were populated.
     # The fix: split tables into REQUIRED (must have >0 rows) and
     # OPTIONAL (may be empty). entity_mapping and pubchem_compound_
     # properties are OPTIONAL.
@@ -340,7 +340,7 @@ def check_neo4j_readiness(pg_session) -> dict:
         "drug_protein_interactions",
     }
     OPTIONAL_TABLES = {
-        "protein_protein_interactions",  # STRING PPI — may be empty if STRING not loaded
+        "protein_protein_interactions",  # STRING PPI -- may be empty if STRING not loaded
         "entity_mapping",  # only populated by entity_resolution task
         "pubchem_compound_properties",  # v40: was missing from the original list
     }
@@ -348,7 +348,7 @@ def check_neo4j_readiness(pg_session) -> dict:
     # v40 ROOT FIX (P1 #51): the f-string SQL pattern is safe because
     # ALL_TABLES is a hardcoded set (not user input). But we add a
     # whitelist check to make the safety explicit.
-    # v66 ROOT FIX (P1C-025 — eliminate f-string SQL table interpolation):
+    # v66 ROOT FIX (P1C-025 -- eliminate f-string SQL table interpolation):
     #   The previous code used ``text(f'SELECT COUNT(*) FROM {t}')`` which
     #   interpolated the table name directly into the SQL string via
     #   f-string. The whitelist check (``t.replace("_", "").isalnum()``)
@@ -389,7 +389,7 @@ def check_neo4j_readiness(pg_session) -> dict:
                     _meta_name = _sa_inspect(_bind).default_schema_name
                     # P1-002 ROOT FIX (v100 forensic): the previous code
                     # computed _meta (default_schema_name) but NEVER used
-                    # it — it always created an UNQUALIFIED _sa_table(t),
+                    # it -- it always created an UNQUALIFIED _sa_table(t),
                     # which fails on PostgreSQL when the table is in a
                     # non-default schema or search_path is misconfigured.
                     # This caused check_neo4j_readiness to return ready=False
@@ -464,11 +464,11 @@ def export_to_neo4j(
     """Export staged Phase 1 data to the Neo4j knowledge graph via the bridge.
 
     v29 ROOT FIX (audit O-4): the legacy ``pg_session`` parameter was
-    REMOVED from the signature — it was accepted but silently ignored,
-    making the Phase 1 → Neo4j wire look like it was using PostgreSQL
+    REMOVED from the signature -- it was accepted but silently ignored,
+    making the Phase 1 -> Neo4j wire look like it was using PostgreSQL
     when it was actually reading CSVs through ``phase1_bridge``.
-    PostgreSQL → Neo4j via a SQLAlchemy session is **not implemented**
-    in this function — use ``phase1_bridge.py`` instead (the bridge
+    PostgreSQL -> Neo4j via a SQLAlchemy session is **not implemented**
+    in this function -- use ``phase1_bridge.py`` instead (the bridge
     prefers PostgreSQL when ``DATABASE_URL`` is set and the ``drugs``
     table is populated).
 
@@ -476,12 +476,12 @@ def export_to_neo4j(
     so callers (especially tests) can explicitly force the CSV backend
     without depending on whether ``DATABASE_URL`` happens to be set in
     the environment. The bridge now treats ``DATABASE_URL`` being set
-    as "production mode" — PostgreSQL failures are FATAL, not silently
+    as "production mode" -- PostgreSQL failures are FATAL, not silently
     fallen back to CSV.
 
     The function now ACTUALLY WORKS: it locates Phase 2's bridge module,
     reads Phase 1's processed_data CSVs (or PostgreSQL when ``DATABASE_URL``
-    is set — handled inside the bridge), converts them to Phase 2
+    is set -- handled inside the bridge), converts them to Phase 2
     node/edge dicts, and loads them into the supplied ``builder``.
 
     Two modes:
@@ -533,28 +533,28 @@ def export_to_neo4j(
         If neither ``builder`` nor ``neo4j_uri`` is provided AND Phase 2's
         ``drugos_graph`` package cannot be located on disk.
     """
-    # v29 ROOT FIX (audit O-4): pg_session was accepted but ignored —
+    # v29 ROOT FIX (audit O-4): pg_session was accepted but ignored --
     # misleading API. Either implement or remove. We chose REMOVE: the
     # parameter is no longer in the signature, but **_legacy_kwargs absorbs
     # any stray ``pg_session=...`` passed by old callers (with a
-    # DeprecationWarning) so existing tests don't break. PostgreSQL → Neo4j
-    # export is NOT implemented here — use phase1_bridge.py instead.
+    # DeprecationWarning) so existing tests don't break. PostgreSQL -> Neo4j
+    # export is NOT implemented here -- use phase1_bridge.py instead.
     if _legacy_kwargs:
         import warnings as _warnings
         _warnings.warn(
             "export_to_neo4j() no longer accepts keyword arguments "
             f"{sorted(_legacy_kwargs)} (audit O-4: pg_session was "
-            "accepted but ignored — misleading API). The pg_session "
-            "parameter has been removed. PostgreSQL → Neo4j is not "
-            "implemented in this function — use phase1_bridge.py "
+            "accepted but ignored -- misleading API). The pg_session "
+            "parameter has been removed. PostgreSQL -> Neo4j is not "
+            "implemented in this function -- use phase1_bridge.py "
             "instead (set DATABASE_URL to use PostgreSQL).",
             DeprecationWarning,
             stacklevel=2,
         )
         logger.warning(
             "export_to_neo4j: ignored legacy kwargs %s (audit O-4: "
-            "pg_session was removed — use phase1_bridge.py for "
-            "PostgreSQL → Neo4j).",
+            "pg_session was removed -- use phase1_bridge.py for "
+            "PostgreSQL -> Neo4j).",
             sorted(_legacy_kwargs),
         )
 
@@ -587,7 +587,7 @@ def export_to_neo4j(
     # boundary for any missing REQUIRED CSV.
     resolved_paths = validate_phase1_output_contract(phase1_processed_dir)
     logger.info(
-        "export_to_neo4j: Phase 1 output contract validated — %d/%d "
+        "export_to_neo4j: Phase 1 output contract validated -- %d/%d "
         "sources present under %s",
         len(resolved_paths),
         len(Phase1OutputContract().all_keys()),
@@ -618,7 +618,7 @@ def export_to_neo4j(
     # If still no builder, fall back to RecordingGraphBuilder (dry-run mode)
     if builder is None:
         logger.info(
-            "export_to_neo4j: no builder or Neo4j credentials supplied — "
+            "export_to_neo4j: no builder or Neo4j credentials supplied -- "
             "using RecordingGraphBuilder (in-memory dry run)."
         )
         builder = RecordingGraphBuilder()
@@ -632,14 +632,14 @@ def export_to_neo4j(
 
     # v52 ROOT FIX (P1-025): verify all 5 DOCX-required node types are present.
     # The DOCX Phase 2 section requires: Drug/Protein/Pathway/Disease/ClinicalOutcome.
-    # If any are missing, log a WARNING (non-fatal — the bridge still produced
+    # If any are missing, log a WARNING (non-fatal -- the bridge still produced
     # a partial graph, but the operator is now aware the DOCX contract is violated).
     try:
         coverage = check_node_type_coverage(result.get("summary", {}))
         result["node_type_coverage"] = coverage
         if not coverage["all_present"]:
             logger.warning(
-                "export_to_neo4j: DOCX 5-node-type contract VIOLATED — "
+                "export_to_neo4j: DOCX 5-node-type contract VIOLATED -- "
                 "missing: %s. The KG was built but is incomplete. To fix: "
                 "ensure Phase 1 produces drugbank_indications.csv (for "
                 "ClinicalOutcome) and protein_protein_interactions.csv "
@@ -655,14 +655,14 @@ def export_to_neo4j(
 def is_synthetic_inchikey(inchikey: str) -> bool:
     """Check if an InChIKey was synthetically generated (starts with SYNTH).
 
-    v43 ROOT FIX (P1 — case-sensitive SYNTH check): the previous code
+    v43 ROOT FIX (P1 -- case-sensitive SYNTH check): the previous code
     used ``inchikey.startswith("SYNTH")`` which is CASE-SENSITIVE. A
     lowercase or mixed-case key like ``synth-abc-def-g`` would NOT be
     detected as synthetic and would be exported to Neo4j as if it were
     a real InChIKey. The canonical check in 3 other modules
     (cleaning.normalizer, entity_resolution.base, drug_resolver) all
     use ``.upper().startswith("SYNTH")`` (case-insensitive). This was
-    the 4th duplicate definition of the same function — exactly the
+    the 4th duplicate definition of the same function -- exactly the
     divergence anti-pattern the v9 audit claimed to fix.
 
     Fix: use ``.upper().startswith("SYNTH")`` to match the canonical
@@ -700,17 +700,17 @@ def check_node_type_coverage(bridge_summary: Dict[str, Any]) -> Dict[str, Any]:
     -------
     dict
         Keys:
-        - 'all_present': bool — True if all 5 DOCX-required types are present
-        - 'present_types': list — node types that have >0 nodes
-        - 'missing_types': list — DOCX-required types with 0 nodes
-        - 'node_counts_by_type': dict — type → count
-        - 'docx_compliant': bool — True if all 5 types present (alias for all_present)
+        - 'all_present': bool -- True if all 5 DOCX-required types are present
+        - 'present_types': list -- node types that have >0 nodes
+        - 'missing_types': list -- DOCX-required types with 0 nodes
+        - 'node_counts_by_type': dict -- type -> count
+        - 'docx_compliant': bool -- True if all 5 types present (alias for all_present)
     """
     node_counts = bridge_summary.get("node_counts_by_type", {})
     if not node_counts:
         # Try to extract from the summary's edge_types_present
         logger.warning(
-            "check_node_type_coverage: no node_counts_by_type in summary — "
+            "check_node_type_coverage: no node_counts_by_type in summary -- "
             "cannot verify DOCX 5-node-type requirement"
         )
         return {

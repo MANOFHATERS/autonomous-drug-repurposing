@@ -7,7 +7,7 @@ from typing import Dict, List, Optional, Tuple
 # v91 FORENSIC ROOT FIX: when `phase1/database/connection.py` does
 # `from config import settings`, Python can accidentally find THIS file
 # (graph_transformer/config/__init__.py) instead of phase1/config/settings.py
-# — a name collision between phase1/config/ and graph_transformer/config/.
+# -- a name collision between phase1/config/ and graph_transformer/config/.
 # When loaded as top-level `config`, the relative import `from ..data` goes
 # beyond the top-level package and raises ImportError. The fix: try the
 # relative import first (normal case when imported as graph_transformer.config),

@@ -11,12 +11,12 @@ This test verifies that the following 8 files work as a cohesive unit:
   7. database/migrations/__init__.py
   8. database/migrations/002_bug_fixes_migration.sql  (PRIMARY TARGET)
 
-Tests are REAL — they verify actual behavior, not just "does it exist":
+Tests are REAL -- they verify actual behavior, not just "does it exist":
 - Import all modules and verify their public APIs
 - Create a real SQLite database from ORM models
 - Insert valid and invalid data and verify constraints
 - Verify the migration SQL file is syntactically correct and complete
-- Verify cross-module consistency (config → connection → models → migrations)
+- Verify cross-module consistency (config -> connection -> models -> migrations)
 - Verify the migration file's output schema matches the ORM models
 
 Run with:
@@ -52,7 +52,7 @@ os.environ.setdefault("LOG_LEVEL", "WARNING")
 
 
 # ============================================================================
-# FILE 1: config/__init__.py — Import and API verification
+# FILE 1: config/__init__.py -- Import and API verification
 # ============================================================================
 
 
@@ -89,7 +89,7 @@ class TestConfigInit:
 
 
 # ============================================================================
-# FILE 2: config/settings.py — Settings validation
+# FILE 2: config/settings.py -- Settings validation
 # ============================================================================
 
 
@@ -133,7 +133,7 @@ class TestConfigSettings:
 
 
 # ============================================================================
-# FILE 3: database/__init__.py — Package facade verification
+# FILE 3: database/__init__.py -- Package facade verification
 # ============================================================================
 
 
@@ -175,7 +175,7 @@ class TestDatabaseInit:
 
 
 # ============================================================================
-# FILE 4: database/connection.py — Connection management verification
+# FILE 4: database/connection.py -- Connection management verification
 # ============================================================================
 
 
@@ -209,7 +209,7 @@ class TestDatabaseConnection:
 
 
 # ============================================================================
-# FILE 5: database/base.py — Base class and naming convention
+# FILE 5: database/base.py -- Base class and naming convention
 # ============================================================================
 
 
@@ -252,7 +252,7 @@ class TestDatabaseBase:
 
 
 # ============================================================================
-# FILE 6: database/models.py — ORM model verification
+# FILE 6: database/models.py -- ORM model verification
 # ============================================================================
 
 
@@ -331,7 +331,7 @@ class TestDatabaseModels:
 
 
 # ============================================================================
-# FILE 7: database/migrations/__init__.py — Migration package verification
+# FILE 7: database/migrations/__init__.py -- Migration package verification
 # ============================================================================
 
 
@@ -367,7 +367,7 @@ class TestMigrationsInit:
 
 
 # ============================================================================
-# FILE 8: database/migrations/002_bug_fixes_migration.sql — SQL verification
+# FILE 8: database/migrations/002_bug_fixes_migration.sql -- SQL verification
 # ============================================================================
 
 
@@ -451,7 +451,7 @@ class TestMigration002SQL:
         for line in lines:
             stripped = line.strip()
             if stripped.upper() in ('BEGIN;', 'COMMIT;'):
-                pytest.fail(f"Standalone {stripped} found — Python runner manages transactions")
+                pytest.fail(f"Standalone {stripped} found -- Python runner manages transactions")
 
 
 # ============================================================================
@@ -463,7 +463,7 @@ class TestCrossModuleIntegration:
     """Verify that all 8 files work together correctly."""
 
     def test_config_to_connection_pipeline(self):
-        """Config DATABASE_URL → Connection engine creation → works end-to-end."""
+        """Config DATABASE_URL -> Connection engine creation -> works end-to-end."""
         import config
         from database.connection import get_engine
         db_url = config.DATABASE_URL
@@ -474,7 +474,7 @@ class TestCrossModuleIntegration:
         engine.dispose()
 
     def test_base_to_models_to_tables(self):
-        """Base class → ORM models → create_all → tables exist."""
+        """Base class -> ORM models -> create_all -> tables exist."""
         import sqlite3
         from datetime import datetime, timezone
         from database.base import Base
@@ -509,7 +509,7 @@ class TestCrossModuleIntegration:
         engine.dispose()
 
     def test_models_to_data_round_trip(self):
-        """ORM models → insert data → query data → round trip works."""
+        """ORM models -> insert data -> query data -> round trip works."""
         import sqlite3
         from datetime import datetime, timezone
         from database.base import Base
@@ -649,7 +649,7 @@ class TestCrossModuleIntegration:
         )
 
     def test_config_drives_database_url_for_migrations(self):
-        """Config DATABASE_URL → Python migration runner → engine works."""
+        """Config DATABASE_URL -> Python migration runner -> engine works."""
         import config
         db_url = config.DATABASE_URL
         # DATABASE_URL may be a relative path like sqlite:///test.db
@@ -695,10 +695,10 @@ class TestCrossModuleIntegration:
         # NOTE: The ORM uses Text() which maps to TEXT in PostgreSQL. The migration
         # specifies VARCHAR(10000) to cap the length. The ORM Text() is unbounded
         # in PostgreSQL, but the migration enforces the cap at the SQL level.
-        # This is intentional — the migration is more restrictive than the ORM.
+        # This is intentional -- the migration is more restrictive than the ORM.
         function_desc_col = Protein.__table__.columns["function_desc"]
         assert function_desc_col is not None
-        # The column exists — type match is enforced at the migration SQL level
+        # The column exists -- type match is enforced at the migration SQL level
 
 
 # ============================================================================
@@ -861,7 +861,7 @@ class TestDataIntegrityIntegration:
         from database.models import Protein
         col = Protein.__table__.columns["function_desc"]
         assert col is not None
-        # Verify the column exists — the VARCHAR(10000) cap is enforced
+        # Verify the column exists -- the VARCHAR(10000) cap is enforced
         # by the migration SQL, not the ORM model
         migration_sql = (PROJECT_ROOT / "database" / "migrations" / "002_bug_fixes_migration.sql").read_text()
         assert "VARCHAR(10000)" in migration_sql, (

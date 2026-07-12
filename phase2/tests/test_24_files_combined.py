@@ -1,32 +1,32 @@
 """
-Test 2 — Real integration test for ALL 24 files working together.
+Test 2 -- Real integration test for ALL 24 files working together.
 
 This test verifies that the 23 previously-fixed institutional-grade
 files PLUS the newly-fixed ``drugos_graph/__main__.py`` (24 files total)
 work together as a coherent codebase.  Unlike ``test_20_files_combined.py``
 (which only tests 20 modules' import surface), this test exercises:
 
-  1. **Import chain integrity** — every one of the 24 files imports
+  1. **Import chain integrity** -- every one of the 24 files imports
      successfully AND every critical export they declare is accessible
      from the package namespace.
-  2. **Cross-module data-flow contract** — the 13-step pipeline's data
-     flow (DRKG → entity resolution → KG build → PyG build → training
-     data → TransE → evaluation) is verifiable end-to-end with mocked
+  2. **Cross-module data-flow contract** -- the 13-step pipeline's data
+     flow (DRKG -> entity resolution -> KG build -> PyG build -> training
+     data -> TransE -> evaluation) is verifiable end-to-end with mocked
      data, not just importable.
-  3. **__main__ integration with run_pipeline** — the entry point
+  3. **__main__ integration with run_pipeline** -- the entry point
      correctly dispatches to run_pipeline.main() and translates its
      exit codes (D2-DES-02 contract).
-  4. **Config-constant consistency** — the same SEED, SCHEMA_VERSION,
+  4. **Config-constant consistency** -- the same SEED, SCHEMA_VERSION,
      MIN_NODES_W2, TARGET_TRANSE_AUC etc. are visible from every
      module that imports them (no shadowing).
-  5. **Exception hierarchy integrity** — every domain-specific
+  5. **Exception hierarchy integrity** -- every domain-specific
      exception in exceptions.py inherits from a documented base class
      so the entry point's top-level handler (D6-REL-01) can catch them.
-  6. **Schema contract** — PyG HeteroData produced by pyg_builder is
+  6. **Schema contract** -- PyG HeteroData produced by pyg_builder is
      consumable by transe_model; training_data produces splits
      consumable by evaluation.
-  7. **Lineage chain** — config.build_lineage_metadata →
-     run_pipeline._log_transformation → __main__._write_preliminary_manifest
+  7. **Lineage chain** -- config.build_lineage_metadata ->
+     run_pipeline._log_transformation -> __main__._write_preliminary_manifest
      all use the same run_id, schema_version, config_hash.
 
 The 24 files covered (in pipeline order):
@@ -81,13 +81,13 @@ if str(_PROJECT_ROOT) not in sys.path:
 # We test ALL of them, plus the supporting modules they depend on
 # (schemas, exceptions, _loader_protocol, model_protocol, chemberta_encoder,
 # mlflow_tracker, gpu_utils) that are listed in the codebase but were not
-# in the user's explicit list — because institutional-grade coverage
+# in the user's explicit list -- because institutional-grade coverage
 # requires verifying every file in the package, not just the ones the
 # user remembered to name.
 
 EXPECTED_24_FILES: list[str] = [
     # The 23 user-named files (alphabetical):
-    "__main__",          # NEWLY FIXED — institutional-grade entry point
+    "__main__",          # NEWLY FIXED -- institutional-grade entry point
     "__init__",
     "chembl_loader",
     "config",
@@ -119,7 +119,7 @@ EXPECTED_24_FILES: list[str] = [
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# SECTION 1 — IMPORT CHAIN INTEGRITY (all 24 files import cleanly)
+# SECTION 1 -- IMPORT CHAIN INTEGRITY (all 24 files import cleanly)
 # ═══════════════════════════════════════════════════════════════════════════
 
 
@@ -164,7 +164,7 @@ class TestAllFilesImportCleanly:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# SECTION 2 — CONFIG CONSTANT CONSISTENCY (same values across all importers)
+# SECTION 2 -- CONFIG CONSTANT CONSISTENCY (same values across all importers)
 # ═══════════════════════════════════════════════════════════════════════════
 
 
@@ -292,7 +292,7 @@ class TestConfigConstantConsistency:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# SECTION 3 — __main__ → run_pipeline DISPATCH CONTRACT
+# SECTION 3 -- __main__ -> run_pipeline DISPATCH CONTRACT
 # ═══════════════════════════════════════════════════════════════════════════
 
 
@@ -320,7 +320,7 @@ class TestMainPipelineDispatch:
         for node in tree.body:
             if isinstance(node, ast.ImportFrom):
                 assert node.module != "run_pipeline" or node.level != 1, \
-                    "Top-level `from .run_pipeline import main` found — must be lazy"
+                    "Top-level `from .run_pipeline import main` found -- must be lazy"
 
     def test_run_translates_pipeline_success(self, tmp_path, monkeypatch):
         """When run_pipeline.main() returns 0, run() returns EXIT_SUCCESS (0)."""
@@ -358,7 +358,7 @@ class TestMainPipelineDispatch:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# SECTION 4 — EXCEPTION HIERARCHY INTEGRITY
+# SECTION 4 -- EXCEPTION HIERARCHY INTEGRITY
 # ═══════════════════════════════════════════════════════════════════════════
 
 
@@ -422,17 +422,17 @@ class TestExceptionHierarchy:
         with patch.object(main_mod, "_run_pipeline_main", side_effect=_raise_drugos_exc):
             rc = main_mod.run(["--skip-neo4j", "--yes"])
         assert rc == EXIT_ERROR, \
-            "DrugOS exception must be caught by top-level handler → EXIT_ERROR"
+            "DrugOS exception must be caught by top-level handler -> EXIT_ERROR"
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# SECTION 5 — CROSS-MODULE DATA-FLOW CONTRACT
+# SECTION 5 -- CROSS-MODULE DATA-FLOW CONTRACT
 # ═══════════════════════════════════════════════════════════════════════════
 
 
 class TestCrossModuleDataFlow:
     """The 13-step pipeline's data flow is verifiable end-to-end with mocked
-    data — not just importable.  This is the integration test that proves
+    data -- not just importable.  This is the integration test that proves
     the 24 files form a coherent codebase."""
 
     def test_drkg_loader_to_kg_builder_data_contract(self):
@@ -514,13 +514,13 @@ class TestCrossModuleDataFlow:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# SECTION 6 — LINEAGE CHAIN INTEGRITY
+# SECTION 6 -- LINEAGE CHAIN INTEGRITY
 # ═══════════════════════════════════════════════════════════════════════════
 
 
 class TestLineageChainIntegrity:
-    """The lineage chain config.build_lineage_metadata → run_pipeline
-    → __main__ uses the same run_id, schema_version, config_hash."""
+    """The lineage chain config.build_lineage_metadata -> run_pipeline
+    -> __main__ uses the same run_id, schema_version, config_hash."""
 
     def test_config_exposes_lineage_helpers(self):
         """config exposes build_lineage_metadata and write_lineage_manifest."""
@@ -574,7 +574,7 @@ class TestLineageChainIntegrity:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# SECTION 7 — END-TO-END PIPELINE BEHAVIOR WITH MOCKED DATA
+# SECTION 7 -- END-TO-END PIPELINE BEHAVIOR WITH MOCKED DATA
 # ═══════════════════════════════════════════════════════════════════════════
 
 
@@ -678,7 +678,7 @@ class TestEndToEndWithMockedData:
 
     def test_config_hash_stable_across_calls(self):
         """compute_config_hash() returns the same value on repeated calls
-        (idempotent — D7-IDP-01)."""
+        (idempotent -- D7-IDP-01)."""
         from drugos_graph import config
         h1 = config.compute_config_hash()
         h2 = config.compute_config_hash()
@@ -718,7 +718,7 @@ class TestEndToEndWithMockedData:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# SECTION 8 — SCHEMA & DATA MODEL CONTRACT
+# SECTION 8 -- SCHEMA & DATA MODEL CONTRACT
 # ═══════════════════════════════════════════════════════════════════════════
 
 
@@ -745,7 +745,7 @@ class TestSchemaDataModelContract:
         assert config.CORE_EDGE_TYPES, "CORE_EDGE_TYPES is empty"
 
     def test_canonical_ids_defined(self):
-        """config defines CANONICAL_IDS — the universal ID for each entity
+        """config defines CANONICAL_IDS -- the universal ID for each entity
         type (e.g. InChIKey for Compound, UniProt accession for Protein)."""
         from drugos_graph import config
         assert config.CANONICAL_IDS, "CANONICAL_IDS is empty"
@@ -775,7 +775,7 @@ class TestSchemaDataModelContract:
         from drugos_graph import config
         cfg = config.PyGConfig()
         # PyGConfig uses per-entity feature dimensions (compound_feat_dim,
-        # disease_feat_dim, etc.) — verify at least one is present.
+        # disease_feat_dim, etc.) -- verify at least one is present.
         assert hasattr(cfg, "compound_feat_dim") or hasattr(cfg, "embedding_dim") \
             or hasattr(cfg, "hidden_channels"), \
             "PyGConfig must define per-entity feature dimensions"
@@ -789,7 +789,7 @@ class TestSchemaDataModelContract:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# SECTION 9 — RUN_PIPELINE CONTRACT
+# SECTION 9 -- RUN_PIPELINE CONTRACT
 # ═══════════════════════════════════════════════════════════════════════════
 
 
@@ -802,13 +802,13 @@ class TestRunPipelineContract:
         _logger_configured are present (per master fix prompt §1.2).
 
         Note: ``_drkg_parse_cache`` was REMOVED in FIX-E / C-25
-        (dead-code removal) — it was written but never read.
+        (dead-code removal) -- it was written but never read.
         """
         from drugos_graph import run_pipeline
         for attr in ("_shutdown_requested", "_pipeline_run_id",
                      "_logger_configured"):
             assert hasattr(run_pipeline, attr), \
-                f"run_pipeline.{attr} missing — module-level global required"
+                f"run_pipeline.{attr} missing -- module-level global required"
         # FIX-E / C-25: _drkg_parse_cache is intentionally GONE.
         assert not hasattr(run_pipeline, "_drkg_parse_cache"), \
             "run_pipeline._drkg_parse_cache should be removed (C-25 dead code)"
@@ -840,7 +840,7 @@ class TestRunPipelineContract:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# SECTION 10 — ENTRY POINT EXIT-CODE CONTRACT
+# SECTION 10 -- ENTRY POINT EXIT-CODE CONTRACT
 # ═══════════════════════════════════════════════════════════════════════════
 
 
@@ -848,7 +848,7 @@ class TestEntryPointExitCodeContract:
     """The 5 documented exit codes (0-4) are correctly returned by run()."""
 
     def test_exit_success_zero(self, tmp_path, monkeypatch):
-        """--self-test → exit 0 (SUCCESS)."""
+        """--self-test -> exit 0 (SUCCESS)."""
         from drugos_graph import __main__ as main_mod
         monkeypatch.setenv("DRUGOS_PROJECT_ROOT", str(tmp_path))
         (tmp_path / "data" / "raw").mkdir(parents=True, exist_ok=True)
@@ -858,7 +858,7 @@ class TestEntryPointExitCodeContract:
         assert main_mod.run(["--self-test"]) == 0
 
     def test_exit_config_failure_three_missing_password(self, tmp_path, monkeypatch):
-        """Missing Neo4j password (no --skip-neo4j) → exit 3 (CONFIG_FAILURE)."""
+        """Missing Neo4j password (no --skip-neo4j) -> exit 3 (CONFIG_FAILURE)."""
         from drugos_graph import __main__ as main_mod
         monkeypatch.setenv("DRUGOS_PROJECT_ROOT", str(tmp_path))
         (tmp_path / "data" / "raw").mkdir(parents=True, exist_ok=True)
@@ -871,7 +871,7 @@ class TestEntryPointExitCodeContract:
         assert rc == 3, f"missing Neo4j password should return 3 (CONFIG_FAILURE), got {rc}"
 
     def test_exit_aborted_four_root_without_allow_root(self, tmp_path, monkeypatch):
-        """Root without --allow-root → exit 4 (ABORTED)."""
+        """Root without --allow-root -> exit 4 (ABORTED)."""
         from drugos_graph import __main__ as main_mod
         monkeypatch.setenv("DRUGOS_PROJECT_ROOT", str(tmp_path))
         (tmp_path / "data" / "raw").mkdir(parents=True, exist_ok=True)
@@ -884,7 +884,7 @@ class TestEntryPointExitCodeContract:
         assert rc == 4, f"root without --allow-root should return 4 (ABORTED), got {rc}"
 
     def test_exit_error_one_pipeline_failure(self, tmp_path, monkeypatch):
-        """Pipeline raises an exception → exit 1 (ERROR)."""
+        """Pipeline raises an exception -> exit 1 (ERROR)."""
         from drugos_graph import __main__ as main_mod
         monkeypatch.setenv("DRUGOS_PROJECT_ROOT", str(tmp_path))
         (tmp_path / "data" / "raw").mkdir(parents=True, exist_ok=True)
@@ -902,7 +902,7 @@ class TestEntryPointExitCodeContract:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# SECTION 11 — PYTHON -M drugos_graph SMOKE TEST (subprocess)
+# SECTION 11 -- PYTHON -M drugos_graph SMOKE TEST (subprocess)
 # ═══════════════════════════════════════════════════════════════════════════
 
 

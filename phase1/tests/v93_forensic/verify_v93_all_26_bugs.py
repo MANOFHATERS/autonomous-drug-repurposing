@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""v93 Forensic Root Fix Verification — REAL CODE execution.
+"""v93 Forensic Root Fix Verification -- REAL CODE execution.
 
 This script exercises the ACTUAL production code paths touched by the
 P1-025 through P1-050 fixes. It does NOT read test files or run smoke
-tests — it imports the real modules, instantiates real classes, and
+tests -- it imports the real modules, instantiates real classes, and
 runs real methods to verify the fixes are correct and nothing is broken.
 
 Each verification block:
@@ -91,7 +91,7 @@ def test_p1_025_homodimer_check():
                      organism="Homo sapiens")
         session.add_all([p1, p2])
         session.flush()
-        # Heterodimer with is_homodimer=True — MUST be rejected
+        # Heterodimer with is_homodimer=True -- MUST be rejected
         bad = ProteinProteinInteraction(
             protein_a_id=p1.id, protein_b_id=p2.id,
             is_homodimer=True, source="string",
@@ -100,7 +100,7 @@ def test_p1_025_homodimer_check():
         try:
             session.flush()
             raise AssertionError(
-                "Heterodimer with is_homodimer=True was ACCEPTED — CHECK failed"
+                "Heterodimer with is_homodimer=True was ACCEPTED -- CHECK failed"
             )
         except Exception as exc:
             if "chk_ppi_homodimer_flag" not in str(exc) and "constraint" not in str(exc).lower():
@@ -144,7 +144,7 @@ def test_p1_026_gda_null_dedup():
     Base.metadata.create_all(engine)
 
     # Verify the functional index is DECLARED in the model (even if
-    # SQLite DDL doesn't render it — it WILL render on PostgreSQL).
+    # SQLite DDL doesn't render it -- it WILL render on PostgreSQL).
     from database.models import GeneDiseaseAssociation
     table_args = GeneDiseaseAssociation.__table_args__
     has_nullsafe_idx = any(
@@ -213,7 +213,7 @@ check("P1-027 chembl docstring accuracy", test_p1_027_chembl_docstring)
 
 
 # ============================================================================
-# P1-028: loaders.py source_id empty → None (no NaN, no .where no-op)
+# P1-028: loaders.py source_id empty -> None (no NaN, no .where no-op)
 # ============================================================================
 def test_p1_028_source_id_none():
     """Verify the source_id empty-string-to-None fix in bulk_upsert_dpi.
@@ -270,7 +270,7 @@ def test_p1_028_source_id_none():
     assert df["source_id"].iloc[1] == "abc"
     assert df["source_id"].iloc[4] == "def"
 
-check("P1-028 source_id empty → None", test_p1_028_source_id_none)
+check("P1-028 source_id empty -> None", test_p1_028_source_id_none)
 
 
 # ============================================================================
@@ -285,7 +285,7 @@ def test_p1_029_omim_single_source():
     assert SCORE_BY_MAPPING_KEY[1] == 0.5, f"mk=1 should be 0.5, got {SCORE_BY_MAPPING_KEY[1]}"
 
     # The validator in missing_values.py should import from the pipeline
-    # (lazy import — verified by source code inspection, but we can also
+    # (lazy import -- verified by source code inspection, but we can also
     # check that the values match).
     import cleaning.missing_values as mv
     import inspect
@@ -382,7 +382,7 @@ def test_p1_034_sla_before_timeout():
     sla_h = int(sla_match.group(1))
     timeout_h = int(timeout_match.group(1))
     assert sla_h < timeout_h, \
-        f"SLA ({sla_h}h) must be LESS than timeout ({timeout_h}h) — SLA should fire BEFORE the kill"
+        f"SLA ({sla_h}h) must be LESS than timeout ({timeout_h}h) -- SLA should fire BEFORE the kill"
     assert sla_h == 6, f"SLA should be 6h (1h before 7h kill), got {sla_h}h"
     assert timeout_h == 7, f"timeout should remain 7h, got {timeout_h}h"
 
@@ -397,13 +397,13 @@ def test_p1_035_log_level_lazy():
     # _refresh_log_level should exist
     assert hasattr(norm, "_refresh_log_level"), "_refresh_log_level not defined"
     assert hasattr(norm, "_resolve_log_level"), "_resolve_log_level not defined"
-    # Set env var AFTER import and refresh — should take effect
+    # Set env var AFTER import and refresh -- should take effect
     import logging
     os.environ["CLEANING_LOG_LEVEL"] = "DEBUG"
     norm._refresh_log_level()
     assert norm.logger.level == logging.DEBUG, \
         f"after refresh, logger.level should be DEBUG, got {norm.logger.level}"
-    # Test typo fallback → INFO (not NOTSET)
+    # Test typo fallback -> INFO (not NOTSET)
     os.environ["CLEANING_LOG_LEVEL"] = "DEBG"  # typo
     norm._refresh_log_level()
     assert norm.logger.level == logging.INFO, \
@@ -495,7 +495,7 @@ def test_p1_039_empty_database_url():
         try:
             importlib.reload(settings)
         except Exception:
-            pass  # cleanup reload — best effort
+            pass  # cleanup reload -- best effort
         # Clean up env vars
         for k in ("DATABASE_URL", "DRUGOS_ENVIRONMENT", "DRUGOS_DEV_ALLOW_DEFAULT_DB"):
             os.environ.pop(k, None)

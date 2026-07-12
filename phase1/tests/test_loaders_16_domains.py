@@ -199,7 +199,7 @@ def _insert_drugs_and_proteins(session, drug_df, protein_df):
 
 
 class TestScientificValidation:
-    """Domain 3: Scientific correctness — validate every field."""
+    """Domain 3: Scientific correctness -- validate every field."""
 
     def test_invalid_inchikey_rejected(self):
         with pytest.raises(ValueError, match="Invalid InChIKey"):

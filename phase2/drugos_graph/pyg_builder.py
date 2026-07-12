@@ -1,5 +1,5 @@
 """
-DrugOS Graph Module — PyTorch Geometric (PyG) Builder
+DrugOS Graph Module -- PyTorch Geometric (PyG) Builder
 =====================================================
 
 Converts the DrugOS knowledge graph into PyG HeteroData format for
@@ -161,7 +161,7 @@ import torch
 # 2.8.0, `torch_geometric/__init__.py` does `import torch_geometric.typing`
 # and then `if torch_geometric.typing.WITH_PT20:`. If we import a
 # submodule (e.g. `torch_geometric.data`) FIRST, that triggers
-# `__init__.py` to start executing, which imports `typing` — but if
+# `__init__.py` to start executing, which imports `typing` -- but if
 # `typing` itself imports something that triggers another `torch_geometric`
 # submodule import, the partial `torch_geometric` module doesn't yet have
 # the `typing` attribute set, raising:
@@ -171,7 +171,7 @@ import torch
 # other torch_geometric submodule. This forces the typing module to
 # fully load and sets the `typing` attribute on the `torch_geometric`
 # package before any other submodule import touches it.
-import torch_geometric.typing  # noqa: F401 — MUST be first PyG import
+import torch_geometric.typing  # noqa: F401 -- MUST be first PyG import
 from torch_geometric.data import HeteroData
 
 # FIX(issue-1): fail fast at import time -- no silent None fallback.
@@ -269,7 +269,7 @@ class HeteroDataSummary(TypedDict, total=False):
 # v57 ROOT FIX (P2L-021): all entries lowercased so the case-insensitive
 # comparison against DRKG relation codes (which drkg_loader now emits
 # in lowercase per the v57 ROOT FIX) matches consistently. The mixed-
-# case ``"Hetionet::CtD"`` entry is preserved as-is for back-compat —
+# case ``"Hetionet::CtD"`` entry is preserved as-is for back-compat --
 # callers that still pass mixed-case relation strings will have them
 # lowercased in the comparison at the call site (see the
 # ``rel.lower()`` calls below).
@@ -279,7 +279,7 @@ TREATMENT_LIKE_RELATIONS = {
     "approved_for",
     "therapeutic_for",
     "Hetionet::CtD",
-    "hetionet::ctd",  # v57 ROOT FIX (P2L-021) — lowercase alias
+    "hetionet::ctd",  # v57 ROOT FIX (P2L-021) -- lowercase alias
 }
 
 # FIX(issue-77): schema versioning for FDA 21 CFR Part 11 compliance.
@@ -554,7 +554,7 @@ class PyGBuilder(GraphBuilderProtocol):
                     f"Edge type {et!r} has 0 edges."
                 )
                 continue
-            # v53 ROOT FIX (P2-014 — PyG edge_index shape validation):
+            # v53 ROOT FIX (P2-014 -- PyG edge_index shape validation):
             # PyG requires edge_index to have shape [2, num_edges]. A
             # malformed edge_index (e.g. [1, N] or [N, 2]) would silently
             # produce wrong message-passing behavior. Validate BEFORE
@@ -563,7 +563,7 @@ class PyGBuilder(GraphBuilderProtocol):
                 raise ValueError(
                     f"Edge type {et!r}: edge_index must have shape [2, num_edges], "
                     f"got {list(ei.shape)} (dim={ei.dim()}). This indicates a "
-                    f"corruption in the edge_index construction — the graph "
+                    f"corruption in the edge_index construction -- the graph "
                     f"cannot be used for training."
                 )
             # v53 ROOT FIX: also validate dtype (must be long/int64 per PyG)
@@ -621,14 +621,14 @@ class PyGBuilder(GraphBuilderProtocol):
                         f"node indices). (v39 P2 #39 fix)"
                     )
 
-        # v84 FORENSIC ROOT FIX (BUG #9 — edge_label / edge_label_index
+        # v84 FORENSIC ROOT FIX (BUG #9 -- edge_label / edge_label_index
         # shape mismatch silently inflates AUC):
         # PyG's HeteroData does NOT enforce any relationship between
         # edge_index (message-passing edges) and edge_label_index
         # (supervision edges). A bug that sets edge_label_index =
         # pos_edge_index (forgetting to concatenate negatives) would
         # produce a val/test split with edge_label of length N but
-        # edge_label_index of length 2N — the model scores only the
+        # edge_label_index of length 2N -- the model scores only the
         # first N (positives only), AUC is 1.0 (perfect separation,
         # since no negatives are scored), and the launch gate passes
         # on a degenerate model. ROOT FIX: for each edge type that has
@@ -650,11 +650,11 @@ class PyGBuilder(GraphBuilderProtocol):
                     raise ValueError(
                         f"Edge type {et!r}: edge_label has {_n_label} "
                         f"entries but edge_label_index has "
-                        f"{_n_label_index} columns. These MUST match — "
+                        f"{_n_label_index} columns. These MUST match -- "
                         f"a mismatch means the model scores a different "
                         f"set of edges than the labels it trains/evaluates "
                         f"against, silently inflating AUC (e.g. scoring "
-                        f"only positives → AUC=1.0 on a degenerate model). "
+                        f"only positives -> AUC=1.0 on a degenerate model). "
                         f"(v84 BUG #9 root fix)"
                     )
 
@@ -837,7 +837,7 @@ class PyGBuilder(GraphBuilderProtocol):
                     # FIX(issue-28): use torch.empty + xavier_uniform_ directly,
                     # no Embedding object.
                     # FIX-P3-15: removed unnecessary `.detach().clone()`.
-                    # ``weight`` was created with ``torch.empty(...)`` —
+                    # ``weight`` was created with ``torch.empty(...)`` --
                     # it has no grad, so ``.detach()`` is a no-op.
                     # ``.clone()`` made a redundant copy (one full
                     # ``num_nodes × feat_dim`` tensor alloc per node type
@@ -845,17 +845,17 @@ class PyGBuilder(GraphBuilderProtocol):
                     # safety benefit. Assign directly.
                     weight = torch.empty(num_nodes, feat_dim)
                     torch.nn.init.xavier_uniform_(weight)
-                    # v84 FORENSIC ROOT FIX (BUG #10 — NaN / dead nodes
+                    # v84 FORENSIC ROOT FIX (BUG #10 -- NaN / dead nodes
                     # from all-zero Xavier init rows):
                     # Xavier uniform samples from U(-a, a) where
                     # a = sqrt(6 / (fan_in + fan_out)). For small feat_dim
                     # and small num_nodes, this can produce a row of
-                    # all-zeros (rare but possible — the boundary of the
+                    # all-zeros (rare but possible -- the boundary of the
                     # uniform distribution is 0-probability but finite-
                     # precision rounding can land there). The downstream
                     # `normalize_entity_embeddings` in transe_model.py
                     # divides by the L2 norm clamped at NORM_CLAMP_MIN=
-                    # 1e-9. A zero row becomes 0 / 1e-9 = 0 — silently
+                    # 1e-9. A zero row becomes 0 / 1e-9 = 0 -- silently
                     # a zero embedding. The model has no signal for that
                     # node: TransE scores for triples involving this
                     # node are dominated by the relation and tail, and
@@ -891,7 +891,7 @@ class PyGBuilder(GraphBuilderProtocol):
                             (feat_dim,), 1e-4, dtype=weight.dtype,
                         )
                         weight[_zero_row_mask] = _eps_vec
-                    # v100 ROOT FIX (BUG P2-034 — PyG / Aliasing):
+                    # v100 ROOT FIX (BUG P2-034 -- PyG / Aliasing):
                     # ``weight`` is a tensor that may be referenced
                     # elsewhere (e.g. by the caller, or by the
                     # random-feature branch above). Assigning it
@@ -949,16 +949,16 @@ class PyGBuilder(GraphBuilderProtocol):
 
                 # FIX(C-21): deduplicate (src, dst) pairs.
                 # ``edge_maps`` is built upstream from multiple sources
-                # (DrugBank targets, ChEMBL inhibits, STITCH binds, …)
+                # (DrugBank targets, ChEMBL inhibits, STITCH binds, ...)
                 # that frequently emit the SAME (src, dst) pair for the
-                # same edge type — e.g. DrugBank and ChEMBL both report
+                # same edge type -- e.g. DrugBank and ChEMBL both report
                 # "Compound X inhibits Protein Y". Without dedup, both
                 # rows end up in ``edge_index``, inflating degree counts
                 # and biasing the GNN's attention weights. ``kg_builder``
                 # dedups at Neo4j load time, but the PyG path bypasses
-                # Neo4j entirely (in-memory recorder → PyG), so we dedup
+                # Neo4j entirely (in-memory recorder -> PyG), so we dedup
                 # here as the last line of defense.
-                # v37 ROOT FIX (Phase 2 Issue #38 — performance): replaced
+                # v37 ROOT FIX (Phase 2 Issue #38 -- performance): replaced
                 # the Python ``set`` + ``for`` loop with a vectorised
                 # ``torch.unique`` call. On a 5M-edge DRKG the previous
                 # code ran 5M iterations with ``.item()`` calls (each
@@ -987,17 +987,17 @@ class PyGBuilder(GraphBuilderProtocol):
                         # Fallback: if torch.unique fails for any reason
                         # (e.g. dtype mismatch on an old PyTorch), fall
                         # back to the Python loop. This is the original
-                        # behavior — we don't lose data, just performance.
+                        # behavior -- we don't lose data, just performance.
                         self.logger.warning(
                             f"torch.unique edge dedup failed ({_dedup_exc}); "
                             f"falling back to Python loop."
                         )
-                        # v100 ROOT FIX (BUG P2-032 — PyG / Edge Dedup
+                        # v100 ROOT FIX (BUG P2-032 -- PyG / Edge Dedup
                         # Fallback Perf): the original fallback called
                         # ``edge_index[0, _i].item()`` and
                         # ``edge_index[1, _i].item()`` PER EDGE. Each
                         # ``.item()`` is a CPU↔GPU sync, so on a GPU
-                        # tensor this is O(num_edges) syncs —
+                        # tensor this is O(num_edges) syncs --
                         # catastrophic for multi-million-edge graphs.
                         # ROOT FIX: transfer the entire ``edge_index``
                         # to CPU ONCE via ``.cpu().numpy()`` (a single
@@ -1024,13 +1024,13 @@ class PyGBuilder(GraphBuilderProtocol):
                         self.logger.info(
                             f"  Deduplicated edges "
                             f"({src_type},{rel_name},{dst_type}): "
-                            f"{_orig_count} → {_new_count} "
+                            f"{_orig_count} -> {_new_count} "
                             f"(removed {_orig_count - _new_count} "
                             f"duplicate (src,dst) pairs) [v37 vectorised]"
                         )
 
                 data[src_type, rel_name, dst_type].edge_index = edge_index
-                # v84 FORENSIC ROOT FIX (BUG #18 — missing edge_type in
+                # v84 FORENSIC ROOT FIX (BUG #18 -- missing edge_type in
                 # HeteroData):
                 # The previous code set edge_index but NEVER set edge_type
                 # (an integer tensor mapping each edge to its relation
@@ -1057,9 +1057,9 @@ class PyGBuilder(GraphBuilderProtocol):
                         torch.zeros(0, dtype=torch.long)
                     )
 
-                # v100 ROOT FIX (BUG P2-053 — PyG / Aliasing / Dead
+                # v100 ROOT FIX (BUG P2-053 -- PyG / Aliasing / Dead
                 # Code): the v88 "ROOT FIX" block that previously
-                # lived here was DEAD CODE — it re-assigned
+                # lived here was DEAD CODE -- it re-assigned
                 # ``edge_type`` a SECOND time with an identical
                 # ``torch.zeros(edge_index.size(1), dtype=torch.long)``
                 # value, overwriting the v84 block above (lines
@@ -1280,7 +1280,7 @@ class PyGBuilder(GraphBuilderProtocol):
             matched = int(valid_mask.sum())
             unmatched = num_compounds - matched
 
-            # v88 ROOT FIX (BUG #30 — NaN/dead embeddings when no
+            # v88 ROOT FIX (BUG #30 -- NaN/dead embeddings when no
             # ChemBERTa features match): when matched == 0, initialize
             # ALL rows with Xavier-style random normal * 0.1 so the
             # embeddings are non-zero and learnable.
@@ -1291,7 +1291,7 @@ class PyGBuilder(GraphBuilderProtocol):
                 ).astype(np.float32)
                 self.logger.warning(
                     f"add_chemberta_features: 0/{num_compounds} "
-                    f"compounds matched ChemBERTa embeddings — using "
+                    f"compounds matched ChemBERTa embeddings -- using "
                     f"Xavier-style random init (v88 BUG #30 root fix)."
                 )
 
@@ -1304,7 +1304,7 @@ class PyGBuilder(GraphBuilderProtocol):
             # which only assigned the mean to unmatched compound_ids
             # (rows in ``ordered`` indexed by ``node_indices``).
             # However, the loop over ``compound_id_order`` uses
-            # ``entity_map_compound.get(cid, -1)`` — so compounds with
+            # ``entity_map_compound.get(cid, -1)`` -- so compounds with
             # cid NOT in the entity map have ``node_indices[i] = -1``
             # and are NOT in the graph. The mean imputation therefore
             # never reached the actual graph nodes that had no
@@ -1329,12 +1329,12 @@ class PyGBuilder(GraphBuilderProtocol):
                 )
 
             # v35 ROOT FIX (M-12): the previous code emitted the SAME
-            # ``unmatched compounds`` warning twice — once in the
+            # ``unmatched compounds`` warning twice -- once in the
             # mean-imputation block above ("Compound feature
             # imputation: ...") and once below ("add_chemberta_features:
             # {unmatched}/... compound IDs not found"). The first was
             # in terms of graph-node count, the second in terms of
-            # ``compound_id_order`` count — both referring to the same
+            # ``compound_id_order`` count -- both referring to the same
             # underlying mismatch but with different numbers, which
             # confused operators. The fix removes the duplicate
             # warning and keeps ONLY the one below (which lists the
@@ -1622,19 +1622,42 @@ class PyGBuilder(GraphBuilderProtocol):
         data: HeteroData,
         target_edge_type: Optional[Tuple[str, str, str]] = None,
         *,
-        node_disjoint: bool = False,
+        node_disjoint: bool = True,
     ) -> Tuple[HeteroData, HeteroData, HeteroData]:
         """Split the graph for drug-disease link prediction.
 
-        .. note:: v72 ROOT FIX (P2C-012) — accurate deprecation status.
+        .. note:: P2-006 FORENSIC ROOT FIX (Team 4 -- default was leaky).
+            The previous default was ``node_disjoint=False``, which uses
+            PyG's ``RandomLinkSplit`` (EDGE-disjoint). The same node can
+            appear in BOTH train and test. For a TransE model (scoring
+            triples in isolation), this is fine. But for a GNN (HGT,
+            GraphTransformer), the message-passing propagates features
+            across edges -- a node in both train and test lets the GNN
+            "see" the test node's neighborhood during training. Hu et al.
+            2020 ("Evaluating GNNs") warns this inflates AUC by 0.10-0.30.
+            The Phase 3 Graph Transformer (the V1 launch-critical model)
+            was evaluated with INFLATED AUC. The 0.85 launch criterion
+            may be met on a leaky split but fail on a real-world holdout.
+
+            ROOT FIX: the default is now ``node_disjoint=True`` (the
+            GNN-safe path). TransE callers should explicitly pass
+            ``node_disjoint=False`` with a comment explaining why
+            (TransE scores triples in isolation, benefits from
+            edge-disjoint). A runtime WARNING is logged if
+            ``node_disjoint=False`` is passed, so operators using a GNN
+            training path are alerted to the leakage risk.
+
+        .. note:: v72 ROOT FIX (P2C-012) -- accurate deprecation status.
             This method is NOT dead code. It is called by
             :meth:`temporal_split` as the random fallback when
             ``edge_years`` is not provided (pyg_builder.py line ~2023).
             It is also valid for TransE-style models that score triples
-            in isolation (no message passing across edges).
+            in isolation (no message passing across edges) -- BUT those
+            callers MUST now explicitly pass ``node_disjoint=False``.
 
-            It IS deprecated for GNN training (HGT, GraphTransformer):
-            PyG ``RandomLinkSplit`` is EDGE-DISJOINT — the same node
+            It IS deprecated for GNN training (HGT, GraphTransformer)
+            when called WITHOUT ``node_disjoint=True``: PyG
+            ``RandomLinkSplit`` is EDGE-DISJOINT -- the same node
             can appear in both train and test. For GNN models, this
             causes message-passing leakage: test node neighborhoods
             propagate into training, inflating AUC by 0.1-0.3
@@ -1642,11 +1665,12 @@ class PyGBuilder(GraphBuilderProtocol):
             for GNN training.
 
             The production pipeline (step11/step11b in run_pipeline.py)
-            does NOT call this method for GNN training — it uses an
+            does NOT call this method for GNN training -- it uses an
             inline node-disjoint partition (v72 P2C-018 root fix) that
             routes ALL edge types through the partition. This method
-            remains for: (a) TransE training, (b) temporal_split's
-            random fallback, (c) direct callers from notebooks/tests.
+            remains for: (a) TransE training (with explicit
+            ``node_disjoint=False``), (b) temporal_split's random
+            fallback, (c) direct callers from notebooks/tests.
 
         Only the target edge type is split. All other edge types
         remain intact for message passing. ToUndirected is applied
@@ -1680,16 +1704,44 @@ class PyGBuilder(GraphBuilderProtocol):
         with self._timed("split_for_link_prediction"):
             # BUG #54 ROOT FIX: for GNN models (HGT, GraphTransformer), an
             # edge-disjoint split (RandomLinkSplit) causes message-passing
-            # leakage — the same node appears in both train and test, so
+            # leakage -- the same node appears in both train and test, so
             # the GNN "sees" test node neighborhoods during training,
             # inflating AUC by 0.1-0.3 (Hu et al. 2020). When
             # node_disjoint=True, delegate to node_disjoint_split which
             # partitions NODES (not edges) so no node appears in more
             # than one split. TransE callers use node_disjoint=False
-            # (default) — TransE scores triples in isolation and benefits
+            # (default) -- TransE scores triples in isolation and benefits
             # from seeing every triple at training time. The production
             # pipeline should pass node_disjoint=True for all HGT/Graph
             # Transformer training (Phase 3 per the DOCX).
+            #
+            # P2-006 FORENSIC ROOT FIX (Team 4): the default is now
+            # ``node_disjoint=True`` (GNN-safe). When a caller explicitly
+            # passes ``node_disjoint=False`` (e.g. TransE training), log a
+            # WARNING so operators using a GNN training path are alerted
+            # to the leakage risk. The warning can be silenced by setting
+            # ``DRUGOS_ALLOW_EDGE_DISJOINT_SPLIT=1`` (for callers that
+            # genuinely want edge-disjoint, e.g. TransE).
+            import os as _os_p2_006
+            if not node_disjoint:
+                _allow_edge_disjoint = (
+                    _os_p2_006.environ.get(
+                        "DRUGOS_ALLOW_EDGE_DISJOINT_SPLIT", "0"
+                    ) == "1"
+                )
+                if not _allow_edge_disjoint:
+                    self.logger.warning(
+                        "P2-006 ROOT FIX: split_for_link_prediction called "
+                        "with node_disjoint=False. This is EDGE-DISJOINT "
+                        "(PyG RandomLinkSplit) -- the same node can appear "
+                        "in BOTH train and test. For GNN models (HGT, "
+                        "GraphTransformer), this causes message-passing "
+                        "leakage that inflates AUC by 0.1-0.3 (Hu et al. "
+                        "2020). Only use node_disjoint=False for TransE "
+                        "(scores triples in isolation). Set "
+                        "DRUGOS_ALLOW_EDGE_DISJOINT_SPLIT=1 to silence "
+                        "this warning if you genuinely want edge-disjoint."
+                    )
             if node_disjoint:
                 return self.node_disjoint_split(
                     data, target_edge_type=target_edge_type,
@@ -1761,7 +1813,7 @@ class PyGBuilder(GraphBuilderProtocol):
             # FIX(issue-47): selective tensor cloning for splits.
             # v72 ROOT FIX (P2C-013 compound link): the previous code
             # shared ``data[nt].x = original[nt].x`` by reference. PyTorch
-            # tensor assignment is NOT a copy — an in-place mutation on
+            # tensor assignment is NOT a copy -- an in-place mutation on
             # any split's ``x`` (e.g. by a normalisation transform or a
             # layer using ``addmm_``) corrupts ALL splits simultaneously.
             # Clone node features so each split owns an independent copy.
@@ -1794,7 +1846,7 @@ class PyGBuilder(GraphBuilderProtocol):
                                 dst,
                                 f"{REVERSE_EDGE_PREFIX}{rel}",
                                 src,
-                            # v100 ROOT FIX (BUG P2-043 — HGT / No
+                            # v100 ROOT FIX (BUG P2-043 -- HGT / No
                             # ToUndirected): the manual
                             # ``torch.flip(edge_index, [0])`` below
                             # only reverses ``edge_index`` (swaps
@@ -1807,7 +1859,7 @@ class PyGBuilder(GraphBuilderProtocol):
                             # ROOT FIX (documentation): a grep confirms
                             # ``edge_attr`` does NOT appear anywhere in
                             # pyg_builder.py outside comments, so this
-                            # pipeline never sets ``edge_attr`` — the
+                            # pipeline never sets ``edge_attr`` -- the
                             # manual flip is functionally correct HERE.
                             # If a future change adds ``edge_attr``,
                             # replace BOTH ``torch.flip`` call sites
@@ -1828,7 +1880,7 @@ class PyGBuilder(GraphBuilderProtocol):
                 if edge_index.numel() > 0:
                     data[
                         dst, f"{REVERSE_EDGE_PREFIX}{rel}", src
-                    # v100 ROOT FIX (BUG P2-043 — HGT / No
+                    # v100 ROOT FIX (BUG P2-043 -- HGT / No
                     # ToUndirected): see the matching comment at the
                     # first ``torch.flip`` call site (~line 1763) for
                     # the full rationale. In short: the manual flip
@@ -1961,13 +2013,13 @@ class PyGBuilder(GraphBuilderProtocol):
 
         v28 ROOT FIX (audit ML-10):
             ``split_for_link_prediction`` uses PyG ``RandomLinkSplit``
-            with ``disjoint_train_ratio=0.3`` — an EDGE-level split.
+            with ``disjoint_train_ratio=0.3`` -- an EDGE-level split.
             This is correct for TransE (which scores triples in
             isolation) but is CATASTROPHIC LEAKAGE for a Phase 3 GNN:
             the GNN's message-passing propagates node features across
             edges, so a node that appears in BOTH train and test lets
             the GNN "see" the test node's neighbourhood during training
-            — AUC is inflated by 0.10-0.30 in our internal benchmarks
+            -- AUC is inflated by 0.10-0.30 in our internal benchmarks
             (matches the literature: "Evaluating GNNs without
             node-disjoint splits is meaningless", Hu et al. 2020).
 
@@ -1984,7 +2036,7 @@ class PyGBuilder(GraphBuilderProtocol):
                 + No node appears in more than one split (GNN-safe).
                 - We drop cross-partition edges (10-30% of edges
                   depending on graph density and split ratios).
-                  This is INTENTIONAL — those edges would leak.
+                  This is INTENTIONAL -- those edges would leak.
                 - TransE should NOT use this split (it benefits from
                   seeing every triple at training time and does not
                   propagate features across edges).
@@ -1994,7 +2046,7 @@ class PyGBuilder(GraphBuilderProtocol):
         data : HeteroData
             The full heterogeneous graph.
         target_edge_type : tuple, optional
-            Currently unused — included for API symmetry with
+            Currently unused -- included for API symmetry with
             ``split_for_link_prediction``. All edge types are split
             by the same node partition (otherwise message-passing
             would leak across edge types). May be used in future for
@@ -2013,7 +2065,7 @@ class PyGBuilder(GraphBuilderProtocol):
             Three graphs, each containing only edges whose endpoints
             are BOTH in the corresponding node partition. Node
             features are RE-INDEXED within each split (so node 0 in
-            ``train_data`` may be node 17 in the original graph) —
+            ``train_data`` may be node 17 in the original graph) --
             the partition assignment is returned via
             ``data[ntype].partition_orig_idx`` so callers can map
             back if needed.
@@ -2029,7 +2081,7 @@ class PyGBuilder(GraphBuilderProtocol):
             if target_edge_type is None:
                 target_edge_type = self.config.target_edge_type
 
-            # Resolve ratios — default to PyGConfig values.
+            # Resolve ratios -- default to PyGConfig values.
             _train_ratio = (
                 train_ratio if train_ratio is not None
                 else self.config.train_ratio
@@ -2051,7 +2103,7 @@ class PyGBuilder(GraphBuilderProtocol):
                     f"= {total}"
                 )
 
-            # Resolve seed — default to PyGConfig.seed or global SEED.
+            # Resolve seed -- default to PyGConfig.seed or global SEED.
             _seed = (
                 seed if seed is not None
                 else getattr(self.config, "seed", None)
@@ -2129,7 +2181,7 @@ class PyGBuilder(GraphBuilderProtocol):
                 src_type, _, dst_type = etype
                 edge_index = data[etype].edge_index
                 if edge_index.numel() == 0:
-                    # Empty edge type — propagate to all splits as empty.
+                    # Empty edge type -- propagate to all splits as empty.
                     for sname in split_names:
                         outputs[sname][etype].edge_index = edge_index.clone()
                     continue
@@ -2168,7 +2220,7 @@ class PyGBuilder(GraphBuilderProtocol):
                             if val.size(0) == edge_index.size(1):
                                 outputs[sname][etype][key] = val[mask].clone()
                     else:
-                        # No edges of this type in this split —
+                        # No edges of this type in this split --
                         # propagate an empty edge_index so the
                         # HeteroData shape is consistent.
                         outputs[sname][etype].edge_index = torch.zeros(
@@ -2379,7 +2431,7 @@ class PyGBuilder(GraphBuilderProtocol):
             # splits.
             #
             # v35 ROOT FIX (H-8): the previous _make_split only
-            # attached POSITIVE edges (edge_label=1) to each split —
+            # attached POSITIVE edges (edge_label=1) to each split --
             # val and test had no negatives, so PyG's link-prediction
             # training could not compute a real AUC on the held-out
             # splits. The fix generates negatives for the val and test
@@ -2389,10 +2441,10 @@ class PyGBuilder(GraphBuilderProtocol):
             # because PyG's ``RandomLinkSplit`` / ``train_loader`` will
             # sample its own negatives during training.
             #
-            # v43 ROOT FIX (Chain 6 — temporal_split negative leak):
+            # v43 ROOT FIX (Chain 6 -- temporal_split negative leak):
             # The previous code built `pos_pairs_set` from ONLY the
             # current split's positives. A true positive in TRAIN could
-            # silently appear as a NEGATIVE in VAL/TEST — textbook
+            # silently appear as a NEGATIVE in VAL/TEST -- textbook
             # train/test contamination that structurally inflates AUC.
             # Per Bordes 2013 / Sun 2019, the filtered-eval protocol
             # requires filtering negatives against the FULL positive
@@ -2405,7 +2457,7 @@ class PyGBuilder(GraphBuilderProtocol):
                 _all_pos_pairs = edge_index.t().tolist()
                 full_pos_pairs_set = {(int(h), int(t)) for h, t in _all_pos_pairs}
             except Exception:
-                pass  # defensive — fall back to per-split filtering
+                pass  # defensive -- fall back to per-split filtering
 
             def _make_split(mask_indices, generate_negatives: bool = False, split_name: str = ""):
                 split_data = HeteroData()
@@ -2419,7 +2471,7 @@ class PyGBuilder(GraphBuilderProtocol):
                 # layer that uses ``addmm_`` internally), the mutation
                 # silently propagates to ALL three splits simultaneously.
                 # Today's HGTConv may be safe, but this is a latent
-                # correctness bug — a future layer or feature transform
+                # correctness bug -- a future layer or feature transform
                 # that mutates ``x`` in-place would corrupt all splits,
                 # making train and test see identical features and AUC
                 # reports meaningless. The fix clones the tensor so each
@@ -2427,13 +2479,13 @@ class PyGBuilder(GraphBuilderProtocol):
                 # per split (3× total) which is acceptable for correctness.
                 # Non-target edge_index is left shared-by-reference because
                 # PyG layers use edge_index only for gather/scatter indexing
-                # (read-only) — they never mutate edge_index in-place.
+                # (read-only) -- they never mutate edge_index in-place.
                 for nt in data.node_types:
                     split_data[nt].num_nodes = data[nt].num_nodes
                     if data[nt].x is not None:
                         split_data[nt].x = data[nt].x.clone()  # P2C-013: clone, not share
 
-                # v84 FORENSIC ROOT FIX (BUG #11 + BUG #24 — HGT message-
+                # v84 FORENSIC ROOT FIX (BUG #11 + BUG #24 -- HGT message-
                 # passing leakage from non-target / reverse edges in
                 # val/test splits):
                 #
@@ -2443,14 +2495,14 @@ class PyGBuilder(GraphBuilderProtocol):
                 # split_data[et].edge_index = data[et].edge_index``).
                 # For an HGT model, this is message-passing leakage: the
                 # val/test HGT encoder sees training-time edges of all
-                # non-target types — including edges incident to val/test
+                # non-target types -- including edges incident to val/test
                 # target entities. Val/test AUC is structurally inflated.
                 #
                 # BUG #24: the reverse edge (Disease, rev_treats, Compound)
                 # is NOT split in parallel with the target edge type. After
                 # splitting, val/test splits have Disease-rev_treats-
                 # Compound edges that point to the FULL graph's Compound
-                # entities — including train Compounds. HGT val/test AUC
+                # entities -- including train Compounds. HGT val/test AUC
                 # is inflated by reverse-edge leakage from train Compounds.
                 #
                 # ROOT FIX: for val/test splits, drop non-target edges
@@ -2524,7 +2576,7 @@ class PyGBuilder(GraphBuilderProtocol):
                         self.logger.info(
                             f"temporal_split: dropped {_n_dropped}/{_n_total} "
                             f"non-target edges of {et!r} from val/test split "
-                            f"(touched target entities — would leak via HGT "
+                            f"(touched target entities -- would leak via HGT "
                             f"message passing). (v84 BUG #11+#24 root fix)"
                         )
                     split_data[et].edge_index = _et_edge_index[:, _keep_mask]
@@ -2566,14 +2618,14 @@ class PyGBuilder(GraphBuilderProtocol):
                         # triples) are still in the negative sampling
                         # pool. A held-out drug D with a random-init
                         # embedding produces a large translational
-                        # distance for any (D, *) pair → trivially
-                        # distinguishable as a negative → INFLATED
+                        # distance for any (D, *) pair -> trivially
+                        # distinguishable as a negative -> INFLATED
                         # val/test AUC. ROOT FIX: restrict the negative
                         # sampling range to the nodes that ACTUALLY
                         # appear as endpoints in this split's positive
                         # edges (the inductive entity pool). Negatives
                         # are now drawn from entities the model has
-                        # actually seen in this split's positive set —
+                        # actually seen in this split's positive set --
                         # making the negative discrimination task
                         # genuinely test the model's learned ranking
                         # rather than its ability to spot unseen entities.
@@ -2694,7 +2746,7 @@ class PyGBuilder(GraphBuilderProtocol):
                                 [pos_edge_index, neg_edge_index], dim=1
                             )
                             combined_labels = torch.cat([pos_labels, neg_labels])
-                            # v88 ROOT FIX (BUG #48 — PyG HeteroData built
+                            # v88 ROOT FIX (BUG #48 -- PyG HeteroData built
                             # with mismatched edge_index): set
                             #   edge_index = pos_edge_index (positives only)
                             #   edge_label_index = combined_edge_index
@@ -2727,7 +2779,7 @@ class PyGBuilder(GraphBuilderProtocol):
                             ].edge_label_index = pos_edge_index
                             self.logger.warning(
                                 f"temporal_split: generated 0 negatives "
-                                f"for split — AUC will be 0.5 by default."
+                                f"for split -- AUC will be 0.5 by default."
                             )
                     else:
                         # Train split: positives only (PyG sampler will
@@ -3165,13 +3217,13 @@ if __name__ == "__main__":
 
 
 # ===========================================================================
-# v85 P0 ROOT FIX — build_pyg_hetero_data (Phase 2→3 bridge function)
+# v85 P0 ROOT FIX -- build_pyg_hetero_data (Phase 2->3 bridge function)
 # ===========================================================================
 # The run_pipeline.py (line 166) imports ``build_pyg_hetero_data`` from
-# this module. The function DID NOT EXIST — the entire 4-phase pipeline
+# this module. The function DID NOT EXIST -- the entire 4-phase pipeline
 # was dead on arrival (ImportError at runtime). This function converts
 # Phase 2 node/edge dicts into the format the GT-RL bridge expects,
-# with critical node-type name mapping (Compound→drug, Disease→disease).
+# with critical node-type name mapping (Compound->drug, Disease->disease).
 
 _PHASE2_TO_GT_NODE_TYPE: Dict[str, str] = {
     "Compound": "drug",
@@ -3195,7 +3247,7 @@ def build_pyg_hetero_data(
 ) -> Tuple[HeteroData, Dict[str, Dict[str, int]], List[Tuple[str, str]]]:
     """Build PyG HeteroData from Phase 2 node/edge dicts.
 
-    This is the CRITICAL Phase 2→3 bridge function that run_pipeline.py
+    This is the CRITICAL Phase 2->3 bridge function that run_pipeline.py
     imports. It converts the stage_phase1_to_phase2 output (lists of
     node/edge dicts) into the HeteroData + node_maps + known_pairs
     format that gt_rl_bridge.GTRLBridge expects.
@@ -3220,19 +3272,19 @@ def build_pyg_hetero_data(
     hetero_data : HeteroData
         PyG graph with lowercase node type keys.
     node_maps : dict[str, dict[str, int]]
-        ID→index mappings with lowercase keys.
+        ID->index mappings with lowercase keys.
     known_pairs : list[tuple[str, str]]
         Known drug-treats-disease pairs.
     """
     if not nodes:
         raise ValueError(
-            "build_pyg_hetero_data received empty nodes list — "
+            "build_pyg_hetero_data received empty nodes list -- "
             "cannot build a graph. Check Phase 1 outputs."
         )
 
     builder = PyGBuilder(config=config or PyGConfig())
 
-    # Step 1: Build entity_maps from node dicts with Phase2→GT mapping
+    # Step 1: Build entity_maps from node dicts with Phase2->GT mapping
     entity_maps: Dict[str, Dict[str, int]] = {}
     _phase2_nodes_by_type: Dict[str, List[Dict]] = {}
 
@@ -3306,7 +3358,7 @@ def build_pyg_hetero_data(
     # Step 3: Build HeteroData via PyGBuilder
     hetero_data = builder.build_from_drkg(entity_maps, edge_maps)
 
-    # Step 4: Extract known drug→disease pairs
+    # Step 4: Extract known drug->disease pairs
     known_pairs: List[Tuple[str, str]] = []
     drug_id_map = entity_maps.get("drug", {})
     disease_id_map = entity_maps.get("disease", {})

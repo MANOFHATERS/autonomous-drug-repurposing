@@ -1,4 +1,4 @@
-"""DrugOS Graph Module — Exception Hierarchy
+"""DrugOS Graph Module -- Exception Hierarchy
 ============================================
 Domain-specific exceptions for the DrugOS data pipeline.
 
@@ -9,14 +9,14 @@ appropriate granularity. Every exception here carries enough context
 failure without re-reading the source file.
 
 Design rules (audit issues D6-006, D1-002):
-  * Exceptions are **additive** — they do not replace any stdlib exception.
+  * Exceptions are **additive** -- they do not replace any stdlib exception.
     Existing ``except FileNotFoundError`` / ``except Exception`` blocks in
     callers continue to work because these new types subclass the most
     relevant stdlib base.
   * Every exception stores a structured ``context`` dict so that the
     dead-letter writer and the structured logger can serialise it without
     re-formatting strings.
-  * No third-party dependencies — stdlib only.
+  * No third-party dependencies -- stdlib only.
 
 Fixes: D6-006 (wrap raw URLError), D1-002 (Loader Protocol error contract),
        D5-005/D5-007 (data-integrity guard errors).
@@ -31,34 +31,34 @@ __all__: list[str] = [
     "UniProtDownloadError",
     "UniProtParseError",
     "UniProtDataIntegrityError",
-    # DRKG exceptions — added by drkg_loader v2.0 audit fix
+    # DRKG exceptions -- added by drkg_loader v2.0 audit fix
     # (DRKG-002 / BUG 6.2 in drkg_loader_repair_prompt.md).
     "DRKGDownloadError",
     "DRKGParseError",
     "DRKGDataIntegrityError",
-    # DrugBank exceptions — added by drugbank_parser v2.0 audit fix
-    # (drugbank_parser_fix_prompt.md — Domain 6 Reliability, FIX 6.14).
+    # DrugBank exceptions -- added by drugbank_parser v2.0 audit fix
+    # (drugbank_parser_fix_prompt.md -- Domain 6 Reliability, FIX 6.14).
     # These three exception types mirror the UniProt and DRKG trios
     # (Download / Parse / DataIntegrity) so that ``run_pipeline.py`` and
     # the ``Loader`` Protocol can treat all loaders polymorphically.
     "DrugBankDownloadError",
     "DrugBankParseError",
     "DrugBankDataIntegrityError",
-    # ChEMBL exceptions — added by the chembl_loader v2.0 audit fix
-    # (chembl_loader institutional-grade rewrite — Domain 6 Reliability).
+    # ChEMBL exceptions -- added by the chembl_loader v2.0 audit fix
+    # (chembl_loader institutional-grade rewrite -- Domain 6 Reliability).
     "ChEMBLDownloadError",
     "ChEMBLParseError",
     "ChEMBLDataIntegrityError",
-    # STRING exceptions — added by the string_loader v1.0 institutional-grade
-    # audit fix (master_prompt_fix_string_loader.md — Sections 5, 9).
+    # STRING exceptions -- added by the string_loader v1.0 institutional-grade
+    # audit fix (master_prompt_fix_string_loader.md -- Sections 5, 9).
     # The first three mirror the UniProt/DRKG/DrugBank/ChEMBL trios
     # (Download / Parse / DataIntegrity). The remaining four are
     # STRING-specific:
-    #   * StringEdgeLoadMismatchError — Neo4j load dropped edges (D5-10)
-    #   * CircuitBreakerOpenError     — repeated download failure (R6-12)
-    #   * CriticalDataSourceError     — 0 edges on required source (D5-10)
-    #   * SecurityError               — URL/path-traversal / SSRF (S9-02/03)
-    #   * ConfigurationError          — invalid STRING_* config (C12-08)
+    #   * StringEdgeLoadMismatchError -- Neo4j load dropped edges (D5-10)
+    #   * CircuitBreakerOpenError     -- repeated download failure (R6-12)
+    #   * CriticalDataSourceError     -- 0 edges on required source (D5-10)
+    #   * SecurityError               -- URL/path-traversal / SSRF (S9-02/03)
+    #   * ConfigurationError          -- invalid STRING_* config (C12-08)
     "StringDownloadError",
     "StringParseError",
     "StringDataIntegrityError",
@@ -67,17 +67,17 @@ __all__: list[str] = [
     "CriticalDataSourceError",
     "SecurityError",
     "ConfigurationError",
-    # STITCH exceptions — added by the stitch_loader v1.1.0 institutional-grade
-    # audit fix (master_prompt_fix_stitch_loader.md — Sections 3, 9).
+    # STITCH exceptions -- added by the stitch_loader v1.1.0 institutional-grade
+    # audit fix (master_prompt_fix_stitch_loader.md -- Sections 3, 9).
     # The first three mirror the STRING trio (Download / Parse / DataIntegrity)
     # plus three STITCH-specific extras:
-    #   * StitchEdgeLoadMismatchError — Neo4j load dropped edges (BUG-15.1)
-    #   * StitchSecurityError         — URL/path-traversal / SSRF (BUG-9.1, GAP-9.4)
-    #   * StitchConfigurationError    — invalid STITCH_* config (GAP-12.4, BUG-12.1)
+    #   * StitchEdgeLoadMismatchError -- Neo4j load dropped edges (BUG-15.1)
+    #   * StitchSecurityError         -- URL/path-traversal / SSRF (BUG-9.1, GAP-9.4)
+    #   * StitchConfigurationError    -- invalid STITCH_* config (GAP-12.4, BUG-12.1)
     # All STITCH exceptions subclass DrugOSDataError so callers can write
     # `except DrugOSDataError` to catch any pipeline failure while still
     # letting unrelated bugs propagate. They are SIBLING classes to the
-    # STRING exceptions — STITCH errors must NOT be caught by
+    # STRING exceptions -- STITCH errors must NOT be caught by
     # `except StringDownloadError` (catch granularity, master prompt R7).
     "StitchDownloadError",
     "StitchParseError",
@@ -85,28 +85,28 @@ __all__: list[str] = [
     "StitchEdgeLoadMismatchError",
     "StitchSecurityError",
     "StitchConfigurationError",
-    # SIDER exceptions — added by sider_loader v1.0.0 institutional-grade
-    # audit fix (master_prompt — Section 3, Phase 0.4 / Domain 6 / Domain 9).
+    # SIDER exceptions -- added by sider_loader v1.0.0 institutional-grade
+    # audit fix (master_prompt -- Section 3, Phase 0.4 / Domain 6 / Domain 9).
     # These six exception types extend the DrugOSDataError hierarchy with
     # SIDER-specific failures. They follow the same ``context`` kwarg pattern
     # as every other loader exception so that the dead-letter writer and the
     # structured logger can serialise them without re-formatting strings.
     #
     # IMPORTANT catch-granularity design (mirrors STITCH/STRING siblings):
-    #   * SIDER exceptions are SIBLINGS of the STITCH/STRING exceptions — they
+    #   * SIDER exceptions are SIBLINGS of the STITCH/STRING exceptions -- they
     #     do NOT subclass Stitch*Error or String*Error. This means
     #     ``except StitchDownloadError`` will NOT catch ``SiderDownloadError``.
     #     Callers wanting to catch any loader failure should use
     #     ``except DrugOSDataError``.
     #   * ``SiderParseError`` MULTIPLE-INHERITS from ``DrugOSDataError`` AND
     #     ``FileNotFoundError`` so existing ``except FileNotFoundError`` blocks
-    #     in callers continue to work (backward compat — Rule R3).
+    #     in callers continue to work (backward compat -- Rule R3).
     #
     # Patient-safety doctrine: SIDER is the SOLE source of adverse-event
     # data feeding the RL safety-signal dimension. If this loader emits a
     # wrong CID, wrong UMLS CUI, or fails silently, the safety ranker will
     # see zero adverse events for every drug and rank dangerous drugs as
-    # GREEN (recommend). These exceptions MUST NOT be silenced — every
+    # GREEN (recommend). These exceptions MUST NOT be silenced -- every
     # ``except SiderCriticalError`` block must either re-raise or fail the
     # pipeline loudly (Rule R5: no silent failures).
     "SiderCriticalError",
@@ -115,8 +115,8 @@ __all__: list[str] = [
     "SiderDataQualityError",
     "SiderSchemaError",
     "SiderDualWriteError",
-    # OpenTargets exceptions — added by opentargets_loader v2.0 institutional-grade
-    # audit fix (opentargets_loader_repair_prompt.md — Section 2.7).
+    # OpenTargets exceptions -- added by opentargets_loader v2.0 institutional-grade
+    # audit fix (opentargets_loader_repair_prompt.md -- Section 2.7).
     # These seven exception types extend the DrugOSDataError hierarchy with
     # OpenTargets-specific failures. They follow the same ``context`` kwarg
     # pattern as every other loader exception so that the dead-letter writer
@@ -124,20 +124,20 @@ __all__: list[str] = [
     #
     # IMPORTANT catch-granularity design (mirrors SIDER/STITCH/STRING siblings):
     #   * OpenTargets exceptions are SIBLINGS of the SIDER/STITCH/STRING
-    #     exceptions — they do NOT subclass Sider*Error / Stitch*Error /
+    #     exceptions -- they do NOT subclass Sider*Error / Stitch*Error /
     #     String*Error. This means ``except StitchDownloadError`` will NOT
     #     catch ``OpenTargetsDownloadError``. Callers wanting to catch any
     #     loader failure should use ``except DrugOSDataError``.
     #   * ``OpenTargetsParseError`` MULTIPLE-INHERITS from ``DrugOSDataError``
     #     AND ``FileNotFoundError`` so existing ``except FileNotFoundError``
-    #     blocks in callers continue to work (backward compat — Rule R3).
+    #     blocks in callers continue to work (backward compat -- Rule R3).
     #
     # Patient-safety doctrine: OpenTargets is the SOLE source of evidence-
     # scored drug-target-disease triples feeding the Graph Transformer's
     # confidence training objective. If this loader silently drops 100% of
     # records (the v1 SCI-1 condition), the model trains on an empty
-    # OpenTargets signal — worse than no signal. These exceptions MUST NOT
-    # be silenced — every ``except OpenTargetsDataIntegrityError`` block
+    # OpenTargets signal -- worse than no signal. These exceptions MUST NOT
+    # be silenced -- every ``except OpenTargetsDataIntegrityError`` block
     # must either re-raise or fail the pipeline loudly (Rule R5: no silent
     # failures).
     "OpenTargetsDownloadError",
@@ -147,9 +147,9 @@ __all__: list[str] = [
     "OpenTargetsConfigurationError",
     "OpenTargetsEdgeLoadMismatchError",
     "OpenTargetsSchemaError",
-    # ClinicalTrials exceptions — added by clinicaltrials_loader v2.1.0
+    # ClinicalTrials exceptions -- added by clinicaltrials_loader v2.1.0
     # institutional-grade audit fix
-    # (PROMPT_fix_clinicaltrials_loader.md — 148 findings across 16 domains).
+    # (PROMPT_fix_clinicaltrials_loader.md -- 148 findings across 16 domains).
     # These seven exception types extend the DrugOSDataError hierarchy with
     # ClinicalTrials-specific failures. They follow the same ``context`` kwarg
     # pattern as every other loader exception so that the dead-letter writer
@@ -158,13 +158,13 @@ __all__: list[str] = [
     # IMPORTANT catch-granularity design (mirrors OpenTargets/SIDER/STITCH/STRING
     # siblings):
     #   * ClinicalTrials exceptions are SIBLINGS of the OpenTargets / SIDER /
-    #     STITCH / STRING exceptions — they do NOT subclass any sibling. This
+    #     STITCH / STRING exceptions -- they do NOT subclass any sibling. This
     #     means ``except OpenTargetsDownloadError`` will NOT catch
     #     ``ClinicalTrialsDownloadError``. Callers wanting to catch any loader
     #     failure should use ``except DrugOSDataError``.
     #   * ``ClinicalTrialsParseError`` MULTIPLE-INHERITS from ``DrugOSDataError``
     #     AND ``FileNotFoundError`` so existing ``except FileNotFoundError``
-    #     blocks in callers continue to work (backward compat — Rule R3).
+    #     blocks in callers continue to work (backward compat -- Rule R3).
     #
     # Patient-safety doctrine: ClinicalTrials.gov AACT is the SOLE source of
     # clinical-trial evidence feeding the RL ranker's "has been tested in
@@ -173,7 +173,7 @@ __all__: list[str] = [
     # arm, not the experimental arm), the ranker learns that Warfarin treats
     # X. A clinician who trusts that ranker can prescribe Warfarin off-label
     # to a patient for whom it is contraindicated. THAT PATIENT CAN DIE.
-    # These exceptions MUST NOT be silenced — every
+    # These exceptions MUST NOT be silenced -- every
     # ``except ClinicalTrialsDataIntegrityError`` block must either re-raise
     # or fail the pipeline loudly (Rule R5: no silent failures).
     "ClinicalTrialsDownloadError",
@@ -183,8 +183,8 @@ __all__: list[str] = [
     "ClinicalTrialsConfigurationError",
     "ClinicalTrialsEdgeLoadMismatchError",
     "ClinicalTrialsSchemaError",
-    # GEO exceptions — added by geo_loader v1.0.0 institutional-grade audit
-    # fix (GEO_LOADER_MASTER_REPAIR_PROMPT.md — 192 findings across 16 domains).
+    # GEO exceptions -- added by geo_loader v1.0.0 institutional-grade audit
+    # fix (GEO_LOADER_MASTER_REPAIR_PROMPT.md -- 192 findings across 16 domains).
     # These eight exception types extend the DrugOSDataError hierarchy with
     # GEO-specific failures. They follow the same ``context`` kwarg pattern
     # as every other loader exception so the dead-letter writer and the
@@ -192,7 +192,7 @@ __all__: list[str] = [
     #
     # IMPORTANT catch-granularity design (mirrors ClinicalTrials/OpenTargets/
     # SIDER/STITCH/STRING siblings):
-    #   * GEO exceptions are SIBLINGS of the other loader exceptions — they
+    #   * GEO exceptions are SIBLINGS of the other loader exceptions -- they
     #     do NOT subclass ClinicalTrials*Error / OpenTargets*Error /
     #     Sider*Error / Stitch*Error / String*Error. This means
     #     ``except SiderDownloadError`` will NOT catch ``GeoDownloadError``.
@@ -200,15 +200,15 @@ __all__: list[str] = [
     #     ``except DrugOSDataError``.
     #   * ``GeoParseError`` MULTIPLE-INHERITS from ``DrugOSDataError`` AND
     #     ``FileNotFoundError`` so existing ``except FileNotFoundError``
-    #     blocks in callers continue to work (backward compat — Rule R4).
+    #     blocks in callers continue to work (backward compat -- Rule R4).
     #
     # Patient-safety doctrine: GEO is the SOLE source of
-    # Protein→expressed_in→Anatomy edges in the KG. If this loader silently
+    # Protein->expressed_in->Anatomy edges in the KG. If this loader silently
     # produces zero records, the KG lacks the entire tissue-specificity
     # modality, the model cannot learn that a drug target is absent from the
     # disease tissue, and a clinician can be handed a "high-confidence"
-    # repurposing candidate that will fail in Phase II — or harm a patient
-    # in a clinical-trial setting. These exceptions MUST NOT be silenced —
+    # repurposing candidate that will fail in Phase II -- or harm a patient
+    # in a clinical-trial setting. These exceptions MUST NOT be silenced --
     # every ``except GeoCriticalError`` block must either re-raise or fail
     # the pipeline loudly (master prompt Rule R5).
     "GeoConfigurationError",
@@ -248,13 +248,13 @@ __all__: list[str] = [
     "ResolverConflictError",
     "ResolverDataQualityError",
     "ResolverProvenanceError",
-    # Evaluation exceptions — evaluation.py v2.0 audit fix
+    # Evaluation exceptions -- evaluation.py v2.0 audit fix
     "EvaluationError",
     "EvaluationInputError",
     "EvaluationIntegrityError",
     "EvaluationReproducibilityError",
     "EvaluationSecurityError",
-    # v9 audit fix F7.8 — fail-closed validation for unknown node labels.
+    # v9 audit fix F7.8 -- fail-closed validation for unknown node labels.
     "UnknownLabelError",
     # FIX-P3-2: 6 exceptions defined but missing from __all__.
     # EdgeLoadMismatchError is the base class for StringEdgeLoadMismatchError
@@ -311,11 +311,11 @@ class UniProtDownloadError(DrugOSDataError):
     stdlib error.
 
     Typical causes:
-      * Network/DNS failure (retryable — see ``retry_count`` in config).
+      * Network/DNS failure (retryable -- see ``retry_count`` in config).
       * TLS certificate verification failure (D9-001).
-      * URL not in the allowlist (D9-002 — refused before any network call).
+      * URL not in the allowlist (D9-002 -- refused before any network call).
       * Downloaded file fails the size or SHA-256 check (D5-006/D5-007).
-      * Downloaded file fails the content-sniff assertion (D12-002 — tar.gz
+      * Downloaded file fails the content-sniff assertion (D12-002 -- tar.gz
         served where a flat .dat.gz was expected).
     """
 
@@ -324,9 +324,9 @@ class UniProtParseError(DrugOSDataError):
     """Raised when the UniProt flat file cannot be parsed safely.
 
     Raised when the per-line parse-error rate exceeds the configured
-    threshold (default 1% of kept records — D6-003) or when a structural
+    threshold (default 1% of kept records -- D6-003) or when a structural
     invariant is violated (e.g. the file is not valid UTF-8 even in
-    degraded mode — D4-006).
+    degraded mode -- D4-006).
 
     Individual malformed lines do NOT raise this exception; they are
     logged at WARNING, written to the dead-letter queue (D6-004), and
@@ -342,7 +342,7 @@ class UniProtDataIntegrityError(DrugOSDataError):
 
     Typical causes:
       * Record count is more than 50% below ``expected_record_count``
-        (D5-005) — almost always a URL/format mismatch or a corrupted file.
+        (D5-005) -- almost always a URL/format mismatch or a corrupted file.
       * SHA-256 of the downloaded file does not match the pinned value
         (D5-007).
       * A record returned by ``uniprot_to_node_records`` is missing the
@@ -352,8 +352,8 @@ class UniProtDataIntegrityError(DrugOSDataError):
 
 
 # =============================================================================
-# DRKG exceptions — added by the drkg_loader v2.0 audit fix
-# (drkg_loader_repair_prompt.md — Domain 6 Reliability, BUG 6.2).
+# DRKG exceptions -- added by the drkg_loader v2.0 audit fix
+# (drkg_loader_repair_prompt.md -- Domain 6 Reliability, BUG 6.2).
 #
 # These three exception types mirror the UniProt trio (Download / Parse /
 # DataIntegrity) so that ``run_pipeline.py`` and the ``Loader`` Protocol
@@ -374,9 +374,9 @@ class DRKGDownloadError(DrugOSDataError):
       * Network/DNS failure after all retries exhausted (BUG 6.1).
       * TLS certificate verification failure (BUG 9.1).
       * URL not in the allowlist ``config.ALLOWED_DRKG_URLS``
-        (BUG 9.2 — refused before any network call).
+        (BUG 9.2 -- refused before any network call).
       * Downloaded file fails the gzip content-sniff assertion
-        (GAP 5.10 — server returned an HTML error page).
+        (GAP 5.10 -- server returned an HTML error page).
       * Tar member fails the path-traversal / type-safety check
         (BUG 9.4 / BUG 9.5).
       * ``allow_stale=False`` AND no cached copy exists.
@@ -392,11 +392,11 @@ class DRKGParseError(DrugOSDataError):
     Raised when ``pandas.errors.ParserError`` is caught (BUG 6.6), when
     the parsed DataFrame is missing required columns (BUG 15.3), or when
     a structural invariant is violated (e.g. no row contains the ``::``
-    separator — BUG 4.3 / BUG 4.4).
+    separator -- BUG 4.3 / BUG 4.4).
 
     Individual malformed rows do NOT raise this exception; they are
     logged at WARNING, written to the dead-letter queue
-    (``data/dead_letter/drkg_malformed.jsonl`` — GAP 5.11), and skipped
+    (``data/dead_letter/drkg_malformed.jsonl`` -- GAP 5.11), and skipped
     so that one bad row cannot kill a 5.9M-triple parse.
 
     Fixes: BUG 4.3, BUG 4.4, BUG 6.6, BUG 15.3, BUG 16.1.
@@ -412,19 +412,19 @@ class DRKGDataIntegrityError(DrugOSDataError):
     Typical causes (per the audit, drkg_loader_repair_prompt.md
     §Domain 5):
       * Row count is more than 5% below ``expected_record_count`` (BUG 5.1)
-        — almost always a truncated download or corrupted file.
+        -- almost always a truncated download or corrupted file.
       * Entity-type count deviates from the expected 13 by more than ±1
         (BUG 5.2).
       * Relation-type count deviates from the expected 107 by more than ±1
         (BUG 5.2).
       * SHA-256 of the downloaded ``drkg.tar.gz`` does not match the
-        pinned value (BUG 5.8) — possible MITM or S3 corruption.
+        pinned value (BUG 5.8) -- possible MITM or S3 corruption.
       * Downloaded file size is below 90% of ``size_bytes`` (BUG 5.9) or
         above ``max_size_bytes`` (BUG 5.9).
       * ``build_edge_index_maps`` cannot find a head/tail entity in
-        ``entity_maps`` (BUG 2.1) — indicates a parser bug.
+        ``entity_maps`` (BUG 2.1) -- indicates a parser bug.
       * ``build_networkx_graph`` finds an entity ID with multiple
-        ``entity_type`` values (BUG 4.10) — data corruption.
+        ``entity_type`` values (BUG 4.10) -- data corruption.
 
     Fixes: BUG 2.1, BUG 4.10, BUG 5.1, BUG 5.2, BUG 5.8, BUG 5.9,
            GAP 5.10, GUARD 5.13.
@@ -432,8 +432,8 @@ class DRKGDataIntegrityError(DrugOSDataError):
 
 
 # =============================================================================
-# DrugBank exceptions — added by the drugbank_parser v2.0 audit fix
-# (drugbank_parser_fix_prompt.md — Domain 6 Reliability, FIX 6.14).
+# DrugBank exceptions -- added by the drugbank_parser v2.0 audit fix
+# (drugbank_parser_fix_prompt.md -- Domain 6 Reliability, FIX 6.14).
 #
 # These three exception types mirror the UniProt and DRKG trios (Download /
 # Parse / DataIntegrity) so that ``run_pipeline.py`` and the ``Loader``
@@ -444,7 +444,7 @@ class DRKGDataIntegrityError(DrugOSDataError):
 # Patient-safety doctrine: DrugBank is the canonical FDA-approved-drug
 # reference for the project. If this parser emits a wrong or missing field,
 # the model will silently train on garbage and recommend the wrong drug to a
-# clinician. These exceptions MUST NOT be silenced — every ``except
+# clinician. These exceptions MUST NOT be silenced -- every ``except
 # DrugBankDataIntegrityError`` block must either re-raise or fail the
 # pipeline loudly.
 # =============================================================================
@@ -461,15 +461,15 @@ class DrugBankDownloadError(DrugOSDataError):
       * Network/DNS failure after all retries exhausted (FIX 6.3).
       * TLS certificate verification failure (FIX 9.2).
       * URL not in the allowlist ``config.ALLOWED_DRUGBANK_URLS``
-        (FIX 9.1 — refused before any network call).
-      * Downloaded file fails the XML content-sniff assertion (FIX 5.13 —
+        (FIX 9.1 -- refused before any network call).
+      * Downloaded file fails the XML content-sniff assertion (FIX 5.13 --
         DrugBank requires academic registration; an HTML login page is
         served where the XML was expected).
-      * Downloaded file fails the size check (FIX 5.5) — too small (likely
+      * Downloaded file fails the size check (FIX 5.5) -- too small (likely
         an error page) or too large (likely malicious).
       * SHA-256 of the downloaded file does not match the pinned value
-        (FIX 5.2 — possible MITM or S3 corruption).
-      * Credentials missing or invalid (FIX 9.4 — DrugBank requires
+        (FIX 5.2 -- possible MITM or S3 corruption).
+      * Credentials missing or invalid (FIX 9.4 -- DrugBank requires
         academic registration; username/password read via
         ``config.get_secret``).
 
@@ -481,16 +481,16 @@ class DrugBankDownloadError(DrugOSDataError):
 class DrugBankParseError(DrugOSDataError):
     """Raised when the DrugBank XML cannot be parsed safely.
 
-    Raised when ``ET.ParseError`` is caught (FIX 5.12 — truncated or
+    Raised when ``ET.ParseError`` is caught (FIX 5.12 -- truncated or
     malformed XML), when the parser exceeds the memory ceiling (FIX 6.8),
     when the parser exceeds the timeout (FIX 6.6), when a per-drug parse
-    fails repeatedly (FIX 6.12 — per-drug exception isolation), or when a
+    fails repeatedly (FIX 6.12 -- per-drug exception isolation), or when a
     structural invariant is violated (e.g. the root element is not
-    ``<drugbank>`` — FIX 5.1).
+    ``<drugbank>`` -- FIX 5.1).
 
     Individual malformed ``<drug>`` elements do NOT raise this exception;
     they are logged at WARNING, written to the dead-letter queue
-    (``data/dead_letter/drugbank_malformed.jsonl`` — FIX 6.2), and
+    (``data/dead_letter/drugbank_malformed.jsonl`` -- FIX 6.2), and
     skipped so that one bad drug cannot kill a 15k-drug parse.
 
     Fixes: FIX 5.1, FIX 5.12, FIX 6.1, FIX 6.4, FIX 6.6, FIX 6.8,
@@ -505,36 +505,36 @@ class DrugBankDataIntegrityError(DrugOSDataError):
     exception means the XML parsed fine but the *content* is wrong.
 
     Typical causes (per the audit, drugbank_parser_fix_prompt.md
-    §Domain 5 and §Phase Q — Guards):
-      * Parsed drug count is 0 (Guard G.1 — empty drugs list MUST NOT
+    §Domain 5 and §Phase Q -- Guards):
+      * Parsed drug count is 0 (Guard G.1 -- empty drugs list MUST NOT
         reach ``kg_builder``).
       * Parsed drug count is < 50% of ``expected_record_count`` (FIX 5.3
-        — almost always a URL/format mismatch or a corrupted file).
+        -- almost always a URL/format mismatch or a corrupted file).
       * SHA-256 of the source XML does not match the pinned value
-        (FIX 5.2 — possible MITM or S3 corruption).
-      * Downloaded file size is below 1 MB (FIX 5.5 — likely an HTML
-        error page) or above ``max_size_bytes`` (FIX 5.5 — likely
+        (FIX 5.2 -- possible MITM or S3 corruption).
+      * Downloaded file size is below 1 MB (FIX 5.5 -- likely an HTML
+        error page) or above ``max_size_bytes`` (FIX 5.5 -- likely
         malicious).
-      * Namespace mismatch (FIX 5.1 — root element namespace is not in
+      * Namespace mismatch (FIX 5.1 -- root element namespace is not in
         ``DRUGBANK_NAMESPACE_ALIASES``).
-      * DrugBank version downgrade detected (Guard G.16 — refusing to
+      * DrugBank version downgrade detected (Guard G.16 -- refusing to
         overwrite newer data with older).
       * Non-human target edge with ``organism_filter=9606`` reached the
-        output (Guard G.3 — filter should have removed it).
+        output (Guard G.3 -- filter should have removed it).
       * Withdrawn drug reached ``drugbank_to_node_records`` without
-        ``withdrawn=True`` flag set (Guard G.4 — patient safety).
-      * Invalid SMILES reached the output (Guard G.5 —
+        ``withdrawn=True`` flag set (Guard G.4 -- patient safety).
+      * Invalid SMILES reached the output (Guard G.5 --
         ``chemberta_encoder`` would silently drop the entire batch).
       * drugbank_id does not match ``^DB\\d{5,7}$`` (Guard G.14).
-      * DrugBank file is severely stale (Guard G.11 — > 4x expected
+      * DrugBank file is severely stale (Guard G.11 -- > 4x expected
         update frequency).
-      * Parser is already running in another process (Guard G.12 —
+      * Parser is already running in another process (Guard G.12 --
         concurrent-execution guard).
-      * Pathological XML detected (Guard G.13 — billion-laughs attack).
-      * Non-academic deployment context (Guard G.17 — DrugBank CC BY-NC
+      * Pathological XML detected (Guard G.13 -- billion-laughs attack).
+      * Non-academic deployment context (Guard G.17 -- DrugBank CC BY-NC
         4.0 license prohibits non-academic use).
       * Majority of approved drugs have ``approval_year=None`` (Guard
-        G.10 — temporal split would silently fall back to random).
+        G.10 -- temporal split would silently fall back to random).
 
     Fixes: FIX 5.1, FIX 5.2, FIX 5.3, FIX 5.5, FIX 5.6, FIX 5.7,
            FIX 5.19, FIX 5.20, FIX 14.11, FIX G.1, FIX G.3, FIX G.4,
@@ -545,8 +545,8 @@ class DrugBankDataIntegrityError(DrugOSDataError):
 
 
 # =============================================================================
-# ChEMBL exceptions — added by the chembl_loader v2.0 audit fix
-# (chembl_loader institutional-grade rewrite — Domain 6 Reliability).
+# ChEMBL exceptions -- added by the chembl_loader v2.0 audit fix
+# (chembl_loader institutional-grade rewrite -- Domain 6 Reliability).
 #
 # These three exception types mirror the UniProt, DRKG, and DrugBank trios
 # (Download / Parse / DataIntegrity) so that ``run_pipeline.py`` and the
@@ -560,7 +560,7 @@ class DrugBankDataIntegrityError(DrugOSDataError):
 # wrong relation type (e.g., "inhibits" for an agonist), the Graph
 # Transformer will train on inverted edges and the RL ranker will
 # recommend the wrong drug to a clinician. These exceptions MUST NOT be
-# silenced — every ``except ChEMBLDataIntegrityError`` block must either
+# silenced -- every ``except ChEMBLDataIntegrityError`` block must either
 # re-raise or fail the pipeline loudly.
 # =============================================================================
 
@@ -614,7 +614,7 @@ class ChEMBLDataIntegrityError(DrugOSDataError):
     exception means the database queried fine but the *content* is wrong.
 
     Typical causes:
-      * Activity count is 0 (Guard — empty activities MUST NOT reach the
+      * Activity count is 0 (Guard -- empty activities MUST NOT reach the
         knowledge graph).
       * Activity count is < 50% of ``expected_record_count`` (almost
         always a schema/version mismatch or a corrupted file).
@@ -633,8 +633,8 @@ class ChEMBLDataIntegrityError(DrugOSDataError):
 
 
 # =============================================================================
-# STRING exceptions — added by string_loader v1.0 institutional-grade audit fix
-# (master_prompt_fix_string_loader.md — Sections 5, 9).
+# STRING exceptions -- added by string_loader v1.0 institutional-grade audit fix
+# (master_prompt_fix_string_loader.md -- Sections 5, 9).
 #
 # These eight exception types extend the DrugOSDataError hierarchy with
 # STRING-specific failures. They follow the same ``context`` kwarg pattern
@@ -652,13 +652,13 @@ class StringDownloadError(DrugOSDataError):
     and ``StringDataIntegrityError`` (the file parses but is corrupt).
 
     Typical causes:
-      * URL is not in ``ALLOWED_STRING_URLS`` (SSRF guard — S9-02).
+      * URL is not in ``ALLOWED_STRING_URLS`` (SSRF guard -- S9-02).
       * URL scheme is not HTTPS (S9-01).
       * Network timeout after all retries exhausted (R6-01).
       * HTTP 4xx/5xx response from string-db.org.
       * Downloaded file size is below ``STRING_MIN_VALID_SIZE_BYTES``
-        (likely an HTML error page — R6-03).
-      * Gzip magic bytes missing (``\\x1f\\x8b``) — R6-03.
+        (likely an HTML error page -- R6-03).
+      * Gzip magic bytes missing (``\\x1f\\x8b``) -- R6-03.
       * Circuit breaker is open after 5 consecutive failures (R6-12).
 
     Fixes: S9-01 (TLS), S9-02 (URL allowlist), R6-01 (retry),
@@ -674,7 +674,7 @@ class StringParseError(DrugOSDataError):
 
     Typical causes:
       * File is not valid gzip (``gzip.BadGzipFile``).
-      * Required columns are missing (``_validate_columns`` — D5-04).
+      * Required columns are missing (``_validate_columns`` -- D5-04).
       * File encoding is not UTF-8 / UTF-8-BOM (D5-05).
       * Pandas ``pd.read_csv`` raises on malformed whitespace-separated row.
 
@@ -698,7 +698,7 @@ class StringDataIntegrityError(DrugOSDataError):
       * Crosswalk is a dict instead of an IDCrosswalk instance (C14-06).
       * ``score_threshold`` is outside [0, 1000] (S3-01).
       * ``unresolved_policy="raise"`` and an unresolved edge is encountered (D2-07).
-      * Score distribution is implausible (mean outside expected band — S3-11).
+      * Score distribution is implausible (mean outside expected band -- S3-11).
 
     Fixes: S3-01/11 (scientific correctness), D5-01/02/03/04/07 (data quality),
            C14-06 (crosswalk type guard), D2-07/08 (design).
@@ -726,12 +726,12 @@ class StringEdgeLoadMismatchError(EdgeLoadMismatchError):
 
     The STRING loader emits ``N`` edge records; after the bulk load, the
     Neo4j ``LOAD`` reports ``M < N`` edges actually written. If
-    ``M < N`` (and ``N > 0``), this exception is raised — the missing
+    ``M < N`` (and ``N > 0``), this exception is raised -- the missing
     edges represent lost biological signal that would corrupt the
     downstream Graph Transformer.
 
     This is distinct from ``CriticalDataSourceError`` (which is raised
-    when ``M == 0`` — total load failure).
+    when ``M == 0`` -- total load failure).
 
     Fixes: D5-10 (referential integrity), D5-13 (cross-source check).
     """
@@ -764,7 +764,7 @@ class CriticalDataSourceError(DrugOSDataError):
     degraded model.
 
     Distinct from ``StringEdgeLoadMismatchError`` (some edges loaded, some
-    dropped) — this exception means **zero** edges were loaded.
+    dropped) -- this exception means **zero** edges were loaded.
 
     Fixes: D5-10 (zero-edge guard), R6-04 (STRING_REQUIRED flag),
            master prompt Rule R5 (no silent failures).
@@ -775,12 +775,12 @@ class SecurityError(DrugOSDataError):
     """Raised when a security guard rejects an input (S9-02 / S9-03).
 
     Typical causes:
-      * URL is not in ``ALLOWED_STRING_URLS`` (SSRF guard — S9-02).
+      * URL is not in ``ALLOWED_STRING_URLS`` (SSRF guard -- S9-02).
       * URL scheme is not HTTPS (S9-01).
-      * Filename contains path-traversal characters (``..``, ``/``, ``\\`` — S9-03).
+      * Filename contains path-traversal characters (``..``, ``/``, ``\\`` -- S9-03).
       * Filename does not end in ``.gz`` (S9-03).
 
-    These failures are NOT retried — a security violation indicates a
+    These failures are NOT retried -- a security violation indicates a
     configuration error or an attacker, not a transient network issue.
 
     Fixes: S9-02 (URL allowlist), S9-03 (path traversal), S9-06 (URL
@@ -806,8 +806,8 @@ class ConfigurationError(DrugOSDataError):
 
 
 # =============================================================================
-# STITCH exceptions — added by stitch_loader v1.1.0 institutional-grade audit fix
-# (master_prompt_fix_stitch_loader.md — Sections 3, 9).
+# STITCH exceptions -- added by stitch_loader v1.1.0 institutional-grade audit fix
+# (master_prompt_fix_stitch_loader.md -- Sections 3, 9).
 #
 # These six exception types extend the DrugOSDataError hierarchy with
 # STITCH-specific failures. They follow the same ``context`` kwarg pattern
@@ -815,19 +815,19 @@ class ConfigurationError(DrugOSDataError):
 # structured logger can serialise them without re-formatting strings.
 #
 # IMPORTANT catch-granularity design (master prompt Section 0, R7):
-#   * STITCH exceptions are SIBLINGS of the STRING exceptions — they do NOT
+#   * STITCH exceptions are SIBLINGS of the STRING exceptions -- they do NOT
 #     subclass String*Error. This means ``except StringDownloadError`` will
 #     NOT catch ``StitchDownloadError``. Callers wanting to catch any
 #     loader failure should use ``except DrugOSDataError``.
 #   * ``StitchParseError`` MULTIPLE-INHERITS from ``DrugOSDataError`` AND
 #     ``FileNotFoundError`` so existing ``except FileNotFoundError`` blocks
-#     in callers continue to work (Rule R3 — backward compat).
+#     in callers continue to work (Rule R3 -- backward compat).
 #
-# Patient-safety doctrine: STITCH contributes ~20M Compound→Protein edges.
+# Patient-safety doctrine: STITCH contributes ~20M Compound->Protein edges.
 # If this loader emits a wrong CID, wrong protein, wrong organism, or wrong
 # stereochemistry (CIDm vs CIDs), the Graph Transformer learns garbage
 # associations and the RL ranker recommends the wrong drug to a clinician.
-# These exceptions MUST NOT be silenced — every ``except
+# These exceptions MUST NOT be silenced -- every ``except
 # StitchDataIntegrityError`` block must either re-raise or fail the
 # pipeline loudly (Rule R5: no silent failures).
 #
@@ -839,20 +839,20 @@ class ConfigurationError(DrugOSDataError):
 class StitchDownloadError(DrugOSDataError):
     """Raised when the STITCH CPI file cannot be downloaded.
 
-    Subclasses ``DrugOSDataError`` (NOT ``StringDownloadError`` — siblings
+    Subclasses ``DrugOSDataError`` (NOT ``StringDownloadError`` -- siblings
     for catch granularity, master prompt R7).
 
     Distinct from ``StitchParseError`` (the file is downloaded but unreadable)
     and ``StitchDataIntegrityError`` (the file parses but is corrupt).
 
     Typical causes (per master_prompt_fix_stitch_loader.md):
-      * URL is not in ``ALLOWED_STITCH_URLS`` (SSRF guard — BUG-9.1).
+      * URL is not in ``ALLOWED_STITCH_URLS`` (SSRF guard -- BUG-9.1).
       * URL scheme is not HTTPS (BUG-9.1).
       * Network timeout after all retries exhausted (BUG-6.1).
       * HTTP 4xx/5xx response from stitch.embl.de.
       * Downloaded file size is below ``STITCH_MIN_VALID_SIZE_BYTES``
-        (likely an HTML error page — BUG-6.1).
-      * Gzip magic bytes missing (``\\x1f\\x8b``) — BUG-6.1.
+        (likely an HTML error page -- BUG-6.1).
+      * Gzip magic bytes missing (``\\x1f\\x8b``) -- BUG-6.1.
 
     Fixes: BUG-6.1 (retry/timeout/atomic download), BUG-9.1 (URL allowlist),
            BUG-9.2 (TLS).
@@ -864,18 +864,18 @@ class StitchParseError(DrugOSDataError, FileNotFoundError):
 
     Subclasses BOTH ``DrugOSDataError`` AND ``FileNotFoundError`` (multiple
     inheritance) so existing ``except FileNotFoundError`` blocks in callers
-    continue to work (Rule R3 — backward compat). This is critical because
+    continue to work (Rule R3 -- backward compat). This is critical because
     the v0 ``parse_stitch_interactions`` raised ``FileNotFoundError`` directly.
 
     Distinct from ``StitchDownloadError`` (transport problem) and
     ``StitchDataIntegrityError`` (content problem).
 
     Typical causes:
-      * File is not valid gzip (``gzip.BadGzipFile``) — BUG-6.3.
-      * File is missing on disk — BUG-6.2 (replaces raw FileNotFoundError).
-      * Required columns are missing (``_validate_columns`` — BUG-5.3).
+      * File is not valid gzip (``gzip.BadGzipFile``) -- BUG-6.3.
+      * File is missing on disk -- BUG-6.2 (replaces raw FileNotFoundError).
+      * Required columns are missing (``_validate_columns`` -- BUG-5.3).
       * File encoding is not UTF-8 / UTF-8-BOM (GAP-15.4).
-      * Pandas ``pd.read_csv`` raises ``ParserError`` on malformed TSV — BUG-6.3.
+      * Pandas ``pd.read_csv`` raises ``ParserError`` on malformed TSV -- BUG-6.3.
       * STITCH file version mismatch (GAP-15.3).
 
     Fixes: BUG-5.3 (column validation), BUG-6.2 (FileNotFoundError compat),
@@ -891,14 +891,14 @@ class StitchDataIntegrityError(DrugOSDataError):
 
     Typical causes (per master_prompt_fix_stitch_loader.md):
       * SHA-256 of the downloaded file does not match the pinned value
-        (BUG-7.2 — possible MITM or S3 corruption).
+        (BUG-7.2 -- possible MITM or S3 corruption).
       * File size is outside [0.5x, 2.0x] expected (BUG-5.2).
       * Row count is outside [0.5x, 2.0x] expected (BUG-5.2).
       * Score is outside [0, 1000] range after filtering (BUG-3.3).
       * Score column is missing entirely (BUG-4.3, BUG-11.5).
       * (src_type, rel_type, dst_type) not in CORE_EDGE_TYPES (GAP-14.4).
       * CID is outside PubChem range [1, 370M] (GAP-3.6).
-      * STITCH file is severely stale (GAP-5.6 — > 2x expected update frequency).
+      * STITCH file is severely stale (GAP-5.6 -- > 2x expected update frequency).
       * ``unresolved_policy="raise"`` and an unresolved edge is encountered
         (BUG-2.3).
 
@@ -915,12 +915,12 @@ class StitchEdgeLoadMismatchError(EdgeLoadMismatchError):
 
     The STITCH loader emits ``N`` edge records; after the bulk load, the
     Neo4j ``LOAD`` reports ``M < N`` edges actually written. If
-    ``M < N`` (and ``N > 0``), this exception is raised — the missing
+    ``M < N`` (and ``N > 0``), this exception is raised -- the missing
     edges represent lost biological signal that would corrupt the
     downstream Graph Transformer.
 
     This is distinct from ``CriticalDataSourceError`` (which is raised
-    when ``M == 0`` — total load failure).
+    when ``M == 0`` -- total load failure).
 
     Fixes: BUG-15.1 (kg_builder contract + mismatch raise).
     """
@@ -930,15 +930,15 @@ class StitchSecurityError(DrugOSDataError):
     """Raised when a security guard rejects a STITCH input.
 
     Typical causes:
-      * URL is not in ``ALLOWED_STITCH_URLS`` (SSRF guard — BUG-9.1).
+      * URL is not in ``ALLOWED_STITCH_URLS`` (SSRF guard -- BUG-9.1).
       * URL scheme is not HTTPS (BUG-9.1).
-      * URL resolves to a private/internal IP (SSRF — BUG-9.1).
-      * URL contains embedded credentials (``@`` — BUG-9.1).
+      * URL resolves to a private/internal IP (SSRF -- BUG-9.1).
+      * URL contains embedded credentials (``@`` -- BUG-9.1).
       * Filename contains path-traversal characters
-        (``..``, ``/``, ``\\``, null bytes — GAP-9.4).
+        (``..``, ``/``, ``\\``, null bytes -- GAP-9.4).
       * Filename does not end in ``.gz`` (GAP-9.4).
 
-    These failures are NOT retried — a security violation indicates a
+    These failures are NOT retried -- a security violation indicates a
     configuration error or an attacker, not a transient network issue.
 
     Fixes: BUG-9.1 (URL allowlist), GAP-9.4 (path traversal).
@@ -969,8 +969,8 @@ class StitchConfigurationError(DrugOSDataError):
 
 
 # =============================================================================
-# SIDER exceptions — added by sider_loader v1.0.0 institutional-grade audit fix
-# (master_prompt — Section 3 Phase 0.4, Domain 6 Reliability, Domain 9 Security).
+# SIDER exceptions -- added by sider_loader v1.0.0 institutional-grade audit fix
+# (master_prompt -- Section 3 Phase 0.4, Domain 6 Reliability, Domain 9 Security).
 #
 # These six exception types extend the DrugOSDataError hierarchy with
 # SIDER-specific failures. They follow the same ``context`` kwarg pattern
@@ -978,24 +978,24 @@ class StitchConfigurationError(DrugOSDataError):
 # structured logger can serialise them without re-formatting strings.
 #
 # IMPORTANT catch-granularity design (mirrors STITCH/STRING siblings):
-#   * SIDER exceptions are SIBLINGS of the STITCH/STRING exceptions — they
+#   * SIDER exceptions are SIBLINGS of the STITCH/STRING exceptions -- they
 #     do NOT subclass Stitch*Error or String*Error. This means
 #     ``except StitchDownloadError`` will NOT catch ``SiderDownloadError``.
 #     Callers wanting to catch any loader failure should use
 #     ``except DrugOSDataError``.
 #   * ``SiderParseError`` MULTIPLE-INHERITS from ``DrugOSDataError`` AND
 #     ``FileNotFoundError`` so existing ``except FileNotFoundError`` blocks
-#     in callers continue to work (backward compat — Rule R3).
+#     in callers continue to work (backward compat -- Rule R3).
 #
 # Patient-safety doctrine: SIDER is the SOLE source of adverse-event data
 # feeding the RL safety-signal dimension. If this loader emits a wrong CID,
 # wrong UMLS CUI, or fails silently, the safety ranker will see zero
 # adverse events for every drug and rank dangerous drugs as GREEN
-# (recommend). These exceptions MUST NOT be silenced — every
+# (recommend). These exceptions MUST NOT be silenced -- every
 # ``except SiderCriticalError`` block must either re-raise or fail the
 # pipeline loudly (Rule R5: no silent failures).
 #
-# Fixes: Phase 0.4 (A1.1 — SIDER is critical), D6.3 (no graceful
+# Fixes: Phase 0.4 (A1.1 -- SIDER is critical), D6.3 (no graceful
 #        degradation), D6.1/D6.2 (retry/timeout), D6.4 (parse errors),
 #        D6.9 (HTTP errors), D6.12 (corrupt-file quarantine), D9.1/D9.2
 #        (TLS / URL scheme), D2.13 (dual-write mutual exclusion), D5.1
@@ -1009,7 +1009,7 @@ class SiderCriticalError(DrugOSDataError):
     SIDER is listed in ``CRITICAL_SOURCES`` (config.py). If a SIDER load
     produces 0 rows (after parsing, before filtering) OR if the download
     fails after all retries, the downstream RL safety ranker has no
-    adverse-event edges to aggregate onto Compound nodes — every drug
+    adverse-event edges to aggregate onto Compound nodes -- every drug
     would be ranked GREEN (recommend) by default. This exception makes the
     failure LOUD (master prompt Rule R5: no silent failures) so that the
     pipeline fails fast rather than shipping a deadly safety ranker.
@@ -1033,7 +1033,7 @@ class SiderCriticalError(DrugOSDataError):
 class SiderDownloadError(DrugOSDataError):
     """Raised when the SIDER meddra_all_se.tsv.gz cannot be downloaded.
 
-    Subclasses ``DrugOSDataError`` (NOT ``StitchDownloadError`` — siblings
+    Subclasses ``DrugOSDataError`` (NOT ``StitchDownloadError`` -- siblings
     for catch granularity, master prompt R7).
 
     Distinct from ``SiderParseError`` (the file is downloaded but unreadable)
@@ -1045,8 +1045,8 @@ class SiderDownloadError(DrugOSDataError):
       * URL scheme is not HTTPS (D9.2).
       * HTTP 4xx/5xx response from sideeffects.embl.de (D6.9).
       * Downloaded file size is below ``SIDER_MIN_VALID_SIZE_BYTES``
-        (likely an HTML error page — D4.26).
-      * Gzip magic bytes missing (``\\x1f\\x8b``) — D4.10.
+        (likely an HTML error page -- D4.26).
+      * Gzip magic bytes missing (``\\x1f\\x8b``) -- D4.10.
       * Downloaded 0-byte file (D4.26).
       * sha256 mismatch with the pinned value (D4.19, D3.8).
 
@@ -1061,18 +1061,18 @@ class SiderParseError(DrugOSDataError, FileNotFoundError):
 
     Subclasses BOTH ``DrugOSDataError`` AND ``FileNotFoundError`` (multiple
     inheritance) so existing ``except FileNotFoundError`` blocks in callers
-    continue to work (Rule R3 — backward compat). This is critical because
+    continue to work (Rule R3 -- backward compat). This is critical because
     the v0 ``parse_sider_side_effects`` raised ``FileNotFoundError`` directly.
 
     Distinct from ``SiderDownloadError`` (transport problem) and
     ``SiderCriticalError`` (pipeline cannot continue).
 
     Typical causes (per master_prompt Domain 6 Reliability / Domain 15 Interop):
-      * File is not valid gzip (``gzip.BadGzipFile``) — D6.4.
-      * File is missing on disk — D6.4 (replaces raw FileNotFoundError).
-      * Wrong column count (``SIDER_EXPECTED_COLUMN_COUNT = 6``) — D15.10.
+      * File is not valid gzip (``gzip.BadGzipFile``) -- D6.4.
+      * File is missing on disk -- D6.4 (replaces raw FileNotFoundError).
+      * Wrong column count (``SIDER_EXPECTED_COLUMN_COUNT = 6``) -- D15.10.
       * File encoding is not UTF-8 / UTF-8-BOM (D4.14).
-      * Pandas ``pd.read_csv`` raises ``ParserError`` on malformed TSV — D6.4.
+      * Pandas ``pd.read_csv`` raises ``ParserError`` on malformed TSV -- D6.4.
       * SIDER file version mismatch (D12.6).
 
     Fixes: D6.4 (BadGzipFile/ParserError propagation), D15.10 (column count),
@@ -1094,7 +1094,7 @@ class SiderDataQualityError(DrugOSDataError):
       * ``side_effect_name`` is empty or a sentinel null (D3.9 / D5.7).
       * ``meddra_type`` is not in ``VALID_MEDDRA_TYPES`` (D2.12 / D5.5).
       * ``stitch_id_flat`` numeric portion != ``stitch_id_stereo`` numeric
-        portion (D3.10 / D5.4 — same compound, different CID).
+        portion (D3.10 / D5.4 -- same compound, different CID).
 
     Fixes: D5.1 (row count), D3.12/D5.13 (CID range), D3.4/D5.6 (UMLS),
            D3.9/D5.7 (side_effect_name), D2.12/D5.5 (meddra_type),
@@ -1107,7 +1107,7 @@ class SiderSchemaError(DrugOSDataError):
 
     Distinct from ``SiderParseError`` (input format) and
     ``SiderDataQualityError`` (input content): this exception means the
-    loader's *output* schema is wrong — e.g. an emitted edge record is
+    loader's *output* schema is wrong -- e.g. an emitted edge record is
     missing a required field, has the wrong type, or fails referential
     integrity with the node records.
 
@@ -1117,7 +1117,7 @@ class SiderSchemaError(DrugOSDataError):
       * ``src_type`` is not ``"Compound"`` (D15.8).
       * ``dst_type`` is not the canonical ``"MedDRA_Term"`` (Phase 0.3 / D15.11).
       * ``rel_type`` is not the canonical ``"causes_adverse_event"`` (Phase 0.3).
-      * Edge references a ``dst_id`` that is not in the node set (D5.8 —
+      * Edge references a ``dst_id`` that is not in the node set (D5.8 --
         referential integrity).
 
     Fixes: D15.6 (TypedDict contract), D15.8 (src_id int), D15.11 (dst_type),
@@ -1129,13 +1129,13 @@ class SiderDualWriteError(DrugOSDataError):
     """Raised when both canonical and legacy SIDER edge emitters are called.
 
     SIDER has two edge emitters:
-      * ``sider_to_edge_records`` — canonical (``causes_adverse_event``,
+      * ``sider_to_edge_records`` -- canonical (``causes_adverse_event``,
         ``MedDRA_Term``).
-      * ``sider_to_legacy_edge_records`` — legacy (``causes_side_effect``,
+      * ``sider_to_legacy_edge_records`` -- legacy (``causes_side_effect``,
         ``Side Effect``), kept for migration-period dual-write.
 
     Calling BOTH in the same process would emit every adverse-event edge
-    twice (once canonical, once legacy) — the RL safety ranker would then
+    twice (once canonical, once legacy) -- the RL safety ranker would then
     double-count adverse events, marking safe drugs as RED (do not
     recommend). This exception makes the conflict LOUD (master prompt
     Rule R5: no silent failures, G13: dual-write protected).
@@ -1155,8 +1155,8 @@ class SiderDualWriteError(DrugOSDataError):
 
 
 # =============================================================================
-# OpenTargets exceptions — added by opentargets_loader v2.0 institutional-grade
-# audit fix (opentargets_loader_repair_prompt.md — Section 2.7).
+# OpenTargets exceptions -- added by opentargets_loader v2.0 institutional-grade
+# audit fix (opentargets_loader_repair_prompt.md -- Section 2.7).
 #
 # These seven exception types extend the DrugOSDataError hierarchy with
 # OpenTargets-specific failures. They follow the same ``context`` kwarg
@@ -1165,19 +1165,19 @@ class SiderDualWriteError(DrugOSDataError):
 #
 # IMPORTANT catch-granularity design (mirrors SIDER/STITCH/STRING siblings):
 #   * OpenTargets exceptions are SIBLINGS of the SIDER/STITCH/STRING
-#     exceptions — they do NOT subclass Sider*Error / Stitch*Error /
+#     exceptions -- they do NOT subclass Sider*Error / Stitch*Error /
 #     String*Error. This means ``except StitchDownloadError`` will NOT
 #     catch ``OpenTargetsDownloadError``. Callers wanting to catch any
 #     loader failure should use ``except DrugOSDataError``.
 #   * ``OpenTargetsParseError`` MULTIPLE-INHERITS from ``DrugOSDataError``
 #     AND ``FileNotFoundError`` so existing ``except FileNotFoundError``
-#     blocks in callers continue to work (backward compat — Rule R3).
+#     blocks in callers continue to work (backward compat -- Rule R3).
 #
 # Patient-safety doctrine: OpenTargets is the SOLE source of evidence-scored
 # drug-target-disease triples feeding the Graph Transformer's confidence
 # training objective. If this loader silently drops 100% of records
 # (the v1 SCI-1 condition), the model trains on an empty OpenTargets
-# signal — worse than no signal. These exceptions MUST NOT be silenced —
+# signal -- worse than no signal. These exceptions MUST NOT be silenced --
 # every ``except OpenTargetsDataIntegrityError`` block must either re-raise
 # or fail the pipeline loudly (Rule R5: no silent failures).
 #
@@ -1193,7 +1193,7 @@ class OpenTargetsDownloadError(DrugOSDataError):
     """Raised when the OpenTargets evidence JSONL cannot be downloaded.
 
     Subclasses ``DrugOSDataError`` (NOT ``StitchDownloadError`` /
-    ``SiderDownloadError`` — siblings for catch granularity, master prompt R7).
+    ``SiderDownloadError`` -- siblings for catch granularity, master prompt R7).
 
     Distinct from ``OpenTargetsParseError`` (the file is downloaded but
     unreadable) and ``OpenTargetsDataIntegrityError`` (the pipeline cannot
@@ -1206,8 +1206,8 @@ class OpenTargetsDownloadError(DrugOSDataError):
       * URL not in ``ALLOWED_OPENTARGETS_URLS`` allowlist (SEC-2).
       * HTTP 4xx/5xx response from EBI FTP (REL-1).
       * Downloaded file size is below ``OPENTARGETS_MIN_VALID_SIZE_BYTES``
-        (likely an HTML error page — DQ-3).
-      * Gzip magic bytes missing (``\\x1f\\x8b``) — DQ-2.
+        (likely an HTML error page -- DQ-3).
+      * Gzip magic bytes missing (``\\x1f\\x8b``) -- DQ-2.
       * Downloaded 0-byte file (DQ-2).
       * sha256 mismatch with the pinned value (DQ-1, DQ-14).
       * Path-traversal attempt in output filename (SEC-3).
@@ -1223,19 +1223,19 @@ class OpenTargetsParseError(DrugOSDataError, FileNotFoundError):
 
     Subclasses BOTH ``DrugOSDataError`` AND ``FileNotFoundError`` (multiple
     inheritance) so existing ``except FileNotFoundError`` blocks in callers
-    continue to work (Rule R3 — backward compat). This is critical because
+    continue to work (Rule R3 -- backward compat). This is critical because
     the v1 ``parse_opentargets_evidence`` raised ``FileNotFoundError`` directly.
 
     Distinct from ``OpenTargetsDownloadError`` (transport problem) and
     ``OpenTargetsDataIntegrityError`` (pipeline cannot continue).
 
     Typical causes (per Domain 6 Reliability / Domain 15 Interop):
-      * File is not valid gzip (``gzip.BadGzipFile``) — REL-4.
-      * File is missing on disk — REL-4 (replaces raw FileNotFoundError).
+      * File is not valid gzip (``gzip.BadGzipFile``) -- REL-4.
+      * File is missing on disk -- REL-4 (replaces raw FileNotFoundError).
       * Wrong JSON schema (e.g. nested ``entry["drug"]["id"]`` instead of flat
-        ``entry["drugId"]`` — SCI-1, but this is now handled gracefully).
+        ``entry["drugId"]`` -- SCI-1, but this is now handled gracefully).
       * File encoding is not UTF-8 / UTF-8-BOM (COD-5).
-      * Circuit breaker triggered (too many consecutive per-record failures —
+      * Circuit breaker triggered (too many consecutive per-record failures --
         REL-9).
 
     Fixes: REL-4 (per-record error isolation + circuit breaker),
@@ -1252,14 +1252,14 @@ class OpenTargetsDataIntegrityError(DrugOSDataError):
     the pipeline cannot continue safely without OpenTargets data.
 
     Typical causes (per Domain 5 Data Quality / Section 0.4 escalation):
-      * 0 records parsed (empty file, all rows DLQ'd, or schema drift) — SCI-15.
-      * <50% target resolution rate (crosswalk not loaded) — Section 0.4.
-      * <expected_record_count × 0.5 records kept (truncated download) — DQ-1.
-      * sha256/size mismatch with the pinned value — DQ-1, DQ-2.
-      * Schema-version drift — DQ-13.
-      * <90% target resolution rate in REGULATORY mode — Section 0.4.
-      * Any non-human record detected in REGULATORY mode — Section 0.4.
-      * Any ID failing format validation in REGULATORY mode — Section 0.4.
+      * 0 records parsed (empty file, all rows DLQ'd, or schema drift) -- SCI-15.
+      * <50% target resolution rate (crosswalk not loaded) -- Section 0.4.
+      * <expected_record_count × 0.5 records kept (truncated download) -- DQ-1.
+      * sha256/size mismatch with the pinned value -- DQ-1, DQ-2.
+      * Schema-version drift -- DQ-13.
+      * <90% target resolution rate in REGULATORY mode -- Section 0.4.
+      * Any non-human record detected in REGULATORY mode -- Section 0.4.
+      * Any ID failing format validation in REGULATORY mode -- Section 0.4.
 
     Fixes: SCI-15 (0 records raises in CLINICAL), Section 0.4 (escalation),
            DQ-1/DQ-2/DQ-13 (integrity guards).
@@ -1318,7 +1318,7 @@ class OpenTargetsEdgeLoadMismatchError(EdgeLoadMismatchError):
       * Neo4j ``load_edges_bulk_create`` reported fewer edges written than
         provided (D5-10).
       * Edge record schema mismatch with ``EDGE_PRODUCERS`` contract (ARCH-2).
-      * Edge references a node ID not in the node set (D5-8 — referential
+      * Edge references a node ID not in the node set (D5-8 -- referential
         integrity).
 
     Fixes: D5-10 (edge load mismatch), ARCH-2 (EDGE_PRODUCERS contract),
@@ -1331,7 +1331,7 @@ class OpenTargetsSchemaError(DrugOSDataError):
 
     Distinct from ``OpenTargetsParseError`` (input format) and
     ``OpenTargetsDataIntegrityError`` (input content): this exception means
-    the loader's *output* schema is wrong — e.g. an emitted edge record is
+    the loader's *output* schema is wrong -- e.g. an emitted edge record is
     missing a required field, has the wrong type, or fails referential
     integrity with the node records.
 
@@ -1339,7 +1339,7 @@ class OpenTargetsSchemaError(DrugOSDataError):
       * Emitted edge record missing ``src_id``, ``dst_id``, ``src_type``,
         ``dst_type``, ``rel_type``, or ``props`` (D15.6).
       * ``src_type`` is not ``"Compound"`` (D15.8).
-      * ``rel_type`` is ``"indication"`` (FORBIDDEN — SCI-8).
+      * ``rel_type`` is ``"indication"`` (FORBIDDEN -- SCI-8).
       * Edge ``_provenance`` missing one of ``OPENTARGETS_PROVENANCE_KEYS``
         (LIN-1..5, COMP-2..5).
       * Edge missing ``_source``, ``_license``, ``_attribution``,
@@ -1352,8 +1352,8 @@ class OpenTargetsSchemaError(DrugOSDataError):
 
 
 # =============================================================================
-# ClinicalTrials exceptions — added by clinicaltrials_loader v2.1.0
-# institutional-grade audit fix (PROMPT_fix_clinicaltrials_loader.md —
+# ClinicalTrials exceptions -- added by clinicaltrials_loader v2.1.0
+# institutional-grade audit fix (PROMPT_fix_clinicaltrials_loader.md --
 # 148 findings across 16 domains).
 #
 # These seven exception types extend the DrugOSDataError hierarchy with
@@ -1365,13 +1365,13 @@ class OpenTargetsSchemaError(DrugOSDataError):
 # IMPORTANT catch-granularity design (mirrors OpenTargets/SIDER/STITCH/STRING
 # siblings):
 #   * ClinicalTrials exceptions are SIBLINGS of the OpenTargets / SIDER /
-#     STITCH / STRING exceptions — they do NOT subclass any sibling. This
+#     STITCH / STRING exceptions -- they do NOT subclass any sibling. This
 #     means ``except OpenTargetsDownloadError`` will NOT catch
 #     ``ClinicalTrialsDownloadError``. Callers wanting to catch any loader
 #     failure should use ``except DrugOSDataError``.
 #   * ``ClinicalTrialsParseError`` MULTIPLE-INHERITS from ``DrugOSDataError``
 #     AND ``FileNotFoundError`` so existing ``except FileNotFoundError``
-#     blocks in callers continue to work (backward compat — Rule R3).
+#     blocks in callers continue to work (backward compat -- Rule R3).
 #
 # Patient-safety doctrine: ClinicalTrials.gov AACT is the SOLE source of
 # clinical-trial evidence feeding the RL ranker's "has been tested in
@@ -1379,8 +1379,8 @@ class OpenTargetsSchemaError(DrugOSDataError):
 # (because Warfarin was the *comparator* arm, not the experimental arm)
 # teaches the ranker that Warfarin treats X. A clinician who trusts that
 # ranker can prescribe Warfarin off-label to a patient for whom it is
-# contraindicated — THAT PATIENT CAN DIE. These exceptions MUST NOT be
-# silenced — every ``except ClinicalTrialsDataIntegrityError`` block must
+# contraindicated -- THAT PATIENT CAN DIE. These exceptions MUST NOT be
+# silenced -- every ``except ClinicalTrialsDataIntegrityError`` block must
 # either re-raise or fail the pipeline loudly (Rule R5: no silent failures).
 #
 # Fixes: PROMPT_fix_clinicaltrials_loader.md Issues 1.1 (Loader Protocol),
@@ -1393,7 +1393,7 @@ class ClinicalTrialsDownloadError(DrugOSDataError):
     """Raised when the AACT sqlite snapshot cannot be downloaded.
 
     Subclasses ``DrugOSDataError`` (NOT ``OpenTargetsDownloadError`` /
-    ``SiderDownloadError`` — siblings for catch granularity, master prompt R7).
+    ``SiderDownloadError`` -- siblings for catch granularity, master prompt R7).
 
     Distinct from ``ClinicalTrialsParseError`` (the file is downloaded but
     unreadable) and ``ClinicalTrialsDataIntegrityError`` (the pipeline cannot
@@ -1422,7 +1422,7 @@ class ClinicalTrialsParseError(DrugOSDataError, FileNotFoundError):
 
     Subclasses BOTH ``DrugOSDataError`` AND ``FileNotFoundError`` (multiple
     inheritance) so existing ``except FileNotFoundError`` blocks in callers
-    continue to work (Rule R3 — backward compat). This is critical because
+    continue to work (Rule R3 -- backward compat). This is critical because
     the v1 ``parse_clinicaltrials`` raised ``FileNotFoundError`` directly.
 
     Distinct from ``ClinicalTrialsDownloadError`` (transport problem) and
@@ -1433,10 +1433,10 @@ class ClinicalTrialsParseError(DrugOSDataError, FileNotFoundError):
       * DB is not a valid sqlite file (Issue 4.5, 9.5).
       * DB is missing one of the required AACT tables (``studies``,
         ``interventions``, ``conditions``, ``designs``) (Issue 4.5, 9.5).
-      * Unrecognized AACT schema — neither ``interventions_mesh_terms`` table
+      * Unrecognized AACT schema -- neither ``interventions_mesh_terms`` table
         nor ``mesh_term`` column on ``interventions`` (Issue 3.1, C1).
-      * SQL query fails (Issue 11.5 — re-raised with context).
-      * Zip extraction interrupted — sentinel file missing (Issue 4.8, 6.9).
+      * SQL query fails (Issue 11.5 -- re-raised with context).
+      * Zip extraction interrupted -- sentinel file missing (Issue 4.8, 6.9).
 
     Fixes: Issues 3.1 (schema detection), 4.1 (try/finally sqlite),
            4.4 (read-only sqlite), 4.5 (validate AACT DB),
@@ -1464,7 +1464,7 @@ class ClinicalTrialsDataIntegrityError(DrugOSDataError):
         (Issue 2.10, 5.5).
       * ``phases`` parameter contains LIKE wildcards (``%`` or ``_``)
         (Issue 9.7).
-      * ``enrollment`` < 30 in a Phase 3 trial (Issue 3.6 — suspect trial).
+      * ``enrollment`` < 30 in a Phase 3 trial (Issue 3.6 -- suspect trial).
 
     Fixes: Issues 4.7 (empty IDs), 5.1 (null nct_id), 5.5 (controlled vocab),
            5.9 (expected count), 5.11 (garbage MeSH), 3.6 (enrollment),
@@ -1538,7 +1538,7 @@ class ClinicalTrialsEdgeLoadMismatchError(EdgeLoadMismatchError):
         provided (Issue 5.4).
       * Edge record schema mismatch with ``EDGE_PRODUCERS`` contract
         (Issue 1.4, 14.1, 15.3).
-      * Edge references a node ID not in the node set (Issue 5.4 —
+      * Edge references a node ID not in the node set (Issue 5.4 --
         referential integrity; >50% orphan rate triggers warning).
 
     Fixes: Issues 1.4 (EDGE_PRODUCERS contract), 5.4 (referential integrity),
@@ -1551,7 +1551,7 @@ class ClinicalTrialsSchemaError(DrugOSDataError):
 
     Distinct from ``ClinicalTrialsParseError`` (input format) and
     ``ClinicalTrialsDataIntegrityError`` (input content): this exception means
-    the loader's *output* schema is wrong — e.g. an emitted edge record is
+    the loader's *output* schema is wrong -- e.g. an emitted edge record is
     missing a required field, has the wrong type, or fails referential
     integrity with the node records.
 
@@ -1560,8 +1560,8 @@ class ClinicalTrialsSchemaError(DrugOSDataError):
         ``dst_type``, ``rel_type``, or ``props`` (Issue 2.6).
       * ``src_type`` is not ``"Compound"`` (Issue 15.9).
       * ``dst_type`` is not ``"Disease"`` (Issue 15.9).
-      * ``rel_type`` is ``"clinical_trial"`` (DEPRECATED — Issue 2.1).
-      * ``rel_type`` is ``"treats"`` (FORBIDDEN — reserved for FDA-approved
+      * ``rel_type`` is ``"clinical_trial"`` (DEPRECATED -- Issue 2.1).
+      * ``rel_type`` is ``"treats"`` (FORBIDDEN -- reserved for FDA-approved
         drugs from DrugBank; Issue 2.1, 14.1).
       * Edge ``_provenance`` missing one of ``CLINICALTRIALS_PROVENANCE_KEYS``
         (Issue 16.1-16.12).
@@ -1578,8 +1578,8 @@ class ClinicalTrialsSchemaError(DrugOSDataError):
 
 
 # =============================================================================
-# GEO exceptions — added by geo_loader v1.0.0 institutional-grade audit fix
-# (GEO_LOADER_MASTER_REPAIR_PROMPT.md — 192 findings across 16 domains).
+# GEO exceptions -- added by geo_loader v1.0.0 institutional-grade audit fix
+# (GEO_LOADER_MASTER_REPAIR_PROMPT.md -- 192 findings across 16 domains).
 #
 # These eight exception types extend the DrugOSDataError hierarchy with
 # GEO (Gene Expression Omnibus)-specific failures. They follow the same
@@ -1589,23 +1589,23 @@ class ClinicalTrialsSchemaError(DrugOSDataError):
 #
 # IMPORTANT catch-granularity design (mirrors ClinicalTrials/OpenTargets/
 # SIDER/STITCH/STRING siblings):
-#   * GEO exceptions are SIBLINGS of the other loader exceptions — they
+#   * GEO exceptions are SIBLINGS of the other loader exceptions -- they
 #     do NOT subclass any sibling. This means
 #     ``except ClinicalTrialsDownloadError`` will NOT catch
 #     ``GeoDownloadError``. Callers wanting to catch any loader failure
 #     should use ``except DrugOSDataError``.
 #   * ``GeoParseError`` MULTIPLE-INHERITS from ``DrugOSDataError`` AND
 #     ``FileNotFoundError`` so existing ``except FileNotFoundError``
-#     blocks in callers continue to work (backward compat — Rule R4).
+#     blocks in callers continue to work (backward compat -- Rule R4).
 #
 # Patient-safety doctrine: GEO is the SOLE source of
-# Protein→expressed_in→Anatomy edges in the KG. If this loader silently
+# Protein->expressed_in->Anatomy edges in the KG. If this loader silently
 # produces zero records, the KG lacks the entire tissue-specificity
 # modality, the Graph Transformer cannot learn that a drug target is
 # absent from the disease tissue, and a clinician can be handed a
-# "high-confidence" repurposing candidate that will fail in Phase II —
+# "high-confidence" repurposing candidate that will fail in Phase II --
 # or harm a patient in a clinical-trial setting. These exceptions MUST
-# NOT be silenced — every ``except GeoCriticalError`` block must either
+# NOT be silenced -- every ``except GeoCriticalError`` block must either
 # re-raise or fail the pipeline loudly (master prompt Rule R5).
 #
 # Fixes: GEO_LOADER_MASTER_REPAIR_PROMPT.md Section 6 (Phase 0.1, 0.5,
@@ -1618,7 +1618,7 @@ class GeoConfigurationError(DrugOSDataError):
     """Raised when the GEO loader configuration is invalid or missing.
 
     Subclasses ``DrugOSDataError`` (NOT ``ClinicalTrialsConfigurationError``
-    or any sibling — siblings for catch granularity, master prompt R7).
+    or any sibling -- siblings for catch granularity, master prompt R7).
 
     Distinct from ``GeoDownloadError`` (transport problem) and
     ``GeoParseError`` (file format problem): this exception means the
@@ -1640,7 +1640,7 @@ class GeoConfigurationError(DrugOSDataError):
       * ``cfg.version`` does not match ``GSE\\d+`` (GEO-2.10, GEO-12.6).
       * ``cfg.schema_version`` is empty (GEO-12.6).
       * ``series_id`` does not match ``GSE\\d+`` (GEO-2.1, GEO-3.14,
-        GEO-7.5, GEO-12.1 — Phase 0.4).
+        GEO-7.5, GEO-12.1 -- Phase 0.4).
       * ``series_id`` does not match pinned ``cfg.version`` when
         ``cfg.pinned == True`` (GEO-15.4).
       * Cannot create ``RAW_DIR/geo/`` directory (PermissionError)
@@ -1688,7 +1688,7 @@ class GeoDownloadError(DrugOSDataError):
     """Raised when the GEO SOFT file cannot be downloaded.
 
     Subclasses ``DrugOSDataError`` (NOT ``ClinicalTrialsDownloadError`` or
-    any sibling — siblings for catch granularity, master prompt R7).
+    any sibling -- siblings for catch granularity, master prompt R7).
 
     Distinct from ``GeoDownloadRequiredError`` (auto-download disabled)
     and ``GeoParseError`` (file present but unreadable).
@@ -1745,7 +1745,7 @@ class GeoParseError(DrugOSDataError, FileNotFoundError):
 
     Subclasses BOTH ``DrugOSDataError`` AND ``FileNotFoundError`` (multiple
     inheritance) so existing ``except FileNotFoundError`` blocks in callers
-    continue to work (master prompt Rule R4 — backward compat). This is
+    continue to work (master prompt Rule R4 -- backward compat). This is
     critical because the v0 ``parse_geo_series`` returned ``[]`` on a
     missing file; callers may have relied on FileNotFoundError-style
     handling.
@@ -1799,7 +1799,7 @@ class GeoDataQualityError(DrugOSDataError):
         (Phase 0.6).
       * Tissue cannot be mapped to UBERON and
         ``tissue_uberon_required=True`` (GEO-3.3).
-      * Probe cannot be resolved to a gene ID (GEO-3.4) — dead-lettered
+      * Probe cannot be resolved to a gene ID (GEO-3.4) -- dead-lettered
         by default; raises only if ALL probes fail.
       * Expression unit is unknown and cannot be normalized (GEO-3.9).
       * Memory budget exceeded (GEO-8.6).
@@ -1816,13 +1816,13 @@ class GeoCriticalError(DrugOSDataError):
     """Raised when GEO produces zero records AND ``GEO_REQUIRED=1``.
 
     This is the patient-safety-critical exception. It signals that the KG
-    will lack the entire ``Protein→expressed_in→Anatomy`` modality, which
+    will lack the entire ``Protein->expressed_in->Anatomy`` modality, which
     means the Graph Transformer cannot learn tissue-specificity, which
     means a clinician may be handed a "high-confidence" repurposing
     candidate that targets a protein absent from the disease tissue.
 
     The pipeline's ``ON_SOURCE_FAILURE`` policy
-    (``config.py:2144`` — ``DRUGOS_ON_SOURCE_FAILURE`` env var) governs
+    (``config.py:2144`` -- ``DRUGOS_ON_SOURCE_FAILURE`` env var) governs
     the global behavior. When ``GEO_REQUIRED=1`` is set (operator opts
     into hard-fail mode), this exception MUST propagate to the pipeline
     root and terminate the run with a non-zero exit code.
@@ -1858,13 +1858,13 @@ class GeoNotImplementedError(DrugOSDataError):
     MUST raise.
 
     Typical causes:
-      * ``parse_geo_series(format="miniml")`` — MINiML format support
+      * ``parse_geo_series(format="miniml")`` -- MINiML format support
         is planned for v1.1.0 (GEO-3.12).
-      * ``parse_geo_series(format="series_matrix")`` — Series Matrix
+      * ``parse_geo_series(format="series_matrix")`` -- Series Matrix
         format support is planned for v1.1.0 (GEO-3.12).
-      * ``GeoConfig(encrypt_outputs=True)`` — output encryption requires
+      * ``GeoConfig(encrypt_outputs=True)`` -- output encryption requires
         the ``cryptography`` package (GEO-9.8).
-      * ``GeoConfig(verify_tls=False)`` — TLS verification is mandatory;
+      * ``GeoConfig(verify_tls=False)`` -- TLS verification is mandatory;
         disabling it raises ``GeoSecurityError``, NOT this exception
         (this is documented for clarity).
 
@@ -2033,8 +2033,8 @@ class ResolverProvenanceError(ResolverError):
 
 
 # =============================================================================
-# Evaluation exceptions — added by evaluation.py v2.0 audit fix
-# (MASTER_REPAIR_PROMPT_evaluation.md — Domains 5, 6, 7, 9).
+# Evaluation exceptions -- added by evaluation.py v2.0 audit fix
+# (MASTER_REPAIR_PROMPT_evaluation.md -- Domains 5, 6, 7, 9).
 #
 # Five exception types for the evaluation module. All subclass
 # DrugOSDataError so callers can write ``except DrugOSDataError``
@@ -2250,7 +2250,7 @@ class UnknownLabelError(DrugOSDataError):
     """Raised when a node/edge label has no entry in ID_PATTERNS.
 
     v9 ROOT FIX (audit F7.8): the previous ``_validate_id`` returned True
-    for any label not present in ID_PATTERNS — silently disabling
+    for any label not present in ID_PATTERNS -- silently disabling
     validation for typo'd labels like 'MedDRATerm' (missing underscore)
     or 'Compoud' (misspelled Compound). Every ID was accepted. Now the
     function raises this exception so the caller MUST either fix the

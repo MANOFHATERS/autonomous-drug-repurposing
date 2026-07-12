@@ -3,7 +3,7 @@ C-1 through C-5 Connectivity Verification Tests
 ================================================
 
 These tests verify the 5 Phase 3 ↔ Phase 4 connectivity issues identified
-in the forensic audit are FIXED at the ROOT level — not surface patches.
+in the forensic audit are FIXED at the ROOT level -- not surface patches.
 
 Each test exercises the ACTUAL code path (not docstring inspection) to
 prove the fix is real and working.
@@ -77,7 +77,7 @@ def test_c1_streaming_uses_apply_temperature_false():
 
 def test_c1_in_memory_uses_apply_temperature_false():
     """C-1: generate_rl_input (in-memory path) uses apply_temperature=False.
-    This was already correct before the fix — this test confirms it wasn't
+    This was already correct before the fix -- this test confirms it wasn't
     accidentally changed.
     """
     bridge_path = os.path.join(
@@ -92,7 +92,7 @@ def test_c1_in_memory_uses_apply_temperature_false():
 
     assert "apply_temperature=False" in gen_section, (
         "C-1: generate_rl_input must use apply_temperature=False (this "
-        "was already correct before the fix — if this fails, the fix "
+        "was already correct before the fix -- if this fails, the fix "
         "was accidentally reverted)."
     )
 
@@ -141,7 +141,7 @@ def test_c1_distribution_match():
             f"C-1 ROOT FIX FAILED: gnn_score distributions do NOT match "
             f"between in-memory and streaming paths. Max diff = {gnn_diff:.6f}. "
             f"This means the two paths produce DIFFERENT gnn_score values "
-            f"from the same model — the C-1 bug is still present."
+            f"from the same model -- the C-1 bug is still present."
         )
 
     print(f"  C-1 RUNTIME: gnn_score max diff = {gnn_diff:.8f} (PASS)")
@@ -152,7 +152,7 @@ def test_c1_distribution_match():
 # ============================================================================
 
 def test_c2_patent_score_is_drug_level():
-    """C-2 ROOT FIX: patent_score is a DRUG property — same drug gets the
+    """C-2 ROOT FIX: patent_score is a DRUG property -- same drug gets the
     same patent_score across ALL its disease pairs.
 
     The audit found the bridge generated patent_score as per-pair random
@@ -213,7 +213,7 @@ def test_c2_efficacy_score_is_drug_level():
     """v89 ROOT FIX: efficacy_score is a PAIR-LEVEL property (drug, disease).
 
     The v88 code made efficacy_score a DRUG-LEVEL property (same value for
-    all disease pairs of the same drug). This was scientifically WRONG —
+    all disease pairs of the same drug). This was scientifically WRONG --
     efficacy is a (drug, disease) property. A drug can be efficacious for
     disease A and useless for disease B.
 
@@ -256,7 +256,7 @@ def test_c2_efficacy_score_not_confounded():
     """v89 ROOT FIX: efficacy_score is derived from gnn + pathway + drug_validation.
 
     The v88 audit found efficacy_score = 0.4*gnn + 0.4*pathway + 0.2*noise.
-    The v89 fix uses 0.5*gnn + 0.3*pathway + 0.2*drug_validation — the noise
+    The v89 fix uses 0.5*gnn + 0.3*pathway + 0.2*drug_validation -- the noise
     is replaced with a STABLE drug-level signal (drug_validation).
 
     This test verifies the efficacy_score has a reasonable range and is
@@ -326,8 +326,8 @@ def test_c3_gt_uses_drug_aware_split_for_all_sizes():
     The audit found the GT model used a pair-wise split for small graphs
     (<100 drugs), allowing the SAME drugs in train and test (with different
     diseases). This created drug-level train/test leakage: the GT model
-    trained on aspirin→X pairs, then scored aspirin→cardiovascular disease
-    at inference — the score was inflated by aspirin-specific memorization.
+    trained on aspirin->X pairs, then scored aspirin->cardiovascular disease
+    at inference -- the score was inflated by aspirin-specific memorization.
 
     The fix uses drug_aware_split for ALL graph sizes, aligning with the
     RL split (which is always drug-aware).
@@ -518,7 +518,7 @@ def test_c4_verified_auc_runtime():
     bridge does NOT raise RuntimeError when scientific validation fails
     (which can happen on tiny demo graphs where KP recovery is hard).
     The test's purpose is to verify the metadata FIELDS exist, not to
-    verify the science passes — so we allow invalid output here.
+    verify the science passes -- so we allow invalid output here.
     """
     from graph_transformer.gt_rl_bridge import GTRLBridge
     import json

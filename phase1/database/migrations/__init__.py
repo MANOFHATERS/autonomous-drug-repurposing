@@ -27,9 +27,9 @@ Public API
 
 Migration Files
 ---------------
-- 001_initial_schema.sql — Creates all 7 core tables
-- 002_bug_fixes_migration.sql — Adds columns, deduplicates, adds constraints
-- 003_models_fix_migration.sql — 78-issue scientific/design/quality fix
+- 001_initial_schema.sql -- Creates all 7 core tables
+- 002_bug_fixes_migration.sql -- Adds columns, deduplicates, adds constraints
+- 003_models_fix_migration.sql -- 78-issue scientific/design/quality fix
 
 Cross-Dialect Support
 ---------------------
@@ -147,7 +147,7 @@ v9 ROOT FIX (audit F3.7): migration 003 line 243-248 now correctly
 SWAPS misordered protein_a_id / protein_b_id pairs via a single
 UPDATE statement (SET protein_a_id = protein_b_id, protein_b_id =
 protein_a_id WHERE protein_a_id > protein_b_id). The previous
-implementation DELETED misordered rows — that was data loss. The
+implementation DELETED misordered rows -- that was data loss. The
 swap preserves every PPI edge while enforcing the ordering
 constraint (protein_a_id < protein_b_id). The docstring above is
 retained as a historical note; the code is now correct.
@@ -170,7 +170,7 @@ Note on Concurrent Index Creation:
 For production databases with >1M rows, consider using
 CREATE INDEX CONCURRENTLY (PostgreSQL) to avoid blocking concurrent
 writes. The current migration system does not support concurrent
-index creation — this is a known limitation for the Alembic migration.
+index creation -- this is a known limitation for the Alembic migration.
 """
 
 from __future__ import annotations
@@ -286,7 +286,7 @@ def __getattr__(name: str) -> Any:
     subsequent ``from database.migrations import X`` calls find the
     symbol in the module namespace rather than resolving to a submodule.
     """
-    # __version__ is defined at module level — return directly
+    # __version__ is defined at module level -- return directly
     if name == "__version__":
         return __version__
 
@@ -382,7 +382,7 @@ def __dir__() -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# Public API — explicit declaration (CODE-MIG-04, DOC-MIG-05, CMP-MIG-03)
+# Public API -- explicit declaration (CODE-MIG-04, DOC-MIG-05, CMP-MIG-03)
 #
 # __all__ defines the public API of the migrations package.
 # Symbols are organized by category:
@@ -455,7 +455,7 @@ __all__: list[str] = [
 # import _split_sql_statements``), Python automatically sets
 # ``database.migrations.__dict__['run_migrations'] = <submodule>``,
 # shadowing the function. After that, ``from database.migrations import
-# run_migrations`` returns the submodule instead of the function — and
+# run_migrations`` returns the submodule instead of the function -- and
 # ``__getattr__`` never fires (because the attribute IS in ``__dict__``).
 #
 # We work around this by hooking into the submodule's import: when
@@ -516,7 +516,7 @@ def _ensure_run_migrations_is_function() -> None:
 # eagerly here. Doing so triggers a circular import (the submodule imports
 # symbols from this package during its own initialisation). Instead, the
 # submodule's bottom-of-file hook calls back into this function after it
-# has finished loading — see ``run_migrations.py``.
+# has finished loading -- see ``run_migrations.py``.
 
 
 # ---------------------------------------------------------------------------
@@ -530,7 +530,7 @@ def _ensure_run_migrations_is_function() -> None:
 # We use a try/except because the import may fail if sqlalchemy is not
 # installed. This is safe to call at module-load time because by the time
 # this code runs, the submodule has either been imported (and finished
-# loading) or not — either way, the `from ... import` will trigger the
+# loading) or not -- either way, the `from ... import` will trigger the
 # import if needed.
 # ---------------------------------------------------------------------------
 def _eagerly_export_symbols():
@@ -589,6 +589,6 @@ def _eagerly_export_symbols():
         _parent.__dict__[_name] = locals()[_name]
 
 
-# Do NOT call _eagerly_export_symbols() at module load time — it would
+# Do NOT call _eagerly_export_symbols() at module load time -- it would
 # trigger a circular import. Instead, we provide it as a public function
 # that tests can call if they encounter shadowing issues.

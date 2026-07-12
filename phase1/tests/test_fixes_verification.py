@@ -52,7 +52,7 @@ class TestC1PsqlMetaCommands:
         assert "CREATE TABLE t" in result
 
     def test_c1_do_blocks_preserved(self):
-        """DO $$ blocks must NOT be stripped — they are valid PostgreSQL."""
+        """DO $$ blocks must NOT be stripped -- they are valid PostgreSQL."""
         from database.migrations.run_migrations import _strip_psql_meta_commands
         sql = "DO $$ BEGIN RAISE NOTICE 'hello'; END $$;"
         result = _strip_psql_meta_commands(sql)
@@ -159,7 +159,7 @@ class TestC5NullGeneSymbolDedup:
         are ALL quarantined (not coalesced to empty string and deduplicated).
 
         The previous test expected 1 row to survive (after dedup of the
-        two empty-gene rows). That was the buggy behavior — coalescing
+        two empty-gene rows). That was the buggy behavior -- coalescing
         empty gene_symbol to a single dedup key silently collapsed
         DISTINCT genes into one row (every empty-gene row became the
         same "" gene). The v13 fix routes empty-gene rows to a
@@ -180,7 +180,7 @@ class TestC5NullGeneSymbolDedup:
             "SELECT COUNT(*) FROM gene_disease_associations "
             "WHERE disease_id='C0001' AND source='test'"
         ))
-        # Both empty-gene rows are quarantined (BUG-A-002 root fix) — 0 inserted.
+        # Both empty-gene rows are quarantined (BUG-A-002 root fix) -- 0 inserted.
         assert result.scalar() == 0, (
             f"BUG-A-002 regression: expected 0 rows in GDA table (both "
             f"empty-gene rows quarantined), got {result.scalar()}. "

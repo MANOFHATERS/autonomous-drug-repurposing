@@ -1,5 +1,5 @@
 """
-v65 REAL CODE execution — imports and exercises every fixed module.
+v65 REAL CODE execution -- imports and exercises every fixed module.
 
 This is NOT a test file. It imports the REAL source modules and runs
 REAL code paths to prove the fixes don't break imports or basic
@@ -39,7 +39,7 @@ def check(label: str, fn):
         FAIL += 1
 
 print("=" * 70)
-print("v65 REAL CODE EXECUTION — importing and exercising fixed modules")
+print("v65 REAL CODE EXECUTION -- importing and exercising fixed modules")
 print("=" * 70)
 
 # --- 1. config.settings (P1C-003, P1C-010) ---
@@ -102,7 +102,7 @@ check("import database.models + verify P1C-001/002/006 schema + validators", imp
 print("\n[4] database.loaders")
 def import_loaders():
     import database.loaders as L
-    # P1C-002: loaders mirror — rejects P001 by default.
+    # P1C-002: loaders mirror -- rejects P001 by default.
     os.environ.pop("DRUGOS_ENVIRONMENT", None)
     try:
         L._validate_uniprot_id("P001")
@@ -248,8 +248,8 @@ print("\n" + "=" * 70)
 print(f"REAL CODE EXECUTION SUMMARY: {PASS} passed, {FAIL} failed")
 print("=" * 70)
 if FAIL > 0:
-    print("\n*** FAILURES DETECTED — see tracebacks above ***")
+    print("\n*** FAILURES DETECTED -- see tracebacks above ***")
     sys.exit(1)
 else:
-    print("\n*** ALL REAL CODE PATHS EXECUTE CLEANLY — NO REGRESSIONS ***")
+    print("\n*** ALL REAL CODE PATHS EXECUTE CLEANLY -- NO REGRESSIONS ***")
     sys.exit(0)

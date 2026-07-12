@@ -1,4 +1,4 @@
-"""DrugOS Graph Module — ClinicalTrials Loader (Institutional-Grade v2.1.0)
+"""DrugOS Graph Module -- ClinicalTrials Loader (Institutional-Grade v2.1.0)
 ==========================================================================
 Downloads, validates, parses, and converts the ClinicalTrials.gov AACT
 (Accelerated Clinical Trials Transformation Initiative) database into
@@ -16,15 +16,15 @@ Project Context
 The Autonomous Drug Repurposing Platform mines 10,000 FDA-approved drugs
 against every known disease using a chained pipeline:
 
-1. **Knowledge Graph (Neo4j)** — built by this loader + 12 sibling loaders
+1. **Knowledge Graph (Neo4j)** -- built by this loader + 12 sibling loaders
    (ChEMBL, DrugBank, UniProt, STRING, STITCH, DRKG, OpenTargets, SIDER,
    DisGeNET, OMIM, PubChem, GEO).
-2. **Graph Transformer (PyTorch + PyG)** — predicts a 0-1 therapeutic-
+2. **Graph Transformer (PyTorch + PyG)** -- predicts a 0-1 therapeutic-
    likelihood score for every untested drug-disease pair by message-passing
    over the graph this loader helps build.
-3. **RL Hypothesis Ranker (Stable-Baselines3, PPO)** — ranks the top
+3. **RL Hypothesis Ranker (Stable-Baselines3, PPO)** -- ranks the top
    predictions by plausibility x **safety signal** x market opportunity.
-4. **Clinical decision layer** — pharma partners + clinicians consume the
+4. **Clinical decision layer** -- pharma partners + clinicians consume the
    ranking.
 
 ClinicalTrials.gov AACT data are **edges** in that graph. They tell the RL
@@ -32,13 +32,13 @@ ranker "Drug X has been TESTED FOR Disease Y in a Phase 3 RCT." The RL
 ranker aggregates these onto the Compound node and assigns a **clinical-
 evidence tier**:
 
-  * HIGH CONFIDENCE — Phase 4 (post-marketing) + completed + randomized
-  * MEDIUM CONFIDENCE — Phase 3 + completed + randomized
-  * LOW CONFIDENCE — Phase 2, OR terminated, OR comparator/placebo arm,
+  * HIGH CONFIDENCE -- Phase 4 (post-marketing) + completed + randomized
+  * MEDIUM CONFIDENCE -- Phase 3 + completed + randomized
+  * LOW CONFIDENCE -- Phase 2, OR terminated, OR comparator/placebo arm,
     OR stopped for safety
 
 .. warning::
-    **PATIENT SAFETY — READ BEFORE MODIFYING THIS FILE**
+    **PATIENT SAFETY -- READ BEFORE MODIFYING THIS FILE**
 
     The 51 ☠️ patient-safety flags in the audit dominate all other
     concerns. If a fix to a patient-safety item conflicts with a fix to
@@ -46,41 +46,41 @@ evidence tier**:
 
     The four critical C-tier fixes (C1-C10) are mandatory and ship FIRST:
 
-    * **C1** — AACT ``mesh_term`` column does NOT exist on interventions;
+    * **C1** -- AACT ``mesh_term`` column does NOT exist on interventions;
       must use the ``interventions_mesh_terms`` JOIN table (modern schema)
       or fall back to ``interventions.mesh_term`` (legacy schema) with a
       WARNING. Refuse to run on unknown schemas. (Issue 3.1)
-    * **C2** — AACT cross-product JOIN fabricates drug-disease pairs (a
+    * **C2** -- AACT cross-product JOIN fabricates drug-disease pairs (a
       trial with interventions [Drug A, Placebo] and conditions [Disease X,
       Disease Y] emits 4 edges, only 1 of which is real). Mitigate via
       ``drug_role`` detection (comparator/placebo gets 0.3x evidence
       multiplier + id_confidence="low") + cross-product penalty. (Issues
       2.2, 3.3)
-    * **C3** — ``why_stopped`` is not captured by v0. Add it; apply
+    * **C3** -- ``why_stopped`` is not captured by v0. Add it; apply
       -0.20 evidence penalty + ``safety_signal="stopped_for_safety"`` flag
       when the value matches the safety regex. (Issue 3.5)
-    * **C4** — v0 ``intervention_type='Drug'`` excludes Biological
-      interventions (Humira, Keytruda, Ozempic — ~30% of modern FDA
+    * **C4** -- v0 ``intervention_type='Drug'`` excludes Biological
+      interventions (Humira, Keytruda, Ozempic -- ~30% of modern FDA
       approvals). Default now includes Biological. (Issues 2.7, 3.4)
-    * **C5** — v0 ``LIKE '%Phase 3%'`` substring match also matches
+    * **C5** -- v0 ``LIKE '%Phase 3%'`` substring match also matches
       "Phase 2/Phase 3" and "Phase 3/Phase 4". Replaced with exact-match
       ``IN (?, ?)``. (Issue 3.2)
-    * **C6** — v0 ``rel_type="clinical_trial"`` is not in the KG schema
+    * **C6** -- v0 ``rel_type="clinical_trial"`` is not in the KG schema
       registry (config.CORE_EDGE_TYPES). Changed to ``"tested_for"``.
-      ``"treats"`` is FORBIDDEN — reserved for FDA-approved drugs from
+      ``"treats"`` is FORBIDDEN -- reserved for FDA-approved drugs from
       DrugBank. (Issues 2.1, 14.1, 15.3)
-    * **C7** — v0 does not capture ``enrollment`` count. Added; small
+    * **C7** -- v0 does not capture ``enrollment`` count. Added; small
       enrollment (<30 in Phase 3) triggers WARNING. (Issue 3.6)
-    * **C8** — v0 re-runs create duplicate edges. Fixed via deterministic
+    * **C8** -- v0 re-runs create duplicate edges. Fixed via deterministic
       ``edge_id`` + ``use_merge=True`` at the Neo4j load site. (Issues
       7.1, 2.4)
-    * **C9** — v0 emits raw MeSH descriptor IDs as src_id/dst_id, which
+    * **C9** -- v0 emits raw MeSH descriptor IDs as src_id/dst_id, which
       do not match the canonical Compound (DrugBank ID) / Disease (UMLS
       CUI) namespaces used by sibling loaders. Crosswalk integration
       added; unresolved IDs get ``id_confidence="low"``. (Issues 15.7,
       15.10)
-    * **C10** — v0 emits empty src_id/dst_id on missing data. Fixed via
-      quarantine — bad rows go to DLQ, never to the KG. (Issue 4.7)
+    * **C10** -- v0 emits empty src_id/dst_id on missing data. Fixed via
+      quarantine -- bad rows go to DLQ, never to the KG. (Issue 4.7)
 
 Scientific Scope
 ----------------
@@ -89,7 +89,7 @@ Scientific Scope
 - **URL:** https://aact.ctti-clinicaltrials.org/static/static_db_copies/dataset/aact_dataset.zip
 - **File:** ``aact_dataset.zip`` (~500 MB compressed, ~500K records).
 - **Format:** SQLite database (one .db file inside the zip). Tables used
-  by this loader (Issue 13.12 — AACT table/column reference):
+  by this loader (Issue 13.12 -- AACT table/column reference):
 
   =====================  ===================================================
   Table                  Columns used
@@ -121,39 +121,39 @@ queried by this loader (Issue 9.6). If a future change adds PI queries,
 PII handling must be revisited.
 
 .. warning::
-    **CROSS-JOIN SEMANTICS — PATIENT SAFETY** (Fixes: 13.5, 2.2, 3.3):
+    **CROSS-JOIN SEMANTICS -- PATIENT SAFETY** (Fixes: 13.5, 2.2, 3.3):
 
     The AACT schema does NOT link interventions to conditions at the row
     level. A trial with interventions [Drug A, Placebo] and conditions
     [Disease X, Disease Y] produces 4 rows in the JOIN. Only ONE of these
-    rows (Drug A → Disease X) is the experimental association the trial
+    rows (Drug A -> Disease X) is the experimental association the trial
     was designed to test; the other 3 are fabrications of the JOIN.
 
     This loader mitigates (does not eliminate) the problem by:
       1. Tagging placebo/comparator interventions via description regex
-         (Issue 3.3) — these edges get drug_role='comparator_or_placebo',
+         (Issue 3.3) -- these edges get drug_role='comparator_or_placebo',
          evidence_strength *= 0.3, id_confidence='low'.
       2. Penalizing evidence_strength for parallel-design trials with
          N_interventions × N_conditions > 4 (Issue 2.2).
       3. Emitting a WARNING per trial with high cross-product inflation.
 
     The fully-correct fix requires joining result_groups / outcome_analysis
-    to identify the experimental arm — see Issue 2.2 option (b). That mode
-    is available via ``id_strictness='strict_arm'`` (future work — excluded
+    to identify the experimental arm -- see Issue 2.2 option (b). That mode
+    is available via ``id_strictness='strict_arm'`` (future work -- excluded
     ~70% of trials that lack results).
 
 Public API
 ----------
-Backward compatibility (master prompt Rule R3) — the three original v0
+Backward compatibility (master prompt Rule R3) -- the three original v0
 public functions remain importable with the SAME positional signatures,
 SAME types, and SAME default behaviors (with one safe upgrade: LIKE
-substring matching replaced by exact-match IN — see Issue 3.2):
+substring matching replaced by exact-match IN -- see Issue 3.2):
 
 - ``download_clinicaltrials(force=False) -> Path``
 - ``parse_clinicaltrials(ct_dir=None, phase="Phase 3") -> pd.DataFrame``
 - ``clinicaltrials_to_edge_records(df) -> List[Dict]``
 
-New public functions (additive only — Rule R2/R3):
+New public functions (additive only -- Rule R2/R3):
 
 - ``parse_clinicaltrials_trials(ct_dir=None, phases=None, ...) -> pd.DataFrame``
 - ``iter_clinicaltrials_trials(ct_dir=None, phases=None, ...) -> Iterator[Dict]``
@@ -165,8 +165,8 @@ New public functions (additive only — Rule R2/R3):
 
 New public class:
 
-- ``ClinicalTrialsLoader``  (Loader Protocol adapter — Issue 1.1)
-- ``ClinicalTrialsConfig``  (frozen dataclass — Issue 1.6)
+- ``ClinicalTrialsLoader``  (Loader Protocol adapter -- Issue 1.1)
+- ``ClinicalTrialsConfig``  (frozen dataclass -- Issue 1.6)
 
 Environment Variables
 ---------------------
@@ -177,7 +177,7 @@ monkeypatch ``os.environ`` between calls:
 Env var                         Purpose
 ==============================  =============================================
 ``DRUGOS_CLINICALTRIALS_SKIP``  Skip loader entirely
-``DRUGOS_CLINICALTRIALS_OFFLINE`` Use cached file only — no download
+``DRUGOS_CLINICALTRIALS_OFFLINE`` Use cached file only -- no download
 ``DRUGOS_CLINICALTRIALS_FORCE_DOWNLOAD`` Force re-download
 ``DRUGOS_CLINICALTRIALS_ALLOW_STALE`` Allow stale cache on download failure
 ``DRUGOS_CLINICALTRIALS_ALLOW_LEGACY`` Allow legacy AACT schema (mesh_term column)
@@ -201,9 +201,9 @@ References
 
 SCHEMA CHANGELOG
 ----------------
-v2.1.0 (this file) — institutional-grade audit fix. 148 findings across
+v2.1.0 (this file) -- institutional-grade audit fix. 148 findings across
                       16 domains. Backward-compatible shims preserved.
-v1.0.0 (v0 prototype) — 116 lines. Three free functions. Known-defective
+v1.0.0 (v0 prototype) -- 116 lines. Three free functions. Known-defective
                         (LIKE substring, no MeSH JOIN, no why_stopped,
                         no enrollment, raw MeSH as src_id, etc.).
 
@@ -211,7 +211,7 @@ Fixes: Issues 1.1-1.6 (Architecture), 2.1-2.10 (Design),
        3.1-3.15 (Scientific Correctness), 4.1-4.16 (Coding),
        5.1-5.11 (Data Quality), 6.1-6.11 (Reliability),
        7.1-7.10 (Idempotency), 8.1-8.10 (Performance),
-       9.1-9.10 (Security), 10.1-10.12 (Testing — tests in
+       9.1-9.10 (Security), 10.1-10.12 (Testing -- tests in
        tests/test_clinicaltrials_loader.py), 11.1-11.11 (Logging),
        12.1-12.12 (Configuration), 13.1-13.12 (Documentation),
        14.1-14.12 (Compliance), 15.1-15.11 (Interoperability),
@@ -362,21 +362,21 @@ from .schemas import (  # noqa: E402
     ClinicalTrialsValidationReport,
 )
 
-try:  # TYPE_CHECKING only — never imported at runtime.
+try:  # TYPE_CHECKING only -- never imported at runtime.
     from typing import TYPE_CHECKING
     if TYPE_CHECKING:
         from ._loader_protocol import Loader  # noqa: F401
         from .id_crosswalk import IDCrosswalk  # noqa: F401
-except ImportError:  # pragma: no cover — defensive.
+except ImportError:  # pragma: no cover -- defensive.
     pass
 
 
 # =============================================================================
-# Section 1 — Module-level constants
+# Section 1 -- Module-level constants
 # =============================================================================
-# Fixes Domain 4 (Coding) Issue 4.10 — lazy logging; no f-strings in log calls.
-# Fixes Domain 12 (Configuration) Issue 12.1 — defaults come from config.py.
-# Fixes Domain 7 (Idempotency) Issue 7.5 — pipeline_version in every edge.
+# Fixes Domain 4 (Coding) Issue 4.10 -- lazy logging; no f-strings in log calls.
+# Fixes Domain 12 (Configuration) Issue 12.1 -- defaults come from config.py.
+# Fixes Domain 7 (Idempotency) Issue 7.5 -- pipeline_version in every edge.
 
 PARSER_VERSION: str = CLINICALTRIALS_PARSER_VERSION  # "2.1.0"  # Issue 7.5
 SCHEMA_VERSION: str = CLINICALTRIALS_SCHEMA_VERSION  # "2.1.0"  # Issue 14.6
@@ -386,7 +386,7 @@ LICENSE: str = CLINICALTRIALS_LICENSE  # "CC0 1.0"
 ATTRIBUTION: str = CLINICALTRIALS_ATTRIBUTION
 CITATION: str = CLINICALTRIALS_CITATION  # Issue 13.8
 
-# Pre-compiled regex patterns (Issue 3.15, 14.8 — NCT ID format validation).
+# Pre-compiled regex patterns (Issue 3.15, 14.8 -- NCT ID format validation).
 _NCT_ID_REGEX: re.Pattern[str] = re.compile(
     CLINICALTRIALS_NCT_ID_REGEX_PATTERN  # ^NCT\d{8}$
 )
@@ -406,20 +406,20 @@ _COMPARATOR_REGEX: re.Pattern[str] = re.compile(
 #   * "placebo comparator"
 #   * "Placebo (saline)"
 #   * "PLACEBO ARM"
-# Placebo is the most specific signal — if the description mentions
+# Placebo is the most specific signal -- if the description mentions
 # placebo, the arm IS a placebo (even if it also says "comparator").
 _PLACEBO_REGEX: re.Pattern[str] = re.compile(r"(?i)\bplacebo\b")
 # v70 P2L-043: Active-comparator regex. Matches "active comparator",
 # "active control", OR bare "comparator" (case-insensitive, word-
 # boundary anchored). All three phrases denote a REAL drug used as a
-# comparison standard — NOT an inert placebo. Examples that match:
+# comparison standard -- NOT an inert placebo. Examples that match:
 #   * "active comparator"
 #   * "Active control: metformin"
 #   * "comparator: warfarin"
 #   * "Comparator Arm"
 # The bare "comparator" word is included because ClinicalTrials.gov
 # descriptions often say just "comparator" without the "active"
-# qualifier — but the trial designers would not list a placebo as
+# qualifier -- but the trial designers would not list a placebo as
 # just "comparator" without the "placebo" qualifier (they would say
 # "placebo comparator"). So bare "comparator" is treated as an active
 # comparator unless the placebo regex already matched.
@@ -431,10 +431,10 @@ _SAFETY_STOP_REGEX: re.Pattern[str] = re.compile(
     CLINICALTRIALS_SAFETY_STOP_PATTERN
 )
 
-# URL credential masking regex (Issue 9.9 — log sanitization).
+# URL credential masking regex (Issue 9.9 -- log sanitization).
 _URL_CRED_RE: re.Pattern[str] = re.compile(r"://([^:/@]+):([^@/]+)@")
 
-# Secret patterns (Issue 9.10 — secret scanning on output).
+# Secret patterns (Issue 9.10 -- secret scanning on output).
 _SECRET_PATTERNS: List[re.Pattern[str]] = [
     re.compile(r"(?i)api[_-]?key\s*[=:]\s*[\w-]{20,}"),
     re.compile(r"(?i)aws[_-]?(access|secret)[\w-]*\s*[=:]\s*[\w/+=]{20,}"),
@@ -442,15 +442,15 @@ _SECRET_PATTERNS: List[re.Pattern[str]] = [
     re.compile(r"(?i)password\s*[=:]\s*\S{6,}"),
 ]
 
-# Process-cached load_id (correlation ID — Issue 16.9).
+# Process-cached load_id (correlation ID -- Issue 16.9).
 _LOAD_ID_LOCK: threading.Lock = threading.Lock()
 _LOAD_ID: Optional[str] = None
 
-# Dead-letter queue write lock (thread-safe DLQ writes — Issue 6.5).
+# Dead-letter queue write lock (thread-safe DLQ writes -- Issue 6.5).
 _DLQ_LOCK: threading.Lock = threading.Lock()
-# Lineage log write lock (thread-safe lineage writes — Issue 16.10).
+# Lineage log write lock (thread-safe lineage writes -- Issue 16.10).
 _LINEAGE_LOCK: threading.Lock = threading.Lock()
-# Audit log write lock (thread-safe audit writes — Issue 16.9).
+# Audit log write lock (thread-safe audit writes -- Issue 16.9).
 _AUDIT_LOCK: threading.Lock = threading.Lock()
 
 # Circuit breaker state (Issue 6.11).
@@ -458,13 +458,13 @@ _CB_LOCK: threading.Lock = threading.Lock()
 _CB_FAILURE_COUNT: int = 0
 _CB_OPEN_UNTIL: float = 0.0
 
-# Sentinel for "no cached parsed DataFrame" (Issue 8.3 — generator pattern).
+# Sentinel for "no cached parsed DataFrame" (Issue 8.3 -- generator pattern).
 _PARSED_CACHE: Dict[str, List[Dict[str, Any]]] = {}
 
-# MB constant (used for byte→MB conversions in logging).
+# MB constant (used for byte->MB conversions in logging).
 _MB: int = 1_000_000
 
-# Required AACT tables (Issue 4.5 — validate DB is AACT).
+# Required AACT tables (Issue 4.5 -- validate DB is AACT).
 _REQUIRED_AACT_TABLES: FrozenSet[str] = frozenset({
     "studies", "interventions", "conditions", "designs",
 })
@@ -501,11 +501,11 @@ logger: logging.Logger = logging.getLogger(__name__)
 
 
 # =============================================================================
-# Section 2 — ClinicalTrialsConfig dataclass
+# Section 2 -- ClinicalTrialsConfig dataclass
 # =============================================================================
 # Fixes Domain 12 (Configuration) Issues 12.1, 12.2, 12.7, 12.12.
-# Fixes Domain 7 (Idempotency) Issue 7.1 — frozen instance prevents mutation.
-# Fixes Domain 4 (Coding) Issue 4.11 — split force into force_download /
+# Fixes Domain 7 (Idempotency) Issue 7.1 -- frozen instance prevents mutation.
+# Fixes Domain 4 (Coding) Issue 4.11 -- split force into force_download /
 # force_extract, with `force=` kept as a deprecated alias.
 
 
@@ -515,35 +515,35 @@ class ClinicalTrialsConfig:
 
     All thresholds are documented with their scientific rationale. Instances
     are frozen (immutable) to prevent accidental mutation during a pipeline
-    run (Domain 7 — Idempotency, Issue 7.1).
+    run (Domain 7 -- Idempotency, Issue 7.1).
 
     Parameters
     ----------
     phases : tuple[str, ...]
         Trial phases to include (Issue 3.2, 3.4). Default
-        ``("Phase 3", "Phase 4")`` — Phase 4 is post-marketing surveillance,
+        ``("Phase 3", "Phase 4")`` -- Phase 4 is post-marketing surveillance,
         STRONGER evidence than Phase 3 (Issue 3.4 / 13.2).
     intervention_types : tuple[str, ...]
         AACT ``intervention_type`` values to include (Issue 2.7). Default
-        ``("Drug", "Biological")`` — Biological covers mAbs, vaccines, cell
-        therapies (~30% of modern FDA approvals — Issue 13.3).
+        ``("Drug", "Biological")`` -- Biological covers mAbs, vaccines, cell
+        therapies (~30% of modern FDA approvals -- Issue 13.3).
     study_types : tuple[str, ...]
         AACT ``study_type`` values to include (Issue 3.7). Default
-        ``("Interventional",)`` — RCTs only.
+        ``("Interventional",)`` -- RCTs only.
     allowed_statuses : tuple[str, ...]
         AACT ``overall_status`` values to include (Issue 3.11). Default
-        excludes Withdrawn/Suspended/Terminated/etc. — those are not
+        excludes Withdrawn/Suspended/Terminated/etc. -- those are not
         positive evidence.
     min_enrollment : int
         Minimum enrollment count filter (Issue 3.6). Default 0 (no filter).
     max_trial_age_years : int or None
         When set, exclude trials older than this many years (Issue 3.13).
-        Default None — include all trials.
+        Default None -- include all trials.
     require_results : bool
         If True, only include trials with published results (Issue 3.10).
         v27 ROOT FIX (P2-L-7): default is now True. The previous default
         (False) included Recruiting/Not-yet-recruiting trials with zero
-        results data as efficacy evidence — a patient-safety risk.
+        results data as efficacy evidence -- a patient-safety risk.
     force_download : bool
         If True, re-download even if a cached copy exists (Issue 4.11).
     force_extract : bool
@@ -563,10 +563,10 @@ class ClinicalTrialsConfig:
     neo4j_batch_size : int
         Maximum edges per Neo4j ``load_edges_bulk_create`` call (Issue 8.6).
     limit : int or None
-        If set, append ``LIMIT ?`` to SQL (Issue 8.5 — testing only).
+        If set, append ``LIMIT ?`` to SQL (Issue 8.5 -- testing only).
     pinned_aact_release : str or None
         When set, refuse to use any AACT snapshot other than this one
-        (Issue 7.8 — backfilling safety).
+        (Issue 7.8 -- backfilling safety).
     raw_dir : Path or None
         Directory for raw downloaded files. If None, defaults to ``RAW_DIR``.
     dead_letter_path : Path or None
@@ -610,13 +610,13 @@ class ClinicalTrialsConfig:
         ClinicalTrialsConfigurationError
             If any field has an invalid value.
         """
-        # Issue 2.10 / 4.6 — reject empty phases.
+        # Issue 2.10 / 4.6 -- reject empty phases.
         if not self.phases:
             raise ClinicalTrialsConfigurationError(
                 "phases must not be empty (Issue 2.10, 4.6).",
                 context={"phases": self.phases},
             )
-        # Issue 9.7 — reject LIKE wildcards.
+        # Issue 9.7 -- reject LIKE wildcards.
         for p in self.phases:
             if not isinstance(p, str) or "%" in p or "_" in p:
                 raise ClinicalTrialsConfigurationError(
@@ -631,7 +631,7 @@ class ClinicalTrialsConfig:
                     context={"phase": p,
                              "valid_phases": sorted(CLINICALTRIALS_VALID_PHASES)},
                 )
-        # Issue 2.7 — intervention_types validation.
+        # Issue 2.7 -- intervention_types validation.
         if not self.intervention_types:
             raise ClinicalTrialsConfigurationError(
                 "intervention_types must not be empty (Issue 2.7).",
@@ -644,7 +644,7 @@ class ClinicalTrialsConfig:
                     f"(Issue 2.7).",
                     context={"intervention_type": it},
                 )
-        # Issue 3.7 — study_types validation.
+        # Issue 3.7 -- study_types validation.
         if not self.study_types:
             raise ClinicalTrialsConfigurationError(
                 "study_types must not be empty (Issue 3.7).",
@@ -657,7 +657,7 @@ class ClinicalTrialsConfig:
                     f"(Issue 3.7).",
                     context={"study_type": st},
                 )
-        # Issue 3.11 — allowed_statuses validation.
+        # Issue 3.11 -- allowed_statuses validation.
         if not self.allowed_statuses:
             raise ClinicalTrialsConfigurationError(
                 "allowed_statuses must not be empty (Issue 3.11).",
@@ -670,14 +670,14 @@ class ClinicalTrialsConfig:
                     f"(Issue 3.11).",
                     context={"status": s},
                 )
-        # Issue 3.6 — min_enrollment validation.
+        # Issue 3.6 -- min_enrollment validation.
         if not isinstance(self.min_enrollment, int) or self.min_enrollment < 0:
             raise ClinicalTrialsConfigurationError(
                 f"min_enrollment must be >= 0, got {self.min_enrollment!r} "
                 f"(Issue 3.6).",
                 context={"min_enrollment": self.min_enrollment},
             )
-        # Issue 3.13 — max_trial_age_years validation.
+        # Issue 3.13 -- max_trial_age_years validation.
         if self.max_trial_age_years is not None:
             if not isinstance(self.max_trial_age_years, int) or \
                     self.max_trial_age_years <= 0:
@@ -686,14 +686,14 @@ class ClinicalTrialsConfig:
                     f"got {self.max_trial_age_years!r} (Issue 3.13).",
                     context={"max_trial_age_years": self.max_trial_age_years},
                 )
-        # Issue 8.1 — chunksize validation.
+        # Issue 8.1 -- chunksize validation.
         if not isinstance(self.chunksize, int) or self.chunksize <= 0:
             raise ClinicalTrialsConfigurationError(
                 f"chunksize must be positive int, got {self.chunksize!r} "
                 f"(Issue 8.1).",
                 context={"chunksize": self.chunksize},
             )
-        # Issue 8.5 — limit validation.
+        # Issue 8.5 -- limit validation.
         if self.limit is not None and (
             not isinstance(self.limit, int) or self.limit <= 0
         ):
@@ -702,7 +702,7 @@ class ClinicalTrialsConfig:
                 f"(Issue 8.5).",
                 context={"limit": self.limit},
             )
-        # Issue 7.8 — pinned_aact_release validation.
+        # Issue 7.8 -- pinned_aact_release validation.
         if self.pinned_aact_release is not None:
             if not isinstance(self.pinned_aact_release, str) or \
                     not self.pinned_aact_release.strip():
@@ -753,7 +753,7 @@ class ClinicalTrialsConfig:
 
 
 # =============================================================================
-# Section 3 — ID validators and MeSH / drug_name normalization
+# Section 3 -- ID validators and MeSH / drug_name normalization
 # =============================================================================
 # Fixes Issues 3.15 (NCT format), 14.9 (MeSH normalization),
 # 15.10 (drug name normalization), 5.11 (garbage MeSH).
@@ -872,7 +872,7 @@ def _is_valid_mesh_id_format(term: Optional[str]) -> bool:
     """Check if a MeSH term LOOKS like a MeSH descriptor ID (D######).
 
     Returns True if the term matches ``^D\\d{6}$`` (case-insensitive).
-    Returns True for free-text terms — they're not garbage, just non-ID
+    Returns True for free-text terms -- they're not garbage, just non-ID
     MeSH terms (used as fallback IDs with id_confidence="low").
     """
     if term is None:
@@ -883,7 +883,7 @@ def _is_valid_mesh_id_format(term: Optional[str]) -> bool:
 
 
 # =============================================================================
-# Section 4 — Security helpers
+# Section 4 -- Security helpers
 # =============================================================================
 # Fixes Issues 4.3 (zip-slip), 9.1 (TLS), 9.3 (zip-slip),
 # 9.8 (file perms), 9.9 (log sanitization), 9.10 (secret scanning).
@@ -1032,7 +1032,7 @@ def _safe_extract(zip_path: Path, extract_dir: Path) -> None:
     extract_dir_resolved: Path = extract_dir.resolve()
     try:
         with zipfile.ZipFile(zip_path, "r") as z:
-            # Issue 4.3 — validate every entry path before extraction.
+            # Issue 4.3 -- validate every entry path before extraction.
             for info in z.infolist():
                 name: str = info.filename
                 if name.startswith("/") or (
@@ -1061,15 +1061,15 @@ def _safe_extract(zip_path: Path, extract_dir: Path) -> None:
             f"Error: {exc}",
             context={"zip_path": str(zip_path), "error": str(exc)},
         ) from exc
-    # Issue 4.8 / 6.9 — write sentinel file to indicate extraction complete.
+    # Issue 4.8 / 6.9 -- write sentinel file to indicate extraction complete.
     sentinel: Path = extract_dir / CLINICALTRIALS_EXTRACT_SENTINEL
     sentinel.touch()
-    # Issue 9.8 — restrict file permissions on extracted DB files (best-effort).
+    # Issue 9.8 -- restrict file permissions on extracted DB files (best-effort).
     for db_file in extract_dir.rglob("*.db"):
         try:
             os.chmod(db_file, 0o600)
         except OSError:
-            # Best-effort — may fail on Windows or read-only filesystems.
+            # Best-effort -- may fail on Windows or read-only filesystems.
             pass
 
 
@@ -1162,7 +1162,7 @@ def _scan_for_secrets(props: Dict[str, Any]) -> Optional[str]:
 
 
 # =============================================================================
-# Section 5 — Download (atomic, retried, TLS-verified, hash-verified)
+# Section 5 -- Download (atomic, retried, TLS-verified, hash-verified)
 # =============================================================================
 # Fixes Issues 4.2 (urlopen+Request), 6.1 (retry), 6.2 (timeout),
 # 6.3 (atomic write), 6.4 (allow_stale), 6.10 (checksum),
@@ -1170,7 +1170,7 @@ def _scan_for_secrets(props: Dict[str, Any]) -> Optional[str]:
 # 12.4 (max_size_bytes), 12.5 (checksum), 4.9 (corrupt zip sniff),
 # 6.8 (HTML error page), 7.3 (downloaded_at), 7.4 (source_sha256),
 # 16.2 (downloaded_at in props), 16.3 (source_sha256 in props),
-# 16.8 (impact analysis — old SHA capture).
+# 16.8 (impact analysis -- old SHA capture).
 
 
 def _compute_sha256(path: Path, chunk_size: int = 1 << 20) -> str:
@@ -1232,7 +1232,7 @@ def _format_age(mtime: float) -> str:
 
 
 def _read_lineage(lineage_path: Path) -> Optional[Dict[str, Any]]:
-    """Read the most recent lineage entry (Issue 16.8 — impact analysis).
+    """Read the most recent lineage entry (Issue 16.8 -- impact analysis).
 
     Parameters
     ----------
@@ -1304,7 +1304,7 @@ def _atomic_download(
                     context={"url": _sanitize_url_for_logging(url),
                              "http_code": code},
                 )
-            # Issue 6.8 — reject HTML error pages.
+            # Issue 6.8 -- reject HTML error pages.
             content_type: str = response.headers.get(
                 "Content-Type", "application/octet-stream"
             )
@@ -1372,7 +1372,7 @@ def _download_with_retry(
     CircuitBreakerOpenError
         If the circuit breaker is open (Issue 6.11).
     """
-    # Issue 6.11 — check circuit breaker before attempting download.
+    # Issue 6.11 -- check circuit breaker before attempting download.
     _check_circuit_breaker()
     retries: int = source_cfg.get(
         "retry_count", CLINICALTRIALS_MAX_RETRIES
@@ -1389,7 +1389,7 @@ def _download_with_retry(
             bytes_downloaded: int = _atomic_download(
                 url, dest, timeout, _SSL_CONTEXT
             )
-            # Issue 6.11 — record success on circuit breaker.
+            # Issue 6.11 -- record success on circuit breaker.
             _record_circuit_breaker_success()
             return bytes_downloaded
         except (
@@ -1547,7 +1547,7 @@ def _validate_downloaded_zip(
     ClinicalTrialsDataIntegrityError
         If the SHA-256 does not match.
     """
-    # Issue 6.8 / 4.9 — validate zip magic bytes.
+    # Issue 6.8 / 4.9 -- validate zip magic bytes.
     if not _is_valid_zip(zip_path):
         raise ClinicalTrialsDownloadError(
             f"Downloaded file is not a valid zip (likely HTML error page or "
@@ -1555,7 +1555,7 @@ def _validate_downloaded_zip(
             context={"zip_path": str(zip_path)},
         )
     actual_size: int = zip_path.stat().st_size
-    # Issue 12.4 — check max_size_bytes.
+    # Issue 12.4 -- check max_size_bytes.
     max_size: int = source_cfg.get(
         "max_size_bytes", 1_500_000_000
     )
@@ -1568,7 +1568,7 @@ def _validate_downloaded_zip(
                      "actual_size": actual_size,
                      "max_size_bytes": max_size},
         )
-    # Issue 12.4 — check min_size_bytes.
+    # Issue 12.4 -- check min_size_bytes.
     if actual_size < CLINICALTRIALS_MIN_VALID_SIZE_BYTES:
         raise ClinicalTrialsDownloadError(
             f"Downloaded zip size {actual_size} is below minimum "
@@ -1577,7 +1577,7 @@ def _validate_downloaded_zip(
                      "actual_size": actual_size,
                      "min_size_bytes": CLINICALTRIALS_MIN_VALID_SIZE_BYTES},
         )
-    # Issue 6.10 — verify SHA-256.
+    # Issue 6.10 -- verify SHA-256.
     return _verify_checksum(zip_path, source_cfg.get("sha256"))
 
 
@@ -1638,7 +1638,7 @@ def download_clinicaltrials(
     force_extract: bool = False,
     cfg: Optional[ClinicalTrialsConfig] = None,
 ) -> Path:
-    """Download and extract the AACT database (Issue 4.11 — split force).
+    """Download and extract the AACT database (Issue 4.11 -- split force).
 
     This is the public download entry point. It implements a fully hardened
     download pipeline:
@@ -1688,9 +1688,9 @@ def download_clinicaltrials(
     CircuitBreakerOpenError
         If the download circuit breaker is open (Issue 6.11).
     """
-    # Issue 7.1 — deterministic seed for idempotency.
+    # Issue 7.1 -- deterministic seed for idempotency.
     set_global_seed(SEED)
-    # Issue 4.11 — handle deprecated `force` parameter.
+    # Issue 4.11 -- handle deprecated `force` parameter.
     if force is not None:
         warnings.warn(
             "`force=` is deprecated; use force_download= and force_extract=. "
@@ -1701,21 +1701,21 @@ def download_clinicaltrials(
         force_download = force_download or force
         force_extract = force_extract or force
 
-    # Issue 12.6 — honor env vars at call time.
+    # Issue 12.6 -- honor env vars at call time.
     if CLINICALTRIALS_FORCE_DOWNLOAD:
         force_download = True
     if CLINICALTRIALS_SKIP:
         logger.warning(
-            "DRUGOS_CLINICALTRIALS_SKIP=1 — skipping ClinicalTrials download. "
+            "DRUGOS_CLINICALTRIALS_SKIP=1 -- skipping ClinicalTrials download. "
             "Fixes: 12.6.",
             extra={"stage": "download", "source": SOURCE_KEY, "skipped": True},
         )
         return RAW_DIR / "clinicaltrials"
 
     cfg = cfg or ClinicalTrialsConfig()
-    # Issue 6.4 — allow_stale from cfg or env var.
+    # Issue 6.4 -- allow_stale from cfg or env var.
     allow_stale: bool = cfg.allow_stale or CLINICALTRIALS_ALLOW_STALE
-    # Issue 7.8 — pinned release handling.
+    # Issue 7.8 -- pinned release handling.
     if cfg.pinned_aact_release is None and CLINICALTRIALS_PINNED_RELEASE:
         cfg = ClinicalTrialsConfig(
             **{**asdict(cfg),
@@ -1723,11 +1723,11 @@ def download_clinicaltrials(
         )
 
     source_cfg: Dict[str, Any] = DATA_SOURCES[SOURCE_KEY]
-    # Issue 12.7 — validate config on startup.
+    # Issue 12.7 -- validate config on startup.
     _validate_config(source_cfg)
 
     url: str = source_cfg["url"]
-    # Issue 9.1 — URL allowlist + scheme check.
+    # Issue 9.1 -- URL allowlist + scheme check.
     _validate_url_against_allowlist(url)
 
     raw_dir: Path = cfg.effective_raw_dir
@@ -1735,7 +1735,7 @@ def download_clinicaltrials(
     zip_path: Path = raw_dir / source_cfg["filename"]
     extract_dir: Path = raw_dir / "clinicaltrials"
 
-    # Issue 7.8 — pinned release: use a specific zip filename.
+    # Issue 7.8 -- pinned release: use a specific zip filename.
     if cfg.pinned_aact_release:
         pinned_name: str = f"aact_dataset_{cfg.pinned_aact_release}.zip"
         pinned_path: Path = raw_dir / pinned_name
@@ -1750,7 +1750,7 @@ def download_clinicaltrials(
                          "expected_path": str(pinned_path)},
             )
 
-    # Issue 4.8 / 6.9 — check extraction sentinel.
+    # Issue 4.8 / 6.9 -- check extraction sentinel.
     extract_complete: bool = (
         extract_dir.exists()
         and _is_extract_complete(extract_dir)
@@ -1765,21 +1765,21 @@ def download_clinicaltrials(
         )
         return extract_dir
 
-    # Issue 6.4 — allow_stale: use cached copy if download fails.
+    # Issue 6.4 -- allow_stale: use cached copy if download fails.
     cached_zip_valid: bool = (
         zip_path.exists() and _is_valid_zip(zip_path)
     )
 
     if CLINICALTRIALS_OFFLINE and cached_zip_valid:
         logger.warning(
-            "DRUGOS_CLINICALTRIALS_OFFLINE=1 — using cached zip %s without "
+            "DRUGOS_CLINICALTRIALS_OFFLINE=1 -- using cached zip %s without "
             "download. Fixes: 12.6.",
             zip_path,
             extra={"stage": "download", "source": SOURCE_KEY,
                    "offline": True, "zip_path": str(zip_path)},
         )
     elif force_download or not cached_zip_valid:
-        # Issue 16.8 — impact analysis: capture old SHA before re-download.
+        # Issue 16.8 -- impact analysis: capture old SHA before re-download.
         old_lineage: Optional[Dict[str, Any]] = _read_lineage(
             cfg.effective_lineage_log_path
         )
@@ -1799,7 +1799,7 @@ def download_clinicaltrials(
                 url, zip_path, cfg, source_cfg
             )
         except ClinicalTrialsDownloadError as exc:
-            # Issue 6.4 — allow_stale graceful degradation.
+            # Issue 6.4 -- allow_stale graceful degradation.
             if allow_stale and cached_zip_valid:
                 logger.critical(
                     "Download failed (%s); falling back to cached copy %s "
@@ -1814,7 +1814,7 @@ def download_clinicaltrials(
             else:
                 raise
 
-        # Issue 6.8 — delete + retry on HTML error page (already handled
+        # Issue 6.8 -- delete + retry on HTML error page (already handled
         # in _atomic_download, but double-check here).
         if not _is_valid_zip(zip_path):
             logger.warning(
@@ -1831,7 +1831,7 @@ def download_clinicaltrials(
                 context={"zip_path": str(zip_path)},
             )
 
-        # Issue 6.10 / 12.5 — verify SHA-256.
+        # Issue 6.10 / 12.5 -- verify SHA-256.
         sha256_hex: str = _validate_downloaded_zip(zip_path, source_cfg)
 
         elapsed: float = time.perf_counter() - t0
@@ -1846,7 +1846,7 @@ def download_clinicaltrials(
                    "elapsed_seconds": elapsed},
         )
 
-        # Issue 16.8 — warn if SHA changed.
+        # Issue 16.8 -- warn if SHA changed.
         if old_lineage and old_lineage.get("source_sha256"):
             if old_lineage["source_sha256"] != sha256_hex:
                 logger.warning(
@@ -1859,7 +1859,7 @@ def download_clinicaltrials(
                            "new_sha": sha256_hex},
                 )
 
-        # Issue 16.9 — write audit log.
+        # Issue 16.9 -- write audit log.
         _write_audit_log(
             "DOWNLOAD",
             url=_sanitize_url_for_logging(url),
@@ -1869,10 +1869,10 @@ def download_clinicaltrials(
             elapsed_seconds=elapsed,
         )
 
-    # Issue 7.7 — force_extract invalidates extract_dir.
+    # Issue 7.7 -- force_extract invalidates extract_dir.
     if force_extract and extract_dir.exists():
         logger.info(
-            "force_extract=True — removing existing extract_dir: %s. "
+            "force_extract=True -- removing existing extract_dir: %s. "
             "Fixes: 7.7.",
             extract_dir,
             extra={"stage": "extract", "source": SOURCE_KEY,
@@ -1880,7 +1880,7 @@ def download_clinicaltrials(
         )
         shutil.rmtree(extract_dir, ignore_errors=True)
 
-    # Issue 4.8 / 6.9 — extract with sentinel.
+    # Issue 4.8 / 6.9 -- extract with sentinel.
     if not _is_extract_complete(extract_dir) or force_extract:
         t0 = time.perf_counter()
         logger.info(
@@ -1903,12 +1903,12 @@ def download_clinicaltrials(
     return extract_dir
 
 
-# Backward-compat alias (Issue 1.5 — re-use canonical name).
+# Backward-compat alias (Issue 1.5 -- re-use canonical name).
 download_clinicaltrials_evidence = download_clinicaltrials
 
 
 # =============================================================================
-# Section 6 — SQL parsing
+# Section 6 -- SQL parsing
 # =============================================================================
 # Fixes Issues 3.1 (schema detection), 3.2 (exact-match phase),
 # 3.7 (study_type filter), 3.8 (designs join), 3.9 (primary_outcomes),
@@ -1940,7 +1940,7 @@ def _open_aact_readonly(
     ClinicalTrialsParseError
         If the DB cannot be opened.
     """
-    # Issue 4.4 — read-only sqlite via URI mode=ro.
+    # Issue 4.4 -- read-only sqlite via URI mode=ro.
     uri: str = f"file:{db_path}?mode=ro"
     try:
         conn: sqlite3.Connection = sqlite3.connect(uri, uri=True)
@@ -1953,7 +1953,7 @@ def _open_aact_readonly(
     try:
         yield conn
     finally:
-        # Issue 4.1 — try/finally for sqlite connection.
+        # Issue 4.1 -- try/finally for sqlite connection.
         conn.close()
 
 
@@ -1981,14 +1981,14 @@ def _select_aact_db(ct_dir: Path, cfg: ClinicalTrialsConfig) -> Path:
     ClinicalTrialsParseError
         If no .db file is found, or the DB is not a valid AACT DB.
     """
-    # Issue 4.5 — find all .db files.
+    # Issue 4.5 -- find all .db files.
     db_files: List[Path] = sorted(
         ct_dir.rglob("*.db"),
         key=lambda p: p.stat().st_mtime,
         reverse=True,
     )
     if not db_files:
-        # Issue 11.9 — log before raising.
+        # Issue 11.9 -- log before raising.
         logger.error(
             "No SQLite database found in %s. Searched pattern: *.db. "
             "Did download_clinicaltrials() run? Fixes: 11.9, 4.8.",
@@ -2001,7 +2001,7 @@ def _select_aact_db(ct_dir: Path, cfg: ClinicalTrialsConfig) -> Path:
             context={"search_dir": str(ct_dir)},
         )
     if len(db_files) > 1:
-        # Issue 11.11 — log all candidate DB files.
+        # Issue 11.11 -- log all candidate DB files.
         logger.warning(
             "Multiple .db files found in %s; selecting most recent: %s. "
             "Other candidates: %s. Fixes: 4.5, 11.11.",
@@ -2012,7 +2012,7 @@ def _select_aact_db(ct_dir: Path, cfg: ClinicalTrialsConfig) -> Path:
                    "candidates": [str(p) for p in db_files[1:]]},
         )
     db_path: Path = db_files[0]
-    # Issue 4.5 / 9.5 — validate DB is AACT.
+    # Issue 4.5 / 9.5 -- validate DB is AACT.
     _validate_aact_db(db_path, cfg)
     return db_path
 
@@ -2048,7 +2048,7 @@ def _validate_aact_db(db_path: Path, cfg: ClinicalTrialsConfig) -> None:
     missing: FrozenSet[str] = _REQUIRED_AACT_TABLES - actual
     if missing:
         raise ClinicalTrialsParseError(
-            f"DB {db_path} is not a valid AACT database — missing tables: "
+            f"DB {db_path} is not a valid AACT database -- missing tables: "
             f"{sorted(missing)}. Fixes: 4.5, 9.5.",
             context={"db_path": str(db_path),
                      "missing_tables": sorted(missing),
@@ -2064,12 +2064,12 @@ def _detect_aact_schema(
 
     Returns a tuple ``(schema_version, schema_info)`` where
     ``schema_version`` is one of:
-      * ``"modern"`` — has ``interventions_mesh_terms`` and
+      * ``"modern"`` -- has ``interventions_mesh_terms`` and
         ``conditions_mesh_terms`` tables.
-      * ``"legacy"`` — has ``mesh_term`` as a direct column on
+      * ``"legacy"`` -- has ``mesh_term`` as a direct column on
         ``interventions`` and ``conditions`` (requires
         ``allow_legacy_schema=True``).
-      * ``"unknown"`` — neither pattern matches; raises.
+      * ``"unknown"`` -- neither pattern matches; raises.
 
     Parameters
     ----------
@@ -2096,7 +2096,7 @@ def _detect_aact_schema(
         )
         tables: set = {row[0] for row in cursor.fetchall()}
 
-        # Issue 3.1 — check for modern schema.
+        # Issue 3.1 -- check for modern schema.
         has_modern_interventions: bool = (
             "interventions_mesh_terms" in tables
         )
@@ -2121,7 +2121,7 @@ def _detect_aact_schema(
             col[1] == "mesh_term" for col in conditions_cols
         )
 
-        # Issue 8.8 — index hints.
+        # Issue 8.8 -- index hints.
         indexes: List[Tuple[str, ...]] = []
         for table in ("studies", "interventions", "conditions"):
             if table in tables:
@@ -2147,7 +2147,7 @@ def _detect_aact_schema(
         return ("modern", schema_info)
 
     if has_legacy_interventions and has_legacy_conditions:
-        # Issue 2.9 — legacy schema requires allow_legacy_schema.
+        # Issue 2.9 -- legacy schema requires allow_legacy_schema.
         if not (cfg.allow_legacy_schema or CLINICALTRIALS_ALLOW_LEGACY_SCHEMA):
             raise ClinicalTrialsParseError(
                 f"Legacy AACT schema detected (mesh_term as direct column) "
@@ -2169,7 +2169,7 @@ def _detect_aact_schema(
         return ("legacy", schema_info)
 
     raise ClinicalTrialsParseError(
-        f"Unrecognized AACT schema — neither mesh_term column nor "
+        f"Unrecognized AACT schema -- neither mesh_term column nor "
         f"interventions_mesh_terms / conditions_mesh_terms tables found. "
         f"Refusing to emit edges from unverified schema. Fixes: 3.1, 9.5.",
         context={"schema_version": "unknown", **schema_info},
@@ -2198,7 +2198,7 @@ def _build_sql_query(
         v60 ROOT FIX: whether the AACT DB has the ``outcome_analyses``
         table. When True, the SQL JOIN to populate
         ``primary_outcome_met_raw`` is included. When False (older AACT
-        schema), the column is set to '' (empty) for every row —
+        schema), the column is set to '' (empty) for every row --
         ``primary_outcome_met`` then falls back to None (unknown
         outcome), preserving the v57 behavior for legacy databases.
 
@@ -2207,15 +2207,15 @@ def _build_sql_query(
     tuple[str, list]
         ``(query, params)`` ready for pd.read_sql_query.
     """
-    # Issue 4.14 — self-documenting SQL aliases.
-    # Issue 3.2 — exact-match phase via IN (?,?,...) not LIKE.
+    # Issue 4.14 -- self-documenting SQL aliases.
+    # Issue 3.2 -- exact-match phase via IN (?,?,...) not LIKE.
     phase_placeholders: str = ",".join("?" * len(cfg.phases))
     intv_type_placeholders: str = ",".join("?" * len(cfg.intervention_types))
     study_type_placeholders: str = ",".join("?" * len(cfg.study_types))
     status_placeholders: str = ",".join("?" * len(cfg.allowed_statuses))
 
-    # Issue 3.1 — schema-specific SELECT for MeSH terms.
-    # SQLite does NOT support GROUP_CONCAT(DISTINCT col, sep) — DISTINCT
+    # Issue 3.1 -- schema-specific SELECT for MeSH terms.
+    # SQLite does NOT support GROUP_CONCAT(DISTINCT col, sep) -- DISTINCT
     # aggregates must have exactly one argument. So we use a correlated
     # subquery with an inner DISTINCT + outer GROUP_CONCAT.
     if schema_version == "modern":
@@ -2241,33 +2241,33 @@ def _build_sql_query(
         drug_mesh_join = ""
         cond_mesh_join = ""
 
-    # Issue 3.8 — JOIN designs table.
+    # Issue 3.8 -- JOIN designs table.
     designs_join: str = (
         "LEFT JOIN designs d ON d.nct_id = s.nct_id"
     )
-    # Issue 3.9 — JOIN primary_outcomes (aggregated via subquery).
+    # Issue 3.9 -- JOIN primary_outcomes (aggregated via subquery).
     primary_outcomes_select: str = (
         "(SELECT GROUP_CONCAT(po.measure, ' || ') FROM primary_outcomes po "
         "WHERE po.nct_id = s.nct_id) AS primary_outcome"
     )
-    # v60 ROOT FIX (FORENSIC-DEEP — ClinicalTrials 'Completed' as positive
-    # evidence → negative-result trials become positive training signal).
+    # v60 ROOT FIX (FORENSIC-DEEP -- ClinicalTrials 'Completed' as positive
+    # evidence -> negative-result trials become positive training signal).
     # The v57 fix added `_classify_trial_confidence` which differentiates
     # Completed+primary_outcome_met=True (0.9) vs False (0.1) vs None (0.4).
     # BUT `primary_outcome_met` was ALWAYS None in practice because the
     # AACT `primary_outcomes` table stores the *measure text*, not a
     # boolean success flag. So EVERY Completed trial went through the
-    # None branch → emitted as a positive `tested_for` edge with 0.4
+    # None branch -> emitted as a positive `tested_for` edge with 0.4
     # evidence_strength. Negative-result trials (drug FAILED Phase 3)
     # became positive training signal.
     #
     # ROOT FIX: JOIN the AACT `outcome_analyses` table which stores the
     # actual outcome analysis category. The relevant column is
     # `outcome_analysis_category` with values like:
-    #   "Achieved" / "Yes"           → primary endpoint MET
-    #   "Not Achieved" / "No"        → primary endpoint NOT MET (negative trial)
-    #   "Partially Achieved"         → partially met (treat as None)
-    #   "Statistical Test Not Done"  → no analysis (treat as None)
+    #   "Achieved" / "Yes"           -> primary endpoint MET
+    #   "Not Achieved" / "No"        -> primary endpoint NOT MET (negative trial)
+    #   "Partially Achieved"         -> partially met (treat as None)
+    #   "Statistical Test Not Done"  -> no analysis (treat as None)
     # We only consider PRIMARY outcome analyses (outcome_type='Primary').
     # The subquery returns a single string ("met" / "not_met" / "partial" / "")
     # which the edge builder translates to True / False / None.
@@ -2300,23 +2300,23 @@ def _build_sql_query(
             ") AS primary_outcome_met_raw"
         )
     else:
-        # v60: legacy AACT schema without outcome_analyses table —
+        # v60: legacy AACT schema without outcome_analyses table --
         # emit empty string so primary_outcome_met falls back to None.
         primary_outcome_met_select = "'' AS primary_outcome_met_raw"
 
-    # Issue 7.9 — deterministic ORDER BY.
+    # Issue 7.9 -- deterministic ORDER BY.
     order_by: str = (
         "ORDER BY s.nct_id, intv.name, cond.name"
     )
 
-    # Issue 3.6 — min_enrollment filter.
+    # Issue 3.6 -- min_enrollment filter.
     enrollment_filter: str = ""
     if cfg.min_enrollment > 0:
         enrollment_filter = "AND s.enrollment >= ?"
 
-    # Issue 3.13 — max_trial_age_years filter (applied in Python after parse).
+    # Issue 3.13 -- max_trial_age_years filter (applied in Python after parse).
 
-    # Issue 8.5 — LIMIT for testing.
+    # Issue 8.5 -- LIMIT for testing.
     limit_clause: str = ""
     if cfg.limit is not None:
         limit_clause = "LIMIT ?"
@@ -2393,7 +2393,7 @@ def parse_clinicaltrials(
         is deprecated; use ``phases`` for explicit multi-phase selection
         (Issue 4.6). The default behavior has changed:
           * v0: ``phase="Phase 3"`` used ``LIKE '%Phase 3%'`` which also
-            matched "Phase 2/Phase 3" and "Phase 3/Phase 4" (bug — Issue 3.2).
+            matched "Phase 2/Phase 3" and "Phase 3/Phase 4" (bug -- Issue 3.2).
           * v2.1: ``phase="Phase 3"`` is converted to ``phases=("Phase 3",)``
             with exact-match ``IN (?)`` semantics.
 
@@ -2418,9 +2418,9 @@ def parse_clinicaltrials(
         completion_date, drug_name, description, intervention_type,
         drug_mesh, condition_name, condition_mesh, allocation,
         intervention_model, masking, primary_purpose, primary_outcome,
-        primary_outcome_met_raw (v60 ROOT FIX — 'met'/'not_met'/'partial'/'').
+        primary_outcome_met_raw (v60 ROOT FIX -- 'met'/'not_met'/'partial'/'').
     """
-    # Issue 4.6 / 12.9 — deprecation warning when `phase` is used.
+    # Issue 4.6 / 12.9 -- deprecation warning when `phase` is used.
     if phase is not None and phases is None and cfg is None:
         warnings.warn(
             "`phase=` is deprecated; use `phases=` for explicit multi-phase "
@@ -2429,7 +2429,7 @@ def parse_clinicaltrials(
             DeprecationWarning,
             stacklevel=2,
         )
-        # Issue 3.2 — convert phase to phases tuple (exact match).
+        # Issue 3.2 -- convert phase to phases tuple (exact match).
         cfg = ClinicalTrialsConfig(phases=(phase,))
     elif phases is not None and cfg is None:
         cfg = ClinicalTrialsConfig(phases=tuple(phases))
@@ -2443,7 +2443,7 @@ def parse_clinicaltrials(
     return parse_clinicaltrials_trials(ct_dir=ct_dir, cfg=cfg)
 
 
-# Issue 1.5 — re-export under canonical name (sibling-loader convention).
+# Issue 1.5 -- re-export under canonical name (sibling-loader convention).
 parse_clinicaltrials_evidence = parse_clinicaltrials
 
 
@@ -2455,7 +2455,7 @@ def parse_clinicaltrials_trials(
 ) -> pd.DataFrame:
     """Parse ClinicalTrials drug-disease evidence from AACT SQLite.
 
-    Eager wrapper around ``iter_clinicaltrials_trials`` — materializes the
+    Eager wrapper around ``iter_clinicaltrials_trials`` -- materializes the
     full DataFrame into memory. For large AACT snapshots, prefer
     ``iter_clinicaltrials_trials`` with ``chunksize`` for streaming.
 
@@ -2532,25 +2532,25 @@ def iter_clinicaltrials_trials(
     ClinicalTrialsConfigurationError
         If the config is invalid.
     """
-    set_global_seed(SEED)  # Issue 7.1 — idempotency.
+    set_global_seed(SEED)  # Issue 7.1 -- idempotency.
     cfg = cfg or ClinicalTrialsConfig()
-    # Issue 12.6 — defaults may be overridden via env vars.
+    # Issue 12.6 -- defaults may be overridden via env vars.
     if ct_dir is None:
         ct_dir = RAW_DIR / "clinicaltrials"
 
-    # Issue 4.5 / 11.9 — select and validate the AACT .db file.
+    # Issue 4.5 / 11.9 -- select and validate the AACT .db file.
     db_path: Path = _select_aact_db(ct_dir, cfg)
 
-    # Issue 3.1 — detect schema (modern vs legacy).
+    # Issue 3.1 -- detect schema (modern vs legacy).
     schema_version, schema_info = _detect_aact_schema(db_path, cfg)
 
-    # Issue 8.8 — log index info (warning if missing indexes).
+    # Issue 8.8 -- log index info (warning if missing indexes).
     _check_indexes(db_path, schema_info)
 
     # v60 ROOT FIX: detect whether the AACT DB has the outcome_analyses
     # table. This table is part of the standard modern AACT schema but
     # may be absent in older releases. The SQL JOIN to populate
-    # primary_outcome_met_raw is only included when this table exists —
+    # primary_outcome_met_raw is only included when this table exists --
     # otherwise every row gets '' (empty) and primary_outcome_met falls
     # back to None (preserving v57 behavior for legacy databases).
     _has_outcome_analyses: bool = False
@@ -2564,24 +2564,24 @@ def iter_clinicaltrials_trials(
     except Exception as _oa_exc:
         logger.warning(
             "Could not check for outcome_analyses table (%s). "
-            "Assuming it does NOT exist — primary_outcome_met will "
+            "Assuming it does NOT exist -- primary_outcome_met will "
             "fall back to None for every trial. v60 root fix.",
             _oa_exc,
         )
         _has_outcome_analyses = False
     if _has_outcome_analyses:
         logger.info(
-            "AACT DB has outcome_analyses table — primary_outcome_met "
+            "AACT DB has outcome_analyses table -- primary_outcome_met "
             "will be parsed from outcome_analysis_category. v60 root fix."
         )
     else:
         logger.warning(
-            "AACT DB does NOT have outcome_analyses table — "
+            "AACT DB does NOT have outcome_analyses table -- "
             "primary_outcome_met will be None for every trial "
             "(legacy schema fallback). v60 root fix."
         )
 
-    # Issue 4.14 / 7.9 / 8.5 — build SQL query.
+    # Issue 4.14 / 7.9 / 8.5 -- build SQL query.
     query, params = _build_sql_query(
         schema_version, cfg,
         has_outcome_analyses=_has_outcome_analyses,
@@ -2604,13 +2604,13 @@ def iter_clinicaltrials_trials(
                "chunksize": cfg.chunksize},
     )
 
-    # Issue 4.1 — try/finally for sqlite connection.
-    # Issue 11.5 — wrap SQL execution in try/except with context.
+    # Issue 4.1 -- try/finally for sqlite connection.
+    # Issue 11.5 -- wrap SQL execution in try/except with context.
     t0: float = time.perf_counter()
     total_rows: int = 0
     try:
         with _open_aact_readonly(db_path) as conn:
-            # Issue 8.1 — chunked SQL reads.
+            # Issue 8.1 -- chunked SQL reads.
             for chunk_idx, chunk_df in enumerate(
                 pd.read_sql_query(
                     query, conn, params=params,
@@ -2618,12 +2618,12 @@ def iter_clinicaltrials_trials(
                 )
             ):
                 total_rows += len(chunk_df)
-                # Issue 14.7 — parse dates to ISO8601.
+                # Issue 14.7 -- parse dates to ISO8601.
                 # FIX-P1-B-14 (audit P1): the previous call
                 #   pd.to_datetime(chunk_df[date_col], errors="coerce")
                 # omitted ``format=``, so pandas fell back to its
                 # heuristic date inference. That heuristic is locale- and
-                # value-dependent — for the AACT ``start_date`` column
+                # value-dependent -- for the AACT ``start_date`` column
                 # (which mixes ISO-8601 "YYYY-MM-DD" with the legacy
                 # "Month dd, yyyy" form), the inferred parser can FLIP
                 # interpretation mid-stream, silently swapping
@@ -2641,7 +2641,7 @@ def iter_clinicaltrials_trials(
                             format="mixed",
                         ).dt.strftime("%Y-%m-%d")
 
-                # Issue 3.14 — split MeSH terms aggregated via GROUP_CONCAT.
+                # Issue 3.14 -- split MeSH terms aggregated via GROUP_CONCAT.
                 if "drug_mesh" in chunk_df.columns and schema_version == "modern":
                     chunk_df = _explode_mesh_column(
                         chunk_df, "drug_mesh",
@@ -2653,10 +2653,10 @@ def iter_clinicaltrials_trials(
                         CLINICALTRIALS_MAX_MESH_PER_INTERVENTION,
                     )
 
-                # Issue 11.10 — empty result warning.
+                # Issue 11.10 -- empty result warning.
                 if total_rows == 0 and chunk_idx == 0 and len(chunk_df) == 0:
                     logger.warning(
-                        "Zero clinical-trial rows returned — check AACT "
+                        "Zero clinical-trial rows returned -- check AACT "
                         "data and phase filter. Pipeline will continue with "
                         "0 clinical-trial edges. RL ranker will be BLIND to "
                         "clinical evidence. Fixes: 11.10.",
@@ -2679,16 +2679,16 @@ def iter_clinicaltrials_trials(
                                "chunk_idx": chunk_idx},
                     )
 
-                # Issue 3.13 — max_trial_age_years filter (applied in Python).
+                # Issue 3.13 -- max_trial_age_years filter (applied in Python).
                 if cfg.max_trial_age_years is not None and "start_date" in chunk_df.columns:
                     chunk_df = _filter_by_trial_age(
                         chunk_df, cfg.max_trial_age_years
                     )
 
-                # Issue 8.10 — memory ceiling warning.
+                # Issue 8.10 -- memory ceiling warning.
                 if total_rows > CLINICALTRIALS_MEMORY_CEILING_WARNING_THRESHOLD:
                     logger.warning(
-                        "Row count %d exceeds memory ceiling threshold %d — "
+                        "Row count %d exceeds memory ceiling threshold %d -- "
                         "consider using chunksize parameter. Fixes: 8.10.",
                         total_rows,
                         CLINICALTRIALS_MEMORY_CEILING_WARNING_THRESHOLD,
@@ -2699,7 +2699,7 @@ def iter_clinicaltrials_trials(
 
                 yield chunk_df
     except sqlite3.OperationalError as exc:
-        # Issue 11.5 — re-raise with context.
+        # Issue 11.5 -- re-raise with context.
         raise ClinicalTrialsParseError(
             f"SQL failed on DB {db_path} with phases={cfg.phases}, "
             f"intervention_types={cfg.intervention_types}: {exc}. "
@@ -2720,7 +2720,7 @@ def iter_clinicaltrials_trials(
                    "elapsed_seconds": elapsed},
         )
 
-        # Issue 5.9 — validate expected_record_count.
+        # Issue 5.9 -- validate expected_record_count.
         _validate_expected_record_count(total_rows, db_path)
 
 
@@ -2784,7 +2784,7 @@ def _explode_mesh_column(
     high_count: int = int((counts > max_terms).sum())
     if high_count > 0:
         logger.warning(
-            "%d interventions have >%d MeSH terms (suspicious — likely "
+            "%d interventions have >%d MeSH terms (suspicious -- likely "
             "over-broad intervention). Fixes: 3.14.",
             high_count, max_terms,
             extra={"stage": "data_quality", "source": SOURCE_KEY,
@@ -2849,7 +2849,7 @@ def _validate_expected_record_count(
     ------
     CriticalDataSourceError
         If row count deviates from expected by >50% AND actual is at
-        least 1000 rows (sanity floor — small test fixtures shouldn't
+        least 1000 rows (sanity floor -- small test fixtures shouldn't
         trigger the critical check).
     """
     source_cfg: Dict[str, Any] = DATA_SOURCES[SOURCE_KEY]
@@ -2857,7 +2857,7 @@ def _validate_expected_record_count(
     if not expected or row_count == 0:
         return
     deviation: float = abs(row_count - expected) / expected
-    # Issue 5.9 — only enforce critical check on substantial datasets
+    # Issue 5.9 -- only enforce critical check on substantial datasets
     # (>= 1000 rows). Small test fixtures would otherwise trigger the
     # critical check spuriously.
     if (
@@ -2866,7 +2866,7 @@ def _validate_expected_record_count(
     ):
         raise CriticalDataSourceError(
             f"Row count {row_count} deviates from expected {expected} by "
-            f"{deviation * 100:.1f}% — possible AACT schema change or "
+            f"{deviation * 100:.1f}% -- possible AACT schema change or "
             f"truncated download. Fixes: 5.9, 12.4.",
             context={"db_path": str(db_path),
                      "expected": expected,
@@ -2878,7 +2878,7 @@ def _validate_expected_record_count(
         and row_count >= 1000
     ):
         logger.warning(
-            "Row count %d deviates from expected %d by %.1f%% — possible "
+            "Row count %d deviates from expected %d by %.1f%% -- possible "
             "AACT schema change. Fixes: 5.9, 12.4.",
             row_count, expected, deviation * 100,
             extra={"stage": "data_quality", "source": SOURCE_KEY,
@@ -2889,7 +2889,7 @@ def _validate_expected_record_count(
 
 
 # =============================================================================
-# Section 7 — Edge conversion
+# Section 7 -- Edge conversion
 # =============================================================================
 # Fixes Issues 2.1 (rel_type tested_for), 2.2 (cross-product penalty),
 # 2.3 (deterministic edge_id), 2.4 (deduplication), 2.5 (evidence_strength),
@@ -2938,7 +2938,7 @@ def _compute_evidence_strength(
         v70 P2L-043: one of "experimental", "placebo", or
         "active_comparator". (Previous versions returned
         "comparator_or_placebo" for both placebo and active-comparator
-        arms — these are now distinguished so the evidence-strength
+        arms -- these are now distinguished so the evidence-strength
         multiplier can be applied appropriately.)
     n_interventions : int
         Number of interventions in the trial.
@@ -2950,7 +2950,7 @@ def _compute_evidence_strength(
         negative trial (drug shown INEFFECTIVE or HARMFUL). ``None`` =
         unknown (outcome not yet measured or partial). When ``has_results``
         is True but ``primary_outcome_met`` is False, the trial published
-        NEGATIVE results — applying a bonus would inflate the score of
+        NEGATIVE results -- applying a bonus would inflate the score of
         ineffective/harmful drugs (inverted ranking). Defaults to ``None``
         for backward compatibility with callers that haven't been updated.
 
@@ -2969,7 +2969,7 @@ def _compute_evidence_strength(
          ``has_results is True AND primary_outcome_met is True`` (positive
          trial). When ``has_results is True AND primary_outcome_met is
          False`` (negative trial), apply ``CLINICALTRIALS_NEGATIVE_RESULTS_PENALTY``
-         instead — a published negative trial is evidence AGAINST the
+         instead -- a published negative trial is evidence AGAINST the
          drug's efficacy. When ``primary_outcome_met is None``, no change
          (we don't know if results were positive or negative).
       5. + ``CLINICALTRIALS_ENROLLMENT_BONUS_VALUE`` if enrollment >=
@@ -2981,20 +2981,20 @@ def _compute_evidence_strength(
          the safety pattern.
       8. * ``CLINICALTRIALS_COMPARATOR_EVIDENCE_MULTIPLIER`` if
          drug_role == "placebo" (v70 P2L-043: was
-         "comparator_or_placebo"; now applies ONLY to placebo arms —
+         "comparator_or_placebo"; now applies ONLY to placebo arms --
          active-comparator arms use
          ``CLINICALTRIALS_ACTIVE_COMPARATOR_EVIDENCE_MULTIPLIER``
          instead, a milder 0.8 penalty that preserves the evidence
          value of real drugs used as comparison standards).
       9. Clamp to [0.0, 1.0].
     """
-    # Issue 2.5 — base from phase.
+    # Issue 2.5 -- base from phase.
     base: float = CLINICALTRIALS_PHASE_STRENGTH.get(phase or "", 0.0)
-    # Issue 3.8 — allocation bonus.
+    # Issue 3.8 -- allocation bonus.
     base += CLINICALTRIALS_ALLOCATION_BONUS.get(allocation or "NA", 0.0)
-    # Issue 3.8 — masking bonus.
+    # Issue 3.8 -- masking bonus.
     base += CLINICALTRIALS_MASKING_BONUS.get(masking or "NA", 0.0)
-    # v69 ROOT FIX (P2L-042 — has_results bonus ignores negative trials).
+    # v69 ROOT FIX (P2L-042 -- has_results bonus ignores negative trials).
     #
     # The previous code added ``CLINICALTRIALS_HAS_RESULTS_BONUS`` whenever
     # ``has_results`` was True, regardless of whether the published results
@@ -3004,11 +3004,11 @@ def _compute_evidence_strength(
     # than effective drugs with unpublished results.
     #
     # ROOT FIX: gate the bonus on ``primary_outcome_met is True``. When
-    # the trial published results AND the primary endpoint was met →
+    # the trial published results AND the primary endpoint was met ->
     # bonus (positive evidence). When the trial published results AND
-    # the primary endpoint was NOT met → penalty (negative evidence —
+    # the primary endpoint was NOT met -> penalty (negative evidence --
     # a published negative trial is evidence AGAINST the drug). When
-    # ``primary_outcome_met is None`` → no change (we don't know if the
+    # ``primary_outcome_met is None`` -> no change (we don't know if the
     # results were positive or negative; preserve the legacy behavior of
     # applying the bonus, but log a warning so the operator can audit).
     #
@@ -3017,10 +3017,10 @@ def _compute_evidence_strength(
     # negative trial are symmetric around the no-results baseline.
     if has_results:
         if primary_outcome_met is True:
-            # Positive trial — published results showed the drug works.
+            # Positive trial -- published results showed the drug works.
             base += CLINICALTRIALS_HAS_RESULTS_BONUS
         elif primary_outcome_met is False:
-            # Negative trial — published results showed the drug does NOT
+            # Negative trial -- published results showed the drug does NOT
             # work (or was harmful). Apply a penalty symmetric to the
             # bonus. This is the scientific inverse of the bonus: a
             # published negative trial is EVIDENCE AGAINST the drug.
@@ -3036,7 +3036,7 @@ def _compute_evidence_strength(
             )
             base -= _neg_penalty
         else:
-            # primary_outcome_met is None — results published but outcome
+            # primary_outcome_met is None -- results published but outcome
             # unknown. v69: apply the bonus (legacy behavior) but log a
             # warning so the operator can audit which trials had
             # unparseable outcomes. This is the conservative choice: we
@@ -3045,35 +3045,35 @@ def _compute_evidence_strength(
             base += CLINICALTRIALS_HAS_RESULTS_BONUS
             logger.debug(
                 "clinicaltrials_loader: has_results=True but "
-                "primary_outcome_met=None — applying has_results bonus "
+                "primary_outcome_met=None -- applying has_results bonus "
                 "(legacy behavior). Trial outcome could not be parsed.",
             )
-    # Issue 3.6 — large-trial bonus.
+    # Issue 3.6 -- large-trial bonus.
     if enrollment is not None and enrollment >= CLINICALTRIALS_ENROLLMENT_BONUS_LARGE_TRIAL:
         base += CLINICALTRIALS_ENROLLMENT_BONUS_VALUE
-    # Issue 2.2 — cross-product penalty.
+    # Issue 2.2 -- cross-product penalty.
     if n_interventions * n_conditions > CLINICALTRIALS_CROSS_PRODUCT_WARN_THRESHOLD:
         base -= CLINICALTRIALS_CROSS_PRODUCT_PENALTY
-    # Issue 3.5 — safety-stop penalty.
+    # Issue 3.5 -- safety-stop penalty.
     safety_signal: bool = False
     if why_stopped and isinstance(why_stopped, str):
         if _SAFETY_STOP_REGEX.search(why_stopped):
             base -= CLINICALTRIALS_SAFETY_STOP_PENALTY
             safety_signal = True
-    # Issue 3.3 — comparator/placebo multiplier.
+    # Issue 3.3 -- comparator/placebo multiplier.
     # v70 ROOT FIX (P2L-043): the previous code applied
     # ``CLINICALTRIALS_COMPARATOR_EVIDENCE_MULTIPLIER`` (0.3) to ANY
     # drug whose role was "comparator_or_placebo", which lumps together
     # two semantically distinct arm types:
     #
-    #   * PLACEBO arm — an inert substance (sugar pill, saline). The
+    #   * PLACEBO arm -- an inert substance (sugar pill, saline). The
     #     "drug" here is NOT evidence that the disease is treatable;
     #     it's the control. Down-weighting is correct.
     #
-    #   * ACTIVE COMPARATOR arm — a real, known-effective drug used as
+    #   * ACTIVE COMPARATOR arm -- a real, known-effective drug used as
     #     the comparison standard (e.g. metformin in a T2D trial, or
     #     warfarin in an anticoagulation trial). The drug IS evidence
-    #     that the disease is treatable — the trial designers chose it
+    #     that the disease is treatable -- the trial designers chose it
     #     BECAUSE it's an established therapy. Down-weighting it by 0.3
     #     artificially suppresses evidence for drugs that are already
     #     known to work, reducing their visibility in the KG.
@@ -3081,12 +3081,12 @@ def _compute_evidence_strength(
     # Root fix: distinguish "placebo" from "active_comparator" and
     # apply the multiplier ONLY to placebo arms. Active-comparator
     # drugs get a much milder penalty (``CLINICALTRIALS_ACTIVE_COMPARATOR_EVIDENCE_MULTIPLIER``
-    # from config, defaulting to a mild 0.8 — they're still
+    # from config, defaulting to a mild 0.8 -- they're still
     # comparator-arm evidence, not first-line experimental-arm
     # evidence, but they're real drugs with real therapeutic value).
     # The ``drug_role`` field on the emitted edge now takes one of
     # THREE values: ``"experimental"``, ``"active_comparator"``, or
-    # ``"placebo"`` — preserving the rich provenance downstream
+    # ``"placebo"`` -- preserving the rich provenance downstream
     # consumers (RL ranker, evidence auditing) need. Callers that
     # previously checked ``drug_role == "comparator_or_placebo"`` are
     # updated to check for both ``"active_comparator"`` and
@@ -3108,11 +3108,11 @@ def _compute_evidence_strength(
         confidence = "medium"
     else:
         confidence = "low"
-    # Issue 16.12 — id_confidence.
+    # Issue 16.12 -- id_confidence.
     # v70 P2L-043: ``is_comparator`` was renamed to ``is_placebo`` /
     # ``is_active_comparator``. Placebo arms always get id_confidence=low
     # (no real drug identity to verify). Active-comparator arms get
-    # id_confidence=low only when the description regex matched — the
+    # id_confidence=low only when the description regex matched -- the
     # active comparator IS a real drug with a verifiable identity, but
     # its role as comparator (rather than experimental) means the
     # evidence direction is ambiguous. Preserve the historical behavior
@@ -3138,26 +3138,26 @@ def _detect_drug_role(description: Optional[str]) -> str:
     conflating two semantically distinct arm types. The previous
     behavior caused active-comparator drugs (real, known-effective
     drugs used as comparison standards) to be down-weighted by the
-    same 0.3 multiplier as placebos — suppressing legitimate evidence
+    same 0.3 multiplier as placebos -- suppressing legitimate evidence
     that the disease is treatable.
 
     Root fix: distinguish three roles:
-      * ``"placebo"``              — inert control (sugar pill, saline)
-      * ``"active_comparator"``    — real drug used as comparison standard
-      * ``"experimental"``         — default (none of the above)
+      * ``"placebo"``              -- inert control (sugar pill, saline)
+      * ``"active_comparator"``    -- real drug used as comparison standard
+      * ``"experimental"``         -- default (none of the above)
 
-    Detection logic (priority order — first match wins):
-      1. ``"placebo"`` — description contains the word "placebo"
+    Detection logic (priority order -- first match wins):
+      1. ``"placebo"`` -- description contains the word "placebo"
          (case-insensitive, word-boundary anchored). Placebo is the
-         most specific signal — if the description says "placebo", the
+         most specific signal -- if the description says "placebo", the
          arm IS a placebo, even if it also says "comparator" (e.g.
          "placebo comparator" is a common phrasing).
-      2. ``"active_comparator"`` — description contains
+      2. ``"active_comparator"`` -- description contains
          "active comparator", "active control", OR "comparator"
          (case-insensitive). Active-comparator language takes priority
          over the bare "comparator" word because "active comparator"
          is the more specific signal.
-      3. ``"experimental"`` — default.
+      3. ``"experimental"`` -- default.
 
     Parameters
     ----------
@@ -3183,12 +3183,12 @@ def _detect_drug_role(description: Optional[str]) -> str:
     """
     if not description or not isinstance(description, str):
         return "experimental"
-    # Priority 1: placebo (most specific — "placebo comparator" is a
+    # Priority 1: placebo (most specific -- "placebo comparator" is a
     # placebo, not an active comparator).
     if _PLACEBO_REGEX.search(description):
         return "placebo"
     # Priority 2: active comparator (catches "active comparator",
-    # "active control", and bare "comparator" — all are real drugs
+    # "active control", and bare "comparator" -- all are real drugs
     # used as comparison standards, not inert placebos).
     if _ACTIVE_COMPARATOR_REGEX.search(description):
         return "active_comparator"
@@ -3206,17 +3206,17 @@ def _detect_drug_role(description: Optional[str]) -> str:
 # per-trial confidence override. The override is then used as the
 # ``evidence_strength`` (capping the phase-based calculation) so downstream
 # ML training sees:
-#   * Completed + primary_outcome_met=True  → 0.9 (strong positive signal)
-#   * Completed + no primary_outcome_met    → 0.4 (weak positive signal — we
+#   * Completed + primary_outcome_met=True  -> 0.9 (strong positive signal)
+#   * Completed + no primary_outcome_met    -> 0.4 (weak positive signal -- we
 #                                               do not know if the trial
 #                                               succeeded; do NOT treat as
 #                                               proven effective)
-#   * Completed + primary_outcome_met=False → 0.1 (negative result — the drug
+#   * Completed + primary_outcome_met=False -> 0.1 (negative result -- the drug
 #                                               was tested and FAILED)
-#   * Terminated / Withdrawn / Suspended    → 0.1 (clearly negative signal)
-#   * Unknown status                        → SKIP (do not emit the edge —
+#   * Terminated / Withdrawn / Suspended    -> 0.1 (clearly negative signal)
+#   * Unknown status                        -> SKIP (do not emit the edge --
 #                                               the trial state is opaque)
-#   * Active / Recruiting / etc.            → None (no override; keep the
+#   * Active / Recruiting / etc.            -> None (no override; keep the
 #                                               phase-based evidence_strength)
 #
 # This fix prevents failed Phase 3 trials from contaminating the positive
@@ -3269,35 +3269,35 @@ def _classify_trial_confidence(
     Returns
     -------
     float or None
-        * ``_TRIAL_SKIP`` (-1.0) → caller must SKIP the edge (Unknown status).
-        * ``0.9``  → Completed + primary_outcome_met=True.
-        * ``0.4``  → Completed + no primary_outcome_met data.
-        * ``0.1``  → Completed + primary_outcome_met=False (negative result),
+        * ``_TRIAL_SKIP`` (-1.0) -> caller must SKIP the edge (Unknown status).
+        * ``0.9``  -> Completed + primary_outcome_met=True.
+        * ``0.4``  -> Completed + no primary_outcome_met data.
+        * ``0.1``  -> Completed + primary_outcome_met=False (negative result),
                      OR Terminated / Withdrawn / Suspended.
-        * ``None`` → no override (Active, Recruiting, etc.). Caller keeps
+        * ``None`` -> no override (Active, Recruiting, etc.). Caller keeps
                      the existing phase-based ``evidence_strength``.
     """
     s: str = _normalise_trial_status(overall_status)
     if not s:
         return None
     if s == "unknown_status":
-        # SKIP — trial state is opaque; do not emit a tested_for edge.
+        # SKIP -- trial state is opaque; do not emit a tested_for edge.
         return _TRIAL_SKIP
     if s == "completed":
         if primary_outcome_met is True:
             return 0.9
         if primary_outcome_met is False:
-            # Trial completed but FAILED its primary endpoint — clearly
+            # Trial completed but FAILED its primary endpoint -- clearly
             # negative signal that the drug is ineffective for this disease.
             return 0.1
-        # primary_outcome_met is None — we do not know whether the trial
+        # primary_outcome_met is None -- we do not know whether the trial
         # succeeded. Emit the edge but with LOW confidence so downstream
         # training does NOT treat this as proven efficacy.
         return 0.4
     if s in ("terminated", "withdrawn", "suspended"):
-        # Stopped before completion — clearly negative signal.
+        # Stopped before completion -- clearly negative signal.
         return 0.1
-    # Active, Recruiting, Not yet recruiting, Available, etc. — no override.
+    # Active, Recruiting, Not yet recruiting, Available, etc. -- no override.
     return None
 
 
@@ -3312,9 +3312,9 @@ def _build_edge_id(
     """Build a deterministic edge_id (Issue 2.3, 7.1, 7.2).
 
     The edge_id is a SHA-1 hash of
-    ``"{src_id}|{dst_id}|{src_type}|{dst_type}|{rel_type}|{nct_id}"`` —
+    ``"{src_id}|{dst_id}|{src_type}|{dst_type}|{rel_type}|{nct_id}"`` --
     including ``nct_id`` ensures that each trial produces a DISTINCT edge
-    (Issue 5.3 — uniqueness of nct_id per edge).
+    (Issue 5.3 -- uniqueness of nct_id per edge).
 
     Parameters
     ----------
@@ -3393,7 +3393,7 @@ def _build_edge_record_from_dict(
 
     Returns None if the row was quarantined.
     """
-    # Issue 5.1 — null check on nct_id.
+    # Issue 5.1 -- null check on nct_id.
     nct_id_raw: Any = record.get("nct_id")
     if nct_id_raw is None or (
         isinstance(nct_id_raw, float) and pd.isna(nct_id_raw)
@@ -3401,33 +3401,33 @@ def _build_edge_record_from_dict(
         _quarantine(state, record, "null_or_empty_nct_id")
         return None
     nct_id: str = str(nct_id_raw).strip()
-    # Issue 3.15 / 14.8 — validate NCT ID format.
+    # Issue 3.15 / 14.8 -- validate NCT ID format.
     validated: Optional[str] = _validate_nct_id(nct_id)
     if validated is None:
         _quarantine(state, record, "invalid_nct_id_format")
         return None
     nct_id = validated
 
-    # Issue 5.1 — nct_id type coercion (Issue 5.10).
+    # Issue 5.1 -- nct_id type coercion (Issue 5.10).
     phase: Optional[str] = record.get("phase")
     if phase is not None and not isinstance(phase, str):
         phase = str(phase)
-    # v82 ROOT FIX (Phase parsing — "Phase 1/Phase 2" combined phases):
+    # v82 ROOT FIX (Phase parsing -- "Phase 1/Phase 2" combined phases):
     # AACT stores combined phases like "Phase 1/Phase 2", "Phase 2/Phase 3",
     # and "Phase 3/Phase 4". The previous code used the raw AACT phase value
     # directly for evidence-strength lookup in CLINICALTRIALS_PHASE_STRENGTH.
     # That works when the config dict has an exact key like "Phase 1/Phase 2",
     # but AACT also produces shorthand forms like "Phase 1/2" (without the
     # repeated "Phase" prefix) that DON'T match the config dict keys. This
-    # causes evidence_strength to fall back to 0.0 (missing key) — a
+    # causes evidence_strength to fall back to 0.0 (missing key) -- a
     # combined-phase trial gets ZERO evidence strength, silently dropping
     # legitimate evidence.
     #
     # Fix: normalize phase values so shorthand forms like "Phase 1/2" are
     # expanded to the canonical form "Phase 1/Phase 2" that matches the
     # CLINICALTRIALS_PHASE_STRENGTH and CLINICALTRIALS_VALID_PHASES keys.
-    # The regex handles: "Phase 1/2" → "Phase 1/Phase 2",
-    # "Phase 2/3" → "Phase 2/Phase 3", "Phase 3/4" → "Phase 3/Phase 4".
+    # The regex handles: "Phase 1/2" -> "Phase 1/Phase 2",
+    # "Phase 2/3" -> "Phase 2/Phase 3", "Phase 3/4" -> "Phase 3/Phase 4".
     if phase is not None:
         import re as _re_phase
         _shorthand_match = _re_phase.match(
@@ -3436,15 +3436,15 @@ def _build_edge_record_from_dict(
         if _shorthand_match:
             phase = f"Phase {_shorthand_match.group(1)}/Phase {_shorthand_match.group(2)}"
 
-    # Issue 3.3 — detect drug_role from description.
+    # Issue 3.3 -- detect drug_role from description.
     description: Optional[str] = record.get("description")
     drug_role: str = _detect_drug_role(description)
 
-    # Issue 15.10 — normalize drug_name.
+    # Issue 15.10 -- normalize drug_name.
     drug_name: Optional[str] = _normalize_drug_name(record.get("drug_name"))
-    # Issue 14.9 — normalize drug_mesh.
+    # Issue 14.9 -- normalize drug_mesh.
     drug_mesh: Optional[str] = _normalize_mesh(record.get("drug_mesh"))
-    # Issue 5.11 — garbage MeSH check.
+    # Issue 5.11 -- garbage MeSH check.
     if drug_mesh and _is_garbage_mesh(drug_mesh):
         _quarantine(state, record, "garbage_mesh_term")
         return None
@@ -3459,14 +3459,14 @@ def _build_edge_record_from_dict(
         _quarantine(state, record, "garbage_mesh_term")
         return None
 
-    # Issue 4.7 / C10 — empty src_id / dst_id rejection.
+    # Issue 4.7 / C10 -- empty src_id / dst_id rejection.
     # src_id preference: drug_mesh (crosswalked) > drug_mesh (raw) > drug_name
     # v9 ROOT FIX (audit F5.2.5): the previous code emitted src_id = drug_mesh
     # (e.g. "D000068") or src_id = drug_name (e.g. "Dipyridamole"). Neither
     # matches ID_PATTERNS["Compound"] = ^(DB\d{5,6}|CHEMBL\d+|CID\d+|...)$,
-    # so every ClinicalTrials Compound→Disease edge was dead-lettered. Now
+    # so every ClinicalTrials Compound->Disease edge was dead-lettered. Now
     # we MIRROR SIDER's pattern: prefix MeSH IDs with "MESH:" so they
-    # become "MESH:D000068" — and kg_builder's ID_PATTERNS["Compound"]
+    # become "MESH:D000068" -- and kg_builder's ID_PATTERNS["Compound"]
     # accepts MESH-prefixed IDs as a valid (though uncanonicalized) alias.
     # The entity_resolver can later canonicalize to DrugBank/ChEMBL ID via
     # the id_crosswalk module. drug_name (free text) is preserved as a
@@ -3482,16 +3482,16 @@ def _build_edge_record_from_dict(
         elif raw_mesh.startswith("D") and raw_mesh[1:].isdigit():
             src_id = f"MESH:{raw_mesh}"
         else:
-            # Not a recognisable MeSH descriptor — fall through to name.
+            # Not a recognisable MeSH descriptor -- fall through to name.
             src_id = ""
     # v35 ROOT FIX (V35-P2-LOADERS-FIXES M-6): the entity_resolver has
-    # NO MeSH Compound alias system — MESH:D000068 IDs never match
+    # NO MeSH Compound alias system -- MESH:D000068 IDs never match
     # any staged Compound node (which is keyed by InChIKey). Mirror
     # the drkg_loader / opentargets_loader pattern: call
     # ``_normalize_compound_id_to_inchikey`` to resolve the MeSH
     # descriptor to an InChIKey when the crosswalk can do so. Only
     # fall back to the raw ``MESH:`` ID when the crosswalk misses
-    # (preserving prior behavior so the edge is still emitted — the
+    # (preserving prior behavior so the edge is still emitted -- the
     # downstream entity resolver may still recover the link via
     # later crosswalk enrichment).
     if src_id.startswith("MESH:"):
@@ -3502,9 +3502,9 @@ def _build_edge_record_from_dict(
             )
             if _norm_inchi and str(_norm_inchi).strip():
                 src_id = str(_norm_inchi).strip().upper()
-        except ImportError:  # pragma: no cover — defensive
+        except ImportError:  # pragma: no cover -- defensive
             pass
-        except Exception:  # pragma: no cover — defensive
+        except Exception:  # pragma: no cover -- defensive
             # Keep the raw MESH: ID; crosswalk miss is non-fatal.
             pass
     if not src_id and drug_name:
@@ -3514,13 +3514,13 @@ def _build_edge_record_from_dict(
         # v28 ROOT FIX (P2-B-12): ``NAME:`` was REMOVED from
         # kg_builder.ID_PATTERNS["Compound"] because the previous
         # ``NAME:[A-Za-z0-9 _.-]{1,64}`` alternative accepted literally
-        # any string as a Compound ID — making validation a no-op and
+        # any string as a Compound ID -- making validation a no-op and
         # creating disjoint subgraphs (InChIKey-canonical nodes vs
         # NAME: nodes for the same drug). These ``NAME:``-prefixed
         # Compound IDs will now be DEAD-LETTERED by kg_builder with a
         # clear ``invalid_id_format`` reason. Operators who need to
         # ingest free-text drug names MUST extend the crosswalk to map
-        # drug_name → DrugBank/ChEMBL InChIKey (the proper canonical
+        # drug_name -> DrugBank/ChEMBL InChIKey (the proper canonical
         # ID) before emitting edges. The dead-letter entries retain
         # the original drug_name for forensic inspection.
         src_id = f"NAME:{str(drug_name).strip()[:64]}"
@@ -3531,9 +3531,9 @@ def _build_edge_record_from_dict(
 
     dst_id: str = ""
     dst_id_from_name: bool = False
-    # v9 ROOT FIX (audit F5.2.5): same as src_id — prefix MeSH descriptors
+    # v9 ROOT FIX (audit F5.2.5): same as src_id -- prefix MeSH descriptors
     # with "MESH:" so they pass ID_PATTERNS["Disease"]. The Disease
-    # pattern already accepts MESH:[A-Z]\d+ — so "MESH:D014979" is valid.
+    # pattern already accepts MESH:[A-Z]\d+ -- so "MESH:D014979" is valid.
     if condition_mesh:
         raw_mesh = str(condition_mesh).strip()
         if raw_mesh.upper().startswith("MESH:"):
@@ -3543,10 +3543,10 @@ def _build_edge_record_from_dict(
         else:
             dst_id = ""
     if not dst_id and condition_name:
-        # Free-text condition name — prefix with NAME: as a last resort.
-        # NOTE: NAME: is NOT in ID_PATTERNS["Disease"] by design — these
+        # Free-text condition name -- prefix with NAME: as a last resort.
+        # NOTE: NAME: is NOT in ID_PATTERNS["Disease"] by design -- these
         # edges WILL be dead-lettered with a clear reason. The proper fix
-        # is to extend the crosswalk to map condition_name → MESH/DOID.
+        # is to extend the crosswalk to map condition_name -> MESH/DOID.
         # For now we emit NAME: so the dead-letter record carries the
         # original drug_name for forensic inspection.
         dst_id = f"NAME:{str(condition_name).strip()[:64]}"
@@ -3555,7 +3555,7 @@ def _build_edge_record_from_dict(
         _quarantine(state, record, "empty_dst_id")
         return None
 
-    # Issue 3.6 — enrollment.
+    # Issue 3.6 -- enrollment.
     enrollment_raw: Any = record.get("enrollment")
     enrollment: Optional[int]
     if enrollment_raw is None or (
@@ -3567,7 +3567,7 @@ def _build_edge_record_from_dict(
             enrollment = int(enrollment_raw)
         except (ValueError, TypeError):
             enrollment = None
-    # Issue 3.6 — small enrollment warning.
+    # Issue 3.6 -- small enrollment warning.
     if enrollment is not None and enrollment < CLINICALTRIALS_SUSPECT_ENROLLMENT_THRESHOLD \
             and phase in ("Phase 3", "Phase 4"):
         logger.warning(
@@ -3580,15 +3580,15 @@ def _build_edge_record_from_dict(
                    "phase": phase},
         )
 
-    # Issue 3.5 — why_stopped safety signal.
+    # Issue 3.5 -- why_stopped safety signal.
     why_stopped: Optional[str] = record.get("why_stopped")
     if why_stopped is not None and not isinstance(why_stopped, str):
         why_stopped = str(why_stopped)
 
-    # Issue 3.8 — allocation/masking.
+    # Issue 3.8 -- allocation/masking.
     allocation: Optional[str] = record.get("allocation")
     masking: Optional[str] = record.get("masking")
-    # Issue 3.10 — has_results.
+    # Issue 3.10 -- has_results.
     has_results_raw: Any = record.get("has_results")
     has_results: Optional[bool]
     if has_results_raw is None or (
@@ -3598,7 +3598,7 @@ def _build_edge_record_from_dict(
     else:
         has_results = bool(has_results_raw)
 
-    # Issue 2.2 — cross-product inflation. We don't have direct access to
+    # Issue 2.2 -- cross-product inflation. We don't have direct access to
     # n_interventions / n_conditions here; we approximate via the GROUP BY.
     # For now, set to 1×1 (the loader has already exploded MeSH terms).
     n_interventions: int = 1
@@ -3609,7 +3609,7 @@ def _build_edge_record_from_dict(
     # can be gated on whether the trial was positive or negative.
     #
     # The previous code computed ``primary_outcome_met`` AFTER the
-    # evidence_strength call — so the bonus was applied BEFORE we knew
+    # evidence_strength call -- so the bonus was applied BEFORE we knew
     # whether the trial was positive or negative. Negative-result trials
     # (drug proven INEFFECTIVE) got the bonus, inflating their score.
     #
@@ -3638,10 +3638,10 @@ def _build_edge_record_from_dict(
         elif _raw_str == "not_met":
             primary_outcome_met = False
         else:
-            # "partial" or any other value → unknown
+            # "partial" or any other value -> unknown
             primary_outcome_met = None
 
-    # Issue 2.5 — compute evidence_strength. v69 P2L-042: pass
+    # Issue 2.5 -- compute evidence_strength. v69 P2L-042: pass
     # primary_outcome_met so the has_results bonus is gated on positive
     # outcomes (and a penalty is applied for negative outcomes).
     evidence_strength, confidence, id_confidence = _compute_evidence_strength(
@@ -3657,13 +3657,13 @@ def _build_edge_record_from_dict(
         primary_outcome_met=primary_outcome_met,
     )
 
-    # Issue 16.12 — adjust id_confidence based on fallback ID usage.
+    # Issue 16.12 -- adjust id_confidence based on fallback ID usage.
     if src_id_from_name or dst_id_from_name:
         id_confidence = "low"
 
     # v57 ROOT FIX (P2L-041): Status-aware confidence classification.
     # ``overall_status='Completed'`` was being treated as positive evidence
-    # regardless of whether the trial met its primary endpoint — failed
+    # regardless of whether the trial met its primary endpoint -- failed
     # Phase 3 trials (drug proven INEFFECTIVE) were becoming positive
     # training signal. Now we consult ``_classify_trial_confidence`` to
     # override ``evidence_strength`` based on the trial's status AND whether
@@ -3679,20 +3679,20 @@ def _build_edge_record_from_dict(
     else:
         overall_status_str = str(overall_status_raw)
 
-    # v60 ROOT FIX (FORENSIC-DEEP — primary_outcome_met always None).
+    # v60 ROOT FIX (FORENSIC-DEEP -- primary_outcome_met always None).
     # The v57 code read `record.get("primary_outcome_met")` which was
     # NEVER populated (the AACT `primary_outcomes` table stores measure
     # TEXT, not a boolean). So primary_outcome_met was always None, and
-    # every Completed trial went through the None branch → emitted as
+    # every Completed trial went through the None branch -> emitted as
     # positive evidence with 0.4 strength. Negative-result trials
     # became positive training signal.
     #
     # ROOT FIX: read the new `primary_outcome_met_raw` column populated
     # by the SQL JOIN to `outcome_analyses`. The column contains one of:
-    #   "met"     → primary endpoint was met (True)
-    #   "not_met" → primary endpoint was NOT met (False — negative trial)
-    #   "partial" → partially met or other non-binary outcome (None)
-    #   ""        → no outcome_analysis row (None — unknown)
+    #   "met"     -> primary endpoint was met (True)
+    #   "not_met" -> primary endpoint was NOT met (False -- negative trial)
+    #   "partial" -> partially met or other non-binary outcome (None)
+    #   ""        -> no outcome_analysis row (None -- unknown)
     # Translate to True / False / None accordingly. Also retain
     # backward-compat by checking the legacy `primary_outcome_met` field
     # (set by upstream callers / tests) when `primary_outcome_met_raw`
@@ -3703,7 +3703,7 @@ def _build_edge_record_from_dict(
     # We keep it here as a no-op re-assignment so the existing
     # _classify_trial_confidence call (which uses primary_outcome_met)
     # continues to work without further refactoring. The value is
-    # identical — this is just defensive duplication.
+    # identical -- this is just defensive duplication.
 
     status_confidence_override: Optional[float] = _classify_trial_confidence(
         overall_status_str, primary_outcome_met,
@@ -3711,11 +3711,11 @@ def _build_edge_record_from_dict(
     status_confidence_value: Optional[float] = None  # for the props dict
     if status_confidence_override is not None:
         if status_confidence_override == _TRIAL_SKIP:
-            # Unknown status — SKIP the edge entirely. Quarantine the row
+            # Unknown status -- SKIP the edge entirely. Quarantine the row
             # so the count is auditable downstream.
             _quarantine(state, record, "unknown_status_skipped_p2l_041")
             logger.info(
-                "NCT%s: overall_status=%r → skipping tested_for edge "
+                "NCT%s: overall_status=%r -> skipping tested_for edge "
                 "(Unknown status). v57 ROOT FIX (P2L-041).",
                 nct_id, overall_status_str,
                 extra={"stage": "status_filter", "source": SOURCE_KEY,
@@ -3734,13 +3734,13 @@ def _build_edge_record_from_dict(
             confidence = "medium"
         else:
             confidence = "low"
-        # Stopped / failed trials get id_confidence="low" — the underlying
+        # Stopped / failed trials get id_confidence="low" -- the underlying
         # evidence is negative or weak, so the resolver should treat these
         # edges as low-identity-confidence even when the IDs are clean.
         if evidence_strength <= 0.1:
             id_confidence = "low"
         logger.debug(
-            "NCT%s: overall_status=%r primary_outcome_met=%r → "
+            "NCT%s: overall_status=%r primary_outcome_met=%r -> "
             "evidence_strength=%.2f (v57 ROOT FIX P2L-041 override).",
             nct_id, overall_status_str, primary_outcome_met,
             evidence_strength,
@@ -3757,7 +3757,7 @@ def _build_edge_record_from_dict(
     # to a ``NAME:<free-text>`` src_id / dst_id. The v28 ROOT FIX
     # (P2-B-12) then REMOVED ``NAME:`` from kg_builder.ID_PATTERNS, so
     # every free-text-fallback edge was dead-lettered at kg_builder load
-    # time — silently dropping every ClinicalTrials edge whose
+    # time -- silently dropping every ClinicalTrials edge whose
     # intervention/condition had no MeSH descriptor. For a 500K-trial
     # source where ~40% of conditions lack MeSH, that was a catastrophic
     # loss of drug-repurposing signal. The ROOT FIX here marks every
@@ -3773,16 +3773,16 @@ def _build_edge_record_from_dict(
         else "unmapped"
     )
 
-    # Issue 2.1 / 14.1 / 15.3 — rel_type = "tested_for".
+    # Issue 2.1 / 14.1 / 15.3 -- rel_type = "tested_for".
     src_type: str = "Compound"  # Issue 15.9
     dst_type: str = "Disease"  # Issue 15.9
     # v68 ROOT FIX (P2L-041): the v57 fix only overrode ``evidence_strength``
-    # based on trial outcome — but ``rel_type`` was STILL always
+    # based on trial outcome -- but ``rel_type`` was STILL always
     # ``"tested_for"``. Downstream model training that filters to
     # ``rel_type="treats"`` for positive drug-disease evidence got ZERO
     # ClinicalTrials edges (none were ever labelled "treats"). Negative-
     # result trials (drug proven INEFFECTIVE in Phase 3) were still
-    # emitted as ``"tested_for"`` — not negative, but NOT positive either,
+    # emitted as ``"tested_for"`` -- not negative, but NOT positive either,
     # so they polluted the "tested_for" pool with negative signal.
     #
     # ROOT FIX: emit ``rel_type="treats"`` ONLY for trials that:
@@ -3792,7 +3792,7 @@ def _build_edge_record_from_dict(
     # for unknown outcomes and ``rel_type='treats'`` only for trials
     # meeting the primary endpoint."
     # All other trials (unknown outcome, negative result, terminated,
-    # withdrawn, suspended) remain ``"tested_for"`` — they are evidence
+    # withdrawn, suspended) remain ``"tested_for"`` -- they are evidence
     # that the drug was TESTED for the disease, but NOT evidence that it
     # TREATS the disease. Downstream training can now cleanly separate
     # positive signal ("treats") from exploratory signal ("tested_for").
@@ -3804,15 +3804,15 @@ def _build_edge_record_from_dict(
     ):
         rel_type = "treats"
 
-    # Issue 2.3 / 7.1 — deterministic edge_id.
+    # Issue 2.3 / 7.1 -- deterministic edge_id.
     edge_id: str = _build_edge_id(
         src_id, dst_id, src_type, dst_type, rel_type, nct_id,
     )
 
-    # Issue 16.6 — nct_url.
+    # Issue 16.6 -- nct_url.
     nct_url: str = f"https://clinicaltrials.gov/study/{nct_id}"
 
-    # Issue 3.3 — comparator/placebo warning.
+    # Issue 3.3 -- comparator/placebo warning.
     # v70 P2L-043: check for BOTH "placebo" and "active_comparator"
     # (the previous "comparator_or_placebo" role no longer exists).
     if drug_role in ("placebo", "active_comparator"):
@@ -3830,13 +3830,13 @@ def _build_edge_record_from_dict(
                    "evidence_strength": evidence_strength},
         )
 
-    # Issue 3.5 — safety_signal flag.
+    # Issue 3.5 -- safety_signal flag.
     safety_signal: Optional[str] = None
     if why_stopped and isinstance(why_stopped, str):
         if _SAFETY_STOP_REGEX.search(why_stopped):
             safety_signal = "stopped_for_safety"
 
-    # Issue 16.1-16.6 — lineage fields.
+    # Issue 16.1-16.6 -- lineage fields.
     source_cfg: Dict[str, Any] = DATA_SOURCES[SOURCE_KEY]
     props: Dict[str, Any] = {
         # Trial identity
@@ -3850,7 +3850,7 @@ def _build_edge_record_from_dict(
         "why_stopped": why_stopped or "",  # Issue 3.5
         # v71 ROOT FIX (P2L-044): preserve None for has_results instead
         # of collapsing it to False. The previous code mapped
-        # ``None → False``, losing the distinction between "trial has
+        # ``None -> False``, losing the distinction between "trial has
         # no published results" (False) and "trial results status
         # unknown" (None). Downstream evidence_strength computation
         # may be biased by treating "unknown" as "no results". Now
@@ -3904,12 +3904,12 @@ def _build_edge_record_from_dict(
         ),
     }
 
-    # Issue 9.10 — secret scanning on props.
+    # Issue 9.10 -- secret scanning on props.
     secret_field: Optional[str] = _scan_for_secrets(props)
     if secret_field:
         _quarantine(state, record, "suspected_secret_in_data")
         logger.warning(
-            "NCT%s: suspected secret detected in field %s — row quarantined. "
+            "NCT%s: suspected secret detected in field %s -- row quarantined. "
             "Fixes: 9.10.",
             nct_id, secret_field,
             extra={"stage": "security", "source": SOURCE_KEY,
@@ -4049,7 +4049,7 @@ def clinicaltrials_to_edge_records(
     ValueError
         If ``df`` is missing required columns (Issue 4.12, 4.16).
     """
-    # Issue 4.12 — input validation.
+    # Issue 4.12 -- input validation.
     if not isinstance(df, pd.DataFrame):
         raise TypeError(
             f"df must be a pandas.DataFrame, got {type(df).__name__}. "
@@ -4057,7 +4057,7 @@ def clinicaltrials_to_edge_records(
         )
     if len(df) == 0:
         return []
-    # Issue 4.12 / 4.16 — required columns.
+    # Issue 4.12 / 4.16 -- required columns.
     required_cols: FrozenSet[str] = frozenset({
         "nct_id", "drug_name", "condition_name",
     })
@@ -4075,14 +4075,14 @@ def clinicaltrials_to_edge_records(
     state: _LoaderState = _LoaderState(cfg, source_sha256, downloaded_at)
     edges: List[Dict[str, Any]] = []
 
-    # Issue 8.7 — vectorize row processing via to_dict('records').
+    # Issue 8.7 -- vectorize row processing via to_dict('records').
     records: List[Dict[str, Any]] = df.to_dict("records")
     state.metrics["rows_before_filter"] = len(records)
 
-    # Issue 11.3 — data quality metrics.
+    # Issue 11.3 -- data quality metrics.
     _compute_data_quality_metrics(df, state)
 
-    # Issue 6.6 — per-row try/except.
+    # Issue 6.6 -- per-row try/except.
     for record in records:
         try:
             edge: Optional[Dict[str, Any]] = _build_edge_record_from_dict(
@@ -4114,13 +4114,13 @@ def clinicaltrials_to_edge_records(
 
     state.metrics["rows_after_filter"] = len(edges)
 
-    # Issue 2.4 / 7.1 — deduplicate by edge_id.
+    # Issue 2.4 / 7.1 -- deduplicate by edge_id.
     edges = _dedupe_edges(edges, state)
 
-    # Issue 5.4 — referential integrity check.
+    # Issue 5.4 -- referential integrity check.
     _check_referential_integrity(edges, state)
 
-    # Issue 5.2 — log duplicate count.
+    # Issue 5.2 -- log duplicate count.
     if state.metrics["edges_deduped"] > 0:
         logger.info(
             "Deduplicated %d duplicate edges (kept %d of %d). Fixes: 5.2.",
@@ -4141,7 +4141,7 @@ def clinicaltrials_to_edge_records(
                    "path": str(state.cfg.effective_dead_letter_path)},
         )
 
-    # Issue 16.10 — write lineage log.
+    # Issue 16.10 -- write lineage log.
     _write_lineage_log({
         "step": "edge_conversion",
         "metrics": state.metrics,
@@ -4150,7 +4150,7 @@ def clinicaltrials_to_edge_records(
         "downloaded_at": downloaded_at,
     }, cfg)
 
-    # Issue 4.10 — lazy logging.
+    # Issue 4.10 -- lazy logging.
     logger.info(
         "Converted %d ClinicalTrials edge records (quarantined=%d, "
         "deduped=%d). Fixes: 4.10.",
@@ -4266,11 +4266,11 @@ def _check_referential_integrity(
 ) -> None:
     """Check that src_id/dst_id will resolve to existing KG nodes (Issue 5.4, 15.7).
 
-    This is a best-effort check — without a loaded crosswalk, we cannot
+    This is a best-effort check -- without a loaded crosswalk, we cannot
     verify that MeSH terms map to existing Compound/Disease nodes. We flag
     edges where:
-      * src_id is a MeSH descriptor (not a DrugBank ID) → orphan_src
-      * dst_id is a MeSH descriptor (not a UMLS CUI) → orphan_dst
+      * src_id is a MeSH descriptor (not a DrugBank ID) -> orphan_src
+      * dst_id is a MeSH descriptor (not a UMLS CUI) -> orphan_dst
     and set their id_confidence to "low".
 
     Parameters
@@ -4283,26 +4283,26 @@ def _check_referential_integrity(
     orphan_src: int = 0
     orphan_dst: int = 0
     for edge in edges:
-        # Issue 15.7 — MeSH term as src_id is "orphan" (not crosswalked to DrugBank).
+        # Issue 15.7 -- MeSH term as src_id is "orphan" (not crosswalked to DrugBank).
         if _is_valid_mesh_id_format(edge["src_id"]):
             orphan_src += 1
             edge["id_confidence"] = "low"
             edge["props"]["orphan_src"] = True
-        # Issue 15.8 — MeSH term as dst_id is "orphan" (not crosswalked to UMLS).
+        # Issue 15.8 -- MeSH term as dst_id is "orphan" (not crosswalked to UMLS).
         if _is_valid_mesh_id_format(edge["dst_id"]):
             orphan_dst += 1
             edge["id_confidence"] = "low"
             edge["props"]["orphan_dst"] = True
     state.metrics["edges_orphan_src"] = orphan_src
     state.metrics["edges_orphan_dst"] = orphan_dst
-    # Issue 5.4 — warn if >50% orphan rate.
+    # Issue 5.4 -- warn if >50% orphan rate.
     if edges and (
         orphan_src / len(edges) > 0.5
         or orphan_dst / len(edges) > 0.5
     ):
         logger.warning(
             "High orphan edge rate: orphan_src=%d/%d (%.1f%%), "
-            "orphan_dst=%d/%d (%.1f%%). Likely a MeSH→DrugBank/UMLS "
+            "orphan_dst=%d/%d (%.1f%%). Likely a MeSH->DrugBank/UMLS "
             "crosswalk failure. Fixes: 5.4, 15.7, 15.8.",
             orphan_src, len(edges), 100 * orphan_src / max(1, len(edges)),
             orphan_dst, len(edges), 100 * orphan_dst / max(1, len(edges)),
@@ -4358,7 +4358,7 @@ def _compute_data_quality_metrics(
                 case=False, na=False,
             ).sum()
         )
-    # Issue 5.5 — phase value counts.
+    # Issue 5.5 -- phase value counts.
     if "phase" in df.columns:
         state.metrics["phase_counts"] = (
             df["phase"].value_counts().to_dict()
@@ -4394,19 +4394,19 @@ def clinicaltrials_to_node_records(
 ) -> List[Dict[str, Any]]:
     """Generate minimal node records for unresolved MeSH IDs (Issue 15.2).
 
-    The ClinicalTrials loader emits edges ONLY — Compound and Disease
+    The ClinicalTrials loader emits edges ONLY -- Compound and Disease
     nodes are owned by DrugBank / ChEMBL / OpenTargets and DisGeNET / OMIM
     respectively. However, this function emits minimal placeholder node
     records for MeSH IDs that don't resolve to existing KG nodes, so the
     KG builder can create them.
 
     P0-G3 ROOT FIX (v82): the previous implementation emitted nodes with
-    shape ``{"node_id": ..., "node_type": ..., "props": {...}}`` — a
+    shape ``{"node_id": ..., "node_type": ..., "props": {...}}`` -- a
     nested triple-store shape. But ``kg_builder.load_nodes_batch`` requires
     FLAT dicts with an ``"id"`` key at top level (it validates
     ``row.get("id")`` and dead-letters any row missing it). The previous
-    shape had NO ``"id"`` key → every single row was silently dead-lettered
-    → ClinicalTrials MeSH Compound/Disease nodes NEVER entered the KG.
+    shape had NO ``"id"`` key -> every single row was silently dead-lettered
+    -> ClinicalTrials MeSH Compound/Disease nodes NEVER entered the KG.
     ROOT FIX: emit flat dicts with ``id``, ``name``, ``source`` at top
     level (matching ``load_nodes_batch``'s contract), plus ``node_type``
     so callers can group by label before calling
@@ -4505,7 +4505,7 @@ def clinicaltrials_to_graph(
 
 
 # =============================================================================
-# Section 8 — Validation
+# Section 8 -- Validation
 # =============================================================================
 # Fixes Issues 10.9 (schema validation tests), 11.3 (data quality metrics),
 # 16.1-16.12 (lineage enforcement).
@@ -4526,8 +4526,8 @@ def validate_clinicaltrials(
          ``id_confidence``, ``props``).
       2. ``src_type`` is always ``"Compound"`` (Issue 15.9).
       3. ``dst_type`` is always ``"Disease"`` (Issue 15.9).
-      4. ``rel_type`` is always ``"tested_for"`` — NEVER ``"clinical_trial"``
-         (deprecated) or ``"treats"`` (forbidden — Issue 2.1, 14.1).
+      4. ``rel_type`` is always ``"tested_for"`` -- NEVER ``"clinical_trial"``
+         (deprecated) or ``"treats"`` (forbidden -- Issue 2.1, 14.1).
       5. Every edge ``props._provenance`` contains every key in
          ``CLINICALTRIALS_PROVENANCE_KEYS`` (Issue 16.1-16.12).
       6. Every edge has ``_source``, ``_license``, ``_attribution``,
@@ -4668,7 +4668,7 @@ def validate_clinicaltrials(
 
 
 # =============================================================================
-# Section 9 — ClinicalTrialsLoader class (Protocol adapter)
+# Section 9 -- ClinicalTrialsLoader class (Protocol adapter)
 # =============================================================================
 # Fixes Issues 1.1 (Loader Protocol), 1.2 (__all__), 1.6 (Config dataclass).
 
@@ -4770,18 +4770,18 @@ class ClinicalTrialsLoader:
 
 
 # =============================================================================
-# Section 10 — Backward-compat aliases
+# Section 10 -- Backward-compat aliases
 # =============================================================================
-# Issue 1.5 — re-export canonical names. The v0 shim names are preserved
+# Issue 1.5 -- re-export canonical names. The v0 shim names are preserved
 # above (download_clinicaltrials, parse_clinicaltrials,
-# clinicaltrials_to_edge_records) — they ARE the public API.
+# clinicaltrials_to_edge_records) -- they ARE the public API.
 
 
 # =============================================================================
-# Section 11 — load_clinicaltrials end-to-end
+# Section 11 -- load_clinicaltrials end-to-end
 # =============================================================================
 # Fixes Issues 1.4 (EDGE_PRODUCERS contract), 1.6 (Config dataclass),
-# 7.1 (idempotency), 10.10 (integration test with kg_builder — TODO).
+# 7.1 (idempotency), 10.10 (integration test with kg_builder -- TODO).
 
 
 def load_clinicaltrials(
@@ -4811,12 +4811,12 @@ def load_clinicaltrials(
         If 0 edges produced and the loader is in CLINICAL+ enforcement
         mode.
     """
-    set_global_seed(SEED)  # Issue 7.1 — idempotency.
+    set_global_seed(SEED)  # Issue 7.1 -- idempotency.
     cfg = cfg or ClinicalTrialsConfig()
     t0: float = time.monotonic()
     ensure_dirs()
 
-    # Issue 6.5 / 4.8 — download + extract.
+    # Issue 6.5 / 4.8 -- download + extract.
     extract_dir: Path = download_clinicaltrials(cfg=cfg)
 
     # Compute SHA-256 of the cached zip for lineage.
@@ -4830,19 +4830,19 @@ def load_clinicaltrials(
             pass
     downloaded_at: str = _iso_now()
 
-    # Issue 3.1 / 4.5 — parse.
+    # Issue 3.1 / 4.5 -- parse.
     df: pd.DataFrame = parse_clinicaltrials_trials(
         ct_dir=extract_dir, cfg=cfg,
     )
 
-    # Issue 2.6 / 4.7 — convert to edges.
+    # Issue 2.6 / 4.7 -- convert to edges.
     nodes, edges = clinicaltrials_to_graph(
         df, cfg=cfg,
         source_sha256=source_sha256,
         downloaded_at=downloaded_at,
     )
 
-    # Issue 10.9 — validate.
+    # Issue 10.9 -- validate.
     report: Dict[str, Any] = validate_clinicaltrials(df, edges, cfg=cfg)
     if not report["is_valid"]:
         logger.warning(
@@ -4854,13 +4854,13 @@ def load_clinicaltrials(
                    "first_errors": report["errors"][:5]},
         )
 
-    # Issue 10.10 — optional Neo4j load.
+    # Issue 10.10 -- optional Neo4j load.
     if not skip_neo4j and edges:
         try:
             from .kg_builder import DrugOSGraphBuilder  # local import.
             with DrugOSGraphBuilder(Neo4jConfig()) as builder:
-                # Issue 2.1 / 14.1 — rel_type="tested_for" (NOT "clinical_trial").
-                # Issue 2.4 / 7.1 — use_merge=True for idempotency.
+                # Issue 2.1 / 14.1 -- rel_type="tested_for" (NOT "clinical_trial").
+                # Issue 2.4 / 7.1 -- use_merge=True for idempotency.
                 builder.load_edges_bulk_create(
                     "Compound", "tested_for", "Disease", edges,
                     use_merge=True,
@@ -4889,7 +4889,7 @@ def load_clinicaltrials(
 
 
 # =============================================================================
-# Section 12 — Utilities (timestamps, IDs, dead-letter, lineage, audit logs)
+# Section 12 -- Utilities (timestamps, IDs, dead-letter, lineage, audit logs)
 # =============================================================================
 # Fixes Issues 11.1 (structured logging), 11.4 (timing logs),
 # 16.9 (audit trail), 16.10 (provenance metadata sidecar).
@@ -4909,7 +4909,7 @@ def _iso_now() -> str:
 
 
 def _get_load_id() -> str:
-    """Return process-cached load_id (correlation ID — Issue 16.9).
+    """Return process-cached load_id (correlation ID -- Issue 16.9).
 
     Thread-safe via ``_LOAD_ID_LOCK``.
 
@@ -5015,9 +5015,9 @@ def _safe_config_dict(cfg: ClinicalTrialsConfig) -> Dict[str, Any]:
 
 
 # =============================================================================
-# Section 13 — Static assertions (forbidden rel_types)
+# Section 13 -- Static assertions (forbidden rel_types)
 # =============================================================================
-# Issue 2.1 / 14.1 / 15.3 — "clinical_trial" and "treats" are FORBIDDEN as
+# Issue 2.1 / 14.1 / 15.3 -- "clinical_trial" and "treats" are FORBIDDEN as
 # rel_types in this loader. The ONLY emittable triple is
 # ("Compound", "tested_for", "Disease").
 
@@ -5040,11 +5040,11 @@ assert ("Compound", "tested_for", "Disease") in CORE_EDGE_TYPES, (
 )
 
 
-# Issue 7.10 — no random seed needed; loader is deterministic given the
+# Issue 7.10 -- no random seed needed; loader is deterministic given the
 # AACT DB. (Comment-only fix.)
 
 
-# Issue 13.1 — Data dictionary is at drugos_graph/data/clinicaltrials_data_dictionary.md.
-# Issue 13.4 — AACT schema documentation: https://aact.ctti-clinicaltrials.org/definitions
-# Issue 13.10 — README section is at drugos_graph/README.md (ClinicalTrials section).
-# Issue 13.12 — AACT table/column reference is in the module docstring above.
+# Issue 13.1 -- Data dictionary is at drugos_graph/data/clinicaltrials_data_dictionary.md.
+# Issue 13.4 -- AACT schema documentation: https://aact.ctti-clinicaltrials.org/definitions
+# Issue 13.10 -- README section is at drugos_graph/README.md (ClinicalTrials section).
+# Issue 13.12 -- AACT table/column reference is in the module docstring above.

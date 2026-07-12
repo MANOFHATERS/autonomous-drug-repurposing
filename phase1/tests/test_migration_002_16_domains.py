@@ -5,7 +5,7 @@ This test verifies that ALL 86 fixes across 16 domains are correctly
 implemented in the migration file, and that the migration produces a
 schema consistent with the ORM models when applied after migration 001.
 
-Tests are REAL — they verify actual SQL behavior, not just "it doesn't crash".
+Tests are REAL -- they verify actual SQL behavior, not just "it doesn't crash".
 They create a real PostgreSQL test database (or validate SQL structure for
 SQLite-compatible checks), apply migrations, insert data, and verify
 constraints, deduplication, and data integrity.
@@ -384,7 +384,7 @@ class TestCoding:
         for line in lines:
             stripped = line.strip()
             if stripped.upper() == 'BEGIN;' or stripped.upper() == 'COMMIT;':
-                pytest.fail(f"COD-3 FAIL: Found standalone {stripped} — Python runner manages transactions")
+                pytest.fail(f"COD-3 FAIL: Found standalone {stripped} -- Python runner manages transactions")
 
     def test_cod_04_if_not_exists_constraint(self, migration_002_sql):
         """COD-4: ADD CONSTRAINT must use IF NOT EXISTS."""
@@ -452,7 +452,7 @@ class TestDataQuality:
 
     def test_dq_03_no_null_before_constraint_race(self, migration_002_sql):
         """DQ-3: Constraint added AFTER NULL cleanup and dedup (order verified in DQ-1)."""
-        # Already verified by DQ-1 test — this is a cross-check
+        # Already verified by DQ-1 test -- this is a cross-check
         null_cleanup_pos = migration_002_sql.find("NULL CLEANUP")
         constraint_pos = migration_002_sql.find("CONSTRAINT AND INDEX CREATION")
         assert null_cleanup_pos < constraint_pos, (
@@ -559,7 +559,7 @@ class TestIdempotency:
     def test_idem_01_cte_idempotent(self, migration_002_sql):
         """IDEM-1: CTE + ROW_NUMBER dedup is idempotent by design."""
         assert "ROW_NUMBER()" in migration_002_sql, (
-            "IDEM-1 FAIL: No ROW_NUMBER() CTE — dedup may not be idempotent"
+            "IDEM-1 FAIL: No ROW_NUMBER() CTE -- dedup may not be idempotent"
         )
 
     def test_idem_02_constraint_if_not_exists(self, migration_002_sql):
@@ -878,19 +878,19 @@ class TestCompliance:
     """Verify compliance and standards adherence."""
 
     def test_cmp_01_constraint_naming_convention(self, migration_002_sql):
-        """CMP-1: v90 ROOT FIX (BUG #2) — constraint name must match the ORM.
+        """CMP-1: v90 ROOT FIX (BUG #2) -- constraint name must match the ORM.
 
         The ORM (models.py:1681-1684) declares
         ``UniqueConstraint(..., name="uq_gda_gene_disease_source")``.
         Migration 001 (line ~1112) creates the same name. Migration 002
-        MUST NOT rename it — keeping the ORM-matching name eliminates
+        MUST NOT rename it -- keeping the ORM-matching name eliminates
         the three-way schema drift (dev / prod / post-002 prod) that
         ``ON CONFLICT ON CONSTRAINT uq_gda_gene_disease_source`` silently
         failed under.
         """
         # v90: migration 002 must ADD the ORM-matching name
         assert "ADD CONSTRAINT IF NOT EXISTS uq_gda_gene_disease_source" in migration_002_sql, (
-            "CMP-1 FAIL: v90 ROOT FIX — migration 002 must re-add uq_gda_gene_disease_source "
+            "CMP-1 FAIL: v90 ROOT FIX -- migration 002 must re-add uq_gda_gene_disease_source "
             "(the ORM-matching name), not invent a new name."
         )
         # v90: migration 002 must NOT ADD the old renamed constraint.
@@ -902,7 +902,7 @@ class TestCompliance:
             _re.IGNORECASE,
         )
         assert not _add_old.search(migration_002_sql), (
-            "CMP-1 FAIL: v90 ROOT FIX — migration 002 must not ADD the renamed "
+            "CMP-1 FAIL: v90 ROOT FIX -- migration 002 must not ADD the renamed "
             "constraint uq_gene_disease_associations_gene_symbol_disease_id_source."
         )
 
@@ -1055,7 +1055,7 @@ class TestORMCompatibility:
         sqlite_session.add(gda1)
         sqlite_session.flush()
 
-        # Insert duplicate — should fail due to unique constraint
+        # Insert duplicate -- should fail due to unique constraint
         gda2 = GeneDiseaseAssociation(
             gene_symbol="TP53", disease_id="C1234567", source="disgenet",
             score=0.9
@@ -1222,7 +1222,7 @@ class TestSQLStructure:
             if stripped.upper() == 'BEGIN;' and not stripped.startswith('--'):
                 if not inside_do_block:
                     pytest.fail(
-                        f"Standalone BEGIN; at line {i+1} — "
+                        f"Standalone BEGIN; at line {i+1} -- "
                         f"Python runner (run_migrations.py) manages transactions via engine.begin(). "
                         f"Adding explicit BEGIN; creates a savepoint, not a true nested transaction (COD-3)."
                     )
@@ -1237,7 +1237,7 @@ class TestSQLStructure:
     def test_no_psql_meta_commands(self, migration_002_sql):
         """No psql meta-commands like \\c in the file."""
         assert "\\c " not in migration_002_sql, (
-            "Found psql meta-command \\c — should be removed"
+            "Found psql meta-command \\c -- should be removed"
         )
 
     def test_section_ordering(self, migration_002_sql):
@@ -1307,7 +1307,7 @@ class TestSQLStructure:
             ("RAISE NOTICE", "LOG-1"),
             # DOC
             ("NULL HANDLING STRATEGY", "DOC-4"),
-            # CMP — v90 ROOT FIX (BUG #2): must use the ORM-matching name
+            # CMP -- v90 ROOT FIX (BUG #2): must use the ORM-matching name
             ("ADD CONSTRAINT IF NOT EXISTS uq_gda_gene_disease_source", "CMP-1"),
         ]
         missing = []

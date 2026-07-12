@@ -5,25 +5,25 @@ the upgraded UniProt pipeline correctly addresses every one of the 346
 issues documented in ``UNIPROT_PIPELINE_346_ISSUES_FIX_PROMPT.md``,
 covering all 16 quality domains:
 
-* Domain 1 (Architecture)          — A1–A14
-* Domain 2 (Design)                — D2-1 through D2-13
-* Domain 3 (Scientific Correctness) — S1–S25   ← LIFE-SAFETY CRITICAL
-* Domain 4 (Coding)                — C1–C57
-* Domain 5 (Data Quality)          — DQ1–DQ25
-* Domain 6 (Reliability)           — R1–R25
-* Domain 7 (Idempotency)           — I1–I16
-* Domain 8 (Performance)           — P1–P20
-* Domain 9 (Security)              — SEC1–SEC20
-* Domain 10 (Testing)              — T1–T30  (this test file)
-* Domain 11 (Logging)              — L1–L25
-* Domain 12 (Configuration)        — CFG1–CFG25
-* Domain 13 (Documentation)        — DOC1–DOC20
-* Domain 14 (Compliance)           — COMP1–COMP20
-* Domain 15 (Interoperability)     — INT1–INT20
-* Domain 16 (Lineage)              — LIN1–LIN20
+* Domain 1 (Architecture)          -- A1-A14
+* Domain 2 (Design)                -- D2-1 through D2-13
+* Domain 3 (Scientific Correctness) -- S1-S25   ← LIFE-SAFETY CRITICAL
+* Domain 4 (Coding)                -- C1-C57
+* Domain 5 (Data Quality)          -- DQ1-DQ25
+* Domain 6 (Reliability)           -- R1-R25
+* Domain 7 (Idempotency)           -- I1-I16
+* Domain 8 (Performance)           -- P1-P20
+* Domain 9 (Security)              -- SEC1-SEC20
+* Domain 10 (Testing)              -- T1-T30  (this test file)
+* Domain 11 (Logging)              -- L1-L25
+* Domain 12 (Configuration)        -- CFG1-CFG25
+* Domain 13 (Documentation)        -- DOC1-DOC20
+* Domain 14 (Compliance)           -- COMP1-COMP20
+* Domain 15 (Interoperability)     -- INT1-INT20
+* Domain 16 (Lineage)              -- LIN1-LIN20
 
 Every test here verifies REAL behaviour (assertions on actual output, not
-``pass`` statements).  All tests are mock-based — no network access is
+``pass`` statements).  All tests are mock-based -- no network access is
 required.
 
 Run::
@@ -174,11 +174,11 @@ def db_session(db_engine):
 
 
 # ============================================================================
-# Domain 13 — Documentation (DOC1–DOC20)
+# Domain 13 -- Documentation (DOC1-DOC20)
 # ============================================================================
 
 class TestDocumentation:
-    """DOC1–DOC20: Module metadata, docstrings, and data dictionary."""
+    """DOC1-DOC20: Module metadata, docstrings, and data dictionary."""
 
     def test_module_has_version(self):
         """DOC17: __version__ is defined and follows semver."""
@@ -229,11 +229,11 @@ class TestDocumentation:
 
 
 # ============================================================================
-# Domain 1 — Architecture (A1–A14)
+# Domain 1 -- Architecture (A1-A14)
 # ============================================================================
 
 class TestArchitecture:
-    """A1–A14: Subclass contract with BasePipeline."""
+    """A1-A14: Subclass contract with BasePipeline."""
 
     def test_source_name_is_uniprot(self, pipeline):
         """A12: source_name class attribute is 'uniprot'."""
@@ -317,7 +317,7 @@ class TestArchitecture:
 
 
 # ============================================================================
-# Domain 2 — Design (D2-1 through D2-13)
+# Domain 2 -- Design (D2-1 through D2-13)
 # ============================================================================
 
 class TestDesign:
@@ -341,7 +341,7 @@ class TestDesign:
 
     def test_ensure_protein_columns_is_static(self):
         """D2-7: _ensure_protein_columns is a @staticmethod."""
-        # Look up the descriptor on the class — for staticmethods,
+        # Look up the descriptor on the class -- for staticmethods,
         # __func__ is the underlying function.
         attr = inspect.getattr_static(UniProtPipeline, "_ensure_protein_columns")
         assert isinstance(attr, staticmethod), \
@@ -362,17 +362,17 @@ class TestDesign:
 
 
 # ============================================================================
-# Domain 3 — Scientific Correctness (S1–S25) — LIFE-SAFETY CRITICAL
+# Domain 3 -- Scientific Correctness (S1-S25) -- LIFE-SAFETY CRITICAL
 # ============================================================================
 
 class TestScientificCorrectness:
-    """S1–S25: Domain-specific scientific accuracy.
+    """S1-S25: Domain-specific scientific accuracy.
 
     These tests verify that the pipeline produces scientifically correct
     data.  Wrong data here = wrong drug predictions = patients die.
     """
 
-    # ---- S1, S22, F2 — Sequence truncation ----
+    # ---- S1, S22, F2 -- Sequence truncation ----
 
     def test_s1_titin_sequence_not_truncated(self, pipeline, sample_tsv_path):
         """S1/F2: Titin's ~34 350 aa sequence is NOT truncated to 10 000.
@@ -398,7 +398,7 @@ class TestScientificCorrectness:
             f"Titin sequence MUST be 34350 aa, got {len(seq)} (F2 violation)"
 
     def test_s22_no_double_truncation(self, pipeline, sample_tsv_path):
-        """S22: Truncation block removed — handle_missing_protein_fields is sole authority."""
+        """S22: Truncation block removed -- handle_missing_protein_fields is sole authority."""
         seq = "A" * 50000  # larger than the old 10000 cap
         tsv = (
             "Entry\tGene Names (primary)\tGene Names\tProtein names\t"
@@ -410,12 +410,12 @@ class TestScientificCorrectness:
         raw_path.write_text(tsv, encoding="utf-8")
         cleaned = pipeline.clean(raw_path)
         # The sequence should still be a string of length 50000 (or None if
-        # cleaning rejected it — but 'A' is a valid amino acid).
+        # cleaning rejected it -- but 'A' is a valid amino acid).
         seq_out = cleaned.iloc[0]["sequence"]
         assert isinstance(seq_out, str)
         assert len(seq_out) == 50000
 
-    # ---- S2, S6, F4 — gene_name semantics ----
+    # ---- S2, S6, F4 -- gene_name semantics ----
 
     def test_s2_gene_name_is_none(self, pipeline, sample_tsv_path):
         """S2/F4: gene_name column does NOT contain protein names."""
@@ -445,7 +445,7 @@ class TestScientificCorrectness:
         assert "HBB" in symbols
         assert "TP53" in symbols
 
-    # ---- S3 — HGNC gene-symbol validation ----
+    # ---- S3 -- HGNC gene-symbol validation ----
 
     def test_s3_gene_symbol_validated(self):
         """S3/DQ9: gene_symbol is validated against the HGNC pattern."""
@@ -456,7 +456,7 @@ class TestScientificCorrectness:
         assert not _HGNC_SYMBOL_RE.match("")       # empty rejected
         assert not _HGNC_SYMBOL_RE.match("invalid_gene!")  # symbols rejected
 
-    # ---- S4 — Nested parentheses ----
+    # ---- S4 -- Nested parentheses ----
 
     def test_s4_nested_parens_handled(self, pipeline):
         """S4/C14: _extract_canonical_name handles nested parentheses."""
@@ -470,7 +470,7 @@ class TestScientificCorrectness:
         assert pipeline._extract_canonical_name("()") is None
         assert pipeline._extract_canonical_name("(only parens)") is None
 
-    # ---- S5, S6, S7 — function_desc cleaning ----
+    # ---- S5, S6, S7 -- function_desc cleaning ----
 
     def test_s5_idx_ge_zero_marker_at_start(self, pipeline):
         """S5: Sub-section marker at start (idx=0) is stripped."""
@@ -501,7 +501,7 @@ class TestScientificCorrectness:
         assert result == "Hemoglobin"
         assert "{ECO:" not in result
 
-    # ---- S8, S9 — STRING ID extraction ----
+    # ---- S8, S9 -- STRING ID extraction ----
 
     def test_s8_first_string_id_returned(self, pipeline):
         """S8: First valid STRING ID returned from multiple."""
@@ -531,7 +531,7 @@ class TestScientificCorrectness:
         result = pipeline._extract_string_id(";9606.ENSP00000357607;")
         assert result == "9606.ENSP00000357607"
 
-    # ---- S10, DQ5 — organism validation ----
+    # ---- S10, DQ5 -- organism validation ----
 
     def test_s10_organism_strict_mode(self, pipeline, sample_tsv_path):
         """S10: organism_fill_mode='strict' is used; non-human organisms logged."""
@@ -558,7 +558,7 @@ class TestScientificCorrectness:
         assert "Mus musculus" in cleaned["organism"].tolist() or \
                "Unknown organism" in cleaned["organism"].tolist()
 
-    # ---- S11, DQ4 — length vs sequence cross-validation ----
+    # ---- S11, DQ4 -- length vs sequence cross-validation ----
 
     def test_s11_length_mismatch_logged(self, pipeline, sample_tsv_path, caplog):
         """S11/DQ4: length != len(sequence) is logged as a WARNING."""
@@ -577,27 +577,27 @@ class TestScientificCorrectness:
         # The mismatch warning should be in the logs.
         assert any("length != len(sequence)" in r.message for r in caplog.records)
 
-    # ---- S12 — length in output ----
+    # ---- S12 -- length in output ----
 
     def test_s12_length_in_cleaned_columns(self, pipeline, sample_tsv_path):
         """S12: length column is present in the cleaned output."""
         cleaned = pipeline.clean(sample_tsv_path)
         assert "length" in cleaned.columns
 
-    # ---- S13 — ft_domain not requested ----
+    # ---- S13 -- ft_domain not requested ----
 
     def test_s13_ft_domain_not_in_fields(self):
         """S13/P20: ft_domain is NOT in uniprot_fields."""
         assert "ft_domain" not in UniProtPipeline.uniprot_fields
 
-    # ---- S18 — xref_string field ----
+    # ---- S18 -- xref_string field ----
 
     def test_s18_xref_string_field_used(self):
         """S18: xref_string is in uniprot_fields (not generic 'xref')."""
         assert "xref_string" in UniProtPipeline.uniprot_fields
         assert "xref" not in UniProtPipeline.uniprot_fields
 
-    # ---- S20, DQ1 — uniprot_id format validation ----
+    # ---- S20, DQ1 -- uniprot_id format validation ----
 
     def test_s20_uniprot_id_format_validated(self):
         """S20/DQ1: uniprot_id accession pattern is correct."""
@@ -625,7 +625,7 @@ class TestScientificCorrectness:
         assert "INVALID_ID" not in cleaned["uniprot_id"].values
         assert "P69905" in cleaned["uniprot_id"].values
 
-    # ---- S21, DQ10 — sequence character validation ----
+    # ---- S21, DQ10 -- sequence character validation ----
 
     def test_s21_valid_aa_pattern(self):
         """S21: Valid amino-acid pattern accepts the 20 standard AAs + ambiguity + stop."""
@@ -644,7 +644,7 @@ class TestScientificCorrectness:
         assert pipeline._validate_sequence("") is None
         assert pipeline._validate_sequence(42) is None  # non-string
 
-    # ---- S25 — Provenance sidecar ----
+    # ---- S25 -- Provenance sidecar ----
 
     def test_s25_provenance_sidecar_written(self, pipeline, sample_tsv_path, tmp_processed_dir):
         """S25/LIN3: provenance sidecar is written after clean()."""
@@ -667,11 +667,11 @@ class TestScientificCorrectness:
 
 
 # ============================================================================
-# Domain 5 — Data Quality (DQ1–DQ25)
+# Domain 5 -- Data Quality (DQ1-DQ25)
 # ============================================================================
 
 class TestDataQuality:
-    """DQ1–DQ25: Data quality and integrity checks."""
+    """DQ1-DQ25: Data quality and integrity checks."""
 
     def test_dq2_duplicate_uniprot_ids_dropped(self, pipeline, sample_tsv_path):
         """DQ2: Duplicate uniprot_ids are detected, logged, and dropped (keep first)."""
@@ -740,11 +740,11 @@ class TestDataQuality:
 
 
 # ============================================================================
-# Domain 7 — Idempotency (I1–I16)
+# Domain 7 -- Idempotency (I1-I16)
 # ============================================================================
 
 class TestIdempotency:
-    """I1–I16: Reproducibility and idempotency."""
+    """I1-I16: Reproducibility and idempotency."""
 
     def test_i2_deterministic_sort_before_dedup(self, pipeline, sample_tsv_path):
         """I2/C10: Output is sorted by uniprot_id (deterministic dedup)."""
@@ -754,7 +754,7 @@ class TestIdempotency:
 
     def test_i6_same_input_same_output(self, pipeline, sample_tsv_path):
         """I6/I16: Same input produces same output (determinism)."""
-        # Run clean twice — the cleaned DataFrames should be identical
+        # Run clean twice -- the cleaned DataFrames should be identical
         # (modulo lineage columns that include timestamps, which we exclude).
         c1 = pipeline.clean(sample_tsv_path)
         c2 = pipeline.clean(sample_tsv_path)
@@ -773,7 +773,7 @@ class TestIdempotency:
         # Set it to a non-zero value.
         pipeline._consecutive_retry_after = 99
         # Force download() to short-circuit by creating a valid cached file.
-        # (We can't easily call download() without network — but we can
+        # (We can't easily call download() without network -- but we can
         # verify the attribute exists and starts at 0 after __init__.)
         p2 = UniProtPipeline()
         assert p2._consecutive_retry_after == 0
@@ -824,7 +824,7 @@ class TestIdempotency:
             "string_id": ["9606.ENSP00000343212"],
         })
         result = pipeline.load(df, session=db_session)
-        # We did NOT commit — the caller manages the transaction.
+        # We did NOT commit -- the caller manages the transaction.
         # The session can still see the row (it's in the transaction).
         from database.models import Protein
         rows = db_session.query(Protein).all()
@@ -833,11 +833,11 @@ class TestIdempotency:
 
 
 # ============================================================================
-# Domain 9 — Security (SEC1–SEC20)
+# Domain 9 -- Security (SEC1-SEC20)
 # ============================================================================
 
 class TestSecurity:
-    """SEC1–SEC20: Security and privacy."""
+    """SEC1-SEC20: Security and privacy."""
 
     def test_sec1_url_validation_rejects_bad_domain(self):
         """SEC1/SEC8: URLs outside allowed domains are rejected."""
@@ -920,11 +920,11 @@ class TestSecurity:
 
 
 # ============================================================================
-# Domain 4 — Coding (C1–C57)
+# Domain 4 -- Coding (C1-C57)
 # ============================================================================
 
 class TestCoding:
-    """C1–C57: Coding quality and correctness."""
+    """C1-C57: Coding quality and correctness."""
 
     def test_c1_no_phantom_entry_rows(self, pipeline, sample_tsv_path):
         """C1/F3: No phantom 'Entry' rows in cleaned data."""
@@ -999,11 +999,11 @@ class TestCoding:
 
 
 # ============================================================================
-# Domain 6 — Reliability (R1–R25)
+# Domain 6 -- Reliability (R1-R25)
 # ============================================================================
 
 class TestReliability:
-    """R1–R25: Error handling and fault tolerance."""
+    """R1-R25: Error handling and fault tolerance."""
 
     def test_r4_dead_letter_queue_in_teardown(self, pipeline, tmp_raw_dir):
         """R4: Dead-letter queue is flushed to disk in teardown()."""
@@ -1048,11 +1048,11 @@ class TestReliability:
 
 
 # ============================================================================
-# Domain 8 — Performance (P1–P20)
+# Domain 8 -- Performance (P1-P20)
 # ============================================================================
 
 class TestPerformance:
-    """P1–P20: Performance and scalability."""
+    """P1-P20: Performance and scalability."""
 
     def test_p3_bulk_write(self, pipeline, sample_tsv_path):
         """P3: clean() works on a reasonable-size TSV without OOM."""
@@ -1067,11 +1067,11 @@ class TestPerformance:
 
 
 # ============================================================================
-# Domain 10 — Testing (T1–T30) — these ARE the tests
+# Domain 10 -- Testing (T1-T30) -- these ARE the tests
 # ============================================================================
 
 class TestTesting:
-    """T1–T30: The tests themselves (meta-verification)."""
+    """T1-T30: The tests themselves (meta-verification)."""
 
     def test_t1_unit_tests_exist(self):
         """T1: Unit tests for UniProtPipeline exist (this class)."""
@@ -1079,7 +1079,7 @@ class TestTesting:
 
     def test_t19_no_network_required(self, pipeline, sample_tsv_path):
         """T19: All tests can run without network access."""
-        # Run clean() — should not raise (no network needed).
+        # Run clean() -- should not raise (no network needed).
         cleaned = pipeline.clean(sample_tsv_path)
         assert len(cleaned) > 0
 
@@ -1090,11 +1090,11 @@ class TestTesting:
 
 
 # ============================================================================
-# Domain 11 — Logging (L1–L25)
+# Domain 11 -- Logging (L1-L25)
 # ============================================================================
 
 class TestLogging:
-    """L1–L25: Logging and observability."""
+    """L1-L25: Logging and observability."""
 
     def test_l2_log_context_has_run_id(self, pipeline):
         """L2/L3: _log_context returns run_id and correlation_id."""
@@ -1145,11 +1145,11 @@ class TestLogging:
 
 
 # ============================================================================
-# Domain 12 — Configuration (CFG1–CFG25)
+# Domain 12 -- Configuration (CFG1-CFG25)
 # ============================================================================
 
 class TestConfiguration:
-    """CFG1–CFG25: Configuration management."""
+    """CFG1-CFG25: Configuration management."""
 
     def test_cfg1_no_magic_numbers(self):
         """CFG1: page_size, max_retries, etc. are class attributes (not inline)."""
@@ -1179,7 +1179,7 @@ class TestConfiguration:
 
     def test_cfg8_settings_integration(self):
         """CFG8: UNIPROT_RELEASE from settings.py is picked up."""
-        # UNIPROT_RELEASE defaults to 'current_release' — source_version
+        # UNIPROT_RELEASE defaults to 'current_release' -- source_version
         # is only set if UNIPROT_RELEASE != 'current_release'.
         p = UniProtPipeline()
         # If UNIPROT_RELEASE == 'current_release', source_version is None
@@ -1188,11 +1188,11 @@ class TestConfiguration:
 
 
 # ============================================================================
-# Domain 14 — Compliance (COMP1–COMP20)
+# Domain 14 -- Compliance (COMP1-COMP20)
 # ============================================================================
 
 class TestCompliance:
-    """COMP1–COMP20: Compliance and standards."""
+    """COMP1-COMP20: Compliance and standards."""
 
     def test_comp1_triggered_by_in_provenance(self, pipeline, sample_tsv_path, tmp_processed_dir):
         """COMP1/SEC20: triggered_by is recorded in the provenance sidecar."""
@@ -1214,7 +1214,7 @@ class TestCompliance:
             if len(l) > 100 and not l.strip().startswith("#")
             and not l.strip().startswith('"""')
         ]
-        # Allow up to 5 long lines (urls, etc.) — but ideally zero.
+        # Allow up to 5 long lines (urls, etc.) -- but ideally zero.
         assert len(long_lines) < 10, \
             f"Too many long lines: {long_lines[:5]}"
 
@@ -1227,11 +1227,11 @@ class TestCompliance:
 
 
 # ============================================================================
-# Domain 15 — Interoperability (INT1–INT20)
+# Domain 15 -- Interoperability (INT1-INT20)
 # ============================================================================
 
 class TestInteroperability:
-    """INT1–INT20: Interoperability and integration."""
+    """INT1-INT20: Interoperability and integration."""
 
     def test_int17_load_columns_match_protein_model(self, pipeline):
         """INT17/D2-9: load_columns is a subset of Protein model columns."""
@@ -1253,7 +1253,7 @@ class TestInteroperability:
         )
         raw_path = tmp_path / "future.tsv"
         raw_path.write_text(tsv, encoding="utf-8")
-        # Should NOT raise — unknown columns are dropped silently.
+        # Should NOT raise -- unknown columns are dropped silently.
         cleaned = pipeline.clean(raw_path)
         assert len(cleaned) == 1
         assert cleaned.iloc[0]["uniprot_id"] == "P69905"
@@ -1266,11 +1266,11 @@ class TestInteroperability:
 
 
 # ============================================================================
-# Domain 16 — Lineage (LIN1–LIN20)
+# Domain 16 -- Lineage (LIN1-LIN20)
 # ============================================================================
 
 class TestLineage:
-    """LIN1–LIN20: Data lineage and traceability."""
+    """LIN1-LIN20: Data lineage and traceability."""
 
     def test_lin1_transformation_log(self, pipeline, caplog):
         """LIN1/LIN5: Transformation steps are logged."""
@@ -1330,7 +1330,7 @@ class TestEndToEnd:
     def test_full_lifecycle_mock(
         self, pipeline, db_session, sample_tsv_content, tmp_raw_dir,
     ):
-        """T17: Full download → clean → load lifecycle with mocks."""
+        """T17: Full download -> clean -> load lifecycle with mocks."""
         # Simulate a download by writing the TSV directly.
         raw_path = tmp_raw_dir / "uniprot_human_reviewed.tsv"
         raw_path.write_text(sample_tsv_content, encoding="utf-8")
@@ -1361,7 +1361,7 @@ class TestEndToEnd:
         pipeline.load(cleaned, session=db_session)
         db_session.commit()
 
-        # Load again — should be idempotent.
+        # Load again -- should be idempotent.
         pipeline.load(cleaned, session=db_session)
         db_session.commit()
 

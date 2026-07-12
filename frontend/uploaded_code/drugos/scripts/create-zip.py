@@ -5,14 +5,14 @@ Create a complete ZIP file of the DrugOS codebase (frontend + backend + tests).
 Excludes:
   - node_modules/
   - .next/ (build cache)
-  - db/*.db (binary database files — will be recreated via `prisma db push`)
+  - db/*.db (binary database files -- will be recreated via `prisma db push`)
   - dev.log, server.log (logs)
   - test-results/, playwright-report/ (test artifacts)
   - .git/ (version control history)
   - upload/ (user-provided reference docs)
   - download/ (generated outputs)
-  - skills/ (skill definitions — not part of the application)
-  - examples/ (framework examples — not part of the application)
+  - skills/ (skill definitions -- not part of the application)
+  - examples/ (framework examples -- not part of the application)
   - agent-ctx/ (agent context files)
   - __pycache__/ (Python cache)
   - *.pyc, *.log

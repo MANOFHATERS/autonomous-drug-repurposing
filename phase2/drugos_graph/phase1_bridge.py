@@ -1,24 +1,24 @@
 """
-DrugOS Graph — Phase 1 → Phase 2 Bridge
+DrugOS Graph -- Phase 1 -> Phase 2 Bridge
 ========================================
 
 This module is the **single, authoritative contract** that connects the two
 phases of the Autonomous Drug Repurposing Platform:
 
-  Phase 1  (``phase1/``)  — Data Ingestion & Pipeline Setup
+  Phase 1  (``phase1/``)  -- Data Ingestion & Pipeline Setup
       Outputs cleaned, normalised, schema-validated data into either:
-        (a) PostgreSQL via the SQLAlchemy ORM (``database/models.py``) — the
+        (a) PostgreSQL via the SQLAlchemy ORM (``database/models.py``) -- the
             AUTHORITATIVE backend per the docx architecture, OR
-        (b) CSV files in ``phase1/processed_data/`` — the legacy/dev fallback.
+        (b) CSV files in ``phase1/processed_data/`` -- the legacy/dev fallback.
       Either backend produces the same dict of DataFrames for Phase 2.
 
-  Phase 2  (``drugos_graph/``) — Knowledge Graph Construction
+  Phase 2  (``drugos_graph/``) -- Knowledge Graph Construction
       Consumes nodes/edges and loads them into Neo4j via
       :class:`drugos_graph.kg_builder.DrugOSGraphBuilder`.
 
 v29 ROOT FIX (Phase1↔Phase2 100% connection):
   The forensic audit proved the bridge previously bypassed PostgreSQL
-  entirely and read CSVs only — Phase 1's 8,500 lines of ORM/migration/
+  entirely and read CSVs only -- Phase 1's 8,500 lines of ORM/migration/
   loader code were dead weight. The bridge now prefers PostgreSQL when
   ``DATABASE_URL`` is set AND the ``drugs`` table is populated. The CSV
   path remains as a fallback for dev/CI runs without a database.
@@ -30,13 +30,13 @@ v29 ROOT FIX (Phase1↔Phase2 100% connection):
 The bridge provides THREE callable entry points, in increasing order of
 abstraction:
 
-  1. :func:`read_phase1_outputs`      — read Phase 1 data (PostgreSQL or CSV) into pandas DataFrames
-  2. :func:`stage_phase1_to_phase2`   — convert DataFrames → Phase 2 node/edge dicts
-  3. :func:`load_into_graph`           — load staged dicts into a graph builder
+  1. :func:`read_phase1_outputs`      -- read Phase 1 data (PostgreSQL or CSV) into pandas DataFrames
+  2. :func:`stage_phase1_to_phase2`   -- convert DataFrames -> Phase 2 node/edge dicts
+  3. :func:`load_into_graph`           -- load staged dicts into a graph builder
 
 Plus a top-level convenience:
 
-  4. :func:`run_phase1_to_phase2`     — read → stage → load in one call
+  4. :func:`run_phase1_to_phase2`     -- read -> stage -> load in one call
 
 WHY THIS MODULE EXISTS
 ----------------------
@@ -50,53 +50,53 @@ edge produced by the bridge carries a ``_source_phase=1`` lineage property
 and the original Phase 1 row index so any downstream bug can be traced back
 to the exact Phase 1 CSV row.
 
-SCHEMA MAPPING (Phase 1 CSV column → Phase 2 node/edge property)
+SCHEMA MAPPING (Phase 1 CSV column -> Phase 2 node/edge property)
 ----------------------------------------------------------------
 
 Compound nodes (from drugbank_drugs.csv)
-    drugbank_id        → id            (canonical Neo4j ID)
-    name               → name
-    inchikey           → inchikey
-    smiles             → smiles
-    molecular_weight   → molecular_weight
-    is_fda_approved    → fda_approved
-    is_withdrawn       → withdrawn       (RL safety signal — patient harm)
-    clinical_status    → clinical_status
-    groups             → groups
-    mechanism_of_action→ mechanism_of_action
-    cas_number         → cas_number
-    chembl_id          → chembl_id
-    pubchem_cid        → pubchem_cid
-    completeness_score → completeness_score
+    drugbank_id        -> id            (canonical Neo4j ID)
+    name               -> name
+    inchikey           -> inchikey
+    smiles             -> smiles
+    molecular_weight   -> molecular_weight
+    is_fda_approved    -> fda_approved
+    is_withdrawn       -> withdrawn       (RL safety signal -- patient harm)
+    clinical_status    -> clinical_status
+    groups             -> groups
+    mechanism_of_action-> mechanism_of_action
+    cas_number         -> cas_number
+    chembl_id          -> chembl_id
+    pubchem_cid        -> pubchem_cid
+    completeness_score -> completeness_score
 
 Protein nodes (from drugbank_interactions.csv.gz, dedup on uniprot_id)
-    uniprot_id         → id
-    target_name        → name
-    organism           → organism
+    uniprot_id         -> id
+    target_name        -> name
+    organism           -> organism
 
 Gene nodes (from omim_gene_disease_associations.csv, dedup on gene_symbol)
-    gene_symbol        → id
-    gene_mim           → mim_id
+    gene_symbol        -> id
+    gene_mim           -> mim_id
 
 Disease nodes (from omim_gene_disease_associations.csv, dedup on disease_id)
-    disease_id         → id
-    disease_name       → name
-    phenotype_mim      → mim_id
+    disease_id         -> id
+    disease_name       -> name
+    phenotype_mim      -> mim_id
 
 Edges
     drugbank_interactions.csv.gz:
-        (Compound, targets, Protein)   — action_type='target'/'unknown'/None
-        (Compound, inhibits, Protein)  — action_type contains 'inhibitor'
-        (Compound, activates, Protein) — action_type contains 'activator'
+        (Compound, targets, Protein)   -- action_type='target'/'unknown'/None
+        (Compound, inhibits, Protein)  -- action_type contains 'inhibitor'
+        (Compound, activates, Protein) -- action_type contains 'activator'
         (Compound, allosterically_modulates, Protein)
-                                       — action_type contains 'allosteric'
-        (Compound, unknown, Protein)   — action_type set but not matched
+                                       -- action_type contains 'allosteric'
+        (Compound, unknown, Protein)   -- action_type set but not matched
     omim_gene_disease_associations.csv:
         (Gene, associated_with, Disease)
-                                       — score + association_type as props
+                                       -- score + association_type as props
 
 The edge types above are a strict subset of
-:data:`drugos_graph.config.CORE_EDGE_TYPES` — no non-core edges are produced.
+:data:`drugos_graph.config.CORE_EDGE_TYPES` -- no non-core edges are produced.
 
 USAGE
 -----
@@ -134,7 +134,7 @@ PATIENT-SAFETY NOTE
 -------------------
 The ``withdrawn`` flag on Compound nodes is the primary input to the RL
 agent's safety ranker. A null ``withdrawn`` value is treated as "not
-withdrawn" → SAFE → a withdrawn drug like Valdecoxib would be surfaced as a
+withdrawn" -> SAFE -> a withdrawn drug like Valdecoxib would be surfaced as a
 repurposing candidate. The bridge EXPLICITLY coerces ``is_withdrawn`` to a
 bool and writes ``withdrawn=False`` (never null) for every Compound node.
 """
@@ -160,7 +160,7 @@ import pandas as pd
 # ``_validate_phase1_columns`` helper can raise on schema mismatch.
 try:
     from .exceptions import DrugOSDataError
-except Exception:  # pragma: no cover — fallback for direct-script execution
+except Exception:  # pragma: no cover -- fallback for direct-script execution
     class DrugOSDataError(Exception):
         """Local fallback when the package cannot be imported."""
 
@@ -237,7 +237,7 @@ def _acquire_audit_lock(audit_path: Path) -> Iterator[Any]:
 
 # v58 ROOT FIX (P2C-001 + P2C-008 deep): structured audit log for every
 # silent fallback the bridge takes. The v57 code only logged at WARNING
-# (or ERROR in prod) but did not write a structured record — operators
+# (or ERROR in prod) but did not write a structured record -- operators
 # had no programmatic way to verify which fallbacks fired during a run.
 # This helper writes one JSONL line per fallback to
 # ``phase2/logs/audit/bridge_fallbacks.jsonl`` so downstream tools (and
@@ -304,7 +304,7 @@ __all__ = [
     "run_phase1_to_phase2",
     "compute_input_checksum",
     "extract_drug_records_from_staged",  # v29 ROOT FIX (audit I-12): reuse staged compound_nodes as drug_records
-    "bridge_to_pyg_maps",  # v6 fix (bug #B3): convert recorder output → PyG maps
+    "bridge_to_pyg_maps",  # v6 fix (bug #B3): convert recorder output -> PyG maps
 ]
 
 PHASE1_TO_PHASE2_BRIDGE_VERSION: str = "1.1.0"  # v6: structured indications + upstream dedup + PyG bridge
@@ -317,7 +317,7 @@ DEFAULT_PHASE1_PROCESSED_DIR: Path = (
 
 
 # ---------------------------------------------------------------------------
-# 1. GraphBuilder protocol — what the bridge needs from a builder
+# 1. GraphBuilder protocol -- what the bridge needs from a builder
 # ---------------------------------------------------------------------------
 class GraphBuilderProtocol(Protocol):
     """Structural type that any graph builder consumed by the bridge must satisfy.
@@ -347,7 +347,7 @@ class GraphBuilderProtocol(Protocol):
 
 
 # ---------------------------------------------------------------------------
-# v78 FORENSIC ROOT FIX — canonical normalized_score + property-whitelist mirror
+# v78 FORENSIC ROOT FIX -- canonical normalized_score + property-whitelist mirror
 # ---------------------------------------------------------------------------
 # BUG #1 (Silent Data-Loss): ``normalized_score`` is in
 # ``kg_builder.EDGE_PROPERTY_WHITELIST`` for EVERY edge type, but the bridge
@@ -370,24 +370,24 @@ def _compute_normalized_score(
 
     Scale rules (mirrors the per-loader logic in disgenet_loader,
     omim_loader, chembl_loader, string_loader, stitch_loader):
-      * DisGeNET GDA ``score`` is already in [0,1] → passthrough.
-      * STRING PPI ``combined_score`` is in [0,1000] → divide by 1000.
-      * STITCH ``combined_score`` is in [0,1000] → divide by 1000.
-      * ChEMBL ``pchembl_value`` is in [0, ~14] → divide by 14.
-      * OMIM GDA: curated qualitative evidence (no numeric score) → 1.0
+      * DisGeNET GDA ``score`` is already in [0,1] -> passthrough.
+      * STRING PPI ``combined_score`` is in [0,1000] -> divide by 1000.
+      * STITCH ``combined_score`` is in [0,1000] -> divide by 1000.
+      * ChEMBL ``pchembl_value`` is in [0, ~14] -> divide by 14.
+      * OMIM GDA: curated qualitative evidence (no numeric score) -> 1.0
         when an association exists (OMIM is curated human genetics).
-      * DrugBank treats: indication_type "approved" → 1.0,
-        "investigational"/"phase" → 0.5, else 0.3.
-      * DrugBank targets/inhibits/activates (Compound→Protein): no numeric
-        score in the CSV → None (the edge existence IS the signal; the RL
+      * DrugBank treats: indication_type "approved" -> 1.0,
+        "investigational"/"phase" -> 0.5, else 0.3.
+      * DrugBank targets/inhibits/activates (Compound->Protein): no numeric
+        score in the CSV -> None (the edge existence IS the signal; the RL
         ranker will use pchembl_value from ChEMBL when present).
-      * Gene-encodes-Protein (OMIM crosswalk): no quantitative score → None.
+      * Gene-encodes-Protein (OMIM crosswalk): no quantitative score -> None.
 
-    Returns None when no quantitative signal is available — callers MUST
+    Returns None when no quantitative signal is available -- callers MUST
     not coerce None to 0.0 (that would conflate "no evidence" with
     "zero-confidence evidence", breaking the RL ranker).
     """
-    # 1. Raw [0,1] score (DisGeNET, OpenTargets) — passthrough with clamp.
+    # 1. Raw [0,1] score (DisGeNET, OpenTargets) -- passthrough with clamp.
     if raw_score is not None:
         try:
             f = float(raw_score)
@@ -398,7 +398,7 @@ def _compute_normalized_score(
         except (TypeError, ValueError):
             pass
 
-    # 2. pchembl_value (ChEMBL potency) — [0, ~14] → divide by 14.
+    # 2. pchembl_value (ChEMBL potency) -- [0, ~14] -> divide by 14.
     if pchembl_value is not None:
         try:
             f = float(pchembl_value)
@@ -406,7 +406,7 @@ def _compute_normalized_score(
         except (TypeError, ValueError):
             pass
 
-    # 3. STRING combined_score — [0, 1000] → divide by 1000.
+    # 3. STRING combined_score -- [0, 1000] -> divide by 1000.
     if combined_score is not None:
         try:
             f = float(combined_score)
@@ -417,7 +417,7 @@ def _compute_normalized_score(
         except (TypeError, ValueError):
             pass
 
-    # 4. STITCH combined_score — same 0-1000 scale as STRING.
+    # 4. STITCH combined_score -- same 0-1000 scale as STRING.
     if stitch_score is not None:
         try:
             f = float(stitch_score)
@@ -427,18 +427,18 @@ def _compute_normalized_score(
         except (TypeError, ValueError):
             pass
 
-    # 5. DrugBank indication_type — qualitative approval signal.
+    # 5. DrugBank indication_type -- qualitative approval signal.
     if indication_type:
         it = str(indication_type).strip().lower()
         if "approved" in it or it == "approved":
             return 1.0
         if "investigational" in it or "phase" in it:
             return 0.5
-        # "withdrawn" / "over_the_counter" / etc. — still a real clinical signal.
+        # "withdrawn" / "over_the_counter" / etc. -- still a real clinical signal.
         if it:
             return 0.3
 
-    # 6. OMIM GDA — curated human-genetics evidence. If we got here with
+    # 6. OMIM GDA -- curated human-genetics evidence. If we got here with
     # source="omim" and an associated_with edge, the association is real.
     if source and str(source).lower() == "omim" and rel_type == "associated_with":
         return 1.0
@@ -458,7 +458,7 @@ def _apply_node_whitelist(
     emitted while production silently stripped them. This made every
     P1-1/P1-2/P1-3 bug (e.g. ClinicalOutcome ``meddra_id`` / ``mesh_id``
     / ``first_seen_drug_id`` stripped by NODE_PROPERTY_WHITELIST)
-    INVISIBLE to tests — CI passed, production lost data.
+    INVISIBLE to tests -- CI passed, production lost data.
 
     ROOT FIX: apply the SAME whitelist in the recorder. Returns
     (cleaned_node, dropped_keys) so tests can assert on dropped keys.
@@ -469,7 +469,7 @@ def _apply_node_whitelist(
             SYSTEM_PROPS,
             _storage_label,
         )
-    except Exception:  # pragma: no cover — fallback for direct-script execution
+    except Exception:  # pragma: no cover -- fallback for direct-script execution
         # If kg_builder is unavailable, return the node unchanged (no filter).
         return dict(node), []
 
@@ -498,21 +498,21 @@ def _apply_edge_whitelist(
     non-whitelisted edge properties, tests must see the SAME stripping
     or production-only data loss stays invisible.
 
-    v79 FORENSIC ROOT FIX (compound — KeyError: 'src_id' in
+    v79 FORENSIC ROOT FIX (compound -- KeyError: 'src_id' in
     bridge_to_pyg_maps):
       The v78 code stripped ANY edge dict key not in
       ``EDGE_PROPERTY_WHITELIST | SYSTEM_PROPS``. But ``src_id`` and
       ``dst_id`` are the INTERNAL STRUCTURAL endpoint keys the bridge
-      uses to identify edge endpoints — they are NOT graph properties.
+      uses to identify edge endpoints -- they are NOT graph properties.
       ``bridge_to_pyg_maps`` (line ~5306) reads ``e["src_id"]`` and
       ``e["dst_id"]`` to build the PyG edge index. When the whitelist
       stripped them, ``bridge_to_pyg_maps`` raised ``KeyError: 'src_id'``
-      and the ENTIRE Phase 2 pipeline aborted at Step 1 — ZERO graph
+      and the ENTIRE Phase 2 pipeline aborted at Step 1 -- ZERO graph
       was built, ZERO treats edges, V1 launch criterion unverifiable.
       This was a COMPOUND failure: the whitelist (designed to mirror
       production property stripping) was incorrectly applied to
       structural keys, breaking the bridge's own contract.
-    ROOT FIX: ``src_id`` and ``dst_id`` are ALWAYS preserved — they
+    ROOT FIX: ``src_id`` and ``dst_id`` are ALWAYS preserved -- they
       are structural endpoint references, not properties. The whitelist
       still strips non-whitelisted PROPERTIES (``source``, ``evidence``,
       ``normalized_score``, etc.) as before, but the endpoint identity
@@ -543,7 +543,7 @@ def _apply_edge_whitelist(
 
 
 # ---------------------------------------------------------------------------
-# 2. RecordingGraphBuilder — for tests, demos, and dry-runs (no Neo4j)
+# 2. RecordingGraphBuilder -- for tests, demos, and dry-runs (no Neo4j)
 # ---------------------------------------------------------------------------
 class RecordingGraphBuilder:
     """In-memory graph builder that records every load call without Neo4j.
@@ -554,10 +554,10 @@ class RecordingGraphBuilder:
     of :meth:`DrugOSGraphBuilder.load_nodes_batch`).
 
     Use this in tests and in the ``--dry-run`` mode of ``run_unified.py`` to
-    validate the full Phase 1 → Phase 2 data flow without provisioning Neo4j.
+    validate the full Phase 1 -> Phase 2 data flow without provisioning Neo4j.
 
     BUG-D-004 root fix: this builder now applies the SAME validation as
-    :class:`DrugOSGraphBuilder` — ID_PATTERNS, CORE_EDGE_TYPES whitelist,
+    :class:`DrugOSGraphBuilder` -- ID_PATTERNS, CORE_EDGE_TYPES whitelist,
     and dead-letter recording. Previously it applied ZERO validation, so
     tests using it were structurally blind to production-only data loss:
     a test could report "100 nodes loaded, 0 errors" while the production
@@ -583,11 +583,11 @@ class RecordingGraphBuilder:
         :meth:`DrugOSGraphBuilder._validate_node_id`.
 
         v28 ROOT FIX (P2-B-6): the previous code returned ``True`` for
-        any label not present in ``ID_PATTERNS`` — silently disabling
+        any label not present in ``ID_PATTERNS`` -- silently disabling
         validation for typo'd labels like 'MedDRATerm' (missing
         underscore) or 'Compoud' (misspelled Compound). Every ID was
         accepted by tests, but production ``DrugOSGraphBuilder`` raises
-        :class:`UnknownLabelError` — so tests passed while production
+        :class:`UnknownLabelError` -- so tests passed while production
         crashed. Now ``RecordingGraphBuilder`` raises the SAME exception
         so tests catch the same failures production does. Fail-closed is
         the only safe default for biomedical ID validation.
@@ -599,7 +599,7 @@ class RecordingGraphBuilder:
         from .exceptions import UnknownLabelError
         pattern = ID_PATTERNS.get(label)
         if pattern is None:
-            # v28 ROOT FIX (P2-B-6): mirror production — raise instead of
+            # v28 ROOT FIX (P2-B-6): mirror production -- raise instead of
             # silently accepting unknown labels. Tests that previously
             # passed with typo'd labels will now FAIL, exposing the bug
             # at test time rather than at production deployment time.
@@ -699,7 +699,7 @@ class RecordingGraphBuilder:
         from .kg_builder import CORE_EDGE_TYPES
         edge_key = (src_label, rel_type, dst_label)
         if hasattr(CORE_EDGE_TYPES, "__contains__") and edge_key not in CORE_EDGE_TYPES:
-            # Not in whitelist — dead-letter every edge with reason.
+            # Not in whitelist -- dead-letter every edge with reason.
             for e in edges:
                 self._dead_letter(
                     source, e,
@@ -801,12 +801,12 @@ class RecordingGraphBuilder:
 
 
 # ---------------------------------------------------------------------------
-# 3. Phase1StagedData — the structured intermediate
+# 3. Phase1StagedData -- the structured intermediate
 # ---------------------------------------------------------------------------
 # P2-014 ROOT FIX: define a typed dict-subclass that carries the backend
 # label as an ATTRIBUTE (not a string-valued dict key). The previous
 # contract returned ``Dict[str, pd.DataFrame]`` but silently inserted a
-# STRING value at key ``"_phase1_backend"`` — a type-system lie. Any
+# STRING value at key ``"_phase1_backend"`` -- a type-system lie. Any
 # downstream iteration site that forgot the ``if key == "_phase1_backend":
 # continue`` guard would crash with
 # ``AttributeError: 'str' object has no attribute 'empty'``. The fix
@@ -819,7 +819,7 @@ class _Phase1BridgeResult(dict):
     Inherits from ``dict`` so all existing call sites (``items()``,
     ``get()``, ``pop()``, ``len()``, ``in``, etc.) work unchanged.
     Adds a ``.backend`` attribute that records which backend
-    (PostgreSQL or CSV) produced the frames — type-safe and
+    (PostgreSQL or CSV) produced the frames -- type-safe and
     iteration-safe.
 
     For backward compat, the legacy ``"_phase1_backend"`` key is ALSO
@@ -856,14 +856,14 @@ class Phase1StagedData:
     # FIX-F / C-16: ClinicalOutcome nodes derived from
     # drugbank_indications.csv by _load_clinical_outcomes().
     clinical_outcome_nodes: List[Dict[str, Any]] = field(default_factory=list)
-    # v43 ROOT FIX (Chain 4b — Pathway nodes missing): Pathway nodes
+    # v43 ROOT FIX (Chain 4b -- Pathway nodes missing): Pathway nodes
     # derived from STRING PPI connected components by
     # _derive_pathways_from_string(). Restores the DOCX Phase 2
     # 5-node-type contract (Drugs, Proteins, Pathways, Diseases,
     # Clinical Outcomes).
     pathway_nodes: List[Dict[str, Any]] = field(default_factory=list)
 
-    # Edges keyed by (src_label, rel_type, dst_label) — matches CORE_EDGE_TYPES
+    # Edges keyed by (src_label, rel_type, dst_label) -- matches CORE_EDGE_TYPES
     edges: Dict[Tuple[str, str, str], List[Dict[str, Any]]] = field(
         default_factory=dict
     )
@@ -913,7 +913,7 @@ class Phase1StagedData:
 
 
 # ---------------------------------------------------------------------------
-# 4. read_phase1_outputs — read CSVs into DataFrames
+# 4. read_phase1_outputs -- read CSVs into DataFrames
 # ---------------------------------------------------------------------------
 def _sha256_of_file(path: Path) -> str:
     h = hashlib.sha256()
@@ -932,7 +932,7 @@ def compute_input_checksum(paths: Iterable[Path]) -> str:
 
     v6 fix (Tier 4): the v5 implementation hashed the full file PATH
     into the checksum, so identical CSVs in different install dirs
-    produced different lineage hashes — breaking reproducibility for
+    produced different lineage hashes -- breaking reproducibility for
     users who installed the package at different filesystem locations.
     The fix hashes only the file BASENAME (e.g. ``drugbank_drugs.csv``)
     plus the file CONTENTS. Two installs with the same CSV contents
@@ -965,7 +965,7 @@ def _read_csv_robust(path: Path) -> pd.DataFrame:
 # downstream loaders) depend on. If a column is missing, the bridge
 # silently returns empty strings/None for every ``row.get(...)`` call,
 # producing ZERO-output bugs that are nearly impossible to triage.
-# Required columns per source (only enforced when the file is present —
+# Required columns per source (only enforced when the file is present --
 # missing files still degrade gracefully per the bridge's contract).
 #
 # v27 NOTE: the original audit spec listed columns like ``target_uniprot_id``
@@ -973,14 +973,14 @@ def _read_csv_robust(path: Path) -> pd.DataFrame:
 # ``uniprot_id`` (uniprot_proteins), ``disease_mim`` (omim_gda). The ACTUAL
 # Phase 1 CSVs (verified at /home/z/my-project/v27/v27_upgraded/phase1/
 # processed_data/) emit:
-#   • drugbank_interactions.csv.gz → drugbank_id, uniprot_id, action_type
+#   • drugbank_interactions.csv.gz -> drugbank_id, uniprot_id, action_type
 #     (column is ``uniprot_id``, NOT ``target_uniprot_id``)
-#   • string_protein_protein_interactions.csv → uniprot_ac_a, uniprot_ac_b,
-#     combined_score (NO ``protein1``/``protein2`` — those are raw STRING
+#   • string_protein_protein_interactions.csv -> uniprot_ac_a, uniprot_ac_b,
+#     combined_score (NO ``protein1``/``protein2`` -- those are raw STRING
 #     columns that Phase 1's pipeline replaces with UniProt accessions)
-#   • uniprot_proteins.csv → uniprot_ac, gene_symbol (column is
+#   • uniprot_proteins.csv -> uniprot_ac, gene_symbol (column is
 #     ``uniprot_ac`` / ``accession``, NOT ``uniprot_id``)
-#   • omim_gene_disease_associations.csv → gene_mim, gene_symbol,
+#   • omim_gene_disease_associations.csv -> gene_mim, gene_symbol,
 #     disease_id, disease_name (column is ``disease_id`` / has
 #     ``phenotype_mim``, NOT ``disease_mim``)
 # Using the audit's literal column list would BREAK the bridge against the
@@ -1003,17 +1003,17 @@ _PHASE1_EXPECTED_COLUMNS: Dict[str, List[str]] = {
     # accepts both forms. ``combined_score`` stays in EXPECTED because
     # the bridge always reads it (no fallback).
     "string_ppi": ["combined_score"],
-    # v78 FORENSIC ROOT FIX (BUG #7 — Silent Data-Loss):
+    # v78 FORENSIC ROOT FIX (BUG #7 -- Silent Data-Loss):
     # The bridge's DisGeNET block reads
     # ``row.get("gene_id") or row.get("ncbi_gene_id")`` to get the
     # Gene node ID. But the previous expected-columns list only
-    # required ``gene_symbol``, ``disease_id``, ``score`` — NOT
+    # required ``gene_symbol``, ``disease_id``, ``score`` -- NOT
     # ``gene_id`` or ``ncbi_gene_id``. If Phase 1's disgenet pipeline
     # dropped those columns (a real risk: the embedded sample emits
     # ``gene_id`` as an integer, but the production pipeline may emit
     # ``ncbi_gene_id`` instead), the bridge silently got
-    # ``gene_id=None`` for every row → 0 DisGeNET edges → 0
-    # Gene→associated_with→Disease edges from DisGeNET. The
+    # ``gene_id=None`` for every row -> 0 DisGeNET edges -> 0
+    # Gene->associated_with->Disease edges from DisGeNET. The
     # _validate_phase1_columns check passed (only required gene_symbol
     # + disease_id + score), so the regression was invisible.
     # ROOT FIX: require AT LEAST ONE of ``gene_id``/``ncbi_gene_id``.
@@ -1024,7 +1024,7 @@ _PHASE1_EXPECTED_COLUMNS: Dict[str, List[str]] = {
     "pubchem_enrichment": ["inchikey", "canonical_smiles"],
     # v35 ROOT FIX (L-7): ``chembl_activities`` previously required only
     # ``molecule_chembl_id`` and ``target_chembl_id``. The bridge's
-    # ChEMBL→Protein/Compound edge builder reads ``pchembl_value`` and
+    # ChEMBL->Protein/Compound edge builder reads ``pchembl_value`` and
     # ``standard_relation`` from each row (see
     # ``_classify_chembl_activity_edge`` and the staged edge props).
     # Without these in the expected-columns list, a Phase 1 schema
@@ -1047,20 +1047,20 @@ _PHASE1_EXPECTED_COLUMNS: Dict[str, List[str]] = {
 # of each list is present. A regression that drops ALL alternatives
 # fails fast at read time instead of silently producing zero edges.
 #
-# v83 FORENSIC ROOT FIX (P0-C14 — UniProt/STRING schema mismatch
+# v83 FORENSIC ROOT FIX (P0-C14 -- UniProt/STRING schema mismatch
 #   between Phase 1 pipeline output and bridge expected columns):
 #   The UniProt pipeline writes ``uniprot_id`` (the canonical UniProt
 #   accession) but the bridge validator required ``uniprot_ac``. The
 #   bridge's READ code at line ~4504 already accepted both
 #   ``uniprot_ac`` and ``accession`` via
-#   ``row.get("uniprot_ac") or row.get("accession")`` — but the
+#   ``row.get("uniprot_ac") or row.get("accession")`` -- but the
 #   VALIDATOR was strict, so the read code never ran. The bridge
 #   crashed with ``DrugOSDataError: missing required column(s)
 #   ['uniprot_ac']`` on every run. ROOT FIX: add ``uniprot_id`` as
 #   an accepted alias for ``uniprot_ac`` (and ``protein_a``/``protein_b``
-#   for STRING PPI — the bridge read code at line ~4554 already
+#   for STRING PPI -- the bridge read code at line ~4554 already
 #   accepts these aliases). The validator now matches the read code's
-#   actual behavior — no more false-positive schema rejections.
+#   actual behavior -- no more false-positive schema rejections.
 _PHASE1_ANY_OF_COLUMNS: Dict[str, List[List[str]]] = {
     "disgenet_gda": [
         ["gene_id", "ncbi_gene_id"],  # bridge reads row.get("gene_id") or row.get("ncbi_gene_id")
@@ -1097,7 +1097,7 @@ def _validate_phase1_columns(
     v27 ROOT FIX (P2-B-5): previously, ``row.get(missing_col)`` silently
     returned ``None`` / empty string for EVERY row, producing zero-output
     bugs (e.g. P2-L-1: ``chembl_to_node_records_from_phase1`` returned 0
-    nodes because ``drug_chembl_id`` was missing — but the Phase 1 CSV
+    nodes because ``drug_chembl_id`` was missing -- but the Phase 1 CSV
     had ``chembl_id``). This helper makes the schema contract explicit
     and fails fast at read time so the operator can fix the Phase 1
     pipeline instead of debugging silent data loss downstream.
@@ -1118,7 +1118,7 @@ def _validate_phase1_columns(
             f"Phase 1 source '{source_name}' is missing required column(s) "
             f"{missing}. Got columns: {sorted(actual)}. This usually "
             f"means Phase 1's pipeline produced a different schema than "
-            f"the bridge expects — re-run the Phase 1 pipeline, or "
+            f"the bridge expects -- re-run the Phase 1 pipeline, or "
             f"update _PHASE1_EXPECTED_COLUMNS in phase1_bridge.py to "
             f"match the new schema."
         )
@@ -1134,7 +1134,7 @@ def _validate_phase1_columns(
                     f"at least one of these per row (e.g. "
                     f"``row.get('gene_id') or row.get('ncbi_gene_id')``); "
                     f"if all are missing, every row silently produces "
-                    f"None → 0 edges. Got columns: {sorted(actual)}. "
+                    f"None -> 0 edges. Got columns: {sorted(actual)}. "
                     f"Re-run the Phase 1 pipeline, or update "
                     f"_PHASE1_ANY_OF_COLUMNS in phase1_bridge.py."
                 )
@@ -1162,25 +1162,25 @@ def _validate_phase1_source(
 # The forensic audit (Compound Chain 2: "Phase 1 Output Is Discarded")
 # proved that the bridge BYPASSED the entire Phase 1 SQLAlchemy/database
 # layer and read CSVs directly. Phase 1's 4,215 lines of loaders, 2,171
-# lines of models, 4,537 lines of migration runner were dead weight —
+# lines of models, 4,537 lines of migration runner were dead weight --
 # Phase 2 never used them. This is the single biggest reason Phase 1 ↔
 # Phase 2 was only ~60% connected, not 100%.
 #
 # ROOT FIX: add a PostgreSQL-backed reader that reads from the same
 # ORM models Phase 1's loaders write to. This makes Phase 2 actually
 # consume Phase 1's database output, fulfilling the docx architecture:
-#   "Airflow → Phase 1 → PostgreSQL → Phase 2"
+#   "Airflow -> Phase 1 -> PostgreSQL -> Phase 2"
 #
 # Strategy:
 #   1. If DATABASE_URL is set AND the Phase 1 schema is populated, read
-#      from PostgreSQL. This is the authoritative path — Phase 1's
+#      from PostgreSQL. This is the authoritative path -- Phase 1's
 #      cleaning/normalization/dedup/ER work is honored.
 #   2. Otherwise, fall back to the CSV reader (the original v28 path).
 #      This preserves backward compatibility with dev/CI runs that
 #      haven't provisioned a database.
 #   3. The choice is logged at INFO so operators can verify which path
 #      was taken. The lineage property ``_source_phase1_backend`` on
-#      every node records which backend produced it — auditors can
+#      every node records which backend produced it -- auditors can
 #      verify PostgreSQL was used in production runs.
 
 _PHASE1_BACKEND_POSTGRES = "postgresql"
@@ -1197,12 +1197,12 @@ _PHASE1_BACKEND_CSV = "csv"
 # ROOT FIX: treat the deployment as PRODUCTION whenever the operator has
 # EXPLICITLY configured a database (``DATABASE_URL`` is set and non-
 # empty). The only way to get the dev-mode CSV fallback now is to
-# explicitly set ``DRUGOS_ENVIRONMENT=dev`` AND not set DATABASE_URL —
+# explicitly set ``DRUGOS_ENVIRONMENT=dev`` AND not set DATABASE_URL --
 # making the fallback an explicit opt-in rather than a silent default.
 #
 # We expose both a module-level constant (``_PRODUCTION_ENV``) computed
 # at import time for production code paths, AND a function
-# (``_is_production_env()``) that recomputes on each call — so tests
+# (``_is_production_env()``) that recomputes on each call -- so tests
 # can verify the logic without module-reload gymnastics.
 
 
@@ -1211,9 +1211,9 @@ def _is_production_env() -> bool:
     as FATAL (rather than silently falling back to CSV).
 
     Logic:
-      * ``DRUGOS_ENVIRONMENT=prod`` → True (explicit prod override).
-      * ``DRUGOS_ENVIRONMENT=dev`` → False (explicit dev override, even
-        if DATABASE_URL is set — lets developers use CSV fallback).
+      * ``DRUGOS_ENVIRONMENT=prod`` -> True (explicit prod override).
+      * ``DRUGOS_ENVIRONMENT=dev`` -> False (explicit dev override, even
+        if DATABASE_URL is set -- lets developers use CSV fallback).
       * Otherwise: True iff ``DATABASE_URL`` is set and non-empty.
     """
     env = os.environ.get("DRUGOS_ENVIRONMENT", "").lower().strip()
@@ -1236,22 +1236,22 @@ def _classify_db_failure(exc: Exception) -> str:
     block conflated THREE distinct failure modes into a single
     "fall back to CSV" branch:
 
-      1. ``schema_missing`` — the database is reachable but the ``drugs``
+      1. ``schema_missing`` -- the database is reachable but the ``drugs``
          table doesn't exist (typically: SQLite file exists but migrations
          haven't run; or PostgreSQL is up but the Phase 1 schema isn't
          applied). This is a CONFIGURATION error, not a database failure.
          The right action is to fall back to CSV with a LOUD warning so
-         the operator can run migrations — NOT to crash the bridge.
+         the operator can run migrations -- NOT to crash the bridge.
 
-      2. ``db_unreachable`` — the database cannot be reached at all
+      2. ``db_unreachable`` -- the database cannot be reached at all
          (network refused, DNS failure, wrong port, server down). This IS
          a real database failure. In production this should be FATAL
-         (operator intended PostgreSQL but it's down — they need to know).
+         (operator intended PostgreSQL but it's down -- they need to know).
 
-      3. ``auth_failed`` — the database is reachable but credentials are
+      3. ``auth_failed`` -- the database is reachable but credentials are
          wrong / permissions missing. Same handling as ``db_unreachable``.
 
-      4. ``unknown`` — any other exception. Conservative: treat like
+      4. ``unknown`` -- any other exception. Conservative: treat like
          ``db_unreachable`` (re-raise in production, fall back in dev).
 
     The classification is based on exception type + message substring
@@ -1323,11 +1323,11 @@ def _classify_db_failure(exc: Exception) -> str:
 def _phase1_db_available() -> bool:
     """Return True iff a Phase 1 database backend is configured AND populated.
 
-    v61 ROOT FIX (silent break point #1 — forensic deep fix):
+    v61 ROOT FIX (silent break point #1 -- forensic deep fix):
     The v58/v60 code swallowed ALL exceptions with a single ``except
     Exception`` block and re-raised in production. This crashed the
     bridge for the COMMON configuration error of "SQLite file exists
-    but no schema migrated" — the user's exact runtime scenario.
+    but no schema migrated" -- the user's exact runtime scenario.
     The .env file sets ``DATABASE_URL=file:/home/z/my-project/db/custom.db``
     which makes ``_PRODUCTION_ENV=True``, but the SQLite file is empty
     (no drugs table), so the SELECT raised ``OperationalError: no such
@@ -1335,17 +1335,17 @@ def _phase1_db_available() -> bool:
     of falling back to CSV.
 
     ROOT FIX: classify the failure mode and act accordingly:
-      * ``schema_missing`` → log ERROR + audit, fall back to CSV (NOT fatal
-        even in production — this is a configuration issue, not a DB
+      * ``schema_missing`` -> log ERROR + audit, fall back to CSV (NOT fatal
+        even in production -- this is a configuration issue, not a DB
         failure; the bridge can still produce a graph from CSV while
         the operator runs migrations)
-      * ``db_unreachable`` / ``auth_failed`` → in production, re-raise
-        (operator intended the DB to be up — they need to know it's
+      * ``db_unreachable`` / ``auth_failed`` -> in production, re-raise
+        (operator intended the DB to be up -- they need to know it's
         not); in dev, fall back to CSV with ERROR log + audit
-      * ``unknown`` → conservative: same as ``db_unreachable``
-      * Success with 0 rows → return False (legitimate empty DB; CSV
+      * ``unknown`` -> conservative: same as ``db_unreachable``
+      * Success with 0 rows -> return False (legitimate empty DB; CSV
         fallback is correct)
-      * Success with >0 rows → return True (DB is populated; use it)
+      * Success with >0 rows -> return True (DB is populated; use it)
     """
     try:
         import sys as _sys
@@ -1360,12 +1360,12 @@ def _phase1_db_available() -> bool:
                 _sa_text("SELECT COUNT(*) AS n FROM drugs")
             ).fetchone()
             return bool(row is not None and row[0] is not None and int(row[0]) > 0)
-    except Exception as exc:  # noqa: BLE001 — best-effort detection
+    except Exception as exc:  # noqa: BLE001 -- best-effort detection
         failure_mode = _classify_db_failure(exc)
         # v61 ROOT FIX: classify and act per failure mode.
         if failure_mode == "schema_missing":
             # Configuration error: DB exists but schema not migrated.
-            # NOT fatal even in production — the bridge can still
+            # NOT fatal even in production -- the bridge can still
             # produce a graph from CSV while the operator runs migrations.
             logger.error(
                 "Phase1 bridge: database is reachable but the `drugs` "
@@ -1387,11 +1387,11 @@ def _phase1_db_available() -> bool:
                 exception_message=str(exc),
                 extra={"failure_mode": "schema_missing"},
             )
-            return False  # fall back to CSV — NOT fatal
+            return False  # fall back to CSV -- NOT fatal
         # failure_mode in {"db_unreachable", "auth_failed", "unknown"}
         logger.error(
             "Phase1 bridge: database backend unavailable (%s): %s: %s "
-            "— will fall back to CSV reader (dev only; in prod this is "
+            "-- will fall back to CSV reader (dev only; in prod this is "
             "fatal for db_unreachable/auth_failed/unknown modes).",
             failure_mode, type(exc).__name__, exc,
         )
@@ -1407,9 +1407,9 @@ def _phase1_db_available() -> bool:
             # Production must not silently bypass Phase 1's ORM/migration/
             # loader code for unreachable/auth failures. Re-raise so the
             # failure is visible. Schema_missing is handled above (NOT
-            # re-raised — it's a configuration issue, not a DB failure).
+            # re-raised -- it's a configuration issue, not a DB failure).
             raise
-        # v88 ROOT FIX (BUG #28 — silent fallback to CSV bypasses Phase 1):
+        # v88 ROOT FIX (BUG #28 -- silent fallback to CSV bypasses Phase 1):
         # the previous gate was `_PRODUCTION_ENV` which is computed from
         # `DATABASE_URL` being set. If the operator FORGOT to set
         # `DATABASE_URL` (a common deployment mistake), `_PRODUCTION_ENV`
@@ -1437,20 +1437,20 @@ def _read_indications_from_postgres(conn: Any) -> Optional[pd.DataFrame]:
 
     Reads from the new ``drugs.indication`` + ``drugs.indication_source``
     columns (added by migration 010). Returns a DataFrame with columns:
-        - drug_inchikey (str) — Compound node identifier
-        - drug_name (str) — display name
-        - disease_id (str) — best-effort: derived from indication text
+        - drug_inchikey (str) -- Compound node identifier
+        - drug_name (str) -- display name
+        - disease_id (str) -- best-effort: derived from indication text
           via simple keyword matching (hypertension, diabetes, etc.) OR
           joined from gene_disease_associations when the drug's targets
           connect to a gene with a known disease.
-        - disease_name (str) — same source
-        - source (str) — always 'drugbank_postgres' (distinguishes from
+        - disease_name (str) -- same source
+        - source (str) -- always 'drugbank_postgres' (distinguishes from
           CSV-derived 'drugbank_xml' structured indications)
-        - indication_source (str) — provenance tag from the Drug ORM
+        - indication_source (str) -- provenance tag from the Drug ORM
           ('drugbank_xml' | 'chembl_max_phase' | 'rxnorm' | 'manual')
 
     Returns None if the `indication` column doesn't exist (DB not yet
-    migrated to v49) — the caller falls back to CSV in that case.
+    migrated to v49) -- the caller falls back to CSV in that case.
 
     Parameters
     ----------
@@ -1472,14 +1472,14 @@ def _read_indications_from_postgres(conn: Any) -> Optional[pd.DataFrame]:
         if "indication" not in inspector_cols:
             logger.debug(
                 "Phase1 bridge: drugs.indication column not present "
-                "(DB not migrated to v49). Returning None — caller "
+                "(DB not migrated to v49). Returning None -- caller "
                 "will fall back to CSV."
             )
             return None
 
         # Read all drugs with non-empty indication text.
-        # v84 FORENSIC ROOT FIX (BUG #25 — missing canonical ID validation):
-        # The previous query only filtered on `indication IS NOT NULL` —
+        # v84 FORENSIC ROOT FIX (BUG #25 -- missing canonical ID validation):
+        # The previous query only filtered on `indication IS NOT NULL` --
         # inchikey NULLs / empty strings / malformed values were allowed
         # through. Downstream code uses inchikey as the canonical Compound
         # ID (per the Phase 1 bridge docstring "Canonical Compound ID =
@@ -1489,11 +1489,11 @@ def _read_indications_from_postgres(conn: Any) -> Optional[pd.DataFrame]:
         # inchikey. ROOT FIX: add `AND inchikey IS NOT NULL AND inchikey
         # ~ '^[A-Z]{14}-[A-Z]{10}-[A-Z]$'` to the WHERE clause so only
         # drugs with a valid InChIKey (14 uppercase letters, hyphen, 10
-        # uppercase letters, hyphen, 1 uppercase letter — the standard
+        # uppercase letters, hyphen, 1 uppercase letter -- the standard
         # InChIKey format) are returned. The KG builder's ID validator
         # no longer needs to dead-letter these rows because they never
         # reach it.
-        # v88 ROOT FIX (BUG #39 — InChIKey format validation): filter
+        # v88 ROOT FIX (BUG #39 -- InChIKey format validation): filter
         # to well-formed InChIKeys (^[A-Z]{14}-[A-Z]{10}-[A-Z]$) so NULL/
         # empty/malformed inchikeys don't violate the InChIKey mandate.
         drugs_with_indication = pd.read_sql(
@@ -1531,7 +1531,7 @@ def _read_indications_from_postgres(conn: Any) -> Optional[pd.DataFrame]:
             return None
 
         # Best-effort disease extraction from indication free-text.
-        # This is intentionally conservative — the DrugBank XML parser
+        # This is intentionally conservative -- the DrugBank XML parser
         # produces structured (drug, disease) pairs in the CSV path
         # which is the gold standard. The PostgreSQL path produces
         # (drug, indication_text) pairs which downstream
@@ -1549,19 +1549,19 @@ def _read_indications_from_postgres(conn: Any) -> Optional[pd.DataFrame]:
         )
         drugs_with_indication["source"] = "drugbank_postgres"
 
-        # Drop rows where we couldn't extract any disease signal —
+        # Drop rows where we couldn't extract any disease signal --
         # they have indication text but no parseable disease. These are
         # still useful as ClinicalOutcome nodes (the indication text IS
         # the outcome), but they cannot form Compound-treats-Disease
         # edges without a disease_id.
-        # Actually KEEP them — _load_clinical_outcomes downstream handles
+        # Actually KEEP them -- _load_clinical_outcomes downstream handles
         # rows with empty disease_id by creating ClinicalOutcome nodes
         # only (no treats edge). That's still valuable.
         return drugs_with_indication
     except Exception as exc:
         logger.debug(
             "Phase1 bridge: _read_indications_from_postgres failed: %s. "
-            "Returning None — caller will fall back to CSV.", exc,
+            "Returning None -- caller will fall back to CSV.", exc,
         )
         return None
 
@@ -1577,7 +1577,7 @@ def _inspect_columns(conn: Any, table_name: str) -> list:
 
 
 # v49 ROOT FIX: simple keyword-based disease extraction from indication
-# free-text. This is intentionally conservative — only matches a small
+# free-text. This is intentionally conservative -- only matches a small
 # set of high-confidence disease keywords. The CSV path remains the
 # gold standard for structured disease mapping.
 _DISEASE_KEYWORD_MAP = {
@@ -1633,13 +1633,13 @@ def _read_phase1_from_postgres() -> Dict[str, pd.DataFrame]:
     a dict with the SAME keys as :func:`read_phase1_outputs` so callers
     can use either backend transparently.
 
-    Schema mapping (Phase 1 ORM table → bridge key):
-        drugs                          → "drugs"
-        drug_protein_interactions      → "interactions"
-        gene_disease_associations      → "omim_gda" + "disgenet_gda"
-        protein_protein_interactions   → "string_ppi"
-        proteins                       → "uniprot_proteins"
-        entity_mapping                 → used for cross-source ID resolution
+    Schema mapping (Phase 1 ORM table -> bridge key):
+        drugs                          -> "drugs"
+        drug_protein_interactions      -> "interactions"
+        gene_disease_associations      -> "omim_gda" + "disgenet_gda"
+        protein_protein_interactions   -> "string_ppi"
+        proteins                       -> "uniprot_proteins"
+        entity_mapping                 -> used for cross-source ID resolution
 
     The function reads with read-only sessions and never mutates the DB.
     """
@@ -1675,7 +1675,7 @@ def _read_phase1_from_postgres() -> Dict[str, pd.DataFrame]:
             _m.Drug.mechanism_of_action,
             _m.Drug.indication,
             _m.Drug.indication_source,
-        ).where(_m.Drug.is_deleted == False)  # noqa: E712 — SQLAlchemy
+        ).where(_m.Drug.is_deleted == False)  # noqa: E712 -- SQLAlchemy
         drugs_df = pd.read_sql(drugs_stmt, conn)
         # Synthesise the legacy 'groups' column from clinical_status so
         # downstream stage_phase1_to_phase2 doesn't break.
@@ -1722,7 +1722,7 @@ def _read_phase1_from_postgres() -> Dict[str, pd.DataFrame]:
         # association_type) and synthesized gene_mim/phenotype_mim as None.
         # When DATABASE_URL was set, the bridge's stage code fell through
         # ALL three Gene ID resolvers (canonical_gene_id, ncbi_gene_id,
-        # gene_mim) and emitted `SYM:{symbol}` IDs for every Gene —
+        # gene_mim) and emitted `SYM:{symbol}` IDs for every Gene --
         # losing cross-source ID resolution. The CSV path includes these
         # columns; the PostgreSQL path did NOT.
         #
@@ -1733,7 +1733,7 @@ def _read_phase1_from_postgres() -> Dict[str, pd.DataFrame]:
         #   - disease_id_type
         #   - score_type, score_method, evidence_strength,
         #     normalized_score, confidence_tier, source_id, source_version
-        #   - mapping_key (synthesized as None — the model doesn't have it;
+        #   - mapping_key (synthesized as None -- the model doesn't have it;
         #     it's a Phase 1 OMIM-specific field that the CSV path provides
         #     but the GDA model doesn't store. This is acceptable: the
         #     bridge's stage code only uses mapping_key for the edge props,
@@ -1825,13 +1825,13 @@ def _read_phase1_from_postgres() -> Dict[str, pd.DataFrame]:
             len(out["string_ppi"]),
         )
 
-        # v49 ROOT FIX (CRITICAL — Compound Chain 2 "PostgreSQL Bridge Data
+        # v49 ROOT FIX (CRITICAL -- Compound Chain 2 "PostgreSQL Bridge Data
         # Corruption" finally closed):
-        # The v37/v43 code gave up on PostgreSQL mode for indications — it
+        # The v37/v43 code gave up on PostgreSQL mode for indications -- it
         # emitted ZERO rows because "the Drug ORM doesn't have an
         # `indication` column". The v49 migration 010 ADDS the `indication`
         # + `indication_source` columns to the Drug ORM. The DrugBank
-        # pipeline already produced `indication` text in its drugs_df — it
+        # pipeline already produced `indication` text in its drugs_df -- it
         # was silently dropped by the loader's column filter. Now it loads.
         #
         # This reader now reads `indication` directly from PostgreSQL:
@@ -1849,7 +1849,7 @@ def _read_phase1_from_postgres() -> Dict[str, pd.DataFrame]:
         #     before DrugBank pipeline has run).
         #
         # This closes the "PostgreSQL mode produces ZERO Compound-treats-
-        # Disease edges" chain — V1 launch criterion `positive_pairs_sufficient`
+        # Disease edges" chain -- V1 launch criterion `positive_pairs_sufficient`
         # is now achievable in pure-PostgreSQL mode.
         out.setdefault("indications", pd.DataFrame())
         try:
@@ -1858,13 +1858,13 @@ def _read_phase1_from_postgres() -> Dict[str, pd.DataFrame]:
                 out["indications"] = _pg_indications_df
                 logger.info(
                     "Phase1 bridge: PostgreSQL backend read %d indication "
-                    "rows from drugs.indication column (v49 root fix — "
+                    "rows from drugs.indication column (v49 root fix -- "
                     "Compound Chain 2 closed).",
                     len(_pg_indications_df),
                 )
             else:
                 # Fall back to the CSV (DrugBank XML-derived structured
-                # indications — the gold-standard).
+                # indications -- the gold-standard).
                 _indications_csv_path = DEFAULT_PHASE1_PROCESSED_DIR / "drugbank_indications.csv"
                 if _indications_csv_path.exists() and _indications_csv_path.stat().st_size > 0:
                     _indications_df = _read_csv_robust(_indications_csv_path)
@@ -1872,7 +1872,7 @@ def _read_phase1_from_postgres() -> Dict[str, pd.DataFrame]:
                         out["indications"] = _indications_df
                         logger.info(
                             "Phase1 bridge: PostgreSQL `indication` column "
-                            "empty — enriched indications from %s (%d rows).",
+                            "empty -- enriched indications from %s (%d rows).",
                             _indications_csv_path.name, len(_indications_df),
                         )
                     else:
@@ -1914,7 +1914,7 @@ def _read_phase1_from_postgres() -> Dict[str, pd.DataFrame]:
                 except Exception as _csv_exc:
                     logger.error(
                         "Phase1 bridge: indications CSV also failed to "
-                        "read (%s: %s). Returning empty DataFrame — "
+                        "read (%s: %s). Returning empty DataFrame -- "
                         "Compound-treats-Disease edges will be ABSENT.",
                         type(_csv_exc).__name__, _csv_exc,
                     )
@@ -1955,14 +1955,14 @@ def _read_phase1_from_postgres() -> Dict[str, pd.DataFrame]:
             out["chembl_drugs"] = chembl_drugs_df
             logger.info(
                 "Phase1 bridge (postgres): read %d ChEMBL drug rows "
-                "(drugs where chembl_id IS NOT NULL) — v37 PostgreSQL bridge fix",
+                "(drugs where chembl_id IS NOT NULL) -- v37 PostgreSQL bridge fix",
                 len(chembl_drugs_df),
             )
         except Exception as exc:
             # v58 ROOT FIX (P2C-008 deep): ERROR + structured audit.
             logger.error(
                 "Phase1 bridge (postgres): could not read chembl_drugs "
-                "from drugs table (%s: %s) — falling back to empty. "
+                "from drugs table (%s: %s) -- falling back to empty. "
                 "Compound nodes from ChEMBL will be ABSENT. v37 "
                 "PostgreSQL bridge fix.",
                 type(exc).__name__, exc,
@@ -1983,7 +1983,7 @@ def _read_phase1_from_postgres() -> Dict[str, pd.DataFrame]:
         # activity_units, pchembl_value, assay_id, standard_relation,
         # assay_type, uniprot_accession.
         # Note: the DPI table doesn't have pchembl_value, assay_id,
-        # standard_relation, or assay_type columns — only activity_value
+        # standard_relation, or assay_type columns -- only activity_value
         # and activity_type. We synthesize the columns the bridge
         # expects, with NULLs where the DB doesn't have the data.
         try:
@@ -1996,12 +1996,12 @@ def _read_phase1_from_postgres() -> Dict[str, pd.DataFrame]:
                     _m.DrugProteinInteraction.activity_type,
                     _m.DrugProteinInteraction.activity_value,
                     _m.DrugProteinInteraction.activity_units,
-                    # v43 ROOT FIX (P1 — synthesized standard_relation
+                    # v43 ROOT FIX (P1 -- synthesized standard_relation
                     # semantically wrong): the previous code aliased
                     # interaction_type (DrugBank action: "inhibitor"/
                     # "agonist") as "standard_relation". But ChEMBL's
                     # standard_relation is the CENSORING direction
-                    # ('=', '<', '>') — a completely different semantic.
+                    # ('=', '<', '>') -- a completely different semantic.
                     # Downstream RL ranker code that reads standard_relation
                     # to apply censoring got action-vocabulary strings
                     # instead of censoring symbols. Fix: set to None
@@ -2018,11 +2018,11 @@ def _read_phase1_from_postgres() -> Dict[str, pd.DataFrame]:
                 .join(_m.Drug, _m.DrugProteinInteraction.drug_id == _m.Drug.id)
                 .join(_m.Protein, _m.DrugProteinInteraction.protein_id == _m.Protein.id)
                 .where(_m.DrugProteinInteraction.source == "chembl")
-                # v88+v89 ROOT FIX (BUG #38 — non-human proteins pollute
+                # v88+v89 ROOT FIX (BUG #38 -- non-human proteins pollute
                 # the human KG): filter to HUMAN proteins only
                 # (ncbi_taxid == 9606). For a HUMAN drug repurposing
                 # platform, only human protein targets are clinically
-                # actionable — a drug's activity against a mouse homolog
+                # actionable -- a drug's activity against a mouse homolog
                 # does NOT predict its activity against the human homolog
                 # (cross-species binding affinity can differ by 10-100x).
                 # This filter is the LAST line of defense: even if non-
@@ -2031,7 +2031,7 @@ def _read_phase1_from_postgres() -> Dict[str, pd.DataFrame]:
                 .where(_m.Protein.ncbi_taxid == 9606)
             )
             chembl_act_df = pd.read_sql(chembl_act_stmt, conn)
-            # v88 ROOT FIX (BUG #51 — UniProt secondary accessions create
+            # v88 ROOT FIX (BUG #51 -- UniProt secondary accessions create
             # duplicate Protein nodes): filter to PRIMARY UniProt accessions.
             import re as _re_v88
             _UNIPROT_PRIMARY_RE = _re_v88.compile(
@@ -2052,7 +2052,7 @@ def _read_phase1_from_postgres() -> Dict[str, pd.DataFrame]:
                         _n_secondary, _before,
                     )
                     chembl_act_df = chembl_act_df[_primary_mask].reset_index(drop=True)
-            # v51 ROOT FIX (COMPOUND-2 — pchembl unit handling):
+            # v51 ROOT FIX (COMPOUND-2 -- pchembl unit handling):
             # The v49/v50 code hardcoded `pchembl = 9.0 - log10(activity_value)`
             # assuming ALL values are in nM. But Phase 1 emits MIXED units
             # (nM, μM, %, ratio, etc.). For non-nM units, the formula is
@@ -2060,7 +2060,7 @@ def _read_phase1_from_postgres() -> Dict[str, pd.DataFrame]:
             #   - μM values: pchembl should be 6 - log10(μM_value), not 9 - log10
             #     (because 1 μM = 1000 nM, so the offset shifts by 3)
             #   - % values: pchembl is undefined (Inhibition % is not a
-            #     concentration — set to None)
+            #     concentration -- set to None)
             #   - M values: pchembl = -log10(M_value)
             # ROOT FIX: read `activity_units` from the DB and apply the
             # correct conversion per row. Default to nM when units are
@@ -2069,11 +2069,11 @@ def _read_phase1_from_postgres() -> Dict[str, pd.DataFrame]:
                 import numpy as _np_v37
                 _av = pd.to_numeric(chembl_act_df["activity_value"], errors="coerce")
                 _av_positive = _av.where(_av > 0, _np_v37.nan)
-                # Read units (default nM if missing — backward compat)
+                # Read units (default nM if missing -- backward compat)
                 _units = chembl_act_df.get(
                     "activity_units", pd.Series(["nM"] * len(chembl_act_df))
                 ).fillna("nM").astype(str).str.strip().str.lower()
-                # v88 ROOT FIX (BUG #29 — Greek mu vs micro sign breaks
+                # v88 ROOT FIX (BUG #29 -- Greek mu vs micro sign breaks
                 # μM unit detection): normalize both U+00B5 (micro sign)
                 # AND U+03BC (Greek mu) to ASCII "u" BEFORE the isin check.
                 _units = _units.str.replace("\u00b5", "u").str.replace("\u03bc", "u")
@@ -2091,7 +2091,7 @@ def _read_phase1_from_postgres() -> Dict[str, pd.DataFrame]:
                 # pM: pchembl = 12 - log10(value)
                 _pM_mask = _units.isin(["pm", "picomolar", "picomole"])
                 _pchembl[_pM_mask] = 12.0 - _np_v37.log10(_av_positive[_pM_mask])
-                # %, ratio, selectivity, etc.: pchembl undefined — leave NaN
+                # %, ratio, selectivity, etc.: pchembl undefined -- leave NaN
                 _undef_mask = ~(_nM_mask | _uM_mask | _M_mask | _pM_mask)
                 _undef_count = int(_undef_mask.sum())
                 if _undef_count > 0:
@@ -2106,7 +2106,7 @@ def _read_phase1_from_postgres() -> Dict[str, pd.DataFrame]:
                 chembl_act_df["pchembl_value"] = _pchembl
             else:
                 chembl_act_df["pchembl_value"] = None
-            # v84 FORENSIC ROOT FIX (BUG #26 — UniProt accession validation):
+            # v84 FORENSIC ROOT FIX (BUG #26 -- UniProt accession validation):
             # The previous code aliased `Protein.uniprot_id` as
             # `uniprot_accession` but did NOT validate the format. Phase 1's
             # `Protein.uniprot_id` column may contain secondary accessions,
@@ -2115,12 +2115,12 @@ def _read_phase1_from_postgres() -> Dict[str, pd.DataFrame]:
             # them as the canonical Protein ID. Isoform IDs (P12345-2) are
             # NOT primary accessions and should be normalized to their
             # parent (P12345). Secondary accessions and malformed values
-            # should be dropped — otherwise the KG has duplicate Protein
+            # should be dropped -- otherwise the KG has duplicate Protein
             # nodes for the same underlying protein, fragmenting the
             # drug-target signal across duplicates.
             #
             # ROOT FIX: post-read normalization pass on the dataframe:
-            #   (a) strip isoform suffixes (-2, -3, ...) → parent accession
+            #   (a) strip isoform suffixes (-2, -3, ...) -> parent accession
             #   (b) validate against the UniProt primary accession regex:
             #        ^[OPQ][0-9][A-Z0-9]{3}[0-9]$                (6 chars)
             #        | ^[A-NR-Z][0-9]([A-Z][A-Z0-9]{2}[0-9]){1,2}$  (10/11 chars)
@@ -2138,7 +2138,7 @@ def _read_phase1_from_postgres() -> Dict[str, pd.DataFrame]:
                     .astype(str)
                     .str.strip()
                 )
-                # Strip isoform suffix: "P12345-2" → "P12345".
+                # Strip isoform suffix: "P12345-2" -> "P12345".
                 _ua_normalized = _ua.str.replace(
                     r"-\d+$", "", regex=True
                 )
@@ -2146,7 +2146,7 @@ def _read_phase1_from_postgres() -> Dict[str, pd.DataFrame]:
                 _ua_normalized = _ua_normalized.replace(
                     {"nan": None, "None": None, "": None}
                 )
-                # Validate against the regex; invalid → NaN.
+                # Validate against the regex; invalid -> NaN.
                 _valid_mask = _ua_normalized.notna() & _ua_normalized.apply(
                     lambda _v: bool(_UNIPROT_PRIMARY_RE.match(str(_v)))
                 )
@@ -2163,23 +2163,23 @@ def _read_phase1_from_postgres() -> Dict[str, pd.DataFrame]:
                     )
                 chembl_act_df = chembl_act_df[_valid_mask].copy()
                 chembl_act_df["uniprot_accession"] = _ua_normalized[_valid_mask].values
-            # Synthesize target_chembl_id (NULL — the DB doesn't store it).
+            # Synthesize target_chembl_id (NULL -- the DB doesn't store it).
             chembl_act_df["target_chembl_id"] = None
             chembl_act_df["assay_id"] = None
-            # v43: standard_relation is NOT in PostgreSQL — set to None.
+            # v43: standard_relation is NOT in PostgreSQL -- set to None.
             chembl_act_df["standard_relation"] = None
             chembl_act_df["assay_type"] = None
             out["chembl_activities"] = chembl_act_df
             logger.info(
                 "Phase1 bridge (postgres): read %d ChEMBL activity rows "
-                "(DPI where source='chembl') — v37 PostgreSQL bridge fix",
+                "(DPI where source='chembl') -- v37 PostgreSQL bridge fix",
                 len(chembl_act_df),
             )
         except Exception as exc:
             # v58 ROOT FIX (P2C-008 deep): ERROR + structured audit.
             logger.error(
                 "Phase1 bridge (postgres): could not read chembl_activities "
-                "from drug_protein_interactions (%s: %s) — falling back "
+                "from drug_protein_interactions (%s: %s) -- falling back "
                 "to empty. Compound-inhibits-Protein edges from ChEMBL "
                 "will be ABSENT. v37 PostgreSQL bridge fix.",
                 type(exc).__name__, exc,
@@ -2200,9 +2200,9 @@ def _read_phase1_from_postgres() -> Dict[str, pd.DataFrame]:
             omim_susc_stmt = (
                 select(
                     _m.GeneDiseaseAssociation.gene_symbol,
-                    # v51 ROOT FIX (COMPOUND-2 — gene_mim aliasing):
+                    # v51 ROOT FIX (COMPOUND-2 -- gene_mim aliasing):
                     # The v49/v50 code labeled `gene_id` (NCBI Entrez
-                    # Gene ID) as `gene_mim`. This is a SEMANTIC ERROR —
+                    # Gene ID) as `gene_mim`. This is a SEMANTIC ERROR --
                     # MIM (Mendelian Inheritance in Man) is a DIFFERENT
                     # namespace from NCBI Entrez Gene:
                     #   - NCBI Entrez Gene ID: integer, e.g. 2261 (FGFR3)
@@ -2213,8 +2213,8 @@ def _read_phase1_from_postgres() -> Dict[str, pd.DataFrame]:
                     # genes that have different NCBI vs MIM identifiers.
                     # ROOT FIX: label `gene_id` as `ncbi_gene_id` (its
                     # true semantic name). The downstream Gene resolver
-                    # already prefers `canonical_gene_id` → `ncbi_gene_id`
-                    # → `gene_mim` (the actual OMIM MIM, which is in the
+                    # already prefers `canonical_gene_id` -> `ncbi_gene_id`
+                    # -> `gene_mim` (the actual OMIM MIM, which is in the
                     # CSV path only). This preserves the resolver chain
                     # without semantic conflation.
                     _m.GeneDiseaseAssociation.gene_id.label("ncbi_gene_id"),
@@ -2230,7 +2230,7 @@ def _read_phase1_from_postgres() -> Dict[str, pd.DataFrame]:
                 )
             )
             omim_susc_df = pd.read_sql(omim_susc_stmt, conn)
-            # v88 ROOT FIX (BUG #27 — gene_mim aliasing fragments gene
+            # v88 ROOT FIX (BUG #27 -- gene_mim aliasing fragments gene
             # resolution): best-effort JOIN to recover MIM numbers from
             # the gene_mim column on gene_disease_associations when
             # available. Falls back to None with a structured log.
@@ -2271,7 +2271,7 @@ def _read_phase1_from_postgres() -> Dict[str, pd.DataFrame]:
                         omim_susc_df["gene_mim"] = None
                 except Exception as _mim_exc:
                     logger.warning(
-                        "phase1_bridge: could not read gene_mim (%s: %s) — "
+                        "phase1_bridge: could not read gene_mim (%s: %s) -- "
                         "falling back to None (v88 BUG #27).",
                         type(_mim_exc).__name__, _mim_exc,
                     )
@@ -2297,7 +2297,7 @@ def _read_phase1_from_postgres() -> Dict[str, pd.DataFrame]:
             out["omim_susceptibility"] = omim_susc_df
             logger.info(
                 "Phase1 bridge (postgres): read %d OMIM susceptibility rows "
-                "(GDA where source='omim' AND is_susceptibility=True) — v51 "
+                "(GDA where source='omim' AND is_susceptibility=True) -- v51 "
                 "PostgreSQL bridge fix",
                 len(omim_susc_df),
             )
@@ -2305,7 +2305,7 @@ def _read_phase1_from_postgres() -> Dict[str, pd.DataFrame]:
             # v58 ROOT FIX (P2C-008 deep): ERROR + structured audit.
             logger.error(
                 "Phase1 bridge (postgres): could not read omim_susceptibility "
-                "from gene_disease_associations (%s: %s) — falling back "
+                "from gene_disease_associations (%s: %s) -- falling back "
                 "to empty. Gene-associates-Disease edges from OMIM will "
                 "be ABSENT. v37 PostgreSQL bridge fix.",
                 type(exc).__name__, exc,
@@ -2321,16 +2321,16 @@ def _read_phase1_from_postgres() -> Dict[str, pd.DataFrame]:
 
         # (5) pubchem_enrichment: select from pubchem_compound_properties.
         # Map the ORM columns to the CSV-path columns the bridge expects.
-        # v43 ROOT FIX (P1 — pubchem is_deleted filter missing): the
+        # v43 ROOT FIX (P1 -- pubchem is_deleted filter missing): the
         # previous code read ALL rows from pubchem_compound_properties
         # including soft-deleted ones. PubChemCompoundProperty has an
         # is_deleted column (standalone, not via SoftDeleteMixin). The
         # fix adds a WHERE is_deleted == False filter so deleted records
         # are excluded.
         try:
-            # v88 ROOT FIX (BUG #40 — NaN in PubChem node features): use
+            # v88 ROOT FIX (BUG #40 -- NaN in PubChem node features): use
             # func.coalesce(xlogp, 0.0) and func.coalesce(tpsa, 0.0) so
-            # NULL → 0.0 instead of propagating NaN through HGT training.
+            # NULL -> 0.0 instead of propagating NaN through HGT training.
             pubchem_stmt = select(
                 _m.PubChemCompoundProperty.inchikey,
                 _m.PubChemCompoundProperty.canonical_smiles,
@@ -2346,14 +2346,14 @@ def _read_phase1_from_postgres() -> Dict[str, pd.DataFrame]:
             out["pubchem_enrichment"] = pubchem_df
             logger.info(
                 "Phase1 bridge (postgres): read %d PubChem enrichment rows "
-                "from pubchem_compound_properties — v37 PostgreSQL bridge fix",
+                "from pubchem_compound_properties -- v37 PostgreSQL bridge fix",
                 len(pubchem_df),
             )
         except Exception as exc:
             # v58 ROOT FIX (P2C-008 deep): ERROR + structured audit.
             logger.error(
                 "Phase1 bridge (postgres): could not read pubchem_enrichment "
-                "from pubchem_compound_properties (%s: %s) — falling back "
+                "from pubchem_compound_properties (%s: %s) -- falling back "
                 "to empty. PubChem molecular property enrichment will be "
                 "ABSENT. v37 PostgreSQL bridge fix.",
                 type(exc).__name__, exc,
@@ -2389,7 +2389,7 @@ def read_phase1_outputs(
 
     v29 ROOT FIX (Phase1↔Phase2 100% connection): the reader now prefers
     PostgreSQL when ``prefer_postgres=True`` (the default). The Phase 1
-    SQLAlchemy ORM models — written by Phase 1's loaders — become the
+    SQLAlchemy ORM models -- written by Phase 1's loaders -- become the
     authoritative source for Phase 2. This closes Compound Chain 2 of the
     forensic audit ("Phase 1 Output Is Discarded").
 
@@ -2397,10 +2397,10 @@ def read_phase1_outputs(
       1. If ``prefer_postgres=True`` AND a populated Phase 1 DB exists,
          read from PostgreSQL via :func:`_read_phase1_from_postgres`.
       2. Otherwise, read CSVs from ``phase1_processed_dir`` (the legacy
-         v28 behaviour — preserved for dev/CI without a database).
+         v28 behaviour -- preserved for dev/CI without a database).
 
     The chosen backend is recorded on the returned object via the
-    ``.backend`` attribute (P2-014 root fix — type-safe), AND via the
+    ``.backend`` attribute (P2-014 root fix -- type-safe), AND via the
     legacy ``"_phase1_backend"`` dict key (backward compat with callers
     that pop it). New code should prefer ``.backend``.
 
@@ -2435,7 +2435,7 @@ def read_phase1_outputs(
             out = _Phase1BridgeResult(_pg_out, backend=_PHASE1_BACKEND_POSTGRES)
             return out
         except Exception as exc:
-            # v61 ROOT FIX (silent break point #2 — forensic deep fix):
+            # v61 ROOT FIX (silent break point #2 -- forensic deep fix):
             # The v58/v60 code re-raised ALL exceptions in production.
             # This crashed the bridge for the same configuration errors
             # that _phase1_db_available now handles gracefully. Even
@@ -2462,7 +2462,7 @@ def read_phase1_outputs(
             # upcoming raise guards will re-raise, so the structured
             # audit record can carry a `raised` flag that distinguishes
             # a true CSV fallback from a misleading log followed by a
-            # raise. The two guards below mirror these conditions —
+            # raise. The two guards below mirror these conditions --
             # keep them in sync.
             _allow_csv_fallback = os.environ.get("DRUGOS_ALLOW_CSV_FALLBACK", "") == "1"
             _will_raise = (
@@ -2482,7 +2482,7 @@ def read_phase1_outputs(
                 # Production must not silently bypass Phase 1's database
                 # output for unreachable/auth/unknown failures. Re-raise
                 # so the failure is visible and the run aborts with the
-                # root cause. Schema_missing is NOT re-raised — it's a
+                # root cause. Schema_missing is NOT re-raised -- it's a
                 # configuration issue (migrations not applied) and the
                 # CSV fallback lets the pipeline still produce a graph.
                 # v100 ROOT FIX (BUG P2-030): the misleading "falling
@@ -2490,7 +2490,7 @@ def read_phase1_outputs(
                 # fires when the fallback actually happens; this branch
                 # re-raises instead of falling back.
                 raise
-            # v88 ROOT FIX (BUG #28 — second silent fallback layer):
+            # v88 ROOT FIX (BUG #28 -- second silent fallback layer):
             # apply the same DRUGOS_ALLOW_CSV_FALLBACK=1 opt-in gate here.
             if failure_mode != "schema_missing":
                 if not _allow_csv_fallback:
@@ -2518,7 +2518,7 @@ def read_phase1_outputs(
             if failure_mode == "schema_missing":
                 logger.warning(
                     "Phase1 bridge: schema_missing in "
-                    "_read_phase1_from_postgres — falling back to CSV. "
+                    "_read_phase1_from_postgres -- falling back to CSV. "
                     "Run `python -m database.migrations.run_migrations` "
                     "from phase1/ to apply the schema and use the DB "
                     "backend.",
@@ -2543,8 +2543,8 @@ def read_phase1_outputs(
         "drugs": base / "drugbank_drugs.csv",
         "interactions": base / "drugbank_interactions.csv.gz",
         "omim_gda": base / "omim_gene_disease_associations.csv",
-        # v6 fix (bug #B9): structured drug → OMIM disease indications.
-        # Optional — bridge degrades to free-text `indication` column
+        # v6 fix (bug #B9): structured drug -> OMIM disease indications.
+        # Optional -- bridge degrades to free-text `indication` column
         # matching if this file is absent.
         "indications": base / "drugbank_indications.csv",
         # ROOT FIX (Phase1↔Phase2 100% connection): extend the bridge
@@ -2562,18 +2562,18 @@ def read_phase1_outputs(
         # DO NOT MATCH the actual filenames the Phase 1 pipelines
         # emit. Per `phase1/pipelines/base_pipeline.py:_get_processed_filename`,
         # the actual output filenames are unprefixed:
-        #   chembl   → drugs.csv
-        #   uniprot  → proteins.csv
-        #   string   → protein_protein_interactions.csv
-        #   disgenet → gene_disease_associations.csv
-        #   pubchem  → pubchem_enrichment.csv  (already matched)
+        #   chembl   -> drugs.csv
+        #   uniprot  -> proteins.csv
+        #   string   -> protein_protein_interactions.csv
+        #   disgenet -> gene_disease_associations.csv
+        #   pubchem  -> pubchem_enrichment.csv  (already matched)
         # The mismatch meant 4 of 5 new sources were silently skipped
         # at runtime (warning logged, empty DataFrame returned). The
         # v12 "100% connection" claim was unverifiable on the toy
         # fixture AND broken in production.
         #
-        # v13 fix: try BOTH the prefixed name (preferred — explicit)
-        # AND the actual pipeline-emitted name (fallback — what
+        # v13 fix: try BOTH the prefixed name (preferred -- explicit)
+        # AND the actual pipeline-emitted name (fallback -- what
         # production runs actually produce). This is backwards-
         # compatible: existing toy fixtures with prefixed names still
         # work, and production runs with unprefixed names now work.
@@ -2596,24 +2596,24 @@ def read_phase1_outputs(
         "pubchem_enrichment": base / "pubchem_enrichment.csv",
         # ─── v15 ROOT FIX (Phase1↔Phase2 100% connection, REM-12/13/14): ──
         # The two Phase-1 source CSVs that v14 STILL bypassed:
-        #   • chembl_activities_clean.csv  — the actual ChEMBL bioactivity
+        #   • chembl_activities_clean.csv  -- the actual ChEMBL bioactivity
         #     table (IC50 / Ki / EC50 + pchembl_value per molecule-target
         #     pair). v14 only read chembl_drugs.csv (compound METADATA
-        #     denormalized to one row per compound) — that path could not
+        #     denormalized to one row per compound) -- that path could not
         #     emit direction-correct inhibits/activates edges nor carry
         #     the potency value. The audit (REM-13/14) flagged this as
         #     HIGH severity: "ChEMBL edges are ALL hardcoded to
         #     (Compound, targets, Protein) regardless of activity_type."
         #     Fix: read the activities table here, classify each edge by
-        #     activity_type semantics (inhibition→inhibits,
-        #     activation→activates, otherwise→targets), and carry
+        #     activity_type semantics (inhibition->inhibits,
+        #     activation->activates, otherwise->targets), and carry
         #     pchembl_value + standard_relation as edge properties so the
         #     RL ranker has potency + censoring context.
-        #   • omim_gene_disease_susceptibility.csv  — OMIM susceptibility
+        #   • omim_gene_disease_susceptibility.csv  -- OMIM susceptibility
         #     / polygenic associations (is_susceptibility=True). v14 only
         #     read omim_gene_disease_associations.csv (causative Mendelian
         #     GDA). Susceptibility associations are scientifically
-        #     distinct: they are NOT因果 — a variant raises risk but
+        #     distinct: they are NOT因果 -- a variant raises risk but
         #     does not deterministically cause the disease. Conflating
         #     them under the same `associated_with` edge would teach
         #     TransE that BRCA1+breast_cancer is equivalent to
@@ -2656,7 +2656,7 @@ def read_phase1_outputs(
             else:
                 out[key] = pd.DataFrame()
                 logger.warning(
-                    "Phase1 bridge: %s not found at any of %s — "
+                    "Phase1 bridge: %s not found at any of %s -- "
                     "producing empty DataFrame. The bridge will skip "
                     "this source. To fix: run the Phase 1 pipeline "
                     "for this source before invoking the bridge.",
@@ -2678,7 +2678,7 @@ def read_phase1_outputs(
             else:
                 out[key] = pd.DataFrame()
                 logger.warning(
-                    "Phase1 bridge: %s not found at %s — producing "
+                    "Phase1 bridge: %s not found at %s -- producing "
                     "empty DataFrame. The bridge will skip this "
                     "source. To fix: run the Phase 1 pipeline for "
                     "this source before invoking the bridge.",
@@ -2691,7 +2691,7 @@ def read_phase1_outputs(
 
 
 # ---------------------------------------------------------------------------
-# 5. stage_phase1_to_phase2 — convert DataFrames → Phase 2 node/edge dicts
+# 5. stage_phase1_to_phase2 -- convert DataFrames -> Phase 2 node/edge dicts
 # ---------------------------------------------------------------------------
 def _to_bool(v: Any) -> bool:
     """Coerce arbitrary Phase 1 cell value to a strict bool.
@@ -2721,7 +2721,7 @@ def _resolve_fda_approved(row: Any) -> bool:
     ChEMBL cannot provide FDA-specific approval (no FDA Orange Book join is
     wired in), so `is_fda_approved` is None for all ChEMBL-sourced drugs.
     The previous code did `_to_bool(row.get("is_fda_approved"))`, which
-    converted None → False — corrupting the RL ranker's market-opportunity
+    converted None -> False -- corrupting the RL ranker's market-opportunity
     scoring (every ChEMBL-only drug was marked unapproved, even FDA-approved
     ones like aspirin/acetaminophen).
 
@@ -2739,7 +2739,7 @@ def _resolve_fda_approved(row: Any) -> bool:
         scoring, not safety filtering.
 
     Drugs from DrugBank (which has real FDA Orange Book data) keep their
-    explicit `is_fda_approved` value — the fallback only fires when the
+    explicit `is_fda_approved` value -- the fallback only fires when the
     value is genuinely unknown (None/NaN).
     """
     fda_raw = row.get("is_fda_approved")
@@ -2751,9 +2751,9 @@ def _resolve_fda_approved(row: Any) -> bool:
         s = str(fda_raw).strip().lower()
         if s not in ("", "nan", "none", "null"):
             return s not in ("0", "false", "no", "f", "n")
-    # fda_approved is None/NaN/unknown → fall back to is_globally_approved.
+    # fda_approved is None/NaN/unknown -> fall back to is_globally_approved.
     # This is the ChEMBL-only path (max_phase=4 drugs without FDA Orange
-    # Book data). Logically: globally approved → likely FDA approved.
+    # Book data). Logically: globally approved -> likely FDA approved.
     globally_raw = row.get("is_globally_approved")
     return _to_bool(globally_raw)
 
@@ -2783,16 +2783,16 @@ def _safe_float(v: Any) -> Optional[float]:
 # reindexed DataFrame). Phase 1 CSVs typically produce RangeIndex, but
 # tests / post-processing code that calls ``stage_phase1_to_phase2`` may
 # pass DataFrames with custom indices. The previous code did
-# ``"_source_row": int(idx)`` directly — a single non-int index value
+# ``"_source_row": int(idx)`` directly -- a single non-int index value
 # raised TypeError and aborted the entire batch (the caller in
 # run_pipeline.py swallows the exception, so all subsequent rows were
 # silently lost). This helper provides a stable int for any hashable
 # ``idx`` value:
-#   * int / numpy int → passthrough (preserves RangeIndex behavior).
-#   * str / bytes / datetime / other hashable → ``hash(idx)`` (stable
+#   * int / numpy int -> passthrough (preserves RangeIndex behavior).
+#   * str / bytes / datetime / other hashable -> ``hash(idx)`` (stable
 #     within a Python process; cross-process stable only for str/bytes
-#     with PYTHONHASHSEED=0 — acceptable for a row-level provenance key).
-#   * None / NaN → 0 (sentinel; the row is preserved, not dropped).
+#     with PYTHONHASHSEED=0 -- acceptable for a row-level provenance key).
+#   * None / NaN -> 0 (sentinel; the row is preserved, not dropped).
 def _safe_row_idx(idx: Any) -> int:
     """Convert a DataFrame row index to a stable int.
 
@@ -2802,11 +2802,11 @@ def _safe_row_idx(idx: Any) -> int:
     """
     if idx is None:
         return 0
-    # bool is a subclass of int — guard explicitly so True/False don't
+    # bool is a subclass of int -- guard explicitly so True/False don't
     # silently become 1/0 (which would lose the boolean semantics).
     if isinstance(idx, bool):
         return int(idx)
-    # Python int / numpy int64 / numpy int32 — passthrough.
+    # Python int / numpy int64 / numpy int32 -- passthrough.
     try:
         if isinstance(idx, int):
             return int(idx)
@@ -2821,15 +2821,15 @@ def _safe_row_idx(idx: Any) -> int:
             return int(idx)
     except ImportError:
         pass
-    # Float that is integral (e.g., 5.0) — coerce.
+    # Float that is integral (e.g., 5.0) -- coerce.
     if isinstance(idx, float):
         if pd.isna(idx):
             return 0
         if idx.is_integer():
             return int(idx)
-        # Non-integer float (e.g., 5.5) — hash for stability.
+        # Non-integer float (e.g., 5.5) -- hash for stability.
         return hash(idx)
-    # Pandas Timestamp / datetime / str / bytes / tuple — hash for stability.
+    # Pandas Timestamp / datetime / str / bytes / tuple -- hash for stability.
     try:
         if pd.isna(idx):
             return 0
@@ -2838,7 +2838,7 @@ def _safe_row_idx(idx: Any) -> int:
     try:
         return hash(idx)
     except TypeError:
-        # Unhashable (e.g., a list) — last-resort stable hash via repr.
+        # Unhashable (e.g., a list) -- last-resort stable hash via repr.
         return hash(repr(idx))
 
 
@@ -2848,10 +2848,10 @@ def _classify_drug_protein_edge(action_type: str) -> str:
     Returns one of: ``"targets"``, ``"inhibits"``, ``"activates"``,
     ``"allosterically_modulates"``, ``"unknown"``.
 
-    The mapping is conservative — when in doubt, ``"targets"`` (the generic
-    drug→protein relation) is used. ``"unknown"`` is reserved for the case
+    The mapping is conservative -- when in doubt, ``"targets"`` (the generic
+    drug->protein relation) is used. ``"unknown"`` is reserved for the case
     where DrugBank explicitly sets a non-empty action_type that doesn't
-    match any of the above (e.g. "negative modulator" — we treat that as
+    match any of the above (e.g. "negative modulator" -- we treat that as
     allosteric, but if a brand-new action_type appears we fail-closed to
     "unknown" so the data still loads).
 
@@ -2859,20 +2859,20 @@ def _classify_drug_protein_edge(action_type: str) -> str:
     alongside ``inhibit`` and ``blocker``. That conflates two different
     pharmacological concepts:
 
-      * ``inhibit`` / ``blocker`` — the molecule directly inhibits the
+      * ``inhibit`` / ``blocker`` -- the molecule directly inhibits the
         target's signaling or enzymatic activity (e.g. proton-pump
         inhibitors, beta-blockers that suppress receptor coupling).
-      * ``antagonist`` — the molecule is a *competitive* receptor
+      * ``antagonist`` -- the molecule is a *competitive* receptor
         antagonist that blocks the endogenous ligand's binding WITHOUT
         inhibiting basal signaling (e.g. naloxone at the μ-opioid
-        receptor — basal signaling continues, only ligand-driven
+        receptor -- basal signaling continues, only ligand-driven
         activation is blocked). Functional antagonism ("functional
         antagonist", "negative antagonist") DOES inhibit downstream
         signaling and is correctly classified as ``inhibits`` by the
         explicit ``"inhibit"`` substring check above.
 
     Conflating competitive antagonists with direct inhibitors taught
-    TransE wrong directionality for the antagonist class — the RL
+    TransE wrong directionality for the antagonist class -- the RL
     safety ranker could not distinguish them. The fix maps a bare
     ``antagonist`` to ``"targets"`` (the honest "we know they
     interact, direction unclassified" relation) so the model is not
@@ -2881,33 +2881,33 @@ def _classify_drug_protein_edge(action_type: str) -> str:
     a = (action_type or "").lower().strip()
     if not a:
         return "targets"
-    # Order matters — 'allosteric' must be checked before 'activator'
+    # Order matters -- 'allosteric' must be checked before 'activator'
     # because some DrugBank entries say "allosteric activator".
     if "allosteric" in a or "modulator" in a:
         return "allosterically_modulates"
-    # Direct inhibitors / blockers → inhibits. Functional antagonists
+    # Direct inhibitors / blockers -> inhibits. Functional antagonists
     # that explicitly say "inhibit" (e.g. "functional inhibitor") also
     # land here via the substring check.
     if "inhibit" in a or "blocker" in a:
         return "inhibits"
-    # v35 H-1: bare "antagonist" — competitive binding, not signaling
+    # v35 H-1: bare "antagonist" -- competitive binding, not signaling
     # inhibition. Map to "targets" (interaction confirmed, direction
     # unclassified) instead of "inhibits". IMPORTANT: this check MUST
     # come BEFORE the "agonist" check below, because the string
-    # "antagonist" CONTAINS "agonist" as a substring — without this
+    # "antagonist" CONTAINS "agonist" as a substring -- without this
     # ordering, every antagonist would match the "agonist" branch and
     # incorrectly return "activates". This ordering bug was the v35
     # H-1 root fix in action: the original code worked around it by
     # putting "antagonist" in the inhibits branch (so the agonist
     # branch was never reached), but that conflated competitive
     # antagonists with direct inhibitors. The new ordering is:
-    # allosteric → inhibit/blocker → antagonist → agonist → unknown.
+    # allosteric -> inhibit/blocker -> antagonist -> agonist -> unknown.
     if "antagonist" in a:
         return "targets"
-    # v84 FORENSIC ROOT FIX (BUG #2 — same fix in _classify_action_edge):
+    # v84 FORENSIC ROOT FIX (BUG #2 -- same fix in _classify_action_edge):
     # The previous code did `if "activ" in a or "agonist" in a or "inducer" in a`.
     # While "agonist" (full word) is safer than "agon" (substring), it still
-    # matches "inverse agonist" and "negative agonist" — both functionally
+    # matches "inverse agonist" and "negative agonist" -- both functionally
     # antagonists in pharmacology. ROOT FIX: exclude inverse/negative
     # agonist patterns before classifying as activates.
     import re as _re_v84_action
@@ -2938,26 +2938,26 @@ def _classify_chembl_activity_edge(
     ``Inhibition``, ``Activation``. The label does NOT directly map to a
     biological relation in all cases:
 
-    * ``IC50`` of an enzyme assay → ``"inhibits"`` (v34 ROOT FIX HIGH #8
+    * ``IC50`` of an enzyme assay -> ``"inhibits"`` (v34 ROOT FIX HIGH #8
       / v35 L-2 docstring update). IC50 literally measures the
       concentration for 50% inhibition, so the inhibition signal is
       directly observed. Ki and Kd of a binding assay remain
-      ``"targets"`` (binding affinity, direction unknown — the molecule
+      ``"targets"`` (binding affinity, direction unknown -- the molecule
       binds but we cannot tell agonist vs antagonist from the potency
       alone).
-    * ``EC50`` / ``AC50`` of a functional assay → the molecule produces a
-      functional effect. ``EC50`` is typically agonist (activator) — but
+    * ``EC50`` / ``AC50`` of a functional assay -> the molecule produces a
+      functional effect. ``EC50`` is typically agonist (activator) -- but
       not always (some assays measure antagonist EC50). If the
       ``activity_type`` literally contains "activ" or "agon", emit
       ``"activates"``; otherwise emit ``"targets"`` (we know there's a
       functional interaction but the direction is uncertain from this
       label alone).
-    * ``Inhibition`` (literal) → ``"inhibits"`` (the assay measured
+    * ``Inhibition`` (literal) -> ``"inhibits"`` (the assay measured
       inhibition of an enzymatic or cellular process).
-    * ``Activation`` (literal) → ``"activates"`` (the assay measured
+    * ``Activation`` (literal) -> ``"activates"`` (the assay measured
       activation of a receptor or process).
     * Anything else (e.g. ``"Potency"``, ``"Selectivity"``, ``"Ratio"``)
-      → ``"targets"`` (interaction confirmed, direction unclassified).
+      -> ``"targets"`` (interaction confirmed, direction unclassified).
 
     The ``assay_type`` argument is reserved for future use (ChEMBL
     ``assay.assay_type`` 'F' functional vs 'B' binding). Currently not
@@ -2974,17 +2974,17 @@ def _classify_chembl_activity_edge(
     a = (activity_type or "").lower().strip()
     if not a:
         return "targets"
-    # v88+v89 ROOT FIX (BUG #36 — covalent inhibitors misclassified as
+    # v88+v89 ROOT FIX (BUG #36 -- covalent inhibitors misclassified as
     # activators): use WORD-BOUNDARY regex to ensure "activ" matches only
     # at the START of a word. "Inactivation" contains the substring
-    # "activ" but is an INHIBITORY process — the assay measures loss of
+    # "activ" but is an INHIBITORY process -- the assay measures loss of
     # target activity. Misclassifying it as "activates" feeds the KG
     # wrong directionality. Check inactivation/deactivation/inhibit/
     # antagonist FIRST (before the "activ" check would misclassify them).
     import re as _re_v89
     if _re_v89.search(r"\b(inactiv|deactiv|inhibit|antagon)", a):
         return "inhibits"
-    # v84 FORENSIC ROOT FIX (BUG #2 — "agon" substring is too permissive):
+    # v84 FORENSIC ROOT FIX (BUG #2 -- "agon" substring is too permissive):
     # The previous code did `if "activ" in a or "agon" in a: return "activates"`.
     # The substring "agon" matches inside "antagonist" (a-n-t-a-g-o-n-i-s-t
     # contains a-g-o-n), inside "inverse agonist" (functionally an
@@ -3002,10 +3002,10 @@ def _classify_chembl_activity_edge(
     # honest "interaction confirmed, direction unclassified" relation).
     import re as _re_v84
     # Excluded patterns (functionally antagonists / inhibitors):
-    #   - "inverse agonist"        → antagonist in pharmacology
-    #   - "negative agonist"       → antagonist (negative modulation)
-    #   - "negative allosteric"    → antagonist (NAM)
-    #   - "antagonist"             → already handled above, but defensive
+    #   - "inverse agonist"        -> antagonist in pharmacology
+    #   - "negative agonist"       -> antagonist (negative modulation)
+    #   - "negative allosteric"    -> antagonist (NAM)
+    #   - "antagonist"             -> already handled above, but defensive
     _EXCLUDED_ANTAGONIST_RE = _re_v84.compile(
         r"\b(?:inverse\s+agonist|negative\s+(?:agonist|allosteric)|antagonist)",
         _re_v84.IGNORECASE,
@@ -3020,28 +3020,28 @@ def _classify_chembl_activity_edge(
     # or _AGONIST_RE.search(a):`` with NO body, causing IndentationError.
     # The word-boundary check below (line 2864) handles the same case
     # more precisely, so the orphaned incomplete if is removed.
-    # Word-boundary "activ" or "agon" → activates. The \b ensures we
+    # Word-boundary "activ" or "agon" -> activates. The \b ensures we
     # match "activation", "activates", "agonist", "agonism" but NOT
     # "inactivation", "deactivation", "inactive" (those are matched
     # by the inhibits regex above).
     # ROOT FIX (v92): the previous code had an orphan ``if`` statement
     # on line 2859 (``if "activ" in a or _AGONIST_RE.search(a):``) with
-    # NO indented body — only a comment and another ``if`` followed it.
+    # NO indented body -- only a comment and another ``if`` followed it.
     # This caused ``compileall`` to fail with IndentationError, breaking
     # CI's build job for every PR. The orphan ``if`` was a leftover from
     # a previous edit that duplicated the word-boundary check below. The
     # correct check (``_re_v89.search(r"\b(activ|agon)", a)``) is the one
-    # that already runs below — so the orphan line is removed and the
+    # that already runs below -- so the orphan line is removed and the
     # ``_AGONIST_RE`` regex is retained for documentation/debugging.
     if _re_v89.search(r"\b(activ|agon)", a):
         return "activates"
-    # v88 ROOT FIX (BUG #50 — IC50 with non-bare standard_type strings
+    # v88 ROOT FIX (BUG #50 -- IC50 with non-bare standard_type strings
     # lose inhibition signal): use substring match `if "ic50" in a`
     # instead of exact match, so "IC50 (μM)", "pIC50", etc. all route
     # to "inhibits".
     if "ic50" in a:
         return "inhibits"
-    # v88 ROOT FIX (BUG #37 + #52 — EC50/AC50 with direction info lost):
+    # v88 ROOT FIX (BUG #37 + #52 -- EC50/AC50 with direction info lost):
     # consult assay_type parameter AND check standard_type string for
     # direction substrings.
     if "ec50" in a or "ac50" in a:
@@ -3053,7 +3053,7 @@ def _classify_chembl_activity_edge(
         if at == "F":
             logger.debug(
                 "phase1_bridge: EC50/AC50 from functional assay "
-                "(assay_type='F') has ambiguous direction — "
+                "(assay_type='F') has ambiguous direction -- "
                 "classifying as 'targets'. activity_type=%r",
                 activity_type,
             )
@@ -3063,7 +3063,7 @@ def _classify_chembl_activity_edge(
 
 
 # ---------------------------------------------------------------------------
-# v43 ROOT FIX (Chain 4b): _derive_pathways_from_string — derive Pathway
+# v43 ROOT FIX (Chain 4b): _derive_pathways_from_string -- derive Pathway
 # nodes from STRING PPI connected components. Restores the DOCX Phase 2
 # 5-node-type contract (Drugs, Proteins, Pathways, Diseases, Clinical
 # Outcomes).
@@ -3077,7 +3077,7 @@ def _derive_pathways_from_string(
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """Derive Pathway nodes from STRING PPI connected components.
 
-    Per the DOCX: "STRING — Maps protein-protein interaction networks,
+    Per the DOCX: "STRING -- Maps protein-protein interaction networks,
     showing which proteins work together in the same pathways." The
     biologically-defensible interpretation: each connected component of
     the STRING PPI graph = a putative pathway (a cluster of co-
@@ -3086,9 +3086,9 @@ def _derive_pathways_from_string(
 
     Algorithm:
       1. Build an undirected graph from the STRING PPI edges (Protein
-         A — Protein B).
+         A -- Protein B).
       2. Find connected components using Union-Find (disjoint-set union
-         with path compression + union by rank — O(E * α(V))).
+         with path compression + union by rank -- O(E * α(V))).
       3. For each component with >= 2 proteins, emit one Pathway node
          (singletons are not biologically meaningful as pathways).
       4. For each protein in a multi-protein component, emit one
@@ -3169,14 +3169,14 @@ def _derive_pathways_from_string(
     pathway_idx = 0
     for root, members in components.items():
         # Singleton components are not biologically meaningful as
-        # pathways — skip them.
+        # pathways -- skip them.
         if len(members) < 2:
             continue
         pathway_idx += 1
         # Stable, deterministic ID: PATHWAY_CC_<idx>_<sha8> where sha8
         # is the first 8 chars of the SHA-256 of the sorted member list.
         # This makes the ID reproducible across runs (same STRING data
-        # → same Pathway IDs) AND unique across different components.
+        # -> same Pathway IDs) AND unique across different components.
         import hashlib as _hashlib
         members_sorted = sorted(members)
         members_hash = _hashlib.sha256(
@@ -3209,7 +3209,7 @@ def _derive_pathways_from_string(
                 # v78 FORENSIC ROOT FIX (BUG #1): canonical
                 # normalized_score on participates_in edges. STRING-
                 # inferred pathway membership is high-confidence
-                # (the proteins co-occur in the PPI graph) → 1.0.
+                # (the proteins co-occur in the PPI graph) -> 1.0.
                 "normalized_score": _compute_normalized_score(
                     source="string_inferred", rel_type="participates_in",
                 ),
@@ -3221,7 +3221,7 @@ def _derive_pathways_from_string(
                 "_schema_version": schema_version,
             })
 
-    # v53 ROOT FIX (P2-013 — Pathway derivation produces too few nodes):
+    # v53 ROOT FIX (P2-013 -- Pathway derivation produces too few nodes):
     # When STRING PPI data is sparse or missing, the connected-components
     # derivation produces 0 or 1 Pathway nodes. The DOCX requires Pathway
     # as one of the 5 node types. ROOT FIX: when 0 Pathway nodes were
@@ -3231,16 +3231,16 @@ def _derive_pathways_from_string(
     # as a fallback so operators know to provide real STRING data for
     # production.
     #
-    # v78 FORENSIC ROOT FIX (BUG #2 + BUG #3 — two silent killers in
+    # v78 FORENSIC ROOT FIX (BUG #2 + BUG #3 -- two silent killers in
     # this fallback block):
     #
     #   BUG #2: the previous code referenced ``string_df`` (a DataFrame
-    #   that is NOT in this function's scope — only ``string_edges``
+    #   that is NOT in this function's scope -- only ``string_edges``
     #   is passed). This raised NameError, which was silently caught
     #   by the ``try/except Exception`` in the CALLER (line ~4121),
     #   turning the entire v53 ROOT FIX into DEAD CODE. When STRING PPI
     #   data was sparse (the exact scenario v53 promised to handle),
-    #   ZERO Pathway nodes were emitted — silently violating the DOCX
+    #   ZERO Pathway nodes were emitted -- silently violating the DOCX
     #   5-node-type contract.
     #
     #   BUG #3: even if the NameError were fixed, the fallback ID
@@ -3251,12 +3251,12 @@ def _derive_pathways_from_string(
     #   DOCX contract.
     #
     #   ROOT FIX (BUG #2): derive the protein list from ``string_edges``
-    #   itself — each edge already carries ``src_id`` and ``dst_id``
+    #   itself -- each edge already carries ``src_id`` and ``dst_id``
     #   (both UniProt ACs). No external DataFrame needed. The fallback
     #   now works whether or not STRING data is sparse.
     #
     #   ROOT FIX (BUG #3): use ``PATHWAY_CC_0_00000000`` as the fallback
-    #   ID — it matches the existing ``PATHWAY_CC_\d+_[0-9a-f]+`` pattern
+    #   ID -- it matches the existing ``PATHWAY_CC_\d+_[0-9a-f]+`` pattern
     #   (idx=0, sha8=00000000) so it passes ID_PATTERNS validation. The
     #   ``derivation_method`` and ``name`` properties clearly mark it as
     #   the no-STRING-data fallback for operators.
@@ -3274,7 +3274,7 @@ def _derive_pathways_from_string(
         pathway_node = {
             "id": default_pathway_id,
             "label": "Pathway",
-            "name": "Default Pathway (fallback — no STRING PPI data)",
+            "name": "Default Pathway (fallback -- no STRING PPI data)",
             "member_count": 0,
             "members": "",
             "source": "default_fallback",
@@ -3332,7 +3332,7 @@ def _derive_pathways_from_string(
 
 
 # ---------------------------------------------------------------------------
-# FIX-F / C-16: _load_clinical_outcomes — derive ClinicalOutcome nodes
+# FIX-F / C-16: _load_clinical_outcomes -- derive ClinicalOutcome nodes
 # ---------------------------------------------------------------------------
 def _load_clinical_outcomes(
     *,
@@ -3361,7 +3361,7 @@ def _load_clinical_outcomes(
         indication_type     = "approved" | "investigational" | ...
         first_seen_drug_id  = drugbank_id of the FIRST Compound that
                               pointed to this (disease, type) tuple.
-                              (v35 M-5 root fix — previously called
+                              (v35 M-5 root fix -- previously called
                               ``source_drug_id`` which misleadingly
                               suggested the edge's source drug. The
                               field is renamed and a new
@@ -3372,7 +3372,7 @@ def _load_clinical_outcomes(
                               this node (v35 M-5 root fix).
         source_drug_id      = DEPRECATED alias for first_seen_drug_id
                               (kept for backward compat with callers
-                              that already read this field — see v35
+                              that already read this field -- see v35
                               M-5 root fix comment in the body).
 
     The originating Compound is connected via a
@@ -3381,7 +3381,7 @@ def _load_clinical_outcomes(
     Parameters
     ----------
     indications : DataFrame or None
-        ``drugbank_indications.csv`` content. None or empty → returns ([], []).
+        ``drugbank_indications.csv`` content. None or empty -> returns ([], []).
     drugs : DataFrame or None
         ``drugbank_drugs.csv`` content (used only for drug_canonical_map
         lookups via the ``drug_canonical_map`` arg).
@@ -3405,7 +3405,7 @@ def _load_clinical_outcomes(
     # source drugbank_ids so the ClinicalOutcome node carries the
     # actual provenance (all contributing drugs) rather than just the
     # first-seen drug. The node's ``source_drug_id`` field was
-    # misleadingly named — it actually meant "first drug encountered",
+    # misleadingly named -- it actually meant "first drug encountered",
     # not "the edge's source drug". Renamed to ``first_seen_drug_id``
     # and added a ``source_drug_ids`` list. The deprecated
     # ``source_drug_id`` field is kept (set to the same value) for
@@ -3421,13 +3421,13 @@ def _load_clinical_outcomes(
             continue
         drug_canonical = drug_canonical_map.get(dbid)
         if drug_canonical is None:
-            # Drug not in compound_nodes — skip to preserve referential
+            # Drug not in compound_nodes -- skip to preserve referential
             # integrity (the has_clinical_outcome edge needs a Compound
             # endpoint that exists in the graph).
             continue
 
         # Build a deterministic dedup key. Per the task spec, each unique
-        # (disease_id, indication_type) becomes ONE node — multiple drugs
+        # (disease_id, indication_type) becomes ONE node -- multiple drugs
         # pointing to the same (disease, type) share the node, with
         # first_seen_drug_id set to the FIRST drug encountered and
         # source_drug_ids accumulating ALL drugs (v35 M-5 root fix).
@@ -3437,7 +3437,7 @@ def _load_clinical_outcomes(
             # Slugify the disease name for the ID (strip non-alphanumerics).
             disease_key = re.sub(r"[^A-Za-z0-9]+", "_", dname).strip("_") or "unnamed"
         else:
-            # No disease identifier at all — skip (cannot derive a CO node).
+            # No disease identifier at all -- skip (cannot derive a CO node).
             continue
 
         dedup_key = f"{disease_key}|{itype}"
@@ -3457,10 +3457,10 @@ def _load_clinical_outcomes(
             co_id = f"CO:{dbid}:{disease_key}:{itype}"
             seen_node_keys[dedup_key] = co_id
             node_name = f"{dname or did} ({itype})"
-            # v60 ROOT FIX (FORENSIC-DEEP — 3 CORE_NODE_TYPES have no
+            # v60 ROOT FIX (FORENSIC-DEEP -- 3 CORE_NODE_TYPES have no
             # canonical ID system). The v57 fix added
             # CANONICAL_IDS["ClinicalOutcome"] = "meddra_id" to config.py
-            # — but this ClinicalOutcome node construction never
+            # -- but this ClinicalOutcome node construction never
             # populated `meddra_id` (or the ID_MAPPING_PRIORITY fallback
             # fields `mesh_id`, `name`). So
             # entity_resolver.resolve_canonical_id returned None silently
@@ -3468,10 +3468,10 @@ def _load_clinical_outcomes(
             # canonical ID fields explicitly:
             #   * `meddra_id`: None (ClinicalOutcomes from DrugBank
             #     indications don't carry MedDRA codes; would require a
-            #     MeSH→MedDRA crosswalk not yet implemented). Storing
+            #     MeSH->MedDRA crosswalk not yet implemented). Storing
             #     None makes the gap explicit.
             #   * `mesh_id`: extracted from `did` if it's a MeSH ID
-            #     (e.g. "MESH:D006932" → "D006932"). DrugBank indications
+            #     (e.g. "MESH:D006932" -> "D006932"). DrugBank indications
             #     reference diseases by MeSH descriptor IDs.
             #   * `name`: already set above (used as last-resort
             #     fallback per ID_MAPPING_PRIORITY).
@@ -3484,15 +3484,24 @@ def _load_clinical_outcomes(
                 "disease_id": did,
                 "disease_name": dname,
                 "indication_type": itype,
-                # v60 ROOT FIX: canonical ID fields per
-                # CANONICAL_IDS["ClinicalOutcome"] = "meddra_id" and
-                # ID_MAPPING_PRIORITY["ClinicalOutcome"] =
-                # ["meddra_id", "mesh_id", "name"]. All three fields
-                # are populated so resolve_canonical_id can find them.
-                "meddra_id": None,  # requires MeSH→MedDRA crosswalk (future work)
+                # P2-001 FORENSIC ROOT FIX (Team 4 -- namespace collision):
+                # ClinicalOutcome's canonical ID field is now
+                # ``clinical_outcome_id`` (NOT ``meddra_id`` -- that
+                # collides with MedDRA_Term's namespace). The value is
+                # the same ``CO:<drug>:<disease>:<indication>`` format
+                # used as the node's ``id``. ``meddra_id`` is retained
+                # as a SECONDARY cross-reference field (populated only
+                # when a MeSH->MedDRA crosswalk is available -- currently
+                # None) but is no longer the PRIMARY canonical field.
+                "clinical_outcome_id": co_id,  # PRIMARY canonical ID
+                # v60 ROOT FIX (legacy field, retained for backward compat
+                # with any caller that still reads meddra_id -- but this is
+                # NOT the canonical ID; resolve_canonical_id now uses
+                # clinical_outcome_id first per ID_MAPPING_PRIORITY).
+                "meddra_id": None,  # requires MeSH->MedDRA crosswalk (future work)
                 "mesh_id": _mesh_id,
                 # v35 M-5 root fix: renamed misleading ``source_drug_id``
-                # to ``first_seen_drug_id`` (the actual semantics — the
+                # to ``first_seen_drug_id`` (the actual semantics -- the
                 # first drug that pointed to this node). The new
                 # ``source_drug_ids`` list records ALL drugs pointing
                 # here. ``source_drug_id`` is kept as a deprecated
@@ -3539,7 +3548,7 @@ def stage_phase1_to_phase2(
     run_id: Optional[str] = None,
     phase1_processed_dir: Optional[Path | str] = None,
 ) -> Phase1StagedData:
-    """Convert Phase 1 DataFrames → Phase 2 node/edge dicts.
+    """Convert Phase 1 DataFrames -> Phase 2 node/edge dicts.
 
     Parameters
     ----------
@@ -3578,9 +3587,9 @@ def stage_phase1_to_phase2(
     # (it's a str, not a DataFrame, so `.empty` would crash).
     # v29 ROOT FIX (audit I-10): checksum excluded empty CSVs. Now
     # includes all CSVs for complete lineage. We track TWO lists:
-    #   * ``sources_read`` — only non-empty DataFrames (used by
+    #   * ``sources_read`` -- only non-empty DataFrames (used by
     #     summary/warning logs to report what actually produced rows).
-    #   * ``sources_attempted`` — ALL keys whose CSV/SQL was read
+    #   * ``sources_attempted`` -- ALL keys whose CSV/SQL was read
     #     (including empty DataFrames). Used by load_into_graph's
     #     lineage checksum so empty-but-present CSVs still contribute
     #     to the checksum (otherwise swapping a 0-row CSV for a missing
@@ -3592,7 +3601,7 @@ def stage_phase1_to_phase2(
         if df is None:
             continue
         # Track every key whose DataFrame was constructed (even if
-        # empty) — this is the I-10 fix.
+        # empty) -- this is the I-10 fix.
         staged.sources_attempted.append(key)
         if not df.empty:
             staged.sources_read.append(key)
@@ -3610,10 +3619,10 @@ def stage_phase1_to_phase2(
             # so it matches kg_builder.ID_PATTERNS["Compound"] = DB\d{5,6}).
             # Audit fix (v5 Tier-3 bug #23): the previous code emitted
             # `drugbank:DB00011` for biologics, which kg_builder rejects
-            # (pattern is `^(DB\d{5,6}|CHEMBL\d+|CID\d+|...)$` — no
+            # (pattern is `^(DB\d{5,6}|CHEMBL\d+|CID\d+|...)$` -- no
             # `drugbank:` prefix). Synthetic inchikeys (prefix "SYNTH")
             # must NOT be used as canonical IDs because they collide
-            # across different biologics — fall back to the bare DrugBank
+            # across different biologics -- fall back to the bare DrugBank
             # ID `DB00011` instead.
             #
             # v27 ROOT FIX (P2-B-2): kg_builder.ID_PATTERNS["Compound"]
@@ -3626,7 +3635,7 @@ def stage_phase1_to_phase2(
             if inchikey_canonical and not inchikey_canonical.startswith("SYNTH"):
                 canonical_id = inchikey_canonical
             else:
-                canonical_id = drugbank_id  # e.g. "DB00011" — matches DB\d{5,6}
+                canonical_id = drugbank_id  # e.g. "DB00011" -- matches DB\d{5,6}
             # v61 ROOT FIX (patient-safety regression from v27):
             # The v27 "fix" (P2-B-1) wrote ``withdrawn=None`` when Phase 1
             # was silent on withdrawal status, claiming DrugBankEnricher
@@ -3635,18 +3644,18 @@ def stage_phase1_to_phase2(
             #   "The bridge EXPLICITLY coerces is_withdrawn to a bool and
             #    writes withdrawn=False (never null) for every Compound
             #    node."
-            # The RL safety ranker treats ``None`` as "not withdrawn" →
-            # SAFE → a withdrawn drug like Valdecoxib (withdrawn for
+            # The RL safety ranker treats ``None`` as "not withdrawn" ->
+            # SAFE -> a withdrawn drug like Valdecoxib (withdrawn for
             # cardiovascular risk) would be surfaced as a repurposing
             # candidate. ``None`` and ``False`` are BOTH treated as
             # "not withdrawn" by the ranker, so the distinction v27
-            # tried to preserve was meaningless for safety — while
+            # tried to preserve was meaningless for safety -- while
             # breaking the never-null contract.
             # ROOT FIX: write ``withdrawn=False`` (NEVER null) when Phase 1
             # is silent. Set ``safety_data_missing=True`` so DrugBankEnricher
             # can later UPDATE the field if it has DrugBank XML data. The
             # ``safety_data_missing`` flag is the correct signal for "we
-            # don't know" — NOT a null ``withdrawn`` field.
+            # don't know" -- NOT a null ``withdrawn`` field.
             is_withdrawn_raw = row.get("is_withdrawn")
             if is_withdrawn_raw is None or (
                 isinstance(is_withdrawn_raw, float) and pd.isna(is_withdrawn_raw)
@@ -3678,21 +3687,21 @@ def stage_phase1_to_phase2(
                 "chembl_id": _safe_str(row.get("chembl_id")),
                 "pubchem_cid": _safe_str(row.get("pubchem_cid")),
                 "completeness_score": _safe_float(row.get("completeness_score")),
-                # v78 FORENSIC ROOT FIX (BUG #4 — compound_id_aliases NEVER
+                # v78 FORENSIC ROOT FIX (BUG #4 -- compound_id_aliases NEVER
                 # populated). The v70 ROOT FIX in kg_builder.py added a
                 # Compound-MERGE Cypher that resolves the effective merge_id
                 # by scanning ``row.compound_id_aliases`` for an existing
                 # Compound whose ``id`` matches any alias. The promise:
-                # biotech drugs (insulin, mAbs, vaccines — ~30% of modern
+                # biotech drugs (insulin, mAbs, vaccines -- ~30% of modern
                 # FDA approvals) without InChIKey would MERGE with their
                 # ChEMBL/PubChem equivalents. But the bridge NEVER
-                # populated ``compound_id_aliases`` — so the v70 Cypher's
+                # populated ``compound_id_aliases`` -- so the v70 Cypher's
                 # ``coalesce([a IN coalesce(row.compound_id_aliases, []) ...])``
                 # always fell through to ``row.id``, and biotech drugs
                 # stayed as separate Compound nodes from their ChEMBL/
                 # PubChem equivalents. v70 ROOT FIX Cypher was DEAD CODE.
                 # ROOT FIX: populate ``compound_id_aliases`` with EVERY
-                # alternate stable identifier the bridge knows about —
+                # alternate stable identifier the bridge knows about --
                 # drugbank_id, chembl_id, pubchem_cid, chebi_id, and the
                 # inchikey (when it's not the canonical id). The MERGE
                 # Cypher will then find the cross-source match.
@@ -3722,27 +3731,27 @@ def stage_phase1_to_phase2(
             len(staged.compound_nodes),
         )
     else:
-        staged.warnings.append("drugbank_drugs.csv missing or empty — no Compound nodes staged")
+        staged.warnings.append("drugbank_drugs.csv missing or empty -- no Compound nodes staged")
 
-    # ─── Protein nodes + Compound→Protein edges (from drugbank_interactions) ──
+    # ─── Protein nodes + Compound->Protein edges (from drugbank_interactions) ──
     # v28 ROOT FIX (P2-B-11): build ``drug_canonical_map`` ONCE here (after
     # all DrugBank-sourced Compound nodes are staged) and reuse it for BOTH
-    # the Compound→Protein edge path below AND the Compound→treats→Disease
+    # the Compound->Protein edge path below AND the Compound->treats->Disease
     # edge path further down. Previously the bridge built this map TWICE
     # with divergent logic:
-    #   - At line ~1215 (Compound→Protein path): ``drug_canonical[dbid] =
-    #     n["id"]`` — pulled the canonical ID from already-staged
+    #   - At line ~1215 (Compound->Protein path): ``drug_canonical[dbid] =
+    #     n["id"]`` -- pulled the canonical ID from already-staged
     #     ``staged.compound_nodes`` (which had uppercase InChIKeys
     #     applied at line 1146 via ``inchikey.upper()``).
     #   - At line ~1514 (treats path): ``drug_canonical_map[dbid] = (inchi
-    #     if inchi and not inchi.startswith("SYNTH") else dbid)`` — read
+    #     if inchi and not inchi.startswith("SYNTH") else dbid)`` -- read
     #     ``inchi`` DIRECTLY from the DataFrame, WITHOUT uppercasing. So
     #     if the Phase 1 CSV ever emitted a lowercase InChIKey, treats
-    #     edges would emit a lowercase canonical ID while Compound→Protein
-    #     edges would emit the uppercase form — the SAME drug appeared as
+    #     edges would emit a lowercase canonical ID while Compound->Protein
+    #     edges would emit the uppercase form -- the SAME drug appeared as
     #     two disjoint Compound nodes downstream.
     # The fix: build the map ONCE from ``staged.compound_nodes`` (the source
-    # of truth — every node's ``id`` is already the uppercased canonical
+    # of truth -- every node's ``id`` is already the uppercased canonical
     # form). Both consumers use the same map.
     drug_canonical_map: Dict[str, str] = {
         n["drugbank_id"]: n["id"]
@@ -3760,9 +3769,9 @@ def stage_phase1_to_phase2(
             "allosterically_modulates": [],
             "unknown": [],
         }
-        # v6 fix (bug #B2): dedup Compound→Protein edges upstream by
+        # v6 fix (bug #B2): dedup Compound->Protein edges upstream by
         # (src_id, dst_id, rel_type) so the RecordingGraphBuilder's downstream
-        # dedup is a no-op (no silent edge drops in the staged→loaded count).
+        # dedup is a no-op (no silent edge drops in the staged->loaded count).
         seen_cp: set[Tuple[str, str, str]] = set()
         for idx, row in inter.iterrows():
             drugbank_id = _safe_str(row.get("drugbank_id"))
@@ -3771,7 +3780,7 @@ def stage_phase1_to_phase2(
                 continue
             canonical_drug_id = drug_canonical_map.get(drugbank_id)
             if canonical_drug_id is None:
-                # Drug not in compound_nodes — skip this edge to preserve
+                # Drug not in compound_nodes -- skip this edge to preserve
                 # referential integrity.
                 continue
             # Build Protein node (dedup on uniprot_id)
@@ -3799,7 +3808,7 @@ def stage_phase1_to_phase2(
             # v78 FORENSIC ROOT FIX (BUG #1): emit canonical
             # ``normalized_score`` on every edge so cross-source
             # confidence fusion works. DrugBank interactions CSV has no
-            # quantitative score → normalized_score=None (the edge
+            # quantitative score -> normalized_score=None (the edge
             # existence IS the signal; ChEMBL provides pchembl_value
             # when available, fused downstream).
             edge = {
@@ -3826,16 +3835,16 @@ def stage_phase1_to_phase2(
             if edges:
                 staged.edges[("Compound", rel, "Protein")] = edges
         logger.info(
-            "Phase1 bridge: staged %d Protein nodes and %d Compound→Protein edges",
+            "Phase1 bridge: staged %d Protein nodes and %d Compound->Protein edges",
             len(staged.protein_nodes),
             sum(len(v) for v in edge_buckets.values()),
         )
     else:
         staged.warnings.append(
-            "drugbank_interactions.csv.gz missing or empty — no Protein nodes or Compound→Protein edges staged"
+            "drugbank_interactions.csv.gz missing or empty -- no Protein nodes or Compound->Protein edges staged"
         )
 
-    # ─── Gene + Disease nodes + Gene→Disease edges (from omim_gda) ─────────
+    # ─── Gene + Disease nodes + Gene->Disease edges (from omim_gda) ─────────
     # Audit fix (v5 Tier-3 bug #22): the previous code used the raw gene
     # SYMBOL as the Gene node ID, but kg_builder.ID_PATTERNS["Gene"] =
     # ^\d+$ (NCBI Gene ID). Every Gene node was dead-lettered in
@@ -3845,7 +3854,7 @@ def stage_phase1_to_phase2(
     # We also filter OMIM's ALTGENE/MENDGENE/MYGENE placeholders (audit §C.4).
     #
     # v6 fix (bug #B10/B11): prefer Phase 1's `canonical_gene_id` (NCBI Gene
-    # ID) when populated — this is the proper, unique-per-gene identifier.
+    # ID) when populated -- this is the proper, unique-per-gene identifier.
     # The OMIM CSV's `uniprot_id` column is now also populated (was 100% NaN
     # in v5), so Gene-encodes-Protein edges are emitted and the graph is no
     # longer split into two disconnected halves.
@@ -3853,14 +3862,14 @@ def stage_phase1_to_phase2(
     # v6 fix (bug #B2): dedup gda_edges and encodes_edges UPSTREAM in the
     # bridge so the RecordingGraphBuilder's downstream dedup is a no-op (no
     # silent edge drops). The previous code produced 19 staged / 18 loaded
-    # because of a (gene_mim=164920, OMIM:273300) duplicate — now resolved
+    # because of a (gene_mim=164920, OMIM:273300) duplicate -- now resolved
     # by using canonical_gene_id (FGFR3=2261, KIT=3815, no collision).
     omim = frames.get("omim_gda")
     if omim is not None and not omim.empty:
         gene_seen: Dict[str, Dict[str, Any]] = {}
         disease_seen: Dict[str, Dict[str, Any]] = {}
         gda_edges: List[Dict[str, Any]] = []
-        # Audit fix (v5 Tier-3 bug #25a): collect Gene→Protein (encodes)
+        # Audit fix (v5 Tier-3 bug #25a): collect Gene->Protein (encodes)
         # edges by joining on the OMIM CSV's `uniprot_id` column.
         encodes_edges: List[Dict[str, Any]] = []
         seen_gda: set[Tuple[str, str]] = set()        # upstream dedup (bug #B2)
@@ -3880,7 +3889,7 @@ def stage_phase1_to_phase2(
                 continue
             if not disease_id:
                 continue
-            # Resolve Gene canonical ID — prefer the Phase 1 canonical_gene_id
+            # Resolve Gene canonical ID -- prefer the Phase 1 canonical_gene_id
             # column if populated (Phase 1's entity_resolution populates it
             # with the NCBI Gene ID when available). Fall back to NCBI Gene ID,
             # then OMIM gene MIM (both numeric, both match ^\d+$), then the
@@ -3966,7 +3975,7 @@ def stage_phase1_to_phase2(
                     # v78 FORENSIC ROOT FIX (BUG #1 + BUG #6):
                     #   BUG #1: emit canonical ``normalized_score`` so
                     #   cross-source confidence fusion works. OMIM GDA
-                    #   is curated human-genetics evidence — when no
+                    #   is curated human-genetics evidence -- when no
                     #   numeric score is present, normalized_score=1.0
                     #   (a confirmed OMIM association is high-confidence).
                     #   BUG #6: this is the OMIM side of the
@@ -3994,11 +4003,11 @@ def stage_phase1_to_phase2(
             # Audit fix (v5 Tier-3 bug #25a): emit Gene-encodes-Protein
             # edge when the OMIM CSV provides a UniProt AC for this gene.
             # Without this edge, the Gene subgraph and Protein subgraph
-            # are disconnected in the loaded KG, so Drug→Protein→?→Gene→Disease
+            # are disconnected in the loaded KG, so Drug->Protein->?->Gene->Disease
             # multi-hop queries return empty results.
             #
             # v6 fix (bug #B10/B11): OMIM CSV now has uniprot_id populated
-            # (was 100% NaN in v5) — encodes edges are now actually emitted.
+            # (was 100% NaN in v5) -- encodes edges are now actually emitted.
             # v6 fix (bug #B2): dedup encodes_edges upstream by (src_id, dst_id).
             # v6 fix (bug #B10): ALSO stage a Protein node for the OMIM-derived
             # uniprot_id so the encodes edge's dst endpoint exists in the graph.
@@ -4032,7 +4041,7 @@ def stage_phase1_to_phase2(
                         # v78 FORENSIC ROOT FIX (BUG #1): canonical
                         # normalized_score on encodes edges. The
                         # gene-protein crosswalk is curated human
-                        # genetics → high confidence → 1.0.
+                        # genetics -> high confidence -> 1.0.
                         "normalized_score": _compute_normalized_score(
                             source="omim", rel_type="encodes",
                         ),
@@ -4061,7 +4070,7 @@ def stage_phase1_to_phase2(
         )
     else:
         staged.warnings.append(
-            "omim_gene_disease_associations.csv missing or empty — no Gene/Disease nodes or Gene->Disease edges staged"
+            "omim_gene_disease_associations.csv missing or empty -- no Gene/Disease nodes or Gene->Disease edges staged"
         )
 
     # ─── Chain-1 ROOT FIX: stage DisGeNET Disease nodes BEFORE treats ────
@@ -4070,7 +4079,7 @@ def stage_phase1_to_phase2(
     # indications use DOID-format disease IDs. If DisGeNET's DOID-keyed
     # Disease nodes haven't been staged yet, the treats-edge loop can't
     # match them, and even with the v78 fallback that stages unrecognized
-    # DOID IDs as synthetic Disease nodes, the gene→disease→drug multi-hop
+    # DOID IDs as synthetic Disease nodes, the gene->disease->drug multi-hop
     # path is broken (the synthetic DOID node has no gene associations).
     #
     # ROOT FIX: stage the DisGeNET Disease nodes HERE (before the treats-
@@ -4083,7 +4092,7 @@ def stage_phase1_to_phase2(
     # match still use the v78 synthetic-disease fallback.
     #
     # Note: Gene-node staging from DisGeNET is deferred to the full
-    # DisGeNET edge-staging section below (line ~4704) — only Disease
+    # DisGeNET edge-staging section below (line ~4704) -- only Disease
     # nodes are staged here to avoid duplicating Gene-staging logic.
     extra_disease_seen_pre: set[str] = set()
     disgenet = frames.get("disgenet_gda")
@@ -4114,7 +4123,7 @@ def stage_phase1_to_phase2(
     # ─── Audit fix (v5 Tier-3 bug #25b): derive Compound-treats-Disease ────
     # Phase 2's CORE_EDGE_TYPES declares ("Compound", "treats", "Disease")
     # as the primary link-prediction target. Phase 1's DrugBank CSV has
-    # no disease column, and OMIM has no drug column — so the previous
+    # no disease column, and OMIM has no drug column -- so the previous
     # bridge produced ZERO treats edges. TransE had no positive training
     # signal for the drug-repurposing task.
     #
@@ -4134,7 +4143,7 @@ def stage_phase1_to_phase2(
     # DataFrame with divergent logic (no InChIKey uppercasing), causing
     # the same drug to appear as two disjoint Compound nodes when the
     # Phase 1 CSV emitted a lowercase InChIKey. The unified map reads
-    # from ``staged.compound_nodes`` (the source of truth — every
+    # from ``staged.compound_nodes`` (the source of truth -- every
     # node's ``id`` is already the uppercased canonical form).
 
     # Set of Disease IDs already staged (referential integrity gate).
@@ -4146,7 +4155,7 @@ def stage_phase1_to_phase2(
     # built from OMIM-only diseases. DisGeNET stages DOID-keyed Disease
     # nodes AFTER the treats-edge block, so DrugBank indications using
     # DOID IDs (e.g. DOID:0050133) were not in disease_id_set and were
-    # skipped by the "did not in disease_id_set" check → 0 treats edges
+    # skipped by the "did not in disease_id_set" check -> 0 treats edges
     # from most indication rows. The v78 fallback (staging a new Disease
     # node when did is valid but not in disease_id_set) partially helps,
     # but the ROOT FIX is to pre-scan DisGeNET diseases here so the
@@ -4176,7 +4185,7 @@ def stage_phase1_to_phase2(
     # (and real DrugBank), 4/9 indication rows have EMPTY `disease_id`
     # because DrugBank's open-data dump uses the disease_name field
     # ("Pain", "Asthma", "Hepatitis B") without normalizing to OMIM.
-    # The previous code skipped these rows — losing ~half of the
+    # The previous code skipped these rows -- losing ~half of the
     # Compound-treats-Disease edges (the headline ML target).
     #
     # The fix: when `disease_id` is empty but `disease_name` is non-empty,
@@ -4196,13 +4205,13 @@ def stage_phase1_to_phase2(
                 continue
             drug_canonical = drug_canonical_map.get(dbid)
             if drug_canonical is None:
-                # Drug not in compound_nodes — skip to preserve referential
+                # Drug not in compound_nodes -- skip to preserve referential
                 # integrity.
                 continue
             # v34 ROOT FIX (CRITICAL #8): if disease_id is empty but we
             # have a disease_name, synthesize a slugified Disease ID.
             #
-            # v78 FORENSIC ROOT FIX (BUG #10 — Compound Issue, 0 treats
+            # v78 FORENSIC ROOT FIX (BUG #10 -- Compound Issue, 0 treats
             # edges): the v34 fix only fired when ``disease_id`` was
             # EMPTY. But the real killer bug: DrugBank indications emit
             # ``disease_id = "DOID:0050133"`` (DOID format) while the
@@ -4210,8 +4219,8 @@ def stage_phase1_to_phase2(
             # (OMIM:nnnnnn format). The slugify fallback didn't fire
             # (disease_id was non-empty), and the ``did not in
             # disease_id_set`` check at line ~3244 silently skipped
-            # EVERY DrugBank-indication row → 0 Compound-treats-Disease
-            # edges → V1 launch criterion (>0.85 AUC on held-out drug-
+            # EVERY DrugBank-indication row -> 0 Compound-treats-Disease
+            # edges -> V1 launch criterion (>0.85 AUC on held-out drug-
             # disease pairs) was structurally unverifiable.
             #
             # ROOT FIX (BUG #10): when ``disease_id`` is non-empty but
@@ -4254,10 +4263,10 @@ def stage_phase1_to_phase2(
             # DrugBank indications that reference DOID/MeSH/EFO IDs not
             # present in OMIM or DisGeNET. (DisGeNET runs AFTER this
             # block, so its DOID-keyed diseases aren't available here
-            # yet — this fallback is the robust fix that doesn't depend
+            # yet -- this fallback is the robust fix that doesn't depend
             # on staging order.)
             if did not in disease_id_set:
-                # Validate the ID format before staging — if it's a
+                # Validate the ID format before staging -- if it's a
                 # recognized biomedical ID (DOID/MeSH/EFO/MONDO/etc.),
                 # stage it. Otherwise fall back to slugification.
                 _is_valid_disease_id = bool(re.match(
@@ -4284,7 +4293,7 @@ def stage_phase1_to_phase2(
                     disease_id_set.add(did)
                 else:
                     # The ID doesn't match any known biomedical ontology
-                    # format — skip to avoid polluting the KG with
+                    # format -- skip to avoid polluting the KG with
                     # invalid IDs (would be dead-lettered by kg_builder
                     # anyway). This is the conservative path.
                     continue
@@ -4300,7 +4309,7 @@ def stage_phase1_to_phase2(
                 "evidence": _treat_itype,
                 # v78 FORENSIC ROOT FIX (BUG #1): canonical
                 # normalized_score on treats edges. DrugBank indication_type
-                # "approved" → 1.0, "investigational"/"phase" → 0.5, else 0.3.
+                # "approved" -> 1.0, "investigational"/"phase" -> 0.5, else 0.3.
                 # This is the confidence signal the RL ranker uses to
                 # prioritize drug-disease pairs for repurposing.
                 "normalized_score": _compute_normalized_score(
@@ -4334,12 +4343,12 @@ def stage_phase1_to_phase2(
         if indication_col is not None:
             # v29 ROOT FIX (audit L-11): was O(N×M) free-text matching. Now uses hash-based O(1) lookup.
             # The previous code iterated `for dnode in staged.disease_nodes`
-            # INSIDE `for idx, row in drugs.iterrows()` — O(N_drugs × N_diseases).
+            # INSIDE `for idx, row in drugs.iterrows()` -- O(N_drugs × N_diseases).
             # For a production DrugBank (~14K drugs) × OMIM (~10K diseases)
             # that's 140M regex calls. Now we build:
-            #   1. A hash dict {disease_name_lower: dnode} — O(M) once
+            #   1. A hash dict {disease_name_lower: dnode} -- O(M) once
             #   2. A single compiled alternation regex matching ALL disease
-            #      names with word boundaries — O(M) once
+            #      names with word boundaries -- O(M) once
             # For each drug we then run the regex ONCE (one pass over the
             # indication text) and look up each matched disease name in the
             # dict (O(1) per match). Total complexity is now
@@ -4352,7 +4361,7 @@ def stage_phase1_to_phase2(
                 if not _dname or len(_dname) < 4:
                     continue
                 _dname_lower = _dname.lower()
-                # First occurrence wins (mirrors the old loop's behaviour —
+                # First occurrence wins (mirrors the old loop's behaviour --
                 # `seen_treats` already dedups by (drug, disease) downstream).
                 if _dname_lower not in _disease_name_lookup:
                     _disease_name_lookup[_dname_lower] = _dnode
@@ -4370,7 +4379,7 @@ def stage_phase1_to_phase2(
             # "diabetes" and "type 2 diabetes mellitus" (two separate edges
             # to two different disease_ids). A bare alternation regex
             # (``\b(?:...|...)\b``) would consume the longer match and
-            # skip the shorter — silently dropping the second edge. The
+            # skip the shorter -- silently dropping the second edge. The
             # lookahead preserves the old per-disease-name semantics:
             # every disease name whose word-bounded form appears in the
             # text gets an edge.
@@ -4393,11 +4402,11 @@ def stage_phase1_to_phase2(
                 if drug_canonical is None:
                     continue
                 if _disease_regex is None:
-                    # No disease nodes with usable names — nothing to match.
+                    # No disease nodes with usable names -- nothing to match.
                     continue
                 # v29 ROOT FIX (audit L-11): single regex pass over the
                 # indication text. Each match is looked up in the hash dict
-                # (O(1)) — no inner loop over staged.disease_nodes.
+                # (O(1)) -- no inner loop over staged.disease_nodes.
                 # group(1) is the captured disease name (lookahead pattern).
                 for _match in _disease_regex.finditer(ind_text.lower()):
                     _matched_name = _match.group(1)
@@ -4468,7 +4477,7 @@ def stage_phase1_to_phase2(
         staged.warnings.append(
             "No ClinicalOutcome nodes derivable from Phase 1 outputs "
             "(drugbank_indications.csv missing or empty). The DOCX Phase 2 "
-            "spec mandates ClinicalOutcome as one of 5 node types — this "
+            "spec mandates ClinicalOutcome as one of 5 node types -- this "
             "warning means the spec's 5-type schema is incomplete."
         )
     if co_edges:
@@ -4479,21 +4488,21 @@ def stage_phase1_to_phase2(
     # ─── further below (line ~4670+).                                  ───
     # v82 FORENSIC ROOT FIX (misleading premature warning):
     #   The previous code emitted a "no Pathway nodes derived" warning
-    #   HERE — but this runs BEFORE the actual Pathway derivation block
+    #   HERE -- but this runs BEFORE the actual Pathway derivation block
     #   at line ~4670+. So the warning fired on EVERY run, even when
     #   Pathway nodes WERE successfully derived later. The user saw
     #   both contradictory log lines:
     #     1. "no Pathway nodes derived (STRING PPI data empty or all
     #        singletons). The DOCX Phase 2 spec mandates Pathway..."
     #     2. "derived 1 Pathway nodes from STRING PPI connected
-    #        components. Emitted 8 Protein→participates_in→Pathway
+    #        components. Emitted 8 Protein->participates_in->Pathway
     #        edges. This restores the DOCX Phase 2 5-node-type contract."
     #   The first message was an INFO log AND a staged.warnings append,
     #   so it surfaced in the final summary as a warning, misleading
     #   operators into thinking the 5-node-type contract was violated
     #   when it was actually satisfied.
     # ROOT FIX: remove the premature warning block entirely. The Pathway
-    #   derivation block at line ~4670+ has its OWN logging — INFO when
+    #   derivation block at line ~4670+ has its OWN logging -- INFO when
     #   pathways are derived, WARNING when derivation fails or returns
     #   empty. That is the SINGLE source of truth for Pathway status.
     #   No warning is emitted prematurely based on intermediate state.
@@ -4514,30 +4523,30 @@ def stage_phase1_to_phase2(
 
     # ─── v15 ROOT FIX (REM-12): OMIM susceptibility / polygenic GDA ────────
     # OMIM partitions its gene-phenotype associations into TWO tables:
-    #   • omim_gene_disease_associations.csv  → Mendelian CAUSATIVE
+    #   • omim_gene_disease_associations.csv  -> Mendelian CAUSATIVE
     #     associations (mapping_key=3 dominant/recessive/X-linked; the
     #     gene's mutation DIRECTLY causes the disease).
-    #   • omim_gene_disease_susceptibility.csv  → SUSCEPTIBILITY /
+    #   • omim_gene_disease_susceptibility.csv  -> SUSCEPTIBILITY /
     #     polygenic associations (mapping_key=3 with
     #     association_modifier={susceptibility,modifier,probable});
     #     the variant RAISES RISK but does not deterministically cause.
-    # v14 only loaded the causative table. The susceptibility table —
+    # v14 only loaded the causative table. The susceptibility table --
     # which contains the BRCA1+breast_cancer, APOE+Alzheimer's, and
-    # TERT+glioma signals critical for drug-repurposing — was silently
+    # TERT+glioma signals critical for drug-repurposing -- was silently
     # dropped. Worse, even when susceptibility rows were present in the
     # causative CSV (Phase 1 sometimes merges them), the bridge emitted
     # them under `associated_with`, conflating causal and risk-raising
     # edges. TransE then learned that FGFR3+achondroplasia (causative,
     # fully penetrant) and BRCA1+breast_cancer (susceptibility, ~60%
-    # lifetime risk) are equivalent relations — a scientific error that
+    # lifetime risk) are equivalent relations -- a scientific error that
     # corrupts the embedding geometry.
     # Fix: emit susceptibility associations under a DISTINCT relation
     # `susceptible_to`. This:
     #   1. Preserves the scientific distinction in the graph schema.
     #   2. Lets TransE learn a separate embedding offset for risk vs
     #      causation.
-    #   3. Lets the RL ranker treat "Compound→treats→Disease that has
-    #      susceptibility gene X" differently from "Compound→treats→
+    #   3. Lets the RL ranker treat "Compound->treats->Disease that has
+    #      susceptibility gene X" differently from "Compound->treats->
     #      Disease caused by gene X".
     omim_susc = frames.get("omim_susceptibility")
     if omim_susc is not None and not omim_susc.empty:
@@ -4619,18 +4628,18 @@ def stage_phase1_to_phase2(
                 "_schema_version": schema_version,
             })
         if susc_edges:
-            # Distinct relation: `susceptible_to` — separate from the
+            # Distinct relation: `susceptible_to` -- separate from the
             # causative `associated_with` to preserve the scientific
             # distinction in the embedding geometry.
             staged.edges[("Gene", "susceptible_to", "Disease")] = susc_edges
             logger.info(
-                "Phase1 bridge: staged %d Gene→susceptible_to→Disease edges "
+                "Phase1 bridge: staged %d Gene->susceptible_to->Disease edges "
                 "from omim_gene_disease_susceptibility.csv (%d new Genes, "
                 "%d new Diseases staged)",
                 len(susc_edges), n_new_genes, n_new_diseases,
             )
 
-    # ── ChEMBL: drug bioactivity → Compound→targets→Protein edges ──
+    # ── ChEMBL: drug bioactivity -> Compound->targets->Protein edges ──
     chembl = frames.get("chembl_drugs")
     if chembl is not None and not chembl.empty:
         chembl_edges: List[Dict[str, Any]] = []
@@ -4648,7 +4657,7 @@ def stage_phase1_to_phase2(
             if canonical not in extra_compound_seen:
                 # ROOT FIX (schema consistency / DC-2 follow-up):
                 # ChEMBL-sourced Compound nodes MUST carry the SAME schema
-                # fields as DrugBank-sourced Compound nodes — the previous
+                # fields as DrugBank-sourced Compound nodes -- the previous
                 # code omitted drugbank_id/withdrawn/fda_approved, breaking
                 # schema-consistency tests and forcing downstream consumers
                 # to special-case ChEMBL compounds. Default the
@@ -4681,7 +4690,7 @@ def stage_phase1_to_phase2(
                     "molecular_formula": _safe_str(row.get("molecular_formula")),
                     # Patient-safety: explicit bool, never null.
                     # ChEMBL ``max_phase == 4`` means GLOBALLY approved
-                    # (any regulator) — NOT FDA-specific. We expose both
+                    # (any regulator) -- NOT FDA-specific. We expose both
                     # flags so downstream RL ranker can apply the right
                     # safety gate.
                     "fda_approved": _resolve_fda_approved(row),  # v64 ROOT FIX (P1-012): falls back to is_globally_approved when is_fda_approved is None (ChEMBL source)
@@ -4724,7 +4733,7 @@ def stage_phase1_to_phase2(
                 })
                 extra_compound_seen.add(canonical)
             # If the row carries a target_chembl_id / uniprot_accession
-            # pair, emit a Compound→targets→Protein edge.
+            # pair, emit a Compound->targets->Protein edge.
             tgt_uniprot = (
                 _safe_str(row.get("uniprot_accession"))
                 or _safe_str(row.get("target_uniprot"))
@@ -4754,7 +4763,7 @@ def stage_phase1_to_phase2(
                         "pchembl_value": _chembl_pchembl,
                         # v78 FORENSIC ROOT FIX (BUG #1): canonical
                         # normalized_score derived from pchembl_value
-                        # (potency, scale [0, ~14] → /14). When pchembl
+                        # (potency, scale [0, ~14] -> /14). When pchembl
                         # is missing, falls back to None (the edge
                         # existence IS the signal).
                         "normalized_score": _compute_normalized_score(
@@ -4773,40 +4782,40 @@ def stage_phase1_to_phase2(
             existing = staged.edges.get(("Compound", "targets", "Protein"), [])
             staged.edges[("Compound", "targets", "Protein")] = existing + chembl_edges
             logger.info(
-                "Phase1 bridge: staged %d Compound→targets→Protein edges "
+                "Phase1 bridge: staged %d Compound->targets->Protein edges "
                 "from chembl_drugs.csv",
                 len(chembl_edges),
             )
 
     # ─── v15 ROOT FIX (REM-12/13/14): ChEMBL bioactivity edges ─────────────
-    # v14 only consumed `chembl_drugs.csv` — a compound-METADATA CSV with
+    # v14 only consumed `chembl_drugs.csv` -- a compound-METADATA CSV with
     # one row per compound (denormalized: a single representative
     # target+activity per molecule). That path could not:
-    #   1. Emit direction-correct `inhibits`/`activates` edges — even when
+    #   1. Emit direction-correct `inhibits`/`activates` edges -- even when
     #      the `activity_type` field contained "INHIBITOR" or "ACTIVATOR",
     #      the bridge hardcoded the relation to "targets" (audit REM-13).
-    #   2. Carry the potency value (pchembl_value) as an edge property —
+    #   2. Carry the potency value (pchembl_value) as an edge property --
     #      the RL safety ranker needs potency to distinguish a 10 nM
     #      binder from a 10 µM binder.
-    #   3. Capture the multi-target profile of a compound — a single
+    #   3. Capture the multi-target profile of a compound -- a single
     #      molecule can have 50+ bioactivity rows in ChEMBL, one per
     #      target. v14's chembl_drugs.csv denormalized this to 1 row.
-    # Fix: read `chembl_activities_clean.csv` — the actual bioactivity
+    # Fix: read `chembl_activities_clean.csv` -- the actual bioactivity
     # table (one row per molecule-target-activity triple). For each row,
     # classify the relation via `_classify_chembl_activity_edge()`:
-    #   • activity_type contains "inhibit" → "inhibits"
-    #   • activity_type contains "activ" / "agon" → "activates"
-    #   • EC50 / AC50 → "targets" (v21 root fix: EC50/AC50 can be
-    #     agonist OR antagonist depending on assay design — the honest
+    #   • activity_type contains "inhibit" -> "inhibits"
+    #   • activity_type contains "activ" / "agon" -> "activates"
+    #   • EC50 / AC50 -> "targets" (v21 root fix: EC50/AC50 can be
+    #     agonist OR antagonist depending on assay design -- the honest
     #     relation is 'targets', not 'activates'. See _classify_chembl_
     #     activity_edge docstring for the full rationale.)
-    #   • everything else (IC50/Ki/Kd/Potency) → "targets"
-    #     (interaction confirmed, direction unknown — patient-safety-
+    #   • everything else (IC50/Ki/Kd/Potency) -> "targets"
+    #     (interaction confirmed, direction unknown -- patient-safety-
     #     correct default). The actual activity_type string is preserved
     #     as an edge property so downstream consumers can re-classify.
     chembl_act = frames.get("chembl_activities")
     if chembl_act is not None and not chembl_act.empty:
-        # Build a ChemBL-ID → canonical-Compound-ID lookup from the
+        # Build a ChemBL-ID -> canonical-Compound-ID lookup from the
         # Compound nodes staged so far (so we can resolve the
         # molecule_chembl_id column to an inchikey or drugbank_id).
         chembl_to_canonical: Dict[str, str] = {}
@@ -4814,7 +4823,7 @@ def stage_phase1_to_phase2(
             cid = c.get("chembl_id")
             if cid:
                 chembl_to_canonical[cid] = c["id"]
-        # And a target_chembl_id → uniprot_ac lookup (ChEMBL's target
+        # And a target_chembl_id -> uniprot_ac lookup (ChEMBL's target
         # dictionary, populated by Phase 1 entity resolution when
         # available). For now we use whatever `uniprot_accession` column
         # is present in the activities CSV (Phase 1 may join it in).
@@ -4853,7 +4862,7 @@ def stage_phase1_to_phase2(
             pchembl = _safe_float(row.get("pchembl_value"))
             activity_value = _safe_float(row.get("activity_value"))
             activity_units = _safe_str(row.get("activity_units"))
-            # Resolve molecule → canonical Compound ID.
+            # Resolve molecule -> canonical Compound ID.
             canonical_compound = chembl_to_canonical.get(mol_chembl) or mol_chembl
             if canonical_compound not in extra_compound_seen:
                 # Stage a minimal Compound node for this ChEMBL molecule.
@@ -4919,7 +4928,7 @@ def stage_phase1_to_phase2(
                 extra_compound_seen.add(canonical_compound)
                 chembl_to_canonical[mol_chembl] = canonical_compound
                 n_new_compounds_from_act += 1
-            # Resolve target → UniProt AC (preferred) or ChEMBL target ID.
+            # Resolve target -> UniProt AC (preferred) or ChEMBL target ID.
             tgt_uniprot = (
                 _safe_str(row.get("uniprot_accession"))
                 or _safe_str(row.get("target_uniprot"))
@@ -4927,7 +4936,7 @@ def stage_phase1_to_phase2(
             if tgt_uniprot:
                 tgt_canonical = tgt_uniprot
             else:
-                # No UniProt AC available — use a prefixed ChEMBL target
+                # No UniProt AC available -- use a prefixed ChEMBL target
                 # ID as the Protein node ID. kg_builder's ID_PATTERNS
                 # accepts `CHEMBL\d+` for Compounds; we use a distinct
                 # `CHEMBL_TGT_` prefix to avoid collision and to make
@@ -4937,7 +4946,7 @@ def stage_phase1_to_phase2(
                 # the previous code emitted
                 # ``f"CHEMBL_TGT_{tgt_chembl}"`` where ``tgt_chembl``
                 # is the full ChEMBL ID (e.g. ``CHEMBL2366519``).
-                # The result was ``CHEMBL_TGT_CHEMBL2366519`` — but
+                # The result was ``CHEMBL_TGT_CHEMBL2366519`` -- but
                 # kg_builder.ID_PATTERNS['Protein'] regex is
                 # ``^CHEMBL_TGT_\d+$`` (digits only after the prefix).
                 # Every such Protein node was dead-lettered as
@@ -4972,7 +4981,7 @@ def stage_phase1_to_phase2(
             rel = _classify_chembl_activity_edge(
                 activity_type, assay_type, standard_relation,
             )
-            # Dedup by (src, dst, rel) — keep the highest-pchembl_value
+            # Dedup by (src, dst, rel) -- keep the highest-pchembl_value
             # edge (most potent) when duplicates exist.
             edge_key = (canonical_compound, tgt_canonical, rel)
             if edge_key in seen_act:
@@ -5007,7 +5016,7 @@ def stage_phase1_to_phase2(
                 "evidence": activity_type or "bioactivity",
                 # v78 FORENSIC ROOT FIX (BUG #1): canonical
                 # normalized_score from pchembl_value (potency scale
-                # [0, ~14] → /14). This is the confidence signal the
+                # [0, ~14] -> /14). This is the confidence signal the
                 # RL ranker uses to weigh ChEMBL bioactivity evidence.
                 "normalized_score": _compute_normalized_score(
                     pchembl_value=pchembl,
@@ -5032,7 +5041,7 @@ def stage_phase1_to_phase2(
         total_act_edges = sum(len(v) for v in chembl_act_edges.values())
         if total_act_edges:
             logger.info(
-                "Phase1 bridge: staged %d Compound→{{inhibits,activates,targets}}→"
+                "Phase1 bridge: staged %d Compound->{{inhibits,activates,targets}}->"
                 "Protein edges from chembl_activities_clean.csv "
                 "(inhibits=%d, activates=%d, targets=%d; %d new Compounds, "
                 "%d new Proteins staged)",
@@ -5092,7 +5101,7 @@ def stage_phase1_to_phase2(
                 n_uniprot_staged,
             )
 
-    # ── STRING: Protein→interacts_with→Protein edges ──
+    # ── STRING: Protein->interacts_with->Protein edges ──
     string_df = frames.get("string_ppi")
     if string_df is not None and not string_df.empty:
         string_edges: List[Dict[str, Any]] = []
@@ -5102,7 +5111,7 @@ def stage_phase1_to_phase2(
         # STRING-only proteins with name/gene_name/organism from the
         # STRING CSV columns (protein_name_a/b, preferred_name_a/b).
         # Previously, STRING-introduced Proteins got a bare node with
-        # only id + lineage properties — downstream consumers expecting
+        # only id + lineage properties -- downstream consumers expecting
         # `name` got None.
         _staged_protein_by_id: Dict[str, Dict[str, Any]] = {
             p.get("id", ""): p for p in staged.protein_nodes if p.get("id")
@@ -5193,7 +5202,7 @@ def stage_phase1_to_phase2(
                 "score": _string_combined,
                 # v78 FORENSIC ROOT FIX (BUG #1): canonical
                 # normalized_score from STRING combined_score (scale
-                # [0, 1000] → /1000). This is the confidence signal
+                # [0, 1000] -> /1000). This is the confidence signal
                 # for cross-source PPI fusion.
                 "normalized_score": _compute_normalized_score(
                     combined_score=_string_combined,
@@ -5210,18 +5219,18 @@ def stage_phase1_to_phase2(
         if string_edges:
             staged.edges[("Protein", "interacts_with", "Protein")] = string_edges
             logger.info(
-                "Phase1 bridge: staged %d Protein→interacts_with→Protein edges "
+                "Phase1 bridge: staged %d Protein->interacts_with->Protein edges "
                 "from string_protein_protein_interactions.csv",
                 len(string_edges),
             )
 
-            # ─── v43 ROOT FIX (Chain 4b — Pathway nodes missing) ───────
+            # ─── v43 ROOT FIX (Chain 4b -- Pathway nodes missing) ───────
             # DOCX Phase 2 spec mandates 5 node types: Drugs, Proteins,
             # Pathways, Diseases, Clinical Outcomes. The bridge previously
             # shipped only 4 (Compound, Protein, Gene, Disease) + the
             # recently-added ClinicalOutcome. Pathway was a TODO.
             #
-            # Per DOCX: "STRING — Maps protein-protein interaction
+            # Per DOCX: "STRING -- Maps protein-protein interaction
             # networks, showing which proteins work together in the same
             # pathways." The biologically-defensible interpretation: each
             # connected component of the STRING PPI graph = a putative
@@ -5251,14 +5260,14 @@ def stage_phase1_to_phase2(
                     logger.info(
                         "Phase1 bridge: derived %d Pathway nodes from STRING "
                         "PPI connected components (>=2 proteins each). Emitted "
-                        "%d Protein→participates_in→Pathway edges. This "
+                        "%d Protein->participates_in->Pathway edges. This "
                         "restores the DOCX Phase 2 5-node-type contract.",
                         len(pathway_nodes), len(pathway_edges),
                     )
                 else:
                     logger.info(
                         "Phase1 bridge: STRING PPI graph has no connected "
-                        "components with >=2 proteins — no Pathway nodes "
+                        "components with >=2 proteins -- no Pathway nodes "
                         "derived."
                     )
             except Exception as _pathway_exc:
@@ -5272,7 +5281,7 @@ def stage_phase1_to_phase2(
                     f"Pathway derivation failed: {_pathway_exc}"
                 )
 
-    # ── DisGeNET: Gene→associated_with→Disease (with sub-source attribution) ──
+    # ── DisGeNET: Gene->associated_with->Disease (with sub-source attribution) ──
     #
     # v78 FORENSIC ROOT FIX (BUG #6 + BUG #1 + BUG #10):
     #
@@ -5280,7 +5289,7 @@ def stage_phase1_to_phase2(
     #   ``staged.edges[(...)] = existing + disgenet_edges`` (naive
     #   concatenation). The RecordingGraphBuilder's downstream dedup
     #   (by ``(src, rel_type, dst)``) kept the FIRST edge and dropped
-    #   the second — and OMIM edges were staged first. When the same
+    #   the second -- and OMIM edges were staged first. When the same
     #   (gene, disease) pair appeared in BOTH OMIM and DisGeNET, the
     #   DisGeNET quantitative ``score`` (e.g. 0.85) was silently
     #   dropped, leaving the edge with OMIM's ``score=None``. The RL
@@ -5292,7 +5301,7 @@ def stage_phase1_to_phase2(
     #   BUG #10: DisGeNET Disease-node staging runs AFTER the
     #   treats-edge derivation (which builds ``disease_id_set`` from
     #   OMIM only). DrugBank indications use DOID IDs; DisGeNET stages
-    #   DOID-keyed Disease nodes — too late for the treats-edge loop.
+    #   DOID-keyed Disease nodes -- too late for the treats-edge loop.
     #   The treats-edge block was already updated to fall back to
     #   staging a new Disease node when ``disease_id`` is non-empty
     #   but not in ``disease_id_set`` (see treats-edge Path A v78
@@ -5312,7 +5321,7 @@ def stage_phase1_to_phase2(
     #
     #   ROOT FIX (BUG #1): every DisGeNET edge gets a canonical
     #   ``normalized_score`` derived from the raw DisGeNET ``score``
-    #   (already in [0,1] → passthrough with clamp).
+    #   (already in [0,1] -> passthrough with clamp).
     disgenet = frames.get("disgenet_gda")
     if disgenet is not None and not disgenet.empty:
         disgenet_edges: List[Dict[str, Any]] = []
@@ -5365,7 +5374,7 @@ def stage_phase1_to_phase2(
             _disgenet_assoc_type = _safe_str(row.get("association_type"))
             _disgenet_source = _safe_str(row.get("source")) or "disgenet"
             if key in seen_disgenet:
-                # Merge with the existing DisGeNET entry — prefer higher
+                # Merge with the existing DisGeNET entry -- prefer higher
                 # non-null score, accumulate source and association_type.
                 existing = seen_disgenet[key]
                 # Prefer non-null / higher score.
@@ -5401,7 +5410,7 @@ def stage_phase1_to_phase2(
                 if _disgenet_assoc_type and _disgenet_assoc_type not in existing["association_type"]:
                     existing["association_type"].append(_disgenet_assoc_type)
                 continue
-            # New DisGeNET key — record it in seen_disgenet and build edge dict.
+            # New DisGeNET key -- record it in seen_disgenet and build edge dict.
             seen_disgenet[key] = {
                 "score": _disgenet_raw_score,
                 "normalized_score": _disgenet_norm_score,
@@ -5416,7 +5425,7 @@ def stage_phase1_to_phase2(
                 "association_type": _disgenet_assoc_type,
                 # v78 FORENSIC ROOT FIX (BUG #1): canonical
                 # normalized_score from DisGeNET raw score (already in
-                # [0,1] → passthrough with clamp).
+                # [0,1] -> passthrough with clamp).
                 "normalized_score": _disgenet_norm_score,
                 "_source_phase": 1,
                 "_source_file": "disgenet_gene_disease_associations.csv",
@@ -5486,7 +5495,7 @@ def stage_phase1_to_phase2(
                         target["association_type"].append(at)
                     n_merged += 1
                 else:
-                    # New edge — convert source to list form for consistency.
+                    # New edge -- convert source to list form for consistency.
                     src = e.get("source")
                     if isinstance(src, str):
                         e["source"] = [src]
@@ -5501,7 +5510,7 @@ def stage_phase1_to_phase2(
             merged_list = list(merged_by_key.values())
             staged.edges[("Gene", "associated_with", "Disease")] = merged_list
             logger.info(
-                "Phase1 bridge: staged %d Gene→associated_with→Disease edges "
+                "Phase1 bridge: staged %d Gene->associated_with->Disease edges "
                 "from disgenet_gene_disease_associations.csv (%d merged with "
                 "existing OMIM edges to preserve DisGeNET quantitative score, "
                 "v78 BUG #6 root fix)",
@@ -5516,7 +5525,7 @@ def stage_phase1_to_phase2(
         # ``staged.compound_nodes`` for every PubChem row, giving
         # O(N×M) ≈ 196M comparisons on production-size data (~14K
         # DrugBank × ~14K PubChem). The fix builds a hash dict ONCE
-        # before the loop so each lookup is O(1) — total cost drops
+        # before the loop so each lookup is O(1) -- total cost drops
         # to O(N+M). The first Compound per inchikey is the canonical
         # one (the bridge dedup upstream ensures inchikey uniqueness).
         _compound_by_inchi: Dict[str, Dict[str, Any]] = {
@@ -5551,7 +5560,7 @@ def stage_phase1_to_phase2(
 
 
 # ---------------------------------------------------------------------------
-# 6. load_into_graph — push staged dicts into a graph builder
+# 6. load_into_graph -- push staged dicts into a graph builder
 # ---------------------------------------------------------------------------
 def load_into_graph(
     staged: Phase1StagedData,
@@ -5561,7 +5570,7 @@ def load_into_graph(
 ) -> Dict[str, Any]:
     """Load a :class:`Phase1StagedData` into any graph builder.
 
-    The builder must satisfy :class:`GraphBuilderProtocol` — both the real
+    The builder must satisfy :class:`GraphBuilderProtocol` -- both the real
     :class:`drugos_graph.kg_builder.DrugOSGraphBuilder` (with a connected
     Neo4j) and the test-only :class:`RecordingGraphBuilder` qualify.
 
@@ -5618,7 +5627,7 @@ def load_into_graph(
     # missing files gracefully (it hashes the basename + empty content
     # for non-existent paths), so including an attempted-but-missing
     # key in the list is safe and produces a DIFFERENT checksum from
-    # the same set of present CSVs without that key — which is exactly
+    # the same set of present CSVs without that key -- which is exactly
     # the lineage-discrimination property we want.
     #
     # We fall back to ``sources_read`` for backward compatibility if
@@ -5695,24 +5704,24 @@ def load_into_graph(
 
 
 # ---------------------------------------------------------------------------
-# 7. run_phase1_to_phase2 — top-level convenience
+# 7. run_phase1_to_phase2 -- top-level convenience
 # ---------------------------------------------------------------------------
 # v29 ROOT FIX (audit I-12): bridge work was discarded. Now documents
 # that run_full_pipeline should reuse bridge output.
 #
 # Forensic audit finding I-12: ``run_full_pipeline``'s step 1 calls
 # ``run_phase1_to_phase2`` (this function) which stages ALL Phase 1
-# outputs into a ``Phase1StagedData`` object — including the full
+# outputs into a ``Phase1StagedData`` object -- including the full
 # ``compound_nodes`` list (with InChIKey, drugbank_id, name, smiles,
 # withdrawn, fda_approved, etc.). Step 4 (``step4_drugbank_enrichment``)
 # then RE-READS ``drugbank_drugs.csv`` from disk to re-derive the
 # ``drug_records`` list that step 8 (entity resolution) and step 10
-# (training data) consume. This is duplicate work — the bridge already
+# (training data) consume. This is duplicate work -- the bridge already
 # produced equivalent data in step 1.
 #
 # ROOT FIX:
 #   * ``run_phase1_to_phase2``'s return dict already includes
-#     ``"staged": Phase1StagedData`` — this is the canonical staged
+#     ``"staged": Phase1StagedData`` -- this is the canonical staged
 #     output. Callers (especially ``run_full_pipeline``) SHOULD reuse
 #     ``staged.compound_nodes`` (via the helper
 #     ``extract_drug_records_from_staged``) instead of re-reading the
@@ -5722,7 +5731,7 @@ def load_into_graph(
 #     ``"bridge_staged"``, and step 4's ``data_source="phase1"`` branch
 #     now consumes it via the helper, eliminating the re-read.
 #   * Legacy callers that don't pass ``bridge_staged`` through still
-#     work — step 4 falls back to re-reading the CSV (the old
+#     work -- step 4 falls back to re-reading the CSV (the old
 #     behavior). The fix is opt-in via the new code path.
 def extract_drug_records_from_staged(
     staged: "Phase1StagedData",
@@ -5734,7 +5743,7 @@ def extract_drug_records_from_staged(
 
     v29 ROOT FIX (audit I-12): this helper exists so that
     ``run_full_pipeline`` can reuse the bridge's already-staged
-    Compound nodes (built in step 1) in step 4 / 8 / 10 — instead of
+    Compound nodes (built in step 1) in step 4 / 8 / 10 -- instead of
     re-reading ``drugbank_drugs.csv`` from disk. Each output dict has
     the same schema as ``drugbank_to_node_records_from_phase1``'s
     output (``id``, ``drugbank_id``, ``name``, ``inchikey``,
@@ -5786,7 +5795,7 @@ def extract_drug_records_from_staged(
             "name": n.get("name"),
             "inchikey": n.get("inchikey"),
             "smiles": n.get("smiles"),
-            # v35 M-8: ADDED — these are on the staged Compound schema
+            # v35 M-8: ADDED -- these are on the staged Compound schema
             # but were missing from the extraction (returned None
             # downstream, losing data the bridge HAD captured).
             "molecular_weight": n.get("molecular_weight"),
@@ -5794,7 +5803,7 @@ def extract_drug_records_from_staged(
             "chembl_id": n.get("chembl_id"),
             "completeness_score": n.get("completeness_score"),
             "safety_data_missing": n.get("safety_data_missing"),
-            # v35 M-8: KEPT — these fields are NOT on the staged node
+            # v35 M-8: KEPT -- these fields are NOT on the staged node
             # schema (they're populated by step4_drugbank_enrichment's
             # raw-XML / Phase-1-CSV path via
             # drugbank_to_node_records_from_phase1). The keys remain
@@ -5826,7 +5835,7 @@ def run_phase1_to_phase2(
     run_id: Optional[str] = None,
     prefer_postgres: bool = True,
 ) -> Dict[str, Any]:
-    """Read Phase 1 outputs → stage → load into a graph builder.
+    """Read Phase 1 outputs -> stage -> load into a graph builder.
 
     If ``builder`` is None, a :class:`RecordingGraphBuilder` is used (useful
     for dry-runs and tests).
@@ -5900,7 +5909,7 @@ def run_phase1_to_phase2(
 
 
 # ---------------------------------------------------------------------------
-# 8. bridge_to_pyg_maps — convert a RecordingGraphBuilder into the
+# 8. bridge_to_pyg_maps -- convert a RecordingGraphBuilder into the
 #    (entity_maps, edge_maps) format expected by PyGBuilder.build_from_drkg
 #    and step11_train_transe. v6 fix (bug #B3): the previous
 #    VERIFICATION.md "Full ML Chain" snippet had a literal
@@ -5962,6 +5971,12 @@ def bridge_to_pyg_maps(
     # We build a separate ``alias_to_idx`` map for Compound so edge
     # lookups (which may reference the Compound by ANY of its ids)
     # resolve to the canonical index.
+    #
+    # NOTE: Team 4's P2-005 fix addressed the same issue (P2-027 and
+    # P2-005 are the same bug). This implementation supersedes Team 4's
+    # version because it ALSO handles edge lookup via the alias map
+    # (Team 4's version only consolidated nodes, leaving edges that
+    # reference a Compound by its alias id unresolved).
     entity_maps: Dict[str, Dict[str, int]] = {}
     # P2-027: parallel alias→canonical-index map for Compound nodes.
     # Keyed by ANY id (canonical or alias) → canonical PyG index.
@@ -6076,7 +6091,7 @@ def bridge_to_pyg_maps(
 
     if not entity_maps:
         raise ValueError(
-            "bridge_to_pyg_maps: builder has no node_loads — call "
+            "bridge_to_pyg_maps: builder has no node_loads -- call "
             "load_into_graph() first."
         )
 

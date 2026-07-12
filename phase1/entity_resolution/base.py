@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MIT
-# © 2024-2026 Autonomous Drug Repurposing Platform — Team Cosmic / VentureLab
+# © 2024-2026 Autonomous Drug Repurposing Platform -- Team Cosmic / VentureLab
 """
 Architectural foundation for the ``entity_resolution`` package.
 
@@ -7,23 +7,23 @@ This module defines the **public contract** that every concrete resolver
 (``DrugResolver``, ``ProteinResolver``, and any future resolver) must
 honour.  It also collects shared infrastructure used by both resolvers:
 
-* :class:`ResolverConfig` — an immutable, env-overridable configuration
+* :class:`ResolverConfig` -- an immutable, env-overridable configuration
   dataclass.  Every magic number that previously lived as a private
   module-level constant (PubChem rate-limit delay, fuzzy threshold,
   stereoisomer-collapse flag, ...) now has a documented home here.
-* :class:`ResolverStats` — an observable, mutable counter container
+* :class:`ResolverStats` -- an observable, mutable counter container
   exposed via :meth:`Resolver.get_stats` so operators can monitor
   match-method distribution, dead-letter counts and PubChem failures.
-* :class:`MatchConfidence` — a :class:`enum.FloatEnum` that pins the
+* :class:`MatchConfidence` -- a :class:`enum.FloatEnum` that pins the
   closed set of confidence scores the resolver may emit.  This makes
   ``compute_match_confidence`` a contract, not a free-form lookup.
-* :class:`Resolver` — an :class:`abc.ABC` that pins the public method
+* :class:`Resolver` -- an :class:`abc.ABC` that pins the public method
   surface every resolver must implement (``add_source_records``,
   ``resolve_single``, ``build_mapping``, ``to_dataframe``, ``reset``,
   ``remove_source``, ``get_stats``, ``to_state_dict``,
   ``from_state_dict``, ``to_json``, ``from_json``, ``get_audit_trail``,
   ``find_affected_entities``).
-* :class:`_ProcessGlobalRateLimiter` — a class-level (NOT per-instance)
+* :class:`_ProcessGlobalRateLimiter` -- a class-level (NOT per-instance)
   token-bucket rate limiter so that two ``DrugResolver`` instances in
   the same process still respect the PubChem "5 req/sec" rule when
   their HTTP calls interleave.
@@ -42,7 +42,7 @@ been merged would silently produce a mixed-mode mapping).  If a caller
 needs different behaviour they should construct a new resolver.
 
 The :class:`Resolver` ABC intentionally does **not** enforce a single
-``mapping`` attribute type — drugs are keyed by InChIKey, proteins by
+``mapping`` attribute type -- drugs are keyed by InChIKey, proteins by
 UniProt accession, and forcing them into a common generic type would
 erase scientifically-meaningful distinctions (PEP 484 generic resolvers
 were considered and rejected; see the master fix prompt §11
@@ -51,7 +51,7 @@ anti-pattern #2).
 Network safety
 --------------
 The default :class:`ResolverConfig` sets ``pubchem_enabled=False``.  This
-is **not** a backward-compatibility break — it is the security fix for
+is **not** a backward-compatibility break -- it is the security fix for
 audit D9-1, which classifies undocumented third-party network calls as a
 PII-leakage risk.  Callers who need single-record PubChem lookup must
 opt in via ``ResolverConfig(pubchem_enabled=True)`` or the
@@ -81,7 +81,7 @@ logger = logging.getLogger(__name__)
 
 #: Version of the state-dict / JSON-serialisation schema produced by
 #: :meth:`Resolver.to_state_dict`.  ``from_state_dict`` refuses to load
-#: state-dicts whose schema version is unknown — this is the fix for
+#: state-dicts whose schema version is unknown -- this is the fix for
 #: audit D12-4 ("no ``__version__`` to tie to config schema version").
 MAPPING_SCHEMA_VERSION: str = "1.0"
 
@@ -114,13 +114,13 @@ class MatchConfidence(float, enum.Enum):
     INCHIKEY_CONNECTIVITY = 0.9
     NAME_NORMALIZED = 0.8
     PUBCHEM_XREF = 0.7
-    # v29 ROOT FIX (audit C-1 / C-2 — Confidence Score Inversion):
+    # v29 ROOT FIX (audit C-1 / C-2 -- Confidence Score Inversion):
     # The previous values were 0.85 (FUZZY) and 0.90 (PROTEIN_NAME_FUZZY),
     # BOTH HIGHER than NAME_NORMALIZED=0.8. This is SCIENTIFICALLY WRONG:
     # a fuzzy match (approximate string similarity) is by definition
     # LESS reliable than an exact name match after normalization. The
     # inversion caused the entity resolver to preferentially keep
-    # low-quality fuzzy matches over high-quality exact matches — every
+    # low-quality fuzzy matches over high-quality exact matches -- every
     # downstream consumer that ranked by confidence got the wrong answer.
     #
     # ROOT FIX: set FUZZY below NAME_NORMALIZED, and PROTEIN_NAME_FUZZY
@@ -131,30 +131,30 @@ class MatchConfidence(float, enum.Enum):
     #   > PUBCHEM_XREF (0.55) > UNKNOWN (0.5)
     #
     # The previous comment said "raised from 0.6 to be ≥ _FUZZY_THRESHOLD"
-    # — that was a misdiagnosis. The _FUZZY_THRESHOLD (0.85) was the
+    # -- that was a misdiagnosis. The _FUZZY_THRESHOLD (0.85) was the
     # MINIMUM confidence a match needed to be ACCEPTED at all; raising
     # the FUZZY enum value to meet it did NOT make fuzzy matches
     # correct, it just made them pass the gate. The correct fix is to
     # LOWER _FUZZY_THRESHOLD so fuzzy matches can be accepted at their
     # true confidence (0.65) AND rank below exact matches. We do NOT
-    # lower the threshold here — that's a separate concern. We just
+    # lower the threshold here -- that's a separate concern. We just
     # fix the inverted enum values.
-    FUZZY = 0.65  # v29: was 0.85 — inversion fix
+    FUZZY = 0.65  # v29: was 0.85 -- inversion fix
     UNIPROT_EXACT = 1.0
-    GENE_NAME_ORGANISM = 0.75  # v29: was 0.85 — lowered to sit between
+    GENE_NAME_ORGANISM = 0.75  # v29: was 0.85 -- lowered to sit between
                                 # NAME_NORMALIZED (0.8) and FUZZY (0.65).
                                 # A gene-name+organism match is stronger
                                 # than a fuzzy name match but weaker than
                                 # an exact name match.
-    PROTEIN_NAME_FUZZY = 0.60  # v29: was 0.90 — inversion fix
+    PROTEIN_NAME_FUZZY = 0.60  # v29: was 0.90 -- inversion fix
     UNKNOWN = 0.5
     # v65 ROOT FIX (P1C-009): SYNTH-prefixed InChIKey matches are
-    # COMPUTED (not experimental) — they're generated for biologics /
+    # COMPUTED (not experimental) -- they're generated for biologics /
     # macromolecules that lack a real InChIKey. Different sources may
     # generate DIFFERENT SYNTH keys for the same biologic, so a SYNTH
     # match is much weaker evidence than a real InChIKey match. The
     # previous code labeled SYNTH matches as ``method="inchikey_exact"``
-    # with ``confidence=0.5`` — a hardcoded magic number that happened
+    # with ``confidence=0.5`` -- a hardcoded magic number that happened
     # to equal ``UNKNOWN``. This was self-contradictory: the method
     # label said "exact" (1.0) but the confidence was 0.5 (UNKNOWN).
     # Downstream code that filtered by ``method == "inchikey_exact"``
@@ -163,9 +163,9 @@ class MatchConfidence(float, enum.Enum):
     # (``"synthetic_key_match"``) and their OWN enum member so the
     # method/confidence pair is self-consistent and downstream filters
     # can distinguish SYNTH matches from real InChIKey matches. The
-    # value (0.5) is unchanged — only the labeling is fixed.
+    # value (0.5) is unchanged -- only the labeling is fixed.
     SYNTHETIC_KEY_MATCH = 0.5
-    # v89 ROOT FIX (BUG #32 — smiles_canonical method registered at
+    # v89 ROOT FIX (BUG #32 -- smiles_canonical method registered at
     # runtime but missing from the enum):
     #   ``drug_resolver.py:1979`` registers ``"smiles_canonical"`` with
     #   confidence 0.75 via ``register_match_method``. This ADDS the
@@ -173,7 +173,7 @@ class MatchConfidence(float, enum.Enum):
     #   ``compute_match_confidence("smiles_canonical")`` returns 0.75.
     #   BUT the ``MatchConfidence`` enum had NO ``SMILES_CANONICAL``
     #   member, so ``MatchConfidence.from_method("smiles_canonical")``
-    #   returned ``UNKNOWN`` (0.5) — a DIFFERENT value for the same
+    #   returned ``UNKNOWN`` (0.5) -- a DIFFERENT value for the same
     #   method. Downstream code that used the enum-based lookup got
     #   0.5; code that used the dict-based lookup got 0.75. Filters
     #   behaved differently depending on which lookup path they used.
@@ -182,8 +182,8 @@ class MatchConfidence(float, enum.Enum):
     #   the ``from_method`` mapping (below). Now both lookup paths
     #   return the SAME value (0.75), consistent with the runtime
     #   registration. The value 0.75 places a canonical-SMILES match
-    #   between NAME_NORMALIZED (0.8, stronger — exact name after
-    #   normalization) and FUZZY (0.65, weaker — approximate string
+    #   between NAME_NORMALIZED (0.8, stronger -- exact name after
+    #   normalization) and FUZZY (0.65, weaker -- approximate string
     #   similarity). A canonical-SMILES match is strong evidence of
     #   chemical identity (same molecule) but weaker than an InChIKey
     #   exact match (which is deterministic and source-independent).
@@ -194,7 +194,7 @@ class MatchConfidence(float, enum.Enum):
         """Map a resolution-method string to its enum member.
 
         Unknown method names return :attr:`MatchConfidence.UNKNOWN`
-        instead of raising — this preserves the lenient contract of
+        instead of raising -- this preserves the lenient contract of
         the legacy :func:`compute_match_confidence` helper while still
         giving callers a structured return type.
 
@@ -230,13 +230,13 @@ class MatchConfidence(float, enum.Enum):
         }
         if method in mapping:
             return mapping[method]
-        # FIX #6 / GUARD-ARCH-06 — check resolver_utils._custom_methods
+        # FIX #6 / GUARD-ARCH-06 -- check resolver_utils._custom_methods
         # as a fallback so runtime-registered methods are visible here too.
         try:
             from .resolver_utils import _custom_methods, _ORIGINAL_METHOD_CONFIDENCE
             if method in _custom_methods and method not in _ORIGINAL_METHOD_CONFIDENCE:
                 # Truly custom (non-built-in) method.  We can't synthesise
-                # a new enum member at runtime, so return UNKNOWN — callers
+                # a new enum member at runtime, so return UNKNOWN -- callers
                 # who need the actual numeric value should use
                 # ``resolver_utils.compute_match_confidence(method)`` instead.
                 return cls.UNKNOWN
@@ -259,7 +259,7 @@ class ResolverConfig:
     # to be honest.
     #
     # P2-11 ROOT FIX (v82): the previous docstring honesty is no longer
-    # needed — EVERY field now has an env-var override. The
+    # needed -- EVERY field now has an env-var override. The
     # ``from_env`` factory loads ALL ~50 fields from env vars (prefix
     # ``ENTITY_RESOLUTION_<FIELD_NAME_UPPER>``), with the dataclass
     # default used only when the env var is unset. Operators can now
@@ -268,16 +268,16 @@ class ResolverConfig:
     #
     # Type coercion rules for env vars:
     #   * ``bool`` fields: ``"1"``, ``"true"``, ``"yes"``, ``"on"``
-    #     (case-insensitive) → ``True``; everything else → ``False``.
-    #   * ``int`` fields: parsed with ``int(val)``; non-int → default.
-    #   * ``float`` fields: parsed with ``float(val)``; non-float → default.
+    #     (case-insensitive) -> ``True``; everything else -> ``False``.
+    #   * ``int`` fields: parsed with ``int(val)``; non-int -> default.
+    #   * ``float`` fields: parsed with ``float(val)``; non-float -> default.
     #   * ``str`` fields: the raw string value (whitespace-trimmed).
-    #   * ``Optional[str]`` fields: same as ``str``; empty → ``None``.
+    #   * ``Optional[str]`` fields: same as ``str``; empty -> ``None``.
     #   * ``Tuple[str, ...]`` fields: comma-separated list, e.g.
     #     ``"pubchem.ncbi.nlm.nih.gov,my-internal-mirror.local"``.
     #   * ``Optional[bytes]`` fields (``state_encryption_key``,
     #     ``tamper_evident_key``): hex-encoded bytes (e.g.
-    #     ``openssl rand -hex 32``). Invalid hex → ``None`` + warning.
+    #     ``openssl rand -hex 32``). Invalid hex -> ``None`` + warning.
     #   * ``int`` with octal semantics (``state_file_mode``): parsed
     #     with ``int(val, 8)`` if the value starts with ``0o`` or
     #     contains only octal digits ``[0-7]``; otherwise ``int(val, 0)``
@@ -303,7 +303,7 @@ class ResolverConfig:
         * ``TAMPER_EVIDENT_KEY``            -> tamper_evident_key (hex)
         * ``MAPPING_SCHEMA_VERSION``        -> mapping_schema_version
 
-        # P2-11 v82 ROOT FIX — newly env-backed fields (all additive
+        # P2-11 v82 ROOT FIX -- newly env-backed fields (all additive
         # audit-remediation fields now have env-var overrides):
         * ``DETERMINISTIC_TIMESTAMPS``      -> deterministic_timestamps (bool)
         * ``RANDOM_SEED``                   -> random_seed (int, 0 = None)
@@ -361,14 +361,14 @@ class ResolverConfig:
         If ``True``, two InChIKeys sharing the same 14-char connectivity
         block are merged into one canonical entry (legacy behaviour).
         If ``False`` (default, **safe**), connectivity-block collisions
-        only merge when the full 27-char InChIKeys are identical —
+        only merge when the full 27-char InChIKeys are identical --
         stereoisomers with different biological activity (thalidomide,
         warfarin, citalopram, ...) are kept distinct.  Audit D3-4.
     fuzzy_threshold:
         Minimum :func:`rapidfuzz.fuzz.token_sort_ratio` score (on the
         ``[0.0, 1.0]`` scale) at which a fuzzy name match is accepted.
         Default ``0.85``.  The fuzzy *confidence* reported on a match
-        is always ``>= fuzzy_threshold`` (audit D3-3 — fixes the
+        is always ``>= fuzzy_threshold`` (audit D3-3 -- fixes the
         previous bug where threshold was 0.85 but reported confidence
         was 0.6, silently dropping valid matches downstream).
     fuzzy_max_candidates:
@@ -401,7 +401,7 @@ class ResolverConfig:
         Optional mTLS client certificate paths.  Audit D9-5.
     pubchem_strict_salt_form:
         If ``True``, reject PubChem name lookups that resolve to a
-        salt form (e.g. "aspirin" → "aspirin sodium") — the salt form
+        salt form (e.g. "aspirin" -> "aspirin sodium") -- the salt form
         has different pharmacology from the free acid.  Default
         ``False`` (matches historical behaviour) but documented as a
         known risk.  Audit D3-7.
@@ -492,12 +492,12 @@ class ResolverConfig:
     tamper_evident: bool = True  # audit 14.2
     # FIX P1-ER-18 (LOW): the previous implementation hard-coded the
     # HMAC key as ``b"protein-resolver-tamper-evident-key"`` directly
-    # in protein_resolver.py — anyone with source-code access could
+    # in protein_resolver.py -- anyone with source-code access could
     # forge valid signatures. This field lets operators supply a
     # deployment-specific key (via ``ENTITY_RESOLUTION_TAMPER_EVIDENT_KEY``
     # env var, hex-encoded). If ``tamper_evident=True`` but this field
     # is ``None``, the resolver logs a CRITICAL warning and skips
-    # signing/verification — tamper-evidence is effectively disabled
+    # signing/verification -- tamper-evidence is effectively disabled
     # until the operator configures a key. This is safer than silently
     # using a known-to-attacker key.
     tamper_evident_key: Optional[bytes] = None
@@ -514,7 +514,7 @@ class ResolverConfig:
 
         P2-11 ROOT FIX (v82): EVERY field on the dataclass now has an
         env-var override (prefix ``ENTITY_RESOLUTION_<FIELD_NAME_UPPER>``).
-        Previously, only ~17 of 50+ fields were loaded from env — the
+        Previously, only ~17 of 50+ fields were loaded from env -- the
         rest fell back to dataclass defaults, forcing operators to
         construct the dataclass programmatically to tune anything not
         in the env-backed subset. The root fix loads ALL fields from
@@ -582,7 +582,7 @@ class ResolverConfig:
                 return default
             return val
 
-        # P2-11 v82: Optional[int] with sentinel semantics — ``0`` means
+        # P2-11 v82: Optional[int] with sentinel semantics -- ``0`` means
         # ``None`` (no random seed). This lets operators disable a seed
         # via ``ENTITY_RESOLUTION_RANDOM_SEED=0`` instead of having to
         # unset the env var.
@@ -601,7 +601,7 @@ class ResolverConfig:
                 return default
             return None if parsed == 0 else parsed
 
-        # P2-11 v82: comma-separated list → tuple of stripped non-empty strings.
+        # P2-11 v82: comma-separated list -> tuple of stripped non-empty strings.
         def _get_csv_tuple(
             name: str, default: Tuple[str, ...]
         ) -> Tuple[str, ...]:
@@ -620,12 +620,12 @@ class ResolverConfig:
             try:
                 if v.startswith("0o") or v.startswith("0O"):
                     return int(v, 8)
-                # Plain digits — interpret as octal (matches Unix chmod
+                # Plain digits -- interpret as octal (matches Unix chmod
                 # convention: ``chmod 600 file`` interprets 600 as octal).
                 if v.isdigit() and all(c in "01234567" for c in v):
                     return int(v, 8)
                 # Fallback: int(val, 0) for autodetection (handles 0x...,
-                # 0b..., etc. — though these are unusual for file modes).
+                # 0b..., etc. -- though these are unusual for file modes).
                 return int(v, 0)
             except ValueError:
                 logger.warning(
@@ -646,7 +646,7 @@ class ResolverConfig:
                 return bytes.fromhex(val.strip())
             except ValueError:
                 logger.warning(
-                    "ResolverConfig.from_env: %s=%r is not valid hex — "
+                    "ResolverConfig.from_env: %s=%r is not valid hex -- "
                     "field will be None. Supply a hex-encoded value "
                     "(e.g. openssl rand -hex 32).",
                     prefix + name, val[:8] + "...",
@@ -662,7 +662,7 @@ class ResolverConfig:
             )
 
         # FIX P1-ER-18 (LOW): load the tamper-evident HMAC key from env.
-        # (Preserved verbatim — the new _get_hex_bytes helper centralises
+        # (Preserved verbatim -- the new _get_hex_bytes helper centralises
         # the pattern, but the existing call site is kept for clarity.)
         tamper_key_raw = os.environ.get(prefix + "TAMPER_EVIDENT_KEY", "")
         tamper_evident_key: Optional[bytes] = None
@@ -671,7 +671,7 @@ class ResolverConfig:
                 tamper_evident_key = bytes.fromhex(tamper_key_raw.strip())
             except ValueError:
                 logger.warning(
-                    "ResolverConfig.from_env: %s=%r is not valid hex — "
+                    "ResolverConfig.from_env: %s=%r is not valid hex -- "
                     "tamper-evidence will be DISABLED. Supply a hex-encoded "
                     "key (e.g. openssl rand -hex 32).",
                     prefix + "TAMPER_EVIDENT_KEY", tamper_key_raw[:8] + "...",
@@ -916,7 +916,7 @@ class ResolverStats:
     # FIX-P1-C-13: previously ``inc()`` was called with these names but
     # they were NOT declared as dataclass fields, so ``to_dict()`` (which
     # iterates ``dataclasses.fields``) silently dropped them from every
-    # stats snapshot — 9+ drug_resolver metrics and 4 protein_resolver
+    # stats snapshot -- 9+ drug_resolver metrics and 4 protein_resolver
     # metrics were invisible to operators. Declaring them as fields makes
     # ``to_dict()`` include them.
     # --- drug_resolver metrics ---
@@ -1000,7 +1000,7 @@ class Resolver(abc.ABC):
     implementations that build on the abstract ones.
 
     The ABC intentionally does NOT enforce a common ``mapping``
-    attribute type — drugs are keyed by InChIKey, proteins by UniProt
+    attribute type -- drugs are keyed by InChIKey, proteins by UniProt
     accession, and forcing them into a single generic signature would
     erase scientifically-meaningful distinctions (see master fix
     prompt §11 anti-pattern #2).
@@ -1009,9 +1009,9 @@ class Resolver(abc.ABC):
     attributes** (not abstract methods, because they are plain data
     attributes set in ``__init__``):
 
-    * ``config`` — a :class:`ResolverConfig` instance.
-    * ``stats`` — a :class:`ResolverStats` instance.
-    * ``mapping`` — a ``Dict[str, dict]`` mapping canonical key to
+    * ``config`` -- a :class:`ResolverConfig` instance.
+    * ``stats`` -- a :class:`ResolverStats` instance.
+    * ``mapping`` -- a ``Dict[str, dict]`` mapping canonical key to
       canonical entry.
     """
 
@@ -1102,7 +1102,7 @@ class Resolver(abc.ABC):
 
     @abc.abstractmethod
     def reset(self) -> None:
-        """Clear all internal state — equivalent to a fresh instance."""
+        """Clear all internal state -- equivalent to a fresh instance."""
 
     @abc.abstractmethod
     def remove_source(self, source: str) -> int:
@@ -1136,7 +1136,7 @@ class _ProcessGlobalRateLimiter:
 
     The previous per-instance rate limiter meant that two
     ``DrugResolver`` instances in the same Airflow worker would each
-    independently sleep ``pubchem_call_delay`` seconds — but their
+    independently sleep ``pubchem_call_delay`` seconds -- but their
     HTTP requests would interleave at twice the configured rate,
     violating PubChem's "5 req/sec" limit and risking IP bans.
 
@@ -1183,7 +1183,7 @@ class _ProcessGlobalRateLimiter:
 
     @classmethod
     def _reset_for_tests(cls) -> None:
-        """Clear all buckets — used by the test suite for isolation."""
+        """Clear all buckets -- used by the test suite for isolation."""
         with cls._class_lock:
             cls._buckets.clear()
 
@@ -1199,7 +1199,7 @@ class _ProcessGlobalRateLimiter:
 #: import for O(1) checks.
 #:
 #: P1-ER-3 ROOT FIX: pattern synchronized with normalizer.py / base.py /
-#: models.py — DO NOT diverge (audit P1-ER-3).
+#: models.py -- DO NOT diverge (audit P1-ER-3).
 #:
 #: v35 ROOT FIX (issue 38): import the canonical InChIKey regex from
 #: ``cleaning._constants`` (single source of truth) instead of defining
@@ -1216,7 +1216,7 @@ except ImportError:
 # Backward-compat aliases (the permissive ``INCHIKEY_PATTERN`` historically
 # accepted an optional ``-X`` protonation suffix; the strict pattern does
 # not). The permissive form is retained for any caller that still imports
-# ``INCHIKEY_PATTERN`` directly — but its use is deprecated; new code
+# ``INCHIKEY_PATTERN`` directly -- but its use is deprecated; new code
 # should use ``cleaning._constants.is_canonical_inchikey`` instead.
 INCHIKEY_PATTERN: re.Pattern[str] = re.compile(
     r"^[A-Z]{14}-[A-Z]{10}-[A-Z](?:-[A-Za-z0-9]+)?$"
@@ -1249,17 +1249,17 @@ def is_valid_inchikey(inchikey: Any) -> bool:
     v16 ROOT FIX (CD-6): there were THREE definitions of
     ``is_valid_inchikey`` in the codebase with OPPOSITE behaviors:
 
-      1. ``cleaning.normalizer.is_valid_inchikey`` — PERMISSIVE
+      1. ``cleaning.normalizer.is_valid_inchikey`` -- PERMISSIVE
          (accepts SYNTH-prefixed and mixture keys).
-      2. ``entity_resolution.base.is_valid_inchikey`` (this function) —
+      2. ``entity_resolution.base.is_valid_inchikey`` (this function) --
          STRICT (only standard 27-char pattern).
-      3. ``entity_resolution.resolver_utils.is_valid_inchikey`` —
+      3. ``entity_resolution.resolver_utils.is_valid_inchikey`` --
          DELEGATES to (1).
 
     So ``base.is_valid_inchikey("SYNTH-001")`` returned False while
     ``normalizer.is_valid_inchikey("SYNTH-001")`` returned True. Calls
     that used (2) rejected synthetic keys; calls that used (1) accepted
-    them. Same name, opposite semantics — silent corruption.
+    them. Same name, opposite semantics -- silent corruption.
 
     The fix: ``base.is_valid_inchikey`` now delegates to
     ``cleaning.normalizer.is_valid_inchikey`` so the same name has ONE
@@ -1282,7 +1282,7 @@ def is_valid_inchikey(inchikey: Any) -> bool:
         # was REJECTED when ``cleaning.normalizer`` was importable but
         # ACCEPTED when it was not (test isolation / partial install).
         # The comment above said "strict pattern (no SYNTH, no mixtures)"
-        # but ``INCHIKEY_PATTERN`` is NOT strict — it accepts suffixed keys.
+        # but ``INCHIKEY_PATTERN`` is NOT strict -- it accepts suffixed keys.
         # ROOT FIX: use ``_STRICT_INCHIKEY_PATTERN`` (which delegates to
         # the canonical 27-char regex from ``cleaning._constants``) so the
         # fallback matches the canonical validator's behavior exactly.
@@ -1301,7 +1301,7 @@ def is_strict_inchikey(inchikey: Any) -> bool:
 
     Accepts ONLY the standard 27-char pattern ``[A-Z]{14}-[A-Z]{10}-[A-Z]``.
     Rejects SYNTH-prefixed keys, mixture keys, AND keys with an
-    optional protonation suffix (e.g. ``...-N-a``) — that suffix is
+    optional protonation suffix (e.g. ``...-N-a``) -- that suffix is
     legitimate at the resolver level but MUST NOT be written to the DB
     canonical key column (audit P1-ER-3 / P1-ER-7).
 
@@ -1328,7 +1328,7 @@ def is_synthetic_inchikey(inchikey: Any) -> bool:
     always emits uppercase SYNTH (because the SHA-256 digest is upper-
     cased). Real-world data sources occasionally emit lowercase or
     mixed-case keys (e.g. CSV imports from case-insensitive filesystems),
-    and those would silently fail the synthetic-key detection —
+    and those would silently fail the synthetic-key detection --
     defeating the resolver's purpose. The case-insensitive check aligns
     with ``cleaning._constants.CANONICAL_SYNTHETIC_INCHIKEY_REGEX``
     (which uses ``re.IGNORECASE``).
@@ -1336,7 +1336,7 @@ def is_synthetic_inchikey(inchikey: Any) -> bool:
     Parameters
     ----------
     inchikey:
-        Anything — non-strings return ``False``.
+        Anything -- non-strings return ``False``.
 
     Returns
     -------
@@ -1354,7 +1354,7 @@ def make_synthetic_inchikey(
     """Generate a source-INDEPENDENT synthetic InChIKey.
 
     Audit D3-5 fixed the bug where synthetic keys were
-    ``sha256(name:source)`` — that meant the same InChIKey-less drug
+    ``sha256(name:source)`` -- that meant the same InChIKey-less drug
     from ChEMBL vs DrugBank got two different synthetic keys and was
     never merged, defeating the resolver's purpose.  The new scheme
     hashes **only** the normalized name (plus an optional ``salt``
@@ -1374,20 +1374,20 @@ def make_synthetic_inchikey(
         Optional disambiguator appended to the name before hashing.
         Used when two distinct molecules share a normalized name
         (e.g. "cyclophosphamide" the brand vs "cyclophosphamide" the
-        generic — extremely rare but possible).
+        generic -- extremely rare but possible).
 
     Returns
     -------
     str
         A 27-char synthetic key starting with ``"SYNTH"``.
     """
-    # v66 ROOT FIX (P1C-019 — whitespace stripping causes synthetic-key collisions):
+    # v66 ROOT FIX (P1C-019 -- whitespace stripping causes synthetic-key collisions):
     #   The previous regex ``[\x00-\x20\x7f]`` stripped ALL control chars
     #   AND the space character (\x20). Two distinct biologics whose
     #   ``normalized_name`` was empty (``""``) or whitespace-only
-    #   (``" "``) BOTH collapsed to ``clean_name = ""`` → fell back to
-    #   the literal string ``"unknown"`` → produced the IDENTICAL
-    #   synthetic InChIKey → were silently merged into one canonical
+    #   (``" "``) BOTH collapsed to ``clean_name = ""`` -> fell back to
+    #   the literal string ``"unknown"`` -> produced the IDENTICAL
+    #   synthetic InChIKey -> were silently merged into one canonical
     #   entry. The collision tracker only fires for non-synthetic keys,
     #   so this was undetectable downstream.
     #
@@ -1405,12 +1405,12 @@ def make_synthetic_inchikey(
     #        "unknown"`` fallback was the ROOT CAUSE of the collision.
     clean_name = re.sub(r"[\x00-\x1f\x7f]", "", str(normalized_name))
     if not clean_name or not clean_name.strip():
-        # Empty or whitespace-only name — refuse to mint a colliding
+        # Empty or whitespace-only name -- refuse to mint a colliding
         # synthetic key. The caller must quarantine this record or
         # supply a disambiguating salt (e.g. source + record_index).
         raise ValueError(
             "make_synthetic_inchikey: normalized_name is empty or "
-            "whitespace-only — refusing to generate a colliding "
+            "whitespace-only -- refusing to generate a colliding "
             "synthetic InChIKey. Quarantine the record or supply a "
             "disambiguating salt. (P1C-019 root fix)"
         )
@@ -1430,7 +1430,7 @@ def make_synthetic_inchikey(
         digest_int, rem = divmod(digest_int, 26)
         base26_chars.append(alphabet[rem])
     # ``base26_chars`` is LSB-first; reverse so the most-significant char
-    # is first (cosmetic — both directions are equally valid keys, but
+    # is first (cosmetic -- both directions are equally valid keys, but
     # MSB-first matches the hex-slice convention it replaces).
     base26_str = "".join(reversed(base26_chars))
     block1 = SYNTHETIC_INCHIKEY_PREFIX + base26_str[0:9]    # 14 chars (5 prefix + 9)

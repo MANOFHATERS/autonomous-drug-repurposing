@@ -1,8 +1,8 @@
-"""Dedup guards — prevent parallel-agent drift from creating duplicate code.
+"""Dedup guards -- prevent parallel-agent drift from creating duplicate code.
 
 These tests catch the specific failure modes that occur when multiple
 agents fix the SAME problem DIFFERENTLY on different branches and both
-fixes get merged to main. They are FORENSIC — they inspect actual file
+fixes get merged to main. They are FORENSIC -- they inspect actual file
 contents, not comments.
 
 Failure modes guarded:
@@ -36,7 +36,7 @@ class TestNoDuplicateMigrationNumbers:
 
     Parallel agents who both fix the same bug often both create
     '012_<their-name>.sql'. When both get merged, run_migrations.py
-    executes BOTH — the second is usually a no-op but it's confusing
+    executes BOTH -- the second is usually a no-op but it's confusing
     and can mask bugs (e.g. if one migration has an incomplete backfill).
     """
 
@@ -60,7 +60,7 @@ class TestNoDuplicateMigrationNumbers:
 
         duplicates = {n: files for n, files in numbers.items() if len(files) > 1}
         assert not duplicates, (
-            f"Duplicate migration numbers found — parallel agents created "
+            f"Duplicate migration numbers found -- parallel agents created "
             f"conflicting migrations. Each NNN must be unique. Duplicates: "
             f"{duplicates}. Fix: delete the broken one and keep the correct "
             f"one (verify backfill logic before deleting)."
@@ -136,10 +136,10 @@ class TestConfidenceTierLabelConsistency:
         )
 
     def test_migration_012_backfill_completeness(self):
-        """The 012 migration MUST rename both 'weak'→'sub_weak' AND 'moderate'→'weak'.
+        """The 012 migration MUST rename both 'weak'->'sub_weak' AND 'moderate'->'weak'.
 
-        A parallel agent's migration only did 'moderate'→'weak' and left
-        old 'weak' rows as 'weak' — but the new 'weak' means [0.06, 0.3),
+        A parallel agent's migration only did 'moderate'->'weak' and left
+        old 'weak' rows as 'weak' -- but the new 'weak' means [0.06, 0.3),
         so old sub-floor [0.0, 0.06) rows got mislabeled. This guard
         catches that data-corruption bug.
         """
@@ -157,7 +157,7 @@ class TestConfidenceTierLabelConsistency:
             content,
             re.IGNORECASE,
         ), (
-            f"{m012_files[0].name}: missing 'weak'→'sub_weak' backfill — "
+            f"{m012_files[0].name}: missing 'weak'->'sub_weak' backfill -- "
             f"old sub-floor rows will be mislabeled. See P1-004 root fix."
         )
         assert re.search(
@@ -165,7 +165,7 @@ class TestConfidenceTierLabelConsistency:
             content,
             re.IGNORECASE,
         ), (
-            f"{m012_files[0].name}: missing 'moderate'→'weak' backfill."
+            f"{m012_files[0].name}: missing 'moderate'->'weak' backfill."
         )
 
 
@@ -178,12 +178,12 @@ class TestCircuitBreakerConsolidation:
 
     Other modules should IMPORT it, not define their own. Parallel agents
     who both fix P1-012 may each add a threading.Lock to their own inline
-    class instead of consolidating — this guard catches that drift.
+    class instead of consolidating -- this guard catches that drift.
 
     Allowed definitions:
       - _circuit_breaker.py: the canonical _CircuitBreaker (1 definition)
       - cleaning/normalizer.py: _NormalizerCircuitBreaker (wrapper) +
-        _LegacyLocalCircuitBreaker (fallback) — these are EXPLICITLY
+        _LegacyLocalCircuitBreaker (fallback) -- these are EXPLICITLY
         allowed because the wrapper delegates to the canonical class
         and the legacy fallback is defense-in-depth.
 
@@ -228,12 +228,12 @@ class TestCircuitBreakerConsolidation:
             if isinstance(node, ast.ClassDef) and node.name == "_CircuitBreaker"
         ]
         if rel_path in self.KNOWN_INLINE_BREAKERS:
-            # Pre-existing drift from parallel agents — xfail so we catch
+            # Pre-existing drift from parallel agents -- xfail so we catch
             # NEW duplicates but don't block CI on known issues.
             if inline_defs:
                 pytest.xfail(
                     f"{rel_path} still defines inline _CircuitBreaker (line "
-                    f"{inline_defs[0].lineno}) — pre-existing drift from "
+                    f"{inline_defs[0].lineno}) -- pre-existing drift from "
                     f"parallel agents. Track in worklog for consolidation."
                 )
         else:
@@ -249,7 +249,7 @@ class TestCircuitBreakerConsolidation:
 # ═══════════════════════════════════════════════════════════════════════════
 
 class TestMigrationImmutability:
-    """Migrations 001-011 must NOT contain 'sub_weak' — that label was
+    """Migrations 001-011 must NOT contain 'sub_weak' -- that label was
     introduced in migration 012. If a parallel agent edited an OLD
     migration (004) to use the new labels, that breaks the immutability
     contract: a DB that already applied 004 with the OLD labels won't
@@ -276,6 +276,6 @@ class TestMigrationImmutability:
                 assert "sub_weak" not in content_no_comments, (
                     f"{f.name}: SQL (non-comment) references 'sub_weak' but is "
                     f"migration {num} (pre-012). Editing old migrations breaks "
-                    f"the immutability contract — create a NEW migration instead. "
+                    f"the immutability contract -- create a NEW migration instead. "
                     f"See P1-004 fix."
                 )

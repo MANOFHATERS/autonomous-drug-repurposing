@@ -2,7 +2,7 @@
 Comprehensive tests for the ChEMBL pipeline and cleaning modules.
 
 Tests cover:
-  - cleaning.normalizer  (SMILES→InChIKey, InChIKey validation, drug-record
+  - cleaning.normalizer  (SMILES->InChIKey, InChIKey validation, drug-record
     standardization, activity-value unit conversion)
   - cleaning.deduplicator  (InChIKey dedup, interaction dedup)
   - cleaning.missing_values  (missing InChIKey, drug defaults, protein
@@ -651,7 +651,7 @@ class TestActivityUnitNormalizationIntegration:
 
 
 class TestChEMBLPipelineK1ToK8Bugs:
-    """One real test per K1-K8 bug — each verifies the fix actually works.
+    """One real test per K1-K8 bug -- each verifies the fix actually works.
 
     These tests are designed to catch the K1-K8 bugs and the 16-domain
     issues. If you change a line in chembl_pipeline.py, at least one test
@@ -803,14 +803,14 @@ class TestChEMBLPipelineK1ToK8Bugs:
         df = pipeline._parse_molecules(molecules)
         assert len(df) == 1
         # max_phase should be int 4, not string "4.0".
-        # Note: pandas may store as np.int64 — accept both.
+        # Note: pandas may store as np.int64 -- accept both.
         max_phase_val = df.iloc[0]["max_phase"]
         assert int(max_phase_val) == 4, (
             f"Expected int 4, got {max_phase_val!r}"
         )
         # SW-1 ROOT FIX: ``is_fda_approved`` is now None (unknown) until
         # an FDA Orange Book join is wired in. ChEMBL ``max_phase == 4``
-        # means GLOBALLY approved (any regulator — FDA, EMA, PMDA, etc.),
+        # means GLOBALLY approved (any regulator -- FDA, EMA, PMDA, etc.),
         # NOT FDA-specific. The previous test expected ``is_fda_approved=True``
         # which silently marked EMA-only-approved drugs as FDA-approved,
         # bypassing FDA safety gates downstream. The correct columns are:
@@ -818,7 +818,7 @@ class TestChEMBLPipelineK1ToK8Bugs:
         #   - ``is_fda_approved``: None until FDA Orange Book join
         is_approved = df.iloc[0]["is_fda_approved"]
         assert is_approved is None, (
-            f"Expected is_fda_approved=None (SW-1 root fix — pending FDA Orange "
+            f"Expected is_fda_approved=None (SW-1 root fix -- pending FDA Orange "
             f"Book join), got {is_approved!r}"
         )
         is_globally_approved = df.iloc[0].get("is_globally_approved")
@@ -864,7 +864,7 @@ class TestChEMBLPipelineK1ToK8Bugs:
 
         # The literal 'Macromolecule' must NOT be a value in the map.
         assert "Macromolecule" not in MOLECULE_TYPE_MAP.values(), (
-            "MOLECULE_TYPE_MAP must NOT produce 'Macromolecule' — it's not a valid DrugType"
+            "MOLECULE_TYPE_MAP must NOT produce 'Macromolecule' -- it's not a valid DrugType"
         )
         # _standardize_drug_type should never return 'Macromolecule'.
         pipeline = ChEMBLPipeline.__new__(ChEMBLPipeline)
@@ -948,7 +948,7 @@ class TestChEMBLPipelineEnumContracts:
     """Verify every enum value emitted by the pipeline is valid.
 
     These tests are the scientific-correctness gate (Domain 3). If any
-    enum value is wrong, the loader will quarantine the record — silently
+    enum value is wrong, the loader will quarantine the record -- silently
     producing zero usable output.
     """
 
@@ -1012,7 +1012,7 @@ class TestChEMBLPipelineEnumContracts:
 
     def test_t6_mock_molecule_with_string_max_phase_produces_true_is_fda_approved(self):
         """T6 / SW-1 ROOT FIX: a molecule with max_phase='4.0' produces
-        is_globally_approved=True (ChEMBL semantic — any regulator).
+        is_globally_approved=True (ChEMBL semantic -- any regulator).
         is_fda_approved remains None until an FDA Orange Book join is
         wired in (the previous test incorrectly asserted is_fda_approved=True,
         which silently marked EMA-only-approved drugs as FDA-approved)."""
@@ -1024,7 +1024,7 @@ class TestChEMBLPipelineEnumContracts:
             {
                 "molecule_chembl_id": "CHEMBL25",
                 "pref_name": "Aspirin",
-                "max_phase": "4.0",  # STRING — K4 bug
+                "max_phase": "4.0",  # STRING -- K4 bug
                 "molecule_type": "Small molecule",
             }
         ]
@@ -1034,14 +1034,14 @@ class TestChEMBLPipelineEnumContracts:
             f"Expected is_globally_approved=True, got "
             f"{df.iloc[0]['is_globally_approved']!r}"
         )
-        # SW-1: is_fda_approved is None (unknown — pending FDA Orange Book).
+        # SW-1: is_fda_approved is None (unknown -- pending FDA Orange Book).
         assert df.iloc[0]["is_fda_approved"] is None, (
             f"Expected is_fda_approved=None (SW-1 root fix), got "
             f"{df.iloc[0]['is_fda_approved']!r}"
         )
 
     def test_t7_mock_2_activities_produces_2_row_dataframe(self, tmp_path):
-        """T7: mock API returning 2 activities → DataFrame with 2 rows."""
+        """T7: mock API returning 2 activities -> DataFrame with 2 rows."""
         from pipelines.chembl_pipeline import ChEMBLPipeline
 
         pipeline = ChEMBLPipeline.__new__(ChEMBLPipeline)
@@ -1075,7 +1075,7 @@ class TestChEMBLPipelineEnumContracts:
         assert pd.isna(result.iloc[2])
 
     def test_t10_molecule_type_small_molecule_maps_to_lowercase_enum(self):
-        """T10: molecule_type='Small molecule' → drug_type='small_molecule' (lowercase)."""
+        """T10: molecule_type='Small molecule' -> drug_type='small_molecule' (lowercase)."""
         from pipelines.chembl_pipeline import ChEMBLPipeline
 
         pipeline = ChEMBLPipeline.__new__(ChEMBLPipeline)
@@ -1114,10 +1114,10 @@ class TestChEMBLPipelineEnumContracts:
 
 
 class TestChEMBLPipelineEndToEnd:
-    """Real end-to-end tests: mock the API, run download → clean → load."""
+    """Real end-to-end tests: mock the API, run download -> clean -> load."""
 
     def test_t11_full_pipeline_with_mocked_api(self, tmp_path, monkeypatch, db_session):
-        """T11: mock all ChEMBL endpoints, run download → clean → load, verify DB rows."""
+        """T11: mock all ChEMBL endpoints, run download -> clean -> load, verify DB rows."""
         from pipelines.chembl_pipeline import ChEMBLPipeline
         from database.models import Drug, DrugProteinInteraction, Protein
 
@@ -1206,7 +1206,7 @@ class TestChEMBLPipelineEndToEnd:
             pipeline.raw_dir = tmp_path / "chembl"
             pipeline.raw_dir.mkdir(parents=True, exist_ok=True)
 
-            # Run download → clean.
+            # Run download -> clean.
             drugs_path = pipeline.download()
             assert drugs_path.exists()
 
@@ -1218,8 +1218,8 @@ class TestChEMBLPipelineEndToEnd:
             # Verify max_phase is 4 (use int() for numpy compat).
             assert int(clean_df.iloc[0]["max_phase"]) == 4
             # SW-1 ROOT FIX: is_globally_approved is True (ChEMBL max_phase==4
-            # = globally approved by any regulator — FDA, EMA, PMDA, etc.).
-            # is_fda_approved is None (unknown — pending FDA Orange Book
+            # = globally approved by any regulator -- FDA, EMA, PMDA, etc.).
+            # is_fda_approved is None (unknown -- pending FDA Orange Book
             # join). The previous assertion ``is_fda_approved is True``
             # silently marked EMA-only-approved drugs as FDA-approved,
             # bypassing FDA safety gates downstream.
@@ -1227,14 +1227,14 @@ class TestChEMBLPipelineEndToEnd:
                 f"Expected is_globally_approved=True (max_phase==4), got "
                 f"{clean_df.iloc[0]['is_globally_approved']!r}"
             )
-            # is_fda_approved should be None OR not-True (unknown — pending
+            # is_fda_approved should be None OR not-True (unknown -- pending
             # FDA Orange Book join). The clean() step preserves None; the
             # Drug ORM column (Boolean) may convert None to False on load.
             # The important invariant: is_fda_approved is NOT True.
             fda_val = clean_df.iloc[0]["is_fda_approved"]
             assert fda_val is None or pd.isna(fda_val) or fda_val is False or fda_val is np.False_, (
                 f"SW-1 regression: is_fda_approved should be None/False/NaN "
-                f"(NOT True — pending FDA Orange Book join), got {fda_val!r}"
+                f"(NOT True -- pending FDA Orange Book join), got {fda_val!r}"
             )
             assert fda_val is not True and not (isinstance(fda_val, bool) and fda_val), (
                 f"SW-1 regression: is_fda_approved must NOT be True, got {fda_val!r}"
@@ -1242,7 +1242,7 @@ class TestChEMBLPipelineEndToEnd:
             # Verify drug_type is lowercase enum.
             assert clean_df.iloc[0]["drug_type"] == "small_molecule"
 
-            # Run load — use the provided session.
+            # Run load -- use the provided session.
             total_loaded = pipeline.load(clean_df, session=db_session)
             assert total_loaded >= 1
 
@@ -1500,7 +1500,7 @@ class TestChEMBLPipelineEdgeCases:
         if dead_letter_dir.exists():
             dead_letter_files = list(dead_letter_dir.iterdir())
             # At least one dead-letter file should exist for the dropped row.
-            assert len(dead_letter_files) >= 0  # soft assertion — dead-lettering is best-effort
+            assert len(dead_letter_files) >= 0  # soft assertion -- dead-lettering is best-effort
 
 
 # =====================================================================
@@ -1648,7 +1648,7 @@ class TestChEMBLPipelineDeadLetter:
         raw_data = pd.DataFrame({
             "chembl_id": ["CHEMBL1"],
             "name": ["NoKey"],
-            "inchikey": [None],  # No InChIKey → will be dropped
+            "inchikey": [None],  # No InChIKey -> will be dropped
             "smiles": [None],  # No SMILES to generate one
             "molecular_weight": [200.0],
             "drug_type": ["Small molecule"],
@@ -1722,5 +1722,5 @@ class TestMutationTestingNote:
         testing, coding, performance, logging, configuration, interoperability,
         lineage, documentation.
         """
-        # This test always passes — it's documentation.
+        # This test always passes -- it's documentation.
         assert True
