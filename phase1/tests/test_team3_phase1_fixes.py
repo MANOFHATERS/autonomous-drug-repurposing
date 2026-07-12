@@ -336,14 +336,14 @@ def test_p1_033_nan_units_returns_none_not_nan_string():
 
 
 def test_p1_036_partial_index_migration_exists():
-    """P1-036: migration 013_drugs_pubchem_cid_partial_index.sql must
+    """P1-036: migration 014_drugs_pubchem_cid_partial_index.sql must
     exist and contain the partial index DDL."""
     migration_path = (
         PROJECT_ROOT / "database" / "migrations"
-        / "013_drugs_pubchem_cid_partial_index.sql"
+        / "014_drugs_pubchem_cid_partial_index.sql"
     )
     assert migration_path.exists(), (
-        "P1-036: migration 013_drugs_pubchem_cid_partial_index.sql missing"
+        "P1-036: migration 014_drugs_pubchem_cid_partial_index.sql missing"
     )
     sql = migration_path.read_text()
     sql_upper = sql.upper()
@@ -360,7 +360,7 @@ def test_p1_036_partial_index_migration_exists():
     # Rollback sidecar must exist.
     rollback_path = (
         PROJECT_ROOT / "database" / "migrations"
-        / "013_drugs_pubchem_cid_partial_index_rollback.sql"
+        / "014_drugs_pubchem_cid_partial_index_rollback.sql"
     )
     assert rollback_path.exists(), "P1-036: rollback sidecar missing"
     assert "DROP INDEX" in rollback_path.read_text().upper()
