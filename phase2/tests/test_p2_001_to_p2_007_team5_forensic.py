@@ -63,14 +63,21 @@ def test_p2_001_anti_inflammatory_not_matched_as_inflammation():
 
 
 def test_p2_001_ulcerative_colitis_not_matched_as_ulcer():
-    """P2-001: 'ulcerative colitis' must NOT match 'ulcer'.
+    """P2-001: 'ulcerative colitis' must NOT match 'ulcer' (DOID:77).
 
     Ulcerative colitis is an IBD, not a peptic ulcer.
-    Word boundaries (\bulcer\b) prevent 'ulcerative' from matching.
+    v106 strengthening: 'ulcerative colitis' is now recognized as ONE
+    disease (DOID:8535) via a multi-word keyword. It must NOT match
+    'ulcer' (DOID:77) — that was the original 2-Disease-node bug.
     """
     from drugos_graph.phase1_bridge import _extract_disease_id_from_indication_text
-    assert _extract_disease_id_from_indication_text("for ulcerative colitis") is None
-    assert _extract_disease_id_from_indication_text("treats ulcerative colitis") is None
+    got1 = _extract_disease_id_from_indication_text("for ulcerative colitis")
+    got2 = _extract_disease_id_from_indication_text("treats ulcerative colitis")
+    assert got1 != "DOID:77", f"'ulcerative colitis' wrongly matched 'ulcer' (DOID:77), got {got1!r}"
+    assert got2 != "DOID:77", f"'ulcerative colitis' wrongly matched 'ulcer' (DOID:77), got {got2!r}"
+    # v106: it should now match DOID:8535 (Ulcerative Colitis)
+    assert got1 == "DOID:8535", f"expected DOID:8535, got {got1!r}"
+    assert got2 == "DOID:8535", f"expected DOID:8535, got {got2!r}"
 
 
 def test_p2_001_negated_indications_not_matched():
@@ -530,6 +537,133 @@ def test_p2_007_summary_log_stays_info():
                         f"P2-007 FAIL: edge summary log uses {lines[j].strip()}, expected logger.info"
                     break
             break
+
+
+# ---------------------------------------------------------------------------
+# P2-001 STRENGTHENING (v106) — ulcerative colitis recognized as ONE disease
+# ---------------------------------------------------------------------------
+
+def test_p2_001_ulcerative_colitis_matched_as_single_disease():
+    """P2-001 v106: 'ulcerative colitis' must match DOID:8535 (not None).
+
+    The issue description names this case explicitly: the naive substring
+    match split 'ulcerative colitis' into 'ulcer' + 'colitis' (2 Disease
+    nodes for one condition). The word-boundary regex fix PREVENTED the
+    split but also missed the real disease entirely (returned None). The
+    v106 strengthening adds 'ulcerative colitis' as a multi-word keyword
+    so it is recognized as ONE disease (DOID:8535).
+    """
+    from drugos_graph.phase1_bridge import _extract_disease_id_from_indication_text
+    from drugos_graph.phase1_bridge import _extract_disease_name_from_indication_text
+    # Positive: "ulcerative colitis" must return the correct DOID
+    assert _extract_disease_id_from_indication_text("for ulcerative colitis") == "DOID:8535"
+    assert _extract_disease_name_from_indication_text("treats ulcerative colitis") == "Ulcerative Colitis"
+    # In a sentence with more context
+    assert _extract_disease_id_from_indication_text(
+        "indicated for mild to moderate ulcerative colitis in adults"
+    ) == "DOID:8535"
+
+
+def test_p2_001_ulcerative_colitis_does_not_match_ulcer():
+    """P2-001 v106: 'ulcerative colitis' must NOT match 'ulcer' (DOID:77).
+
+    Longest-match-first (L3) ensures 'ulcerative colitis' is checked
+    BEFORE 'ulcer'. Once 'ulcerative colitis' matches, the function
+    returns immediately — 'ulcer' is never checked. This prevents the
+    2-Disease-node bug from the issue description.
+    """
+    from drugos_graph.phase1_bridge import _extract_disease_id_from_indication_text
+    got = _extract_disease_id_from_indication_text("for ulcerative colitis")
+    assert got != "DOID:77", f"P2-001 FAIL: 'ulcerative colitis' matched 'ulcer' (DOID:77), got {got!r}"
+    assert got == "DOID:8535", f"P2-001 FAIL: expected DOID:8535, got {got!r}"
+
+
+def test_p2_001_peptic_ulcer_still_matches_ulcer():
+    """P2-001 v106: 'peptic ulcer' must still match 'ulcer' (DOID:77).
+
+    Adding 'ulcerative colitis' must NOT break the existing 'ulcer' match
+    for genuine ulcer indications. 'peptic ulcer' should match DOID:77.
+    """
+    from drugos_graph.phase1_bridge import _extract_disease_id_from_indication_text
+    assert _extract_disease_id_from_indication_text("for peptic ulcer") == "DOID:77"
+    assert _extract_disease_id_from_indication_text("treats gastric ulcer") == "DOID:77"
+
+
+# ---------------------------------------------------------------------------
+# P2-002 STRENGTHENING (v106) — misleading fallback comments removed
+# ---------------------------------------------------------------------------
+
+def test_p2_002_no_misleading_fallback_comment_in_source():
+    """P2-002 v106: the source must NOT contain the lying comment
+    'falls back to is_globally_approved when is_fda_approved is None'.
+
+    The previous v64 comment claimed the code falls back to
+    is_globally_approved (max_phase==4) when is_fda_approved is None.
+    That described the OLD buggy behavior. The v104 fix changed the code
+    to return None (no fallback), but the comment was NEVER updated —
+    so operators reading the code saw a comment that lied about what
+    the code does. This test ensures the misleading comment stays gone.
+    """
+    from drugos_graph import phase1_bridge as pb
+    src = inspect.getsource(pb)
+    # The misleading comment text must NOT appear anywhere in the source
+    misleading = "falls back to is_globally_approved when is_fda_approved is None"
+    assert misleading not in src, (
+        f"P2-002 FAIL: misleading comment still present in phase1_bridge.py: "
+        f"'{misleading}'. The code returns None (no fallback) but the comment "
+        f"lies about a fallback. Remove the comment."
+    )
+
+
+def test_p2_002_resolve_fda_approved_never_uses_is_globally_approved():
+    """P2-002 v106: _resolve_fda_approved must NOT READ is_globally_approved.
+
+    The function's contract is: return None for unknown FDA status, NEVER
+    fall back to is_globally_approved (max_phase==4). This test verifies
+    the function never READS the is_globally_approved field from the row
+    (i.e. no row.get('is_globally_approved') / row['is_globally_approved']).
+    Comments and docstrings MAY mention is_globally_approved to explain
+    why the fallback is NOT used — that is documentation, not code logic.
+    """
+    from drugos_graph.phase1_bridge import _resolve_fda_approved
+    src = inspect.getsource(_resolve_fda_approved)
+    # The function must NOT read the is_globally_approved field.
+    # These are the only patterns that would read it from the row dict.
+    forbidden_patterns = [
+        'row.get("is_globally_approved")',
+        "row.get('is_globally_approved')",
+        'row["is_globally_approved"]',
+        "row['is_globally_approved']",
+    ]
+    for pat in forbidden_patterns:
+        assert pat not in src, (
+            f"P2-002 FAIL: _resolve_fda_approved reads 'is_globally_approved' "
+            f"via pattern {pat!r}. The function must NOT use is_globally_approved "
+            f"as a fallback — that conflates EMA/PMDA/NMPA approval with FDA approval."
+        )
+
+
+def test_p2_002_ema_only_drug_returns_none_even_with_max_phase_4():
+    """P2-002 v106: integration test — an EMA-only drug (max_phase=4,
+    is_globally_approved=True, is_fda_approved=None) must return None.
+
+    This is the EXACT scenario from the issue: an EMA-approved drug
+    sold in Germany but never submitted to the FDA has max_phase==4
+    (approved by SOME regulator) but is_fda_approved=None (ChEMBL
+    cannot provide FDA-specific approval). The OLD code marked it
+    fda_approved=True (the bug). The fix returns None (unknown).
+    """
+    from drugos_graph.phase1_bridge import _resolve_fda_approved
+    ema_only_row = {
+        "is_fda_approved": None,
+        "is_globally_approved": True,
+        "max_phase": 4,
+    }
+    result = _resolve_fda_approved(ema_only_row)
+    assert result is None, (
+        f"P2-002 FAIL: EMA-only drug returned {result!r}, expected None. "
+        f"Returning True would conflate EMA approval with FDA approval."
+    )
 
 
 if __name__ == "__main__":

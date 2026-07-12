@@ -1809,6 +1809,15 @@ _DISEASE_KEYWORD_MAP = {
     "inflammation": ("DOID:1101", "Inflammation"),
     "migraine": ("DOID:1197", "Migraine"),
     "ulcer": ("DOID:77", "Ulcer"),
+    # P2-001 STRENGTHENING (v106 — Team Member 5): add multi-word disease
+    # "ulcerative colitis" so it is recognized as ONE disease (DOID:8535)
+    # instead of being missed entirely. The issue description explicitly
+    # names this case: the naive substring match split it into "ulcer" +
+    # "colitis" (2 Disease nodes). The word-boundary regex fix PREVENTS
+    # the split but also misses the real disease. Adding the multi-word
+    # keyword restores correct recognition. Longest-match-first sorting
+    # (L3) ensures "ulcerative colitis" is checked BEFORE "ulcer".
+    "ulcerative colitis": ("DOID:8535", "Ulcerative Colitis"),
 }
 
 # P2-001 L3 — multi-word "false friend" phrases. When any of these
@@ -4109,8 +4118,15 @@ def stage_phase1_to_phase2(
                 "smiles": _safe_str(row.get("smiles")),
                 "molecular_weight": _safe_float(row.get("molecular_weight")),
                 "molecular_formula": _safe_str(row.get("molecular_formula")),
-                # Patient-safety: explicit bool, never null.
-                "fda_approved": _resolve_fda_approved(row),  # v64 ROOT FIX (P1-012): falls back to is_globally_approved when is_fda_approved is None (ChEMBL source)
+                # P2-002 ROOT FIX (v104): _resolve_fda_approved returns
+                # Optional[bool]. When is_fda_approved is None/NaN (ChEMBL-
+                # only path), it returns None — it does NOT fall back to
+                # is_globally_approved (max_phase==4), because that would
+                # conflate EMA/PMDA/NMPA approval with FDA approval and
+                # over-state US market opportunity for the RL ranker.
+                # The outdated v64 comment below was replaced because it
+                # described the OLD buggy behavior, not the current code.
+                "fda_approved": _resolve_fda_approved(row),
                 # v61 ROOT FIX: NEVER null per docstring patient-safety
                 # contract. withdrawn=False (default safe state) when
                 # Phase 1 is silent; safety_data_missing=True flags it.
@@ -5224,7 +5240,9 @@ def stage_phase1_to_phase2(
                     # (any regulator) — NOT FDA-specific. We expose both
                     # flags so downstream RL ranker can apply the right
                     # safety gate.
-                    "fda_approved": _resolve_fda_approved(row),  # v64 ROOT FIX (P1-012): falls back to is_globally_approved when is_fda_approved is None (ChEMBL source)
+                    # P2-002 ROOT FIX (v104): returns None for unknown
+                    # FDA status — does NOT fall back to is_globally_approved.
+                    "fda_approved": _resolve_fda_approved(row),
                     # v61 ROOT FIX: NEVER null per docstring patient-safety contract.
                     "withdrawn": _chembl_withdrawn_val,
                     "safety_data_missing": _chembl_safety_missing,
@@ -5440,7 +5458,9 @@ def stage_phase1_to_phase2(
                     "name": _safe_str(row.get("molecule_name")),
                     "molecular_weight": _safe_float(row.get("molecular_weight")),
                     "molecular_formula": _safe_str(row.get("molecular_formula")),
-                    "fda_approved": _resolve_fda_approved(row),  # v64 ROOT FIX (P1-012): falls back to is_globally_approved when is_fda_approved is None (ChEMBL source)
+                    # P2-002 ROOT FIX (v104): returns None for unknown
+                    # FDA status — does NOT fall back to is_globally_approved.
+                    "fda_approved": _resolve_fda_approved(row),
                     # v61 ROOT FIX: NEVER null per docstring patient-safety contract.
                     "withdrawn": _act_withdrawn_val,
                     "safety_data_missing": _act_safety_missing,
