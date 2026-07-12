@@ -1060,3 +1060,57 @@ Stage Summary:
 - Branch: fix/phase3-tm9-p3-001-to-010-verified-v106 (merged to main)
 - Main branch commit: 0f6fbd9
 - Fresh clone verification: ALL PASS
+
+---
+Task ID: P1-001-to-P1-011-v106
+Agent: Super Z (Team Member 1 — Phase 1 Database, Connection, Migrations, Entity Resolution Core)
+Task: Fix 11 assigned issues (P1-001 through P1-011) for Phase 1. Each fix must be root-cause, not surface-level. Read real code line-by-line (not comments/tests), verify by running REAL CODE, write regression tests, create branch, push, verify CI/build/tests, merge to main, re-clone to verify.
+
+Work Log:
+- Read project docx (Team_Cosmic_Build_Process_Updated.docx): 6-phase platform — Phase 1 (data ingestion, 7 sources) → Phase 2 (Neo4j KG) → Phase 3 (Graph Transformer) → Phase 4 (RL Ranker) → Phase 5 (API) → Phase 6 (testing/V1 launch).
+- Cloned repo via PAT, created branch fix/team1-p1-001-to-p1-011-forensic-stale-test-fix-v106.
+- Read EACH file mentioned in the 11 issues line-by-line (real code, not comments): connection.py (2297 lines), entity_resolution/run.py (1045 lines), run_migrations.py (6244 lines), neo4j_exporter.py (1138 lines), omim_pipeline.py (3539 lines), disgenet_pipeline.py (4441 lines), _constants.py (683 lines), confidence.py (463 lines), missing_values.py (3786 lines), pipelines/__init__.py (2917 lines), normalizer.py (5817 lines), deduplicator.py (4779 lines), master_pipeline_dag.py (1313 lines), loaders.py (5651 lines), base.py.
+- ROOT-CAUSE DISCOVERY: All 11 issues were ALREADY FIXED in the actual code by prior PRs (v104/v105). However, STALE TESTS and STALE COMMENTS still asserted OLD WRONG values, causing regression tests to FAIL when run. This is the "fake fix" cycle the user described: code is fixed but tests lie.
+- Key finding for P1-006: The actual SCORE_BY_MAPPING_KEY values ARE CORRECT ({1:0.2, 2:0.25, 3:0.9, 4:0.8} per Piñero 2020 §2.3). But:
+  * v93_forensic/verify_v93_all_26_bugs.py:284-285 asserted [2]==0.6 and [1]==0.5 (WRONG)
+  * test_omim_pipeline.py:716,1210-1211,1567 asserted 0.5/0.6 (WRONG)
+  * missing_values.py comments at lines 3113,3146,3152,3179,3183-3184,3203 referenced old wrong values
+  * docs/pipelines/omim.md:178-179,278-279 said 0.6/0.5 (WRONG)
+  * test_p1_006_no_hardcoded_fallback FAILED because comments contained the exact wrong string '{1: 0.5, 2: 0.6, 3: 0.9, 4: 0.8}' the test searched for as ABSENT
+- Key finding for P1-010: Code correctly uses RETURNING (xmax = 0) to distinguish INSERT vs UPDATE. But test_p1_010 used get_db_session() which was affected by test-ordering global engine caching (config.settings.DATABASE_URL cached at import time, get_db_session() used stale global engine from previous test). FIX: use the db_engine fixture from conftest.py which creates a fresh in-memory SQLite with all tables pre-created.
+- Applied fixes manually (Edit/MultiEdit, no auto-fix scripts):
+  * Updated stale comments in missing_values.py to reference correct values {0.2, 0.25, 0.9, 0.8}
+  * Updated stale test assertions in v93_forensic, test_omim_pipeline.py to assert correct values
+  * Updated stale docs in omim.md to show correct values
+  * Fixed P1-010 test to use db_engine fixture instead of get_db_session()
+- Installed dependencies: pandas, numpy, sqlalchemy, psycopg2-binary, lxml, rapidfuzz, python-dotenv, filelock, pyarrow, requests, pytest, pytest-mock
+- Ran REAL CODE verification:
+  * 24/24 tests in test_p1_001_to_p1_011_v104.py PASS
+  * v93_forensic P1-029 OMIM single-source test PASSES
+  * test_omim_pipeline score tests PASS (test_bug_12_12, test_bug_12_13, test_bug_2_3, regression)
+  * compileall build check PASSES for all 16 modified/relevant files
+  * Real code verified: SCORE_BY_MAPPING_KEY = {3:0.9, 4:0.8, 2:0.25, 1:0.2}
+  * Real code verified: SCHEMA_VERSION_FALLBACK = 0, SCHEMA_VERSION = 17
+  * Real code verified: session_scope = get_db_session (alias)
+  * Real code verified: Neo4jExporter class importable with __all__ entry
+  * Real code verified: OMIM_MIM_MIN=100100, OMIM_MIM_MAX=999999
+  * Real code verified: _meta_name initialized at top of check_neo4j_readiness
+- Pushed branch fix/team1-p1-001-to-p1-011-forensic-stale-test-fix-v106
+- Merged to main (resolved parallel-agent merge with Team Member 7 P2-017..P2-022)
+- Pushed main to origin
+- FRESH CLONE verification: re-cloned repo from main, ran 24/24 P1 regression tests → ALL PASS
+- Verified all 11 fixes on fresh clone: session_scope, SCHEMA_VERSION_FALLBACK=0, _meta_name, OMIM MIM range, SCORE_BY_MAPPING_KEY={0.2,0.25,0.9,0.8}, InChIKey validators, Neo4jExporter class
+
+Stage Summary:
+- 11 issues (P1-001 through P1-011) ALL VERIFIED FIXED in actual code
+- 5 files modified (comments, tests, docs only — no production code changes needed):
+  * phase1/cleaning/missing_values.py (stale comments → correct values)
+  * phase1/docs/pipelines/omim.md (stale doc values → correct values)
+  * phase1/tests/test_omim_pipeline.py (stale test assertions → correct values)
+  * phase1/tests/test_p1_001_to_p1_011_v104.py (P1-010 test setup fix: db_engine fixture)
+  * phase1/tests/v93_forensic/verify_v93_all_26_bugs.py (stale test assertions → correct values)
+- 24/24 P1 regression tests PASS on fresh clone of main
+- Build check (compileall) PASSES
+- Real code execution verified all 11 fixes (not just source inspection)
+- Commit: 50f2f7a on branch, merged to main as c747628
+- Pre-existing failures (NOT caused by my changes): test_bug_3_2, test_bug_2_4 (TypeError in _strip_inheritance_pattern — pre-existing code bug in omim_pipeline.py:1496), v93 P1-034 (SLA config), v93 P1-047 (environment)
