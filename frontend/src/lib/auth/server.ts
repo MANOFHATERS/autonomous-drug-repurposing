@@ -24,7 +24,23 @@ import { db } from "@/lib/db";
 // meant that a production deploy with a missing env var would silently sign
 // every JWT with a hardcoded string published in the source — full account
 // takeover for any attacker who reads the repo.
-function resolveJwtSecret(): string {
+//
+// FE-041 ROOT FIX: resolveJwtSecret is invoked PER-CALL inside
+// signAccessToken / verifyAccessToken / signMfaChallengeToken /
+// verifyMfaChallengeToken (instead of being cached in a module-level
+// `const JWT_SECRET = resolveJwtSecret()`). This allows JWT secret rotation
+// via a secrets manager (Vault, AWS SM, GCP SM, k8s mounted env) to take
+// effect immediately for newly-issued tokens without requiring a process
+// restart. In a 24/7 pharma research platform, "restart to rotate" is an
+// operational and security hazard — operators delay rotation, leaving old
+// keys in production longer than necessary. Per-call resolution has
+// negligible cost (one env lookup + length check) and removes the
+// downtime-vs-security tradeoff.
+//
+// To support zero-downtime rotation with already-issued tokens, operators
+// may set JWT_SECRET to the NEW value and JWT_SECRET_PREVIOUS to the OLD
+// value during the transition window — verifyAccessToken tries both.
+export function resolveJwtSecret(): string {
   const secret = process.env.JWT_SECRET;
   if (!secret || secret.length < 32) {
     if (process.env.NODE_ENV === "production") {
@@ -45,7 +61,18 @@ function resolveJwtSecret(): string {
   return secret;
 }
 
-const JWT_SECRET = resolveJwtSecret();
+/**
+ * FE-041: Return the previous secret (if any) for zero-downtime rotation.
+ * When JWT_SECRET is rotated, set JWT_SECRET_PREVIOUS to the old value so
+ * tokens signed with the old key remain valid during the access-token TTL
+ * window (15 min). After the TTL expires, unset JWT_SECRET_PREVIOUS.
+ */
+export function resolvePreviousJwtSecret(): string | null {
+  const prev = process.env.JWT_SECRET_PREVIOUS;
+  if (!prev || prev.length < 32) return null;
+  return prev;
+}
+
 const JWT_ISSUER = "drugos";
 
 // FE-004 ROOT FIX: Short-lived MFA challenge token. Issued by /api/auth/login
@@ -64,7 +91,8 @@ export function signMfaChallengeToken(payload: {
     email: payload.email,
     type: "mfa_challenge" as const,
   };
-  return jwt.sign(jwtPayload, JWT_SECRET, {
+  // FE-041: resolve secret per-call to support hot-rotation.
+  return jwt.sign(jwtPayload, resolveJwtSecret(), {
     issuer: JWT_ISSUER,
     expiresIn: MFA_CHALLENGE_TTL_SECONDS,
     algorithm: "HS256",
@@ -75,18 +103,25 @@ export function verifyMfaChallengeToken(token: string): {
   userId: string;
   email: string;
 } | null {
-  try {
-    const decoded = jwt.verify(token, JWT_SECRET, {
-      issuer: JWT_ISSUER,
-      algorithms: ["HS256"],
-    }) as { sub: string; email: string; type: string };
-    if (!decoded || decoded.type !== "mfa_challenge" || !decoded.sub) {
-      return null;
+  // FE-041: try current secret first, then previous-secret (rotation window).
+  const candidates = [resolveJwtSecret(), resolvePreviousJwtSecret()].filter(
+    (s): s is string => !!s
+  );
+  for (const secret of candidates) {
+    try {
+      const decoded = jwt.verify(token, secret, {
+        issuer: JWT_ISSUER,
+        algorithms: ["HS256"],
+      }) as { sub: string; email: string; type: string };
+      if (!decoded || decoded.type !== "mfa_challenge" || !decoded.sub) {
+        continue;
+      }
+      return { userId: decoded.sub, email: decoded.email };
+    } catch {
+      // try next candidate
     }
-    return { userId: decoded.sub, email: decoded.email };
-  } catch {
-    return null;
   }
+  return null;
 }
 
 const ACCESS_TOKEN_TTL_SECONDS = 15 * 60; // 15 minutes
@@ -176,7 +211,8 @@ export function signAccessToken(payload: AuthenticatedUser): string {
     orgId: payload.orgId,
     type: "access",
   };
-  return jwt.sign(jwtPayload, JWT_SECRET, {
+  // FE-041: resolve secret per-call to support hot-rotation.
+  return jwt.sign(jwtPayload, resolveJwtSecret(), {
     issuer: JWT_ISSUER,
     expiresIn: ACCESS_TOKEN_TTL_SECONDS,
     algorithm: "HS256",
@@ -184,21 +220,28 @@ export function signAccessToken(payload: AuthenticatedUser): string {
 }
 
 export function verifyAccessToken(token: string): AuthenticatedUser | null {
-  try {
-    const decoded = jwt.verify(token, JWT_SECRET, {
-      issuer: JWT_ISSUER,
-      algorithms: ["HS256"],
-    }) as AccessTokenPayload;
-    if (!decoded || decoded.type !== "access" || !decoded.sub) return null;
-    return {
-      userId: decoded.sub,
-      email: decoded.email,
-      role: decoded.role,
-      orgId: decoded.orgId,
-    };
-  } catch {
-    return null;
+  // FE-041: try current secret first, then previous-secret (rotation window).
+  const candidates = [resolveJwtSecret(), resolvePreviousJwtSecret()].filter(
+    (s): s is string => !!s
+  );
+  for (const secret of candidates) {
+    try {
+      const decoded = jwt.verify(token, secret, {
+        issuer: JWT_ISSUER,
+        algorithms: ["HS256"],
+      }) as AccessTokenPayload;
+      if (!decoded || decoded.type !== "access" || !decoded.sub) continue;
+      return {
+        userId: decoded.sub,
+        email: decoded.email,
+        role: decoded.role,
+        orgId: decoded.orgId,
+      };
+    } catch {
+      // try next candidate
+    }
   }
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -258,7 +301,19 @@ export async function setAuthCookies(access: string, refresh: string): Promise<v
     httpOnly: true,
     secure: isProd,
     sameSite: "lax",
-    path: "/api/auth/refresh",
+    // FE-050 ROOT FIX: cookie path was "/api/auth/refresh", which meant the
+    // browser only sent the refresh cookie on requests to that exact path.
+    // But getAuthenticatedUser() — called by EVERY authenticated route —
+    // reads the refresh cookie to auto-rotate expired access tokens. With
+    // the restricted path, the cookie was never sent on /api/projects,
+    // /api/auth/me, /api/evidence-package, etc., so the auto-refresh code
+    // path was effectively dead and users were logged out every 15 min.
+    // Setting path: "/" aligns the refresh cookie's scope with the access
+    // cookie. The security trade-off is acceptable: both cookies are
+    // HttpOnly + Secure (in prod) + SameSite=Lax, so they are not readable
+    // by JS, not sent on cross-site requests, and only transmitted over
+    // HTTPS in production.
+    path: "/",
     maxAge: REFRESH_TOKEN_TTL_DAYS * 24 * 60 * 60,
   });
 }

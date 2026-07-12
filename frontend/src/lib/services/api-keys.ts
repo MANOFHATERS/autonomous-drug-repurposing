@@ -5,6 +5,16 @@
  * SHA-256 hash of the key, never the raw key. The user sees the raw key
  * exactly once at creation time and is responsible for storing it.
  *
+ * ROOT FIX for FE-038 (API key prefix includes the "drugos_" prefix):
+ * The full raw key has the shape `drugos_<32 hex>`. The `prefix` column
+ * stores the 8 hex chars immediately AFTER the `drugos_` marker so the UI
+ * can render `drugos_<8 hex>...` without producing the previous
+ * `drugos_drugos_<5 hex>...` double-prefix (FE-015). The Prisma schema
+ * comment for `ApiKey.prefix` (line 294) says "first 8 chars shown in UI
+ * for identification" — the 8 chars in question are the 8 hex chars that
+ * follow `drugos_`, NOT the first 8 chars of the raw key (which would be
+ * `drugos_d` and useless for identification).
+ *
  * ROOT FIX for FE-022 (API key revocation not scoped to owning user):
  *
  * Previously: `revokeApiKey(organizationId, keyId)` matched only on
@@ -40,7 +50,15 @@ export async function issueApiKey(
 ): Promise<CreatedApiKey> {
   const rawKey = `drugos_${randomBytes(16).toString("hex")}`;
   const hash = createHash("sha256").update(rawKey).digest("hex");
-  const prefix = rawKey.slice(0, 12);
+  // FE-038 ROOT FIX: prefix = the 8 hex chars AFTER the "drugos_" marker.
+  // rawKey shape: "drugos_" (7 chars) + 32 hex chars. slice(7, 15) gives
+  // the first 8 hex chars of the random portion — enough entropy for
+  // visual identification (16^8 = ~4 billion) and matches the schema
+  // comment "first 8 chars shown in UI for identification".
+  // The previous code did `rawKey.slice(0, 12)` which produced
+  // "drugos_<5 hex>" — when the UI prepended another "drugos_" it
+  // rendered "drugos_drugos_<5 hex>..." (FE-015).
+  const prefix = rawKey.slice(7, 15);
   const record = await db.apiKey.create({
     data: {
       organizationId,
