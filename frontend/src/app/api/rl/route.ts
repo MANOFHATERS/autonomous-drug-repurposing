@@ -26,7 +26,7 @@ import { checkUserRateLimit as checkUserRateLimitSync } from "@/lib/auth/per-use
 
 /**
  * POST /api/rl
- * Body: { drug?: string, disease?: string, limit?: number }
+ * Body: { drug?: string, disease?: string, limit?: number, sort?: RlSortField, sortDir?: 'asc'|'desc', page?: number, pageSize?: number }
  *
  * FE-019 ROOT FIX: This route previously had its OWN inline CSV parser
  * (parseRlCsv, RlCandidate interface) separate from
@@ -48,6 +48,16 @@ import { checkUserRateLimit as checkUserRateLimitSync } from "@/lib/auth/per-use
  * and POST. The CSV cache lives inside rl-ranker.ts's readLocalCsv (TTL +
  * mtime + fs.watch). The rate limiter is checked BEFORE any disk I/O so a
  * flood of requests is rejected at the gate with 429 + Retry-After.
+ *
+ * FE-033 ROOT FIX: Server-side sort + pagination. The previous version
+ * accepted only `drug`, `disease`, `limit` and returned all matching
+ * candidates (capped at 200). The candidate table then sorted client-side,
+ * which froze the browser at 100K-candidate production scale. Root fix:
+ * the route now accepts `sort`, `sortDir`, `page`, `pageSize` and passes
+ * them to getRankedHypotheses(). The response includes `total` (count
+ * after filtering, before pagination) and `page` / `pageSize` so the
+ * caller can render "Showing X–Y of Z" and pagination controls. Default
+ * page size is 50; max is 200.
  */
 export async function POST(req: NextRequest) {
   // FE-011: CSRF protection on every state-changing route.
@@ -82,7 +92,16 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  let body: { drug?: string; disease?: string; limit?: number; orgId?: string };
+  let body: {
+    drug?: string;
+    disease?: string;
+    limit?: number;
+    sort?: string;
+    sortDir?: string;
+    page?: number;
+    pageSize?: number;
+    orgId?: string;
+  };
   try {
     body = await req.json();
   } catch {
@@ -90,7 +109,20 @@ export async function POST(req: NextRequest) {
   }
   const drug = (body.drug || "").trim();
   const disease = (body.disease || "").trim();
-  const limit = Math.min(body.limit ?? 50, 200);
+
+  // FE-033: Parse + validate sort + pagination params. Invalid values fall
+  // back to the defaults (rank/asc, page 0, pageSize 50).
+  const VALID_SORT_FIELDS = ['rank', 'overallScore', 'gnnScore', 'safetyScore', 'marketScore', 'reward', 'drug', 'disease'] as const;
+  const VALID_SORT_DIRS = ['asc', 'desc'] as const;
+  const sort = (VALID_SORT_FIELDS as readonly string[]).includes(body.sort || '')
+    ? (body.sort as typeof VALID_SORT_FIELDS[number])
+    : undefined;
+  const sortDir = (VALID_SORT_DIRS as readonly string[]).includes(body.sortDir || '')
+    ? (body.sortDir as typeof VALID_SORT_DIRS[number])
+    : undefined;
+  const pageSizeRaw = Math.min(Math.max(1, Number(body.pageSize ?? body.limit ?? 50) || 50), 200);
+  const pageRaw = Math.max(0, Math.floor(Number(body.page ?? 0) || 0));
+  const offset = pageRaw * pageSizeRaw;
 
   // FE-007 ROOT FIX (Team Member 13): accept an explicit orgId.
   //
@@ -146,10 +178,17 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    const result = await getRankedHypotheses({ drug: drug || undefined, disease: disease || undefined, limit });
+    const result = await getRankedHypotheses({
+      drug: drug || undefined,
+      disease: disease || undefined,
+      sort,
+      sortDir,
+      offset,
+      pageSize: pageSizeRaw,
+    });
 
-    // FE-003: if neither the service URL is set nor any local CSV was
-    // found, the lib returns source: "none" with an empty candidate
+    // FE-003 (Team 13): if neither the service URL is set nor any local CSV
+    // was found, the lib returns source: "none" with an empty candidate
     // list. Return 503 so the dashboard shows a clear "RL not run yet"
     // state instead of presenting an empty table.
     if (!availability.available && result.source === "none") {
@@ -174,18 +213,34 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    // FE-007 (Team 13): pass targetOrgId so persistence is scoped to the
+    // user's intended org, not their first org by joinedAt.
     await persistRlCandidates(auth.user.userId, result.candidates, targetOrgId);
     await writeAuditLog({
       user: auth.user,
       action: "rl_query",
       resource: `rl:${drug || "*"}:${disease || "*"}`,
-      metadata: { count: result.candidates.length, source: result.source },
+      metadata: {
+        count: result.candidates.length,
+        source: result.source,
+        sort: sort || 'rank',
+        sortDir: sortDir || 'asc',
+        page: pageRaw,
+        pageSize: pageSizeRaw,
+        total: result.total ?? result.candidates.length,
+      },
     });
     return NextResponse.json({
       candidates: result.candidates,
       source: result.source,
       csvPath: result.csvPath,
-      total: result.candidates.length,
+      // FE-033: `total` is the count AFTER filtering but BEFORE pagination.
+      // The candidate table uses this to render "Showing X–Y of Z" and
+      // pagination controls. `count` is the page size (length of candidates
+      // on the current page).
+      total: result.total ?? result.candidates.length,
+      page: pageRaw,
+      pageSize: pageSizeRaw,
       note: result.note,
     });
   } catch (e: unknown) {
@@ -197,7 +252,7 @@ export async function POST(req: NextRequest) {
   }
 }
 
-export async function GET() {
+export async function GET(req: NextRequest) {
   const auth = await requireAuth();
   if (auth.user === null) return auth.response;
 
@@ -221,13 +276,33 @@ export async function GET() {
     );
   }
 
+  // FE-033: GET also accepts sort + pagination via query params so the
+  // candidate table can paginate without a POST body.
+  const sp = req.nextUrl.searchParams;
+  const VALID_SORT_FIELDS = ['rank', 'overallScore', 'gnnScore', 'safetyScore', 'marketScore', 'reward', 'drug', 'disease'] as const;
+  const VALID_SORT_DIRS = ['asc', 'desc'] as const;
+  const sort = (VALID_SORT_FIELDS as readonly string[]).includes(sp.get('sort') || '')
+    ? (sp.get('sort') as typeof VALID_SORT_FIELDS[number])
+    : undefined;
+  const sortDir = (VALID_SORT_DIRS as readonly string[]).includes(sp.get('sortDir') || '')
+    ? (sp.get('sortDir') as typeof VALID_SORT_DIRS[number])
+    : undefined;
+  const pageSizeRaw = Math.min(Math.max(1, Number(sp.get('pageSize') ?? sp.get('limit') ?? 50) || 50), 200);
+  const pageRaw = Math.max(0, Math.floor(Number(sp.get('page') ?? 0) || 0));
+  const offset = pageRaw * pageSizeRaw;
+
   const availability = checkRlAvailability();
 
   try {
-    const result = await getRankedHypotheses({ limit: 50 });
+    const result = await getRankedHypotheses({
+      sort,
+      sortDir,
+      offset,
+      pageSize: pageSizeRaw,
+    });
 
-    // FE-003: same 503 fallback as POST. The dashboard's RL page calls
-    // GET to populate the table — if neither the service nor a local
+    // FE-003 (Team 13): same 503 fallback as POST. The dashboard's RL page
+    // calls GET to populate the table — if neither the service nor a local
     // CSV is available, return 503 so the UI shows a clear state.
     if (!availability.available && result.source === "none") {
       return NextResponse.json(
@@ -249,11 +324,14 @@ export async function GET() {
       );
     }
 
+
     return NextResponse.json({
       candidates: result.candidates,
       source: result.source,
       csvPath: result.csvPath,
-      total: result.candidates.length,
+      total: result.total ?? result.candidates.length,
+      page: pageRaw,
+      pageSize: pageSizeRaw,
       note: result.note,
     });
   } catch (e: unknown) {

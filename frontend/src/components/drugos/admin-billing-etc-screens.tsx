@@ -53,13 +53,16 @@ import {
   XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip,
   ResponsiveContainer, Legend, PieChart as RechartsPieChart, Pie, Cell,
 } from 'recharts';
-// FE-026 ROOT FIX: All data exports from mock-data.ts are now EMPTY arrays.
-// Components render empty states until migrated to real API calls.
+// FE-034 ROOT FIX: `mock-data.ts` was deleted (dangerous name invited future
+// engineers to add fabricated data). Empty defaults now live in
+// `@/lib/empty-defaults` — the name makes it unambiguous that these are
+// EMPTY placeholders, NOT sample data. Components render empty states until
+// migrated to real API calls (see use-api-data.tsx / use-account-data.tsx).
 import {
   users, auditLogs, subscriptionPlans, billingHistory,
   apiKeys, webhooks, usageMetrics, dealPipeline, organization,
   featureFlags, dataSources,
-} from '@/lib/mock-data';
+} from '@/lib/empty-defaults';
 
 // ─── Design Tokens ───
 const C = { primary: '#5B4FCF', green: '#1D9E75', orange: '#D4853A', red: '#C0392B', bg: '#F8F8FA' };

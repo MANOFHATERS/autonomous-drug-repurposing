@@ -399,6 +399,122 @@ export function useRlCandidates(params: { drug?: string; disease?: string; limit
 }
 
 /**
+ * FE-029 ROOT FIX: Real notifications hook for the app shell.
+ *
+ * The previous app-shell.tsx imported a hardcoded `notifications` array from
+ * `mock-data.ts` (now deleted). The array was empty, but the NAME invited
+ * future engineers to add fabricated "Dr. Sarah Chen published a hypothesis"
+ * entries — which would have been presented to researchers as real activity.
+ *
+ * This hook calls the real /api/notifications endpoint, which returns the
+ * authenticated user's actual notification feed from the database. The hook
+ * polls every 60 seconds so the bell-icon badge stays fresh without requiring
+ * a manual refresh. On error or empty, it returns an empty array — the UI
+ * renders an honest "No notifications" state, never fabricated data.
+ *
+ * Returns:
+ *   - notifications: Notification[]  — the user's real notifications (newest first)
+ *   - unreadCount: number           — count of notifications with readAt === null
+ *   - loading: boolean              — true during the initial fetch
+ *   - error: ApiError | null        — surfaced honestly, never swallowed
+ *   - refetch: () => void           — trigger a manual refresh
+ */
+export function useNotifications(options: { pollMs?: number } = {}) {
+  const [state, setState] = useState<{
+    notifications: import("@/lib/api-client").Notification[];
+    unreadCount: number;
+    loading: boolean;
+    error: ApiError | null;
+  }>({
+    notifications: [],
+    unreadCount: 0,
+    loading: true,
+    error: null,
+  });
+  const [refetchCounter, setRefetchCounter] = useState(0);
+  const refetch = () => setRefetchCounter((c) => c + 1);
+
+  // Initial fetch + refetch when refetchCounter changes.
+  useEffect(() => {
+    let cancelled = false;
+    setState((s) => ({ ...s, loading: true, error: null }));
+    api
+      .listNotifications()
+      .then((res) => {
+        if (cancelled) return;
+        const items = res?.items ?? [];
+        const unread = items.filter((n) => n.readAt === null).length;
+        setState({ notifications: items, unreadCount: unread, loading: false, error: null });
+      })
+      .catch((error: ApiError) => {
+        if (cancelled) return;
+        // On error, render an empty feed — NEVER fabricated notifications.
+        setState({ notifications: [], unreadCount: 0, loading: false, error });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [refetchCounter]);
+
+  // Optional polling. Default 60s. Caller can disable by passing { pollMs: 0 }.
+  const pollMs = options.pollMs ?? 60_000;
+  useEffect(() => {
+    if (!pollMs || pollMs <= 0) return;
+    const id = setInterval(() => setRefetchCounter((c) => c + 1), pollMs);
+    return () => clearInterval(id);
+  }, [pollMs]);
+
+  return { ...state, refetch };
+}
+
+/**
+ * FE-030 ROOT FIX: Real team-activity feed hook for dashboard "Recent Activity".
+ *
+ * The previous all-screens.tsx / remaining-screens.tsx rendered hardcoded
+ * arrays of fake colleagues ("Dr. Sarah Chen", "James Wilson", "Dr. Priya
+ * Patel", "Dr. Lisa Kim") in the "Shared Queries", "Team Comments", and
+ * "Recent Feedback" sections. A researcher believed these were real colleagues
+ * and could not tell the dashboard was empty.
+ *
+ * This hook calls /api/team to fetch the REAL organization members. It does
+ * NOT fabricate colleagues. On error or empty, it returns an empty array —
+ * the UI renders an honest "No team members yet" state.
+ */
+export function useTeamMembers() {
+  const [state, setState] = useState<{
+    members: import("@/lib/api-client").TeamMember[];
+    loading: boolean;
+    error: ApiError | null;
+  }>({
+    members: [],
+    loading: true,
+    error: null,
+  });
+  const [refetchCounter, setRefetchCounter] = useState(0);
+  const refetch = () => setRefetchCounter((c) => c + 1);
+
+  useEffect(() => {
+    let cancelled = false;
+    setState((s) => ({ ...s, loading: true, error: null }));
+    api
+      .listTeamMembers()
+      .then((res) => {
+        if (cancelled) return;
+        setState({ members: res?.items ?? [], loading: false, error: null });
+      })
+      .catch((error: ApiError) => {
+        if (cancelled) return;
+        setState({ members: [], loading: false, error });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [refetchCounter]);
+
+  return { ...state, refetch };
+}
+
+/**
  * FE-024 ROOT FIX: Batch-fetch real drug mechanisms via the
  * /api/drugs/mechanism endpoint (backed by the ChEMBL service in
  * lib/services/drug-mechanism.ts). The UI uses this hook to display

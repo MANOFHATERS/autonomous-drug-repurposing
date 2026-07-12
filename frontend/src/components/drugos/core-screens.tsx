@@ -57,15 +57,15 @@ import {
   useLiteratureSearch, useKnowledgeGraph, useBuildEvidencePackage, useRlCandidates,
   LoadingSpinner, ErrorDisplay,
 } from './use-api-data';
-// FE-026 ROOT FIX: All data exports from mock-data.ts are now EMPTY arrays.
-// Type imports should come from @/lib/types. Components render empty
-// states until migrated to real API calls.
+// FE-034 ROOT FIX: `mock-data.ts` deleted (dangerous name invited future
+// engineers to re-add fabricated data). Empty defaults now live in
+// `@/lib/empty-defaults`. Type imports come from `@/lib/types`.
 import {
   diseases, drugCandidates, clinicalTrials, graphNodes, graphEdges,
   trendingDiseases, recentQueries, savedQueries, usageMetrics,
   patents, evidenceItems, admetProfiles, offTargetPredictions,
   drugInteractions,
-} from '@/lib/mock-data';
+} from '@/lib/empty-defaults';
 import type {
   DrugCandidate, Disease, ClinicalTrial,
   GraphNode, GraphEdge, Patent, EvidenceItem,
