@@ -1,8 +1,8 @@
-import { NextResponse } from "next/server";
+import { NextResponse, NextRequest } from "next/server";
 import { db } from "@/lib/db";
 import { getAuthenticatedUser } from "@/lib/auth/server";
 import { generateTotpSecret, buildOtpAuthUri } from "@/lib/auth/totp";
-import { internalError } from "@/lib/api-helpers";
+import { internalError, requireCsrfOrSend } from "@/lib/api-helpers";
 import { issue2faSetupToken } from "@/lib/auth/two-factor-setup-token";
 
 /**
@@ -32,7 +32,11 @@ import { issue2faSetupToken } from "@/lib/auth/two-factor-setup-token";
  * with the code from their authenticator app + the setupToken to confirm
  * they have stored it. Only then do we set `mfaEnabled = true`.
  */
-export async function POST() {
+export async function POST(req: NextRequest) {
+  // FE-011: CSRF protection on every state-changing route.
+  const csrf = await requireCsrfOrSend(req);
+  if (csrf.response) return csrf.response;
+
   const user = await getAuthenticatedUser();
   if (!user) {
     return NextResponse.json({ error: "unauthorized", message: "Authentication required" }, { status: 401 });

@@ -6,7 +6,7 @@ import {
   verifyPassword,
   validatePasswordPolicy,
 } from "@/lib/auth/server";
-import { badRequest, internalError, writeAuditLog } from "@/lib/api-helpers";
+import { badRequest, internalError, writeAuditLog, requireCsrfOrSend } from "@/lib/api-helpers";
 
 /**
  * POST /api/auth/password
@@ -16,6 +16,10 @@ import { badRequest, internalError, writeAuditLog } from "@/lib/api-helpers";
  * policy, and updates the user's passwordHash. Returns 200 on success.
  */
 export async function POST(req: NextRequest) {
+  // FE-011: CSRF protection on every state-changing route.
+  const csrf = await requireCsrfOrSend(req);
+  if (csrf.response) return csrf.response;
+
   const user = await getAuthenticatedUser();
   if (!user) {
     return NextResponse.json({ error: "unauthorized", message: "Authentication required" }, { status: 401 });

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requireAdmin, badRequest, writeAuditLog } from "@/lib/api-helpers";
+import { requireAdmin, badRequest, writeAuditLog, requireCsrfOrSend } from "@/lib/api-helpers";
 import { revokeAllRefreshTokensForUser } from "@/lib/auth/server";
 import { db } from "@/lib/db";
 import {
@@ -87,6 +87,10 @@ export async function GET(req: NextRequest) {
  * ALLOWED_USER_STATUSES before the update. Reject unknown values with 400.
  */
 export async function PATCH(req: NextRequest) {
+  // FE-011: CSRF protection on every state-changing route.
+  const csrf = await requireCsrfOrSend(req);
+  if (csrf.response) return csrf.response;
+
   const auth = await requireAdmin();
   if (auth.user === null) return auth.response;
   let body: { userId: string; role?: string; status?: string };
@@ -126,6 +130,41 @@ export async function PATCH(req: NextRequest) {
       { error: "forbidden", message: "Only an owner can promote another user to owner." },
       { status: 403 }
     );
+  }
+
+  // FE-013 ROOT FIX: cross-tenant IDOR guard. An admin (non-owner) can only
+  // PATCH users who share at least one org membership with them. Owner is
+  // global super-admin and bypasses the check. Without this, an admin in
+  // Org A could suspend any user in Org B by guessing their cuid.
+  if (auth.user.role !== "owner") {
+    const adminMemberships = await db.organizationMember.findMany({
+      where: { userId: auth.user.userId },
+      select: { organizationId: true },
+    });
+    const adminOrgIds = adminMemberships.map((m) => m.organizationId);
+    if (adminOrgIds.length === 0) {
+      return NextResponse.json(
+        { error: "forbidden", message: "You are not a member of any organization." },
+        { status: 403 }
+      );
+    }
+    const targetMemberships = await db.organizationMember.findMany({
+      where: { userId: body.userId, organizationId: { in: adminOrgIds } },
+      select: { id: true },
+    });
+    if (targetMemberships.length === 0) {
+      // Do NOT leak whether the target user exists — return 404 not 403.
+      await writeAuditLog({
+        user: auth.user,
+        action: "admin_user_update_denied_cross_tenant",
+        resource: `user:${body.userId}`,
+        metadata: { adminOrgIds },
+      });
+      return NextResponse.json(
+        { error: "not_found", message: "User not found in your organization(s)." },
+        { status: 404 }
+      );
+    }
   }
 
   const updated = await db.user.update({
