@@ -299,21 +299,51 @@ class TestP3_021(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# P3-022: evaluate_link_prediction must NOT claim to be "independent
-# verification" — it's a code-path-identical sanity check.
+# P3-022: evaluate_link_prediction must be GENUINELY INDEPENDENT (P3-017 fix).
+#
+# UPDATE (P3-017 forensic root fix, Team Member 10): the previous test
+# enforced HONEST documentation that the AUC was "code-path-identical"
+# (the same number computed twice). The P3-017 fix made
+# evaluate_link_prediction GENUINELY independent via:
+#   - from-scratch Mann-Whitney U AUC (independent implementation)
+#   - dot-product cosine-similarity AUC (independent scorer, bypasses MLP)
+# So the documentation now reflects the INDEPENDENT verification, not
+# the code-path-identical scope. This test is updated to assert the
+# NEW behavior.
 # ---------------------------------------------------------------------------
 class TestP3_022(unittest.TestCase):
     def test_independent_claim_removed_or_documented(self):
-        """The docstring must honestly state it's a code-path-identical
-        sanity check, NOT an independent verification."""
+        """The evaluation must GENUINELY independent AUC verification
+        (P3-017 fix), not just a code-path-identical sanity check.
+
+        Previously this test enforced that the evaluation module
+        documented the code-path-identical scope. The P3-017 forensic
+        root fix (Team Member 10) made the verification genuinely
+        independent by adding:
+          - from-scratch Mann-Whitney U AUC (independent implementation)
+          - dot-product cosine-similarity AUC (independent scorer)
+        So the documentation must now reflect the INDEPENDENT
+        verification, not the code-path-identical scope.
+        """
         import inspect
         from graph_transformer import evaluation as eval_mod
         src = inspect.getsource(eval_mod)
-        # The honest documentation must be present.
+        # P3-017 ROOT FIX: the evaluation module must document the
+        # independent AUC computation (Mann-Whitney + dot-product).
         self.assertIn(
-            "CODE-PATH-IDENTICAL", src,
-            "P3-022: evaluation must document that evaluate_link_prediction "
-            "is a code-path-identical sanity check, not independent verification.",
+            "Mann-Whitney", src,
+            "P3-022: evaluation must document the from-scratch "
+            "Mann-Whitney U AUC (P3-017 independent verification).",
+        )
+        self.assertIn(
+            "auc_mannwhitney", src,
+            "P3-022: evaluation must expose auc_mannwhitney "
+            "(P3-017 independent AUC field).",
+        )
+        self.assertIn(
+            "auc_dotproduct", src,
+            "P3-022: evaluation must expose auc_dotproduct "
+            "(P3-017 independent scorer, bypasses the MLP).",
         )
 
 
