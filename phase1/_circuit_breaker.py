@@ -76,6 +76,7 @@ import contextlib
 import logging
 import threading
 import time
+from collections import deque
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +88,22 @@ logger = logging.getLogger(__name__)
 # this, assume the caller process crashed (OOM, SIGKILL, segfault) and
 # release the slot so a new probe can fire.
 _DEFAULT_PROBE_TIMEOUT: float = 300.0
+
+# P1-030 ROOT FIX (Team Member 3 -- rolling failure window + exponential
+# backoff for ChEMBL-class outages):
+#   The issue: the breaker tripped after 5 CONSECUTIVE failures (no time
+#   window) and reset after 30s. ChEMBL outages typically last 5-15 min.
+#   After the 30s reset, the breaker immediately re-tripped, hammering
+#   ChEMBL every 30s -- worsening the outage and risking IP bans.
+#   ROOT FIX: (1) add a ROLLING failure window (default 300s = 5 min) so
+#   the breaker only trips when failure_threshold failures occur WITHIN
+#   the window (not lifetime-consecutive). (2) Increase the default
+#   reset_timeout to 60s. (3) Add EXPONENTIAL BACKOFF: each failed
+#   half-open probe DOUBLES the effective reset_timeout (capped at
+#   _BACKOFF_CAP_MULT * base), so repeated outages cause progressively
+#   longer cooldowns instead of a fixed 60s hammer.
+_DEFAULT_FAILURE_WINDOW: float = 300.0
+_BACKOFF_CAP_MULT: float = 8.0  # max 8x base reset_timeout (60s -> 480s)
 
 
 class _CircuitBreaker:
@@ -126,10 +143,12 @@ class _CircuitBreaker:
     def __init__(
         self,
         failure_threshold: int = 5,
-        reset_timeout: float = 30.0,
+        reset_timeout: float = 60.0,
         *,
         name: str | None = None,
         probe_timeout: float = _DEFAULT_PROBE_TIMEOUT,
+        failure_window: float = _DEFAULT_FAILURE_WINDOW,
+        exponential_backoff: bool = True,
     ) -> None:
         if failure_threshold < 1:
             raise ValueError(
@@ -142,6 +161,10 @@ class _CircuitBreaker:
         if probe_timeout < 1.0:
             raise ValueError(
                 f"probe_timeout must be >= 1.0s, got {probe_timeout}"
+            )
+        if failure_window < 0:
+            raise ValueError(
+                f"failure_window must be >= 0, got {failure_window}"
             )
         self._failure_threshold: int = int(failure_threshold)
         self._reset_timeout: float = float(reset_timeout)
@@ -163,6 +186,24 @@ class _CircuitBreaker:
         # fire. Initialized to 0.0 (no probe reserved).
         self._half_open_probe_reserved_at: float = 0.0
         self._probe_timeout: float = float(probe_timeout)
+        # P1-030 ROOT FIX: rolling failure window. ``_failure_times`` is
+        # a deque of monotonic timestamps, one per recorded failure,
+        # pruned to entries within ``failure_window`` seconds of the
+        # current time. The breaker trips when
+        # ``len(_failure_times) >= failure_threshold`` WITHIN the window
+        # (not lifetime-consecutive). This prevents the breaker from
+        # tripping due to a sparse trickle of failures spread over hours,
+        # while still tripping fast on a burst of failures within minutes.
+        self._failure_window: float = float(failure_window)
+        self._failure_times: deque = deque()
+        # P1-030 ROOT FIX: exponential backoff multiplier. Starts at 1.0;
+        # doubles on each failed half-open probe (capped at
+        # _BACKOFF_CAP_MULT). Reset to 1.0 on a successful probe. The
+        # effective reset_timeout = ``_reset_timeout * _backoff_mult``.
+        # This makes repeated outages progressively back off instead of
+        # hammering the protected service every 60s.
+        self._exponential_backoff: bool = bool(exponential_backoff)
+        self._backoff_mult: float = 1.0
 
     # -- Convenience properties ----------------------------------------
 
@@ -259,6 +300,10 @@ class _CircuitBreaker:
             # P1-028: clear the probe reservation timestamp so the next
             # half-open probe starts fresh.
             self._half_open_probe_reserved_at = 0.0
+            # P1-030: clear the rolling failure window and reset the
+            # exponential backoff multiplier on a successful probe.
+            self._failure_times.clear()
+            self._backoff_mult = 1.0
 
     def record_failure(self) -> None:
         """Record a failed operation -- may open the breaker.
@@ -283,7 +328,21 @@ class _CircuitBreaker:
         """
         with self._lock:
             self._failure_count += 1
-            self._last_failure_time = time.monotonic()
+            now = time.monotonic()
+            self._last_failure_time = now
+            # P1-030 ROOT FIX: prune the rolling failure window and
+            # append the current failure timestamp. The threshold check
+            # below uses the WINDOWED count (not lifetime-consecutive).
+            if self._failure_window > 0:
+                cutoff = now - self._failure_window
+                while self._failure_times and self._failure_times[0] < cutoff:
+                    self._failure_times.popleft()
+                self._failure_times.append(now)
+            else:
+                # failure_window=0 means "lifetime consecutive" (legacy
+                # behaviour) -- still track for consistency.
+                self._failure_times.append(now)
+            windowed_count = len(self._failure_times)
             if self._state == "half_open":
                 # A failed probe in half_open trips the breaker back to
                 # open. ALWAYS clear the probe-in-flight flag when leaving
@@ -293,24 +352,39 @@ class _CircuitBreaker:
                 self._half_open_probe_in_flight = False
                 # P1-028: clear the probe reservation timestamp.
                 self._half_open_probe_reserved_at = 0.0
+                # P1-030 ROOT FIX: exponential backoff. Each failed
+                # half-open probe DOUBLES the effective reset_timeout
+                # (capped at _BACKOFF_CAP_MULT * base). This makes
+                # repeated outages progressively back off instead of
+                # hammering the protected service every 60s.
+                if self._exponential_backoff:
+                    self._backoff_mult = min(
+                        self._backoff_mult * 2.0, _BACKOFF_CAP_MULT
+                    )
                 label = self.name or "circuit_breaker"
                 logger.warning(
                     "[%s] Circuit breaker re-OPENED after failed half-open "
-                    "probe (failure_count=%d, threshold=%d, reset_timeout=%.1fs)",
+                    "probe (failure_count=%d, threshold=%d, "
+                    "reset_timeout=%.1fs, backoff_mult=%.1f, "
+                    "effective_reset=%.1fs)",
                     label,
                     self._failure_count,
                     self._failure_threshold,
                     self._reset_timeout,
+                    self._backoff_mult,
+                    self._reset_timeout * self._backoff_mult,
                 )
                 return
-            if self._failure_count >= self._failure_threshold:
+            if windowed_count >= self._failure_threshold:
                 if self._state != "open":
                     label = self.name or "circuit_breaker"
                     logger.warning(
-                        "[%s] Circuit breaker OPENED after %d consecutive "
-                        "failures (threshold=%d, reset_timeout=%.1fs)",
+                        "[%s] Circuit breaker OPENED after %d failures "
+                        "within %.0fs window (threshold=%d, "
+                        "reset_timeout=%.1fs)",
                         label,
-                        self._failure_count,
+                        windowed_count,
+                        self._failure_window,
                         self._failure_threshold,
                         self._reset_timeout,
                     )
@@ -349,8 +423,11 @@ class _CircuitBreaker:
         with self._lock:
             current_state = self._state
             if current_state == "open":
-                # Check if recovery timeout has elapsed.
-                if time.monotonic() - self._last_failure_time > self._reset_timeout:
+                # Check if recovery timeout has elapsed. P1-030: use the
+                # EFFECTIVE reset_timeout (base * backoff_mult) so
+                # exponential backoff is honoured.
+                effective_reset = self._reset_timeout * self._backoff_mult
+                if time.monotonic() - self._last_failure_time > effective_reset:
                     self._state = "half_open"
                     self._half_open_probe_in_flight = False
                     # P1-028: clear the reservation timestamp on the
@@ -506,6 +583,9 @@ class _CircuitBreaker:
             self._last_failure_time = 0.0
             self._half_open_probe_in_flight = False
             self._half_open_probe_reserved_at = 0.0
+            # P1-030: clear the rolling failure window and backoff.
+            self._failure_times.clear()
+            self._backoff_mult = 1.0
 
     # -- Backward-compat UPPERCASE state aliases (P1-002 / P1-011) ---------
     # ``database/connection.py``'s local ``_CircuitBreaker`` used
