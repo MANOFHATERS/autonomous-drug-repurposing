@@ -38,6 +38,12 @@ __schema_version__ = "4.1.0"
 # import safe_load_input`` form. This broke the package's public API
 # contract and made the rl package feel half-built. The fix adds all
 # missing public symbols to both the import statement and __all__.
+# P4-004 ROOT FIX: KNOWN_POSITIVES and VALIDATED_HYPOTHESES are now
+# _LazyList proxy objects in rl_drug_ranker. They CAN be eagerly
+# imported here (the proxy is just a thin wrapper — the CSV read only
+# fires on first iteration/len/indexing, NOT at import time). This
+# preserves the public API (`from rl import KNOWN_POSITIVES`) without
+# re-introducing the import-time CSV read.
 from .rl_drug_ranker import (
     # Configuration
     RewardConfig,
@@ -45,9 +51,10 @@ from .rl_drug_ranker import (
     DEFAULT_CONFIG,
     # P0 fix: scientific failure exception
     ScientificFailureError,
-    # Constants
+    # Constants — KNOWN_POSITIVES and VALIDATED_HYPOTHESES are _LazyList
+    # proxies (P4-004): importing them does NOT trigger the CSV read.
     KNOWN_POSITIVES,
-    VALIDATED_HYPOTHESES,  # V30 (10.25): separate from KNOWN_POSITIVES to prevent circular leakage
+    VALIDATED_HYPOTHESES,
     WITHDRAWN_DRUGS,
     CONTROLLED_SUBSTANCES,
     REQUIRED_COLUMNS,
@@ -72,6 +79,12 @@ from .rl_drug_ranker import (
     save_results,
     run_pipeline,
     # P4-029: previously-missing re-exports (public API completeness)
+    # P4-004: also re-export the lazy-load helpers so callers can
+    # explicitly trigger/reload the caches.
+    get_known_positives,
+    get_validated_hypotheses,
+    reload_known_positives,
+    reload_validated_hypotheses,
     load_validated_hypotheses,
     merge_results,
     safe_load_input,
@@ -95,15 +108,27 @@ from .rl_drug_ranker import (
     DATA_DICTIONARY,
     INPUT_SCHEMA,
     OUTPUT_SCHEMA,
+    # P4-005: per-tenant reward weights
+    load_reward_weights_for_tenant,
+    save_reward_weights_for_tenant,
+    apply_tenant_reward_weights,
+    DEFAULT_REWARD_WEIGHTS_DIR,
 )
 
+# P4-004: KNOWN_POSITIVES and VALIDATED_HYPOTHESES are exposed via the
+# package-level __getattr__ below (lazy). They are listed in __all__ so
+# `from rl import *` still works, but they are NOT eagerly imported.
 __all__ = [
     "RewardConfig",
     "PipelineConfig",
     "DEFAULT_CONFIG",
     "ScientificFailureError",
     "KNOWN_POSITIVES",
-    "VALIDATED_HYPOTHESES",  # V30 (10.25)
+    "VALIDATED_HYPOTHESES",  # lazy via __getattr__
+    "get_known_positives",
+    "get_validated_hypotheses",
+    "reload_known_positives",
+    "reload_validated_hypotheses",
     "WITHDRAWN_DRUGS",
     "CONTROLLED_SUBSTANCES",
     "REQUIRED_COLUMNS",
@@ -148,6 +173,11 @@ __all__ = [
     "DATA_DICTIONARY",
     "INPUT_SCHEMA",
     "OUTPUT_SCHEMA",
+    # P4-005: per-tenant reward weights
+    "load_reward_weights_for_tenant",
+    "save_reward_weights_for_tenant",
+    "apply_tenant_reward_weights",
+    "DEFAULT_REWARD_WEIGHTS_DIR",
     "__version__",
     "__schema_version__",
 ]
