@@ -45,6 +45,12 @@ import {
 } from 'recharts';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useDrugOSNav } from './nav-context';
+// FE-053 ROOT FIX: Use the dedicated ScoreBar and SafetyBadge components
+// from ./score-bar and ./safety-badge instead of inline duplicates that
+// had different color thresholds, size mappings, and visual styles.
+// Single source of truth = bug fixes propagate everywhere.
+import { ScoreBar } from './score-bar';
+import { SafetyBadge } from './safety-badge';
 // FE-001 ROOT FIX: Real API hooks replace direct mock-data imports.
 import {
   useDiseaseSearch, useDrugSearch, useDrugSafety, useClinicalTrialsSearch,
@@ -80,34 +86,6 @@ function scoreColor(s: number) {
   if (s >= 80) return ACCENT_GREEN;
   if (s >= 60) return ACCENT_ORANGE;
   return ACCENT_RED;
-}
-
-function ScoreBar({ score, size = 'md' }: { score: number; size?: 'sm' | 'md' | 'lg' }) {
-  const color = scoreColor(score);
-  const h = size === 'sm' ? 'h-1.5' : size === 'lg' ? 'h-3.5' : 'h-2.5';
-  return (
-    <div className="flex items-center gap-2">
-      <span className="text-xs font-bold" style={{ color }}>{score}</span>
-      <div className="flex-1 bg-slate-100 rounded-full overflow-hidden">
-        <div className={`${h} rounded-full transition-all duration-500`} style={{ width: `${score}%`, backgroundColor: color }} />
-      </div>
-    </div>
-  );
-}
-
-function SafetyBadge({ tier }: { tier: 'green' | 'yellow' | 'red' }) {
-  const cfg = {
-    green: { label: 'Safe', bg: 'bg-emerald-50', text: 'text-emerald-700', border: 'border-emerald-200', dot: 'bg-emerald-500' },
-    yellow: { label: 'Caution', bg: 'bg-amber-50', text: 'text-amber-700', border: 'border-amber-200', dot: 'bg-amber-500' },
-    red: { label: 'High Risk', bg: 'bg-red-50', text: 'text-red-700', border: 'border-red-200', dot: 'bg-red-500' },
-  };
-  const c = cfg[tier];
-  return (
-    <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-semibold border ${c.bg} ${c.text} ${c.border}`}>
-      <span className={`w-1.5 h-1.5 rounded-full ${c.dot}`} />
-      {c.label}
-    </span>
-  );
 }
 
 function StatCard({ icon: Icon, value, label, color = PRIMARY }: { icon: React.ElementType; value: string | number; label: string; color?: string }) {
@@ -449,7 +427,11 @@ function SearchResultsScreen() {
   // (passed via navigate({ name })) and use it to query the real RL ranker
   // via /api/rl. Falls back to mock candidates if RL service not deployed.
   const diseaseId = currentRoute.id || 'D001';
-  const diseaseName = (currentRoute as any).name ||
+  // FE-062 ROOT FIX: Remove the `as any` cast — the Route type in
+  // nav-context.tsx already has an optional `name` field, so the cast was
+  // unnecessary and bypassed type checking. Direct property access is
+  // type-safe and surfaces any future Route shape changes at compile time.
+  const diseaseName = currentRoute.name ||
     (diseaseId.startsWith('search:') ? decodeURIComponent(diseaseId.slice(7)) : diseaseId);
   const disease = diseases.find(d => d.id === diseaseId) ||
     diseases.find(d => d.name === diseaseName) || {

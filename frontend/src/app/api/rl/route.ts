@@ -333,7 +333,16 @@ async function persistRlCandidates(userId: string, candidates: RlCandidate[]): P
             tags: "rl,predictions,auto-generated",
           },
         });
-      } catch (e: any) {
+      } catch (e: unknown) {
+        // FE-063 ROOT FIX: `e: any` disabled type safety. Use `e: unknown`
+        // and narrow with instanceof Error. The original issue (FE-063)
+        // flagged lines 113, 136, 158 — those three were already fixed to
+        // `e: unknown`. This fourth catch block (in persistRlCandidates)
+        // was missed. It catches Prisma's P2002 unique-constraint race
+        // (another concurrent request created the project between our
+        // findFirst and create). We re-fetch; if the re-fetch also fails,
+        // we re-throw. Using `e: unknown` ensures we don't accidentally
+        // read `.message` / `.code` off a non-Error value.
         // Race: another concurrent request created the project between
         // our findFirst and create. Re-fetch.
         project = await db.project.findFirst({
@@ -383,8 +392,12 @@ async function persistRlCandidates(userId: string, candidates: RlCandidate[]): P
         });
       }
     }
-  } catch (e) {
-    // Persistence is best-effort — the response still returns the candidates.
-    console.error("persistRlCandidates failed:", e);
+  } catch (e: unknown) {
+    // FE-063: explicit `e: unknown` — never `e: any`. Persistence is
+    // best-effort; the response still returns the candidates. We log the
+    // error for observability; if it's an Error we use .message, otherwise
+    // String(e) so the log never shows "undefined".
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error("persistRlCandidates failed:", msg);
   }
 }
