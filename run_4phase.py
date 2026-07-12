@@ -367,17 +367,25 @@ def run_phase3_and_4(
     rl_top_n: int,
     output_dir: str,
     seed: int,
+    # P4-016 ROOT FIX (Team Member 12): cap the number of drug-disease
+    # pairs written to gt_predictions.csv. Default 1000 (the RL ranker's
+    # env only needs the top-K pairs).
+    gt_top_k: int = 1000,
 ) -> Tuple[Any, Dict[str, Any]]:
     """Phase 3 + 4: GT training + RL ranking via ``GTRLBridge``.
 
     Uses the REAL Phase 2 HeteroData (passed as ``graph_data``) instead
     of ``build_demo_graph``.
 
-    RT-004 ROOT FIX (Team Member 17): the ``allow_invalid_output`` parameter
-    has been REMOVED entirely. The scientific-validation gate is now
-    UN-BYPASSABLE — if the gate fails, the pipeline fails with exit code 4.
-    No escape hatch exists. A stressed engineer can no longer ship invalid
-    CSVs by passing ``--allow-invalid-output``.
+    RT-004 ROOT FIX (Team Member 17) + P4-014 ROOT FIX (Team Member 12):
+    the ``allow_invalid_output`` parameter has been REMOVED entirely.
+    The scientific-validation gate is now UN-BYPASSABLE from this entry
+    point — if the gate fails, the pipeline fails with exit code 4.
+    No escape hatch exists in the CLI. A stressed engineer can no longer
+    ship invalid CSVs by passing ``--allow-invalid-output``. The Python
+    API on ``GTRLBridge.run_full_pipeline`` retains the parameter as a
+    test-only escape hatch, but it is NOT reachable from the CLI or
+    from this function.
     """
     logger.info("=" * 70)
     logger.info("PHASE 3 + 4: Graph Transformer Training + RL Ranking")
@@ -396,7 +404,11 @@ def run_phase3_and_4(
         gt_epochs=gt_epochs,
         rl_timesteps=rl_timesteps,
         rl_top_n=rl_top_n,
+        # RT-004 + P4-014: allow_invalid_output is HARDCODED to False. The
+        # bridge's safety net cannot be disabled from run_4phase.py.
         allow_invalid_output=False,
+        # P4-016: pass the top-K limit to the bridge.
+        gt_top_k=gt_top_k,
         graph_data=graph_data,
     )
     return candidates_df, results
@@ -439,15 +451,31 @@ def main() -> int:
         "--seed", type=int, default=42,
         help="Random seed for RNG initialization (default 42)",
     )
-    # RT-004 ROOT FIX (Team Member 17): the --allow-invalid-output flag has
-    # been REMOVED entirely. The scientific-validation safety net is now
-    # UN-BYPASSABLE from this entry point. If the gate fails, the pipeline
-    # exits with code 4 — period. A stressed engineer can no longer ship
-    # invalid CSVs (degenerate RL candidates, AUC < 0.85, dangerous
-    # predictions like warfarin->epilepsy) by passing a debug flag.
-    # If you genuinely need to inspect failing output for debugging, read
-    # the CSVs written to output_dir/ BEFORE the gate fires — they are
-    # always written, the gate only controls the EXIT CODE.
+    parser.add_argument(
+        # P4-016 ROOT FIX (Team Member 12): cap the number of drug-disease
+        # pairs written to gt_predictions.csv. The previous code wrote ALL
+        # pairs (e.g., 115 in the live test, 1M+ for the production graph).
+        # The RL ranker's env only needs the top-K pairs (it ranks them,
+        # not discovers them). Writing all pairs wastes disk and confuses
+        # the ranker (which may rank low-quality pairs). Default 1000.
+        "--gt-top-k", type=int, default=1000,
+        help="Maximum number of drug-disease pairs to write to "
+             "gt_predictions.csv (default 1000). The RL ranker only "
+             "needs the top-K pairs by GT score. Set to 0 to write ALL "
+             "pairs (not recommended — produces 100+ MB CSVs at "
+             "production scale).",
+    )
+    # RT-004 ROOT FIX (Team Member 17) + P4-014 ROOT FIX (Team Member 12):
+    # the --allow-invalid-output CLI flag has been REMOVED entirely. The
+    # scientific-validation safety net is now UN-BYPASSABLE from this
+    # entry point. If the gate fails, the pipeline exits with code 4 —
+    # period. A stressed engineer can no longer ship invalid CSVs
+    # (degenerate RL candidates, AUC < 0.85, dangerous predictions like
+    # warfarin->epilepsy) by passing a debug flag. The Python API
+    # parameter ``allow_invalid_output`` on
+    # ``GTRLBridge.run_full_pipeline`` is retained ONLY as a test-only
+    # escape hatch (the CI test suite needs a way to inspect invalid
+    # output for verification). It is NOT reachable from the CLI.
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir)
@@ -463,8 +491,10 @@ def main() -> int:
         "rl_timesteps": args.rl_timesteps,
         "rl_top_n": args.rl_top_n,
         "seed": args.seed,
-        # RT-004 ROOT FIX: allow_invalid_output is always False — the
-        # scientific-validation gate cannot be bypassed.
+        # RT-004 + P4-016: record the gt_top_k limit in the manifest.
+        "gt_top_k": args.gt_top_k,
+        # RT-004 + P4-014: allow_invalid_output is always False — the
+        # scientific-validation gate cannot be bypassed from the CLI.
         "allow_invalid_output": False,
     }
     _write_manifest(output_dir, phase1_dir, config_snapshot)
@@ -540,6 +570,9 @@ def main() -> int:
             rl_top_n=args.rl_top_n,
             output_dir=str(output_dir),
             seed=args.seed,
+            # P4-016: pass the top-K limit to the bridge so it writes
+            # only the top-K GT predictions to gt_predictions.csv.
+            gt_top_k=args.gt_top_k,
         )
 
         # ─── Summary (R-022: removed duplicate 9-line block) ───────────
@@ -582,11 +615,16 @@ def main() -> int:
         if not overall_pass:
             print("\n" + "=" * 70)
             print("SCIENTIFIC VALIDATION FAILED. Exiting non-zero (exit code 4).")
-            print("RT-004 ROOT FIX: the --allow-invalid-output escape hatch has")
+            # RT-004 + P4-014 ROOT FIX: the --allow-invalid-output bypass
+            # has been REMOVED. The pipeline FAILS when scientific_validation
+            # fails — no exceptions, no bypass. Fix the underlying issues
+            # (GT AUC, RL AUC, KP recovery, literature support) and re-run.
+            print("RT-004 + P4-014: the --allow-invalid-output escape hatch has")
             print("been REMOVED. The scientific-validation gate is un-bypassable.")
             print("The CSVs in the output directory were written BEFORE the gate")
             print("fired — inspect them there for debugging. The gate ONLY")
             print("controls the exit code, not whether artifacts are written.")
+            print("Fix the failed checks above and re-run. There is NO bypass.")
             print("=" * 70)
             return 4
         return 0

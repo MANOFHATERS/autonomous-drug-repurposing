@@ -299,21 +299,51 @@ class TestP3_021(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# P3-022: evaluate_link_prediction must NOT claim to be "independent
-# verification" — it's a code-path-identical sanity check.
+# P3-022: evaluate_link_prediction must be GENUINELY INDEPENDENT (P3-017 fix).
+#
+# UPDATE (P3-017 forensic root fix, Team Member 10): the previous test
+# enforced HONEST documentation that the AUC was "code-path-identical"
+# (the same number computed twice). The P3-017 fix made
+# evaluate_link_prediction GENUINELY independent via:
+#   - from-scratch Mann-Whitney U AUC (independent implementation)
+#   - dot-product cosine-similarity AUC (independent scorer, bypasses MLP)
+# So the documentation now reflects the INDEPENDENT verification, not
+# the code-path-identical scope. This test is updated to assert the
+# NEW behavior.
 # ---------------------------------------------------------------------------
 class TestP3_022(unittest.TestCase):
     def test_independent_claim_removed_or_documented(self):
-        """The docstring must honestly state it's a code-path-identical
-        sanity check, NOT an independent verification."""
+        """The evaluation must GENUINELY independent AUC verification
+        (P3-017 fix), not just a code-path-identical sanity check.
+
+        Previously this test enforced that the evaluation module
+        documented the code-path-identical scope. The P3-017 forensic
+        root fix (Team Member 10) made the verification genuinely
+        independent by adding:
+          - from-scratch Mann-Whitney U AUC (independent implementation)
+          - dot-product cosine-similarity AUC (independent scorer)
+        So the documentation must now reflect the INDEPENDENT
+        verification, not the code-path-identical scope.
+        """
         import inspect
         from graph_transformer import evaluation as eval_mod
         src = inspect.getsource(eval_mod)
-        # The honest documentation must be present.
+        # P3-017 ROOT FIX: the evaluation module must document the
+        # independent AUC computation (Mann-Whitney + dot-product).
         self.assertIn(
-            "CODE-PATH-IDENTICAL", src,
-            "P3-022: evaluation must document that evaluate_link_prediction "
-            "is a code-path-identical sanity check, not independent verification.",
+            "Mann-Whitney", src,
+            "P3-022: evaluation must document the from-scratch "
+            "Mann-Whitney U AUC (P3-017 independent verification).",
+        )
+        self.assertIn(
+            "auc_mannwhitney", src,
+            "P3-022: evaluation must expose auc_mannwhitney "
+            "(P3-017 independent AUC field).",
+        )
+        self.assertIn(
+            "auc_dotproduct", src,
+            "P3-022: evaluation must expose auc_dotproduct "
+            "(P3-017 independent scorer, bypasses the MLP).",
         )
 
 
@@ -339,12 +369,20 @@ class TestP3_023(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# P3-024: Model must RAISE ValueError when len(edge_types) < 14.
+# P3-024 / P3-001 v104: Model must RAISE ValueError when len(edge_types) < 18
+# (the canonical Phase 2 schema is 9 forward + 9 reverse = 18 edge types).
+# Pre-v104 this check was at < 14, allowing the OLD 14-type schema to pass
+# silently and degrade message passing for the 4 neutral binding/modulation
+# edge types. The v104 ROOT FIX raises the threshold to < 18.
 # ---------------------------------------------------------------------------
 class TestP3_024(unittest.TestCase):
-    def test_raises_on_fewer_than_14_edge_types(self):
-        """Constructing the model with < 14 edge types must raise ValueError,
-        not just warn."""
+    def test_raises_on_fewer_than_18_edge_types(self):
+        """Constructing the model with < 18 edge types must raise ValueError,
+        not just warn.
+
+        Updated for P3-001 ROOT FIX v104: threshold raised from 14 to 18
+        to match the canonical Phase 2 schema (9 forward + 9 reverse).
+        """
         # 7 edge types (forward only, no reverse) — must raise.
         few_edges = [
             ("drug", "inhibits", "protein"),
@@ -355,7 +393,7 @@ class TestP3_024(unittest.TestCase):
             ("drug", "tested_for", "disease"),
             ("drug", "causes", "outcome"),
         ]
-        with self.assertRaises(ValueError, msg="P3-024: must raise ValueError"):
+        with self.assertRaises(ValueError, msg="P3-024/P3-001 v104: must raise ValueError"):
             DrugRepurposingGraphTransformer(
                 node_types=["drug", "protein", "pathway", "disease", "outcome"],
                 edge_types=few_edges,
@@ -463,24 +501,22 @@ class TestP3_027(unittest.TestCase):
 # ---------------------------------------------------------------------------
 class TestP3_028(unittest.TestCase):
     def _build_minimal_model_and_graph(self):
-        """Helper: build a minimal 14-edge-type model + matching graph."""
-        edge_types = [
-            ("drug", "inhibits", "protein"),
-            ("protein", "inhibited_by", "drug"),
-            ("drug", "activates", "protein"),
-            ("protein", "activated_by", "drug"),
-            ("protein", "part_of", "pathway"),
-            ("pathway", "has_protein", "protein"),
-            ("pathway", "disrupted_in", "disease"),
-            ("disease", "disrupts_pathway", "pathway"),
-            ("drug", "treats", "disease"),
-            ("disease", "treated_by", "drug"),
-            ("drug", "tested_for", "disease"),
-            ("disease", "tests_drug", "drug"),
-            ("drug", "causes", "outcome"),
-            ("outcome", "caused_by", "drug"),
-        ]
-        n_types = ["drug", "protein", "pathway", "disease", "outcome"]
+        """Helper: build a minimal model + matching graph using the canonical
+        18-edge Phase 2 schema (9 forward + 9 reverse).
+
+        Updated for P3-001 ROOT FIX v104: the model constructor now RAISES
+        ValueError when len(edge_types) < 18 (the canonical Phase 2 schema
+        has 18 edge types, not 14). The old 14-edge schema used here was
+        perpetuating the stale-schema bug. This helper now uses the
+        canonical 18-edge schema from graph_transformer.data.EDGE_TYPES.
+        """
+        # Import the canonical 18-edge schema (single source of truth).
+        from graph_transformer.data import EDGE_TYPES
+        edge_types = list(EDGE_TYPES)  # 18 types
+        assert len(edge_types) == 18, (
+            f"test setup error: expected 18 canonical edge types, got {len(edge_types)}"
+        )
+        n_types = ["drug", "protein", "pathway", "disease", "clinical_outcome"]
         model = DrugRepurposingGraphTransformer(
             node_types=n_types,
             edge_types=edge_types,

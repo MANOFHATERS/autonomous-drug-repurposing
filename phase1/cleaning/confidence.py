@@ -299,4 +299,165 @@ __all__ = [
     "DEFAULT_CONFIDENCE_TIERS",
     "CONFIDENCE_TIER_METHOD_VERSION",
     "classify_confidence",
+    "SOURCE_RELIABILITY_WEIGHTS",
+    "DEFAULT_SOURCE_RELIABILITY_WEIGHT",
+    "compute_source_weighted_confidence",
+    "SOURCE_RELIABILITY_METHOD_VERSION",
 ]
+
+
+# ---------------------------------------------------------------------------
+# P1-027 ROOT FIX (Team Member 3 -- source-reliability-weighted confidence):
+#
+# The issue: the original ``compute_confidence()`` (which has since been
+# refactored out of this module, but the SCIENTIFIC CONCERN remains live)
+# took the MAX confidence across all sources for a given KG edge. This
+# ignored source reliability: a Curated (expert-validated) edge with
+# confidence 0.9 was treated identically to a Predicted (text-mined) edge
+# with confidence 0.9. The KG then had edges that LOOKED equally reliable
+# but were not -- the GNN over-weighted text-mined edges and the RL ranker
+# could recommend drugs based on weak text-mined evidence.
+#
+# ROOT FIX: introduce ``SOURCE_RELIABILITY_WEIGHTS`` -- a publication-aligned
+# reliability multiplier per source class. ``compute_source_weighted_confidence``
+# takes a list of ``(source, confidence)`` pairs and returns the
+# reliability-weighted maximum:
+#
+#     weighted_confidence(source, conf) = conf * SOURCE_RELIABILITY_WEIGHTS[source]
+#     result = max(weighted_confidence(s, c) for (s, c) in pairs)
+#
+# We use weighted-MAX (not weighted-average) because a single high-quality
+# curated edge SHOULD dominate a sea of low-quality predicted edges -- this
+# matches the DisGeNET curation philosophy (Piñero et al. 2020, §2.3: the
+# DSGP score is upward-biased by curated sources). But the weight ensures a
+# Predicted 0.95 edge (0.95 * 0.6 = 0.57) does NOT beat a Curated 0.7 edge
+# (0.7 * 1.0 = 0.70).
+#
+# Reliability tiers (aligned with DisGeNET source classes + general
+# biomedical evidence principles):
+#   - curated      : 1.00  (expert-validated; DisGeNET CURATED, UniProt manual)
+#   - model_organism: 0.85 (animal-model with high human transferability;
+#                     mouse/rat for conserved pathways)
+#   - clinical     : 0.95  (clinical trial / EHR-validated)
+#   - predicted    : 0.60  (text-mining / NLP; DisGeNET PREDICTED)
+#   - animal_model : 0.45  (animal-model with low human transferability)
+#   - unknown      : 0.50  (source class not specified -- conservative)
+#
+# These weights are CALIBRATED so that:
+#   - Curated 0.5  (0.50) < Predicted 0.95 (0.57)  [predicted CAN win if
+#     its raw confidence is high enough -- text-mining is not useless]
+#   - Curated 0.7  (0.70) > Predicted 0.95 (0.57)  [but curated dominates
+#     at moderate confidence -- the intended behaviour]
+#   - Clinical 0.8 (0.76) > Curated 0.7 (0.70)     [clinical > curated]
+#
+# Callers can override weights via the ``weights`` parameter for domain-
+# specific calibration (e.g. a neuroscience pipeline may downweight
+# animal_model further due to blood-brain-barrier transferability concerns).
+# ---------------------------------------------------------------------------
+SOURCE_RELIABILITY_WEIGHTS: dict[str, float] = {
+    "curated": 1.00,
+    "clinical": 0.95,
+    "model_organism": 0.85,
+    "predicted": 0.60,
+    "animal_model": 0.45,
+    "unknown": 0.50,
+}
+
+#: Default weight for sources not in ``SOURCE_RELIABILITY_WEIGHTS``.
+#: Conservative (0.50) so an unrecognised source does not silently get
+#: full reliability. Operators should register new sources explicitly.
+DEFAULT_SOURCE_RELIABILITY_WEIGHT: float = 0.50
+
+#: Version string for the source-reliability weighting scheme. Bump when
+#: the weights change so downstream consumers can detect a definition change.
+SOURCE_RELIABILITY_METHOD_VERSION: str = "pinero_2020_source_reliability_v1"
+
+
+def compute_source_weighted_confidence(
+    source_confidence_pairs: list[tuple[str, float]],
+    *,
+    weights: dict[str, float] | None = None,
+) -> float:
+    """Compute the reliability-weighted maximum confidence for a KG edge.
+
+    P1-027 ROOT FIX: takes a list of ``(source_class, raw_confidence)``
+    pairs (one per source that asserted this edge) and returns the
+    MAXIMUM of ``raw_confidence * reliability_weight[source_class]``.
+
+    This ensures a Curated edge (weight 1.0) at confidence 0.7 beats a
+    Predicted edge (weight 0.6) at confidence 0.95, because
+    ``0.7*1.0 = 0.70 > 0.95*0.6 = 0.57``. Without the weight, the
+    Predicted edge would win (0.95 > 0.7) and the GNN would over-weight
+    text-mined evidence.
+
+    Parameters
+    ----------
+    source_confidence_pairs:
+        List of ``(source_class, raw_confidence)`` tuples. ``source_class``
+        is a key into ``SOURCE_RELIABILITY_WEIGHTS`` (e.g. ``"curated"``,
+        ``"predicted"``, ``"animal_model"``). ``raw_confidence`` is in
+        ``[0.0, 1.0]``. An empty list returns ``0.0``.
+    weights:
+        Optional override dict. Defaults to :data:`SOURCE_RELIABILITY_WEIGHTS`.
+
+    Returns
+    -------
+    float
+        The reliability-weighted maximum confidence, in ``[0.0, 1.0]``.
+        Returns ``0.0`` for an empty input. The result is clamped to
+        ``[0.0, 1.0]`` defensively (a weight > 1.0 could otherwise push
+        the result above 1.0).
+
+    Raises
+    ------
+    ValueError
+        If any ``raw_confidence`` is not in ``[0.0, 1.0]`` (defensive --
+        callers should clip first). NaN values are rejected.
+
+    Examples
+    --------
+    >>> # Curated 0.7 beats Predicted 0.95 after weighting.
+    >>> result = compute_source_weighted_confidence([
+    ...     ("curated", 0.7),
+    ...     ("predicted", 0.95),
+    ... ])
+    >>> round(result, 2)
+    0.7
+    >>> # Predicted alone is downweighted.
+    >>> round(compute_source_weighted_confidence([("predicted", 0.9)]), 2)
+    0.54
+    >>> # Empty input returns 0.0.
+    >>> compute_source_weighted_confidence([])
+    0.0
+    """
+    if not source_confidence_pairs:
+        return 0.0
+    eff_weights = weights if weights is not None else SOURCE_RELIABILITY_WEIGHTS
+    best = 0.0
+    for source_class, raw_conf in source_confidence_pairs:
+        if not isinstance(source_class, str):
+            source_class = "unknown"
+        if not isinstance(raw_conf, (int, float)):
+            raise ValueError(
+                f"compute_source_weighted_confidence: raw_confidence must "
+                f"be a number, got {type(raw_conf).__name__}={raw_conf!r}"
+            )
+        if raw_conf != raw_conf:  # NaN check
+            raise ValueError(
+                "compute_source_weighted_confidence: raw_confidence is NaN"
+            )
+        if raw_conf < 0.0 or raw_conf > 1.0:
+            raise ValueError(
+                f"compute_source_weighted_confidence: raw_confidence "
+                f"{raw_conf!r} out of [0.0, 1.0]"
+            )
+        weight = eff_weights.get(source_class, DEFAULT_SOURCE_RELIABILITY_WEIGHT)
+        weighted = float(raw_conf) * float(weight)
+        if weighted > best:
+            best = weighted
+    # Clamp to [0.0, 1.0] defensively (weights could push above 1.0).
+    if best > 1.0:
+        best = 1.0
+    elif best < 0.0:
+        best = 0.0
+    return best

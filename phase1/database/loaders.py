@@ -511,6 +511,9 @@ def _count_upsert_inserts_updates(
     session: Session,
     stmt,
     chunk_size: int,
+    conflict_keys: list[str] | None = None,
+    chunk_records: list[dict] | None = None,
+    target_table=None,
 ) -> tuple[int, int]:
     """Execute an ON CONFLICT upsert and return (inserts, updates) counts.
 
@@ -534,12 +537,33 @@ def _count_upsert_inserts_updates(
 
     On SQLite (used for tests/dev), there is no ``xmax`` equivalent and
     RETURNING support for ON CONFLICT upserts is unreliable across
-    SQLite versions. We fall back to the chunk size as the total
-    (inserted + updated) count and report updated=0. This is the same
-    behavior as the pre-fix code (which also could not distinguish
-    inserts from updates on SQLite) -- the total is correct, only the
-    split is approximate. Production runs on PostgreSQL get the
-    accurate split.
+    SQLite versions. The v104 P1-010 ROOT FIX below uses a PRE-COUNT
+    query: before executing the upsert, count how many of the chunk's
+    conflict-key values already exist in the target table. That count
+    is the UPDATE count; the remainder is the INSERT count. This is
+    deterministic and matches the PostgreSQL xmax split exactly.
+
+    v104 FORENSIC ROOT FIX (P1-010 -- bulk_upsert_drugs miscounts UPDATEs
+      as INSERTs on SQLite):
+      The previous SQLite branch ALWAYS returned ``(total, 0)`` -- every
+      row was counted as an INSERT, none as an UPDATE. On a re-run of
+      bulk_upsert_drugs (where every row hits ON CONFLICT DO UPDATE),
+      the function reported ``n_inserted = N, n_updated = 0`` when the
+      truth was ``n_inserted = 0, n_updated = N``. The audit log (which
+      tracks inserts vs updates for regulatory compliance under FDA 21
+      CFR Part 11) was falsified -- a pharma auditor reviewing the logs
+      would believe 10K new drugs were inserted when only 1K were (the
+      other 9K were updates from a re-run).
+
+      ROOT FIX: when the caller passes ``conflict_keys``,
+      ``chunk_records``, and ``target_table``, the SQLite branch does a
+      pre-count: ``SELECT COUNT(*) FROM <target_table> WHERE <conflict_col>
+      IN (?, ?, ...)`` for the chunk's conflict-key values. The existing
+      rows = UPDATE count; the remainder = INSERT count. When the caller
+      does NOT pass these (legacy callers), the old behavior is preserved
+      (return ``(total, 0)``) so this fix is non-breaking -- but the
+      bulk_upsert_drugs caller (the one specifically called out in
+      P1-010) now passes all three.
 
     Parameters
     ----------
@@ -547,11 +571,23 @@ def _count_upsert_inserts_updates(
         Active SQLAlchemy session.
     stmt : Insert
         The ``INSERT ... ON CONFLICT DO UPDATE`` statement to execute.
-        This function will append a ``.returning(...)`` clause on
-        PostgreSQL before executing.
+        On PostgreSQL this function will append a ``.returning(...)``
+        clause before executing.
     chunk_size : int
         The number of input rows in this chunk. Used as the fallback
-        total on SQLite.
+        total on SQLite when pre-count metadata is not supplied.
+    conflict_keys : list[str], optional
+        The conflict column name(s) used in the ON CONFLICT clause
+        (e.g. ``["inchikey"]`` for bulk_upsert_drugs). Required for the
+        SQLite pre-count path; ignored on PostgreSQL.
+    chunk_records : list[dict], optional
+        The chunk's record dicts. Used to extract the conflict-key
+        values for the SQLite pre-count. Required for the SQLite
+        pre-count path; ignored on PostgreSQL.
+    target_table : SQLAlchemy Table, optional
+        The target table object (e.g. ``Drug.__table__``). Used to
+        build the SELECT COUNT(*) pre-count query on SQLite. Required
+        for the SQLite pre-count path; ignored on PostgreSQL.
 
     Returns
     -------
@@ -571,24 +607,73 @@ def _count_upsert_inserts_updates(
         chunk_inserts = sum(1 for r in rows if r[0])
         chunk_updates = len(rows) - chunk_inserts
         return chunk_inserts, chunk_updates
-    # SQLite fallback: cannot distinguish inserts from updates reliably.
-    # v90 ROOT FIX (BUG #13 -- P1 SQLite upsert rowcount unreliable):
-    #   The previous code used ``result_cursor.rowcount`` which is
-    #   UNRELIABLE on SQLite for ``INSERT ... ON CONFLICT DO UPDATE`` --
-    #   it can return -1 (unsupported), 0 (no rows), or the total touched
-    #   count. The code fell back to ``chunk_size`` (the INPUT size) when
-    #   rowcount was falsy/0, which OVERSTATED the affected rows if some
-    #   rows were quarantined upstream or if the INSERT silently inserted
-    #   0 rows (e.g. all rows hit ON CONFLICT DO UPDATE but the UPDATE
-    #   set no-op). Tests on SQLite showed "1000 inserted" when reality
-    #   was "0 inserted, 1000 updated" -- divergent from PostgreSQL (which
-    #   uses xmax for accurate splits). ROOT FIX: use ``SELECT changes()``
-    #   AFTER the executemany to get the actual affected-row count. This
-    #   is SQLite's authoritative rowcount for the most recent
-    #   INSERT/UPDATE/DELETE. We still cannot distinguish inserts from
-    #   updates on SQLite (changes() returns touched rows, not the split),
-    #   so we report all as inserts (updated=0) -- same as before. But the
-    #   TOTAL is now accurate, not a chunk_size guess.
+    # SQLite fallback: v104 P1-010 ROOT FIX -- pre-count existing rows
+    # by conflict key to determine the insert/update split. This is
+    # deterministic and matches the PostgreSQL xmax split exactly. The
+    # previous code returned ``(total, 0)`` which silently counted all
+    # rows as inserts (P1-010 audit-trail falsification bug).
+    #
+    # Pre-count requires the caller to pass conflict_keys, chunk_records,
+    # and target_table. If any is missing (legacy caller), fall back to
+    # the old (buggy) behavior to avoid breaking the call site -- but
+    # log a WARNING so the operator knows the metrics are inaccurate.
+    can_pre_count = (
+        conflict_keys
+        and chunk_records
+        and target_table is not None
+        and len(conflict_keys) == 1  # single-column conflict only for now
+    )
+    if can_pre_count:
+        conflict_col = conflict_keys[0]
+        # Extract conflict-key values from the chunk records. Skip
+        # None/NaN values -- they cannot match an existing row (SQLite
+        # UNIQUE allows multiple NULLs).
+        conflict_values = []
+        for rec in chunk_records:
+            v = rec.get(conflict_col)
+            if v is None:
+                continue
+            # Skip NaN (pandas). ``pd.isna`` works on scalars.
+            try:
+                import pandas as _pd
+                if isinstance(v, float) and _pd.isna(v):
+                    continue
+            except Exception:
+                pass
+            conflict_values.append(v)
+        existing_count = 0
+        if conflict_values:
+            # SELECT COUNT(*) FROM <target_table> WHERE <conflict_col> IN (?, ...)
+            # Use the SQLAlchemy select() constructor so the query is
+            # dialect-correct and parameterized (no SQL injection).
+            from sqlalchemy import select as _sa_select, func as _sa_func
+            count_stmt = _sa_select(
+                _sa_func.count()
+            ).select_from(target_table).where(
+                target_table.c[conflict_col].in_(conflict_values)
+            )
+            existing_count = session.execute(count_stmt).scalar() or 0
+            # Clamp to chunk_size -- pre-count could exceed chunk_size
+            # only if the same conflict key appeared multiple times in
+            # the chunk (which the upstream dedup should have prevented).
+            existing_count = min(existing_count, chunk_size)
+        # Execute the actual upsert AFTER the pre-count (so the pre-count
+        # sees the pre-upsert state).
+        session.execute(stmt)
+        inserts = chunk_size - existing_count
+        updates = existing_count
+        return inserts, updates
+    # Legacy fallback (no pre-count metadata): preserve old behavior but
+    # warn. The total is still accurate (via changes()); only the split
+    # is approximate.
+    logger.warning(
+        "_count_upsert_inserts_updates: SQLite pre-count metadata not "
+        "supplied (conflict_keys=%s, chunk_records=%s, target_table=%s). "
+        "Falling back to (total, 0) -- inserts/updates split is "
+        "INACCURATE. Pass conflict_keys, chunk_records, and target_table "
+        "to enable accurate splits (P1-010 ROOT FIX).",
+        conflict_keys, bool(chunk_records), target_table is not None,
+    )
     result_cursor = session.execute(stmt)
     # SQLite's changes() returns the number of rows modified by the most
     # recent INSERT/UPDATE/DELETE statement on this connection.
@@ -2143,8 +2228,18 @@ def bulk_upsert_drugs(
                 # Use _count_upsert_inserts_updates for accurate counts
                 # instead of result.inserted += len(valid_chunk) which
                 # counts updates as inserts.
+                #
+                # v104 P1-010 ROOT FIX: pass conflict_keys, chunk_records,
+                # and target_table so the SQLite branch can do an accurate
+                # pre-count (the PostgreSQL branch already uses xmax and
+                # ignores these kwargs). Without these, the SQLite branch
+                # returns ``(total, 0)`` -- counting every row as an
+                # INSERT, falsifying the audit trail on re-runs.
                 _ins, _upd = _count_upsert_inserts_updates(
-                    session, stmt, len(valid_chunk)
+                    session, stmt, len(valid_chunk),
+                    conflict_keys=["inchikey"],
+                    chunk_records=filtered_chunk,
+                    target_table=Drug.__table__,
                 )
                 result.inserted += _ins
                 result.updated += _upd

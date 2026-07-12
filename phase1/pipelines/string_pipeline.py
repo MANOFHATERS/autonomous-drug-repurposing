@@ -2034,6 +2034,48 @@ class StringPipeline(BasePipeline):
                 STRING_DEDUP_STRATEGY,
             )
 
+        # P1-017 ROOT FIX (Team-2): post-dedup DEFENSIVE ASSERTION that no
+        # symmetric PPI edges remain. STRING ships A-B and B-A as separate
+        # rows; if both survive into the KG, the GNN's protein embeddings
+        # are skewed (each protein "sees" its neighbours twice) and the
+        # RL ranker's pathway_score dimension is inflated. The canonical
+        # ordering in ``_canonicalize_protein_order`` (min/max on STRING
+        # IDs) + this dedup SHOULD collapse all symmetric pairs. This
+        # assertion verifies that invariant at runtime -- if a future
+        # refactor breaks the canonicalisation, this assertion fires
+        # LOUDLY instead of silently producing 2x PPI edges.
+        if "uniprot_a" in df.columns and "uniprot_b" in df.columns and len(df) > 0:
+            _sym_mask = df["uniprot_a"] > df["uniprot_b"]
+            _n_sym = int(_sym_mask.sum())
+            if _n_sym > 0:
+                # Re-canonicalise defensively (the loader also does this,
+                # but we catch it here so the clean CSV is canonical too).
+                logger.warning(
+                    "[%s] P1-017 defensive: %d rows had uniprot_a > uniprot_b "
+                    "after dedup -- re-canonicalising (loader swap would "
+                    "catch these too, but we fix here so the cleaned CSV "
+                    "is canonical).",
+                    self.source_name, _n_sym,
+                )
+                _swap = df.loc[_sym_mask, ["uniprot_a", "uniprot_b"]].to_numpy()
+                df.loc[_sym_mask, ["uniprot_b", "uniprot_a"]] = _swap
+            # Now verify no (uniprot_a, uniprot_b) duplicates remain.
+            _dupe_mask = df.duplicated(subset=["uniprot_a", "uniprot_b"], keep=False)
+            _n_dupes = int(_dupe_mask.sum())
+            if _n_dupes > 0:
+                raise RuntimeError(
+                    f"[{self.source_name}] P1-017 ASSERTION FAILED: "
+                    f"{_n_dupes} symmetric/duplicate PPI edges remain after "
+                    f"dedup. This would cause 2x PPI edges in the KG and "
+                    f"skew the GNN's protein embeddings. Sample duplicates: "
+                    f"{df.loc[_dupe_mask, ['uniprot_a','uniprot_b']].head(5).to_dict('records')}"
+                )
+            self._emit_metric(
+                "string.symmetric_edges_collapsed",
+                dedup_count,
+                tags={"fix": "P1-017"},
+            )
+
         return df
 
     # ------------------------------------------------------------------

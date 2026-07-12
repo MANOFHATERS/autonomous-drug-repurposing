@@ -15,3 +15,7 @@ frontend/db/
 frontend/dev.log
 frontend/server.log
 .env.local
+# Pipeline-trained model checkpoints (regenerable, do not commit)
+checkpoints/
+output_v100/
+rl/output/

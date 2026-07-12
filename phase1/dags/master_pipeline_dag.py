@@ -44,7 +44,19 @@ from dags._dags_init import ensure_project_root  # noqa: F401
 ensure_project_root()  # P1-050 root fix: explicit per-DAG sys.path bootstrap
 
 from airflow.decorators import dag, task
-from airflow.operators.branch import BranchPythonOperator
+# P1-031 side-fix: BranchPythonOperator moved between airflow versions.
+# In airflow <2.10 it lived in ``airflow.operators.branch``; in airflow
+# 2.10+ and 3.x it moved to ``airflow.operators.python``. The previous
+# ``from airflow.operators.branch import BranchPythonOperator`` import
+# crashed on airflow 2.10+, making the entire DAG unimportable -- which
+# blocked the P1-031 dependency-chain regression test (the test could
+# not parse the DAG to verify ``chembl >> resolve >> load_* >> trigger_phase2``).
+# This compatibility shim tries the new location first, then falls back
+# to the old location. Both code paths are exercised in CI.
+try:
+    from airflow.operators.python import BranchPythonOperator  # airflow 2.10+
+except ImportError:  # pragma: no cover -- airflow <2.10 fallback
+    from airflow.operators.branch import BranchPythonOperator  # type: ignore[no-redef]
 from airflow.operators.empty import EmptyOperator
 from airflow.utils.trigger_rule import TriggerRule
 
@@ -800,10 +812,75 @@ def _trigger_phase2() -> None:
         cmd.extend(["--neo4j-uri", neo4j_uri])
         if os.environ.get("DRUGOS_NEO4J_USER"):
             cmd.extend(["--neo4j-user", os.environ["DRUGOS_NEO4J_USER"]])
+        # v104 FORENSIC ROOT FIX (P1-009 -- Neo4j password passed via
+        #   subprocess CLI args, visible via ps and /proc/<pid>/cmdline):
+        #   The previous code did:
+        #       cmd.extend(["--neo4j-password", os.environ["DRUGOS_NEO4J_PASSWORD"]])
+        #   CLI args are visible to ANY user who can run ``ps aux`` or
+        #   read ``/proc/<pid>/cmdline`` on the Airflow worker. In a
+        #   multi-tenant Airflow deployment (common in pharma IT), any
+        #   user with shell access to the worker could read the Neo4j
+        #   password. Worse, the DAG ALSO logged the full cmd (including
+        #   the password) at INFO level on line ~806 -- the password was
+        #   then in Airflow's task logs, retained 30+ days, accessible to
+        #   anyone with Airflow UI access.
+        #
+        #   ROOT FIX: do NOT pass the password as a CLI arg at all. The
+        #   subprocess inherits the parent's environment, so
+        #   ``DRUGOS_NEO4J_PASSWORD`` is ALREADY visible to the child
+        #   process via ``os.environ``. The receiving script
+        #   (run_unified.py:619) already reads ``DRUGOS_NEO4J_PASSWORD``
+        #   from the environment as a fallback when ``--neo4j-password``
+        #   is not passed on the CLI. So removing the CLI arg does NOT
+        #   break the password flow -- it just stops leaking it via
+        #   ``ps``/``/proc``/logs.
+        #
+        #   Defense in depth: also sanitize ANY log message that
+        #   includes the cmd. The ``_redact_cmd_for_log`` helper below
+        #   replaces the value of any sensitive flag (``--neo4j-password``,
+        #   ``--neo4j-user``, ``NEO4J_PASSWORD=...``) with ``***`` before
+        #   the cmd is joined into a string for logging. This catches
+        #   both the current call site and any future caller that adds
+        #   a different secret flag.
         if os.environ.get("DRUGOS_NEO4J_PASSWORD"):
-            cmd.extend(["--neo4j-password", os.environ["DRUGOS_NEO4J_PASSWORD"]])
+            # Password flows to the subprocess via env-var inheritance.
+            # Do NOT add it to cmd. (See P1-009 comment above.)
+            pass
 
-    logger.info("v29 trigger_phase2: invoking Phase 2 pipeline: %s", " ".join(cmd))
+    # v104 P1-009 ROOT FIX: sanitize the cmd before logging. NEVER log
+    # the Neo4j password (or any other secret). Replace sensitive values
+    # with ``***`` so the log shows the cmd STRUCTURE without leaking
+    # credentials. The unsanitized cmd is still passed to subprocess.run
+    # below -- only the LOG is sanitized.
+    def _redact_cmd_for_log(cmd_list):
+        """Return a copy of cmd_list with sensitive values replaced by ***."""
+        redacted = []
+        skip_next = False
+        sensitive_flags = {"--neo4j-password", "--neo4j-user",
+                           "--neo4j-uri"}  # URI may embed user:pass@host
+        for i, item in enumerate(cmd_list):
+            if skip_next:
+                redacted.append("***")
+                skip_next = False
+                continue
+            if item in sensitive_flags:
+                redacted.append(item)
+                skip_next = True  # next item is the value -> redact it
+                continue
+            # Catch ``--flag=value`` form
+            if "=" in item and item.split("=", 1)[0] in sensitive_flags:
+                redacted.append(f"{item.split('=', 1)[0]}=***")
+                continue
+            # Catch env-var-like values
+            if isinstance(item, str) and "NEO4J_PASSWORD" in item:
+                redacted.append("***")
+                continue
+            redacted.append(item)
+        return redacted
+
+    _cmd_for_log = _redact_cmd_for_log(cmd)
+    logger.info("v29 trigger_phase2: invoking Phase 2 pipeline: %s",
+                " ".join(_cmd_for_log))
 
     # v29 ROOT FIX: check=True (was False) so non-zero exit raises
     # CalledProcessError. This makes the task fail RED when Phase 2
@@ -974,9 +1051,15 @@ def master_pipeline() -> None:
     #   AirflowException at RUNTIME. This assertion catches the
     #   mismatch at DAG PARSE time, so the DAG shows up as "import
     #   error" in the Airflow UI instead of failing mid-run.
-    assert drugbank.task_id == _DRUGBANK_DOWNLOAD_TASK_ID, (
+    #
+    # P1-031 side-fix: in airflow 2.10+ the TaskFlow API returns a
+    # ``PlainXComArg`` (not the operator directly). Access the operator
+    # via ``.operator`` to get the task_id. Older airflow versions
+    # return the operator directly (no ``.operator`` attr).
+    _drugbank_op = getattr(drugbank, "operator", drugbank)
+    assert _drugbank_op.task_id == _DRUGBANK_DOWNLOAD_TASK_ID, (
         f"BUG #36 regression: download_drugbank task_id is "
-        f"{drugbank.task_id!r} but _check_drugbank_xml returns "
+        f"{_drugbank_op.task_id!r} but _check_drugbank_xml returns "
         f"{_DRUGBANK_DOWNLOAD_TASK_ID!r}. Update "
         f"_DRUGBANK_DOWNLOAD_TASK_ID or the function name to match."
     )

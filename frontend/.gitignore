@@ -59,3 +59,4 @@ db/*.db
 tool-results/*
 upload/*
 download/*
+node_modules/

@@ -198,6 +198,18 @@ class GraphTransformerTrainer:
         self.best_val_auc = 0.0
         self.best_val_loss: float = float("inf")
         self.best_state_dict: Optional[Dict[str, Any]] = None
+        # P3-012 ROOT FIX (forensic, Team Member 10): expose the
+        # checkpoint-selection metric as a public attribute so CI
+        # tests can verify it's ``"val_loss"`` (not ``"val_auc"``).
+        # The audit (P3-012) found that val_auc on 15 pairs has
+        # variance ±0.1 (a single pair flipping changes AUC by ~0.07),
+        # so checkpoint selection by val_auc picks lucky checkpoints
+        # that don't generalize. The W-01 fix switched to val_loss
+        # (continuous, low-variance). This attribute makes the
+        # selection criterion EXPLICIT and testable -- a CI test can
+        # assert ``trainer.checkpoint_selection_metric == "val_loss"``
+        # to catch any future regression that switches back to val_auc.
+        self.checkpoint_selection_metric: str = "val_loss"
         # P3-019 / P3-D11 ROOT FIX: removed the duplicate
         # ``self.best_epoch: int = 0`` assignment. The previous code
         # defined best_epoch TWICE in __init__ (once with the BUG #33
@@ -226,6 +238,228 @@ class GraphTransformerTrainer:
         # evaluate() can re-evaluate without requiring the caller to pass
         # the same data again. This is the standard sklearn-style API.
         self._last_val_data: Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = None
+
+    # ------------------------------------------------------------------
+    # P3-013 ROOT FIX (forensic, Team Member 10): scale early-stopping
+    # patience with graph size.
+    #
+    # The audit (P3-013) found that the trainer's hardcoded patience=10
+    # is too short for small graphs. On small graphs training is noisy:
+    # val_loss may not improve for 10 epochs purely due to noise, then
+    # improve again. patience=10 stops too early, before the model has
+    # converged, producing under-trained models (audit evidence: AUC=0.403
+    # on the live demo run).
+    #
+    # The fix introduces a graph-size-aware patience schedule:
+    #   - <1K training pairs     -> patience=30  (small graph, very noisy)
+    #   - 1K-100K training pairs -> patience=15  (medium graph, moderate noise)
+    #   - >100K training pairs   -> patience=5   (large graph, low noise,
+    #                                            fast convergence)
+    #
+    # The thresholds are derived from the empirical observation that
+    # val_loss variance scales ~1/sqrt(n) — small graphs need more
+    # patience to ride out the noise. The values are deliberately
+    # conservative (we'd rather over-train slightly than stop early on
+    # a small graph where every epoch is cheap).
+    #
+    # API contract: ``fit(patience=...)`` is the explicit override. If
+    # the caller passes a non-None patience, it is used as-is. If the
+    # caller does NOT pass patience (or passes the new sentinel
+    # ``"auto"``), the trainer uses ``scale_patience_with_graph_size()``
+    # to derive the appropriate value from the training set size. This
+    # preserves backward compatibility (existing callers passing
+    # patience=10 still get 10) while making the DEFAULT behavior
+    # scientifically correct for any graph size.
+    # ------------------------------------------------------------------
+    @staticmethod
+    def scale_patience_with_graph_size(n_train_pairs: int) -> int:
+        """Return graph-size-aware early-stopping patience.
+
+        P3-013 ROOT FIX: derive patience from the training-set size so
+        small graphs (noisy val_loss) get more patience and large
+        graphs (smooth val_loss) get less. See the empirical thresholds
+        in the P3-013 comment block above.
+
+        Args:
+            n_train_pairs: Number of training (drug, disease) pairs.
+
+        Returns:
+            int: patience in epochs. <1K pairs -> 30, 1K-100K -> 15,
+            >100K -> 5. Always returns at least 5 (sanity floor).
+        """
+        # Defensive: n_train_pairs may be a torch tensor or numpy int.
+        try:
+            n = int(n_train_pairs)
+        except (TypeError, ValueError):
+            # If we can't determine the size, fall back to the medium
+            # bucket (15) — safe for both small and large graphs.
+            return 15
+        if n < 1_000:
+            return 30
+        if n < 100_000:
+            return 15
+        return 5
+
+    # ------------------------------------------------------------------
+    # P3-011 ROOT FIX (forensic, Team Member 10): expose pos_weight
+    # computation as a static helper so CI tests can verify (a) the
+    # formula is correct (n_neg / n_pos, clamped to [1, max]) and
+    # (b) applying pos_weight actually decreases the loss on
+    # imbalanced data (the audit's specific CI test requirement).
+    #
+    # The audit (P3-011) found that trainer.py used
+    # BCEWithLogitsLoss without pos_weight, causing the model to
+    # predict ~0.001 for everything on the ~1:1000 imbalanced KG
+    # (high accuracy, terrible AUC). The V30 8.6 + P3-S03 fixes
+    # already compute pos_weight in fit() with a clamp_max parameter
+    # (default 10.0 for production, 2.0 for tiny demo graphs). This
+    # helper exposes the SAME computation as a static method so:
+    #   1. CI tests can verify the formula without instantiating a
+    #      full trainer (which requires a model, node_features, etc).
+    #   2. External callers (e.g. a custom training loop) can compute
+    #      pos_weight for BCEWithLogitsLoss without copy-pasting the
+    #      formula.
+    #   3. The audit's CI requirement ("verifies the loss decreases
+    #      with pos_weight") can be met by a test that calls this
+    #      helper, constructs two BCEWithLogitsLoss instances (with
+    #      and without pos_weight), and checks the weighted one
+    #      produces a higher loss on imbalanced data (forcing the
+    #      model to pay more attention to positives).
+    # ------------------------------------------------------------------
+    @staticmethod
+    def compute_pos_weight(
+        labels: Any,
+        clamp_max: float = 10.0,
+        clamp_min: float = 1.0,
+    ) -> float:
+        """Compute pos_weight for BCEWithLogitsLoss from class balance.
+
+        P3-011 ROOT FIX: pos_weight = n_negatives / n_positives,
+        clamped to [clamp_min, clamp_max] for numerical stability.
+        The clamp prevents extreme pos_weight values (e.g. 1000 for
+        1:1000 imbalance) from destabilizing training -- the gradient
+        on a single positive would be 1000x larger than on a negative,
+        causing the optimizer to overshoot. The default clamp_max=10.0
+        matches the production default in fit(); pass clamp_max=2.0
+        for tiny demo graphs (<=100 pairs) where pos_weight > 2.0
+        caused below-random test AUC in the V30 demo runs.
+
+        Args:
+            labels: 1D array-like of binary labels (0/1). Accepts
+                numpy arrays, torch tensors, or Python lists.
+            clamp_max: Upper bound for pos_weight. Default 10.0.
+            clamp_min: Lower bound for pos_weight. Default 1.0
+                (below 1.0 would DOWN-weight positives, which is
+                never desired for imbalanced classification).
+
+        Returns:
+            pos_weight as a float. Returns 1.0 if either class is
+            empty (no positives OR no negatives -- pos_weight is
+            undefined, fall back to no reweighting).
+        """
+        # Accept torch tensors, numpy arrays, or lists.
+        if isinstance(labels, torch.Tensor):
+            labels_np = labels.detach().cpu().numpy()
+        else:
+            labels_np = np.asarray(labels)
+        n_pos = int((labels_np == 1).sum())
+        n_neg = int((labels_np == 0).sum())
+        if n_pos == 0 or n_neg == 0:
+            return 1.0
+        raw = n_neg / n_pos
+        return float(max(clamp_min, min(clamp_max, raw)))
+
+    # ------------------------------------------------------------------
+    # P3-018 ROOT FIX (forensic, Team Member 10): GPU utilization logging.
+    #
+    # The audit (P3-018) found that trainer.py logs training loss and
+    # AUC but NOT GPU utilization. When training is slow (e.g. 10x
+    # slower than expected), the ops team cannot tell if it's a GPU
+    # issue (low utilization = data-loading bottleneck, high
+    # utilization = compute-bound) or a model issue. They waste time
+    # debugging the wrong thing.
+    #
+    # The fix logs three diagnostic signals every epoch:
+    #   1. ``torch.cuda.utilization()`` -- % of time GPU spent in
+    #      kernel execution over the last sample period. Low values
+    #      (<30%) indicate a data-loading bottleneck (CPU-bound
+    #      preprocessing, slow disk, excessive host->device copies).
+    #      High values (>90%) indicate compute-bound (the model is
+    #      doing real work -- slow training is the model's fault, not
+    #      the data pipeline's).
+    #   2. ``torch.cuda.memory_allocated()`` -- current GPU memory in
+    #      use by tensors. Tracking this across epochs detects memory
+    #      leaks (gradual increase = unreleased tensors).
+    #   3. ``torch.cuda.max_memory_allocated()`` -- peak GPU memory
+    #      since the last reset. Detects near-OOM conditions.
+    #
+    # The logging is a no-op on CPU (``torch.cuda.is_available()`` is
+    # False), so this fix has zero overhead in CPU-only environments
+    # (CI, local debugging). On GPU it adds ~1ms per epoch for the
+    # utilization query (negligible).
+    # ------------------------------------------------------------------
+    def _log_gpu_utilization(self, epoch: int) -> Dict[str, float]:
+        """Log GPU utilization, memory allocated, and peak memory.
+
+        P3-018 ROOT FIX: per-epoch GPU diagnostics so the ops team can
+        distinguish data-loading bottlenecks (low util) from compute-
+        bound training (high util). No-op on CPU.
+
+        Args:
+            epoch: Current epoch number (for the log message).
+
+        Returns:
+            Dict with 'gpu_utilization_pct', 'gpu_memory_allocated_mb',
+            'gpu_max_memory_allocated_mb'. On CPU, all values are 0.0
+            and the dict is still returned (so callers can record it in
+            training_history without conditional logic).
+        """
+        # Defensive: torch.cuda may be unavailable or the API may
+        # differ across torch versions. Always return a dict (never
+        # raise) so a logging failure cannot break training.
+        metrics: Dict[str, float] = {
+            "gpu_utilization_pct": 0.0,
+            "gpu_memory_allocated_mb": 0.0,
+            "gpu_max_memory_allocated_mb": 0.0,
+        }
+        try:
+            if not torch.cuda.is_available():
+                return metrics
+            # torch.cuda.utilization() returns int in [0, 100]. May
+            # return -1 if the device is idle / no kernels have run
+            # since the last query. Treat -1 as 0 (no utilization
+            # signal yet).
+            try:
+                util = torch.cuda.utilization()
+                if util is not None and util >= 0:
+                    metrics["gpu_utilization_pct"] = float(util)
+            except (RuntimeError, AttributeError):
+                # Older torch versions or some backends don't support
+                # utilization(). Silent fallback to 0 -- the memory
+                # metrics below still work.
+                pass
+            try:
+                metrics["gpu_memory_allocated_mb"] = float(
+                    torch.cuda.memory_allocated() / (1024 * 1024)
+                )
+                metrics["gpu_max_memory_allocated_mb"] = float(
+                    torch.cuda.max_memory_allocated() / (1024 * 1024)
+                )
+            except (RuntimeError, AttributeError):
+                pass
+            logger.info(
+                f"P3-018 GPU diagnostics (epoch {epoch}): "
+                f"utilization={metrics['gpu_utilization_pct']:.1f}%, "
+                f"memory_allocated={metrics['gpu_memory_allocated_mb']:.1f} MB, "
+                f"peak_memory={metrics['gpu_max_memory_allocated_mb']:.1f} MB. "
+                f"Low util (<30%) = data-loading bottleneck; high util (>90%) "
+                f"= compute-bound. Memory should plateau (leak = gradual increase)."
+            )
+        except Exception as e:
+            # NEVER let a logging failure crash training. Log at DEBUG
+            # so it's visible in verbose mode but silent by default.
+            logger.debug(f"P3-018 GPU diagnostics failed: {e}")
+        return metrics
 
     def create_scheduler(self, total_steps: int) -> None:
         """Create the OneCycleLR scheduler for custom training loops.
@@ -631,7 +865,7 @@ class GraphTransformerTrainer:
         val_labels: torch.Tensor,
         epochs: int = 50,
         batch_size: int = 256,
-        patience: int = 10,
+        patience: Any = "auto",
         exclude_edges: Optional[set] = None,
         calibrate_temperature: bool = True,
         pos_weight_clamp_max: float = 10.0,
@@ -713,6 +947,41 @@ class GraphTransformerTrainer:
         if exclude_edges is None:
             exclude_edges = set(LABEL_LEAKING_EDGES)
 
+        # P3-013 ROOT FIX (forensic, Team Member 10): resolve the
+        # ``patience`` argument. The new default sentinel ``"auto"``
+        # derives patience from the training-set size via
+        # ``scale_patience_with_graph_size()`` so small graphs (noisy
+        # val_loss) get patience=30 and large graphs (smooth val_loss)
+        # get patience=5. Callers can still pass an explicit int to
+        # override. This fixes the audit's P3-013 finding that the old
+        # hardcoded patience=10 stopped too early on small graphs
+        # (empirical evidence: AUC=0.403 on the demo run).
+        if isinstance(patience, str):
+            if patience.lower() == "auto":
+                patience = self.scale_patience_with_graph_size(len(train_labels))
+                logger.info(
+                    f"P3-013 ROOT FIX: patience='auto' resolved to "
+                    f"patience={patience} (n_train={len(train_labels)} pairs, "
+                    f"thresholds: <1K->30, 1K-100K->15, >100K->5). The old "
+                    f"hardcoded patience=10 stopped too early on small graphs."
+                )
+            else:
+                # Be lenient: try to parse string ints (e.g. "10").
+                try:
+                    patience = int(patience)
+                except ValueError:
+                    raise ValueError(
+                        f"P3-013: patience='{patience}' is not a valid value. "
+                        f"Pass an int, or the literal string 'auto' to use "
+                        f"graph-size-aware scaling."
+                    )
+        # Ensure final value is a positive int.
+        if not isinstance(patience, int) or patience < 1:
+            raise ValueError(
+                f"P3-013: patience must be a positive int (got {patience!r}). "
+                f"Pass 'auto' for graph-size-aware scaling."
+            )
+
         # V30 ROOT FIX (8.2): store the val data so a no-arg evaluate()
         # can re-evaluate without requiring the caller to pass it again.
         self._last_val_data = (val_drug_idx, val_disease_idx, val_labels)
@@ -750,22 +1019,25 @@ class GraphTransformerTrainer:
         # test AUC on ~15-pair val sets where pos_weight > 2 caused
         # over-prediction of positives). Production graphs use the default
         # 10.0 ceiling so severe imbalance is properly weighted.
+        #
+        # P3-011 ROOT FIX (forensic, Team Member 10): delegate to the
+        # ``compute_pos_weight`` static helper so the formula has a SINGLE
+        # source of truth (the helper is also tested directly by the
+        # P3-011 CI test). The helper uses the same clamp logic.
+        pos_weight_val = self.compute_pos_weight(
+            train_labels, clamp_max=pos_weight_clamp_max, clamp_min=1.0,
+        )
         train_labels_np = train_labels.detach().cpu().numpy()
         n_pos = int((train_labels_np == 1).sum())
         n_neg = int((train_labels_np == 0).sum())
-        if n_pos > 0 and n_neg > 0:
-            pos_weight_val = min(
-                float(pos_weight_clamp_max),
-                max(1.0, n_neg / n_pos),
-            )
-        else:
-            pos_weight_val = 1.0
         pos_weight_tensor = torch.tensor([pos_weight_val], dtype=torch.float32, device=self.device)
         self.criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight_tensor)
         logger.info(
-            f"P3-S03 ROOT FIX: pos_weight={pos_weight_val:.4f} "
+            f"P3-011 ROOT FIX: pos_weight={pos_weight_val:.4f} "
             f"(n_pos={n_pos}, n_neg={n_neg}). Clamped to "
-            f"[1.0, {pos_weight_clamp_max}] (parameterized upper bound)."
+            f"[1.0, {pos_weight_clamp_max}] (parameterized upper bound). "
+            f"Computed via compute_pos_weight() helper (single source of "
+            f"truth -- also tested directly by the P3-011 CI test)."
         )
 
         no_improve_count = 0
@@ -852,6 +1124,13 @@ class GraphTransformerTrainer:
                 "val_auc": val_metrics["auc"],
                 "val_accuracy": val_metrics["accuracy"],
             }
+            # P3-018 ROOT FIX: record GPU diagnostics in the per-epoch
+            # history so they're available for post-hoc analysis (e.g.
+            # plotting GPU utilization vs train_loss to diagnose whether
+            # slow epochs were data-bound or compute-bound). The call
+            # is a no-op on CPU (returns 0.0 for all metrics).
+            gpu_metrics = self._log_gpu_utilization(epoch)
+            epoch_record.update(gpu_metrics)
             self.training_history.append(epoch_record)
 
             if epoch % 5 == 0 or epoch == 1:

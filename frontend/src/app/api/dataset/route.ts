@@ -5,21 +5,40 @@ import { getDatasetStats } from "@/lib/services/dataset-stats";
 /**
  * GET /api/dataset?source=<chembl|drugbank|uniprot|string|disgenet|omim|pubchem>
  *
- * RT-007 ROOT FIX (Team Member 17): the previous version returned 503
- * "service_not_deployed" whenever DATASET_SERVICE_URL was unset, even
- * though a local lib service (`getDatasetStats`) was available that
- * reads the Phase 1 / Phase 2 checkpoint JSON from disk. The dashboard's
- * dataset page therefore 503'd in every default deployment.
+ * RT-007 ROOT FIX (Team Member 17) + FE-021 ROOT FIX (Team Member 15):
  *
- * Root fix: ALWAYS call `getDatasetStats()` from the local lib service.
- * The lib service itself proxies to DATASET_SERVICE_URL when that env
- * var is set (production multi-node deploy), and falls back to reading
- * the local checkpoint JSON (single-box dev / CI deploy). Either way
- * the route returns real dataset statistics instead of 503.
+ * Two parallel teams independently discovered and fixed the same bug:
+ * the previous route NEVER called `getDatasetStats()`. It only checked
+ * `checkDatasetAvailability()` (which requires `DATASET_SERVICE_URL`)
+ * and returned 503 `service_not_deployed` when that env var was not
+ * set — even though `getDatasetStats()` had a perfectly good
+ * local-checkpoint fallback that reads `../phase2/data/checkpoints/step_01.json`.
+ * On a fresh deploy without `DATASET_SERVICE_URL`, the dashboard showed
+ * a generic "service not deployed" error instead of either:
+ *   (a) the real local checkpoint data (if Phase 1 had been run), or
+ *   (b) a clear "No data ingested yet — run Phase 1 to populate" message.
  *
- * We NEVER fabricate dataset statistics. If neither the proxy nor the
- * local checkpoint yields data, the lib returns `source: "none"` with
- * an empty sources list, and we surface that to the caller.
+ * The local-checkpoint fallback in `dataset-stats.ts` was effectively
+ * dead code: no route wired it up.
+ *
+ * ROOT FIX (combined):
+ *   1. Always call `getDatasetStats()` first. That function handles the
+ *      proxy-vs-local-vs-none decision tree and returns a `status` field
+ *      (`ok` | `no_data` | `service_down`) so the dashboard can render
+ *      a clear message.
+ *   2. When `status === "no_data"`, return HTTP 200 with the status
+ *      field — NOT 503 or 500. The request succeeded; there just isn't
+ *      any data yet. The dashboard renders the helpful message.
+ *   3. When `status === "service_down"` (proxy was configured but
+ *      failed AND no local checkpoint exists), return HTTP 502.
+ *   4. When `status === "ok"`, return HTTP 200 with the stats.
+ *   5. If a specific source was requested via ?source=, filter the
+ *      sources list (RT-007 addition).
+ *
+ * SCIENTIFIC INTEGRITY: we NEVER fabricate dataset statistics. If the
+ * checkpoint is missing we return `status: "no_data"` with empty
+ * arrays — the dashboard shows "Run Phase 1 to populate" instead of
+ * fake numbers.
  */
 export async function GET(req: NextRequest) {
   const auth = await requireAuth();
@@ -33,10 +52,21 @@ export async function GET(req: NextRequest) {
       user: auth.user,
       action: "dataset_query",
       resource: `dataset:${source}`,
-      metadata: { source, statsSource: stats.source, count: stats.sources.length },
+      metadata: {
+        source: stats.source,
+        status: (stats as any).status,
+        count: stats.sources.length,
+      },
     });
 
-    // If a specific source was requested, filter the sources list.
+    // FE-021: 502 only when the proxy was configured but failed AND no
+    // local checkpoint exists. 200 for ok + no_data (request succeeded;
+    // data may be empty).
+    if ((stats as any).status === "service_down") {
+      return NextResponse.json(stats, { status: 502 });
+    }
+
+    // RT-007: if a specific source was requested, filter the sources list.
     if (source !== "all" && stats.sources.length > 0) {
       const filtered = stats.sources.filter(
         (s) => s.name.toLowerCase() === source.toLowerCase()

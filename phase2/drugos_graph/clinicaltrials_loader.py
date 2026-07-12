@@ -234,6 +234,7 @@ import ssl
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 import warnings
@@ -5285,3 +5286,269 @@ if _REQUIRED_TESTED_FOR_TRIPLE not in CORE_EDGE_TYPES:
 # Issue 13.4 -- AACT schema documentation: https://aact.ctti-clinicaltrials.org/definitions
 # Issue 13.10 -- README section is at drugos_graph/README.md (ClinicalTrials section).
 # Issue 13.12 -- AACT table/column reference is in the module docstring above.
+
+
+# =============================================================================
+# P2-011 ROOT FIX -- ClinicalTrials.gov JSON API v2 schema support
+# =============================================================================
+# The bulk loader above uses the AACT static database (a PostgreSQL dump
+# distributed as a zip). For live updates / single-trial lookups, the
+# ClinicalTrials.gov JSON API (https://clinicaltrials.gov/api/v2/studies)
+# is the canonical source. ClinicalTrials.gov migrated from v1 to v2
+# schema in 2024 -- the v1 schema used ``StudyFieldsSection -> StudyFields``,
+# the v2 schema uses ``StudyProtoSection -> StudyProto``. A loader that
+# parses only v1 will crash with ``KeyError`` on the first v2 trial it
+# encounters. This section adds a v2-aware JSON API client so live
+# updates work across the schema migration.
+#
+# The v2 API is the only API available today (the v1 endpoint was
+# deprecated in 2024 and is being decommissioned). However, cached v1
+# responses may still be present in operator environments, so the parser
+# below handles BOTH schemas and tags the schema version in the result.
+# =============================================================================
+
+CTGOV_API_V2_BASE: str = "https://clinicaltrials.gov/api/v2/studies"
+
+
+def _detect_ctgov_schema_version(response_json: Dict[str, Any]) -> str:
+    """Detect whether a ClinicalTrials.gov JSON response is v1 or v2.
+
+    P2-011 ROOT FIX: ClinicalTrials.gov migrated from v1 to v2 schema in
+    2024. The two schemas are structurally different:
+
+    * **v1** (deprecated): each study has a ``StudyFieldsSection`` ->
+      ``StudyFields`` subtree with field names like ``NCTId``,
+      ``BriefTitle``, ``OverallStatus`` (CamelCase).
+    * **v2** (current): each study has a ``protocolSection`` ->
+      ``identificationModule`` subtree with field names like ``nctId``,
+      ``briefTitle``, ``overallStatus`` (camelCase).
+
+    A parser that handles only v1 will raise ``KeyError`` on the first
+    v2 study. A parser that handles only v2 will raise ``KeyError`` on
+    a cached v1 response. This helper inspects the response shape and
+    returns the schema version so the caller can dispatch to the
+    appropriate parser.
+
+    Parameters
+    ----------
+    response_json : dict
+        The decoded JSON response from the ClinicalTrials.gov API.
+
+    Returns
+    -------
+    str
+        One of ``"v2"`` (current), ``"v1"`` (legacy), or ``"unknown"``
+        (neither shape detected -- the caller should dead-letter).
+    """
+    if not isinstance(response_json, dict):
+        return "unknown"
+    studies = response_json.get("studies", [])
+    if not isinstance(studies, list) or not studies:
+        return "unknown"
+    first = studies[0]
+    if not isinstance(first, dict):
+        return "unknown"
+    # v2: study has "protocolSection" (camelCase modules).
+    if "protocolSection" in first:
+        return "v2"
+    # v1: study has "StudyFieldsSection" or "StudyFields".
+    if "StudyFieldsSection" in first or "StudyFields" in first:
+        return "v1"
+    # Fallback heuristics: v2 uses "nctId", v1 uses "NCTId".
+    if "nctId" in first or "briefTitle" in first:
+        return "v2"
+    if "NCTId" in first or "BriefTitle" in first:
+        return "v1"
+    return "unknown"
+
+
+def _parse_ctgov_v1_study(study: Dict[str, Any]) -> Dict[str, Any]:
+    """Parse a single v1-schema ClinicalTrials.gov study (legacy).
+
+    v1 schema uses CamelCase field names nested under
+    ``StudyFieldsSection -> StudyFields``.
+    """
+    sfs = study.get("StudyFieldsSection", {})
+    sf = sfs.get("StudyFields", study.get("StudyFields", {}))
+    return {
+        "schema_version": "v1",
+        "nct_id": sf.get("NCTId", [""])[0] if isinstance(sf.get("NCTId"), list) else sf.get("NCTId", ""),
+        "brief_title": sf.get("BriefTitle", [""])[0] if isinstance(sf.get("BriefTitle"), list) else sf.get("BriefTitle", ""),
+        "overall_status": sf.get("OverallStatus", [""])[0] if isinstance(sf.get("OverallStatus"), list) else sf.get("OverallStatus", ""),
+        "phase": sf.get("Phase", [""])[0] if isinstance(sf.get("Phase"), list) else sf.get("Phase", ""),
+        "enrollment": sf.get("EnrollmentCount", [""])[0] if isinstance(sf.get("EnrollmentCount"), list) else sf.get("EnrollmentCount", ""),
+        "start_date": sf.get("StartDateStruct", [""])[0] if isinstance(sf.get("StartDateStruct"), list) else sf.get("StartDateStruct", ""),
+        "completion_date": sf.get("CompletionDateStruct", [""])[0] if isinstance(sf.get("CompletionDateStruct"), list) else sf.get("CompletionDateStruct", ""),
+        "conditions": sf.get("Condition", []) if isinstance(sf.get("Condition"), list) else [sf.get("Condition", "")],
+        "interventions": sf.get("InterventionName", []) if isinstance(sf.get("InterventionName"), list) else [sf.get("InterventionName", "")],
+    }
+
+
+def _parse_ctgov_v2_study(study: Dict[str, Any]) -> Dict[str, Any]:
+    """Parse a single v2-schema ClinicalTrials.gov study (current).
+
+    v2 schema uses camelCase field names nested under
+    ``protocolSection -> identificationModule / statusModule /
+    designModule``.
+    """
+    proto = study.get("protocolSection", {})
+    ident = proto.get("identificationModule", {})
+    status = proto.get("statusModule", {})
+    design = proto.get("designModule", {})
+    arms = proto.get("armsInterventionsModule", {})
+    conditions_mod = proto.get("conditionsModule", {})
+    return {
+        "schema_version": "v2",
+        "nct_id": ident.get("nctId", ""),
+        "brief_title": ident.get("briefTitle", ""),
+        "overall_status": status.get("overallStatus", ""),
+        "phase": design.get("phases", [None])[0] if isinstance(design.get("phases"), list) else design.get("phases", ""),
+        "enrollment": design.get("enrollmentInfo", {}).get("count", ""),
+        "start_date": status.get("startDateStruct", {}).get("date", ""),
+        "completion_date": status.get("completionDateStruct", {}).get("date", ""),
+        "conditions": conditions_mod.get("conditions", []),
+        "interventions": [
+            iv.get("name", "") for iv in arms.get("interventions", [])
+            if isinstance(iv, dict)
+        ],
+    }
+
+
+def parse_ctgov_study(study: Dict[str, Any], schema_version: Optional[str] = None) -> Dict[str, Any]:
+    """Parse a single ClinicalTrials.gov study, auto-detecting schema.
+
+    P2-011 ROOT FIX: dispatches to ``_parse_ctgov_v1_study`` or
+    ``_parse_ctgov_v2_study`` based on the detected schema version.
+    When ``schema_version`` is None, it is auto-detected from the
+    study's shape. When the schema is unknown, the study is returned
+    with ``schema_version="unknown"`` and all fields empty -- the
+    caller should dead-letter it.
+    """
+    if schema_version is None:
+        # Auto-detect from the single-study shape.
+        if "protocolSection" in study:
+            schema_version = "v2"
+        elif "StudyFieldsSection" in study or "StudyFields" in study:
+            schema_version = "v1"
+        elif "nctId" in study or "briefTitle" in study:
+            schema_version = "v2"
+        elif "NCTId" in study or "BriefTitle" in study:
+            schema_version = "v1"
+        else:
+            schema_version = "unknown"
+    if schema_version == "v2":
+        return _parse_ctgov_v2_study(study)
+    if schema_version == "v1":
+        return _parse_ctgov_v1_study(study)
+    return {
+        "schema_version": "unknown",
+        "nct_id": "",
+        "brief_title": "",
+        "overall_status": "",
+        "phase": "",
+        "enrollment": "",
+        "start_date": "",
+        "completion_date": "",
+        "conditions": [],
+        "interventions": [],
+    }
+
+
+def fetch_ctgov_studies(
+    query: str,
+    *,
+    max_pages: int = 10,
+    page_size: int = 100,
+    timeout: int = 30,
+) -> List[Dict[str, Any]]:
+    """Fetch studies from the ClinicalTrials.gov v2 JSON API with pagination.
+
+    P2-011 ROOT FIX: calls the v2 API endpoint
+    ``https://clinicaltrials.gov/api/v2/studies`` and follows the
+    ``nextPageToken`` cursor until the response has no next page or
+    ``max_pages`` is reached. The response is parsed with
+    ``parse_ctgov_study`` which auto-detects v1 vs v2 schema (so cached
+    v1 responses also work).
+
+    Parameters
+    ----------
+    query : str
+        The search query (e.g. ``"breast cancer"``).
+    max_pages : int, default 10
+        Maximum number of pages to fetch (capped at 100 to prevent
+        runaway queries).
+    page_size : int, default 100
+        Number of studies per page (max 1000 per the API spec).
+    timeout : int, default 30
+        Per-request timeout in seconds.
+
+    Returns
+    -------
+    list of dict
+        Parsed study records. Each record has keys: ``schema_version``,
+        ``nct_id``, ``brief_title``, ``overall_status``, ``phase``,
+        ``enrollment``, ``start_date``, ``completion_date``,
+        ``conditions``, ``interventions``.
+    """
+    if max_pages <= 0 or max_pages > 100:
+        raise ValueError(f"max_pages must be in [1, 100], got {max_pages}")
+    if page_size <= 0 or page_size > 1000:
+        raise ValueError(f"page_size must be in [1, 1000], got {page_size}")
+    results: List[Dict[str, Any]] = []
+    page_token: Optional[str] = None
+    ssl_ctx = ssl.create_default_context()
+    ssl_ctx.check_hostname = True
+    ssl_ctx.verify_mode = ssl.CERT_REQUIRED
+    for page_idx in range(max_pages):
+        # Build the URL with query params.
+        params = [
+            ("query.term", query),
+            ("pageSize", str(page_size)),
+            ("format", "json"),
+        ]
+        if page_token:
+            params.append(("pageToken", page_token))
+        url = CTGOV_API_V2_BASE + "?" + "&".join(
+            f"{k}={urllib.parse.quote(str(v))}" for k, v in params
+        )
+        req = urllib.request.Request(
+            url,
+            headers={"User-Agent": CLINICALTRIALS_USER_AGENT},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=timeout, context=ssl_ctx) as resp:
+                if resp.getcode() != 200:
+                    raise ClinicalTrialsDownloadError(
+                        f"HTTP {resp.getcode()} from CT.gov API: {url}",
+                        context={"url": url, "http_code": resp.getcode()},
+                    )
+                payload = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            raise ClinicalTrialsDownloadError(
+                f"HTTPError from CT.gov API: {exc}",
+                context={"url": url, "error": str(exc)},
+            ) from exc
+        # Detect schema version ONCE per response (all studies in a
+        # response share the same schema).
+        schema_version = _detect_ctgov_schema_version(payload)
+        if schema_version == "unknown":
+            logger.warning(
+                "ctgov_api_unknown_schema",
+                extra={"page_idx": page_idx, "url": url},
+            )
+        studies = payload.get("studies", [])
+        for study in studies:
+            results.append(parse_ctgov_study(study, schema_version=schema_version))
+        # Follow the cursor -- v2 uses "nextPageToken".
+        page_token = payload.get("nextPageToken")
+        if not page_token:
+            break
+    logger.info(
+        "ctgov_api_fetch_complete",
+        extra={
+            "query": query,
+            "pages_fetched": page_idx + 1,
+            "studies_returned": len(results),
+        },
+    )
+    return results

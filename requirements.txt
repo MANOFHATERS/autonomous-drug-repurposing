@@ -68,6 +68,20 @@ psutil>=5.9
 # full RL pipeline can run end-to-end without a second pip install.
 gymnasium>=0.29
 stable-baselines3>=2.2
+# P4-012 ROOT FIX (Team Member 12): biopython is a MANDATORY production
+# dependency. rl/rl_drug_ranker.py::literature_crosscheck uses Bio.Entrez
+# to query PubMed for the V1 launch criterion "≥5 literature-supported
+# predictions" (DOCX §8). The previous code SILENTLY SKIPPED the
+# literature check when biopython was missing, marking all candidates
+# with literature_support=False and EXCLUDING the criterion from the
+# scientific_validation gate. The platform then claimed V1 readiness
+# without ever running the literature cross-check. The fix makes
+# biopython a hard requirement: if it is not installed, the
+# scientific_validation gate FAILS (not skips) and the pipeline refuses
+# to write its output CSV. biopython is also required by Phase 1
+# ChEMBL/UniProt pipelines (Bio.Seq, Bio.PDB) so it is not a new
+# transitive dependency.
+biopython>=1.83
 # pytest is needed by the Phase 3/4 test suites (tests/test_*.py).
 pytest>=7.4
 

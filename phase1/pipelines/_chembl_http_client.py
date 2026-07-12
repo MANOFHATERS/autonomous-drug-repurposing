@@ -52,6 +52,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import random
 import threading
 import time
@@ -387,6 +388,47 @@ class RateLimitedHttpClient:
                 f"max_response_bytes must be >= 1024, got {max_response_bytes}"
             )
 
+        # P1-021 ROOT FIX (Team-2): TLS verification guard. The audit
+        # found that the previous code (in the original ``_http_client.py``
+        # before it was renamed to ``_chembl_http_client.py``) had a "dev
+        # mode" that disabled TLS verification via
+        # ``ENVIRONMENT != 'production'`` -- meaning ANY non-production
+        # value (staging, test, unset) triggered dev mode and ran without
+        # cert verification. A staging server (which should have valid
+        # TLS) ran without cert verification, enabling MITM attacks.
+        #
+        # ROOT FIX: TLS verification can ONLY be disabled when ALL of:
+        #   1. ``verify_tls=False`` is explicitly passed by the caller
+        #   2. ``ENVIRONMENT == 'development'`` (exactly -- not "not
+        #      production")
+        #   3. The target host is localhost / 127.0.0.1 / 0.0.0.0
+        # In staging and production, ``verify_tls=False`` is REJECTED
+        # with a ``ValueError`` -- the caller cannot accidentally disable
+        # TLS in a non-dev environment. This is a hard guard; there is no
+        # override env var (operators who need to test against a self-
+        # signed cert in staging must use a proper CA bundle, not disable
+        # verification).
+        if not verify_tls:
+            _env = os.environ.get("DRUGOS_ENVIRONMENT") or os.environ.get("ENVIRONMENT", "production")
+            if _env.lower().strip() != "development":
+                raise ValueError(
+                    f"P1-021 ROOT FIX: verify_tls=False is NOT permitted in "
+                    f"ENVIRONMENT={_env!r}. TLS verification can ONLY be "
+                    f"disabled in development AND when the target host is "
+                    f"localhost. Staging/production must use valid TLS. "
+                    f"To test against a self-signed cert, use a proper CA "
+                    f"bundle via REQUESTS_CA_BUNDLE -- do NOT disable "
+                    f"verification. (P1-021)"
+                )
+            # In development, only allow verify=False for localhost hosts.
+            # The host check is done per-request in ``get()`` -- here we
+            # just record the intent.
+            logger.warning(
+                "[chembl] P1-021: verify_tls=False permitted in DEVELOPMENT "
+                "environment. Per-request host check will reject non-localhost "
+                "targets."
+            )
+
         # Derive rate from CHEMBL_MIN_REQUEST_INTERVAL if not given.
         if rate_limit_per_sec is None:
             if CHEMBL_MIN_REQUEST_INTERVAL > 0:
@@ -466,6 +508,24 @@ class RateLimitedHttpClient:
         """
         params = dict(params or {})
         last_exc: Exception | None = None
+
+        # P1-021 ROOT FIX (Team-2): per-request host check. If
+        # ``verify_tls=False`` was permitted (development env only), we
+        # STILL verify the target host is localhost. This prevents a dev-
+        # mode client from accidentally hitting a non-localhost host
+        # without TLS verification.
+        if not self.verify_tls:
+            from urllib.parse import urlparse
+            _host = (urlparse(url).hostname or "").lower()
+            _localhost_hosts = {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
+            if _host not in _localhost_hosts:
+                raise HttpClientError(
+                    f"P1-021 ROOT FIX: verify_tls=False is only permitted "
+                    f"for localhost targets, but URL host is {_host!r}. "
+                    f"Non-localhost requests MUST use TLS verification. "
+                    f"Fix the test/dev config to point at a localhost "
+                    f"mock server, or set verify_tls=True. (P1-021)"
+                )
 
         for attempt in range(1, self.max_retries + 1):
             # Circuit breaker check -- fails fast if OPEN.

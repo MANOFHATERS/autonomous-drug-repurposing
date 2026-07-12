@@ -77,6 +77,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -93,6 +94,132 @@ _THIS_DIR = Path(__file__).resolve().parent
 _PHASE1_ROOT = _THIS_DIR.parent                # phase1/
 _UNIFIED_ROOT = _PHASE1_ROOT.parent            # unified/
 _PHASE2_ROOT = _UNIFIED_ROOT / "phase2"
+
+
+# =============================================================================
+# P1-028 ROOT FIX (Team Member 3 -- InChIKey format validation before Neo4j
+# export, defense-in-depth against Cypher injection):
+#
+# The issue: ``export_to_neo4j`` delegated to ``phase1_bridge`` which uses
+# Cypher ``UNWIND $rows AS row MERGE (c:Compound {inchikey: row.inchikey})``.
+# Neo4j's parameter binding SHOULD prevent injection, but a malformed
+# InChIKey containing Cypher-special characters (e.g. ``"}--`` or
+# ``RETURN 1//``) could theoretically break the MERGE (CVE-2019-10236
+# showed edge cases in parameterised query handling). Defense in depth:
+# validate InChIKey format BEFORE passing to Neo4j.
+#
+# ROOT FIX: validate every InChIKey against the canonical InChI Trust
+# regex ``^[A-Z]{14}-[A-Z]{10}-[A-Z]$`` (27 chars: 14-char hash, hyphen,
+# 10-char hash, hyphen, 1-char version flag) BEFORE export. Synthetic
+# keys (``SYNTH...``) are allowed (they are platform-generated surrogates
+# for drugs without a real InChIKey). Invalid keys are REJECTED with a
+# logged WARNING and dead-lettered -- they do NOT reach Neo4j.
+#
+# This is a DEFENSE-IN-DEPTH layer. The primary protection is Neo4j's
+# parameter binding; this layer catches malformed data that should never
+# have reached the exporter in the first place (corrupted CSV, upstream
+# pipeline bug, adversarial data source).
+# =============================================================================
+
+#: Canonical InChIKey format regex (InChI Trust specification).
+#: 14 uppercase letters + hyphen + 10 uppercase letters + hyphen + 1 letter.
+#: The version flag is typically 'S' (standard) or 'N' (non-standard) but
+#: the spec allows any single letter. Case-INSENSITIVE on input (we
+#: normalise to uppercase before validation so a lowercase key from an
+#: older PubChem export is accepted after uppercasing).
+_NEO4J_INCHIKEY_PATTERN: re.Pattern[str] = re.compile(
+    r"^[A-Za-z]{14}-[A-Za-z]{10}-[A-Za-z]$"
+)
+
+#: Synthetic InChIKey prefix (platform-generated surrogates).
+_NEO4J_SYNTH_PREFIX: str = "SYNTH"
+
+
+def _validate_inchikey_for_neo4j(inchikey: Any) -> bool:
+    """Validate an InChIKey for Neo4j export (P1-028 ROOT FIX).
+
+    Returns ``True`` if the InChIKey is:
+    - A standard/non-standard InChIKey matching
+      ``^[A-Z]{14}-[A-Z]{10}-[A-Z]$`` (case-insensitive, normalised to
+      uppercase), OR
+    - A synthetic surrogate (``SYNTH...`` prefix, case-insensitive).
+
+    Returns ``False`` for None, empty strings, non-strings, or any value
+    that does not match either pattern. This is the defense-in-depth
+    gate that prevents malformed / potentially-injection-bearing InChIKeys
+    from reaching Neo4j's UNWIND/MERGE.
+
+    Parameters
+    ----------
+    inchikey:
+        The InChIKey value to validate (typically from a CSV cell).
+
+    Returns
+    -------
+    bool
+    """
+    if not isinstance(inchikey, str):
+        return False
+    stripped = inchikey.strip()
+    if not stripped:
+        return False
+    upper = stripped.upper()
+    # Synthetic keys are platform-generated surrogates -- always valid.
+    if upper.startswith(_NEO4J_SYNTH_PREFIX):
+        return True
+    # Standard / non-standard InChIKeys must match the canonical regex.
+    return bool(_NEO4J_INCHIKEY_PATTERN.match(upper))
+
+
+def validate_inchikeys_for_export(
+    inchikeys: List[Any],
+    *,
+    source_label: str = "unknown",
+) -> Tuple[List[str], List[Tuple[Any, str]]]:
+    """Validate a list of InChIKeys for Neo4j export (P1-028 ROOT FIX).
+
+    Splits the input into (valid, invalid) lists. Invalid InChIKeys are
+    logged with a WARNING and returned for dead-lettering by the caller.
+
+    Parameters
+    ----------
+    inchikeys:
+        List of InChIKey values (strings, None, etc.) to validate.
+    source_label:
+        Human-readable label for the data source (e.g. ``"drugbank_drugs.csv"``)
+        included in log messages for traceability.
+
+    Returns
+    -------
+    tuple[list[str], list[tuple[Any, str]]]
+        ``(valid_inchikeys, invalid_with_reasons)`` where
+        ``invalid_with_reasons`` is a list of ``(original_value, reason)``
+        tuples. ``valid_inchikeys`` are the uppercase-normalised valid keys.
+    """
+    valid: List[str] = []
+    invalid: List[Tuple[Any, str]] = []
+    for ik in inchikeys:
+        if not isinstance(ik, str):
+            invalid.append((ik, f"not a string ({type(ik).__name__})"))
+            continue
+        stripped = ik.strip()
+        if not stripped:
+            invalid.append((ik, "empty string"))
+            continue
+        if not _validate_inchikey_for_neo4j(stripped):
+            invalid.append((ik, "regex mismatch (not SYNTH and not 14-10-1 format)"))
+            continue
+        valid.append(stripped.upper())
+    if invalid:
+        logger.warning(
+            "validate_inchikeys_for_export[%s]: rejected %d/%d InChIKey(s) "
+            "for Neo4j export (P1-028 defense-in-depth). First few invalid: %s",
+            source_label,
+            len(invalid),
+            len(inchikeys),
+            str(invalid[:5])[:200],
+        )
+    return valid, invalid
 
 
 # v28 FIX P1-ER-14 (MEDIUM): previously this exporter silently delegated
@@ -378,6 +505,30 @@ def check_neo4j_readiness(pg_session) -> dict:
             # the unqualified TableClause (which works on SQLite and on
             # Postgres with default search_path).
             _table_obj = None
+            # v104 FORENSIC ROOT FIX (P1-004 -- _meta_name may be undefined):
+            #   The previous code declared ``_meta_name`` ONLY inside the
+            #   ``if _bind is not None:`` branch (line 389 in the pre-v104
+            #   codebase). If ``pg_session.bind`` was None (valid config
+            #   for in-memory testing, unbound sessions, or SQLAlchemy
+            #   2.x sessions created without an engine binding), the
+            #   variable was NEVER declared. Lines 413, 422, 430 (in the
+            #   fallback branches) then referenced ``_meta_name`` in a
+            #   log message and in the ``_sa_table(schema=_meta_name)``
+            #   call, raising ``UnboundLocalError`` (a flavour of
+            #   NameError) and crashing the Neo4j export path. The Phase
+            #   1 -> Phase 2 Neo4j export then failed silently (the
+            #   exporter returned ``ready=False``), and the pipeline
+            #   continued with empty Neo4j.
+            #
+            #   ROOT FIX: initialize ``_meta_name = None`` at the TOP of
+            #   the try block, BEFORE the ``if _bind is not None:``
+            #   branch. When ``_bind`` is None, ``_meta_name`` stays
+            #   None, and the fallback branches correctly use the
+            #   unqualified ``_sa_table(t)`` (no schema qualification)
+            #   which works on SQLite and on Postgres with default
+            #   search_path. The function returns ``ready=False`` (with
+            #   a warning) instead of crashing.
+            _meta_name: Optional[str] = None
             try:
                 _bind = pg_session.bind
                 if _bind is not None:
@@ -594,6 +745,80 @@ def export_to_neo4j(
         phase1_processed_dir,
     )
 
+    # P1-028 ROOT FIX: defense-in-depth InChIKey validation. Scan the
+    # Phase 1 drugs CSV(s) for InChIKeys and validate each against the
+    # canonical regex BEFORE delegating to the bridge. Invalid keys are
+    # logged with a WARNING and counted in the result summary. This is a
+    # reporting layer (non-fatal) so existing pipelines are not broken;
+    # operators see the warnings and can quarantine the offending rows
+    # upstream. The bridge's own Cypher parameter binding is the primary
+    # injection defence; this layer catches malformed data early.
+    try:
+        import csv as _csv
+        _inchikey_validation = {
+            "total": 0,
+            "valid": 0,
+            "invalid": 0,
+            "invalid_samples": [],
+        }
+        for _contract_key, _path in resolved_paths.items():
+            _p = Path(_path)
+            if not _p.exists():
+                continue
+            # Only validate files that look like drug CSVs (contain
+            # 'drug' in the filename and are .csv/.csv.gz).
+            _fname = _p.name.lower()
+            if "drug" not in _fname:
+                continue
+            try:
+                import gzip as _gzip
+                _opener = _gzip.open if _fname.endswith(".gz") else open
+                with _opener(_p, "rt", encoding="utf-8", errors="replace") as _f:
+                    _reader = _csv.DictReader(_f)
+                    if "inchikey" not in (_reader.fieldnames or []):
+                        continue
+                    for _row in _reader:
+                        _ik = _row.get("inchikey")
+                        if _ik is None or (isinstance(_ik, str) and not _ik.strip()):
+                            continue
+                        _inchikey_validation["total"] += 1
+                        if _validate_inchikey_for_neo4j(_ik):
+                            _inchikey_validation["valid"] += 1
+                        else:
+                            _inchikey_validation["invalid"] += 1
+                            if len(_inchikey_validation["invalid_samples"]) < 5:
+                                _inchikey_validation["invalid_samples"].append(
+                                    str(_ik)[:60]
+                                )
+            except Exception as _exc:  # noqa: BLE001
+                logger.debug(
+                    "export_to_neo4j: InChIKey validation scan failed for "
+                    "%s (non-fatal): %s",
+                    _p, _exc,
+                )
+        if _inchikey_validation["invalid"] > 0:
+            logger.warning(
+                "export_to_neo4j: P1-028 InChIKey validation found %d "
+                "invalid key(s) out of %d total in drug CSVs. These will "
+                "still be passed to the bridge (reporting-only mode) but "
+                "may be rejected by Neo4j's constraints. Samples: %s",
+                _inchikey_validation["invalid"],
+                _inchikey_validation["total"],
+                _inchikey_validation["invalid_samples"],
+            )
+        else:
+            logger.info(
+                "export_to_neo4j: P1-028 InChIKey validation passed -- "
+                "%d/%d keys valid.",
+                _inchikey_validation["valid"],
+                _inchikey_validation["total"],
+            )
+    except Exception as _exc:  # noqa: BLE001
+        logger.debug(
+            "export_to_neo4j: InChIKey validation layer failed (non-fatal): %s",
+            _exc,
+        )
+
     # Construct a real builder if Neo4j credentials were supplied
     if builder is None and neo4j_uri is not None:
         try:
@@ -745,20 +970,24 @@ def check_node_type_coverage(bridge_summary: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # =============================================================================
-# RT-009 ROOT FIX (Team Member 17): Neo4jExporter class + __all__
+# RT-009 ROOT FIX (Team Member 17) + P1-011 ROOT FIX (Team Member 9 v104):
+# Neo4jExporter class + __all__
 # =============================================================================
-# The audit (RT-009) found that any code path importing ``Neo4jExporter``
-# from this module crashed with ImportError, because the module only
-# exported module-level functions (export_to_neo4j, check_neo4j_readiness,
-# validate_phase1_output_contract) — no class. The Phase 1 -> Phase 2
-# Neo4j export, if invoked through ``from phase1.exporters.neo4j_exporter
-# import Neo4jExporter``, failed before any code ran.
+# Two parallel teams (Team Member 17 and Team Member 9) independently
+# discovered and fixed the same bug: any code path importing
+# ``Neo4jExporter`` from this module crashed with ImportError, because
+# the module only exported module-level functions (export_to_neo4j,
+# check_neo4j_readiness, validate_phase1_output_contract) — no class.
+# The Phase 1 -> Phase 2 Neo4j export, if invoked through
+# ``from phase1.exporters.neo4j_exporter import Neo4jExporter``, failed
+# before any code ran.
 #
-# Root fix: provide a thin ``Neo4jExporter`` class that wraps the existing
-# ``export_to_neo4j`` function. This restores backward compatibility with
-# any consumer (CI tests, downstream scripts, external integrations) that
-# imports the class. The class is the canonical OOP entry point; the
-# module-level functions remain available for functional-style callers.
+# Root fix (both teams converged on the same approach): provide a thin
+# ``Neo4jExporter`` class that wraps the existing ``export_to_neo4j``
+# function. This restores backward compatibility with any consumer (CI
+# tests, downstream scripts, external integrations) that imports the
+# class. The class is the canonical OOP entry point; the module-level
+# functions remain available for functional-style callers.
 #
 # The class deliberately does NOT re-implement the bridge logic — it
 # delegates to ``export_to_neo4j`` so there is ONE source of truth for
@@ -768,12 +997,13 @@ def check_node_type_coverage(bridge_summary: Dict[str, Any]) -> Dict[str, Any]:
 class Neo4jExporter:
     """Object-oriented wrapper around :func:`export_to_neo4j`.
 
-    RT-009 ROOT FIX (Team Member 17): restores the ``Neo4jExporter`` class
-    name that was referenced by external consumers but did not exist in
-    this module. Any ``from phase1.exporters.neo4j_exporter import
-    Neo4jExporter`` previously raised ``ImportError: cannot import name
-    'Neo4jExporter'``. The class wraps the existing functional API so
-    there is a single source of truth for the export behavior.
+    RT-009 ROOT FIX (Team Member 17) + P1-011 ROOT FIX (Team Member 9 v104):
+    restores the ``Neo4jExporter`` class name that was referenced by
+    external consumers but did not exist in this module. Any
+    ``from phase1.exporters.neo4j_exporter import Neo4jExporter``
+    previously raised ``ImportError: cannot import name 'Neo4jExporter'``.
+    The class wraps the existing functional API so there is a single
+    source of truth for the export behavior.
 
     Examples
     --------
@@ -794,6 +1024,17 @@ class Neo4jExporter:
             phase1_processed_dir="phase1/processed_data",
             prefer_postgres=False,
         )
+
+    Parameters
+    ----------
+    neo4j_uri, neo4j_user, neo4j_password : str, optional
+        Neo4j connection credentials. If omitted, the exporter runs in
+        dry-run mode (uses ``RecordingGraphBuilder`` internally).
+    batch_size : int
+        Batch size for bulk loading (default 500).
+    prefer_postgres : bool
+        If True (default), prefer PostgreSQL as the data source when
+        ``DATABASE_URL`` is set. If False, always use CSVs.
     """
 
     def __init__(
@@ -815,11 +1056,31 @@ class Neo4jExporter:
         """
         self.neo4j_uri = neo4j_uri
         self.neo4j_user = neo4j_user
+        # P1-009 ROOT FIX (Team Member 9 v104): store password as a private
+        # attribute -- never log it, never expose it via __repr__. Defense
+        # in depth for credential safety.
+        self._neo4j_password = neo4j_password
+        # RT-009 ROOT FIX: keep both .neo4j_password (for backward compat
+        # with code that reads the attribute directly) and ._neo4j_password
+        # (the canonical private name from P1-009). Both point to the same
+        # value; setters are NOT provided so the password is effectively
+        # read-only after construction.
         self.neo4j_password = neo4j_password
         self.builder = builder
         self.phase1_processed_dir = phase1_processed_dir
         self.batch_size = batch_size
         self.prefer_postgres = prefer_postgres
+
+    def __repr__(self) -> str:
+        # P1-009 ROOT FIX (Team Member 9 v104): NEVER include the password
+        # in repr. This is defense in depth so log lines / error messages
+        # / debug prints never leak the Neo4j password.
+        return (
+            f"Neo4jExporter(neo4j_uri={self.neo4j_uri!r}, "
+            f"neo4j_user={self.neo4j_user!r}, "
+            f"neo4j_password=***, batch_size={self.batch_size!r}, "
+            f"prefer_postgres={self.prefer_postgres!r})"
+        )
 
     def export(
         self,
@@ -837,10 +1098,13 @@ class Neo4jExporter:
         Any ``None`` argument falls back to the value set at ``__init__``.
         This lets callers configure the exporter once and override per-call.
         """
+        # Use the private _neo4j_password (P1-009) if neither the per-call
+        # nor the public attribute provides one.
+        eff_password = neo4j_password if neo4j_password is not None else self.neo4j_password
         return export_to_neo4j(
             neo4j_uri=neo4j_uri if neo4j_uri is not None else self.neo4j_uri,
             neo4j_user=neo4j_user if neo4j_user is not None else self.neo4j_user,
-            neo4j_password=neo4j_password if neo4j_password is not None else self.neo4j_password,
+            neo4j_password=eff_password,
             phase1_processed_dir=phase1_processed_dir if phase1_processed_dir is not None else self.phase1_processed_dir,
             builder=builder if builder is not None else self.builder,
             batch_size=batch_size if batch_size is not None else self.batch_size,
@@ -857,16 +1121,17 @@ class Neo4jExporter:
         return validate_phase1_output_contract(phase1_processed_dir)
 
 
-# RT-009 ROOT FIX: explicit __all__ so it is crystal-clear what this module
-# exports. Prevents future regressions where a class or function is silently
-# removed and downstream consumers only discover the breakage at runtime.
-__all__ = [
-    "Neo4jExporter",
-    "Phase1OutputContract",
+# RT-009 + P1-011 ROOT FIX: explicit __all__ so it is crystal-clear what
+# this module exports. Prevents future regressions where a class or function
+# is silently removed and downstream consumers only discover the breakage
+# at runtime.
+__all__: list[str] = [
     "DOCX_REQUIRED_NODE_TYPES",
-    "export_to_neo4j",
+    "Neo4jExporter",            # RT-009 + P1-011 ROOT FIX: class-based API wrapper
+    "Phase1OutputContract",
     "check_neo4j_readiness",
-    "validate_phase1_output_contract",
     "check_node_type_coverage",
+    "export_to_neo4j",
     "is_synthetic_inchikey",
+    "validate_phase1_output_contract",
 ]

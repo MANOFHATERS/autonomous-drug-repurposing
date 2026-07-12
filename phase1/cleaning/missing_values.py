@@ -3197,11 +3197,39 @@ def validate_gda_scores(
         # The verify command caught that this block was dropped during a parallel
         # merge. Restoring the mapping_key-based verification logic.
         if source == "omim":
-            try:
-                from pipelines.omim_pipeline import SCORE_BY_MAPPING_KEY
-                _OMIM_CATEGORICAL_MAP = SCORE_BY_MAPPING_KEY
-            except ImportError:
-                _OMIM_CATEGORICAL_MAP = {1: 0.5, 2: 0.6, 3: 0.9, 4: 0.8}
+            # v104 FORENSIC ROOT FIX (P1-006 -- WRONG hardcoded fallback OMIM
+            #   score map):
+            #   The previous code had a ``try/except ImportError`` that fell
+            #   back to a HARDCODED score map ``{1: 0.5, 2: 0.6, 3: 0.9,
+            #   4: 0.8}`` when the canonical ``SCORE_BY_MAPPING_KEY`` import
+            #   from ``pipelines.omim_pipeline`` failed. The CANONICAL map
+            #   (Piñero 2020 §2.3, implemented in omim_pipeline.py:434) is
+            #   ``{1: 0.2, 2: 0.25, 3: 0.9, 4: 0.8}``. The fallback gave
+            #   ``mapping_key=1`` records a score of 0.5 (2.5x too high)
+            #   and ``mapping_key=2`` records 0.6 (2.4x too high). These
+            #   inflated scores propagated to the KG's Disease-gene edges,
+            #   then to the GNN's edge weights, then to the RL ranker's
+            #   plausibility dimension. A pharma partner acting on these
+            #   scores would prioritize weakly-supported disease-gene
+            #   associations as if they were strongly supported.
+            #
+            #   ROOT FIX: DELETE the fallback entirely. If the canonical
+            #   import fails, RAISE ImportError -- do not silently
+            #   substitute wrong values. The import can only fail for
+            #   three reasons, all of which are operator-actionable:
+            #     (1) Circular-dep guard fires (ARCH-1, GUARD-A7) -- the
+            #         caller is invoking validate_gda_scores at module-
+            #         load time of pipelines.omim_pipeline, which is a
+            #         bug in the caller. The error message says so.
+            #     (2) pipelines.omim_pipeline itself is broken (syntax
+            #         error, missing dependency) -- the operator must
+            #         fix the pipeline before continuing.
+            #     (3) The package layout is wrong (pipelines/ not on
+            #         sys.path) -- the operator must fix the install.
+            #   None of these are recoverable by silently substituting
+            #   wrong scores. Fail loud, fail fast.
+            from pipelines.omim_pipeline import SCORE_BY_MAPPING_KEY
+            _OMIM_CATEGORICAL_MAP = SCORE_BY_MAPPING_KEY
             if "_omim_categorical_mapped" not in out.columns:
                 out["_omim_categorical_mapped"] = False
             try:

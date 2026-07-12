@@ -17,6 +17,47 @@
 
 const OPENFDA_BASE = "https://api.fda.gov";
 
+/**
+ * FE-024 ROOT FIX (Team Member 15):
+ *
+ * ROOT CAUSE: openFDA's free public tier is rate-limited at 240 req/min
+ * SHARED across all unauthenticated callers. With 10 concurrent users
+ * the effective per-user rate drops to 24 req/min — too slow for a
+ * pharma partner demo. Registering an API key (free, via
+ * https://open.fda.gov/api/reference/) raises the limit to 120,000
+ * req/min per key. The previous code NEVER sent the `api_key` query
+ * param even when `OPENFDA_API_KEY` was set, AND never warned when it
+ * was missing — so operators had no signal that their demo would be
+ * slow until it was slow.
+ *
+ * ROOT FIX:
+ *   1. Append `&api_key=...` to every openFDA request when
+ *      `OPENFDA_API_KEY` is set.
+ *   2. Log a ONE-TIME warning when the key is missing (not per-request
+ *      — that would spam the logs). The warning names the env var so
+ *      operators know exactly what to set.
+ *   3. Expose `isOpenfdaApiKeyConfigured()` for the `/api/system/status`
+ *      endpoint to report the missing key as a degraded-service signal.
+ */
+
+let openfdaApiKeyWarned = false;
+
+export function isOpenfdaApiKeyConfigured(): boolean {
+  return Boolean(process.env.OPENFDA_API_KEY);
+}
+
+function warnIfApiKeyMissing(): void {
+  if (openfdaApiKeyWarned) return;
+  if (process.env.OPENFDA_API_KEY) return;
+  openfdaApiKeyWarned = true;
+  console.warn(
+    "[openfda] OPENFDA_API_KEY is not set. Requests will use the shared " +
+      "public rate limit (240 req/min across ALL unauthenticated callers). " +
+      "Register a free key at https://open.fda.gov/api/reference/ and set " +
+      "OPENFDA_API_KEY to raise the limit to 120,000 req/min."
+  );
+}
+
 export interface AdverseEventReaction {
   term: string;
   count: number;
@@ -87,6 +128,13 @@ export async function getDrugSafetySummary(drugName: string): Promise<DrugSafety
     `+OR+` +
     `patient.drug.openfda.brand_name:"${sanitized}"`;
   const params = new URLSearchParams({ limit: "100" });
+  // FE-024: include api_key when configured — raises rate limit from
+  // 240 req/min (shared public) to 120,000 req/min (per-key).
+  if (process.env.OPENFDA_API_KEY) {
+    params.set("api_key", process.env.OPENFDA_API_KEY);
+  } else {
+    warnIfApiKeyMissing();
+  }
   const encodedSearch = encodeURIComponent(searchValue).replace(/%2B/g, "+");
   const url = `${OPENFDA_BASE}/drug/event.json?search=${encodedSearch}&${params.toString()}`;
 
