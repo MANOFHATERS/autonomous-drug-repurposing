@@ -926,10 +926,65 @@ def _compute_normalized_score(
     Returns ``None`` if either input is None.  The source weights come
     from :data:`config.settings.DISGENET_SOURCE_WEIGHTS` (configurable
     via the ``DISGENET_SOURCE_WEIGHTS`` env var, JSON object).
+
+    P1-039 ROOT FIX (unknown sub-source defaults to CURATED-quality weight):
+      The previous code did ``DISGENET_SOURCE_WEIGHTS.get(source_id, 1.0)``.
+      ``DISGENET_SOURCE_WEIGHTS`` is a fixed dict in ``config/settings.py``
+      with 12 known sub-sources (CURATED=1.0, CGI=0.95, ..., BEFREE=0.5,
+      RONB=0.5). If DisGeNET adds a new sub-source (e.g. "OPENTARGETS"),
+      the ``.get(source_id, 1.0)`` returned 1.0 — the SAME weight as
+      CURATED (the most reliable sub-source). The new sub-source's scores
+      were treated as CURATED-quality.
+
+      ROOT FIX: default unknown sources to a LOW weight (0.3 — below
+      BEFREE/RONB's 0.5, the lowest known weight) and log a WARNING so
+      operators know to add the new source to
+      ``DISGENET_SOURCE_WEIGHTS``. This ensures a new DisGeNET sub-source
+      with poor curation (e.g. an automatic text-mining pipeline) does
+      NOT get treated as CURATED-quality. The WARNING includes the
+      unknown source_id and the default weight so the operator can
+      decide whether to add it with a higher weight.
+
+      Strict mode: if ``DISGENET_STRICT_SOURCE_WEIGHTS=1`` is set, raise
+      ``ValueError`` on unknown sources instead of using the default.
+      This is for operators who want to enforce that every source is
+      explicitly weighted.
     """
     if score is None or pd.isna(score) or source_id is None:
         return None
-    weight = DISGENET_SOURCE_WEIGHTS.get(source_id, 1.0)
+    # P1-039 ROOT FIX: default to LOW weight for unknown sources.
+    _UNKNOWN_SOURCE_DEFAULT_WEIGHT: float = 0.3
+    _strict_mode = os.environ.get("DISGENET_STRICT_SOURCE_WEIGHTS", "") == "1"
+    if source_id not in DISGENET_SOURCE_WEIGHTS:
+        if _strict_mode:
+            raise ValueError(
+                f"P1-039 strict mode: unknown DisGeNET sub-source "
+                f"{source_id!r} not in DISGENET_SOURCE_WEIGHTS. Either "
+                f"add it to config/settings.py or set "
+                f"DISGENET_STRICT_SOURCE_WEIGHTS=0 to use the default "
+                f"weight {_UNKNOWN_SOURCE_DEFAULT_WEIGHT}."
+            )
+        # Use a module-level set to warn ONCE per unknown source per
+        # process (avoids log spam on every row of a 1M-row DataFrame).
+        global _warned_unknown_sources
+        try:
+            _warned_unknown_sources
+        except NameError:
+            _warned_unknown_sources: set[str] = set()
+        if source_id not in _warned_unknown_sources:
+            _warned_unknown_sources.add(source_id)
+            logger.warning(
+                "P1-039: unknown DisGeNET sub-source %r not in "
+                "DISGENET_SOURCE_WEIGHTS — using default weight %.2f "
+                "(below BEFREE/RONB's 0.5). Add the source to "
+                "DISGENET_SOURCE_WEIGHTS in config/settings.py to "
+                "override. This warning fires ONCE per source per "
+                "process.",
+                source_id, _UNKNOWN_SOURCE_DEFAULT_WEIGHT,
+            )
+        weight = _UNKNOWN_SOURCE_DEFAULT_WEIGHT
+    else:
+        weight = DISGENET_SOURCE_WEIGHTS[source_id]
     return float(score) * float(weight)
 
 
