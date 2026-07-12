@@ -3554,23 +3554,55 @@ def train_transe(
                             float(_loss_half.item()) / _full_loss_val
                             if _full_loss_val > 0 else 1.0
                         )
-                        if not (0.95 <= _ratio <= 1.05):
+                        # v106 ROOT FIX (P2-018 — false-positive guard):
+                        # The v104 guard used tolerance [0.95, 1.05],
+                        # which is too tight for SMALL batches. The
+                        # guard compares the mean loss of the FIRST HALF
+                        # of the batch to the mean loss of the FULL batch.
+                        # With .mean() reduction, the expected ratio is
+                        # 1.0, but the VARIANCE is high for small batches:
+                        # the first 8 triples of a 16-triple batch can
+                        # easily have a 15-25%% different mean than the
+                        # full 16, purely by sampling chance. The v104
+                        # guard fired false positives on small batches,
+                        # ABORTING legitimate training even though .mean()
+                        # was correctly used.
+                        #
+                        # The ROOT FIX: widen the tolerance to [0.70, 1.30].
+                        # This cleanly separates the two cases:
+                        #   - .sum() reduction: ratio ≈ 0.5 (half the
+                        #     elements → half the sum). 0.5 < 0.70 →
+                        #     REJECTED (guard fires, as intended).
+                        #   - .mean() reduction: ratio ≈ 1.0 ± 0.25
+                        #     (sampling variance on small batches).
+                        #     0.70 ≤ ratio ≤ 1.30 → ACCEPTED.
+                        # The [0.70, 1.30] window is the widest window
+                        # that still rejects .sum() (ratio 0.5) while
+                        # accepting .mean() with up to 30%% sampling
+                        # variance. For batch_size ≥ 64 the variance
+                        # shrinks below 10%%, so the guard becomes more
+                        # precise at production scale.
+                        if not (0.70 <= _ratio <= 1.30):
                             raise RuntimeError(
                                 f"P2-018 ROOT FIX: loss reduction is NOT "
                                 f"batch-size-independent — half-batch loss "
                                 f"={float(_loss_half.item()):.6f} vs "
                                 f"full-batch loss={_full_loss_val:.6f} "
                                 f"(ratio={_ratio:.4f}). Expected ratio ~1.0 "
-                                f"with .mean() reduction. A .sum() reduction "
-                                f"would produce ratio ~0.5. Aborting training "
-                                f"to prevent silent lr/batch coupling. "
-                                f"Restore .mean() in the loss formula. "
-                                f"(P2-018 root fix runtime guard)"
+                                f"with .mean() reduction (tolerance "
+                                f"[0.70, 1.30] for small-batch variance). "
+                                f"A .sum() reduction would produce ratio "
+                                f"~0.5 (outside tolerance). Aborting "
+                                f"training to prevent silent lr/batch "
+                                f"coupling. Restore .mean() in the loss "
+                                f"formula. (P2-018 root fix runtime guard, "
+                                f"v106 widened tolerance)"
                             )
                         logger.info(
                             "P2-018 ROOT FIX: loss reduction verified "
                             "batch-size-independent (half-batch ratio = "
-                            "%.4f, expected ~1.0). (P2-018)",
+                            "%.4f, expected ~1.0 within [0.70, 1.30]). "
+                            "(P2-018)",
                             _ratio,
                         )
 
