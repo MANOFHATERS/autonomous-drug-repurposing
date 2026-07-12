@@ -5440,7 +5440,39 @@ def literature_crosscheck(
     (1000+ candidates). The fix adds time.sleep(0.34) between requests
     (3/sec limit) when no API key is set, and time.sleep(0.11) (10/sec
     limit) when an API key is provided.
+
+    P4-012 ROOT FIX (LOW — Team Cosmic / Phase 4): the previous code
+    checked RL_SKIP_LITERATURE ONLY inside the `except ImportError`
+    branch — i.e., the env var was honored ONLY when biopython was
+    NOT installed. When biopython WAS installed, RL_SKIP_LITERATURE
+    was silently IGNORED, and the function made real PubMed network
+    calls — defeating the purpose of the escape hatch in CI/CD,
+    airgapped environments, and unit tests. The fix checks
+    RL_SKIP_LITERATURE FIRST (before importing biopython) so the env
+    var is a TRUE escape hatch regardless of biopython's install state.
     """
+    # P4-012 ROOT FIX: honor RL_SKIP_LITERATURE FIRST, before attempting
+    # to import biopython. This makes the env var a true escape hatch that
+    # works in CI/CD, airgapped environments, and unit tests — regardless
+    # of whether biopython is installed. The previous code only checked
+    # the env var inside the `except ImportError` branch, so deployments
+    # that had biopython installed but wanted to skip the network calls
+    # (e.g., CI, airgapped) silently made real PubMed calls.
+    if os.environ.get("RL_SKIP_LITERATURE"):
+        logger.warning(
+            "P4-012 ROOT FIX: RL_SKIP_LITERATURE is set -- skipping "
+            "literature cross-check entirely (no PubMed network calls). "
+            "All candidates will have literature_support=False. The V1 "
+            "launch criterion '>=5 literature-supported predictions' "
+            "WILL FAIL. This escape hatch is for CI/CD, airgapped "
+            "environments, and unit tests. To enable the literature "
+            "check, unset RL_SKIP_LITERATURE and install biopython "
+            "(pip install biopython)."
+        )
+        for c in top_candidates:
+            c.literature_support = False
+        return top_candidates
+
     try:
         from Bio import Entrez  # type: ignore
     except ImportError:
