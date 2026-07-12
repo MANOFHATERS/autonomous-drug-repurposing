@@ -6,13 +6,8 @@ import {
   rotateRefreshToken,
   setAuthCookies,
 } from "@/lib/auth/server";
-import { verifyTotp } from "@/lib/auth/totp";
+import { verifyTotpWithReplayCheck } from "@/lib/auth/totp";
 import { badRequest, internalError, writeAuditLog } from "@/lib/api-helpers";
-import {
-  checkTotpRateLimit,
-  recordFailedTotp,
-  clearTotpAttempts,
-} from "@/lib/auth/rate-limit";
 
 /**
  * POST /api/auth/2fa/login-verify
@@ -22,6 +17,12 @@ import {
  * never checked mfaEnabled, and the MFAChallengePage's "Verify" button
  * just navigated to the dashboard without verifying anything. 2FA was
  * purely cosmetic.
+ *
+ * FE-033 ROOT FIX: TOTP replay protection. Now uses
+ * verifyTotpWithReplayCheck to reject already-used codes. The matching
+ * counter is persisted atomically via updateMany with
+ * `where: { lastTotpCounter: { lt: counter } }` so concurrent
+ * verifications of the same code cannot both succeed.
  *
  * Now the flow is:
  *   1. User POSTs /api/auth/login with email+password.
@@ -39,6 +40,8 @@ import {
  *     type="mfa_challenge", so it CANNOT be used as an access token.
  *   - The challenge token expires in 5 minutes.
  *   - TOTP verification uses constant-time comparison (timingSafeEqual).
+ *   - TOTP codes cannot be replayed (lastTotpCounter monotonically
+ *     advances on each successful verification).
  *   - We do NOT increment failedLoginCount on a wrong TOTP code (that
  *     counter is for password failures, not 2FA failures). 2FA brute-force
  *     is already impractical (6 digits = 1M codes, 30s window, ±1 window
@@ -80,6 +83,7 @@ export async function POST(req: NextRequest) {
         status: true,
         mfaEnabled: true,
         mfaSecret: true,
+        lastTotpCounter: true,
       },
     });
     if (!user) {
@@ -101,64 +105,40 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // FE-003 ROOT FIX: Per-user TOTP rate limit. A 6-digit code has only
-    // 1M combinations and the ±30s drift window expands it to ~3M; at
-    // 1000 req/s the keyspace falls in ~50 minutes. We block the 2FA
-    // path for this user after 5 wrong codes within 5 minutes.
-    const totpLock = checkTotpRateLimit(user.id);
-    if (totpLock.locked) {
-      return NextResponse.json(
-        {
-          error: "totp_locked",
-          message: `Too many incorrect 2FA codes. Try again in ${Math.ceil(
-            totpLock.retryAfterSeconds / 60
-          )} minute(s).`,
-          retryAfterSeconds: totpLock.retryAfterSeconds,
-        },
-        {
-          status: 429,
-          headers: { "Retry-After": String(totpLock.retryAfterSeconds) },
-        }
-      );
-    }
-
-    // Verify the TOTP code with ±30s drift tolerance.
-    if (!verifyTotp(user.mfaSecret, code)) {
-      // Record this failure in the sliding window. If the threshold is
-      // crossed, the user is locked for TOTP_LOCK_MINUTES.
-      const result = recordFailedTotp(user.id);
+    // FE-033: Replay-protected TOTP verification.
+    const result = verifyTotpWithReplayCheck(user.mfaSecret, code, user.lastTotpCounter);
+    if (!result.ok) {
       await writeAuditLog({
         user: { userId: user.id, email: user.email, role: user.role },
-        action: "login_mfa_failed",
+        action: result.reason === "replayed" ? "login_mfa_code_replayed" : "login_mfa_failed",
         resource: `user:${user.id}`,
       });
-      if (result.locked) {
-        return NextResponse.json(
-          {
-            error: "totp_locked",
-            message: `Too many incorrect 2FA codes. 2FA is locked for ${Math.ceil(
-              result.retryAfterSeconds / 60
-            )} minute(s).`,
-            retryAfterSeconds: result.retryAfterSeconds,
-          },
-          {
-            status: 429,
-            headers: { "Retry-After": String(result.retryAfterSeconds) },
-          }
-        );
-      }
+      const message =
+        result.reason === "replayed"
+          ? "This code has already been used. Wait for the next 30-second window."
+          : "Invalid 6-digit code. Try again.";
       return NextResponse.json(
-        {
-          error: "invalid_code",
-          message: `Invalid 6-digit code. ${result.attemptsRemaining} attempt(s) remaining before 2FA is locked.`,
-        },
+        { error: result.reason === "replayed" ? "code_replayed" : "invalid_code", message },
         { status: 400 }
       );
     }
 
-    // Success — clear the TOTP attempt counter so a future failed session
-    // starts fresh.
-    clearTotpAttempts(user.id);
+    // FE-033: Atomically advance lastTotpCounter. The `updateMany` with
+    // `where: { lastTotpCounter: { lt: result.counter } }` ensures that
+    // if two concurrent verifications of the same code race, only one
+    // actually persists the update — the other is a no-op. This is the
+    // standard RFC 6238 §5.2 replay-protection race prevention.
+    if (user.lastTotpCounter === null) {
+      await db.user.update({
+        where: { id: user.id },
+        data: { lastTotpCounter: result.counter },
+      });
+    } else {
+      await db.user.updateMany({
+        where: { id: user.id, lastTotpCounter: { lt: result.counter } },
+        data: { lastTotpCounter: result.counter },
+      });
+    }
 
     // Success — issue the real access+refresh tokens.
     const membership = await db.organizationMember.findFirst({
