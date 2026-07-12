@@ -734,3 +734,38 @@ Stage Summary:
 - Phase 1 → Phase 2 connectivity confirmed (P1-018 eliminates drugs table read race)
 - Production-ready: no breaking changes, all fixes root-level
  fix/team-2-p1-015-028-verification-v102
+
+---
+Task ID: P4-verified-v2-team11
+Agent: Team 11 (RL Agent + Orchestration)
+Task: Verify and root-fix 14 issues (P4-001..P4-013, ORCH-001) by running REAL CODE, not trusting comments.
+
+Work Log:
+- Read project DOCX (Team_Cosmic_Build_Process_Updated.docx) to understand 4-phase architecture (Phase 1 data, Phase 2 KG, Phase 3 GT, Phase 4 RL).
+- Cloned repo, installed deps: numpy 2.1.3, pandas 2.2.3, sklearn 1.5.2, torch 2.13.0+cpu, stable_baselines3 2.9.0, gymnasium 1.3.0.
+- Wrote tests/test_p4_verified_fixes.py with 15 tests that exercise ACTUAL CODE PATHS (not comments) for all 14 issues.
+- Initial run: 13/15 passed. Two failures revealed:
+  (a) Test bug: wrong column name (_is_known vs re-derived KP membership).
+  (b) REAL BUG P4-012: RL_SKIP_LITERATURE was only checked inside 'except ImportError' branch, so deployments WITH biopython installed silently made real PubMed network calls, defeating the escape hatch in CI/CD, airgapped environments, and unit tests.
+- Applied root-cause fix to P4-012: moved RL_SKIP_LITERATURE check to the TOP of literature_crosscheck (before importing biopython), so the env var is a TRUE escape hatch regardless of biopython's install state.
+- Re-ran verification tests: 15/15 pass.
+- Ran REAL standalone pipeline: python -m rl.rl_drug_ranker --timesteps 256 --top-n 5 --skip-literature. Pipeline completed with scientific_validation_passed=true, produced top_candidates CSV with 5 ranked candidates (2 KPs), model_checkpoint='none' (P4-005 blocked standalone save), literature_support=0 for all (P4-012 honored RL_SKIP_LITERATURE).
+- Regression check: tests/test_p4_001_024_forensic_fixes.py (38 passed), tests/test_orch_002_to_006_root_fixes.py (5 passed). Total 58 passed, 0 failed.
+- Created branch fix/p4-001-013-verified-v2-team11, committed, pushed.
+- Merged latest origin/main into branch (no conflicts).
+- Merged branch into main with --no-ff.
+- Fresh-cloned repo to /tmp/adr-fresh-verify, confirmed:
+  * Latest commit: f0d7b83 (the merge)
+  * P4-012 fix present at line 5454 of rl/rl_drug_ranker.py
+  * tests/test_p4_verified_fixes.py present
+  * All 15 verification tests pass on fresh clone
+  * Real standalone pipeline runs end-to-end on fresh clone (1024 timesteps, scientific_validation_passed=true)
+
+Stage Summary:
+- 13 of 14 issues were already correctly fixed in main (verified by real code execution, not comments).
+- 1 issue (P4-012) had a real runtime bug that was fixed in this PR.
+- 15 new verification tests added to prevent regression.
+- 58 total tests pass (15 new + 38 P4 + 5 ORCH).
+- Branch: fix/p4-001-013-verified-v2-team11 (pushed)
+- Main commit: f0d7b83 (merge commit)
+- Fresh-clone verification: PASSED
