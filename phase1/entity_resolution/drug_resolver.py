@@ -18,6 +18,19 @@ merge corrupts the data flywheel (Phase 6+ retrains).  A privacy leak in
 logging exposes investigational compound names to PubChem and to log
 aggregators.  Every fix here prevents a downstream failure.
 
+P1-038 ROOT FIX (audit-trail extraction):
+  This file previously had ~57 inline "FORENSIC ROOT FIX (BUG #X)"
+  comment blocks (often 20–50 lines each), making the 6,600+ line file
+  nearly unmaintainable. The audit comments are valuable for
+  traceability but should be indexed in a separate file. The full
+  forensic context for every fix in this file now lives in
+  ``AUDIT_TRAIL.md`` (next to this file). Inline comments now contain
+  only the essential "why this code exists" context (1–3 lines max)
+  plus a one-line pointer to the AUDIT_TRAIL.md entry. When
+  investigating a bug, find the relevant BUG # in AUDIT_TRAIL.md, read
+  the root-fix description, then jump to the cited line range here for
+  the code-level fix.
+
 Resolution strategy (priority order)
 ------------------------------------
 1. **InChIKey exact match** (confidence 1.0) — full 27-char equality.
