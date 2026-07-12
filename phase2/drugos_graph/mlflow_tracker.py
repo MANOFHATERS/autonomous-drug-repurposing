@@ -503,3 +503,257 @@ class MLflowTracker:
         # The previous ``return False`` was dead code that could mislead a
         # maintainer into thinking the return value mattered. The
         # convention is to return None (implicitly) from __del__.
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # P2-024 ROOT FIX (Team 8 — forensic completion): the REAPER.
+    # ─────────────────────────────────────────────────────────────────────────
+    # The heartbeat (above) writes ``drugos.heartbeat_ts`` every 30s. But
+    # the issue ALSO requires: "If a run's heartbeat is >5 minutes stale,
+    # MLflow can mark it as FAILED." The previous fix only wrote the
+    # heartbeat — there was no function that QUERIED MLflow for stale
+    # RUNNING runs and MARKED them FAILED. Ops had to do it manually.
+    # This is the missing piece: a classmethod that ops (or a cron job,
+    # or an Airflow sensor) calls periodically to reap stale runs.
+    # ─────────────────────────────────────────────────────────────────────────
+    @classmethod
+    def reap_stale_runs(
+        cls,
+        experiment_name: Optional[str] = None,
+        stale_threshold_seconds: Optional[int] = None,
+        *,
+        dry_run: bool = False,
+    ) -> Dict[str, Any]:
+        """P2-024 ROOT FIX (Team 8): mark stale RUNNING runs as FAILED.
+
+        The heartbeat thread (``_heartbeat_loop``) updates
+        ``drugos.heartbeat_ts`` on the MLflow run every
+        ``heartbeat_interval`` seconds. If the process is SIGKILL'd
+        (OOM kill, kernel panic, ``os._exit``), atexit does NOT fire
+        and the heartbeat stops. The MLflow run stays in RUNNING state
+        forever. After 100 OOM-killed runs, the MLflow UI shows 100
+        "RUNNING" runs that are actually dead — ops cannot find the
+        real active run, and the audit trail is corrupted.
+
+        This classmethod queries MLflow for all RUNNING runs in the
+        experiment, reads each run's ``drugos.heartbeat_ts`` tag, and
+        marks runs whose heartbeat is older than ``stale_threshold_seconds``
+        as FAILED (with a ``drugos.reaped_reason="heartbeat_stale"`` tag
+        so ops can audit the reap action).
+
+        Called by:
+          - ops manually: ``python -c "from drugos_graph.mlflow_tracker
+            import MLflowTracker; MLflowTracker.reap_stale_runs()"``
+          - a cron job / Airflow sensor that runs every 5 minutes
+          - the pipeline's startup self-check (to clean up stale runs
+            from a previous crashed invocation before starting a new one)
+
+        Args:
+            experiment_name: The MLflow experiment to scan. If None,
+                uses the default ``"DrugOS_Phase2"`` (matching
+                ``MLflowTracker.__init__``).
+            stale_threshold_seconds: A run is considered stale if its
+                ``drugos.heartbeat_ts`` is more than this many seconds
+                in the past. If None, uses
+                ``DEFAULT_HEARTBEAT_STALE_THRESHOLD_SECONDS`` (default
+                300 = 5 minutes, override via
+                ``DRUGOS_MLFLOW_HEARTBEAT_STALE_THRESHOLD``).
+            dry_run: If True, log what WOULD be reaped but do NOT
+                actually mark runs as FAILED. Useful for ops to
+                preview the reap action before running it for real.
+
+        Returns:
+            A dict with keys:
+              - ``scanned`` (int): number of RUNNING runs examined.
+              - ``reaped`` (int): number of runs marked FAILED (0 if
+                ``dry_run=True``).
+              - ``skipped_no_heartbeat_tag`` (int): runs without a
+                ``drugos.heartbeat_ts`` tag (pre-P2-024 runs or runs
+                from other tools). These are NOT reaped — they may
+                be legitimate long-running runs from a different tool.
+              - ``skipped_heartbeat_recent`` (int): runs with a recent
+                heartbeat (within the threshold).
+              - ``reaped_run_ids`` (List[str]): IDs of reaped runs.
+              - ``errors`` (List[str]): error messages for runs that
+                could not be reaped (e.g. MLflow server error).
+
+        Raises:
+            RuntimeError: if MLflow is not installed (the reaper
+                requires MLflow to query and update runs).
+        """
+        try:
+            import mlflow
+        except ImportError as exc:
+            raise RuntimeError(
+                "P2-024 reap_stale_runs requires mlflow to be installed. "
+                "Install with: pip install mlflow"
+            ) from exc
+
+        if experiment_name is None:
+            experiment_name = "DrugOS_Phase2"
+        if stale_threshold_seconds is None:
+            stale_threshold_seconds = DEFAULT_HEARTBEAT_STALE_THRESHOLD_SECONDS
+
+        result: Dict[str, Any] = {
+            "scanned": 0,
+            "reaped": 0,
+            "skipped_no_heartbeat_tag": 0,
+            "skipped_heartbeat_recent": 0,
+            "reaped_run_ids": [],
+            "errors": [],
+            "dry_run": dry_run,
+            "stale_threshold_seconds": stale_threshold_seconds,
+            "experiment_name": experiment_name,
+        }
+
+        try:
+            exp = mlflow.get_experiment_by_name(experiment_name)
+            if exp is None:
+                # No experiment — nothing to reap.
+                logger.info(
+                    "P2-024 reap_stale_runs: experiment %r not found — "
+                    "nothing to reap.",
+                    experiment_name,
+                )
+                return result
+            runs = mlflow.search_runs(
+                experiment_ids=[exp.experiment_id],
+                filter_string="attributes.status = 'RUNNING'",
+            )
+        except Exception as exc:
+            result["errors"].append(
+                f"failed to query MLflow for RUNNING runs: {exc}"
+            )
+            logger.error(
+                "P2-024 reap_stale_runs: failed to query MLflow: %s", exc
+            )
+            return result
+
+        # `runs` is a pandas DataFrame; if pandas is not available or
+        # the search returned no runs, fall back to an empty iterable.
+        try:
+            run_rows = runs.iterrows() if hasattr(runs, "iterrows") else []
+        except Exception:
+            run_rows = []
+
+        now = time.time()
+        for _, row in run_rows:
+            result["scanned"] += 1
+            # The run_id is the index of the DataFrame (mlflow.search_runs
+            # uses run_id as the index).
+            try:
+                run_id = row.name if hasattr(row, "name") else None
+            except Exception:
+                run_id = None
+            if run_id is None:
+                result["errors"].append(
+                    "could not extract run_id from MLflow search row"
+                )
+                continue
+
+            # Read the heartbeat timestamp tag.
+            # mlflow.search_runs puts tags in columns named "tags.<tag_name>".
+            heartbeat_ts_str = None
+            try:
+                if hasattr(runs, "columns"):
+                    tag_col = f"tags.{HEARTBEAT_TAG_NAME}"
+                    if tag_col in runs.columns:
+                        heartbeat_ts_str = row.get(tag_col)
+                # Fallback: use mlflow.get_run to read tags directly
+                # (more reliable across MLflow versions).
+                if heartbeat_ts_str is None:
+                    run_info = mlflow.get_run(run_id)
+                    heartbeat_ts_str = run_info.data.tags.get(HEARTBEAT_TAG_NAME)
+            except Exception as exc:
+                result["errors"].append(
+                    f"run {run_id}: failed to read heartbeat tag: {exc}"
+                )
+                continue
+
+            if heartbeat_ts_str is None:
+                # No heartbeat tag — this is either a pre-P2-024 run or
+                # a run from a different tool. Do NOT reap it (it may be
+                # a legitimate long-running run from another tool that
+                # doesn't use our heartbeat convention).
+                result["skipped_no_heartbeat_tag"] += 1
+                logger.info(
+                    "P2-024 reap_stale_runs: run %s has no %s tag — "
+                    "skipping (may be a pre-P2-024 run or a run from "
+                    "a different tool).",
+                    run_id, HEARTBEAT_TAG_NAME,
+                )
+                continue
+
+            try:
+                heartbeat_ts = float(heartbeat_ts_str)
+            except (TypeError, ValueError):
+                result["errors"].append(
+                    f"run {run_id}: heartbeat tag {heartbeat_ts_str!r} "
+                    f"is not a valid float"
+                )
+                continue
+
+            age = now - heartbeat_ts
+            if age <= stale_threshold_seconds:
+                result["skipped_heartbeat_recent"] += 1
+                logger.debug(
+                    "P2-024 reap_stale_runs: run %s heartbeat is %.1fs "
+                    "old (within threshold %ds) — skipping.",
+                    run_id, age, stale_threshold_seconds,
+                )
+                continue
+
+            # The run is stale — mark it FAILED.
+            logger.warning(
+                "P2-024 reap_stale_runs: run %s heartbeat is %.1fs old "
+                "(threshold %ds) — %s.",
+                run_id, age, stale_threshold_seconds,
+                "would mark FAILED (dry_run)" if dry_run else "marking FAILED",
+            )
+            if dry_run:
+                result["reaped_run_ids"].append(run_id)
+                # In dry_run, don't actually mark — just count what we
+                # WOULD reap. The reaped count is 0 (we didn't reap).
+                continue
+
+            try:
+                mlflow.set_terminated(run_id, status="FAILED")
+                # Also set a tag so ops can audit WHY the run was reaped.
+                try:
+                    client = mlflow.tracking.MlflowClient()
+                    client.set_tag(
+                        run_id, "drugos.reaped_reason", "heartbeat_stale"
+                    )
+                    client.set_tag(
+                        run_id,
+                        "drugos.reaped_heartbeat_age_seconds",
+                        str(int(age)),
+                    )
+                    client.set_tag(
+                        run_id, "drugos.reaped_at", str(now),
+                    )
+                except Exception:
+                    # The set_terminated call already marked the run
+                    # FAILED; the audit tags are best-effort.
+                    pass
+                result["reaped"] += 1
+                result["reaped_run_ids"].append(run_id)
+            except Exception as exc:
+                result["errors"].append(
+                    f"run {run_id}: failed to mark FAILED: {exc}"
+                )
+                logger.error(
+                    "P2-024 reap_stale_runs: failed to mark run %s as "
+                    "FAILED: %s",
+                    run_id, exc,
+                )
+
+        logger.info(
+            "P2-024 reap_stale_runs: scanned=%d, reaped=%d, "
+            "skipped_no_heartbeat=%d, skipped_recent=%d, errors=%d "
+            "(dry_run=%s, threshold=%ds)",
+            result["scanned"], result["reaped"],
+            result["skipped_no_heartbeat_tag"],
+            result["skipped_heartbeat_recent"],
+            len(result["errors"]), dry_run, stale_threshold_seconds,
+        )
+        return result
