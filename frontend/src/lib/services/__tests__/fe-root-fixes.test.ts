@@ -298,9 +298,17 @@ describe("FE-002 + FE-003: Real API proxies implemented", () => {
 
   test("Dataset route implements real proxy (not 501)", () => {
     expect(ds).not.toMatch(/"not_implemented"/);
-    expect(ds).toMatch(/DATASET_SERVICE_URL/);
-    expect(ds).toMatch(/datasetUrl/);
-    expect(ds).toMatch(/fetch\(/);
+    // FE-021 ROOT FIX: the route now delegates to `getDatasetStats()`
+    // in dataset-stats.ts, which handles the DATASET_SERVICE_URL proxy
+    // AND the local checkpoint fallback. The route is a thin handler.
+    // Previous assertions checked for `fetch(`/`datasetUrl` directly
+    // in the route — those moved to the service layer where they belong.
+    expect(ds).toMatch(/getDatasetStats/);
+    expect(ds).toMatch(/dataset-stats/);
+    // The proxy logic lives in the service now — verify it's there.
+    const dssvc = readSrc("lib/services/dataset-stats.ts");
+    expect(dssvc).toMatch(/DATASET_SERVICE_URL/);
+    expect(dssvc).toMatch(/fetch\(/);
   });
 });
 

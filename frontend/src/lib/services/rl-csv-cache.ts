@@ -193,3 +193,53 @@ export function __clearRlCsvCacheForTests(): void {
   cache.clear();
   watchedPaths.clear();
 }
+
+/**
+ * FE-022 ROOT FIX (Team Member 15):
+ *
+ * `fs.watch()` is unreliable on NFS, Samba, and some Linux filesystems —
+ * the change event may not fire, leaving the cache stale until the 60s
+ * TTL expires. For a pharma partner demo, 60 seconds of stale RL data
+ * is noticeable.
+ *
+ * Root fix: expose a PRODUCTION-SAFE manual cache-clear function that
+ * the dashboard's "Refresh" button can call via POST /api/rl/refresh.
+ * This complements (does not replace) the `fs.watch` invalidation —
+ * the watcher still fires on platforms that support it, but operators
+ * and researchers can now force a refresh on demand.
+ *
+ * @param path Optional CSV path. If omitted, clears ALL cached paths.
+ */
+export function clearRlCsvCache(path?: string): void {
+  if (path) {
+    cache.delete(path);
+    // Note: we deliberately do NOT remove the path from `watchedPaths`.
+    // The watcher is still registered; we just invalidate the cached
+    // entry so the next read re-parses from disk.
+  } else {
+    cache.clear();
+  }
+}
+
+/**
+ * FE-022: inspect the cache state for observability / debugging.
+ * Returns the list of cached paths and their parsedAt timestamps.
+ */
+export function getRlCsvCacheState(): Array<{
+  path: string;
+  parsedAt: number;
+  mtimeMs: number;
+  candidateCount: number;
+  ageMs: number;
+  ttlRemainingMs: number;
+}> {
+  const now = Date.now();
+  return Array.from(cache.entries()).map(([p, entry]) => ({
+    path: p,
+    parsedAt: entry.parsedAt,
+    mtimeMs: entry.mtimeMs,
+    candidateCount: entry.candidates.length,
+    ageMs: now - entry.parsedAt,
+    ttlRemainingMs: Math.max(0, TTL_MS - (now - entry.parsedAt)),
+  }));
+}
