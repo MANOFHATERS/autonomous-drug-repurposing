@@ -2431,7 +2431,7 @@ class PyGBuilder(GraphBuilderProtocol):
             except Exception:
                 pass  # defensive — fall back to per-split filtering
 
-            def _make_split(mask_indices, generate_negatives: bool = False):
+            def _make_split(mask_indices, generate_negatives: bool = False, split_name: str = ""):
                 split_data = HeteroData()
                 # v72 ROOT FIX (P2C-013): CLONE node features per split.
                 # The previous code assigned ``split_data[nt].x = data[nt].x``
@@ -2720,8 +2720,51 @@ class PyGBuilder(GraphBuilderProtocol):
                         max_attempts = n_pos * 50
                         attempts = 0
                         # Seed the local RNG for reproducibility.
+                        # P2-034 ROOT FIX: incorporate ``split_name`` into
+                        # the seed so val and test splits with the SAME
+                        # size produce DIFFERENT negative samples.
+                        #
+                        # The previous seed was
+                        # ``self.config.seed + len(mask_indices)`` — it
+                        # depended ONLY on the split size, not on which
+                        # split (train/val/test) it was. For a 10K-edge
+                        # graph with 10% val + 10% test, both val and
+                        # test have 1K edges → same seed → SAME negatives.
+                        # Val and test AUC were computed on overlapping
+                        # negative sets, biasing the comparison and
+                        # leading to mild overfitting to the test set
+                        # (the "best val epoch" selection was correlated
+                        # with test AUC).
+                        #
+                        # ROOT FIX: hash (split_name, len(mask_indices))
+                        # into the seed using a DETERMINISTIC hash
+                        # (``hashlib.sha256``, NOT Python's built-in
+                        # ``hash()`` which is randomized per-process via
+                        # PYTHONHASHSEED and would break reproducibility
+                        # across runs). This guarantees:
+                        #   (1) val and test with the same size get
+                        #       DIFFERENT seeds (independent RNG streams);
+                        #   (2) the same split with the same size gets
+                        #       the SAME seed across runs (reproducible);
+                        #   (3) changing val_ratio changes test negatives
+                        #       only if it changes the test SIZE (the
+                        #       split_name component is stable).
+                        # The ``& 0xFFFFFFFF`` masks to 32 bits because
+                        # ``torch.Generator.manual_seed`` requires a
+                        # uint32 (Python ints are arbitrary precision).
+                        _split_seed_str = f"{split_name}:{len(mask_indices)}".encode("utf-8")
+                        _split_seed_component = (
+                            int.from_bytes(
+                                hashlib.sha256(_split_seed_str).digest()[:4],
+                                byteorder="big",
+                                signed=False,
+                            )
+                            & 0xFFFFFFFF
+                        )
                         _neg_rng = torch.Generator()
-                        _neg_rng.manual_seed(self.config.seed + len(mask_indices))
+                        _neg_rng.manual_seed(
+                            (self.config.seed + _split_seed_component) & 0xFFFFFFFF
+                        )
                         # v81 P0-F3: sample from the per-split entity
                         # pools (inductive), not the full graph node
                         # count (transductive).
@@ -2886,9 +2929,9 @@ class PyGBuilder(GraphBuilderProtocol):
 
             # H-8: train split stays positive-only; val/test get
             # negatives so AUC is computable on the held-out splits.
-            train_data = _make_split(train_mask, generate_negatives=False)
-            val_data = _make_split(val_mask, generate_negatives=True)
-            test_data = _make_split(test_mask, generate_negatives=True)
+            train_data = _make_split(train_mask, generate_negatives=False, split_name="train")
+            val_data = _make_split(val_mask, generate_negatives=True, split_name="val")
+            test_data = _make_split(test_mask, generate_negatives=True, split_name="test")
 
             # FIX(issue-80): temporal_split output compatible with PyG
             # training -- post-split assertion.

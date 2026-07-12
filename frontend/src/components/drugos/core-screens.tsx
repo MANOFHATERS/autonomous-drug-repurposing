@@ -1235,6 +1235,26 @@ function KnowledgeGraphScreen() {
     drug: searchQuery.length >= 2 ? searchQuery : undefined,
   });
 
+  // FE-067 ROOT FIX: "View candidate detail" button used to look up the
+  // clicked drug node in the MOCK `drugCandidates` array. For real RL
+  // candidates (sourced from /api/rl), the mock lookup returned undefined
+  // and the button silently did nothing. Now we fetch the real RL top-N
+  // candidates via the same /api/rl endpoint the dashboard uses, and look
+  // up the clicked drug by name in that real list. The candidate's `id`
+  // for navigation is synthesized as `${drug}|${disease}` when the API
+  // does not return one (the RL CSV doesn't have a stable row id), so the
+  // navigation is stable across re-renders.
+  const { data: rlData } = useRlCandidates({ limit: 200 });
+  const realRlCandidates = useMemo(() => {
+    const list = rlData?.candidates || [];
+    return list.map((c: any) => ({
+      id: c.id || `${c.drug}|${c.disease}`,
+      drugName: c.drug as string,
+      diseaseName: c.disease as string,
+      overallScore: c.overallScore as number,
+    }));
+  }, [rlData]);
+
   const realNodes = kgData?.nodes || [];
   const realEdges = kgData?.edges || [];
 
@@ -1388,7 +1408,16 @@ function KnowledgeGraphScreen() {
                   <p className="text-xs text-muted-foreground mt-1">{nodeEdges.length} connections</p>
                   {node.type === 'drug' && (
                     <Button variant="link" size="sm" className="h-6 p-0 text-xs mt-1" onClick={() => {
-                      const cand = drugCandidates.find(c => c.drugName === node.label);
+                      // FE-067 ROOT FIX: Look up the clicked drug in the
+                      // REAL RL candidate list (sourced from /api/rl).
+                      // Previously this searched the mock `drugCandidates`
+                      // array, which silently failed for any drug that
+                      // wasn't in the mock set. Now we prefer the real RL
+                      // data; if the RL service isn't deployed yet, we
+                      // fall back to the mock array so the button still
+                      // works for demo drugs.
+                      const cand = realRlCandidates.find(c => c.drugName === node.label)
+                        || drugCandidates.find(c => c.drugName === node.label);
                       if (cand) navigate({ page: 'app', section: 'candidate', id: cand.id });
                     }}>View candidate detail →</Button>
                   )}

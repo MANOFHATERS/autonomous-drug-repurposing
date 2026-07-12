@@ -49,6 +49,8 @@ Stage Summary:
 - Fresh clone verification: tsc PASS, lint PASS, 47/47 new tests PASS
 - Pre-existing 4 DB-dependent test suite failures (auth, projects, billing, api-keys) remain unchanged — they require PostgreSQL which is not available in this environment. These are NOT regressions; they were failing at baseline before any of my changes.
 ---
+---
+
 - Repo at /home/z/my-project/repo/autonomous-drug-repurposing
 - CI workflow requires: build (compileall), lint (non-blocking), pytest, P2 verify, E2E, v83 verify, Phase 3/4 build+test+V31 verify, ci-success summary
 - All 19 bugs (BUG #20-#38) verified against real code; root-cause fixes drafted below
@@ -410,3 +412,89 @@ Stage Summary:
 - Phase 1 → Phase 2 → Phase 3 → Phase 4 chain is now reachable from BOTH run_unified.py (--run-gt-rl) and run_4phase.py.
 - 57 new tests added (25 TS + 26 Python + 6 updated existing).
 - tsc --noEmit: 0 errors. eslint: 0 errors. Next.js build: success. Python smoke tests: all pass.
+---
+Task ID: team-2-phase1-db-schema-issues
+Agent: Super Z (Team Member 2 — Phase 1 Database Schema & Migrations)
+Task: Fix 14 assigned issues (P1-015 through P1-028) for Phase 1 Database Schema & Migrations. Each fix must be root-level, not surface-level. Run real code to verify. Create branch, push, verify, merge to main.
+
+Work Log:
+- Read project docx (Team_Cosmic_Build_Process_Updated.docx) to understand the 6-phase drug repurposing platform architecture.
+- Cloned repo from github.com/MANOFHATERS/autonomous-drug-repurposing (main branch @ a249140).
+- Created branch: fix/team-2-phase1-db-schema-issues.
+- Read each affected file LINE BY LINE (not comments/tests) to verify the actual code state before fixing.
+
+Root-level fixes applied (manual edits, no scripts):
+
+P1-015 (SQLite InChIKey CHECK too weak):
+  - database/connection.py: registered SQLite REGEXP function via create_function in _attach_lifecycle_events. SQLite now supports the REGEXP operator with full Python regex semantics.
+  - database/migrations/run_migrations.py: replaced the weak LENGTH+SUBSTR backstop translation with `<col> REGEXP '<regex>'` translation. All regex-based CHECK constraints now use IDENTICAL semantics on SQLite and PostgreSQL.
+  - database/migrations/009_tighten_inchikey_check_constraint.sql: SQLite fallback now uses `inchikey REGEXP '^[A-Z]{14}-[A-Z]{10}-[A-Z]$'` instead of the LENGTH+SUBSTR backstop.
+
+P1-016 (locals().get() anti-pattern):
+  - pipelines/drugbank_pipeline.py: replaced TWO instances of locals().get() with explicit sentinel variables. (1) `drug_rec = None` before the try block in the parse loop. (2) `_file_handle = None` before the outer try block in clean(). Both except/finally blocks now read the sentinel directly — no locals() call.
+
+P1-017 (synthesized DrugBank IDs use DB prefix):
+  - pipelines/_v50_downloaders.py: _synthesize_drugbank_id now emits `SYNTH-DB-{8 hex}` (hash form) and `SYNTH-DB-M{6 digits}` (missing-InChIKey form) instead of `DB{8 hex}` and `DBSYNTH{6 digits}`. No collision risk with real DrugBank IDs.
+  - pipelines/drugbank_pipeline.py: _DRUGBANK_ID_RE now ONLY matches real DrugBank IDs (`^DB\d{5,7}$`). Added _SYNTHESIZED_DRUG_ID_RE for the new SYNTH-DB- prefix. Added _is_valid_drugbank_id() helper that accepts EITHER form. DQ4 validation updated to use _is_valid_drugbank_id().
+  - entity_resolution/resolver_utils.py: added _SYNTHESIZED_DRUG_ID_RE and _is_valid_drugbank_id() (mirror of drugbank_pipeline's). Validation at line ~2235 updated to accept EITHER form.
+  - database/models.py: DRUGBANK_ID_LENGTH widened from 10 to 64 to accommodate the longer synthesized IDs (17 chars).
+  - database/migrations/013_widen_drugbank_id_column.sql: NEW migration to ALTER drugs.drugbank_id and entity_mapping.drugbank_id from VARCHAR(10) to VARCHAR(64). Includes rollback migration.
+  - phase2/drugos_graph/kg_builder.py: ID_PATTERNS["Compound"] updated to accept SYNTH-DB-[0-9A-F]{8} and SYNTH-DB-M\d{6} — so synthesized IDs flow through the Phase 1 → Phase 2 bridge.
+
+P1-018 (trigger_phase2 race with concurrent pubchem_load):
+  - dags/master_pipeline_dag.py: changed _trigger_phase2 decorator from trigger_rule=ALL_SUCCESS to trigger_rule=NONE_FAILED_MIN_ONE_SUCCESS. Wired pubchem_load >> trigger_phase2. Phase 2 now waits for PubChem to FINISH (SUCCEED or SKIP) before reading the drugs table. PubChem API outage (pubchem_load SKIPPED) no longer blocks Phase 2; a real pubchem_load FAILURE (bug) still blocks Phase 2.
+  - Also fixed a PRE-EXISTING SyntaxError in the same file (premature triple-quote closing the download_pubchem docstring at line 361 — em-dash outside any string). This was blocking compilation of the P1-018 changes.
+
+P1-019 (load_dotenv wrapper dead code):
+  - config/settings.py: removed the module-level load_dotenv wrapper. Inlined the import as _load_dotenv_func (None if python-dotenv not installed). _ensure_dotenv_loaded now calls _load_dotenv_func directly. Tests updated to mock _load_dotenv_func instead of load_dotenv.
+
+P1-020 (pED50 dimensional ambiguity):
+  - cleaning/normalizer.py: pED50 conversion now logs an INFO message and adds a `ped50_assumed_ec50_equivalent` warning tag. The conversion formula (10^(9-pED50)) is correct for in vitro assays (where ED50 ≈ EC50 in nM) but wrong for in vivo assays (where ED50 is in mg/kg). The warning makes the assumption visible to operators and downstream filtering code.
+
+P1-021 (MatchConfidence enum comment drift):
+  - entity_resolution/base.py: updated the hierarchy comment to match the ACTUAL enum values (PUBCHEM_XREF=0.7, not 0.55 as the old comment claimed). Added _CONFIDENCE_HIERARCHY_ASSERTIONS tuple + runtime assertion loop that fails at import time if any enum value drifts from the documented hierarchy.
+
+P1-022 (OMIM disease_id CHECK divergence):
+  - database/loaders.py: the SQL CHECK (migration 001 line 1104) ALREADY accepts both `OMIM:\d{4,7}` and `\d{4,7}` — the divergence described in the issue was based on a STALE COMMENT. Updated the comment to reflect the actual state: SQL CHECK and Python validator are BOTH aligned. No code change needed — the bug was documentation drift.
+
+P1-023 (canonical ordering comment):
+  - pipelines/string_pipeline.py: clarified that min/max on STRING IDs uses LEXICOGRAPHIC ordering (sufficient for dedup, NOT a biological ordering). Updated both the comment and the log message.
+
+P1-024 (div-by-zero guard):
+  - pipelines/base_pipeline.py: added explicit comment on the division line documenting that it's guarded by the `len(df) > 0` check above.
+
+P1-025 (pubchem div-by-zero invariant):
+  - pipelines/pubchem_pipeline.py: documented the subtle invariant that protects the division from div-by-zero (list-comprehension-over-empty yields empty → guard is False → division never reached).
+
+P1-026 (disgenet misleading log):
+  - pipelines/disgenet_pipeline.py: replaced `str(total_available) if total_available else "?"` with `str(total_available)`. `0` is a valid value, not unknown.
+
+P1-027 (dead abs() in cap check):
+  - cleaning/normalizer.py: removed `abs()` from `if abs(converted) > _ACTIVITY_CENSORED_MAX` → `if converted > _ACTIVITY_CENSORED_MAX`. The abs() was dead code (converted is always >= 0 because numeric_value is guarded to be non-negative at line 4439 and factor is always positive). Added a comment documenting the invariant.
+
+P1-028 (CircuitBreaker half-open probe stuck):
+  - _circuit_breaker.py: added probe_timeout parameter (default 300s = 5 min). Track _half_open_probe_reserved_at timestamp when the probe slot is reserved. In allow_request(), if the probe has been in flight longer than probe_timeout, auto-release the slot (assume caller crashed). This bounds the stuck-half-open window to probe_timeout seconds instead of infinity. Added probe() context manager API for new callers — acquires on enter, ALWAYS releases on exit (success, failure, or exception). Existing allow_request()/record_*() callers continue to work unchanged with the auto-recovery safety net.
+
+Verification:
+- python3 -m compileall phase1/ phase2/ → 0 errors (entire codebase compiles).
+- 39 new regression tests in tests/test_team2_p1_fixes.py → ALL 39 PASS.
+- Pre-existing test failures (9 in test_v92_root_fixes.py + test_config_init.py) verified to fail on main BEFORE my changes (via git stash) — NOT caused by my fixes.
+- Real code verification (not just tests):
+  * CircuitBreaker probe_timeout auto-recovery: verified with timing test (probe auto-released after 1.0s timeout).
+  * CircuitBreaker probe() context manager: verified success path (closes breaker) and exception path (re-opens breaker, releases slot).
+  * MatchConfidence enum: all 11 values match documented hierarchy (PUBCHEM_XREF=0.7, not 0.55).
+  * pED50 conversion: pED50=6.0 → 1000.0 nM with ped50_assumed_ec50_equivalent warning.
+  * abs() removal: actual code line uses `if converted > _ACTIVITY_CENSORED_MAX` (no abs).
+  * DrugBank ID regex: real IDs match, old synthesized forms (DB{8hex}, DBSYNTH{6digits}) REJECTED, new SYNTH-DB- forms ACCEPTED.
+  * Synthesized ID generation: aspirin InChIKey → SYNTH-DB-7E5FACAB (17 chars, fits VARCHAR(64)).
+  * SQLite REGEXP: valid InChIKey matches, digits-only/lowercase/punctuation all REJECTED (old LENGTH backstop accepted them).
+  * OMIM regex: both `219700` and `OMIM:219700` accepted by Python validator and SQL CHECK.
+
+Stage Summary:
+- 14 issues fixed at root level (no surface-level patches, no comment-only edits except where the issue explicitly asked for documentation fixes).
+- 13 files modified, 2 new files (migration 013 + rollback, test file).
+- Phase 1 → Phase 2 connectivity PRESERVED: synthesized IDs now flow through the entire pipeline (drugbank_pipeline → entity_resolution → kg_builder) with the new SYNTH-DB- prefix.
+- Dev/prod asymmetry ELIMINATED: SQLite REGEXP function gives identical regex semantics to PostgreSQL ~.
+- CircuitBreaker no longer stuck-forever on caller crash: probe_timeout bounds the stuck window to 5 min.
+- All 39 new regression tests pass; 0 regressions introduced (9 pre-existing failures verified on main).
+- Next: push branch, verify via GitHub CLI, merge to main, re-clone to verify.

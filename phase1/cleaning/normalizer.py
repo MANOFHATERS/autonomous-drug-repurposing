@@ -727,6 +727,15 @@ _ALLOWED_ACTIVITY_TYPES: frozenset[str] = frozenset({
     "pKi", "pIC50", "pEC50", "pKd", "pKb", "pED50", "pAC50",
     "ED50", "AC50",
 })
+# P1-020 NOTE (Team-2): pED50 is INCLUDED here because ChEMBL emits it
+# for some dose-response assay types. The p-scale conversion block
+# (below, ~line 4502) treats pED50 as pEC50-equivalent per the
+# pharmacology dose-response convention (in vitro molar concentration).
+# When pED50 is encountered, a ``ped50_assumed_ec50_equivalent`` warning
+# tag is added AND an INFO log is emitted so operators can verify the
+# in vitro assumption for each pED50 value. If the value is from an
+# in vivo assay (ED50 in mg/kg), the nM conversion is dimensionally
+# invalid — downstream consumers MUST filter on the warning tag.
 
 # [SCI-3, SCI-16] InChI generation options.
 _INCHI_OPTIONS_DEFAULT: str = ""  # empty = RDKit default
@@ -4620,6 +4629,38 @@ def normalize_activity_value(
                 # pIC50=6 → 10^3 nM = 1 µM ✓
                 # pIC50=9 → 10^0 nM = 1 nM ✓
                 # pIC50=3 → 10^6 nM = 1 mM ✓ (at the cap)
+                #
+                # P1-020 ROOT FIX (Team-2 — pED50 dimensional ambiguity):
+                #   ED50 is "Effective Dose 50" — typically a DOSE
+                #   (mg/kg, in vivo) rather than a CONCENTRATION
+                #   (Molar, in vitro). Applying ``10^(9 - pED50)``
+                #   assumes pED50 = -log10(ED50_in_M) — i.e. ED50 is
+                #   in Molar units. This is dimensionally correct for
+                #   in vitro dose-response assays (where ED50 ≈ EC50
+                #   and is in nM), but WRONG for in vivo assays (where
+                #   ED50 is in mg/kg and the conversion produces
+                #   garbage nM values).
+                #   ROOT FIX (option b per P1-020 issue spec): treat
+                #   pED50 as pEC50-equivalent — the pharmacology
+                #   convention for dose-response assays. Add a
+                #   ``ped50_assumed_ec50_equivalent`` warning tag and
+                #   log at INFO so operators can see when pED50 values
+                #   are processed and verify the in vitro assumption.
+                #   Downstream filtering code can use this tag to
+                #   exclude pED50 values from potency rankings if the
+                #   in vitro assumption is unsafe for the use case.
+                if _at == "pED50":
+                    logger.info(
+                        "normalize_activity_value: pED50 conversion "
+                        "ASSUMES in vitro molar concentration (pED50 ≈ "
+                        "pEC50 per pharmacology dose-response convention). "
+                        "If this value is from an in vivo assay (ED50 in "
+                        "mg/kg), the nM result is dimensionally invalid. "
+                        "Value=%s → %.4g nM (assumed).",
+                        numeric_value,
+                        float(10 ** (9.0 - float(numeric_value))),
+                    )
+                    warnings_tuple.append("ped50_assumed_ec50_equivalent")
                 converted_to_nM = float(10 ** (9.0 - float(numeric_value)))
                 # P1-037 layer 2: post-conversion cap check.
                 if abs(converted_to_nM) > _ACTIVITY_CENSORED_MAX:
@@ -4740,7 +4781,33 @@ def normalize_activity_value(
     # v66 ROOT FIX (P1C-020): use the clearly-named ``_ACTIVITY_CENSORED_MAX``
     # (1e6 = 1 mM censored threshold) instead of the misleading legacy
     # ``_ACTIVITY_VALUE_MAX`` alias. Same value, self-documenting name.
-    if abs(converted) > _ACTIVITY_CENSORED_MAX:
+    #
+    # P1-027 ROOT FIX (Team-2 — dead ``abs()`` on the cap check):
+    #   The previous code was ``if abs(converted) > _ACTIVITY_CENSORED_MAX``.
+    #   The ``abs()`` was DEAD CODE: ``converted = numeric_value * factor``
+    #   where ``factor`` is always positive (the ``_UNIT_CONVERSIONS_CF``
+    #   table maps unit strings to positive multipliers — nM=1.0,
+    #   µM=1000.0, pM=0.001, etc.) and ``numeric_value`` is guarded to
+    #   be non-negative at the early-return on line 4439 (negative values
+    #   are flagged ``is_corrupt=True`` and never reach this point).
+    #   Therefore ``converted >= 0`` always holds, and ``abs()`` is a
+    #   no-op. The ``abs()`` was MISLEADING — a future maintainer who
+    #   adds a negative factor to ``_UNIT_CONVERSIONS_CF`` (e.g. for an
+    #   inverted unit) would believe the ``abs()`` protects them, but
+    #   the early-return on line 4439 would still reject the negative
+    #   INPUT before the multiplication. ROOT FIX: remove the ``abs()``
+    #   and add an explicit comment documenting the invariant so future
+    #   maintainers don't reintroduce the misleading guard.
+    # converted is always >= 0 here:
+    #   * numeric_value is guarded to be >= 0 at the early-return on
+    #     line 4439 (negative values are flagged is_corrupt=True).
+    #   * factor is always positive (the _UNIT_CONVERSIONS_CF table
+    #     maps unit strings to positive multipliers — see definition
+    #     above). If a future maintainer adds a negative factor for
+    #     an inverted unit, they MUST also adjust the negative-value
+    #     guard on line 4439 — otherwise the input would be rejected
+    #     before the multiplication.
+    if converted > _ACTIVITY_CENSORED_MAX:
         logger.warning(
             "normalize_activity_value: converted value %s exceeds cap %s "
             "— marking as censored (effectively '> measurable')",

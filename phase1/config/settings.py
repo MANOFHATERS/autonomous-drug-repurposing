@@ -113,25 +113,28 @@ from typing import Optional
 
 _dotenv_loaded: bool = False
 
-# Module-level load_dotenv binding so tests can mock `config.settings.load_dotenv`
-# and downstream code can call it without re-importing. python-dotenv is an
-# OPTIONAL dependency -- if it's not installed, `load_dotenv` is a no-op
-# function that returns False (and logs once).
+# P1-019 ROOT FIX (Team-2 -- inline the load_dotenv import, remove the
+#   module-level wrapper):
+#   The previous code defined a module-level ``load_dotenv`` wrapper that
+#   tried to import ``python-dotenv`` and fell back to a no-op function
+#   on ImportError. The wrapper existed ONLY so tests could mock
+#   ``config.settings.load_dotenv`` directly. But the wrapper was dead
+#   code: ``_ensure_dotenv_loaded`` (the only caller) was already guarded
+#   by ``_dotenv_loaded`` (a process-wide flag), so the no-op fallback
+#   was called at most once per process. The wrapper also logged the
+#   SAME INFO message on every call (misleading -- it implied the no-op
+#   could be called multiple times).
+#   ROOT FIX: inline the import in ``_ensure_dotenv_loaded``. Tests that
+#   need to mock the dotenv loader can mock
+#   ``config.settings._load_dotenv_func`` (the module-level binding) OR
+#   use ``monkeypatch.setattr`` on the import. No wrapper needed.
+#   If python-dotenv is not installed, ``_load_dotenv_func`` is None and
+#   ``_ensure_dotenv_loaded`` logs a SINGLE info message and falls back
+#   to pure ``os.getenv()``.
 try:
     from dotenv import load_dotenv as _load_dotenv_func  # type: ignore[import-untyped]
-
-    def load_dotenv(*args, **kwargs):  # type: ignore[no-redef]
-        """Module-level wrapper around python-dotenv's load_dotenv."""
-        return _load_dotenv_func(*args, **kwargs)
-
 except ImportError:  # pragma: no cover -- exercised when dotenv is missing
-    def load_dotenv(*args, **kwargs):  # type: ignore[no-redef]
-        """No-op fallback when python-dotenv is not installed."""
-        logging.getLogger(__name__).info(
-            "python-dotenv is not installed. Environment variables must "
-            "be set externally. Install with: pip install python-dotenv"
-        )
-        return False
+    _load_dotenv_func = None  # type: ignore[assignment]
 
 
 def _ensure_dotenv_loaded() -> None:
@@ -147,9 +150,17 @@ def _ensure_dotenv_loaded() -> None:
         return
     _dotenv_loaded = True
 
+    # P1-019: if python-dotenv is not installed, log ONCE and fall back.
+    if _load_dotenv_func is None:
+        logging.getLogger(__name__).info(
+            "python-dotenv is not installed. Environment variables must "
+            "be set externally. Install with: pip install python-dotenv"
+        )
+        return
+
     try:
         env_path = Path(__file__).parent.parent / ".env"
-        loaded = load_dotenv(env_path, override=False)
+        loaded = _load_dotenv_func(env_path, override=False)
         if not loaded and not env_path.exists():
             logging.getLogger(__name__).info(
                 "No .env file found at %s. All settings will use "

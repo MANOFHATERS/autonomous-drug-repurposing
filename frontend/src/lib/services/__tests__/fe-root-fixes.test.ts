@@ -284,7 +284,10 @@ describe("FE-002 + FE-003: Real API proxies implemented", () => {
     expect(rl).not.toMatch(/"not_implemented"/);
     expect(rl).toMatch(/RL_SERVICE_URL/);
     expect(rl).toMatch(/RL_LOCAL_CSV/);
-    expect(rl).toMatch(/parseRlCsv/);
+    // The CSV-parsing helper was renamed from parseRlCsv -> readRlCsvCached
+    // in a parallel team's fix. Accept either name so this test does not
+    // break across teams.
+    expect(rl).toMatch(/parseRlCsv|readRlCsvCached/);
   });
 
   test("KG route implements real proxy (not 501)", () => {

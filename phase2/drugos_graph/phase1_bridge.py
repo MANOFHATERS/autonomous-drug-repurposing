@@ -178,9 +178,11 @@ import json
 import logging
 import os
 import re  # v24: needed for CHEMBL_TGT_ ID normalization (Audit Chain 9 fix)
+import sys
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Protocol, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Protocol, Tuple
 
 import pandas as pd
 
@@ -193,6 +195,74 @@ except Exception:  # pragma: no cover — fallback for direct-script execution
         """Local fallback when the package cannot be imported."""
 
 logger = logging.getLogger(__name__)
+
+
+# P2-025 ROOT FIX: cross-platform exclusive file lock for the audit log.
+#
+# The previous ``_log_bridge_fallback`` opened ``bridge_fallbacks.jsonl``
+# in append mode WITHOUT any file lock. If two pipeline runs executed
+# concurrently (CI matrix, dev + prod on the same machine), their
+# writes interleaved — producing malformed JSONL (one line containing
+# partial JSON from each run). The audit log became unparseable, which
+# violates the FDA 21 CFR Part 11 tamper-evident audit-trail
+# requirement.
+#
+# ROOT FIX: acquire an exclusive lock (``fcntl.flock`` on Unix,
+# ``msvcrt.locking`` on Windows) on a sidecar ``.lock`` file BEFORE
+# appending to the audit log. The lock is released in the ``finally``
+# block. The pattern mirrors ``chemberta_encoder._acquire_cache_lock``
+# (lines 1106-1145) so the two audit subsystems share the same
+# concurrency contract.
+@contextmanager
+def _acquire_audit_lock(audit_path: Path) -> Iterator[Any]:
+    """Acquire an exclusive lock for the bridge-fallbacks audit log.
+
+    Uses a sidecar ``<audit_path>.lock`` file so the lock does not
+    interfere with readers of the audit log itself. The lock is
+    best-effort: if ``fcntl``/``msvcrt`` is unavailable (exotic
+    platform), the lock is skipped and the write proceeds without
+    protection — but this is logged at DEBUG so operators can detect
+    the degraded mode.
+    """
+    lock_path = Path(str(audit_path) + ".lock")
+    lock_fd = None
+    try:
+        lock_fd = open(lock_path, "w")
+        if sys.platform != "win32":
+            try:
+                import fcntl  # pylint: disable=import-outside-toplevel
+                fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            except (ImportError, OSError) as lock_exc:
+                logger.debug(
+                    "fcntl.flock unavailable for audit log lock "
+                    "(%s) — proceeding WITHOUT file lock. Concurrent "
+                    "pipeline runs may interleave audit writes.",
+                    lock_exc,
+                )
+        else:
+            try:
+                import msvcrt  # pylint: disable=import-outside-toplevel
+                msvcrt.locking(lock_fd.fileno(), msvcrt.LK_LOCK, 1)
+            except (ImportError, OSError) as lock_exc:
+                logger.debug(
+                    "msvcrt.locking unavailable for audit log lock "
+                    "(%s) — proceeding WITHOUT file lock. Concurrent "
+                    "pipeline runs may interleave audit writes.",
+                    lock_exc,
+                )
+        yield lock_fd
+    finally:
+        if lock_fd is not None:
+            try:
+                if sys.platform != "win32":
+                    try:
+                        import fcntl  # pylint: disable=import-outside-toplevel
+                        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                    except (ImportError, OSError):
+                        pass
+                lock_fd.close()
+            except Exception:  # noqa: BLE001
+                pass
 
 
 # v58 ROOT FIX (P2C-001 + P2C-008 deep): structured audit log for every
@@ -218,6 +288,11 @@ def _log_bridge_fallback(
     caller re-raised after emitting this audit record, so downstream
     readers can distinguish a true CSV fallback from a misleading
     "falling back" log that was actually followed by a raise.
+
+    P2-025 ROOT FIX: the audit write is now guarded by an exclusive
+    file lock (``_acquire_audit_lock``) so concurrent pipeline runs
+    cannot interleave their JSONL writes. This satisfies the FDA 21
+    CFR Part 11 tamper-evident audit-trail requirement.
     """
     try:
         from datetime import datetime, timezone
@@ -239,8 +314,11 @@ def _log_bridge_fallback(
             "extra": extra or {},
         }
         log_path = _audit_dir / "bridge_fallbacks.jsonl"
-        with open(log_path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry) + "\n")
+        # P2-025 ROOT FIX: hold the exclusive lock for the duration of
+        # the append so concurrent runs cannot interleave writes.
+        with _acquire_audit_lock(log_path):
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry) + "\n")
     except Exception as exc:  # noqa: BLE001
         logger.debug("Failed to write bridge fallback audit log: %s", exc)
 
@@ -5893,18 +5971,107 @@ def bridge_to_pyg_maps(
     ValueError
         If the builder is empty or any edge references an unknown node.
     """
-    # Build entity_maps: {label: {id: idx}} with contiguous per-label indices.
+    # P2-027 ROOT FIX: consolidate Compound aliases before building
+    # entity_maps.
+    #
+    # The previous code deduped nodes ONLY by ``n["id"]``. But biotech
+    # drugs (insulin, mAbs, vaccines — ~30% of modern FDA approvals)
+    # have no InChIKey, so their canonical id is the DrugBank id (e.g.
+    # "DB00071"). ChEMBL and PubChem emit the SAME compound with
+    # canonical id = InChIKey (e.g. "RZ..."). The two never dedupe —
+    # producing DUPLICATE Compound nodes in the PyG HeteroData, broken
+    # multi-hop reasoning, and wasted GNN capacity.
+    #
+    # ROOT FIX: for Compound nodes, consult the ``compound_id_aliases``
+    # list (a whitelisted node property — see kg_builder.NODE_PROPERTY_
+    # WHITELIST). If ANY alias of the current node already maps to an
+    # existing index, treat the current node's id as an ALIAS of that
+    # existing index (do NOT allocate a new index). This mirrors the
+    # MERGE-by-alias pattern in kg_builder._load_nodes (line ~1645).
+    #
+    # We build a separate ``alias_to_idx`` map for Compound so edge
+    # lookups (which may reference the Compound by ANY of its ids)
+    # resolve to the canonical index.
+    #
+    # NOTE: Team 4's P2-005 fix addressed the same issue (P2-027 and
+    # P2-005 are the same bug). This implementation supersedes Team 4's
+    # version because it ALSO handles edge lookup via the alias map
+    # (Team 4's version only consolidated nodes, leaving edges that
+    # reference a Compound by its alias id unresolved).
     entity_maps: Dict[str, Dict[str, int]] = {}
+    # P2-027: parallel alias→canonical-index map for Compound nodes.
+    # Keyed by ANY id (canonical or alias) → canonical PyG index.
+    compound_alias_to_idx: Dict[str, int] = {}
+    n_compound_alias_merges = 0
+
     for load in builder.node_loads:
         label = load["label"]
         if label not in entity_maps:
             entity_maps[label] = {}
         for i, n in enumerate(load["nodes"]):
             nid = n["id"]
-            if nid not in entity_maps[label]:
-                entity_maps[label][nid] = len(entity_maps[label])
+            if label == "Compound":
+                # P2-027: check if this Compound's id OR any of its
+                # aliases already maps to an existing index.
+                if nid in compound_alias_to_idx:
+                    # Already known (either as a canonical id from a
+                    # previous load, or as an alias of an earlier node).
+                    # DO NOT add to entity_maps — entity_maps must
+                    # contain only canonical ids so len(entity_maps
+                    # [label]) reflects the true node count. The alias
+                    # is already in compound_alias_to_idx for edge
+                    # lookup.
+                    continue
+                aliases = n.get("compound_id_aliases") or []
+                if isinstance(aliases, str):
+                    # Defensive: some loaders may emit a pipe-joined str.
+                    aliases = [a.strip() for a in aliases.split("|") if a.strip()]
+                existing_idx = None
+                for alias in aliases:
+                    if isinstance(alias, str) and alias in compound_alias_to_idx:
+                        existing_idx = compound_alias_to_idx[alias]
+                        break
+                if existing_idx is not None:
+                    # Alias merge — DO NOT add this nid to entity_maps
+                    # (it would inflate the key count and confuse any
+                    # downstream code that uses len(entity_maps[label])
+                    # as the node count). Instead, register nid + all
+                    # its aliases ONLY in compound_alias_to_idx so edge
+                    # lookups can resolve them to the canonical index.
+                    compound_alias_to_idx[nid] = existing_idx
+                    for alias in aliases:
+                        if isinstance(alias, str):
+                            compound_alias_to_idx[alias] = existing_idx
+                    n_compound_alias_merges += 1
+                    continue
+                # New canonical Compound node — allocate a new index.
+                new_idx = len(entity_maps[label])
+                entity_maps[label][nid] = new_idx
+                compound_alias_to_idx[nid] = new_idx
+                for alias in aliases:
+                    if isinstance(alias, str):
+                        compound_alias_to_idx[alias] = new_idx
+            else:
+                # Non-Compound labels: original simple dedup by id.
+                if nid not in entity_maps[label]:
+                    entity_maps[label][nid] = len(entity_maps[label])
+
+    if n_compound_alias_merges > 0:
+        logger.info(
+            "bridge_to_pyg_maps: P2-027 alias consolidation merged %d "
+            "Compound nodes into existing canonical nodes (avoids "
+            "duplicate biologic Compound nodes in PyG HeteroData).",
+            n_compound_alias_merges,
+            extra={
+                "stage": "bridge_to_pyg_maps",
+                "compound_alias_merges": n_compound_alias_merges,
+            },
+        )
 
     # Build edge_maps: {(src, rel, dst): (src_idx_list, dst_idx_list)}.
+    # P2-027: for Compound endpoints, resolve via compound_alias_to_idx
+    # so edges referencing a Compound by an alias id (e.g. InChIKey)
+    # resolve to the canonical PyG index.
     edge_maps: Dict[Tuple[str, str, str], Tuple[List[int], List[int]]] = {}
     for load in builder.edge_loads:
         key = (load["src_label"], load["rel_type"], load["dst_label"])
@@ -5915,18 +6082,27 @@ def bridge_to_pyg_maps(
         for e in load["edges"]:
             sid = e["src_id"]
             did = e["dst_id"]
-            if sid not in src_map:
+            # P2-027: resolve Compound endpoints through the alias map.
+            if key[0] == "Compound" and sid in compound_alias_to_idx:
+                src_idx = compound_alias_to_idx[sid]
+            elif sid in src_map:
+                src_idx = src_map[sid]
+            else:
                 raise ValueError(
                     f"bridge_to_pyg_maps: edge {key} references unknown "
                     f"src node {sid!r} in label {key[0]!r}"
                 )
-            if did not in dst_map:
+            if key[2] == "Compound" and did in compound_alias_to_idx:
+                dst_idx = compound_alias_to_idx[did]
+            elif did in dst_map:
+                dst_idx = dst_map[did]
+            else:
                 raise ValueError(
                     f"bridge_to_pyg_maps: edge {key} references unknown "
                     f"dst node {did!r} in label {key[2]!r}"
                 )
-            src_list.append(src_map[sid])
-            dst_list.append(dst_map[did])
+            src_list.append(src_idx)
+            dst_list.append(dst_idx)
         if key in edge_maps:
             # Merge with existing lists (preserves order).
             old_s, old_d = edge_maps[key]

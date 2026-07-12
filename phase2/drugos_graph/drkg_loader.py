@@ -147,6 +147,7 @@ from .config import (
     DRKG_PARSER_VERSION,
     DRKG_RARE_DISEASE_CODES,
     DRKG_RELATION_ABBREV_TO_NAME,
+    DRKG_RELATION_CODE_CANONICAL_CASE,
     DRKG_RELATION_SEPARATOR,
     DRKG_SCHEMA_VERSION,
     DRKG_STRICT_FILTER_ALLOW_UNKNOWN,
@@ -163,6 +164,7 @@ from .config import (
     compute_impact_analysis,
     ensure_dirs,
     get_data_source_path,
+    reconstruct_relation_code,
     set_global_seed,
     split_drkg_relation,
 )
@@ -1347,35 +1349,43 @@ def parse_drkg_tsv(
     df["relation_name"] = parsed_relations.str[1]
     df["relation_dst_type"] = parsed_relations.str[2]
 
-    # v57 ROOT FIX (P2L-021): DRKG relation encoding case mismatch.
-    # DRKG uses relation codes like ``DRUGBANK::treats::Compound:Disease``
-    # where the source token (``DRUGBANK``) is UPPER_CASE and the
-    # relation name (``treats``) is lower_case. Some DRKG-derived sources
-    # (and the entity_resolver's alias system) emit the FULL relation
-    # code in lowercase (``drugbank::treats::compound:disease``), while
-    # kg_builder / Neo4j's MERGE is case-sensitive on relationship types.
-    # The result: the SAME logical edge emitted by two loaders (one
-    # upper, one lower) gets TWO Neo4j relationships instead of one --
-    # a silent duplication that corrupts graph statistics, training
-    # data, and edge counts.
+    # v57 ROOT FIX (P2L-021) / P2-021 ROOT FIX: DRKG relation encoding
+    # case mismatch.
     #
-    # ROOT FIX: pick LOWERCASE as the canonical case for the relation
-    # CODE (the ``relation`` column plus its parsed ``relation_source``
-    # and ``relation_name`` tokens). This matches the existing lowercase
-    # convention for relation_name throughout the codebase -- see
-    # ``DRKG_RELATION_ABBREV_TO_NAME`` keys and the ``CORE_EDGE_TYPES``
-    # triples. NB: we deliberately DO NOT lowercase ``relation_dst_type``
-    # because it carries the PascalCase entity-type tokens
-    # (``Compound:Disease``) -- lowercasing it would break the BUG 3.5
-    # cross-check against ``head_type`` / ``tail_type`` (which are also
-    # PascalCase). The entity types are PascalCase throughout the
-    # codebase by convention (matches ``CORE_EDGE_TYPES`` triples and
-    # ``kg_builder.sanitize_label``'s PascalCase enforcement).
+    # DRKG raw relation codes look like ``DRUGBANK::treats::Compound:Disease``
+    # — the source token is UPPER_CASE, the abbreviation is lower_case,
+    # and the HeadType:TailType token is PascalCase. The previous fix
+    # lowercased ``relation``, ``relation_source`` and ``relation_name``
+    # but PRESERVED ``relation_dst_type`` in PascalCase. This created a
+    # MAINTENANCE TRAP: round-trip reconstruction
+    # (``source + "::" + name + "::" + dst_type``) produced
+    # "drugbank::treats::Compound:Disease" which ≠ the stored
+    # "drugbank::treats::compound:disease". Any maintainer who assumed
+    # consistency and filtered by the reconstructed string got ZERO
+    # results.
+    #
+    # P2-021 ROOT FIX: lowercase ALL FOUR relation-code fields so the
+    # invariant ``reconstruct_relation_code(src, name, dst_type) ==
+    # relation`` holds byte-for-byte. The canonical case is declared in
+    # ``config.DRKG_RELATION_CODE_CANONICAL_CASE`` (single source of
+    # truth). ``head_type`` and ``tail_type`` REMAIN PascalCase because
+    # ``EDGE_EVIDENCE_STRENGTH`` and ``DRKG_VALID_TRIPLE_SCHEMAS`` use
+    # PascalCase entity-type keys; the BUG 3.5 cross-check below
+    # therefore compares LOWERCASED versions of both sides.
     df["relation"] = df["relation"].astype(str).str.lower()
     df["relation_source"] = df["relation_source"].astype(str).str.lower()
     df["relation_name"] = df["relation_name"].astype(str).str.lower()
-    # ``relation_dst_type``, ``head_type``, ``tail_type`` are PRESERVED in
-    # their original PascalCase form -- see comment above.
+    df["relation_dst_type"] = df["relation_dst_type"].astype(str).str.lower()
+
+    # P2-021 invariant assertion — single source of truth enforced on
+    # every parse. If any future edit re-introduces the case mismatch,
+    # this assertion fires immediately rather than silently corrupting
+    # downstream graph queries.
+    assert DRKG_RELATION_CODE_CANONICAL_CASE == "lower", (
+        "DRKG_RELATION_CODE_CANONICAL_CASE must be 'lower' — the loader "
+        "logic below assumes lowercase relation codes. Update both the "
+        "config constant AND this loader together."
+    )
 
     # ── BUG 3.5: cross-check entity_type vs relation_dst_type ─────────
     # The third token of the relation embeds "HeadType:TailType" --
@@ -1383,24 +1393,35 @@ def parse_drkg_tsv(
     # any mismatch.
     #
     # v68 ROOT FIX (P2L-023): the previous code had a silent-skip bug.
-    # If ``relation_dst_type`` (e.g. "Compound:Disease") had NO ``:``
-    # separator (malformed relation string), ``str.split(":", n=1,
-    # expand=True)`` returned a DataFrame with 1 column. The check
-    # ``if rel_dst_split.shape[1] >= 2:`` was False -- the ENTIRE mismatch
-    # detection block was SKIPPED. No dead-letter, no warning. Malformed
-    # relations passed through to edge emission, bypassing the
-    # biological-validity check.
+    # If ``relation_dst_type`` (e.g. "compound:disease" after P2-021
+    # lowercasing) had NO ``:`` separator (malformed relation string),
+    # ``str.split(":", n=1, expand=True)`` returned a DataFrame with 1
+    # column. The check ``if rel_dst_split.shape[1] >= 2:`` was False —
+    # the ENTIRE mismatch detection block was SKIPPED. No dead-letter,
+    # no warning. Malformed relations passed through to edge emission,
+    # bypassing the biological-validity check.
     # ROOT FIX: add an explicit ``else`` branch that dead-letters every
     # row where ``relation_dst_type`` has no ``:`` separator. This
     # ensures malformed relations are quarantined rather than silently
     # admitted to the KG.
+    #
+    # P2-021 ROOT FIX: ``relation_dst_type`` is now LOWERCASED (e.g.
+    # "compound:disease") while ``head_type`` / ``tail_type`` remain
+    # PascalCase (e.g. "Compound", "Disease") for downstream
+    # ``EDGE_EVIDENCE_STRENGTH`` lookup. Compare LOWERCASED versions of
+    # both sides so the cross-check still catches real mismatches
+    # (e.g. head_type="Gene" vs relation_dst_type="compound:disease").
     if len(df) > 0:
         rel_dst_split = df["relation_dst_type"].str.split(":", n=1, expand=True)
         if rel_dst_split.shape[1] >= 2:
             rel_head_type = rel_dst_split[0]
             rel_tail_type = rel_dst_split[1]
-            mismatch_mask = (rel_head_type != df["head_type"]) | (
-                rel_tail_type != df["tail_type"]
+            # P2-021: lowercase head_type/tail_type for the comparison
+            # only — the stored columns stay PascalCase.
+            mismatch_mask = (
+                rel_head_type != df["head_type"].astype(str).str.lower()
+            ) | (
+                rel_tail_type != df["tail_type"].astype(str).str.lower()
             )
             n_mismatch = int(mismatch_mask.sum())
             if n_mismatch > 0:
@@ -1815,6 +1836,42 @@ def parse_drkg_tsv(
                      "stage": "parse_provenance"},
         )
     df.attrs["provenance"] = provenance
+
+    # P2-021 ROOT FIX — round-trip invariant assertion. Verifies that
+    # ``reconstruct_relation_code(src, name, dst_type) == relation`` for
+    # EVERY row. If any future edit re-introduces the case mismatch
+    # (e.g. preserves PascalCase in one field but not another), this
+    # assertion fires immediately rather than silently corrupting
+    # downstream graph queries. This is the "assert it on every read"
+    # guarantee mandated by the issue.
+    if len(df) > 0:
+        _reconstructed = df.apply(
+            lambda r: reconstruct_relation_code(
+                r["relation_source"],
+                r["relation_name"],
+                r["relation_dst_type"],
+            ),
+            axis=1,
+        )
+        _roundtrip_mismatch = _reconstructed != df["relation"].astype(str)
+        _n_roundtrip_bad = int(_roundtrip_mismatch.sum())
+        if _n_roundtrip_bad > 0:
+            _sample = df.loc[_roundtrip_mismatch, [
+                "relation", "relation_source",
+                "relation_name", "relation_dst_type",
+            ]].head(5).to_dict("records")
+            raise DRKGDataIntegrityError(
+                "P2-021 round-trip invariant violated: "
+                f"{_n_roundtrip_bad} rows where reconstruct_relation_code("
+                "src, name, dst_type) != relation. The four relation-code "
+                "fields MUST share the same canonical case (config."
+                "DRKG_RELATION_CODE_CANONICAL_CASE='lower'). Sample:",
+                context={
+                    "stage": "parse_roundtrip_invariant",
+                    "bad_count": _n_roundtrip_bad,
+                    "sample": _sample,
+                },
+            )
 
     logger.info(
         "DRKG parse complete: %d triples, schema_version=%s",

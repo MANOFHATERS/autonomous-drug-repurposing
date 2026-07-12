@@ -234,7 +234,45 @@ _CHEMBL_ID_RE: re.Pattern[str] = re.compile(r"^CHEMBL\d+$")
 # (5 digits); even with expansion headroom to DB999999 (6 digits), 7
 # digits is unjustified. Lower bound 5 preserves the rejection of
 # DB1 / DB123. SW-7 ROOT FIX retained.
+#
+# P1-017 ROOT FIX (Team-2 — accept synthesized IDs in entity resolution):
+#   The v50 open-data fallback (``_v50_downloaders.py::_synthesize_drugbank_id``)
+#   generates synthesized IDs with the ``SYNTH-DB-`` prefix (clearly
+#   non-DrugBank — see P1-017 root fix in drugbank_pipeline.py). Entity
+#   resolution MUST accept these IDs so synthesized drugs flow through
+#   to the KG. The previous regex ``^DB\d{5,6}$`` REJECTED all synthesized
+#   IDs — the v50 fallback was dead code at the entity resolution stage.
+#   ROOT FIX: add a SEPARATE ``_SYNTHESIZED_DRUG_ID_RE`` regex for the
+#   synthesized form. The validation logic (line ~2235) accepts EITHER
+#   a real DrugBank ID OR a synthesized ID via ``_is_valid_drugbank_id``.
+#   NOTE: this regex is kept in sync with ``drugbank_pipeline._DRUGBANK_ID_RE``
+#   and ``drugbank_pipeline._SYNTHESIZED_DRUG_ID_RE``. A future refactor
+#   should consolidate these into a single shared module to eliminate
+#   the duplication (documented as a follow-up — not in P1-017 scope).
 _DRUGBANK_ID_RE: re.Pattern[str] = re.compile(r"^DB\d{5,6}$")
+# P1-017 ROOT FIX (Team-2): separate regex for synthesized drug IDs.
+# MUST match the pattern in ``drugbank_pipeline._SYNTHESIZED_DRUG_ID_RE``.
+_SYNTHESIZED_DRUG_ID_RE: re.Pattern[str] = re.compile(
+    r"^SYNTH-DB-[0-9A-F]{8}$"  # synthesized from InChIKey hash: SYNTH-DB-A1B2C3D4
+    r"|^SYNTH-DB-M\d{6}$"      # synthesized for missing InChIKey: SYNTH-DB-M000001
+)
+
+
+def _is_valid_drugbank_id(drugbank_id: "str | None") -> bool:
+    """Validate a drugbank_id — accepts EITHER real OR synthesized IDs.
+
+    P1-017 ROOT FIX (Team-2): see drugbank_pipeline._is_valid_drugbank_id
+    for the full rationale. This is a copy kept in entity_resolution to
+    avoid a circular import (drugbank_pipeline imports from
+    entity_resolution at runtime). A future refactor should consolidate
+    both copies into a shared ``_constants`` module.
+    """
+    if not drugbank_id or not isinstance(drugbank_id, str):
+        return False
+    return bool(
+        _DRUGBANK_ID_RE.match(drugbank_id)
+        or _SYNTHESIZED_DRUG_ID_RE.match(drugbank_id)
+    )
 _INCHI_PREFIX_RE: re.Pattern[str] = re.compile(r"^InChI=1[SB]?/")
 # v9 ROOT FIX (audit F4.8): the comment claimed this matches STRING's
 # "taxonID.ENSEMBL_protein_id" format (e.g. 9606.ENSP00000269305), but
@@ -2231,11 +2269,16 @@ def validate_drug_record(
             )
 
         # FIX #23 -- DrugBank ID format
+        # P1-017 ROOT FIX (Team-2): accept EITHER a real DrugBank ID
+        # (``DB\d{5,6}``) OR a synthesized ID (``SYNTH-DB-...``). The
+        # previous check used ``_DRUGBANK_ID_RE.match()`` which rejected
+        # synthesized IDs -- breaking the v50 fallback at entity resolution.
         drugbank_id = record.get("drugbank_id")
-        if drugbank_id and isinstance(drugbank_id, str) and not _DRUGBANK_ID_RE.match(drugbank_id):
+        if drugbank_id and isinstance(drugbank_id, str) and not _is_valid_drugbank_id(drugbank_id):
             errors.append(
                 f"drugbank_id {_truncate_for_error(drugbank_id)} does not match "
-                f"DB\\d+ format"
+                f"DB\\d{{5,6}} (real DrugBank) OR SYNTH-DB-[0-9A-F]{{8}} / "
+                f"SYNTH-DB-M\\d{{6}} (synthesized) format"
             )
 
         # FIX #23, #30 / BUG-CODE-06 -- PubChem CID type + positivity

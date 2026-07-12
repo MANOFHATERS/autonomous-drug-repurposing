@@ -87,8 +87,9 @@ import tempfile
 import threading
 import time
 import warnings
+from collections import OrderedDict
 from contextlib import contextmanager
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, asdict, is_dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import (
@@ -1145,6 +1146,101 @@ def _acquire_cache_lock(cache_path: Path) -> contextmanager:
     return _lock_ctx()
 
 
+def _sanitize_payload_for_weights_only(obj: Any) -> Any:
+    """Recursively sanitize a payload so ``torch.load(weights_only=True)`` succeeds.
+
+    P2-033 ROOT FIX. ``weights_only=True`` restricts unpickling to a safe
+    allowlist (tensors, dicts, lists, str, int, float, bool, None, tuple,
+    set, frozenset). Any non-allowlist type — ``datetime``, ``Path``,
+    custom dataclass, ``OrderedDict``, ``namedtuple``, etc. — causes
+    ``UnpicklingError`` on load. The load path catches the exception and
+    treats it as a cache miss, silently re-encoding. For a non-trivial
+    payload this drops cache hit rate to ~0%.
+
+    This helper walks the payload recursively BEFORE ``torch.save`` and
+    converts any non-allowlist type to a primitive form:
+      - ``datetime`` → ``.isoformat()`` string
+      - ``date``     → ``.isoformat()`` string
+      - ``Path``     → ``str()``
+      - ``dataclass`` → ``dataclasses.asdict()`` (then recurse)
+      - ``OrderedDict`` → plain ``dict`` (then recurse)
+      - ``namedtuple`` → plain ``tuple`` (then recurse)
+      - ``set``/``frozenset`` → sorted ``list`` (then recurse) — sets
+        are technically allowed by weights_only but their iteration
+        order is non-deterministic, which breaks the SHA-256 sidecar
+        verification (the same payload produces different bytes on
+        re-save). Converting to a sorted list makes the serialisation
+        byte-stable.
+      - ``torch.Tensor`` → unchanged (allowlisted)
+      - other unknown types → ``str()`` (last-resort coercion, logged
+        at WARNING so operators can detect payload-schema drift)
+
+    The function is idempotent: sanitizing an already-primitive payload
+    returns it unchanged.
+    """
+    # Fast path: allowlisted primitives and torch.Tensor pass through.
+    if obj is None or isinstance(obj, (bool, int, float, str, bytes)):
+        return obj
+    # torch.Tensor must be checked BEFORE the general "unknown" branch.
+    # Use duck-typing so the helper works even if torch is a stub.
+    if _HAS_TORCH and isinstance(obj, torch.Tensor):
+        return obj
+    # datetime/date → ISO string (P2-033: datetime is the most common
+    # non-primitive that creeps into payloads via ``datetime.now()``).
+    try:
+        from datetime import date, datetime as _dt
+        if isinstance(obj, _dt):
+            return obj.isoformat()
+        if isinstance(obj, date):
+            return obj.isoformat()
+    except ImportError:
+        pass
+    # pathlib.Path → str
+    if isinstance(obj, Path):
+        return str(obj)
+    # dataclass → dict (then recurse)
+    if is_dataclass(obj) and not isinstance(obj, type):
+        return _sanitize_payload_for_weights_only(asdict(obj))
+    # OrderedDict → plain dict
+    if isinstance(obj, OrderedDict):
+        return _sanitize_payload_for_weights_only(dict(obj))
+    # namedtuple → plain tuple (namedtuple subclasses tuple, so check
+    # ``_fields`` attribute).
+    if isinstance(obj, tuple) and hasattr(obj, "_fields") and hasattr(obj, "_asdict"):
+        return _sanitize_payload_for_weights_only(dict(obj._asdict()))
+    # set/frozenset → sorted list (byte-stable serialisation)
+    if isinstance(obj, (set, frozenset)):
+        try:
+            return _sanitize_payload_for_weights_only(sorted(obj))
+        except TypeError:
+            # Unsortable (mixed types) — fall back to list with str sort.
+            return _sanitize_payload_for_weights_only(sorted(obj, key=str))
+    # list → recurse element-wise
+    if isinstance(obj, list):
+        return [_sanitize_payload_for_weights_only(v) for v in obj]
+    # tuple → recurse element-wise (plain tuple, not namedtuple)
+    if isinstance(obj, tuple):
+        return tuple(_sanitize_payload_for_weights_only(v) for v in obj)
+    # dict → recurse value-wise (keys assumed primitive)
+    if isinstance(obj, dict):
+        return {
+            (str(k) if not isinstance(k, (str, int, float, bool)) else k):
+            _sanitize_payload_for_weights_only(v)
+            for k, v in obj.items()
+        }
+    # Last-resort coercion for any unknown type. Log at WARNING so
+    # operators detect payload-schema drift (a new field type that
+    # needs explicit handling).
+    logger.warning(
+        "P2-033: coercing non-allowlist type %s to str for "
+        "weights_only=True compatibility. Update "
+        "_sanitize_payload_for_weights_only to handle this type "
+        "explicitly if lossless round-trip is required.",
+        type(obj).__name__,
+    )
+    return str(obj)
+
+
 def _cache_save_atomic(
     cache_path: Path,
     payload: Dict[str, Any],
@@ -1169,7 +1265,27 @@ def _cache_save_atomic(
       2. Add ``payload["cache_sha256"]`` to the dict BEFORE
          serialising, so the digest is part of the persisted bytes.
       3. The SHA-256 sidecar file matches the file bytes exactly.
+
+    P2-033 ROOT FIX: sanitize the payload BEFORE ``torch.save`` so
+    that ``torch.load(..., weights_only=True)`` (the safe-load mode
+    that prevents arbitrary code execution) ALWAYS succeeds on
+    read-back. The previous code assumed all payload fields were
+    primitives (str/int/bool/list/dict) or torch.Tensor, but if any
+    future edit adds a ``datetime``, ``Path``, or custom dataclass
+    field, ``weights_only=True`` raises ``UnpicklingError`` — which
+    the load path catches and treats as a cache miss, silently
+    re-encoding. Cache hit rate drops to ~0% for any non-trivial
+    payload. The fix runs ``_sanitize_payload_for_weights_only``
+    recursively on the payload before serialisation, converting any
+    non-primitive to a primitive form (datetime→ISO string,
+    Path→str, dataclass→dict).
     """
+    # P2-033: sanitize BEFORE serialisation so weights_only=True load
+    # always succeeds. This is the "audit all fields" mandate from
+    # the issue, implemented as a recursive walk that is robust to
+    # future payload additions.
+    payload = _sanitize_payload_for_weights_only(payload)
+
     temp_path = Path(str(cache_path) + f".{run_id}.tmp")
 
     # FIX-P2-P2-16: the in-payload ``cache_sha256`` field previously
