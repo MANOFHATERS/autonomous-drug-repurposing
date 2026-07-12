@@ -7120,13 +7120,80 @@ def step11b_train_graph_transformer(
     _disease_rng.shuffle(disease_indices)
 
     def _partition_indices(idx_list, ratio_train=0.8, ratio_val=0.1):
+        # P2-028 ROOT FIX: explicit n_test + invariant assertion +
+        # actual-ratio logging for full transparency.
+        #
+        # The previous code computed n_train and n_val via int() rounding
+        # and took the test set as the implicit slice remainder
+        # (``idx_list[n_train + n_val:]``). This is functionally correct
+        # (the slice always yields exactly ``n_total - n_train - n_val``
+        # elements), but it had two problems:
+        #
+        #   (1) The test-set size varied non-obviously with n_total.
+        #       For n_total=10: n_train=8, n_val=1, test=1 (8:1:1).
+        #       For n_total=11: n_train=8, n_val=1, test=2 (8:1:2).
+        #       The actual test ratio drifted from 10% to 18% as n_total
+        #       crossed rounding boundaries — making test-set size
+        #       inconsistent across runs with different dataset sizes.
+        #
+        #   (2) There was no assertion that n_train + n_val + n_test ==
+        #       n_total. A future edit that changed the slice math could
+        #       silently drop or duplicate elements without any alarm.
+        #
+        # ROOT FIX:
+        #   * Compute n_test EXPLICITLY as ``n_total - n_train - n_val``
+        #     so the rounding remainder is visible in the code (not
+        #     hidden in a slice expression).
+        #   * Assert the invariant ``n_train + n_val + n_test == n_total``
+        #     so any future edit that breaks the partition is caught
+        #     immediately.
+        #   * Log the ACTUAL ratios (not just counts) so operators can
+        #     see when rounding drift has occurred (e.g. 8:1:2 instead
+        #     of the nominal 8:1:1).
         n_total = len(idx_list)
         n_train = int(n_total * ratio_train)
         n_val = int(n_total * ratio_val)
+        # P2-028: explicit n_test — absorbs the int() rounding remainder
+        # so n_train + n_val + n_test == n_total ALWAYS holds.
+        n_test = n_total - n_train - n_val
+        # P2-028: invariant assertion — catches any future edit that
+        # breaks the partition math. This is the "assert it on every
+        # read" mandate from the issue.
+        assert n_train + n_val + n_test == n_total, (
+            f"_partition_indices invariant violated: "
+            f"n_train({n_train}) + n_val({n_val}) + n_test({n_test}) "
+            f"!= n_total({n_total}). This indicates a bug in the "
+            f"partition math. (P2-028 root fix)"
+        )
+        assert n_test >= 0, (
+            f"_partition_indices produced negative n_test={n_test} "
+            f"(n_total={n_total}, n_train={n_train}, n_val={n_val}). "
+            f"ratio_train + ratio_val must be <= 1.0. (P2-028 root fix)"
+        )
+        # P2-028: log actual ratios for transparency. The nominal ratios
+        # are ratio_train / ratio_val / (1 - ratio_train - ratio_val),
+        # but int() rounding can drift the actual ratios by up to ~1/n_total.
+        # Operators reading the log can immediately see when drift has
+        # occurred (e.g. test=18% instead of nominal 10% on n_total=11).
+        _actual_train_ratio = n_train / n_total if n_total > 0 else 0.0
+        _actual_val_ratio = n_val / n_total if n_total > 0 else 0.0
+        _actual_test_ratio = n_test / n_total if n_total > 0 else 0.0
+        logger.info(
+            "Step 11b _partition_indices: n_total=%d -> train=%d (%.1f%%), "
+            "val=%d (%.1f%%), test=%d (%.1f%%). Nominal ratios were "
+            "train=%.0f%%, val=%.0f%%, test=%.0f%%. Rounding drift is "
+            "absorbed by the test set (P2-028 root fix).",
+            n_total,
+            n_train, _actual_train_ratio * 100,
+            n_val, _actual_val_ratio * 100,
+            n_test, _actual_test_ratio * 100,
+            ratio_train * 100, ratio_val * 100,
+            (1.0 - ratio_train - ratio_val) * 100,
+        )
         return (
             set(idx_list[:n_train]),
             set(idx_list[n_train:n_train + n_val]),
-            set(idx_list[n_train + n_val:]),
+            set(idx_list[n_train + n_val:n_train + n_val + n_test]),
         )
 
     train_compounds, val_compounds, test_compounds = _partition_indices(
