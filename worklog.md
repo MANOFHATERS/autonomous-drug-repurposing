@@ -941,3 +941,35 @@ Stage Summary:
 
 NOTIFICATION for Team 7 (owner of P2-065):
 - 3 P2-065 tests in phase2/tests/p2_049_067/test_p2_049_to_067_root_fixes.py are now SKIPPED with reason "P2-026 (Team 8) deleted phase2/drugos_graph/graph_transformer_model.py". These tests imported from the deleted dead file. Team 7 must migrate them to import from the canonical Phase 3 location: graph_transformer.models.graph_transformer. The _PendingEmbedding sentinel behavior they test may or may not exist on the canonical model — Team 7 should verify.
+
+---
+Task ID: team4-p1-031-to-037
+Agent: Team Member 4 (forensic root fix)
+Task: Fix 7 Phase 1 Airflow DAG issues (P1-031..P1-037) — institutional-grade, root-cause, no surface fixes.
+
+Work Log:
+- Read project docx (Team_Cosmic_Build_Process_Updated.docx) to understand the 4-phase architecture (Phase 1 data ingestion, Phase 2 KG, Phase 3 Graph Transformer, Phase 4 RL ranker).
+- Read each of the 7 target DAG files LINE BY LINE (chembl_dag, drugbank_dag, disgenet_dag, pubchem_dag, master_pipeline_dag, _retry_policy, _dags_init) — not grep, not test files, the actual source.
+- Found ROOT CAUSE that explained why every previous "fix" silently passed tests: phase1/airflow/__init__.py was a 47-byte STUB shadowing the real airflow package. Any `import airflow` from inside phase1/ returned the empty stub; `from airflow.decorators import dag, task` failed with ModuleNotFoundError. This is why pytest.skip() fired in test_dag_structure.py and DAG structure bugs shipped to production. REMOVED the stub.
+- P1-031: Verified master_pipeline_dag task dependencies ARE wired (the audit description was outdated). Added 10 new dependency-chain regression tests verifying every >> / << edge.
+- P1-032: Bumped chembl_dag retries from 2 (inherited from DEFAULT_RETRY_ARGS) to 6 (95 min total — spans ChEMBL's 30-60 min maintenance windows). Added check_chembl_health pre-flight sensor that hits /status endpoint, raises AirflowFailException on DOWN. Added on_failure_callback for structured alerting.
+- P1-033: Added DB_DEADLOCK_RETRY_ARGS (retries=5, max_retry_delay=5min per audit). Added is_db_deadlock_error() detector and retry_on_db_deadlock decorator with jittered backoff. 7 new tests.
+- P1-034: Added require_airflow() helper to _dags_init.py. Created requirements-dev.txt. Removed ALL pytest.skip() in test_dag_structure.py (replaced with hard failures). Added sqlalchemy 2.0 compatibility patch for airflow 2.9-2.10's legacy annotations.
+- P1-035: Added SUPPORTED_DRUGBANK_SCHEMAS frozenset (5.0..5.1.12). Added _detect_drugbank_schema_version() that reads only first 8 KB (handles .gz). Added check_drugbank_schema pre-flight task. 11 new tests including a mocked future 6.0.0 schema (REJECTED).
+- P1-036: Moved disgenet_dag schedule from "0 6 * * 2" (Tuesday) to "0 2 * * 1" (Monday 02:00 UTC) per audit. Added check_disgenet_release sensor that queries /v1/public/release_notes and verifies latest release is <7 days old. 5 new tests.
+- P1-037: Verified HTTPS already used (PUBCHEM_FTP_BASE defaults to https://...). Verified resumable downloads (HTTP Range) already exist in _v50_downloaders. Added explicit PUBCHEM_TASK_TIMEOUT=4h on @task decorator. Added check_pubchem_https pre-flight sensor. 6 new tests including Range-header verification.
+- Side-fixes (justified — blocked P1-031 verification): BranchPythonOperator import compatibility shim for airflow 2.10+; PlainXComArg.task_id compatibility for airflow 2.10+.
+- Ran real code: imported every modified DAG, built the DAG objects, verified task_ids, schedules, retries, execution_timeout, on_failure_callback. ALL PASS.
+- Ran pytest: 63 new regression tests + existing test_v26_infra_fixes.py = 75 tests, ALL PASS.
+- Pushed fix/team4-p1-031-to-037-forensic-root-fix branch.
+- Merged to main (merge commit 4e07676).
+- Re-cloned main to /home/z/my-project/work/verify/repo_fresh and verified all 7 fixes are present + all 63 tests pass on the fresh clone.
+
+Stage Summary:
+- 7 issues fixed (0 CRITICAL, 2 HIGH, 3 MEDIUM, 2 LOW).
+- 63 new regression tests, ALL PASSING on fresh clone of main.
+- 1 ROOT CAUSE found and fixed: phase1/airflow/ stub was shadowing the real airflow package — this was the silent-skip enabler for every previous "fix".
+- 3 side-fixes in master_pipeline_dag.py (BranchPythonOperator import, PlainXComArg.task_id) — justified because they blocked P1-031 verification.
+- Merge commit on main: 4e07676.
+- Files modified: phase1/dags/{_dags_init,_retry_policy,chembl_dag,drugbank_dag,disgenet_dag,pubchem_dag,master_pipeline_dag}.py, phase1/tests/{test_dag_structure,test_team4_p1_031_to_037_forensic_fixes}.py, phase1/tests/conftest_p1_034.py (new), requirements-dev.txt (new), phase1/airflow/__init__.py (REMOVED).
+- Forensic findings outside Team 4 scope (notified): the phase1/airflow/ stub was the root cause of EVERY previous session's silent test skips. Other team members should verify their tests are not similarly affected.
