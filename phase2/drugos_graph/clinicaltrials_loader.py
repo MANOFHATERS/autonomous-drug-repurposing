@@ -4861,6 +4861,11 @@ def load_clinicaltrials(
     cfg = cfg or ClinicalTrialsConfig()
     t0: float = time.monotonic()
     ensure_dirs()
+    # P2-056 ROOT FIX: runtime check that the schema triple is still in
+    # CORE_EDGE_TYPES. The check is HERE (not at module import) so a
+    # config regression does not crash the module's import graph — only
+    # the actual edge-load path fails, with a clear error message.
+    _assert_tested_for_in_core_edge_types()
 
     # Issue 6.5 / 4.8 -- download + extract.
     extract_dir: Path = download_clinicaltrials(cfg=cfg)
@@ -5079,11 +5084,60 @@ assert not any(
     "allowed."
 )
 
-# Static assertion that ("Compound", "tested_for", "Disease") is in CORE_EDGE_TYPES.
-assert ("Compound", "tested_for", "Disease") in CORE_EDGE_TYPES, (
-    "Issue 2.1 / 14.1 / 15.3 violation: ('Compound', 'tested_for', 'Disease') "
-    "must be in config.CORE_EDGE_TYPES for clinicaltrials_loader to emit edges."
-)
+# P2-056 ROOT FIX: the previous ``assert ("Compound", "tested_for", "Disease")
+# in CORE_EDGE_TYPES`` ran at MODULE IMPORT TIME. If a future config refactor
+# renamed "tested_for" to "tested_for_disease" (or removed it entirely), this
+# assertion would fire at import — crashing EVERY module that imports
+# clinicaltrials_loader, including tests, run_pipeline, and run_unified. That
+# is fragile: a config regression in one place takes down the entire import
+# graph, and the operator can't even open a Python REPL to debug. Root fix:
+# convert the static assert into a runtime function that the loader's main
+# entry point calls BEFORE emitting any tested_for edges. The function logs
+# a CRITICAL warning (not a silent assert) and raises RuntimeError so the
+# operator sees the exact problem at the call site — not at import time. We
+# ALSO keep an import-time check that ONLY logs (does NOT raise) so the
+# operator sees the warning even if they import the module without calling
+# the loader. This mirrors the pattern used by kg_builder's
+# ``_assert_edge_property_whitelist_populated`` (RT-8 root fix).
+_REQUIRED_TESTED_FOR_TRIPLE = ("Compound", "tested_for", "Disease")
+
+
+def _assert_tested_for_in_core_edge_types() -> None:
+    """Raise RuntimeError if ('Compound', 'tested_for', 'Disease') is
+    not in CORE_EDGE_TYPES.
+
+    Called from the loader's main entry point BEFORE emitting any
+    tested_for edges. P2-056 root fix: this is a RUNTIME check (not an
+    import-time assert) so a config regression does not crash the
+    module's import graph. The check fires ONLY when an actual
+    production edge load is attempted — operators can still import the
+    module to inspect the loader / run unit tests / debug.
+    """
+    if _REQUIRED_TESTED_FOR_TRIPLE not in CORE_EDGE_TYPES:
+        raise RuntimeError(
+            "P2-056 invariant violated: ('Compound', 'tested_for', "
+            "'Disease') is not in config.CORE_EDGE_TYPES. The "
+            "clinicaltrials_loader can only emit 'tested_for' edges "
+            "for this triple type. Either (a) restore the triple in "
+            "config.CORE_EDGE_TYPES, OR (b) update the loader's "
+            "emittable-triples list to match the new schema. The "
+            "loader will not emit any edges until this is fixed. "
+            "(P2-056 root fix)"
+        )
+
+
+# Import-time WARNING (no raise) so the operator sees the problem
+# even if they only import the module. We use a module-level flag
+# instead of an assert so test fixtures can monkey-patch
+# CORE_EDGE_TYPES without triggering a hard failure.
+if _REQUIRED_TESTED_FOR_TRIPLE not in CORE_EDGE_TYPES:
+    logging.getLogger(__name__).critical(
+        "P2-056 invariant violated at import time: "
+        "('Compound', 'tested_for', 'Disease') is not in "
+        "config.CORE_EDGE_TYPES. The module is importable for "
+        "debugging, but the loader's main entry point will raise "
+        "RuntimeError until the config regression is fixed."
+    )
 
 
 # Issue 7.10 -- no random seed needed; loader is deterministic given the
