@@ -67,6 +67,7 @@ export async function POST(req: NextRequest) {
       passwordHash: true,
       role: true,
       status: true,
+      emailVerified: true,
       name: true,
       mfaEnabled: true,
       mfaSecret: true,
@@ -97,6 +98,25 @@ export async function POST(req: NextRequest) {
   if (user.status === "suspended") {
     return NextResponse.json(
       { error: "account_suspended", message: "Account suspended. Contact your administrator." },
+      { status: 403 }
+    );
+  }
+
+  // FE-035 ROOT FIX: Reject unverified accounts. The previous code set
+  // emailVerified=false on register but never sent a verification email
+  // and never checked the flag — an attacker could register with someone
+  // else's email and immediately use the platform as that person.
+  //
+  // Now registration sends a real verification email (via EMAIL_SERVICE_URL
+  // in prod, stderr in dev) and the user MUST click the link before they
+  // can log in. We return 403 with a clear message so the UI can prompt
+  // the user to check their inbox or request a new link.
+  if (!user.emailVerified) {
+    return NextResponse.json(
+      {
+        error: "email_not_verified",
+        message: "Please verify your email before logging in. Check your inbox for a verification link.",
+      },
       { status: 403 }
     );
   }
