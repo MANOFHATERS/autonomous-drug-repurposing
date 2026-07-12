@@ -3471,15 +3471,95 @@ def train_transe(
                 if _model_higher_is_better:
                     # HGT-style: higher score = more plausible.
                     # Loss = max(0, neg - pos + margin).
+                    # P2-018 ROOT FIX (v104): the reduction MUST be ``.mean()``
+                    # (per-element mean over the batch). The previous v28
+                    # comment claimed ``.mean()`` was used, but the audit
+                    # flagged that any future change to ``.sum()`` would
+                    # silently make the loss scale with batch size — a
+                    # batch of 100 would have 10x the loss of a batch of
+                    # 10, forcing a per-batch-size learning-rate re-tune
+                    # and causing training instability at production batch
+                    # sizes (e.g. batch=512 with lr tuned for batch=128
+                    # would be 4x too high). We add a runtime guard that
+                    # verifies the loss scalar is approximately batch-size
+                    # independent on the first batch — if it is not, the
+                    # trainer aborts with a clear error rather than
+                    # silently training with the wrong gradient scale.
                     loss = (
                         neg_scores - pos_expanded + config.margin
                     ).clamp(min=0).mean()
                 else:
                     # TransE-style: lower score = more plausible.
                     # Loss = max(0, pos - neg + margin).
+                    # P2-018 ROOT FIX (v104): see the matching comment
+                    # above — reduction MUST be ``.mean()``. The Bordes
+                    # 2013 paper specifies a per-triple margin loss; the
+                    # standard practice (and the only reduction that
+                    # keeps the learning rate invariant to batch size)
+                    # is the mean over the batch. Sum reduction would
+                    # couple the loss magnitude to batch size, breaking
+                    # the lr/batch independence assumed by Adam's
+                    # step-size estimate.
                     loss = (
                         pos_expanded - neg_scores + config.margin
                     ).clamp(min=0).mean()
+
+                # P2-018 ROOT FIX (v104): runtime guard. On the first
+                # batch of the first epoch, verify the loss is
+                # approximately batch-size-independent by recomputing it
+                # with a 2x subsample and checking the loss ratio is
+                # ~1.0 (within 5% tolerance). If a future maintainer
+                # changes ``.mean()`` to ``.sum()``, this guard fires
+                # on the first batch and aborts training with a clear
+                # error, rather than silently producing unstable
+                # gradients. The check is cheap (one extra forward on
+                # a half-batch on epoch 0 batch 0 only) and skipped
+                # on subsequent batches via the function-attribute
+                # flag ``train_transe._p2_018_checked`` (set on first
+                # invocation). The flag lives on the function object
+                # itself so it persists across batches within one
+                # process without polluting module state.
+                if epoch == 0 and batch_start == 0 and not getattr(
+                    train_transe, "_p2_018_checked", False
+                ):
+                    train_transe._p2_018_checked = True
+                    _half = max(1, pos_scores.shape[0] // 2)
+                    _pos_half = pos_scores[:_half]
+                    _neg_half = neg_scores[: _half * _num_negatives]
+                    _pos_exp_half = _pos_half.repeat_interleave(_num_negatives)
+                    if _pos_exp_half.shape[0] == _neg_half.shape[0] and _half > 1:
+                        if _model_higher_is_better:
+                            _loss_half = (
+                                _neg_half - _pos_exp_half + config.margin
+                            ).clamp(min=0).mean()
+                        else:
+                            _loss_half = (
+                                _pos_exp_half - _neg_half + config.margin
+                            ).clamp(min=0).mean()
+                        _full_loss_val = float(loss.item())
+                        _ratio = (
+                            float(_loss_half.item()) / _full_loss_val
+                            if _full_loss_val > 0 else 1.0
+                        )
+                        if not (0.95 <= _ratio <= 1.05):
+                            raise RuntimeError(
+                                f"P2-018 ROOT FIX: loss reduction is NOT "
+                                f"batch-size-independent — half-batch loss "
+                                f"={float(_loss_half.item()):.6f} vs "
+                                f"full-batch loss={_full_loss_val:.6f} "
+                                f"(ratio={_ratio:.4f}). Expected ratio ~1.0 "
+                                f"with .mean() reduction. A .sum() reduction "
+                                f"would produce ratio ~0.5. Aborting training "
+                                f"to prevent silent lr/batch coupling. "
+                                f"Restore .mean() in the loss formula. "
+                                f"(P2-018 root fix runtime guard)"
+                            )
+                        logger.info(
+                            "P2-018 ROOT FIX: loss reduction verified "
+                            "batch-size-independent (half-batch ratio = "
+                            "%.4f, expected ~1.0). (P2-018)",
+                            _ratio,
+                        )
 
                 # FIX R6.2: NaN/Inf check BEFORE backward pass.
                 if torch.isnan(loss) or torch.isinf(loss):
