@@ -238,7 +238,29 @@ ID_PATTERNS: dict[str, str] = {
     # (DRUGBANK_DRUG_IDENTIFIER_REGEX), all = ^DB\d{5,7}$. Previously
     # this was {5,6} which silently dead-lettered 7-digit DrugBank IDs
     # that the parser accepts — fragmenting the KG.
-    "Compound": r"^(DB\d{5,7}|CHEMBL\d+|CID\d+|[A-Z]{14}-[A-Z]{10}-[A-Z]|CIDm\d+|CIDs\d+|MESH:[A-Z]\d+)$",
+    # P2-010 ROOT FIX (STITCH CIDm/CIDs case-sensitivity):
+    # The previous pattern ``CIDm\d+|CIDs\d+`` was case-SENSITIVE —
+    # it accepted ``CIDm00002244`` and ``CIDs00002244`` (lowercase
+    # m/s) but NOT ``CIDM00002244`` / ``CIDS00002244`` (uppercase
+    # M/S). Any caller that uppercased the ID upstream (e.g.
+    # phase1_bridge.py:3547 uppercases inchikey, and the entity
+    # resolver applies .upper() to canonical IDs in some paths)
+    # converted ``CIDm00002244`` → ``CIDM00002244`` which FAILED
+    # the pattern — dead-lettering the entire STITCH drug-target
+    # edge set (STITCH has ~500K drug-protein edges, the largest
+    # single source). Drug-protein connectivity of the KG was
+    # silently halved.
+    #
+    # ROOT FIX: make the CIDm/CIDs prefix case-INSENSITIVE via the
+    # character-class form ``[Cc][Ii][Dd][Mm]\d+`` /
+    # ``[Cc][Ii][Dd][Ss]\d+``. This matches any case combination of
+    # the four-letter prefix while keeping the digit run strict
+    # (avoiding accidental match of unrelated identifiers). The
+    # canonical form emitted by the STITCH loader remains
+    # ``CIDm<digits>`` / ``CIDs<digits>`` (lowercase m/s) — the
+    # case-insensitive pattern is defensive against upstream
+    # normalisation, NOT a licence to emit arbitrary case.
+    "Compound": r"^(DB\d{5,7}|CHEMBL\d+|CID\d+|[A-Z]{14}-[A-Z]{10}-[A-Z]|[Cc][Ii][Dd][Mm]\d+|[Cc][Ii][Dd][Ss]\d+|MESH:[A-Z]\d+)$",
     # v21 ROOT FIX (Audit section 4 finding 8 / Chain 9 - "Bridge emits
     # IDs that production rejects"): the previous Protein pattern
     # accepted ONLY UniProt accessions. But phase1_bridge.py:1642 emits

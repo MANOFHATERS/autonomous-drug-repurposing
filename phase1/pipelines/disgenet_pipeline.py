@@ -1,21 +1,21 @@
 """
-DisGeNET Pipeline — institutional-grade gene-disease association (GDA) ingestion.
+DisGeNET Pipeline -- institutional-grade gene-disease association (GDA) ingestion.
 
 This is the **single source of truth** for every gene-disease association in
 the Autonomous Drug Repurposing Platform.  The data flow is::
 
-    DisGeNET API/TSV  →  disgenet_pipeline.py  →  gene_disease_associations.csv
-                                                →  gene_disease_associations (DB table)
-                                                →  Neo4j Knowledge Graph
-                                                →  Graph Transformer (ML model)
-                                                →  RL Ranker
-                                                →  Pharma partner API / Researcher dashboard
-                                                →  CLINICAL DECISION about a drug
-                                                →  PATIENT TAKES THE DRUG
+    DisGeNET API/TSV  ->  disgenet_pipeline.py  ->  gene_disease_associations.csv
+                                                ->  gene_disease_associations (DB table)
+                                                ->  Neo4j Knowledge Graph
+                                                ->  Graph Transformer (ML model)
+                                                ->  RL Ranker
+                                                ->  Pharma partner API / Researcher dashboard
+                                                ->  CLINICAL DECISION about a drug
+                                                ->  PATIENT TAKES THE DRUG
 
 Every defect in this file propagates downward.  A wrong score, a wrong
 gene-symbol resolution, a dropped evidence record, or a mis-attributed
-disease ID does NOT stop at the CSV — it becomes a "fact" in the
+disease ID does NOT stop at the CSV -- it becomes a "fact" in the
 knowledge graph, a "feature" in the ML model, and a "recommendation" in
 the dashboard.  Per the project owner's brief:
 
@@ -26,7 +26,7 @@ the dashboard.  Per the project owner's brief:
     percent true in domain scientific 100 percent true"
 
 This is the operating constraint.  Treat every line of this file as if a
-typographical error in it could kill a person — because it can.
+typographical error in it could kill a person -- because it can.
 
 Scientific ground truth (do not contradict)
 -------------------------------------------
@@ -86,7 +86,7 @@ Both must pass with zero failures.
 Dependencies
 ------------
 - UniProt pipeline MUST run first (the ``proteins`` table is required
-  for ``gene_symbol → uniprot_id`` resolution).  This is enforced at
+  for ``gene_symbol -> uniprot_id`` resolution).  This is enforced at
   ``run()`` entry (ARCH-17).
 
 Configuration
@@ -98,14 +98,14 @@ Contracts preserved
 -------------------
 - ``BasePipeline`` ABC (download/clean/load signatures, run-order).
 - ``pipelines/schema/v1.json`` (extended with optional columns;
-  ``required`` set is ``["disease_id", "score"]`` — relaxed from the
+  ``required`` set is ``["disease_id", "score"]`` -- relaxed from the
   previous ``["gene_id", "disease_id", "score"]`` because ``gene_id``
   may legitimately be NULL when the source provides only ``gene_symbol``).
 - ``validate_gda_scores`` signature (cleaning/missing_values.py).
-- ``bulk_upsert_gda`` signature (database/loaders.py) — extended with
+- ``bulk_upsert_gda`` signature (database/loaders.py) -- extended with
   ``dedup_already_done: bool = False`` kwarg (additive, backward-compat).
 - ``UpsertResult`` dataclass (database/loaders.py).
-- ``GeneDiseaseAssociation`` model (database/models.py) — extended with
+- ``GeneDiseaseAssociation`` model (database/models.py) -- extended with
   new nullable columns + ``hpo`` in the ``disease_id_type`` CHECK.
 - ``DataSourceName`` enum (config/settings.py).
 - ``PMID_LIST_LENGTH = 2000`` (database/models.py).
@@ -227,7 +227,7 @@ GDARecord = dict[str, Any]
 CleaningReport = dict[str, Any]
 
 # ---------------------------------------------------------------------------
-# Constants — no magic numbers in methods (CFG-12.x)
+# Constants -- no magic numbers in methods (CFG-12.x)
 # ---------------------------------------------------------------------------
 
 # SCI-2: Score-type label for DisGeNET's DSGP score.
@@ -262,7 +262,7 @@ SOURCE_ID_TO_ASSOCIATION_TYPE: dict[str, str] = {
 }
 """Mapping from DisGeNET ``sourceId`` (sub-source) to the
 ``association_type`` label stored in the GDA model.  Each sub-source has
-a distinct curation method (Piñero et al. 2020 §2.3) — encoding it as
+a distinct curation method (Piñero et al. 2020 §2.3) -- encoding it as
 ``association_type`` lets downstream ML distinguish a curated
 association from a text-mined one."""
 
@@ -316,7 +316,7 @@ _DISGENET_CANONICAL_MAP: dict[str, str] = {
 """Canonical field map: ALL possible DisGeNET field names (both TSV and
 API formats) mapped to our schema's snake_case column names. Adding a
 field here automatically makes it available to both format dispatchers.
-P2-5 ROOT FIX: single source of truth — drift between TSV and API maps
+P2-5 ROOT FIX: single source of truth -- drift between TSV and API maps
 is structurally impossible."""
 
 # TSV-only keys (the subset used by static TSV files)
@@ -372,7 +372,7 @@ backward compatibility with code that imports ``CONFIDENCE_TIERS`` from
 this module.  Use ``classify_confidence(score)`` for classification."""
 
 # ---------------------------------------------------------------------------
-# Compiled regexes — disease ID vocabulary patterns (SCI-5, SCI-29)
+# Compiled regexes -- disease ID vocabulary patterns (SCI-5, SCI-29)
 # ---------------------------------------------------------------------------
 # v9 ROOT FIX (audit F4.1 / F1): the DisGeNET v2024+ REST API returns
 # prefixed disease_ids in lowercase form: "umls:C0006142", "omim:100100",
@@ -405,12 +405,12 @@ _RE_HPO = re.compile(r"^HP:[0-9]+$", re.IGNORECASE)
 #
 # Historical note: the v35 comment said "align with cleaning._constants
 # .CANONICAL_OMIM_DISEASE_ID_REGEX (which uses 4-7 digits)". That regex
-# is for DISGENET-side acceptance only — the OMIM pipeline still enforces
+# is for DISGENET-side acceptance only -- the OMIM pipeline still enforces
 # the [100100, 999999] range at load time. The mismatch caused silent
 # join failures. The v64 fix makes DisGeNET reject out-of-range IDs
 # BEFORE they reach the KG, so the join is clean.
 _RE_OMIM = re.compile(r"^(?:OMIM:)?[0-9]{6,7}$", re.IGNORECASE)
-# OMIM MIM number valid range — matches omim_pipeline.py:553.
+# OMIM MIM number valid range -- matches omim_pipeline.py:553.
 # Lower bound 100100 is the first official OMIM phenotype MIM number.
 # Upper bound 9999999 allows for 7-digit future expansion (current max
 # is 6 digits ~ 6xxxxx).
@@ -453,7 +453,7 @@ _RE_ICD10 = re.compile(r"^[A-Z][0-9]{2}(\.[A-Z0-9]{1,4})?$")
 # invisible to the KG. Also accept the OBO underscore form (EFO_0000400)
 # for defense-in-depth (some databases emit this form).
 _RE_EFO = re.compile(r"^EFO:[0-9]{7}$")
-# Orphanet rare-disease IDs: "ORPHA:nnnn" — also a known DisGeNET
+# Orphanet rare-disease IDs: "ORPHA:nnnn" -- also a known DisGeNET
 # disease vocabulary; included for completeness even though the original
 # audit only flagged ICD-10 and EFO.
 _RE_ORPHANET = re.compile(r"^ORPHA:[0-9]+$")
@@ -467,11 +467,11 @@ _RE_ORPHANET = re.compile(r"^ORPHA:[0-9]+$")
 # column (``models.Protein.gene_symbol`` CHECK LENGTH 1-50) and the
 # canonical regex in ``cleaning._constants``. Without this alignment, a
 # 45-char gene symbol would pass the DB CHECK but fail the pipeline
-# validator (silent data loss at the pipeline → DB boundary).
+# validator (silent data loss at the pipeline -> DB boundary).
 _RE_HGNC_GENE_SYMBOL = re.compile(r"^[A-Z][A-Z0-9-]{0,49}$")
 # PMID format: 7-8 digit integer.
 _RE_PMID = re.compile(r"^\d{7,8}$")
-# SQL-injection defence — reject PMIDs containing SQL keywords.
+# SQL-injection defence -- reject PMIDs containing SQL keywords.
 _RE_PMID_SQL_INJECTION = re.compile(
     r"(DROP|DELETE|INSERT|UPDATE|--|;)", re.IGNORECASE
 )
@@ -489,7 +489,7 @@ _RE_HTML_TAGS = re.compile(r"<[^>]+>")
 class DisGeNETSourceFormat:
     """DisGeNET source-format discriminator (ARCH-9).
 
-    A simple constant-namespace class (not an ``Enum``) — the values are
+    A simple constant-namespace class (not an ``Enum``) -- the values are
     plain strings so they can be compared with ``==`` and stored in the
     ``source_format`` column without conversion.
     """
@@ -563,7 +563,7 @@ class _CircuitBreaker:
                 self._last_failure_time = time.time()
                 logger.warning(
                     "[disgenet] Circuit breaker re-OPENED after failed "
-                    "half-open probe — refusing calls for %.1fs",
+                    "half-open probe -- refusing calls for %.1fs",
                     self._reset_timeout,
                 )
                 return
@@ -573,7 +573,7 @@ class _CircuitBreaker:
                 if self._state != "open":
                     logger.warning(
                         "[disgenet] Circuit breaker OPENED after %d consecutive "
-                        "failures — refusing calls for %.1fs",
+                        "failures -- refusing calls for %.1fs",
                         self._failure_count,
                         self._reset_timeout,
                     )
@@ -606,8 +606,8 @@ class _CircuitBreaker:
             if self._state == "half_open":
                 # v92 ROOT FIX: if a probe is already in flight, refuse.
                 if self._half_open_probe_in_flight:
-                    return True  # refuse — wait for probe to complete
-                # No probe in flight — allow this call as the new probe.
+                    return True  # refuse -- wait for probe to complete
+                # No probe in flight -- allow this call as the new probe.
                 self._half_open_probe_in_flight = True
                 return False
             return False
@@ -671,7 +671,7 @@ def _classify_confidence(score: float) -> str:
     ----------
     score : float
         DisGeNET DSGP score, expected to be in ``[0, 1]`` (post-clip).
-        NaN and negative scores MUST NOT reach this function —
+        NaN and negative scores MUST NOT reach this function --
         :func:`validate_gda_scores` is responsible for clipping first
         (SCI-12, SCI-13).  A defensive assertion fires if these
         invariants are violated.
@@ -682,6 +682,43 @@ def _classify_confidence(score: float) -> str:
         Tier label (``"sub_weak"``, ``"weak"``, or ``"strong"``).
     """
     return classify_confidence(score, tiers=CONFIDENCE_TIERS)
+
+
+def _safe_classify_confidence(score: object) -> Optional[str]:
+    """Classify a DisGeNET score into a confidence tier, never raising.
+
+    P1-045 FORENSIC ROOT FIX (Team 4 -- lambda crashed on malformed score).
+    The previous ``df["score"].apply(lambda s: _classify_confidence(float(s))
+    if pd.notna(s) else None)`` did NOT catch ``TypeError`` or ``ValueError``.
+    A single malformed score value (e.g. ``"weak"`` instead of ``0.5`` --
+    possible if the DisGeNET TSV had a header row that wasn't stripped)
+    crashed the entire DisGeNET clean step. The dead-letter queue was NOT
+    populated (the crash happened before dead-lettering).
+
+    ROOT FIX: this wrapper catches ``(TypeError, ValueError)`` and returns
+    ``None`` so the apply never crashes. Combined with the
+    ``pd.to_numeric(df["score"], errors="coerce")`` call at the call site
+    (which converts non-numeric values to NaN before the apply runs), this
+    makes the confidence-tier classification fully defensive.
+
+    Parameters
+    ----------
+    score : object
+        Numeric score (int, float, or string coercible to float). NaN
+        values are handled by the caller's ``pd.notna`` check before
+        reaching this function.
+
+    Returns
+    -------
+    str or None
+        Tier label (``"sub_weak"``, ``"weak"``, or ``"strong"``), or
+        ``None`` if the score cannot be classified (non-numeric, out of
+        range, or any other error).
+    """
+    try:
+        return _classify_confidence(float(score))
+    except (TypeError, ValueError, OverflowError):
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -714,7 +751,7 @@ def _infer_disease_id_type(disease_id: Optional[str]) -> Optional[str]:
         return "umls"
     if _RE_MESH_DESCRIPTOR.match(did) or _RE_MESH_TREE.match(did):
         return "mesh"
-    if _RE_DOID.match(disease_id):  # DOID is case-sensitive — keep original
+    if _RE_DOID.match(disease_id):  # DOID is case-sensitive -- keep original
         return "doid"
     if _RE_HPO.match(disease_id):  # HP: prefix is uppercase
         return "hpo"
@@ -730,9 +767,9 @@ def _infer_disease_id_type(disease_id: Optional[str]) -> Optional[str]:
         return None
     if _RE_ICD10.match(did):
         return "icd10"
-    if _RE_EFO.match(disease_id):  # EFO:nnnnnnn — P0-A1 fix, no underscore
+    if _RE_EFO.match(disease_id):  # EFO:nnnnnnn -- P0-A1 fix, no underscore
         return "efo"
-    if _RE_ORPHANET.match(disease_id):  # ORPHA:nnnn — case-sensitive
+    if _RE_ORPHANET.match(disease_id):  # ORPHA:nnnn -- case-sensitive
         return "orphanet"
     return None
 
@@ -744,23 +781,23 @@ def _normalise_disease_id(disease_id: Optional[str]) -> Optional[str]:
     ``"umls:C0006142"``, ``"omim:100100"``, ``"mesh:D014979"``. The
     canonical form for each vocabulary is:
 
-      * UMLS CUIs: bare ``"C0006142"`` (no prefix) — matches kg_builder
+      * UMLS CUIs: bare ``"C0006142"`` (no prefix) -- matches kg_builder
         ID_PATTERNS["Disease"] = ``C\d{7}``.
-      * MeSH descriptors: bare ``"D014979"`` (no prefix) — matches
+      * MeSH descriptors: bare ``"D014979"`` (no prefix) -- matches
         ``D\d{6}``.
-      * OMIM IDs: ``"OMIM:100100"`` (WITH prefix, uppercase) — matches
+      * OMIM IDs: ``"OMIM:100100"`` (WITH prefix, uppercase) -- matches
         ``OMIM:\d+`` AND matches the OMIM pipeline's own emission format
         (``disease_id = "OMIM:" + str(phenotype_mim)`` per BUG-3.8).
       * DOID / HP / Orphanet / EFO: keep their curie form (already
         canonical: ``DOID:1234``, ``HP:0001234``, ``ORPHA:558``,
         ``EFO:0000400``).
 
-    v9 ROOT FIX (audit F4.9 — "Three layers, three OMIM ID format
+    v9 ROOT FIX (audit F4.9 -- "Three layers, three OMIM ID format
     assumptions"): the previous implementation stripped ALL prefixes
     including ``omim:``, producing bare ``"100100"``. The OMIM pipeline
     emits ``"OMIM:100100"``. The DB loader accepts both via
     ``^(?:OMIM:)?\d{4,7}$``. But when OMIM ↔ DisGeNET gene-disease
-    edges are JOINED on disease_id, ``"OMIM:100100" != "100100"`` —
+    edges are JOINED on disease_id, ``"OMIM:100100" != "100100"`` --
     the same disease appears as two distinct nodes in the knowledge
     graph, and the join produces ZERO matching rows. This is a
     compound destruction pattern (P2-COMPOUND): three files each look
@@ -770,11 +807,11 @@ def _normalise_disease_id(disease_id: Optional[str]) -> Optional[str]:
     Fix: preserve the ``OMIM:`` prefix for OMIM-sourced IDs so DisGeNET
     and OMIM pipelines emit the SAME canonical form. Other vocabularies
     (UMLS, MeSH) continue to use bare form because no other pipeline
-    emits them with a prefix — so there's no cross-source join risk.
+    emits them with a prefix -- so there's no cross-source join risk.
 
     Returns ``None`` for None/empty input; returns the input unchanged
     (after stripping whitespace) if it does not start with a recognised
-    prefix — preserving backwards compatibility with bare-format inputs.
+    prefix -- preserving backwards compatibility with bare-format inputs.
     """
     if disease_id is None or not isinstance(disease_id, str):
         return None
@@ -829,10 +866,10 @@ def _sanitise_free_text(value: Any, max_length: int = 1000) -> Any:
     """Sanitise a free-text field against XSS / control-char injection (SEC-3).
 
     Strips control characters, strips HTML tags, escapes angle brackets,
-    and truncates to ``max_length`` chars (with a ``…`` suffix).
+    and truncates to ``max_length`` chars (with a ``...`` suffix).
     Returns the sanitised value, or the original value if it's not a
     string.  Logs a WARNING if sanitisation changed the value (the
-    caller is responsible for the log — this function is pure).
+    caller is responsible for the log -- this function is pure).
     """
     if value is None or not isinstance(value, str):
         return value
@@ -840,7 +877,7 @@ def _sanitise_free_text(value: Any, max_length: int = 1000) -> Any:
     out = _RE_HTML_TAGS.sub("", out)
     out = out.replace("<", "&lt;").replace(">", "&gt;")
     if len(out) > max_length:
-        out = out[: max_length - 1] + "…"
+        out = out[: max_length - 1] + "..."
     return out
 
 
@@ -880,7 +917,7 @@ def _normalise_disease_id_series(s: pd.Series) -> pd.Series:
 
     UMLS CUIs and MeSH descriptors are uppercase.  DOIDs are
     case-sensitive (``DOID:`` prefix is uppercase, the numeric suffix
-    is digits) — uppercase does not change them.  HPO IDs (``HP:``
+    is digits) -- uppercase does not change them.  HPO IDs (``HP:``
     prefix) are also uppercase.  So a blanket upper() is safe.
     """
     if s is None:
@@ -926,10 +963,64 @@ def _compute_normalized_score(
     Returns ``None`` if either input is None.  The source weights come
     from :data:`config.settings.DISGENET_SOURCE_WEIGHTS` (configurable
     via the ``DISGENET_SOURCE_WEIGHTS`` env var, JSON object).
+
+    P1-039 ROOT FIX (unknown sub-source defaults to CURATED-quality weight):
+      The previous code did ``DISGENET_SOURCE_WEIGHTS.get(source_id, 1.0)``.
+      ``DISGENET_SOURCE_WEIGHTS`` is a fixed dict in ``config/settings.py``
+      with 12 known sub-sources (CURATED=1.0, CGI=0.95, ..., BEFREE=0.5,
+      RONB=0.5). If DisGeNET adds a new sub-source (e.g. "OPENTARGETS"),
+      the ``.get(source_id, 1.0)`` returned 1.0 — the SAME weight as
+      CURATED (the most reliable sub-source). The new sub-source's scores
+      were treated as CURATED-quality.
+
+      ROOT FIX: default unknown sources to a LOW weight (0.3 — below
+      BEFREE/RONB's 0.5, the lowest known weight) and log a WARNING so
+      operators know to add the new source to
+      ``DISGENET_SOURCE_WEIGHTS``. This ensures a new DisGeNET sub-source
+      with poor curation (e.g. an automatic text-mining pipeline) does
+      NOT get treated as CURATED-quality. The WARNING includes the
+      unknown source_id and the default weight so the operator can
+      decide whether to add it with a higher weight.
+
+      Strict mode: if ``DISGENET_STRICT_SOURCE_WEIGHTS=1`` is set, raise
+      ``ValueError`` on unknown sources instead of using the default.
+      This is for operators who want to enforce that every source is
+      explicitly weighted.
     """
     if score is None or pd.isna(score) or source_id is None:
         return None
-    weight = DISGENET_SOURCE_WEIGHTS.get(source_id, 1.0)
+    # P1-039 ROOT FIX: default to LOW weight for unknown sources.
+    _UNKNOWN_SOURCE_DEFAULT_WEIGHT: float = 0.3
+    _strict_mode = os.environ.get("DISGENET_STRICT_SOURCE_WEIGHTS", "") == "1"
+    if source_id not in DISGENET_SOURCE_WEIGHTS:
+        if _strict_mode:
+            raise ValueError(
+                f"P1-039 strict mode: unknown DisGeNET sub-source "
+                f"{source_id!r} not in DISGENET_SOURCE_WEIGHTS. Either "
+                f"add it to config/settings.py or set "
+                f"DISGENET_STRICT_SOURCE_WEIGHTS=0 to use the default "
+                f"weight {_UNKNOWN_SOURCE_DEFAULT_WEIGHT}."
+            )
+        # Use a module-level set to warn ONCE per unknown source per
+        # process (avoids log spam on every row of a 1M-row DataFrame).
+        global _warned_unknown_sources
+        if "_warned_unknown_sources" not in globals():
+            globals()["_warned_unknown_sources"] = set()
+        _warned = globals()["_warned_unknown_sources"]
+        if source_id not in _warned:
+            _warned.add(source_id)
+            logger.warning(
+                "P1-039: unknown DisGeNET sub-source %r not in "
+                "DISGENET_SOURCE_WEIGHTS — using default weight %.2f "
+                "(below BEFREE/RONB's 0.5). Add the source to "
+                "DISGENET_SOURCE_WEIGHTS in config/settings.py to "
+                "override. This warning fires ONCE per source per "
+                "process.",
+                source_id, _UNKNOWN_SOURCE_DEFAULT_WEIGHT,
+            )
+        weight = _UNKNOWN_SOURCE_DEFAULT_WEIGHT
+    else:
+        weight = DISGENET_SOURCE_WEIGHTS[source_id]
     return float(score) * float(weight)
 
 
@@ -940,7 +1031,7 @@ class DisGeNETPipeline(BasePipeline):
     """DisGeNET pipeline for gene-disease association data.
 
     Subclasses :class:`pipelines.base_pipeline.BasePipeline` and
-    implements the ``download → clean → load`` contract.  All public
+    implements the ``download -> clean -> load`` contract.  All public
     contracts (BasePipeline ABC, schema v1.json, validate_gda_scores
     signature, bulk_upsert_gda signature, UpsertResult,
     GeneDiseaseAssociation model, DataSourceName enum, PMID_LIST_LENGTH)
@@ -959,7 +1050,7 @@ class DisGeNETPipeline(BasePipeline):
     # The cleaned-data filename is determined by
     # BasePipeline._get_processed_filename() which returns
     # "gene_disease_associations.csv" for source_name="disgenet".
-    # DISGENET_OUTPUT_FILENAME is also configurable (CONF-10) — we
+    # DISGENET_OUTPUT_FILENAME is also configurable (CONF-10) -- we
     # honour it via the ``processed_filename`` attribute (ARCH-1.6).
 
     # ------------------------------------------------------------------
@@ -1065,7 +1156,7 @@ class DisGeNETPipeline(BasePipeline):
         """Download gene-disease associations from DisGeNET.
 
         **Contract:** returns a :class:`pathlib.Path` to the downloaded
-        file (the framework's ``download() -> Path`` contract — see
+        file (the framework's ``download() -> Path`` contract -- see
         ARCH-6).  The file write is part of the contract, not a coupling
         violation.
 
@@ -1074,7 +1165,7 @@ class DisGeNETPipeline(BasePipeline):
         :meth:`_download_static` (explicit opt-in via
         ``DISGENET_USE_API=False``).
 
-        v83 FORENSIC ROOT FIX (P0-C13 — DisGeNET pipeline unusable in
+        v83 FORENSIC ROOT FIX (P0-C13 -- DisGeNET pipeline unusable in
         sample/laptop mode):
           Same root cause as OMIM P0-C12: the DOCX mandates a $0 data-
           cost V1 that runs end-to-end on a laptop, but DisGeNET now
@@ -1089,18 +1180,18 @@ class DisGeNETPipeline(BasePipeline):
           embedded sample GDA dataset
           (``_embedded_samples.embedded_disgenet_gda()``). The embedded
           sample is biologically valid (real gene IDs, real DOIDs, real
-          association types — see the ``embedded_disgenet_gda``
+          association types -- see the ``embedded_disgenet_gda``
           docstring). It is written to
           ``raw_dir/disgenet_embedded_sample.csv`` and returned as the
           ``download()`` path; ``clean()`` then processes it like any
-          other raw file. In full mode, the API key is STILL required —
+          other raw file. In full mode, the API key is STILL required --
           the embedded sample is a SAMPLE-mode fallback only.
 
         Raises
         ------
         ValueError
             If ``DISGENET_USE_API=True`` but ``DISGENET_API_KEY`` is not
-            set AND DRUGOS_DOWNLOAD_MODE != "sample" (SCI-27 — no silent
+            set AND DRUGOS_DOWNLOAD_MODE != "sample" (SCI-27 -- no silent
             fallback to the deprecated static URL in full mode).
         """
         # v83 P0-C13: sample-mode embedded fallback.
@@ -1110,7 +1201,7 @@ class DisGeNETPipeline(BasePipeline):
         #   The previous code only short-circuited to the embedded sample
         #   when DISGENET_USE_API=true AND no API key. When DISGENET_USE_API=false
         #   (the CI default), it fell through to _download_static() which uses
-        #   DISGENET_URL — and DISGENET_URL was remapped to the API endpoint
+        #   DISGENET_URL -- and DISGENET_URL was remapped to the API endpoint
         #   (https://api.disgenet.com/api/v1/gda/summary) because the static
         #   URL was deprecated in 2024. The API endpoint returns 401 without
         #   an API key. The except block at line 1101 SHOULD have caught the
@@ -1125,7 +1216,7 @@ class DisGeNETPipeline(BasePipeline):
         #   live download in sample mode. This eliminates the 401 entirely.
         if _download_mode == "sample":
             logger.info(
-                "[disgenet] DRUGOS_DOWNLOAD_MODE=sample — using embedded sample "
+                "[disgenet] DRUGOS_DOWNLOAD_MODE=sample -- using embedded sample "
                 "GDA dataset directly (skipping live download). Set "
                 "DRUGOS_DOWNLOAD_MODE=full + DISGENET_API_KEY for the complete "
                 "DisGeNET corpus."
@@ -1140,7 +1231,7 @@ class DisGeNETPipeline(BasePipeline):
             if _download_mode == "sample":
                 logger.warning(
                     "[disgenet] DISGENET_USE_API=true but DISGENET_API_KEY is "
-                    "not set AND DRUGOS_DOWNLOAD_MODE=sample — falling back to "
+                    "not set AND DRUGOS_DOWNLOAD_MODE=sample -- falling back to "
                     "embedded sample GDA dataset so the platform can run "
                     "end-to-end on a laptop (per the DOCX V1 mandate). "
                     "Set DISGENET_API_KEY + DRUGOS_DOWNLOAD_MODE=full for "
@@ -1164,13 +1255,13 @@ class DisGeNETPipeline(BasePipeline):
                 else:
                     self._source_format = DisGeNETSourceFormat.TSV
                     path = self._download_static()
-            except (OSError, ValueError, ConnectionError, TimeoutError, RuntimeError, requests.exceptions.RequestException, DownloadError) as exc:  # v85 FORENSIC ROOT FIX (BUG #51) + v91 P0 ROOT FIX (401 from deprecated static URL — DownloadError is the custom wrapper raised by _download_with_retries)
+            except (OSError, ValueError, ConnectionError, TimeoutError, RuntimeError, requests.exceptions.RequestException, DownloadError) as exc:  # v85 FORENSIC ROOT FIX (BUG #51) + v91 P0 ROOT FIX (401 from deprecated static URL -- DownloadError is the custom wrapper raised by _download_with_retries)
                 # v83 P0-C13: in sample mode, fall back to embedded samples
                 # instead of raising. In full mode, re-raise.
                 if _download_mode == "sample":
                     logger.warning(
                         "[disgenet] Live download failed in sample mode (%s: %s) "
-                        "— falling back to embedded sample GDA dataset so the "
+                        "-- falling back to embedded sample GDA dataset so the "
                         "platform can run end-to-end.",
                         type(exc).__name__, exc,
                     )
@@ -1215,7 +1306,7 @@ class DisGeNETPipeline(BasePipeline):
 
         Used as a fallback when the API key is missing OR the live
         download fails in sample mode. The embedded sample is biologically
-        valid (real gene IDs, real DOIDs, real association types — see
+        valid (real gene IDs, real DOIDs, real association types -- see
         ``_embedded_samples.embedded_disgenet_gda`` docstring) and
         produces a small but scientifically valid Knowledge Graph.
         """
@@ -1240,7 +1331,7 @@ class DisGeNETPipeline(BasePipeline):
         WHY: DisGeNET deprecated the static TSV URL in 2024 in favour of
         the REST API (DOC-8).  The static URL may be removed at any time.
         This method is kept for offline/mirror scenarios but is NOT the
-        primary path — call it only via explicit ``DISGENET_USE_API=false``
+        primary path -- call it only via explicit ``DISGENET_USE_API=false``
         opt-in.
 
         Per SCI-28 / SEC-2: NO Authorization header is sent for the
@@ -1275,17 +1366,17 @@ class DisGeNETPipeline(BasePipeline):
     def _download_via_api(self) -> Path:
         """Download GDA data via the DisGeNET REST API with pagination.
 
-        Streams records to disk (REL-10, PERF-1, PERF-2) — peak memory
+        Streams records to disk (REL-10, PERF-1, PERF-2) -- peak memory
         is O(page_size), not O(total_records).  Pagination is stable
         (SCI-25, IDEM-20) via the ``sort=geneId`` parameter.
-        Completeness is asserted (SCI-35, IDEM-16) — if the API returns
+        Completeness is asserted (SCI-35, IDEM-16) -- if the API returns
         fewer records than ``totalResults``, the pipeline raises
         RuntimeError (or, with ``DISGENET_ALLOW_PARTIAL_DATA=True``,
         writes a partial-data manifest and continues).
         """
         dest = self.raw_dir / "all_gene_disease_associations.tsv"
 
-        # IDEM-4 / REL-5: Cache integrity check — if the file exists AND
+        # IDEM-4 / REL-5: Cache integrity check -- if the file exists AND
         # a valid SHA-256 sidecar exists AND it matches, skip download.
         if dest.exists() and dest.stat().st_size > 0:
             sha256_sidecar = dest.with_suffix(dest.suffix + ".sha256")
@@ -1303,7 +1394,7 @@ class DisGeNETPipeline(BasePipeline):
                     else:
                         logger.warning(
                             "[disgenet] Cached file %s SHA-256 mismatch "
-                            "(expected %s, got %s) — re-downloading",
+                            "(expected %s, got %s) -- re-downloading",
                             dest.name, expected_sha, actual_sha,
                         )
                 except OSError as exc:
@@ -1312,12 +1403,12 @@ class DisGeNETPipeline(BasePipeline):
                     )
             else:
                 logger.info(
-                    "[disgenet] No SHA-256 sidecar for %s — using cached file",
+                    "[disgenet] No SHA-256 sidecar for %s -- using cached file",
                     dest.name,
                 )
                 return dest
 
-        # Open the output file in write mode (streaming — REL-10).
+        # Open the output file in write mode (streaming -- REL-10).
         # We'll write the header first, then each page's records as TSV
         # rows.  Memory usage is O(page_size).
         records_written = 0
@@ -1345,7 +1436,7 @@ class DisGeNETPipeline(BasePipeline):
                     "[disgenet] Could not remove stale .tmp file: %s", exc
                 )
 
-        # Write to the .tmp file first (atomic write — DQ-12, REL-11).
+        # Write to the .tmp file first (atomic write -- DQ-12, REL-11).
         try:
             with open(tmp_dest, "w", encoding="utf-8", newline="") as out_fh:
                 page_num = 0
@@ -1364,7 +1455,7 @@ class DisGeNETPipeline(BasePipeline):
                     # REL-14: Max pages cap.
                     if page_num >= DISGENET_API_MAX_PAGES:
                         logger.error(
-                            "[disgenet] Reached DISGENET_API_MAX_PAGES=%d — "
+                            "[disgenet] Reached DISGENET_API_MAX_PAGES=%d -- "
                             "stopping pagination (this is likely a config "
                             "issue; DisGeNET has ~1M records)",
                             DISGENET_API_MAX_PAGES,
@@ -1410,14 +1501,14 @@ class DisGeNETPipeline(BasePipeline):
                     # (before _extract_total_results tries .get on it).
                     records = self._extract_payload(payload)
                     if records is None:
-                        # End-of-data signal — break the loop.
+                        # End-of-data signal -- break the loop.
                         break
 
                     # SCI-32: Disambiguate totalResults vs count.
                     total_available = self._extract_total_results(payload, total_available)
 
                     if not records:
-                        # Empty page but not end-of-data — log and continue.
+                        # Empty page but not end-of-data -- log and continue.
                         logger.info(
                             "[disgenet] Page %d returned 0 records (offset=%d)",
                             page_num, offset,
@@ -1469,7 +1560,7 @@ class DisGeNETPipeline(BasePipeline):
                     # CONF-5: Safety cap on total records.
                     if records_written >= DISGENET_API_MAX_RECORDS:
                         logger.warning(
-                            "[disgenet] Reached DISGENET_API_MAX_RECORDS=%d — "
+                            "[disgenet] Reached DISGENET_API_MAX_RECORDS=%d -- "
                             "stopping pagination (safety cap)",
                             DISGENET_API_MAX_RECORDS,
                         )
@@ -1489,7 +1580,7 @@ class DisGeNETPipeline(BasePipeline):
                         )
                         break
 
-                    # v43 ROOT FIX (P2 — pagination advances by PAGE_SIZE
+                    # v43 ROOT FIX (P2 -- pagination advances by PAGE_SIZE
                     # not records returned): the previous code did
                     # `offset += DISGENET_API_PAGE_SIZE` which advances by
                     # the REQUESTED page size. If the API returns fewer
@@ -1505,7 +1596,7 @@ class DisGeNETPipeline(BasePipeline):
                 except OSError:
                     pass
                 raise RuntimeError(
-                    "DisGeNET API returned 0 records — this is likely a "
+                    "DisGeNET API returned 0 records -- this is likely a "
                     "configuration or API error, not a legitimate empty result."
                 )
 
@@ -1532,7 +1623,7 @@ class DisGeNETPipeline(BasePipeline):
                 and DISGENET_ALLOW_PARTIAL_DATA
             ):
                 logger.error(
-                    "[disgenet] PARTIAL DATA: fetched %d / %d records — "
+                    "[disgenet] PARTIAL DATA: fetched %d / %d records -- "
                     "DISGENET_ALLOW_PARTIAL_DATA=true, continuing with partial "
                     "dataset",
                     records_written, total_available,
@@ -1571,12 +1662,12 @@ class DisGeNETPipeline(BasePipeline):
                     tmp_dest.unlink()
             except OSError:
                 pass
-            # REL-6: Graceful degradation — try the most recent cached TSV.
+            # REL-6: Graceful degradation -- try the most recent cached TSV.
             if DISGENET_FALLBACK_TO_CACHE:
                 cached = self._find_most_recent_cached_tsv()
                 if cached is not None:
                     logger.warning(
-                        "[disgenet] API download failed — falling back to "
+                        "[disgenet] API download failed -- falling back to "
                         "cached TSV %s (DATA MAY BE STALE)",
                         cached,
                     )
@@ -1661,7 +1752,7 @@ class DisGeNETPipeline(BasePipeline):
         if previous is not None and total_int < previous:
             logger.warning(
                 "[disgenet] API returned totalResults=%d but we've already "
-                "fetched %d records — likely picked the wrong field",
+                "fetched %d records -- likely picked the wrong field",
                 total_int, previous,
             )
         return total_int
@@ -1685,12 +1776,12 @@ class DisGeNETPipeline(BasePipeline):
             if isinstance(payload, list):
                 return payload  # type: ignore[unreachable]
             raise RuntimeError(
-                "DisGeNET API response has no 'payload' field — "
+                "DisGeNET API response has no 'payload' field -- "
                 f"keys: {list(payload.keys())}"
             )
         raw_payload = payload.get("payload")
         if raw_payload is None:
-            # DisGeNET explicitly returned null — could be rate-limit,
+            # DisGeNET explicitly returned null -- could be rate-limit,
             # error, or end-of-data.
             error = payload.get("error") or payload.get("message")
             if error:
@@ -1786,7 +1877,7 @@ class DisGeNETPipeline(BasePipeline):
             If ``url`` or ``params`` is invalid (CODE-10), or if
             ``max_retries < 1`` (CODE-9).
         RuntimeError
-            On non-retryable HTTP errors (401, 403, 404) — SEC-17, REL-21.
+            On non-retryable HTTP errors (401, 403, 404) -- SEC-17, REL-21.
             On circuit-breaker open (REL-8).  After exhausting retries.
         """
         # CODE-9: Validate max_retries.
@@ -1803,13 +1894,13 @@ class DisGeNETPipeline(BasePipeline):
             raise TypeError(
                 f"params must be a dict, got {type(params).__name__}"
             )
-        # SEC-7: SSRF protection — validate URL scheme + domain.
+        # SEC-7: SSRF protection -- validate URL scheme + domain.
         self._validate_url(url)
 
         # REL-8: Circuit breaker.
         if _CIRCUIT_BREAKER.is_open():
             raise RuntimeError(
-                "DisGeNET API circuit breaker is OPEN — refusing to make "
+                "DisGeNET API circuit breaker is OPEN -- refusing to make "
                 f"request for {self._sanitize_url(url)}. Wait "
                 f"{DISGENET_CIRCUIT_BREAKER_RESET_SECONDS}s or restart."
             )
@@ -1846,7 +1937,7 @@ class DisGeNETPipeline(BasePipeline):
                     # Some errors return text/html or text/plain.
                     body_preview = resp.text[:500] if resp.text else ""
                     if resp.status_code >= 400:
-                        # Non-JSON error response — fail fast.
+                        # Non-JSON error response -- fail fast.
                         raise RuntimeError(
                             f"DisGeNET API returned HTTP {resp.status_code} "
                             f"with non-JSON Content-Type {ctype!r}. "
@@ -1869,7 +1960,7 @@ class DisGeNETPipeline(BasePipeline):
                                 f"{DISGENET_API_MAX_RESPONSE_BYTES}"
                             )
                     except ValueError:
-                        pass  # Malformed Content-Length — let the body check catch it.
+                        pass  # Malformed Content-Length -- let the body check catch it.
 
                 # Read the body in chunks, enforcing the size limit.
                 body = bytearray()
@@ -1886,15 +1977,15 @@ class DisGeNETPipeline(BasePipeline):
 
                 # SEC-17 / REL-21 / REL-7: Status-code handling.
                 #
-                # v93 ROOT FIX (P1-041 — 4xx errors are NOT transient):
+                # v93 ROOT FIX (P1-041 -- 4xx errors are NOT transient):
                 #   The previous code called ``_CIRCUIT_BREAKER.record_failure()``
                 #   for 401, 403, 404, and 400. But 4xx errors (except 429) are
-                #   PERMANENT — they indicate a misconfigured API key (401/403),
+                #   PERMANENT -- they indicate a misconfigured API key (401/403),
                 #   a wrong endpoint URL (404), or a malformed request (400).
                 #   These are NOT transient failures that the circuit breaker
                 #   should protect against. Recording them as failures means a
                 #   misconfigured ``DISGENET_API_KEY`` trips the circuit
-                #   breaker after ``failure_threshold`` (5) attempts — blocking
+                #   breaker after ``failure_threshold`` (5) attempts -- blocking
                 #   ALL DisGeNET API calls until the breaker resets. The
                 #   operator then has to wait for the reset timeout even after
                 #   fixing the config. Root fix: do NOT call ``record_failure()``
@@ -1902,27 +1993,27 @@ class DisGeNETPipeline(BasePipeline):
                 #   4xx errors raise immediately so the operator sees the
                 #   config error without tripping the breaker.
                 if resp.status_code in (401,):
-                    # 401 — API key invalid/expired. NOT transient.
+                    # 401 -- API key invalid/expired. NOT transient.
                     raise RuntimeError(
-                        "DisGeNET API returned 401 — DISGENET_API_KEY is "
+                        "DisGeNET API returned 401 -- DISGENET_API_KEY is "
                         "invalid or expired. Get a new key at "
                         "https://api.disgenet.com/api/v1/"
                     )
                 if resp.status_code == 403:
-                    # 403 — API key invalid or insufficient permissions.
+                    # 403 -- API key invalid or insufficient permissions.
                     # NOT transient.
                     raise RuntimeError(
-                        "DisGeNET API returned 403 — API key invalid or "
+                        "DisGeNET API returned 403 -- API key invalid or "
                         "insufficient permissions. Check DISGENET_API_KEY."
                     )
                 if resp.status_code == 404:
-                    # 404 — endpoint not found. NOT transient (config error).
+                    # 404 -- endpoint not found. NOT transient (config error).
                     raise RuntimeError(
-                        "DisGeNET API endpoint not found — check "
+                        "DisGeNET API endpoint not found -- check "
                         "DISGENET_API_URL."
                     )
                 if resp.status_code == 400:
-                    # 400 — Bad Request. NOT transient (client error).
+                    # 400 -- Bad Request. NOT transient (client error).
                     # v93 P1-041: do NOT trip the circuit breaker.
                     body_preview = bytes(body[:500]).decode(
                         "utf-8", errors="replace"
@@ -1948,9 +2039,9 @@ class DisGeNETPipeline(BasePipeline):
                     # v93 P1-041: separate 4xx (non-transient) from 5xx
                     # (transient). Only 5xx should trip the circuit breaker.
                     if resp.status_code >= 500:
-                        # 5xx — server error, transient.
+                        # 5xx -- server error, transient.
                         _CIRCUIT_BREAKER.record_failure()
-                    # 4xx (other than 401/403/404/400/429 handled above) —
+                    # 4xx (other than 401/403/404/400/429 handled above) --
                     # e.g. 405, 406, 410, 451. NOT transient. Do NOT trip
                     # the circuit breaker.
                     body_preview = bytes(body[:500]).decode(
@@ -1961,11 +2052,11 @@ class DisGeNETPipeline(BasePipeline):
                         f"Body: {body_preview!r}"
                     )
 
-                # 2xx — parse JSON.
+                # 2xx -- parse JSON.
                 try:
                     payload = json.loads(bytes(body).decode("utf-8"))
                 except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-                    # SEC-19 / REL-15: JSON decode error — retryable.
+                    # SEC-19 / REL-15: JSON decode error -- retryable.
                     if attempt == max_retries:
                         _CIRCUIT_BREAKER.record_failure()
                         body_preview = bytes(body[:500]).decode(
@@ -2030,7 +2121,7 @@ class DisGeNETPipeline(BasePipeline):
                 self._interruptible_sleep(wait)
                 continue
 
-        # Should not reach here — the loop either returns or raises.
+        # Should not reach here -- the loop either returns or raises.
         _CIRCUIT_BREAKER.record_failure()
         raise RuntimeError(
             f"Failed to GET {self._sanitize_url(url)} after {max_retries} "
@@ -2067,19 +2158,19 @@ class DisGeNETPipeline(BasePipeline):
         # Exponential backoff with cap (PERF-9, CONF-8).
         # FIX-P2-C-14 (audit P2): the previous code did
         # ``raw = DISGENET_API_BACKOFF_BASE ** attempt; return min(raw, cap)``
-        # — pure exponential with NO jitter. If multiple workers retry
+        # -- pure exponential with NO jitter. If multiple workers retry
         # simultaneously (e.g. the parallel GDA fetcher), they retry in
         # lockstep and re-trigger the rate limit ("thundering herd").
         #
-        # P1-018 ROOT FIX (v100 forensic — JITTER WAS NOT ACTUALLY JITTER):
+        # P1-018 ROOT FIX (v100 forensic -- JITTER WAS NOT ACTUALLY JITTER):
         # The previous "fix" added ``jitter = _random.uniform(0, capped * 0.5)``
         # and returned ``capped + jitter``. That made the wait fall in
-        # ``[capped, capped * 1.5]`` — it NEVER slept less than ``capped``.
+        # ``[capped, capped * 1.5]`` -- it NEVER slept less than ``capped``.
         # That's NOT jitter (which by definition must spread wait times
         # AROUND a center); it's "capped plus a positive offset". All
         # concurrent workers still slept at least ``capped``, defeating
         # the thundering-herd mitigation. ROOT FIX: use centered ±50%
-        # jitter — ``_random.uniform(capped * 0.5, capped * 1.5)`` — so
+        # jitter -- ``_random.uniform(capped * 0.5, capped * 1.5)`` -- so
         # wait times spread in ``[capped * 0.5, capped * 1.5]`` with mean
         # ``capped``. Concurrent workers now retry at staggered offsets,
         # spreading load on the API. (Full-jitter variant
@@ -2108,7 +2199,7 @@ class DisGeNETPipeline(BasePipeline):
         """Clean and normalise DisGeNET gene-disease association data.
 
         Returns a :class:`pandas.DataFrame` (the framework's
-        ``clean() -> pd.DataFrame`` contract — see ARCH-8).  The
+        ``clean() -> pd.DataFrame`` contract -- see ARCH-8).  The
         DataFrame is also persisted to
         ``PROCESSED_DATA_DIR / DISGENET_OUTPUT_FILENAME`` via the
         atomic-write manifest-based save (DQ-7, DQ-12).
@@ -2127,7 +2218,7 @@ class DisGeNETPipeline(BasePipeline):
             10. Cap pmid_list (dedup, sort, validate, cap).
             11. Infer disease_id_type from prefix (SCI-5).
             12. Derive source from source_id (SCI-4) and association_type (SCI-19).
-            13. Ensure required columns (_ensure_gda_columns — purely additive).
+            13. Ensure required columns (_ensure_gda_columns -- purely additive).
             14. Apply score filter (configurable, weak-evidence escape hatch).
             15. Validate output against v1.json schema.
             16. Persist to CSV (atomic, manifest, file permissions).
@@ -2138,9 +2229,9 @@ class DisGeNETPipeline(BasePipeline):
             df = self._clean_core(raw_path)
             # ARCH-8: clean() returns the DataFrame (framework contract).
             # Persistence is done inside _clean_core via _save_processed_csv
-            # because BasePipeline.run() also persists — we keep both
+            # because BasePipeline.run() also persists -- we keep both
             # paths consistent by writing here AND letting the framework
-            # re-write (idempotent — same content, same path).
+            # re-write (idempotent -- same content, same path).
             return df
         finally:
             duration = time.perf_counter() - start
@@ -2153,7 +2244,7 @@ class DisGeNETPipeline(BasePipeline):
             )
 
     def _clean_core(self, raw_path: Path) -> pd.DataFrame:
-        """Internal clean implementation — returns the cleaned DataFrame.
+        """Internal clean implementation -- returns the cleaned DataFrame.
 
         Populates ``self.last_clean_result`` (DES-13) and
         ``self.last_cleaning_report`` (LOG-5).
@@ -2161,7 +2252,7 @@ class DisGeNETPipeline(BasePipeline):
         # ----------------------------------------------------------------
         # v83 P0-C13: short-circuit for the embedded sample CSV. The
         # embedded sample (written by ``_write_embedded_sample``) already
-        # has the cleaned schema — it was authored to match what the
+        # has the cleaned schema -- it was authored to match what the
         # full clean() pipeline produces. Re-running the TSV parser on
         # it would crash (it's a CSV with comma separator, not a TSV).
         # Instead, validate the score, compute confidence_tier, persist
@@ -2169,7 +2260,7 @@ class DisGeNETPipeline(BasePipeline):
         # ----------------------------------------------------------------
         if self._source_format == "embedded_csv" or raw_path.name == "disgenet_embedded_sample.csv":
             logger.info(
-                "[disgenet] _clean_core — embedded sample CSV path (%s)", raw_path,
+                "[disgenet] _clean_core -- embedded sample CSV path (%s)", raw_path,
             )
             df = pd.read_csv(raw_path)
             # Ensure required columns exist.
@@ -2186,7 +2277,7 @@ class DisGeNETPipeline(BasePipeline):
             # first running ``validate_gda_scores``. If the embedded sample
             # had a score outside [0, 1] (e.g. a manually-entered 1.2),
             # ``_classify_confidence`` raised ``ValueError`` and the ENTIRE
-            # embedded-sample path crashed — taking down offline/demo runs.
+            # embedded-sample path crashed -- taking down offline/demo runs.
             # ROOT FIX: coerce to numeric + clip to [0, 1] BEFORE
             # classification, mirroring what ``validate_gda_scores`` does
             # on the full-data path. This guarantees ``_classify_confidence``
@@ -2264,7 +2355,7 @@ class DisGeNETPipeline(BasePipeline):
         )
 
         # ----------------------------------------------------------------
-        # Step 2: Rename columns (declarative — IDEM-6, ARCH-5, ARCH-9).
+        # Step 2: Rename columns (declarative -- IDEM-6, ARCH-5, ARCH-9).
         # ----------------------------------------------------------------
         col_map = self._get_column_map()
         df = df.rename(columns={k: v for k, v in col_map.items() if k in df.columns})
@@ -2312,7 +2403,7 @@ class DisGeNETPipeline(BasePipeline):
         # source).  If we derive `source` AFTER the validator, two rows
         # with the same (gene_id, disease_id) but DIFFERENT source_id
         # (e.g. CURATED vs BEFREE) would both have source="disgenet" at
-        # dedup time and collapse to one — losing the sub-source
+        # dedup time and collapse to one -- losing the sub-source
         # distinction that SCI-4 explicitly requires to preserve.
         # Deriving source BEFORE the validator ensures the dedup keys
         # reflect the true sub-source.
@@ -2340,7 +2431,7 @@ class DisGeNETPipeline(BasePipeline):
 
         # SCI-23 / DQ-24 / CODE-20: pass source="disgenet".
         # SCI-22 / DQ-23 / CODE-21: pass dedup=True with explicit keys.
-        # v79 FORENSIC ROOT FIX (P0-B6 — preserve_direction semantic
+        # v79 FORENSIC ROOT FIX (P0-B6 -- preserve_direction semantic
         #   contract bug on unsigned DisGeNET scores):
         #   The v78 code passed ``preserve_direction=True`` to
         #   ``validate_gda_scores``. Per the function's own docstring
@@ -2355,11 +2446,11 @@ class DisGeNETPipeline(BasePipeline):
         #   Calling ``preserve_direction=True`` with ``score_range=(0,1)``
         #   is a SEMANTIC CONTRACT VIOLATION:
         #     - It tags EVERY positive score as ``_score_direction="positive"``
-        #       (misleading — DisGeNET has no direction).
+        #       (misleading -- DisGeNET has no direction).
         #     - The direction-preservation path was designed to KEEP
         #       low-magnitude signed scores (e.g. -0.06 protective) that
         #       would otherwise be clipped to 0. For unsigned DisGeNET
-        #       scores, this path is semantically meaningless — but its
+        #       scores, this path is semantically meaningless -- but its
         #       presence in the lineage (``_score_direction`` column)
         #       misleads downstream consumers and any future filter that
         #       consults the direction column.
@@ -2373,7 +2464,7 @@ class DisGeNETPipeline(BasePipeline):
         # ROOT FIX: pass ``preserve_direction=False`` for DisGeNET
         #   (unsigned scores). The ``_score_direction`` column is no
         #   longer populated for DisGeNET rows, the semantic contract
-        #   matches the data (unsigned → no direction), and the
+        #   matches the data (unsigned -> no direction), and the
         #   validate_gda_scores + _apply_score_filter pipeline behaves
         #   predictably: scores are clipped to [0,1] (no-op for valid
         #   DisGeNET data) and then filtered by DISGENET_MIN_SCORE.
@@ -2395,7 +2486,7 @@ class DisGeNETPipeline(BasePipeline):
         # Step 8: Compute confidence_tier on the clipped score (SCI-10,
         # SCI-12, SCI-13, IDEM-17, LIN-15).
         # ----------------------------------------------------------------
-        # v83 FORENSIC ROOT FIX (Chain-3 leftover — silent confidence_tier
+        # v83 FORENSIC ROOT FIX (Chain-3 leftover -- silent confidence_tier
         #   corruption via inline ``float(s) >= 0`` guard):
         #   The v79 root fix removed ``preserve_direction=True`` (the
         #   actual root cause of Chain-3), so ``validate_gda_scores`` now
@@ -2406,7 +2497,7 @@ class DisGeNETPipeline(BasePipeline):
         #   still had a silent ``else None`` branch for ANY value that
         #   was NaN OR negative. Under the new contract:
         #     * NaN SHOULD have been coerced to 0.0 by validate_gda_scores.
-        #       If a NaN reaches here, that's a CONTRACT VIOLATION — we
+        #       If a NaN reaches here, that's a CONTRACT VIOLATION -- we
         #       want to surface it as a real error, not silently set
         #       ``confidence_tier=None`` (which downstream ML filters
         #       exclude, producing silent data loss).
@@ -2414,7 +2505,7 @@ class DisGeNETPipeline(BasePipeline):
         #       reaches here, same contract violation.
         #   ROOT FIX: drop the ``float(s) >= 0`` guard entirely. The
         #   ``_classify_confidence`` function (cleaning/confidence.py)
-        #   has its own defensive invariants — it raises ``ValueError``
+        #   has its own defensive invariants -- it raises ``ValueError``
         #   on None, NaN, negative (without ``allow_negative=True``),
         #   or >1.0. Letting it raise here surfaces the contract
         #   violation LOUDLY so operators can diagnose the upstream
@@ -2426,13 +2517,40 @@ class DisGeNETPipeline(BasePipeline):
         #   that case ``None`` is the honest value (NOT a contract
         #   violation) and downstream filters correctly exclude the
         #   row. The classify_confidence raise on NaN is reserved for
-        #   the case where a NaN SHOULD have been coerced — but we
+        #   the case where a NaN SHOULD have been coerced -- but we
         #   cannot distinguish that from "score column was missing",
         #   so we use the pandas-native NaN check here.
+        #
+        # P1-045 FORENSIC ROOT FIX (Team 4 -- lambda crashed on malformed
+        # score). The previous lambda was:
+        #     lambda s: _classify_confidence(float(s)) if pd.notna(s) else None
+        # The ``pd.notna(s)`` check filters out NaN. But pandas nullable
+        # extension types (e.g. ``Float64`` with ``pd.NA``) return ``pd.NA``
+        # for missing values, NOT ``np.nan``. ``pd.notna(pd.NA)`` returns
+        # ``False``, so the lambda returned ``None`` -- correct. BUT: if the
+        # column dtype was ``object`` (mixed strings and floats), ``s`` may
+        # be a string like "0.5" -- ``float("0.5")`` works, but
+        # ``float("weak")`` raises ``ValueError``. The lambda did NOT catch
+        # ``ValueError``. The whole ``apply`` raised, crashing the entire
+        # DisGeNET clean step. The dead-letter queue was NOT populated (the
+        # crash happened before dead-lettering).
+        #
+        # ROOT FIX: coerce the column to numeric FIRST (errors="coerce"
+        # turns non-numeric values into NaN, which the lambda then handles
+        # via the pd.notna check). This is the same pattern the embedded-
+        # sample path uses at line 2196. The full-data path previously
+        # relied on ``validate_gda_scores`` to have done it -- but a single
+        # malformed value (e.g. "weak" instead of 0.5 -- possible if the
+        # DisGeNET TSV had a header row that wasn't stripped) crashed the
+        # whole step. The ``errors="coerce"`` is the defensive fix.
         if "score" in df.columns:
+            # P1-045: coerce to numeric FIRST so non-numeric values
+            # become NaN (handled by the pd.notna check below) instead
+            # of crashing the apply with ValueError.
+            df["score"] = pd.to_numeric(df["score"], errors="coerce")
             df["confidence_tier"] = df["score"].apply(
                 lambda s: (
-                    _classify_confidence(float(s))
+                    _safe_classify_confidence(s)
                     if pd.notna(s)
                     else None
                 )
@@ -2479,7 +2597,7 @@ class DisGeNETPipeline(BasePipeline):
             df["disease_id_type"] = df["disease_id"].apply(_infer_disease_id_type)
 
         # ----------------------------------------------------------------
-        # Step 12: (Moved to Step 6.5 — source + association_type are now
+        # Step 12: (Moved to Step 6.5 -- source + association_type are now
         # derived BEFORE validate_gda_scores so the dedup keys reflect the
         # true sub-source.  See Step 6.5 above for the rationale.)
 
@@ -2524,14 +2642,14 @@ class DisGeNETPipeline(BasePipeline):
         # ----------------------------------------------------------------
         output_path = PROCESSED_DATA_DIR / DISGENET_OUTPUT_FILENAME
 
-        # v29 ROOT FIX (audit P1-24): ID format divergence — normalize to
+        # v29 ROOT FIX (audit P1-24): ID format divergence -- normalize to
         # canonical form before writing. ``gene_symbol`` is uppercased +
         # stripped; ``uniprot_id`` (resolved later in load()) is uppercased
         # + stripped when present. This guarantees downstream joins against
         # UniProt (uniprot_id), OMIM (gene_symbol), and DrugBank
         # interactions (uniprot_id) succeed regardless of which source
         # wrote the value. DisGeNET's CSV is the cross-source GDA truth
-        # set — case divergence here would split a single gene's records
+        # set -- case divergence here would split a single gene's records
         # across multiple keys in the knowledge graph.
         if len(df) > 0:
             if "gene_symbol" in df.columns:
@@ -2558,7 +2676,7 @@ class DisGeNETPipeline(BasePipeline):
             # v84 FORENSIC ROOT FIX (BUG #28): narrowed from broad
             # ``except Exception`` logged at DEBUG. The previous code
             # caught ALL exceptions (including programming bugs in
-            # ``_fingerprint_df`` / ``_compute_sha256``) at DEBUG level —
+            # ``_fingerprint_df`` / ``_compute_sha256``) at DEBUG level --
             # a level most operators never see. A missing provenance
             # fingerprint with no visible warning breaks audit trails
             # silently. Now we catch only the expected I/O + type errors
@@ -2601,7 +2719,7 @@ class DisGeNETPipeline(BasePipeline):
         """Return the dtype spec for pd.read_csv (DQ-28).
 
         Only applies to columns that exist in the file (pandas raises
-        if a dtype key is missing from the file — we filter first).
+        if a dtype key is missing from the file -- we filter first).
         """
         # We can't know the columns without reading the header first.
         # Pandas will warn but not fail on extra dtype keys, so we
@@ -2653,7 +2771,7 @@ class DisGeNETPipeline(BasePipeline):
         # gene_symbol validation.
         # v84 FORENSIC ROOT FIX (BUG #43): the previous code used a
         # per-row Python loop (``for idx, val in df["gene_symbol"].items()``)
-        # calling ``_validate_gene_symbol`` on each value — O(N) Python
+        # calling ``_validate_gene_symbol`` on each value -- O(N) Python
         # with N function calls. On the 1M+ DisGeNET GDA dataset, this
         # took minutes. ROOT FIX: vectorize using pandas ``.str.match``
         # on the same regex (``_RE_HGNC_GENE_SYMBOL``). This runs in C
@@ -2749,7 +2867,7 @@ class DisGeNETPipeline(BasePipeline):
                             keep_mask.at[idx] = False
             except OSError as exc:
                 logger.warning(
-                    "[disgenet] Could not load HGNC file %s: %s — skipping "
+                    "[disgenet] Could not load HGNC file %s: %s -- skipping "
                     "referential-integrity check",
                     DISGENET_HGNC_PATH, exc,
                 )
@@ -2771,7 +2889,7 @@ class DisGeNETPipeline(BasePipeline):
                             keep_mask.at[idx] = False
             except OSError as exc:
                 logger.warning(
-                    "[disgenet] Could not load disease ontology %s: %s — "
+                    "[disgenet] Could not load disease ontology %s: %s -- "
                     "skipping referential-integrity check",
                     DISGENET_DISEASE_ONTOLOGY_PATH, exc,
                 )
@@ -2797,8 +2915,31 @@ class DisGeNETPipeline(BasePipeline):
         reason: str,
         details: dict[str, Any],
     ) -> None:
-        """Add a row to the dead-letter queue (DQ-18, LIN-11, LIN-12, LIN-13)."""
+        """Add a row to the dead-letter queue (DQ-18, LIN-11, LIN-12, LIN-13).
+
+        P1-030 ROOT FIX: also snapshot the row's ``confidence_tier`` into
+        the record so downstream dead-letter consumers (CSV, DB, DataFrame)
+        see the value AT THE TIME OF THE DROP — which, for ``below_min_score``
+        drops, has already been cleared to ``None`` by ``_apply_score_filter``
+        to avoid the misleading "sub_weak" label. The original tier is
+        preserved inside ``details_json.original_confidence_tier`` for audit.
+
+        Note: pandas may store ``None`` as ``NaN`` in object columns. We
+        normalize NaN → None when building the record so downstream
+        consumers (CSV writers, JSON serializers) see a clean None.
+        """
         row = df.loc[idx].to_dict() if idx in df.index else {}
+        # P1-030 ROOT FIX: normalize pandas NaN → Python None for the
+        # confidence_tier field. When _apply_score_filter sets
+        # df.at[idx, "confidence_tier"] = None on an object column,
+        # pandas may convert None to NaN. The dead-letter record must
+        # carry a clean None (not NaN) so CSV/JSON serialization works.
+        _tier = row.get("confidence_tier")
+        try:
+            if _tier is not None and pd.isna(_tier):
+                _tier = None
+        except (TypeError, ValueError):
+            pass  # pd.isna raises on some non-scalar types; leave as-is
         record = {
             "gene_symbol": row.get("gene_symbol"),
             "disease_id": row.get("disease_id"),
@@ -2806,6 +2947,11 @@ class DisGeNETPipeline(BasePipeline):
             "reason": reason,
             "details_json": json.dumps(details, default=str),
             "run_id": self.run_id,
+            # P1-030 ROOT FIX: persist the (already-cleared) confidence_tier
+            # so dead-letter consumers see None for below_min_score drops
+            # instead of the stale "sub_weak" label computed before the
+            # filter. The original tier is preserved in details_json above.
+            "confidence_tier": _tier,
         }
         self._dead_letter_rows.append(record)
         # LOG-1: contextual log.
@@ -3105,7 +3251,7 @@ class DisGeNETPipeline(BasePipeline):
             self.start_time.isoformat() if self.start_time else datetime.now(timezone.utc).isoformat()
         )
         # SCI-21: Ensure all lineage columns exist (validate_gda_scores may
-        # not add them if no filling occurred — we add defaults here so the
+        # not add them if no filling occurred -- we add defaults here so the
         # CSV schema is consistent).
         for lineage_col, default in (
             ("_score_was_clipped", False),
@@ -3141,6 +3287,30 @@ class DisGeNETPipeline(BasePipeline):
     def _apply_score_filter(self, df: pd.DataFrame) -> pd.DataFrame:
         """Apply the MIN_SCORE filter with weak-evidence escape hatch (SCI-1,
         SCI-22, LOG-8, LIN-12).
+
+        P1-030 ROOT FIX (dead-letter ``confidence_tier`` misleading state):
+          ``confidence_tier`` is computed in Step 8 (line ~2432) BEFORE this
+          filter runs. For a row with ``score=0.0`` (no publications, no
+          curated evidence), ``_classify_confidence(0.0)`` returns
+          ``"sub_weak"`` — the lowest tier. The previous code then added the
+          row to the dead-letter queue WITH ``confidence_tier="sub_weak"``
+          still set on the row, while the drop reason was ``below_min_score``.
+          An operator inspecting the dead-letter CSV/DB saw
+          ``confidence_tier=sub_weak`` for a row that was dropped for having
+          ZERO evidence — misleading them into thinking "weak evidence was
+          dropped" and potentially re-ingesting with a lower threshold,
+          re-introducing zero-evidence rows.
+
+          ROOT FIX: for every row about to be dropped via
+          ``below_min_score``, capture the ORIGINAL ``confidence_tier`` in
+          ``details_json`` (for audit) and then CLEAR the row's
+          ``confidence_tier`` to ``None`` BEFORE calling
+          ``_add_to_dead_letter``. The dead-letter record now carries
+          ``confidence_tier=None`` (no misleading tier) plus
+          ``details_json.original_confidence_tier`` (the audit value). The
+          ``_add_to_dead_letter`` helper was also extended to persist the
+          row's ``confidence_tier`` snapshot into the record so downstream
+          dead-letter consumers see the cleared value, not the stale tier.
         """
         if df.empty or "score" not in df.columns:
             return df
@@ -3149,7 +3319,7 @@ class DisGeNETPipeline(BasePipeline):
             # v82 FORENSIC ROOT FIX (P1-3): use configurable
             # DISGENET_WEAK_EVIDENCE_THRESHOLD (default 0.1) instead of
             # the hardcoded 0.1. The weak-evidence band is now
-            # [DISGENET_MIN_SCORE, DISGENET_WEAK_EVIDENCE_THRESHOLD) —
+            # [DISGENET_MIN_SCORE, DISGENET_WEAK_EVIDENCE_THRESHOLD) --
             # the two thresholds move together when operators tune either.
             weak_mask = (
                 df["score"].notna()
@@ -3161,11 +3331,29 @@ class DisGeNETPipeline(BasePipeline):
             # Drop only rows below DISGENET_MIN_SCORE.
             drop_mask = df["score"].notna() & (df["score"] < DISGENET_MIN_SCORE)
             for idx in df.index[drop_mask]:
+                # P1-030 ROOT FIX: snapshot the stale tier, then clear it
+                # so the dead-letter record does not carry a misleading
+                # "sub_weak" label for a row dropped due to NO evidence.
+                _stale_tier = (
+                    df.at[idx, "confidence_tier"]
+                    if "confidence_tier" in df.columns
+                    and pd.notna(df.at[idx, "confidence_tier"])
+                    else None
+                )
+                if "confidence_tier" in df.columns:
+                    df.at[idx, "confidence_tier"] = None
                 self._add_to_dead_letter(
                     df, idx, reason="below_min_score",
                     details={
                         "score": float(df.at[idx, "score"]),
                         "threshold": DISGENET_MIN_SCORE,
+                        "original_confidence_tier": _stale_tier,
+                        "cleared_reason": (
+                            "P1-030: confidence_tier was computed before "
+                            "the score filter; cleared to None to avoid "
+                            "misleading dead-letter consumers (the row was "
+                            "dropped for zero evidence, not for weak evidence)"
+                        ),
                     },
                 )
             df = df[~drop_mask].copy()
@@ -3173,11 +3361,27 @@ class DisGeNETPipeline(BasePipeline):
             # Hard filter at DISGENET_MIN_SCORE.
             drop_mask = df["score"].notna() & (df["score"] < DISGENET_MIN_SCORE)
             for idx in df.index[drop_mask]:
+                # P1-030 ROOT FIX: same snapshot-and-clear pattern as above.
+                _stale_tier = (
+                    df.at[idx, "confidence_tier"]
+                    if "confidence_tier" in df.columns
+                    and pd.notna(df.at[idx, "confidence_tier"])
+                    else None
+                )
+                if "confidence_tier" in df.columns:
+                    df.at[idx, "confidence_tier"] = None
                 self._add_to_dead_letter(
                     df, idx, reason="below_min_score",
                     details={
                         "score": float(df.at[idx, "score"]),
                         "threshold": DISGENET_MIN_SCORE,
+                        "original_confidence_tier": _stale_tier,
+                        "cleared_reason": (
+                            "P1-030: confidence_tier was computed before "
+                            "the score filter; cleared to None to avoid "
+                            "misleading dead-letter consumers (the row was "
+                            "dropped for zero evidence, not for weak evidence)"
+                        ),
                     },
                 )
             df = df[~drop_mask].copy()
@@ -3194,10 +3398,10 @@ class DisGeNETPipeline(BasePipeline):
         DQ-3, DQ-4, DQ-5, IDEM-13, ARCH-14, SCI-33, SCI-6, SCI-9, SCI-21,
         COMP-1).
 
-        This function is PURELY ADDITIVE — it never removes columns or
+        This function is PURELY ADDITIVE -- it never removes columns or
         rows (the disease_id filter is moved to a separate function per
-        IDEM-13).  It operates on a copy (ARCH-14) — the input is not
-        mutated.  It is idempotent (IDEM-13) — calling it twice is a
+        IDEM-13).  It operates on a copy (ARCH-14) -- the input is not
+        mutated.  It is idempotent (IDEM-13) -- calling it twice is a
         no-op.  Complexity is O(k) where k = len(required_defaults) ≈ 15
         (PERF-12).
         """
@@ -3269,7 +3473,7 @@ class DisGeNETPipeline(BasePipeline):
                 df[col] = default
 
         # SCI-33 / IDEM-13: assertion that confidence_tier is present.
-        # v29 ROOT FIX (audit P1-19): was assert — stripped by python -O. Use raise for production validation.
+        # v29 ROOT FIX (audit P1-19): was assert -- stripped by python -O. Use raise for production validation.
         if "confidence_tier" not in df.columns:
             raise ValueError(
                 "_ensure_gda_columns invariant: confidence_tier must be present"
@@ -3309,8 +3513,8 @@ class DisGeNETPipeline(BasePipeline):
         DQ-10, DQ-11, DQ-12, IDEM-1, IDEM-13, COMP-14, COMP-15, COMP-16,
         SEC-14, INT-19, LIN-25, LOG-4).
 
-        - Manifest-based source detection (DQ-7) — no ``nrows=5`` peek.
-        - No source-conflict redirect (DQ-8) — raise instead.
+        - Manifest-based source detection (DQ-7) -- no ``nrows=5`` peek.
+        - No source-conflict redirect (DQ-8) -- raise instead.
         - Atomic write via ``.tmp`` + ``os.replace`` (DQ-12, REL-11).
         - Explicit ``encoding="utf-8"``, ``lineterminator="\\n"``,
           ``quoting=csv.QUOTE_ALL`` (COMP-14, COMP-15, COMP-16).
@@ -3412,7 +3616,7 @@ class DisGeNETPipeline(BasePipeline):
             manifest["stale_data"] = age_days > DISGENET_MAX_DATA_AGE_DAYS
             if manifest["stale_data"]:
                 logger.warning(
-                    "[disgenet] DisGeNET release is %d days old (> %d) — "
+                    "[disgenet] DisGeNET release is %d days old (> %d) -- "
                     "stale_data flag set in manifest",
                     age_days, DISGENET_MAX_DATA_AGE_DAYS,
                 )
@@ -3448,7 +3652,7 @@ class DisGeNETPipeline(BasePipeline):
                 return data.get("primary_source")
             except (OSError, json.JSONDecodeError) as exc:
                 logger.warning(
-                    "[disgenet] Could not read manifest %s: %s — falling back "
+                    "[disgenet] Could not read manifest %s: %s -- falling back "
                     "to reading the CSV's source column",
                     manifest_path, exc,
                 )
@@ -3458,9 +3662,9 @@ class DisGeNETPipeline(BasePipeline):
                 csv_path, usecols=lambda c: c == "source", low_memory=False,
             )
             if "source" not in existing_df.columns:
-                # No 'source' column in the CSV — can't determine the source.
+                # No 'source' column in the CSV -- can't determine the source.
                 logger.warning(
-                    "[disgenet] Existing CSV %s has no 'source' column — "
+                    "[disgenet] Existing CSV %s has no 'source' column -- "
                     "cannot determine primary_source",
                     csv_path,
                 )
@@ -3487,7 +3691,7 @@ class DisGeNETPipeline(BasePipeline):
         **Contract:** returns ``int`` (the framework's ``load() -> int``
         contract).  The returned value is ``result.inserted +
         result.updated`` (NOT ``int(result)`` which returns
-        ``total_input``) — see ARCH-11.
+        ``total_input``) -- see ARCH-11.
 
         Parameters
         ----------
@@ -3499,7 +3703,7 @@ class DisGeNETPipeline(BasePipeline):
             opens its own session via ``get_db_session()``.
 
         Steps:
-            1. Resolve gene_symbol → uniprot_id (single DB session — ARCH-3).
+            1. Resolve gene_symbol -> uniprot_id (single DB session -- ARCH-3).
             2. Partition resolved / unresolved; write unresolved to dead-letter
                (DQ-18, REL-3, LIN-11).
             3. Build load_df with all GDA model columns (DES-11).
@@ -3530,13 +3734,13 @@ class DisGeNETPipeline(BasePipeline):
             return self._load_with_session(df, session)
 
     def _load_with_session(self, df: pd.DataFrame, session: Any) -> int:
-        """Internal load implementation — uses the provided session (ARCH-3)."""
+        """Internal load implementation -- uses the provided session (ARCH-3)."""
         # v14 ROOT FIX (DQ-18 / dead-letter persistence): the previous
         # code only persisted LOAD-time unresolved records to the
         # dead_letter_gda DB table (line 3063). CLEAN-time dead-letter
         # records (added to self._dead_letter_rows at clean() time,
         # e.g. for invalid_gene_symbol_format) were ONLY logged as
-        # warnings — never persisted to the DB. This meant operators
+        # warnings -- never persisted to the DB. This meant operators
         # querying the dead_letter_gda table for audit/lineage saw an
         # INCOMPLETE picture: records dropped at clean time were
         # invisible. The fix: flush self._dead_letter_rows to the DB
@@ -3623,7 +3827,7 @@ class DisGeNETPipeline(BasePipeline):
                     exc,
                 )
 
-        # ARCH-17: Dependency check — proteins table must be non-empty.
+        # ARCH-17: Dependency check -- proteins table must be non-empty.
         self._assert_uniprot_dependency(session)
 
         # IDEM-7: Cached gene_to_uniprot map.
@@ -3631,7 +3835,7 @@ class DisGeNETPipeline(BasePipeline):
             self._get_or_build_uniprot_map(session)
         )
 
-        # Resolve gene_symbol → uniprot_id.
+        # Resolve gene_symbol -> uniprot_id.
         df = resolve_gene_symbol_to_uniprot(
             df, gene_to_uniprot, protein_name_to_uniprot
         )
@@ -3651,7 +3855,7 @@ class DisGeNETPipeline(BasePipeline):
                 if invalid_count > 0:
                     logger.warning(
                         "[disgenet] %d API-provided UniProt IDs failed "
-                        "format validation — routing to dead-letter "
+                        "format validation -- routing to dead-letter "
                         "(set to None).",
                         invalid_count,
                     )
@@ -3691,7 +3895,7 @@ class DisGeNETPipeline(BasePipeline):
         if len(unresolved) > 0:
             logger.warning(
                 "[disgenet] %d / %d GDA records have unresolved "
-                "gene_symbol — routing to dead-letter",
+                "gene_symbol -- routing to dead-letter",
                 len(unresolved), len(df),
             )
             # LOG-7: First 10 unresolved symbols.
@@ -3738,7 +3942,7 @@ class DisGeNETPipeline(BasePipeline):
             input_checksum=input_checksum,
             dedup_already_done=True,  # DQ-6 / SCI-37: validator already deduped.
         )
-        # v29 ROOT FIX (audit P1-11/12/13): was session.commit() — breaks
+        # v29 ROOT FIX (audit P1-11/12/13): was session.commit() -- breaks
         # atomicity. Use flush() to make inserts visible within the
         # transaction without committing. The commit happens in __exit__.
         session.flush()
@@ -3792,7 +3996,7 @@ class DisGeNETPipeline(BasePipeline):
             # MUST propagate so the operator sees them.
             logger.warning(
                 "[disgenet] Could not verify proteins table is non-empty "
-                "(Protein model import failed — treating as missing "
+                "(Protein model import failed -- treating as missing "
                 "dependency): %s",
                 exc,
             )
@@ -3858,11 +4062,11 @@ class DisGeNETPipeline(BasePipeline):
         CODE-5, CODE-24, INT-4).
 
         Missing columns are filled with None (with the right length and
-        dtype — CODE-5).  Column selection is schema-driven (introspects
-        the GeneDiseaseAssociation model — DES-11).
+        dtype -- CODE-5).  Column selection is schema-driven (introspects
+        the GeneDiseaseAssociation model -- DES-11).
         """
         # Get the model's column names, EXCLUDING auto-managed columns
-        # (id, created_at, updated_at) — these have server_defaults that
+        # (id, created_at, updated_at) -- these have server_defaults that
         # the DB populates; sending NULL overrides the default.
         _AUTO_MANAGED_COLS = {"id", "created_at", "updated_at"}
         try:
@@ -3891,7 +4095,7 @@ class DisGeNETPipeline(BasePipeline):
             ]
 
         # Map CSV lineage column names (underscore-prefixed) to DB column
-        # names (no underscore) — SCI-21.
+        # names (no underscore) -- SCI-21.
         csv_to_db = {
             "_score_was_clipped": "score_was_clipped",
             "_original_score": "original_score",
@@ -4011,7 +4215,7 @@ class DisGeNETPipeline(BasePipeline):
     # ``@classmethod``-decorated functions at MODULE level (after the
     # class definition) and attached via
     # ``DisGeNETPipeline.get_gda_by_gene = classmethod(_get_gda_by_gene_cls)``
-    # — a convoluted pattern that obscures the methods' class membership,
+    # -- a convoluted pattern that obscures the methods' class membership,
     # defeats static-analysis tools (they appear as free functions), and
     # makes IDE jump-to-definition misbehave. They are now proper
     # ``@classmethod`` methods on the class itself.
@@ -4078,7 +4282,7 @@ class DisGeNETPipeline(BasePipeline):
         """
         import warnings
         warnings.warn(
-            "_save_csv_with_mode is deprecated — use _save_processed_csv "
+            "_save_csv_with_mode is deprecated -- use _save_processed_csv "
             "instead. This wrapper will be removed in v3.0.0.",
             DeprecationWarning,
             stacklevel=2,

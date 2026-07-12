@@ -288,7 +288,7 @@ def test_bf4_market_score_orphan_favoring():
         f"n_unique={n_unique}, sample={np.round(markets, 3)[:5].tolist()}",
     )
 
-    # v91 ROOT FIX (B-F4 test was using pathway count as rarity proxy —
+    # v91 ROOT FIX (B-F4 test was using pathway count as rarity proxy --
     # scientifically wrong): the v89 ROOT FIX changed market_score to use
     # CURATED WHO/Orphanet disease prevalence (the scientifically correct
     # approach). Rare diseases (prevalence < 5/10K per FDA/EU) get HIGH
@@ -300,7 +300,7 @@ def test_bf4_market_score_orphan_favoring():
     # (e.g., atrial fibrillation, prevalence ~3300/10K). The test was
     # picking atrial fibrillation (pw=0, but actually common) as the "rare"
     # disease and lupus (pw=1, but actually less common than AFib) as the
-    # "common" disease — then asserting rare_market > common_market, which
+    # "common" disease -- then asserting rare_market > common_market, which
     # failed because the production code correctly gives AFib a LOWER
     # market_score than lupus.
     #
@@ -329,7 +329,7 @@ def test_bf4_market_score_orphan_favoring():
     # to fail with "single positional indexer is out-of-bounds" (empty df).
     #
     # ROOT FIX (v92): the previous test used pathway count (pw) as a proxy
-    # for disease rarity — "low pw = rare = high market_score". This was
+    # for disease rarity -- "low pw = rare = high market_score". This was
     # the v88 assumption. The v89 ROOT FIX replaced market_score with
     # curated WHO/Orphanet prevalence data (compute_market_score), so
     # rarity is now determined by ACTUAL prevalence, not pathway count.
@@ -384,7 +384,7 @@ def test_bf4_market_score_orphan_favoring():
         common_market = float(df[df["disease"] == common_disease]["market_score"].iloc[0])
         # Only assert if the two diseases actually have different rarity
         # (if all diseases in the demo graph are common, the check is
-        # vacuously true — skip it).
+        # vacuously true -- skip it).
         rare_flag = disease_rarity[0][1]
         common_flag = disease_rarity[-1][1]
         if rare_flag != common_flag:
@@ -395,28 +395,28 @@ def test_bf4_market_score_orphan_favoring():
                 f"common({common_disease}, rare_flag={common_flag})={common_market:.3f}",
             )
         else:
-            # All diseases in the demo graph have the same rarity flag —
+            # All diseases in the demo graph have the same rarity flag --
             # skip the comparison (vacuously true) but log for visibility.
             print(f"  SKIP  B-F4: all {len(disease_rarity)} demo diseases have "
-                  f"the same rarity flag ({rare_flag}) — comparison vacuous.")
+                  f"the same rarity flag ({rare_flag}) -- comparison vacuous.")
 
     # v91 ROOT FIX: the v89 ROOT FIX changed compute_market_score from a
     # pathway-count-based formula to a PREVALENCE-based formula (curated
     # WHO/Orphanet data). The old test used pathway count as a proxy for
-    # rarity (low pw = rare → high market_score), but this proxy is no
+    # rarity (low pw = rare -> high market_score), but this proxy is no
     # longer valid: a disease can have low pathway count but be COMMON
-    # (e.g., atrial fibrillation: pw=0, prevalence=400 → market_score=0.384).
+    # (e.g., atrial fibrillation: pw=0, prevalence=400 -> market_score=0.384).
     # The fix: sort diseases by PREVALENCE (the actual input to
     # compute_market_score), not pathway count. Low-prevalence (rare)
     # diseases should have HIGHER market_score than high-prevalence
-    # (common) diseases — this is the orphan-drug-opportunity principle.
+    # (common) diseases -- this is the orphan-drug-opportunity principle.
     from graph_transformer.data.biomedical_tables import get_disease_prevalence
     df_disease_set = set(df["disease"].tolist())
     disease_prev = []
     for d_name in disease_map.keys():
         if d_name in df_disease_set:
             prev = get_disease_prevalence(d_name)
-            # Unknown prevalence (None) → treat as mid-prevalence (50/10K)
+            # Unknown prevalence (None) -> treat as mid-prevalence (50/10K)
             # so it sorts between rare and common.
             prev_val = prev if prev is not None else 50.0
             disease_prev.append((d_name, prev_val, prev))
@@ -728,7 +728,7 @@ def test_dead_code_audit_logger_has_handler():
            "connectivity). On the tiny 15-drug demo graph used by this test, "
            "the unmet_need_score now has only 3 distinct values (was >3 with "
            "the injected paths). This is the EXPECTED outcome of removing the "
-           "artificial injection — the score now reflects NATURAL topology, "
+           "artificial injection -- the score now reflects NATURAL topology, "
            "which is sparser on a 15-drug graph. On production-scale graphs "
            "(10K drugs), the score has plenty of variance. The test's >3 "
            "threshold was calibrated to the OLD injected topology."
@@ -863,7 +863,7 @@ def test_sf4_fit_temperature_uses_lr_1():
 
     ROOT FIX (FORENSIC-AUDIT-C01): the V26 fit_temperature used LBFGS with
     lr=1.0 and a wide clamp [0.05, 10.0]. LBFGS took massive first steps,
-    hit the clamp boundary, and the clamp zeroed the gradient — so the
+    hit the clamp boundary, and the clamp zeroed the gradient -- so the
     calibration ALWAYS converged to T=0.05 (extreme sharpening) or T=10.0
     (extreme softening), producing degenerate saturated probabilities.
 
@@ -873,7 +873,7 @@ def test_sf4_fit_temperature_uses_lr_1():
     [0.5, 2.0] (Guo et al. 2017 standard range) before storing.
 
     The V26 test checked for "lr=1.0 default" and "LBFGS([opt_temp], lr=lr"
-    in the source — both are GONE after the C01 fix. The test now checks
+    in the source -- both are GONE after the C01 fix. The test now checks
     for the Adam optimizer and the log-parameterization.
     """
     section("S-F4: fit_temperature uses Adam + log-parameterization (C01 fix)")

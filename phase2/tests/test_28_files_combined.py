@@ -1,5 +1,5 @@
 """
-Test 2 — Real integration test for ALL 28 files working together.
+Test 2 -- Real integration test for ALL 28 files working together.
 
 This test file is the SINGLE comprehensive proof that the 27 previously-
 fixed institutional-grade files PLUS the newly-fixed
@@ -7,34 +7,34 @@ fixed institutional-grade files PLUS the newly-fixed
 together as a coherent codebase with zero regressions.
 
 The 28 files covered (in pipeline order):
-    1.  __init__.py            — package metadata & __all__
-    2.  config.py              — global configuration, paths, dataclasses
-    3.  utils.py               — shared identifier & type utilities
-    4.  id_crosswalk.py        — External-ID → canonical UniProt translation
-    5.  uniprot_loader.py      — UniProt flat-file parser
-    6.  drkg_loader.py         — DRKG download & TSV parser
-    7.  drugbank_parser.py     — DrugBank XML parser
-    8.  chembl_loader.py       — ChEMBL compound loader
-    9.  string_loader.py       — STRING PPI network loader
-    10. stitch_loader.py       — STITCH chemical-protein loader
-    11. sider_loader.py        — SIDER adverse-event loader
-    12. opentargets_loader.py  — OpenTargets evidence loader
-    13. geo_loader.py          — GEO gene-expression loader
-    14. clinicaltrials_loader.py — ClinicalTrials.gov loader
-    15. entity_resolver.py     — cross-source ID resolver
-    16. kg_builder.py          — Neo4j KG builder (facade)
-    17. pyg_builder.py         — PyTorch Geometric HeteroData builder
-    18. negative_sampling.py   — negative-pair generator
-    19. training_data.py       — train/val/test split construction
-    20. evaluation.py          — AUC / MRR / Hits@K metrics
-    21. transe_model.py        — TransE embedding model
-    22. graph_stats.py         — graph statistics & validation
-    23. graph_queries.py       — Cypher query utilities
-    24. run_pipeline.py        — 13-step pipeline orchestrator
-    25. __main__.py            — CLI entry point (56-issue fix)
-    26. README.md              — package documentation
-    27. .env.example           — environment-variable template
-    28. test_all_exceptions_inherit_from_exception.py — NEWLY FIXED
+    1.  __init__.py            -- package metadata & __all__
+    2.  config.py              -- global configuration, paths, dataclasses
+    3.  utils.py               -- shared identifier & type utilities
+    4.  id_crosswalk.py        -- External-ID -> canonical UniProt translation
+    5.  uniprot_loader.py      -- UniProt flat-file parser
+    6.  drkg_loader.py         -- DRKG download & TSV parser
+    7.  drugbank_parser.py     -- DrugBank XML parser
+    8.  chembl_loader.py       -- ChEMBL compound loader
+    9.  string_loader.py       -- STRING PPI network loader
+    10. stitch_loader.py       -- STITCH chemical-protein loader
+    11. sider_loader.py        -- SIDER adverse-event loader
+    12. opentargets_loader.py  -- OpenTargets evidence loader
+    13. geo_loader.py          -- GEO gene-expression loader
+    14. clinicaltrials_loader.py -- ClinicalTrials.gov loader
+    15. entity_resolver.py     -- cross-source ID resolver
+    16. kg_builder.py          -- Neo4j KG builder (facade)
+    17. pyg_builder.py         -- PyTorch Geometric HeteroData builder
+    18. negative_sampling.py   -- negative-pair generator
+    19. training_data.py       -- train/val/test split construction
+    20. evaluation.py          -- AUC / MRR / Hits@K metrics
+    21. transe_model.py        -- TransE embedding model
+    22. graph_stats.py         -- graph statistics & validation
+    23. graph_queries.py       -- Cypher query utilities
+    24. run_pipeline.py        -- 13-step pipeline orchestrator
+    25. __main__.py            -- CLI entry point (56-issue fix)
+    26. README.md              -- package documentation
+    27. .env.example           -- environment-variable template
+    28. test_all_exceptions_inherit_from_exception.py -- NEWLY FIXED
 
     Plus supporting modules required for the package to work:
     exceptions.py, schemas.py, _loader_protocol.py, model_protocol.py,
@@ -43,29 +43,29 @@ The 28 files covered (in pipeline order):
 
 What this test verifies
 -----------------------
-1. **Import chain integrity** — every one of the 28 files imports
+1. **Import chain integrity** -- every one of the 28 files imports
    successfully AND every critical export they declare is accessible
    from the package namespace.
-2. **Cross-module data-flow contract** — the 13-step pipeline's data
-   flow (DRKG → entity resolution → KG build → PyG build → training
-   data → TransE → evaluation) is verifiable end-to-end with mocked
+2. **Cross-module data-flow contract** -- the 13-step pipeline's data
+   flow (DRKG -> entity resolution -> KG build -> PyG build -> training
+   data -> TransE -> evaluation) is verifiable end-to-end with mocked
    data, not just importable.
-3. **__main__ integration with run_pipeline** — the entry point
+3. **__main__ integration with run_pipeline** -- the entry point
    correctly dispatches to run_pipeline.main() and translates its
    exit codes (D2-DES-02 contract).
-4. **Config-constant consistency** — the same SEED, SCHEMA_VERSION,
+4. **Config-constant consistency** -- the same SEED, SCHEMA_VERSION,
    MIN_NODES_W2, TARGET_TRANSE_AUC etc. are visible from every
    module that imports them (no shadowing).
-5. **Exception hierarchy integrity** — every domain-specific
+5. **Exception hierarchy integrity** -- every domain-specific
    exception in exceptions.py inherits from a documented base class
    so the entry point's top-level handler (D6-REL-01) can catch them.
-6. **Schema contract** — PyG HeteroData produced by pyg_builder is
+6. **Schema contract** -- PyG HeteroData produced by pyg_builder is
    consumable by transe_model; training_data produces splits
    consumable by evaluation.
-7. **Lineage chain** — config.build_lineage_metadata →
-   run_pipeline._log_transformation → __main__._write_preliminary_manifest
+7. **Lineage chain** -- config.build_lineage_metadata ->
+   run_pipeline._log_transformation -> __main__._write_preliminary_manifest
    all use the same run_id, schema_version, config_hash.
-8. **The newly-fixed test file itself** —
+8. **The newly-fixed test file itself** --
    test_all_exceptions_inherit_from_exception.py loads cleanly,
    discovers the expected number of tests, and its module-level
    assertions pass.
@@ -79,13 +79,13 @@ Running
 
 Patient-safety doctrine
 -----------------------
-This test file is the SOLE proof that the entire DrugOS codebase —
-all 28 files — works together coherently.  If any module has a
+This test file is the SOLE proof that the entire DrugOS codebase --
+all 28 files -- works together coherently.  If any module has a
 regression that breaks the import chain, the data-flow contract, or
 the exception hierarchy, this test will catch it before the code
 reaches a clinician's hands.
 
-Team Cosmic / VentureLab — Autonomous Drug Repurposing Platform.
+Team Cosmic / VentureLab -- Autonomous Drug Repurposing Platform.
 Package: drugos-graph v2.0.0 | Pipeline: 2.0.0-week2 | Schema: 2.0.0
 """
 
@@ -207,7 +207,7 @@ def isolated_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# SECTION 1 — IMPORT CHAIN INTEGRITY (all 28 files import cleanly)
+# SECTION 1 -- IMPORT CHAIN INTEGRITY (all 28 files import cleanly)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
@@ -250,7 +250,7 @@ class TestAllFilesImportCleanly:
         assert "main" in main_mod.__all__
 
     def test_exceptions_module_exports_drugos_data_error(self):
-        """exceptions.py exposes DrugOSDataError — the universal catchable base."""
+        """exceptions.py exposes DrugOSDataError -- the universal catchable base."""
         from drugos_graph.exceptions import DrugOSDataError
         assert issubclass(DrugOSDataError, Exception)
 
@@ -281,7 +281,7 @@ class TestAllFilesImportCleanly:
         mod = importlib.util.module_from_spec(spec)
         # We don't execute the module (that would re-run all the tests);
         # we just verify it can be LOADED.
-        # Actually, loading requires execution in Python — let's just
+        # Actually, loading requires execution in Python -- let's just
         # verify the file parses as valid Python.
         import ast
         src = test_file.read_text(encoding="utf-8")
@@ -299,13 +299,13 @@ class TestAllFilesImportCleanly:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# SECTION 2 — CONFIG CONSTANT CONSISTENCY
+# SECTION 2 -- CONFIG CONSTANT CONSISTENCY
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
 class TestConfigConstantConsistency:
     """Same SEED, SCHEMA_VERSION, MIN_NODES_W2 etc. must be visible from
-    every module that imports them — no shadowing."""
+    every module that imports them -- no shadowing."""
 
     def test_seed_constant_match_across_modules(self):
         """SEED is the same constant used by every consumer module."""
@@ -365,7 +365,7 @@ class TestConfigConstantConsistency:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# SECTION 3 — EXCEPTION HIERARCHY INTEGRITY
+# SECTION 3 -- EXCEPTION HIERARCHY INTEGRITY
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
@@ -373,7 +373,7 @@ class TestExceptionHierarchyIntegrity:
     """Every domain-specific exception inherits from a documented base."""
 
     def test_all_exceptions_inherit_from_exception(self):
-        """THE CORE INVARIANT — every exception class inherits from Exception."""
+        """THE CORE INVARIANT -- every exception class inherits from Exception."""
         import inspect
         from drugos_graph import exceptions as exc
         classes = {
@@ -385,7 +385,7 @@ class TestExceptionHierarchyIntegrity:
         )
         for name, cls in classes.items():
             assert issubclass(cls, Exception), (
-                f"{name} does NOT inherit from Exception — CRITICAL bug"
+                f"{name} does NOT inherit from Exception -- CRITICAL bug"
             )
 
     def test_all_exceptions_inherit_from_drugos_data_error(self):
@@ -416,7 +416,7 @@ class TestExceptionHierarchyIntegrity:
 
     def test_top_level_handler_catches_every_exception(self, isolated_env, monkeypatch):
         """Every exception class is catchable by __main__'s top-level
-        ``except Exception`` handler — exercised via REAL catch."""
+        ``except Exception`` handler -- exercised via REAL catch."""
         import inspect
         from drugos_graph import exceptions as exc
         from drugos_graph import __main__ as main_mod
@@ -446,7 +446,7 @@ class TestExceptionHierarchyIntegrity:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# SECTION 4 — CROSS-MODULE DATA-FLOW CONTRACT
+# SECTION 4 -- CROSS-MODULE DATA-FLOW CONTRACT
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
@@ -545,7 +545,7 @@ class TestCrossModuleDataFlow:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# SECTION 5 — __main__ INTEGRATION WITH RUN_PIPELINE
+# SECTION 5 -- __main__ INTEGRATION WITH RUN_PIPELINE
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
@@ -614,12 +614,12 @@ class TestMainIntegrationWithRunPipeline:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# SECTION 6 — LINEAGE CHAIN INTEGRITY
+# SECTION 6 -- LINEAGE CHAIN INTEGRITY
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
 class TestLineageChainIntegrity:
-    """config.build_lineage_metadata → run_pipeline._log_transformation →
+    """config.build_lineage_metadata -> run_pipeline._log_transformation ->
     __main__._write_preliminary_manifest all use the same run_id,
     schema_version, config_hash."""
 
@@ -679,7 +679,7 @@ class TestLineageChainIntegrity:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# SECTION 7 — NEWLY-FIXED TEST FILE INTEGRATION
+# SECTION 7 -- NEWLY-FIXED TEST FILE INTEGRATION
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
@@ -752,7 +752,7 @@ class TestNewlyFixedTestFileIntegration:
             )
 
     def test_test_file_does_not_remove_existing_tests(self):
-        """The new test file does NOT remove or break existing tests —
+        """The new test file does NOT remove or break existing tests --
         verified by checking that the existing test files still exist
         and are unchanged in size (>1000 bytes each)."""
         tests_dir = _PROJECT_ROOT / "tests"
@@ -771,7 +771,7 @@ class TestNewlyFixedTestFileIntegration:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# SECTION 8 — FULL CODEBASE SANITY CHECK
+# SECTION 8 -- FULL CODEBASE SANITY CHECK
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
@@ -780,7 +780,7 @@ class TestFullCodebaseSanity:
 
     def test_no_module_shadows_config_constants(self):
         """No module shadows config constants (SEED, SCHEMA_VERSION, etc.)
-        with its own values — which would cause silent scientific drift."""
+        with its own values -- which would cause silent scientific drift."""
         from drugos_graph import config
         critical_constants = ["SEED", "SCHEMA_VERSION", "PIPELINE_VERSION",
                               "PACKAGE_VERSION", "CONFIG_HASH"]
@@ -790,10 +790,10 @@ class TestFullCodebaseSanity:
                 if hasattr(mod, const) and mod is not config:
                     mod_val = getattr(mod, const)
                     cfg_val = getattr(config, const)
-                    # Some modules legitimately import SEED from config —
+                    # Some modules legitimately import SEED from config --
                     # we check the value matches.
                     if mod_name in ("__main__",):
-                        # __main__ doesn't define these — it accesses via config.
+                        # __main__ doesn't define these -- it accesses via config.
                         continue
                     if mod_val != cfg_val:
                         # Only fail if the module DEFINES the constant
@@ -803,13 +803,13 @@ class TestFullCodebaseSanity:
                         import re
                         pattern = rf"^{const}\s*[:=]"
                         if re.search(pattern, src, re.MULTILINE):
-                            # Module defines the constant — verify it matches.
+                            # Module defines the constant -- verify it matches.
                             # Some modules may legitimately redefine for
-                            # caching — we just log a warning here.
+                            # caching -- we just log a warning here.
                             pass  # tolerated for now
 
     def test_all_loader_modules_use_exceptions_module(self):
-        """Every loader module imports from drugos_graph.exceptions —
+        """Every loader module imports from drugos_graph.exceptions --
         ensuring the exception hierarchy is the SOLE error-reporting
         mechanism across the codebase."""
         loader_modules = [
@@ -830,7 +830,7 @@ class TestFullCodebaseSanity:
 
     def test_no_circular_imports(self):
         """Importing the package does not trigger a circular import."""
-        # Force a fresh import — if there's a circular import, this hangs
+        # Force a fresh import -- if there's a circular import, this hangs
         # or raises ImportError.  Using import_module (cached) is safe.
         mod = importlib.import_module("drugos_graph")
         assert mod is not None
@@ -853,7 +853,7 @@ class TestFullCodebaseSanity:
                 "pyproject.toml missing [project] or [tool] section"
             )
         except ImportError:
-            # Python < 3.11 — just verify the file is non-empty and parses.
+            # Python < 3.11 -- just verify the file is non-empty and parses.
             content = pyproject_path.read_text(encoding="utf-8")
             assert len(content) > 50, "pyproject.toml suspiciously small"
             assert "[project]" in content or "[tool]" in content
@@ -902,7 +902,7 @@ class TestFullCodebaseSanity:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# SECTION 9 — PERFORMANCE & ISOLATION GUARANTEES
+# SECTION 9 -- PERFORMANCE & ISOLATION GUARANTEES
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
@@ -934,7 +934,7 @@ class TestPerformanceAndIsolation:
         set by __main__._generate_run_id)."""
         # Snapshot env vars before import.
         env_before = dict(os.environ)
-        # Re-import a downstream module — if it modifies env on import,
+        # Re-import a downstream module -- if it modifies env on import,
         # we'll see the difference.
         # Note: most modules are already imported, so this is a no-op
         # for them.  We verify the structural property: no module
@@ -956,18 +956,18 @@ class TestPerformanceAndIsolation:
                             and target.value.attr == "environ"):
                             pytest.fail(
                                 f"{mod_name} modifies os.environ at module "
-                                f"top level (line {node.lineno}) — this is "
+                                f"top level (line {node.lineno}) -- this is "
                                 f"global state mutation on import."
                             )
 
     def test_test_isolation_no_shared_mutable_state(self):
-        """Tests do not share mutable state — verified by checking that
+        """Tests do not share mutable state -- verified by checking that
         at least the new test files use isolation fixtures.
 
         Note: some pre-existing test files (e.g. test_20_files_combined.py)
         were written before the tmp_path / monkeypatch convention was
         established.  They use module-level setup/teardown instead.  We
-        do NOT modify those files (constraint: NO FILE REMOVAL) — we
+        do NOT modify those files (constraint: NO FILE REMOVAL) -- we
         only verify that the NEW test files (test_all_exceptions_inherit_from_exception.py
         and test_28_files_combined.py) use proper isolation."""
         tests_dir = _PROJECT_ROOT / "tests"
@@ -990,13 +990,13 @@ import time  # noqa: E402
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# SECTION 10 — END-TO-END EXCEPTION FLOW (integration test)
+# SECTION 10 -- END-TO-END EXCEPTION FLOW (integration test)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
 class TestEndToEndExceptionFlow:
-    """End-to-end exception flow: loader raises → __main__ catches →
-    exit code returned → lineage manifest preserved."""
+    """End-to-end exception flow: loader raises -> __main__ catches ->
+    exit code returned -> lineage manifest preserved."""
 
     def test_drkg_parse_error_flows_to_exit_code(self, isolated_env, monkeypatch):
         """A DRKGParseError raised by drkg_loader is catchable by
@@ -1051,9 +1051,9 @@ class TestEndToEndExceptionFlow:
 
     def test_trane_training_error_flows_to_exit_code(self, isolated_env, monkeypatch):
         """A TransETrainingError (missing from __all__) is still catchable
-        by __main__ — proving the 6 missing classes are properly integrated."""
+        by __main__ -- proving the 6 missing classes are properly integrated."""
         from drugos_graph import __main__ as main_mod
-        # Direct import — works even though the class is missing from __all__.
+        # Direct import -- works even though the class is missing from __all__.
         from drugos_graph.exceptions import TransETrainingError
         err = TransETrainingError(
             "NaN loss detected",

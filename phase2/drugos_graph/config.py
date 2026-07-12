@@ -3902,6 +3902,54 @@ CORE_EDGE_TYPES: list[Tuple[str, str, str]] = [
 CORE_EDGE_TYPES_SET: frozenset[Tuple[str, str, str]] = frozenset(CORE_EDGE_TYPES)
 
 
+# P2-011 ROOT FIX (symmetric / biologically-undirected relations):
+# The per-edge-type density computation in graph_stats.py needs to
+# distinguish DIRECTED edges (Compound→treats→Disease — only one
+# direction is biologically meaningful) from SYMMETRIC edges
+# (Protein-interacts_with-Protein — the edge is biologically
+# undirected; STRING PPI is symmetric by construction). For
+# symmetric same-type relations, the directed-graph denominator
+# ``n*(n-1)`` double-counts each undirected edge — the correct
+# denominator is ``n*(n-1)/2``. Without this distinction, PPI
+# density reports at HALF its true value (e.g. 0.5% instead of
+# 1.0%), biasing ML hyperparameter tuning (sparse vs dense message
+# passing) and masking duplicate-edge bugs ("PPI density > 5%
+# suggests duplicates" — the threshold is now meaningful).
+#
+# Membership rule: a relation is symmetric IFF the edge is
+# biologically undirected AND the source and destination node
+# types are identical (so the n*(n-1)/2 form is well-defined).
+# Cross-type relations like (Compound, treats, Disease) are NEVER
+# symmetric even when semantically bidirectional — they use the
+# n_src * n_dst denominator.
+#
+# Sources:
+#   - STRING PPI: "interactions are undirected" (Szklarczyk et al.
+#     2023, STRING database paper §2).
+#   - DRKG Gene-Gene: same as STRING (DRKG collects PPIs from
+#     multiple sources, all undirected).
+#   - Compound-Compound drug-drug interactions: pharmacologically
+#     symmetric (if A interacts with B, B interacts with A) — see
+#     DrugBank DDI documentation. The (Compound, interacts_with,
+#     Compound) edge is included here.
+SYMMETRIC_RELATIONS: frozenset[str] = frozenset({
+    "interacts_with",  # PPI (Protein-Protein, Gene-Gene) AND DDI (Compound-Compound)
+})
+
+
+# P2-011 helper: predicate form (used by graph_stats.py density
+# computation and by the schema validator).
+def is_symmetric_relation(rel_name: str) -> bool:
+    """Return True if ``rel_name`` is a biologically-undirected relation.
+
+    See ``SYMMETRIC_RELATIONS`` for the rationale and source
+    citations. Used by ``graph_stats.compute_density_per_type`` to
+    pick the correct density denominator:
+    ``n*(n-1)/2`` for symmetric, ``n*(n-1)`` for directed.
+    """
+    return rel_name in SYMMETRIC_RELATIONS
+
+
 # Fixes audit issue 2.13 — is_core_edge() helper
 def is_core_edge(src: str, rel: str, dst: str) -> bool:
     """Check if a triple is a core edge type.

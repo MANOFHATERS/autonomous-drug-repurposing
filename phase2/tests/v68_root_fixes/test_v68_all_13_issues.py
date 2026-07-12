@@ -1,26 +1,26 @@
-"""v68 ROOT FIX test suite — verifies all 13 audit issues (P2L-003 .. P2L-045).
+"""v68 ROOT FIX test suite -- verifies all 13 audit issues (P2L-003 .. P2L-045).
 
 Each test is a FORENSIC verification that the specific root-cause described
 in the audit issue is actually fixed in the source code. Tests import the
-REAL loader modules and exercise the REAL functions — no mocks, no stubs.
+REAL loader modules and exercise the REAL functions -- no mocks, no stubs.
 
 Coverage:
   P0 (critical):
-    - P2L-008: chembl _RE_ACTIVATE regex — INACTIVATION not misclassified
-    - P2L-021: drkg compound ID normalization — no NaN in head_id
-    - P2L-032: string UNIPROT_AC_REGEX — grouped alternatives
-    - P2L-041: clinicaltrials rel_type — "treats" for positive trials
-    - P2L-045: opentargets score keys — no binding_confidence/chembl_score
+    - P2L-008: chembl _RE_ACTIVATE regex -- INACTIVATION not misclassified
+    - P2L-021: drkg compound ID normalization -- no NaN in head_id
+    - P2L-032: string UNIPROT_AC_REGEX -- grouped alternatives
+    - P2L-041: clinicaltrials rel_type -- "treats" for positive trials
+    - P2L-045: opentargets score keys -- no binding_confidence/chembl_score
 
   P1 (high):
-    - P2L-003: disgenet stale-cache — copy canonical CSV to target_path
-    - P2L-005: omim score fallback — mapping_key consulted
-    - P2L-009: chembl edge props — standard_value/standard_units present
-    - P2L-010: chembl organism filter — NaN tax_id rows dropped
-    - P2L-013: chembl iter_chembl_activities — per-chunk filters applied
-    - P2L-015: uniprot DR-edges — bare dst_id (no db_name: prefix)
-    - P2L-022: drkg read_csv — no comment="#" parameter
-    - P2L-023: drkg type cross-check — else branch for malformed relation
+    - P2L-003: disgenet stale-cache -- copy canonical CSV to target_path
+    - P2L-005: omim score fallback -- mapping_key consulted
+    - P2L-009: chembl edge props -- standard_value/standard_units present
+    - P2L-010: chembl organism filter -- NaN tax_id rows dropped
+    - P2L-013: chembl iter_chembl_activities -- per-chunk filters applied
+    - P2L-015: uniprot DR-edges -- bare dst_id (no db_name: prefix)
+    - P2L-022: drkg read_csv -- no comment="#" parameter
+    - P2L-023: drkg type cross-check -- else branch for malformed relation
 """
 
 from __future__ import annotations
@@ -51,7 +51,7 @@ from drugos_graph import uniprot_loader
 
 
 # =============================================================================
-# P2L-008 — chembl _RE_ACTIVATE regex (P0-critical)
+# P2L-008 -- chembl _RE_ACTIVATE regex (P0-critical)
 # =============================================================================
 
 class TestP2L008ChEMBLRegex:
@@ -64,7 +64,7 @@ class TestP2L008ChEMBLRegex:
         assert result == "inhibits", (
             f"P2L-008 FAIL: 'Inactivation' -> {result!r}, expected 'inhibits'. "
             f"This means covalent inhibitors (aspirin, omeprazole) are still "
-            f"being misclassified as activators — INVERTED drug-target semantics."
+            f"being misclassified as activators -- INVERTED drug-target semantics."
         )
 
     def test_inactivate_classified_as_inhibits(self):
@@ -96,7 +96,7 @@ class TestP2L008ChEMBLRegex:
 
 
 # =============================================================================
-# P2L-021 — drkg compound ID normalization NaN (P0-critical)
+# P2L-021 -- drkg compound ID normalization NaN (P0-critical)
 # =============================================================================
 
 class TestP2L021DRKGCompoundIDNaN:
@@ -129,7 +129,7 @@ class TestP2L021DRKGCompoundIDNaN:
 
 
 # =============================================================================
-# P2L-032 — string UNIPROT_AC_REGEX grouping (P0-critical)
+# P2L-032 -- string UNIPROT_AC_REGEX grouping (P0-critical)
 # =============================================================================
 
 class TestP2L032UniProtACRegex:
@@ -175,7 +175,7 @@ class TestP2L032UniProtACRegex:
 
 
 # =============================================================================
-# P2L-041 — clinicaltrials rel_type (P0-critical)
+# P2L-041 -- clinicaltrials rel_type (P0-critical)
 # =============================================================================
 
 class TestP2L041ClinicalTrialsRelType:
@@ -255,14 +255,14 @@ class TestP2L041ClinicalTrialsRelType:
 
 
 # =============================================================================
-# P2L-045 — opentargets score keys (P0-critical)
+# P2L-045 -- opentargets score keys (P0-critical)
 # =============================================================================
 
 class TestP2L045OpenTargetsScoreKeys:
     """Verify binding_confidence/chembl_score are NOT set; opentargets_score IS."""
 
     def test_no_binding_confidence_in_compound_protein_edge(self):
-        """The compound→protein edge props must NOT contain binding_confidence."""
+        """The compound->protein edge props must NOT contain binding_confidence."""
         src = inspect.getsource(opentargets_loader._emit_compound_protein_edge)
         # The props dict should set opentargets_score, not binding_confidence
         assert '"opentargets_score"' in src, (
@@ -273,7 +273,7 @@ class TestP2L045OpenTargetsScoreKeys:
         # Check that it's not in the props dict assignment
         assert '"binding_confidence": score' not in src, (
             "P2L-045 FAIL: _emit_compound_protein_edge still sets "
-            "'binding_confidence: score'. The v68 fix removes this — "
+            "'binding_confidence: score'. The v68 fix removes this -- "
             "binding_confidence is reserved for ChEMBL/binding-specific loaders."
         )
 
@@ -294,7 +294,7 @@ class TestP2L045OpenTargetsScoreKeys:
 
 
 # =============================================================================
-# P2L-003 — disgenet stale-cache refresh (P1-high)
+# P2L-003 -- disgenet stale-cache refresh (P1-high)
 # =============================================================================
 
 class TestP2L003DisGeNETStaleCache:
@@ -323,7 +323,7 @@ class TestP2L003DisGeNETStaleCache:
             # not DisgenetPipeline. The previous patch target raised AttributeError.
             # v77 ROOT FIX 2: mock side_effects must accept *args because
             # patch.object(Path, "exists") replaces the instance method with a
-            # MagicMock — MagicMocks don't implement the descriptor protocol,
+            # MagicMock -- MagicMocks don't implement the descriptor protocol,
             # so path.exists() calls the mock with NO args (not with path as self).
             with patch("phase1.pipelines.disgenet_pipeline.DisGeNETPipeline") as MockPipe:
                 MockPipe.return_value.run.return_value = None
@@ -334,14 +334,14 @@ class TestP2L003DisGeNETStaleCache:
                     # Make canonical exist and be non-empty, target stale.
                     # side_effect must accept *args (MagicMock doesn't pass self).
                     # v77 ROOT FIX 3: also mock Path.mkdir because mkdir internally
-                    # calls self.is_dir() which calls self.stat().st_mode — the
+                    # calls self.is_dir() which calls self.stat().st_mode -- the
                     # stat mock returns a MagicMock whose st_mode is not an int,
                     # causing TypeError. Mocking mkdir as a no-op avoids this.
                     mock_exists.side_effect = lambda *a, **kw: True
                     mock_mkdir.return_value = None
                     mock_stat_ret = MagicMock()
                     mock_stat_ret.st_size = 1000
-                    mock_stat_ret.st_mtime = 0  # very old → stale
+                    mock_stat_ret.st_mtime = 0  # very old -> stale
                     mock_stat.side_effect = lambda *a, **kw: mock_stat_ret
 
                     # Call with custom target_path
@@ -358,7 +358,7 @@ class TestP2L003DisGeNETStaleCache:
 
 
 # =============================================================================
-# P2L-005 — omim mapping_key fallback (P1-high)
+# P2L-005 -- omim mapping_key fallback (P1-high)
 # =============================================================================
 
 class TestP2L005OMIMMappingKey:
@@ -413,7 +413,7 @@ class TestP2L005OMIMMappingKey:
 
 
 # =============================================================================
-# P2L-009 — chembl standard_value propagation (P1-high)
+# P2L-009 -- chembl standard_value propagation (P1-high)
 # =============================================================================
 
 class TestP2L009ChEMBLStandardValue:
@@ -434,7 +434,7 @@ class TestP2L009ChEMBLStandardValue:
 
 
 # =============================================================================
-# P2L-010 — chembl organism filter NaN (P1-high)
+# P2L-010 -- chembl organism filter NaN (P1-high)
 # =============================================================================
 
 class TestP2L010ChEMBLOrganismFilter:
@@ -475,7 +475,7 @@ class TestP2L010ChEMBLOrganismFilter:
 
 
 # =============================================================================
-# P2L-013 — chembl iter_chembl_activities filters (P1-high)
+# P2L-013 -- chembl iter_chembl_activities filters (P1-high)
 # =============================================================================
 
 class TestP2L013ChEMBLIterFilters:
@@ -502,7 +502,7 @@ class TestP2L013ChEMBLIterFilters:
 
 
 # =============================================================================
-# P2L-015 — uniprot DR-edges bare dst_id (P1-high)
+# P2L-015 -- uniprot DR-edges bare dst_id (P1-high)
 # =============================================================================
 
 class TestP2L015UniProtDREdges:
@@ -546,7 +546,7 @@ class TestP2L015UniProtDREdges:
 
 
 # =============================================================================
-# P2L-022 — drkg no comment="#" (P1-high)
+# P2L-022 -- drkg no comment="#" (P1-high)
 # =============================================================================
 
 class TestP2L022DRKGNoComment:
@@ -575,7 +575,7 @@ class TestP2L022DRKGNoComment:
 
 
 # =============================================================================
-# P2L-023 — drkg type cross-check else branch (P1-high)
+# P2L-023 -- drkg type cross-check else branch (P1-high)
 # =============================================================================
 
 class TestP2L023DRKGTypeCrossCheck:

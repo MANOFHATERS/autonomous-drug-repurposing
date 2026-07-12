@@ -1,7 +1,7 @@
 """
 Test 1: Comprehensive v2.1.0 test for the upgraded `cleaning.normalizer`.
 
-This is a REAL test (not a fake "check if attribute exists" test) — it
+This is a REAL test (not a fake "check if attribute exists" test) -- it
 exercises every behavior change introduced by the v2.1.0 upgrade across
 all 16 domains.  Every assertion verifies a specific scientific or
 engineering property of the codebase.
@@ -94,12 +94,12 @@ requires_rdkit = pytest.mark.skipif(
 
 
 # ===========================================================================
-# DOMAIN 3 — SCIENTIFIC CORRECTNESS
+# DOMAIN 3 -- SCIENTIFIC CORRECTNESS
 # ===========================================================================
 
 
 class TestScientificCorrectness:
-    """[DOMAIN 3] SCI-1 through SCI-20 — verify scientific correctness."""
+    """[DOMAIN 3] SCI-1 through SCI-20 -- verify scientific correctness."""
 
     def test_sci_1_withdrawn_drugs_not_marked_approved(self):
         """SCI-1: drugs with ['approved','withdrawn'] groups are NOT FDA-approved."""
@@ -129,23 +129,23 @@ class TestScientificCorrectness:
         assert out["is_fda_approved"] is True
 
     def test_sci_2_max_phase_3_5_rejected(self):
-        """SCI-2: max_phase='3.5' is not a valid phase → is_fda_approved=False."""
+        """SCI-2: max_phase='3.5' is not a valid phase -> is_fda_approved=False."""
         out = standardize_drug_record({"max_phase": "3.5"})
         assert out["is_fda_approved"] is False
 
     def test_sci_2_max_phase_bool_returns_none(self):
-        """SCI-2 / CODE-3: bool max_phase is scientifically meaningless → None."""
+        """SCI-2 / CODE-3: bool max_phase is scientifically meaningless -> None."""
         out = standardize_drug_record({"max_phase": True})
         assert out["is_fda_approved"] is False
 
     def test_sci_14_max_phase_5_rejected(self):
-        """SCI-14: max_phase=5 is out of [0,4] range → is_fda_approved=False."""
+        """SCI-14: max_phase=5 is out of [0,4] range -> is_fda_approved=False."""
         out = standardize_drug_record({"max_phase": 5})
         assert out["is_fda_approved"] is False
 
     @requires_rdkit
     def test_sci_3_aspirin_inchikey(self):
-        """SCI-3: aspirin SMILES → correct InChIKey."""
+        """SCI-3: aspirin SMILES -> correct InChIKey."""
         ik = convert_to_inchikey("CC(=O)OC1=CC=CC=C1C(=O)O")
         assert ik == "BSYNRYMUTXBXSQ-UHFFFAOYSA-N"
 
@@ -193,22 +193,22 @@ class TestScientificCorrectness:
             normalizer.configure_normalizer(stereo_policy="preserve")
 
     def test_sci_7_mw_out_of_range_set_to_none(self):
-        """SCI-7: molecular_weight=-100 → None."""
+        """SCI-7: molecular_weight=-100 -> None."""
         out = standardize_drug_record({"molecular_weight": -100})
         assert out["molecular_weight"] is None
 
     def test_sci_7_mw_too_large_set_to_none(self):
-        """SCI-7: molecular_weight=10000 → None."""
+        """SCI-7: molecular_weight=10000 -> None."""
         out = standardize_drug_record({"molecular_weight": 10000})
         assert out["molecular_weight"] is None
 
     def test_sci_7_mw_nan_set_to_none(self):
-        """SCI-7: molecular_weight=NaN → None."""
+        """SCI-7: molecular_weight=NaN -> None."""
         out = standardize_drug_record({"molecular_weight": float("nan")})
         assert out["molecular_weight"] is None
 
     def test_sci_7_mw_inf_set_to_none(self):
-        """SCI-7: molecular_weight=inf → None."""
+        """SCI-7: molecular_weight=inf -> None."""
         out = standardize_drug_record({"molecular_weight": float("inf")})
         assert out["molecular_weight"] is None
 
@@ -235,9 +235,9 @@ class TestScientificCorrectness:
         assert validate_inchikey("BSYNRYMUTXBXSQ-UHFFFAOYSA-X", strict=True) is False
 
     def test_sci_9_negative_activity_value_returns_none(self):
-        """SCI-9: negative activity value → value=None, is_corrupt=True.
+        """SCI-9: negative activity value -> value=None, is_corrupt=True.
 
-        v16 ROOT FIX (SW-6): negative values are NOT censored — they are
+        v16 ROOT FIX (SW-6): negative values are NOT censored -- they are
         CORRUPT. "Censored" means "we know it's >X or <X" (e.g. ">30 nM"),
         while a negative concentration is impossible in any unit system.
         The previous code returned censored=True which polluted the
@@ -251,21 +251,21 @@ class TestScientificCorrectness:
         assert r.original_value == -50
 
     def test_sci_10_censor_prefix_greater_than(self):
-        """SCI-10: '>100' uM → 100000 nM, censored=True, direction='>'."""
+        """SCI-10: '>100' uM -> 100000 nM, censored=True, direction='>'."""
         r = normalize_activity_value(">100", "uM")
         assert r.value == 100000.0
         assert r.censored is True
         assert r.censor_direction == ">"
 
     def test_sci_10_censor_prefix_less_than(self):
-        """SCI-10: '<1' nM → 1 nM, censored=True, direction='<'."""
+        """SCI-10: '<1' nM -> 1 nM, censored=True, direction='<'."""
         r = normalize_activity_value("<1", "nM")
         assert r.value == 1.0
         assert r.censored is True
         assert r.censor_direction == "<"
 
     def test_sci_10_censor_prefix_approximate(self):
-        """SCI-10: '~50' nM → 50 nM, censored=True, direction='~'."""
+        """SCI-10: '~50' nM -> 50 nM, censored=True, direction='~'."""
         r = normalize_activity_value("~50", "nM")
         assert r.value == 50.0
         assert r.censored is True
@@ -322,7 +322,7 @@ class TestScientificCorrectness:
             assert ik.endswith("-N"), f"Expected -N ending, got {ik}"
 
     def test_sci_18_mechanism_null_values_normalized(self):
-        """SCI-18: 'TODO', 'N/A', 'unknown' → empty string."""
+        """SCI-18: 'TODO', 'N/A', 'unknown' -> empty string."""
         for val in ("TODO", "N/A", "unknown", "tbd", "none", "null", "-"):
             out = standardize_drug_record({"mechanism_of_action": val})
             assert out["mechanism_of_action"] == "", f"Failed for {val!r}"
@@ -339,7 +339,7 @@ class TestScientificCorrectness:
 
 
 # ===========================================================================
-# DOMAIN 5 — DATA QUALITY & INTEGRITY
+# DOMAIN 5 -- DATA QUALITY & INTEGRITY
 # ===========================================================================
 
 
@@ -423,7 +423,7 @@ class TestDataQuality:
         assert standardize_inchikey("TOO_SHORT") is None
 
     def test_dq_20_stereo_ambiguous_detection(self):
-        """DQ-20: SMILES without '@' but with chiral centers → stereo_ambiguous."""
+        """DQ-20: SMILES without '@' but with chiral centers -> stereo_ambiguous."""
         if not rdkit_available:
             pytest.skip("RDKit not installed")
         # Alanine without stereo specification
@@ -433,7 +433,7 @@ class TestDataQuality:
 
 
 # ===========================================================================
-# DOMAIN 7 — IDEMPOTENCY & REPRODUCIBILITY
+# DOMAIN 7 -- IDEMPOTENCY & REPRODUCIBILITY
 # ===========================================================================
 
 
@@ -526,7 +526,7 @@ class TestIdempotency:
 
 
 # ===========================================================================
-# DOMAIN 1 — ARCHITECTURE
+# DOMAIN 1 -- ARCHITECTURE
 # ===========================================================================
 
 
@@ -585,10 +585,10 @@ class TestArchitecture:
         # Verify by passing a record with a malicious __deepcopy__ method
         class MaliciousDict(dict):
             def __deepcopy__(self, memo):
-                raise RuntimeError("__deepcopy__ was called — ARCH-10 violated")
+                raise RuntimeError("__deepcopy__ was called -- ARCH-10 violated")
 
         rec = MaliciousDict({"name": "X", "max_phase": 4})
-        # Should not raise — _shallow_copy_record does not invoke __deepcopy__
+        # Should not raise -- _shallow_copy_record does not invoke __deepcopy__
         out = standardize_drug_record(rec)
         assert out["name"] == "X"
 
@@ -599,7 +599,7 @@ class TestArchitecture:
 
 
 # ===========================================================================
-# DOMAIN 9 — SECURITY & PRIVACY
+# DOMAIN 9 -- SECURITY & PRIVACY
 # ===========================================================================
 
 
@@ -655,12 +655,12 @@ class TestSecurity:
             standardize_drug_record({"name": "TestDrug"})
         # Audit log may go through cleaning._audit_log or local logger
         audit_messages = [r for r in caplog.records if "AUDIT" in r.getMessage()]
-        # Allow either path — both are valid
+        # Allow either path -- both are valid
         assert len(audit_messages) >= 0  # at minimum, no crash
 
 
 # ===========================================================================
-# DOMAIN 2 — DESIGN
+# DOMAIN 2 -- DESIGN
 # ===========================================================================
 
 
@@ -675,7 +675,7 @@ class TestDesign:
         assert r1.unit == r2.unit == "nM"
 
     def test_design_6_molar_unit_supported(self):
-        """DESIGN-6: 'M' (mol/L) is supported → 1e9 nM."""
+        """DESIGN-6: 'M' (mol/L) is supported -> 1e9 nM."""
         r = normalize_activity_value(1.0, "M")
         assert r.value == 1e9
         assert r.unit == "nM"
@@ -742,7 +742,7 @@ class TestDesign:
 
 
 # ===========================================================================
-# DOMAIN 14 — COMPLIANCE & STANDARDS ADHERENCE
+# DOMAIN 14 -- COMPLIANCE & STANDARDS ADHERENCE
 # ===========================================================================
 
 
@@ -793,7 +793,7 @@ class TestCompliance:
 
 
 # ===========================================================================
-# DOMAIN 6 — RELIABILITY & RESILIENCE
+# DOMAIN 6 -- RELIABILITY & RESILIENCE
 # ===========================================================================
 
 
@@ -802,7 +802,7 @@ class TestReliability:
 
     def test_rel_1_timeout_kwarg_accepted(self):
         """REL-1: timeout kwarg is accepted (no crash)."""
-        # Short timeout on a valid SMILES — should still work
+        # Short timeout on a valid SMILES -- should still work
         r = convert_to_inchikey_detailed("CCO", timeout=5.0)
         assert isinstance(r, ConversionResult)
 
@@ -817,7 +817,7 @@ class TestReliability:
         assert isinstance(letters, list)
 
     def test_rel_9_inf_activity_value_returns_none(self):
-        """REL-9: '1e400' (inf) → value=None."""
+        """REL-9: '1e400' (inf) -> value=None."""
         r = normalize_activity_value("1e400", "nM")
         assert r.value is None
         assert "non_finite_value" in r.warnings
@@ -847,12 +847,12 @@ class TestReliability:
 
 
 # ===========================================================================
-# DOMAIN 10 — TESTING & VALIDATION (the test-of-the-test)
+# DOMAIN 10 -- TESTING & VALIDATION (the test-of-the-test)
 # ===========================================================================
 
 
 class TestTestingValidation:
-    """[DOMAIN 10] TEST-1 through TEST-28 — exercises every test category."""
+    """[DOMAIN 10] TEST-1 through TEST-28 -- exercises every test category."""
 
     def test_test_1_convert_edge_cases(self):
         """TEST-1: convert_to_inchikey handles edge cases."""
@@ -991,7 +991,7 @@ class TestTestingValidation:
 
 
 # ===========================================================================
-# DOMAIN 4 — CODING
+# DOMAIN 4 -- CODING
 # ===========================================================================
 
 
@@ -1050,7 +1050,7 @@ class TestCoding:
 
 
 # ===========================================================================
-# DOMAIN 8 — PERFORMANCE & SCALABILITY
+# DOMAIN 8 -- PERFORMANCE & SCALABILITY
 # ===========================================================================
 
 
@@ -1098,7 +1098,7 @@ class TestPerformance:
 
     def test_perf_13_exact_match_bypasses_fuzzy(self):
         """PERF-13: 'Small molecule' (exact match) returns immediately."""
-        # Time it — should be microseconds
+        # Time it -- should be microseconds
         start = time.time()
         for _ in range(1000):
             fuzzy_match_drug_type("Small molecule")
@@ -1107,7 +1107,7 @@ class TestPerformance:
 
 
 # ===========================================================================
-# DOMAIN 11 — LOGGING & OBSERVABILITY
+# DOMAIN 11 -- LOGGING & OBSERVABILITY
 # ===========================================================================
 
 
@@ -1128,7 +1128,7 @@ class TestLogging:
 
     def test_log_7_rdkit_unavailable_logged_at_error(self, caplog):
         """LOG-7: if RDKit is unavailable, it's logged at ERROR (not WARNING)."""
-        # This is verified at import time — if RDKit is unavailable, the
+        # This is verified at import time -- if RDKit is unavailable, the
         # import would have logged an ERROR.  We can't easily re-test this
         # without reloading the module, so just check the logger has the
         # right level if RDKit is unavailable.
@@ -1144,7 +1144,7 @@ class TestLogging:
 
 
 # ===========================================================================
-# DOMAIN 12 — CONFIGURATION & ENVIRONMENT
+# DOMAIN 12 -- CONFIGURATION & ENVIRONMENT
 # ===========================================================================
 
 
@@ -1202,7 +1202,7 @@ class TestConfiguration:
 
 
 # ===========================================================================
-# DOMAIN 15 — INTEROPERABILITY & INTEGRATION
+# DOMAIN 15 -- INTEROPERABILITY & INTEGRATION
 # ===========================================================================
 
 
@@ -1265,7 +1265,7 @@ class TestInteroperability:
 
 
 # ===========================================================================
-# DOMAIN 16 — DATA LINEAGE & TRACEABILITY
+# DOMAIN 16 -- DATA LINEAGE & TRACEABILITY
 # ===========================================================================
 
 
@@ -1380,7 +1380,7 @@ class TestCrossCuttingVerification:
         assert standardize_inchikey("SYNTH-TEST-COMPOUND-001") == "SYNTH-TEST-COMPOUND-001"
 
     def test_section_6_1_aspirin_record(self):
-        """§6.1: standardize_drug_record(aspirin) → is_fda_approved=True."""
+        """§6.1: standardize_drug_record(aspirin) -> is_fda_approved=True."""
         rec = {
             "name": "  Aspirin  ",
             "molecular_weight": "180.16",
@@ -1392,7 +1392,7 @@ class TestCrossCuttingVerification:
         assert out["is_fda_approved"] is True
 
     def test_section_6_1_withdrawn_record(self):
-        """§6.1: withdrawn drug → is_fda_approved=False, is_withdrawn=True."""
+        """§6.1: withdrawn drug -> is_fda_approved=False, is_withdrawn=True."""
         out = standardize_drug_record({
             "groups": ["approved", "withdrawn"],
             "max_phase": 4,
@@ -1401,18 +1401,18 @@ class TestCrossCuttingVerification:
         assert out["is_withdrawn"] is True
 
     def test_section_6_1_max_phase_4_0(self):
-        """§6.1: max_phase='4.0' → is_fda_approved=True."""
+        """§6.1: max_phase='4.0' -> is_fda_approved=True."""
         out = standardize_drug_record({"max_phase": "4.0"})
         assert out["is_fda_approved"] is True
 
     def test_section_6_1_activity_1_5_uM(self):
-        """§6.1: normalize_activity_value(1.5, 'uM') → value=1500.0, unit='nM'."""
+        """§6.1: normalize_activity_value(1.5, 'uM') -> value=1500.0, unit='nM'."""
         r = normalize_activity_value(1.5, "uM")
         assert r.value == 1500.0
         assert r.unit == "nM"
 
     def test_section_6_1_activity_gt_100_uM(self):
-        """§6.1: normalize_activity_value('>100', 'uM') → value=100000.0, censored=True."""
+        """§6.1: normalize_activity_value('>100', 'uM') -> value=100000.0, censored=True."""
         r = normalize_activity_value(">100", "uM")
         assert r.value == 100000.0
         assert r.censored is True

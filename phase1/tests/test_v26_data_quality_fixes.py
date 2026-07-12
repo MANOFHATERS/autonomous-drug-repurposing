@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 # ---------------------------------------------------------------------------
-# Path setup — make both phase1 and phase2 importable.
+# Path setup -- make both phase1 and phase2 importable.
 # ---------------------------------------------------------------------------
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent  # v26_upgraded/
 PHASE1_DIR = PROJECT_ROOT / "phase1"
@@ -45,7 +45,7 @@ class TestC7ScientificallyCorrectFixtures:
                 if r["indication_type"] == "approved":
                     pytest.fail(
                         "DB00645 (Aspirin) is still marked approved for "
-                        "Sickle cell anemia — scientifically false."
+                        "Sickle cell anemia -- scientifically false."
                     )
 
     def test_drugbank_indications_aspirin_has_real_indication(self):
@@ -71,7 +71,7 @@ class TestC7ScientificallyCorrectFixtures:
             if r["drugbank_id"] == "DB00011" and r["disease_id"] == "OMIM:219700":
                 pytest.fail(
                     "DB00011 (Hepatitis B vaccine) is still marked approved "
-                    "for Cystic fibrosis — scientifically false."
+                    "for Cystic fibrosis -- scientifically false."
                 )
         # And must now be approved for Hepatitis B
         hb_rows = [r for r in rows if r["drugbank_id"] == "DB00011"]
@@ -90,7 +90,7 @@ class TestC7ScientificallyCorrectFixtures:
             if r["drugbank_id"] == "DB00008" and r["disease_id"] == "OMIM:219700":
                 pytest.fail(
                     "DB00008 (Pegademase bovine) is still marked for "
-                    "Cystic fibrosis — scientifically false."
+                    "Cystic fibrosis -- scientifically false."
                 )
         ada_rows = [
             r for r in rows
@@ -120,7 +120,7 @@ class TestC7ScientificallyCorrectFixtures:
         for r in rows:
             if r["drugbank_id"] == "DB00463" and r["disease_id"] == "OMIM:154700":
                 pytest.fail(
-                    "DB00463 is still marked for Marfan syndrome — should be replaced."
+                    "DB00463 is still marked for Marfan syndrome -- should be replaced."
                 )
 
     def test_disgenet_no_hmgcr_marfan(self):
@@ -131,7 +131,7 @@ class TestC7ScientificallyCorrectFixtures:
         for r in rows:
             if r["gene_symbol"] == "HMGCR" and r["disease_id"] == "OMIM:154700":
                 pytest.fail(
-                    "HMGCR -> Marfan syndrome is still in disgenet CSV — scientifically false."
+                    "HMGCR -> Marfan syndrome is still in disgenet CSV -- scientifically false."
                 )
 
     def test_disgenet_fbn1_marfan_present(self):
@@ -144,7 +144,7 @@ class TestC7ScientificallyCorrectFixtures:
             if r["gene_symbol"] == "FBN1" and r["disease_id"] == "OMIM:154700"
         ]
         assert fbn1_marfan, (
-            "FBN1 -> Marfan syndrome must be present (correct biology — Marfan "
+            "FBN1 -> Marfan syndrome must be present (correct biology -- Marfan "
             "is caused by FBN1 mutations)."
         )
 
@@ -164,7 +164,7 @@ class TestC7ScientificallyCorrectFixtures:
 
 
 # ===========================================================================
-# C-8: ChEMBL activity provenance + uM→nM conversion
+# C-8: ChEMBL activity provenance + uM->nM conversion
 # ===========================================================================
 class TestC8ChEMBLProvenanceAndUnits:
     """Verify the provenance sidecar matches the CSV and units are nM."""
@@ -333,7 +333,7 @@ class TestC16ClinicalOutcomeNode:
         )
         staged = report["staged"]
         assert len(staged.clinical_outcome_nodes) > 0, (
-            "Bridge produced zero ClinicalOutcome nodes — C-16 fix did not take effect"
+            "Bridge produced zero ClinicalOutcome nodes -- C-16 fix did not take effect"
         )
         # Each node must carry the required properties.
         for n in staged.clinical_outcome_nodes:
@@ -435,7 +435,7 @@ class TestC18UnifiedDeadLetterQueue:
         letters.clear()
         # Internal dedup queue must NOT have been cleared.
         assert any(l.get("test") == "from dedup" for l in dedup_q), (
-            "get_dead_letters() returned the internal list reference — "
+            "get_dead_letters() returned the internal list reference -- "
             "caller mutations corrupted the queue."
         )
 
@@ -470,7 +470,7 @@ class TestC19InchiKeyProtonation:
         normalized = normalize_inchikey("BSYNRYMUTXBXSQ-UHFFFAOYSA-N-a")
         assert validate_inchikey(normalized) is True, (
             f"Protonation-form InChIKey {normalized!r} was rejected by "
-            f"validate_inchikey() — C-19 regex fix did not take effect."
+            f"validate_inchikey() -- C-19 regex fix did not take effect."
         )
 
     def test_pattern_accepts_protonation_form_directly(self):

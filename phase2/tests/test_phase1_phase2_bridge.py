@@ -1,5 +1,5 @@
 """
-Phase 1 → Phase 2 Integration Test (THE bridge verification)
+Phase 1 -> Phase 2 Integration Test (THE bridge verification)
 =============================================================
 
 This test file is the SINGLE proof that Phase 1's processed_data outputs
@@ -76,7 +76,7 @@ class TestPhase1OutputsExist:
 # ---------------------------------------------------------------------------
 class TestReadPhase1Outputs:
     # v58 ROOT FIX (P2C-008 deep): the bridge now treats DATABASE_URL
-    # being set as "production mode" — PostgreSQL failures are FATAL,
+    # being set as "production mode" -- PostgreSQL failures are FATAL,
     # not silently fallen back to CSV. These CSV-path tests must
     # explicitly force CSV mode (prefer_postgres=False) so they don't
     # depend on whether DATABASE_URL happens to be set in the env.
@@ -137,7 +137,7 @@ class TestStaging:
         for n in staged.compound_nodes:
             assert "id" in n and n["id"]
             assert "drugbank_id" in n
-            # v27 ROOT FIX (P2-B-1): withdrawn is now Optional[bool] —
+            # v27 ROOT FIX (P2-B-1): withdrawn is now Optional[bool] --
             # None when Phase 1 is silent (so DrugBankEnricher coalesce
             # can fire and set safety_data_missing=True), True/False
             # only when Phase 1 explicitly says so. Old test asserted
@@ -195,11 +195,11 @@ class TestStaging:
         # v61 ROOT FIX (Pathway referential integrity): the v43 fix
         # added Pathway nodes derived from STRING PPI connected
         # components, and (Protein, participates_in, Pathway) edges.
-        # This test was written BEFORE v43 — its endpoint_map did not
+        # This test was written BEFORE v43 -- its endpoint_map did not
         # include Pathway, so every v43+ run failed this assertion
         # with "Edge type Protein-[participates_in]->Pathway references
         # unstaged dst label 'Pathway'". The Pathway nodes ARE staged
-        # (in staged.pathway_nodes) — the test was just not checking
+        # (in staged.pathway_nodes) -- the test was just not checking
         # them. Fix: add Pathway to the endpoint_map.
         pathway_ids = {n["id"] for n in staged.pathway_nodes}
 
@@ -256,14 +256,14 @@ class TestLoadIntoGraph:
     def test_nodes_loaded_match_staged(self, loaded):
         s = loaded["summary"]
         assert s["nodes_loaded"] == s["nodes_staged"], (
-            f"Loaded {s['nodes_loaded']} nodes but staged {s['nodes_staged']} — "
+            f"Loaded {s['nodes_loaded']} nodes but staged {s['nodes_staged']} -- "
             f"some nodes were silently dropped by the builder."
         )
 
     def test_edges_loaded_match_staged(self, loaded):
         s = loaded["summary"]
         assert s["edges_loaded"] == s["edges_staged"], (
-            f"Loaded {s['edges_loaded']} edges but staged {s['edges_staged']} — "
+            f"Loaded {s['edges_loaded']} edges but staged {s['edges_staged']} -- "
             f"some edges were silently dropped by the builder (likely "
             f"referential integrity failure)."
         )
@@ -271,11 +271,11 @@ class TestLoadIntoGraph:
     def test_at_least_one_edge_type_present(self, loaded):
         s = loaded["summary"]
         assert len(s["edge_types_present"]) >= 1, (
-            "Bridge produced zero edge types — Phase 1 → Phase 2 flow is broken."
+            "Bridge produced zero edge types -- Phase 1 -> Phase 2 flow is broken."
         )
 
     def test_compound_protein_edges_present(self, loaded):
-        """DrugBank interactions MUST produce at least one Compound→Protein edge."""
+        """DrugBank interactions MUST produce at least one Compound->Protein edge."""
         builder: RecordingGraphBuilder = loaded["builder"]
         cp_edges = []
         for et in [("Compound", "targets", "Protein"),
@@ -285,16 +285,16 @@ class TestLoadIntoGraph:
                    ("Compound", "unknown", "Protein")]:
             cp_edges.extend(builder.edges_by_type(*et))
         assert len(cp_edges) > 0, (
-            "Expected Compound→Protein edges from drugbank_interactions.csv.gz "
+            "Expected Compound->Protein edges from drugbank_interactions.csv.gz "
             "but none were loaded."
         )
 
     def test_gene_disease_edges_present(self, loaded):
-        """OMIM GDA MUST produce at least one Gene→Disease edge."""
+        """OMIM GDA MUST produce at least one Gene->Disease edge."""
         builder: RecordingGraphBuilder = loaded["builder"]
         gd_edges = builder.edges_by_type("Gene", "associated_with", "Disease")
         assert len(gd_edges) > 0, (
-            "Expected Gene→Disease edges from omim_gene_disease_associations.csv "
+            "Expected Gene->Disease edges from omim_gene_disease_associations.csv "
             "but none were loaded."
         )
 
@@ -332,7 +332,7 @@ class TestPhase1Neo4jExporterNoLongerRaises:
 
 
 # ---------------------------------------------------------------------------
-# 6. Determinism — same inputs → same staged output
+# 6. Determinism -- same inputs -> same staged output
 # ---------------------------------------------------------------------------
 class TestDeterminism:
     def test_two_runs_produce_identical_node_ids(self):

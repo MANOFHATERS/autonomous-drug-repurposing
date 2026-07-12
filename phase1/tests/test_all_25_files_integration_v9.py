@@ -1,11 +1,11 @@
-"""Test 2 of 3 — Real integration test for all 25 files working together.
+"""Test 2 of 3 -- Real integration test for all 25 files working together.
 
 This is the second of the three test suites the user mandated.  It
 verifies that the newly-upgraded ``pipelines/disgenet_pipeline.py`` works
-correctly with ALL other files in the codebase — the 24 already-fixed
-files plus the one we just upgraded — for a total of 25 files.
+correctly with ALL other files in the codebase -- the 24 already-fixed
+files plus the one we just upgraded -- for a total of 25 files.
 
-The 25 files covered (no files removed — all originals preserved):
+The 25 files covered (no files removed -- all originals preserved):
 
   1.  config/__init__.py
   2.  config/settings.py                              (additive DisGeNET knobs added)
@@ -24,7 +24,7 @@ The 25 files covered (no files removed — all originals preserved):
   15. cleaning/normalizer.py
   16. cleaning/missing_values.py
   17. cleaning/deduplicator.py
-  18. cleaning/confidence.py                          (NEW — ARCH-7)
+  18. cleaning/confidence.py                          (NEW -- ARCH-7)
   19. entity_resolution/__init__.py
   20. entity_resolution/resolver_utils.py
   21. entity_resolution/drug_resolver.py
@@ -48,7 +48,7 @@ Test coverage
    ``protein_resolver``) can resolve the pipeline's output.
 6. ``BasePipeline`` audit-trail infrastructure (``PipelineRun`` rows)
    works with the upgraded ``DisGeNETPipeline``.
-7. End-to-end: download (mocked) → clean → load into SQLite, verify
+7. End-to-end: download (mocked) -> clean -> load into SQLite, verify
    DB contains expected ``GeneDiseaseAssociation`` rows with full
    lineage (``pipeline_run_id`` non-NULL on every row).
 8. Idempotency: running ``clean()`` + ``load()`` twice produces
@@ -235,7 +235,7 @@ def _make_tsv(rows: list[dict], path: Path) -> Path:
 
 
 # ============================================================================
-# Section 1 — Import sanity (all 25 files import cleanly)
+# Section 1 -- Import sanity (all 25 files import cleanly)
 # ============================================================================
 
 
@@ -285,7 +285,7 @@ class TestAllFilesImport:
 
 
 # ============================================================================
-# Section 2 — Config integration
+# Section 2 -- Config integration
 # ============================================================================
 
 
@@ -336,7 +336,7 @@ class TestConfigIntegration:
 
 
 # ============================================================================
-# Section 3 — Database model integration
+# Section 3 -- Database model integration
 # ============================================================================
 
 
@@ -425,7 +425,7 @@ class TestDatabaseIntegration:
 
 
 # ============================================================================
-# Section 4 — Cleaning module integration
+# Section 4 -- Cleaning module integration
 # ============================================================================
 
 
@@ -461,15 +461,15 @@ class TestCleaningIntegration:
 
 
 # ============================================================================
-# Section 5 — End-to-end integration
+# Section 5 -- End-to-end integration
 # ============================================================================
 
 
 class TestEndToEndIntegration:
-    """End-to-end: download (mocked) → clean → load into SQLite."""
+    """End-to-end: download (mocked) -> clean -> load into SQLite."""
 
     def test_full_pipeline_clean_and_load(self, disgenet_pipeline, populated_db_session):
-        """Full pipeline: clean a TSV → load into DB → verify DB rows."""
+        """Full pipeline: clean a TSV -> load into DB -> verify DB rows."""
         rows = [
             {"geneId": 672, "gene_symbol": "BRCA1", "diseaseId": "C0006142",
              "disease_name": "Breast Cancer", "sourceId": "CURATED",
@@ -534,7 +534,7 @@ class TestEndToEndIntegration:
         gene symbols that fail format validation (like 'UNKNOWN_GENE').
         The 'unresolved_gene_symbol' reason is used for a DIFFERENT path
         (genes that pass format validation but can't be resolved to
-        UniProt accessions). The test now accepts EITHER reason — the
+        UniProt accessions). The test now accepts EITHER reason -- the
         important invariant is that the invalid record is in the
         dead-letter queue."""
         rows = [
@@ -553,7 +553,7 @@ class TestEndToEndIntegration:
         disgenet_pipeline.load(df, session=populated_db_session)
         populated_db_session.commit()
         from database.models import DeadLetterGDA
-        # Accept EITHER reason — both indicate the invalid record was
+        # Accept EITHER reason -- both indicate the invalid record was
         # routed to the dead-letter queue (just at different stages).
         dead_letters = populated_db_session.query(DeadLetterGDA).filter(
             DeadLetterGDA.reason.in_([
@@ -572,7 +572,7 @@ class TestEndToEndIntegration:
 
 
 # ============================================================================
-# Section 6 — Schema compliance
+# Section 6 -- Schema compliance
 # ============================================================================
 
 
@@ -612,7 +612,7 @@ class TestSchemaCompliance:
 
 
 # ============================================================================
-# Section 7 — Lineage / manifest
+# Section 7 -- Lineage / manifest
 # ============================================================================
 
 
@@ -641,7 +641,7 @@ class TestLineageIntegration:
 
 
 # ============================================================================
-# Section 8 — Migration file
+# Section 8 -- Migration file
 # ============================================================================
 
 
@@ -678,7 +678,7 @@ class TestMigrationFile:
 
 
 # ============================================================================
-# Section 9 — Module-level smoke test
+# Section 9 -- Module-level smoke test
 # ============================================================================
 
 
@@ -696,7 +696,7 @@ def test_all_25_files_count():
     json_files = [f for f in TWENTY_FIVE_FILES if f.endswith(".json")]
     # 21 .py + 4 .sql + 1 .json = 26 entries (the list name is
     # TWENTY_FIVE_FILES but we include the schema + all 4 migrations
-    # for completeness — the user's "25 files" refers to the .py code
+    # for completeness -- the user's "25 files" refers to the .py code
     # files plus the schema).
     assert len(py_files) >= 20  # at least 20 .py files
     assert len(sql_files) >= 4  # 4 migrations

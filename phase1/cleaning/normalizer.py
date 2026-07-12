@@ -4258,6 +4258,64 @@ def normalize_activity_value(
             warnings=tuple(warnings_tuple),
         )
     if not isinstance(units, str):
+        # P1-033 ROOT FIX (NaN units coerced to "nan" string):
+        #   The previous code did ``units = str(units)`` for any non-str,
+        #   non-None value. For ``float('nan')``, ``np.nan``, or pandas
+        #   ``pd.NA`` / ``pd.NaT`` this produces the strings ``"nan"`` or
+        #   ``"<NA>"`` — which then fail the unit lookup at line ~4545
+        #   (``_UNIT_CONVERSIONS_CF.get("nan".casefold())`` returns None)
+        #   and the function returns ``value=numeric_value`` unchanged
+        #   with ``unit="nan"`` — silently passing the original value as
+        #   if it were already in nM. Same impact as P1-014 (wrong
+        #   magnitude). The ``unit="nan"`` string in the DB CHECK
+        #   constraint may or may not pass depending on the constraint.
+        #
+        #   ROOT FIX: explicitly check for NaN/NA values WITHOUT
+        #   requiring pandas (normalizer.py is imported lazily and pd
+        #   may not be in scope at this point). Use ``math.isnan`` for
+        #   floats, ``is None`` for None, and a defensive string check
+        #   for pandas NA sentinels (``str(pd.NA) == "<NA>"``). For
+        #   NaN/NA we log a warning and return ``value=None`` with
+        #   ``unit=""`` — the same behavior as the ``units is None``
+        #   branch above. This prevents the silent "nan"-string
+        #   passthrough.
+        import math as _math
+        _is_na = False
+        if units is None:
+            _is_na = True  # defensive — the early-return above should have caught this
+        elif isinstance(units, float) and _math.isnan(units):
+            _is_na = True
+        elif isinstance(units, str) and units.lower() in ("nan", "<na>", "na"):
+            # Already a string NaN/NA sentinel (e.g. from a previous
+            # str() coercion upstream) — treat as missing.
+            _is_na = True
+        else:
+            # Catch pandas NA sentinels (pd.NA, pd.NaT) without importing
+            # pandas. ``str(pd.NA) == "<NA>"``, ``str(pd.NaT) == "NaT"``.
+            try:
+                _s = str(units)
+                if _s in ("<NA>", "NaT", "<NA>", "nan", "NaN"):
+                    _is_na = True
+            except Exception:
+                pass
+        if _is_na:
+            logger.warning(
+                "normalize_activity_value: units is NaN/NA (type=%s, "
+                "value=%r) — treating as missing (returning value=None, "
+                "unit='')",
+                type(units).__name__, units,
+            )
+            warnings_tuple.append("units_is_nan")
+            return ActivityValue(
+                value=None,
+                unit="",
+                original_value=original_value,
+                original_unit=original_unit,
+                censored=False,
+                activity_type=activity_type,
+                temperature_c=temperature_c,
+                warnings=tuple(warnings_tuple),
+            )
         logger.debug(
             "normalize_activity_value: units is %s, not str — coercing",
             type(units).__name__,
@@ -4503,11 +4561,104 @@ def normalize_activity_value(
         _at = activity_type.strip()
         if _at in ("pKi", "pIC50", "pEC50", "pKd", "pKb", "pED50", "pAC50"):
             try:
+                # P1-037 ROOT FIX (p-scale overflow returns before cap check):
+                #   The previous code did
+                #     ``converted_to_nM = float(10 ** (9.0 - float(numeric_value)))``
+                #   and returned the result IMMEDIATELY (line ~4565). For a
+                #   corrupted pIC50 of -10 (data entry error, or a parsing
+                #   bug), the conversion produces ``10^19 nM`` — a valid
+                #   Python float (no overflow) but a non-physical value.
+                #   The ``abs(converted) > _ACTIVITY_CENSORED_MAX`` check
+                #   at line ~4635 runs AFTER the p-scale return at line
+                #   ~4565, so the 1e19 value was returned as-is. The DB
+                #   CHECK ``activity_value > 0`` passed. Downstream ML saw
+                #   a fake 1e19 nM value, corrupting any normalization.
+                #
+                #   ROOT FIX (defense-in-depth, two layers):
+                #   (1) Pre-conversion range check on ``numeric_value``:
+                #       p-scale values are log10 concentrations; physically
+                #       plausible range is [0, 14] (1 M down to 1 fM, which
+                #       covers every real biochemical measurement). Values
+                #       outside this range are data entry errors — return
+                #       value=None with a warning instead of producing a
+                #       non-physical converted value.
+                #   (2) Post-conversion cap check on ``converted_to_nM``:
+                #       even for in-range p-scale values, if the converted
+                #       value exceeds ``_ACTIVITY_CENSORED_MAX`` (1 mM),
+                #       clip to the cap and mark as censored (same logic as
+                #       the unit-conversion path at line ~4635). This
+                #       guarantees p-scale-converted values are bounded
+                #       by the same physical cap as unit-converted values.
+                _p_scale_min: float = 0.0
+                _p_scale_max: float = 14.0
+                if (
+                    not isinstance(numeric_value, (int, float))
+                    or numeric_value < _p_scale_min
+                    or numeric_value > _p_scale_max
+                ):
+                    logger.warning(
+                        "normalize_activity_value: p-scale value %s "
+                        "(activity_type=%s) outside physical range "
+                        "[%g, %g] — returning value=None (likely data "
+                        "entry error or parsing bug)",
+                        numeric_value, _at, _p_scale_min, _p_scale_max,
+                    )
+                    warnings_tuple.append(
+                        f"p_scale_out_of_range:{_at}:{numeric_value}"
+                    )
+                    return ActivityValue(
+                        value=None,
+                        unit="",
+                        original_value=original_value,
+                        original_unit=original_unit,
+                        censored=False,
+                        activity_type=activity_type,
+                        temperature_c=temperature_c,
+                        warnings=tuple(warnings_tuple),
+                    )
                 # p-scale → nM: 10^(9 - pValue)
                 # pIC50=6 → 10^3 nM = 1 µM ✓
                 # pIC50=9 → 10^0 nM = 1 nM ✓
-                # pIC50=3 → 10^6 nM = 1 mM ✓
+                # pIC50=3 → 10^6 nM = 1 mM ✓ (at the cap)
                 converted_to_nM = float(10 ** (9.0 - float(numeric_value)))
+                # P1-037 layer 2: post-conversion cap check.
+                if abs(converted_to_nM) > _ACTIVITY_CENSORED_MAX:
+                    logger.warning(
+                        "normalize_activity_value: p-scale converted "
+                        "value %g nM (activity_type=%s, value=%s) "
+                        "exceeds cap %s — clipping to cap and marking "
+                        "as censored",
+                        converted_to_nM, _at, numeric_value,
+                        _ACTIVITY_CENSORED_MAX,
+                    )
+                    warnings_tuple.append(
+                        f"p_scale_value_exceeds_cap:{converted_to_nM}"
+                    )
+                    # Clip to cap (same convention as the unit-conversion
+                    # path: censored values get value=threshold).
+                    _clipped_value = (
+                        _ACTIVITY_CENSORED_MAX
+                        if converted_to_nM > 0
+                        else -_ACTIVITY_CENSORED_MAX
+                    )
+                    # Preserve censored/censor_direction from input if
+                    # already censored; default to ">" for uncensored
+                    # inputs that exceed the cap post-conversion.
+                    _new_censor_direction = (
+                        censor_direction if censored else ">"
+                    )
+                    return ActivityValue(
+                        value=_clipped_value,
+                        unit="nM",
+                        original_value=original_value,
+                        original_unit=original_unit,
+                        conversion_factor=None,
+                        censored=True,
+                        censor_direction=_new_censor_direction,
+                        activity_type=activity_type,
+                        temperature_c=temperature_c,
+                        warnings=tuple(warnings_tuple),
+                    )
                 logger.debug(
                     "normalize_activity_value: p-scale conversion "
                     "(activity_type=%s, value=%s, censored=%s, "

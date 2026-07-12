@@ -463,6 +463,18 @@ function SearchResultsScreen() {
   });
 
   // Map RL candidates to the DrugCandidate shape the UI expects.
+  //
+  // FE-049 ROOT FIX: previously this mapping fabricated `molSimScore: 0`,
+  // `ipStatus: 'Unknown'`, `targets: []`, `pathways: []`. A researcher
+  // seeing "Mol Similarity: 0" may interpret it as "no molecular
+  // similarity to known drugs" (a negative scientific signal), when in
+  // reality the RL ranker does not populate that field at all. Likewise
+  // "IP Status: Unknown" reads as "we checked and could not determine
+  // patent status" — vs. the truth, which is "we have not looked it up".
+  // The fix is to use `null` for any field the RL ranker does not
+  // populate, and have the UI render "N/A" for null values. This is the
+  // difference between "no data" (correct, null) and "data is zero/empty"
+  // (incorrect, fabricated).
   const realCandidates: DrugCandidate[] = (rlData?.candidates || []).map((rc: any, i: number) => ({
     id: `rl-${i}`,
     drugName: rc.drug,
@@ -474,13 +486,16 @@ function SearchResultsScreen() {
     kgScore: Math.round((rc.plausibilityScore || 0) * 100),
     safetyScore: Math.round((rc.safetyScore || 0) * 100),
     clinicalScore: Math.round((rc.efficacyScore || 0) * 100),
-    molSimScore: 0,
+    // FE-049: RL ranker does not compute molecular similarity — null, not 0.
+    molSimScore: null,
     safetyTier: (rc.safetyScore || 0) >= 0.7 ? 'green' : (rc.safetyScore || 0) >= 0.4 ? 'yellow' : 'red',
     mechanism: `RL reward: ${rc.reward?.toFixed(3) || '—'}, policy_prob: ${rc.policyProb?.toFixed(3) || '—'}`,
     clinicalPhase: rc.literatureSupport ? 'Literature-supported' : 'Novel',
-    ipStatus: 'Unknown',
-    targets: [],
-    pathways: [],
+    // FE-049: patent status lookup is a separate pipeline step — null, not "Unknown".
+    ipStatus: null,
+    // FE-049: target/pathway population comes from the KG, not the RL ranker — null, not [].
+    targets: null,
+    pathways: null,
     rank: rc.rank,
   }));
 
@@ -624,7 +639,7 @@ function SearchResultsScreen() {
                     <TableCell><SafetyBadge tier={c.safetyTier} /></TableCell>
                     <TableCell><span className="text-xs text-slate-600 line-clamp-2 max-w-[180px]">{c.mechanism}</span></TableCell>
                     <TableCell><Badge variant="outline" className="text-xs">{c.clinicalPhase}</Badge></TableCell>
-                    <TableCell><span className="text-xs">{c.ipStatus}</span></TableCell>
+                    <TableCell><span className="text-xs">{c.ipStatus ?? 'N/A'}</span></TableCell>
                     <TableCell>
                       <Button variant="ghost" size="sm" className="h-6 w-6 p-0" onClick={e => { e.stopPropagation(); setExpandedId(expandedId === c.id ? null : c.id); }}>
                         {expandedId === c.id ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
@@ -636,17 +651,25 @@ function SearchResultsScreen() {
                       <TableCell colSpan={9} className="bg-muted/20 p-4">
                         <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-sm">
                           <div><span className="text-muted-foreground">KG Score:</span> <span className="font-semibold">{c.kgScore}</span></div>
-                          <div><span className="text-muted-foreground">Mol Similarity:</span> <span className="font-semibold">{c.molSimScore}</span></div>
+                          <div><span className="text-muted-foreground">Mol Similarity:</span> <span className="font-semibold">{c.molSimScore === null ? 'N/A' : c.molSimScore}</span></div>
                           <div><span className="text-muted-foreground">Safety Score:</span> <span className="font-semibold">{c.safetyScore}</span></div>
                           <div><span className="text-muted-foreground">Clinical Score:</span> <span className="font-semibold">{c.clinicalScore}</span></div>
                         </div>
                         <div className="mt-2">
                           <span className="text-xs text-muted-foreground">Targets: </span>
-                          {c.targets.map(t => <Badge key={t} variant="secondary" className="text-xs mr-1">{t}</Badge>)}
+                          {c.targets === null
+                            ? <span className="text-xs text-muted-foreground">N/A</span>
+                            : c.targets.length === 0
+                              ? <span className="text-xs text-muted-foreground">None</span>
+                              : c.targets.map(t => <Badge key={t} variant="secondary" className="text-xs mr-1">{t}</Badge>)}
                         </div>
                         <div className="mt-1">
                           <span className="text-xs text-muted-foreground">Pathways: </span>
-                          {c.pathways.map(p => <Badge key={p} variant="outline" className="text-xs mr-1">{p}</Badge>)}
+                          {c.pathways === null
+                            ? <span className="text-xs text-muted-foreground">N/A</span>
+                            : c.pathways.length === 0
+                              ? <span className="text-xs text-muted-foreground">None</span>
+                              : c.pathways.map(p => <Badge key={p} variant="outline" className="text-xs mr-1">{p}</Badge>)}
                         </div>
                       </TableCell>
                     </TableRow>
@@ -695,7 +718,7 @@ function CandidateDetailScreen() {
           <div className="flex items-center gap-2">
             <SafetyBadge tier={candidate.safetyTier} />
             <Badge variant="outline">{candidate.clinicalPhase}</Badge>
-            <Badge variant="outline">{candidate.ipStatus}</Badge>
+            <Badge variant="outline">{candidate.ipStatus ?? 'N/A'}</Badge>
           </div>
         }
       />
@@ -730,17 +753,20 @@ function CandidateDetailScreen() {
                 <CardContent className="space-y-3">
                   {[
                     { label: 'Knowledge Graph Score', value: candidate.kgScore },
-                    { label: 'Molecular Similarity', value: candidate.molSimScore },
+                    { label: 'Molecular Similarity', value: candidate.molSimScore === null ? null : candidate.molSimScore },
                     { label: 'Safety Profile', value: candidate.safetyScore },
                     { label: 'Clinical Evidence', value: candidate.clinicalScore },
-                  ].map(s => (
+                  ].map(s => {
+                    const pct = s.value === null ? 0 : (s.value as number);
+                    return (
                     <div key={s.label}>
-                      <div className="flex justify-between text-sm mb-1"><span className="text-muted-foreground">{s.label}</span><span className="font-semibold">{s.value}</span></div>
+                      <div className="flex justify-between text-sm mb-1"><span className="text-muted-foreground">{s.label}</span><span className="font-semibold">{s.value === null ? 'N/A' : s.value}</span></div>
                       <div className="w-full bg-slate-100 rounded-full h-2.5 overflow-hidden">
-                        <div className="h-full rounded-full transition-all duration-500" style={{ width: `${s.value}%`, backgroundColor: scoreColor(s.value) }} />
+                        <div className="h-full rounded-full transition-all duration-500" style={{ width: `${pct}%`, backgroundColor: scoreColor(pct) }} />
                       </div>
                     </div>
-                  ))}
+                    );
+                  })}
                 </CardContent>
               </Card>
               <Card>
@@ -749,11 +775,19 @@ function CandidateDetailScreen() {
                   <p className="text-sm">{candidate.mechanism}</p>
                   <div className="mt-3">
                     <span className="text-xs font-medium text-muted-foreground">Target Proteins: </span>
-                    {candidate.targets.map(t => <Badge key={t} variant="secondary" className="text-xs mr-1 font-mono">{t}</Badge>)}
+                    {candidate.targets === null
+                      ? <span className="text-xs text-muted-foreground">N/A</span>
+                      : candidate.targets.length === 0
+                        ? <span className="text-xs text-muted-foreground">None</span>
+                        : candidate.targets.map(t => <Badge key={t} variant="secondary" className="text-xs mr-1 font-mono">{t}</Badge>)}
                   </div>
                   <div className="mt-2">
                     <span className="text-xs font-medium text-muted-foreground">Pathways: </span>
-                    {candidate.pathways.map(p => <Badge key={p} variant="outline" className="text-xs mr-1">{p}</Badge>)}
+                    {candidate.pathways === null
+                      ? <span className="text-xs text-muted-foreground">N/A</span>
+                      : candidate.pathways.length === 0
+                        ? <span className="text-xs text-muted-foreground">None</span>
+                        : candidate.pathways.map(p => <Badge key={p} variant="outline" className="text-xs mr-1">{p}</Badge>)}
                   </div>
                 </CardContent>
               </Card>
@@ -779,7 +813,7 @@ function CandidateDetailScreen() {
                   <div className="flex justify-between"><span className="text-muted-foreground">Generic</span><span className="font-medium">{candidate.genericName}</span></div>
                   <div className="flex justify-between"><span className="text-muted-foreground">Brand</span><span className="font-medium">{candidate.brandNames.join(', ')}</span></div>
                   <div className="flex justify-between"><span className="text-muted-foreground">Phase</span><Badge variant="outline" className="text-xs">{candidate.clinicalPhase}</Badge></div>
-                  <div className="flex justify-between"><span className="text-muted-foreground">IP</span><Badge variant="outline" className="text-xs">{candidate.ipStatus}</Badge></div>
+                  <div className="flex justify-between"><span className="text-muted-foreground">IP</span><Badge variant="outline" className="text-xs">{candidate.ipStatus ?? 'N/A'}</Badge></div>
                 </CardContent>
               </Card>
             </div>
@@ -931,10 +965,10 @@ function CandidateDetailScreen() {
                 <CardHeader className="pb-3"><CardTitle className="text-base">Freedom to Operate</CardTitle></CardHeader>
                 <CardContent>
                   <div className="text-center">
-                    <div className="text-3xl font-bold" style={{ color: candidate.ipStatus === 'Off-Patent' || candidate.ipStatus === 'Patent Expired' ? ACCENT_GREEN : candidate.ipStatus === 'Novel Use Patentable' ? ACCENT_ORANGE : ACCENT_RED }}>
-                      {candidate.ipStatus === 'Off-Patent' || candidate.ipStatus === 'Patent Expired' ? 'Clear' : candidate.ipStatus === 'Novel Use Patentable' ? 'Partial' : 'Restricted'}
+                    <div className="text-3xl font-bold" style={{ color: candidate.ipStatus === 'Off-Patent' || candidate.ipStatus === 'Patent Expired' ? ACCENT_GREEN : candidate.ipStatus === 'Novel Use Patentable' ? ACCENT_ORANGE : candidate.ipStatus === null ? '#94A3B8' /* slate-400 for N/A */ : ACCENT_RED }}>
+                      {candidate.ipStatus === 'Off-Patent' || candidate.ipStatus === 'Patent Expired' ? 'Clear' : candidate.ipStatus === 'Novel Use Patentable' ? 'Partial' : candidate.ipStatus === null ? 'N/A' : 'Restricted'}
                     </div>
-                    <p className="text-sm text-muted-foreground mt-1">IP Status: {candidate.ipStatus}</p>
+                    <p className="text-sm text-muted-foreground mt-1">IP Status: {candidate.ipStatus ?? 'N/A'}</p>
                   </div>
                 </CardContent>
               </Card>
@@ -1002,11 +1036,14 @@ function CandidateDetailScreen() {
 // ═══════════════════════════════════════════
 
 function PathwayDiagram({ candidate, disease }: { candidate: DrugCandidate; disease: Disease }) {
+  // FE-049: guard against null targets/pathways (RL candidates).
+  const targets = candidate.targets ?? [];
+  const pathways = candidate.pathways ?? [];
   const relatedNodes = graphNodes.filter(n =>
-    candidate.targets.includes(n.label) ||
+    targets.includes(n.label) ||
     n.label === candidate.drugName ||
     n.label === disease.name ||
-    candidate.pathways.some(p => n.label.includes(p.split(' ')[0]))
+    pathways.some(p => n.label.includes(p.split(' ')[0]))
   );
   const relatedEdges = graphEdges.filter(e => {
     const srcNode = graphNodes.find(n => n.id === e.source);
@@ -1028,8 +1065,9 @@ function PathwayDiagram({ candidate, disease }: { candidate: DrugCandidate; dise
         {/* Layout nodes in pathway style */}
         {(() => {
           const drugNode = { x: 80, y: 190, label: candidate.drugName, type: 'drug' };
-          const targetNodes = candidate.targets.map((t, i) => ({ x: 260, y: 100 + i * 90, label: t, type: 'gene' }));
-          const pathwayNodes = candidate.pathways.map((p, i) => ({ x: 480, y: 120 + i * 100, label: p, type: 'pathway' }));
+          // FE-049: candidate.targets/pathways may be null for RL candidates.
+          const targetNodes = (candidate.targets ?? []).map((t, i) => ({ x: 260, y: 100 + i * 90, label: t, type: 'gene' }));
+          const pathwayNodes = (candidate.pathways ?? []).map((p, i) => ({ x: 480, y: 120 + i * 100, label: p, type: 'pathway' }));
           const diseaseNode = { x: 700, y: 190, label: disease.name, type: 'disease' };
           const allNodes = [drugNode, ...targetNodes, ...pathwayNodes, diseaseNode];
           return (
@@ -1714,10 +1752,10 @@ function IPPatentsScreen() {
             <CardHeader className="pb-3"><CardTitle className="text-base">Freedom to Operate</CardTitle></CardHeader>
             <CardContent>
               <div className="text-center">
-                <div className="text-3xl font-bold" style={{ color: candidate?.ipStatus === 'Off-Patent' || candidate?.ipStatus === 'Patent Expired' ? ACCENT_GREEN : ACCENT_ORANGE }}>
-                  {candidate?.ipStatus === 'Off-Patent' || candidate?.ipStatus === 'Patent Expired' ? 'Clear' : candidate?.ipStatus === 'Novel Use Patentable' ? 'Partial' : 'Restricted'}
+                <div className="text-3xl font-bold" style={{ color: candidate?.ipStatus === 'Off-Patent' || candidate?.ipStatus === 'Patent Expired' ? ACCENT_GREEN : candidate?.ipStatus === null ? '#94A3B8' : ACCENT_ORANGE }}>
+                  {candidate?.ipStatus === 'Off-Patent' || candidate?.ipStatus === 'Patent Expired' ? 'Clear' : candidate?.ipStatus === 'Novel Use Patentable' ? 'Partial' : candidate?.ipStatus === null ? 'N/A' : 'Restricted'}
                 </div>
-                <p className="text-sm text-muted-foreground mt-1">{candidate?.ipStatus}</p>
+                <p className="text-sm text-muted-foreground mt-1">{candidate?.ipStatus ?? 'N/A'}</p>
               </div>
             </CardContent>
           </Card>
@@ -2184,7 +2222,7 @@ function DrugComparisonScreen() {
                 </TableRow>
                 <TableRow>
                   <TableCell className="font-medium text-sm">IP Status</TableCell>
-                  {compared.map(c => <TableCell key={c.id} className="text-center text-xs">{c.ipStatus}</TableCell>)}
+                  {compared.map(c => <TableCell key={c.id} className="text-center text-xs">{c.ipStatus ?? 'N/A'}</TableCell>)}
                 </TableRow>
               </TableBody>
             </Table>
@@ -2290,7 +2328,7 @@ function ScoreBreakdownScreen() {
 
   const chartData = [
     { name: 'KG Score', value: candidate.kgScore, fill: PRIMARY },
-    { name: 'Mol Similarity', value: candidate.molSimScore, fill: '#3B82F6' },
+    { name: 'Mol Similarity', value: candidate.molSimScore ?? 0, fill: '#3B82F6' },
     { name: 'Safety', value: candidate.safetyScore, fill: ACCENT_GREEN },
     { name: 'Clinical', value: candidate.clinicalScore, fill: ACCENT_ORANGE },
   ];
@@ -2503,7 +2541,7 @@ function PredictionExplorerScreen() {
           <ResponsiveContainer width="100%" height={300}>
             <BarChart data={[
               { name: 'KG Score', value: candidate.kgScore, fill: PRIMARY },
-              { name: 'Molecular', value: candidate.molSimScore, fill: '#3B82F6' },
+              { name: 'Molecular', value: candidate.molSimScore ?? 0, fill: '#3B82F6' },
               { name: 'Safety', value: candidate.safetyScore, fill: ACCENT_GREEN },
               { name: 'Clinical', value: candidate.clinicalScore, fill: ACCENT_ORANGE },
             ]}>
@@ -2566,9 +2604,9 @@ function MechanismOfActionScreen() {
           <CardContent className="space-y-4">
             <p className="text-sm">{candidate.mechanism}</p>
             <div><span className="text-xs font-semibold text-muted-foreground">Target Proteins</span>
-              <div className="flex flex-wrap gap-2 mt-1">{candidate.targets.map(t => <Badge key={t} variant="secondary" className="font-mono">{t}</Badge>)}</div></div>
+              <div className="flex flex-wrap gap-2 mt-1">{(candidate.targets ?? []).length === 0 ? <span className="text-xs text-muted-foreground">N/A</span> : (candidate.targets ?? []).map(t => <Badge key={t} variant="secondary" className="font-mono">{t}</Badge>)}</div></div>
             <div><span className="text-xs font-semibold text-muted-foreground">Pathways</span>
-              <div className="flex flex-wrap gap-2 mt-1">{candidate.pathways.map(p => <Badge key={p} variant="outline">{p}</Badge>)}</div></div>
+              <div className="flex flex-wrap gap-2 mt-1">{(candidate.pathways ?? []).length === 0 ? <span className="text-xs text-muted-foreground">N/A</span> : (candidate.pathways ?? []).map(p => <Badge key={p} variant="outline">{p}</Badge>)}</div></div>
           </CardContent>
         </Card>
         <Card>

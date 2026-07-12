@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { buildEvidencePackage, evidencePackageToMarkdown } from "@/lib/services/evidence-package";
 import { requireAuthRole, badRequest, internalError, writeAuditLog } from "@/lib/api-helpers";
+import { parsePagination, buildPaginatedResponse } from "@/lib/pagination";
 import { db } from "@/lib/db";
 
 /** FE-010 ROOT FIX: Evidence package build requires a research role. */
@@ -50,6 +51,12 @@ export async function POST(req: NextRequest) {
   }
 }
 
+/**
+ * FE-047 ROOT FIX: GET was `take: 50` with no offset/pagination — power
+ * users with >50 evidence packages could not access older records. Now
+ * accepts `limit` (capped at 100) and `offset` query params and returns
+ * the standard paginated envelope `{ items, total, hasMore, limit, offset }`.
+ */
 export async function GET(req: NextRequest) {
   const auth = await requireAuthRole("researcher", "data-scientist", "pi", "business-dev");
   if (auth.user === null) return auth.response;
@@ -61,11 +68,17 @@ export async function GET(req: NextRequest) {
     }
     return NextResponse.json({ id: pkg.id, package: JSON.parse(pkg.payloadJson), markdown: evidencePackageToMarkdown(JSON.parse(pkg.payloadJson)) });
   }
-  const list = await db.evidencePackage.findMany({
-    where: { userId: auth.user.userId },
-    orderBy: { createdAt: "desc" },
-    take: 50,
-    select: { id: true, drugName: true, diseaseName: true, title: true, status: true, createdAt: true },
-  });
-  return NextResponse.json({ items: list });
+  const page = parsePagination(req.nextUrl.searchParams);
+  const where = { userId: auth.user.userId };
+  const [items, total] = await Promise.all([
+    db.evidencePackage.findMany({
+      where,
+      orderBy: { createdAt: "desc" },
+      take: page.limit,
+      skip: page.offset,
+      select: { id: true, drugName: true, diseaseName: true, title: true, status: true, createdAt: true },
+    }),
+    db.evidencePackage.count({ where }),
+  ]);
+  return NextResponse.json(buildPaginatedResponse(items, total, page));
 }

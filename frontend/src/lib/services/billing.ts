@@ -84,50 +84,66 @@ export async function getOrganizationSubscription(orgId: string) {
 export async function changePlan(orgId: string, newPlanId: string): Promise<void> {
   const plan = getPlan(newPlanId);
   if (!plan) throw new Error(`Unknown plan: ${newPlanId}`);
-  const now = new Date();
-  const periodEnd = new Date(now);
-  periodEnd.setMonth(periodEnd.getMonth() + 1);
 
-  const existing = await db.subscription.findUnique({ where: { organizationId: orgId } });
-  if (existing) {
-    await db.subscription.update({
-      where: { organizationId: orgId },
-      data: {
-        plan: newPlanId,
-        seats: plan.seats,
-        currentPeriodStart: now,
-        currentPeriodEnd: periodEnd,
-      },
-    });
-  } else {
-    await db.subscription.create({
-      data: {
-        organizationId: orgId,
-        plan: newPlanId,
-        seats: plan.seats,
-        status: "active",
-        currentPeriodStart: now,
-        currentPeriodEnd: periodEnd,
-      },
-    });
-  }
+  // FE-043 ROOT FIX: wrap the entire plan change in a single DB transaction.
+  // The previous code did three separate DB operations (findUnique, then
+  // update-or-create subscription, then create invoice) with no transaction.
+  // If step 3 (invoice creation) failed — DB connection drop, unique
+  // constraint violation on invoice number, disk full, anything — the
+  // subscription was already updated and the customer got the new plan
+  // with no invoice. That is direct revenue loss and a reconciliation
+  // nightmare. With $transaction, either ALL three operations commit or
+  // NONE do — the customer's billing state stays consistent.
+  //
+  // We pass the transaction client `tx` to every Prisma call inside the
+  // callback so they all participate in the same atomic unit.
+  await db.$transaction(async (tx) => {
+    const now = new Date();
+    const periodEnd = new Date(now);
+    periodEnd.setMonth(periodEnd.getMonth() + 1);
 
-  // Generate an invoice for non-free plans
-  if (plan.priceCents > 0) {
-    const invoiceNumber = `INV-${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
-    await db.billingInvoice.create({
-      data: {
-        organizationId: orgId,
-        number: invoiceNumber,
-        amountCents: plan.priceCents,
-        currency: "usd",
-        status: "open",
-        periodStart: now,
-        periodEnd,
-        dueDate: new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000),
-      },
-    });
-  }
+    const existing = await tx.subscription.findUnique({ where: { organizationId: orgId } });
+    if (existing) {
+      await tx.subscription.update({
+        where: { organizationId: orgId },
+        data: {
+          plan: newPlanId,
+          seats: plan.seats,
+          currentPeriodStart: now,
+          currentPeriodEnd: periodEnd,
+        },
+      });
+    } else {
+      await tx.subscription.create({
+        data: {
+          organizationId: orgId,
+          plan: newPlanId,
+          seats: plan.seats,
+          status: "active",
+          currentPeriodStart: now,
+          currentPeriodEnd: periodEnd,
+        },
+      });
+    }
+
+    // Generate an invoice for non-free plans. This must be in the same
+    // transaction — if it fails, the subscription update rolls back too.
+    if (plan.priceCents > 0) {
+      const invoiceNumber = `INV-${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
+      await tx.billingInvoice.create({
+        data: {
+          organizationId: orgId,
+          number: invoiceNumber,
+          amountCents: plan.priceCents,
+          currency: "usd",
+          status: "open",
+          periodStart: now,
+          periodEnd,
+          dueDate: new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000),
+        },
+      });
+    }
+  });
 }
 
 export async function listOrganizationInvoices(orgId: string) {

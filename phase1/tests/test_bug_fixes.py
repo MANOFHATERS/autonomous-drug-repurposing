@@ -9,12 +9,12 @@ This file is kept for backward compatibility and should not be used for CI.
 Use test_fix_verification.py for the canonical test suite.
 
 Test classes:
-  TestFix1_DagNameError          — Bug 4: _check_drugbank NameError
-  TestFix2_PipelineRunFields     — Bug 1: PipelineRun constructor field names
-  TestFix3a_ChEMBLColumns        — Bug 2: ChEMBL is_fda_approved / drug_type / no extra cols
-  TestFix3b_DrugBankColumns      — Bug 2: DrugBank is_fda_approved / drug_type / no extra cols
-  TestFix4_GdaUniprotId          — Bug 3: DisGeNET + OMIM use uniprot_id, not protein_id
-  TestFix5_DrugBankGzip          — Bug 6: DrugBank iterparse handles .gz via file handle
+  TestFix1_DagNameError          -- Bug 4: _check_drugbank NameError
+  TestFix2_PipelineRunFields     -- Bug 1: PipelineRun constructor field names
+  TestFix3a_ChEMBLColumns        -- Bug 2: ChEMBL is_fda_approved / drug_type / no extra cols
+  TestFix3b_DrugBankColumns      -- Bug 2: DrugBank is_fda_approved / drug_type / no extra cols
+  TestFix4_GdaUniprotId          -- Bug 3: DisGeNET + OMIM use uniprot_id, not protein_id
+  TestFix5_DrugBankGzip          -- Bug 6: DrugBank iterparse handles .gz via file handle
 
 Each test class has at minimum:
   - A "happy path" test confirming the fix works
@@ -60,7 +60,7 @@ from tests.db_helpers import (
 
 
 # ============================================================================
-# Helper — extract PipelineRun(...) constructor call text from source
+# Helper -- extract PipelineRun(...) constructor call text from source
 # ============================================================================
 
 def _extract_constructor_call(src: str, class_name: str = "PipelineRun") -> str:
@@ -87,7 +87,7 @@ def _extract_constructor_call(src: str, class_name: str = "PipelineRun") -> str:
 
 
 # ============================================================================
-# Fix 1 — DAG NameError: _check_drugbank does not exist
+# Fix 1 -- DAG NameError: _check_drugbank does not exist
 # ============================================================================
 
 
@@ -159,7 +159,7 @@ class TestFix1_DagNameError:
 
 
 # ============================================================================
-# Fix 2 — PipelineRun constructor: wrong field names cause TypeError at runtime
+# Fix 2 -- PipelineRun constructor: wrong field names cause TypeError at runtime
 # ============================================================================
 
 
@@ -235,7 +235,7 @@ class TestFix2_PipelineRunFields:
         constructor = _extract_constructor_call(src, "PipelineRun")
 
         # Old broken names must NOT appear inside the PipelineRun constructor call
-        # v59 ROOT FIX: removed ``metadata_json=`` from this list — it is
+        # v59 ROOT FIX: removed ``metadata_json=`` from this list -- it is
         # now a VALID column on PipelineRun (models.py:1989, added by
         # migration 007). The test was written before the column existed
         # and was never updated. Keeping it in the bad_field list caused
@@ -277,7 +277,7 @@ class TestFix2_PipelineRunFields:
             f"PipelineRun model missing columns: {expected - cols}"
         )
         # Old broken column names must NOT exist on the model
-        # v59 ROOT FIX: removed ``metadata_json`` from this list — it is
+        # v59 ROOT FIX: removed ``metadata_json`` from this list -- it is
         # now a VALID column on PipelineRun (models.py:1989, added by
         # migration 007). The test was written before the column existed.
         for bad in ("pipeline_name", "started_at", "finished_at",
@@ -311,7 +311,7 @@ class TestFix2_PipelineRunFields:
 
 
 # ============================================================================
-# Fix 3a — ChEMBL pipeline: wrong column names (molecule_type, is_approved, extras)
+# Fix 3a -- ChEMBL pipeline: wrong column names (molecule_type, is_approved, extras)
 # ============================================================================
 
 
@@ -429,7 +429,7 @@ class TestFix3a_ChEMBLColumns:
         assert "is_fda_approved" in df.columns, "FIX INCOMPLETE: is_fda_approved missing"
         assert "is_globally_approved" in df.columns, (
             "SW-1 FIX INCOMPLETE: is_globally_approved column missing "
-            "(the real ChEMBL semantic for max_phase==4 — any regulator)"
+            "(the real ChEMBL semantic for max_phase==4 -- any regulator)"
         )
 
         # Every column in the output must be in Drug model or a pipeline-internal staging col
@@ -467,7 +467,7 @@ class TestFix3a_ChEMBLColumns:
                 f"REGRESSION: forbidden column '{bad}' in _ensure_drug_columns output"
             )
 
-        # Must be insertable — no CompileError / KeyError
+        # Must be insertable -- no CompileError / KeyError
         count = sqlite_bulk_upsert_drugs(db_session, ready_df)
         assert int(count) >= 1
 
@@ -499,7 +499,7 @@ class TestFix3a_ChEMBLColumns:
 
 
 # ============================================================================
-# Fix 3b — DrugBank pipeline: wrong column names
+# Fix 3b -- DrugBank pipeline: wrong column names
 # ============================================================================
 
 
@@ -641,7 +641,7 @@ class TestFix3b_DrugBankColumns:
 
 
 # ============================================================================
-# Fix 4 — DisGeNET & OMIM: gene_symbol must resolve to uniprot_id, not protein integer PK
+# Fix 4 -- DisGeNET & OMIM: gene_symbol must resolve to uniprot_id, not protein integer PK
 # ============================================================================
 
 
@@ -736,7 +736,7 @@ class TestFix4_GdaUniprotId:
         cols = {c.name for c in inspect(GeneDiseaseAssociation).columns}
         assert "uniprot_id" in cols, "GDA model missing uniprot_id column"
         assert "protein_id" not in cols, (
-            "REGRESSION: protein_id column on GeneDiseaseAssociation — schema mismatch"
+            "REGRESSION: protein_id column on GeneDiseaseAssociation -- schema mismatch"
         )
 
     def test_bulk_upsert_gda_with_uniprot_id_succeeds(self, db_session, sample_protein_df):
@@ -747,7 +747,7 @@ class TestFix4_GdaUniprotId:
 
         gda_df = pd.DataFrame({
             "gene_symbol": ["PTGS1"],
-            "uniprot_id": ["P23219"],         # string FK — correct
+            "uniprot_id": ["P23219"],         # string FK -- correct
             "disease_id": ["C0003843"],
             "disease_name": ["Arthritis"],
             "score": [0.85],
@@ -766,12 +766,12 @@ class TestFix4_GdaUniprotId:
         assert row.score == pytest.approx(0.85)
 
     def test_bulk_upsert_gda_rejects_protein_id_column(self, db_session, sample_protein_df):
-        """Inserting a GDA DataFrame with 'protein_id' column must fail — it's not in the table."""
+        """Inserting a GDA DataFrame with 'protein_id' column must fail -- it's not in the table."""
         sqlite_bulk_upsert_proteins(db_session, sample_protein_df)
         db_session.flush()
 
         bad_df = pd.DataFrame({
-            "protein_id": [1],              # integer PK — WRONG column name
+            "protein_id": [1],              # integer PK -- WRONG column name
             "disease_id": ["C0003843"],
             "disease_name": ["Arthritis"],
             "source": ["disgenet"],
@@ -809,14 +809,14 @@ class TestFix4_GdaUniprotId:
         assert gene_to_uniprot["PTGS1"] == "P23219"
 
     def test_gda_columns_match_model(self):
-        """GDA model columns must match expected set — no surprise columns.
+        """GDA model columns must match expected set -- no surprise columns.
 
         Note (389-fix audit): The audit EXPLICITLY mandates adding
         ``disease_type``, ``disease_class``, ``source_id``, ``year_initial``,
         ``year_final``, ``gene_id``, ``confidence_tier``, ``evidence_strength``,
         ``normalized_score``, and several lineage columns to the GDA model
         (SCI-3, SCI-6, SCI-7, SCI-8, SCI-9, SCI-10, SCI-21, SCI-24, SCI-38,
-        LIN-1..28).  These columns are NOW scientifically required — the
+        LIN-1..28).  These columns are NOW scientifically required -- the
         previous "no surprise columns" check reflected the broken state.
         The only column that must NEVER appear is ``protein_id`` (the GDA
         model uses the string ``uniprot_id`` FK, not the integer protein PK).
@@ -910,7 +910,7 @@ class TestFix4_GdaUniprotId:
 
 
 # ============================================================================
-# Fix 5 — DrugBank pipeline: gzip dead code / iterparse must use file handle
+# Fix 5 -- DrugBank pipeline: gzip dead code / iterparse must use file handle
 # ============================================================================
 
 
@@ -975,7 +975,7 @@ class TestFix5_DrugBankGzip:
         """The _file_handle must be closed after the parse loop."""
         src = self._read_src()
         assert "_file_handle.close()" in src, (
-            "FIX INCOMPLETE: _file_handle.close() missing — file handle leak"
+            "FIX INCOMPLETE: _file_handle.close() missing -- file handle leak"
         )
 
     def test_gzip_roundtrip_xml_parsing(self, tmp_path):

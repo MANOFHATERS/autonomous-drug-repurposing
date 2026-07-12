@@ -274,7 +274,7 @@ def run_bridge(phase1_dir: Path) -> Tuple[Any, Any]:
         logger.error(
             "Bridge produced 0 nodes. Phase 1 outputs are likely missing "
             "or empty. The embedded sample fallback should have written "
-            "data — check the Phase 1 logs above."
+            "data -- check the Phase 1 logs above."
         )
     return builder, staged
 
@@ -430,7 +430,7 @@ def main() -> int:
         # ─── Phase 2 -> Phase 3 Schema Adapter ─────────────────────────
         # R-INT-005 / R-STUB-003: this output is now consumed (was
         # previously overwritten by a second call to run_phase2_kg_builder
-        # that crashed with NameError on `seed` — R-INT-002).
+        # that crashed with NameError on `seed` -- R-INT-002).
         graph_data = run_schema_adapter(builder, seed=args.seed)
         node_features, edge_indices, node_maps, known_pairs = graph_data
         if len(node_maps.get("drug", {})) == 0:
@@ -450,7 +450,7 @@ def main() -> int:
 
         # ─── Summary (R-022: removed duplicate 9-line block) ───────────
         print("\n" + "=" * 70)
-        print("v100 4-PHASE PIPELINE COMPLETE — SUMMARY")
+        print("v100 4-PHASE PIPELINE COMPLETE -- SUMMARY")
         print("=" * 70)
         print(f"  Phase 1 CSVs:            {len(phase1_csvs)}")
         print(f"  Phase 2 nodes (staged):  {staged.total_nodes}")

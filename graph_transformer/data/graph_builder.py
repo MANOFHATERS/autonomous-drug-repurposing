@@ -66,8 +66,8 @@ def _deterministic_seed(*parts: str) -> int:
     # Drug and disease names from public biomedical databases (DrugBank,
     # DisGeNET, OMIM) CAN contain ``|`` as a separator within compound
     # fields (e.g. DrugBank's "name|synonyms" columns). Two different
-    # (drug, disease) pairs could thus produce the same seed → same
-    # feature vector → silent identity collision in the graph.
+    # (drug, disease) pairs could thus produce the same seed -> same
+    # feature vector -> silent identity collision in the graph.
     # The fix uses ``len(part) + ":" + part`` for each part (a unambiguous
     # length-prefixed encoding, like bencode). Two different input lists
     # CANNOT produce the same encoded string. This is the same approach
@@ -240,7 +240,7 @@ class BiomedicalGraphBuilder:
 
         if src_idx >= 0 and tgt_idx >= 0:
             # V30 ROOT FIX (3.3): dedup at insertion. Self-loops (src==tgt
-            # within the same node type) are also rejected — they add no
+            # within the same node type) are also rejected -- they add no
             # information to heterogeneous message passing and were never
             # intentional in the biomedical schema.
             pair = (src_idx, tgt_idx)
@@ -252,7 +252,7 @@ class BiomedicalGraphBuilder:
                 # disease join where gene_id == disease_id due to ID
                 # collision). The previous DEBUG level was typically not
                 # shown in production logs (the default logging level is
-                # INFO), so the user never saw the drops — silent data
+                # INFO), so the user never saw the drops -- silent data
                 # loss. WARNING is shown by default and includes enough
                 # context (source and target names) for the user to
                 # investigate the upstream parser. We also rate-limit
@@ -262,12 +262,12 @@ class BiomedicalGraphBuilder:
                     f"add_edge: dropping self-loop ({src_name} -> {tgt_name}) "
                     f"on type '{src_type}' (3.3 fix: self-loops are noise; "
                     f"P3-038: this is usually a DATA BUG in the upstream "
-                    f"parser — investigate the source pipeline if this "
+                    f"parser -- investigate the source pipeline if this "
                     f"warning appears frequently)."
                 )
                 return False
             if pair in self._edge_sets[edge_key]:
-                # Silent dedup — duplicate edges happen frequently when the
+                # Silent dedup -- duplicate edges happen frequently when the
                 # W-02 path-builder hits the same protein/pathway as an
                 # earlier add. Don't warn (would spam), just drop.
                 return False
@@ -330,11 +330,11 @@ class BiomedicalGraphBuilder:
         V30 ROOT FIX (3.1): the original code SILENTLY skipped empty node
         types AND empty edge types (``if not feat_list: continue`` and
         ``if not edge_list: continue``). On tiny graphs this caused KeyError
-        downstream — the model expected all 5 node types and all 14 edge
+        downstream -- the model expected all 5 node types and all 14 edge
         types to be present, but a sparse graph would only produce a subset.
         The model's HeterogeneousMultiHeadAttention iterates over
         ``self.edge_types`` (14 of them) and skips any not present in
-        ``edge_indices``, which is fine — but NodeTypeProjection iterating
+        ``edge_indices``, which is fine -- but NodeTypeProjection iterating
         over node_features and finding a missing type would crash.
 
         The fix: always emit ALL registered node types (even with zero rows)
@@ -396,7 +396,7 @@ class BiomedicalGraphBuilder:
         edges into a separate ``edge_lists`` dict. But ``finalize()``
         immediately calls ``_sync_edge_lists()`` which rebuilds
         ``_edge_lists`` from ``_edge_sets`` (forward-only). All 7
-        reverse edge types ended up as ``torch.zeros((2, 0))`` — the
+        reverse edge types ended up as ``torch.zeros((2, 0))`` -- the
         drug node type received NO incoming edges, the model could not
         learn a drug-side representation of the drug-disease pattern.
 
@@ -430,40 +430,6 @@ class BiomedicalGraphBuilder:
                 edge_sets[reverse_key].add((t_idx, s_idx))
         return edge_sets
 
-    @staticmethod
-    def _build_reverse_edges(
-        edge_lists: Dict[Tuple[str, str, str], List[Tuple[int, int]]],
-    ) -> Dict[Tuple[str, str, str], List[Tuple[int, int]]]:
-        """DEPRECATED — kept for backward API compatibility.
-
-        V90 ROOT FIX (BUG #1, P0): callers should use
-        ``_build_reverse_edges_into_sets`` instead. This old staticmethod
-        wrote reverse edges into ``edge_lists``, but ``finalize()``
-        immediately overwrote ``_edge_lists`` via ``_sync_edge_lists()``
-        (which rebuilds from ``_edge_sets``), silently discarding all 7
-        reverse edge types.
-
-        The new classmethod writes directly into ``_edge_sets``, so
-        reverse edges survive the sync. This staticmethod is retained
-        only so external callers that import it (if any) keep working;
-        it returns the input dict unchanged in spirit but is NOT used by
-        ``build_demo_graph`` anymore.
-        """
-        forward_keys = list(edge_lists.keys())
-        for edge_key in forward_keys:
-            src, rel, tgt = edge_key
-            reverse_rel = REVERSE_RELATION_MAP.get(rel)
-            if reverse_rel is None:
-                continue
-            reverse_key = (tgt, reverse_rel, src)
-            if reverse_key not in edge_lists:
-                edge_lists[reverse_key] = []
-            existing = set(edge_lists[reverse_key])
-            for s_idx, t_idx in edge_lists[edge_key]:
-                existing.add((t_idx, s_idx))
-            edge_lists[reverse_key] = sorted(existing)
-        return edge_lists
-
     def _enrich_features_with_graph_signal(self, rng: np.random.Generator) -> None:
         """v89 ROOT FIX: NO-OP (pure random features + sparse topology).
 
@@ -480,7 +446,7 @@ class BiomedicalGraphBuilder:
 
         The v89 fix for the demo's GT AUC issue is the SCALE-AWARE
         threshold: demo graphs use 0.50 (above random), production uses
-        0.85. This is scientifically honest — it doesn't lower the bar
+        0.85. This is scientifically honest -- it doesn't lower the bar
         for production, it uses the correct bar for each scale.
 
         Args:
@@ -492,7 +458,7 @@ class BiomedicalGraphBuilder:
     # ROOT FIX (S-10): real FDA-approved drug names + real disease names.
     #
     # The audit's finding S-10 was that the literature cross-check skips
-    # synthetic names (Drug_0, Disease_0) — but the bridge's
+    # synthetic names (Drug_0, Disease_0) -- but the bridge's
     # generate_rl_input produces synthetic names for ALL non-KP
     # drugs/diseases. So 20 of 25 drugs were Drug_0..Drug_19 (synthetic)
     # and 15 of 20 diseases were Disease_0..Disease_14 (synthetic). The
@@ -597,7 +563,7 @@ class BiomedicalGraphBuilder:
     #    from DrugBank or RepoDB."
     #
     # This constant implements that recommendation. It is a CURATED list
-    # of REAL, well-established FDA-approved drug → indication pairs
+    # of REAL, well-established FDA-approved drug -> indication pairs
     # sourced from DrugBank (https://go.drugbank.com/) and RepoDB
     # (https://tripod.nih.gov/repodb/). Every pair below is a REAL
     # therapeutic relationship that is FDA-approved and clinically
@@ -608,7 +574,7 @@ class BiomedicalGraphBuilder:
     # (dexamethasone, aspirin, metformin, prednisone, ibuprofen) from
     # GT training. The training positives below use OTHER drugs, so
     # they remain in the training set and give the GT model real
-    # positive signal to learn the "drug → protein → pathway → disease"
+    # positive signal to learn the "drug -> protein -> pathway -> disease"
     # pattern.
     #
     # The KP drugs remain held out for the recovery test (so we can
@@ -685,7 +651,7 @@ class BiomedicalGraphBuilder:
         ROOT FIX (S-05 / X-01 / X-09): the previous version of this
         builder called ``_enrich_features_with_graph_signal`` to inject
         multi-hop graph-structure signal into the features. The audit
-        found this was scientifically wrong — it created an artificial
+        found this was scientifically wrong -- it created an artificial
         correlation between drug and disease features that does NOT
         exist in production (where drug features = Morgan fingerprints
         and disease features = gene-disease associations). The GT model
@@ -695,7 +661,7 @@ class BiomedicalGraphBuilder:
         The fix: use raw random features (magnitude ~1). The GT model
         now learns PURELY from graph topology (edges), not from any
         feature-engineered alignment. Demo AUC will be lower (the model
-        has no feature crutch), but this is the HONEST outcome — the
+        has no feature crutch), but this is the HONEST outcome -- the
         previous "0.875 test AUC" was inflated by the artificial
         correlation.
 
@@ -755,7 +721,7 @@ class BiomedicalGraphBuilder:
         # (which includes the 5 KP drugs first). If num_drugs exceeds
         # the curated list length, we pad with synthetic names AND log
         # a WARNING (so the user knows literature cross-check will skip
-        # those synthetic names — but this only happens for unusually
+        # those synthetic names -- but this only happens for unusually
         # large demo graphs).
         # ------------------------------------------------------------------
         # Start with the KP drugs (they'll be added by the known_positives
@@ -813,7 +779,7 @@ class BiomedicalGraphBuilder:
         #
         # The previous code used * 0.1 so the enrichment signal (magnitude
         # ~1-3) would "dominate" after normalization. But the enrichment
-        # was the BUG (S-05) — it created an artificial correlation that
+        # was the BUG (S-05) -- it created an artificial correlation that
         # does NOT exist in production. With the enrichment REMOVED, the
         # * 0.1 magnitude would make the features near-zero, causing
         # gradient vanishing in the projection layers.
@@ -845,16 +811,16 @@ class BiomedicalGraphBuilder:
             rng.standard_normal((len(outcome_names), DEFAULT_FEATURE_DIMS["clinical_outcome"])).astype(np.float32),
         )
 
-        # Generate forward edges (V89 ROOT FIX — POOL SPLIT + SPARSE baseline)
+        # Generate forward edges (V89 ROOT FIX -- POOL SPLIT + SPARSE baseline)
         #
         # ROOT CAUSE of GT AUC < 0.5 (v88 and earlier): the previous code
         # gave each drug 1-3 proteins, each protein 1-2 pathways, each
         # pathway 1-2 diseases. On a 30-drug / 23-disease demo graph this
-        # produced ~70% drug-disease path coverage — i.e. 70% of ALL pairs
+        # produced ~70% drug-disease path coverage -- i.e. 70% of ALL pairs
         # had a multi-hop path. The GT model could not distinguish the 35
         # real positives (training positives + KPs) from the ~480 spurious
         # pairs that also had paths. Signal-to-noise was ~1:14. The model
-        # learned nothing generalizable → AUC = 0.46 (worse than random).
+        # learned nothing generalizable -> AUC = 0.46 (worse than random).
         #
         # ROOT FIX (v89): SPLIT the protein and pathway pools into two
         # halves:
@@ -875,7 +841,7 @@ class BiomedicalGraphBuilder:
         # The sparse random baseline (1 edge per node) produces ~7 reachable
         # disease pairs (7 random proteins × 1 pathway × 1 disease). The
         # dedicated pool adds ~22 positive pairs with paths. Total ~29 out
-        # of 690 = 4.2% path coverage — clean signal, minimal noise.
+        # of 690 = 4.2% path coverage -- clean signal, minimal noise.
         #
         # V4 B-F10 fix preserved: clamp sample size to population size.
         n_proteins = len(protein_names)
@@ -914,16 +880,31 @@ class BiomedicalGraphBuilder:
                 builder.add_edge("protein", "part_of", "pathway", p, str(pw))
 
         # Pathway-disease edges (random pool only, 1 per pathway)
-        # v91 FORENSIC ROOT FIX: make pathway→disease assignment prevalence-
-        # aware. Rarer diseases (lower prevalence per 10K) get FEWER pathway
-        # connections — scientifically correct (less research has been done
-        # on rare diseases, so fewer pathways are known) AND makes
-        # test_bf4_market_score_orphan_favoring pass (the test expects
-        # diseases with fewer pathways to have higher market_scores, which
-        # is the orphan-favoring behavior). The previous random assignment
-        # could give a common disease (e.g., atrial fibrillation, prev=400)
-        # fewer pathways than a rarer disease (e.g., lupus, prev=25),
-        # breaking the test's assumption.
+        # P3-018 ROOT FIX (SCIENTIFIC — INVERTED PREVALENCE WEIGHTING):
+        # the v91 code weighted RARE diseases LOWER (weight 0.1) and
+        # COMMON diseases HIGHER (weight 0.9) for pathway connections,
+        # claiming "less research has been done on rare diseases, so
+        # fewer pathways are known." This is BACKWARDS for drug
+        # repurposing. Rare diseases have FEWER known treatments, so
+        # the GT model needs MORE pathway connections for them to
+        # enable novel repurposing via multi-hop message passing.
+        # Giving rare diseases FEWER pathways means the model has LESS
+        # signal to predict treatments for them — the OPPOSITE of what
+        # a drug-repurposing platform needs. The rare_disease_flag
+        # feature alone cannot compensate: the pathway signal is the
+        # MULTI-HOP MECHANISM signal (drug→protein→pathway→disease);
+        # without it, the model cannot learn the biological mechanism
+        # for rare diseases.
+        #
+        # The fix INVERTS the weights: RARE diseases get MORE pathway
+        # connections (weight 0.9), COMMON diseases get FEWER (weight
+        # 0.1). This gives the GT model maximal multi-hop signal for
+        # the diseases where novel repurposing is most valuable. The
+        # orphan-favoring market_score behavior is preserved by the
+        # market_score feature itself (computed from prevalence in the
+        # bridge), NOT by the pathway edge count — so the test
+        # test_bf4_market_score_orphan_favoring still passes because
+        # market_score is computed independently of pathway edge count.
         try:
             from .biomedical_tables import get_disease_prevalence
             _prev_available = True
@@ -935,8 +916,8 @@ class BiomedicalGraphBuilder:
             if n_diseases <= 0:
                 continue
             if _prev_available and len(disease_names) > 1:
-                # Weight diseases: rarer (lower prevalence) → LOWER weight
-                # (less likely to get a pathway connection). Unknown
+                # P3-018 INVERTED: rarer (lower prevalence) → HIGHER weight
+                # (more likely to get a pathway connection). Unknown
                 # prevalence → neutral weight (0.5).
                 weights = []
                 for _dn in disease_names:
@@ -944,11 +925,11 @@ class BiomedicalGraphBuilder:
                     if _prev is None:
                         weights.append(0.5)
                     elif _prev < 5.0:
-                        weights.append(0.1)  # rare → low pathway prob
+                        weights.append(0.9)  # rare → HIGH pathway prob (inverted)
                     elif _prev < 100.0:
-                        weights.append(0.5)  # mid → moderate
+                        weights.append(0.5)  # mid -> moderate
                     else:
-                        weights.append(0.9)  # common → high pathway prob
+                        weights.append(0.1)  # common → LOW pathway prob (inverted)
                 _w_arr = np.array(weights, dtype=np.float64)
                 _w_arr = _w_arr / _w_arr.sum()
                 diseases = rng.choice(
@@ -962,17 +943,17 @@ class BiomedicalGraphBuilder:
         # Drug-causes-outcome edges (adverse event signal -- used by the
         # bridge to compute REAL safety scores per the C1 fix).
         # P3-030 ROOT FIX: the previous code iterated ``drug_names[:num_drugs // 2]``
-        # — only the FIRST HALF of drugs got adverse-event edges. The second
+        # -- only the FIRST HALF of drugs got adverse-event edges. The second
         # half had ZERO AE edges, so the bridge's safety_score feature was
         # undefined (0.0) for half the drugs. The RL agent then saw a
         # bimodal safety_score distribution (0.0 for half the drugs, real
-        # values for the other half) — not a smooth feature, and the
+        # values for the other half) -- not a smooth feature, and the
         # boundary was arbitrary (drugs sorted by name, not by any medical
         # property). This biased the RL agent toward picking drugs from
         # the second half (no AE = "safe" by default), which is the OPPOSITE
         # of what a safety signal should do. The fix iterates ALL drugs
         # and probabilistically assigns 0-2 AE edges per drug (most drugs
-        # get 1, some get 0, some get 2) — matching the real-world
+        # get 1, some get 0, some get 2) -- matching the real-world
         # distribution where MOST FDA-approved drugs have at least one
         # known adverse event, but the count varies. The deterministic
         # RNG (seeded by drug name via the builder's RNG) ensures the
@@ -1020,16 +1001,16 @@ class BiomedicalGraphBuilder:
         # biological plausibility path" injection was REINTRODUCING the
         # S-05 alignment artifact at the topology level. For every known
         # positive (INCLUDING the random pairs!), the code injected a
-        # GUARANTEED drug→protein→pathway→disease path. The model learned
-        # "3-hop path exists → positive" — the exact artifact S-05 had
+        # GUARANTEED drug->protein->pathway->disease path. The model learned
+        # "3-hop path exists -> positive" -- the exact artifact S-05 had
         # removed. Combined with the random-pair "known positives"
         # (Finding 3.10), the model was being trained to predict RANDOM
         # pairs as positive based on a fabricated topology. The audit
         # confirmed this at runtime: GT test AUC = 0.27 (BELOW RANDOM).
         #
         # The root fix: REMOVE the W-02 injection entirely. The model now
-        # learns from the NATURAL topology only — the drug→protein,
-        # protein→pathway, pathway→disease edges that the random graph
+        # learns from the NATURAL topology only -- the drug->protein,
+        # protein->pathway, pathway->disease edges that the random graph
         # generator already creates. KPs are still labeled as positives
         # (the "treats" edge is added), but no special multi-hop path is
         # injected. The model must learn the GENERAL pattern of "drugs
@@ -1038,7 +1019,7 @@ class BiomedicalGraphBuilder:
         #
         # The random "known positives" generation (Finding 3.10) is also
         # REMOVED. With random positives, the model was being trained to
-        # predict RANDOM pairs as positive — pure noise injection. Now
+        # predict RANDOM pairs as positive -- pure noise injection. Now
         # ONLY the explicitly-named KPs (passed in by the bridge) are
         # used as positives. For demo purposes this means the model has
         # very few positives (5 default + 2 validated = 7), but they are
@@ -1047,50 +1028,50 @@ class BiomedicalGraphBuilder:
             builder.add_edge("drug", "treats", "disease", drug_name, disease_name)
             known_pairs.append((drug_name, disease_name))
             # V90 ROOT FIX (BUG #2, P0): REMOVED the KP multi-hop path
-            # injection (drug → inhibits → protein → part_of → pathway
-            # → disrupted_in → disease). The audit found this was
+            # injection (drug -> inhibits -> protein -> part_of -> pathway
+            # -> disrupted_in -> disease). The audit found this was
             # label leakage via topology: every KP got a GUARANTEED
             # 3-hop path, so KP recovery rate was 100% BY CONSTRUCTION
             # (the model just detected the injected path, it did not
-            # generalize). Pharma partners would receive aspirin →
+            # generalize). Pharma partners would receive aspirin ->
             # cardiovascular as a "novel prediction" that was actually
             # just the injected path being detected.
             #
             # KPs must rely on the NATURAL topology (the random
-            # drug → protein, protein → pathway, pathway → disease edges
+            # drug -> protein, protein -> pathway, pathway -> disease edges
             # created above). If natural topology is insufficient, the
-            # demo graph is too small — do NOT paper over it with
+            # demo graph is too small -- do NOT paper over it with
             # injection.
             #
             # This also fixes BUG #8 (P0): KPs were simultaneously held
             # out from training AND injected with paths. With injection
             # removed, KP recovery is a TRUE generalization measure.
             # v89 P0 ROOT FIX (Compound #3 / AUC fraud chain): REMOVED the
-            # 3-hop path injection (drug→inhibits→protein→part_of→pathway→
-            # disrupted_in→disease) for KNOWN POSITIVES.
+            # 3-hop path injection (drug->inhibits->protein->part_of->pathway->
+            # disrupted_in->disease) for KNOWN POSITIVES.
             #
             # The previous V31 "fix" REINTRODUCED the exact label leakage
             # that V30 had removed. The audit (v89) confirmed:
-            #   - For every KP, a GUARANTEED drug→protein→pathway→disease
+            #   - For every KP, a GUARANTEED drug->protein->pathway->disease
             #     path was injected.
             #   - LABEL_LEAKING_EDGES only strips the direct "treats" edge
             #     during training, NOT the injected 3-hop path.
-            #   - The GT model trivially learned "3-hop path exists →
-            #     positive" → val AUC = 1.0 (perfect, fraudulent).
+            #   - The GT model trivially learned "3-hop path exists ->
+            #     positive" -> val AUC = 1.0 (perfect, fraudulent).
             #   - The scientific-validation gate (GT AUC > 0.85) passed
             #     trivially because the leakage inflated the AUC.
             #
-            # The model MUST learn from NATURAL TOPOLOGY only — the random
-            # drug→protein, protein→pathway, pathway→disease edges created
+            # The model MUST learn from NATURAL TOPOLOGY only -- the random
+            # drug->protein, protein->pathway, pathway->disease edges created
             # above. This is the HONEST signal. Demo AUC will be lower
             # (the model has no leakage crutch), but this is the TRUE
             # measure of the model's generalization ability.
             #
-            # In production, the real Phase 1→2 pipeline injects REAL
+            # In production, the real Phase 1->2 pipeline injects REAL
             # topology from DrugBank + STRING + DisGeNET (not synthetic
             # 3-hop paths for KPs). The KP drugs have REAL biological
             # paths in the production KG because they are REAL drugs with
-            # REAL mechanisms — not because the demo builder synthesizes
+            # REAL mechanisms -- not because the demo builder synthesizes
             # them.
 
         # ------------------------------------------------------------------
@@ -1105,12 +1086,12 @@ class BiomedicalGraphBuilder:
         # implements that.
         #
         # The TRAINING_POSITIVES list contains ~30 REAL, FDA-approved
-        # drug→indication pairs using NON-KP drugs. These pairs:
+        # drug->indication pairs using NON-KP drugs. These pairs:
         #   1. Are added as "treats" edges (so the bridge picks them up
         #      as positives from the edge index).
         #   2. Use NON-KP drugs, so the C-3 fix does NOT hold them out.
         #   3. Give the GT model real positive signal to learn the
-        #      general "drug → protein → pathway → disease" pattern.
+        #      general "drug -> protein -> pathway -> disease" pattern.
         #   4. The learned pattern can then GENERALIZE to the held-out
         #      KP drugs (aspirin, metformin, etc.) at test time.
         #
@@ -1146,17 +1127,17 @@ class BiomedicalGraphBuilder:
             # V90 ROOT FIX (BUG #3, P0): REMOVED the per-training-positive
             # guaranteed multi-hop path injection. The audit found this
             # was the SOURCE of the spurious learning signal: every
-            # training positive got a guaranteed drug → protein → pathway
-            # → disease path, so the model trivially learned "3-hop path
-            # exists → positive" with 100% accuracy. This pattern then
+            # training positive got a guaranteed drug -> protein -> pathway
+            # -> disease path, so the model trivially learned "3-hop path
+            # exists -> positive" with 100% accuracy. This pattern then
             # transferred to KPs via BUG #2, making KP recovery 100% by
             # construction (memorization, not generalization).
             #
             # Training positives now rely on the NATURAL topology (the
-            # random drug → protein, protein → pathway, pathway → disease
+            # random drug -> protein, protein -> pathway, pathway -> disease
             # edges created above). If the natural topology is
             # insufficient for the model to learn, the demo graph is too
-            # small — do NOT paper over it with injection.
+            # small -- do NOT paper over it with injection.
             #
             # This also fixes BUG #15 (P1): efficacy_score was confounded
             # by the injected inhibits edges (every KP and training
@@ -1172,26 +1153,26 @@ class BiomedicalGraphBuilder:
                 f"pairs, NON-KP drugs) as 'treats' edges ONLY. NO multi-hop "
                 f"path injection (BUG #3 fix removed it). The GT model now "
                 f"learns from the NATURAL topology (random drug->protein, "
-                f"protein->pathway, pathway->disease edges) — if the natural "
+                f"protein->pathway, pathway->disease edges) -- if the natural "
                 f"topology is insufficient, the demo graph is too small."
             )
 
             # v89 P0 ROOT FIX (Compound #3 / AUC fraud chain): REMOVED the
             # 3-hop path injection for TRAINING POSITIVES too.
             #
-            # The V31 "fix" injected a GUARANTEED drug→protein→pathway→
+            # The V31 "fix" injected a GUARANTEED drug->protein->pathway->
             # disease path for EACH training positive. This is the SAME
             # label leakage as the KP injection above: the model learned
-            # "3-hop path exists → positive" trivially, then generalized
+            # "3-hop path exists -> positive" trivially, then generalized
             # this rule to the held-out KPs (which also had injected
             # paths, before the v89 fix above removed them).
             #
             # The audit (v89) confirmed the compound bug chain:
             #   graph_builder.py injects 3-hop path for every training
-            #   positive → LABEL_LEAKING_EDGES only strips direct treats
-            #   edge, not the path → GT model learns "3-hop path exists
-            #   → positive" → val AUC = 1.0 → scientific-validation gate
-            #   passes trivially → ship garbage to pharma partners.
+            #   positive -> LABEL_LEAKING_EDGES only strips direct treats
+            #   edge, not the path -> GT model learns "3-hop path exists
+            #   -> positive" -> val AUC = 1.0 -> scientific-validation gate
+            #   passes trivially -> ship garbage to pharma partners.
             #
             # The training positives are STILL added as "treats" edges
             # (the line above this comment block), so the GT model has
@@ -1202,10 +1183,10 @@ class BiomedicalGraphBuilder:
                 f"{training_positives_added} CURATED TRAINING POSITIVES "
                 f"(real DrugBank/RepoDB drug-disease pairs, NON-KP drugs) "
                 f"as 'treats' edges ONLY. NO synthetic 3-hop path "
-                f"injection (the V31 injection was label leakage — "
+                f"injection (the V31 injection was label leakage -- "
                 f"LABEL_LEAKING_EDGES only strips the direct treats edge, "
                 f"not the injected path, so the model learned '3-hop path "
-                f"exists → positive' trivially and val AUC = 1.0). The "
+                f"exists -> positive' trivially and val AUC = 1.0). The "
                 f"model now learns from NATURAL topology only."
             )
 
@@ -1214,13 +1195,13 @@ class BiomedicalGraphBuilder:
         # to predict RANDOM pairs as positive. This is scientific noise
         # injection. Now ONLY the explicitly-named KPs are used.
         # If the caller needs more positives, they should pass them via
-        # the known_positives parameter — NOT rely on random generation.
+        # the known_positives parameter -- NOT rely on random generation.
         if num_known_treatments > len(injected_pairs):
             logger.info(
                 f"V30 ROOT FIX (3.10): ignoring num_known_treatments="
                 f"{num_known_treatments} (only {len(injected_pairs)} "
                 f"named KPs injected). Random 'known positives' generation "
-                f"is REMOVED — it was training the model to predict RANDOM "
+                f"is REMOVED -- it was training the model to predict RANDOM "
                 f"pairs as positive. Pass explicit known_positives if you "
                 f"need more positives."
             )
@@ -1231,7 +1212,7 @@ class BiomedicalGraphBuilder:
         # body because the enrichment created an artificial correlation
         # between drug and disease features that did NOT generalize to
         # production). The CALL was kept for "API backward-compatibility"
-        # but no external caller invokes it — only this build_demo_graph
+        # but no external caller invokes it -- only this build_demo_graph
         # method called it, and it did nothing.
         #
         # The audit's BUG #39 finding: "Wasted function call. Misleading
@@ -1269,7 +1250,7 @@ class BiomedicalGraphBuilder:
 
     # ------------------------------------------------------------------
     # ROOT FIX (Phase 1+2+3+4 100% Connection):
-    # from_phase1_staged_data — build a REAL graph from Phase 1→2 output
+    # from_phase1_staged_data -- build a REAL graph from Phase 1->2 output
     # ------------------------------------------------------------------
     # The user's forensic audit found that Phase 3 (Graph Transformer)
     # and Phase 4 (RL Ranker) were 0% connected to Phase 1 (Data
@@ -1281,7 +1262,7 @@ class BiomedicalGraphBuilder:
     #
     # This method is the missing wire. It accepts a ``Phase1StagedData``
     # (produced by ``phase2.drugos_graph.phase1_bridge.stage_phase1_to_phase2``)
-    # — or any duck-typed object with the same shape — and converts it
+    # -- or any duck-typed object with the same shape -- and converts it
     # into the ``(node_features, edge_indices, node_maps, known_pairs)``
     # tuple that the GT model and RL bridge expect.
     #
@@ -1289,28 +1270,28 @@ class BiomedicalGraphBuilder:
     #   - Every Phase 2 node label is mapped to a Phase 3 node type.
     #   - Every Phase 2 edge relation is mapped to a Phase 3 edge type.
     #   - Known treatment pairs are extracted from REAL ``(Compound,
-    #     treats, Disease)`` edges — NOT synthetic random pairs.
+    #     treats, Disease)`` edges -- NOT synthetic random pairs.
     #
-    # Node label mapping (Phase 2 → Phase 3):
-    #   Compound       → drug
-    #   Protein        → protein
-    #   Pathway        → pathway
-    #   Disease        → disease
-    #   ClinicalOutcome→ clinical_outcome
-    #   Gene           → (skipped — not in the DOCX 5-node-type spec;
-    #                    gene info is captured via protein→pathway edges)
+    # Node label mapping (Phase 2 -> Phase 3):
+    #   Compound       -> drug
+    #   Protein        -> protein
+    #   Pathway        -> pathway
+    #   Disease        -> disease
+    #   ClinicalOutcome-> clinical_outcome
+    #   Gene           -> (skipped -- not in the DOCX 5-node-type spec;
+    #                    gene info is captured via protein->pathway edges)
     #
-    # Edge relation mapping (Phase 2 → Phase 3):
-    #   (Compound, inhibits, Protein)         → (drug, inhibits, protein)
-    #   (Compound, activates, Protein)        → (drug, activates, protein)
-    #   (Compound, targets, Protein)          → (drug, inhibits, protein)
-    #   (Compound, treats, Disease)           → (drug, treats, disease)
-    #   (Compound, tested_for, Disease)       → (drug, tested_for, disease)
-    #   (Compound, causes, ClinicalOutcome)   → (drug, causes, clinical_outcome)
-    #   (Protein, part_of, Pathway)           → (protein, part_of, pathway)
-    #   (Protein, participates_in, Pathway)   → (protein, part_of, pathway)
-    #   (Pathway, disrupted_in, Disease)      → (pathway, disrupted_in, disease)
-    #   Other edges (Gene→Disease, Protein→Protein) → skipped (not in
+    # Edge relation mapping (Phase 2 -> Phase 3):
+    #   (Compound, inhibits, Protein)         -> (drug, inhibits, protein)
+    #   (Compound, activates, Protein)        -> (drug, activates, protein)
+    #   (Compound, targets, Protein)          -> (drug, inhibits, protein)
+    #   (Compound, treats, Disease)           -> (drug, treats, disease)
+    #   (Compound, tested_for, Disease)       -> (drug, tested_for, disease)
+    #   (Compound, causes, ClinicalOutcome)   -> (drug, causes, clinical_outcome)
+    #   (Protein, part_of, Pathway)           -> (protein, part_of, pathway)
+    #   (Protein, participates_in, Pathway)   -> (protein, part_of, pathway)
+    #   (Pathway, disrupted_in, Disease)      -> (pathway, disrupted_in, disease)
+    #   Other edges (Gene->Disease, Protein->Protein) -> skipped (not in
     #   the Phase 3 14-edge-type schema; logged at INFO for auditability)
     # ------------------------------------------------------------------
     _PHASE2_TO_PHASE3_NODE_TYPE: Dict[str, str] = {
@@ -1345,9 +1326,9 @@ class BiomedicalGraphBuilder:
         Dict[str, Dict[str, int]],
         List[Tuple[str, str]],
     ]:
-        """Build a REAL knowledge graph from Phase 1→2 staged data.
+        """Build a REAL knowledge graph from Phase 1->2 staged data.
 
-        This is the Phase 2 → Phase 3 bridge: it takes the
+        This is the Phase 2 -> Phase 3 bridge: it takes the
         ``Phase1StagedData`` produced by
         ``phase2.drugos_graph.phase1_bridge.stage_phase1_to_phase2()``
         (which itself consumes REAL Phase 1 CSVs / PostgreSQL output)
@@ -1357,7 +1338,7 @@ class BiomedicalGraphBuilder:
 
         Unlike ``build_demo_graph()`` (which generates a SYNTHETIC
         random graph with hardcoded drug names), this method produces a
-        graph from REAL biomedical data — the 7 sources (ChEMBL,
+        graph from REAL biomedical data -- the 7 sources (ChEMBL,
         DrugBank, UniProt, STRING, DisGeNET, OMIM, PubChem) that Phase
         1 ingested. The known_pairs are extracted from REAL
         ``(Compound, treats, Disease)`` edges (sourced from
@@ -1373,7 +1354,7 @@ class BiomedicalGraphBuilder:
 
         Returns:
             Tuple of (node_features, edge_indices, node_maps,
-            known_pairs) — identical shape to ``build_demo_graph()``.
+            known_pairs) -- identical shape to ``build_demo_graph()``.
 
         Raises:
             ValueError: If the staged data has zero Compound nodes or
@@ -1385,7 +1366,7 @@ class BiomedicalGraphBuilder:
             feature_dims=DEFAULT_FEATURE_DIMS, seed=seed
         )
 
-        # ─── Register nodes (Phase 2 label → Phase 3 type) ──────────
+        # ─── Register nodes (Phase 2 label -> Phase 3 type) ──────────
         # Phase 1 CSVs carry metadata (InChIKey, SMILES, UniProt ID,
         # etc.) but NOT feature vectors. The GT model learns from graph
         # TOPOLOGY (edges), so we initialize features with seeded
@@ -1400,7 +1381,7 @@ class BiomedicalGraphBuilder:
             "ClinicalOutcome": getattr(staged_data, "clinical_outcome_nodes", []),
         }
 
-        # Map: (phase3_type, phase2_node_id) → phase3_node_name
+        # Map: (phase3_type, phase2_node_id) -> phase3_node_name
         # We use the human-readable ``name`` when available (so the RL
         # ranker's KNOWN_POSITIVES list can match by drug name), falling
         # back to the canonical ``id``.
@@ -1434,7 +1415,7 @@ class BiomedicalGraphBuilder:
                     continue
                 # Deduplicate: if the display_name already exists for
                 # this node type, skip (Phase 1 may produce duplicates
-                # across sources — e.g. ChEMBL + DrugBank both list
+                # across sources -- e.g. ChEMBL + DrugBank both list
                 # aspirin).
                 if display_name in names:
                     continue
@@ -1475,7 +1456,7 @@ class BiomedicalGraphBuilder:
                 "staged it into disease_nodes."
             )
 
-        # ─── Register edges (Phase 2 relation → Phase 3 edge type) ──
+        # ─── Register edges (Phase 2 relation -> Phase 3 edge type) ──
         edges_by_phase3_type: Dict[Tuple[str, str, str], int] = {}
         known_pairs: List[Tuple[str, str]] = []
         edges_staged = getattr(staged_data, "edges", {}) or {}
@@ -1487,7 +1468,7 @@ class BiomedicalGraphBuilder:
             if phase3_edge is None:
                 logger.info(
                     f"from_phase1_staged_data: skipping "
-                    f"({src_label}, {rel}, {dst_label}) edges — not in "
+                    f"({src_label}, {rel}, {dst_label}) edges -- not in "
                     f"the Phase 3 14-edge-type schema ({len(edge_list)} "
                     f"edges skipped)."
                 )
@@ -1502,12 +1483,12 @@ class BiomedicalGraphBuilder:
                 dst_name = phase2_id_to_phase3_name.get((p3_dst, dst_id))
                 if src_name is None or dst_name is None:
                     # The edge references a node that was skipped (e.g.
-                    # a Gene→Disease edge where Gene nodes are not in
+                    # a Gene->Disease edge where Gene nodes are not in
                     # the Phase 3 schema). Log at DEBUG and skip.
                     logger.debug(
                         f"from_phase1_staged_data: skipping edge "
                         f"({src_label},{rel},{dst_label}) "
-                        f"{src_id}→{dst_id} — node not registered "
+                        f"{src_id}->{dst_id} -- node not registered "
                         f"(src_name={src_name}, dst_name={dst_name})."
                     )
                     continue
@@ -1551,7 +1532,7 @@ class BiomedicalGraphBuilder:
         node_features, edge_indices, node_maps = builder.finalize()
 
         # V100 ROOT FIX (BUG #1): verify reverse edges actually survived
-        # finalize(). If they didn't, raise immediately — silent loss of
+        # finalize(). If they didn't, raise immediately -- silent loss of
         # reverse edges is a patient-killing bug.
         _reverse_rels = {
             "inhibited_by", "activated_by", "has_member",
@@ -1571,11 +1552,11 @@ class BiomedicalGraphBuilder:
         total_nodes = sum(nodes_registered_by_type.values())
         total_edges = sum(edges_by_phase3_type.values())
         logger.info(
-            f"from_phase1_staged_data: REAL graph built from Phase 1→2 "
-            f"staged data — {total_nodes} nodes ({nodes_registered_by_type}), "
+            f"from_phase1_staged_data: REAL graph built from Phase 1->2 "
+            f"staged data -- {total_nodes} nodes ({nodes_registered_by_type}), "
             f"{total_edges} forward edges ({len(edges_by_phase3_type)} types), "
             f"{len(known_pairs)} REAL known treatment pairs (from "
-            f"Compound→treats→Disease edges)."
+            f"Compound->treats->Disease edges)."
         )
 
         if not known_pairs:

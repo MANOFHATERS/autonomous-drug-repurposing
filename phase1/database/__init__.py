@@ -3,8 +3,8 @@ Database package for the Drug Repurposing ETL Platform.
 
 This package serves as the **single canonical entry point** for all database
 operations across the platform.  It provides a complete, lazily-loaded facade
-over four architectural layers — connection management, ORM models, bulk data
-operations, and schema migrations — with built-in error handling, observability
+over four architectural layers -- connection management, ORM models, bulk data
+operations, and schema migrations -- with built-in error handling, observability
 hooks, and runtime introspection.
 
 Architecture
@@ -12,18 +12,18 @@ Architecture
 The database package is organised into four submodules, each responsible for
 one clearly defined concern:
 
-- **database.connection** — Engine creation, session factory, context-managed
+- **database.connection** -- Engine creation, session factory, context-managed
   sessions, health checks, and lifecycle management (``get_engine``,
   ``get_db_session``, ``init_db``, ``dispose_engine``, ``check_connection``,
   ``get_session_factory``, ``Base``).
 
-- **database.models** — Seven SQLAlchemy ORM models that map 1:1 to the
+- **database.models** -- Seven SQLAlchemy ORM models that map 1:1 to the
   database schema: ``Drug``, ``Protein``, ``DrugProteinInteraction``,
   ``ProteinProteinInteraction``, ``GeneDiseaseAssociation``,
   ``EntityMapping``, ``PipelineRun``, plus the
   ``cleanup_orphan_gda_records`` utility.
 
-- **database.loaders** — Eight bulk data operation functions (``bulk_upsert_*``
+- **database.loaders** -- Eight bulk data operation functions (``bulk_upsert_*``
   and ``bulk_update_drugs_from_pubchem``) that implement ON CONFLICT DO UPDATE
   semantics with dialect-specific handling for PostgreSQL and SQLite.  Four
   lookup helpers (``get_uniprot_to_protein_id_map``,
@@ -31,7 +31,7 @@ one clearly defined concern:
   ``resolve_gene_symbol_to_uniprot``) provide foreign-key resolution before
   bulk inserts.
 
-- **database.migrations** — Cross-dialect schema migration runner
+- **database.migrations** -- Cross-dialect schema migration runner
   (``run_migrations``) that handles column additions, SQL file execution, and
   migration history tracking.
 
@@ -44,7 +44,7 @@ Prefer ``from database import X`` over ``from database.submodule import X``::
     from database import bulk_upsert_drugs, bulk_upsert_gda
     from database import run_migrations, check_connection, Base
 
-The package-level import is complete — every public symbol from all four
+The package-level import is complete -- every public symbol from all four
 submodules is available directly.  Direct submodule imports (e.g.
 ``from database.loaders import bulk_upsert_drugs``) continue to work for
 backward compatibility but are not the recommended path.
@@ -63,7 +63,7 @@ DAGs.
 
 Performance characteristics:
 
-- Importing the package is O(1) — no submodule loading occurs.
+- Importing the package is O(1) -- no submodule loading occurs.
 - First access to any symbol triggers its submodule import (one-time cost).
 - Subsequent accesses are O(1) dict lookups from the internal cache.
 
@@ -86,23 +86,23 @@ for full traceability.
 
 Optional Utilities
 ------------------
-- ``validate_data_quality_infrastructure(session)`` — Verify that all
+- ``validate_data_quality_infrastructure(session)`` -- Verify that all
   bulk_upsert functions are importable, ORM constraints are defined, and
   lookup functions return valid mappings.
 
-- ``_validate_database_security()`` — Audit ``DATABASE_URL`` for insecure
+- ``_validate_database_security()`` -- Audit ``DATABASE_URL`` for insecure
   patterns (in-memory SQLite in production, missing SSL, weak credentials).
 
-- ``_reset()`` — Clear the lazy-loaded symbol cache for testing.  Use this
+- ``_reset()`` -- Clear the lazy-loaded symbol cache for testing.  Use this
   in test fixtures to reset the package state between tests.
 
-- ``_log_import_status()`` — Log which symbols have been loaded and which
+- ``_log_import_status()`` -- Log which symbols have been loaded and which
   haven't (useful for debugging import issues).
 
 Changelog
 ---------
-v1.0.0 (AUDIT-34) — Initial convenience imports (10 symbols, 2 submodules).
-v2.0.0 — Complete rewrite: lazy loading across all 4 submodules, 26 public
+v1.0.0 (AUDIT-34) -- Initial convenience imports (10 symbols, 2 submodules).
+v2.0.0 -- Complete rewrite: lazy loading across all 4 submodules, 26 public
     symbols, __all__ declaration, error handling, observability hooks,
     validation utilities, and full 16-domain compliance.
 
@@ -134,7 +134,7 @@ logger = logging.getLogger(__name__)
 __version__: str = "11.0.0"
 
 # ---------------------------------------------------------------------------
-# Public API — explicit declaration (Domain 1: Architecture, Domain 14: PEP)
+# Public API -- explicit declaration (Domain 1: Architecture, Domain 14: PEP)
 # ---------------------------------------------------------------------------
 __all__: list[str] = [
     # --- Connection Management ---
@@ -247,10 +247,10 @@ def __getattr__(name: str) -> Any:
 
     Error Handling
     ~~~~~~~~~~~~~~
-    - ``ImportError`` / ``ModuleNotFoundError`` — wrapped with an informative
+    - ``ImportError`` / ``ModuleNotFoundError`` -- wrapped with an informative
       message naming the symbol, submodule, and original error.  This
       prevents cryptic tracebacks during Airflow DAG parsing.
-    - ``AttributeError`` — raised when the submodule loads but does not
+    - ``AttributeError`` -- raised when the submodule loads but does not
       contain the expected symbol (version mismatch).
     - Unknown symbols raise ``AttributeError`` with the module name.
 
@@ -272,7 +272,7 @@ def __getattr__(name: str) -> Any:
     ImportError
         If the target submodule cannot be imported.
     """
-    # __version__ is defined at module level — no lazy load needed
+    # __version__ is defined at module level -- no lazy load needed
     if name == "__version__":
         return __version__
 
@@ -369,7 +369,7 @@ def _reset() -> None:
     Use this in test fixtures to reset the database package state
     between tests that require different configurations.
 
-    This function does **not** dispose the engine or close sessions —
+    This function does **not** dispose the engine or close sessions --
     it only clears the symbol cache so that subsequent attribute accesses
     re-import the submodules.
 

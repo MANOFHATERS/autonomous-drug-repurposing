@@ -1,4 +1,4 @@
-"""DrugOS Graph Module — Evaluation Metrics
+"""DrugOS Graph Module -- Evaluation Metrics
 =============================================
 Implements evaluation metrics for knowledge graph link prediction:
   - AUC (Area Under ROC Curve)
@@ -81,7 +81,7 @@ from .exceptions import (
 logger = logging.getLogger(__name__)
 
 # ─── Scientific References ────────────────────────────────────────────────────
-# Fixes E3-004 — Mann-Whitney and Wilcoxon citations required for audit trail.
+# Fixes E3-004 -- Mann-Whitney and Wilcoxon citations required for audit trail.
 
 MANN_WHITNEY_REFERENCE: str = (
     "Mann, H. B.; Whitney, D. R. (1947). "
@@ -126,7 +126,7 @@ K_VALUES_DEFAULT: Tuple[int, ...] = (1, 3, 5, 10, 20)  # Fixes E12-001
 EVALUATION_FALLBACK_STRATEGY: str = "warn"  # "fail", "warn", or "silent"
 
 # ─── Transformation Audit Trail ───────────────────────────────────────────────
-# Fixes E16-004 — every input transformation is logged for traceability.
+# Fixes E16-004 -- every input transformation is logged for traceability.
 #
 # v35 ROOT FIX (L-18 / L-21): ``EVALUATION_TRANSFORMATIONS_LOG`` is a
 # module-level mutable list. Without a reset hook, it grows unboundedly
@@ -138,14 +138,14 @@ EVALUATION_FALLBACK_STRATEGY: str = "warn"  # "fail", "warn", or "silent"
 # L-21 thread-safety note: this list is NOT thread-safe. Concurrent
 # calls to ``compute_auc`` from multiple threads can race on
 # ``list.append``. In CPython the GIL makes ``append`` atomic, so the
-# list itself will not corrupt — but the LOGICAL ORDER of entries is
+# list itself will not corrupt -- but the LOGICAL ORDER of entries is
 # not guaranteed across threads. For audit-trail purposes, callers
 # that need strict ordering should run ``compute_auc`` serially (the
-# default — single-threaded evaluation is the DrugOS standard).
+# default -- single-threaded evaluation is the DrugOS standard).
 # Multi-threaded evaluation is NOT supported and NOT recommended for
 # FDA 21 CFR Part 11 runs.
 
-# v43 ROOT FIX (P2 — EVALUATION_TRANSFORMATIONS_LOG unbounded): the
+# v43 ROOT FIX (P2 -- EVALUATION_TRANSFORMATIONS_LOG unbounded): the
 # previous list grew unboundedly across runs. Fix: cap at 10000 entries
 # (FIFO eviction) to bound memory. The reset_evaluation_transformations_
 # log() function still clears the log for explicit resets.
@@ -157,7 +157,7 @@ def _append_evaluation_log(entry: Dict[str, Any]) -> None:
     """Append to EVALUATION_TRANSFORMATIONS_LOG with FIFO cap."""
     EVALUATION_TRANSFORMATIONS_LOG.append(entry)
     if len(EVALUATION_TRANSFORMATIONS_LOG) > _EVAL_LOG_MAX_ENTRIES:
-        # FIFO eviction — remove oldest 10% to avoid O(n) shift on every append
+        # FIFO eviction -- remove oldest 10% to avoid O(n) shift on every append
         del EVALUATION_TRANSFORMATIONS_LOG[:_EVAL_LOG_MAX_ENTRIES // 10]
 
 
@@ -169,7 +169,7 @@ def reset_evaluation_transformations_log() -> None:
     eventually consuming megabytes of memory and producing
     unreadable audit trails. Call this at the start of each
     ``evaluate_link_prediction`` invocation (or per epoch) to keep
-    the log bounded. The previous contents are discarded — callers
+    the log bounded. The previous contents are discarded -- callers
     that need to persist them should snapshot the list BEFORE
     calling reset.
 
@@ -298,7 +298,7 @@ class EvaluationResult:
     falling back to synthetic N(0.3, 0.15) / N(0.7, 0.15) draws).
     """
 
-    metrics: Dict[str, Any]  # FIX-P4-10 (v42): was Dict[str, float] — but the
+    metrics: Dict[str, Any]  # FIX-P4-10 (v42): was Dict[str, float] -- but the
     # evaluation pipeline populates this with str (``_auc_algorithm``,
     # ``evaluation_metric_version``, ``evaluation_schema_version``,
     # ``mrr_setting``, ``ranking_setting``), bool (``mrr_is_filtered``,
@@ -318,7 +318,7 @@ class EvaluationResult:
     # can resample WITH REPLACEMENT from the observed score distribution
     # instead of falling back to synthetic Gaussian draws. The previous
     # code called ``getattr(result, "pos_scores", [])`` which always
-    # returned ``[]`` because this field did not exist — the synthetic
+    # returned ``[]`` because this field did not exist -- the synthetic
     # fallback therefore ALWAYS fired and the reported 95% CI described
     # N(0.3, 0.15) vs N(0.7, 0.15), not the model.
     pos_scores: Optional[Any] = None  # np.ndarray, kept Optional for back-compat
@@ -547,12 +547,12 @@ def _validate_score_array(
         )
     # v35 ROOT FIX (M-21): if the caller passed an integer-dtype
     # array, ``np.asarray(..., dtype=np.float64)`` silently coerced it
-    # to float64 — useful behavior, but the silent coercion hid
+    # to float64 -- useful behavior, but the silent coercion hid
     # upstream bugs where scores were computed as integers (e.g. a
     # rank field instead of a similarity score). The fix logs a
     # WARNING when coercion happens so operators can detect the
     # upstream bug. The coercion itself is preserved for backward
-    # compatibility — downstream AUC math genuinely needs float64.
+    # compatibility -- downstream AUC math genuinely needs float64.
     if hasattr(scores, "dtype") and scores is not None:
         try:
             _orig_dtype = np.asarray(scores).dtype
@@ -585,7 +585,7 @@ def _precheck_inputs(
     Fixes E3-002, E5-001.
 
     Returns:
-        NaN if one class is empty (n_pos==0 or n_neg==0) — v82 P0-F12.
+        NaN if one class is empty (n_pos==0 or n_neg==0) -- v82 P0-F12.
         0.5 if scores do not separate classes (single unique score).
         None if normal computation should proceed.
 
@@ -593,7 +593,7 @@ def _precheck_inputs(
         EvaluationInputError: If either array is empty.
     """
     # v82 ROOT FIX (P0-F12): empty pos or neg arrays produce UNDEFINED
-    # AUC — return NaN instead of 0.5 to prevent macro-average inflation.
+    # AUC -- return NaN instead of 0.5 to prevent macro-average inflation.
     if len(pos_scores) == 0 or len(neg_scores) == 0:
         _log_structured(
             logging.WARNING,
@@ -602,7 +602,7 @@ def _precheck_inputs(
             n_neg=len(neg_scores),
             message=(
                 "compute_auc returning NaN because one class is empty "
-                "(n_pos=0 or n_neg=0). This AUC is UNDEFINED — "
+                "(n_pos=0 or n_neg=0). This AUC is UNDEFINED -- "
                 "exclude it from macro-averages. (v82 P0-F12 root fix)"
             ),
         )
@@ -621,7 +621,7 @@ def _precheck_inputs(
                 "compute_auc returning 0.5 because pos and neg scores "
                 "do not separate (single unique score across both "
                 "arrays). This usually indicates a model bug or a "
-                "data-loading bug — DO NOT use this AUC for launch "
+                "data-loading bug -- DO NOT use this AUC for launch "
                 "decisions. (M-22)"
             ),
         )
@@ -642,13 +642,13 @@ def _detect_leakage(
         for ps in pos_scores:
             n_overlap += int(np.sum(np.isclose(neg_scores, ps, atol=tol)))
     which is O(N*M) where N=len(pos) and M=len(neg). For a 5K-pos /
-    50K-neg validation set, that was 250M np.isclose calls — adding
+    50K-neg validation set, that was 250M np.isclose calls -- adding
     ~18s to every AUC computation. The fix uses ``np.isin`` with a
     rounded-key trick: round both arrays to ``tol`` precision, then
     do a single set-intersection via ``np.isin``. This is O(N+M) on
     average (NumPy uses a hash set internally) and produces identical
     results for the ``tol=1e-12`` default. For non-default tols, we
-    fall back to the original nested loop (rare in practice — the
+    fall back to the original nested loop (rare in practice -- the
     default is what every caller uses).
 
     Args:
@@ -692,7 +692,7 @@ def _detect_false_negatives(
     Fixes E5-005.
 
     v35 ROOT FIX (M-9): the previous code silently returned when
-    either ``pos_ids`` or ``neg_ids`` was None — logging only a
+    either ``pos_ids`` or ``neg_ids`` was None -- logging only a
     DEBUG message that was invisible at the default INFO log level.
     This meant a caller that forgot to pass IDs would silently skip
     the integrity check, and downstream metrics could be inflated by
@@ -853,7 +853,7 @@ def _check_authorization(
         _log_structured(
             logging.DEBUG,
             "authorization_skipped",
-            reason="DRUGOS_EVAL_ROLE not set — development mode",
+            reason="DRUGOS_EVAL_ROLE not set -- development mode",
         )
         return
     if role == "read_only" and operation != "read":
@@ -958,7 +958,7 @@ def compute_score_distribution(
 
     v35 ROOT FIX (L-20 / L-37): document truncation behavior and
     batch the computation. The function drops NaN and Inf values
-    before computing statistics — this is the ``truncation`` the
+    before computing statistics -- this is the ``truncation`` the
     docstring warned about. Callers that need to know how many
     values were dropped should inspect the ``n_nan`` and ``n_inf``
     fields in the returned dict (they are computed against the
@@ -996,7 +996,7 @@ def compute_score_distribution(
             "n_inf": n_inf,
             "n_unique": 0,
             # v100 ROOT FIX (BUG P2-033): n_ties=0 for empty arrays is
-            # cosmetic but misleading — it implies "no ties observed"
+            # cosmetic but misleading -- it implies "no ties observed"
             # when in fact no scores were available to evaluate. Use
             # NaN (matches the other stats) so the empty-array case is
             # distinguishable from the legitimate 0-ties case (a non-
@@ -1021,15 +1021,17 @@ def compute_score_distribution(
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# PUBLIC API — AUC Computation
+# PUBLIC API -- AUC Computation
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
 def compute_auc(
     pos_scores: np.ndarray,
     neg_scores: np.ndarray,
-    higher_is_better: bool = False,
+    higher_is_better: Optional[bool] = None,
     *,
+    model: Optional[Any] = None,
+    model_score_direction: Optional[str] = None,
     allow_nan: bool = False,
 ) -> float:
     """Compute AUC (Area Under ROC Curve) for link prediction.
@@ -1048,15 +1050,47 @@ def compute_auc(
         correct; the docstring was wrong. Lower distance => more
         plausible triple. Therefore, for TransE-derived scores,
         ``higher_is_better=False`` is the SCIENTIFICALLY CORRECT
-        default. Scores are negated before AUC so that "positive
+        value. Scores are negated before AUC so that "positive
         scores are higher" in the transformed space, matching the
         convention ``roc_auc_score``
         expects.
 
         For the Phase 3 Graph Transformer (dot-product attention),
         higher score => more plausible, so ``higher_is_better=True``
-        MUST be passed explicitly or set via
-        ``EvaluationConfig.default_higher_is_better``.
+        MUST be passed explicitly OR inferred from
+        ``model.score_direction == "higher_better"``.
+
+    P2-007 ROOT FIX (CRITICAL — AUC direction inference):
+        The previous signature defaulted ``higher_is_better=False``
+        (the TransE-correct value). For HGT / GraphTransformer
+        (where higher score = more plausible via sigmoid), the caller
+        HAD to pass ``higher_is_better=True`` explicitly. Any caller
+        that forgot got an INVERTED AUC (a 0.90 model reported as
+        0.10), and the training loop's ``best_val_auc`` check picked
+        the WORST epoch as the best — patient-safety blocker.
+
+        ROOT FIX: ``higher_is_better`` is now OPTIONAL (default
+        ``None``) and is RESOLVED from (in priority order):
+
+          1. Explicit ``higher_is_better`` argument (backward compat).
+          2. ``model_score_direction`` keyword (string
+             ``"lower_better"`` or ``"higher_better"``).
+          3. ``model.score_direction`` attribute (per
+             ``KGEmbeddingModel`` Protocol).
+
+        If NONE of the three is provided, the function RAISES
+        ``EvaluationInputError``. An operator who wants the legacy
+        silent-default behaviour can set
+        ``DRUGOS_ALLOW_DEFAULT_AUC_DIRECTION=1`` (NOT recommended
+        for production — it is the exact foot-gun this fix removes).
+
+        Backward compatibility: every existing in-repo caller
+        (``run_pipeline.py:7579``, ``run_pipeline.py:7712``,
+        ``evaluation.py:2420``) already passes ``higher_is_better``
+        explicitly, so this change is non-breaking for production
+        code. Test files that relied on the implicit ``False``
+        default must be updated to pass it explicitly (or pass the
+        model) — the raise-on-first-call contract is intentional.
 
     Examples
     --------
@@ -1068,14 +1102,36 @@ def compute_auc(
     1.0
     >>> compute_auc(pos, neg, higher_is_better=True)
     0.0
+    >>> # P2-007: infer from model.score_direction
+    >>> class FakeTransE:
+    ...     score_direction = "lower_better"
+    >>> compute_auc(pos, neg, model=FakeTransE())
+    1.0
 
     Args:
         pos_scores: Scores for positive (true) edges.
         neg_scores: Scores for negative (false) edges.
         higher_is_better: If True, higher scores indicate more likely
-            positives (e.g. cosine similarity). If False (default
-            for TransE), lower scores indicate more likely positives
-            and scores are negated before computing AUC.
+            positives (e.g. cosine similarity). If False, lower scores
+            indicate more likely positives and scores are negated
+            before computing AUC. If ``None`` (default), the value is
+            resolved from ``model_score_direction`` or
+            ``model.score_direction``; if neither is provided the
+            function raises ``EvaluationInputError`` (P2-007 root
+            fix — prevents silent AUC inversion for HGT callers).
+        model: Optional KG embedding model implementing the
+            ``KGEmbeddingModel`` Protocol (see ``model_protocol.py``).
+            When provided AND ``higher_is_better`` is None, the
+            function reads ``model.score_direction`` (one of
+            ``"lower_better"`` / ``"higher_better"``) to infer the
+            direction. This is the PREFERRED call shape for any
+            model-aware evaluation path — it makes the AUC
+            direction impossible to forget.
+        model_score_direction: Optional string override (one of
+            ``"lower_better"`` / ``"higher_better"``) for callers
+            that have the direction as a string but not a model
+            instance. Lower priority than ``higher_is_better``;
+            higher priority than ``model.score_direction``.
         allow_nan: If True, NaN scores are dropped with a warning.
             Default False (raises EvaluationInputError).
 
@@ -1084,17 +1140,150 @@ def compute_auc(
 
     Raises:
         EvaluationInputError: If inputs are empty, contain NaN/Inf,
-            or have other validation failures.
+            have other validation failures, OR if no AUC direction
+            can be resolved (P2-007 root fix).
         EvaluationIntegrityError: If computed AUC is out of [0, 1]
             or sklearn/manual paths disagree.
         EvaluationError: For unexpected errors (wraps raw exceptions).
 
     References:
-        Mann & Whitney (1947) — see ``MANN_WHITNEY_REFERENCE``.
-        Bordes et al. (2013) — see ``BORDES_2013_REFERENCE``.
+        Mann & Whitney (1947) -- see ``MANN_WHITNEY_REFERENCE``.
+        Bordes et al. (2013) -- see ``BORDES_2013_REFERENCE``.
     """
-    # Fixes E9-004 — authorization check
+    # Fixes E9-004 -- authorization check
     _check_authorization("compute_auc")
+
+    # ── P2-007 ROOT FIX: resolve AUC direction ─────────────────────────
+    # ``higher_is_better`` MUST be determinable. The previous code
+    # silently defaulted to ``False`` (TransE-correct), which INVERTS
+    # the AUC for HGT / GraphTransformer callers that forget to pass
+    # ``higher_is_better=True``. A 0.90 HGT AUC silently reports as
+    # 0.10, the training loop picks the WORST epoch as the best, and
+    # the deployed model ranks drugs BACKWARDS — patient-safety
+    # blocker. The fix refuses to guess; callers MUST declare the
+    # direction explicitly OR pass the model (which declares it via
+    # the ``KGEmbeddingModel`` Protocol).
+    if higher_is_better is None:
+        if model_score_direction is not None:
+            _sd = str(model_score_direction).strip().lower()
+            if _sd not in ("lower_better", "higher_better"):
+                raise EvaluationInputError(
+                    f"compute_auc: model_score_direction="
+                    f"{model_score_direction!r} is not one of "
+                    f"'lower_better' / 'higher_better'. "
+                    f"(P2-007 root fix — prevents silent AUC inversion)",
+                    context={
+                        "reason": "invalid_score_direction",
+                        "model_score_direction": model_score_direction,
+                    },
+                )
+            higher_is_better = (_sd == "higher_better")
+        elif model is not None:
+            # Read score_direction from the model per the
+            # KGEmbeddingModel Protocol (see model_protocol.py).
+            _sd_attr = getattr(model, "score_direction", None)
+            if _sd_attr is None:
+                # Backward compat: legacy models used the boolean
+                # ``score_higher_is_better`` attribute before the
+                # Protocol standardised on the string form. Accept
+                # it with a deprecation warning so legacy model
+                # classes still work.
+                _legacy_attr = getattr(model, "score_higher_is_better", None)
+                if isinstance(_legacy_attr, bool):
+                    _log_structured(
+                        logging.WARNING,
+                        "compute_auc_legacy_score_attr",
+                        message=(
+                            "Model passed to compute_auc uses the "
+                            "deprecated 'score_higher_is_better' "
+                            "boolean attribute. Migrate to the "
+                            "'score_direction' string Protocol "
+                            "attribute ('lower_better' / "
+                            "'higher_better'). (P2-007 root fix)"
+                        ),
+                        model_class=type(model).__name__,
+                    )
+                    higher_is_better = bool(_legacy_attr)
+                else:
+                    raise EvaluationInputError(
+                        f"compute_auc: model {type(model).__name__} does "
+                        f"NOT declare 'score_direction' (Protocol "
+                        f"attribute) NOR the legacy "
+                        f"'score_higher_is_better' boolean. Cannot "
+                        f"infer AUC direction. Either pass "
+                        f"higher_is_better explicitly, OR add a "
+                        f"score_direction property to the model "
+                        f"returning 'lower_better' (TransE) or "
+                        f"'higher_better' (HGT/GraphTransformer). "
+                        f"(P2-007 root fix — prevents silent AUC "
+                        f"inversion for HGT callers)",
+                        context={
+                            "reason": "model_missing_score_direction",
+                            "model_class": type(model).__name__,
+                        },
+                    )
+            else:
+                _sd = str(_sd_attr).strip().lower()
+                if _sd not in ("lower_better", "higher_better"):
+                    raise EvaluationInputError(
+                        f"compute_auc: model {type(model).__name__}."
+                        f"score_direction={_sd_attr!r} is not one of "
+                        f"'lower_better' / 'higher_better'. "
+                        f"(P2-007 root fix)",
+                        context={
+                            "reason": "invalid_model_score_direction",
+                            "model_class": type(model).__name__,
+                            "score_direction": _sd_attr,
+                        },
+                    )
+                higher_is_better = (_sd == "higher_better")
+        else:
+            # No direction source — refuse to guess. Allow an
+            # environment-variable escape hatch for legacy callers
+            # that have not yet been migrated (NOT recommended for
+            # production; the entire point of this fix is to make
+            # the silent default impossible).
+            import os as _os_p2_007
+            _allow_default = _os_p2_007.environ.get(
+                "DRUGOS_ALLOW_DEFAULT_AUC_DIRECTION", ""
+            ) == "1"
+            if _allow_default:
+                _log_structured(
+                    logging.WARNING,
+                    "compute_auc_default_direction_used",
+                    message=(
+                        "compute_auc called with no "
+                        "higher_is_better / model / "
+                        "model_score_direction. "
+                        "DRUGOS_ALLOW_DEFAULT_AUC_DIRECTION=1 is "
+                        "set — falling back to the legacy TransE "
+                        "default (higher_is_better=False). THIS "
+                        "IS THE EXACT FOOT-GUN THE P2-007 ROOT "
+                        "FIX REMOVES — passing the model (or the "
+                        "explicit bool) is the production-grade "
+                        "call shape."
+                    ),
+                )
+                higher_is_better = False
+            else:
+                raise EvaluationInputError(
+                    "compute_auc: cannot resolve AUC direction. "
+                    "Pass higher_is_better explicitly (bool), OR "
+                    "pass model=<KGEmbeddingModel> (the function "
+                    "will read model.score_direction), OR pass "
+                    "model_score_direction='lower_better' / "
+                    "'higher_better'. The silent default was "
+                    "removed because it INVERTED the AUC for HGT "
+                    "callers (a 0.90 HGT model reported as 0.10) "
+                    "— patient-safety blocker. To restore the "
+                    "legacy TransE-correct default for an "
+                    "unmigrated caller, set "
+                    "DRUGOS_ALLOW_DEFAULT_AUC_DIRECTION=1 in the "
+                    "environment. (P2-007 root fix)",
+                    context={
+                        "reason": "auc_direction_not_resolvable",
+                    },
+                )
 
     try:
         pos_scores = _validate_score_array(
@@ -1104,14 +1293,14 @@ def compute_auc(
             neg_scores, "neg_scores", allow_nan=allow_nan
         )
 
-        # Fixes E5-002 — leakage detection
+        # Fixes E5-002 -- leakage detection
         leakage = _detect_leakage(pos_scores, neg_scores)
         if leakage["likely_same_array"]:
-            # v43 ROOT FIX (P1 — _detect_leakage crashes on untrained HGT):
+            # v43 ROOT FIX (P1 -- _detect_leakage crashes on untrained HGT):
             # The previous code raised EvaluationIntegrityError whenever
             # pos and neg score arrays were >50% identical. An UNTRAINED
-            # HGT model produces all-0.5 scores (sigmoid of 0) → overlap
-            # ratio = 1.0 → raise. This conflates "data leakage" with
+            # HGT model produces all-0.5 scores (sigmoid of 0) -> overlap
+            # ratio = 1.0 -> raise. This conflates "data leakage" with
             # "model produced identical scores". Untrained ≠ leaked.
             # The fix: distinguish DEGENERATE scores (all pos == all neg
             # == same constant) from TRUE leakage (pos and neg overlap
@@ -1120,7 +1309,7 @@ def compute_auc(
             # leakage still raises.
             # P2-010 ROOT FIX: choose atol based on the score dtype.
             # The previous code used atol=1e-12 which is too tight for
-            # fp16/bf16 ChemBERTa features — a model trained on
+            # fp16/bf16 ChemBERTa features -- a model trained on
             # insufficient data that produces NEARLY identical (but
             # not bit-identical) pos/neg scores (e.g. pos=[0.51,...]
             # vs neg=[0.49,...]) had overlap_ratio=0 and was NOT
@@ -1154,7 +1343,7 @@ def compute_auc(
                     message=(
                         "Pos and neg score arrays are both constant "
                         "(all values identical). This is NOT data leakage "
-                        "— it indicates an untrained model (e.g. HGT "
+                        "-- it indicates an untrained model (e.g. HGT "
                         "before training produces all-0.5 sigmoid scores). "
                         "AUC will be 0.5 by definition. Proceeding without "
                         "raising EvaluationIntegrityError."
@@ -1173,7 +1362,7 @@ def compute_auc(
                     },
                 )
         elif leakage["overlap_ratio"] > 0.05:
-            # v100 ROOT FIX (BUG P2-026 — arbitrary threshold documentation):
+            # v100 ROOT FIX (BUG P2-026 -- arbitrary threshold documentation):
             # The 5% overlap threshold for the WARNING (vs raising
             # EvaluationIntegrityError at higher overlaps) is documented
             # here so the choice is auditable. The threshold comes from
@@ -1182,13 +1371,13 @@ def compute_auc(
             # sigmoid(0)=0.5 for untrained nodes, tied scores from
             # finite-precision reduction). Collisions under 5% are
             # statistically negligible for the Mann-Whitney U statistic
-            # (the AUC estimator) — they shift the AUC by < 0.005,
+            # (the AUC estimator) -- they shift the AUC by < 0.005,
             # well below the V1 launch criterion's 0.85 threshold.
             # Overlaps above 5% indicate either (a) a data pipeline bug
             # (the same triple appearing in both pos and neg sets) or
             # (b) a degenerate model (all-0.5 sigmoid outputs). Both
             # warrant operator attention but neither automatically
-            # invalidates the AUC — hence WARNING, not raise. The
+            # invalidates the AUC -- hence WARNING, not raise. The
             # threshold is configurable via the DRUGOS_LEAKAGE_WARN_PCT
             # env var (default 0.05) for operators who need stricter
             # or looser bounds.
@@ -1207,24 +1396,24 @@ def compute_auc(
                     threshold=_warn_pct,
                 )
 
-        # Fixes E3-002 — pre-check for single-class inputs
+        # Fixes E3-002 -- pre-check for single-class inputs
         precheck = _precheck_inputs(pos_scores, neg_scores)
         if precheck is not None:
             return precheck
 
-        # v53 ROOT FIX (P2-017 — AUC on imbalanced eval set):
+        # v53 ROOT FIX (P2-017 -- AUC on imbalanced eval set):
         # AUC is misleading when the positive:negative ratio is highly
         # skewed (e.g. 7 positives × 70 negatives = 1:10 ratio). The
         # Mann-Whitney U statistic has high variance with few positives.
         # ROOT FIX: log a WARNING when the ratio exceeds 1:5 or 5:1,
         # so operators know the AUC has a wide confidence interval.
-        # v100 ROOT FIX (BUG P2-044 — make imbalance BLOCKING for tiny
-        # eval sets): the v53 fix only logged a WARNING — the AUC was
+        # v100 ROOT FIX (BUG P2-044 -- make imbalance BLOCKING for tiny
+        # eval sets): the v53 fix only logged a WARNING -- the AUC was
         # still computed and returned, but for eval sets with < 30
         # positives AND ratio > 5:1 the Mann-Whitney U variance is so
         # high that the AUC is uninterpretable (the 95% CI can span
         # 0.65-0.95 for a 7-positive × 70-negative eval set). The DOCX
-        # V1 launch criterion requires >0.85 AUC — a 7-positive eval
+        # V1 launch criterion requires >0.85 AUC -- a 7-positive eval
         # set can produce AUC=0.85 ± 0.15, which is statistically
         # indistinguishable from random (0.5). ROOT FIX: raise
         # EvaluationIntegrityError when (pos:neg ratio > 5:1 OR
@@ -1244,7 +1433,7 @@ def compute_auc(
                         f"AUC computed on highly imbalanced eval set: "
                         f"{_n_pos} positives × {_n_neg} negatives "
                         f"(ratio 1:{_ratio:.1f}). The AUC confidence "
-                        f"interval is wide — interpret with caution. "
+                        f"interval is wide -- interpret with caution. "
                         f"For production V1 launch sign-off, use at "
                         f"least 30 positives and 30 negatives."
                     ),
@@ -1277,7 +1466,7 @@ def compute_auc(
                         (
                             f"AUC on eval set with {_n_pos} positives × "
                             f"{_n_neg} negatives (ratio 1:{_ratio:.1f}) "
-                            f"is statistically unreliable — the 95% CI "
+                            f"is statistically unreliable -- the 95% CI "
                             f"spans more than ±0.15 AUC. V1 launch "
                             f"sign-off requires ≥30 positives AND "
                             f"≥30 negatives for the AUC to be "
@@ -1296,7 +1485,7 @@ def compute_auc(
         sklearn_version = _check_sklearn_version()
 
         if sklearn_version is not None:
-            # sklearn available — fast path
+            # sklearn available -- fast path
             try:
                 from sklearn.metrics import roc_auc_score
 
@@ -1306,7 +1495,7 @@ def compute_auc(
                 scores = np.concatenate([pos_scores, neg_scores])
 
                 # v28 ROOT FIX (audit ML-12): the previous code used
-                # ``np.negative(scores, out=scores)`` — an IN-PLACE
+                # ``np.negative(scores, out=scores)`` -- an IN-PLACE
                 # mutation of the caller's concatenated array. Because
                 # ``scores`` was built via ``np.concatenate([pos_scores,
                 # neg_scores])`` it WAS a fresh array at this point,
@@ -1319,7 +1508,7 @@ def compute_auc(
                 # unary minus operator, which is non-mutating and
                 # documents intent ("we want the negated view for
                 # AUC computation only, the caller's data is
-                # unchanged"). Also fixes E4-005 properly — the
+                # unchanged"). Also fixes E4-005 properly -- the
                 # in-place form was claimed to be the E4-005 fix, but
                 # in-place mutation is exactly the E4-005 root cause.
                 if not higher_is_better:
@@ -1328,7 +1517,7 @@ def compute_auc(
                 auc = roc_auc_score(labels, scores)
                 auc = float(auc)
 
-                # Fixes E7-001 — verify agreement with manual path
+                # Fixes E7-001 -- verify agreement with manual path
                 from .config import EVALUATION_CONFIG
 
                 if EVALUATION_CONFIG.verify_sklearn_agreement:
@@ -1379,7 +1568,7 @@ def compute_auc(
             except EvaluationReproducibilityError:
                 raise
             except ValueError as e:
-                # Fixes E6-001, E3-002 — handle sklearn ValueError
+                # Fixes E6-001, E3-002 -- handle sklearn ValueError
                 if "single class" in str(e).lower() or "only one" in str(e).lower():
                     _log_structured(
                         logging.WARNING,
@@ -1406,7 +1595,7 @@ def compute_auc(
                     },
                 ) from e
         else:
-            # sklearn not available — manual path
+            # sklearn not available -- manual path
             strategy = EVALUATION_FALLBACK_STRATEGY
             if strategy == "fail":
                 raise EvaluationError(
@@ -1420,7 +1609,7 @@ def compute_auc(
                     strategy=strategy,
                 )
             # v39 ROOT FIX (P2 #15): when sklearn is not installed,
-            # verify_sklearn_agreement is silently skipped — no warning
+            # verify_sklearn_agreement is silently skipped -- no warning
             # is logged. The "bit-identical to sklearn" claim is
             # silently false in any environment without sklearn. The
             # fix: log an explicit WARNING so operators know the
@@ -1433,14 +1622,14 @@ def compute_auc(
                         "sklearn_agreement_skipped",
                         reason="sklearn_not_installed",
                         message="verify_sklearn_agreement=True but sklearn "
-                                "is not installed — AUC verification SKIPPED. "
+                                "is not installed -- AUC verification SKIPPED. "
                                 "The manual AUC path is used without cross-"
                                 "validation against sklearn. Install sklearn "
                                 "(pip install scikit-learn) to enable "
                                 "verification. (v39 P2 #15 fix)",
                     )
             except (ImportError, AttributeError, ValueError, RuntimeError):  # v85 FORENSIC ROOT FIX (BUG #51)
-                pass  # defensive — don't let logging fail the AUC computation
+                pass  # defensive -- don't let logging fail the AUC computation
             EVALUATION_TRANSFORMATIONS_LOG.append(
                 {"action": "auc_via_manual", "reason": "sklearn_unavailable"}
             )
@@ -1459,7 +1648,7 @@ def compute_auc(
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# MANUAL AUC — Canonical Implementation
+# MANUAL AUC -- Canonical Implementation
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
@@ -1509,7 +1698,7 @@ def _manual_auc(
     # in the test set, the AUC for that relation should be reported as
     # NaN/None, NOT 0.5. Returning 0.5 (random baseline) for a relation
     # with zero positive edges artificially inflates the macro-average
-    # AUC — a model that has never seen a positive example for a
+    # AUC -- a model that has never seen a positive example for a
     # relation is NOT performing at random-chance level on that relation;
     # the metric is undefined. Callers computing per-relation or macro-
     # average AUC MUST exclude NaN entries from the average.
@@ -1521,7 +1710,7 @@ def _manual_auc(
             n_neg=n_neg,
             message=(
                 "_manual_auc returning NaN because one class is empty "
-                "(n_pos=0 or n_neg=0). This AUC is UNDEFINED — "
+                "(n_pos=0 or n_neg=0). This AUC is UNDEFINED -- "
                 "exclude it from macro-averages. (v82 P0-F12 root fix)"
             ),
         )
@@ -1545,7 +1734,7 @@ def _manual_auc(
                              np.zeros(n_neg, dtype=np.float64)])
 
     # Compute ranks using average tie-breaking (Wilcoxon half-credit)
-    # Fixes E4-001, E7-002 — vectorized, order-independent
+    # Fixes E4-001, E7-002 -- vectorized, order-independent
     order = np.argsort(all_scores, kind="mergesort")
     sorted_scores = all_scores[order]
     sorted_labels = labels[order]
@@ -1584,7 +1773,7 @@ def _manual_auc(
         # lower=better (TransE default): AUC = P(pos < neg) = 1 - P(pos > neg)
         auc = 1.0 - u_statistic / (n_pos * n_neg)
 
-    # Fixes E6-002 — clamp to [0, 1] for floating-point safety
+    # Fixes E6-002 -- clamp to [0, 1] for floating-point safety
     clamped = max(0.0, min(1.0, float(auc)))
     if clamped != auc:
         _log_structured(
@@ -1604,7 +1793,7 @@ def _manual_auc(
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# PUBLIC API — Ranking Metrics
+# PUBLIC API -- Ranking Metrics
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
@@ -1896,7 +2085,7 @@ def hits_at_k(
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# BUILDER / FACTORY — Ranked List Construction
+# BUILDER / FACTORY -- Ranked List Construction
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
@@ -1988,7 +2177,7 @@ def _coerce_to_ranked_list(
 ) -> List[RankedItem]:
     """Coerce numpy arrays of scores and labels to a ranked list.
 
-    Fixes E2-001 — allows numpy-array inputs for ranking functions.
+    Fixes E2-001 -- allows numpy-array inputs for ranking functions.
     """
     items = []
     for i in range(len(scores)):
@@ -2014,8 +2203,8 @@ def _compute_all_ranking_metrics(
 ) -> Dict[str, Any]:
     """Compute P@K, R@K, MRR, Hits@K in a single pass per ranked list.
 
-    Fixes E8-002 — eliminates 4-pass iteration over ranked_lists.
-    FIX-P4-10 (v42): return type relaxed to Dict[str, Any] — the dict
+    Fixes E8-002 -- eliminates 4-pass iteration over ranked_lists.
+    FIX-P4-10 (v42): return type relaxed to Dict[str, Any] -- the dict
     mixes float metric values with bool (``*_is_filtered``) and str
     (``*_setting``) metadata, plus int (``_n_ranked_lists_*``) input-
     quality counters.
@@ -2039,7 +2228,7 @@ def _compute_all_ranking_metrics(
     recall_sums: Dict[int, float] = {k: 0.0 for k in k_values}
     hits_sums: Dict[int, float] = {k: 0.0 for k in k_values}
     mrr_sum = 0.0
-    # v22 ROOT FIX (Audit section 7 finding 9 — "Non-filtered MRR"):
+    # v22 ROOT FIX (Audit section 7 finding 9 -- "Non-filtered MRR"):
     # the audit flagged that the previous code computed only the RAW
     # MRR (where other true positives in the candidate set inflate the
     # rank of the target triple) and reported it under the unqualified
@@ -2050,7 +2239,7 @@ def _compute_all_ranking_metrics(
     # literature (Bordes et al. 2013, Sun et al. 2019). For each
     # query, we remove OTHER true triples from the candidate ranking
     # before computing the rank of the target true triple. This
-    # requires the caller to pass ``other_true_triples_per_query`` —
+    # requires the caller to pass ``other_true_triples_per_query`` --
     # a list of sets of entity IDs that are ALSO true tails for the
     # same (head, relation) pair (excluding the target). When this
     # is None, the filtered metrics are not computed and only the raw
@@ -2086,13 +2275,13 @@ def _compute_all_ranking_metrics(
             # v72 ROOT FIX (P2C-022): the previous code had TWO branches
             # (strict_recall_denominator True / False) that BOTH did the
             # SAME thing: ``tp_count = sum(1 for _, _, t in ranked if t)``
-            # — the count of true positives IN THE RANKED LIST. This is
+            # -- the count of true positives IN THE RANKED LIST. This is
             # the EXACT bug E2-002 was supposed to prevent: Recall@K =
             # hits / total_positives, where total_positives is the count
             # in the ENTIRE evaluation set, NOT in the ranked list. If
             # the ranked list only contains top-K items, tp_count is at
             # most K, making Recall@K = hits/K which is Precision@K, not
-            # Recall@K. The strict flag was DEAD — both branches
+            # Recall@K. The strict flag was DEAD -- both branches
             # produced the same wrong value, and only an ERROR log (easy
             # to miss in production) signalled the problem.
             #
@@ -2102,7 +2291,7 @@ def _compute_all_ranking_metrics(
             # RAISE EvaluationInputError instead of silently producing a
             # wrong Recall value. This makes the DOCX V1 launch
             # criterion ">0.85 AUC on held-out drug-disease pairs"
-            # trustworthy — a Recall@K number in the report is now
+            # trustworthy -- a Recall@K number in the report is now
             # guaranteed to be a real Recall (denominator = full
             # evaluation set), never a mislabelled Precision@K. In
             # non-strict mode (unit tests / dev), fall back to the
@@ -2130,7 +2319,7 @@ def _compute_all_ranking_metrics(
                     f"denominator, NOT the count in the ranked list "
                     f"(which would make Recall@K == Precision@K). "
                     f"Caller MUST pass total_positives_per_query with one "
-                    f"entry per query. (P2C-022 root fix — the previous "
+                    f"entry per query. (P2C-022 root fix -- the previous "
                     f"strict_recall_denominator flag was dead code: both "
                     f"branches computed the same wrong value.) "
                     f"To override for dev/unit tests, pass "
@@ -2162,7 +2351,7 @@ def _compute_all_ranking_metrics(
 
         mrr_sum += rr
 
-        # v22: filtered MRR — remove other true triples from the
+        # v22: filtered MRR -- remove other true triples from the
         # ranking, then recompute the rank of the (first) true item.
         if other_true_triples_per_query is not None and qi < len(
             other_true_triples_per_query
@@ -2176,7 +2365,7 @@ def _compute_all_ranking_metrics(
                 # target). The target's eid is NOT in other_true_set
                 # by contract, so the target is preserved. Items with
                 # ``is_true=True`` that are NOT the target (i.e. other
-                # true tails) ARE removed — this is the standard
+                # true tails) ARE removed -- this is the standard
                 # filtered-setting protocol from Bordes 2013 / Sun 2019.
                 # The previous code had a bug: ``if is_true or (eid
                 # not in other_true_set)`` kept other-true items
@@ -2202,7 +2391,7 @@ def _compute_all_ranking_metrics(
                     if hits_filtered > 0:
                         hits_filtered_sums[k] += 1
             else:
-                # No other-true set for this query — filtered == raw.
+                # No other-true set for this query -- filtered == raw.
                 mrr_filtered_sum += rr
                 for k in k_values:
                     top_k = ranked[:k]
@@ -2244,7 +2433,7 @@ def _compute_all_ranking_metrics(
 
     metrics["mrr"] = _to_native_float(mrr_sum / n_queries)
 
-    # BUG-C-011 root fix — AUDIT_FIXES_v5.md #12 admitted filtered
+    # BUG-C-011 root fix -- AUDIT_FIXES_v5.md #12 admitted filtered
     # MRR/Hits@K was a TODO. Raw MRR (without removing other true
     # positives from the candidate set) is optimistically biased
     # because easy true positives inflate the rank of the target.
@@ -2292,7 +2481,7 @@ def _compute_all_ranking_metrics(
         metrics["ranking_setting"] = "filtered"
         metrics["_n_queries_with_other_true_set"] = n_queries_with_filter_set
 
-    # Input quality summary — Fixes E5-004
+    # Input quality summary -- Fixes E5-004
     metrics["_n_ranked_lists_unsorted"] = n_unsorted  # type: ignore[assignment]
     metrics["_n_ranked_lists_with_no_true"] = n_no_true  # type: ignore[assignment]
     for k in k_values:
@@ -2304,7 +2493,7 @@ def _compute_all_ranking_metrics(
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# PUBLIC API — Full Evaluation
+# PUBLIC API -- Full Evaluation
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
@@ -2371,7 +2560,7 @@ def evaluate_link_prediction(
             "return_nan".
         mlflow_tracker: Optional MLflowTracker instance for auto-logging.
         model_path: Optional path to model checkpoint for provenance.
-        other_true_triples_per_query: v22 — Optional list of sets of
+        other_true_triples_per_query: v22 -- Optional list of sets of
             entity IDs that are ALSO true tails for each query's
             (head, relation) pair (excluding the target triple).
             When provided, the FILTERED MRR / Hits@K (standard
@@ -2413,7 +2602,7 @@ def evaluate_link_prediction(
             neg_scores, "neg_scores"
         )
 
-        # Fixes E5-005 — false negative detection
+        # Fixes E5-005 -- false negative detection
         _detect_false_negatives(pos_triple_ids, neg_triple_ids)
 
         # Compute AUC
@@ -2447,10 +2636,10 @@ def evaluate_link_prediction(
                 else:
                     metrics[key] = _to_native_float(val)
 
-        # AUC path info — Fixes E11-003
+        # AUC path info -- Fixes E11-003
         metrics["_auc_algorithm"] = "sklearn" if _check_sklearn_version() is not None else "manual"
 
-        # Data quality report — Fixes E5-003
+        # Data quality report -- Fixes E5-003
         pos_dist = compute_score_distribution(pos_scores)
         neg_dist = compute_score_distribution(neg_scores)
         leakage = _detect_leakage(pos_scores, neg_scores)
@@ -2476,7 +2665,7 @@ def evaluate_link_prediction(
             "num_negatives": len(neg_scores),
         }
 
-        # Provenance — Fixes E16-001, E9-002
+        # Provenance -- Fixes E16-001, E9-002
         input_checksums = {
             "pos_scores_sha256": hashlib.sha256(
                 pos_scores.tobytes()
@@ -2498,22 +2687,22 @@ def evaluate_link_prediction(
             input_checksums=input_checksums
         )
 
-        # Timing — Fixes E11-005
+        # Timing -- Fixes E11-005
         t_end = time.perf_counter()
         duration_ms = (t_end - t_start) * 1000.0
         metrics["evaluation_duration_ms"] = _to_native_float(duration_ms)
 
-        # Seed — Fixes E7-004
+        # Seed -- Fixes E7-004
         metrics["seed"] = float(seed)
 
-        # Version info — Fixes E7-003, E14-002
-        # FIX-P4-10 (v42): removed ``# type: ignore[assignment]`` — the
+        # Version info -- Fixes E7-003, E14-002
+        # FIX-P4-10 (v42): removed ``# type: ignore[assignment]`` -- the
         # metrics dict is now declared ``Dict[str, Any]`` so the str
         # assignment type-checks cleanly.
         metrics["evaluation_metric_version"] = EVALUATION_METRIC_VERSION
         metrics["evaluation_schema_version"] = EVALUATION_SCHEMA_VERSION
 
-        # Build frozen result — Fixes E9-003
+        # Build frozen result -- Fixes E9-003
         # BUG-C-001 root fix: attach the raw model scores so the bootstrap
         # CI can resample from the observed distribution. Previously
         # ``getattr(result, "pos_scores", [])`` always returned ``[]``
@@ -2529,11 +2718,11 @@ def evaluate_link_prediction(
             neg_scores=neg_scores,
         )
 
-        # MLflow logging — Fixes E15-003
+        # MLflow logging -- Fixes E15-003
         if mlflow_tracker is not None:
             _log_to_mlflow(result, tracker=mlflow_tracker)
 
-        # Logging — Fixes E11-001, E11-002, E11-005
+        # Logging -- Fixes E11-001, E11-002, E11-005
         if log_results:
             _log_evaluation_results(metrics, quality_report)
 
@@ -2542,13 +2731,13 @@ def evaluate_link_prediction(
     except DrugOSDataError:
         if on_failure == "warn":
             logger.error(
-                "Evaluation failed — returning NaN metrics",
+                "Evaluation failed -- returning NaN metrics",
                 exc_info=True,
             )
             return _nan_result(seed)
         elif on_failure == "return_nan":
             logger.warning(
-                "Evaluation failed — returning NaN metrics"
+                "Evaluation failed -- returning NaN metrics"
             )
             return _nan_result(seed)
         raise
@@ -2573,7 +2762,7 @@ def _nan_result(seed: Optional[int] = None) -> EvaluationResult:
     P2-020 ROOT FIX: the previous _nan_result constructed an
     EvaluationResult without pos_scores/neg_scores. The bootstrap CI
     was then computed against N(0.3, 0.15) vs N(0.7, 0.15) synthetic
-    draws — NOT against the model's actual scores. The CI was reported
+    draws -- NOT against the model's actual scores. The CI was reported
     with synthetic=True, but consumers may not check this flag,
     silently presenting synthetic CIs as real model uncertainty.
     The fix: explicitly mark the result as synthetic in the
@@ -2627,10 +2816,10 @@ def _log_evaluation_results(
     _log_structured(logging.INFO, "evaluation_completed", **loggable)
     logger.info(msg)
 
-    # Audit hash — Fixes E9-002
+    # Audit hash -- Fixes E9-002
     audit_hash = metrics.get("audit_hash", "N/A")
 
-    # Data characteristics — Fixes E11-002
+    # Data characteristics -- Fixes E11-002
     if quality_report:
         _log_structured(
             logging.INFO,
@@ -2778,7 +2967,7 @@ def _log_to_mlflow(
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# PERFORMANCE — Streaming & Early Exit
+# PERFORMANCE -- Streaming & Early Exit
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
@@ -2792,7 +2981,7 @@ def auc_meets_threshold_fast(
 ) -> Optional[bool]:
     """Sampling-based early exit for AUC threshold checking.
 
-    NEVER use for final AUC reporting — only for training-loop
+    NEVER use for final AUC reporting -- only for training-loop
     early stopping. Final validation MUST use full ``compute_auc``.
 
     Fixes E8-004. FIX-P1-D-1 (root): propagate ``higher_is_better``
@@ -2814,11 +3003,11 @@ def auc_meets_threshold_fast(
 
     Returns:
         True (confident pass), False (confident fail), or None
-        (inconclusive — run full computation).
+        (inconclusive -- run full computation).
     """
     if seed is None:
         seed = SEED
-    # FIX-P4-11 (v42): was ``np.random.RandomState(seed)`` — the rest of
+    # FIX-P4-11 (v42): was ``np.random.RandomState(seed)`` -- the rest of
     # the codebase uses the modern ``np.random.default_rng(seed)``
     # Generator API. The legacy RandomState is frozen on numpy's old
     # MT19937 implementation and is deprecated for new code. The modern
@@ -2857,13 +3046,13 @@ def evaluate_link_prediction_streamed(
     Genuinely streams the input iterables into a single contiguous
     ``np.float64`` array via ``np.fromiter`` so that the peak memory
     cost is one final array per arm (no intermediate Python list of
-    chunks is materialised). Has slight overhead for small arrays —
+    chunks is materialised). Has slight overhead for small arrays --
     use only when needed.
 
     Fixes E8-003. FIX-P1-D-2 (root): the previous implementation
     called ``list(pos_scores_iter)`` on the iterable, materialising
     the ENTIRE sequence as a Python list of chunks and then
-    concatenating — using MORE peak memory than a single array. The
+    concatenating -- using MORE peak memory than a single array. The
     docstring promise ("Processes scores in chunks to reduce peak
     memory") was therefore violated. The new implementation uses
     ``np.fromiter`` to consume the iterable lazily into a flat
@@ -2911,7 +3100,7 @@ def evaluate_link_prediction_streamed(
             return np.concatenate(chunks) if chunks else np.zeros(0, dtype=np.float64)
         # Scalar stream: consume lazily without materialising a
         # Python list. np.fromiter needs a count for best perf but
-        # works without one — we use the no-count form so we don't
+        # works without one -- we use the no-count form so we don't
         # require the caller to know the length upfront.
         def _chain():
             yield first
@@ -2924,7 +3113,7 @@ def evaluate_link_prediction_streamed(
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# DATA LINEAGE — Comparison & Per-Prediction Breakdown
+# DATA LINEAGE -- Comparison & Per-Prediction Breakdown
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
@@ -2992,7 +3181,7 @@ def compute_per_prediction_breakdown(
     ``neg_scores > ps`` for the ``contributes_to_auc`` check, which
     assumes the TransE convention (lower score = more plausible
     positive). For the Graph Transformer (higher_is_better=True),
-    the inequality is INVERTED — the check incorrectly marked every
+    the inequality is INVERTED -- the check incorrectly marked every
     positive prediction as non-contributing and every negative as
     contributing. The new ``higher_is_better`` parameter flips the
     inequality direction when set, matching the AUC convention used
@@ -3006,7 +3195,7 @@ def compute_per_prediction_breakdown(
         higher_is_better: If ``False`` (default, TransE), a positive
             contributes to AUC when at least one negative has a
             HIGHER score than it (``neg_scores > ps``). If ``True``
-            (Graph Transformer / HGT), the inequality is flipped —
+            (Graph Transformer / HGT), the inequality is flipped --
             a positive contributes when at least one negative has a
             LOWER score than it (``neg_scores < ps``).
 
@@ -3019,9 +3208,9 @@ def compute_per_prediction_breakdown(
         if not np.isnan(ps):
             # FIX-P1-D-3: direction depends on the score convention.
             # lower=better (TransE): pos contributes when SOME neg
-            #   has a higher (worse) score — i.e. neg_scores > ps.
+            #   has a higher (worse) score -- i.e. neg_scores > ps.
             # higher=better (HGT): pos contributes when SOME neg has
-            #   a lower (worse) score — i.e. neg_scores < ps.
+            #   a lower (worse) score -- i.e. neg_scores < ps.
             if higher_is_better:
                 contributes = int(np.sum(neg_scores < ps))
             else:
@@ -3056,7 +3245,7 @@ def report_consolidated_standards(
     For FDA 21 CFR Part 11 submissions, the REGULATORY enforcement
     level MUST be set, which enables bootstrap CI and audit trail.
 
-    This function does NOT replace ``evaluate_link_prediction`` —
+    This function does NOT replace ``evaluate_link_prediction`` --
     it is an additional reporting layer.
 
     Fixes E14-003.
@@ -3112,7 +3301,7 @@ def _compute_bootstrap_ci(
 
             When ``True``, resample ``(pos, neg)`` PAIRS together by
             index. Use this mode when each positive score is paired
-            with a specific negative score — e.g. per-query AUC where
+            with a specific negative score -- e.g. per-query AUC where
             for each query ``i`` you have one ``pos_scores[i]`` and one
             ``neg_scores[i]``. Independent resampling destroys the
             within-query pairing structure and yields CIs that
@@ -3130,11 +3319,11 @@ def _compute_bootstrap_ci(
     from .config import EVALUATION_CONFIG
 
     rng_seed = EVALUATION_CONFIG.ci_seed or SEED
-    # FIX-P4-11 (v42): was ``np.random.RandomState(rng_seed)`` — switched
+    # FIX-P4-11 (v42): was ``np.random.RandomState(rng_seed)`` -- switched
     # to the modern ``np.random.default_rng`` Generator API for
     # consistency with the rest of the codebase. Note: this changes the
     # bit-stream (PCG64 vs MT19937), so CIs computed against historical
-    # checkpoints may shift slightly. The seed contract (same seed →
+    # checkpoints may shift slightly. The seed contract (same seed ->
     # reproducible CI) is preserved; only the underlying PRNG algorithm
     # changes.
     rng = np.random.default_rng(rng_seed)
@@ -3179,7 +3368,7 @@ def _compute_bootstrap_ci(
     # BUG-C-001 root fix: use the pos_scores / neg_scores fields that are
     # now populated by evaluate_link_prediction. The ``or []`` pattern
     # below cannot be used on numpy arrays because their truth value is
-    # ambiguous — use explicit None / len checks instead.
+    # ambiguous -- use explicit None / len checks instead.
     _raw_pos = _raw_pos_pre
     _raw_neg = _raw_neg_pre
     pos_scores = (
@@ -3194,7 +3383,7 @@ def _compute_bootstrap_ci(
     if len(pos_scores) < 2 or len(neg_scores) < 2:
         # v9 ROOT FIX (audit F6.3.10 / BUG-C-010): the previous code
         # silently fell back to a synthetic Gaussian distribution when
-        # raw scores were missing — producing invalid confidence
+        # raw scores were missing -- producing invalid confidence
         # intervals that LOOKED like real CIs. The synthetic=True flag
         # was added so consumers could detect degraded mode, but the
         # fallback STILL produced numbers instead of failing loudly.
@@ -3304,7 +3493,7 @@ def dump_transformation_log(path: str) -> None:
 # Fixes E4-003
 
 __all__: List[str] = [
-    # Core metric functions (7 original — all preserved per P4)
+    # Core metric functions (7 original -- all preserved per P4)
     "compute_auc",
     "precision_at_k",
     "recall_at_k",

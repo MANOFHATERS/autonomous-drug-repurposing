@@ -74,7 +74,7 @@ def _insert_drugs_and_proteins(session, drug_df, protein_df):
 
 
 # ============================================================================
-# 1. bulk_upsert_drugs — INSERT
+# 1. bulk_upsert_drugs -- INSERT
 # ============================================================================
 
 
@@ -93,7 +93,7 @@ class TestBulkUpsertDrugsInsert:
 
 
 # ============================================================================
-# 2. bulk_upsert_drugs — UPDATE (upsert)
+# 2. bulk_upsert_drugs -- UPDATE (upsert)
 # ============================================================================
 
 
@@ -134,7 +134,7 @@ class TestBulkUpsertDrugsUpdate:
 
 
 # ============================================================================
-# 3. bulk_upsert_drugs — empty DataFrame
+# 3. bulk_upsert_drugs -- empty DataFrame
 # ============================================================================
 
 
@@ -157,7 +157,7 @@ class TestBulkUpsertDrugsEmpty:
 
 
 # ============================================================================
-# 4. bulk_upsert_proteins — INSERT
+# 4. bulk_upsert_proteins -- INSERT
 # ============================================================================
 
 
@@ -177,7 +177,7 @@ class TestBulkUpsertProteinsInsert:
 
 
 # ============================================================================
-# 5. bulk_upsert_proteins — UPDATE
+# 5. bulk_upsert_proteins -- UPDATE
 # ============================================================================
 
 
@@ -206,7 +206,7 @@ class TestBulkUpsertProteinsUpdate:
 
 
 # ============================================================================
-# 6. bulk_upsert_dpi — INSERT with FK resolution
+# 6. bulk_upsert_dpi -- INSERT with FK resolution
 # ============================================================================
 
 
@@ -241,7 +241,7 @@ class TestBulkUpsertDpiInsert:
 
 
 # ============================================================================
-# 7. bulk_upsert_ppi — INSERT
+# 7. bulk_upsert_ppi -- INSERT
 # ============================================================================
 
 
@@ -278,7 +278,7 @@ class TestBulkUpsertPpiInsert:
 
 
 # ============================================================================
-# 8. bulk_upsert_gda — INSERT
+# 8. bulk_upsert_gda -- INSERT
 # ============================================================================
 
 
@@ -311,7 +311,7 @@ class TestBulkUpsertGdaInsert:
 
 
 # ============================================================================
-# 9. bulk_upsert_entity_mapping — INSERT
+# 9. bulk_upsert_entity_mapping -- INSERT
 # ============================================================================
 
 

@@ -141,7 +141,7 @@ def test_v31_feature_rng_instance_level():
 
     The V31 P1-11 fix introduced ``self._feature_rng`` to hoist the
     feature RNG to instance state. However, BUG #38 found that this
-    attribute was DEAD CODE — the per-drug feature computation uses
+    attribute was DEAD CODE -- the per-drug feature computation uses
     DEDICATED per-drug RNGs (``drug_rng = np.random.default_rng(drug_seed)``),
     NOT ``self._feature_rng``. The ``rng = self._feature_rng`` line at
     the top of each method was a DEAD assignment.
@@ -155,7 +155,7 @@ def test_v31_feature_rng_instance_level():
 
     # V90 BUG #38: _feature_rng must NOT exist (it was dead code, removed).
     assert not hasattr(bridge, '_feature_rng'), \
-        "V90 BUG #38: _feature_rng must be REMOVED (it was dead code — " \
+        "V90 BUG #38: _feature_rng must be REMOVED (it was dead code -- " \
         "the per-drug feature computation uses dedicated per-drug RNGs, " \
         "not self._feature_rng). The V31 P1-11 fix introduced it but the " \
         "rng = self._feature_rng assignment was never actually used."
@@ -170,8 +170,8 @@ def test_v31_feature_rng_instance_level():
     s3 = _deterministic_name_seed(42, 'metformin', 42)
     assert s1 != s3, "V90 COMPOUND #2: different drugs must get different seeds"
 
-    print("  PASS: V90 BUG #38 — _feature_rng dead code REMOVED. "
-          "V90 COMPOUND #2 — _deterministic_name_seed is reproducible.")
+    print("  PASS: V90 BUG #38 -- _feature_rng dead code REMOVED. "
+          "V90 COMPOUND #2 -- _deterministic_name_seed is reproducible.")
 
 
 def test_v31_top_k_novel_uses_raw_sigmoid():
@@ -289,7 +289,7 @@ def test_v31_end_to_end_smoke():
     # had already closed at indent 4). This caused ``compileall`` to
     # fail with IndentationError: unexpected indent (line 288), breaking
     # CI's Phase 3/4 build job for every PR. The duplicate code was a
-    # botched merge of BUG #18 → BUG #38 (both made the same assertion
+    # botched merge of BUG #18 -> BUG #38 (both made the same assertion
     # about ``_feature_rng`` being removed).
 
 

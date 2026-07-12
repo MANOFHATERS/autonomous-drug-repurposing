@@ -69,12 +69,25 @@ export async function searchClinicalTrials(params: {
 
   // Build the query expression the way ClinicalTrials.gov v2 expects.
   // Use the simpler query.cond and query.intr parameters when possible.
+  //
+  // FE-048 ROOT FIX: the previous code defined `escapeQuery` but never
+  // called it — `urlParams.set("query.cond", params.condition.trim())`
+  // URL-encoded the value (good for URL safety) but did NOT escape
+  // CT.gov's query syntax. An attacker passing
+  //   condition = "cancer AND (AREA[Phase]PHASE3)"
+  // could inject boolean operators and field qualifiers into the
+  // CT.gov query, manipulating result sets and potentially exfiltrating
+  // trial data from queries they should not be able to construct.
+  // The fix: pass cond/intr values through `escapeQuery`, which quotes
+  // the value when it contains any character that CT.gov's parser
+  // treats specially (whitespace, parens, quotes). Quoted values are
+  // treated as literal phrases by CT.gov, defeating injection.
   const urlParams = new URLSearchParams();
   if (params.condition && params.condition.trim()) {
-    urlParams.set("query.cond", params.condition.trim());
+    urlParams.set("query.cond", escapeQuery(params.condition.trim()));
   }
   if (params.intervention && params.intervention.trim()) {
-    urlParams.set("query.intr", params.intervention.trim());
+    urlParams.set("query.intr", escapeQuery(params.intervention.trim()));
   }
   if (!params.condition && !params.intervention) {
     urlParams.set("query", "*");
@@ -172,10 +185,22 @@ function normalizeTrial(p: any): ClinicalTrial {
   };
 }
 
-function escapeQuery(s: string): string {
-  // CT.gov's query parser treats some characters specially; quote the value
-  // when it contains spaces or punctuation to keep multi-word queries intact.
-  if (/[\s()"]/g.test(s)) {
+/**
+ * Escape a value for inclusion in a ClinicalTrials.gov v2 query expression.
+ *
+ * CT.gov's query parser treats whitespace, parens, and double-quotes as
+ * syntax — so a value containing any of those must be wrapped in double
+ * quotes (and any embedded double-quotes backslash-escaped) to be treated
+ * as a literal phrase. This is the same convention used by Elasticsearch's
+ * `query_string` parser, which CT.gov v2 uses under the hood.
+ *
+ * FE-048 ROOT FIX: this function was previously defined but never called
+ * (dead code). It is now invoked for every `query.cond` and `query.intr`
+ * value to prevent CT.gov query-syntax injection.
+ */
+export function escapeQuery(s: string): string {
+  if (typeof s !== "string" || s.length === 0) return '""';
+  if (/[\s()"]/.test(s)) {
     return `"${s.replace(/"/g, '\\"')}"`;
   }
   return s;

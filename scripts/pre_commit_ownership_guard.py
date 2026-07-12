@@ -4,11 +4,11 @@
 Runs in <0.1 seconds. No CI needed. Blocks commits that violate the
 ownership contract:
 
-  1. If you edit a file marked CLAIMED by another agent → BLOCK
-  2. If you edit a file marked DONE without bumping its status → WARN
-  3. If you edit an immutable migration (001-011) → BLOCK
+  1. If you edit a file marked CLAIMED by another agent -> BLOCK
+  2. If you edit a file marked DONE without bumping its status -> WARN
+  3. If you edit an immutable migration (001-011) -> BLOCK
   4. If you forget to update AGENTS_FILE_OWNERSHIP.md when claiming a
-     new file → WARN (remind them to claim)
+     new file -> WARN (remind them to claim)
 
 Install (run once, from repo root):
     cp scripts/pre_commit_ownership_guard.py .git/hooks/pre-commit
@@ -57,7 +57,7 @@ def parse_ownership_map() -> dict[str, dict]:
         # Skip header rows and separators
         if path.startswith("#") or path.startswith("---") or path.startswith("<"):
             continue
-        if path in ("file_or_dir", "—"):
+        if path in ("file_or_dir", "--"):
             continue
         ownership[path] = {
             "bug_ids": bug_ids.strip(),
@@ -81,7 +81,7 @@ def check_immutable_migrations(staged: set[str]) -> list[str]:
                 f"BLOCKED: {f} is an immutable migration (001-011). "
                 f"Editing applied migrations breaks the immutability contract. "
                 f"Create a NEW migration (013+) instead. "
-                f"See AGENTS_FILE_OWNERSHIP.md → IMMUTABLE FILES RULE."
+                f"See AGENTS_FILE_OWNERSHIP.md -> IMMUTABLE FILES RULE."
             )
     return errors
 
@@ -103,11 +103,11 @@ def check_claimed_files(staged: set[str], ownership: dict) -> list[str]:
         entry = ownership.get(f)
         if entry and entry["status"] == "CLAIMED":
             claimer = entry["agent"]
-            if claimer and claimer != current_agent and claimer != "—":
+            if claimer and claimer != current_agent and claimer != "--":
                 errors.append(
                     f"BLOCKED: {f} is CLAIMED by {claimer} (since {entry['timestamp']}). "
                     f"Branch: {entry['branch']}. Bug: {entry['bug_ids']}. "
-                    f"DO NOT TOUCH — pick another file or wait for {claimer} to finish. "
+                    f"DO NOT TOUCH -- pick another file or wait for {claimer} to finish. "
                     f"See AGENTS_FILE_OWNERSHIP.md."
                 )
     return errors
@@ -153,7 +153,7 @@ def check_new_file_claimed(staged: set[str], ownership: dict) -> list[str]:
 
 def main() -> int:
     if not OWNERSHIP_FILE.exists():
-        # Ownership file doesn't exist yet — skip checks (bootstrap mode)
+        # Ownership file doesn't exist yet -- skip checks (bootstrap mode)
         return 0
 
     staged = get_staged_files()
@@ -172,7 +172,7 @@ def main() -> int:
 
     if warnings:
         print("=" * 70)
-        print("OWNERSHIP GUARD — WARNINGS (commit will proceed):")
+        print("OWNERSHIP GUARD -- WARNINGS (commit will proceed):")
         print("=" * 70)
         for w in warnings:
             print(f"  ⚠️  {w}")
@@ -180,7 +180,7 @@ def main() -> int:
 
     if errors:
         print("=" * 70)
-        print("OWNERSHIP GUARD — ERRORS (commit BLOCKED):")
+        print("OWNERSHIP GUARD -- ERRORS (commit BLOCKED):")
         print("=" * 70)
         for e in errors:
             print(f"  🚫 {e}")

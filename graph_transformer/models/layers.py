@@ -52,7 +52,7 @@ if _TORCH_VERSION < (1, 12):
 if not hasattr(torch.Tensor, "scatter_reduce_"):
     raise RuntimeError(
         f"PyTorch {torch.__version__} is >= 1.12 but scatter_reduce_ is "
-        f"missing. This is unexpected — please report this as a bug. "
+        f"missing. This is unexpected -- please report this as a bug. "
         f"(F1 fix: feature detection fallback)"
     )
 # ---------------------------------------------------------------------------
@@ -69,17 +69,17 @@ class HeterogeneousMultiHeadAttention(nn.Module):
     SINGLE shared ``q_proj`` for all heads and per-edge-type K/V
     projections that were also shared across heads (just reshaped into
     ``(num_heads, head_dim)``). This is NOT standard multi-head attention
-    — it's "edge-type-aware single-head attention with multi-head scoring."
+    -- it's "edge-type-aware single-head attention with multi-head scoring."
     Standard MHA (Vaswani et al. 2017) has PER-HEAD Q/K/V projections,
     allowing each head to attend to different subspaces of the embedding.
 
     The root fix introduces PER-HEAD Q/K/V projections for each edge type:
-      - ``q_proj``: (embedding_dim, num_heads * head_dim) — projects all
+      - ``q_proj``: (embedding_dim, num_heads * head_dim) -- projects all
         nodes into per-head queries. Each head gets its own slice of the
         projection, so head h attends to a different subspace.
-      - ``k_proj[edge_key]``: (embedding_dim, num_heads * head_dim) —
+      - ``k_proj[edge_key]``: (embedding_dim, num_heads * head_dim) --
         per-edge-type, per-head keys.
-      - ``v_proj[edge_key]``: (embedding_dim, num_heads * head_dim) —
+      - ``v_proj[edge_key]``: (embedding_dim, num_heads * head_dim) --
         per-edge-type, per-head values.
 
     This matches the standard MHA formulation and gives each head
@@ -138,7 +138,7 @@ class HeterogeneousMultiHeadAttention(nn.Module):
         self.out_proj = nn.Linear(num_heads * self.head_dim, embedding_dim, bias=False)
 
         # ROOT FIX (FORENSIC-AUDIT-I05): separate self-loop projection.
-        # The previous code applied ``out_proj`` TWICE — once for self-loops
+        # The previous code applied ``out_proj`` TWICE -- once for self-loops
         # (with hardcoded weight 0.1) and once for the final output. The
         # composition ``out_proj(out_proj(...))`` is non-standard and doubles
         # the parameters' effective depth in an unprincipled way.
@@ -159,7 +159,7 @@ class HeterogeneousMultiHeadAttention(nn.Module):
         #     still TOO HIGH: combined with cross_type_norm ≈ 0.27 for 14
         #     edge types, a node with 3 incoming edge types receives a
         #     total edge message of 3 * 0.27 = 0.81, while the self-loop
-        #     contributes 0.5 — self-loops are ~38% of the total message,
+        #     contributes 0.5 -- self-loops are ~38% of the total message,
         #     disproportionately high for a "residual" connection.
         # The fix initializes to 1.0 (standard residual identity) and lets
         # gradient descent learn the right balance. With 1.0, the self-loop
@@ -187,7 +187,7 @@ class HeterogeneousMultiHeadAttention(nn.Module):
         # Standard HGT (Wang et al. 2019) either softmaxes across ALL edge
         # types jointly or divides by sqrt(num_edge_types).
         #
-        # We use the sqrt(num_edge_types) divisor — it preserves per-type
+        # We use the sqrt(num_edge_types) divisor -- it preserves per-type
         # attention patterns (each type still softmaxes independently) but
         # bounds the total message magnitude regardless of how many edge
         # types a node receives from. This is the same scheme used by
@@ -204,7 +204,7 @@ class HeterogeneousMultiHeadAttention(nn.Module):
         # scatter for the divisor), but the comment must NOT claim it's
         # per-node. Per-node normalization would require a separate
         # scatter to count incoming edge types per node, then a per-node
-        # divide — future work if hub-node saturation becomes a problem.
+        # divide -- future work if hub-node saturation becomes a problem.
         #
         # V90 ROOT FIX (BUG #17, P1): the divisor is now computed
         # DYNAMICALLY per forward call from the edge types that
@@ -222,7 +222,17 @@ class HeterogeneousMultiHeadAttention(nn.Module):
         # The fix: count active edge types per forward call and use
         # 1/sqrt(active_count). This is computed lazily (no buffer)
         # so it adapts to graph sparsity.
-        self._static_num_edge_types = max(1, len(self.edge_types))
+        #
+        # P3-017 ROOT FIX (DEAD CODE): removed
+        # ``self._static_num_edge_types = max(1, len(self.edge_types))``.
+        # This attribute was a LEFTOVER from the pre-V90 code that used a
+        # static buffer for the cross_type_norm divisor. After the V90
+        # BUG #17 fix made the divisor DYNAMIC (computed per forward call
+        # from active_edge_type_count), the static attribute was NEVER
+        # READ anywhere — not in forward(), not in any other method, not
+        # by any external caller. It was dead code that misled readers
+        # into thinking it was used for the divisor. Removing it makes
+        # the code honest about what's actually used at runtime.
 
         self.attn_dropout = nn.Dropout(dropout)
 
@@ -295,7 +305,7 @@ class HeterogeneousMultiHeadAttention(nn.Module):
         # P3-039 ROOT FIX (comment accuracy): the previous comment claimed
         # to "track which edge types actually contribute messages to each
         # target node, so we can apply per-node cross-type normalization".
-        # That was FALSE — no such tracking happens. The code applies the
+        # That was FALSE -- no such tracking happens. The code applies the
         # GLOBAL cross_type_norm (computed above from active_edge_type_count)
         # uniformly to all edge types and all target nodes. This is the
         # standard HGT approximation (avoids a costly per-node scatter for
@@ -303,7 +313,7 @@ class HeterogeneousMultiHeadAttention(nn.Module):
         # top of __init__ (see P3-039 fix there). The original V30 5.3
         # fix's intent (bound total message magnitude regardless of how
         # many edge types a node receives from) is achieved by the global
-        # divisor — a node receiving from K edge types gets total message
+        # divisor -- a node receiving from K edge types gets total message
         # K * (1/sqrt(active_count)) * |V|, which is bounded by
         # K * |V| / sqrt(active_count) <= sqrt(active_count) * |V|.
         for (src_type, rel_type, tgt_type), edge_idx in edge_indices.items():
@@ -335,7 +345,7 @@ class HeterogeneousMultiHeadAttention(nn.Module):
 
             # Gather K and V for source nodes (now indexing into the
             # src-only projection, not the full all_embeddings projection)
-            K_src = K[edge_idx[0]]  # (E, H, head_dim) — src indices are local to src_type
+            K_src = K[edge_idx[0]]  # (E, H, head_dim) -- src indices are local to src_type
             V_src = V[edge_idx[0]]  # (E, H, head_dim)
             Q_tgt = Q[tgt_nodes]  # (E, H, head_dim)
 
@@ -362,7 +372,7 @@ class HeterogeneousMultiHeadAttention(nn.Module):
             # common in enterprise pharma IT), this raises
             # ``AttributeError: 'ParameterDict' object has no attribute 'get'``
             # on every forward pass. Use an explicit membership check instead
-            # — this works on every PyTorch version and is semantically
+            # -- this works on every PyTorch version and is semantically
             # identical. By construction ``edge_key`` is always present in
             # ``self.edge_gates`` (built from ``self.edge_types`` at init),
             # so the fallback is only a defensive default for legacy graphs
@@ -479,7 +489,7 @@ class TransformerFFN(nn.Module):
     external dropout on FFN output (in GraphTransformerLayer.forward)
     AND the attention-weight dropout AND the attention-output dropout,
     each layer applied FIVE dropout masks. Across 4 layers this was 20
-    dropout masks, with signal survival ~8% — far below the standard
+    dropout masks, with signal survival ~8% -- far below the standard
     transformer's ~50%. The fix removes the redundant second internal
     dropout, leaving ONE internal dropout (standard transformer design:
     ReLU/GELU -> Dropout -> Linear -> (no dropout; the residual+LayerNorm
@@ -598,7 +608,7 @@ class GraphTransformerLayer(nn.Module):
         # weights. Standard HGT (Wang et al. 2019) uses per-node-type
         # FFNs (or at least per-node-type projections). Sharing the FFN
         # means the model cannot learn node-type-specific transformations
-        # — a drug's representation is transformed by the same weights
+        # -- a drug's representation is transformed by the same weights
         # as a disease's, which is biologically unprincipled.
         #
         # The fix: create a ModuleDict of per-node-type FFNs. If
@@ -659,7 +669,7 @@ class GraphTransformerLayer(nn.Module):
                 # continue processing the known node types while
                 # skipping normalization for the unknown type. The
                 # unknown type's embeddings will still flow through the
-                # attention and FFN layers — just without LayerNorm.
+                # attention and FFN layers -- just without LayerNorm.
                 # This is a graceful degradation: the model produces
                 # output for ALL node types, even if the unknown type's
                 # output is suboptimal.

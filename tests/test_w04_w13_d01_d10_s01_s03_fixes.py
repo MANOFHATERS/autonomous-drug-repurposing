@@ -1,5 +1,5 @@
 """
-V28 Forensic Audit Fixes — Test Suite for W-04..W-13, D-01..D-10, S-01..S-03.
+V28 Forensic Audit Fixes -- Test Suite for W-04..W-13, D-01..D-10, S-01..S-03.
 
 This test suite verifies each root-level fix applied in V28 to the V27
 codebase. Every test is a ROOT-LEVEL verification (not a surface check):
@@ -153,11 +153,18 @@ class TestW06UnifiedEvaluationPath(unittest.TestCase):
 
 
 class TestW07KPDrugsExcludedFromNegatives(unittest.TestCase):
-    """W-07: KP drugs excluded from negative sampling in train_model."""
+    """P3-021 SUPERSEDED W-07: KP drugs are now INCLUDED in the negative
+    sampling pool. The C-3 split (held_out_drugs=kp_drugs) STILL holds
+    KP drugs out of TRAINING — so KP drugs appear in val/test only
+    (for calibration), never in train. The old W-07 exclusion
+    (non_kp_drug_indices) was REMOVED because it was redundant given
+    C-3 and starved val/test of KP-drug-negative pairs."""
 
     def test_train_model_excludes_kp_drugs(self):
-        """train_model should sample negatives from non_kp_drug_indices only.
-        
+        """P3-021: negative sampling uses ALL drugs (incl. KP); C-3 split
+        holds KP drugs out of TRAINING. The old non_kp_drug_indices
+        pool is REMOVED.
+
         V90 ROOT FIX (BUG #5): the split logic was extracted into
         ``_compute_training_split()`` so the resume_from_checkpoint
         path can compute the SAME test split. We check BOTH methods' source.
@@ -166,22 +173,36 @@ class TestW07KPDrugsExcludedFromNegatives(unittest.TestCase):
         from graph_transformer.gt_rl_bridge import GTRLBridge
         source = (inspect.getsource(GTRLBridge.train_model)
                   + inspect.getsource(GTRLBridge._compute_training_split))
+        # P3-021: kp_drug_indices is STILL defined (used by the C-3 split
+        # as held_out_drugs, so KP drugs don't appear in TRAINING).
         self.assertIn(
             "kp_drug_indices",
             source,
-            "W-07: train_model or _compute_training_split should define "
-            "kp_drug_indices to exclude KP drugs from negative sampling.",
+            "P3-021: kp_drug_indices must still be defined (used by the "
+            "C-3 split as held_out_drugs to keep KP drugs out of TRAINING).",
         )
-        self.assertIn(
+        # P3-021: the OLD non_kp_drug_indices pool is REMOVED. The neg
+        # pool now uses ALL drugs (all_drug_indices_for_neg).
+        self.assertNotIn(
             "non_kp_drug_indices",
             source,
-            "W-07: should sample negatives from "
-            "non_kp_drug_indices (not range(num_drugs)).",
+            "P3-021: non_kp_drug_indices must be REMOVED — KP drugs are "
+            "now INCLUDED in the negative pool. C-3 (held_out_drugs) "
+            "keeps them out of TRAINING, so there is no conflicting signal.",
         )
         self.assertIn(
-            "ROOT FIX (W-07)",
+            "all_drug_indices_for_neg",
             source,
-            "W-07: train_model should have a ROOT FIX (W-07) comment.",
+            "P3-021: negative sampling must use all_drug_indices_for_neg "
+            "(ALL drugs, incl. KP) instead of the old non_kp pool.",
+        )
+        # P3-021: the C-3 hold-out must STILL be present (P3-021 does NOT
+        # remove C-3 — it only removes the W-07 neg-pool exclusion).
+        self.assertIn(
+            "held_out_drugs=held_out_drug_indices",
+            source,
+            "P3-021: C-3 hold-out (held_out_drugs=kp_drugs) must be "
+            "preserved — KP drugs still do NOT appear in TRAINING.",
         )
 
 
@@ -214,9 +235,9 @@ class TestW08RareDiseaseFlagPerDisease(unittest.TestCase):
         self.assertEqual(_is_rare_disease("cystic fibrosis"), 1)
         # v89: sickle cell disease IS rare (~100K US, orphan)
         self.assertEqual(_is_rare_disease("sickle cell disease"), 1)
-        # v89: Parkinson's is NOT rare (~1M US) — was incorrectly rare before
+        # v89: Parkinson's is NOT rare (~1M US) -- was incorrectly rare before
         self.assertEqual(_is_rare_disease("parkinson disease"), 0)
-        # v89: MS is NOT rare (~400K US, over 200K threshold) — was incorrectly rare before
+        # v89: MS is NOT rare (~400K US, over 200K threshold) -- was incorrectly rare before
         self.assertEqual(_is_rare_disease("multiple sclerosis"), 0)
         # Pain should NOT be flagged rare (common condition)
         self.assertEqual(_is_rare_disease("pain"), 0)
@@ -256,7 +277,7 @@ class TestW09RareThresholdAbsolute(unittest.TestCase):
     The v88 W-09 fix used an absolute pathway threshold (RARE_DISEASE_PATHWAY_THRESHOLD=2).
     The v89 fix replaces this with curated disease prevalence data from WHO/Orphanet.
     FDA/EU defines rare disease as prevalence <5 per 10K population. This is
-    scientifically correct — disease rarity is defined by PREVALENCE, not by
+    scientifically correct -- disease rarity is defined by PREVALENCE, not by
     graph topology (pathway count).
     """
 

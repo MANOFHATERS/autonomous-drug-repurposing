@@ -25,9 +25,9 @@ The 13 files (in dependency order):
   12. cleaning/normalizer.py
   13. cleaning/missing_values.py  ← the file upgraded in this session
 
-This is NOT a "files exist" smoke test — it exercises REAL end-to-end
-data flows through the full stack: raw DataFrames → cleaning → DB load
-→ DB query → output verification.
+This is NOT a "files exist" smoke test -- it exercises REAL end-to-end
+data flows through the full stack: raw DataFrames -> cleaning -> DB load
+-> DB query -> output verification.
 
 Run:  pytest tests/test_all_13_files_integration_v3.py -v
 """
@@ -50,7 +50,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 
 # ===========================================================================
-# Section 1: All 13 files exist (no files removed — Constraint #1)
+# Section 1: All 13 files exist (no files removed -- Constraint #1)
 # ===========================================================================
 
 
@@ -71,13 +71,13 @@ class TestAllThirteenFilesExist:
         "database/loaders.py",
         "cleaning/__init__.py",
         "cleaning/normalizer.py",
-        # 13th file — the one upgraded in this session
+        # 13th file -- the one upgraded in this session
         "cleaning/missing_values.py",
     ]
 
     @pytest.mark.parametrize("file_path", FILES)
     def test_file_exists(self, file_path):
-        """File must exist — no files removed (Constraint #1)."""
+        """File must exist -- no files removed (Constraint #1)."""
         full_path = PROJECT_ROOT / file_path
         assert full_path.exists(), f"File removed: {file_path}"
 
@@ -210,7 +210,7 @@ class TestInChIKeyContractConsistency:
 
 
 # ===========================================================================
-# Section 4: End-to-end pipeline flow — config -> DB -> cleaning
+# Section 4: End-to-end pipeline flow -- config -> DB -> cleaning
 # ===========================================================================
 
 
@@ -234,7 +234,7 @@ class TestEndToEndPipelineFlow:
         from cleaning.normalizer import standardize_inchikey
         from database.loaders import _validate_inchikey
 
-        # Use a SYNTH key — no RDKit required.
+        # Use a SYNTH key -- no RDKit required.
         standardized = standardize_inchikey("SYNTH-001")
         assert standardized is not None
         assert _validate_inchikey(standardized) == standardized
@@ -705,10 +705,10 @@ class TestSchemaValidationIntegration:
         """database.models._validate_inchikey rejects invalid InChIKeys."""
         from database.models import _validate_inchikey
 
-        # Valid SYNTH key — accepted.
+        # Valid SYNTH key -- accepted.
         assert _validate_inchikey("SYNTH-001") == "SYNTH-001"
 
-        # Invalid key — raises.
+        # Invalid key -- raises.
         with pytest.raises(ValueError):
             _validate_inchikey("INVALID")
 
@@ -721,7 +721,7 @@ class TestSchemaValidationIntegration:
         assert _validate_max_phase(4) == 4
         assert _validate_max_phase(None) is None
 
-        # Out of range — raises.
+        # Out of range -- raises.
         with pytest.raises(ValueError):
             _validate_max_phase(5)
         with pytest.raises(ValueError):
@@ -737,7 +737,7 @@ class TestFullPipelineSmoke:
     """Full end-to-end pipeline smoke test."""
 
     def test_full_drug_pipeline(self, db_session):
-        """End-to-end: raw drug data → cleaning → DB → query → verify."""
+        """End-to-end: raw drug data -> cleaning -> DB -> query -> verify."""
         import cleaning
         from database.models import Drug
         from cleaning.missing_values import handle_missing_inchikey, fill_missing_drug_fields
@@ -763,7 +763,7 @@ class TestFullPipelineSmoke:
         # 2. Run the full cleaning pipeline.
         cleaned = cleaning.clean_drugs(raw)
 
-        # 3. Insert into DB — skip rows with null inchikey (DB requires NOT NULL).
+        # 3. Insert into DB -- skip rows with null inchikey (DB requires NOT NULL).
         for _, row in cleaned.iterrows():
             if pd.isna(row["inchikey"]) or not row["inchikey"]:
                 continue
@@ -786,7 +786,7 @@ class TestFullPipelineSmoke:
         assert aspirin.name == "Aspirin"
 
     def test_full_protein_pipeline(self, db_session):
-        """End-to-end: raw protein data → cleaning → DB → query → verify."""
+        """End-to-end: raw protein data -> cleaning -> DB -> query -> verify."""
         from database.models import Protein
         from cleaning.missing_values import handle_missing_protein_fields
 
@@ -815,7 +815,7 @@ class TestFullPipelineSmoke:
         assert len(all_proteins) == 2
 
     def test_full_gda_pipeline(self, db_session):
-        """End-to-end: raw GDA data → cleaning → DB → query → verify."""
+        """End-to-end: raw GDA data -> cleaning -> DB -> query -> verify."""
         from database.models import GeneDiseaseAssociation
         from cleaning.missing_values import validate_gda_scores
 
@@ -927,7 +927,7 @@ class TestV3FeaturesIntegration:
         })
         result = clean_drugs(df, converter=lambda s: "SYNTH-FAKE")
         # Row 1: inchikey present, kept.
-        # Row 2: no inchikey, no smiles, but has name — kept (BUG-SCI-2 fix).
+        # Row 2: no inchikey, no smiles, but has name -- kept (BUG-SCI-2 fix).
         assert len(result) >= 1
 
     def test_clean_proteins_orchestrator(self):
@@ -966,7 +966,7 @@ class TestV3FeaturesIntegration:
         assert isinstance(result.df, pd.DataFrame)
         assert result.rows_dropped >= 0
 
-        # Load the cleaned DataFrame into the DB — skip rows with null inchikey.
+        # Load the cleaned DataFrame into the DB -- skip rows with null inchikey.
         loaded = 0
         for _, row in result.df.iterrows():
             if pd.isna(row["inchikey"]) or not row["inchikey"]:
@@ -984,7 +984,7 @@ class TestV3FeaturesIntegration:
         assert len(all_drugs) == loaded
 
     def test_conservative_defaults_prevent_rdkit_crash(self):
-        """conservative_defaults=True fills smiles with None (not '') — prevents RDKit crash."""
+        """conservative_defaults=True fills smiles with None (not '') -- prevents RDKit crash."""
         from cleaning.missing_values import fill_missing_drug_fields
 
         df = pd.DataFrame({"smiles": [None]})
@@ -1036,7 +1036,7 @@ class TestCircularDependencyGuard:
         assert callable(convert)
 
     def test_missing_values_module_imports_cleanly_after_normalizer(self):
-        """Import order doesn't matter — both modules load cleanly in any order.
+        """Import order doesn't matter -- both modules load cleanly in any order.
 
         Note: we do NOT use ``importlib.reload`` here because reloading
         ``cleaning.missing_values`` would replace the ``NullStrategy``

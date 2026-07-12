@@ -1790,34 +1790,45 @@ class PyGBuilder(GraphBuilderProtocol):
                     if rev_key not in data.edge_types:
                         edge_index = data[et].edge_index
                         if edge_index.numel() > 0:
+                            # P2-017 ROOT FIX (latent edge_attr bug):
+                            # The manual ``torch.flip(edge_index, [0])``
+                            # below only reverses ``edge_index``
+                            # (swaps src/dst per edge), NOT ``edge_attr``.
+                            # If ``edge_attr`` is ever added (e.g. for
+                            # edge confidence scores, attention bias),
+                            # the forward ``edge_attr`` would be paired
+                            # with the reversed ``edge_index``, producing
+                            # edges with WRONG attributes — silent
+                            # corruption. The v100 comment acknowledged
+                            # this but did not enforce it. ROOT FIX:
+                            # runtime assertion that ``edge_attr`` is
+                            # absent. If the assertion fires, the
+                            # developer MUST migrate to ``ToUndirected()``
+                            # from ``torch_geometric.transforms`` which
+                            # handles both ``edge_index`` and
+                            # ``edge_attr``.
+                            _existing_edge_attr = data[et].get(
+                                "edge_attr", None
+                            )
+                            assert (
+                                _existing_edge_attr is None
+                            ), (
+                                f"P2-017 ROOT FIX: edge type {et} has "
+                                f"edge_attr set (shape "
+                                f"{_existing_edge_attr.shape}). The "
+                                f"manual torch.flip(edge_index, [0]) "
+                                f"would reverse edge_index but NOT "
+                                f"edge_attr, producing reverse edges "
+                                f"with WRONG attributes. Migrate to "
+                                f"ToUndirected() from "
+                                f"torch_geometric.transforms which "
+                                f"handles both. (P2-017 root fix — "
+                                f"latent edge_attr corruption guard)"
+                            )
                             data[
                                 dst,
                                 f"{REVERSE_EDGE_PREFIX}{rel}",
                                 src,
-                            # v100 ROOT FIX (BUG P2-043 — HGT / No
-                            # ToUndirected): the manual
-                            # ``torch.flip(edge_index, [0])`` below
-                            # only reverses ``edge_index`` (swaps
-                            # src/dst per edge), NOT ``edge_attr``.
-                            # HGTConv in PyG 2.6+ expects
-                            # ``edge_index_dict`` to contain BOTH
-                            # directions for each edge type, AND if
-                            # ``edge_attr`` is present it must also be
-                            # reversed for the reverse edge type.
-                            # ROOT FIX (documentation): a grep confirms
-                            # ``edge_attr`` does NOT appear anywhere in
-                            # pyg_builder.py outside comments, so this
-                            # pipeline never sets ``edge_attr`` — the
-                            # manual flip is functionally correct HERE.
-                            # If a future change adds ``edge_attr``,
-                            # replace BOTH ``torch.flip`` call sites
-                            # (here and ~line 1773) with
-                            # ``ToUndirected()`` from
-                            # ``torch_geometric.transforms`` which
-                            # handles both ``edge_index`` and
-                            # ``edge_attr``. We do NOT replace now to
-                            # avoid changing behavior and risking a
-                            # pipeline regression.
                             ].edge_index = torch.flip(edge_index, [0])
 
             # Also add reverse for target type (needed by RandomLinkSplit)
@@ -1826,20 +1837,33 @@ class PyGBuilder(GraphBuilderProtocol):
             if rev_key not in data.edge_types:
                 edge_index = data[target_edge_type].edge_index
                 if edge_index.numel() > 0:
+                    # P2-017 ROOT FIX (latent edge_attr bug — second
+                    # torch.flip call site): see the matching assertion
+                    # above the first torch.flip call site (~line 1790)
+                    # for the full rationale. The manual flip only
+                    # reverses edge_index, not edge_attr; if edge_attr
+                    # is ever added, the reverse edges would carry the
+                    # WRONG attributes. Runtime assertion enforces the
+                    # invariant.
+                    _existing_edge_attr_t = data[target_edge_type].get(
+                        "edge_attr", None
+                    )
+                    assert (
+                        _existing_edge_attr_t is None
+                    ), (
+                        f"P2-017 ROOT FIX: target edge type "
+                        f"{target_edge_type} has edge_attr set (shape "
+                        f"{_existing_edge_attr_t.shape}). The manual "
+                        f"torch.flip(edge_index, [0]) would reverse "
+                        f"edge_index but NOT edge_attr, producing "
+                        f"reverse edges with WRONG attributes. "
+                        f"Migrate to ToUndirected() from "
+                        f"torch_geometric.transforms which handles "
+                        f"both. (P2-017 root fix — latent edge_attr "
+                        f"corruption guard, second call site)"
+                    )
                     data[
                         dst, f"{REVERSE_EDGE_PREFIX}{rel}", src
-                    # v100 ROOT FIX (BUG P2-043 — HGT / No
-                    # ToUndirected): see the matching comment at the
-                    # first ``torch.flip`` call site (~line 1763) for
-                    # the full rationale. In short: the manual flip
-                    # only reverses ``edge_index``, not ``edge_attr``;
-                    # this pipeline does NOT set ``edge_attr``
-                    # (grep-verified), so the manual flip is correct
-                    # HERE. If ``edge_attr`` is ever added, replace
-                    # BOTH ``torch.flip`` call sites with
-                    # ``ToUndirected()`` from
-                    # ``torch_geometric.transforms`` which handles
-                    # both ``edge_index`` and ``edge_attr``.
                     ].edge_index = torch.flip(edge_index, [0])
 
             # FIX(issue-19): seeded RandomLinkSplit for
@@ -2587,20 +2611,99 @@ class PyGBuilder(GraphBuilderProtocol):
                         # indexing during sampling.
                         split_src_list = sorted(split_src_ids)
                         split_dst_list = sorted(split_dst_ids)
-                        # Defensive: fall back to full-graph range if
-                        # the split has too few unique entities to
-                        # support negative generation (e.g. a split
-                        # with only 1 unique drug would produce 0
-                        # valid negatives with the inductive pool).
+                        # P2-018 ROOT FIX (transductive negative
+                        # fallback via full-graph node count):
+                        # The previous code silently fell back to
+                        # ``split_src_list = list(range(data[...].num_nodes))``
+                        # when the split had < 2 unique src/dst
+                        # entities. This re-introduced the TRANSDUCTIVE
+                        # negative sampling that the v81 P0-F3 fix was
+                        # specifically designed to prevent: held-out
+                        # drugs with random-init embeddings become
+                        # trivially distinguishable negatives
+                        # (random init = large translational distance
+                        # = "negative" with high confidence), inflating
+                        # AUC by 0.1-0.3. The fallback undid the
+                        # inductive fix for the edge case that needs
+                        # it MOST (small splits).
+                        #
+                        # ROOT FIX: RAISE a clear error explaining
+                        # the problem and offering an env-var override
+                        # for dev runs (where small splits are
+                        # unavoidable and the operator accepts the
+                        # AUC inflation). The override is OFF by
+                        # default — production MUST NOT silently
+                        # fall back to transductive negatives.
                         _min_pool = 2
+                        _allow_small_split = (
+                            os.environ.get(
+                                "DRUGOS_ALLOW_SMALL_SPLIT_NEGATIVES", ""
+                            ) == "1"
+                        )
                         if len(split_src_list) < _min_pool:
-                            split_src_list = list(range(
-                                data[target_edge_type[0]].num_nodes
-                            ))
+                            if _allow_small_split:
+                                self.logger.warning(
+                                    "P2-018: split has only %d unique "
+                                    "source entities (< %d). "
+                                    "DRUGOS_ALLOW_SMALL_SPLIT_NEGATIVES=1 "
+                                    "is set — falling back to "
+                                    "TRANSDUCTIVE negatives (full-"
+                                    "graph node count). Val/test AUC "
+                                    "will be INFLATED by 0.1-0.3. "
+                                    "Dev mode ONLY.",
+                                    len(split_src_list), _min_pool,
+                                )
+                                split_src_list = list(range(
+                                    data[target_edge_type[0]].num_nodes
+                                ))
+                            else:
+                                raise RuntimeError(
+                                    f"temporal_split: split has only "
+                                    f"{len(split_src_list)} unique "
+                                    f"source entities (< {_min_pool}) "
+                                    f"for inductive negative sampling. "
+                                    f"Falling back to transductive "
+                                    f"(full-graph) negatives would "
+                                    f"inflate AUC by 0.1-0.3 (v81 "
+                                    f"P0-F3 root cause). Use a larger "
+                                    f"split OR set "
+                                    f"DRUGOS_ALLOW_SMALL_SPLIT_NEGATIVES=1 "
+                                    f"to permit the transductive "
+                                    f"fallback (dev mode only — AUC "
+                                    f"will be inflated). (P2-018 root fix)"
+                                )
                         if len(split_dst_list) < _min_pool:
-                            split_dst_list = list(range(
-                                data[target_edge_type[2]].num_nodes
-                            ))
+                            if _allow_small_split:
+                                self.logger.warning(
+                                    "P2-018: split has only %d unique "
+                                    "destination entities (< %d). "
+                                    "DRUGOS_ALLOW_SMALL_SPLIT_NEGATIVES=1 "
+                                    "is set — falling back to "
+                                    "TRANSDUCTIVE negatives (full-"
+                                    "graph node count). Val/test AUC "
+                                    "will be INFLATED by 0.1-0.3. "
+                                    "Dev mode ONLY.",
+                                    len(split_dst_list), _min_pool,
+                                )
+                                split_dst_list = list(range(
+                                    data[target_edge_type[2]].num_nodes
+                                ))
+                            else:
+                                raise RuntimeError(
+                                    f"temporal_split: split has only "
+                                    f"{len(split_dst_list)} unique "
+                                    f"destination entities (< {_min_pool}) "
+                                    f"for inductive negative sampling. "
+                                    f"Falling back to transductive "
+                                    f"(full-graph) negatives would "
+                                    f"inflate AUC by 0.1-0.3 (v81 "
+                                    f"P0-F3 root cause). Use a larger "
+                                    f"split OR set "
+                                    f"DRUGOS_ALLOW_SMALL_SPLIT_NEGATIVES=1 "
+                                    f"to permit the transductive "
+                                    f"fallback (dev mode only — AUC "
+                                    f"will be inflated). (P2-018 root fix)"
+                                )
                         # v43 Chain 6: use the FULL positive set, not
                         # just this split's positives. Falls back to
                         # per-split set if full set is empty (defensive).
@@ -2666,12 +2769,72 @@ class PyGBuilder(GraphBuilderProtocol):
                                 target_edge_type
                             ].edge_label_index = combined_edge_index
                             if n_neg < n_pos:
+                                # P2-019 ROOT FIX (negative shortfall
+                                # warning does not raise):
+                                # The previous code only logged a
+                                # WARNING when ``n_neg < n_pos``. The
+                                # val/test split was then computed
+                                # with mismatched pos/neg counts, and
+                                # the downstream BCE loss computed on
+                                # unequal pos/neg sets — mathematically
+                                # valid but statistically biased (the
+                                # model's decision threshold is skewed
+                                # by the imbalance). Operators saw a
+                                # WARNING buried in logs and may not
+                                # realise the AUC is unreliable.
+                                #
+                                # ROOT FIX: RAISE RuntimeError when
+                                # ``n_neg < 0.5 * n_pos`` (less than
+                                # half the required negatives). The
+                                # AUC is genuinely uninterpretable
+                                # with insufficient negatives — the
+                                # V1 launch criterion (0.85 AUC) may
+                                # be met on a split with insufficient
+                                # negatives, giving false confidence
+                                # in a model that will fail in
+                                # production. Operators can override
+                                # with
+                                # DRUGOS_ALLOW_INSUFFICIENT_NEGATIVES=1
+                                # for dev runs.
+                                _allow_insufficient = (
+                                    os.environ.get(
+                                        "DRUGOS_ALLOW_INSUFFICIENT_NEGATIVES",
+                                        "",
+                                    ) == "1"
+                                )
+                                _shortfall_ratio = (
+                                    n_neg / n_pos if n_pos > 0 else 1.0
+                                )
+                                if (
+                                    _shortfall_ratio < 0.5
+                                    and not _allow_insufficient
+                                ):
+                                    raise RuntimeError(
+                                        f"temporal_split: only generated "
+                                        f"{n_neg}/{n_pos} negatives "
+                                        f"({100.0 * _shortfall_ratio:.1f}%) "
+                                        f"for split after {attempts} "
+                                        f"attempts (graph may be too "
+                                        f"dense). The AUC for this "
+                                        f"split is UNINTERPRETABLE with "
+                                        f"insufficient negatives — the "
+                                        f"V1 launch criterion (0.85 AUC) "
+                                        f"may be met on this split but "
+                                        f"fail in production. Set "
+                                        f"DRUGOS_ALLOW_INSUFFICIENT_NEGATIVES=1 "
+                                        f"to permit the run (dev mode "
+                                        f"only — AUC is unreliable). "
+                                        f"(P2-019 root fix)"
+                                    )
                                 self.logger.warning(
                                     f"temporal_split: only generated "
                                     f"{n_neg}/{n_pos} negatives for split "
-                                    f"after {attempts} attempts (graph "
+                                    f"({100.0 * _shortfall_ratio:.1f}% — "
+                                    f"after {attempts} attempts; graph "
                                     f"may be too dense). AUC for this "
-                                    f"split may be inflated."
+                                    f"split may be inflated. "
+                                    f"(P2-019 — shortfall below the 50% "
+                                    f"RAISE threshold was {'overridden' if _allow_insufficient else 'not triggered'})."
                                 )
                         else:
                             # Fall back to positive-only if neg gen failed.

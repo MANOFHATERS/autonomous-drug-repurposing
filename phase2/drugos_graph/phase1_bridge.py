@@ -54,20 +54,50 @@ SCHEMA MAPPING (Phase 1 CSV column → Phase 2 node/edge property)
 ----------------------------------------------------------------
 
 Compound nodes (from drugbank_drugs.csv)
-    drugbank_id        → id            (canonical Neo4j ID)
-    name               → name
-    inchikey           → inchikey
-    smiles             → smiles
-    molecular_weight   → molecular_weight
-    is_fda_approved    → fda_approved
-    is_withdrawn       → withdrawn       (RL safety signal — patient harm)
-    clinical_status    → clinical_status
-    groups             → groups
-    mechanism_of_action→ mechanism_of_action
-    cas_number         → cas_number
-    chembl_id          → chembl_id
-    pubchem_cid        → pubchem_cid
-    completeness_score → completeness_score
+    P2-009 ROOT FIX (docstring drift): the previous docstring claimed
+    ``drugbank_id → id (canonical Neo4j ID)``. That was the v3.11
+    behaviour. As of v3.12 (see config.py:5508-5509,
+    ``CANONICAL_IDS["Compound"] = "inchikey"`` with the comment
+    "Changed from drugbank_id (issue 3.12)"), the canonical Neo4j ID
+    for Compound nodes is ``inchikey`` (uppercase IUPAC form, e.g.
+    ``RZVAJINKQORUOD-UHFFFAOYSA-N`` for aspirin). The actual bridge
+    code at lines ~3547-3551 uses ``inchikey_canonical`` when present
+    and non-synthetic, falling back to ``drugbank_id`` ONLY for
+    biologics that lack an InChIKey (e.g. ``DB00071`` for insulin
+    glargine). A new developer reading the old docstring wrote
+    queries / unit tests / merge logic keyed on ``drugbank_id`` —
+    which worked for biologics but silently FAILED for every
+    small-molecule drug (which uses ``inchikey``). The misleading
+    documentation caused silent test-passes-while-prod-fails bugs
+    (tests used biologics, prod used small molecules).
+
+    Canonical ID resolution (in priority order — see also
+    ``entity_resolver.resolve_canonical_id``):
+        inchikey (uppercase)         → id    (canonical Neo4j ID when
+                                              present and non-synthetic;
+                                              universal across ChEMBL,
+                                              PubChem, DrugBank per
+                                              IUPAC standard)
+        drugbank_id (e.g. DB00071)   → id    (fallback for biologics
+                                              and any compound lacking
+                                              an InChIKey — typically
+                                              large molecules /
+                                              peptides / mixtures)
+
+    Other Compound properties (unchanged):
+        name                          → name
+        inchikey                      → inchikey
+        smiles                        → smiles
+        molecular_weight              → molecular_weight
+        is_fda_approved               → fda_approved
+        is_withdrawn                  → withdrawn       (RL safety signal — patient harm)
+        clinical_status               → clinical_status
+        groups                        → groups
+        mechanism_of_action           → mechanism_of_action
+        cas_number                    → cas_number
+        chembl_id                     → chembl_id
+        pubchem_cid                   → pubchem_cid
+        completeness_score            → completeness_score
 
 Protein nodes (from drugbank_interactions.csv.gz, dedup on uniprot_id)
     uniprot_id         → id

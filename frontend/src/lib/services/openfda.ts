@@ -43,35 +43,52 @@ export async function getDrugSafetySummary(drugName: string): Promise<DrugSafety
   const q = (drugName || "").trim();
   if (q.length < 2) return null;
 
-  // FE-014 ROOT FIX: Sanitize user input before interpolating into the
-  // openFDA query expression. The previous code did:
-  //   const search = `patient.drug.openfda.generic_name:"${q}"+OR+...`
-  //   const url = `${OPENFDA_BASE}/drug/event.json?search=${encodeURIComponent(search)...}`
+  // FE-045 ROOT FIX: the previous "best-effort" sanitization (strip a few
+  // special chars + boolean operators) was fragile because the openFDA
+  // query language reserves far more than quotes/parens/AND/OR/NOT — it
+  // also supports field qualifiers (`field:value`), wildcards (`*`),
+  // fuzzy (`~`), range queries (`[a TO b]`), and more. An attacker
+  // passing `q=patient.drug.openfda.generic_name:ibuprofen` would have
+  // their value pass the old sanitizer (no quotes, parens, or boolean
+  // words) and end up injected as a field qualifier inside the quoted
+  // search string — which openFDA's parser may interpret as a literal
+  // OR as a query directive depending on its escape handling.
   //
-  // The openFDA search syntax reserves ", (, ), AND, OR, NOT. An attacker
-  // passing q=aspirin") AND (patient.drug.openfda.generic_name:ibuprofen
-  // could manipulate the query — escape the quoted field, inject boolean
-  // operators, exfiltrate data from other drugs, exhaust the openFDA API
-  // quota, or trigger 500s.
+  // Root fix: instead of trying to escape a syntax we don't fully
+  // control, we apply a STRICT WHITELIST. Drug names are alphanumerics,
+  // spaces, hyphens, and apostrophes (e.g. "St John's Wort"). Anything
+  // else is rejected up-front and we return null — the caller treats
+  // null as "no data" and the UI shows "No safety data available".
   //
-  // Root fix: strip every character that has special meaning in the openFDA
-  // query language BEFORE interpolation. We allow alphanumerics, spaces,
-  // hyphens, and apostrophes (e.g., "St John's Wort"). Everything else is
-  // removed. We also collapse whitespace and apply a max length.
-  const sanitized = q
-    .replace(/["()\\]/g, "") // remove quotes, parens, backslashes
-    .replace(/\b(AND|OR|NOT)\b/gi, "") // remove boolean operators
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, 128);
-  if (sanitized.length < 2) return null;
+  // Max 64 chars: FDA generic/brand names are well under this limit
+  // (longest generic name ~30 chars; longest brand name ~25 chars), so
+  // this is a sane upper bound that also caps any pathological input.
+  const WHITELIST = /^[A-Za-z0-9 \-']{2,64}$/;
+  if (!WHITELIST.test(q)) return null;
+  const sanitized = q.replace(/\s+/g, " ").trim();
 
-  // openFDA uses the generic (non-proprietary) name in the `patient.drug.openfda.generic_name` field.
-  // We do an exact (case-insensitive) match on generic_name OR brand_name.
-  // The sanitized value is safe to interpolate because we stripped every
-  // special character above.
-  const search = `patient.drug.openfda.generic_name:"${sanitized}"+OR+patient.drug.openfda.brand_name:"${sanitized}"`;
-  const url = `${OPENFDA_BASE}/drug/event.json?search=${encodeURIComponent(search).replace(/%2B/g, "+")}&limit=100`;
+  // openFDA uses the generic (non-proprietary) name in the
+  // `patient.drug.openfda.generic_name` field. We do an exact
+  // (case-insensitive) match on generic_name OR brand_name.
+  //
+  // FE-045: build the search expression with URLSearchParams so the
+  // openFDA query syntax (`"`, `:`, etc.) is properly URL-encoded
+  // by the standard library. The `+OR+` separator between the two
+  // field clauses is a LITERAL openFDA query operator (not a URL
+  // space) — URLSearchParams would encode `+` as `%2B`, which
+  // openFDA's parser does NOT accept as the OR separator. So we
+  // build the search value with `+OR+` as a literal, URL-encode the
+  // value with `encodeURIComponent`, then convert the encoded `%2B`
+  // back to literal `+` so the openFDA API sees the operator it
+  // expects. This is the same final URL format the openFDA docs
+  // publish: `search=field:"value"+OR+field:"value"`.
+  const searchValue =
+    `patient.drug.openfda.generic_name:"${sanitized}"` +
+    `+OR+` +
+    `patient.drug.openfda.brand_name:"${sanitized}"`;
+  const params = new URLSearchParams({ limit: "100" });
+  const encodedSearch = encodeURIComponent(searchValue).replace(/%2B/g, "+");
+  const url = `${OPENFDA_BASE}/drug/event.json?search=${encodedSearch}&${params.toString()}`;
 
   // Note: openFDA responses can exceed Next.js's 2MB fetch cache limit, so
   // we do not pass `next: { revalidate }` here — we always fetch fresh.

@@ -24,19 +24,43 @@ export interface DrugCandidate {
   genericName: string;
   compositeScore: number;
   kgScore: number;
-  molSimScore: number;
+  /**
+   * FE-049 ROOT FIX: molSimScore is nullable. When the underlying data
+   * source (RL ranker, KG, etc.) has not computed a molecular-similarity
+   * score for this candidate, the field is `null` — NOT a fabricated `0`.
+   * A fabricated `0` is actively misleading: a researcher seeing
+   * "Mol Similarity: 0" may interpret it as "no similarity to known drugs"
+   * (a negative signal), when in reality the field is just not populated.
+   * The UI renders "N/A" when the value is null.
+   */
+  molSimScore: number | null;
   safetyScore: number;
   clinicalScore: number;
   safetyTier: 'green' | 'yellow' | 'red';
   mechanism: string;
   clinicalPhase: string;
-  ipStatus: string;
+  /**
+   * FE-049 ROOT FIX: ipStatus is nullable. When patent status has not been
+   * looked up yet, the field is `null` — NOT a fabricated "Unknown" string.
+   * The previous code rendered "IP Status: Unknown" in the UI, which
+   * researchers could mistake for an authoritative "we checked and the
+   * status is unknown" — vs. the truth, which is "we have not checked".
+   * The UI renders "N/A" when the value is null.
+   */
+  ipStatus: string | null;
   diseaseId: string;
   // FE-001: added diseaseName + rank for real RL candidate mapping.
   diseaseName?: string;
   rank?: number;
-  targets: string[];
-  pathways: string[];
+  /**
+   * FE-049 ROOT FIX: targets/pathways are nullable. The previous code
+   * fabricated `[]` (empty arrays) for RL candidates — which renders as
+   * "no targets / no pathways" in the UI and is indistinguishable from
+   * "we checked and there are none". The truth is "we have not populated
+   * them yet". The UI renders "N/A" when the value is null.
+   */
+  targets: string[] | null;
+  pathways: string[] | null;
 }
 
 export interface ClinicalTrial {

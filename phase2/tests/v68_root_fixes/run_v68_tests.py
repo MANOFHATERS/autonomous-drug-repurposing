@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""v68 ROOT FIX — standalone test runner (no pytest, no conftest dependency).
+"""v68 ROOT FIX -- standalone test runner (no pytest, no conftest dependency).
 
 Runs all 13 forensic tests directly via Python assertions. This avoids
 the parent conftest.py which requires torch_geometric (heavy install).
@@ -51,7 +51,7 @@ def check(name: str, condition: bool, detail: str = ""):
 
 
 print("=" * 72)
-print("v68 ROOT FIX — 13-Issue Forensic Verification")
+print("v68 ROOT FIX -- 13-Issue Forensic Verification")
 print("=" * 72)
 
 # ---------------------------------------------------------------------------

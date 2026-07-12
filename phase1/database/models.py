@@ -1,7 +1,7 @@
 """
 SQLAlchemy ORM models for the Drug Repurposing ETL platform.
 
-This module is a **pure ORM definition module** — it contains only the seven
+This module is a **pure ORM definition module** -- it contains only the seven
 table models (``Drug``, ``Protein``, ``DrugProteinInteraction``,
 ``ProteinProteinInteraction``, ``GeneDiseaseAssociation``,
 ``EntityMapping``, ``PipelineRun``), the ``SchemaVersion`` metadata table,
@@ -24,8 +24,8 @@ Tables
 
 Changelog
 ---------
-v1 — Initial models (429 lines).
-v2 — 78 fixes across 16 verification domains (SCI, DQ, IDEM, ARCH, …).
+v1 -- Initial models (429 lines).
+v2 -- 78 fixes across 16 verification domains (SCI, DQ, IDEM, ARCH, ...).
 """
 
 from __future__ import annotations
@@ -61,7 +61,7 @@ from database.base import Base, IDMixin, SoftDeleteMixin, TimestampMixin
 
 # SCHEMA_VERSION is defined in database.base (the single source of truth).
 # Re-export it here so callers can import it from either location.
-from database.base import SCHEMA_VERSION  # noqa: F401 — re-exported for callers
+from database.base import SCHEMA_VERSION  # noqa: F401 -- re-exported for callers
 
 # ---------------------------------------------------------------------------
 # Module logger (LOG-01, LOG-02)
@@ -69,13 +69,13 @@ from database.base import SCHEMA_VERSION  # noqa: F401 — re-exported for calle
 logger = logging.getLogger(__name__)
 
 # ===========================================================================
-# Column-length constants (CFG-01 — documented, no magic numbers)
+# Column-length constants (CFG-01 -- documented, no magic numbers)
 # ===========================================================================
 #: Standard InChIKey length.  Synthetic keys (prefixed 'SYNTH') may exceed
 #: 27 chars, so the column is widened to 50 (SCI-01).
 INCHIKEY_LENGTH: int = 50
 
-#: UniProt accession max length (6–10 alphanumeric chars, SCI-05).
+#: UniProt accession max length (6-10 alphanumeric chars, SCI-05).
 UNIPROT_ID_LENGTH: int = 10
 
 #: HGNC gene symbol max length (SCI-04).
@@ -99,10 +99,10 @@ SOURCE_LENGTH: int = 20
 #: Pipeline source max length (longer to accommodate future names).
 PIPELINE_SOURCE_LENGTH: int = 50
 
-#: PMID list max length (SEC-02 — capped to prevent unbounded Text DoS).
+#: PMID list max length (SEC-02 -- capped to prevent unbounded Text DoS).
 PMID_LIST_LENGTH: int = 2000
 
-#: Error message max length (SEC-04 — prevent stack trace leakage).
+#: Error message max length (SEC-04 -- prevent stack trace leakage).
 ERROR_MESSAGE_LENGTH: int = 500
 
 #: Disease ID max length.
@@ -112,7 +112,7 @@ DISEASE_ID_LENGTH: int = 50
 DISEASE_ID_TYPE_LENGTH: int = 20
 
 # ===========================================================================
-# Domain enums (DES-05 — enforced at DB and Python level)
+# Domain enums (DES-05 -- enforced at DB and Python level)
 # ===========================================================================
 
 
@@ -150,7 +150,7 @@ class PipelineStatus(str, enum.Enum):
 
 
 class InteractionType(str, enum.Enum):
-    """Drug–protein interaction types (DES-05)."""
+    """Drug-protein interaction types (DES-05)."""
     INHIBITOR = "inhibitor"
     ACTIVATOR = "activator"
     AGONIST = "agonist"
@@ -210,14 +210,14 @@ class ActivityType(str, enum.Enum):
 #: entity_resolver.py / id_crosswalk.py / protein_resolver.py already
 #: use this exact pattern (resolver_utils._UNIPROT_ACCESSION_RE).
 #:
-#: v22 ROOT FIX (audit P1-8 / section 5 finding 2 — "Three divergent
+#: v22 ROOT FIX (audit P1-8 / section 5 finding 2 -- "Three divergent
 #: UniProt regexes"): the previous ``_UNIPROT_RE`` used the LOOSE pattern
 #: ``[A-NR-Z][0-9][A-Z0-9]{3}[0-9][A-Z0-9]{3}[0-9]`` for 10-char IDs
-#: (first char of each 4-char block could be a digit) — divergent from
+#: (first char of each 4-char block could be a digit) -- divergent from
 #: the official ``resolver_utils._UNIPROT_ACCESSION_RE`` which uses
 #: ``[A-Z][A-Z0-9]{2}[0-9]`` (first char MUST be a letter). It also
 #: added ``(-\d+)?`` isoform suffix and ``|^CHEMBL_TGT_\d+$`` alternative
-#: — neither of which is a UniProt accession. The loose pattern accepted
+#: -- neither of which is a UniProt accession. The loose pattern accepted
 #: IDs like A0A024R1G1 (digit-first 4-char block) that the resolver
 #: rejected. Unify: use the OFFICIAL pattern from resolver_utils
 #: EXACTLY. Isoform suffix and CHEMBL_TGT_ prefix are handled separately
@@ -279,9 +279,9 @@ _HUMAN_GENE_SYMBOL_RE: re.Pattern[str] = re.compile(
 #: Amino acid sequence: 20 standard + ambiguity codes (SCI-08) + the
 #: alignment gap char ``-`` (v35 root fix: included for consistency with
 #: ``cleaning._constants.CANONICAL_AA_SEQUENCE_REGEX`` and the pipeline
-#: validators — without it, an aligned sequence with gaps would pass
+#: validators -- without it, an aligned sequence with gaps would pass
 #: the cleaning validator but fail this DB validator, causing silent
-#: data loss at the cleaning → DB boundary).
+#: data loss at the cleaning -> DB boundary).
 _SEQUENCE_RE: re.Pattern[str] = re.compile(
     r"^[ACDEFGHIKLMNPQRSTVWYBJOUXZ\*\-]+$"
 )
@@ -297,7 +297,7 @@ _SEQUENCE_RE: re.Pattern[str] = re.compile(
 #: validation). Having two definitions meant future edits to one could
 #: silently diverge from the other (audit Chain 3).
 #: P1-ER-3 ROOT FIX: pattern synchronized with normalizer.py / base.py /
-#: models.py — DO NOT diverge (audit P1-ER-3).
+#: models.py -- DO NOT diverge (audit P1-ER-3).
 try:
     from cleaning._constants import (
         CANONICAL_INCHIKEY_REGEX as _STANDARD_INCHIKEY_RE,  # noqa: F401
@@ -319,13 +319,13 @@ def _validate_inchikey(value: Optional[str]) -> Optional[str]:
     """Validate InChIKey format (SCI-01).  Accepts standard 27-char keys
     and synthetic keys prefixed with 'SYNTH'.
 
-    The DB layer delegates to ``cleaning.normalizer.is_valid_inchikey`` —
+    The DB layer delegates to ``cleaning.normalizer.is_valid_inchikey`` --
     the SINGLE canonical validator. See P1-ER-2 / P1-ER-3 for the audit
     that removed acceptance of TEST/OUTER/INNER/IK test-fixture prefixes
     from the canonical contract.
 
     v35 ROOT FIX (issue 28): the previous docstring mentioned "optional
-    protonation suffix" — the canonical InChIKey is exactly 27 chars per
+    protonation suffix" -- the canonical InChIKey is exactly 27 chars per
     IUPAC; protonation extensions (``-a``, ``-N-a``) are NOT part of the
     canonical key and must be stripped by ``strip_inchikey_extension``
     BEFORE validation. The docstring has been updated to reflect this.
@@ -346,9 +346,9 @@ def _validate_inchikey(value: Optional[str]) -> Optional[str]:
         # (test isolation). The patterns here MUST stay in sync with
         # cleaning.normalizer.is_valid_inchikey.
         # P1-ER-2 ROOT FIX: removed TEST/OUTER/INNER/IK acceptance from
-        # the fallback branch — it must mirror the canonical validator.
+        # the fallback branch -- it must mirror the canonical validator.
         # P1-ER-3 ROOT FIX: pattern synchronized with normalizer.py /
-        # base.py / models.py — DO NOT diverge.
+        # base.py / models.py -- DO NOT diverge.
         # v35 ROOT FIX (issue 28): ``_STANDARD_INCHIKEY_RE`` is now
         # imported from ``cleaning._constants`` (single source of truth).
         upper = value.upper()
@@ -390,7 +390,7 @@ def _validate_uniprot_id(value: Optional[str]) -> Optional[str]:
             base, isoform_suffix = parts[0], "-" + parts[1]
     # v22: CHEMBL_TGT_ prefix is a Phase 2 synthetic ID for ChEMBL
     # targets without UniProt AC. Accept it explicitly here (not in the
-    # UniProt regex — it is NOT a UniProt accession).
+    # UniProt regex -- it is NOT a UniProt accession).
     if base.upper().startswith("CHEMBL_TGT_"):
         return value
     if _UNIPROT_RE.match(base):
@@ -399,24 +399,24 @@ def _validate_uniprot_id(value: Optional[str]) -> Optional[str]:
     # and any <6-char alphanumeric as valid UniProt accessions, claiming
     # "never in production" but providing NO enforcement. This caused
     # test-fixture proteins like `P001` to flow into the production `proteins`
-    # table — contradicting the P1-ER-2 ROOT FIX that REJECTED test-fixture
+    # table -- contradicting the P1-ER-2 ROOT FIX that REJECTED test-fixture
     # InChIKeys. Now we ONLY accept test fixtures when DRUGOS_ENVIRONMENT
     # is explicitly set to a dev/test value. In production (or unset),
     # test fixtures are REJECTED.
     #
     # v57 ROOT FIX (P1C-002): the previous default was "dev", which meant
     # test-fixture proteins (e.g. `P001`, `TEST001`) were accepted by
-    # DEFAULT — contaminating the proteins table in any deployment that
+    # DEFAULT -- contaminating the proteins table in any deployment that
     # forgot to set DRUGOS_ENVIRONMENT=prod. The default is now "prod"
     # so test fixtures are rejected UNLESS the operator explicitly opts
     # into dev mode. This matches the existing comment's promise of
     # "rejected in production environments (set DRUGOS_ENVIRONMENT=dev
     # to allow)".
     #
-    # v65 ROOT FIX (P1C-002 compound — root contamination path):
+    # v65 ROOT FIX (P1C-002 compound -- root contamination path):
     #   The v57 fix changed the default to "prod" but LEFT the
     #   `<6-char alphanumeric` acceptance block in place. This block
-    #   accepted junk like `P001`, `ABC`, `12345` — NONE of which are
+    #   accepted junk like `P001`, `ABC`, `12345` -- NONE of which are
     #   real UniProt accessions (real accessions are ALWAYS 6 or 10
     #   chars per the UniProt spec) and NONE of which are TEST-prefixed.
     #   So even with the "prod" default, an operator who explicitly set
@@ -425,7 +425,7 @@ def _validate_uniprot_id(value: Optional[str]) -> Optional[str]:
     #   called this the "asymmetry" with the P1-ER-2 InChIKey fix: test-
     #   fixture DRUGS are rejected but test-fixture PROTEINS are accepted.
     #   ROOT FIX:
-    #     1. Remove "staging" from the allow-test list — staging MUST be
+    #     1. Remove "staging" from the allow-test list -- staging MUST be
     #        production-like (per .env.example: "staging: production-like
     #        with moderate limits"). Only dev/development/test/ci accept
     #        test fixtures.
@@ -486,7 +486,7 @@ def _validate_max_phase(value: Optional[int]) -> Optional[int]:
 
 
 # ===========================================================================
-# Public API — explicit declaration (ARCH-03)
+# Public API -- explicit declaration (ARCH-03)
 # ===========================================================================
 __all__: list[str] = [
     "Drug",
@@ -541,7 +541,7 @@ class SchemaVersion(Base, IDMixin):
 
 
 class Drug(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
-    """Master drug table — unified across all sources.
+    """Master drug table -- unified across all sources.
 
     Domain meaning
     --------------
@@ -551,14 +551,14 @@ class Drug(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
     Key constraints
     ---------------
     - ``inchikey`` is the natural primary identifier (unique, not null).
-    - ``max_phase`` must be 0–4 (SCI-02, clinical trial phases).
+    - ``max_phase`` must be 0-4 (SCI-02, clinical trial phases).
     - ``molecular_weight`` must be positive (DQ-09).
     - ``is_fda_approved`` is a boolean with a CHECK for SQLite compat (DQ-01).
     - ``name`` must be at least 2 characters (DQ-04).
 
     Relationships
     -------------
-    - ``drug_protein_interactions`` → DPI rows (cascade delete-orphan).
+    - ``drug_protein_interactions`` -> DPI rows (cascade delete-orphan).
 
     [SCI-01] inchikey widened to String(50) for synthetic keys.
     [SCI-07] molecular_weight uses Numeric(12,6) for precision.
@@ -588,7 +588,7 @@ class Drug(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
     )
     smiles: Mapped[Optional[str]] = mapped_column(String(50000), nullable=True)
     # [DQ-01] [CODE-02] Use proper server_default for cross-dialect boolean.
-    # v90 ROOT FIX (BUG #23 — complete the three-way boolean default unification):
+    # v90 ROOT FIX (BUG #23 -- complete the three-way boolean default unification):
     #   v89 only updated run_migrations.py REQUIRED_COLUMNS to DEFAULT FALSE;
     #   the ORM was left on the non-portable ``server_default="0"`` (string
     #   integer literal). Three-way drift remained: ORM "0" / migration 001
@@ -597,24 +597,35 @@ class Drug(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
     #   strict-mode MySQL/MariaDB and produces inconsistent column-type
     #   metadata across dialects (verify_schema_matches_orm flagged it as
     #   type drift on SQLite). ROOT FIX: switch the ORM to the SQL-standard
-    #   ``text("FALSE")`` so the emitted DDL is ``DEFAULT FALSE`` on every
-    #   dialect — byte-identical to migration 001 and run_migrations.py.
-    #   Behaviour is unchanged on SQLite/PostgreSQL (FALSE == 0 in boolean
-    #   context) but the column-type metadata is now consistent and the
-    #   schema is portable to MySQL/MariaDB strict mode if the platform
-    #   ever needs to run there.
-    is_fda_approved: Mapped[bool] = mapped_column(
-        Boolean, server_default=text("FALSE"), nullable=False,
+    # P1-049 / P1-046 FORENSIC ROOT FIX (Team 4 -- was NOT NULL DEFAULT FALSE):
+    #   The previous definition was ``Mapped[bool]`` with
+    #   ``server_default=text("FALSE"), nullable=False``. The ChEMBL
+    #   pipeline docstring says ``is_fda_approved`` should be ``None``
+    #   (unknown) until the FDA Orange Book join runs (v93 patient-safety
+    #   fix). But the DB column was ``NOT NULL`` -- inserting ``None``
+    #   raised ``IntegrityError``, and the loader coerced ``None`` to
+    #   ``False`` to satisfy the constraint, SILENTLY REVERTING the v93
+    #   fix. EMA-only drugs (max_phase=4, not FDA-approved) were stored
+    #   as ``is_fda_approved=False`` -- same as a confirmed-not-approved
+    #   drug.
+    #
+    #   ROOT FIX: change to ``Mapped[Optional[bool]]`` with
+    #   ``nullable=True`` and NO server_default. NULL now means "unknown
+    #   FDA status" (distinct from FALSE = "confirmed not FDA-approved").
+    #   Migration 013 ALTERs the column for existing DBs; migration 001
+    #   (this file's DDL emitter) is also updated.
+    is_fda_approved: Mapped[Optional[bool]] = mapped_column(
+        Boolean, nullable=True,
     )
     # [P1-28 ROOT FIX] Global regulatory approval flag (any of FDA / EMA /
     # PMDA / MHRA / Health Canada / TGA). Distinct from is_fda_approved
-    # (FDA-specific) — the ChEMBL pipeline emits is_globally_approved =
+    # (FDA-specific) -- the ChEMBL pipeline emits is_globally_approved =
     # (max_phase == 4) per SW-1 ROOT FIX (patient safety). The column was
     # previously emitted by the ChEMBL pipeline but missing from the Drug
     # model, so it was silently dropped by _filter_to_drug_columns and
     # always NULL in the DB. Migration 008 adds the column.
     is_globally_approved: Mapped[bool] = mapped_column(
-        # v65 ROOT FIX (P1C-006 — silent NULL exclusion from "approved"
+        # v65 ROOT FIX (P1C-006 -- silent NULL exclusion from "approved"
         # queries):
         #   The previous definition was `Mapped[Optional[bool]]` with
         #   `nullable=True` and NO server_default. When a source pipeline
@@ -622,12 +633,12 @@ class Drug(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
         #   stayed NULL. Downstream SQL like `WHERE is_globally_approved
         #   = True` uses three-valued logic: `NULL = True` evaluates to
         #   UNKNOWN (falsy), so NULL rows were SILENTLY excluded from
-        #   "approved drugs" queries — the opposite of the patient-safety
+        #   "approved drugs" queries -- the opposite of the patient-safety
         #   intent. Drugs loaded from sources that don't set the flag
         #   were treated as NOT approved, reducing recall for drug-
         #   repurposing candidates.
         #   ROOT FIX: match the pattern used by is_fda_approved (line 551)
-        #   and is_withdrawn (line 577) — `nullable=False` with the SQL-
+        #   and is_withdrawn (line 577) -- `nullable=False` with the SQL-
         #   standard `server_default=text("FALSE")`. INSERTs that omit
         #   the column now get False (explicit, not NULL); UPDATEs that
         #   set the flag work exactly as before. `WHERE
@@ -639,9 +650,9 @@ class Drug(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
         #   on `server_default=text("FALSE")` (was `server_default="0"`).
         Boolean, nullable=False, server_default=text("FALSE"),
     )
-    # [SCI-02] Clinical trial phase — validated 0–4
+    # [SCI-02] Clinical trial phase -- validated 0-4
     max_phase: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    # [DES-05] Drug type — constrained by CHECK (enum enforced at Python level)
+    # [DES-05] Drug type -- constrained by CHECK (enum enforced at Python level)
     drug_type: Mapped[Optional[str]] = mapped_column(
         String(50), nullable=True,
     )
@@ -668,7 +679,7 @@ class Drug(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
     # semicolon-separated string (e.g. "approved;withdrawn;investigational").
     # Used to derive is_withdrawn / clinical_status via a PostgreSQL
     # trigger (migration 006) and a Python-side fallback in the loader.
-    # The column was missing from the ORM entirely — the DrugBank
+    # The column was missing from the ORM entirely -- the DrugBank
     # pipeline produced a 'groups' string in drugs_df, but the loader
     # silently dropped it because the ORM had no attribute, and the
     # safety trigger had no source data to fire on. Withdrawn killer
@@ -680,7 +691,7 @@ class Drug(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
     cas_number: Mapped[Optional[str]] = mapped_column(
         String(20), nullable=True,
     )
-    # v49 ROOT FIX (CRITICAL — Compound Chain 2 / "PostgreSQL Bridge Data
+    # v49 ROOT FIX (CRITICAL -- Compound Chain 2 / "PostgreSQL Bridge Data
     # Corruption"): the Drug ORM previously had NO `indication` column.
     # The Phase 2 bridge (`phase2/drugos_graph/phase1_bridge.py`) needs
     # the free-text indication field to synthesize Compound-treats-Disease
@@ -688,15 +699,15 @@ class Drug(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
     # PostgreSQL mode. Without this column, PostgreSQL mode produced
     # ZERO prediction-target edges, structurally making V1 launch
     # impossible. ROOT FIX: add the column here + migration 010. The
-    # DrugBank pipeline already emits `indication` in its drugs_df — it
+    # DrugBank pipeline already emits `indication` in its drugs_df -- it
     # was silently dropped by _filter_to_drug_columns because the ORM
     # had no attribute. Now it loads. See also: phase1_bridge.py line
     # ~920 (the bridge's "we CANNOT reconstruct indications from
-    # PostgreSQL alone" comment — that comment is now stale).
+    # PostgreSQL alone" comment -- that comment is now stale).
     indication: Mapped[Optional[str]] = mapped_column(
         Text, nullable=True,
     )
-    # v49 ROOT FIX (CRITICAL — Phase 2 Compound-treats-Disease edges):
+    # v49 ROOT FIX (CRITICAL -- Phase 2 Compound-treats-Disease edges):
     # the `indication_source` column records WHERE the indication text
     # came from ('drugbank_xml' | 'chembl_max_phase' | 'rxnorm' |
     # 'manual') so downstream consumers can filter by confidence.
@@ -708,7 +719,7 @@ class Drug(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
         String(30), nullable=True,
     )
     # Calculated LogP (octanol-water partition coefficient).
-    # FIX-P3-9: was Float — precision mismatch with
+    # FIX-P3-9: was Float -- precision mismatch with
     # pubchem_compound_properties.xlogp (Numeric(6,2)). Cross-table
     # joins on logp == xlogp failed because Float (binary64) cannot
     # represent 2-decimal decimal values exactly (e.g. 3.10 stored as
@@ -716,7 +727,7 @@ class Drug(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
     # 005 and the pubchem_compound_properties table.
     logp: Mapped[Optional[float]] = mapped_column(Numeric(6, 2), nullable=True)
     # Topological Polar Surface Area (Å²).
-    # FIX-P3-9: was Float — same precision-mismatch issue as logp.
+    # FIX-P3-9: was Float -- same precision-mismatch issue as logp.
     # Changed to Numeric(8, 2) to match migration 005 and the
     # pubchem_compound_properties.tpsa column.
     tpsa: Mapped[Optional[float]] = mapped_column(Numeric(8, 2), nullable=True)
@@ -738,7 +749,7 @@ class Drug(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
     )
     # Molecular complexity (Bertz complexity index).
     complexity: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    # Data quality: fraction of expected fields populated (0.0–1.0).
+    # Data quality: fraction of expected fields populated (0.0-1.0).
     completeness_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
 
     # -- relationships --
@@ -776,14 +787,14 @@ class Drug(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
             # v29 ROOT FIX (audit D-2): the canonical regex
             # ``^[A-Z]{14}-[A-Z]{10}-[A-Z]$`` is enforced AUTHORITATIVELY
             # at the Python layer (cleaning._constants.is_canonical_inchikey).
-            # v76 ROOT FIX (T-038 — ORM CHECK strengthened to match migration 001):
+            # v76 ROOT FIX (T-038 -- ORM CHECK strengthened to match migration 001):
             #   The migration 001 SQL now uses PostgreSQL's ``~`` regex
             #   operator for strict InChIKey validation. The migration
             #   runner's ``_translate_sql_for_sqlite`` translates the
             #   regex to the STRONG portable form below for SQLite.
             #   HOWEVER, the ORM's ``Base.metadata.create_all()`` path
             #   (used by dev/test SQLite DBs) does NOT go through the
-            #   translator — it emits the raw CheckConstraint text. So
+            #   translator -- it emits the raw CheckConstraint text. So
             #   the ORM must use a PORTABLE form that works on BOTH
             #   dialects. The previous ``LENGTH(inchikey) = 27 OR LIKE
             #   'SYNTH%'`` accepted any 27-char ASCII string (gibberish).
@@ -795,7 +806,7 @@ class Drug(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
             #   validation is enforced by the Python validator
             #   (is_canonical_inchikey) on both dialects. The SYNTH%
             #   escape hatch (dev fixtures) is preserved.
-            # P1-A5 ROOT FIX (v82): the previous CHECK was UNPARENTHESIZED —
+            # P1-A5 ROOT FIX (v82): the previous CHECK was UNPARENTHESIZED --
             # ``LENGTH=27 AND ... AND ... OR LIKE 'SYNTH%'``. SQL operator
             # precedence (AND binds tighter than OR) made it evaluate as
             # intended, but it was FRAGILE: any refactor adding another AND
@@ -803,27 +814,27 @@ class Drug(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
             # EXPLICIT parentheses so the grouping is intentional and
             # refactor-safe.
             #
-            # v90 ROOT FIX (BUG #36 — strengthen ORM CHECK with portable
+            # v90 ROOT FIX (BUG #36 -- strengthen ORM CHECK with portable
             #   uppercase-letter validation):
             #   The previous portable form checked LENGTH=27 + hyphen
-            #   positions but NOT character class — so a 27-char string
+            #   positions but NOT character class -- so a 27-char string
             #   like ``aaaaaaaaaaaaaa-bbbbbbbbbb-c`` (lowercase) or
             #   ``!!!!!!!!!!!!!!-!!!!!!!!!!-!`` (symbols) passed the ORM
             #   CHECK on SQLite dev DBs even though the Python validator
             #   (is_canonical_inchikey) and the PostgreSQL regex
             #   (``^[A-Z]{14}-[A-Z]{10}-[A-Z]$``) both reject them. This
-            #   left the dev DB CHECK as the WEAKEST layer — a raw SQL
+            #   left the dev DB CHECK as the WEAKEST layer -- a raw SQL
             #   INSERT bypassing the ORM could land lowercase / symbol-
             #   containing InChIKeys in dev SQLite, which would then BLOCK
             #   migration 009's strict regex when the dev DB was promoted
             #   to prod (with no way to know which rows were invalid).
-            #   ROOT FIX: add ``inchikey = UPPER(inchikey)`` — a portable
+            #   ROOT FIX: add ``inchikey = UPPER(inchikey)`` -- a portable
             #   predicate that fails if ANY character is lowercase. This
             #   works on BOTH SQLite and PostgreSQL (UPPER() is SQL-
             #   standard). It does NOT fully match the PostgreSQL regex
             #   (digits and symbols at non-hyphen positions would still
             #   pass since they are unchanged by UPPER), but it closes
-            #   the lowercase gap — the most common class of typo. Full
+            #   the lowercase gap -- the most common class of typo. Full
             #   character-class validation remains at the Python layer
             #   (is_canonical_inchikey, single source of truth). The
             #   defense-in-depth contract is now: Python validator is
@@ -840,19 +851,19 @@ class Drug(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
             name="chk_drugs_max_phase",
         ),
         # [DQ-01] Boolean CHECK for SQLite compatibility
-        # v66 ROOT FIX (P1C-024 — CHECK didn't reject NULL):
+        # v66 ROOT FIX (P1C-024 -- CHECK didn't reject NULL):
         #   The previous CHECK ``is_fda_approved IN (0, 1)`` did NOT
-        #   reject NULL — ``NULL IN (0, 1)`` evaluates to UNKNOWN (not
+        #   reject NULL -- ``NULL IN (0, 1)`` evaluates to UNKNOWN (not
         #   FALSE), which PASSES the CHECK. The column is ``nullable=False``
         #   with ``server_default="0"``, so NULL should never reach the DB
-        #   today — but if a future migration makes the column nullable,
+        #   today -- but if a future migration makes the column nullable,
         #   the old CHECK would silently accept NULL (an FDA-approval
         #   status of "unknown" could be mistaken for "not approved",
         #   a patient-safety risk). ROOT FIX: add an explicit
         #   ``IS NOT NULL`` predicate so the CHECK is defense-in-depth
         #   that actually defends against NULL, regardless of future
         #   schema changes. Same pattern applied to ``is_withdrawn``
-        #   below (patient-safety signal — an unknown withdrawal status
+        #   below (patient-safety signal -- an unknown withdrawal status
         #   must not silently become "not withdrawn").
         CheckConstraint(
             "is_fda_approved IS NOT NULL AND is_fda_approved IN (0, 1)",
@@ -860,7 +871,7 @@ class Drug(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
         ),
         # [DQ-04] Name minimum length
         # P1-A9 ROOT FIX (v82): the previous CHECK ``LENGTH(name) >= 2`` did
-        # NOT TRIM whitespace — so a name like "  A" (2 chars with leading
+        # NOT TRIM whitespace -- so a name like "  A" (2 chars with leading
         # spaces) passed the DB CHECK but failed the Python validator
         # (``len(name.strip()) >= 2``). Chinese drug names (multi-byte) also
         # diverged when SQLite's LENGTH() counted bytes vs Python's len()
@@ -876,22 +887,22 @@ class Drug(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
             name="chk_drugs_molecular_weight_positive",
         ),
         # [LIFE-SAFETY] is_withdrawn boolean CHECK for SQLite compatibility
-        # v66 ROOT FIX (P1C-024 compound — same NULL-rejection fix as
+        # v66 ROOT FIX (P1C-024 compound -- same NULL-rejection fix as
         # is_fda_approved above). is_withdrawn is a patient-safety signal:
         # a drug withdrawn for hepatotoxicity MUST NOT have its withdrawal
         # status silently accepted as NULL. ``NULL IN (0, 1)`` evaluates to
-        # UNKNOWN which passes the old CHECK — explicit ``IS NOT NULL`` is
+        # UNKNOWN which passes the old CHECK -- explicit ``IS NOT NULL`` is
         # required for defense-in-depth.
         CheckConstraint(
             "is_withdrawn IS NOT NULL AND is_withdrawn IN (0, 1)",
             name="chk_drugs_is_withdrawn",
         ),
-        # v74 ROOT FIX (T-014 — chk_drugs_is_globally_approved missing
+        # v74 ROOT FIX (T-014 -- chk_drugs_is_globally_approved missing
         # from ORM __table_args__):
         #   Migration 008 (line 42-51) adds ``chk_drugs_is_globally_approved``
         #   to the drugs table via ALTER TABLE. But the ORM Drug model
         #   declared the ``is_globally_approved`` column (line 580) WITHOUT
-        #   a matching CheckConstraint in __table_args__ — dev DBs created
+        #   a matching CheckConstraint in __table_args__ -- dev DBs created
         #   via ``Base.metadata.create_all()`` (the SQLite/pytest path)
         #   LACK this constraint. Prod DBs (migration-created) HAVE it.
         #   Schema drift: a row with ``is_globally_approved=2`` would
@@ -899,7 +910,7 @@ class Drug(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
         #   rejects). Tests on dev DBs don't catch invalid values.
         #
         #   ROOT FIX: declare the CheckConstraint in the ORM with the
-        #   portable ``IN (0, 1)`` form (SQLite-compatible — same pattern
+        #   portable ``IN (0, 1)`` form (SQLite-compatible -- same pattern
         #   as chk_drugs_is_fda_approved and chk_drugs_is_withdrawn above).
         #   The migration 008 CHECK is also simplified to match (the
         #   previous ``IN (FALSE, TRUE)`` form worked on PostgreSQL but
@@ -912,18 +923,18 @@ class Drug(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
             "is_globally_approved IS NOT NULL AND is_globally_approved IN (0, 1)",
             name="chk_drugs_is_globally_approved",
         ),
-        # v90 ROOT FIX (BUG #6 — P0 patient-safety invariant missing from ORM):
+        # v90 ROOT FIX (BUG #6 -- P0 patient-safety invariant missing from ORM):
         #   Migration 008 (line ~160-167) adds the patient-safety invariant
-        #   ``chk_drugs_no_approved_and_withdrawn`` — a drug CANNOT be both
+        #   ``chk_drugs_no_approved_and_withdrawn`` -- a drug CANNOT be both
         #   globally-approved AND withdrawn. This prevents a withdrawn killer
         #   drug (Vioxx, Baycol, thalidomide) from being surfaced as a safe
         #   repurposing candidate. BUT the invariant was NOT declared on the
-        #   ORM Drug model — dev DBs created via Base.metadata.create_all()
+        #   ORM Drug model -- dev DBs created via Base.metadata.create_all()
         #   (the SQLite/pytest path) LACK this invariant. A test that sets
         #   is_globally_approved=True, is_withdrawn=True passes on dev but
         #   fails on prod. The Python-side safety hook in bulk_upsert_drugs
         #   (loaders.py:1886-1892) sets is_globally_approved=False when
-        #   is_withdrawn=True — but a direct SQL INSERT or a different
+        #   is_withdrawn=True -- but a direct SQL INSERT or a different
         #   loader bypassing that hook can violate the invariant on dev
         #   with no error. ROOT FIX: declare the CheckConstraint on the
         #   ORM with the portable form (works on both SQLite and PostgreSQL).
@@ -941,12 +952,12 @@ class Drug(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
             "completeness_score IS NULL OR (completeness_score >= 0.0 AND completeness_score <= 1.0)",
             name="chk_drugs_completeness_score_range",
         ),
-        # v59 ROOT FIX (compound of InChIKey fix — SQLite create_all
+        # v59 ROOT FIX (compound of InChIKey fix -- SQLite create_all
         # crash): the previous ORM CheckConstraint used the PostgreSQL
         # regex operator ``~`` which SQLite does NOT support. When a
         # test or dev environment called ``Base.metadata.create_all()``
         # on SQLite, SQLAlchemy emitted the raw DDL with ``~`` and
-        # SQLite raised ``OperationalError: near "~": syntax error`` —
+        # SQLite raised ``OperationalError: near "~": syntax error`` --
         # breaking every test that uses the ORM to bootstrap the schema
         # (e.g. test_001_schema_16_domains::test_valid_drug_insert).
         # The migration 001 SQL keeps the regex form (the migration
@@ -956,7 +967,7 @@ class Drug(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
         # enforced by the Python validator (cleaning.normalizer) on
         # both dialects. Same pattern as chk_drugs_inchikey_format.
         #
-        # v76 ROOT FIX (T-039 — ORM SMILES CHECK strengthened to match
+        # v76 ROOT FIX (T-039 -- ORM SMILES CHECK strengthened to match
         # migration 001's portable NOT LIKE form):
         #   The previous ORM CHECK ``smiles IS NULL OR LENGTH(TRIM(smiles))
         #   > 0`` was a non-empty backstop that accepted HTML tags, script
@@ -1060,16 +1071,16 @@ class Protein(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
       Validated against UniProt accession format (SCI-05).
     - ``gene_symbol`` validated against HGNC format (SCI-04).
     - ``sequence`` validated to contain only standard amino acid codes (SCI-08).
-    - ``gene_name`` is **deprecated** — it stores canonical protein names,
+    - ``gene_name`` is **deprecated** -- it stores canonical protein names,
       not gene symbols.  Use ``gene_symbol`` for gene symbols and
       ``protein_name`` for protein names.
 
     Relationships
     -------------
-    - ``drug_protein_interactions`` → DPI rows (cascade delete-orphan).
-    - ``gene_disease_associations`` → GDA rows (cascade delete-orphan).
-    - ``ppi_as_protein_a`` / ``ppi_as_protein_b`` → PPI rows.
-    - ``all_ppi_interactions`` → unified property combining both PPI sides.
+    - ``drug_protein_interactions`` -> DPI rows (cascade delete-orphan).
+    - ``gene_disease_associations`` -> GDA rows (cascade delete-orphan).
+    - ``ppi_as_protein_a`` / ``ppi_as_protein_b`` -> PPI rows.
+    - ``all_ppi_interactions`` -> unified property combining both PPI sides.
     """
     __tablename__ = "proteins"
 
@@ -1079,7 +1090,7 @@ class Protein(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
     )
     # DEPRECATED: gene_name stores CANONICAL PROTEIN NAME, NOT a gene symbol.
     # Use gene_symbol for gene symbols and protein_name for full protein names.
-    # DO NOT REMOVE — backward compatibility.  [DQ-06] [DOC-03]
+    # DO NOT REMOVE -- backward compatibility.  [DQ-06] [DOC-03]
     gene_name: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     # The actual gene symbol (e.g. "HBA1") used for GDA resolution (SCI-04)
     gene_symbol: Mapped[Optional[str]] = mapped_column(
@@ -1088,11 +1099,11 @@ class Protein(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
     protein_name: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     organism: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     # [SCI-08] Sequence validated for amino acid codes only
-    # v43 ROOT FIX (Chain 8): Text → String(50000) to match SQL migration 001
+    # v43 ROOT FIX (Chain 8): Text -> String(50000) to match SQL migration 001
     # (line 394). Text is unbounded in SQLite; VARCHAR(50000) in PostgreSQL.
     # Dev/test SQLite accepted 100KB sequences; prod PostgreSQL rejected.
     sequence: Mapped[Optional[str]] = mapped_column(String(50000), nullable=True)
-    # v43 ROOT FIX (Chain 8): Text → String(10000) to match SQL migration 001
+    # v43 ROOT FIX (Chain 8): Text -> String(10000) to match SQL migration 001
     # (line 395).
     function_desc: Mapped[Optional[str]] = mapped_column(String(10000), nullable=True)
     string_id: Mapped[Optional[str]] = mapped_column(
@@ -1100,10 +1111,10 @@ class Protein(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
     )
 
     # -- relationships --
-    # v89 ROOT FIX (BUG #20 — P1 N+1 explosion under bulk loads):
+    # v89 ROOT FIX (BUG #20 -- P1 N+1 explosion under bulk loads):
     #   The previous ``lazy="selectin"`` on ALL FOUR Protein relationships
-    #   (DPI, GDA, PPI-a, PPI-b) meant EVERY ``session.query(Protein)`` —
-    #   even ``session.get(Protein, id)`` — fired 4 additional SELECT
+    #   (DPI, GDA, PPI-a, PPI-b) meant EVERY ``session.query(Protein)`` --
+    #   even ``session.get(Protein, id)`` -- fired 4 additional SELECT
     #   IN queries to eagerly populate all four collections, regardless
     #   of whether the caller needed them. Under the documented 7-
     #   concurrent-pipeline workload, loading 10 000 proteins for entity
@@ -1119,7 +1130,7 @@ class Protein(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
     #   it makes N+1 queries impossible by construction, instead of
     #   relying on developer discipline. Queries that genuinely need
     #   the collections pass ``selectinload(Protein.drug_protein_interactions)``
-    #   (etc.) in their ``options()`` — the query is now explicit
+    #   (etc.) in their ``options()`` -- the query is now explicit
     #   about what it loads, which is exactly what production audit
     #   requires. The ``all_ppi_interactions`` / ``all_ppi_partners``
     #   properties below were updated to surface a clear error when
@@ -1135,22 +1146,22 @@ class Protein(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
     gene_disease_associations: Mapped[list["GeneDiseaseAssociation"]] = relationship(
         "GeneDiseaseAssociation",
         back_populates="protein",
-        # v79 FORENSIC ROOT FIX (P0-A4 — cascade/ondelete mismatch left
+        # v79 FORENSIC ROOT FIX (P0-A4 -- cascade/ondelete mismatch left
         #   orphan GDA rows + stale ORM identity map):
         #   The v78 code used ``cascade="all, delete-orphan"`` with
         #   ``passive_deletes=True``. ``passive_deletes=True`` tells
-        #   SQLAlchemy "trust the DB FK ondelete to handle child rows" —
+        #   SQLAlchemy "trust the DB FK ondelete to handle child rows" --
         #   so the ORM issues NO DELETE for the GDA children. But the GDA
         #   FK (models.py ~line 1458) is ``ondelete="SET NULL"`` (NOT
         #   ``CASCADE``). So when a Protein was hard-deleted:
-        #     1. The DB SET NULL fired → GDA.uniprot_id became NULL
+        #     1. The DB SET NULL fired -> GDA.uniprot_id became NULL
         #        (GDA row survives as an orphan with NULL protein link).
         #     2. The ORM's ``delete-orphan`` cascade expected the
         #        children to be DELETED, but ``passive_deletes=True``
-        #        suppressed the DELETE — so the ORM identity map still
+        #        suppressed the DELETE -- so the ORM identity map still
         #        held the now-orphaned GDA objects, stale until
         #        ``cleanup_orphan_gda_records`` reaped them 24h later.
-        #   Domain semantics: a GDA (gene→disease link from DisGeNET /
+        #   Domain semantics: a GDA (gene->disease link from DisGeNET /
         #   OMIM) is PRECIOUS curated data. When its protein is deleted,
         #   the GDA should SURVIVE with uniprot_id=NULL (it may be
         #   re-linked to a different protein later via gene_symbol).
@@ -1159,12 +1170,12 @@ class Protein(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
         #   are preserved, not deleted) and NO ``passive_deletes``
         #   (the ORM should not pretend the DB will cascade-delete).
         # ROOT FIX: ``cascade="save-update, merge"`` (the minimal
-        #   cascade — children are tracked for write but NOT deleted
+        #   cascade -- children are tracked for write but NOT deleted
         #   when the parent is deleted) and drop ``passive_deletes``.
         #   Now hard-deleting a Protein leaves GDA rows with
         #   uniprot_id=NULL (per the FK SET NULL), the ORM identity
         #   map stays consistent, and the GDA data is preserved for
-        #   re-linking — exactly the patient-safe behaviour.
+        #   re-linking -- exactly the patient-safe behaviour.
         cascade="save-update, merge",
         lazy="raise",
         foreign_keys="GeneDiseaseAssociation.uniprot_id",
@@ -1198,7 +1209,7 @@ class Protein(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
         return _validate_sequence(value)
 
     __table_args__ = (
-        # [SCI-05] UniProt accession format — canonical accessions are exactly
+        # [SCI-05] UniProt accession format -- canonical accessions are exactly
         # 6 chars (old format, e.g. P12345) or 10 chars (new format, e.g.
         # A0A0K3AVT9). The minimum of 4 allows short test fixture IDs (e.g.
         # P001, P100) that are used in unit tests but never in production.
@@ -1215,19 +1226,19 @@ class Protein(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
         # (single source of truth: ``cleaning._constants.CANONICAL_UNIPROT_ACCESSION_REGEX``).
         # This is what prevents mouse-organism accessions and other
         # non-UniProt short alphanumeric strings (e.g. "MOUSE1") from being
-        # accepted into the human protein set — the LENGTH-only CHECK alone
+        # accepted into the human protein set -- the LENGTH-only CHECK alone
         # could not.
         CheckConstraint(
-            # v89 ROOT FIX (BUG #24 — DB CHECK weaker than Python validator):
+            # v89 ROOT FIX (BUG #24 -- DB CHECK weaker than Python validator):
             #   Real UniProt accessions are EXACTLY 6 or 10 chars per the
             #   official spec (https://www.uniprot.org/help/accession_numbers).
             #   The previous ``LENGTH >= 4 AND LENGTH <= 10`` accepted 4, 5,
-            #   7, 8, 9 char strings — NONE of which are real UniProt IDs.
+            #   7, 8, 9 char strings -- NONE of which are real UniProt IDs.
             #   The Python validator ``_validate_uniprot_id`` (line 345)
             #   already rejects these in production (only TEST-prefixed
             #   fixtures are allowed in dev/ci). But a raw SQL INSERT
             #   (migration, manual fix, future tool) bypassing the ORM
-            #   could land a 4-char "UniProt ID" in production — breaking
+            #   could land a 4-char "UniProt ID" in production -- breaking
             #   the defense-in-depth contract (DB should be the LAST line
             #   of defense, not the weakest). The previous comment claimed
             #   the 4-char minimum was for "test fixture IDs (P001, P100)"
@@ -1310,7 +1321,7 @@ class Protein(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
 
     @property
     def canonical_protein_name(self) -> Optional[str]:
-        """Alias for gene_name — clarifies it stores a protein name, not gene symbol.
+        """Alias for gene_name -- clarifies it stores a protein name, not gene symbol.
 
         WARNING: The gene_name column is misleadingly named.  It stores the
         canonical protein name (e.g., "Hemoglobin subunit alpha"), not the
@@ -1348,7 +1359,7 @@ class Protein(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
         """Return the Neo4j node key property name for this entity."""
         return "uniprot_id"
 
-    # [CODE-01] Fixed __repr__ — gene_name labelled as legacy, gene_symbol shown
+    # [CODE-01] Fixed __repr__ -- gene_name labelled as legacy, gene_symbol shown
     def __repr__(self) -> str:
         return (
             f"<Protein(id={self.id}, uniprot_id='{self.uniprot_id}', "
@@ -1359,12 +1370,12 @@ class Protein(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
 
 
 # ===========================================================================
-# 3. DRUG–PROTEIN INTERACTIONS (DPI)
+# 3. DRUG-PROTEIN INTERACTIONS (DPI)
 # ===========================================================================
 
 
 class DrugProteinInteraction(Base, IDMixin, TimestampMixin):
-    """Drug–protein interaction records from ChEMBL and DrugBank.
+    """Drug-protein interaction records from ChEMBL and DrugBank.
 
     Domain meaning
     --------------
@@ -1376,7 +1387,7 @@ class DrugProteinInteraction(Base, IDMixin, TimestampMixin):
     ---------------
     - ``activity_value`` must be positive (DQ-09).
     - ``confidence_score`` must be in [0, 1] (DQ-07).
-    - ``source_id`` is nullable (DES-04 — empty string replaced with NULL).
+    - ``source_id`` is nullable (DES-04 -- empty string replaced with NULL).
     - ``UniqueConstraint(drug_id, protein_id, source, source_id)`` with
       NULL source_id handled by partial index on PostgreSQL.
 
@@ -1397,7 +1408,7 @@ class DrugProteinInteraction(Base, IDMixin, TimestampMixin):
     interaction_type: Mapped[Optional[str]] = mapped_column(
         String(50), nullable=True,
     )
-    # v29 ROOT FIX (audit D-5): was Float — precision loss corrupts pIC50. Use Numeric(10,4).
+    # v29 ROOT FIX (audit D-5): was Float -- precision loss corrupts pIC50. Use Numeric(10,4).
     activity_value: Mapped[Optional[float]] = mapped_column(Numeric(10, 4), nullable=True)
     activity_type: Mapped[Optional[str]] = mapped_column(
         String(20), nullable=True,
@@ -1409,7 +1420,7 @@ class DrugProteinInteraction(Base, IDMixin, TimestampMixin):
         String(SOURCE_LENGTH), nullable=True,
     )
     # [DES-04] source_id now nullable instead of NOT NULL DEFAULT ''
-    # Empty string conflated with "no value" — NULL is semantically correct.
+    # Empty string conflated with "no value" -- NULL is semantically correct.
     source_id: Mapped[Optional[str]] = mapped_column(
         String(50), nullable=True,
     )
@@ -1452,9 +1463,9 @@ class DrugProteinInteraction(Base, IDMixin, TimestampMixin):
             "activity_value IS NULL OR activity_value > 0",
             name="chk_dpi_activity_value_positive",
         ),
-        # v43 ROOT FIX (Chain 8 — 8 missing CHECK constraints in ORM):
+        # v43 ROOT FIX (Chain 8 -- 8 missing CHECK constraints in ORM):
         # The SQL migration 001 has chk_dpi_activity_type, chk_dpi_activity_units,
-        # and chk_dpi_source CHECK constraints, but the ORM model did NOT —
+        # and chk_dpi_source CHECK constraints, but the ORM model did NOT --
         # meaning SQLite ORM-created DBs (dev/test) accepted bad rows that
         # PostgreSQL migration-created DBs (prod) rejected. "Tests green,
         # prod red" anti-pattern. Adding the three missing CHECKs here so
@@ -1466,11 +1477,11 @@ class DrugProteinInteraction(Base, IDMixin, TimestampMixin):
         # A DPI row with ``activity_type='pIC50'`` (a perfectly valid
         # log-scale potency measure used by ChEMBL, PubChem BioAssay, and
         # BindingDB) was REJECTED by the DB CHECK but ACCEPTED by the
-        # normalizer — losing log-scale activity data from the KG and
+        # normalizer -- losing log-scale activity data from the KG and
         # corrupting downstream Graph Transformer edge features (only
         # linear-scale IC50/Ki/Kd/EC50/AC50 survived). The DB CHECK must
         # be a SUPERSET of (or exactly match) the normalizer's allowed
-        # set — never a subset. Single source of truth:
+        # set -- never a subset. Single source of truth:
         # ``cleaning/normalizer.py::_ALLOWED_ACTIVITY_TYPES``.
         CheckConstraint(
             "activity_type IS NULL OR activity_type IN "
@@ -1484,15 +1495,15 @@ class DrugProteinInteraction(Base, IDMixin, TimestampMixin):
             name="chk_dpi_activity_units",
         ),
         CheckConstraint(
-            # v89 ROOT FIX (BUG #27 — over-restrictive CHECK locks DPI to
+            # v89 ROOT FIX (BUG #27 -- over-restrictive CHECK locks DPI to
             #   2 sources forever): the previous ``source IN ('chembl',
             #   'drugbank')`` CHECK rejected every other standard DPI /
-            #   activity-data source — BindingDB, PubChem BioAssay,
+            #   activity-data source -- BindingDB, PubChem BioAssay,
             #   ChEMBL-NTD, IUPHAR/Guide to PHARMACOLOGY, EPA ToxCast,
             #   GtoPdb. All are free, NIH/EMBL-funded, and standard in
             #   drug-repurposing pipelines. The ``source_id`` column is
             #   free-form (no CHECK), but ``source`` was locked to 2
-            #   values — an asymmetry that makes the platform unable to
+            #   values -- an asymmetry that makes the platform unable to
             #   ingest activity data from any future source. ROOT FIX:
             #   expand the whitelist to the 8 standard DPI databases.
             #   The loader's ``_pre_validate_dpi`` validates upstream; the
@@ -1527,17 +1538,17 @@ class DrugProteinInteraction(Base, IDMixin, TimestampMixin):
 
 
 # ===========================================================================
-# 4. PROTEIN–PROTEIN INTERACTIONS (PPI)
+# 4. PROTEIN-PROTEIN INTERACTIONS (PPI)
 # ===========================================================================
 
 
 class ProteinProteinInteraction(Base, IDMixin, TimestampMixin):
-    """Protein–protein interaction records from STRING.
+    """Protein-protein interaction records from STRING.
 
     Domain meaning
     --------------
     Each row represents an interaction between two proteins in the STRING
-    database.  Scores are integers in the range [0, 1000] (NOT 0–100).
+    database.  Scores are integers in the range [0, 1000] (NOT 0-100).
     Score misinterpretation corrupts Graph Transformer edge weights (SCI-03).
 
     Key constraints
@@ -1545,7 +1556,7 @@ class ProteinProteinInteraction(Base, IDMixin, TimestampMixin):
     - ``protein_a_id < protein_b_id`` enforced by CHECK (DES-02, IDEM-03).
       This prevents symmetric duplicates like (A, B) and (B, A).
     - All score columns are in [0, 1000] (SCI-03).
-    - ``source`` has no default — must be specified explicitly (CFG-03).
+    - ``source`` has no default -- must be specified explicitly (CFG-03).
     - ``score_json`` for source-specific score payloads (INT-04).
 
     Normalized Score
@@ -1561,12 +1572,12 @@ class ProteinProteinInteraction(Base, IDMixin, TimestampMixin):
     protein_b_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("proteins.id", ondelete="CASCADE"), nullable=False,
     )
-    # [SCI-03] STRING scores are 0–1000, NOT 0–100
+    # [SCI-03] STRING scores are 0-1000, NOT 0-100
     combined_score: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     experimental_score: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     database_score: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     textmining_score: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    # [CFG-03] No server_default — source must be explicitly specified
+    # [CFG-03] No server_default -- source must be explicitly specified
     source: Mapped[str] = mapped_column(
         String(SOURCE_LENGTH), nullable=False,
     )
@@ -1578,7 +1589,7 @@ class ProteinProteinInteraction(Base, IDMixin, TimestampMixin):
     is_homodimer: Mapped[bool] = mapped_column(
         # P1-005 ROOT FIX (v100 forensic): the v90 ROOT FIX (BUG #23) claimed
         # to unify EVERY boolean column to server_default=text("FALSE") but
-        # MISSED is_homodimer — it kept the non-portable server_default="0".
+        # MISSED is_homodimer -- it kept the non-portable server_default="0".
         # On strict-mode MySQL/MariaDB, DEFAULT 0 for a BOOLEAN column is
         # rejected; on SQLite/PostgreSQL it works but creates three-way
         # schema drift versus every other boolean column. ROOT FIX: align
@@ -1600,7 +1611,7 @@ class ProteinProteinInteraction(Base, IDMixin, TimestampMixin):
 
     __table_args__ = (
         UniqueConstraint("protein_a_id", "protein_b_id", name="uq_ppi_protein_pair"),
-        # [DES-02] [IDEM-03] Prevent symmetric duplicates — protein_a_id must
+        # [DES-02] [IDEM-03] Prevent symmetric duplicates -- protein_a_id must
         # be <= protein_b_id. v91 ROOT FIX (BUG #9): changed from strict
         # less-than (protein_a_id < protein_b_id) to less-than-or-equal,
         # allowing homodimers (protein_a_id == protein_b_id). Homodimers
@@ -1620,7 +1631,7 @@ class ProteinProteinInteraction(Base, IDMixin, TimestampMixin):
         # representations for homodimers vs heterodimers.
         #
         # v93 ROOT FIX (P1-025): the previous CHECK used non-standard SQL
-        # (``==`` and ``= TRUE``) and was logically ASYMMETRIC — it only
+        # (``==`` and ``= TRUE``) and was logically ASYMMETRIC -- it only
         # enforced "homodimer ⇒ a_id == b_id" but NOT "a_id != b_id ⇒
         # NOT homodimer". A heterodimer row with ``is_homodimer = TRUE``
         # (loader bug or manual insert) was SILENTLY ACCEPTED, polluting
@@ -1639,7 +1650,7 @@ class ProteinProteinInteraction(Base, IDMixin, TimestampMixin):
             "OR (protein_a_id != protein_b_id AND is_homodimer = FALSE)",
             name="chk_ppi_homodimer_flag",
         ),
-        # [SCI-03] Score bounds — all STRING scores are 0–1000
+        # [SCI-03] Score bounds -- all STRING scores are 0-1000
         CheckConstraint(
             "combined_score IS NULL OR (combined_score >= 0 AND combined_score <= 1000)",
             name="chk_ppi_combined_score",
@@ -1660,16 +1671,16 @@ class ProteinProteinInteraction(Base, IDMixin, TimestampMixin):
         # but missing from ORM. SQLite dev DB accepted source='intact';
         # PostgreSQL prod DB rejected. Adding to ORM for parity.
         #
-        # v89 ROOT FIX (BUG #26 — over-restrictive CHECK locks platform to
+        # v89 ROOT FIX (BUG #26 -- over-restrictive CHECK locks platform to
         #   STRING forever): the previous ``source IN ('string')`` CHECK
         #   rejected every other standard PPI database (BioGRID, IntAct,
-        #   HPRD, Reactome, BioPlex) — all of which are commonly used
+        #   HPRD, Reactome, BioPlex) -- all of which are commonly used
         #   alongside STRING for PPI network construction. If the platform
         #   ever ingests BioGRID/IntAct (both are free, NIH-funded, and
         #   standard in pharma KG pipelines), the loader fails at INSERT
         #   with a CHECK violation, and the operator has no way to load
         #   the data without dropping the constraint. The ``source`` column
-        #   is NOT NULL (line 1374), so every PPI row MUST have a source —
+        #   is NOT NULL (line 1374), so every PPI row MUST have a source --
         #   the CHECK must accept all legitimate sources. ROOT FIX:
         #   expand the whitelist to the 6 standard PPI databases. The
         #   loader's ``_pre_validate_ppi`` validates the source value
@@ -1687,7 +1698,7 @@ class ProteinProteinInteraction(Base, IDMixin, TimestampMixin):
     def normalized_combined_score(self) -> Optional[float]:
         """Return combined_score normalized to [0, 1] range.
 
-        STRING scores are 0–1000.  Downstream ML models expect [0, 1].
+        STRING scores are 0-1000.  Downstream ML models expect [0, 1].
         """
         if self.combined_score is None:
             return None
@@ -1703,12 +1714,12 @@ class ProteinProteinInteraction(Base, IDMixin, TimestampMixin):
 
 
 # ===========================================================================
-# 5. GENE–DISEASE ASSOCIATIONS (GDA)
+# 5. GENE-DISEASE ASSOCIATIONS (GDA)
 # ===========================================================================
 
 
 class GeneDiseaseAssociation(Base, IDMixin, TimestampMixin):
-    """Gene–disease association records from DisGeNET and OMIM.
+    """Gene-disease association records from DisGeNET and OMIM.
 
     Domain meaning
     --------------
@@ -1736,7 +1747,7 @@ class GeneDiseaseAssociation(Base, IDMixin, TimestampMixin):
     __tablename__ = "gene_disease_associations"
 
     gene_symbol: Mapped[Optional[str]] = mapped_column(
-        # v57 ROOT FIX (P1C-001 — schema contradiction):
+        # v57 ROOT FIX (P1C-001 -- schema contradiction):
         #   The previous definition was `nullable=False, server_default=""`
         #   + a CHECK constraint `gene_symbol <> ''` (declared below).
         #   This is a contradiction: if a loader inserts a row without
@@ -1751,7 +1762,7 @@ class GeneDiseaseAssociation(Base, IDMixin, TimestampMixin):
         #   crashing the pipeline.
         String(GENE_SYMBOL_LENGTH), nullable=True,
     )
-    # String FK to proteins.uniprot_id — the canonical cross-source key.
+    # String FK to proteins.uniprot_id -- the canonical cross-source key.
     # GDA does NOT have an integer protein_id FK because gene-disease data
     # sources provide gene symbols that resolve to UniProt accessions.
     uniprot_id: Mapped[Optional[str]] = mapped_column(
@@ -1761,7 +1772,7 @@ class GeneDiseaseAssociation(Base, IDMixin, TimestampMixin):
     )
     # v14 ROOT FIX (FIX4 / audit CD-3): the integer ``protein_id`` column
     # was REMOVED from the GDA model. The previous v13 code kept it "to
-    # match the migrations" — but the migrations were THEMSELVES the bug.
+    # match the migrations" -- but the migrations were THEMSELVES the bug.
     # The GDA table is supposed to use the STRING ``uniprot_id`` FK
     # (because gene-disease data sources provide gene symbols that
     # resolve to UniProt accessions, NOT integer protein PKs). The
@@ -1772,18 +1783,18 @@ class GeneDiseaseAssociation(Base, IDMixin, TimestampMixin):
     # migrations have also been updated to NOT create the column.
     # Tests under TestFix4_GdaUniprotId enforce this invariant.
     disease_id: Mapped[Optional[str]] = mapped_column(
-        # v59 ROOT FIX (compound of P1C-001 — disease_id contradiction):
+        # v59 ROOT FIX (compound of P1C-001 -- disease_id contradiction):
         #   The previous definition was `nullable=False, server_default=""`
         #   paired with the CHECK constraint `chk_gda_disease_id_nonempty`
         #   (declared below). On PostgreSQL, an INSERT that omits
         #   disease_id triggers the server_default (""), which then FAILS
         #   the CHECK with IntegrityError. On SQLite, the server_default
         #   fires ("") but the CHECK is silently NOT enforced against
-        #   server-supplied values — so dev/test passed while production
+        #   server-supplied values -- so dev/test passed while production
         #   crashed. This is the exact same bug class that v57 fixed for
         #   gene_symbol but left in place for disease_id.
         #   ROOT FIX: drop the server_default. disease_id remains
-        #   nullable=False — the CHECK constraint stays as the guard.
+        #   nullable=False -- the CHECK constraint stays as the guard.
         #   Loaders that fail to supply a real disease_id now quarantine
         #   the row instead of crashing the upsert. The CHECK constraint
         #   `disease_id IS NOT NULL AND disease_id <> ''` is preserved
@@ -1791,7 +1802,7 @@ class GeneDiseaseAssociation(Base, IDMixin, TimestampMixin):
         #   (a GDA row with no disease is data garbage).
         String(DISEASE_ID_LENGTH), nullable=False,
     )
-    # [SCI-06] Disease ID type — indicates which identifier system is used
+    # [SCI-06] Disease ID type -- indicates which identifier system is used
     disease_id_type: Mapped[Optional[str]] = mapped_column(
         String(DISEASE_ID_TYPE_LENGTH), nullable=True,
     )
@@ -1818,21 +1829,21 @@ class GeneDiseaseAssociation(Base, IDMixin, TimestampMixin):
     )
 
     # ------------------------------------------------------------------
-    # 389-fix audit — institutional-grade columns (SCI-3..SCI-42, DQ-1..34,
+    # 389-fix audit -- institutional-grade columns (SCI-3..SCI-42, DQ-1..34,
     # IDEM-9..14, LIN-1..28, COMP-1..20).  All new columns are nullable
     # so existing rows (and existing tests) are unaffected.
     # ------------------------------------------------------------------
 
-    # [SCI-6 / DQ-1] NCBI Entrez Gene ID — stable across HGNC renames.
+    # [SCI-6 / DQ-1] NCBI Entrez Gene ID -- stable across HGNC renames.
     gene_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
     # [SCI-9 / DQ-2] DisGeNET diseaseType ∈ {disease, phenotype, group}.
     disease_type: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
 
-    # [SCI-3] DisGeNET sub-source (CURATED, BEFREE, GWAS_CATALOG, …).
+    # [SCI-3] DisGeNET sub-source (CURATED, BEFREE, GWAS_CATALOG, ...).
     source_id: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
 
-    # [SCI-8] MeSH hierarchy code (e.g. C04.588.614) — stored verbatim.
+    # [SCI-8] MeSH hierarchy code (e.g. C04.588.614) -- stored verbatim.
     disease_class: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     disease_class_source: Mapped[Optional[str]] = mapped_column(
         String(50), nullable=True
@@ -1848,7 +1859,7 @@ class GeneDiseaseAssociation(Base, IDMixin, TimestampMixin):
     # [SCI-24] Evidence-strength label derived from PMID count + recency.
     evidence_strength: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
 
-    # [SCI-38] Score × source_weight — cross-source comparable score.
+    # [SCI-38] Score × source_weight -- cross-source comparable score.
     normalized_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
 
     # [SCI-26 / IDEM-8] DisGeNET release version (e.g. "v7_2024_06").
@@ -1873,7 +1884,7 @@ class GeneDiseaseAssociation(Base, IDMixin, TimestampMixin):
         String(50), nullable=True
     )
 
-    # [LIN-10] Resolution method used for gene_symbol → uniprot_id.
+    # [LIN-10] Resolution method used for gene_symbol -> uniprot_id.
     resolution_method: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
 
     # [LIN-10 / IDEM-7] SHA-256 of the cached gene_to_uniprot map.
@@ -1890,7 +1901,7 @@ class GeneDiseaseAssociation(Base, IDMixin, TimestampMixin):
     # [IDEM-14] Snapshot tag for backfill safety.
     snapshot_tag: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
 
-    # [LIN-9] Source URL (sanitised — no API key).
+    # [LIN-9] Source URL (sanitised -- no API key).
     source_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
 
     # [SCI-21 / LIN-17..19] Lineage columns from validate_gda_scores.
@@ -1923,23 +1934,23 @@ class GeneDiseaseAssociation(Base, IDMixin, TimestampMixin):
     # -- validators --
     @validates("gene_symbol")
     def _validate_gene_symbol(self, key: str, value: Optional[str]) -> Optional[str]:
-        # v89 ROOT FIX (BUG #25 — GDA contaminated with mouse gene symbols):
+        # v89 ROOT FIX (BUG #25 -- GDA contaminated with mouse gene symbols):
         #   The GDA table is HUMAN-ONLY (DisGeNET human subset, OMIM). The
         #   previous code used the LOOSE ``_validate_gene_symbol`` (which
         #   delegates to ``_GENE_SYMBOL_RE`` = ``^[A-Za-z][A-Za-z0-9\-]{0,49}$``),
         #   accepting Title-Case mouse/rat/yeast symbols (Tp53, Brca1, GAL4).
         #   The strict ``_HUMAN_GENE_SYMBOL_RE`` (``^[A-Z][A-Z0-9\-]{0,49}$``,
         #   ALL CAPS) was DEFINED at line 258 but NEVER USED by the GDA
-        #   validator — so a DisGeNET row for a mouse gene (Tp53) passed
+        #   validator -- so a DisGeNET row for a mouse gene (Tp53) passed
         #   ORM validation, landed in ``gene_disease_associations``, and
-        #   downstream KG construction treated it as a human gene — creating
-        #   false Gene→Disease edges and contaminating the KG with non-human
+        #   downstream KG construction treated it as a human gene -- creating
+        #   false Gene->Disease edges and contaminating the KG with non-human
         #   data. ROOT FIX: use ``_HUMAN_GENE_SYMBOL_RE`` here. NULL is
         #   still allowed (gene_symbol is nullable per P1C-001). The loader's
         #   ``_pre_validate_gda`` already normalizes to upper-case before
         #   INSERT, so valid human symbols (BRCA1, FGFR3, TP53) pass. A
         #   row with ``gene_symbol='Tp53'`` (mouse) now raises ValueError
-        #   and is quarantined to the dead-letter queue — exactly the
+        #   and is quarantined to the dead-letter queue -- exactly the
         #   patient-safe behaviour for a human-only disease-association table.
         if value is None:
             return value
@@ -1964,16 +1975,16 @@ class GeneDiseaseAssociation(Base, IDMixin, TimestampMixin):
         Index("idx_gda_source_id", "source_id"),
         # [IDEM-14] Index on snapshot_tag for fast snapshot queries
         Index("idx_gda_snapshot_tag", "snapshot_tag"),
-        # v93 ROOT FIX (P1-026 — NULL gene_symbol dedup):
+        # v93 ROOT FIX (P1-026 -- NULL gene_symbol dedup):
         # ``gene_symbol`` is nullable (line 1700). On PostgreSQL 14 and
         # earlier, SQLite, and MySQL, NULLs are treated as DISTINCT in a
-        # UNIQUE constraint — two GDA rows with ``gene_symbol=NULL``,
+        # UNIQUE constraint -- two GDA rows with ``gene_symbol=NULL``,
         # ``disease_id='C001'``, ``source='disgenet'`` are BOTH allowed
         # (not considered duplicates). This silently corrupts the KG with
-        # duplicate Gene→Disease edges.
+        # duplicate Gene->Disease edges.
         #
         # Portable fix (works on PostgreSQL 12+, SQLite 3.31+, MySQL 8+):
-        # use a functional UNIQUE index on COALESCE(gene_symbol, '') —
+        # use a functional UNIQUE index on COALESCE(gene_symbol, '') --
         # NULL is normalized to empty string for the dedup check, so two
         # NULL-gene rows with the same (disease_id, source) collide.
         # PostgreSQL 15+ supports ``NULLS NOT DISTINCT`` but we cannot
@@ -1988,7 +1999,7 @@ class GeneDiseaseAssociation(Base, IDMixin, TimestampMixin):
         ),
         # Functional UNIQUE index for NULL gene_symbol dedup (portable).
         # v93 ROOT FIX (P1-026): COALESCE(gene_symbol, '') normalizes
-        # NULL → '' so two NULL-gene rows with the same (disease_id,
+        # NULL -> '' so two NULL-gene rows with the same (disease_id,
         # source) collide at the index level. Uses ``func.coalesce``
         # with ``column("gene_symbol")`` (SQLAlchemy expression) so
         # the DDL generator renders it as a column reference, not a
@@ -2002,10 +2013,10 @@ class GeneDiseaseAssociation(Base, IDMixin, TimestampMixin):
             func.coalesce(column("gene_symbol"), ""), "disease_id", "source",
             unique=True,
         ),
-        # [SCI-06 / COMP-5] Disease ID type validation — extended to include
+        # [SCI-06 / COMP-5] Disease ID type validation -- extended to include
         # 'hpo' (HPO terms are valid DisGeNET disease IDs per Piñero et al. 2020).
         # CRITICAL FIX (patient safety): added 'icd10' (WHO international
-        # clinical classification), 'efo' (Experimental Factor Ontology —
+        # clinical classification), 'efo' (Experimental Factor Ontology --
         # used by GWAS Catalog, UK Biobank, Open Targets), and 'orphanet'
         # (rare-disease ontology). Without these, real disease associations
         # would be SILENTLY DROPPED at insert time, hiding drug-disease
@@ -2028,7 +2039,7 @@ class GeneDiseaseAssociation(Base, IDMixin, TimestampMixin):
         ),
         # [SCI-11] confidence_tier must be a known label when non-NULL.
         # V100 ROOT FIX (BUG #4): aligned to Piñero et al. 2020 §2.3 actual
-        # vocabulary — sub_weak / weak / strong. The [0.06, 0.3) band is
+        # vocabulary -- sub_weak / weak / strong. The [0.06, 0.3) band is
         # "weak" (not "moderate" as the previous code wrongly labeled it).
         CheckConstraint(
             "confidence_tier IS NULL OR confidence_tier IN "
@@ -2063,22 +2074,22 @@ class GeneDiseaseAssociation(Base, IDMixin, TimestampMixin):
         ),
         # v39 ROOT FIX (P1 #43/47): added chk_gda_source CHECK constraint
         # to the ORM. The migration (001) has this constraint but the ORM
-        # was missing it — so SQLite dev/test DBs (created via ORM
+        # was missing it -- so SQLite dev/test DBs (created via ORM
         # create_all) accepted ANY source string, while PostgreSQL prod
         # DBs (created via migration) rejected anything outside
         # {NULL, 'disgenet', 'omim'}. A row with source='chembl' would
-        # be accepted on SQLite but rejected on PostgreSQL — tests pass,
+        # be accepted on SQLite but rejected on PostgreSQL -- tests pass,
         # production fails. The fix: add the constraint to the ORM so
         # both paths enforce the same rule.
         CheckConstraint(
             "source IS NULL OR source IN ('disgenet', 'omim')",
             name="chk_gda_source",
         ),
-        # v59 ROOT FIX (compound of InChIKey fix — SQLite create_all
+        # v59 ROOT FIX (compound of InChIKey fix -- SQLite create_all
         # crash): the previous ORM CheckConstraint used 9 PostgreSQL
         # regex operators (``~``) which SQLite does NOT support.
         # ``Base.metadata.create_all()`` on SQLite raised
-        # ``OperationalError: near "~": syntax error`` — breaking every
+        # ``OperationalError: near "~": syntax error`` -- breaking every
         # test that bootstraps via the ORM. The migration 001 SQL keeps
         # the full regex CHECK (the migration runner has its own SQLite-
         # translation logic). The ORM now uses a portable non-empty
@@ -2089,11 +2100,11 @@ class GeneDiseaseAssociation(Base, IDMixin, TimestampMixin):
             "disease_id IS NOT NULL AND LENGTH(TRIM(disease_id)) > 0",
             name="chk_gda_disease_id_format",
         ),
-        # v59 ROOT FIX (compound of InChIKey fix — SQLite create_all
+        # v59 ROOT FIX (compound of InChIKey fix -- SQLite create_all
         # crash): the previous ORM CheckConstraint used the PostgreSQL
         # regex operator ``~`` which SQLite does NOT support.
         # ``Base.metadata.create_all()`` on SQLite raised
-        # ``OperationalError: near "~": syntax error`` — breaking every
+        # ``OperationalError: near "~": syntax error`` -- breaking every
         # test that bootstraps via the ORM. The migration 001 SQL keeps
         # the full regex CHECK (the migration runner has its own SQLite-
         # translation logic). The ORM now uses a portable length backstop;
@@ -2112,16 +2123,16 @@ class GeneDiseaseAssociation(Base, IDMixin, TimestampMixin):
         #   1. The ``postgresql_where`` clause
         #      ``gene_symbol IS NOT NULL OR gene_symbol = ''`` was a
         #      TAUTOLOGY once ``chk_gda_gene_symbol_nonempty`` (just above)
-        #      rejected both NULL and empty-string ``gene_symbol`` — every
+        #      rejected both NULL and empty-string ``gene_symbol`` -- every
         #      surviving row matched the partial predicate, so the "partial"
         #      index actually covered the WHOLE table. It was therefore a
         #      second full UNIQUE index on (gene_symbol, disease_id, source)
-        #      in addition to the UniqueConstraint — 2× write amplification
+        #      in addition to the UniqueConstraint -- 2× write amplification
         #      (4× if you also count the implicit index SQLAlchemy emits on
         #      the UniqueConstraint) on every INSERT/UPDATE/DELETE.
         #   2. SQLite (dev/test) silently ignores ``postgresql_where``, so
         #      the "partial" index became a SECOND plain unique index on
-        #      SQLite — producing a confusing duplicate-index error surface
+        #      SQLite -- producing a confusing duplicate-index error surface
         #      and wasting disk on every dev DB.
         # Keeping ONLY the canonical ``UniqueConstraint`` is sufficient: it
         # already enforces uniqueness on (gene_symbol, disease_id, source)
@@ -2203,7 +2214,7 @@ class EntityMapping(Base, IDMixin, TimestampMixin):
     match_method: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     # [LINE-04] Full resolution attempt chain
     match_history: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    # v89 ROOT FIX (BUG #21 — schema drift: migration 001 declares
+    # v89 ROOT FIX (BUG #21 -- schema drift: migration 001 declares
     #   ``last_matched_at TIMESTAMP WITH TIME ZONE`` at line 1227, but the
     #   ORM EntityMapping model did NOT declare this column.
     #   ``Base.metadata.create_all()`` created ``entity_mapping`` WITHOUT
@@ -2212,7 +2223,7 @@ class EntityMapping(Base, IDMixin, TimestampMixin):
     #   (SQLite, create_all path) LACKED the column, while prod DBs
     #   (PostgreSQL, migration path) HAD it. The loader's
     #   ``bulk_upsert_entity_mapping`` (loaders.py ~line 3377) listed
-    #   ``updatable_cols`` but ``last_matched_at`` was NOT among them — so
+    #   ``updatable_cols`` but ``last_matched_at`` was NOT among them -- so
     #   even on prod, the column was never populated. ``verify_schema_matches_orm``
     #   reported it as an "extra column" on prod, creating false-positive
     #   schema-drift warnings. ROOT FIX: declare the column on the ORM so
@@ -2282,7 +2293,7 @@ class DeadLetterGDA(Base, IDMixin, TimestampMixin):
     Domain meaning
     --------------
     Each row represents a GDA record that was rejected by the load()
-    phase — e.g. unresolved gene_symbol, invalid disease_id format,
+    phase -- e.g. unresolved gene_symbol, invalid disease_id format,
     inverted year range, etc.  Rows are written here instead of being
     silently dropped, so the data can be inspected and reprocessed
     later (REL-3, LIN-11).
@@ -2293,23 +2304,23 @@ class DeadLetterGDA(Base, IDMixin, TimestampMixin):
       ``"unresolved_gene_symbol"``, ``"invalid_disease_id_format"``).
     - ``details_json`` is a JSON object with the offending values
       (gene_symbol, disease_id, score, etc.) for debugging.
-    - ``pipeline_run_id`` is an Integer FK → ``pipeline_runs.id``
+    - ``pipeline_run_id`` is an Integer FK -> ``pipeline_runs.id``
       (ON DELETE SET NULL), matching every other lineage-bearing table
       (DPI, PPI, GDA, RejectedRecord, PubChemCompoundProperty).
 
-    v89 ROOT FIX (BUG #29 — run_id was String(64), not Integer FK):
+    v89 ROOT FIX (BUG #29 -- run_id was String(64), not Integer FK):
       The previous ``run_id: String(64)`` stored a UUID string with NO
       FK to ``pipeline_runs.id``. Every other lineage-bearing table uses
-      ``Integer FK → pipeline_runs.id (ON DELETE SET NULL)``. The audit
+      ``Integer FK -> pipeline_runs.id (ON DELETE SET NULL)``. The audit
       D-7 fix explicitly aligned ``PubChemCompoundProperty.pipeline_run_id``
-      from String(64) to Integer FK — but ``DeadLetterGDA.run_id`` was
+      from String(64) to Integer FK -- but ``DeadLetterGDA.run_id`` was
       NOT updated. This meant: (a) dead-letter rows could not be JOINed
       to ``pipeline_runs`` without a CAST; (b) a typo'd run_id silently
       orphaned the dead-letter row (no FK enforcement); (c) the loader's
-      ``_quarantine_gda_rows`` wrote ``str(pipeline_run_id)`` —
+      ``_quarantine_gda_rows`` wrote ``str(pipeline_run_id)`` --
       converting the Integer to a string, losing the FK relationship.
-      ROOT FIX: rename ``run_id`` → ``pipeline_run_id``, change type to
-      ``Integer FK → pipeline_runs.id (ON DELETE SET NULL)``, and update
+      ROOT FIX: rename ``run_id`` -> ``pipeline_run_id``, change type to
+      ``Integer FK -> pipeline_runs.id (ON DELETE SET NULL)``, and update
       the loader to write the integer directly (see loaders.py fix).
       The index ``idx_dlgda_run_id`` is renamed to
       ``idx_dlgda_pipeline_run_id`` to match the column rename.
@@ -2327,7 +2338,7 @@ class DeadLetterGDA(Base, IDMixin, TimestampMixin):
     )
     reason: Mapped[str] = mapped_column(String(100), nullable=False)
     details_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    # v89 ROOT FIX (BUG #29): Integer FK → pipeline_runs.id (ON DELETE
+    # v89 ROOT FIX (BUG #29): Integer FK -> pipeline_runs.id (ON DELETE
     # SET NULL), matching every other lineage-bearing table. Was
     # String(64) with no FK.
     pipeline_run_id: Mapped[Optional[int]] = mapped_column(
@@ -2363,13 +2374,13 @@ class DeadLetterGDA(Base, IDMixin, TimestampMixin):
 # DEDUP_MIGRATION_002, etc.). The table has 9 columns: id, table_name,
 # operation, record_id, changed_by, changed_at, old_values, new_values,
 # row_count, details. Without an ORM model, ``Base.metadata.create_all()``
-# on SQLite dev/test DBs did NOT create this table — so any Python code
+# on SQLite dev/test DBs did NOT create this table -- so any Python code
 # that tried to write audit records via the ORM raised
 # ``sqlite3.OperationalError: no such table: audit_log``. The migration
 # 001 ``CREATE TABLE IF NOT EXISTS`` was the only creation path, and on
 # SQLite it was being silently skipped (CD-5 was the fix that made
 # migrations run on SQLite, but the audit_log table itself had no ORM
-# fallback). Adding this model closes the gap — create_all() now
+# fallback). Adding this model closes the gap -- create_all() now
 # creates audit_log on BOTH PostgreSQL and SQLite, and migration 001's
 # CREATE TABLE IF NOT EXISTS becomes the idempotent no-op it was
 # designed to be.
@@ -2378,7 +2389,7 @@ class AuditLog(Base, IDMixin):
 
     Domain meaning
     --------------
-    Each row records a single audit event — typically a schema-migration
+    Each row records a single audit event -- typically a schema-migration
     lineage operation (PRE_MIGRATION_002_CHECKSUM, DELETE_NULL_DISEASE_ID,
     DEDUP_MIGRATION_002, etc.) or a bulk data operation (BULK_OPERATION,
     SOFT_DELETE, RESTORE). Used by migrations 002/004/005/006 to record
@@ -2404,7 +2415,7 @@ class AuditLog(Base, IDMixin):
     )
     old_values: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     new_values: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    # v17: row_count + details — added to migration 001 by the RT-1 /
+    # v17: row_count + details -- added to migration 001 by the RT-1 /
     # Compound-4 "Migration Wall" fix so migration 002's INSERTs into
     # audit_log (table_name, operation, row_count, details) stop
     # aborting with "column row_count of relation audit_log does not
@@ -2417,15 +2428,15 @@ class AuditLog(Base, IDMixin):
         # migration 001 so SQLite dev/test DBs (which skip the migration
         # SQL) still enforce the same operation-enum contract.
         #
-        # v89 ROOT FIX (BUG #28 — hardcoded migration numbers block 007+):
+        # v89 ROOT FIX (BUG #28 -- hardcoded migration numbers block 007+):
         #   The previous CHECK hardcoded specific migration numbers (002,
         #   004, 005, 006) in the operation whitelist. Migrations 007, 008,
-        #   009, 010, 011 were NOT in the whitelist — so any migration >= 7
+        #   009, 010, 011 were NOT in the whitelist -- so any migration >= 7
         #   that tried to INSERT a ``PRE_MIGRATION_007_CHECKSUM`` row would
         #   fail the CHECK, and the audit trail would be incomplete for all
         #   future migrations. The migration runner's ``_record_failure``
         #   and provenance code would need to add tokens to the whitelist
-        #   for EVERY new migration — an unmaintainable pattern. ROOT FIX:
+        #   for EVERY new migration -- an unmaintainable pattern. ROOT FIX:
         #   replace the hardcoded migration numbers with a pattern match
         #   (``LIKE 'PRE_MIGRATION_%_CHECKSUM'`` /
         #   ``LIKE 'POST_MIGRATION_%_CHECKSUM'``) so ANY future migration
@@ -2466,7 +2477,7 @@ class PipelineRun(Base, IDMixin, TimestampMixin):
 
     Domain meaning
     --------------
-    Each row records a single pipeline run — its source, status, record
+    Each row records a single pipeline run -- its source, status, record
     counts, duration, and any error details.
 
     Key constraints
@@ -2525,7 +2536,7 @@ class PipelineRun(Base, IDMixin, TimestampMixin):
     # triggered_by, source_version, sha256_raw, sha256_cleaned, git_commit,
     # seed, schema_version, validation_errors, dq_metrics, record counts).
     # BasePipeline._write_run_log already builds this dict and passes it as
-    # metadata_json — without this column, the constructor silently dropped
+    # metadata_json -- without this column, the constructor silently dropped
     # it on every run. Migration 007 adds the column; the JSON type maps to
     # JSONB on PostgreSQL and TEXT on SQLite (via the SQLAlchemy JSON
     # dialect).
@@ -2544,7 +2555,7 @@ class PipelineRun(Base, IDMixin, TimestampMixin):
             name="chk_pipeline_runs_duration_nonneg",
         ),
         # v17 ROOT FIX (CD-4 deepened): migration 001 declares 3 CHECK
-        # constraints on ``pipeline_runs`` that the ORM was MISSING —
+        # constraints on ``pipeline_runs`` that the ORM was MISSING --
         # ``chk_pipeline_runs_status`` (status enum),
         # ``chk_pipeline_runs_counts_nonneg`` (record counts non-negative),
         # ``chk_pipeline_runs_error_message`` (error_message length cap).
@@ -2552,7 +2563,7 @@ class PipelineRun(Base, IDMixin, TimestampMixin):
         # DBs created a ``pipeline_runs`` table that accepted any string
         # for status (e.g. "BOGUS") and negative record counts. The
         # migration 001 ``CREATE TABLE IF NOT EXISTS`` was a no-op
-        # because the table already existed from create_all — so the
+        # because the table already existed from create_all -- so the
         # constraints were NEVER applied on SQLite. Code that passed
         # tests on SQLite could fail on PostgreSQL (where the
         # constraints ARE applied). Add all 3 constraints to the ORM
@@ -2601,7 +2612,7 @@ class PipelineRun(Base, IDMixin, TimestampMixin):
 class PubChemCompoundProperty(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
     """Full PubChem compound property record (one row per inchikey+pubchem_cid).
 
-    v43 ROOT FIX (P2 — PubChemCompoundProperty not using SoftDeleteMixin):
+    v43 ROOT FIX (P2 -- PubChemCompoundProperty not using SoftDeleteMixin):
     Previously used a standalone is_deleted column. Now inherits
     SoftDeleteMixin (like Drug and Protein) so it gets deleted_at
     timestamp + soft_delete()/restore() helpers + consistent query
@@ -2611,7 +2622,7 @@ class PubChemCompoundProperty(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
     --------------
     The ``drugs`` table only stores 4 PubChem columns (pubchem_cid,
     molecular_formula, molecular_weight, smiles).  This table stores the
-    FULL set of 15+ properties fetched from PubChem PUG REST — InChI,
+    FULL set of 15+ properties fetched from PubChem PUG REST -- InChI,
     IUPACName, XLogP, ExactMass, TPSA, Complexity, HBondDonorCount,
     HBondAcceptorCount, RotatableBondCount, HeavyAtomCount, IsomericSMILES,
     CAS, etc.  Phase 3 (Graph Transformer) needs these for molecular
@@ -2628,7 +2639,7 @@ class PubChemCompoundProperty(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
     ``sqlite3.OperationalError: no such table: pubchem_compound_properties``.
     Adding this ORM model means ``Base.metadata.create_all()`` creates the
     table on BOTH PostgreSQL (where it may already exist from migration
-    005 — ``create_all`` is additive and idempotent) AND SQLite (where it
+    005 -- ``create_all`` is additive and idempotent) AND SQLite (where it
     is the only creation path).  Schema parity with migration 005 is
     enforced by the test suite.
     """
@@ -2640,11 +2651,11 @@ class PubChemCompoundProperty(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
     # but present in migration 005). Aligns ORM with migration.
     # v17 ROOT FIX (CD-2 deepened): migration 005 declares the FK
     # WITHOUT ``ondelete`` (default NO ACTION). The ORM declared
-    # ``ondelete="CASCADE"`` — divergent. On PostgreSQL, both
+    # ``ondelete="CASCADE"`` -- divergent. On PostgreSQL, both
     # create_all() and migration 005 try to create the FK; the second
     # one silently wins depending on which runs first, producing
     # non-deterministic on-delete behavior. Align ORM to migration
-    # 005's NO ACTION (the safer default — a properties row blocks
+    # 005's NO ACTION (the safer default -- a properties row blocks
     # drug deletion until explicitly cleaned up).
     inchikey: Mapped[str] = mapped_column(
         String(50),
@@ -2661,10 +2672,10 @@ class PubChemCompoundProperty(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
     # [SCI-1, SCI-14, SCI-15] IsomericSMILES (with stereochemistry).
     isomeric_smiles: Mapped[Optional[str]] = mapped_column(String(50000), nullable=True)
 
-    # [SCI-2] InChI — full InChI string.
+    # [SCI-2] InChI -- full InChI string.
     inchi: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
-    # [SCI-3] IUPACName — systematic chemical name.
+    # [SCI-3] IUPACName -- systematic chemical name.
     # v16 ROOT FIX (CD-2): Text (not String(1000)) to match migration 005.
     iupac_name: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
@@ -2685,10 +2696,10 @@ class PubChemCompoundProperty(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
     # v16 CD-2: Numeric(12,6) to match migration 005.
     exact_mass: Mapped[Optional[float]] = mapped_column(Numeric(12, 6), nullable=True)
 
-    # [SCI-8] XLogP — computed octanol-water partition coefficient.
+    # [SCI-8] XLogP -- computed octanol-water partition coefficient.
     # v16 CD-2: Numeric(6,2) to match migration 005.
     # v17 CD-2 deepened: add server_default='pubchem_xlogp3' to match
-    # migration 005 — without the default, the loader had to populate
+    # migration 005 -- without the default, the loader had to populate
     # xlogp_source explicitly on every insert, diverging from the
     # migration's intent (the value is constant for fetched rows).
     xlogp: Mapped[Optional[float]] = mapped_column(Numeric(6, 2), nullable=True)
@@ -2749,10 +2760,10 @@ class PubChemCompoundProperty(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
     # v16 CD-2: NOT NULL + String(100) to match migration 005.
     # v17 CD-2 deepened: migration 005 declares NOT NULL WITHOUT a
     # server_default. The ORM added ``server_default=""`` to keep
-    # create_all() happy on SQLite — but this means the ORM path
+    # create_all() happy on SQLite -- but this means the ORM path
     # silently accepts empty strings while the migration path raises.
     # Keep the server_default (SQLite compatibility) but document the
-    # divergence — the loader always populates source_id explicitly.
+    # divergence -- the loader always populates source_id explicitly.
     source_id: Mapped[Optional[str]] = mapped_column(
         String(100), nullable=False, server_default="",
     )
@@ -2768,14 +2779,14 @@ class PubChemCompoundProperty(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
     # [LIN-4] Pipeline run ID (FK to pipeline_runs.id).
     # v16 CD-2: NOT NULL + String(64) to match migration 005.
     # v17 CD-2 deepened: same server_default divergence as source_id
-    # — see comment above. Loader populates explicitly.
+    # -- see comment above. Loader populates explicitly.
     #
     # v29 ROOT FIX (audit D-7): was String(64) (a free-form UUID string
     # column with no FK), while EVERY other lineage-bearing table in the
     # schema (``drug_protein_interactions``, ``protein_protein_interactions``,
     # ``gene_disease_associations``, ``rejected_records``) uses
-    # ``Integer FK → pipeline_runs.id (ON DELETE SET NULL)``. The
-    # String(64) form meant (a) no FK was enforced — a typo'd run id could
+    # ``Integer FK -> pipeline_runs.id (ON DELETE SET NULL)``. The
+    # String(64) form meant (a) no FK was enforced -- a typo'd run id could
     # silently orphan the row; (b) join cardinality against
     # ``pipeline_runs`` required a CAST, breaking the planner; (c) the
     # column accepted arbitrary UUID strings that did not correspond to any
@@ -2783,7 +2794,7 @@ class PubChemCompoundProperty(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
     # pattern; nullable=True so historical loader code that wrote "" can
     # still round-trip (the empty string is now mapped to NULL by the
     # loader before INSERT). Migration 005 / pubchem_pipeline.py must be
-    # updated in lockstep — see audit D-7 remediation notes.
+    # updated in lockstep -- see audit D-7 remediation notes.
     pipeline_run_id: Mapped[Optional[int]] = mapped_column(
         Integer,
         ForeignKey("pipeline_runs.id", ondelete="SET NULL"),
@@ -2796,7 +2807,7 @@ class PubChemCompoundProperty(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
 
     # [LIN-5] Input checksum (SHA-256 of the input InChIKey list).
     # v16 CD-2: NOT NULL to match migration 005.
-    # v17 CD-2 deepened: same server_default divergence — see above.
+    # v17 CD-2 deepened: same server_default divergence -- see above.
     input_checksum: Mapped[Optional[str]] = mapped_column(
         String(64), nullable=False, server_default="",
     )
@@ -2808,14 +2819,14 @@ class PubChemCompoundProperty(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
     electronic_signature: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     triggered_by: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
-    # [DESIGN-7, IDEM-9] Enrichment timestamp — non-deterministic by design;
+    # [DESIGN-7, IDEM-9] Enrichment timestamp -- non-deterministic by design;
     # the OTHER columns are deterministic given the same PubChem response.
     # v17 ROOT FIX (CD-2 deepened): migration 005 declares
     # ``enriched_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()``.
-    # The ORM declared it ``nullable=True`` with no default — divergent.
+    # The ORM declared it ``nullable=True`` with no default -- divergent.
     # On PostgreSQL, create_all() creates the column nullable; migration
     # 005's CREATE TABLE is then a no-op (table exists); the column
-    # stays nullable. On INSERT, NULL enriched_at was accepted — but
+    # stays nullable. On INSERT, NULL enriched_at was accepted -- but
     # downstream queries filtering ``WHERE enriched_at IS NOT NULL`` or
     # computing enrichment age would skip / mis-classify those rows.
     # Align ORM to migration: NOT NULL, server_default=NOW().
@@ -2824,7 +2835,7 @@ class PubChemCompoundProperty(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
     )
 
     # [IDEM-9] Soft-delete flag for re-run idempotency.
-    # v90 ROOT FIX (BUG #7 — P1 re-declared is_deleted overrides mixin):
+    # v90 ROOT FIX (BUG #7 -- P1 re-declared is_deleted overrides mixin):
     #   The previous code RE-DECLARED ``is_deleted`` here, even though
     #   ``PubChemCompoundProperty`` already inherits ``SoftDeleteMixin``
     #   (which declares ``is_deleted`` and ``deleted_at`` at base.py:186).
@@ -2832,7 +2843,7 @@ class PubChemCompoundProperty(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
     #   in the class body OVERRIDES the mixin's definition. The
     #   ``soft_delete()`` and ``restore()`` helper methods from
     #   SoftDeleteMixin still reference ``self.is_deleted`` and
-    #   ``self.deleted_at`` — but ``deleted_at`` is now orphaned from the
+    #   ``self.deleted_at`` -- but ``deleted_at`` is now orphaned from the
     #   mixin (still inherited, but the override created inconsistent
     #   metadata). The ``idx_pubchem_props_is_deleted`` partial index
     #   (below) references ``is_deleted`` which had DIVERGENT column
@@ -2842,10 +2853,10 @@ class PubChemCompoundProperty(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
     #   text("FALSE")` instead of the non-portable `server_default="0"`)
     #   plus ``deleted_at`` and the ``soft_delete()`` / ``restore()``
     #   helper methods. The mixin's `is_deleted` now emits `DEFAULT FALSE`
-    #   on every dialect — byte-identical to migration 001 line 540.
+    #   on every dialect -- byte-identical to migration 001 line 540.
 
     __table_args__ = (
-        # [SCI-19, IDEM-4] Composite unique constraint — one row per
+        # [SCI-19, IDEM-4] Composite unique constraint -- one row per
         # (inchikey, pubchem_cid). ON CONFLICT DO UPDATE on this constraint.
         UniqueConstraint(
             "inchikey", "pubchem_cid",
@@ -2856,7 +2867,7 @@ class PubChemCompoundProperty(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
         # ``idx_pubchem_props_cid`` (plus two more indexes the ORM
         # was MISSING entirely: ``idx_pubchem_props_is_deleted`` and
         # ``idx_pubchem_props_run_id``). The ORM created differently-
-        # named indexes — on PostgreSQL this produced DUPLICATE
+        # named indexes -- on PostgreSQL this produced DUPLICATE
         # indexes (one from migration, one from create_all), wasting
         # disk + write bandwidth on every INSERT. Align ORM index
         # names to migration 005 and add the two missing indexes so
@@ -2866,7 +2877,7 @@ class PubChemCompoundProperty(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
         # [IDEM-7] Partial index for soft-delete cleanup queries.
         # Use postgresql_where so the partial index is created on PG;
         # on SQLite the WHERE is dropped by _translate_sql_for_sqlite
-        # (full index is created instead — slightly larger but
+        # (full index is created instead -- slightly larger but
         # functionally equivalent).
         Index(
             "idx_pubchem_props_is_deleted", "is_deleted",
@@ -2892,12 +2903,12 @@ class PubChemCompoundProperty(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
 # a ``rejected_records`` table (lines 1283-1327 of 001_initial_schema.sql)
 # used as a dead-letter queue for records that fail validation during
 # pipeline execution. Without an ORM model, ``Base.metadata.create_all()``
-# on SQLite dev/test DBs did NOT create this table — so any Python code
+# on SQLite dev/test DBs did NOT create this table -- so any Python code
 # that tried to write rejected records via the ORM raised
 # ``sqlite3.OperationalError: no such table: rejected_records``. The
 # migration 001 ``CREATE TABLE IF NOT EXISTS`` was the only creation
 # path, and on SQLite it was being silently skipped. Adding this model
-# closes the gap — create_all() now creates rejected_records on BOTH
+# closes the gap -- create_all() now creates rejected_records on BOTH
 # PostgreSQL and SQLite, and migration 001's CREATE TABLE IF NOT EXISTS
 # becomes the idempotent no-op it was designed to be.
 #
@@ -2909,23 +2920,23 @@ class RejectedRecord(Base, IDMixin):
     Domain meaning
     --------------
     Each row represents a record that was rejected by the load() phase
-    of some pipeline — e.g. a drug with a malformed InChIKey, a protein
+    of some pipeline -- e.g. a drug with a malformed InChIKey, a protein
     with an invalid UniProt accession, a duplicate GDA, etc. Rows are
     written here instead of being silently dropped, so the data can be
     inspected and reprocessed later. Retention: 1 year, then purged.
 
     Key constraints
     ---------------
-    - ``source_table`` NOT NULL — target table the record was intended
+    - ``source_table`` NOT NULL -- target table the record was intended
       for (e.g. "drugs", "proteins", "gene_disease_associations").
-    - ``source_pipeline`` NOT NULL — pipeline that rejected the record
+    - ``source_pipeline`` NOT NULL -- pipeline that rejected the record
       (e.g. "chembl", "drugbank", "disgenet").
-    - ``raw_data`` NOT NULL TEXT — original record as a JSON string.
-    - ``rejection_reason`` NOT NULL VARCHAR(500) — human-readable
+    - ``raw_data`` NOT NULL TEXT -- original record as a JSON string.
+    - ``rejection_reason`` NOT NULL VARCHAR(500) -- human-readable
       explanation.
     - ``rejection_type`` NOT NULL VARCHAR(50), constrained to the
       whitelist defined in migration 001 (chk_rejected_records_rejection_type).
-    - ``pipeline_run_id`` nullable INTEGER FK → pipeline_runs.id, ON
+    - ``pipeline_run_id`` nullable INTEGER FK -> pipeline_runs.id, ON
       DELETE SET NULL.
     - ``created_at`` NOT NULL DEFAULT NOW().
     """

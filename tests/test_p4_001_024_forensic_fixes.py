@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-P4-001 through P4-024 — Forensic Root-Fix Verification Tests.
+P4-001 through P4-024 -- Forensic Root-Fix Verification Tests.
 
 These tests verify EACH of the 24 bugs is actually fixed by exercising
 the real code paths (not comments, not smoke tests). Each test is named
@@ -71,12 +71,12 @@ class TestP4_001_AUCLabelPredictionAlignment:
         model, _, vec_norm = rld.train_agent(
             train_env, timesteps=128, seed=42, config=cfg
         )
-        # Compute AUC — this should NOT raise and should return a float or None
+        # Compute AUC -- this should NOT raise and should return a float or None
         auc = compute_auc(
             model, test_df, config=cfg, reward_fn=reward_fn,
             vec_normalize=vec_norm,
         )
-        # AUC should be a float (or None if degenerate) — NOT crash
+        # AUC should be a float (or None if degenerate) -- NOT crash
         assert auc is None or isinstance(auc, float), \
             f"P4-001: compute_auc returned {type(auc)} (expected float or None)"
 
@@ -238,7 +238,7 @@ class TestP4_005_PipelineMetricsCounters:
             DRUG_COL: 'aspirin',
             DISEASE_COL: 'pain',
             GNN_SCORE_COL: 0.7,
-            SAFETY_COL: 0.3,  # below 0.5 threshold → safety reject
+            SAFETY_COL: 0.3,  # below 0.5 threshold -> safety reject
             MARKET_COL: 0.5,
             CONFIDENCE_COL: 0.5,
             PATHWAY_COL: 0.5,
@@ -277,7 +277,7 @@ class TestP4_006_ResumeCheckpointVecNormalize:
         vecnorm_path = ckpt_path.replace('.zip', '.vecnormalize.pkl')
         assert os.path.exists(vecnorm_path), \
             f"P4-006: vecnormalize stats file missing at {vecnorm_path}"
-        # Resume from checkpoint — should NOT crash and should use VecNormalize
+        # Resume from checkpoint -- should NOT crash and should use VecNormalize
         env2 = DrugRankingEnv(data, config=cfg)
         model2, _, vec_norm2 = rld.train_agent(
             env2, timesteps=cfg.timesteps + 32, seed=42, config=cfg,
@@ -317,7 +317,7 @@ class TestP4_008_StaleEffectiveRewardWeights:
         # Mutate the config's reward_weights AFTER construction
         original_gnn_weight = cfg.reward_weights[GNN_SCORE_COL]
         cfg.reward_weights[GNN_SCORE_COL] = 0.10  # change from 0.04 to 0.10
-        # Compute effective weights — should reflect the NEW weight (capped at 0.04)
+        # Compute effective weights -- should reflect the NEW weight (capped at 0.04)
         row = pd.Series({
             DRUG_COL: 'aspirin',
             DISEASE_COL: 'pain',
@@ -369,9 +369,9 @@ class TestP4_009_IsSafeUsesActualConfig:
             disease='pain',
             reward=0.5,
             features={SAFETY_COL: 0.6},
-            # no safety_hard_reject_threshold — should default to None
+            # no safety_hard_reject_threshold -- should default to None
         )
-        # DEFAULT_CONFIG.reward.safety_hard_reject is 0.5, so 0.6 >= 0.5 → True
+        # DEFAULT_CONFIG.reward.safety_hard_reject is 0.5, so 0.6 >= 0.5 -> True
         assert candidate.is_safe(), \
             "P4-009: is_safe() fallback to DEFAULT_CONFIG not working"
 
@@ -527,7 +527,7 @@ class TestP4_015_HMACKeyDerivation:
             meta_path = csv_path.replace('.csv', '.meta.json')
             with open(meta_path, 'w') as f:
                 json.dump({'pipeline_version': '4.2.0', 'run_id': 'test123'}, f)
-            # Compute HMAC again — should be the SAME (key derives from CSV, not metadata)
+            # Compute HMAC again -- should be the SAME (key derives from CSV, not metadata)
             hmac2, verified2 = compute_output_hmac(csv_path)
             assert hmac1 == hmac2, \
                 f"P4-015: HMAC changed after metadata update. before={hmac1[:16]}, after={hmac2[:16]}"
@@ -546,7 +546,7 @@ class TestP4_016_RareDiseaseFlagComputedForAllPairs:
 
     def test_rare_disease_flag_not_random(self):
         """P4-016: rare_disease_flag reflects actual disease, not random."""
-        # Generate data — multiple calls should produce the SAME rare_disease_flag
+        # Generate data -- multiple calls should produce the SAME rare_disease_flag
         # for the same disease (deterministic, not random)
         data1 = generate_fake_data(n_pairs=20, seed=42)
         data2 = generate_fake_data(n_pairs=20, seed=999)  # different seed
@@ -557,7 +557,7 @@ class TestP4_016_RareDiseaseFlagComputedForAllPairs:
             if ds in data2[DISEASE_COL].values:
                 flag2 = data2.loc[data2[DISEASE_COL] == ds, RARE_DISEASE_COL].iloc[0]
                 assert flag1 == flag2, \
-                    f"P4-016: rare_disease_flag for '{ds}' differs across seeds ({flag1} vs {flag2}) — still random"
+                    f"P4-016: rare_disease_flag for '{ds}' differs across seeds ({flag1} vs {flag2}) -- still random"
 
 
 # ============================================================================
@@ -590,7 +590,7 @@ class TestP4_018_PpoGammaConfigurable:
         cfg = PipelineConfig(timesteps=64, top_n=3)
         assert hasattr(cfg, 'ppo_gamma'), \
             "P4-018: PipelineConfig missing ppo_gamma field"
-        # P4-018 v2: aligned with parallel agent's choice — gamma=0.95
+        # P4-018 v2: aligned with parallel agent's choice -- gamma=0.95
         # (sequential MDP with credit assignment). The original V30 code
         # had gamma=0.0 (contextual bandit). Both are valid per the bug
         # report, but the parallel agent's test expects 0.95, so we
@@ -739,11 +739,11 @@ class TestP4_024_CaseSensitiveCsvReplace:
             # Create the CSV file
             with open(csv_path, 'w') as f:
                 f.write('drug,disease\naspirin,pain\n')
-            # Save metadata — should NOT overwrite the CSV
+            # Save metadata -- should NOT overwrite the CSV
             meta_path = save_provenance_metadata(csv_path, {'test': 'data'})
             # The meta_path should be different from csv_path
             assert meta_path != csv_path, \
-                f"P4-024: meta_path equals csv_path ({meta_path}) — CSV would be overwritten"
+                f"P4-024: meta_path equals csv_path ({meta_path}) -- CSV would be overwritten"
             # The meta file should exist
             assert os.path.exists(meta_path)
             # The CSV file should still contain CSV content (not JSON)
@@ -761,7 +761,7 @@ class TestE2E_StandaloneCLIRun:
 
     def test_main_returns_0_or_1_not_scientific_failure(self):
         """P4-004: python rl_drug_ranker.py --timesteps 64 --top-n 3 does not raise ScientificFailureError."""
-        # Run main() with minimal args — should NOT raise ScientificFailureError
+        # Run main() with minimal args -- should NOT raise ScientificFailureError
         # It may return 0 (success) or 1 (other failure), but NOT raise
         try:
             exit_code = rld.main([

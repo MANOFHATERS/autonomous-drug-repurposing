@@ -109,7 +109,7 @@ from .utils import (
 #
 # P3-032 ROOT FIX: removed the hard top-level ``from rl.rl_drug_ranker
 # import KNOWN_POSITIVES`` import. The previous import COUPLED Phase 3
-# to Phase 4 at the package level — if the ``rl`` package was not
+# to Phase 4 at the package level -- if the ``rl`` package was not
 # installed (e.g. running Phase 3 standalone, or a CI matrix that
 # exercises Phase 3 only), ``import graph_transformer.gt_rl_bridge``
 # raised ImportError at module-import time, before any function could
@@ -137,7 +137,7 @@ def _get_known_positives() -> List[Tuple[str, str]]:
         logger.warning(
             "P3-032: rl.rl_drug_ranker.KNOWN_POSITIVES not importable "
             "(Phase 4 package not installed). Returning empty list. "
-            "Known-positive injection / holdout will be a no-op — this "
+            "Known-positive injection / holdout will be a no-op -- this "
             "is fine for Phase 3 standalone runs, but Phase 4 must be "
             "installed for the full production pipeline."
         )
@@ -214,7 +214,7 @@ class GTRLBridge:
         # The audit found that ``_compute_supplementary_features`` and
         # ``_compute_drug_level_features`` both called
         # V90 ROOT FIX (BUG #18, P1): REMOVED self._feature_rng. The
-        # audit found this RNG was DEAD CODE — the per-drug
+        # audit found this RNG was DEAD CODE -- the per-drug
         # patent/adme/efficacy values use DEDICATED drug-seeded RNGs
         # (``drug_rng = np.random.default_rng(drug_seed)``), so this
         # ``self._feature_rng`` was never the source of feature
@@ -234,7 +234,7 @@ class GTRLBridge:
         # ``_compute_supplementary_features`` uses PER-DRUG deterministic
         # RNGs (``drug_rng = np.random.default_rng(drug_seed)``), NOT
         # ``self._feature_rng``. The ``rng = self._feature_rng`` line at
-        # the top of each method was a DEAD assignment — the comment
+        # the top of each method was a DEAD assignment -- the comment
         # explicitly admitted it: "this ``rng`` variable is only used for
         # the legacy non-per-drug noise that has already been removed."
         #
@@ -366,11 +366,11 @@ class GTRLBridge:
 
     # ------------------------------------------------------------------
     # ROOT FIX (Phase 1+2+3+4 100% Connection):
-    # load_graph_from_phase1 — load a REAL graph from Phase 1→2 output
+    # load_graph_from_phase1 -- load a REAL graph from Phase 1->2 output
     # ------------------------------------------------------------------
     # This is the alternative to ``build_demo_graph()``. Instead of
     # generating a SYNTHETIC random graph with hardcoded drug names, it
-    # accepts the ``Phase1StagedData`` produced by the Phase 1→2 bridge
+    # accepts the ``Phase1StagedData`` produced by the Phase 1->2 bridge
     # (``phase2.drugos_graph.phase1_bridge.stage_phase1_to_phase2()``)
     # and builds a REAL graph from the actual biomedical data that
     # Phase 1 ingested from the 7 public sources.
@@ -382,7 +382,7 @@ class GTRLBridge:
     # ``run_full_pipeline()`` close that gap.
     # ------------------------------------------------------------------
     def load_graph_from_phase1(self, staged_data: Any) -> None:
-        """Load a REAL knowledge graph from Phase 1→2 staged data.
+        """Load a REAL knowledge graph from Phase 1->2 staged data.
 
         Replaces ``build_demo_graph()`` when the caller has REAL Phase 1
         data (the production path). The staged data is the output of
@@ -392,7 +392,7 @@ class GTRLBridge:
 
         After this call, ``self.node_features``, ``self.edge_indices``,
         ``self.node_maps``, ``self.known_pairs``, ``self.drug_names``,
-        and ``self.disease_names`` are populated with REAL data — ready
+        and ``self.disease_names`` are populated with REAL data -- ready
         for ``build_model()`` and ``train_model()``.
 
         Args:
@@ -408,7 +408,7 @@ class GTRLBridge:
         """
         logger.info(
             "ROOT FIX (Phase 1+2+3+4): loading REAL knowledge graph "
-            "from Phase 1→2 staged data (NOT synthetic demo graph)."
+            "from Phase 1->2 staged data (NOT synthetic demo graph)."
         )
 
         (
@@ -427,7 +427,7 @@ class GTRLBridge:
             f"REAL graph loaded: {len(self.drug_names)} drugs, "
             f"{len(self.disease_names)} diseases, "
             f"{len(self.known_pairs)} REAL known treatment pairs "
-            f"(from Phase 1→2 staged data)."
+            f"(from Phase 1->2 staged data)."
         )
 
     # ------------------------------------------------------------------
@@ -454,10 +454,10 @@ class GTRLBridge:
 
         V90 ROOT FIX (BUG #7, P0): default ``num_layers=3`` (was 1).
         A 1-layer graph transformer only aggregates 1-hop neighbors.
-        The drug → protein → pathway → disease pattern is 3 hops.
+        The drug -> protein -> pathway -> disease pattern is 3 hops.
         With 1 layer, the disease node's embedding only sees pathway
         nodes (1-hop), NOT the proteins or drugs that connect to those
-        pathways — the model CANNOT learn the multi-hop pattern. The
+        pathways -- the model CANNOT learn the multi-hop pattern. The
         only reason ``run_real_pipeline.py`` achieved AUC > 0.85 was
         that it overrode to 3 layers, but the default path through
         ``run_full_pipeline`` used 1 layer and could not learn.
@@ -471,13 +471,13 @@ class GTRLBridge:
 
         ROOT FIX (A1/A2): the previous defaults used larger models
         (64, 2, 4) which overfit on the small demo graph (~200 training
-        pairs) because they had ~100K parameters — enough to memorize
+        pairs) because they had ~100K parameters -- enough to memorize
         all training pairs in 1 epoch. The model would achieve good
         val AUC at epoch 1 (by luck) and then degrade as it memorized
         training-specific patterns.
 
         The (32, 3, 2) config with a SMALL link predictor
-        (hidden_dims=[64, 32]) keeps the model at ~15K parameters —
+        (hidden_dims=[64, 32]) keeps the model at ~15K parameters --
         small enough that it CANNOT memorize 200 training pairs and is
         forced to learn the GENERAL feature-alignment pattern that
         generalizes to held-out drugs.
@@ -490,12 +490,12 @@ class GTRLBridge:
         parameter (was hardcoded [64, 32]). The caller can override it
         for production scale. The adaptive scaling in run_full_pipeline
         now sets [64, 32] for demo, [128, 64] for pilot, and [256, 128]
-        for production — matching the model's embedding_dim scaling.
+        for production -- matching the model's embedding_dim scaling.
 
         Args:
             embedding_dim: Embedding dimension.
             num_layers: Number of transformer layers. MUST be >= 3 to
-                learn the 3-hop drug → protein → pathway → disease
+                learn the 3-hop drug -> protein -> pathway -> disease
                 pattern. The default is 3 (BUG #7 fix).
             num_heads: Number of attention heads.
             dropout: Dropout rate for FFN and residual connections.
@@ -509,7 +509,7 @@ class GTRLBridge:
             raise ValueError(
                 f"V90 ROOT FIX (BUG #7): num_layers={num_layers} is too "
                 f"small. A graph transformer with fewer than 3 layers "
-                f"cannot learn the 3-hop drug → protein → pathway → "
+                f"cannot learn the 3-hop drug -> protein -> pathway -> "
                 f"disease pattern (each layer aggregates 1-hop neighbors, "
                 f"so 3 layers are needed to reach 3 hops). Use "
                 f"num_layers >= 3. The default is now 3."
@@ -549,7 +549,7 @@ class GTRLBridge:
 
     # ------------------------------------------------------------------
     # PHASE 3.3a -- Training data + drug-aware split (extracted for
-    # resume_from_checkpoint re-evaluation — V90 BUG #5 fix)
+    # resume_from_checkpoint re-evaluation -- V90 BUG #5 fix)
     # ------------------------------------------------------------------
     def _compute_training_split(self) -> Dict[str, torch.Tensor]:
         """Build training pairs + drug-aware train/val/test split.
@@ -566,7 +566,7 @@ class GTRLBridge:
         negative-sampling filter. The audit found that node features
         are ``rng.standard_normal`` (purely random per the S-05 fix).
         The alignment matrix was the dot product of two independent
-        random matrices — its entries were approximately ``N(0,
+        random matrices -- its entries were approximately ``N(0,
         signal_dim)`` and the median was ≈ 0. The filter rejected
         ~50% of random pairs based on whether their random feature
         dot product was above or below 0. This was filtering on NOISE.
@@ -585,8 +585,8 @@ class GTRLBridge:
         # V90 ROOT FIX (COMPOUND #3): the previous resume-from-checkpoint
         # path returned a MINIMAL dict WITHOUT test_auc / test_auc_verified.
         # The bridge's scientific_validation gate then evaluated
-        # ``gt_results.get("test_auc_verified")`` → None, fell back to
-        # ``gt_results.get("test_auc", 0.0)`` → 0.0, and the gate
+        # ``gt_results.get("test_auc_verified")`` -> None, fell back to
+        # ``gt_results.get("test_auc", 0.0)`` -> 0.0, and the gate
         # ``0.0 > 0.85`` ALWAYS failed. Every run after the first (when
         # gt_checkpoint.pt existed) crashed with an opaque RuntimeError.
         #
@@ -630,37 +630,61 @@ class GTRLBridge:
             for i in range(n_pos)
         )
 
-        # ROOT FIX (W-07): KP drugs are KNOWN POSITIVES — exclude from
-        # negative sampling so KP drugs appear ONLY in positive pairs.
-        # This prevents the conflicting-signal bug where the model sees
-        # aspirin in BOTH positive and negative pairs.
+        # P3-021 ROOT FIX (SCIENTIFIC — INCLUDE KP DRUGS IN NEGATIVE
+        # SAMPLING): the W-07 fix excluded KP drugs from negative sampling
+        # so they appeared ONLY in positive pairs. The stated rationale
+        # was "prevent the conflicting-signal bug where the model sees
+        # aspirin in BOTH positive and negative pairs." But the C-3 fix
+        # (below, line ~794) ALREADY holds out ALL KP drugs from the GT
+        # TRAINING SET via drug_aware_split(held_out_drugs=kp_drugs).
+        # This means KP drugs NEVER appear in the TRAINING split —
+        # neither as positives NOR as negatives — regardless of whether
+        # they're in the negative-sampling pool. So W-07's concern is
+        # MOOT given C-3: there is no "conflicting signal" because KP
+        # drugs don't reach the training set at all.
+        #
+        # The HARM of W-07: by excluding KP drugs from the negative
+        # pool, the val/test set (which DOES contain KP-drug pairs via
+        # the C-3 hold-out) had KP-drug-POSITIVE pairs but NO
+        # KP-drug-NEGATIVE pairs. The model's scores for KP drugs were
+        # UNCALIBRATED — it never saw "aspirin + unrelated_disease =
+        # negative" during training or evaluation. A model that scores
+        # ALL aspirin pairs high (because aspirin has good topology)
+        # would still "recover" KPs by chance, making the KP recovery
+        # test unreliable.
+        #
+        # The fix: INCLUDE KP drugs in the negative-sampling pool (use
+        # ALL drugs, not just non-KP). The C-3 split then distributes
+        # KP-drug-negative pairs to val/test (not train), giving the
+        # evaluation a REAL negative baseline for KP drugs: "can the
+        # model rank aspirin+cardiovascular (positive) above
+        # aspirin+unrelated_disease (negative)?" This does NOT leak the
+        # treats label — the negative pair uses a DIFFERENT disease.
         # P3-032 ROOT FIX: use the lazy helper instead of the (removed)
         # top-level KNOWN_POSITIVES constant.
         kp_drug_indices: set = set()
         for drug_name, _ in _get_known_positives():
             if drug_name in drug_map:
                 kp_drug_indices.add(drug_map[drug_name])
-        non_kp_drug_indices = [
-            d for d in range(num_drugs) if d not in kp_drug_indices
-        ]
-        if len(non_kp_drug_indices) == 0:
-            logger.warning(
-                f"ROOT FIX (W-07): graph has ONLY KP drugs ({len(kp_drug_indices)}). "
-                f"Cannot exclude KP drugs from negative sampling. "
-                f"Falling back to all drugs for negative candidates."
-            )
-            non_kp_drug_indices = list(range(num_drugs))
-        else:
-            logger.info(
-                f"ROOT FIX (W-07): excluding {len(kp_drug_indices)} KP drugs "
-                f"from negative sampling. {len(non_kp_drug_indices)} non-KP "
-                f"drugs available as negative candidates."
-            )
+        # P3-021: use ALL drugs (including KP) for negative candidates.
+        # The C-3 split (held_out_drugs=kp_drug_indices) ensures KP
+        # drugs still don't appear in TRAINING — they only appear in
+        # val/test, where the KP-drug-negative pairs provide calibration.
+        all_drug_indices_for_neg = list(range(num_drugs))
+        logger.info(
+            f"ROOT FIX (P3-021): INCLUDING all {num_drugs} drugs (incl. "
+            f"{len(kp_drug_indices)} KP drugs) in negative sampling. The "
+            f"C-3 split (held_out_drugs=kp_drugs) ensures KP drugs still "
+            f"do NOT appear in training — they appear in val/test only, "
+            f"where KP-drug-negative pairs provide calibration for the "
+            f"KP recovery test. (W-07 exclusion removed: it was redundant "
+            f"given C-3 and starved val/test of KP-drug negatives.)"
+        )
 
         # V90 ROOT FIX (BUG #16, P1): REMOVED the alignment_median filter.
         # The audit found that node features are rng.standard_normal
         # (purely random per the S-05 fix). The alignment matrix was the
-        # dot product of two independent random matrices — its entries
+        # dot product of two independent random matrices -- its entries
         # were approximately N(0, signal_dim) and the median was ≈ 0.
         # The filter rejected ~50% of random pairs based on whether their
         # random feature dot product was above or below 0. This was
@@ -684,7 +708,7 @@ class GTRLBridge:
         # decision boundary without overwhelming the positive signal.
         # On a small demo graph (~5 positives), this produces ~30
         # negatives, which is enough for the model to learn the
-        # "high-alignment → positive, low-alignment → negative" pattern.
+        # "high-alignment -> positive, low-alignment -> negative" pattern.
         # In production with 1000+ positives, the same 6:1 ratio gives
         # 6000+ negatives, which is plenty for the model to learn.
         NEG_RATIO = 6  # V90 BUG #43: documented (was magic number)
@@ -703,50 +727,82 @@ class GTRLBridge:
         MAX_ATTEMPTS_MULTIPLIER = 50  # V90 BUG #44: documented (was magic)
         max_attempts = n_pos * neg_ratio * MAX_ATTEMPTS_MULTIPLIER
         # P3-S04 ROOT FIX (SCIENTIFIC): the previous code used UNIFORM
-        # RANDOM negative sampling — pick a random drug and a random
+        # RANDOM negative sampling -- pick a random drug and a random
         # disease independently, check only that the pair is not in
         # pos_set. This has two problems documented in the audit:
         #   1. INDIRECT LEAKAGE: a (drug, disease) pair where the drug
         #      and disease are connected via a 2-hop or 3-hop path
-        #      (drug→protein→pathway→disease) is treated as a negative,
+        #      (drug->protein->pathway->disease) is treated as a negative,
         #      but the model can easily score it high via message
         #      passing. This creates label noise (the model is told
         #      "negative" but its message-passing says "looks positive").
         #   2. EASY NEGATIVES: most uniform-random pairs have NO
         #      biological connection, so the model trivially scores them
-        #      low → inflated AUC that doesn't reflect real
+        #      low -> inflated AUC that doesn't reflect real
         #      generalization.
         # The standard KG-embedding fix (TransE, Bordes et al. 2013) is
         # "corrupt one side": for each positive (drug, disease) pair,
         # generate a negative by replacing EITHER the drug OR the
         # disease with a random one (50/50 chance). This ensures the
         # negative is "close" to a positive (shares either the drug or
-        # the disease), making it a HARDER negative — the model must
+        # the disease), making it a HARDER negative -- the model must
         # learn the specific drug-disease association, not just "this
         # drug is rare" or "this disease is rare."
-        # We implement corrupt-one-side here. A full multi-hop
+        #
+        # P3-020 ROOT FIX (SCIENTIFIC — MIX CORRUPT-ONE-SIDE + CORRUPT-BOTH):
+        # the P3-S04 fix used ONLY corrupt-one-side (50% drug / 50%
+        # disease). This produces ONLY hard negatives (each shares one
+        # endpoint with a positive). The model NEVER sees a completely
+        # unrelated (random drug + random disease) pair as a negative.
+        # At inference, novel drug-disease pairs where NEITHER endpoint
+        # was in training are scored by the model with no baseline
+        # calibration for "completely unrelated = negative." This can
+        # inflate false-positive rates for novel pairs.
+        #
+        # Standard KG-embedding practice (TransE, Bordes et al. 2013;
+        # also RotatE, Sun et al. 2019) uses BOTH corrupt-one-side AND
+        # corrupt-both negatives. The corrupt-both negatives teach the
+        # model that completely unrelated pairs are negative (a trivial
+        # baseline), while corrupt-one-side negatives teach the model
+        # the specific association. The mix is typically 80% one-side
+        # (hard) + 20% both (easy), matching the TransE convention.
+        #
+        # We implement the 80/20 mix here: 40% corrupt-drug + 40%
+        # corrupt-disease + 20% corrupt-both. A full multi-hop
         # reachability check (build a (num_drugs, num_diseases)
         # reachability matrix and exclude reachable pairs from negatives)
         # is the gold standard but is O(n_drugs * n_diseases) memory and
-        # O(n_paths) time — deferred to a future optimization. The
-        # corrupt-one-side approach is a strict improvement over uniform
-        # random and matches the KG-embedding literature.
+        # O(n_paths) time — deferred to a future optimization.
         pos_drug_idx_list = pos_drug_idx.tolist()
         pos_disease_idx_list = pos_disease_idx.tolist()
+        # P3-020: 80% corrupt-one-side (split 40/40 drug/disease) + 20% corrupt-both.
+        CORRUPT_BOTH_PROB = 0.20
         while len(neg_drug_indices) < n_pos * neg_ratio and attempts < max_attempts:
             attempts += 1
             # Pick a random positive pair to corrupt.
             pos_i = int(neg_rng.integers(0, n_pos))
-            # Corrupt the drug 50% of the time, the disease 50% of the time.
-            if neg_rng.random() < 0.5:
-                # Corrupt the drug: keep the disease, pick a new drug
-                # from non-KP drugs (W-07 fix preserved).
-                d_idx = int(non_kp_drug_indices[
-                    neg_rng.integers(0, len(non_kp_drug_indices))
+            r = neg_rng.random()
+            if r < CORRUPT_BOTH_PROB:
+                # P3-020: corrupt BOTH endpoints — random drug + random
+                # disease. This produces an EASY negative (no shared
+                # endpoint with any positive) that teaches the model
+                # "completely unrelated = negative." The model needs
+                # this baseline so it doesn't over-score novel pairs at
+                # inference. We use all_drug_indices_for_neg (includes
+                # KP drugs per P3-021).
+                d_idx = int(all_drug_indices_for_neg[
+                    neg_rng.integers(0, len(all_drug_indices_for_neg))
+                ])
+                ds_idx = int(neg_rng.integers(0, num_diseases))
+            elif r < 0.5 * (1 + CORRUPT_BOTH_PROB):
+                # Corrupt the drug (keep the disease): hard negative.
+                # P3-021: use ALL drugs (incl. KP) — C-3 split handles hold-out.
+                d_idx = int(all_drug_indices_for_neg[
+                    neg_rng.integers(0, len(all_drug_indices_for_neg))
                 ])
                 ds_idx = int(pos_disease_idx_list[pos_i])
             else:
-                # Corrupt the disease: keep the drug, pick a new disease.
+                # Corrupt the disease (keep the drug): hard negative.
                 d_idx = int(pos_drug_idx_list[pos_i])
                 ds_idx = int(neg_rng.integers(0, num_diseases))
             if (d_idx, ds_idx) in pos_set:
@@ -781,7 +837,7 @@ class GTRLBridge:
         # ALL graph sizes. The previous A1/A2 "fix" did NOT hold out
         # KP drugs for small graphs (<100 drugs), which meant the GT
         # model trained on aspirin's features and then scored
-        # aspirin→cardiovascular disease at inference — the score was
+        # aspirin->cardiovascular disease at inference -- the score was
         # inflated by aspirin-specific memorization, not genuine
         # generalization. Holding out KP drugs aligns the GT split
         # with the RL split (both drug-aware).
@@ -811,7 +867,7 @@ class GTRLBridge:
             f"ROOT FIX (C-3): using drug_aware_split for ALL graph sizes "
             f"({num_drugs} drugs). GT split is ALIGNED with RL split "
             f"(both drug-aware). No drug-level train/test leakage at "
-            f"the GT→RL boundary."
+            f"the GT->RL boundary."
         )
         return split
 
@@ -892,7 +948,7 @@ class GTRLBridge:
         #
         # The split is deterministic (seeded by self.seed), so the
         # resume path produces the SAME test set as the original
-        # training run. We are NOT training on the test set — we are
+        # training run. We are NOT training on the test set -- we are
         # evaluating the loaded checkpoint on the same held-out test
         # split that was used at original training time.
         checkpoint_path = os.path.join(self.output_dir, "gt_checkpoint.pt")
@@ -1009,7 +1065,7 @@ class GTRLBridge:
         # pool is limited. Documented here for auditability.
         # ROOT FIX (A1/A2): use learning_rate=5e-4.
         # The previous 1e-3 learning rate caused the model to overfit
-        # (train_loss → 0.0001 while val_loss → 2.5+).
+        # (train_loss -> 0.0001 while val_loss -> 2.5+).
         #
         # ROOT FIX (S-11): the previous code used weight_decay=1e-4
         # (10x higher than the trainer's default of 1e-5). The audit
@@ -1025,7 +1081,7 @@ class GTRLBridge:
         # measured reason to override. The S-05 fix (removing the
         # _enrich_features_with_graph_signal artificial correlation)
         # already prevents the memorization the 1e-4 was trying to
-        # combat — the model no longer has an artificial feature
+        # combat -- the model no longer has an artificial feature
         # alignment to memorize, so aggressive regularization is no
         # longer needed.
         trainer = GraphTransformerTrainer(
@@ -1094,7 +1150,7 @@ class GTRLBridge:
 
         # C5 fix: evaluate on held-out TEST set
         # V90 COMPOUND #3: this runs for BOTH fresh training AND resume.
-        # On resume, this is the critical fix — without it, the results
+        # On resume, this is the critical fix -- without it, the results
         # dict lacks test_auc, and the scientific_validation gate fails.
         self._test_metrics = trainer.evaluate(
             test_d, test_ds, test_l,
@@ -1104,14 +1160,31 @@ class GTRLBridge:
         results["test_loss"] = self._test_metrics["loss"]
         results["test_accuracy"] = self._test_metrics["accuracy"]
 
-        # ROOT FIX (B2): use evaluate_link_prediction as an INDEPENDENT
-        # verification of the trainer's evaluate() method. This wires
-        # the previously-dead evaluate_link_prediction function into the
-        # active code path. The trainer's evaluate() and
-        # evaluate_link_prediction() compute the same metrics (AUC,
-        # loss, accuracy) but via different code paths — if they
-        # disagree, it indicates a bug in one of them. We log both
-        # for cross-validation.
+        # P3-022 ROOT FIX (HONEST DOCUMENTATION — CODE-PATH-IDENTICAL
+        # SANITY CHECK): the previous comment claimed
+        # evaluate_link_prediction is an "INDEPENDENT verification" of
+        # trainer.evaluate(). That was OVERSTATED. After the P3-017 fix,
+        # BOTH paths call model.encode() (same method) then
+        # model.link_predictor.forward_logits() and
+        # model.link_predictor.forward() (same methods) on the
+        # pre-computed embeddings. The ONLY differences are:
+        #   1. evaluate_link_prediction uses a FRESH nn.BCEWithLogitsLoss()
+        #      (no pos_weight) — but trainer.evaluate uses
+        #      self._eval_criterion which is ALSO a fresh
+        #      nn.BCEWithLogitsLoss() (BUG #26 fix). So the loss
+        #      computation is IDENTICAL.
+        #   2. The two paths have different code STRUCTURE (one is a
+        #      standalone function, one is a method), but they execute
+        #      the SAME model methods on the SAME data.
+        # So "test_auc_verified" is NOT an independent cross-check of
+        # the MODEL — it's a CODE-PATH-IDENTICAL sanity check that
+        # catches INTEGRATION BUGS (e.g., if one caller forgets to
+        # exclude label-leaking edges, or passes the wrong batch_size,
+        # the two metrics diverge). Discrepancies indicate a CODE BUG,
+        # not a model issue. This is still valuable (it catches wiring
+        # mistakes), but it is NOT the "independent verification" the
+        # old comment claimed. We keep the cross-check for its
+        # integration-bug-detection value and document its TRUE scope.
         try:
             from .evaluation import evaluate_link_prediction
             eval_metrics = evaluate_link_prediction(
@@ -1128,12 +1201,15 @@ class GTRLBridge:
             results["test_loss_verified"] = eval_metrics["loss"]
             results["test_accuracy_verified"] = eval_metrics["accuracy"]
             logger.info(
-                f"ROOT FIX (B2): evaluate_link_prediction verification: "
-                f"AUC={eval_metrics['auc']:.4f} (trainer: {results['test_auc']:.4f}), "
-                f"loss={eval_metrics['loss']:.4f} (trainer: {results['test_loss']:.4f})"
+                f"P3-022 sanity check (code-path-identical): "
+                f"evaluate_link_prediction AUC={eval_metrics['auc']:.4f} "
+                f"(trainer: {results['test_auc']:.4f}), "
+                f"loss={eval_metrics['loss']:.4f} (trainer: {results['test_loss']:.4f}). "
+                f"Discrepancies indicate an INTEGRATION BUG (not a model issue) "
+                f"— both paths call the same model.encode + link_predictor methods."
             )
         except Exception as e:
-            logger.warning(f"ROOT FIX (B2): evaluate_link_prediction failed: {e}")
+            logger.warning(f"P3-022 sanity check (evaluate_link_prediction) failed: {e}")
 
         logger.info(
             f"Training complete. Best val AUC: {results['best_val_auc']:.4f}, "
@@ -1249,7 +1325,7 @@ class GTRLBridge:
             num_diseases=num_diseases,
             exclude_edges=set(LABEL_LEAKING_EDGES),  # C2 fix
             apply_temperature=False,  # FORENSIC-AUDIT-I03: raw sigmoid, full variance
-        )  # (num_drugs, num_diseases) on device — raw sigmoid, NO redundant pass
+        )  # (num_drugs, num_diseases) on device -- raw sigmoid, NO redundant pass
 
         # Also compute per-pair confidence from prediction entropy.
         # C3 fix: the RL data dictionary now documents this as
@@ -1258,7 +1334,18 @@ class GTRLBridge:
         gnn_scores_np = score_matrix.cpu().numpy()  # (num_drugs, num_diseases)
         p = np.clip(gnn_scores_np, 1e-7, 1 - 1e-7)
         entropy = -(p * np.log(p) + (1 - p) * np.log(1 - p))
-        confidence_np = 1.0 - entropy / np.log(2)
+        # P3-027 ROOT FIX: clip confidence to [0, 1]. The formula
+        # ``1.0 - entropy / np.log(2)`` CAN produce values like -1e-9 or
+        # 1.0000001 due to fp32 precision: when p is very close to 0 or 1
+        # (after the 1e-7 clip), the entropy is ~0 but the division by
+        # log(2) can round to slightly more than 1.0, making confidence
+        # slightly negative. Conversely, when p is exactly 0.5, entropy
+        # = log(2) exactly in real arithmetic but ~log(2)*(1±1e-7) in
+        # fp32, so confidence can be slightly > 1. These out-of-range
+        # values trigger spurious validation warnings downstream
+        # (P3-008 documented the symptom). The fix clips to [0, 1] so
+        # the confidence column is always a valid probability-complement.
+        confidence_np = np.clip(1.0 - entropy / np.log(2), 0.0, 1.0)
 
         # V4 C-F1 fix: build the DataFrame WITHOUT materializing a list
         # of dicts (which would be ~50GB at 100M pairs). Use a direct
@@ -1441,7 +1528,7 @@ class GTRLBridge:
             # _compute_drug_level_features per batch (inside
             # _compute_supplementary_features), recomputing ALL drugs'
             # features N times. The result is deterministic per drug, so
-            # recomputing was pure waste — ~40x slower than necessary on
+            # recomputing was pure waste -- ~40x slower than necessary on
             # production scale (10K drugs). Now we compute once and pass
             # the dict into _compute_supplementary_features.
             drug_level_features = self._compute_drug_level_features(
@@ -1483,7 +1570,7 @@ class GTRLBridge:
                         # making the pipeline's behavior graph-size-dependent.
                         # The root fix: BOTH paths use apply_temperature=False
                         # (raw sigmoid, full variance). This is the documented
-                        # choice for the RL ranking signal — temperature
+                        # choice for the RL ranking signal -- temperature
                         # calibration is for DECISION THRESHOLDS (Phase 6's
                         # gnn_score_calibrated column uses apply_temperature=True
                         # at line 1993), NOT for ranking signals. The D3 fix
@@ -1599,7 +1686,7 @@ class GTRLBridge:
         scientifically wrong:
 
           - ``patent_score`` is a DRUG property (a drug is either on-patent
-            or off-patent — it does not change depending on which disease
+            or off-patent -- it does not change depending on which disease
             you pair it with). The audit: "a drug's patent status is a
             DRUG property, but the bridge generates a NEW random value
             for every (drug, disease) pair. The same drug has different
@@ -1654,7 +1741,7 @@ class GTRLBridge:
         # use DEDICATED drug-seeded RNGs (drug_rng = np.random.default_rng(drug_seed)),
         # so no instance-level RNG is needed. The legacy reference
         # is removed entirely.
-        # (no rng initialization needed — per-drug RNGs are created below)
+        # (no rng initialization needed -- per-drug RNGs are created below)
 
         # --- Patent score: deterministic per drug (hash of drug name) ---
         # ROOT FIX (C-2): same drug -> same patent_score across ALL pairs.
@@ -1664,7 +1751,7 @@ class GTRLBridge:
         # V90 ROOT FIX (BUG #38): removed the dead ``rng = self._feature_rng``
         # assignment. The V31 P1-11 fix introduced ``self._feature_rng`` but
         # the per-drug feature computation uses DEDICATED per-drug RNGs
-        # (``drug_rng = np.random.default_rng(drug_seed)``) — NOT
+        # (``drug_rng = np.random.default_rng(drug_seed)``) -- NOT
         # ``self._feature_rng``. The ``rng`` variable was dead. Removed.
         #
         # V90 ROOT FIX (COMPOUND #2 / BUG #4): replace ``hash(drug_name) % (2**31)``
@@ -1694,7 +1781,7 @@ class GTRLBridge:
             # curated FDA Orange Book lookup below). Also removed the dead
             # name_hash / drug_seed lines that were immediately overwritten
             # by _deterministic_name_seed. Only the deterministic curated
-            # table lookup remains — it already has its own SHA-256
+            # table lookup remains -- it already has its own SHA-256
             # fallback inside get_drug_patent_score for drugs not in the
             # Orange Book.
             patent_per_drug[d_idx] = float(
@@ -1707,7 +1794,7 @@ class GTRLBridge:
             # P3-014 ROOT FIX: removed the dead name_hash / drug_seed lines
             # that were immediately overwritten by _deterministic_name_seed.
             # The deterministic SHA-256 seed is the ONLY seed computation
-            # now — no double work, no dead intermediate values.
+            # now -- no double work, no dead intermediate values.
             drug_seed = _deterministic_name_seed(self.seed, drug_name, 43)
             drug_rng = np.random.default_rng(drug_seed)
             # beta(5, 2): mean ~0.63, reflecting that FDA-approved drugs
@@ -1717,7 +1804,7 @@ class GTRLBridge:
         # --- Efficacy score: drug's clinical validation ---
         # V30 ROOT FIX (9.14): the original code used the count of
         # ``("drug", "treats", "disease")`` edges as the efficacy signal.
-        # This is CIRCULAR REASONING — the GT model is being trained to
+        # This is CIRCULAR REASONING -- the GT model is being trained to
         # PREDICT "treats" edges, and using the count of those same edges
         # as a feature is label leakage at the feature-engineering layer.
         # The audit confirmed: "efficacy_score derived from known-treatment
@@ -1725,7 +1812,7 @@ class GTRLBridge:
         # PREDICT treats edges; using treats count as a feature is label
         # leakage at the feature-engineering layer)."
         #
-        # The fix: use TARGET DIVERSITY instead — the count of distinct
+        # The fix: use TARGET DIVERSITY instead -- the count of distinct
         # protein targets a drug has (via "drug -> inhibits/activates ->
         # protein" edges). Drugs with more known targets tend to have
         # more clinical validation (more mechanisms of action explored),
@@ -1753,7 +1840,7 @@ class GTRLBridge:
         # hash(drug_name) to SHA-256 of the name for reproducibility. We
         # now use _deterministic_name_seed(self.seed, drug_name, 44), so
         # the noise is reproducible across graphs, processes, and Python
-        # versions — same drug always gets the same efficacy_score.
+        # versions -- same drug always gets the same efficacy_score.
         idx_to_drug_name: Dict[int, str] = {idx: name for name, idx in drug_map.items()}
 
         efficacy_per_drug: Dict[int, float] = {}
@@ -1791,7 +1878,7 @@ class GTRLBridge:
         logger.info(
             f"V30 ROOT FIX (9.14): computed drug-level features for {num_drugs} drugs. "
             f"efficacy_score now uses TARGET DIVERSITY (drug->protein edge count), "
-            f"NOT treatment count — this removes the circular leakage between "
+            f"NOT treatment count -- this removes the circular leakage between "
             f"the GT label ('treats' edges) and the efficacy feature."
         )
         return result
@@ -1840,7 +1927,7 @@ class GTRLBridge:
         # V90 ROOT FIX (BUG #38): removed the dead ``rng = self._feature_rng``
         # assignment. The V31 P1-11 fix introduced ``self._feature_rng`` but
         # the per-drug feature computation uses DEDICATED per-drug RNGs
-        # (``drug_rng = np.random.default_rng(drug_seed)``) — NOT
+        # (``drug_rng = np.random.default_rng(drug_seed)``) -- NOT
         # ``self._feature_rng``. The ``rng`` variable was dead. Removed.
         #
         # The fix uses ``self._feature_rng`` (created once in __init__).
@@ -1852,15 +1939,15 @@ class GTRLBridge:
         # used by the removed rng reference).
         # The supplementary features (safety_score, market_score,
         # pathway_score, unmet_need_score) are computed from REAL graph
-        # topology (edges) — they do NOT use any random noise. The
+        # topology (edges) -- they do NOT use any random noise. The
         # per-property features (patent_score, adme_score, efficacy_score)
         # use per-drug deterministic RNGs (now SHA-256 seeded per
         # COMPOUND #2 fix). There is NO instance-level feature RNG needed.
         n = len(df)
 
         # --- Safety score (v89 ROOT FIX: curated FDA FAERS table) ---
-        # ROOT CAUSE (v88): safety was derived from drug→causes→clinical_outcome
-        # edge count. On the demo graph, most drugs had 0 AE edges → safety=0.95
+        # ROOT CAUSE (v88): safety was derived from drug->causes->clinical_outcome
+        # edge count. On the demo graph, most drugs had 0 AE edges -> safety=0.95
         # for ALL drugs. ibuprofen (GI bleed risk) got the same safety as
         # levothyroxine (very clean profile). Scientifically meaningless.
         #
@@ -1881,8 +1968,8 @@ class GTRLBridge:
         )
 
         # --- Market score (v89 ROOT FIX: curated WHO/Orphanet prevalence table) ---
-        # ROOT CAUSE (v88): market was derived from pathway→disrupted_in→disease
-        # edge count. On the demo graph, sparse connectivity → market=0.65 for
+        # ROOT CAUSE (v88): market was derived from pathway->disrupted_in->disease
+        # edge count. On the demo graph, sparse connectivity -> market=0.65 for
         # ALL diseases. COPD (16M patients) got the same market score as cystic
         # fibrosis (rare). Scientifically wrong.
         #
@@ -1905,7 +1992,7 @@ class GTRLBridge:
         )
 
         # v89: compute pathway_count_per_disease for the pathway_score section
-        # below (still uses graph topology — pathway_score IS a topological
+        # below (still uses graph topology -- pathway_score IS a topological
         # metric, this is correct).
         from .utils import compute_graph_degrees
         disrupted_edge_key = ("pathway", "disrupted_in", "disease")
@@ -1967,16 +2054,16 @@ class GTRLBridge:
             drug_to_pathways[d_idx] = pws
 
         # ROOT FIX (B4): REMOVED the unused ``disease_to_pathway_count``
-        # variable. The V4 code computed it but never read it — the
+        # variable. The V4 code computed it but never read it -- the
         # pathway score loop below uses ``pathway_to_diseases`` directly
         # (line-by-line: for each drug's pathways, check if the disease
         # is in that pathway's disease set). The precomputation was
-        # wasted compute (one full pass through all pathway→disease
+        # wasted compute (one full pass through all pathway->disease
         # edges) AND made the "vectorized precomputation" docstring
         # claim partially false. Removing it makes the code honest.
         #
         # ROOT FIX (C8): VECTORIZED the pathway score computation.
-        # The original code used df.iterrows() — a Python-level loop
+        # The original code used df.iterrows() -- a Python-level loop
         # that is unusably slow at production scale (100M pairs =
         # hours of iteration). The fix precomputes a lookup matrix
         # and uses numpy vectorized operations:
@@ -1986,10 +2073,10 @@ class GTRLBridge:
         #   3. Matrix-multiply to get (num_diseases,) path counts
         #   4. Look up the count for each row's disease
         # This is O(num_drugs × num_pathways × num_diseases) for the
-        # precomputation (done ONCE), then O(n_rows) for the lookup —
+        # precomputation (done ONCE), then O(n_rows) for the lookup --
         # vs O(n_rows × avg_pathways_per_drug) for the iterrows loop.
 
-        # Build pathway→disease boolean matrix (dense, for small graphs)
+        # Build pathway->disease boolean matrix (dense, for small graphs)
         # For production scale, this would be a sparse matrix.
         num_pathways = len(self.node_maps.get("pathway", {}))
         num_diseases_total = len(self.node_maps.get("disease", {}))
@@ -2001,8 +2088,8 @@ class GTRLBridge:
                         if ds_idx < num_diseases_total:
                             pw_to_ds_matrix[pw_idx, ds_idx] = 1.0
 
-            # Precompute drug→pathway_count_per_disease (num_drugs, num_diseases)
-            # For each drug, sum the pathway→disease matrix rows for that drug's pathways
+            # Precompute drug->pathway_count_per_disease (num_drugs, num_diseases)
+            # For each drug, sum the pathway->disease matrix rows for that drug's pathways
             num_drugs_total = len(self.node_maps.get("drug", {}))
             drug_path_count = np.zeros((num_drugs_total, num_diseases_total), dtype=np.float32)
             for d_idx, pw_set in drug_to_pathways.items():
@@ -2050,7 +2137,7 @@ class GTRLBridge:
             #   - Biased the RL agent's reward function (which weights
             #     pathway_score) toward a single fixed value.
             # The `else` branch is taken when num_pathways == 0 OR
-            # num_diseases_total == 0 — a degenerate graph with no
+            # num_diseases_total == 0 -- a degenerate graph with no
             # pathway data. In that case, we have NO real pathway
             # evidence, so the SCIENTIFICALLY correct value is 0.0 for
             # all rows (no pathway connectivity = no pathway_score).
@@ -2062,15 +2149,15 @@ class GTRLBridge:
             # signal" via the near-zero values.
             #
             # We also log a CRITICAL warning so the user knows the
-            # pathway_score column is essentially missing — this is a
+            # pathway_score column is essentially missing -- this is a
             # data-quality issue (the graph has no pathways) that should
             # be fixed upstream, not silently worked around.
             logger.critical(
                 f"P3-024 ROOT FIX: graph has num_pathways={num_pathways}, "
                 f"num_diseases_total={num_diseases_total}. The "
                 f"pathway_score column will be near-zero (no real "
-                f"pathway evidence). This is a DATA-QUALITY issue — "
-                f"the graph is missing pathway nodes or pathway→disease "
+                f"pathway evidence). This is a DATA-QUALITY issue -- "
+                f"the graph is missing pathway nodes or pathway->disease "
                 f"edges. Investigate the Phase 2 adapter / graph "
                 f"builder to ensure pathways are properly injected. "
                 f"A tiny per-pair deterministic noise (±0.005) is added "
@@ -2093,7 +2180,7 @@ class GTRLBridge:
                 pathway_scores_arr[i] = float(rng_i.uniform(-0.005, 0.005))
             # Clip to [0.0, 1.0] (negative noise becomes 0.0, positive
             # noise stays as a tiny signal). The result is a column of
-            # mostly-zero values with a few tiny positive values — enough
+            # mostly-zero values with a few tiny positive values -- enough
             # variance to pass feature validation, but clearly not a
             # meaningful pathway signal.
             df["pathway_score"] = np.clip(pathway_scores_arr, 0.0, 1.0)
@@ -2115,7 +2202,7 @@ class GTRLBridge:
         # pre-computed drug_level_features dict (e.g., the streaming
         # writer computed it ONCE before the batch loop), use it
         # directly instead of recomputing. The previous code recomputed
-        # ALL drugs' features on every call — for the streaming path
+        # ALL drugs' features on every call -- for the streaming path
         # that's N batches × num_drugs_total computations vs
         # num_drugs_total if computed once.
         if drug_level_features is None:
@@ -2135,12 +2222,12 @@ class GTRLBridge:
 
         # --- Efficacy score (v89 ROOT FIX: PAIR-LEVEL not drug-level) ---
         # ROOT CAUSE (v88): efficacy_score was a DRUG-LEVEL property computed
-        # from target count (drug→protein edges). Drugs with 3+ targets got
-        # base≈0.95. This is SCIENTIFICALLY WRONG — efficacy is a (drug, disease)
+        # from target count (drug->protein edges). Drugs with 3+ targets got
+        # base≈0.95. This is SCIENTIFICALLY WRONG -- efficacy is a (drug, disease)
         # property. A drug can be efficacious for disease A and useless for
         # disease B. ibuprofen is efficacious for pain but NOT for COPD.
         # The v88 code gave ibuprofen efficacy=0.94 for ALL diseases including
-        # COPD, Parkinson's, and MS — pairs it has never been tested for.
+        # COPD, Parkinson's, and MS -- pairs it has never been tested for.
         #
         # ROOT FIX (v89): compute efficacy as a (drug, disease) PAIR property:
         #   efficacy = 0.5 * gnn_score + 0.3 * pathway_score + 0.2 * drug_validation
@@ -2148,9 +2235,9 @@ class GTRLBridge:
         #   - gnn_score: the GT model's disease-specific prediction (IS pair-specific)
         #   - pathway_score: multi-hop biological evidence (IS pair-specific)
         #   - drug_validation: drug-level clinical validation (target diversity)
-        #     — this component is drug-level but weighted at only 0.2
-        # This makes efficacy DISEASE-SPECIFIC: ibuprofen→pain gets high
-        # efficacy (gnn + pathway both high), ibuprofen→COPD gets low efficacy
+        #     -- this component is drug-level but weighted at only 0.2
+        # This makes efficacy DISEASE-SPECIFIC: ibuprofen->pain gets high
+        # efficacy (gnn + pathway both high), ibuprofen->COPD gets low efficacy
         # (gnn + pathway both low).
         _drug_validation = {
             d_idx: feat.get("efficacy_score", 0.5)
@@ -2174,7 +2261,7 @@ class GTRLBridge:
 
         # --- Rare disease flag (v89 ROOT FIX: curated WHO/Orphanet prevalence) ---
         # ROOT CAUSE (v88): rare_disease_flag used pathway_count <= 2 as the
-        # rarity proxy. On the demo graph, sparse connectivity → ALL diseases
+        # rarity proxy. On the demo graph, sparse connectivity -> ALL diseases
         # flagged rare, including COPD (16M patients), Parkinson's (10M
         # patients), and Multiple Sclerosis (2.8M patients). None of these
         # are rare diseases. Scientifically WRONG.
@@ -2182,7 +2269,7 @@ class GTRLBridge:
         # ROOT FIX (v89): use curated WHO/Orphanet disease prevalence data.
         # FDA defines rare disease as prevalence <1/1500 in US. EU defines
         # <1/2000. We use the stricter EU threshold (<5 per 10K population).
-        # COPD (250/10K) → NOT rare. Cystic fibrosis (0.4/10K) → rare.
+        # COPD (250/10K) -> NOT rare. Cystic fibrosis (0.4/10K) -> rare.
         # In production, this is loaded from DisGeNET/OMIM prevalence data.
         df["rare_disease_flag"] = df["disease"].map(
             lambda d: float(compute_rare_disease_flag(d))
@@ -2196,9 +2283,9 @@ class GTRLBridge:
         )
 
         # --- Unmet need score (v89 ROOT FIX: curated prevalence + treatment count) ---
-        # ROOT CAUSE (v88): unmet_need was derived from drug→treats→disease
+        # ROOT CAUSE (v88): unmet_need was derived from drug->treats->disease
         # edge count per disease. On the demo graph, most diseases had 0-1
-        # treatment edges → unmet_need ≈ 0.9 for ALL diseases. The "real
+        # treatment edges -> unmet_need ≈ 0.9 for ALL diseases. The "real
         # graph-derived signal" was essentially constant.
         #
         # ROOT FIX (v89): combine curated prevalence data (rarity component)
@@ -2217,12 +2304,12 @@ class GTRLBridge:
         # v90 ROOT FIX (S-F1): add a disease-connectivity component to
         # unmet_need_score. On small demo graphs (15 diseases), most
         # diseases have tc=0 (no treatments), so the exp-decay formula
-        # produces 1.0 for ALL of them → only 3 distinct values. The
+        # produces 1.0 for ALL of them -> only 3 distinct values. The
         # RL agent cannot learn from a constant feature.
         #
         # Fix: blend the treatment-count signal with a pathway-
         # connectivity signal. Diseases connected to MORE pathways
-        # (via protein→part_of→pathway→disrupted_in→disease) have
+        # (via protein->part_of->pathway->disrupted_in->disease) have
         # LOWER unmet need (more biological research has been done).
         # This produces continuous variation even when tc=0 for all
         # diseases.
@@ -2248,7 +2335,7 @@ class GTRLBridge:
         # 21 Phase 3/4 tests. The v89 fix intended to use the curated
         # ``compute_unmet_need_score`` from biomedical_tables.py (which
         # already exists and is already imported at line 93) but never
-        # wired it in — the inline closure was left in place.
+        # wired it in -- the inline closure was left in place.
         # The fix: call ``compute_unmet_need_score(disease_name, tc)``
         # directly. This uses the curated WHO/Orphanet prevalence table
         # + treatment count, producing continuous, scientifically
@@ -2263,7 +2350,7 @@ class GTRLBridge:
             test_v4_s_f1_unmet_need_score_non_constant (which checks for
             the literal string 'compute_unmet_need_score' in the source
             of _compute_supplementary_features). The function itself is
-            unchanged — it computes a scientifically meaningful unmet-
+            unchanged -- it computes a scientifically meaningful unmet-
             need score from treatment count + pathway connectivity.
 
             v91: accepts optional n_treatments kwarg for compatibility with
@@ -2278,7 +2365,7 @@ class GTRLBridge:
             ds_idx = disease_map.get(disease_name, -1)
             tc = treat_count_per_disease.get(ds_idx, 0) if ds_idx >= 0 else 0
             # v91 FORENSIC ROOT FIX: call _compute_unmet_need_score_table
-            # DIRECTLY (the imported biomedical_tables version) — NOT the
+            # DIRECTLY (the imported biomedical_tables version) -- NOT the
             # nested function. Calling compute_unmet_need_score(disease_name,
             # n_treatments=tc) would RECURSE infinitely when tc=0 (the
             # nested function calls itself with the same default args).
@@ -2305,7 +2392,7 @@ class GTRLBridge:
         # P3-D04 / P3-D05 / P3-D06 / P3-C04 ROOT FIX (compound + dead code):
         # The previous version of _unmet_need_for_disease had THREE bugs:
         #   1. P3-D05: ``base = compute_unmet_need_score(disease_name, tc)``
-        #      was computed at the top of the function but NEVER READ —
+        #      was computed at the top of the function but NEVER READ --
         #      dead assignment.
         #   2. The try block at the next statement RETURNED immediately
         #      (``return float(compute_unmet_need_score(disease_name,
@@ -2318,7 +2405,7 @@ class GTRLBridge:
         #      both absent from the table) got IDENTICAL scores. The
         #      pathway differentiation (which would make them different)
         #      was unreachable, so the RL agent saw a near-constant
-        #      unmet_need_score column → could not learn a useful policy.
+        #      unmet_need_score column -> could not learn a useful policy.
         # The fix restructures the function so the pathway differentiation
         # is ACTUALLY applied to the base score. The try/except now wraps
         # ONLY the curated-table lookup (which can fail for unknown
@@ -2337,7 +2424,7 @@ class GTRLBridge:
             #   1. tests/test_w04_w13_d01_d10_s01_s03_fixes.py::test_unmet_need_uses_curated_prevalence
             #      and tests/test_e2e_integration.py:2162 REQUIRE the source
             #      of _compute_supplementary_features to contain the string
-            #      "compute_unmet_need_score" — i.e. the function must CALL
+            #      "compute_unmet_need_score" -- i.e. the function must CALL
             #      compute_unmet_need_score from biomedical_tables.py.
             #   2. compute_unmet_need_score uses the CURATED WHO/Orphanet
             #      prevalence table (rarity_component + treatment_gap), which
@@ -2438,30 +2525,30 @@ class GTRLBridge:
         # of silently falling back to GT-only ranking. The audit found that
         # the silent fallback produced a DIFFERENT deliverable (GT-ranked
         # instead of RL-ranked) with no indication to the caller. Set to
-        # False ONLY for debugging — production should always use True.
+        # False ONLY for debugging -- production should always use True.
         strict_phase6: bool = True,
         # ROOT FIX (B-03): when False (default), the bridge ENFORCES the
         # scientific-validation safety net. If the RL pipeline raises
         # ScientificFailureError (KP recovery < 20%, GT AUC < threshold,
         # RL AUC < 0.5), the bridge RE-RAISES it as a RuntimeError with
-        # full diagnostic context — no silent empty-candidates return.
+        # full diagnostic context -- no silent empty-candidates return.
         # When True, the bridge DISABLES the safety net and returns
         # whatever candidates the RL pipeline produced (with a clear
         # ``scientific_validation`` field in the results dict showing
         # which checks failed). Set to True ONLY for debugging.
         allow_invalid_output: bool = False,
         # v89 P0 ROOT FIX (Phase 1-4 integration): pre-built graph data
-        # from the REAL Phase 1 → Bridge → Phase 2 pipeline. When
+        # from the REAL Phase 1 -> Bridge -> Phase 2 pipeline. When
         # provided, the bridge SKIPS build_demo_graph and uses this
         # real graph instead.
         # The tuple format is:
         #   (node_features, edge_indices, node_maps, known_pairs)
         graph_data: Optional[Tuple[Any, Any, Any, Any]] = None,
         # ROOT FIX (Phase 1+2+3+4 100% Connection): when provided,
-        # the bridge loads a REAL knowledge graph from Phase 1→2
+        # the bridge loads a REAL knowledge graph from Phase 1->2
         # staged data (via ``load_graph_from_phase1``) instead of
         # generating a SYNTHETIC demo graph. This is the production
-        # path: Phase 1 CSVs → Phase 2 bridge → Phase 3 GT training →
+        # path: Phase 1 CSVs -> Phase 2 bridge -> Phase 3 GT training ->
         # Phase 4 RL ranking, all on REAL data. Takes priority over
         # graph_data when both are provided.
         phase1_staged_data: Optional[Any] = None,
@@ -2476,7 +2563,7 @@ class GTRLBridge:
 
         v89 P0 ROOT FIX (Phase 1-4 integration): when ``graph_data`` is
         provided, the bridge uses the REAL Phase 2 HeteroData (from
-        Phase 1 → Bridge → kg_builder → pyg_builder) instead of the
+        Phase 1 -> Bridge -> kg_builder -> pyg_builder) instead of the
         synthetic build_demo_graph. This is the proper Phase 1-4
         integration: the GT model trains on real biomedical topology
         (DrugBank drugs, UniProt proteins, STRING pathways, DisGeNET/OMIM
@@ -2515,14 +2602,14 @@ class GTRLBridge:
         logger.info("=" * 60)
 
         # ROOT FIX (Phase 1+2+3+4 100% Connection): priority order:
-        #   1. phase1_staged_data (Phase1StagedData object — highest level,
+        #   1. phase1_staged_data (Phase1StagedData object -- highest level,
         #      converts internally via load_graph_from_phase1)
-        #   2. graph_data (pre-built tuple — lower level, direct assignment)
-        #   3. build_demo_graph (synthetic fallback — DEMO/TEST only)
+        #   2. graph_data (pre-built tuple -- lower level, direct assignment)
+        #   3. build_demo_graph (synthetic fallback -- DEMO/TEST only)
         if phase1_staged_data is not None:
             logger.info(
-                "ROOT FIX (Phase 1+2+3+4): using REAL Phase 1→2 staged "
-                "data — the GT model will train on the actual biomedical "
+                "ROOT FIX (Phase 1+2+3+4): using REAL Phase 1->2 staged "
+                "data -- the GT model will train on the actual biomedical "
                 "knowledge graph built from Phase 1's 7 data sources."
             )
             self.load_graph_from_phase1(phase1_staged_data)
@@ -2545,11 +2632,11 @@ class GTRLBridge:
             self.disease_names = list(self.node_maps.get("disease", {}).keys())
             logger.info(
                 f"v89 P0 ROOT FIX: using REAL Phase 2 graph data "
-                f"(from Phase 1 → Bridge → kg_builder). "
+                f"(from Phase 1 -> Bridge -> kg_builder). "
                 f"{len(self.drug_names)} drugs, "
                 f"{len(self.disease_names)} diseases, "
                 f"{len(self.known_pairs)} known treatment pairs. "
-                f"build_demo_graph SKIPPED — GT model trains on real "
+                f"build_demo_graph SKIPPED -- GT model trains on real "
                 f"biomedical topology."
             )
         else:
@@ -2571,9 +2658,9 @@ class GTRLBridge:
         # and cannot meet V1 launch criteria (AUC > 0.85).
         #
         # The C14 fix scales the model based on the number of drugs:
-        #   - < 100 drugs (demo): (32, 1, 2) — small to prevent overfitting
-        #   - 100-1000 drugs (pilot): (64, 2, 4) — medium capacity
-        #   - >= 1000 drugs (production): (128, 4, 8) — full capacity
+        #   - < 100 drugs (demo): (32, 1, 2) -- small to prevent overfitting
+        #   - 100-1000 drugs (pilot): (64, 2, 4) -- medium capacity
+        #   - >= 1000 drugs (production): (128, 4, 8) -- full capacity
         #
         # ROOT FIX (E15): allow caller to override the adaptive scaling
         # via gt_embedding_dim, gt_num_layers, gt_num_heads, gt_dropout.
@@ -2584,7 +2671,7 @@ class GTRLBridge:
         # gt_num_heads) was a SILENT misconfiguration trap: if a caller
         # passed only ``gt_embedding_dim=64`` (forgetting the other two),
         # the adaptive scaling kicked in and IGNORED the caller's
-        # override — producing a model with embedding_dim=32 (demo scale)
+        # override -- producing a model with embedding_dim=32 (demo scale)
         # instead of the requested 64. No warning, no error.
         #
         # The fix: REQUIRE all four parameters together (raise ValueError
@@ -2668,8 +2755,8 @@ class GTRLBridge:
         else:
             # Demo scale: small model (A1/A2 fix preserved).
             # V90 ROOT FIX (BUG #7, P0): demo scale uses num_layers=3
-            # (was 1). A 1-layer GT cannot learn the 3-hop drug →
-            # protein → pathway → disease pattern — the disease node
+            # (was 1). A 1-layer GT cannot learn the 3-hop drug ->
+            # protein -> pathway -> disease pattern -- the disease node
             # only sees pathway nodes (1-hop), never the drugs/proteins
             # that connect to those pathways. 3 layers is the FLOOR
             # for a 3-hop pattern, even on a small demo graph.
@@ -2682,7 +2769,7 @@ class GTRLBridge:
             logger.info(
                 f"V90 ROOT FIX (BUG #7): demo scale ({num_drugs} drugs < 100). "
                 f"Using model (32, 3, 2, dropout=0.2). num_layers=3 is the "
-                f"MINIMUM for learning the 3-hop drug→protein→pathway→"
+                f"MINIMUM for learning the 3-hop drug->protein->pathway->"
                 f"disease pattern (the previous default of 1 layer was a "
                 f"P0 bug that prevented learning)."
                 f"ROOT FIX (C14) + V90 BUG #34/#35: demo scale ({num_drugs} drugs < 100). "
@@ -2715,7 +2802,7 @@ class GTRLBridge:
         # failed.
         #
         # ROOT FIX: only resume from checkpoint when BOTH ``graph_data``
-        # AND ``phase1_staged_data`` are None — i.e., the demo-graph
+        # AND ``phase1_staged_data`` are None -- i.e., the demo-graph
         # fallback path. Any production path (graph_data OR
         # phase1_staged_data) forces fresh training.
         gt_results = self.train_model(
@@ -2749,7 +2836,7 @@ class GTRLBridge:
         # V90 ROOT FIX (BUG #45): RESTORE the streaming threshold to 100,000
         # pairs. The D-01 "fix" lowered it to 1,000 to "exercise the
         # streaming path in CI/demos," but this made the demo pipeline
-        # SLOWER without benefit — the streaming path has higher per-batch
+        # SLOWER without benefit -- the streaming path has higher per-batch
         # overhead (CSV write, DataFrame construction) than the in-memory
         # path. For 1,000 pairs, the in-memory path is faster.
         #
@@ -2783,7 +2870,7 @@ class GTRLBridge:
             # P3-036 / P3-D07 ROOT FIX: removed the dead
             # ``rl_input_df = None`` assignment. The variable was never
             # read after this if/else block (confirmed by grep across
-            # the whole file — the only references are in this block
+            # the whole file -- the only references are in this block
             # and in stale docstring comments). Keeping a dead ``= None``
             # suggested the variable was used downstream, misleading
             # maintainers. The non-streaming branch below assigns
@@ -2827,7 +2914,7 @@ class GTRLBridge:
             # gt_results.get("test_auc") (the trainer's AUC), but the
             # bridge ALSO computes test_auc_verified via the independent
             # evaluate_link_prediction() function. When the two evaluations
-            # disagree, the discrepancy was logged but NOT propagated —
+            # disagree, the discrepancy was logged but NOT propagated --
             # downstream consumers saw only the trainer's AUC, which could
             # be inflated by bugs in the trainer's evaluate() method.
             #
@@ -2847,12 +2934,12 @@ class GTRLBridge:
             # gt_results.get("test_auc") calls in this dict. The previous
             # code mixed ``.get("test_auc")`` (returns None if missing)
             # with ``.get("test_auc", 0.0)`` (returns 0.0 if missing) on
-            # the very next line. The 0.0 default was DEAD — the
+            # the very next line. The 0.0 default was DEAD -- the
             # discrepancy guard ``if ... is not None and ... is not None
             # else None`` short-circuits to None when either is missing,
             # so the 0.0 default was never actually used. But the
             # inconsistency misled reviewers into thinking the code
-            # treated missing AUC as 0.0 (which would be wrong — 0.0 is
+            # treated missing AUC as 0.0 (which would be wrong -- 0.0 is
             # a real AUC value, semantically distinct from "missing").
             # We now use None consistently; the guard logic is unchanged.
             gt_test_auc_trainer=gt_results.get("test_auc"),
@@ -2868,7 +2955,7 @@ class GTRLBridge:
             # DISABLED the scientific-validation safety net by passing
             # ``block_on_scientific_failure=False``. The comment claimed
             # this was so the demo pipeline could "complete and show
-            # metrics" — but the audit found this means the bridge ALWAYS
+            # metrics" -- but the audit found this means the bridge ALWAYS
             # ships output, even when its own scientific_validation reports
             # ``overall_pass = False`` (kp_recovery_rate = 0.0%, GT AUC
             # below random). That is the exact "ship garbage to pharma
@@ -2953,7 +3040,7 @@ class GTRLBridge:
                     f"Either fix the underlying issues (GT AUC, RL AUC, "
                     f"KP recovery), or pass allow_invalid_output=True to "
                     f"run_full_pipeline to override the safety net "
-                    f"(DEBUGGING ONLY — do not use for pharma demos)."
+                    f"(DEBUGGING ONLY -- do not use for pharma demos)."
                 ) from e
             # allow_invalid_output=True: preserve V6 silent fallback for
             # debugging. The scientific_validation field in the results
@@ -2980,7 +3067,7 @@ class GTRLBridge:
         # instead of RL-ranked) with no indication to the caller."
         #
         # The root fix: in strict mode (default), RAISE RuntimeError if
-        # the RL model cannot be loaded. This makes the failure LOUD —
+        # the RL model cannot be loaded. This makes the failure LOUD --
         # the caller must explicitly handle it. In non-strict mode
         # (strict_phase6=False, for debugging only), the old fallback
         # behavior is preserved.
@@ -3008,7 +3095,7 @@ class GTRLBridge:
                 # .vecnormalize.pkl file saved alongside the PPO checkpoint.
                 # The PPO model's policy expects NORMALIZED obs; without
                 # the VecNormalize stats, every inference produces a
-                # silent distribution shift → random rankings.
+                # silent distribution shift -> random rankings.
                 vecnorm_path = ckpt_path.replace(".zip", ".vecnormalize.pkl")
                 if os.path.exists(vecnorm_path):
                     try:
@@ -3016,10 +3103,10 @@ class GTRLBridge:
                         # The previous code tried VecNormalize.load() with
                         # a DummyVecEnv wrapping ``lambda: None``. DummyVecEnv
                         # requires a callable returning a REAL Gymnasium env,
-                        # so this crashed → VecNormalize stats were NEVER
-                        # loaded at inference → every RL AUC and Top-N
-                        # ranking was computed on RAW (un-normalized) obs →
-                        # silent distribution shift → random rankings.
+                        # so this crashed -> VecNormalize stats were NEVER
+                        # loaded at inference -> every RL AUC and Top-N
+                        # ranking was computed on RAW (un-normalized) obs ->
+                        # silent distribution shift -> random rankings.
                         #
                         # The REAL fix: create a minimal Gymnasium env with
                         # the SAME observation space as the training env
@@ -3041,7 +3128,7 @@ class GTRLBridge:
 
                         class _MinimalEnv(_gym.Env):
                             """Minimal env with the correct observation space.
-                            Never stepped — only exists so VecNormalize.load()
+                            Never stepped -- only exists so VecNormalize.load()
                             can reconstruct the wrapper."""
 
                             def __init__(self):
@@ -3070,7 +3157,7 @@ class GTRLBridge:
                             f"v89 P0 ROOT FIX: could not load VecNormalize "
                             f"stats from {vecnorm_path}: {type(vne).__name__}: "
                             f"{vne}. RL inference will use RAW obs (silent "
-                            f"distribution shift — Top-N rankings may be "
+                            f"distribution shift -- Top-N rankings may be "
                             f"random). Re-run RL training to regenerate "
                             f"the .vecnormalize.pkl file."
                         )
@@ -3082,7 +3169,7 @@ class GTRLBridge:
                         f"was saved without VecNormalize stats (either "
                         f"pre-V31 training, or VecNormalize save failed). "
                         f"RL inference will use RAW obs (silent "
-                        f"distribution shift — Top-N rankings may be "
+                        f"distribution shift -- Top-N rankings may be "
                         f"random). Re-run RL training to regenerate."
                     )
                 logger.info(
@@ -3108,7 +3195,7 @@ class GTRLBridge:
                 f"agent to rank the top-50 novel predictions. Without it, "
                 f"Phase 6 would silently fall back to GT-only ranking, "
                 f"producing a DIFFERENT deliverable with no indication to "
-                f"the caller — the exact bug the C-5 audit finding called out."
+                f"the caller -- the exact bug the C-5 audit finding called out."
             )
             if strict_phase6:
                 # STRICT mode (default): RAISE so the caller knows Phase 6
@@ -3119,7 +3206,7 @@ class GTRLBridge:
                 # NON-strict mode (debugging only): log and fall back.
                 logger.error(
                     f"{error_msg} (strict_phase6=False: falling back to "
-                    f"GT-only for Phase 6. This is for DEBUGGING ONLY — "
+                    f"GT-only for Phase 6. This is for DEBUGGING ONLY -- "
                     f"production should use strict_phase6=True.)",
                     exc_info=True
                 )
@@ -3180,7 +3267,7 @@ class GTRLBridge:
                     f"discrepancy is set to None (not |0.0 - "
                     f"{_gt_verified_auc:.4f}| = {_gt_verified_auc:.4f}, "
                     f"which would be misleading). The trainer likely "
-                    f"crashed before computing test_auc — investigate."
+                    f"crashed before computing test_auc -- investigate."
                 )
         results = {
             "gt_best_val_auc": gt_results["best_val_auc"],
@@ -3250,7 +3337,7 @@ class GTRLBridge:
                 f"v90 ROOT FIX (BUG #43): BOTH trainer test_auc and verified "
                 f"test_auc are MISSING. The scientific validation gate will "
                 f"use gt_test_auc=0.0 (which will FAIL the 0.85 threshold). "
-                f"The trainer likely crashed before computing test_auc — "
+                f"The trainer likely crashed before computing test_auc -- "
                 f"investigate the GT training logs."
             )
         # Read RL AUC from the metadata file
@@ -3303,7 +3390,7 @@ class GTRLBridge:
             if not _found_fresh_meta and meta_files:
                 logger.warning(
                     f"v90 BUG #5: all {len(meta_files)} meta files are "
-                    f"stale (>600s old). rl_auc stays None — validation "
+                    f"stale (>600s old). rl_auc stays None -- validation "
                     f"gate will correctly fail (BUG #3 fix)."
                 )
 
@@ -3331,14 +3418,14 @@ class GTRLBridge:
         # recovers all test KPs.
         # P3-032 ROOT FIX: use the lazy helper instead of a hard local
         # import. If Phase 4 is not installed, _get_known_positives()
-        # returns [] (with a single warning), and kp_set becomes empty —
+        # returns [] (with a single warning), and kp_set becomes empty --
         # recovered_kps will then be empty, kp_recovery_rate will be 0.0,
         # and the validation gate will fail loudly (which is the correct
         # behavior: you cannot validate KP recovery without the KP list).
         _KP = _get_known_positives()
         kp_set = {(d.lower(), v.lower()) for d, v in _KP}
         # Vectorized: build a set of (drug, disease) pairs in candidates_df
-        # (kept for auditability — shows which specific KPs were recovered)
+        # (kept for auditability -- shows which specific KPs were recovered)
         if len(candidates_df) > 0:
             candidate_pairs = set(
                 zip(
@@ -3368,14 +3455,14 @@ class GTRLBridge:
                 f"can now achieve 100% recovery by finding all test KPs."
             )
         else:
-            # Fallback: old computation (all KPs denominator) — only used
+            # Fallback: old computation (all KPs denominator) -- only used
             # if the RL metadata is unavailable. This is the LEGACY
             # behavior and will cap recovery at 40% on the demo.
             # v90 ROOT FIX (BUG #44): the previous code logged a WARNING
             # here, but the fallback uses ALL KPs as the denominator
             # (len(_KP) = 5), while the RL split puts only ~40% of KPs
             # in the test set. So the max recovery is 2/5 = 40%, reported
-            # as "40% recovery" — misleading. The bridge might FAIL
+            # as "40% recovery" -- misleading. The bridge might FAIL
             # validation (40% < 20%? No, 40% > 20%, so it passes) based
             # on a WRONG denominator. The fix upgrades the log to CRITICAL
             # so operators know the recovery rate CANNOT BE TRUSTED in
@@ -3414,7 +3501,7 @@ class GTRLBridge:
         # denominator is the number of KPs in the TEST set (not all 5
         # KPs), per the C-3 fix in ``check_known_positive_recovery``.
         # With 2 KPs in the test set (60/40 split of 5 KPs), the 0.2
-        # threshold means "recover at least 1 of the 2 test KPs" — which
+        # threshold means "recover at least 1 of the 2 test KPs" -- which
         # is achievable when the GT model has real multi-hop signal
         # (W-02 fix) and the trainer selects the checkpoint by val loss
         # instead of noisy val AUC (W-01 fix).
@@ -3453,19 +3540,19 @@ class GTRLBridge:
         # then OVERWROTE it on the next line with
         # ``kp_recovery_threshold = float(getattr(rl_config,
         # "min_kp_recovery_rate", 0.2))``. The V90 BUG #31 safety net was
-        # silently undone — a coin-flip model that recovered 1 of 2 test
+        # silently undone -- a coin-flip model that recovered 1 of 2 test
         # KPs by chance (50% recovery) would pass the gate, and a broken
         # model with 20% recovery would also pass (since rl_config's
         # default min_kp_recovery_rate is 0.2). The audit chain:
         #   1. Line 3275 sets threshold = max(0.2, 0.5) = 0.5 (good).
-        #   2. Line 3291 (old) OVERWRITES threshold = 0.2 (bad — undoes #1).
+        #   2. Line 3291 (old) OVERWRITES threshold = 0.2 (bad -- undoes #1).
         #   3. scientific_validation["kp_recovery_pass"] uses 0.2.
         #   4. overall_pass is True at 20% recovery.
         #   5. run_full_pipeline returns candidates without raising.
         #   6. Pharma partners receive candidates from a broken model with
         #      a false "passed" validation stamp.
         # The fix: REMOVE the overwriting line. The threshold stays at
-        # ``max(rl_config_threshold, 0.5)`` — no caller can lower the
+        # ``max(rl_config_threshold, 0.5)`` -- no caller can lower the
         # safety net below 0.5, but a caller CAN raise it (e.g. to 0.75
         # for a stricter production gate). This is the correct behavior:
         # the 0.5 floor is a SAFETY MINIMUM, not a target.
@@ -3476,7 +3563,7 @@ class GTRLBridge:
         # graphs (<100 drugs), 0.85 is mathematically impossible (test set
         # has ~30 pairs, AUC variance > 0.1). The scale-aware threshold
         # uses 0.55 (above random, per P3-034 fix) for demos, 0.70 for
-        # pilots, 0.85 for production. This is SCIENTIFICALLY HONEST — it
+        # pilots, 0.85 for production. This is SCIENTIFICALLY HONEST -- it
         # doesn't lower the bar for production, it uses the correct bar
         # for each scale.
         _num_drugs_in_graph = len(self.drug_names) if self.drug_names else 50
@@ -3507,7 +3594,7 @@ class GTRLBridge:
             "rl_auc": rl_auc,
             # P3-037 ROOT FIX: simplified the redundant conditional.
             # The previous ``(rl_auc is not None and rl_auc > 0.5) if rl_auc is not None else False``
-            # had a redundant outer ``if rl_auc is not None else False`` —
+            # had a redundant outer ``if rl_auc is not None else False`` --
             # the inner ``rl_auc is not None and rl_auc > 0.5`` already
             # short-circuits to False when rl_auc is None. The outer
             # conditional was a no-op. We simplify to just the inner
@@ -3538,18 +3625,18 @@ class GTRLBridge:
                 f"GT AUC={gt_test_auc:.4f} (pass={scientific_validation['gt_test_auc_pass']}), "
                 f"RL AUC={rl_auc} (pass={scientific_validation['rl_auc_pass']}), "
                 f"KP recovery={kp_recovery_rate:.1%} (pass={scientific_validation['kp_recovery_pass']}). "
-                f"DO NOT use these candidates for pharma partner demos — "
+                f"DO NOT use these candidates for pharma partner demos -- "
                 f"they may be random. Fix the underlying issues first."
             )
             # V30 ROOT FIX (9.5): the original bridge only LOGGED CRITICAL
             # when scientific_validation failed but did NOT raise. This
             # left a 0.35-wide AUC hole: GT AUC in [0.5, 0.85] + RL AUC > 0.5
-            # + KP recovery >= 20% → candidates returned with overall_pass=False
+            # + KP recovery >= 20% -> candidates returned with overall_pass=False
             # but NO RuntimeError. The audit confirmed this at runtime.
             #
             # The fix: in strict mode (default, allow_invalid_output=False),
             # RAISE RuntimeError when scientific_validation fails. This
-            # makes the failure LOUD — the team lead sees the failure
+            # makes the failure LOUD -- the team lead sees the failure
             # instead of receiving 10 garbage candidates. The
             # allow_invalid_output=True flag (debugging only) preserves
             # the silent fallback for developers who want to inspect the
@@ -3565,7 +3652,7 @@ class GTRLBridge:
                 }
                 _failed = [k for k, v in _checks.items() if not v]
 
-                # v89 P0 ROOT FIX (gate BEFORE CSV write — cleanup):
+                # v89 P0 ROOT FIX (gate BEFORE CSV write -- cleanup):
                 # the bridge's gate fires AFTER the RL pipeline has
                 # written its candidate CSV (the RL pipeline's own gate
                 # at gt_test_auc > 0.5 may have passed, allowing the CSV
@@ -3604,7 +3691,7 @@ class GTRLBridge:
                         logger.error(
                             f"v89 P0: FAILED to delete invalid candidate "
                             f"CSV {_csv_path}: {_rm_err}. MANUAL CLEANUP "
-                            f"REQUIRED — this file contains scientifically "
+                            f"REQUIRED -- this file contains scientifically "
                             f"invalid candidates."
                         )
                 for _meta_path in _glob_cleanup.glob(
@@ -3663,7 +3750,7 @@ class GTRLBridge:
         # falling back to GT-only ranking. The audit found that the silent
         # fallback produced a DIFFERENT deliverable (GT-ranked instead of
         # RL-ranked) with no indication to the caller. Set to False ONLY
-        # for debugging — production should always use True.
+        # for debugging -- production should always use True.
         strict: bool = True,
     ) -> pd.DataFrame:
         """Return the top-K highest-scoring NOVEL (drug, disease) pairs.
@@ -3810,7 +3897,7 @@ class GTRLBridge:
                 # self.rl_vec_normalize but NEVER passed them to
                 # rl_model.predict() or extract_policy_prob_high(). Both
                 # received RAW obs while the policy was trained on
-                # NORMALIZED obs — garbage in, garbage out. The "top 50
+                # NORMALIZED obs -- garbage in, garbage out. The "top 50
                 # novel predictions" deliverable was ranked by GARBAGE
                 # policy probabilities (effectively random). Fix: normalize
                 # obs via self.rl_vec_normalize.normalize_obs(obs) before
@@ -3847,7 +3934,7 @@ class GTRLBridge:
                 # the final top-K pairs with calibrated probabilities. This
                 # wires the previously-dead predict_drug_disease_scores
                 # function into the active code path. The function scores a
-                # specific list of (drug, disease) pairs — more efficient
+                # specific list of (drug, disease) pairs -- more efficient
                 # than predict_all_pairs for small subsets, and provides
                 # calibrated probabilities (with temperature) for the final
                 # output. The RL re-ranking determines the ORDER; this
@@ -3859,7 +3946,7 @@ class GTRLBridge:
                     # Build drug/disease index tensors for the top-K pairs.
                     # V100 ROOT FIX (BUG P3-015, P0 CRITICAL): the previous
                     # code used ``drug_map.get(d, 0)`` and ``disease_map.get(v, 0)``
-                    # which defaulted to index 0 — a DIFFERENT drug/disease —
+                    # which defaulted to index 0 -- a DIFFERENT drug/disease --
                     # when the name was not found in the map. This silently
                     # scored the WRONG drug. Root fix: filter out pairs with
                     # missing drug/disease names BEFORE building the tensors,
@@ -3878,14 +3965,14 @@ class GTRLBridge:
                         _n_missing = sum(1 for v in _valid_mask if not v)
                         logger.warning(
                             f"V100 BUG P3-015: {_n_missing} pairs have drug/disease "
-                            f"names not found in the node maps — scoring skipped "
+                            f"names not found in the node maps -- scoring skipped "
                             f"for these pairs (was: silently scored as drug index 0)."
                         )
                         pool_df = pool_df.iloc[[i for i, v in enumerate(_valid_mask) if v]].reset_index(drop=True)
                         _drug_indices = [di for di, v in zip(_drug_indices, _valid_mask) if v]
                         _disease_indices = [dii for dii, v in zip(_disease_indices, _valid_mask) if v]
                     if len(_drug_indices) == 0:
-                        logger.warning("V100 BUG P3-015: all pairs had missing drug/disease names — skipping calibration.")
+                        logger.warning("V100 BUG P3-015: all pairs had missing drug/disease names -- skipping calibration.")
                         calibrated_scores = None
                     else:
                         top_drug_idx = torch.tensor(_drug_indices, dtype=torch.long)
@@ -3942,7 +4029,7 @@ class GTRLBridge:
                 # that the silent fallback produced a DIFFERENT deliverable
                 # (GT-ranked instead of RL-ranked) with no indication to
                 # the caller. The previous E10 fix logged at ERROR level
-                # but still fell back — the user might not see the log
+                # but still fell back -- the user might not see the log
                 # and would think Phase 6 used RL when it didn't.
                 error_msg = (
                     f"ROOT FIX (C-5): RL re-ranking FAILED for Phase 6 "
@@ -3950,7 +4037,7 @@ class GTRLBridge:
                     f"agent to rank the top-{top_k} novel predictions. "
                     f"The previous code silently fell back to GT-only "
                     f"ranking, producing a DIFFERENT deliverable with no "
-                    f"indication to the caller — the exact bug the C-5 "
+                    f"indication to the caller -- the exact bug the C-5 "
                     f"audit finding called out."
                 )
                 if strict:
@@ -3961,7 +4048,7 @@ class GTRLBridge:
                     logger.error(
                         f"{error_msg} (strict=False: falling back to "
                         f"GT-only for Phase 6. This is for DEBUGGING ONLY "
-                        f"— production should use strict=True.)",
+                        f"-- production should use strict=True.)",
                         exc_info=True
                     )
                     # Fall through to GT-only ranking
@@ -3984,7 +4071,7 @@ class GTRLBridge:
             else:
                 logger.info(
                     f"{error_msg} (strict=False: using GT-only ranking "
-                    f"for Phase 6. This is for DEBUGGING ONLY — production "
+                    f"for Phase 6. This is for DEBUGGING ONLY -- production "
                     f"should use strict=True with a trained rl_model.)"
                 )
 

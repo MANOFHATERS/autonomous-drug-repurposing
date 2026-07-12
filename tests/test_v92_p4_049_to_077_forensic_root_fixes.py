@@ -37,7 +37,7 @@ def check(name, condition, detail=""):
         results.append(f"PASS: {name}")
     else:
         failed += 1
-        results.append(f"FAIL: {name} — {detail}")
+        results.append(f"FAIL: {name} -- {detail}")
 
 # ─── P4-049: BAD_HIGH_PENALTY_SCALE docstring consistency ──────────────
 cfg = RewardConfig()
@@ -159,7 +159,7 @@ row_safety_06 = pd.Series({
 })
 row_safety_09 = row_safety_06.copy()
 row_safety_09['safety_score'] = 0.9
-# With graduated: safety=0.6 → factor=(0.6-0.5)/(1-0.5)=0.2; safety=0.9 → factor=1.0
+# With graduated: safety=0.6 -> factor=(0.6-0.5)/(1-0.5)=0.2; safety=0.9 -> factor=1.0
 # With binary: both would give factor=0.5 (0.6 < 0.7) and 1.0 (0.9 >= 0.7)
 # So reward(0.6) with graduated should be ~0.2/0.5 = 40% of reward(0.6) with binary
 # Easier check: reward(safety=0.9) > reward(safety=0.6) * 2 (graduated makes the difference larger)

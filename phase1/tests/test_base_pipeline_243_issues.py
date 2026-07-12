@@ -1,30 +1,30 @@
 """
-Test 1 of 3 — Real functional tests for the upgraded ``pipelines/base_pipeline.py``.
+Test 1 of 3 -- Real functional tests for the upgraded ``pipelines/base_pipeline.py``.
 
 This test file verifies that EVERY one of the 243 fixes across the 16
 verification domains is actually implemented and working. It does NOT
-just check that a function exists — it calls each function with real
+just check that a function exists -- it calls each function with real
 inputs and asserts on the real outputs. If the upgraded base_pipeline
 silently breaks, this test catches it.
 
-Coverage map (243 issues → 16 domains):
+Coverage map (243 issues -> 16 domains):
 
-  Domain  3 (Scientific)     — SCI-3.1  through SCI-3.18  (18 issues)
-  Domain  5 (Data Quality)   — DQ-5.1   through DQ-5.19   (19 issues)
-  Domain  7 (Idempotency)    — IDEM-7.1 through IDEM-7.15 (15 issues)
-  Domain  1 (Architecture)   — ARCH-1.1 through ARCH-1.16 (16 issues)
-  Domain  9 (Security)       — SEC-9.1  through SEC-9.20  (20 issues)
-  Domain  2 (Design)         — DESIGN-2.1 through DESIGN-2.16 (16 issues)
-  Domain 14 (Compliance)     — COMP-14.1 through COMP-14.15 (15 issues)
-  Domain  6 (Reliability)    — REL-6.1  through REL-6.20  (20 issues)
-  Domain 10 (Testing)        — TEST-10.1 through TEST-10.35 (35 issues)
-  Domain  4 (Coding)         — CODE-4.1 through CODE-4.50 (50 issues)
-  Domain  8 (Performance)    — PERF-8.1 through PERF-8.20 (20 issues)
-  Domain 11 (Logging)        — LOG-11.1 through LOG-11.20 (20 issues)
-  Domain 12 (Configuration)  — CFG-12.1 through CFG-12.18 (18 issues)
-  Domain 15 (Interoperability) — INT-15.1 through INT-15.20 (20 issues)
-  Domain 16 (Lineage)        — LIN-16.1 through LIN-16.13 (13 issues)
-  Domain 13 (Documentation)  — DOC-13.1 through DOC-13.20 (20 issues)
+  Domain  3 (Scientific)     -- SCI-3.1  through SCI-3.18  (18 issues)
+  Domain  5 (Data Quality)   -- DQ-5.1   through DQ-5.19   (19 issues)
+  Domain  7 (Idempotency)    -- IDEM-7.1 through IDEM-7.15 (15 issues)
+  Domain  1 (Architecture)   -- ARCH-1.1 through ARCH-1.16 (16 issues)
+  Domain  9 (Security)       -- SEC-9.1  through SEC-9.20  (20 issues)
+  Domain  2 (Design)         -- DESIGN-2.1 through DESIGN-2.16 (16 issues)
+  Domain 14 (Compliance)     -- COMP-14.1 through COMP-14.15 (15 issues)
+  Domain  6 (Reliability)    -- REL-6.1  through REL-6.20  (20 issues)
+  Domain 10 (Testing)        -- TEST-10.1 through TEST-10.35 (35 issues)
+  Domain  4 (Coding)         -- CODE-4.1 through CODE-4.50 (50 issues)
+  Domain  8 (Performance)    -- PERF-8.1 through PERF-8.20 (20 issues)
+  Domain 11 (Logging)        -- LOG-11.1 through LOG-11.20 (20 issues)
+  Domain 12 (Configuration)  -- CFG-12.1 through CFG-12.18 (18 issues)
+  Domain 15 (Interoperability) -- INT-15.1 through INT-15.20 (20 issues)
+  Domain 16 (Lineage)        -- LIN-16.1 through LIN-16.13 (13 issues)
+  Domain 13 (Documentation)  -- DOC-13.1 through DOC-13.20 (20 issues)
 
 Total: 315 explicit issue IDs (the prompt title says 243; some issues
 are grouped). Every domain has at least one functional test below.
@@ -132,7 +132,7 @@ def tmp_file(tmp_path):
 
 
 # ===========================================================================
-# DOMAIN 3 — Scientific Correctness (SCI-3.1 through SCI-3.18)
+# DOMAIN 3 -- Scientific Correctness (SCI-3.1 through SCI-3.18)
 # ===========================================================================
 class TestDomain3ScientificCorrectness:
     """Life-safety-critical scientific correctness (Domain 3)."""
@@ -222,7 +222,7 @@ class TestDomain3ScientificCorrectness:
         src = (PROJECT_ROOT / "pipelines" / "base_pipeline.py").read_text()
         # The bare pattern from the original code should not exist
         assert "except Exception:\n            return 0" not in src, (
-            "Bare 'except Exception: return 0' still in source — SCI-3.5 not fixed"
+            "Bare 'except Exception: return 0' still in source -- SCI-3.5 not fixed"
         )
 
     def test_sci_3_5_file_not_found_returns_0(self, pipeline, tmp_path):
@@ -233,7 +233,7 @@ class TestDomain3ScientificCorrectness:
     def test_sci_3_5_malformed_json_returns_sentinel(self, pipeline, tmp_path):
         """Malformed JSON returns a sensible non-positive value.
 
-        Our bracket counter doesn't fully validate JSON syntax — it
+        Our bracket counter doesn't fully validate JSON syntax -- it
         just counts based on brackets. For a file that starts with `{`
         but is malformed, we may return 1 (treating it as a single
         object). That's acceptable as long as we don't return a
@@ -242,7 +242,7 @@ class TestDomain3ScientificCorrectness:
         bad_path = tmp_path / "bad.json"
         bad_path.write_text("{not valid json", encoding="utf-8")
         count = pipeline._count_records(bad_path)
-        # We accept 0, -1 (sentinel), or 1 (single object heuristic) —
+        # We accept 0, -1 (sentinel), or 1 (single object heuristic) --
         # but never a large positive number that would be misleading
         # in the audit trail.
         assert count in (0, SENTINEL_COUNT_FAILED, 1), (
@@ -437,7 +437,7 @@ class TestDomain3ScientificCorrectness:
     def test_sci_3_13_download_returns_list_supported(self):
         """Subclasses can return a list of Paths from download()."""
         p = _DummyPipelineListDownload()
-        # The download() method returns a list — the base class accepts it
+        # The download() method returns a list -- the base class accepts it
         result = p.download()
         assert isinstance(result, list)
         assert all(isinstance(x, Path) for x in result)
@@ -575,7 +575,7 @@ class TestDomain3ScientificCorrectness:
 
 
 # ===========================================================================
-# DOMAIN 5 — Data Quality & Integrity (DQ-5.1 through DQ-5.19)
+# DOMAIN 5 -- Data Quality & Integrity (DQ-5.1 through DQ-5.19)
 # ===========================================================================
 class TestDomain5DataQuality:
     """Data quality and integrity checks (Domain 5)."""
@@ -669,7 +669,7 @@ class TestDomain5DataQuality:
 
 
 # ===========================================================================
-# DOMAIN 7 — Idempotency & Reproducibility (IDEM-7.1 through IDEM-7.15)
+# DOMAIN 7 -- Idempotency & Reproducibility (IDEM-7.1 through IDEM-7.15)
 # ===========================================================================
 class TestDomain7Idempotency:
     """Idempotency and reproducibility (Domain 7)."""
@@ -750,7 +750,7 @@ class TestDomain7Idempotency:
 
 
 # ===========================================================================
-# DOMAIN 1 — Architecture (ARCH-1.1 through ARCH-1.16)
+# DOMAIN 1 -- Architecture (ARCH-1.1 through ARCH-1.16)
 # ===========================================================================
 class TestDomain1Architecture:
     """Architecture and module organisation (Domain 1)."""
@@ -787,7 +787,7 @@ class TestDomain1Architecture:
         import inspect
         src = inspect.getsource(BasePipeline.__init__)
         assert "mkdir" not in src, (
-            "__init__ should not call mkdir — directories must be created "
+            "__init__ should not call mkdir -- directories must be created "
             "lazily by _ensure_directories (ARCH-1.7)"
         )
 
@@ -847,7 +847,7 @@ class TestDomain1Architecture:
 
 
 # ===========================================================================
-# DOMAIN 9 — Security & Privacy (SEC-9.1 through SEC-9.20)
+# DOMAIN 9 -- Security & Privacy (SEC-9.1 through SEC-9.20)
 # ===========================================================================
 class TestDomain9Security:
     """Security and privacy (Domain 9)."""
@@ -983,7 +983,7 @@ class TestDomain9Security:
 
 
 # ===========================================================================
-# DOMAIN 2 — Design (DESIGN-2.1 through DESIGN-2.16)
+# DOMAIN 2 -- Design (DESIGN-2.1 through DESIGN-2.16)
 # ===========================================================================
 class TestDomain2Design:
     """Design patterns and API design (Domain 2)."""
@@ -1035,13 +1035,13 @@ class TestDomain2Design:
 
 
 # ===========================================================================
-# DOMAIN 14 — Compliance & Standards (COMP-14.1 through COMP-14.15)
+# DOMAIN 14 -- Compliance & Standards (COMP-14.1 through COMP-14.15)
 # ===========================================================================
 class TestDomain14Compliance:
     """Compliance and standards adherence (Domain 14)."""
 
     def test_comp_14_3_no_optional_x(self):
-        """No Optional[X] usage — all replaced with X | None."""
+        """No Optional[X] usage -- all replaced with X | None."""
         src = (PROJECT_ROOT / "pipelines" / "base_pipeline.py").read_text()
         # Allow Optional in type comments / strings, but not in actual annotations
         # Check that "Optional[" doesn't appear as a type annotation
@@ -1084,7 +1084,7 @@ class TestDomain14Compliance:
 
 
 # ===========================================================================
-# DOMAIN 6 — Reliability & Resilience (REL-6.1 through REL-6.20)
+# DOMAIN 6 -- Reliability & Resilience (REL-6.1 through REL-6.20)
 # ===========================================================================
 class TestDomain6Reliability:
     """Reliability and resilience (Domain 6)."""
@@ -1141,7 +1141,7 @@ class TestDomain6Reliability:
 
 
 # ===========================================================================
-# DOMAIN 10 — Testing & Validation (TEST-10.1 through TEST-10.35)
+# DOMAIN 10 -- Testing & Validation (TEST-10.1 through TEST-10.35)
 # ===========================================================================
 class TestDomain10Testing:
     """Testing and validation (Domain 10).
@@ -1200,7 +1200,7 @@ class TestDomain10Testing:
 
 
 # ===========================================================================
-# DOMAIN 4 — Coding (CODE-4.1 through CODE-4.50)
+# DOMAIN 4 -- Coding (CODE-4.1 through CODE-4.50)
 # ===========================================================================
 class TestDomain4Coding:
     """Coding standards (Domain 4)."""
@@ -1232,7 +1232,7 @@ class TestDomain4Coding:
 
     def test_code_4_28_no_toctou_in_size_check(self, pipeline, tmp_path):
         """_count_records handles FileNotFoundError gracefully."""
-        # File that disappears between exists() and stat() — simulate by passing
+        # File that disappears between exists() and stat() -- simulate by passing
         # a path that doesn't exist
         missing = tmp_path / "vanishing.csv"
         # Should return 0, not raise
@@ -1278,7 +1278,7 @@ class TestDomain4Coding:
 
 
 # ===========================================================================
-# DOMAIN 8 — Performance & Scalability (PERF-8.1 through PERF-8.20)
+# DOMAIN 8 -- Performance & Scalability (PERF-8.1 through PERF-8.20)
 # ===========================================================================
 class TestDomain8Performance:
     """Performance and scalability (Domain 8)."""
@@ -1286,7 +1286,7 @@ class TestDomain8Performance:
     def test_perf_8_2_gz_line_counting_chunked(self, pipeline, tmp_path):
         """Gzipped file line counting uses chunked reading (no full decompression)."""
         import inspect
-        # _count_gz_csv_records uses readline + read() — let's check it
+        # _count_gz_csv_records uses readline + read() -- let's check it
         # doesn't load entire file via read() without chunks
         src = inspect.getsource(BasePipeline._count_gz_csv_records)
         # The implementation reads line by line via csv.reader, not the whole file
@@ -1327,7 +1327,7 @@ class TestDomain8Performance:
 
 
 # ===========================================================================
-# DOMAIN 11 — Logging & Observability (LOG-11.1 through LOG-11.20)
+# DOMAIN 11 -- Logging & Observability (LOG-11.1 through LOG-11.20)
 # ===========================================================================
 class TestDomain11Logging:
     """Logging and observability (Domain 11)."""
@@ -1378,7 +1378,7 @@ class TestDomain11Logging:
 
 
 # ===========================================================================
-# DOMAIN 12 — Configuration & Environment Management (CFG-12.1 through CFG-12.18)
+# DOMAIN 12 -- Configuration & Environment Management (CFG-12.1 through CFG-12.18)
 # ===========================================================================
 class TestDomain12Configuration:
     """Configuration and environment management (Domain 12)."""
@@ -1430,7 +1430,7 @@ class TestDomain12Configuration:
 
 
 # ===========================================================================
-# DOMAIN 15 — Interoperability & Integration (INT-15.1 through INT-15.20)
+# DOMAIN 15 -- Interoperability & Integration (INT-15.1 through INT-15.20)
 # ===========================================================================
 class TestDomain15Interoperability:
     """Interoperability and integration (Domain 15)."""
@@ -1472,7 +1472,7 @@ class TestDomain15Interoperability:
 
 
 # ===========================================================================
-# DOMAIN 16 — Data Lineage & Traceability (LIN-16.1 through LIN-16.13)
+# DOMAIN 16 -- Data Lineage & Traceability (LIN-16.1 through LIN-16.13)
 # ===========================================================================
 class TestDomain16Lineage:
     """Data lineage and traceability (Domain 16)."""
@@ -1566,7 +1566,7 @@ class TestDomain16Lineage:
 
 
 # ===========================================================================
-# DOMAIN 13 — Documentation & Readability (DOC-13.1 through DOC-13.20)
+# DOMAIN 13 -- Documentation & Readability (DOC-13.1 through DOC-13.20)
 # ===========================================================================
 class TestDomain13Documentation:
     """Documentation and readability (Domain 13)."""
