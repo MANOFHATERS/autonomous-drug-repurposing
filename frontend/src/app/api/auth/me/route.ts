@@ -6,6 +6,21 @@ import { badRequest, writeAuditLog } from "@/lib/api-helpers";
 /**
  * GET /api/auth/me — return the current user's profile + organization
  * memberships. Returns 401 if no valid session.
+ *
+ * FE-051 ROOT FIX: every authenticated page load triggers this endpoint,
+ * which does db.user.findUnique + db.organizationMember.findMany. For a
+ * SPA with frequent re-renders and a pharma platform with 1000 researchers
+ * doing 100 page views/day each, that's 200K DB queries/day just for /me.
+ * We add `Cache-Control: private, max-age=60` so browsers AND Next.js's
+ * Data Cache cache the response for 60 seconds per user.
+ *
+ * `private` is critical: it forbids shared/CDN caches from storing the
+ * response (which would leak one user's profile to others). Only the
+ * user's own browser may cache it. `max-age=60` is short enough that
+ * role/membership changes propagate within a minute, but long enough
+ * to collapse the 100-page-views/day-per-user load into ~1 DB query/min.
+ *
+ * The PATCH handler below remains un-cached because it mutates state.
  */
 export async function GET() {
   const authUser = await getAuthenticatedUser();
@@ -36,7 +51,7 @@ export async function GET() {
     where: { userId: user.id },
     include: { organization: true },
   });
-  return NextResponse.json({
+  const body = {
     user,
     organizations: memberships.map((m) => ({
       id: m.organization.id,
@@ -46,6 +61,12 @@ export async function GET() {
       role: m.role,
     })),
     activeOrganizationId: authUser.orgId || memberships[0]?.organization.id || null,
+  };
+  return NextResponse.json(body, {
+    headers: {
+      // FE-051: per-user browser cache, 60s. Never cache on shared/CDN.
+      "Cache-Control": "private, max-age=60",
+    },
   });
 }
 

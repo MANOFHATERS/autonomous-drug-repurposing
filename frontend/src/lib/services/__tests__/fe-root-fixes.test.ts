@@ -163,14 +163,22 @@ describe("FE-007: SSRF removed from Caddyfile", () => {
   });
 });
 
-describe("FE-014: openFDA query sanitization", () => {
+describe("FE-014 / FE-045: openFDA query sanitization", () => {
   const openfda = readSrc("lib/services/openfda.ts");
 
   test("sanitizes user input before interpolation", () => {
     expect(openfda).toMatch(/sanitized/);
-    // Check that quotes, parens, and boolean operators are stripped.
-    expect(openfda).toMatch(/replace\(/);
-    expect(openfda).toMatch(/AND\|OR\|NOT/);
+    // FE-045 ROOT FIX: the old blacklist sanitizer (strip quotes, parens,
+    // AND/OR/NOT) was replaced with a STRICT WHITELIST that rejects any
+    // input containing characters outside [A-Za-z0-9 '-]. The whitelist
+    // is more secure because it defeats ALL openFDA query-syntax injection
+    // (field qualifiers, wildcards, fuzzy, range, etc.) — not just the
+    // specific operators the old blacklist knew about. We assert the
+    // whitelist regex is present.
+    expect(openfda).toMatch(/\[A-Za-z0-9 /);
+    expect(openfda).toMatch(/WHITELIST/);
+    // The whitelist must REJECT input that doesn't match (return null).
+    expect(openfda).toMatch(/if \(!WHITELIST\.test/);
   });
 });
 
@@ -238,11 +246,22 @@ describe("FE-018: Prisma indexes added", () => {
   });
 
   test("AuditLog has @@index([createdAt])", () => {
-    // Use a greedy match to capture the full AuditLog model block.
+    // FE-040 ROOT FIX: the AuditLog model grew (organizationId field +
+    // detailed JSDoc). The model block also contains a `@default("{}")`
+    // string literal whose `}` confuses a naive non-greedy regex. We
+    // find the model start, then find the first `}` that is at column 0
+    // (the actual model terminator).
     const auditStart = schema.indexOf("model AuditLog");
     expect(auditStart).toBeGreaterThanOrEqual(0);
-    const auditBlock = schema.slice(auditStart, auditStart + 800);
+    // Find the closing `}` at column 0 after auditStart.
+    const afterStart = schema.slice(auditStart);
+    const closeMatch = afterStart.match(/\n\}\n/);
+    expect(closeMatch).toBeTruthy();
+    const auditBlock = afterStart.slice(0, closeMatch!.index! + 2);
     expect(auditBlock).toMatch(/@@index\(\[createdAt\]\)/);
+    // FE-040: also confirm the new organizationId field + index.
+    expect(auditBlock).toMatch(/organizationId\s+String\?/);
+    expect(auditBlock).toMatch(/@@index\(\[organizationId\]\)/);
   });
 });
 

@@ -97,11 +97,26 @@ export async function writeAuditLog(params: {
   action: string;
   resource?: string;
   metadata?: Record<string, unknown>;
+  /**
+   * FE-040: optional explicit organizationId override. Use this for
+   * system-level events (where there is no authenticated user) that are
+   * nonetheless scoped to an org — e.g. a webhook delivery failure.
+   * When omitted, the authenticated user's orgId is used (or null for
+   * truly system-level events like anonymous failed logins).
+   */
+  organizationId?: string | null;
 }) {
   try {
+    // FE-040 ROOT FIX: populate organizationId from the authenticated user's
+    // orgId (or an explicit override) so audit logs are scoped to an org.
+    const orgId =
+      params.organizationId !== undefined
+        ? params.organizationId
+        : params.user?.orgId ?? null;
     await db.auditLog.create({
       data: {
         userId: params.user?.userId || null,
+        organizationId: orgId,
         actorName: params.user?.email || "anonymous",
         action: params.action,
         resource: params.resource || null,

@@ -291,7 +291,7 @@ model ApiKey {
   userId          String
   name            String
   hashedKey       String   @unique // FE-018: enforced unique + indexed
-  prefix          String   // first 8 chars shown in UI for identification
+  prefix          String   // FE-038: 8 hex chars AFTER the "drugos_" marker, shown in UI for identification
   lastUsedAt      DateTime?
   revokedAt       DateTime?
   createdAt       DateTime @default(now())
@@ -325,15 +325,25 @@ model Notification {
 }
 
 model AuditLog {
-  id         String   @id @default(cuid())
-  userId     String?
-  actorName  String
-  action     String   // login | logout | hypothesis_create | billing_change | admin_action
-  resource   String?
-  ip         String?
-  userAgent  String?
-  metadata   String   @default("{}") // JSON string
-  createdAt  DateTime @default(now())
+  id              String   @id @default(cuid())
+  userId          String?
+  // FE-040 ROOT FIX: organizationId is required for multi-tenant audit-trail
+  // isolation. The previous schema had only userId + actorName — meaning
+  // audit logs could not be scoped to an org for query purposes, a user
+  // who was a member of multiple orgs had their actions conflated across
+  // orgs, and GDPR/CCPA data-subject-access-requests could not be scoped
+  // to a specific org. The field is nullable ONLY for system-level events
+  // (e.g. failed-login on a non-existent email) that are not tied to any
+  // org. All user-initiated writes populate it from the authenticated
+  // user's orgId via writeAuditLog.
+  organizationId  String?
+  actorName       String
+  action          String   // login | logout | hypothesis_create | billing_change | admin_action
+  resource        String?
+  ip              String?
+  userAgent       String?
+  metadata        String   @default("{}") // JSON string
+  createdAt       DateTime @default(now())
 
   user User? @relation(fields: [userId], references: [id])
 
@@ -342,6 +352,9 @@ model AuditLog {
   // FE-018 ROOT FIX: Missing index on createdAt — audit log queries by
   // time range were full table scans.
   @@index([createdAt])
+  // FE-040 ROOT FIX: index on organizationId for per-org audit-log queries
+  // (compliance reporting, DSARs, multi-tenant scoping).
+  @@index([organizationId])
 }
 
 // ---------------------------------------------------------------------------
