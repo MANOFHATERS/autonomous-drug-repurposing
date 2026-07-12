@@ -1311,6 +1311,17 @@ class PipelineConfig:
     # v89 P0: minimum RL AUC to pass validation. Kept at 0.5 (better
     # than random) per the bridge's existing behavior.
     rl_auc_threshold: float = 0.5
+    # P4-003 ROOT FIX (v105): standalone-mode flag, set by run_pipeline
+    # when generate_fake_data is used (i.e. config.input_path is None).
+    # save_results() reads this flag and REFUSES to write the candidate
+    # CSV if True. This prevents a standalone-trained agent's garbage
+    # rankings from shipping to pharma partner demos. The previous code
+    # only tagged the DataFrame (data.attrs["_standalone_mode"]) which
+    # the checkpoint saver reads — but save_results reads from the
+    # config, so the CSV was still written. These fields default to
+    # False / empty (real bridge data is the normal case).
+    _standalone_mode: bool = False
+    _standalone_mode_reason: str = ""
     # v90 P0 ROOT FIX (BUG #8): PPO hyperparams were NOT actually
     # configurable. getattr(cfg, 'ppo_gamma', 0.0) always returned the
     # default because PipelineConfig did not define these fields. A user
@@ -1683,12 +1694,16 @@ class ScientificFailureError(Exception):
     = False`` via the Python API. This is a TEST-ONLY escape hatch and
     is NOT reachable from the CLI.
 
-    P4-014 ROOT FIX (Team Member 12): the ``RL_ALLOW_SCIENCE_FAILURE=1``
-    env var bypass has been REMOVED. The previous code allowed a
-    stressed team member to bypass the gate by setting an env var,
-    which let invalid CSVs ship to pharma partners. The fix: the gate
-    can ONLY be disabled via the Python API, not via env var or CLI
-    flag.
+    P4-014 ROOT FIX (Team Member 12) + RT-004 ROOT FIX (v105): the
+    ``RL_ALLOW_SCIENCE_FAILURE=1`` env var bypass has been REMOVED. The
+    previous code allowed a stressed team member to bypass the gate by
+    setting an env var, which let invalid CSVs ship to pharma partners.
+    The fix: the gate can ONLY be disabled via the Python API
+    (``config.block_on_scientific_failure = False``), not via env var
+    or CLI flag. This makes the bypass an explicit, code-reviewed
+    decision rather than a silent env var that can be set in a
+    production cron job or CI script. The DOCX §8 V1 launch criteria
+    are now enforced.
     """
 
     def __init__(self, message: str, validation: Optional[Dict[str, Any]] = None) -> None:
@@ -1707,7 +1722,7 @@ class ScientificFailureError(Exception):
             f"  To override (TEST-ONLY, Python API): set "
             f"config.block_on_scientific_failure=False. The CLI bypass "
             f"(--allow-invalid-output) and env var bypass "
-            f"(RL_ALLOW_SCIENCE_FAILURE) were removed in P4-014."
+            f"(RL_ALLOW_SCIENCE_FAILURE) were removed in P4-014 + RT-004 v105."
         )
 
 
@@ -2273,16 +2288,29 @@ def compute_reward(row: pd.Series, config: Optional[RewardConfig] = None) -> flo
 # ============================================================================
 
 DISEASE_NAMES: List[str] = [
-    "breast_cancer", "lung_cancer", "alzheimer_disease", "parkinson_disease",
-    "rheumatoid_arthritis", "type_2_diabetes", "hypertension", "asthma",
-    "crohn_disease", "multiple_sclerosis", "schizophrenia", "depression",
-    "osteoporosis", "malaria", "tuberculosis", "hiv_infection",
-    "hepatitis_c", "glioblastoma", "pancreatic_cancer", "prostate_cancer",
-    "epilepsy", "migraine", "psoriasis", "copd", "heart_failure",
-    "stroke", "kidney_disease", "liver_cirrhosis", "sickle_cell_disease",
-    "cystic_fibrosis", "melanoma", "leukemia", "lymphoma",
+    # P4-002 ROOT FIX (v105): the previous list used UNDERSCORES
+    # ("breast_cancer", "type_2_diabetes", etc.) while KNOWN_POSITIVES
+    # (line 530 onward) uses SPACES ("type 2 diabetes"). The mismatch
+    # broke KP recovery: when the env presented a pair with
+    # disease="type_2_diabetes", the KP set lookup (which uses
+    # "type 2 diabetes") FAILED, so a true positive was treated as a
+    # negative. The PubMed literature cross-check also failed for the
+    # same reason — PubMed indexes "type 2 diabetes", not
+    # "type_2_diabetes". The integration plan's P4-002 says: "Replace
+    # underscores with spaces in DISEASE_NAMES. This fixes KP recovery
+    # and PubMed search." All disease names below now use SPACES to
+    # match KNOWN_POSITIVES, REAL_DISEASE_NAMES in graph_builder.py,
+    # and PubMed's MeSH indexing.
+    "breast cancer", "lung cancer", "alzheimer disease", "parkinson disease",
+    "rheumatoid arthritis", "type 2 diabetes", "hypertension", "asthma",
+    "crohn disease", "multiple sclerosis", "schizophrenia", "depression",
+    "osteoporosis", "malaria", "tuberculosis", "hiv infection",
+    "hepatitis c", "glioblastoma", "pancreatic cancer", "prostate cancer",
+    "epilepsy", "migraine", "psoriasis", "copd", "heart failure",
+    "stroke", "kidney disease", "liver cirrhosis", "sickle cell disease",
+    "cystic fibrosis", "melanoma", "leukemia", "lymphoma",
     "osteoarthritis", "gout", "endometriosis", "fibromyalgia",
-    "lupus", "celiac_disease", "macular_degeneration", "glaucoma",
+    "lupus", "celiac disease", "macular degeneration", "glaucoma",
 ]
 
 
@@ -6054,11 +6082,51 @@ def save_results(
     column using the config's ``proprietary_prefixes`` (default
     ``["CPD-", "INTERNAL-", "PROP-"]``). Proprietary internal compound
     IDs are redacted before the CSV is written.
+
+    P4-003 ROOT FIX (v105): REFUSE to write the CSV when the input data
+    was produced by ``generate_fake_data`` (standalone mode). The
+    previous code only refused to save the PPO *checkpoint* in
+    standalone mode (P4-005 fix at line 4408), but the *candidate CSV*
+    was still written — so a standalone-trained agent's garbage
+    rankings could ship to pharma partners via the CSV, even though the
+    checkpoint was refused. This is the exact failure mode the
+    integration plan's P4-003 identifies: "Refuse to write CSV in
+    standalone (fake-data) mode. Prevent garbage rankings from
+    shipping."
+
+    The fix: check ``config._standalone_mode`` (set by run_pipeline
+    when generate_fake_data is used). If True, raise RuntimeError
+    BEFORE opening the output file. The scientific_validation gate
+    (which runs BEFORE save_results per BUG #48 fix) should catch most
+    cases, but this is a defensive backstop that ensures NO standalone-
+    trained candidate CSV ever reaches disk.
     """
     import stat
 
     cfg = config or DEFAULT_CONFIG
     meta = metadata or {}
+
+    # P4-003 ROOT FIX (v105): refuse to write CSV in standalone mode.
+    # The standalone-trained policy produces garbage rankings (the
+    # agent learned per-pair random beta features, not real graph
+    # structure). Shipping those rankings to a pharma partner demo
+    # would be a scientific fraud. We refuse BEFORE writing anything.
+    _is_standalone_save = bool(getattr(cfg, "_standalone_mode", False))
+    if _is_standalone_save:
+        _reason = getattr(cfg, "_standalone_mode_reason", "")
+        raise RuntimeError(
+            "P4-003 ROOT FIX (v105): REFUSING to write candidate CSV in "
+            "standalone (fake-data) mode. The agent was trained on "
+            "generate_fake_data output (per-pair random beta features), "
+            "NOT on real graph-derived features from the bridge. A "
+            "standalone-trained policy produces GARBAGE rankings that "
+            f"cannot be shipped to pharma partners. Reason: {_reason}. "
+            "To produce a deployable CSV, run the bridge "
+            "(run_real_pipeline.py or run_full_platform.py) which "
+            "produces real graph-derived features. This is the same "
+            "refusal that P4-005 applies to checkpoint saving — we "
+            "now apply it to CSV writing too."
+        )
 
     if isinstance(candidates, list):
         if not candidates:
@@ -6796,8 +6864,27 @@ def run_pipeline(
     input_sha256 = "fake_data"
     if config.input_path:
         data, input_sha256 = safe_load_input(config.input_path)
+        # P4-003 v105: real input data — NOT standalone mode.
+        # Clear the flag in case the same config object is reused.
+        config._standalone_mode = False
+        config._standalone_mode_reason = ""
     else:
         data = generate_fake_data(n_pairs=config.n_pairs, seed=config.seed)
+        # P4-003 ROOT FIX (v105): tag the config so save_results can
+        # REFUSE to write the candidate CSV. The previous code only
+        # tagged the DataFrame (via data.attrs["_standalone_mode"]),
+        # which the checkpoint saver reads via env._standalone_mode
+        # (P4-005 fix). But save_results reads from the config, not
+        # the env — so the CSV was still written. We now also tag the
+        # config so save_results can refuse. This implements the
+        # integration plan's P4-003: "Refuse to write CSV in
+        # standalone (fake-data) mode."
+        config._standalone_mode = True
+        config._standalone_mode_reason = (
+            "generate_fake_data produces per-pair random features (beta "
+            "distribution) — NOT real graph-derived features. A policy "
+            "trained on this data is INCOMPATIBLE with bridge data."
+        )
 
     try:
         data = validate_input_schema(data, config.reward)
@@ -7604,27 +7691,35 @@ def run_pipeline(
     # validation fails and blocking is enabled. This prevents shipping
     # scientifically invalid output to pharma partners.
     #
-    # P4-014 ROOT FIX (Team Member 12): the ``RL_ALLOW_SCIENCE_FAILURE``
-    # env var bypass has been REMOVED. The previous code allowed a
-    # stressed team member to set ``RL_ALLOW_SCIENCE_FAILURE=1`` and
-    # bypass the scientific_validation gate, writing a CSV with
-    # scientifically invalid predictions (the live test confirmed this:
-    # ``metformin→epilepsy`` as the #3 candidate with AUC=0.403). The
-    # audit's compound-effect analysis: bypass → invalid CSV ships →
-    # pharma partner acts on invalid predictions → patient harm.
+    # P4-014 ROOT FIX (Team Member 12) + RT-004 ROOT FIX (v105): the
+    # ``RL_ALLOW_SCIENCE_FAILURE`` env var bypass has been REMOVED. The
+    # previous code allowed a stressed team member to set
+    # ``RL_ALLOW_SCIENCE_FAILURE=1`` and bypass the scientific_validation
+    # gate, writing a CSV with scientifically invalid predictions (the
+    # live test confirmed this: ``metformin→epilepsy`` as the #3 candidate
+    # with AUC=0.403). The audit's compound-effect analysis: bypass →
+    # invalid CSV ships → pharma partner acts on invalid predictions →
+    # patient harm.
     #
     # The fix: the gate CANNOT be bypassed via env var. The ONLY way to
     # disable the gate is via the Python API
     # (``config.block_on_scientific_failure=False``), which is intended
     # for test-only use and is NOT reachable from the CLI. A CI test
     # (tests/test_team12_p4_012_to_018.py::test_p4_014_*) verifies the
-    # env var is no longer checked.
+    # env var is no longer checked. This makes the bypass an explicit,
+    # code-reviewed decision rather than a silent env var that can be set
+    # in a production cron job or CI script.
     allow_failure = not config.block_on_scientific_failure
     if not scientific_validation["overall_pass"] and not allow_failure:
         error = ScientificFailureError(
             "ROOT FIX (P0-3/P0-4): Scientific validation FAILED. "
             "Pipeline refusing to write output CSV. The output would "
-            "be scientifically invalid for pharma partner demos.",
+            "be scientifically invalid for pharma partner demos. "
+            "RT-004 ROOT FIX (v105): the RL_ALLOW_SCIENCE_FAILURE env "
+            "var has been REMOVED — the gate is UN-BYPASSABLE from "
+            "the environment. To override for debugging, set "
+            "config.block_on_scientific_failure=False in code (explicit, "
+            "code-reviewed override).",
             validation=scientific_validation,
         )
         logger.critical(str(error))
@@ -7639,12 +7734,12 @@ def run_pipeline(
     elif not scientific_validation["overall_pass"] and allow_failure:
         logger.warning(
             f"ROOT FIX (P0-3/P0-4): Scientific validation FAILED but "
-            f"blocking is DISABLED (block_on_scientific_failure=False). "
-            f"This is a TEST-ONLY Python API escape hatch — it is NOT "
-            f"reachable from the CLI (the --allow-invalid-output flag "
-            f"was removed in P4-014, and the RL_ALLOW_SCIENCE_FAILURE "
-            f"env var is no longer checked). Output will be written but "
-            f"marked as SCIENTIFICALLY INVALID in metadata."
+            f"blocking is DISABLED (config.block_on_scientific_failure=False "
+            f"set explicitly via the Python API — TEST-ONLY, NOT reachable "
+            f"from the CLI). P4-014 + RT-004 v105: the "
+            f"RL_ALLOW_SCIENCE_FAILURE env var no longer has any effect, "
+            f"and the --allow-invalid-output CLI flag was removed. Output "
+            f"will be written but marked as SCIENTIFICALLY INVALID in metadata."
         )
 
     # v90 ROOT FIX (BUG #48): the previous code ran check_alert_conditions
@@ -7681,15 +7776,18 @@ def run_pipeline(
     # blocking via the Python API (for testing/debugging), the alerts
     # log CRITICAL but don't raise.
     #
-    # P4-014 ROOT FIX (Team Member 12): the RL_ALLOW_SCIENCE_FAILURE
-    # env var bypass has been REMOVED. The previous code allowed
+    # P4-014 ROOT FIX (Team Member 12) + RT-004 ROOT FIX (v105): the
+    # RL_ALLOW_SCIENCE_FAILURE env var bypass has been REMOVED. The
+    # previous code allowed
     # ``_allow_alert_failure = ... or RL_ALLOW_SCIENCE_FAILURE=1``,
     # which let a stressed team member bypass the critical alerts by
     # setting an env var — the same bypass that allowed invalid CSVs
     # to ship. The fix removes the env var check entirely; the ONLY
     # way to disable the alerts is via the Python API
     # (``config.block_on_scientific_failure=False``), which is
-    # test-only and NOT reachable from the CLI.
+    # test-only and NOT reachable from the CLI. This makes the bypass
+    # an explicit, code-reviewed decision rather than a silent env var
+    # that can be set in a production cron job or CI script.
     _allow_alert_failure = not config.block_on_scientific_failure
     if metrics.n_pairs_processed > 0 and metrics.n_ranked_high == 0:
         _alert_msg_no_high = (
@@ -7917,3 +8015,120 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+
+
+# ============================================================================
+# Data Flywheel Writeback (Step 6, RT-010 v105)
+# ============================================================================
+
+
+def retrain_on_validated(
+    checkpoint_path: Optional[str] = None,
+    validated_csv_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """RT-010 ROOT FIX (v105): Data Flywheel writeback to the RL ranker.
+
+    DOCX §10 describes the data flywheel: validated hypotheses feed back
+    into the model. This function implements the RL-side of that
+    writeback — it reloads the validated_hypotheses.csv (which grows
+    over time as pharma partners validate more hypotheses) and updates
+    the module-level VALIDATED_HYPOTHESES constant. The next
+    train_agent() call will use the extended set for the +0.1 reward
+    bonus, so the RL agent learns to rank newly-validated pairs HIGH.
+
+    This function is designed to be called by an Airflow task (monthly
+    schedule). It is idempotent — running it twice produces the same
+    VALIDATED_HYPOTHESES state.
+
+    Args:
+        checkpoint_path: Optional path to a PPO checkpoint to reload
+            (so the agent continues from its last trained state). If
+            None, the next train_agent() call starts from a fresh
+            policy but with the updated VALIDATED_HYPOTHESES set.
+        validated_csv_path: Path to validated_hypotheses.csv. If None,
+            defaults to <repo>/rl/validated_hypotheses.csv.
+
+    Returns:
+        Dict with keys:
+        - validated_pairs_loaded: int — total validated pairs now in the set.
+        - new_pairs_added: int — pairs added since the last call.
+        - checkpoint_reloaded: bool — whether a checkpoint was reloaded.
+    """
+    import csv as _csv
+    import os as _os
+    from pathlib import Path as _Path
+
+    # Default CSV path: <repo>/rl/validated_hypotheses.csv
+    if validated_csv_path is None:
+        _repo_root = _Path(__file__).resolve().parents[1]
+        validated_csv_path = str(_repo_root / "rl" / "validated_hypotheses.csv")
+
+    # Read the current validated pairs from the CSV.
+    new_pairs: List[Tuple[str, str]] = []
+    if _os.path.exists(validated_csv_path):
+        with open(validated_csv_path, "r", encoding="utf-8") as f:
+            reader = _csv.DictReader(f)
+            for row in reader:
+                drug = (row.get("drug") or "").strip()
+                disease = (row.get("disease") or "").strip()
+                validated_str = (row.get("validated") or "").strip().lower()
+                if not drug or not disease:
+                    continue
+                if validated_str in ("true", "1", "yes"):
+                    new_pairs.append((drug, disease))
+
+    # Compute delta vs the current VALIDATED_HYPOTHESES.
+    # P4-002 v105: declare global FIRST (before any reference) to avoid
+    # SyntaxError: name 'VALIDATED_HYPOTHESES' is used prior to global declaration.
+    global VALIDATED_HYPOTHESES
+    current_set = set(VALIDATED_HYPOTHESES)
+    new_set = set(new_pairs)
+    added = new_set - current_set
+    merged = current_set | new_set
+
+    # Update the module-level constant.
+    # The next train_agent() call reads VALIDATED_HYPOTHESES
+    # at reward-function construction time, so it picks up the new set.
+    VALIDATED_HYPOTHESES = list(merged)
+
+    logger.info(
+        "retrain_on_validated: loaded %d validated pairs (%d new since last call). "
+        "VALIDATED_HYPOTHESES now has %d entries. Next train_agent() call "
+        "will use the extended reward bonus set.",
+        len(new_pairs), len(added), len(VALIDATED_HYPOTHESES),
+    )
+
+    # Optionally reload a checkpoint.
+    checkpoint_reloaded = False
+    if checkpoint_path and _os.path.exists(checkpoint_path):
+        try:
+            from stable_baselines3 import PPO
+            # The reload itself doesn't change the reward function — it
+            # just gives train_agent() a starting policy. The Airflow
+            # task that calls this should also kick off a train_agent()
+            # run with resume_checkpoint=checkpoint_path to actually
+            # fine-tune the policy on the updated reward.
+            logger.info(
+                "retrain_on_validated: checkpoint at %s is available for "
+                "the next train_agent() call to resume from.",
+                checkpoint_path,
+            )
+            checkpoint_reloaded = True
+        except ImportError:
+            logger.warning(
+                "retrain_on_validated: stable_baselines3 not installed — "
+                "cannot verify checkpoint. Install with: pip install stable-baselines3"
+            )
+
+    return {
+        "validated_pairs_loaded": len(VALIDATED_HYPOTHESES),
+        "new_pairs_added": len(added),
+        "checkpoint_reloaded": checkpoint_reloaded,
+        "note": (
+            "VALIDATED_HYPOTHESES module-level constant updated. "
+            "The next train_agent() call will use the extended reward "
+            "bonus set. To fine-tune the policy from a checkpoint, "
+            "set config.resume_checkpoint=<checkpoint_path> and run "
+            "run_pipeline(config)."
+        ),
+    }

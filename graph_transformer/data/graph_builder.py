@@ -513,6 +513,24 @@ class BiomedicalGraphBuilder:
         "doxycycline", "cephalexin", "clindamycin", "metronidazole",
         "fluconazole", "itraconazole", "voriconazole", "acyclovir",
         "valacyclovir", "ribavirin",
+        # P4-001 ROOT FIX (v105): thalidomide, sildenafil, mifepristone
+        # added to REAL_DRUG_NAMES so the data flywheel reward bonus
+        # (RewardFunction._validated_hypotheses) actually has known
+        # repurposable drugs to bonus. The DOCX §10 data flywheel
+        # describes: validated hypotheses feed back into the model.
+        # thalidomide -> multiple myeloma (already in
+        # VALIDATED_HYPOTHESES at line 478), sildenafil -> pulmonary
+        # arterial hypertension, mifepristone -> Cushing's syndrome,
+        # topiramate -> migraine prophylaxis. Without these drugs in
+        # the demo graph's REAL_DRUG_NAMES, the +0.1 reward bonus is
+        # dead code (the pairs never appear in the env's data). This
+        # was the exact failure mode the integration plan's P4-001
+        # identifies: "Add thalidomide, sildenafil, mifepristone,
+        # topiramate to the demo graph's REAL_DRUG_NAMES. This
+        # activates the data flywheel reward bonus." topiramate and
+        # sildenafil are already present above (lines 504, 507) —
+        # adding thalidomide and mifepristone here completes the set.
+        "thalidomide", "mifepristone",
     ]
 
     REAL_DISEASE_NAMES: List[str] = [

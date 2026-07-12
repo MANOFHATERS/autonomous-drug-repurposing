@@ -336,11 +336,18 @@ def run_phase3_and_4(
     Uses the REAL Phase 2 HeteroData (passed as ``graph_data``) instead
     of ``build_demo_graph``.
 
-    P4-014 ROOT FIX: the ``allow_invalid_output`` parameter has been
-    REMOVED. The pipeline FAILS if scientific_validation fails — no
-    bypass. The Python API on ``GTRLBridge.run_full_pipeline`` retains
-    the parameter as a test-only escape hatch, but it is NOT reachable
-    from the CLI or from this function.
+    P4-014 ROOT FIX (Team Member 12) + RT-004 ROOT FIX (v105):
+    The ``allow_invalid_output`` parameter has been REMOVED from this
+    function's signature. The pipeline FAILS if scientific_validation
+    fails — no bypass. The previous ``--allow-invalid-output`` CLI flag
+    was a silent escape hatch that let scientifically invalid output
+    (e.g. GT AUC < 0.85, all-metformin RL output) ship to pharma
+    partner demos, violating the DOCX §8 V1 launch criteria. The
+    underlying ``GTRLBridge.run_full_pipeline`` still accepts the kwarg
+    for backward compatibility with old scripts (and as a test-only
+    escape hatch for the CI test suite), but we ALWAYS call it without
+    the kwarg from this runner (it defaults to False inside the bridge).
+    There is NO way to opt back in from the run_4phase.py CLI.
     """
     logger.info("=" * 70)
     logger.info("PHASE 3 + 4: Graph Transformer Training + RL Ranking")
@@ -359,8 +366,9 @@ def run_phase3_and_4(
         rl_top_n=rl_top_n,
         # P4-016: pass the top-K limit to the bridge.
         gt_top_k=gt_top_k,
-        # P4-014: allow_invalid_output defaults to False (strict mode).
-        # The pipeline FAILS if scientific_validation fails.
+        # P4-014 + RT-004: allow_invalid_output defaults to False inside
+        # the bridge. We do NOT pass it here — the kwarg is retained on
+        # the bridge ONLY as a test-only escape hatch for the CI suite.
         graph_data=graph_data,
     )
     return candidates_df, results
@@ -417,15 +425,15 @@ def main() -> int:
              "pairs (not recommended — produces 100+ MB CSVs at "
              "production scale).",
     )
-    # P4-014 ROOT FIX (Team Member 12): the --allow-invalid-output CLI
-    # flag has been REMOVED. The previous code allowed a stressed team
-    # member facing a pharma partner demo to bypass the
-    # scientific_validation gate by passing --allow-invalid-output (or
-    # setting RL_ALLOW_SCIENCE_FAILURE=1). The bypass then wrote a CSV
-    # with scientifically invalid predictions (AUC=0.403,
-    # metformin→epilepsy as the #3 candidate in the live test). The
-    # audit's compound-effect analysis: bypass → invalid CSV ships →
-    # pharma partner acts on invalid predictions → patient harm.
+    # P4-014 ROOT FIX (Team Member 12) + RT-004 ROOT FIX (v105):
+    # the --allow-invalid-output CLI flag has been REMOVED. The previous
+    # code allowed a stressed team member facing a pharma partner demo
+    # to bypass the scientific_validation gate by passing
+    # --allow-invalid-output (or setting RL_ALLOW_SCIENCE_FAILURE=1).
+    # The bypass then wrote a CSV with scientifically invalid predictions
+    # (AUC=0.403, metformin→epilepsy as the #3 candidate in the live
+    # test). The audit's compound-effect analysis: bypass → invalid CSV
+    # ships → pharma partner acts on invalid predictions → patient harm.
     #
     # The fix: if the scientific_validation gate fails, the pipeline
     # FAILS — no exceptions, no bypass. The Python API parameter
@@ -452,8 +460,9 @@ def main() -> int:
         "seed": args.seed,
         # P4-016: record the gt_top_k limit in the manifest for auditability.
         "gt_top_k": args.gt_top_k,
-        # P4-014: the allow_invalid_output field is INTENTIONALLY ABSENT.
-        # The CLI flag was removed; there is no longer a bypass to record.
+        # P4-014 + RT-004 v105: the allow_invalid_output field is INTENTIONALLY
+        # ABSENT. The CLI flag was removed; there is no longer a bypass to
+        # record. The gate is UN-BYPASSABLE from the CLI.
     }
     _write_manifest(output_dir, phase1_dir, config_snapshot)
 
@@ -531,9 +540,9 @@ def main() -> int:
             # P4-016: pass the top-K limit to the bridge so it writes
             # only the top-K GT predictions to gt_predictions.csv.
             gt_top_k=args.gt_top_k,
-            # P4-014: allow_invalid_output is INTENTIONALLY NOT passed.
-            # The CLI flag was removed; the bridge defaults to
-            # allow_invalid_output=False (strict mode). The pipeline
+            # P4-014 + RT-004 v105: allow_invalid_output is INTENTIONALLY
+            # NOT passed. The CLI flag was removed; the bridge defaults
+            # to allow_invalid_output=False (strict mode). The pipeline
             # FAILS if scientific_validation fails — no CLI bypass.
         )
 
@@ -576,11 +585,16 @@ def main() -> int:
 
         if not overall_pass:
             print("\n" + "=" * 70)
-            print("SCIENTIFIC VALIDATION FAILED. Exiting non-zero.")
-            # P4-014 ROOT FIX: the --allow-invalid-output bypass has been
-            # REMOVED. The pipeline FAILS when scientific_validation fails
-            # — no exceptions. Fix the underlying issues (GT AUC, RL AUC,
-            # KP recovery, literature support) and re-run.
+            print("SCIENTIFIC VALIDATION FAILED. Exiting non-zero (return 4).")
+            # P4-014 ROOT FIX (Team Member 12) + RT-004 ROOT FIX (v105):
+            # the --allow-invalid-output bypass has been REMOVED. The
+            # pipeline FAILS when scientific_validation fails — no
+            # exceptions, no bypass. Fix the underlying issues (GT AUC,
+            # RL AUC, KP recovery, literature support) and re-run. There
+            # is NO CLI flag to skip the gate; the Python API parameter
+            # ``allow_invalid_output`` on ``GTRLBridge.run_full_pipeline``
+            # is retained ONLY as a test-only escape hatch for the CI
+            # suite, NOT reachable from the CLI.
             print("Fix the failed checks above and re-run. There is NO bypass.")
             print("=" * 70)
             return 4

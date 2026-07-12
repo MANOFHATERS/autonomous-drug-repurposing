@@ -454,8 +454,10 @@ export async function getRankedHypotheses(opts?: {
       csvPath,
       note:
         "No RL-ranked candidates found. Set RL_SERVICE_URL to proxy to the " +
-        "Phase 4 service, or ensure the ranker has written its output to " +
-        `${csvPath}.`,
+        "Phase 4 service, OR run `python run_4phase.py` to generate " +
+        "top_candidates_*.csv output. FE-003 v105: the default scan looks " +
+        `for top_candidates_*.csv in ${RL_DIR} (NOT the INPUT ` +
+        "validated_hypotheses.csv file — that was the previous bug).",
     };
   }
 
