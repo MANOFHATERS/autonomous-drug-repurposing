@@ -2280,16 +2280,33 @@ def train_transe(
 
     # FIX D5.2: Validate triple value ranges.
     heads, rels, tails = train_triples
-    # v43 ROOT FIX (P0-6): prefer ``num_total_entities`` when the model
-    # exposes it (HGT). For TransE, ``entity_embeddings.num_embeddings``
-    # IS the total. For HGT, ``entity_embeddings`` returns the FIRST
-    # node type's table (typically Compound) — wrong for index-range
-    # validation. ``num_total_entities`` returns the SUM of all node-
-    # type counts. The getattr fallback preserves backward compat for
-    # any model that doesn't expose ``num_total_entities``.
-    num_entities = getattr(model, "num_total_entities", None)
-    if num_entities is None:
-        num_entities = model.entity_embeddings.num_embeddings
+    # v103 ROOT FIX (P2-039 deep): the v102 fix added ``num_total_entities``
+    # to the KGEmbeddingModel Protocol AND to TransEModel, but left the
+    # getattr-with-fallback pattern here. That pattern was the ORIGINAL
+    # bug — it was dead code for TransE (which now exposes the property)
+    # and misleading for maintainers. The Protocol now REQUIRES
+    # ``num_total_entities`` as a @property, so any model passed to
+    # train_transe MUST expose it. Remove the fallback and access the
+    # property directly. If a non-conforming model is passed, raise a
+    # clear Protocol-violation error instead of silently falling back
+    # to ``entity_embeddings.num_embeddings`` (which returns the WRONG
+    # count for heterogeneous models — the original P2-039 root cause).
+    #
+    # Why no getattr fallback: the Protocol contract is now explicit.
+    # A model that doesn't expose ``num_total_entities`` is Protocol-
+    # non-compliant and should fail FAST with a clear message, not
+    # silently produce wrong negative samples / index-range checks.
+    if not hasattr(model, "num_total_entities"):
+        raise TransETrainingError(
+            f"Model {type(model).__name__} does not expose "
+            f"``num_total_entities`` — required by the KGEmbeddingModel "
+            f"Protocol (P2-039 v103 root fix). TransEModel exposes it "
+            f"(returns entity_embeddings.num_embeddings). Heterogeneous "
+            f"models must expose it as the SUM of all node-type counts. "
+            f"See model_protocol.py.",
+            context={"model_class": type(model).__name__},
+        )
+    num_entities = int(model.num_total_entities)
     num_relations = model.relation_embeddings.num_embeddings
 
     if heads.min() < 0 or heads.max() >= num_entities:
