@@ -50,6 +50,9 @@ import {
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow
 } from '@/components/ui/table'
+// FE-026 ROOT FIX: All data exports from mock-data.ts are now EMPTY arrays.
+// Components render empty states until migrated to real API calls.
+// Type imports should come from @/lib/types (canonical home).
 import {
   diseases, drugCandidates, clinicalTrials, users, auditLogs, subscriptionPlans, billingHistory, apiKeys,
   webhooks, usageMetrics, dataSources, dealPipeline, organization, featureFlags, systemStatus, savedQueries

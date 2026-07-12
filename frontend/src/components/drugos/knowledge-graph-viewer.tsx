@@ -5,8 +5,12 @@ import { ZoomIn, ZoomOut, RotateCcw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
-import type { KnowledgeGraphNode, KnowledgeGraphEdge } from '@/lib/mock-data';
-import { knowledgeGraphNodes, knowledgeGraphEdges } from '@/lib/mock-data';
+import type { KnowledgeGraphNode, KnowledgeGraphEdge } from '@/lib/types';
+// FE-026 ROOT FIX: knowledgeGraphNodes/Edges were mock data — now empty.
+// The viewer fetches real graph data via the useKnowledgeGraph hook
+// (see use-api-data.tsx). The empty defaults below are used only as
+// initial state before the API responds.
+import { useState, useEffect } from 'react';
 
 interface KnowledgeGraphViewerProps {
   nodes?: KnowledgeGraphNode[];
@@ -39,8 +43,8 @@ function buildPositionMap(nodes: KnowledgeGraphNode[]): Map<string, { x: number;
 }
 
 export function KnowledgeGraphViewer({
-  nodes = knowledgeGraphNodes,
-  edges = knowledgeGraphEdges,
+  nodes = [],
+  edges = [],
   width = 900,
   height = 550,
   className = '',

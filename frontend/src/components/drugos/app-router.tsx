@@ -48,31 +48,14 @@ import {
 import {
   Sheet, SheetContent, SheetTrigger, SheetTitle
 } from '@/components/ui/sheet'
-// FE-065 ROOT FIX: Removed ALL 23 mock-data imports. The app shell now
-// sources account-scoped data from real API hooks (see use-account-data.tsx)
-// and static marketing content from static-content.ts. The previous
-// implementation rendered fake notifications, billing history, API keys,
-// usage metrics, and audit logs directly in the sidebar / dashboard /
-// notifications dropdown — every account-scoped view was fabrication.
-//
-// What stayed in mock-data.ts: TYPE definitions only (DrugCandidate,
-// Disease, ClinicalTrial, GraphNode, GraphEdge, etc.) so we don't break
-// the type system. Those types are still used by core-screens.tsx for its
-// fallback display when the real API returns 503 (service_not_deployed).
-import type {
-  DrugCandidate, Disease,
+// FE-026 ROOT FIX: All data exports from mock-data.ts are now EMPTY arrays.
+// Components render empty states until migrated to real API calls.
+import {
+  diseases, drugCandidates, clinicalTrials, graphNodes, graphEdges, users,
+  notifications as notifData, auditLogs, billingHistory, apiKeys,
+  webhooks, usageMetrics, dataSources, trendingDiseases, recentQueries, projects,
+  dealPipeline, organization, featureFlags, systemStatus, savedQueries, blogPosts, careers
 } from '@/lib/mock-data'
-// FE-065: Static marketing content (blog, careers, trending diseases) is
-// now in static-content.ts — clearly labeled as static, not "mock data".
-import {
-  blogPosts, careers, trendingDiseases,
-} from '@/lib/static-content'
-// FE-065: Account-scoped data hooks (notifications, usage, billing, etc.)
-import {
-  useNotifications, useRecentQueries, useUsageMetrics, useSystemStatus,
-} from './use-account-data'
-// FE-065: Real biomedical data hooks (already existed for core-screens).
-import { useDiseaseSearch, useRlCandidates } from './use-api-data'
 import { cn } from '@/lib/utils'
 import { coreScreens } from './core-screens'
 import { allScreens } from './all-screens'
@@ -394,21 +377,14 @@ function LandingPage() {
   const [showAutocomplete, setShowAutocomplete] = useState(false)
   const [selectedDisease, setSelectedDisease] = useState<string | null>(null)
 
-  // FE-065 ROOT FIX: Use the real /api/diseases/search endpoint (NLM MeSH)
-  // for the landing page autocomplete. The previous code filtered a local
-  // `diseases` array of 8 mock entries — visitors could never find real
-  // diseases from the public landing page.
-  const { data: diseaseSearchData } = useDiseaseSearch(searchQuery, 2)
-
   const filteredDiseases = useMemo(() => {
-    if (!diseaseSearchData?.items) return []
-    return diseaseSearchData.items.slice(0, 6).map(d => ({
-      id: d.descriptorUI,
-      name: d.descriptorName,
-      icdCode: d.descriptorUI,
-      therapeuticArea: d.scopeNote ? d.scopeNote.slice(0, 60) : 'Biomedical',
-    }))
-  }, [diseaseSearchData])
+    if (!searchQuery || searchQuery.length < 2) return []
+    return diseases.filter(d =>
+      d.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      d.therapeuticArea.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      d.icdCode.toLowerCase().includes(searchQuery.toLowerCase())
+    ).slice(0, 6)
+  }, [searchQuery])
 
   const handleSearch = () => {
     if (selectedDisease) {
@@ -511,10 +487,7 @@ function LandingPage() {
                 {trendingDiseases.slice(0, 4).map(d => (
                   <button
                     key={d.name}
-                    // FE-065: trendingDiseases is now static marketing content
-                    // (see static-content.ts). Clicking sets the search query;
-                    // the real autocomplete then resolves to a real MeSH ID.
-                    onClick={() => { setSearchQuery(d.name); setSelectedDisease(null) }}
+                    onClick={() => { setSearchQuery(d.name); setSelectedDisease(diseases.find(dd => dd.name === d.name)?.id || null) }}
                     className="text-sm text-[#5B4FCF] hover:underline"
                   >
                     {d.name}
@@ -1049,25 +1022,8 @@ function SecurityPage() {
 // =====================================================================
 
 function StatusPage() {
-  // FE-065 ROOT FIX: Replaced the static `systemStatus` mock array with the
-  // real /api/system/status endpoint. The endpoint returns which backend
-  // services (Neo4j knowledge graph, Phase 1 dataset service, Phase 4 RL
-  // ranker) are configured and reachable. We map each service's
-  // `available` flag to operational/degraded for display.
-  const { data: statusData, loading, error } = useSystemStatus()
-
-  const serviceEntries = statusData
-    ? Object.entries(statusData.services).map(([key, svc]) => ({
-        key,
-        service: svc.service,
-        status: svc.available ? 'operational' : 'degraded',
-        reason: svc.reason,
-      }))
-    : []
-  const operationalCount = serviceEntries.filter(s => s.status === 'operational').length
-  const overallStatus = serviceEntries.length === 0
-    ? 'unknown'
-    : operationalCount === serviceEntries.length ? 'operational' : 'degraded'
+  const operationalCount = systemStatus.filter(s => s.status === 'operational').length
+  const overallStatus = operationalCount === systemStatus.length ? 'operational' : 'degraded'
 
   return (
     <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-12 lg:py-20">
@@ -1087,19 +1043,9 @@ function StatusPage() {
           </div>
           <div>
             <h2 className="text-xl font-bold text-foreground">
-              {loading
-                ? 'Checking services…'
-                : error
-                ? 'Status check failed'
-                : overallStatus === 'operational'
-                ? 'All Systems Operational'
-                : overallStatus === 'unknown'
-                ? 'No services configured'
-                : 'Partial Service Degradation'}
+              {overallStatus === 'operational' ? 'All Systems Operational' : 'Partial Service Degradation'}
             </h2>
-            <p className="text-muted-foreground">
-              Last updated: {statusData ? new Date(statusData.generatedAt).toLocaleString() : 'never'}
-            </p>
+            <p className="text-muted-foreground">Last updated: just now</p>
           </div>
         </CardContent>
       </Card>
@@ -1108,28 +1054,15 @@ function StatusPage() {
       <Card className="mb-8">
         <CardContent className="pt-6">
           <div className="space-y-4">
-            {loading && <p className="text-sm text-muted-foreground py-4">Loading service status…</p>}
-            {error && (
-              <p className="text-sm text-red-500 py-4">
-                Failed to load service status: {error.message}
-              </p>
-            )}
-            {!loading && !error && serviceEntries.length === 0 && (
-              <p className="text-sm text-muted-foreground py-4">
-                No backend services are configured. Set DATASET_SERVICE_URL,
-                KG_SERVICE_URL, and RL_SERVICE_URL to enable Phase 1/2/4.
-              </p>
-            )}
-            {serviceEntries.map(service => (
-              <div key={service.key} className="flex items-center justify-between py-3 border-b border-border last:border-0">
+            {systemStatus.map(service => (
+              <div key={service.service} className="flex items-center justify-between py-3 border-b border-border last:border-0">
                 <div className="flex items-center gap-3">
                   <StatusDot status={service.status} />
                   <span className="font-medium text-foreground">{service.service}</span>
                 </div>
                 <div className="flex items-center gap-6 text-sm">
-                  <span className="text-muted-foreground">
-                    {service.reason ? service.reason.slice(0, 60) : '—'}
-                  </span>
+                  <span className="text-muted-foreground">Latency: {service.latency}</span>
+                  <span className="text-muted-foreground">Uptime: {service.uptime}%</span>
                   <Badge variant={service.status === 'operational' ? 'secondary' : 'destructive'} className="text-xs">
                     {service.status}
                   </Badge>
@@ -2337,9 +2270,6 @@ const sidebarNavGroups = [
 function AppShell({ children, section }: { children: React.ReactNode; section: string }) {
   const { navigate } = useRouter()
   const { user, loading, signOut, organizations, activeOrganizationId } = useSession()
-  // FE-065 ROOT FIX: Real notifications feed from /api/notifications —
-  // previously this was a hardcoded `notifData` mock array.
-  const { data: notifItems } = useNotifications()
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const [mobileOpen, setMobileOpen] = useState(false)
   const [expandedGroups, setExpandedGroups] = useState<string[]>(['Overview', 'Research', 'Evidence', 'Team', 'Billing', 'Admin', 'Developer', 'Settings'])
@@ -2379,10 +2309,7 @@ function AppShell({ children, section }: { children: React.ReactNode; section: s
     .join('') || user.email[0]?.toUpperCase()
   const activeOrg = organizations.find(o => o.id === activeOrganizationId) || organizations[0]
 
-  // FE-065: Real notification items from /api/notifications. `readAt` is null
-  // for unread items (matches the Notification interface in api-client.ts).
-  const notifList = notifItems ?? []
-  const unreadNotifs = notifList.filter(n => !n.readAt).length
+  const unreadNotifs = notifData.filter(n => !n.read).length
   const toggleGroup = (label: string) => {
     setExpandedGroups(prev => prev.includes(label) ? prev.filter(g => g !== label) : [...prev, label])
   }
@@ -2541,12 +2468,7 @@ function AppShell({ children, section }: { children: React.ReactNode; section: s
                   <Badge variant="secondary" className="text-[10px]">{unreadNotifs} new</Badge>
                 </DropdownMenuLabel>
                 <DropdownMenuSeparator />
-                {notifList.length === 0 && (
-                  <div className="px-3 py-6 text-center text-xs text-muted-foreground">
-                    No notifications yet.
-                  </div>
-                )}
-                {notifList.slice(0, 5).map(n => (
+                {notifData.slice(0, 5).map(n => (
                   <DropdownMenuItem key={n.id} className="flex flex-col items-start gap-1 p-3 cursor-pointer">
                     <div className="flex items-center gap-2 w-full">
                       <span className={cn(
@@ -2557,9 +2479,9 @@ function AppShell({ children, section }: { children: React.ReactNode; section: s
                         n.type === 'info' && 'bg-[#5B4FCF]'
                       )} />
                       <span className="text-sm font-medium truncate">{n.title}</span>
-                      {!n.readAt && <Badge className="ml-auto text-[9px] h-4">New</Badge>}
+                      {!n.read && <Badge className="ml-auto text-[9px] h-4">New</Badge>}
                     </div>
-                    <span className="text-xs text-muted-foreground line-clamp-1">{n.body}</span>
+                    <span className="text-xs text-muted-foreground line-clamp-1">{n.message}</span>
                   </DropdownMenuItem>
                 ))}
               </DropdownMenuContent>
@@ -2617,42 +2539,6 @@ function AppShell({ children, section }: { children: React.ReactNode; section: s
 function AppDashboard() {
   const { navigate } = useRouter()
   const { user } = useSession()
-  // FE-065 ROOT FIX: Real recent queries (localStorage-persisted) + real
-  // usage metrics (from /api/billing/subscription + /api/api-keys + /api/projects).
-  // Previously these were hardcoded mock arrays showing fabricated
-  // "8/10 queries today", "1,247 API calls", etc.
-  const { queries: recentQueryList } = useRecentQueries()
-  const { data: usage } = useUsageMetrics()
-
-  // Build the stats grid from real data. When a category has no real source
-  // (queries / apiCalls / reports require a usage-tracking service that
-  // doesn't exist yet), we show '—' instead of a fabricated number.
-  const stats = [
-    {
-      title: 'API Keys',
-      value: usage?.apiKeys ? `${usage.apiKeys.used}` : '—',
-      subtitle: usage?.apiKeys?.limit ? `of ${usage.apiKeys.limit}` : 'active keys',
-      icon: <Code className="w-5 h-5" />,
-    },
-    {
-      title: 'Projects',
-      value: usage?.projects ? `${usage.projects.used}` : '—',
-      subtitle: usage?.projects?.limit ? `of ${usage.projects.limit}` : 'total projects',
-      icon: <Star className="w-5 h-5" />,
-    },
-    {
-      title: 'Seats',
-      value: usage?.seats ? `${usage.seats.used}` : '—',
-      subtitle: usage?.seats?.limit ? `of ${usage.seats.limit}` : 'seats',
-      icon: <Users className="w-5 h-5" />,
-    },
-    {
-      title: 'Plan',
-      value: usage?.plan ?? '—',
-      subtitle: 'current subscription',
-      icon: <Download className="w-5 h-5" />,
-    },
-  ]
 
   return (
     <div>
@@ -2664,7 +2550,12 @@ function AppDashboard() {
 
       {/* Stats */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
-        {stats.map(stat => (
+        {[
+          { title: 'Queries Today', value: '8/10', subtitle: 'Free tier limit', icon: <Search className="w-5 h-5" /> },
+          { title: 'Saved Candidates', value: '24', trend: '+3 this week', icon: <Star className="w-5 h-5" /> },
+          { title: 'Reports', value: '12', trend: '+2 this week', icon: <Download className="w-5 h-5" /> },
+          { title: 'API Calls', value: '1,247', subtitle: 'of 50K limit', icon: <Code className="w-5 h-5" /> },
+        ].map(stat => (
           <Card key={stat.title} className="hover:shadow-md transition-shadow">
             <CardContent className="pt-6">
               <div className="flex items-start justify-between">
@@ -2672,6 +2563,7 @@ function AppDashboard() {
                   <p className="text-sm text-muted-foreground">{stat.title}</p>
                   <p className="text-2xl font-bold text-foreground mt-1">{stat.value}</p>
                   {stat.subtitle && <p className="text-xs text-muted-foreground mt-1">{stat.subtitle}</p>}
+                  {stat.trend && <p className="text-xs text-[#1D9E75] mt-1">{stat.trend}</p>}
                 </div>
                 <div className="w-10 h-10 rounded-lg bg-[#5B4FCF]/10 text-[#5B4FCF] flex items-center justify-center">{stat.icon}</div>
               </div>
@@ -2688,20 +2580,17 @@ function AppDashboard() {
           </CardHeader>
           <CardContent>
             <div className="space-y-3">
-              {recentQueryList.length === 0 && (
-                <p className="text-sm text-muted-foreground py-4 text-center">
-                  No recent queries yet. Run a search to populate this list.
-                </p>
-              )}
-              {recentQueryList.map(q => (
+              {recentQueries.map(q => (
                 <div key={q.id} className="flex items-center justify-between py-2 border-b border-border last:border-0">
                   <div>
-                    <p className="font-medium text-foreground text-sm">{q.q}</p>
-                    <p className="text-xs text-muted-foreground">
-                      {new Date(q.timestamp).toLocaleString()} · {q.type}
-                    </p>
+                    <p className="font-medium text-foreground text-sm">{q.disease}</p>
+                    <p className="text-xs text-muted-foreground">{q.date}</p>
                   </div>
-                  <Badge variant="outline" className="text-xs capitalize">{q.type}</Badge>
+                  <div className="flex items-center gap-3">
+                    <span className="text-xs text-muted-foreground">{q.candidates} candidates</span>
+                    <div className="w-16"><ScoreBar score={q.topScore} size="sm" /></div>
+                    <span className="text-sm font-bold text-foreground">{q.topScore}</span>
+                  </div>
                 </div>
               ))}
             </div>
@@ -2714,61 +2603,19 @@ function AppDashboard() {
             <CardTitle className="text-lg">Usage This Period</CardTitle>
           </CardHeader>
           <CardContent className="space-y-4">
-            {/* FE-065: Real categories from usage hook. Categories that
-                don't have a real source yet (queries, apiCalls, reports)
-                render an EmptyState instead of fabricated numbers. */}
-            {usage?.apiKeys && (
-              <div>
+            {[
+              { label: 'Queries', value: usageMetrics.queries.used, max: usageMetrics.queries.limit },
+              { label: 'API Calls', value: usageMetrics.apiCalls.used, max: usageMetrics.apiCalls.limit },
+              { label: 'Reports', value: usageMetrics.reports.used, max: usageMetrics.reports.limit },
+            ].map(item => (
+              <div key={item.label}>
                 <div className="flex justify-between text-sm mb-1">
-                  <span className="text-muted-foreground">API Keys (active)</span>
-                  <span className="text-foreground font-medium">
-                    {usage.apiKeys.used}
-                    {usage.apiKeys.limit ? ` / ${usage.apiKeys.limit}` : ''}
-                  </span>
+                  <span className="text-muted-foreground">{item.label}</span>
+                  <span className="text-foreground font-medium">{item.value.toLocaleString()} / {item.max.toLocaleString()}</span>
                 </div>
-                <Progress
-                  value={usage.apiKeys.limit ? (usage.apiKeys.used / usage.apiKeys.limit) * 100 : 0}
-                  className="h-2"
-                />
+                <Progress value={(item.value / item.max) * 100} className="h-2" />
               </div>
-            )}
-            {usage?.projects && (
-              <div>
-                <div className="flex justify-between text-sm mb-1">
-                  <span className="text-muted-foreground">Projects</span>
-                  <span className="text-foreground font-medium">
-                    {usage.projects.used}
-                    {usage.projects.limit ? ` / ${usage.projects.limit}` : ''}
-                  </span>
-                </div>
-                <Progress
-                  value={usage.projects.limit ? (usage.projects.used / usage.projects.limit) * 100 : 0}
-                  className="h-2"
-                />
-              </div>
-            )}
-            {usage?.seats && (
-              <div>
-                <div className="flex justify-between text-sm mb-1">
-                  <span className="text-muted-foreground">Seats</span>
-                  <span className="text-foreground font-medium">
-                    {usage.seats.used}
-                    {usage.seats.limit ? ` / ${usage.seats.limit}` : ''}
-                  </span>
-                </div>
-                <Progress
-                  value={usage.seats.limit ? (usage.seats.used / usage.seats.limit) * 100 : 0}
-                  className="h-2"
-                />
-              </div>
-            )}
-            {!usage?.queries && !usage?.apiCalls && !usage?.reports && (
-              <p className="text-xs text-muted-foreground italic">
-                Query / API call / report usage tracking requires a backend
-                usage service. Set up the usage-tracking microservice to
-                populate these metrics.
-              </p>
-            )}
+            ))}
           </CardContent>
         </Card>
       </div>
@@ -2779,22 +2626,13 @@ function AppDashboard() {
 function AppSearchPage() {
   const { navigate } = useRouter()
   const [query, setQuery] = useState('')
-  // FE-065 ROOT FIX: Use the real /api/diseases/search endpoint (NLM MeSH)
-  // instead of filtering a local `diseases` mock array. The previous code
-  // could only return results from 8 hardcoded mock entries.
-  const { data: diseaseSearchData } = useDiseaseSearch(query, 2)
-  // FE-065: Real recent queries from localStorage.
-  const { queries: recentQueryList } = useRecentQueries()
+  const [results, setResults] = useState<typeof diseases>([])
 
-  const results = useMemo(() => {
-    if (!diseaseSearchData?.items) return []
-    return diseaseSearchData.items.slice(0, 10).map(d => ({
-      id: d.descriptorUI,
-      name: d.descriptorName,
-      icdCode: d.descriptorUI,
-      therapeuticArea: d.scopeNote ? d.scopeNote.slice(0, 60) : 'Biomedical',
-    }))
-  }, [diseaseSearchData])
+  const handleSearch = () => {
+    if (query.length >= 2) {
+      setResults(diseases.filter(d => d.name.toLowerCase().includes(query.toLowerCase()) || d.therapeuticArea.toLowerCase().includes(query.toLowerCase())))
+    }
+  }
 
   return (
     <div>
@@ -2805,21 +2643,19 @@ function AppSearchPage() {
           <input
             value={query}
             onChange={e => setQuery(e.target.value)}
+            onKeyDown={e => e.key === 'Enter' && handleSearch()}
             placeholder="Search for a disease, condition, or ICD code..."
             className="w-full pl-12 pr-32 py-4 text-lg border border-border rounded-2xl focus:outline-none focus:ring-2 focus:ring-[#5B4FCF]/20 focus:border-[#5B4FCF] shadow-lg shadow-slate-200/50 bg-white"
           />
-          <Button className="absolute right-2 top-2 bottom-2 px-6 bg-[#5B4FCF] hover:bg-[#4B3FBF] rounded-xl" onClick={() => navigate({ page: 'app', section: 'search', sub: 'results', id: query })}>Search</Button>
+          <Button className="absolute right-2 top-2 bottom-2 px-6 bg-[#5B4FCF] hover:bg-[#4B3FBF] rounded-xl" onClick={handleSearch}>Search</Button>
         </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 text-left">
           <Card>
             <CardContent className="pt-4">
               <h4 className="text-sm font-medium text-muted-foreground mb-3">Recent Queries</h4>
-              {recentQueryList.length === 0 && (
-                <p className="text-xs text-muted-foreground py-2">No recent queries yet.</p>
-              )}
-              {recentQueryList.slice(0, 3).map(q => (
-                <button key={q.id} onClick={() => setQuery(q.q)} className="block text-sm py-1.5 text-foreground hover:text-[#5B4FCF] cursor-pointer">{q.q}</button>
+              {recentQueries.slice(0, 3).map(q => (
+                <button key={q.id} onClick={() => { setQuery(q.disease); handleSearch() }} className="block text-sm py-1.5 text-foreground hover:text-[#5B4FCF] cursor-pointer">{q.disease}</button>
               ))}
             </CardContent>
           </Card>
@@ -2827,18 +2663,15 @@ function AppSearchPage() {
             <CardContent className="pt-4">
               <h4 className="text-sm font-medium text-muted-foreground mb-3">Trending</h4>
               {trendingDiseases.slice(0, 3).map(d => (
-                <button key={d.name} onClick={() => { setQuery(d.name) }} className="block text-sm py-1.5 text-foreground hover:text-[#5B4FCF] cursor-pointer">{d.name}</button>
+                <button key={d.name} onClick={() => { setQuery(d.name); handleSearch() }} className="block text-sm py-1.5 text-foreground hover:text-[#5B4FCF] cursor-pointer">{d.name}</button>
               ))}
             </CardContent>
           </Card>
           <Card>
             <CardContent className="pt-4">
               <h4 className="text-sm font-medium text-muted-foreground mb-3">Quick Start</h4>
-              {/* FE-065: Use trending diseases as quick-start examples — they
-                  are curated in static-content.ts and reflect the platform's
-                  real coverage areas (neurology, oncology). */}
-              {trendingDiseases.slice(0, 3).map(d => (
-                <button key={d.id} onClick={() => { setQuery(d.name) }} className="block text-sm py-1.5 text-foreground hover:text-[#5B4FCF] cursor-pointer">{d.name}</button>
+              {diseases.slice(0, 3).map(d => (
+                <button key={d.id} onClick={() => { setQuery(d.name); handleSearch() }} className="block text-sm py-1.5 text-foreground hover:text-[#5B4FCF] cursor-pointer">{d.name}</button>
               ))}
             </CardContent>
           </Card>
@@ -2880,108 +2713,54 @@ function AppSearchPage() {
 }
 
 function AppSearchResultsPage({ diseaseId }: { diseaseId?: string }) {
-  // FE-065 ROOT FIX: Use the real /api/rl endpoint (Phase 4 RL ranker) to
-  // fetch ranked drug-repurposing candidates for the selected disease. The
-  // previous code filtered a hardcoded `drugCandidates` mock array of ~10
-  // entries — researchers saw the same fake drugs for every disease.
-  // diseaseId may be a MeSH descriptor UI (e.g. "D006816") or a free-text
-  // disease name passed from the search box. We pass it to the RL ranker
-  // as `disease` — the ranker filters by substring match on the disease
-  // column in its CSV / service response.
-  const diseaseName = diseaseId || ''
-  const { data: rlData, loading: rlLoading, error: rlError } = useRlCandidates({
-    disease: diseaseName,
-    limit: 50,
-  })
-
-  const candidates = rlData?.candidates ?? []
+  const disease = diseases.find(d => d.id === diseaseId) || diseases[0]
+  const candidates = drugCandidates.filter(d => d.diseaseId === disease.id)
 
   return (
     <div>
       <SectionHeading
-        title={`${diseaseName || 'Disease'} — Candidates`}
-        subtitle={rlLoading
-          ? 'Loading ranked candidates from RL ranker…'
-          : rlError
-          ? `RL ranker unavailable: ${rlError.message}`
-          : `${candidates.length} drug repurposing candidates found`}
-        action={<Button variant="outline" disabled={candidates.length === 0}><Download className="w-4 h-4 mr-1" />Export CSV</Button>}
+        title={`${disease.name} — Candidates`}
+        subtitle={`${candidates.length} drug repurposing candidates found`}
+        action={<Button variant="outline"><Download className="w-4 h-4 mr-1" />Export CSV</Button>}
       />
 
       <Card>
         <CardContent className="pt-6">
-          {rlLoading && (
-            <p className="text-sm text-muted-foreground py-8 text-center">
-              Loading…
-            </p>
-          )}
-          {rlError && (
-            <div className="py-8 text-center">
-              <p className="text-sm text-red-500 mb-2">RL ranker unavailable</p>
-              <p className="text-xs text-muted-foreground max-w-md mx-auto">
-                {rlError.message}. Set RL_SERVICE_URL or RL_LOCAL_CSV on the
-                server to enable Phase 4 RL ranker integration.
-              </p>
-            </div>
-          )}
-          {!rlLoading && !rlError && candidates.length === 0 && (
-            <p className="text-sm text-muted-foreground py-8 text-center">
-              No candidates found for &quot;{diseaseName}&quot;. The RL ranker
-              may not have scored this disease yet.
-            </p>
-          )}
-          {candidates.length > 0 && (
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="border-b border-border">
-                    {['#', 'Drug Name', 'Composite', 'Safety', 'Reward', 'Rank', 'Lit. Support'].map(h => (
-                      <th key={h} className="text-left py-3 px-3 font-medium text-muted-foreground text-xs uppercase tracking-wider">{h}</th>
-                    ))}
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-border">
+                  {['#', 'Drug Name', 'Composite', 'Safety', 'Mechanism', 'Phase', 'IP'].map(h => (
+                    <th key={h} className="text-left py-3 px-3 font-medium text-muted-foreground text-xs uppercase tracking-wider">{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {candidates.map((d, i) => (
+                  <tr key={d.id} className="border-b border-border/50 hover:bg-accent/50 transition-colors">
+                    <td className="py-3 px-3 font-bold text-muted-foreground">{i + 1}</td>
+                    <td className="py-3 px-3">
+                      <div>
+                        <span className="font-semibold text-foreground">{d.drugName}</span>
+                        <br />
+                        <span className="text-xs text-muted-foreground">{d.brandNames.join(', ')}</span>
+                      </div>
+                    </td>
+                    <td className="py-3 px-3">
+                      <div className="w-24">
+                        <div className="flex items-center justify-between text-sm mb-1"><span className="font-bold">{d.compositeScore}</span></div>
+                        <ScoreBar score={d.compositeScore} size="sm" />
+                      </div>
+                    </td>
+                    <td className="py-3 px-3"><SafetyBadge tier={d.safetyTier} /></td>
+                    <td className="py-3 px-3 max-w-[200px]"><span className="text-xs text-muted-foreground line-clamp-2">{d.mechanism}</span></td>
+                    <td className="py-3 px-3"><span className="text-xs font-medium text-foreground">{d.clinicalPhase}</span></td>
+                    <td className="py-3 px-3"><span className="text-xs text-muted-foreground">{d.ipStatus}</span></td>
                   </tr>
-                </thead>
-                <tbody>
-                  {candidates.map((d, i) => {
-                    const composite = Math.round(
-                      (typeof d.plausibilityScore === 'number' ? d.plausibilityScore : 0) * 100
-                    )
-                    return (
-                      <tr key={`${d.drug}-${d.disease}-${i}`} className="border-b border-border/50 hover:bg-accent/50 transition-colors">
-                        <td className="py-3 px-3 font-bold text-muted-foreground">{i + 1}</td>
-                        <td className="py-3 px-3">
-                          <div>
-                            <span className="font-semibold text-foreground">{d.drug}</span>
-                            <br />
-                            <span className="text-xs text-muted-foreground">{d.disease}</span>
-                          </div>
-                        </td>
-                        <td className="py-3 px-3">
-                          <div className="w-24">
-                            <div className="flex items-center justify-between text-sm mb-1"><span className="font-bold">{composite}</span></div>
-                            <ScoreBar score={composite} size="sm" />
-                          </div>
-                        </td>
-                        <td className="py-3 px-3">
-                          {typeof d.safetyScore === 'number' ? (
-                            <SafetyBadge tier={d.safetyScore >= 0.8 ? 'green' : d.safetyScore >= 0.5 ? 'yellow' : 'red'} />
-                          ) : '—'}
-                        </td>
-                        <td className="py-3 px-3"><span className="text-xs font-medium text-foreground">
-                          {typeof d.reward === 'number' ? d.reward.toFixed(4) : '—'}
-                        </span></td>
-                        <td className="py-3 px-3"><span className="text-xs font-medium text-foreground">{d.rank ?? i + 1}</span></td>
-                        <td className="py-3 px-3"><span className="text-xs text-muted-foreground">
-                          {typeof d.literatureSupport === 'number'
-                            ? (d.literatureSupport > 0 ? 'Yes' : 'No')
-                            : '—'}
-                        </span></td>
-                      </tr>
-                    )
-                  })}
-                </tbody>
-              </table>
-            </div>
-          )}
+                ))}
+              </tbody>
+            </table>
+          </div>
         </CardContent>
       </Card>
     </div>

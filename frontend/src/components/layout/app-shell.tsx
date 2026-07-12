@@ -61,6 +61,9 @@ import {
   sidebarCategories,
   type ScreenCategory,
 } from '@/lib/screens';
+// FE-026 ROOT FIX: notifications array is now empty (was fabricated data).
+// The shell should call api.listNotifications() — see api-client.ts.
+// For now, the empty array renders an empty notifications dropdown.
 import { notifications } from '@/lib/mock-data';
 import { cn } from '@/lib/utils';
 

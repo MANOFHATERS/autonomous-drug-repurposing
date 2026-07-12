@@ -51,19 +51,20 @@ import {
   useLiteratureSearch, useKnowledgeGraph, useBuildEvidencePackage, useRlCandidates,
   LoadingSpinner, ErrorDisplay,
 } from './use-api-data';
-// FE-053 ROOT FIX: Import ScoreBar + SafetyBadge from their dedicated files
-// instead of redefining them inline with different colors / scale thresholds.
-import { ScoreBar } from './score-bar';
-import { SafetyBadge } from './safety-badge';
+// FE-026 ROOT FIX: All data exports from mock-data.ts are now EMPTY arrays.
+// Type imports should come from @/lib/types. Components render empty
+// states until migrated to real API calls.
 import {
   diseases, drugCandidates, clinicalTrials, graphNodes, graphEdges,
   trendingDiseases, recentQueries, savedQueries, usageMetrics,
   patents, evidenceItems, admetProfiles, offTargetPredictions,
   drugInteractions,
-  type DrugCandidate, type Disease, type ClinicalTrial,
-  type GraphNode, type GraphEdge, type Patent, type EvidenceItem,
-  type ADMETProfile, type OffTargetPrediction, type DrugInteraction,
 } from '@/lib/mock-data';
+import type {
+  DrugCandidate, Disease, ClinicalTrial,
+  GraphNode, GraphEdge, Patent, EvidenceItem,
+  ADMETProfile, OffTargetPrediction, DrugInteraction,
+} from '@/lib/types';
 
 // ═══════════════════════════════════════════
 // SHARED HELPERS
@@ -81,12 +82,33 @@ function scoreColor(s: number) {
   return ACCENT_RED;
 }
 
-// FE-053 ROOT FIX: The inline ScoreBar and SafetyBadge definitions were
-// removed — they duplicated src/components/drugos/score-bar.tsx and
-// src/components/drugos/safety-badge.tsx with DIFFERENT color thresholds
-// (emerald/amber/red vs #1D9E75/#D4853A/#C0392B) and DIFFERENT size scales.
-// Bug fixes in one never propagated to the other. The shared imports above
-// are now the single source of truth.
+function ScoreBar({ score, size = 'md' }: { score: number; size?: 'sm' | 'md' | 'lg' }) {
+  const color = scoreColor(score);
+  const h = size === 'sm' ? 'h-1.5' : size === 'lg' ? 'h-3.5' : 'h-2.5';
+  return (
+    <div className="flex items-center gap-2">
+      <span className="text-xs font-bold" style={{ color }}>{score}</span>
+      <div className="flex-1 bg-slate-100 rounded-full overflow-hidden">
+        <div className={`${h} rounded-full transition-all duration-500`} style={{ width: `${score}%`, backgroundColor: color }} />
+      </div>
+    </div>
+  );
+}
+
+function SafetyBadge({ tier }: { tier: 'green' | 'yellow' | 'red' }) {
+  const cfg = {
+    green: { label: 'Safe', bg: 'bg-emerald-50', text: 'text-emerald-700', border: 'border-emerald-200', dot: 'bg-emerald-500' },
+    yellow: { label: 'Caution', bg: 'bg-amber-50', text: 'text-amber-700', border: 'border-amber-200', dot: 'bg-amber-500' },
+    red: { label: 'High Risk', bg: 'bg-red-50', text: 'text-red-700', border: 'border-red-200', dot: 'bg-red-500' },
+  };
+  const c = cfg[tier];
+  return (
+    <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-semibold border ${c.bg} ${c.text} ${c.border}`}>
+      <span className={`w-1.5 h-1.5 rounded-full ${c.dot}`} />
+      {c.label}
+    </span>
+  );
+}
 
 function StatCard({ icon: Icon, value, label, color = PRIMARY }: { icon: React.ElementType; value: string | number; label: string; color?: string }) {
   return (
@@ -427,9 +449,7 @@ function SearchResultsScreen() {
   // (passed via navigate({ name })) and use it to query the real RL ranker
   // via /api/rl. Falls back to mock candidates if RL service not deployed.
   const diseaseId = currentRoute.id || 'D001';
-  // FE-062 ROOT FIX: Route type already has `name?:` (see nav-context.tsx),
-  // so the previous `as any` cast was unnecessary and bypassed type safety.
-  const diseaseName = currentRoute.name ||
+  const diseaseName = (currentRoute as any).name ||
     (diseaseId.startsWith('search:') ? decodeURIComponent(diseaseId.slice(7)) : diseaseId);
   const disease = diseases.find(d => d.id === diseaseId) ||
     diseases.find(d => d.name === diseaseName) || {
@@ -500,14 +520,10 @@ function SearchResultsScreen() {
     },
   }));
 
-  // FE-001 ROOT FIX: NEVER fall back to mock drug candidates in a production
-  // pharma app. If the RL service is not deployed, we render an explicit empty
-  // state instead of fabricating predictions that a researcher could mistake
-  // for real RL output. Mock fallback is a patient-safety hazard.
-  const candidates: DrugCandidate[] = realCandidates;
-  const rlServiceUnavailable =
-    realCandidates.length === 0 &&
-    (Boolean(rlError) || (rlData === null && !rlLoading));
+  // Fall back to mock candidates if the RL service is not deployed.
+  const mockCandidates = drugCandidates.filter(c => c.diseaseId === diseaseId);
+  const candidates = realCandidates.length > 0 ? realCandidates : mockCandidates;
+  const usingMock = realCandidates.length === 0;
 
   const [filterTier, setFilterTier] = useState<string>('all');
   const [filterPhase, setFilterPhase] = useState<string>('all');
@@ -577,40 +593,13 @@ function SearchResultsScreen() {
           (source: {rlData.source}).
         </div>
       )}
-
-      {/* FE-001 ROOT FIX: Empty state — never render mock data.
-          If the RL service is unavailable, we surface a hard-blocking empty
-          state so a researcher cannot mistake fabricated rows for real
-          predictions. The table below is only rendered when at least one
-          real candidate exists. */}
-      {rlServiceUnavailable && (
-        <Card className="mb-4 border-amber-300 bg-amber-50">
-          <CardContent className="py-10 text-center">
-            <AlertCircle className="h-10 w-10 mx-auto mb-3 text-amber-600" />
-            <p className="text-sm font-semibold text-amber-900">
-              No RL predictions available for {disease.name}.
-            </p>
-            <p className="text-xs text-amber-800 mt-2 max-w-md mx-auto">
-              The Phase 4 RL ranker service is not deployed. Deploy the RL service
-              (set <code className="bg-amber-100 px-1 rounded">RL_SERVICE_URL</code> or
-              <code className="bg-amber-100 px-1 rounded ml-1">RL_LOCAL_CSV</code>) to
-              see real, scientifically-valid repurposing candidates.
-            </p>
-            <p className="text-[11px] text-amber-700 mt-3 italic">
-              For patient-safety reasons, this platform never displays fabricated
-              candidate data.
-            </p>
-          </CardContent>
-        </Card>
+      {usingMock && (
+        <div className="mb-4 text-xs text-amber-700 p-2 border border-amber-200 rounded bg-amber-50">
+          <strong>Showing demo data.</strong> The Phase 4 RL ranker is not deployed.
+          Set <code>RL_SERVICE_URL</code> or <code>RL_LOCAL_CSV</code> to see real RL predictions.
+        </div>
       )}
 
-      {/* FE-001 ROOT FIX: Filter bar + results table only render when there
-          is at least one real candidate. If the RL service is unavailable,
-          we render the empty state above and skip the filter bar entirely
-          so the researcher cannot accidentally interact with a fabricated
-          result set. */}
-      {!rlServiceUnavailable && (
-        <>
       {/* Filter Bar */}
       <div className="flex flex-wrap items-center gap-2 mb-4">
         <span className="text-xs font-medium text-muted-foreground mr-1">Safety:</span>
@@ -718,8 +707,6 @@ function SearchResultsScreen() {
           )}
         </CardContent>
       </Card>
-        </>
-      )}
     </FadeIn>
   );
 }

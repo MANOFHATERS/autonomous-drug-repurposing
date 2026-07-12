@@ -2,6 +2,9 @@
 
 import { useState } from 'react';
 import { Badge } from '@/components/ui/badge';
+// FE-026 ROOT FIX: pathwayData was fabricated mock data — now empty.
+// The viewer should call useKnowledgeGraph() to fetch real pathway data
+// from /api/knowledge-graph (Phase 2 Neo4j graph).
 import { pathwayData } from '@/lib/mock-data';
 
 interface PathwayVizProps {
