@@ -9,6 +9,8 @@ module.exports = {
   testEnvironment: "node",
   testMatch: [
     "<rootDir>/src/lib/services/__tests__/**/*.test.ts",
+    "<rootDir>/src/lib/auth/__tests__/**/*.test.ts",
+    "<rootDir>/src/app/api/**/__tests__/**/*.test.ts",
     "<rootDir>/tests/api/**/*.test.ts",
   ],
   moduleNameMapper: {

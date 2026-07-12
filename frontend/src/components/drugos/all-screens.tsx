@@ -55,8 +55,18 @@ import {
   webhooks, usageMetrics, dataSources, dealPipeline, organization, featureFlags, systemStatus, savedQueries
 } from '@/lib/mock-data'
 import { useSession } from './session-provider'
-import { api, type TeamMember } from '@/lib/api-client'
+import { api, type TeamMember, type AdminUser, type AuditLog } from '@/lib/api-client'
 import { roleLabel, canAccessSection } from '@/lib/rbac'
+// FE-009 ROOT FIX: real-API hooks for admin/dashboard screens + DemoDataBanner
+// for screens whose backend is not yet implemented.
+import {
+  useApiList,
+  useApiResource,
+  LoadingSpinner,
+  ErrorDisplay,
+  EmptyState,
+  DemoDataBanner,
+} from './use-api-data'
 
 const P = '#5B4FCF'
 const G = '#1D9E75'
@@ -436,17 +446,34 @@ function QualityScreen() {
 // SUBSCRIPTION SCREEN
 // ═══════════════════════════════════════════
 function SubscriptionScreen() {
-  const currentPlan = subscriptionPlans.find(p => p.id === 'professional') || subscriptionPlans[2]
-  const usageBars = [{ label: 'Queries', used: 342, limit: 1000 },{ label: 'API Calls/Day', used: 45230, limit: 50000 },{ label: 'Storage', used: 2.4, limit: 10 },{ label: 'Team Seats', used: 8, limit: 25 }]
+  // FE-009 ROOT FIX: call the real /api/billing/subscription endpoint. The
+  // previous code rendered hardcoded "Professional Plan - $5,000" + fabricated
+  // usage bars (342/1000 queries, 45230/50000 API calls, etc.).
+  const { data, loading, error, refetch } = useApiResource(() => api.getSubscription(), [])
+  const sub = data?.subscription ?? null
+  const plans = data?.plans ?? []
+  const currentPlan = sub ? plans.find(p => p.id === sub.plan || p.name.toLowerCase() === sub.plan.toLowerCase()) : null
   return (
     <FadeIn><div className="space-y-6">
-      <PH title="Subscription" desc="Manage your plan and billing" />
-      <Card className="border-[#5B4FCF]/30"><CardContent className="p-6"><div className="flex items-center justify-between mb-4"><div><h3 className="text-lg font-semibold">{currentPlan.name} Plan</h3><p className="text-sm text-muted-foreground">Your current plan</p></div><div className="text-right"><p className="text-3xl font-bold">{currentPlan.price}<span className="text-sm text-muted-foreground">{currentPlan.period}</span></p></div></div>
-        <div className="space-y-3">{usageBars.map(u => (<div key={u.label}><div className="flex justify-between text-sm mb-1"><span className="text-muted-foreground">{u.label}</span><span className="font-medium">{typeof u.used === 'number' && u.used > 1000 ? `${(u.used/1000).toFixed(1)}K` : u.used} / {typeof u.limit === 'number' && u.limit > 1000 ? `${(u.limit/1000).toFixed(0)}K` : u.limit}{u.label === 'Storage' ? ' GB' : ''}</span></div><Progress value={(u.used as number) / (u.limit as number) * 100} className="h-2" /></div>))}</div>
-      </CardContent></Card>
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        {subscriptionPlans.filter(p => p.id !== 'professional').slice(0, 3).map(plan => (<Card key={plan.id} className="hover:shadow-md transition-shadow"><CardHeader><CardTitle className="text-lg">{plan.name}</CardTitle><div className="mt-1"><span className="text-2xl font-bold">{plan.price}</span><span className="text-sm text-muted-foreground">{plan.period}</span></div></CardHeader><CardContent><ul className="space-y-1.5">{plan.features.slice(0, 4).map((f, i) => <li key={i} className="flex items-center gap-2 text-sm"><Check className="h-3 w-3 text-green-500" />{f}</li>)}</ul></CardContent><CardFooter><Button variant="outline" className="w-full">{plan.price === '$0' ? 'Downgrade' : 'Upgrade'}</Button></CardFooter></Card>))}
-      </div>
+      <PH title="Subscription" desc="Manage your plan and billing" actions={<Button variant="outline" size="sm" onClick={() => refetch()}><RefreshCw className="h-4 w-4 mr-1.5" />Refresh</Button>} />
+      {error && <ErrorDisplay error={error} onRetry={refetch} />}
+      {loading && <LoadingSpinner label="Loading subscription..." />}
+      {!loading && !error && !sub && (
+        <EmptyState title="No active subscription" description="Choose a plan below to get started." />
+      )}
+      {!loading && !error && sub && currentPlan && (
+        <Card className="border-[#5B4FCF]/30"><CardContent className="p-6"><div className="flex items-center justify-between mb-4"><div><h3 className="text-lg font-semibold">{currentPlan.name} Plan</h3><p className="text-sm text-muted-foreground">Status: {sub.status}{sub.cancelAtPeriodEnd ? ' (cancels at period end)' : ''}</p></div><div className="text-right"><p className="text-3xl font-bold">${(currentPlan.price / 100).toFixed(2)}<span className="text-sm text-muted-foreground">/{currentPlan.interval}</span></p></div></div>
+          <div className="space-y-2 text-sm text-muted-foreground">
+            <p><strong>Seats:</strong> {sub.seats}</p>
+            <p><strong>Current period:</strong> {new Date(sub.currentPeriodStart).toLocaleDateString()} → {new Date(sub.currentPeriodEnd).toLocaleDateString()}</p>
+          </div>
+        </CardContent></Card>
+      )}
+      {!loading && !error && plans.length > 0 && (
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          {plans.slice(0, 3).map(plan => (<Card key={plan.id} className="hover:shadow-md transition-shadow"><CardHeader><CardTitle className="text-lg">{plan.name}</CardTitle><div className="mt-1"><span className="text-2xl font-bold">${(plan.price / 100).toFixed(2)}</span><span className="text-sm text-muted-foreground">/{plan.interval}</span></div></CardHeader><CardContent><ul className="space-y-1.5">{plan.features.slice(0, 4).map((f, i) => <li key={i} className="flex items-center gap-2 text-sm"><Check className="h-3 w-3 text-green-500" />{f}</li>)}</ul></CardContent><CardFooter><Button variant="outline" className="w-full" onClick={async () => { try { await api.changePlan(plan.id); refetch(); } catch (e: any) { alert(e?.message || 'Failed to change plan.') } }}>{plan.price === 0 ? 'Downgrade' : 'Switch'}</Button></CardFooter></Card>))}
+        </div>
+      )}
     </div></FadeIn>
   )
 }
@@ -497,22 +524,25 @@ function DealsScreen() {
 // INVOICES SCREEN
 // ═══════════════════════════════════════════
 function InvoicesScreen() {
-  const invoices = [
-    { id: 'INV-2026-042', date: 'Jun 1, 2026', amount: '$5,000.00', status: 'Paid', plan: 'Professional' },
-    { id: 'INV-2026-035', date: 'May 1, 2026', amount: '$5,000.00', status: 'Paid', plan: 'Professional' },
-    { id: 'INV-2026-028', date: 'Apr 1, 2026', amount: '$5,000.00', status: 'Paid', plan: 'Professional' },
-    { id: 'INV-2026-015', date: 'Mar 1, 2026', amount: '$499.00', status: 'Paid', plan: 'Starter' },
-    { id: 'INV-2026-008', date: 'Feb 1, 2026', amount: '$499.00', status: 'Paid', plan: 'Starter' },
-  ]
+  // FE-009 ROOT FIX: call the real /api/billing/invoices endpoint. The
+  // previous code rendered 5 hardcoded fake invoices ("INV-2026-042", etc.).
+  const { data, loading, error, refetch } = useApiList(() => api.listInvoices(), [])
+  const invoices = data?.items ?? []
   return (
     <FadeIn><div className="space-y-6">
-      <PH title="Invoices" desc="Billing history and invoice management" actions={<Button variant="outline" size="sm"><Download className="h-4 w-4 mr-1.5" />Export All</Button>} />
-      <Card className="bg-gradient-to-r from-[#5B4FCF]/5 to-[#5B4FCF]/10"><CardContent className="p-5"><div className="flex items-center justify-between"><div><p className="text-sm text-muted-foreground">Next billing date</p><p className="text-lg font-bold">July 1, 2026</p><p className="text-sm text-muted-foreground">Professional Plan - $5,000.00</p></div><div><CreditCard className="h-8 w-8 text-[#5B4FCF]/40" /></div></div></CardContent></Card>
-      <Card><CardContent className="p-0"><Table><TableHeader><TableRow><TableHead>Invoice</TableHead><TableHead>Date</TableHead><TableHead>Plan</TableHead><TableHead>Amount</TableHead><TableHead>Status</TableHead><TableHead></TableHead></TableRow></TableHeader>
-        <TableBody>{invoices.map(inv => (<TableRow key={inv.id}><TableCell className="font-medium">{inv.id}</TableCell><TableCell>{inv.date}</TableCell><TableCell>{inv.plan}</TableCell><TableCell className="font-semibold">{inv.amount}</TableCell>
-          <TableCell><Badge variant="default">{inv.status}</Badge></TableCell>
-          <TableCell><Button variant="ghost" size="sm"><Download className="h-4 w-4" /></Button></TableCell>
-        </TableRow>))}</TableBody></Table></CardContent></Card>
+      <PH title="Invoices" desc="Billing history and invoice management" actions={<Button variant="outline" size="sm" onClick={() => refetch()}><RefreshCw className="h-4 w-4 mr-1.5" />Refresh</Button>} />
+      {error && <ErrorDisplay error={error} onRetry={refetch} />}
+      {loading && <LoadingSpinner label="Loading invoices..." />}
+      {!loading && !error && invoices.length === 0 && (
+        <EmptyState title="No invoices yet" description="Invoices will appear here once you have an active subscription." />
+      )}
+      {!loading && !error && invoices.length > 0 && (
+        <Card><CardContent className="p-0"><Table><TableHeader><TableRow><TableHead>Invoice</TableHead><TableHead>Date</TableHead><TableHead>Amount</TableHead><TableHead>Status</TableHead><TableHead></TableHead></TableRow></TableHeader>
+          <TableBody>{invoices.map(inv => (<TableRow key={inv.id}><TableCell className="font-medium">{inv.number}</TableCell><TableCell>{new Date(inv.createdAt).toLocaleDateString()}</TableCell><TableCell className="font-semibold">${(inv.amountCents / 100).toFixed(2)} {inv.currency.toUpperCase()}</TableCell>
+            <TableCell><Badge variant={inv.status === 'paid' ? 'default' : 'outline'}>{inv.status}</Badge></TableCell>
+            <TableCell>{inv.pdfUrl && <Button variant="ghost" size="sm" asChild><a href={inv.pdfUrl} target="_blank" rel="noreferrer"><Download className="h-4 w-4" /></a></Button>}</TableCell>
+          </TableRow>))}</TableBody></Table></CardContent></Card>
+      )}
     </div></FadeIn>
   )
 }
@@ -523,25 +553,43 @@ function InvoicesScreen() {
 function UsersAdminScreen() {
   const [search, setSearch] = useState('')
   const [addOpen, setAddOpen] = useState(false)
-  const adminUsers = [
-    { name: 'Dr. Sarah Chen', email: 'sarah@pharma.com', role: 'Super Admin', status: 'active', lastLogin: '2 min ago', mfa: true },
-    { name: 'James Wilson', email: 'james@pharma.com', role: 'Admin', status: 'active', lastLogin: '15 min ago', mfa: true },
-    { name: 'Mike Rodriguez', email: 'mike@pharma.com', role: 'User', status: 'active', lastLogin: '1 hr ago', mfa: false },
-    { name: 'Dr. Lisa Kim', email: 'lisa@pharma.com', role: 'User', status: 'suspended', lastLogin: '3 days ago', mfa: true },
-    { name: 'Tom Baker', email: 'tom@partner.org', role: 'CRO User', status: 'active', lastLogin: '1 day ago', mfa: false },
-    { name: 'Dr. Priya Patel', email: 'priya@university.edu', role: 'Academic', status: 'active', lastLogin: '5 hrs ago', mfa: true },
-  ]
+  // FE-009 ROOT FIX: call the real /api/admin/users endpoint instead of
+  // rendering 6 hardcoded fake users. The previous code rendered
+  // "Dr. Sarah Chen", "James Wilson", etc. as if they were real — an admin
+  // could not tell whether the user list was fabricated or live.
+  const { data, loading, error, refetch } = useApiList(
+    () => api.listUsers(100, 0),
+    []
+  )
+  const adminUsers: AdminUser[] = data?.items ?? []
+  const filtered = adminUsers.filter(u =>
+    u.name?.toLowerCase().includes(search.toLowerCase()) ||
+    u.email?.toLowerCase().includes(search.toLowerCase())
+  )
+  const initials = (name?: string | null) =>
+    (name ?? '?').split(/[\s@.]+/).filter(Boolean).slice(0, 2)
+      .map((s: string) => s[0]?.toUpperCase()).join('') || '?'
   return (
     <FadeIn><div className="space-y-6">
-      <PH title="User Management" desc={`${adminUsers.length} users`} actions={<><div className="relative"><Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" /><Input placeholder="Search users..." value={search} onChange={e => setSearch(e.target.value)} className="pl-9 w-56" /></div><Button style={{ backgroundColor: P }} onClick={() => setAddOpen(true)}><Plus className="h-4 w-4 mr-1.5" />Add User</Button></>} />
-      <Card><CardContent className="p-0"><Table><TableHeader><TableRow><TableHead>User</TableHead><TableHead>Role</TableHead><TableHead>Status</TableHead><TableHead>MFA</TableHead><TableHead>Last Login</TableHead><TableHead></TableHead></TableRow></TableHeader>
-        <TableBody>{adminUsers.map(u => (<TableRow key={u.email}><TableCell><div className="flex items-center gap-3"><Avatar className="h-8 w-8"><AvatarFallback className="bg-[#5B4FCF]/10 text-[#5B4FCF] text-xs">{u.name.split(' ').map(n => n[0]).join('')}</AvatarFallback></Avatar><div><p className="font-medium text-sm">{u.name}</p><p className="text-xs text-muted-foreground">{u.email}</p></div></div></TableCell>
-          <TableCell><Badge variant="outline">{u.role}</Badge></TableCell>
-          <TableCell><Badge variant={u.status === 'active' ? 'default' : 'destructive'}>{u.status}</Badge></TableCell>
-          <TableCell>{u.mfa ? <CheckCircle2 className="h-4 w-4 text-green-500" /> : <XCircle className="h-4 w-4 text-red-400" />}</TableCell>
-          <TableCell className="text-sm text-muted-foreground">{u.lastLogin}</TableCell>
-          <TableCell><Button variant="ghost" size="sm"><MoreHorizontal className="h-4 w-4" /></Button></TableCell>
-        </TableRow>))}</TableBody></Table></CardContent></Card>
+      <PH title="User Management" desc={`${adminUsers.length} user${adminUsers.length === 1 ? '' : 's'}`} actions={<><div className="relative"><Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" /><Input placeholder="Search users..." value={search} onChange={e => setSearch(e.target.value)} className="pl-9 w-56" /></div><Button variant="outline" size="sm" onClick={() => refetch()}><RefreshCw className="h-4 w-4 mr-1.5" />Refresh</Button><Button style={{ backgroundColor: P }} onClick={() => setAddOpen(true)}><Plus className="h-4 w-4 mr-1.5" />Add User</Button></>} />
+      {error && <ErrorDisplay error={error} onRetry={refetch} />}
+      {loading && <LoadingSpinner label="Loading users..." />}
+      {!loading && !error && filtered.length === 0 && (
+        <EmptyState
+          title={adminUsers.length === 0 ? 'No users yet' : 'No users match your search'}
+          description={adminUsers.length === 0 ? 'Invite your first user to get started.' : 'Try a different search term.'}
+        />
+      )}
+      {!loading && !error && filtered.length > 0 && (
+        <Card><CardContent className="p-0"><Table><TableHeader><TableRow><TableHead>User</TableHead><TableHead>Role</TableHead><TableHead>Status</TableHead><TableHead>MFA</TableHead><TableHead>Last Login</TableHead><TableHead></TableHead></TableRow></TableHeader>
+          <TableBody>{filtered.map(u => (<TableRow key={u.id}><TableCell><div className="flex items-center gap-3"><Avatar className="h-8 w-8"><AvatarFallback className="bg-[#5B4FCF]/10 text-[#5B4FCF] text-xs">{initials(u.name)}</AvatarFallback></Avatar><div><p className="font-medium text-sm">{u.name || '(no name)'}</p><p className="text-xs text-muted-foreground">{u.email}</p></div></div></TableCell>
+            <TableCell><Badge variant="outline">{u.role}</Badge></TableCell>
+            <TableCell><Badge variant={u.status === 'active' ? 'default' : 'destructive'}>{u.status}</Badge></TableCell>
+            <TableCell>{u.mfaEnabled ? <CheckCircle2 className="h-4 w-4 text-green-500" /> : <XCircle className="h-4 w-4 text-red-400" />}</TableCell>
+            <TableCell className="text-sm text-muted-foreground">{u.lastLoginAt ? new Date(u.lastLoginAt).toLocaleString() : 'Never'}</TableCell>
+            <TableCell><Button variant="ghost" size="sm"><MoreHorizontal className="h-4 w-4" /></Button></TableCell>
+          </TableRow>))}</TableBody></Table></CardContent></Card>
+      )}
       <Dialog open={addOpen} onOpenChange={setAddOpen}><DialogContent><DialogHeader><DialogTitle>Add New User</DialogTitle></DialogHeader>
         <div className="space-y-4"><div><Label>Name</Label><Input placeholder="Full name" /></div><div><Label>Email</Label><Input placeholder="user@company.com" /></div><div><Label>Role</Label><Select><SelectTrigger><SelectValue placeholder="Select role" /></SelectTrigger><SelectContent><SelectItem value="super-admin">Super Admin</SelectItem><SelectItem value="admin">Admin</SelectItem><SelectItem value="user">User</SelectItem></SelectContent></Select></div></div>
         <DialogFooter><Button variant="outline" onClick={() => setAddOpen(false)}>Cancel</Button><Button style={{ backgroundColor: P }} onClick={() => setAddOpen(false)}>Add User</Button></DialogFooter>
@@ -564,6 +612,7 @@ function RolesScreen() {
   const allPerms = ['All', 'Users', 'Billing', 'Settings', 'Data', 'Reports', 'Search', 'KG', 'Safety', 'Evidence', 'Annotations']
   return (
     <FadeIn><div className="space-y-6">
+      <DemoDataBanner screenName="Roles & Permissions" />
       <PH title="Roles & Permissions" desc="Manage access levels for your organization" actions={<Button style={{ backgroundColor: P }}><Plus className="h-4 w-4 mr-1.5" />Create Role</Button>} />
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
         {roles.map(r => (<Card key={r.name} className="hover:shadow-md transition-shadow"><CardContent className="p-5"><div className="flex items-center justify-between mb-3"><div className="flex items-center gap-2"><div className="w-3 h-3 rounded-full" style={{ backgroundColor: r.color }} /><h3 className="font-semibold text-sm">{r.name}</h3></div><Badge variant="outline">{r.users} users</Badge></div>
@@ -585,6 +634,7 @@ function SSOScreen() {
   ]
   return (
     <FadeIn><div className="space-y-6">
+      <DemoDataBanner screenName="SSO Configuration" />
       <PH title="SSO Configuration" desc="Configure Single Sign-On providers" actions={<Button style={{ backgroundColor: P }}><Plus className="h-4 w-4 mr-1.5" />Add Provider</Button>} />
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
         {providers.map(p => (<Card key={p.name} className="hover:shadow-md transition-shadow"><CardContent className="p-5"><div className="flex items-center justify-between mb-3"><h3 className="font-semibold text-sm">{p.name}</h3><Badge variant={p.status === 'active' ? 'default' : 'secondary'}>{p.status}</Badge></div>
@@ -605,20 +655,38 @@ function SSOScreen() {
 // ═══════════════════════════════════════════
 function AuditLogsScreen() {
   const [filter, setFilter] = useState('all')
-  const logs = [
-    { user: 'Dr. Sarah Chen', action: 'Updated role', target: 'Mike Rodriguez', ip: '192.168.1.45', time: '2 min ago', type: 'admin' },
-    { user: 'System', action: 'Auto-synced', target: 'DrugBank', ip: '-', time: '1 hr ago', type: 'system' },
-    { user: 'James Wilson', action: 'Exported report', target: "Huntington's Evidence Package", ip: '192.168.1.67', time: '2 hrs ago', type: 'data' },
-    { user: 'Dr. Priya Patel', action: 'Shared query', target: 'Oncology Cross-Filter', ip: '10.0.0.23', time: '3 hrs ago', type: 'collab' },
-    { user: 'System', action: 'Rotated API key', target: 'Production Key', ip: '-', time: '6 hrs ago', type: 'security' },
-    { user: 'Tom Baker', action: 'Logged in', target: '-', ip: '203.45.67.89', time: '1 day ago', type: 'auth' },
-  ]
-  const filtered = filter === 'all' ? logs : logs.filter(l => l.type === filter)
+  // FE-009 ROOT FIX: call the real /api/audit-logs endpoint instead of
+  // rendering 6 hardcoded fake entries ("Dr. Sarah Chen updated role of
+  // Mike Rodriguez", etc.). The previous code presented fabricated audit
+  // history as if it were real — a compliance violation.
+  const { data, loading, error, refetch } = useApiList(
+    () => api.listAuditLogs(200, 0),
+    []
+  )
+  const logs: AuditLog[] = data?.items ?? []
+  const filtered = filter === 'all' ? logs : logs.filter(l => {
+    // Best-effort categorization by action keyword.
+    const a = l.action.toLowerCase()
+    if (filter === 'admin') return a.includes('admin') || a.includes('role') || a.includes('user')
+    if (filter === 'security') return a.includes('login') || a.includes('password') || a.includes('mfa') || a.includes('key') || a.includes('revoke')
+    if (filter === 'data') return a.includes('kg_') || a.includes('query') || a.includes('export') || a.includes('evidence')
+    return true
+  })
   return (
     <FadeIn><div className="space-y-6">
-      <PH title="Audit Logs" desc="Track all system and user activities" actions={<><div className="flex gap-2"><Badge variant={filter === 'all' ? 'default' : 'outline'} className="cursor-pointer" onClick={() => setFilter('all')}>All</Badge><Badge variant={filter === 'admin' ? 'default' : 'outline'} className="cursor-pointer" onClick={() => setFilter('admin')}>Admin</Badge><Badge variant={filter === 'security' ? 'default' : 'outline'} className="cursor-pointer" onClick={() => setFilter('security')}>Security</Badge><Badge variant={filter === 'data' ? 'default' : 'outline'} className="cursor-pointer" onClick={() => setFilter('data')}>Data</Badge></div><Button variant="outline" size="sm"><Download className="h-4 w-4 mr-1.5" />Export</Button></>} />
-      <Card><CardContent className="p-0"><Table><TableHeader><TableRow><TableHead>User</TableHead><TableHead>Action</TableHead><TableHead>Target</TableHead><TableHead>IP</TableHead><TableHead>Time</TableHead></TableRow></TableHeader>
-        <TableBody>{filtered.map((l, i) => (<TableRow key={i}><TableCell className="font-medium">{l.user}</TableCell><TableCell>{l.action}</TableCell><TableCell className="text-muted-foreground">{l.target}</TableCell><TableCell className="font-mono text-xs">{l.ip}</TableCell><TableCell className="text-muted-foreground text-sm">{l.time}</TableCell></TableRow>))}</TableBody></Table></CardContent></Card>
+      <PH title="Audit Logs" desc="Track all system and user activities" actions={<><div className="flex gap-2"><Badge variant={filter === 'all' ? 'default' : 'outline'} className="cursor-pointer" onClick={() => setFilter('all')}>All</Badge><Badge variant={filter === 'admin' ? 'default' : 'outline'} className="cursor-pointer" onClick={() => setFilter('admin')}>Admin</Badge><Badge variant={filter === 'security' ? 'default' : 'outline'} className="cursor-pointer" onClick={() => setFilter('security')}>Security</Badge><Badge variant={filter === 'data' ? 'default' : 'outline'} className="cursor-pointer" onClick={() => setFilter('data')}>Data</Badge></div><Button variant="outline" size="sm" onClick={() => refetch()}><RefreshCw className="h-4 w-4 mr-1.5" />Refresh</Button><Button variant="outline" size="sm"><Download className="h-4 w-4 mr-1.5" />Export</Button></>} />
+      {error && <ErrorDisplay error={error} onRetry={refetch} />}
+      {loading && <LoadingSpinner label="Loading audit logs..." />}
+      {!loading && !error && filtered.length === 0 && (
+        <EmptyState
+          title={logs.length === 0 ? 'No audit log entries yet' : 'No entries match your filter'}
+          description={logs.length === 0 ? 'Audit log entries will appear here as users interact with the platform.' : 'Try a different filter.'}
+        />
+      )}
+      {!loading && !error && filtered.length > 0 && (
+        <Card><CardContent className="p-0"><Table><TableHeader><TableRow><TableHead>User</TableHead><TableHead>Action</TableHead><TableHead>Target</TableHead><TableHead>IP</TableHead><TableHead>Time</TableHead></TableRow></TableHeader>
+          <TableBody>{filtered.map((l) => (<TableRow key={l.id}><TableCell className="font-medium">{l.actorName}</TableCell><TableCell>{l.action}</TableCell><TableCell className="text-muted-foreground">{l.resource ?? '—'}</TableCell><TableCell className="font-mono text-xs">{l.ip ?? '—'}</TableCell><TableCell className="text-muted-foreground text-sm">{new Date(l.createdAt).toLocaleString()}</TableCell></TableRow>))}</TableBody></Table></CardContent></Card>
+      )}
     </div></FadeIn>
   )
 }
@@ -637,6 +705,7 @@ function FeatureFlagsScreen() {
   ]
   return (
     <FadeIn><div className="space-y-6">
+      <DemoDataBanner screenName="Feature Flags" />
       <PH title="Feature Flags" desc="Control feature rollout across environments" actions={<Button style={{ backgroundColor: P }}><Plus className="h-4 w-4 mr-1.5" />New Flag</Button>} />
       <Card><CardContent className="p-0"><Table><TableHeader><TableRow><TableHead>Flag</TableHead><TableHead>Description</TableHead><TableHead>Status</TableHead><TableHead>Environments</TableHead><TableHead></TableHead></TableRow></TableHeader>
         <TableBody>{flags.map(f => (<TableRow key={f.name}><TableCell><code className="text-sm font-mono bg-muted px-2 py-0.5 rounded">{f.name}</code></TableCell><TableCell className="text-sm text-muted-foreground">{f.desc}</TableCell>
@@ -678,22 +747,50 @@ function APIDocsScreen() {
 // ═══════════════════════════════════════════
 function APIKeysScreen() {
   const [createOpen, setCreateOpen] = useState(false)
-  const keys = [
-    { name: 'Production Key', prefix: 'sk-prod-****4f2a', created: 'Jan 15, 2026', lastUsed: '2 min ago', status: 'active' },
-    { name: 'Staging Key', prefix: 'sk-stag-****8b1c', created: 'Mar 1, 2026', lastUsed: '1 day ago', status: 'active' },
-    { name: 'Old Production', prefix: 'sk-prod-****2e9d', created: 'Sep 1, 2025', lastUsed: '3 months ago', status: 'revoked' },
-  ]
+  // FE-009 ROOT FIX: call the real /api/api-keys endpoint. The previous code
+  // rendered 3 hardcoded fake keys ("sk-prod-****4f2a", etc.).
+  const { data, loading, error, refetch } = useApiList(() => api.listApiKeys(), [])
+  const keys = data?.items ?? []
+  const handleRevoke = async (id: string) => {
+    if (!confirm('Revoke this API key? Any client using it will immediately stop working.')) return
+    try {
+      await api.revokeApiKey(id)
+      refetch()
+    } catch (e: any) {
+      alert(e?.message || 'Failed to revoke key.')
+    }
+  }
+  const handleCreate = async () => {
+    const nameInput = (document.getElementById('api-key-name') as HTMLInputElement)?.value || 'Untitled Key'
+    try {
+      const created = await api.createApiKey(nameInput)
+      setCreateOpen(false)
+      refetch()
+      if (created.rawKey) {
+        alert(`API key created. Copy it now — this is the only time it will be shown:\n\n${created.rawKey}`)
+      }
+    } catch (e: any) {
+      alert(e?.message || 'Failed to create key.')
+    }
+  }
   return (
     <FadeIn><div className="space-y-6">
-      <PH title="API Keys" desc="Manage your API keys" actions={<Button style={{ backgroundColor: P }} onClick={() => setCreateOpen(true)}><Plus className="h-4 w-4 mr-1.5" />Create Key</Button>} />
-      <Card><CardContent className="p-0"><Table><TableHeader><TableRow><TableHead>Name</TableHead><TableHead>Key</TableHead><TableHead>Created</TableHead><TableHead>Last Used</TableHead><TableHead>Status</TableHead><TableHead></TableHead></TableRow></TableHeader>
-        <TableBody>{keys.map(k => (<TableRow key={k.prefix}><TableCell className="font-medium">{k.name}</TableCell><TableCell><code className="text-sm font-mono bg-muted px-2 py-0.5 rounded">{k.prefix}</code></TableCell><TableCell className="text-muted-foreground">{k.created}</TableCell><TableCell className="text-muted-foreground">{k.lastUsed}</TableCell>
-          <TableCell><Badge variant={k.status === 'active' ? 'default' : 'destructive'}>{k.status}</Badge></TableCell>
-          <TableCell><div className="flex gap-1"><Button variant="ghost" size="sm"><Copy className="h-4 w-4" /></Button>{k.status === 'active' && <Button variant="ghost" size="sm" className="text-red-500"><Trash2 className="h-4 w-4" /></Button>}</div></TableCell>
-        </TableRow>))}</TableBody></Table></CardContent></Card>
+      <PH title="API Keys" desc="Manage your API keys" actions={<><Button variant="outline" size="sm" onClick={() => refetch()}><RefreshCw className="h-4 w-4 mr-1.5" />Refresh</Button><Button style={{ backgroundColor: P }} onClick={() => setCreateOpen(true)}><Plus className="h-4 w-4 mr-1.5" />Create Key</Button></>} />
+      {error && <ErrorDisplay error={error} onRetry={refetch} />}
+      {loading && <LoadingSpinner label="Loading API keys..." />}
+      {!loading && !error && keys.length === 0 && (
+        <EmptyState title="No API keys yet" description="Create an API key to enable programmatic access to the DrugOS API." />
+      )}
+      {!loading && !error && keys.length > 0 && (
+        <Card><CardContent className="p-0"><Table><TableHeader><TableRow><TableHead>Name</TableHead><TableHead>Key</TableHead><TableHead>Created</TableHead><TableHead>Last Used</TableHead><TableHead>Status</TableHead><TableHead></TableHead></TableRow></TableHeader>
+          <TableBody>{keys.map(k => (<TableRow key={k.id}><TableCell className="font-medium">{k.name}</TableCell><TableCell><code className="text-sm font-mono bg-muted px-2 py-0.5 rounded">{k.prefix}…</code></TableCell><TableCell className="text-muted-foreground">{new Date(k.createdAt).toLocaleDateString()}</TableCell><TableCell className="text-muted-foreground">{k.lastUsedAt ? new Date(k.lastUsedAt).toLocaleString() : 'Never'}</TableCell>
+            <TableCell><Badge variant={!k.revokedAt ? 'default' : 'destructive'}>{!k.revokedAt ? 'active' : 'revoked'}</Badge></TableCell>
+            <TableCell><div className="flex gap-1"><Button variant="ghost" size="sm"><Copy className="h-4 w-4" /></Button>{!k.revokedAt && <Button variant="ghost" size="sm" className="text-red-500" onClick={() => handleRevoke(k.id)}><Trash2 className="h-4 w-4" /></Button>}</div></TableCell>
+          </TableRow>))}</TableBody></Table></CardContent></Card>
+      )}
       <Dialog open={createOpen} onOpenChange={setCreateOpen}><DialogContent><DialogHeader><DialogTitle>Create API Key</DialogTitle><DialogDescription>Generate a new API key for programmatic access</DialogDescription></DialogHeader>
-        <div className="space-y-4"><div><Label>Key Name</Label><Input placeholder="e.g. Production Key" /></div><div><Label>Environment</Label><Select><SelectTrigger><SelectValue placeholder="Select environment" /></SelectTrigger><SelectContent><SelectItem value="production">Production</SelectItem><SelectItem value="staging">Staging</SelectItem><SelectItem value="development">Development</SelectItem></SelectContent></Select></div></div>
-        <DialogFooter><Button variant="outline" onClick={() => setCreateOpen(false)}>Cancel</Button><Button style={{ backgroundColor: P }} onClick={() => setCreateOpen(false)}>Create Key</Button></DialogFooter>
+        <div className="space-y-4"><div><Label>Key Name</Label><Input id="api-key-name" placeholder="e.g. Production Key" /></div></div>
+        <DialogFooter><Button variant="outline" onClick={() => setCreateOpen(false)}>Cancel</Button><Button style={{ backgroundColor: P }} onClick={handleCreate}>Create Key</Button></DialogFooter>
       </DialogContent></Dialog>
     </div></FadeIn>
   )
@@ -930,6 +1027,7 @@ function ComplianceScreen() {
   ]
   return (
     <FadeIn><div className="space-y-6">
+      <DemoDataBanner screenName="Compliance Dashboard" />
       <PH title="Compliance Dashboard" desc="Monitor your regulatory compliance status" actions={<Button variant="outline" size="sm"><Download className="h-4 w-4 mr-1.5" />Download BAA</Button>} />
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-4">
         <SC title="Compliant Frameworks" value="4/5" icon={ShieldCheck} /><SC title="Last Audit" value="Jun 2026" icon={FileCheck} /><SC title="Open Items" value="2" icon={AlertTriangle} />
@@ -1002,25 +1100,30 @@ function TicketsScreen() {
 // SYSTEM STATUS SCREEN
 // ═══════════════════════════════════════════
 function SystemStatusScreen() {
-  const services = [
-    { name: 'API Gateway', status: 'operational', uptime: '99.99%', latency: '45ms' },
-    { name: 'Knowledge Graph DB', status: 'operational', uptime: '99.98%', latency: '120ms' },
-    { name: 'Search Engine', status: 'operational', uptime: '99.95%', latency: '230ms' },
-    { name: 'Report Generator', status: 'operational', uptime: '99.90%', latency: '1.2s' },
-    { name: 'Authentication', status: 'operational', uptime: '99.99%', latency: '80ms' },
-    { name: 'File Storage', status: 'degraded', uptime: '99.50%', latency: '350ms' },
-  ]
-  const uptimeData = [{ day: 'Mon', uptime: 99.99 },{ day: 'Tue', uptime: 99.98 },{ day: 'Wed', uptime: 99.95 },{ day: 'Thu', uptime: 100 },{ day: 'Fri', uptime: 99.99 },{ day: 'Sat', uptime: 100 },{ day: 'Sun', uptime: 99.97 }]
+  // FE-009 ROOT FIX: call the real /api/system/status endpoint. The previous
+  // code rendered 6 hardcoded "operational" services with fabricated
+  // uptime/latency numbers. An admin could not tell whether the platform
+  // was actually healthy or whether the green checkmarks were real.
+  const { data, loading, error, refetch } = useApiResource(() => api.getSystemStatus(), [])
+  const services = data ? Object.entries(data.services).map(([key, s]) => ({
+    key,
+    name: s.service,
+    available: s.available,
+    reason: s.reason,
+  })) : []
+  const allOperational = services.length > 0 && services.every(s => s.available)
   return (
     <FadeIn><div className="space-y-6">
-      <PH title="System Status" desc="Real-time platform health monitoring" />
-      <Card className="bg-green-50 border-green-200"><CardContent className="p-5"><div className="flex items-center gap-3"><CheckCircle2 className="h-6 w-6 text-green-500" /><div><p className="font-semibold text-green-700">All Systems Operational</p><p className="text-sm text-green-600">Last incident: 15 days ago</p></div></div></CardContent></Card>
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-        <SC title="Overall Uptime" value="99.97%" icon={Activity} /><SC title="Avg Latency" value="145ms" icon={Zap} /><SC title="Active Incidents" value="0" icon={AlertCircle} />
-      </div>
-      <Card><CardHeader className="pb-2"><CardTitle className="text-base">Service Health</CardTitle></CardHeader><CardContent className="p-0"><Table><TableHeader><TableRow><TableHead>Service</TableHead><TableHead>Status</TableHead><TableHead>Uptime (30d)</TableHead><TableHead>Latency</TableHead></TableRow></TableHeader>
-        <TableBody>{services.map(s => (<TableRow key={s.name}><TableCell className="font-medium">{s.name}</TableCell><TableCell><div className="flex items-center gap-2"><span className={`w-2.5 h-2.5 rounded-full ${s.status === 'operational' ? 'bg-green-500' : 'bg-amber-500'}`} /><span className="text-sm capitalize">{s.status}</span></div></TableCell><TableCell>{s.uptime}</TableCell><TableCell>{s.latency}</TableCell></TableRow>))}</TableBody></Table></CardContent></Card>
-      <Card><CardHeader className="pb-2"><CardTitle className="text-base">Uptime History (7 Days)</CardTitle></CardHeader><CardContent><div className="h-48"><ResponsiveContainer width="100%" height="100%"><LineChart data={uptimeData}><CartesianGrid strokeDasharray="3 3" /><XAxis dataKey="day" /><YAxis domain={[99.5, 100]} /><RechartsTooltip /><Line type="monotone" dataKey="uptime" stroke={G} strokeWidth={2} dot={{ fill: G }} /></LineChart></ResponsiveContainer></div></CardContent></Card>
+      <PH title="System Status" desc="Real-time platform health monitoring" actions={<Button variant="outline" size="sm" onClick={() => refetch()}><RefreshCw className="h-4 w-4 mr-1.5" />Refresh</Button>} />
+      {error && <ErrorDisplay error={error} onRetry={refetch} />}
+      {loading && <LoadingSpinner label="Loading system status..." />}
+      {!loading && !error && (
+        <>
+          <Card className={allOperational ? 'bg-green-50 border-green-200' : 'bg-amber-50 border-amber-200'}><CardContent className="p-5"><div className="flex items-center gap-3">{allOperational ? <CheckCircle2 className="h-6 w-6 text-green-500" /> : <AlertCircle className="h-6 w-6 text-amber-500" />}<div><p className={`font-semibold ${allOperational ? 'text-green-700' : 'text-amber-700'}`}>{allOperational ? 'All Systems Operational' : 'Some Services Unavailable'}</p><p className={`text-sm ${allOperational ? 'text-green-600' : 'text-amber-600'}`}>Last checked: {new Date(data!.generatedAt).toLocaleString()}</p></div></div></CardContent></Card>
+          <Card><CardHeader className="pb-2"><CardTitle className="text-base">Service Health</CardTitle></CardHeader><CardContent className="p-0"><Table><TableHeader><TableRow><TableHead>Service</TableHead><TableHead>Status</TableHead><TableHead>Details</TableHead></TableRow></TableHeader>
+            <TableBody>{services.map(s => (<TableRow key={s.key}><TableCell className="font-medium">{s.name}</TableCell><TableCell><div className="flex items-center gap-2"><span className={`w-2.5 h-2.5 rounded-full ${s.available ? 'bg-green-500' : 'bg-amber-500'}`} /><span className="text-sm">{s.available ? 'Operational' : 'Unavailable'}</span></div></TableCell><TableCell className="text-xs text-muted-foreground">{s.reason || '—'}</TableCell></TableRow>))}</TableBody></Table></CardContent></Card>
+        </>
+      )}
     </div></FadeIn>
   )
 }
