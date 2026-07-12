@@ -4756,6 +4756,64 @@ DRKG_GENE_DISEASE_BIOMARKER_RELATIONS: frozenset[str] = frozenset({
     "X",   # GNBR overexpressed
 })
 
+# ── P2-021 ROOT FIX: canonical case for DRKG relation-code fields ──────
+# SINGLE SOURCE OF TRUTH for the case convention of the four relation-code
+# columns emitted by ``drkg_loader.parse_drkg_tsv``:
+#   relation            — the full relation code, e.g. "drugbank::treats::compound:disease"
+#   relation_source     — "drugbank"
+#   relation_name       — "treats"
+#   relation_dst_type   — "compound:disease"
+#
+# All four are LOWERCASED so that round-trip reconstruction
+# (``relation_source + "::" + relation_name + "::" + relation_dst_type``)
+# equals the stored ``relation`` column byte-for-byte. The previous code
+# lowercased only the first three and preserved ``relation_dst_type`` in
+# PascalCase ("Compound:Disease") — producing a mixed convention where
+# reconstruction yielded "drugbank::treats::Compound:Disease" ≠ the stored
+# "drugbank::treats::compound:disease". Any maintainer who assumed
+# consistency wrote ``WHERE rel = 'drugbank::treats::Compound:Disease'``
+# and got ZERO results.
+#
+# NOTE: ``head_type`` and ``tail_type`` are SEPARATELY kept PascalCase
+# (e.g. "Compound", "Disease") because ``EDGE_EVIDENCE_STRENGTH`` and
+# ``DRKG_VALID_TRIPLE_SCHEMAS`` use PascalCase entity-type keys. The
+# BUG 3.5 cross-check therefore compares LOWERCASED versions of both
+# ``relation_dst_type`` tokens AND ``head_type``/``tail_type``.
+DRKG_RELATION_CODE_CANONICAL_CASE: str = "lower"
+
+# DRKG_ENTITY_TYPE_CANONICAL_CASE — entity-type tokens (head_type, tail_type
+# and the tokens inside relation_dst_type) are PascalCase in the raw DRKG
+# file ("Compound", "Disease", "Gene", "Anatomy"). We preserve this for
+# the head_type/tail_type columns (consumed by EDGE_EVIDENCE_STRENGTH).
+# relation_dst_type is lowercased per DRKG_RELATION_CODE_CANONICAL_CASE.
+DRKG_ENTITY_TYPE_CANONICAL_CASE: str = "pascal"
+
+
+def reconstruct_relation_code(
+    relation_source: str,
+    relation_name: str,
+    relation_dst_type: str,
+) -> str:
+    """Reconstruct the canonical (lowercase) DRKG relation code from parts.
+
+    Single source of truth for round-trip reconstruction. All three inputs
+    are lowercased before joining so the output is always canonical
+    regardless of the caller's case. This guarantees::
+
+        reconstruct_relation_code(
+            df.relation_source, df.relation_name, df.relation_dst_type
+        ) == df.relation
+
+    P2-021 ROOT FIX — eliminates the maintenance trap where callers had to
+    remember which fields were lowercased and which were PascalCase.
+    """
+    return "::".join((
+        str(relation_source).strip().lower(),
+        str(relation_name).strip().lower(),
+        str(relation_dst_type).strip().lower(),
+    ))
+
+
 # DRKG_RELATION_ABBREV_TO_NAME — codebook mapping the DRKG abbreviation
 # (middle token of the relation string) to its human-readable name.
 # Fixes GAP 3.7 — the loader emits a ``relation_human_name`` column so

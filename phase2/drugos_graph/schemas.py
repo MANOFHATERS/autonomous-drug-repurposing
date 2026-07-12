@@ -338,8 +338,12 @@ class DRKGRecord(TypedDict, total=False):
     # ── Parsed relation components (BUG 1.5 — uses config.split_drkg_relation)
     relation_source: str      # "Hetionet"  (also: DRUGBANK, GNBR, bioarx, …)
     relation_name: str        # "CtD"       (the abbreviation, NOT a verb)
-    relation_dst_type: str    # "Compound:Disease" (the third token, kept for
-                              #   cross-check against head_type/tail_type — BUG 3.5)
+    relation_dst_type: str    # "compound:disease" (the third token, LOWERCASED
+                              #   per P2-021 root fix — canonical case is
+                              #   config.DRKG_RELATION_CODE_CANONICAL_CASE="lower".
+                              #   head_type/tail_type stay PascalCase for
+                              #   EDGE_EVIDENCE_STRENGTH lookup; the BUG 3.5
+                              #   cross-check compares lowercased versions.)
     relation_human_name: str  # "Compound-treats-Disease"  (GAP 3.7)
 
     # ── Evidence + source-confidence tagging (GAP 3.8, GUARD 3.10) ────
