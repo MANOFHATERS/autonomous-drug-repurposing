@@ -351,3 +351,68 @@ Stage Summary:
 - Makefile now exposes run-4phase and run-full-platform targets.
 - No fake / stub / synthetic-pipeline bugs remain.
 - Next: install deps, run real code end-to-end, write tests, push branch, verify, merge to main, re-clone to verify.
+
+---
+Task ID: p3-015-to-028-team10-phase3
+Agent: Team Member 10 (Phase 3 - Model & Trainer)
+Task: Fix 14 assigned issues (P3-015..P3-028) — 10 MEDIUM + 4 LOW — in the Phase 3 Graph Transformer model/trainer. Read real code line-by-line (not comments/tests), fix manually (no scripts), run real code, write unit tests, push to branch, verify nothing broken, merge to main, re-clone to verify.
+
+Work Log:
+- Read project docx (Team_Cosmic_Build_Process_Updated.docx) — confirmed Phase 3 = Graph Transformer (PyTorch + PyG) for link prediction on the biomedical KG; Phase 1 data feeds Phase 2 KG feeds Phase 3 GT feeds Phase 4 RL.
+- Cloned repo to /home/z/my-project/adr_repo, configured git identity (MANOFHATERS / manoj.c@atraiuniversity.edu.in), created branch fix/p3-015-to-028-team10-phase3-forensic-root-fixes.
+- Read the ACTUAL source files line-by-line (not comments, not tests) for all 10 target files:
+  * graph_transformer/models/layers.py (lines 150-250 — self_loop_weight init, _static_num_edge_types)
+  * graph_transformer/models/link_predictor.py (lines 60-200 — input_dim, _construct_pair_features)
+  * graph_transformer/models/embeddings.py (full 313 lines — _SafeBatchNorm1d, NodeTypeProjection)
+  * graph_transformer/models/graph_transformer.py (lines 110-220 — constructor, edge_types validation)
+  * graph_transformer/data/graph_builder.py (lines 410-500, 880-990 — _build_reverse_edges, pathway→disease weighting)
+  * graph_transformer/data/__init__.py (lines 140-210 — AUC thresholds, get_auc_threshold_for_scale)
+  * graph_transformer/data/phase2_adapter.py (lines 440-500 — reverse-edge build call)
+  * graph_transformer/training/trainer.py (lines 80-200, 255-285, 284-475, 950-1000 — generator, randperm, evaluate, D-10 logging)
+  * graph_transformer/evaluation/__init__.py (full 226 lines — evaluate_link_prediction)
+  * graph_transformer/gt_rl_bridge.py (lines 525-820, 1090-1180, 1230-1320 — build_model, neg sampling, train_model, evaluate call, confidence)
+- Applied all 14 fixes MANUALLY (no scripts):
+  * P3-015: D-10 logging baseline 0.1→1.0 (trainer.py) — matches actual self_loop_weight init=1.0
+  * P3-016: Reverted B-06 — restored abs_diff, link_predictor input 4*D→5*D (link_predictor.py)
+  * P3-017: Removed dead _static_num_edge_types attribute (layers.py)
+  * P3-018: Inverted pathway→disease weights — rare=0.9 (MORE), common=0.1 (LESS) (graph_builder.py)
+  * P3-019: evaluate() returns numpy arrays + added to_json_metrics() helper (trainer.py)
+  * P3-020: Mixed 80% corrupt-one-side + 20% corrupt-both negative sampling (gt_rl_bridge.py)
+  * P3-021: Included KP drugs in negative pool (removed W-07 exclusion); C-3 split still holds them out of training (gt_rl_bridge.py)
+  * P3-022: Documented evaluate_link_prediction as CODE-PATH-IDENTICAL sanity check (NOT "independent verification") (evaluation/__init__.py + gt_rl_bridge.py)
+  * P3-023: Removed deprecated _build_reverse_edges staticmethod (graph_builder.py) — _build_reverse_edges_into_sets is the only correct method
+  * P3-024: Raise ValueError if len(edge_types) < 14 (graph_transformer.py) — was only a WARNING that silently dropped reverse edges
+  * P3-025: Documented _SafeBatchNorm1d reachability gap (embeddings.py) — retained for the feature_norm="batch" public API
+  * P3-026: Raised V1_AUC_THRESHOLD_DEMO 0.55→0.65 (data/__init__.py) — 0.55 was essentially random
+  * P3-027: Clipped confidence to [0,1] via np.clip (gt_rl_bridge.py) — fp32 could produce -1e-9
+  * P3-028: Wrapped torch.Generator in try/except for MPS/XLA fallback to CPU (trainer.py) + fixed randperm device mismatch
+- Verified py_compile on all 10 modified files — ALL CLEAN.
+- Installed deps: torch 2.13.0+cpu, scikit-learn 1.5.2, pandas 2.2.3, rapidfuzz 3.14.3, gymnasium, stable-baselines3.
+- Ran REAL CODE end-to-end (not smoke tests, not test files): build_demo_graph → build_model → _compute_training_split → train_model(2 epochs) → evaluate → generate_rl_input. All 13 real-code checks PASSED.
+- Wrote tests/test_p3_015_to_028_team10_phase3.py — 14 unit tests (one per issue). All 14 PASS.
+- Updated 2 existing tests that were encoding the OLD buggy behavior my fixes correct:
+  * test_b06_no_redundant_abs_diff — was asserting 4*D (B-06 bug); updated to assert 5*D (P3-016 fix)
+  * TestW07KPDrugsExcludedFromNegatives.test_train_model_excludes_kp_drugs — was asserting non_kp_drug_indices (W-07); updated to assert all_drug_indices_for_neg + C-3 preserved (P3-021)
+- Ran broader regression suite (test_v30_forensic_fixes, test_v90_bugs_31_50, test_v100_root_fixes, test_v100_forensic_root_fixes, test_e2e_integration, test_b01_b10_w01_w03, test_w04_w13_d01_d10_s01_s03): 215 passed, 3 failed (all PRE-EXISTING in phase2/ and rl/ — files I was explicitly told NOT to touch; failures are missing WITHDRAWN_INDICATIONS attr and Phase 2 source-pattern checks, NOT caused by my changes).
+
+Stage Summary:
+- 14/14 assigned issues fixed at root cause (no surface-level/sugar-coating).
+- 14/14 new unit tests PASS.
+- 2 existing tests updated to assert corrected behavior (P3-016, P3-021).
+- 0 regressions introduced in Phase 3 code.
+- 3 pre-existing failures in Phase 2/Phase 4 are documented (NOT my assigned scope).
+- Files modified (10 source + 3 test):
+  * graph_transformer/models/layers.py (P3-017)
+  * graph_transformer/models/link_predictor.py (P3-016)
+  * graph_transformer/models/embeddings.py (P3-025)
+  * graph_transformer/models/graph_transformer.py (P3-024)
+  * graph_transformer/data/graph_builder.py (P3-018, P3-023)
+  * graph_transformer/data/__init__.py (P3-026)
+  * graph_transformer/training/trainer.py (P3-015, P3-019, P3-028)
+  * graph_transformer/evaluation/__init__.py (P3-022)
+  * graph_transformer/gt_rl_bridge.py (P3-020, P3-021, P3-022, P3-027)
+  * tests/test_p3_015_to_028_team10_phase3.py (NEW — 14 tests)
+  * tests/test_b01_b10_w01_w03_fixes.py (updated test_b06 for P3-016)
+  * tests/test_w04_w13_d01_d10_s01_s03_fixes.py (updated TestW07 for P3-021)
+- Branch: fix/p3-015-to-028-team10-phase3-forensic-root-fixes
+- Next: commit, push, verify on branch, merge to main, re-clone to verify.
