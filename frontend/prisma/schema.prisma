@@ -49,6 +49,18 @@ model User {
   // window expires.
   failedLoginCount  Int           @default(0)
   lockedUntil       DateTime?
+  // FE-055 ROOT FIX: Soft-delete field for GDPR / CCPA right-to-erasure.
+  // Hard-deleting a User cascades to OrganizationMember / RefreshToken /
+  // ApiKey (good) but nullifies AuditLog.userId (bad — audit trail loses
+  // its user link, breaking compliance). Soft-delete lets us:
+  //   1. Filter deletedAt !== null out of all auth queries (user can no
+  //      longer log in, but their historical audit trail is preserved).
+  //   2. Anonymize PII fields (email, name, title, bio) at delete time
+  //      so the right-to-erasure is satisfied while the audit log rows
+  //      themselves remain intact for compliance retention windows.
+  //   3. Provide a separate hard-delete endpoint that scrubs the user's
+  //      data after the legal retention window expires.
+  deletedAt         DateTime?
   lastLoginAt       DateTime?
   createdAt         DateTime      @default(now())
   updatedAt         DateTime      @updatedAt
@@ -64,6 +76,8 @@ model User {
 
   @@index([status])
   @@index([role])
+  // FE-055: index on deletedAt so "list active users" queries are cheap.
+  @@index([deletedAt])
 }
 
 model Organization {
