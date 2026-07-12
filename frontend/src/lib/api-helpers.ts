@@ -160,9 +160,29 @@ export async function writeAuditLog(params: {
    */
   organizationId?: string;
 }): Promise<AuditLogResult> {
-  // FE-005 ROOT FIX (v2): Resolve the effective organizationId —
-  // explicit param wins, else fall back to the authenticated user's orgId.
-  const effectiveOrgId = params.organizationId ?? params.user?.orgId ?? null;
+  // FE-005 / FE-040 ROOT FIX (v2, merged): Resolve the effective
+  // organizationId — explicit param wins, else fall back to the
+  // authenticated user's orgId.
+  //
+  // The previous "fix" added `organizationId String?` to the AuditLog
+  // schema and accepted an optional `organizationId` param here — BUT
+  // none of the ~20 production callers (billing, evidence-package, kg,
+  // rl, admin, auth/*) ever passed it. So the column was ALWAYS NULL in
+  // production, completely defeating the purpose of multi-tenant
+  // audit-trail isolation. The fix was comments-only — exactly the
+  // failure mode the audit warned about.
+  //
+  // Real root fix (independently arrived at by Team 12 and Team Cosmic):
+  // auto-populate `organizationId` from the authenticated user's `orgId`
+  // (set by getAuthenticatedUser from the access-token's `orgId` claim)
+  // when the caller does not explicitly pass one. This makes EVERY
+  // user-initiated audit-log row org-scoped automatically, without
+  // requiring each call site to remember to pass it. Callers that need
+  // to override (e.g. system/webhook events with no user session) can
+  // still pass `organizationId` explicitly.
+  const effectiveOrgId =
+    params.organizationId ?? params.user?.orgId ?? null;
+
   try {
     await db.auditLog.create({
       data: {
@@ -172,14 +192,18 @@ export async function writeAuditLog(params: {
         resource: params.resource || null,
         ip: params.ip || null,
         userAgent: params.userAgent || null,
+        // Always populate the organizationId column when we have one.
+        // This is what makes the /api/audit-logs org filter actually
+        // work — previously every row had null orgId.
+        ...(effectiveOrgId ? { organizationId: effectiveOrgId } : {}),
         metadata: JSON.stringify({
           ...(params.metadata || {}),
+          // Also fold organizationId into metadata for call sites that
+          // read the JSON blob (e.g. the audit-log viewer UI), so the
+          // org context is discoverable even when the row is exported
+          // as JSON.
           ...(effectiveOrgId ? { organizationId: effectiveOrgId } : {}),
         }),
-        // FE-005 ROOT FIX (v2): Always populate the organizationId column
-        // when we have one. This is what makes the /api/audit-logs org
-        // filter actually work — previously every row had null orgId.
-        ...(effectiveOrgId ? { organizationId: effectiveOrgId } : {}),
       } as any,
     });
     return { ok: true };

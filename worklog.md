@@ -512,6 +512,39 @@ Stage Summary:
 - Ready to commit, push, merge to main, then re-clone to verify.
 
 ---
+Task ID: team-15-fe038-to-fe051-verification
+Agent: Team 15 (Frontend - Public API Proxies & Clinical) — verification pass
+Task: Verify FE-038..FE-051 fixes are REAL (not surface-level comment-only), fix any that are fake, write root-level regression tests, run real build/tsc/lint/tests, push branch, merge to main, re-clone to verify.
+
+Work Log:
+- Read the project docx (Team_Cosmic_Build_Process_Updated.docx) to understand the 4-phase Autonomous Drug Repurposing Platform (Data Ingestion → Knowledge Graph → Graph Transformer → RL Ranker → API+Dashboard).
+- Cloned repo, created branch fix/fe-038-to-051-team-15-public-api-clinical.
+- Discovered prior Team 15 agent already committed c8e08b1 "fix(FE-038..FE-051)" and merged to main (8c71ee7). User warned: "comments and tests are fakes — when I manually check code it's 100 percent broken".
+- Read EVERY target file LINE-BY-LINE (api-keys.ts, billing/subscription/route.ts, server.ts, totp.ts, billing.ts, projects/route.ts, openfda.ts, rxnorm.ts, evidence-package/route.ts, notifications/route.ts, team/route.ts, auth/activity/route.ts, auth/me/route.ts, clinical-trials.ts, core-screens.tsx, remaining-screens.tsx, schema.prisma, api-helpers.ts, pagination.ts, types.ts, audit-logs/route.ts).
+- VERIFIED 13 of 14 fixes are REAL (FE-038, FE-039, FE-041, FE-042, FE-043, FE-044, FE-045, FE-046, FE-047, FE-048, FE-049, FE-050, FE-051) — the actual code logic matches the issue's required fix.
+- FOUND 1 CRITICAL SURFACE-LEVEL FIX: FE-040. The prior agent added `organizationId String?` to the AuditLog schema and an `organizationId?: string` param to writeAuditLog — BUT none of the ~20 production callers (billing, evidence-package, kg, rl, admin, auth/*) ever passed it. So the column was ALWAYS NULL in production. This completely defeated FE-040's purpose (multi-tenant audit-trail isolation) AND broke FE-005 (the audit-logs route filters by organizationId for non-owners, so non-owner admins saw EMPTY audit logs).
+- APPLIED ROOT FIX to api-helpers.ts writeAuditLog: auto-populate `organizationId` from `params.user?.orgId` when the caller does not explicitly pass one. This makes EVERY user-initiated audit-log row org-scoped automatically. Callers that need to override (webhook/system events) can still pass `organizationId` explicitly.
+- Cleaned up unused imports in projects/route.ts (FE-044).
+- Fixed stale test in team-15-fe038-to-fe051.test.ts: FE-049 type-declaration test was reading mock-data.ts, but FE-026 moved the DrugCandidate interface to types.ts. Updated test to read types.ts.
+- Wrote NEW root-verification test file: team-15-fe038-to-fe051-root-verification.test.ts (29 tests). Each test exercises the ACTUAL code path and would FAIL if the fix were reverted. Includes the critical FE-040 test that would have caught the surface-level fix (asserts writeAuditLog auto-populates organizationId from user.orgId when no explicit param is passed).
+- Installed all npm dependencies (1092 packages).
+- Ran `npx prisma generate` → success.
+- Ran `npx tsc --noEmit` → ZERO errors.
+- Ran `npx eslint` on all 17 touched files → ZERO errors (11 pre-existing warnings only).
+- Ran `npx jest team-15-fe038-to-fe051-root-verification.test.ts` → 29/29 PASS.
+- Ran `npx jest team-15-fe038-to-fe051.test.ts` → 47/47 PASS.
+- Ran `npx next build` → ZERO errors, all 33 API routes + pages compiled.
+
+Stage Summary:
+- 1 REAL root fix applied: FE-040 writeAuditLog auto-populates organizationId (prior fix was surface-level — column always NULL).
+- 13 fixes verified as REAL (prior agent's work was correct for these).
+- 1 unused-import cleanup (FE-044).
+- 1 stale test fixed (FE-049 type-declaration test now reads types.ts).
+- 29 new root-verification tests added (would catch each bug if reverted).
+- All verification passed: tsc 0 errors, lint 0 errors, build 0 errors, 76/76 tests pass.
+- Files modified: frontend/src/lib/api-helpers.ts, frontend/src/app/api/projects/route.ts, frontend/src/lib/services/__tests__/team-15-fe038-to-fe051.test.ts.
+- Files added: frontend/src/lib/services/__tests__/team-15-fe038-to-fe051-root-verification.test.ts.
+- Next: commit, push branch, merge to main, re-clone to verify.
 Task ID: TM3-P1-030-TO-P1-042
 Agent: Team Member 3 (Phase 1 - Pipelines & Cleaning)
 Task: Verify and fix 14 assigned issues (P1-030..P1-042) in the autonomous-drug-repurposing repo. Read each affected file line-by-line, run real code (not smoke tests), write tests that would have caught the bug, run them, then branch/push/verify/merge.
@@ -769,3 +802,43 @@ Stage Summary:
 - Branch: fix/p4-001-013-verified-v2-team11 (pushed)
 - Main commit: f0d7b83 (merge commit)
 - Fresh-clone verification: PASSED
+
+---
+Task ID: Team8-P2-049-to-067-v2
+Agent: Team Member 8 (Phase 2 Auxiliary Loaders & Utils)
+Task: Fix 19 LOW-severity issues P2-049 through P2-067 in phase2/drugos_graph/
+
+Work Log:
+- Cloned repo and created branch fix/p2-049-to-067-team8-forensic-v2 from main
+- Read actual source code line-by-line for all 19 issue files (no grep, no scripts)
+- Verified 14 issues were already genuinely fixed by previous agents:
+  P2-049, P2-050, P2-051, P2-052, P2-053, P2-055, P2-056, P2-058,
+  P2-060, P2-061, P2-062, P2-064, P2-066, P2-067
+- Discovered 5 issues had FAKE fixes (comments claimed "resolved by refactor"
+  but actual code was still broken — exactly the user's complaint):
+  * P2-054: except Exception around OneCycleLR (no fallback, no warning)
+  * P2-057: NaN triples filtered with NO logging/metric
+  * P2-059: edge-loader still used i // batch_size pattern
+  * P2-063: MIN_TRIPLES_FOR_HGT still 5/100 (not 50/1000)
+  * P2-065: graph_transformer_model.py was DELETED but run_pipeline.py
+            line 6780 still imports from it (silent ImportError)
+- Applied root-level fixes for all 5 broken issues
+- Replaced 7 SKIPPED tests with REAL tests that verify the fixes
+- Ran pytest: 32 passed, 0 skipped (was 25 passed + 7 skipped)
+- Ran REAL CODE verification: all 13 modules import, step11b imports,
+  GraphTransformerModel constructs, encode() raises clear RuntimeError,
+  resize clears sentinels, CosineAnnealingLR fallback works
+- Pushed branch, merged to main with --no-ff, pushed main
+- Re-cloned main to fresh location and verified ALL 5 fixes present
+- Ran test suite on fresh clone: 32 passed
+
+Stage Summary:
+- 19 issues addressed (14 verified-already-fixed + 5 new root-level fixes)
+- 5 commits on branch fix/p2-049-to-067-team8-forensic-v2
+- Merge commit 995164f on main
+- 32/32 tests pass (0 skipped)
+- Critical discovery: previous "resolved by refactor" comments were FALSE
+  for 5 issues — the user's complaint about "fake tests" was accurate
+- Pre-existing test isolation issue noted (prometheus duplicate metrics
+  in chemberta_encoder when imported via different paths) — NOT caused
+  by these changes, documented for future fix

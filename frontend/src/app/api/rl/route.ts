@@ -102,6 +102,9 @@ export async function POST(req: NextRequest) {
       note: result.note,
     });
   } catch (e: unknown) {
+    // FE-063 ROOT FIX: `e: any` disabled type safety; if a non-Error was
+    // thrown (e.g. a string), e.message was undefined and the response
+    // became "undefined". Narrow with instanceof, fallback to String(e).
     const msg = e instanceof Error ? e.message : String(e);
     return internalError(`RL query failed: ${msg}`);
   }
@@ -132,6 +135,9 @@ export async function GET() {
       note: result.note,
     });
   } catch (e: unknown) {
+    // FE-063 ROOT FIX: `e: any` disabled type safety; if a non-Error was
+    // thrown (e.g. a string), e.message was undefined and the response
+    // became "undefined". Narrow with instanceof, fallback to String(e).
     const msg = e instanceof Error ? e.message : String(e);
     return internalError(`RL query failed: ${msg}`);
   }
@@ -245,7 +251,12 @@ async function persistRlCandidates(userId: string, candidates: RankedHypothesis[
         });
       }
     }
-  } catch (e) {
-    console.error("persistRlCandidates failed:", e);
+  } catch (e: unknown) {
+    // FE-063: explicit `e: unknown` — never `e: any`. Persistence is
+    // best-effort; the response still returns the candidates. We log the
+    // error for observability; if it's an Error we use .message, otherwise
+    // String(e) so the log never shows "undefined".
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error("persistRlCandidates failed:", msg);
   }
 }
