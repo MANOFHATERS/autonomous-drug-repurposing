@@ -1,71 +1,52 @@
 import { NextRequest, NextResponse } from "next/server";
-import { checkDatasetAvailability } from "@/lib/services/ml-stubs";
 import { requireAuth, internalError, writeAuditLog } from "@/lib/api-helpers";
+import { getDatasetStats } from "@/lib/services/dataset-stats";
 
 /**
  * GET /api/dataset?source=<chembl|drugbank|uniprot|string|disgenet|omim|pubchem>
  *
- * FE-003 ROOT FIX: The previous code returned 501 even when
- * DATASET_SERVICE_URL was set. The Phase 1 Airflow ETL pipeline was
- * unreachable from the dashboard.
+ * RT-007 ROOT FIX (Team Member 17): the previous version returned 503
+ * "service_not_deployed" whenever DATASET_SERVICE_URL was unset, even
+ * though a local lib service (`getDatasetStats`) was available that
+ * reads the Phase 1 / Phase 2 checkpoint JSON from disk. The dashboard's
+ * dataset page therefore 503'd in every default deployment.
  *
- * ROOT FIX: This endpoint now proxies to the standalone dataset service
- * (a FastAPI wrapper around the Airflow ETL pipeline) when
- * DATASET_SERVICE_URL is set. The dashboard can query real dataset
- * statistics (row counts, last-updated timestamps, quality metrics)
- * from each of the 7 Phase 1 sources.
+ * Root fix: ALWAYS call `getDatasetStats()` from the local lib service.
+ * The lib service itself proxies to DATASET_SERVICE_URL when that env
+ * var is set (production multi-node deploy), and falls back to reading
+ * the local checkpoint JSON (single-box dev / CI deploy). Either way
+ * the route returns real dataset statistics instead of 503.
  *
- * We NEVER fabricate dataset statistics. If the dataset service is not
- * deployed, we return 503 service_not_deployed.
+ * We NEVER fabricate dataset statistics. If neither the proxy nor the
+ * local checkpoint yields data, the lib returns `source: "none"` with
+ * an empty sources list, and we surface that to the caller.
  */
 export async function GET(req: NextRequest) {
   const auth = await requireAuth();
   if (auth.user === null) return auth.response;
 
-  const availability = checkDatasetAvailability();
-  if (!availability.available) {
-    return NextResponse.json(
-      {
-        error: "service_not_deployed",
-        service: availability.service,
-        description: availability.description,
-        reason: availability.reason,
-        documentation:
-          "See Phase 1 of the build plan (Data Ingestion & Pipeline Setup). " +
-          "Set DATASET_SERVICE_URL to enable the proxy.",
-      },
-      { status: 503 }
-    );
-  }
-
-  const datasetUrl = process.env.DATASET_SERVICE_URL!;
-  const source = req.nextUrl.searchParams.get("source") || "all";
-  const limit = parseInt(req.nextUrl.searchParams.get("limit") || "100", 10);
-
   try {
-    const upstream = await fetch(
-      `${datasetUrl.replace(/\/$/, "")}/stats?source=${encodeURIComponent(source)}&limit=${limit}`,
-      { headers: { Accept: "application/json" } }
-    );
-    if (!upstream.ok) {
-      const text = await upstream.text();
-      return NextResponse.json(
-        {
-          error: "dataset_service_error",
-          message: `Dataset service returned ${upstream.status}: ${text.slice(0, 500)}`,
-        },
-        { status: 502 }
-      );
-    }
-    const data = await upstream.json();
+    const stats = await getDatasetStats();
+    const source = req.nextUrl.searchParams.get("source") || "all";
+
     await writeAuditLog({
       user: auth.user,
       action: "dataset_query",
       resource: `dataset:${source}`,
-      metadata: { source },
+      metadata: { source, statsSource: stats.source, count: stats.sources.length },
     });
-    return NextResponse.json(data);
-  } catch (e: any) {
-    return internalError(`Dataset service proxy failed: ${e.message}`);
+
+    // If a specific source was requested, filter the sources list.
+    if (source !== "all" && stats.sources.length > 0) {
+      const filtered = stats.sources.filter(
+        (s) => s.name.toLowerCase() === source.toLowerCase()
+      );
+      return NextResponse.json({ ...stats, sources: filtered });
+    }
+
+    return NextResponse.json(stats);
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return internalError(`Dataset stats failed: ${msg}`);
   }
 }

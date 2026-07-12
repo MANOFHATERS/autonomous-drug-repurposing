@@ -100,11 +100,111 @@ export interface RlRankerResponse {
   modelVersion?: string;
   generatedAt: string;
   count: number;
-  csvPath?: string;
+  // RT-008 ROOT FIX: csvPath is nullable — when no top_candidates_*.csv
+  // exists yet, this is null (we do NOT fall back to validated_hypotheses.csv).
+  csvPath?: string | null;
   note?: string;
 }
 
-const DEFAULT_CSV_PATH = path.resolve(process.cwd(), "..", "rl", "validated_hypotheses.csv");
+// RT-008 ROOT FIX (Team Member 17): the previous default was
+//   ../rl/validated_hypotheses.csv
+// which is Phase 4's INPUT file — 4 known-positive FDA-approved drugs
+// (thalidomide, metformin, warfarin, …). The dashboard was showing
+// these 4 KNOWN drugs as "novel RL-ranked repurposing candidates",
+// which is scientifically wrong AND commercially damaging: a pharma
+// partner would immediately recognize thalidomide (the standard
+// treatment for multiple myeloma) being marketed back to them as a
+// "novel candidate".
+//
+// The actual Phase 4 OUTPUT is `top_candidates_<timestamp>.csv`,
+// written by rl/rl_drug_ranker.py to the configured output_dir
+// (defaults to ./output or `RL_OUTPUT_DIR` env var). The fix: glob
+// for the LATEST `top_candidates_*.csv` file across the candidate
+// directories and use that. If no output file exists yet, return
+// an empty list with a clear "no RL output yet" note — we NEVER
+// fall back to the input file.
+const RL_OUTPUT_CANDIDATE_DIRS = [
+  // 1. Explicit env var (highest priority — operator override)
+  process.env.RL_OUTPUT_DIR,
+  // 2. <repo>/output_v100 (run_4phase.py default output dir)
+  path.resolve(process.cwd(), "output_v100"),
+  // 3. <repo>/output (generic default)
+  path.resolve(process.cwd(), "output"),
+  // 4. <repo>/rl/output (rl_drug_ranker.py default when run from repo root)
+  path.resolve(process.cwd(), "rl", "output"),
+  // 5. <repo>/rl (legacy — last resort, but ONLY for top_candidates_*.csv,
+  //    NEVER for validated_hypotheses.csv)
+  path.resolve(process.cwd(), "rl"),
+].filter(Boolean) as string[];
+
+/**
+ * RT-008 ROOT FIX: find the LATEST `top_candidates_*.csv` written by the
+ * Phase 4 RL ranker. Returns the absolute path, or null if none exists.
+ *
+ * The function tries each candidate directory in priority order. Within
+ * each directory, it picks the `top_candidates_*.csv` with the most
+ * recent mtime — this is the most-recent RL run.
+ *
+ * IMPORTANT: this function NEVER returns a path to
+ * `validated_hypotheses.csv` (the INPUT file). If no output file is
+ * found, callers receive null and must surface a "no RL output yet"
+ * message to the user. We do NOT silently fall back to the input file
+ * — that was the bug.
+ */
+function findLatestRlOutputCsv(): string | null {
+  for (const dir of RL_OUTPUT_CANDIDATE_DIRS) {
+    let entries: string[] = [];
+    try {
+      entries = nodeFs.readdirSync(dir);
+    } catch {
+      continue; // dir doesn't exist or unreadable — try the next one
+    }
+    const candidates = entries
+      .filter((name) => /^top_candidates_.*\.csv$/i.test(name))
+      .map((name) => ({ name, full: path.join(dir, name) }))
+      .filter((entry) => {
+        try {
+          return nodeFs.statSync(entry.full).isFile();
+        } catch {
+          return false;
+        }
+      });
+    if (candidates.length === 0) continue;
+    // Pick the most-recently-modified file in this directory.
+    let best = candidates[0];
+    let bestMtime = -Infinity;
+    for (const c of candidates) {
+      try {
+        const m = nodeFs.statSync(c.full).mtimeMs;
+        if (m > bestMtime) {
+          bestMtime = m;
+          best = c;
+        }
+      } catch {
+        // ignore stat errors — skip this candidate
+      }
+    }
+    return best.full;
+  }
+  return null;
+}
+
+/**
+ * RT-008 ROOT FIX: resolve the RL output CSV path. Priority order:
+ *   1. process.env.RL_OUTPUT_CSV_PATH (explicit operator override)
+ *   2. process.env.RL_LOCAL_CSV (legacy alias, kept for backward compat)
+ *   3. findLatestRlOutputCsv() — glob for top_candidates_*.csv across
+ *      the standard output directories.
+ *
+ * Returns null if no candidate is found — callers MUST handle null by
+ * returning an empty candidates list with a clear "no RL output yet"
+ * message. We NEVER fall back to validated_hypotheses.csv (the INPUT).
+ */
+function resolveRlOutputCsvPath(): string | null {
+  const explicit = process.env.RL_OUTPUT_CSV_PATH || process.env.RL_LOCAL_CSV;
+  if (explicit) return explicit;
+  return findLatestRlOutputCsv();
+}
 
 function parseNumber(s: string | undefined): number | undefined {
   if (s === undefined || s === null || s === "") return undefined;
@@ -287,7 +387,25 @@ export async function getRankedHypotheses(opts?: {
     }
   }
 
-  const csvPath = process.env.RL_OUTPUT_CSV_PATH || process.env.RL_LOCAL_CSV || DEFAULT_CSV_PATH;
+  // RT-008 ROOT FIX: resolve the RL OUTPUT path (never the INPUT file).
+  // If no top_candidates_*.csv exists yet, return an empty list with a
+  // clear "no RL output yet" note — do NOT fall back to validated_hypotheses.csv.
+  const csvPath = resolveRlOutputCsvPath();
+  if (csvPath === null) {
+    return {
+      candidates: [],
+      source: "none",
+      generatedAt: new Date().toISOString(),
+      count: 0,
+      csvPath: null,
+      note:
+        "No RL-ranked candidates found. The Phase 4 RL ranker has not yet " +
+        "written a top_candidates_*.csv output. Run `python run_4phase.py` " +
+        "(or set RL_OUTPUT_CSV_PATH to point at an existing output CSV). " +
+        "RT-008 ROOT FIX: this route NEVER serves the INPUT file " +
+        "(rl/validated_hypotheses.csv) as candidate output.",
+    };
+  }
   let candidates = await readLocalCsv(csvPath);
 
   if (opts?.drug) {

@@ -10,21 +10,31 @@ import {
 // FE-008 ROOT FIX: shared validator extracted so unit tests can exercise it
 // without spinning up the route handler.
 import { validateReadOnlyCypher } from "./cypher-validator";
+// RT-007 ROOT FIX (Team Member 17): import the local lib service so the
+// GET endpoint can return real KG stats even when KG_SERVICE_URL is unset.
+// The local lib reads from the Phase 2 registry JSON on disk — sufficient
+// for single-instance deploys and dev/CI. The proxy is still used in
+// multi-node production deployments where KG_SERVICE_URL is set.
+import { getKnowledgeGraphStats } from "@/lib/services/knowledge-graph-stats";
 
 /**
- * GET /api/knowledge-graph?cypher=<Cypher query>&limit=<n>
- * POST /api/knowledge-graph  body: { cypher: string, params?: Record<string, unknown> }
+ * GET /api/knowledge-graph?cypher=<Cypher query>&limit=<n>&drug=<name>&disease=<name>
  *
- * FE-003 ROOT FIX: The previous code returned 501 even when KG_SERVICE_URL
- * was set. The Phase 2 Neo4j graph was unreachable from the dashboard.
+ * RT-007 ROOT FIX (Team Member 17): the previous version returned 503
+ * "service_not_deployed" whenever KG_SERVICE_URL was unset, even for the
+ * aggregate-stats GET path. The dashboard's KG page therefore 503'd in
+ * every default deployment.
  *
- * ROOT FIX: This endpoint now proxies to the standalone Neo4j service
- * (or a FastAPI wrapper around it) when KG_SERVICE_URL is set. The caller
- * provides a Cypher query (or a structured query that the KG service
- * translates to Cypher); we forward it and stream back the results.
- *
- * We NEVER fabricate graph data. If the KG service is not deployed, we
- * return 503 service_not_deployed.
+ * Root fix: the GET endpoint now serves TWO modes:
+ *   1. STATS MODE (default — no drug/disease params): call the local lib
+ *      `getKnowledgeGraphStats()`. The lib itself proxies to KG_SERVICE_URL
+ *      when set (production), and falls back to the local Phase 2 registry
+ *      JSON on disk (dev/CI/single-box). This is the default mode for the
+ *      dashboard's KG overview page.
+ *   2. SUBGRAPH MODE (drug or disease param present): a real Neo4j backend
+ *      is required to return drug/disease-specific subgraph data. We proxy
+ *      to KG_SERVICE_URL when set, and return 503 with a clear message
+ *      otherwise — we NEVER fabricate subgraph data.
  *
  * SECURITY: Cypher queries can be parameterized — we forward the `params`
  * object so the KG service can use parameterized queries. Raw string
@@ -35,6 +45,33 @@ export async function GET(req: NextRequest) {
   const auth = await requireAuth();
   if (auth.user === null) return auth.response;
 
+  const cypher = req.nextUrl.searchParams.get("cypher");
+  const limit = parseInt(req.nextUrl.searchParams.get("limit") || "100", 10);
+  const drug = req.nextUrl.searchParams.get("drug");
+  const disease = req.nextUrl.searchParams.get("disease");
+
+  // RT-007 ROOT FIX: STATS MODE — no drug/disease/cypher params means the
+  // caller wants aggregate KG stats (node count, edge count, source coverage).
+  // Use the local lib as the default. The lib proxies to KG_SERVICE_URL
+  // when set, and falls back to the local registry JSON otherwise.
+  if (!drug && !disease && !cypher) {
+    try {
+      const stats = await getKnowledgeGraphStats();
+      await writeAuditLog({
+        user: auth.user,
+        action: "kg_stats",
+        resource: "kg:stats",
+        metadata: { source: stats.source, nodeCount: stats.nodeCount, edgeCount: stats.edgeCount },
+      });
+      return NextResponse.json(stats);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      return internalError(`KG stats failed: ${msg}`);
+    }
+  }
+
+  // RT-007 ROOT FIX: SUBGRAPH MODE — a real Neo4j backend is required for
+  // drug/disease-specific subgraph data. We do NOT fabricate this.
   const availability = checkKnowledgeGraphAvailability();
   if (!availability.available) {
     return NextResponse.json(
@@ -44,18 +81,17 @@ export async function GET(req: NextRequest) {
         description: availability.description,
         reason: availability.reason,
         documentation:
-          "See Phase 2 of the build plan (Neo4j Knowledge Graph Construction). " +
-          "Set KG_SERVICE_URL to enable the proxy.",
+          "RT-007 ROOT FIX: aggregate KG stats are served from the local " +
+          "Phase 2 registry (no env var required). Drug/disease-specific " +
+          "subgraph queries require a real Neo4j backend — set " +
+          "KG_SERVICE_URL to enable the proxy, or run Neo4j locally " +
+          "(`docker-compose up -d neo4j`).",
       },
       { status: 503 }
     );
   }
 
   const kgUrl = process.env.KG_SERVICE_URL!;
-  const cypher = req.nextUrl.searchParams.get("cypher");
-  const limit = parseInt(req.nextUrl.searchParams.get("limit") || "100", 10);
-  const drug = req.nextUrl.searchParams.get("drug");
-  const disease = req.nextUrl.searchParams.get("disease");
 
   try {
     // Build a structured query for the KG service. We do NOT let the

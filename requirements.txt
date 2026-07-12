@@ -70,3 +70,36 @@ gymnasium>=0.29
 stable-baselines3>=2.2
 # pytest is needed by the Phase 3/4 test suites (tests/test_*.py).
 pytest>=7.4
+
+# ─── RT-005 ROOT FIX (Team Member 17): Literature Cross-Check (Phase 6 V1 criterion) ──
+# The V1 launch contract (project docx Section 8) requires:
+#   "At least 5 top predictions are supported by published literature"
+# Phase 4's rl_drug_ranker.py performs an automated PubMed literature cross-check
+# via Bio.Entrez (NCBI E-utilities). The audit (RT-005) found biopython was NOT
+# declared in requirements.txt, so on a fresh install the literature cross-check
+# was SKIPPED (silently) — meaning the V1 launch gate passed WITHOUT actually
+# verifying the literature criterion. This is a fundamental V1 contract violation.
+# The fix: declare biopython as a REQUIRED dependency so the literature check
+# cannot be skipped. The scientific_validation gate in rl_drug_ranker.py now
+# FAILS (not skips) if biopython is missing.
+biopython>=1.83
+
+# ─── RT-014 ROOT FIX (Team Member 17): HTTP API layer (Phase 5/6) ──────────
+# The project docx (Section 7) specifies FastAPI as the REST API framework.
+# The frontend's /api/dataset, /api/knowledge-graph, /api/rl routes proxy to
+# DATASET_SERVICE_URL, KG_SERVICE_URL, RL_SERVICE_URL — expecting FastAPI
+# HTTP services wrapping Phase 1/2/3/4. But fastapi/uvicorn were NOT in
+# requirements.txt, so there was no way to run any phase as an HTTP service.
+# The fix: declare fastapi + uvicorn so the standalone services can be built
+# and the frontend's proxy pattern actually works in production. This also
+# enables the new /api/predict and /api/top-k routes (RT-006) which wrap
+# the GT inference module via a FastAPI service.
+fastapi>=0.110
+uvicorn[standard]>=0.27
+
+# ─── RT-010 ROOT FIX (Team Member 17): Data Flywheel writeback ─────────────
+# The data flywheel (project docx Section 10) requires validated hypotheses
+# to be written back to Phase 1's database as new labeled data points. The
+# writeback modules use psycopg2-binary (already listed in Phase 1) for
+# PostgreSQL writes. No new dep required, but documenting the dependency
+# chain here for clarity.

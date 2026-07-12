@@ -3782,6 +3782,25 @@ class DrugRankingEnv(gym.Env):
         RANKER -- the Top-N candidates reflect the agent's learned
         ranking policy, not the hand-coded reward function. The reward
         is still stored for transparency/auditability.
+
+        RT-002 ROOT FIX (Team Member 17): the audit found that top-5
+        candidates were ALL the same drug (metformin) for 5 different
+        diseases — degenerate collapse. The root cause is that PPO's
+        policy collapses to a few actions on small action spaces, AND
+        the GT model gives high gnn_scores to a few "popular" drugs for
+        many diseases (metformin is heavily connected in the KG).
+
+        The fix: enforce DRUG DIVERSITY in the top-N. We sort all pairs
+        by policy_prob (descending), then iterate, keeping at most
+        ``max_per_drug`` (default 1) candidates per drug. This guarantees
+        the top-N contains at least N distinct drugs (when the candidate
+        pool has >= N distinct drugs). The user explicitly asked for
+        "top-5 contains >= 3 distinct drugs" — this fix delivers >= 5
+        distinct drugs (max_per_drug=1 by default).
+
+        Set ``max_per_drug`` > 1 to allow duplicate drugs in the top-N
+        (e.g., for ablation studies comparing the same drug across
+        diseases). The default of 1 is the production setting.
         """
         # v90 P0 ROOT FIX (BUG #19): use all_ranked (ALL pairs) instead
         # of high_ranked (only action=1 pairs). The previous code was a
@@ -3801,18 +3820,48 @@ class DrugRankingEnv(gym.Env):
         # NOT by REWARD_COL (hand-coded reward function). Falls back
         # to REWARD_COL if policy_prob is not present (legacy data).
         if "policy_prob" in df.columns and df["policy_prob"].notna().any():
-            df = df.sort_values("policy_prob", ascending=False).head(top_n)
+            df = df.sort_values("policy_prob", ascending=False)
             logger.info(
                 f"v90 BUG #19: ranked top-{top_n} from ALL {len(self.all_ranked)} "
                 f"pairs by RL policy probability (real ranker, not filter)."
             )
         else:
-            df = df.sort_values(REWARD_COL, ascending=False).head(top_n)
+            df = df.sort_values(REWARD_COL, ascending=False)
             logger.warning(
                 "V4 B-F2: policy_prob not found in all_ranked buffer. "
                 "Falling back to reward-based ranking. This should not "
                 "happen if evaluate_agent was used."
             )
+
+        # RT-002 ROOT FIX (Team Member 17): enforce DRUG DIVERSITY in
+        # the top-N. Iterate the sorted list, keep at most max_per_drug
+        # candidates per drug. This breaks the degenerate "all metformin"
+        # collapse. max_per_drug=1 (default) means the top-N has N
+        # distinct drugs.
+        max_per_drug = int(os.environ.get("RL_MAX_PER_DRUG", "1"))
+        if max_per_drug < 1:
+            max_per_drug = 1
+        if max_per_drug == 1:
+            logger.info(
+                f"RT-002 ROOT FIX: enforcing DRUG DIVERSITY (max_per_drug=1) "
+                f"in top-{top_n}. Each drug appears at most once."
+            )
+        else:
+            logger.info(
+                f"RT-002 ROOT FIX: enforcing DRUG DIVERSITY "
+                f"(max_per_drug={max_per_drug}) in top-{top_n}."
+            )
+        seen_drug_count: dict = {}
+        diverse_rows = []
+        for _, row in df.iterrows():
+            drug_name = str(row.get(DRUG_COL, ""))
+            if seen_drug_count.get(drug_name, 0) >= max_per_drug:
+                continue
+            seen_drug_count[drug_name] = seen_drug_count.get(drug_name, 0) + 1
+            diverse_rows.append(row)
+            if len(diverse_rows) >= top_n:
+                break
+        df = pd.DataFrame(diverse_rows)
         candidates: List[RankedCandidate] = []
         # Build a set of lowercase (drug, disease) tuples for known-positive check
         known_set = {(d.lower(), v.lower()) for d, v in KNOWN_POSITIVES}
@@ -7135,6 +7184,19 @@ def run_pipeline(config: PipelineConfig) -> Tuple[List[RankedCandidate], Pipelin
     # a WARNING that the literature check was skipped and can install
     # biopython (pip install biopython) to enable it.
     _literature_check_skipped: bool = False
+    # RT-005 ROOT FIX (Team Member 17): track whether biopython was
+    # MISSING (not just whether the user set RL_SKIP_LITERATURE). The
+    # audit (RT-005) found that biopython was NOT in requirements.txt,
+    # so on a fresh install the literature cross-check was SKIPPED
+    # (not failed) — the V1 launch gate passed WITHOUT verifying the
+    # "≥5 literature-supported predictions" criterion. This is a
+    # fundamental V1 contract violation.
+    #
+    # Root fix: when biopython is MISSING, the gate FAILS (not skips).
+    # Only an explicit RL_SKIP_LITERATURE env var (set by an operator
+    # who knows what they're doing) skips the check. The default
+    # behavior — fresh install, no env vars — must FAIL the gate.
+    _biopython_missing: bool = False
     if os.environ.get("RL_SKIP_LITERATURE"):
         _literature_check_skipped = True
         logger.warning(
@@ -7150,19 +7212,33 @@ def run_pipeline(config: PipelineConfig) -> Tuple[List[RankedCandidate], Pipelin
             candidates = literature_crosscheck(candidates)
         except RuntimeError as _lit_err:
             if "Biopython not installed" in str(_lit_err):
-                # P4-012: mark the check as SKIPPED so the gate excludes
-                # it from checks_passed and checks_failed. The previous
-                # code silently downgraded to a warning, which masked
-                # the missing-biopython case from the gate.
-                _literature_check_skipped = True
-                logger.warning(
-                    "P4-012 ROOT FIX: literature cross-check SKIPPED "
-                    "(biopython not installed). All candidates have "
-                    "literature_support=False. The V1 launch criterion "
-                    "'≥5 literature-supported predictions' is EXCLUDED "
-                    "from the scientific_validation gate (skipped, not "
-                    "failed). Install biopython (pip install biopython) "
-                    "to enable the literature cross-check."
+                # RT-005 ROOT FIX: biopython is missing. The previous
+                # behavior (P4-012) was to SKIP the check — the gate
+                # passed without verifying the literature criterion.
+                # The audit found this is a V1 contract violation.
+                # The fix: FAIL the gate. We do NOT set
+                # _literature_check_skipped = True; instead we set
+                # _biopython_missing = True so the gate sees
+                # literature_pass = False and adds 'literature' to
+                # checks_failed. The pipeline then refuses to write
+                # the output CSV (the scientific_validation gate
+                # raises ScientificFailureError). The operator MUST
+                # install biopython (`pip install biopython`) to pass
+                # the gate.
+                _biopython_missing = True
+                logger.error(
+                    "RT-005 ROOT FIX (Team Member 17): literature "
+                    "cross-check FAILED (biopython not installed). "
+                    "All candidates have literature_support=False. "
+                    "The V1 launch criterion '≥5 literature-supported "
+                    "predictions' is FAILED (not skipped). The "
+                    "scientific_validation gate will refuse to write "
+                    "the output CSV. Install biopython "
+                    "(`pip install biopython` — it is in "
+                    "requirements.txt as of RT-005) and re-run. "
+                    "If you genuinely need to skip the check for a "
+                    "dev/CI run, set RL_SKIP_LITERATURE=1 — but "
+                    "this is NOT acceptable for production."
                 )
             else:
                 raise
@@ -7374,10 +7450,20 @@ def run_pipeline(config: PipelineConfig) -> Tuple[List[RankedCandidate], Pipelin
         ),
         "min_literature_supported": 5,  # DOCX §8 V1 launch criterion
         "literature_check_skipped": _literature_check_skipped,
+        # RT-005 ROOT FIX: track biopython missing explicitly so the
+        # gate can FAIL (not skip) when the dep is absent.
+        "biopython_missing": _biopython_missing,
     }
-    # P4-012: set literature_pass based on whether the check was skipped.
+    # P4-012 + RT-005: set literature_pass based on whether the check
+    # was skipped (RL_SKIP_LITERATURE) OR failed (biopython missing).
+    #   - RL_SKIP_LITERATURE=1 -> literature_pass = None (skipped, gate excludes)
+    #   - biopython missing    -> literature_pass = False (gate FAILS)
+    #   - otherwise            -> True iff n_literature_supported >= 5
     if _literature_check_skipped:
         scientific_validation["literature_pass"] = None  # skipped
+    elif _biopython_missing:
+        # RT-005 ROOT FIX: biopython is missing — FAIL the gate.
+        scientific_validation["literature_pass"] = False
     else:
         scientific_validation["literature_pass"] = (
             scientific_validation["n_literature_supported"]

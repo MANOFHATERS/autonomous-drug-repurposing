@@ -742,3 +742,131 @@ def check_node_type_coverage(bridge_summary: Dict[str, Any]) -> Dict[str, Any]:
         "node_counts_by_type": node_counts,
         "docx_compliant": all_present,
     }
+
+
+# =============================================================================
+# RT-009 ROOT FIX (Team Member 17): Neo4jExporter class + __all__
+# =============================================================================
+# The audit (RT-009) found that any code path importing ``Neo4jExporter``
+# from this module crashed with ImportError, because the module only
+# exported module-level functions (export_to_neo4j, check_neo4j_readiness,
+# validate_phase1_output_contract) — no class. The Phase 1 -> Phase 2
+# Neo4j export, if invoked through ``from phase1.exporters.neo4j_exporter
+# import Neo4jExporter``, failed before any code ran.
+#
+# Root fix: provide a thin ``Neo4jExporter`` class that wraps the existing
+# ``export_to_neo4j`` function. This restores backward compatibility with
+# any consumer (CI tests, downstream scripts, external integrations) that
+# imports the class. The class is the canonical OOP entry point; the
+# module-level functions remain available for functional-style callers.
+#
+# The class deliberately does NOT re-implement the bridge logic — it
+# delegates to ``export_to_neo4j`` so there is ONE source of truth for
+# the export behavior. Duplicating the logic would re-introduce the
+# "two divergent code paths" anti-pattern that the v29 bridge fix
+# eliminated.
+class Neo4jExporter:
+    """Object-oriented wrapper around :func:`export_to_neo4j`.
+
+    RT-009 ROOT FIX (Team Member 17): restores the ``Neo4jExporter`` class
+    name that was referenced by external consumers but did not exist in
+    this module. Any ``from phase1.exporters.neo4j_exporter import
+    Neo4jExporter`` previously raised ``ImportError: cannot import name
+    'Neo4jExporter'``. The class wraps the existing functional API so
+    there is a single source of truth for the export behavior.
+
+    Examples
+    --------
+    Production (Neo4j credentials)::
+
+        exporter = Neo4jExporter(
+            neo4j_uri="bolt://localhost:7687",
+            neo4j_user="neo4j",
+            neo4j_password="drugos_dev_password",
+        )
+        report = exporter.export(phase1_processed_dir="phase1/processed_data")
+
+    Tests / demos (inject a RecordingGraphBuilder)::
+
+        from phase2.drugos_graph.phase1_bridge import RecordingGraphBuilder
+        exporter = Neo4jExporter(builder=RecordingGraphBuilder())
+        report = exporter.export(
+            phase1_processed_dir="phase1/processed_data",
+            prefer_postgres=False,
+        )
+    """
+
+    def __init__(
+        self,
+        neo4j_uri: Optional[str] = None,
+        neo4j_user: Optional[str] = None,
+        neo4j_password: Optional[str] = None,
+        *,
+        builder: Any = None,
+        phase1_processed_dir: Optional[Path | str] = None,
+        batch_size: int = 500,
+        prefer_postgres: bool = True,
+    ) -> None:
+        """Configure the exporter. Credentials OR builder must be supplied at
+        ``export()`` time if not provided here.
+
+        Parameters mirror :func:`export_to_neo4j`. Any parameter set here is
+        used as a default but can be overridden per-call at ``export()``.
+        """
+        self.neo4j_uri = neo4j_uri
+        self.neo4j_user = neo4j_user
+        self.neo4j_password = neo4j_password
+        self.builder = builder
+        self.phase1_processed_dir = phase1_processed_dir
+        self.batch_size = batch_size
+        self.prefer_postgres = prefer_postgres
+
+    def export(
+        self,
+        *,
+        neo4j_uri: Optional[str] = None,
+        neo4j_user: Optional[str] = None,
+        neo4j_password: Optional[str] = None,
+        phase1_processed_dir: Optional[Path | str] = None,
+        builder: Any = None,
+        batch_size: Optional[int] = None,
+        prefer_postgres: Optional[bool] = None,
+    ) -> Dict[str, Any]:
+        """Run the Phase 1 -> Neo4j export via :func:`export_to_neo4j`.
+
+        Any ``None`` argument falls back to the value set at ``__init__``.
+        This lets callers configure the exporter once and override per-call.
+        """
+        return export_to_neo4j(
+            neo4j_uri=neo4j_uri if neo4j_uri is not None else self.neo4j_uri,
+            neo4j_user=neo4j_user if neo4j_user is not None else self.neo4j_user,
+            neo4j_password=neo4j_password if neo4j_password is not None else self.neo4j_password,
+            phase1_processed_dir=phase1_processed_dir if phase1_processed_dir is not None else self.phase1_processed_dir,
+            builder=builder if builder is not None else self.builder,
+            batch_size=batch_size if batch_size is not None else self.batch_size,
+            prefer_postgres=prefer_postgres if prefer_postgres is not None else self.prefer_postgres,
+        )
+
+    def check_readiness(self, pg_session: Any = None) -> Dict[str, Any]:
+        """Wrap :func:`check_neo4j_readiness` for OO callers."""
+        return check_neo4j_readiness(pg_session)
+
+    @staticmethod
+    def validate_contract(phase1_processed_dir: Optional[Path | str] = None) -> Dict[str, Any]:
+        """Wrap :func:`validate_phase1_output_contract` for OO callers."""
+        return validate_phase1_output_contract(phase1_processed_dir)
+
+
+# RT-009 ROOT FIX: explicit __all__ so it is crystal-clear what this module
+# exports. Prevents future regressions where a class or function is silently
+# removed and downstream consumers only discover the breakage at runtime.
+__all__ = [
+    "Neo4jExporter",
+    "Phase1OutputContract",
+    "DOCX_REQUIRED_NODE_TYPES",
+    "export_to_neo4j",
+    "check_neo4j_readiness",
+    "validate_phase1_output_contract",
+    "check_node_type_coverage",
+    "is_synthetic_inchikey",
+]

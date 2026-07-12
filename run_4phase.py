@@ -252,8 +252,49 @@ def run_bridge(phase1_dir: Path) -> Tuple[Any, Any]:
 
     from drugos_graph.phase1_bridge import run_phase1_to_phase2
 
+    # RT-012 ROOT FIX (Team Member 17): honor USE_NEO4J_BUILDER env var so
+    # the Makefile's `make run` target can opt in to Neo4j persistence.
+    # When USE_NEO4J_BUILDER=1 AND DRUGOS_NEO4J_URI is set, we construct
+    # a real DrugOSGraphBuilder and pass it to the bridge — the KG is
+    # persisted to Neo4j. Otherwise we fall back to the bridge's default
+    # RecordingGraphBuilder (in-memory, NOT persisted) and print a clear
+    # warning so the engineer knows the KG is not persisted.
+    builder = None
+    use_neo4j = os.environ.get("USE_NEO4J_BUILDER", "").lower() in ("1", "true", "yes")
+    neo4j_uri = os.environ.get("DRUGOS_NEO4J_URI")
+    if use_neo4j and neo4j_uri:
+        try:
+            from drugos_graph import DrugOSGraphBuilder, Neo4jConfig
+            neo4j_cfg = Neo4jConfig(
+                uri=neo4j_uri,
+                user=os.environ.get("DRUGOS_NEO4J_USER", "neo4j"),
+                password=os.environ.get("DRUGOS_NEO4J_PASSWORD", ""),
+            )
+            builder = DrugOSGraphBuilder(neo4j_cfg)
+            logger.info(
+                "RT-012 ROOT FIX: using DrugOSGraphBuilder (persists to "
+                "Neo4j at %s). The KG will be queryable after this run.",
+                neo4j_uri,
+            )
+        except Exception as exc:
+            logger.warning(
+                "RT-012: USE_NEO4J_BUILDER=1 but could not construct "
+                "DrugOSGraphBuilder (%s). Falling back to "
+                "RecordingGraphBuilder (in-memory, NOT persisted).",
+                exc,
+            )
+            builder = None
+    else:
+        logger.warning(
+            "RT-012: DRUGOS_NEO4J_URI not set or USE_NEO4J_BUILDER unset. "
+            "Using RecordingGraphBuilder (in-memory, NOT persisted to "
+            "Neo4j). To persist: export DRUGOS_NEO4J_URI=bolt://localhost:7687 "
+            "and USE_NEO4J_BUILDER=1, then re-run."
+        )
+
     result = run_phase1_to_phase2(
         phase1_processed_dir=str(resolved_phase1_dir),
+        builder=builder,  # RT-012: None -> bridge uses RecordingGraphBuilder
         prefer_postgres=False,  # CSV path for dev/CI; set True for prod
     )
     builder = result["builder"]
@@ -326,12 +367,17 @@ def run_phase3_and_4(
     rl_top_n: int,
     output_dir: str,
     seed: int,
-    allow_invalid_output: bool,
 ) -> Tuple[Any, Dict[str, Any]]:
     """Phase 3 + 4: GT training + RL ranking via ``GTRLBridge``.
 
     Uses the REAL Phase 2 HeteroData (passed as ``graph_data``) instead
     of ``build_demo_graph``.
+
+    RT-004 ROOT FIX (Team Member 17): the ``allow_invalid_output`` parameter
+    has been REMOVED entirely. The scientific-validation gate is now
+    UN-BYPASSABLE — if the gate fails, the pipeline fails with exit code 4.
+    No escape hatch exists. A stressed engineer can no longer ship invalid
+    CSVs by passing ``--allow-invalid-output``.
     """
     logger.info("=" * 70)
     logger.info("PHASE 3 + 4: Graph Transformer Training + RL Ranking")
@@ -344,11 +390,13 @@ def run_phase3_and_4(
         device="cpu",
         seed=seed,
     )
+    # RT-004 ROOT FIX: allow_invalid_output is HARDCODED to False. The
+    # bridge's safety net cannot be disabled from run_4phase.py.
     candidates_df, results = bridge.run_full_pipeline(
         gt_epochs=gt_epochs,
         rl_timesteps=rl_timesteps,
         rl_top_n=rl_top_n,
-        allow_invalid_output=allow_invalid_output,
+        allow_invalid_output=False,
         graph_data=graph_data,
     )
     return candidates_df, results
@@ -391,10 +439,15 @@ def main() -> int:
         "--seed", type=int, default=42,
         help="Random seed for RNG initialization (default 42)",
     )
-    parser.add_argument(
-        "--allow-invalid-output", action="store_true",
-        help="Bypass scientific-validation safety net (DEBUGGING ONLY)",
-    )
+    # RT-004 ROOT FIX (Team Member 17): the --allow-invalid-output flag has
+    # been REMOVED entirely. The scientific-validation safety net is now
+    # UN-BYPASSABLE from this entry point. If the gate fails, the pipeline
+    # exits with code 4 — period. A stressed engineer can no longer ship
+    # invalid CSVs (degenerate RL candidates, AUC < 0.85, dangerous
+    # predictions like warfarin->epilepsy) by passing a debug flag.
+    # If you genuinely need to inspect failing output for debugging, read
+    # the CSVs written to output_dir/ BEFORE the gate fires — they are
+    # always written, the gate only controls the EXIT CODE.
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir)
@@ -410,7 +463,9 @@ def main() -> int:
         "rl_timesteps": args.rl_timesteps,
         "rl_top_n": args.rl_top_n,
         "seed": args.seed,
-        "allow_invalid_output": args.allow_invalid_output,
+        # RT-004 ROOT FIX: allow_invalid_output is always False — the
+        # scientific-validation gate cannot be bypassed.
+        "allow_invalid_output": False,
     }
     _write_manifest(output_dir, phase1_dir, config_snapshot)
 
@@ -485,7 +540,6 @@ def main() -> int:
             rl_top_n=args.rl_top_n,
             output_dir=str(output_dir),
             seed=args.seed,
-            allow_invalid_output=args.allow_invalid_output,
         )
 
         # ─── Summary (R-022: removed duplicate 9-line block) ───────────
@@ -527,8 +581,12 @@ def main() -> int:
 
         if not overall_pass:
             print("\n" + "=" * 70)
-            print("SCIENTIFIC VALIDATION FAILED. Exiting non-zero.")
-            print("Use --allow-invalid-output for debugging.")
+            print("SCIENTIFIC VALIDATION FAILED. Exiting non-zero (exit code 4).")
+            print("RT-004 ROOT FIX: the --allow-invalid-output escape hatch has")
+            print("been REMOVED. The scientific-validation gate is un-bypassable.")
+            print("The CSVs in the output directory were written BEFORE the gate")
+            print("fired — inspect them there for debugging. The gate ONLY")
+            print("controls the exit code, not whether artifacts are written.")
             print("=" * 70)
             return 4
         return 0

@@ -14,8 +14,22 @@
 # working Phase 2 backend. Set DRUGOS_NEO4J_URI=bolt://localhost:7687
 # in your .env to use it.
 #
+# RT-011 ROOT FIX (Team Member 17): the previous docker-compose.yml defined
+# ONLY postgres + neo4j. There was no service for Phase 1 (Airflow ETL),
+# Phase 2 (KG builder), Phase 3 (GT trainer), Phase 4 (RL ranker), or the
+# frontend. A new engineer running `docker-compose up` got only the
+# databases — no ML pipeline, no dashboard. They had to read 5 different
+# README files to figure out how to run each phase manually.
+#
+# Root fix: add services for phase1-airflow, phase2-kg-builder, phase3-trainer,
+# phase4-rl, and frontend. Use depends_on to order startup. Each phase
+# service has a healthcheck so `docker-compose up` produces a fully working
+# platform — databases, ML pipeline, AND dashboard — from a single command.
+#
 # Usage:
-#   docker-compose up -d postgres neo4j
+#   docker-compose up -d                          # full stack
+#   docker-compose up -d postgres neo4j           # databases only
+#   docker-compose up -d frontend                 # dashboard only
 #   DATABASE_URL=postgresql://drugos:drugos_dev_password@localhost:5432/drugos?schema=public npm run db:migrate
 #   DRUGOS_NEO4J_URI=bolt://localhost:7687 DRUGOS_NEO4J_USER=neo4j DRUGOS_NEO4J_PASSWORD=drugos_dev_password npm run dev
 
@@ -77,6 +91,179 @@ services:
     # Uncomment to keep Neo4j out of the default `docker-compose up`:
     # profiles: [dev-only]
 
+  # RT-011 ROOT FIX (Team Member 17): Phase 1 — Airflow ETL pipeline.
+  # Runs the 7-source data ingestion (ChEMBL, DrugBank, UniProt, STRING,
+  # DisGeNET, OMIM, PubChem) on a schedule. Writes cleaned CSVs to the
+  # shared `phase1-data` volume for Phase 2 to consume.
+  phase1-airflow:
+    build:
+      context: ./phase1
+      dockerfile: docker/Dockerfile.airflow
+    container_name: drugos-phase1-airflow
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql://drugos:drugos_dev_password@postgres:5432/drugos
+      AIRFLOW__CORE__FERNET_KEY: "dev_fernet_key_replace_in_production"
+      PHASE1_PROCESSED_DIR: /opt/phase1/processed_data
+    volumes:
+      - ./phase1:/opt/phase1
+      - phase1-data:/opt/phase1/processed_data
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "airflow jobs check --job-type SchedulerJob --hostname $(hostname) || exit 1"]
+      interval: 30s
+      timeout: 30s
+      retries: 5
+      start_period: 60s
+    # Phase 1 is resource-heavy (downloads GBs of biomedical data). Use a
+    # profile so it does NOT start by default — invoke explicitly:
+    #   docker-compose up -d phase1-airflow
+    profiles: [full-stack, etl]
+
+  # RT-011 ROOT FIX (Team Member 17): Phase 2 — Knowledge Graph builder.
+  # Reads Phase 1 CSVs from the shared volume, builds the Neo4j KG via
+  # the bridge, and exposes a small FastAPI service at :8001 for
+  # /stats, /query, /cypher (consumed by the frontend /api/knowledge-graph).
+  phase2-kg-builder:
+    build:
+      context: .
+      dockerfile: phase2/drugos_graph/Dockerfile
+    container_name: drugos-phase2-kg
+    environment:
+      DRUGOS_NEO4J_URI: bolt://neo4j:7687
+      DRUGOS_NEO4J_USER: neo4j
+      DRUGOS_NEO4J_PASSWORD: drugos_dev_password
+      PHASE1_PROCESSED_DIR: /opt/phase1/processed_data
+      KG_SERVICE_PORT: "8001"
+    ports:
+      - "8001:8001"
+    volumes:
+      - ./phase2:/opt/phase2
+      - ./:/opt/repo
+      - phase1-data:/opt/phase1/processed_data:ro
+    depends_on:
+      neo4j:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8001/healthz || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    command: >
+      bash -lc "python -c 'from drugos_graph.phase1_bridge import run_phase1_to_phase2; run_phase1_to_phase2(phase1_processed_dir=\"/opt/phase1/processed_data\", prefer_postgres=False)'
+      && uvicorn phase2.drugos_graph.kg_api:app --host 0.0.0.0 --port 8001"
+    profiles: [full-stack, kg]
+
+  # RT-011 ROOT FIX (Team Member 17): Phase 3 — Graph Transformer trainer.
+  # Runs run_4phase.py with the GT training loop. Writes the trained
+  # checkpoint + graph_state.pt to the shared `ml-artifacts` volume.
+  # Exposes a small FastAPI service at :8002 for /predict and /top-k
+  # (consumed by the frontend /api/predict and /api/top-k routes).
+  phase3-trainer:
+    build:
+      context: .
+      dockerfile: Dockerfile.ml
+    container_name: drugos-phase3-gt
+    environment:
+      PHASE1_PROCESSED_DIR: /opt/phase1/processed_data
+      ML_ARTIFACTS_DIR: /opt/ml_artifacts
+      GT_SERVICE_PORT: "8002"
+    ports:
+      - "8002:8002"
+    volumes:
+      - ./:/opt/repo
+      - phase1-data:/opt/phase1/processed_data:ro
+      - ml-artifacts:/opt/ml_artifacts
+    depends_on:
+      phase2-kg-builder:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8002/healthz || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+    command: >
+      bash -lc "python run_4phase.py --output-dir /opt/ml_artifacts
+      && uvicorn scripts.gt_api:app --host 0.0.0.0 --port 8002"
+    profiles: [full-stack, ml]
+
+  # RT-011 ROOT FIX (Team Member 17): Phase 4 — RL Hypothesis Ranker.
+  # Reads the GT predictions CSV from the shared `ml-artifacts` volume,
+  # runs the PPO training loop, and writes top_candidates_*.csv.
+  # Exposes a small FastAPI service at :8003 for /rank (consumed by
+  # the frontend /api/rl route via RL_SERVICE_URL).
+  phase4-rl:
+    build:
+      context: .
+      dockerfile: Dockerfile.ml
+    container_name: drugos-phase4-rl
+    environment:
+      ML_ARTIFACTS_DIR: /opt/ml_artifacts
+      RL_SERVICE_PORT: "8003"
+    ports:
+      - "8003:8003"
+    volumes:
+      - ./:/opt/repo
+      - ml-artifacts:/opt/ml_artifacts:ro
+    depends_on:
+      phase3-trainer:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8003/healthz || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    command: >
+      bash -lc "uvicorn scripts.rl_api:app --host 0.0.0.0 --port 8003"
+    profiles: [full-stack, ml]
+
+  # RT-011 ROOT FIX (Team Member 17): Frontend (Next.js dashboard).
+  # The React dashboard served by Next.js. Reads ML predictions from
+  # phase3-trainer (:8002) and phase4-rl (:8003) via the env vars
+  # GT_SERVICE_URL and RL_SERVICE_URL. Reads KG stats from phase2-kg-builder
+  # (:8001) via KG_SERVICE_URL. Reads dataset stats from phase1-airflow
+  # via DATASET_SERVICE_URL.
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: drugos-frontend
+    environment:
+      DATABASE_URL: postgresql://drugos:drugos_dev_password@postgres:5432/drugos?schema=public
+      DRUGOS_NEO4J_URI: bolt://neo4j:7687
+      DRUGOS_NEO4J_USER: neo4j
+      DRUGOS_NEO4J_PASSWORD: drugos_dev_password
+      DATASET_SERVICE_URL: http://phase1-airflow:8000
+      KG_SERVICE_URL: http://phase2-kg-builder:8001
+      GT_SERVICE_URL: http://phase3-trainer:8002
+      RL_SERVICE_URL: http://phase4-rl:8003
+      GT_CHECKPOINT_DIR: /opt/ml_artifacts
+      RL_OUTPUT_DIR: /opt/ml_artifacts
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./frontend:/opt/frontend
+      - ml-artifacts:/opt/ml_artifacts:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      phase3-trainer:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:3000/api/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    profiles: [full-stack, dashboard]
+
 volumes:
   drugos_pgdata:
   drugos_neo4jdata:
+  phase1-data:
+  ml-artifacts:
