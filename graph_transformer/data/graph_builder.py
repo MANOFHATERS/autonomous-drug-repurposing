@@ -930,9 +930,19 @@ class BiomedicalGraphBuilder:
         except ImportError:
             _prev_available = False
         for pw in random_pathways:
-            n_diseases = 1
-            n_diseases = min(n_diseases, n_diseases)
-            if n_diseases <= 0:
+            # P3-011 ROOT FIX (variable shadowing): the previous code did
+            #   n_diseases = 1
+            #   n_diseases = min(n_diseases, n_diseases)   ← no-op (1 = min(1, 1))
+            # which OVERWROTE the outer ``n_diseases = len(disease_names)``
+            # (line 883, the total disease population size) with the
+            # per-pathway sample size (1). The shadowed value was not read
+            # again in this scope, so there was no RUNTIME bug — but the
+            # shadowing was a maintenance trap: any future edit that
+            # referenced ``n_diseases`` after this loop would silently get
+            # 1 instead of the population size. Renamed to
+            # ``n_diseases_per_pathway`` and removed the no-op ``min``.
+            n_diseases_per_pathway = 1
+            if n_diseases_per_pathway <= 0:
                 continue
             if _prev_available and len(disease_names) > 1:
                 # Weight diseases: rarer (lower prevalence) -> LOWER weight
@@ -952,10 +962,10 @@ class BiomedicalGraphBuilder:
                 _w_arr = np.array(weights, dtype=np.float64)
                 _w_arr = _w_arr / _w_arr.sum()
                 diseases = rng.choice(
-                    disease_names, size=n_diseases, replace=False, p=_w_arr
+                    disease_names, size=n_diseases_per_pathway, replace=False, p=_w_arr
                 )
             else:
-                diseases = rng.choice(disease_names, size=n_diseases, replace=False)
+                diseases = rng.choice(disease_names, size=n_diseases_per_pathway, replace=False)
             for d in diseases:
                 builder.add_edge("pathway", "disrupted_in", "disease", pw, str(d))
 
@@ -1300,18 +1310,25 @@ class BiomedicalGraphBuilder:
     #   Gene           -> (skipped -- not in the DOCX 5-node-type spec;
     #                    gene info is captured via protein->pathway edges)
     #
-    # Edge relation mapping (Phase 2 -> Phase 3):
-    #   (Compound, inhibits, Protein)         -> (drug, inhibits, protein)
-    #   (Compound, activates, Protein)        -> (drug, activates, protein)
-    #   (Compound, targets, Protein)          -> (drug, inhibits, protein)
-    #   (Compound, treats, Disease)           -> (drug, treats, disease)
-    #   (Compound, tested_for, Disease)       -> (drug, tested_for, disease)
-    #   (Compound, causes, ClinicalOutcome)   -> (drug, causes, clinical_outcome)
-    #   (Protein, part_of, Pathway)           -> (protein, part_of, pathway)
-    #   (Protein, participates_in, Pathway)   -> (protein, part_of, pathway)
-    #   (Pathway, disrupted_in, Disease)      -> (pathway, disrupted_in, disease)
-    #   Other edges (Gene->Disease, Protein->Protein) -> skipped (not in
-    #   the Phase 3 14-edge-type schema; logged at INFO for auditability)
+    # Edge relation mapping (Phase 2 → Phase 3):
+    #   (Compound, inhibits, Protein)         → (drug, inhibits, protein)
+    #   (Compound, activates, Protein)        → (drug, activates, protein)
+    #   (Compound, targets, Protein)          → (drug, binds, protein)       [P3-001 fix]
+    #   (Compound, allosterically_modulates, Protein) → (drug, modulates, protein) [P3-002 fix]
+    #   (Compound, unknown, Protein)          → DROPPED (never map unknown to a mechanism) [P3-001 fix]
+    #   (Compound, treats, Disease)           → (drug, treats, disease)
+    #   (Compound, tested_for, Disease)       → (drug, tested_for, disease)
+    #   (Compound, causes, ClinicalOutcome)   → (drug, causes, clinical_outcome)
+    #   (Compound, has_clinical_outcome, ClinicalOutcome) → (drug, causes, clinical_outcome) [P3-009 unification]
+    #   (Protein, part_of, Pathway)           → (protein, part_of, pathway)
+    #   (Protein, participates_in, Pathway)   → (protein, part_of, pathway)
+    #   (Pathway, disrupted_in, Disease)      → (pathway, disrupted_in, disease)
+    #   DERIVED (P3-003 fix): (pathway, disrupted_in, disease) edges are
+    #   derived from (Gene, associated_with, Disease) + (Gene, encodes,
+    #   Protein) + (Protein, participates_in, Pathway) — see the derivation
+    #   block inside from_phase1_staged_data.
+    #   Other edges (Gene→Disease raw, Protein→Protein PPI) → skipped (not
+    #   in the Phase 3 18-edge-type schema; logged at INFO for auditability)
     # ------------------------------------------------------------------
     _PHASE2_TO_PHASE3_NODE_TYPE: Dict[str, str] = {
         "Compound": "drug",
@@ -1322,14 +1339,45 @@ class BiomedicalGraphBuilder:
     }
 
     _PHASE2_TO_PHASE3_EDGE_TYPE: Dict[Tuple[str, str, str], Tuple[str, str, str]] = {
+        # ─── Direct drug→protein mechanism edges (scientifically accurate) ──
         ("Compound", "inhibits", "Protein"): ("drug", "inhibits", "protein"),
         ("Compound", "activates", "Protein"): ("drug", "activates", "protein"),
-        ("Compound", "targets", "Protein"): ("drug", "inhibits", "protein"),
-        ("Compound", "unknown", "Protein"): ("drug", "inhibits", "protein"),
-        ("Compound", "allosterically_modulates", "Protein"): ("drug", "activates", "protein"),
+        # P3-001 ROOT FIX (CRITICAL, scientific): "targets" in DrugBank/ChEMBL
+        # means "binds to (direction UNKNOWN)" — NOT inhibition. The previous
+        # mapping ("targets" → "inhibits") taught the GT model that ALL
+        # drug-protein binding is inhibition, corrupting the multi-hop signal.
+        # The scientifically correct neutral edge type is "binds" (added to
+        # EDGE_TYPES in __init__.py via the P3-001/P3-002 schema fix). This
+        # preserves the binding signal AND keeps the drug connected to the
+        # protein→pathway→disease 3-hop pattern (dropping the edge would
+        # disconnect drugs whose only Phase 2 action is "targets").
+        ("Compound", "targets", "Protein"): ("drug", "binds", "protein"),
+        # P3-002 ROOT FIX (CRITICAL, scientific): allosteric modulators
+        # include BOTH PAM (positive, enhances activity) AND NAM (negative,
+        # inhibits). The previous mapping ("allosterically_modulates" →
+        # "activates") labeled ALL allosteric modulators as activators,
+        # which is wrong for NAM drugs (e.g., benzodiazepine inverse
+        # agonists). The scientifically correct neutral edge type is
+        # "modulates" (added to EDGE_TYPES in __init__.py). Future PAM/NAM
+        # disambiguation can split this into "activates"/"inhibits" by
+        # reading ChEMBL standard_type/standard_relation — but until that
+        # data is available in the Phase 2 staged edges, "modulates" is
+        # the honest representation.
+        ("Compound", "allosterically_modulates", "Protein"): ("drug", "modulates", "protein"),
+        # NOTE: ("Compound", "unknown", "Protein") is INTENTIONALLY ABSENT
+        # from this dict. Per the P3-001 issue mandate: "Never map unknown
+        # to a specific mechanism." Unknown-direction edges are DROPPED at
+        # the Phase 2→3 boundary (the lookup returns None and the edge is
+        # skipped with an INFO log). This is the only scientifically
+        # defensible choice — mapping unknown to inhibits/activates/binds
+        # would fabricate a mechanism the source data does not support.
         ("Compound", "treats", "Disease"): ("drug", "treats", "disease"),
         ("Compound", "tested_for", "Disease"): ("drug", "tested_for", "disease"),
         ("Compound", "causes", "ClinicalOutcome"): ("drug", "causes", "clinical_outcome"),
+        # P3-009 ROOT FIX (unification): also accept DrugBank's
+        # has_clinical_outcome relation (the phase2_adapter path uses this
+        # relation name). Both paths now produce identical Phase 3 graphs.
+        ("Compound", "has_clinical_outcome", "ClinicalOutcome"): ("drug", "causes", "clinical_outcome"),
         ("Protein", "part_of", "Pathway"): ("protein", "part_of", "pathway"),
         ("Protein", "participates_in", "Pathway"): ("protein", "part_of", "pathway"),
         ("Pathway", "disrupted_in", "Disease"): ("pathway", "disrupted_in", "disease"),
@@ -1526,6 +1574,162 @@ class BiomedicalGraphBuilder:
                     f"({src_label}, {rel}, {dst_label}))."
                 )
 
+        # ─── P3-003 ROOT FIX (CRITICAL, scientific): derive ──────────
+        # (pathway, disrupted_in, disease) edges from Gene→Disease +
+        # Gene→Protein + Protein→Pathway associations.
+        #
+        # WHY THIS IS NEEDED: the DOCX's core scientific requirement is the
+        # 3-hop multi-hop pattern Drug → inhibits/activates → Protein →
+        # part_of → Pathway → disrupted_in → Disease. The Graph Transformer
+        # learns this pattern from (pathway, disrupted_in, disease) edges
+        # in the graph. The Phase 1→2 bridge does NOT produce these edges
+        # directly — they must be DERIVED. Without them the GT model has
+        # ZERO pathway→disease edges and CANNOT learn the multi-hop
+        # therapeutic mechanism (GT AUC at or below random, KP recovery
+        # 0%, scientific validation gate FAILS).
+        #
+        # The phase2_adapter.adapt_phase2_to_phase3 function (used by
+        # run_4phase.py via graph_data=) DOES derive these edges. But
+        # from_phase1_staged_data (used by run_full_platform.py and
+        # run_real_pipeline.py via phase1_staged_data=) did NOT — meaning
+        # the DEFAULT runner (`make run` → run_full_platform.py) produced
+        # a graph with NO pathway→disease edges. This fix unifies the two
+        # paths: both now derive pathway→disease edges identically.
+        #
+        # DERIVATION CHAIN (mirrors adapt_phase2_to_phase3 Step 3-5):
+        #   For each (Gene G, associated_with, Disease D):
+        #     1. Map G → UniProt protein P (via ("Gene","encodes","Protein")
+        #        edges, falling back to gene_symbol == protein.name match)
+        #     2. Map P → Pathway W (via ("Protein","participates_in","Pathway")
+        #        or ("Protein","part_of","Pathway") edges)
+        #     3. Add (W, disrupted_in, D) to the Phase 3 graph
+        # A pathway is "disrupted in" a disease if any of its member
+        # proteins' genes are associated with that disease — this is the
+        # scientifically correct definition (DisGeNET/OMIM GDAs bridge
+        # genes to diseases; STRING bridges proteins to pathways; the
+        # gene→protein bridge connects the two).
+        gene_nodes = getattr(staged_data, "gene_nodes", []) or []
+
+        # Build gene_id → gene_symbol map (Gene nodes are NOT registered in
+        # Phase 3 — they're a Phase 2 intermediate used only for derivation).
+        gene_id_to_symbol: Dict[str, str] = {}
+        for gnode in gene_nodes:
+            gid = str(gnode.get("id", "")).strip()
+            if not gid:
+                continue
+            # Prefer the explicit gene_symbol field; fall back to the
+            # node name (some bridges populate name but not gene_symbol).
+            gsym = str(gnode.get("gene_symbol", gnode.get("name", ""))).strip().upper()
+            if gsym:
+                gene_id_to_symbol[gid] = gsym
+
+        # Build protein_name (uppercased) → protein_phase2_id map for
+        # gene_symbol → protein matching.
+        protein_name_to_id: Dict[str, str] = {}
+        for pnode in node_collections.get("Protein", []):
+            pid = str(pnode.get("id", "")).strip()
+            pname = str(pnode.get("name", "")).strip().upper()
+            if pid and pname:
+                protein_name_to_id[pname] = pid
+
+        # Build gene_id → uniprot_id map via:
+        #   (a) explicit ("Gene","encodes","Protein") edges (preferred),
+        #   (b) gene_symbol == protein.name fallback.
+        gene_id_to_uniprot: Dict[str, str] = {}
+        encodes_edges = edges_staged.get(("Gene", "encodes", "Protein"), []) or []
+        for edge in encodes_edges:
+            g_id = str(edge.get("src_id", edge.get("source_id", ""))).strip()
+            p_id = str(edge.get("dst_id", edge.get("target_id", ""))).strip()
+            if g_id and p_id:
+                gene_id_to_uniprot[g_id] = p_id
+        # Fallback: gene_symbol → protein name match (fills in genes that
+        # have no explicit encodes edge but whose symbol matches a known
+        # protein name — common when ChEMBL+UniProt are loaded but the
+        # OMIM encodes bridge was not).
+        for g_id, gsym in gene_id_to_symbol.items():
+            if g_id in gene_id_to_uniprot:
+                continue
+            p_id = protein_name_to_id.get(gsym)
+            if p_id:
+                gene_id_to_uniprot[g_id] = p_id
+
+        # Build protein_id → [pathway_id] map from BOTH participates_in
+        # and part_of relations (Phase 2 may use either; both map to the
+        # same Phase 3 (protein, part_of, pathway) edge type).
+        protein_id_to_pathway_ids: Dict[str, List[str]] = {}
+        for _p2_rel in ("participates_in", "part_of"):
+            for edge in edges_staged.get(("Protein", _p2_rel, "Pathway"), []) or []:
+                p_id = str(edge.get("src_id", edge.get("source_id", ""))).strip()
+                w_id = str(edge.get("dst_id", edge.get("target_id", ""))).strip()
+                if p_id and w_id:
+                    protein_id_to_pathway_ids.setdefault(p_id, []).append(w_id)
+
+        # Derive (pathway, disrupted_in, disease) edges.
+        # Use BOTH "associated_with" (DisGeNET) and "susceptible_to" (OMIM)
+        # gene-disease relations — both indicate the gene's disruption is
+        # linked to the disease, so the pathway containing that gene's
+        # protein is "disrupted in" the disease.
+        gene_disease_edges: List[Dict[str, Any]] = []
+        for _g2d_rel in ("associated_with", "susceptible_to"):
+            gene_disease_edges.extend(
+                edges_staged.get(("Gene", _g2d_rel, "Disease"), []) or []
+            )
+
+        derived_added = 0
+        seen_derived: set = set()  # dedup (pathway_name, disease_name)
+        for edge in gene_disease_edges:
+            g_id = str(edge.get("src_id", edge.get("source_id", ""))).strip()
+            d_id = str(edge.get("dst_id", edge.get("target_id", ""))).strip()
+            if not g_id or not d_id:
+                continue
+            p_id = gene_id_to_uniprot.get(g_id)
+            if not p_id:
+                continue
+            disease_name = phase2_id_to_phase3_name.get(("disease", d_id))
+            if disease_name is None:
+                continue
+            for w_id in protein_id_to_pathway_ids.get(p_id, []):
+                pathway_name = phase2_id_to_phase3_name.get(("pathway", w_id))
+                if pathway_name is None:
+                    continue
+                dedup_key = (pathway_name, disease_name)
+                if dedup_key in seen_derived:
+                    continue
+                seen_derived.add(dedup_key)
+                if builder.add_edge(
+                    "pathway", "disrupted_in", "disease", pathway_name, disease_name
+                ):
+                    derived_added += 1
+
+        if derived_added > 0:
+            edges_by_phase3_type[("pathway", "disrupted_in", "disease")] = (
+                edges_by_phase3_type.get(("pathway", "disrupted_in", "disease"), 0)
+                + derived_added
+            )
+            logger.info(
+                f"from_phase1_staged_data: P3-003 ROOT FIX — derived "
+                f"{derived_added} (pathway, disrupted_in, disease) edges "
+                f"from {len(gene_disease_edges)} gene-disease associations "
+                f"via gene→protein→pathway mapping "
+                f"({len(gene_id_to_uniprot)} genes mapped to proteins, "
+                f"{len(protein_id_to_pathway_ids)} proteins mapped to pathways). "
+                f"The GT model can now learn the drug→protein→pathway→disease "
+                f"multi-hop pattern."
+            )
+        else:
+            logger.warning(
+                f"from_phase1_staged_data: P3-003 ROOT FIX — derived ZERO "
+                f"(pathway, disrupted_in, disease) edges. The GT model will "
+                f"have NO pathway→disease edges and CANNOT learn the "
+                f"multi-hop therapeutic mechanism. Check that Phase 1 "
+                f"produced OMIM/DisGeNET gene-disease associations AND "
+                f"STRING protein-pathway memberships AND that the "
+                f"gene_symbol → protein.name match worked. Inputs: "
+                f"gene_nodes={len(gene_nodes)}, gene_id_to_uniprot={len(gene_id_to_uniprot)}, "
+                f"protein_id_to_pathway_ids={len(protein_id_to_pathway_ids)}, "
+                f"gene_disease_edges={len(gene_disease_edges)}."
+            )
+
         # ─── Finalize: build reverse edges + tensorize ──────────────
         # V92+V100+P3-C01 ROOT FIX (BUG P3-001 / BUG #1, P0 CRITICAL):
         # the previous code called the DEPRECATED ``_build_reverse_edges``
@@ -1556,6 +1760,9 @@ class BiomedicalGraphBuilder:
         _reverse_rels = {
             "inhibited_by", "activated_by", "has_member",
             "disrupted_by", "treated_by", "tested_on", "caused_by",
+            # P3-001/P3-002 root fix: reverse relations for the new
+            # neutral drug→protein edge types (binds, modulates).
+            "bound_by", "modulated_by",
         }
         reverse_edge_count = 0
         for (src_t, rel_t, tgt_t), tensor in edge_indices.items():

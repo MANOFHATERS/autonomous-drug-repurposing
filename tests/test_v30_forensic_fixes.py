@@ -390,8 +390,9 @@ def test_self_loop_weight_init_05():
     The previous V30 5.4 fix set self_loop_weight to 0.5, claiming it
     gave self-loops "equal standing with a single edge-type message".
     The P3-S01 scientific audit found 0.5 was still TOO HIGH: combined
-    with cross_type_norm ~ 0.27 for 14 edge types, self-loops
-    contributed ~38% of the total message -- disproportionately high
+    with cross_type_norm ~ 0.27 for the original 14 edge types (now 18
+    after the P3-001/P3-002 schema fix added binds+modulates), self-loops
+    contributed ~38% of the total message — disproportionately high
     for a "residual" connection. The P3-S01 fix initializes to 1.0
     (standard residual identity, He et al. 2016) and lets gradient
     descent learn the right balance.
@@ -408,18 +409,27 @@ def test_self_loop_weight_init_05():
 # FILE 3 (graph_builder.py) fixes
 # ============================================================================
 
-def test_finalize_emits_all_14_edge_types():
-    """finalize() must emit ALL 14 canonical edge types (3.1)."""
+def test_finalize_emits_all_18_edge_types():
+    """finalize() must emit ALL 18 canonical edge types (3.1).
+
+    P3-001/P3-002 ROOT FIX: the schema was expanded from 14 to 18 edge
+    types (added ('drug','binds','protein'), ('drug','modulates',
+    'protein') + their reverses ('protein','bound_by','drug'),
+    ('protein','modulated_by','drug')). This test was updated from 14
+    to 18 to match the new schema. The original 14-edge-types test
+    would have FAILED after the P3-001/P3-002 fix, masking the schema
+    change — this update keeps the test meaningful.
+    """
     from graph_transformer.data.graph_builder import BiomedicalGraphBuilder
     from graph_transformer.data import EDGE_TYPES
     nf, ei, nm, kp = BiomedicalGraphBuilder.build_demo_graph(
         num_drugs=5, num_diseases=5, num_known_treatments=2,
         known_positives=[('aspirin', 'cardiovascular disease')],
     )
-    assert len(ei) == 14, f"Expected 14 edge types, got {len(ei)}: {list(ei.keys())}"
+    assert len(ei) == 18, f"Expected 18 edge types, got {len(ei)}: {list(ei.keys())}"
     for et in EDGE_TYPES:
         assert et in ei, f"Missing edge type {et}"
-    print(f"PASS: 3.1 -- finalize() emits all 14 edge types")
+    print(f"PASS: 3.1 — finalize() emits all 18 edge types")
 
 
 def test_reverse_edge_dedup():
@@ -612,7 +622,7 @@ def main():
         ("5.5 FFN single dropout", test_ffn_single_internal_dropout),
         ("5.4 self_loop_weight=0.5", test_self_loop_weight_init_05),
         # File 3 (graph_builder)
-        ("3.1 all 14 edge types", test_finalize_emits_all_14_edge_types),
+        ("3.1 all 18 edge types", test_finalize_emits_all_18_edge_types),
         ("3.2 reverse edge dedup", test_reverse_edge_dedup),
         # File 2 (data/__init__)
         ("1.3 LABEL_LEAKING_EDGES", test_label_leaking_edges_comprehensive),
