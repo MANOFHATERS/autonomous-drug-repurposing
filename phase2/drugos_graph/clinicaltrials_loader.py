@@ -350,6 +350,25 @@ from .exceptions import (
     CriticalDataSourceError,
     DrugOSDataError,
 )
+# v103 ROOT FIX (P2-036 deep): centralize InChIKey normalization so the
+# clinical-trials loader (which resolves MeSH descriptors → InChIKeys via
+# the crosswalk) produces the SAME canonical form as every other loader.
+# Previously the crosswalk miss/fallback path used
+# ``str(_norm_inchi).strip().upper()`` which diverged from the helper
+# (no placeholder-collapse, no None safety).
+try:
+    from .utils import normalize_inchikey as _normalize_inchikey
+except Exception:  # pragma: no cover — fallback for direct-script execution
+    def _normalize_inchikey(inchikey):  # type: ignore[no-redef]
+        if inchikey is None:
+            return ""
+        try:
+            ik = str(inchikey).strip()
+        except Exception:
+            return ""
+        if not ik or ik.lower() in ("nan", "none", "null", "na"):
+            return ""
+        return ik.upper()
 
 # Schema / Protocol / crosswalk (avoid circular import at module top).
 from .schemas import (  # noqa: E402
@@ -3587,8 +3606,14 @@ def _build_edge_record_from_dict(
             _norm_inchi = _normalize_compound_id_to_inchikey(
                 src_id, source="clinicaltrials_loader",
             )
-            if _norm_inchi and str(_norm_inchi).strip():
-                src_id = str(_norm_inchi).strip().upper()
+            # v103 ROOT FIX (P2-036 deep): route through the centralized
+            # helper so the crosswalk-resolved InChIKey matches the
+            # canonical form used by every other loader. Previously this
+            # used ``str(_norm_inchi).strip().upper()`` which diverged
+            # (no placeholder-collapse, no None safety).
+            _norm_inchi = _normalize_inchikey(_norm_inchi)
+            if _norm_inchi:
+                src_id = _norm_inchi
         except ImportError:  # pragma: no cover -- defensive
             pass
         except Exception:  # pragma: no cover -- defensive

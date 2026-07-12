@@ -2397,14 +2397,24 @@ def chembl_to_edge_records_from_phase1(
         if compound_canonical_map is not None:
             looked_up = compound_canonical_map.get(compound_id)
             if looked_up and str(looked_up).strip():
-                # v102 P2-036: centralized normalization (strip + upper +
-                # placeholder-collapse) so this loader's canonical_id
-                # matches the form produced by phase1_bridge and pubchem.
-                src_id = _normalize_inchikey(looked_up) or str(looked_up).strip().upper()
+                # v103 ROOT FIX (P2-036 deep): the v102 fix here was
+                # self-defeating — it called ``_normalize_inchikey(looked_up)``
+                # but then fell back to ``str(looked_up).strip().upper()``
+                # when the helper returned "" (e.g. for a "nan" placeholder).
+                # The fallback RE-INTRODUCED the exact bug the helper was
+                # supposed to fix: a "nan" placeholder got through as "NAN"
+                # and became a canonical Compound ID. Drop the fallback;
+                # if the helper says "" the value is unusable.
+                src_id = _normalize_inchikey(looked_up) or None
         if src_id is None:
             row_inchikey = row.get("inchikey")
-            if row_inchikey is not None and str(row_inchikey).strip() not in ("", "nan"):
-                src_id = _normalize_inchikey(row_inchikey) or None
+            # v103 ROOT FIX (P2-036 deep): use the helper for the
+            # placeholder check too. Previously this used
+            # ``str(row_inchikey).strip() not in ("", "nan")`` which
+            # accepted "none"/"null"/"na" as valid InChIKeys.
+            _row_norm = _normalize_inchikey(row_inchikey)
+            if _row_norm:
+                src_id = _row_norm
         if src_id is None:
             # Fall back to the raw ChEMBL ID (last resort).
             src_id = compound_id

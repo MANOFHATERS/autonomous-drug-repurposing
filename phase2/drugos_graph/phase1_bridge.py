@@ -4839,9 +4839,18 @@ def stage_phase1_to_phase2(
             if not chembl_id:
                 continue
             # Stage the compound if not already present.
-            # v27 ROOT FIX (P2-B-2): uppercase InChIKey so kg_builder.ID_PATTERNS
-            # accepts it (lowercase InChIKeys are dead-lettered).
-            canonical = (inchi.upper() if inchi and not inchi.startswith("SYNTH") else chembl_id)
+            # v103 ROOT FIX (P2-036 deep): route ALL InChIKey normalization
+            # through the centralized ``_normalize_inchikey`` helper so
+            # every loader (chembl_drugs, chembl_activities, pubchem,
+            # drugbank) produces the SAME canonical form. The previous
+            # v27 fix used ``inchi.upper()`` which (a) does NOT strip
+            # whitespace (causing " ABCD..." dead-letters) and (b) does
+            # NOT collapse "nan"/"none"/"null" placeholders to empty
+            # (causing literal "NAN" to leak through as a canonical ID).
+            # The helper is the SINGLE source of truth — see
+            # utils.normalize_inchikey docstring.
+            _norm_inchi = _normalize_inchikey(inchi)
+            canonical = (_norm_inchi if _norm_inchi and not _norm_inchi.startswith("SYNTH") else chembl_id)
             if canonical not in extra_compound_seen:
                 # ROOT FIX (schema consistency / DC-2 follow-up):
                 # ChEMBL-sourced Compound nodes MUST carry the SAME schema
@@ -4871,7 +4880,10 @@ def stage_phase1_to_phase2(
                     "id": canonical,
                     "drugbank_id": _safe_str(row.get("drugbank_id")) or None,
                     "chembl_id": chembl_id,
-                    "inchikey": (inchi.upper() if inchi else inchi),
+                    # v103 ROOT FIX (P2-036 deep): use normalized inchikey
+                    # (strip + uppercase + placeholder-collapse) so the
+                    # stored property matches the canonical ID form.
+                    "inchikey": (_norm_inchi or None),
                     "smiles": smiles,
                     "name": _safe_str(row.get("name")),
                     "molecular_weight": _safe_float(row.get("molecular_weight")),
@@ -4907,7 +4919,16 @@ def stage_phase1_to_phase2(
                             chembl_id,
                             _safe_str(row.get("pubchem_cid")),
                             _safe_str(row.get("chebi_id")),
-                            (inchi.upper() if inchi and inchi.upper() != canonical else None),
+                            # v103 ROOT FIX (P2-036 deep): use the
+                            # pre-computed normalized InChIKey (_norm_inchi
+                            # from line ~4835) so the alias list matches
+                            # the canonical ID form exactly. Previously
+                            # this used ``inchi.upper()`` inline which (a)
+                            # did NOT strip whitespace and (b) did NOT
+                            # collapse "nan"/"none"/"null" placeholders —
+                            # causing aliases like " ABCD..." or "NAN" to
+                            # be stored, fragmenting entity resolution.
+                            _norm_inchi if _norm_inchi and _norm_inchi != canonical else None,
                         ]
                         if alias and alias != canonical
                     ],
@@ -5071,11 +5092,19 @@ def stage_phase1_to_phase2(
                 else:
                     _act_withdrawn_val = _to_bool(_act_w_raw)
                     _act_safety_missing = False
+                # v103 ROOT FIX (P2-036 deep): normalize InChIKey ONCE
+                # via the centralized helper and reuse for both the
+                # ``inchikey`` property and the ``compound_id_aliases``
+                # entry. The previous v102 fix only patched chembl_drugs;
+                # this chembl_activities path still used raw ``.upper()``
+                # which dead-lettered lowercase / whitespace-padded / NaN-
+                # placeholder InChIKeys. Computing once avoids 3x calls.
+                _act_norm_inchi = _normalize_inchikey(row.get("inchikey")) or None
                 staged.compound_nodes.append({
                     "id": canonical_compound,
                     "drugbank_id": _safe_str(row.get("drugbank_id")) or None,
                     "chembl_id": mol_chembl,
-                    "inchikey": (_safe_str(row.get("inchikey")).upper() or None) if _safe_str(row.get("inchikey")) else None,
+                    "inchikey": _act_norm_inchi,
                     "smiles": _safe_str(row.get("smiles")) or None,
                     "name": _safe_str(row.get("molecule_name")),
                     "molecular_weight": _safe_float(row.get("molecular_weight")),
@@ -5102,7 +5131,11 @@ def stage_phase1_to_phase2(
                             mol_chembl,
                             _safe_str(row.get("pubchem_cid")),
                             _safe_str(row.get("chebi_id")),
-                            (_safe_str(row.get("inchikey")).upper() or None) if _safe_str(row.get("inchikey")) and _safe_str(row.get("inchikey")).upper() != canonical_compound else None,
+                            # v103 ROOT FIX (P2-036 deep): use the
+                            # pre-computed normalized InChIKey instead of
+                            # calling ``.upper()`` inline (which skipped
+                            # strip and placeholder-collapse).
+                            _act_norm_inchi if _act_norm_inchi and _act_norm_inchi != canonical_compound else None,
                         ]
                         if alias and alias != canonical_compound
                     ],
@@ -5827,6 +5860,49 @@ def load_into_graph(
     )
     real_paths = [base / name_map[k] for k in _sources_for_checksum if k in name_map]
     input_checksum = compute_input_checksum(real_paths)
+
+    # v103 ROOT FIX (P2-037 deep): call consolidate_compounds_by_aliases
+    # BEFORE loading new Compound nodes. The v102 fix defined this method
+    # on DrugOSGraphBuilder but NEVER CALLED it — making the "better: run
+    # a pre-merge consolidation query" half of the P2-037 fix dead code.
+    # The deterministic ORDER BY LIMIT 1 in the MERGE prevents NEW
+    # fragmentation, but a previously-fragmented graph (pre-v102 runs,
+    # manual edits, partial restores) still contains orphaned Compound
+    # nodes whose aliases overlap with the chosen merge target. Without
+    # this consolidation call, those orphans persist forever and the
+    # graph stays fragmented across re-runs.
+    #
+    # Guard with hasattr() so the test-only RecordingGraphBuilder (which
+    # does NOT implement this Neo4j-specific method) still works. Only
+    # the real DrugOSGraphBuilder with an active Neo4j connection will
+    # actually consolidate.
+    _consolidation_method = getattr(builder, "consolidate_compounds_by_aliases", None)
+    if callable(_consolidation_method):
+        try:
+            _consolidation_report = _consolidation_method()
+            if isinstance(_consolidation_report, dict):
+                _merged = int(_consolidation_report.get("merged_count", 0) or 0)
+                if _merged > 0:
+                    logger.info(
+                        "load_into_graph: pre-merge consolidation merged "
+                        "%d fragmented Compound nodes (method=%s). v103 "
+                        "P2-037 root fix — v102 left this method uncalled.",
+                        _merged,
+                        _consolidation_report.get("method", "unknown"),
+                    )
+                    report.setdefault("consolidation", _consolidation_report)
+        except Exception as exc:
+            # Consolidation is best-effort: a failure MUST NOT block the
+            # main node load. Log loudly so operators can investigate,
+            # then proceed with the (still-deterministic) MERGE below.
+            logger.warning(
+                "load_into_graph: consolidate_compounds_by_aliases "
+                "raised %s: %s. Proceeding with node load (deterministic "
+                "MERGE will still prevent NEW fragmentation, but "
+                "pre-existing orphans may remain. v103 P2-037.",
+                type(exc).__name__, exc,
+            )
+            report.setdefault("consolidation_error", str(exc))
 
     # Nodes ────────────────────────────────────────────────────────────────
     for label, nodes in (
