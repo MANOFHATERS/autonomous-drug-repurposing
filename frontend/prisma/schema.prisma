@@ -56,6 +56,10 @@ model User {
   // verifyTotpWithReplayCheck rejects any code whose counter is <= this
   // value. Null means no code has been used yet.
   lastTotpCounter   BigInt?
+  // FE-055: Soft-delete timestamp. Null = active. Set when an admin
+  // deletes a user — the row is preserved for audit trails but login
+  // is refused. (Added by team-15 — login route references it.)
+  deletedAt         DateTime?
   lastLoginAt       DateTime?
   createdAt         DateTime      @default(now())
   updatedAt         DateTime      @updatedAt
