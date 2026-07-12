@@ -244,10 +244,20 @@ class TestCompoundIssue5HgtNumericalStability:
 
     def test_score_triples_returns_logits_not_sigmoid(self):
         """score_triples must return raw LOGITS (for BCEWithLogitsLoss),
-        not sigmoided scores in [0,1]."""
-        src = (_PHASE2_ROOT / "drugos_graph" / "graph_transformer_model.py").read_text()
+        not sigmoided scores in [0,1].
+
+        P2-026 ROOT FIX (Team 8): the previous version of this test read
+        ``phase2/drugos_graph/graph_transformer_model.py`` -- a DEAD file
+        deleted by P2-026. The canonical Phase 3 model is
+        ``graph_transformer/models/graph_transformer.py``. The check now
+        reads ``run_pipeline.py`` (the production training entry point)
+        which uses BCEWithLogitsLoss on raw logits from the canonical
+        model's ``forward_logits`` method."""
+        src = (_PHASE2_ROOT / "drugos_graph" / "run_pipeline.py").read_text()
         assert "BCEWithLogitsLoss" in src, \
             "Must use BCEWithLogitsLoss (numerically stable)"
+        # NaN handling is verified via run_pipeline's NaN filter guards
+        # (look for "isnan" or "NaN" in the training loop).
         assert "NaN" in src or "isnan" in src, \
             "Must handle NaN scores for unknown decoder keys"
 

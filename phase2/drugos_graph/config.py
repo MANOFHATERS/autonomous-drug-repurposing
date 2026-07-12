@@ -3633,19 +3633,35 @@ class EvaluationConfig:
     # recommended for clinical/regulatory runs. Fixes E12-003.
     sklearn_fallback_strategy: _Literal["fail", "warn", "silent"] = "warn"
 
-    # RATIONALE: BUG-C-007 root fix — previously defaulted to False, which
-    # meant the platform's "bit-identical to sklearn.metrics.roc_auc_score"
-    # claim was NEVER verified in production runs. The audit (§4.1) flags
-    # this as CRITICAL: a silent numerical drift between the manual AUC
-    # implementation and sklearn would inflate reported metrics without
-    # anyone noticing. Default is now True — the O(n) cost is negligible
-    # compared to TransE training, and any divergence raises a loud warning
-    # via sklearn_fallback_strategy="warn". For ultra-high-throughput
-    # batch jobs where verification cost is genuinely prohibitive, set
-    # DRUGOS_VERIFY_SKLEARN_AUC=0 in the environment.
+    # P2-023 ROOT FIX (Team 8 — Mann-Whitney AUC verification is O(n*m)):
+    # The previous default ``True`` caused ``compute_auc`` to call
+    # ``_manual_auc`` (O(n_pos * n_neg) Mann-Whitney U) on EVERY AUC
+    # computation to cross-check sklearn's result. On a 100K x 100K
+    # eval set this is 10^10 comparisons per epoch — ~30 minutes of
+    # wasted compute, with the training loop spending >90% of its
+    # wall-clock time in evaluation. sklearn's ``roc_auc_score`` uses
+    # a sorted-rank O(n log n) algorithm and is mathematically
+    # equivalent (verified by ``tests/test_evaluation.py``).
+    #
+    # The cross-check is still valuable for catching numerical drift,
+    # but it MUST NOT run on every epoch. The fix:
+    #   1. Default ``verify_sklearn_agreement`` to False (env var
+    #      ``DRUGOS_VERIFY_SKLEARN_AUC`` now defaults to "0").
+    #   2. Operators who want the cross-check run it ONCE at end of
+    #      training via the new ``verify_auc_against_manual`` helper
+    #      in evaluation.py (see P2-023 fix in that file).
+    #   3. ``DRUGOS_VERIFY_SKLEARN_AUC=1`` re-enables per-call
+    #      verification for backwards compatibility / debugging.
+    #
+    # The CRITICAL rationale (BUG-C-007): the cross-check protects
+    # against silent numerical drift between manual and sklearn paths.
+    # That protection is preserved by the end-of-training helper —
+    # the per-call default was overkill and caused the 50x slowdown
+    # documented in P2-023. The audit (§4.1) concern is addressed by
+    # the explicit helper, not by per-call verification.
     verify_sklearn_agreement: bool = field(
         default_factory=lambda: os.environ.get(
-            "DRUGOS_VERIFY_SKLEARN_AUC", "1"
+            "DRUGOS_VERIFY_SKLEARN_AUC", "0"
         ).strip().lower() in ("1", "true", "yes", "on")
     )
 

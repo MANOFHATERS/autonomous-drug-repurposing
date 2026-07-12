@@ -78,7 +78,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Callable, Final, Literal, NamedTuple, NewType, TypeVar
+from typing import Any, Callable, Final, Literal, NamedTuple, NewType, Optional, TypeVar
 
 # ─── Optional third-party imports (graceful fallback) ──────────────────────
 # Fixes audit issue 11.3 -- Prometheus counters (optional; no-op fallback)
@@ -92,6 +92,205 @@ except ImportError:  # pragma: no cover -- prometheus_client optional
 logger = logging.getLogger(__name__)
 if not any(isinstance(h, logging.NullHandler) for h in logger.handlers):
     logger.addHandler(logging.NullHandler())
+
+
+# ─── P2-027 ROOT FIX (Team 8) — pipeline logging setup ───────────────────────
+#
+# PROBLEM (P2-027): the codebase relied on ``logging.basicConfig`` (called
+# in ``config.py:8226`` under ``if __name__ == "__main__":`` and in
+# various ``__main__`` blocks across phase2). In an Airflow production
+# deployment, ``basicConfig`` is overridden by Airflow's own logging
+# configuration — the pipeline's logs are then routed to Airflow's
+# worker log file, NOT the dedicated pipeline log file. Ops cannot
+# find the pipeline logs, cannot debug production issues, and the
+# audit trail is corrupted.
+#
+# ROOT FIX (per the issue's recommendation): expose a proper
+# ``setup_logging`` function that:
+#   1. Uses a NAMED logger ``drugos.phase2`` (not the root logger that
+#      ``basicConfig`` mutates). Airflow's logging config does NOT
+#      override named loggers — it only configures the root logger
+#      and Airflow's own loggers (``airflow.*``).
+#   2. Adds a ``FileHandler`` writing to
+#      ``${DRUGOS_LOG_DIR:-/var/log/drugos}/phase2.log``. The file
+#      handler is the production-grade log destination; ops can tail
+#      it, ship it to a log aggregator, or grep it for errors.
+#   3. Adds a ``StreamHandler`` for console output (useful in dev and
+#      for Airflow tasks where stderr is captured by the scheduler).
+#   4. Respects ``DRUGOS_LOG_LEVEL`` env var (default INFO).
+#   5. Is IDEMPOTENT: calling it multiple times does NOT add duplicate
+#      handlers (the named logger is checked for existing handlers
+#      before adding new ones).
+#
+# Operators call this ONCE at pipeline entry (e.g. in the Airflow task
+# or the ``python -m drugos_graph`` entry point):
+#
+#     from drugos_graph.utils import setup_logging
+#     setup_logging()
+#
+# After this call, all ``logging.getLogger('drugos.phase2.*')`` loggers
+# (including the module-level ``logger`` in every phase2 file) route
+# to BOTH the file and console handlers, REGARDLESS of Airflow's root
+# logger configuration.
+
+# The canonical pipeline logger name. All phase2 modules SHOULD use a
+# child of this logger (e.g. ``logging.getLogger('drugos.phase2.evaluation')``)
+# so their logs route through the handlers ``setup_logging`` attaches.
+PHASE2_LOGGER_NAME: str = "drugos.phase2"
+
+# Default log directory. Override via ``DRUGOS_LOG_DIR`` env var.
+# RATIONALE: ``/var/log/drugos`` follows the Linux FHS convention for
+# service logs (``/var/log/<service>/*.log``). In containerised
+# deployments, ops mount a volume at ``/var/log/drugos`` so logs
+# persist across container restarts.
+_DEFAULT_LOG_DIR = "/var/log/drugos"
+PHASE2_DEFAULT_LOG_DIR: str = os.environ.get("DRUGOS_LOG_DIR", _DEFAULT_LOG_DIR)
+PHASE2_DEFAULT_LOG_FILE: str = "phase2.log"
+
+# Default log format. Includes timestamp, level, logger name, and the
+# PID (useful for correlating log lines with the MLflow heartbeat PID
+# tag — see P2-024 fix in mlflow_tracker.py).
+PHASE2_LOG_FORMAT: str = (
+    "%(asctime)s [PID %(process)d] %(levelname)s %(name)s: %(message)s"
+)
+PHASE2_DATE_FORMAT: str = "%Y-%m-%d %H:%M:%S"
+
+
+def setup_logging(
+    level: Optional[str] = None,
+    log_dir: Optional[str] = None,
+    log_file: Optional[str] = None,
+    *,
+    attach_stream: bool = True,
+    attach_file: bool = True,
+) -> logging.Logger:
+    """Configure the ``drugos.phase2`` named logger with file + stream handlers.
+
+    P2-027 ROOT FIX (Team 8): replaces ``logging.basicConfig`` (which
+    Airflow overrides) with a NAMED logger that is immune to Airflow's
+    root-logger configuration.
+
+    Idempotent: calling this function multiple times does NOT add
+    duplicate handlers. Existing handlers tagged with
+    ``_drugos_phase2_handler=True`` are removed before the new ones
+    are attached, so reconfiguration (e.g. changing the log level at
+    runtime) is safe.
+
+    Args:
+        level: Log level name (``DEBUG``, ``INFO``, ``WARNING``,
+            ``ERROR``, ``CRITICAL``). If None, reads the
+            ``DRUGOS_LOG_LEVEL`` env var (default ``INFO``).
+        log_dir: Directory for the log file. If None, reads the
+            ``DRUGOS_LOG_DIR`` env var (default ``/var/log/drugos``).
+            The directory is created (mode 0o755) if it does not
+            exist. If the directory CANNOT be created (e.g. running
+            as a non-root user without write access to ``/var/log``),
+            the file handler is skipped with a WARNING, and only the
+            stream handler is attached — this lets the function work
+            in restricted environments (CI, containers without
+            mounted volumes) without crashing.
+        log_file: Log file name (within ``log_dir``). Default
+            ``phase2.log``.
+        attach_stream: If True (default), attach a ``StreamHandler``
+            writing to stderr. Useful in dev and for Airflow tasks
+            (Airflow captures stderr in the worker log).
+        attach_file: If True (default), attach a ``FileHandler``
+            writing to ``log_dir/log_file``. Set to False for unit
+            tests that only want the stream handler.
+
+    Returns:
+        The configured ``logging.Logger`` instance for
+        ``"drugos.phase2"``. Callers can further configure it (e.g.
+        add a syslog handler) or pass it to other modules.
+
+    Examples
+    --------
+    >>> from drugos_graph.utils import setup_logging
+    >>> # Production: log to /var/log/drugos/phase2.log AND stderr
+    >>> logger = setup_logging()
+    >>> # Dev: log to ./logs/phase2.log at DEBUG level
+    >>> logger = setup_logging(level="DEBUG", log_dir="./logs")
+    >>> # CI: only stderr, no file
+    >>> logger = setup_logging(attach_file=False)
+    """
+    # Resolve the level from the arg, then env, then default INFO.
+    if level is None:
+        level = os.environ.get("DRUGOS_LOG_LEVEL", "INFO")
+    numeric_level = getattr(logging, str(level).upper(), logging.INFO)
+
+    # Resolve log_dir from the arg, then env, then default /var/log/drugos.
+    if log_dir is None:
+        log_dir = os.environ.get("DRUGOS_LOG_DIR", PHASE2_DEFAULT_LOG_DIR)
+    if log_file is None:
+        log_file = PHASE2_DEFAULT_LOG_FILE
+
+    # Get the named logger. This is the KEY to the P2-027 fix: a named
+    # logger is NOT affected by ``logging.basicConfig`` (which only
+    # configures the root logger) NOR by Airflow's logging config
+    # (which only configures the root logger and ``airflow.*`` loggers).
+    phase2_logger = logging.getLogger(PHASE2_LOGGER_NAME)
+    phase2_logger.setLevel(numeric_level)
+    # Prevent propagation to the root logger — we don't want Airflow's
+    # root handler to capture our logs (that would duplicate them and
+    # route them to Airflow's worker log, which is the exact bug
+    # P2-027 fixes).
+    phase2_logger.propagate = False
+
+    # Remove existing handlers that we attached previously (idempotent
+    # reconfiguration). We tag our handlers with a special attribute so
+    # we don't accidentally remove handlers attached by other callers
+    # (e.g. a custom syslog handler the operator added).
+    for h in list(phase2_logger.handlers):
+        if getattr(h, "_drugos_phase2_handler", False):
+            phase2_logger.removeHandler(h)
+            try:
+                h.close()
+            except Exception:
+                pass  # never raise from cleanup
+
+    formatter = logging.Formatter(PHASE2_LOG_FORMAT, datefmt=PHASE2_DATE_FORMAT)
+
+    # Attach the file handler (production-grade log destination).
+    if attach_file:
+        try:
+            log_path = Path(log_dir) / log_file
+            # Create the log directory if it doesn't exist. Use mode
+            # 0o755 (rwxr-xr-x) so the directory is readable by the
+            # ops team but only writable by the drugos service user.
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            file_handler = logging.FileHandler(str(log_path), encoding="utf-8")
+            file_handler.setLevel(numeric_level)
+            file_handler.setFormatter(formatter)
+            file_handler._drugos_phase2_handler = True  # type: ignore[attr-defined]
+            phase2_logger.addHandler(file_handler)
+        except (OSError, PermissionError) as exc:
+            # The log directory cannot be created or the file cannot
+            # be opened. This is common in CI (no /var/log write
+            # access) and in containers without mounted volumes. Log
+            # to stderr and continue — the stream handler below
+            # ensures logs are still captured.
+            #
+            # We use stderr directly (NOT the named logger) because
+            # the named logger has no handlers yet at this point.
+            import sys as _sys_p2_027
+            _sys_p2_027.stderr.write(
+                f"P2-027 WARNING: could not attach file handler to "
+                f"{log_dir}/{log_file} ({exc}). Falling back to "
+                f"stream-only logging. Set DRUGOS_LOG_DIR to a writable "
+                f"directory to enable file logging.\n"
+            )
+
+    # Attach the stream handler (useful in dev, captured by Airflow).
+    if attach_stream:
+        import sys as _sys_p2_027_stream
+        stream_handler = logging.StreamHandler(_sys_p2_027_stream.stderr)
+        stream_handler.setLevel(numeric_level)
+        stream_handler.setFormatter(formatter)
+        stream_handler._drugos_phase2_handler = True  # type: ignore[attr-defined]
+        phase2_logger.addHandler(stream_handler)
+
+    return phase2_logger
+
 
 # ─── Public API ────────────────────────────────────────────────────────────
 # Fixes audit issue 4.3 -- explicit __all__ per PEP 8
@@ -118,6 +317,9 @@ __all__: list[str] = [
     "migrate_labels", "diff_label_maps",
     # Reliability helpers
     "safe_call_with_retry", "CircuitBreaker",
+    # Logging (P2-027 root fix -- named logger, NOT basicConfig)
+    "setup_logging", "PHASE2_LOGGER_NAME", "PHASE2_DEFAULT_LOG_DIR",
+    "PHASE2_DEFAULT_LOG_FILE", "PHASE2_LOG_FORMAT", "PHASE2_DATE_FORMAT",
     # Constants -- backward-compat names (issues C2, C3)
     "DRKG_NODE_TYPE_TO_NEO4J_LABEL", "NEO4J_LABEL_TO_DRKG_NODE_TYPE",
     "DRKG_TYPE_TO_LABEL_ENTRY", "LABEL_REGISTRY",
