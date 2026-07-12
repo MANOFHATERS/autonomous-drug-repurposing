@@ -73,15 +73,15 @@ export function PathwayViz({ className = '' }: PathwayVizProps) {
           const isActivation = edge.type === 'activation';
           const isBinding = edge.type === 'binding';
 
-          const dx = target.x - source.x;
-          const dy = target.y - source.y;
+          const dx = (target.x ?? 0) - (source.x ?? 0);
+          const dy = (target.y ?? 0) - (source.y ?? 0);
           const angle = Math.atan2(dy, dx);
           const offset = 28;
 
-          const x1 = source.x + Math.cos(angle) * offset;
-          const y1 = source.y + Math.sin(angle) * offset;
-          const x2 = target.x - Math.cos(angle) * offset;
-          const y2 = target.y - Math.sin(angle) * offset;
+          const x1 = (source.x ?? 0) + Math.cos(angle) * offset;
+          const y1 = (source.y ?? 0) + Math.sin(angle) * offset;
+          const x2 = (target.x ?? 0) - Math.cos(angle) * offset;
+          const y2 = (target.y ?? 0) - Math.sin(angle) * offset;
 
           return (
             <g key={i} opacity={isHighlighted ? 1 : 0.2}>
@@ -138,8 +138,8 @@ export function PathwayViz({ className = '' }: PathwayVizProps) {
               {/* Background glow */}
               {(isSelected || isHovered) && (
                 <circle
-                  cx={node.x}
-                  cy={node.y}
+                  cx={node.x ?? 0}
+                  cy={node.y ?? 0}
                   r={24}
                   fill={style.fill}
                   fillOpacity={0.1}
@@ -148,8 +148,8 @@ export function PathwayViz({ className = '' }: PathwayVizProps) {
               {/* Node shape */}
               {node.type === 'drug' ? (
                 <rect
-                  x={node.x - 24}
-                  y={node.y - 12}
+                  x={(node.x ?? 0) - 24}
+                  y={(node.y ?? 0) - 12}
                   width={48}
                   height={24}
                   rx={4}
@@ -160,8 +160,8 @@ export function PathwayViz({ className = '' }: PathwayVizProps) {
                 />
               ) : (
                 <circle
-                  cx={node.x}
-                  cy={node.y}
+                  cx={node.x ?? 0}
+                  cy={node.y ?? 0}
                   r={20}
                   fill={style.fill}
                   fillOpacity={0.15}
@@ -171,8 +171,8 @@ export function PathwayViz({ className = '' }: PathwayVizProps) {
               )}
               {/* Label */}
               <text
-                x={node.x}
-                y={node.y + 4}
+                x={node.x ?? 0}
+                y={(node.y ?? 0) + 4}
                 textAnchor="middle"
                 className="text-[10px] fill-foreground font-medium pointer-events-none"
               >

@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { ZoomIn, ZoomOut, RotateCcw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -10,7 +10,6 @@ import type { KnowledgeGraphNode, KnowledgeGraphEdge } from '@/lib/types';
 // The viewer fetches real graph data via the useKnowledgeGraph hook
 // (see use-api-data.tsx). The empty defaults below are used only as
 // initial state before the API responds.
-import { useState, useEffect } from 'react';
 
 interface KnowledgeGraphViewerProps {
   nodes?: KnowledgeGraphNode[];

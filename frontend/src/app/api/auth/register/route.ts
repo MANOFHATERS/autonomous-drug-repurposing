@@ -5,6 +5,7 @@ import { badRequest, internalError, writeAuditLog } from "@/lib/api-helpers";
 import { checkIpRateLimit, recordIpAttempt } from "@/lib/auth/rate-limit";
 import { Prisma } from "@prisma/client";
 import { createHmac, randomBytes } from "crypto";
+import jwt from "jsonwebtoken";
 
 interface RegisterBody {
   email: string;
@@ -88,7 +89,6 @@ export function isValidUserStatus(status: unknown): status is AllowedUserStatus 
  * be delivered via email and NEVER returned in the API response.
  */
 function signEmailVerificationToken(userId: string, email: string): string {
-  const jwt = require("jsonwebtoken");
   const secret = process.env.JWT_SECRET;
   if (!secret || secret.length < 32) {
     if (process.env.NODE_ENV === "production") {

@@ -1022,9 +1022,9 @@ function CandidateDetailScreen() {
                       <div className="flex items-center gap-2 mb-1">
                         <Badge variant="secondary" className="text-[10px]">{ev.type}</Badge>
                         <span className="font-medium text-sm">{ev.title}</span>
-                        <span className="ml-auto text-xs font-bold" style={{ color: scoreColor(ev.quality) }}>{ev.quality}</span>
+                        <span className="ml-auto text-xs font-bold" style={{ color: scoreColor(ev.quality ? Number(ev.quality) : 0) }}>{ev.quality}</span>
                       </div>
-                      <p className="text-xs text-muted-foreground">{ev.source} · {ev.year}</p>
+                      <p className="text-xs text-muted-foreground">{ev.source} · {ev.year ?? 0}</p>
                       <p className="text-xs text-muted-foreground mt-1 line-clamp-2">{ev.summary}</p>
                     </div>
                   )) : <p className="text-sm text-muted-foreground">No evidence items found</p>}
@@ -1192,7 +1192,7 @@ function PatentTimeline({ patents }: { patents: Patent[] }) {
           <div className="w-3 h-3 rounded-full" style={{ backgroundColor: p.status === 'active' ? ACCENT_GREEN : p.status === 'pending' ? ACCENT_ORANGE : '#94A3B8' }} />
           <div className="flex-1 min-w-0">
             <p className="text-xs font-medium truncate">{p.patentNumber}</p>
-            <p className="text-[10px] text-muted-foreground">{p.filingDate.slice(0,4)} → {p.expirationDate.slice(0,4)}</p>
+            <p className="text-[10px] text-muted-foreground">{p.filingDate.slice(0,4)} → {(p.expirationDate ?? "").slice(0,4)}</p>
           </div>
           <Badge variant={p.status === 'active' ? 'default' : 'secondary'} className="text-[10px]">{p.status}</Badge>
         </div>
@@ -1559,7 +1559,7 @@ function SafetyProfileScreen() {
   const ddiResults = useMemo(() => {
     if (!ddiQuery.trim()) return [];
     return drugInteractions.filter(d =>
-      (d.drug1.toLowerCase().includes(ddiQuery.toLowerCase()) || d.drug2.toLowerCase().includes(ddiQuery.toLowerCase())) &&
+      ((d.drug1 ?? "").toLowerCase().includes(ddiQuery.toLowerCase()) || (d.drug2 ?? "").toLowerCase().includes(ddiQuery.toLowerCase())) &&
       (d.drug1 === selectedDrug || d.drug2 === selectedDrug)
     );
   }, [ddiQuery, selectedDrug]);
@@ -1876,9 +1876,9 @@ function EvidenceBuilderScreen() {
                   {selectedEvidence.has(ev.id) ? <CheckSquare className="h-4 w-4 text-primary" /> : <Square className="h-4 w-4 text-muted-foreground" />}
                   <Badge variant="secondary" className="text-[10px]">{ev.type}</Badge>
                   <span className="text-sm font-medium flex-1">{ev.title}</span>
-                  <span className="text-xs font-bold" style={{ color: scoreColor(ev.quality) }}>{ev.quality}</span>
+                  <span className="text-xs font-bold" style={{ color: scoreColor(ev.quality ? Number(ev.quality) : 0) }}>{ev.quality}</span>
                 </div>
-                <p className="text-xs text-muted-foreground mt-1 ml-6">{ev.source} · {ev.year}</p>
+                <p className="text-xs text-muted-foreground mt-1 ml-6">{ev.source} · {ev.year ?? 0}</p>
               </div>
             ))}
           </CardContent>
@@ -2262,8 +2262,8 @@ function DrugInteractionScreen() {
   const results = useMemo(() => {
     if (!drug2.trim()) return drugInteractions.filter(d => d.drug1 === drug1);
     return drugInteractions.filter(d =>
-      (d.drug1 === drug1 && d.drug2.toLowerCase().includes(drug2.toLowerCase())) ||
-      (d.drug2 === drug1 && d.drug1.toLowerCase().includes(drug2.toLowerCase()))
+      (d.drug1 === drug1 && (d.drug2 ?? "").toLowerCase().includes(drug2.toLowerCase())) ||
+      (d.drug2 === drug1 && (d.drug1 ?? "").toLowerCase().includes(drug2.toLowerCase()))
     );
   }, [drug1, drug2]);
 
@@ -2582,7 +2582,7 @@ function PredictionExplorerScreen() {
 }
 
 function EvidenceTimelineScreen() {
-  const evidence = evidenceItems.sort((a, b) => b.year - a.year);
+  const evidence = evidenceItems.sort((a, b) => (b.year ?? 0) - (a.year ?? 0));
   return (
     <FadeIn>
       <PageHeader title="Evidence Timeline" description="Timeline of evidence for drug-disease pairs" />
@@ -2593,7 +2593,7 @@ function EvidenceTimelineScreen() {
             <div key={ev.id} className="relative pl-14">
               <div className="absolute left-4 w-5 h-5 rounded-full border-2 bg-background" style={{ borderColor: ev.type === 'clinical' ? ACCENT_GREEN : ev.type === 'preclinical' ? PRIMARY : ACCENT_ORANGE }} />
               <Card><CardContent className="p-4">
-                <div className="flex items-center gap-2 mb-1"><Badge variant="secondary" className="text-[10px]">{ev.type}</Badge><span className="text-xs text-muted-foreground">{ev.year}</span><span className="font-medium text-sm">{ev.drugName}</span></div>
+                <div className="flex items-center gap-2 mb-1"><Badge variant="secondary" className="text-[10px]">{ev.type}</Badge><span className="text-xs text-muted-foreground">{ev.year ?? 0}</span><span className="font-medium text-sm">{ev.drugName}</span></div>
                 <p className="text-sm font-medium">{ev.title}</p>
                 <p className="text-xs text-muted-foreground mt-1">{ev.source} · Quality: {ev.quality}</p>
               </CardContent></Card>

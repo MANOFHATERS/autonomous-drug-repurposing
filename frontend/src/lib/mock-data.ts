@@ -111,55 +111,183 @@ export const notifications: AppNotification[] = [];
 export const auditLogs: AuditLogEntry[] = [];
 
 /** @deprecated Empty. Use api.listPlans() in api-client.ts. */
-export const subscriptionPlans: never[] = [];
+export const subscriptionPlans: Array<{
+  id: string;
+  name: string;
+  price: string; // Components compare with strings like '$0'.
+  period: string;
+  features: string[];
+}> = [];
 
 /** @deprecated Empty. Use api.listInvoices() in api-client.ts. */
-export const billingHistory: never[] = [];
+export const billingHistory: Array<{
+  id: string;
+  number: string;
+  amount: number;
+  date: string;
+  status: string;
+  plan: string;
+}> = [];
 
 /** @deprecated Empty. Use api.listApiKeys() in api-client.ts. */
-export const apiKeys: never[] = [];
+export const apiKeys: Array<{
+  id: string;
+  name: string;
+  prefix: string;
+  createdAt: string;
+  lastUsedAt: string | null;
+  revokedAt: string | null;
+}> = [];
 
 /** @deprecated Empty. Webhooks are managed via /api/webhooks (not yet implemented). */
-export const webhooks: never[] = [];
+export const webhooks: Array<{
+  id: string;
+  url: string;
+  events: string;
+  secret: string;
+  enabled: boolean;
+  lastTriggeredAt: string | null;
+  createdAt: string;
+}> = [];
 
 /** @deprecated Empty. Usage metrics are fetched from /api/usage (not yet implemented). */
-export const usageMetrics: Record<string, never> = {};
+export const usageMetrics: {
+  apiCalls: { used: number; limit: number };
+  storage: { used: number; limit: number };
+  projects: { used: number; limit: number };
+  hypotheses: { used: number; limit: number };
+  queries: { used: number; limit: number };
+  reports: { used: number; limit: number };
+} = {
+  apiCalls: { used: 0, limit: 0 },
+  storage: { used: 0, limit: 0 },
+  projects: { used: 0, limit: 0 },
+  hypotheses: { used: 0, limit: 0 },
+  queries: { used: 0, limit: 0 },
+  reports: { used: 0, limit: 0 },
+};
 
 /** @deprecated Empty. Use api.getDatasetStats() in api-client.ts. */
-export const dataSources: never[] = [];
+export const dataSources: Array<{
+  id: string;
+  name: string;
+  version: string;
+  lastUpdated: string;
+  records: number;
+  status: string;
+}> = [];
 
 /** @deprecated Empty. Use api.getRankedHypotheses() for live trends. */
-export const trendingDiseases: never[] = [];
+export const trendingDiseases: Array<{
+  id: string;
+  name: string;
+  queries: number;
+  candidates: number;
+  trend: string;
+  change?: string;
+}> = [];
 
 /** @deprecated Empty. Persist queries via /api/projects (saved queries). */
-export const recentQueries: never[] = [];
+export const recentQueries: Array<{
+  id: string;
+  disease: string;
+  date: string;
+  candidates: number;
+  topScore: number;
+}> = [];
 
 /** @deprecated Empty. Use api.listTeamMembers(). */
 export const teamMembers: User[] = [];
 
 /** @deprecated Empty. Use api.listProjects(). */
-export const projects: never[] = [];
+export const projects: Array<{
+  id: string;
+  name: string;
+  description: string;
+  status: string;
+  hypotheses: number;
+  collaborators: number;
+  updatedAt: string;
+}> = [];
 
 /** @deprecated Empty. Deal pipeline is managed via /api/projects (not yet implemented). */
-export const dealPipeline: never[] = [];
+export const dealPipeline: Array<{
+  id: string;
+  partner: string;
+  drug: string;
+  disease: string;
+  stage: string;
+  value: number;
+  probability: number;
+  expectedClose: string;
+}> = [];
 
 /** @deprecated Empty. Use api.me() to fetch the user's organization. */
-export const organization: Record<string, never> = {};
+export const organization: {
+  id: string;
+  name: string;
+  plan: string;
+  seats: number;
+  createdAt: string;
+} = {
+  id: "",
+  name: "",
+  plan: "",
+  seats: 0,
+  createdAt: "",
+};
 
 /** @deprecated Empty. Feature flags are managed via /api/admin/feature-flags (not yet implemented). */
-export const featureFlags: never[] = [];
+export const featureFlags: Array<{
+  id: string;
+  name: string;
+  description: string;
+  enabled: boolean;
+  rolloutPercentage: number;
+}> = [];
 
 /** @deprecated Empty. Use api.getSystemStatus(). */
-export const systemStatus: never[] = [];
+export const systemStatus: Array<{
+  id: string;
+  service: string;
+  status: string;
+  latency: number;
+  uptime: number;
+}> = [];
 
 /** @deprecated Empty. Saved queries are managed via /api/projects. */
-export const savedQueries: never[] = [];
+export const savedQueries: Array<{
+  id: string;
+  name: string;
+  query: string;
+  filters: string;
+  createdAt: string;
+  // Backward-compat optional fields used by some components.
+  disease?: string;
+  results?: number;
+  created?: string;
+}> = [];
 
 /** @deprecated Empty. Blog posts are managed via a CMS (not yet integrated). */
-export const blogPosts: never[] = [];
+export const blogPosts: Array<{
+  id: string;
+  title: string;
+  excerpt: string;
+  category: string;
+  date: string;
+  author: string;
+  readTime: string;
+}> = [];
 
 /** @deprecated Empty. Careers are managed via a CMS (not yet integrated). */
-export const careers: never[] = [];
+export const careers: Array<{
+  id: string;
+  title: string;
+  location: string;
+  type: string;
+  department: string;
+  postedAt: string;
+}> = [];
 
 /** @deprecated Empty. Use api.searchPatents(). */
 export const patents: Patent[] = [];

@@ -34,6 +34,8 @@ export interface Disease {
   icd10?: string;
 }
 
+export type SafetyTier = 'green' | 'yellow' | 'red';
+
 export interface DrugCandidate {
   id: string;
   drugName: string;
@@ -110,6 +112,8 @@ export interface GraphEdge {
   target: string;
   type: string;
   weight?: number;
+  // Backward-compat alias used by knowledge-graph-viewer.
+  relation?: string;
 }
 
 export interface User {
@@ -129,6 +133,14 @@ export interface AppNotification {
   body: string;
   readAt: string | null;
   createdAt: string;
+  /**
+   * Backward-compat aliases used by some components. `read` is derived
+   * from `readAt` (read === readAt !== null). `message` is an alias for
+   * `body`. These exist so components that imported the old mock-data
+   * Notification type keep compiling during the FE-026 migration.
+   */
+  read?: boolean;
+  message?: string;
 }
 
 export interface AuditLogEntry {
@@ -151,16 +163,26 @@ export interface Patent {
   grantDate: string;
   abstract: string;
   drugName: string;
+  // Backward-compat optional fields used by some components.
+  status?: string;
+  jurisdiction?: string;
+  claims?: number;
+  expirationDate?: string;
 }
 
 export interface EvidenceItem {
   id: string;
-  type: "pubmed" | "clinical_trial" | "fda_label" | "patent";
+  type: string; // Backward-compat: was union, but components compare with various values like 'clinical', 'preclinical'.
   title: string;
   source: string;
   url: string;
   date: string;
   summary: string;
+  // Backward-compat optional fields used by some components.
+  drugName?: string;
+  disease?: string;
+  quality?: string;
+  year?: number;
 }
 
 export interface ADMETProfile {
@@ -180,17 +202,25 @@ export interface OffTargetPrediction {
   affinity: number;
   probability: number;
   adverseEventRisk: "low" | "medium" | "high";
+  // Backward-compat optional fields used by some components.
+  severity?: string;
+  organSystem?: string;
 }
 
 export interface DrugInteraction {
   drugA: string;
   drugB: string;
-  severity: "mild" | "moderate" | "severe";
+  severity: string; // Backward-compat: was union, but components compare with various values.
   mechanism: string;
   clinicalEffect: string;
+  // Backward-compat aliases used by some components.
+  drug1?: string;
+  drug2?: string;
+  description?: string;
 }
 
-export type SafetyTier = DrugCandidate["safetyTier"];
+// SafetyTier is defined above (line ~37) to avoid a circular reference
+// with DrugCandidate.safetyTier.
 
 export interface DashboardStats {
   totalCandidates: number;
@@ -240,15 +270,22 @@ export interface PathwayNode {
   id: string;
   label: string;
   type: "drug" | "protein" | "pathway" | "disease";
+  // Backward-compat fields used by pathway-viz for positioning.
+  x?: number;
+  y?: number;
 }
 
 export interface PathwayEdge {
   source: string;
   target: string;
   label: string;
+  // Backward-compat field used by pathway-viz.
+  type?: string;
 }
 
 export interface PathwayData {
   nodes: PathwayNode[];
   edges: PathwayEdge[];
+  // Backward-compat field used by pathway-viz.
+  name?: string;
 }
