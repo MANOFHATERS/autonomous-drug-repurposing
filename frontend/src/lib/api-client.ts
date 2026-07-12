@@ -304,12 +304,35 @@ export interface GraphSourceStat {
   producedAt?: string;
   producedBy?: string;
   loadId?: string;
+  /** Per-source breakdown of node types contributed (FE-020). */
+  nodeTypeCounts?: Record<string, number>;
+  /** Per-source breakdown of edge types contributed (FE-020). */
+  edgeTypeCounts?: Record<string, number>;
 }
 
 export interface KnowledgeGraphStatsResponse {
   sources: GraphSourceStat[];
+  /**
+   * Sum of canonical node types ONLY (Compound + Protein + Pathway +
+   * Disease + ClinicalOutcomes) across all sources. Excludes
+   * AdverseEvent and other non-canonical types.
+   */
   nodeCount: number;
+  /**
+   * Sum of all edge_type_counts values across all sources. Edges are
+   * not canonical/non-canonical — they all represent real graph
+   * relationships.
+   */
   edgeCount: number;
+  /** Per-type breakdown of canonical node counts (FE-020). */
+  nodeTypeCounts: Record<string, number>;
+  /** Per-type breakdown of edge counts (FE-020). */
+  edgeTypeCounts: Record<string, number>;
+  /**
+   * Per-type breakdown of NON-canonical node counts (e.g. AdverseEvent).
+   * Surfaced for transparency — NOT included in `nodeCount`.
+   */
+  nonCanonicalNodeCounts: Record<string, number>;
   source: "kg_service" | "local_registry" | "none";
   generatedAt: string;
   note?: string;

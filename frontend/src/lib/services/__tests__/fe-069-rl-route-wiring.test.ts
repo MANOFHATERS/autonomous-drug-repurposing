@@ -206,6 +206,21 @@ describe("FE-069: /api/rl route wiring — rate limit is actually called", () =>
   });
 
   test("POST /api/rl calls getRankedHypotheses when rate limit passes (proves the route uses the cached lib)", async () => {
+    // FE-003 ROOT FIX: the route now returns 503 when source is "none"
+    // AND no service URL is set. To test the wiring (that
+    // getRankedHypotheses is called), we mock it to return a non-empty
+    // candidate list with source: "local_csv" — simulating a real RL
+    // output CSV was found.
+    (getRankedHypotheses as jest.Mock).mockResolvedValue({
+      candidates: [
+        { drug: "metformin", disease: "breast cancer", rank: 1, gnnScore: 0.85 },
+      ],
+      source: "local_csv",
+      generatedAt: new Date().toISOString(),
+      count: 1,
+      csvPath: "/tmp/x",
+      note: "test",
+    });
     const req = new NextRequest("http://localhost/api/rl", {
       method: "POST",
       body: JSON.stringify({ drug: "met" }),
@@ -223,6 +238,18 @@ describe("FE-069: /api/rl route wiring — rate limit is actually called", () =>
   });
 
   test("GET /api/rl calls getRankedHypotheses when rate limit passes", async () => {
+    // FE-003 ROOT FIX: same as POST — mock non-empty candidates so the
+    // route returns 200 and the wiring assertion holds.
+    (getRankedHypotheses as jest.Mock).mockResolvedValue({
+      candidates: [
+        { drug: "metformin", disease: "breast cancer", rank: 1, gnnScore: 0.85 },
+      ],
+      source: "local_csv",
+      generatedAt: new Date().toISOString(),
+      count: 1,
+      csvPath: "/tmp/x",
+      note: "test",
+    });
     const res = await GET();
     expect(res.status).toBe(200);
     expect(getRankedHypotheses).toHaveBeenCalledTimes(1);
