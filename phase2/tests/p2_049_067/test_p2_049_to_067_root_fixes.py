@@ -210,27 +210,95 @@ def test_p2_053_no_whitespace_in_core_edge_types():
 # graph_transformer.models.graph_transformer.DrugRepurposingGraphTransformer.
 # The OLD step11b (which had the OneCycleLR bug) no longer exists. The
 # Phase 3 trainer (graph_transformer/training/trainer.py) handles the
-# OneCycleLR construction correctly via the P3-S06 fix (checks
-# total_steps >= MIN_STEPS_FOR_SCHEDULER before constructing OneCycleLR,
-# logs a WARNING if below threshold). P2-054 is therefore RESOLVED BY
-# REFACTOR — the bug no longer exists in the codebase.
-@pytest.mark.skip(
-    reason="P2-054 resolved by Phase 3 delegation refactor — "
-           "step11b no longer trains HGT; the Phase 3 trainer "
-           "(graph_transformer/training/trainer.py) handles OneCycleLR "
-           "correctly via P3-S06 fix."
-)
+# P2-054 ROOT FIX: the previous tests were SKIPPED with a misleading
+# "resolved by Phase 3 delegation refactor" comment, but the actual
+# step11b_train_graph_transformer in run_pipeline.py STILL contains the
+# OneCycleLR construction with the broad except Exception. This is
+# exactly the "comments and tests are fakes" issue the user reported.
+# The tests below are REAL — they read the actual source code and verify
+# the fix is in place.
 def test_p2_054_onecyclelr_fallback_uses_cosine_annealing_not_none():
-    """P2-054: SKIPPED — resolved by Phase 3 delegation refactor."""
-    pass
+    """P2-054: the OneCycleLR fallback must use CosineAnnealingLR
+    (not None) so transformers get warmup+decay on small datasets.
+
+    The previous code set scheduler=None on ValueError, leaving the
+    HGT transformer to train with a FIXED learning rate — which
+    diverges on small datasets. The fix uses CosineAnnealingLR as
+    the fallback (no minimum-steps requirement).
+    """
+    pipeline_path = os.path.join(
+        _REPO_ROOT, "phase2", "drugos_graph", "run_pipeline.py"
+    )
+    with open(pipeline_path, "r", encoding="utf-8") as f:
+        content = f.read()
+    # The except clause must catch ValueError specifically (not Exception).
+    assert "except ValueError as _p2_054_err" in content, (
+        "P2-054 root fix: the OneCycleLR except clause must catch "
+        "ValueError specifically (not Exception). The previous broad "
+        "except Exception silently swallowed TypeError, AttributeError "
+        "and other real bugs in the scheduler construction path."
+    )
+    # The fallback must be CosineAnnealingLR (not None).
+    assert "CosineAnnealingLR" in content, (
+        "P2-054 root fix: the fallback scheduler must be "
+        "CosineAnnealingLR (not None) so transformers get warmup+decay "
+        "on small datasets. The previous scheduler=None left the HGT "
+        "transformer to train with a FIXED learning rate — diverges."
+    )
+    # The fallback must log a WARNING so operators see the 1cycle
+    # policy was skipped.
+    assert "logger.warning" in content and "P2-054" in content, (
+        "P2-054 root fix: the fallback must log a WARNING so operators "
+        "see the 1cycle policy was skipped. Without the warning, the "
+        "silent scheduler=None produced false confidence."
+    )
+    # The broad except Exception must NOT be present for the OneCycleLR
+    # construction. We check for the specific pattern that was the bug.
+    # (We can't just assert 'except Exception' is absent — the file has
+    # 9500+ lines and many legitimate except Exception blocks. We check
+    # that the OneCycleLR try block uses ValueError.)
+    one_cycle_block_start = content.find("scheduler = torch.optim.lr_scheduler.OneCycleLR")
+    assert one_cycle_block_start > 0, "OneCycleLR construction not found"
+    # Look at the 200 chars after the OneCycleLR construction for the except.
+    block = content[one_cycle_block_start:one_cycle_block_start + 400]
+    assert "except ValueError" in block, (
+        "P2-054 root fix: the except clause immediately after "
+        "OneCycleLR construction must catch ValueError, not Exception."
+    )
+    assert "except Exception" not in block, (
+        "P2-054 root fix: the except clause immediately after "
+        "OneCycleLR construction must NOT be 'except Exception' — "
+        "that's the bug. Use 'except ValueError' instead."
+    )
 
 
-@pytest.mark.skip(
-    reason="P2-054 resolved by Phase 3 delegation refactor."
-)
 def test_p2_054_cosine_annealing_lr_with_small_total_steps():
-    """P2-054: SKIPPED — resolved by Phase 3 delegation refactor."""
-    pass
+    """P2-054: verify CosineAnnealingLR can be constructed with a very
+    small total_steps (the case where OneCycleLR may raise ValueError).
+
+    CosineAnnealingLR has NO minimum-steps requirement, so it works on
+    the tiniest datasets (even total_steps=1). OneCycleLR's minimum-
+    steps validation varies across PyTorch versions, but CosineAnnealingLR
+    is guaranteed to work for any positive T_max.
+    """
+    import torch
+
+    class _DummyModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.linear = torch.nn.Linear(2, 2)
+
+    model = _DummyModel()
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+    # CosineAnnealingLR has NO minimum — T_max=1 works.
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=1, eta_min=0.00001,
+    )
+    # Calling .step() must not raise.
+    scheduler.step()
+    # Verify the scheduler is a real scheduler (not None).
+    assert scheduler is not None
+    assert isinstance(scheduler, torch.optim.lr_scheduler.CosineAnnealingLR)
 
 
 # ─── P2-055 ──────────────────────────────────────────────────────────
@@ -317,19 +385,55 @@ def test_p2_056_runtime_check_raises_when_triple_missing():
 
 # ─── P2-057 ──────────────────────────────────────────────────────────
 # P2-057 NOTE: On the merged main branch, step11b_train_graph_transformer
-# was REFACTORED to delegate HGT training to Phase 3. The OLD step11b
-# (which had the NaN-triple filtering bug) no longer exists. The Phase 3
-# trainer (graph_transformer/training/trainer.py) uses BCEWithLogitsLoss
-# which handles NaN via the model's forward_logits() — the NaN-filtering
-# pattern from step11b is no longer present. P2-057 is therefore
-# RESOLVED BY REFACTOR.
-@pytest.mark.skip(
-    reason="P2-057 resolved by Phase 3 delegation refactor — "
-           "step11b no longer has a training loop with NaN filtering."
-)
+# P2-057 ROOT FIX: the previous test was SKIPPED with a misleading
+# "resolved by Phase 3 delegation refactor" comment, but the actual
+# step11b_train_graph_transformer STILL contains the NaN-filtering code
+# (valid_mask = ~torch.isnan(scores)) with NO logging of which triples
+# produced NaN. This is exactly the "comments and tests are fakes" issue.
+# The test below is REAL — it reads the actual source and verifies the
+# fix is in place.
 def test_p2_057_nan_triple_tracking_initialized():
-    """P2-057: SKIPPED — resolved by Phase 3 delegation refactor."""
-    pass
+    """P2-057: step11b must track n_nan_triples cumulatively and log
+    WARNING when partial-NaN batches are filtered.
+
+    The previous code filtered NaN scores per batch but never logged
+    WHICH triples produced NaN. A relation type missing from the HGT
+    decoder produces NaN for ALL its triples — silently dropped from
+    training. Operators cannot debug decoder coverage bugs.
+    """
+    pipeline_path = os.path.join(
+        _REPO_ROOT, "phase2", "drugos_graph", "run_pipeline.py"
+    )
+    with open(pipeline_path, "r", encoding="utf-8") as f:
+        content = f.read()
+    # The cumulative counter must be initialized before the epoch loop.
+    assert "_p2_057_cumulative_nan_triples = 0" in content, (
+        "P2-057 root fix: step11b must initialize "
+        "_p2_057_cumulative_nan_triples = 0 before the epoch loop so "
+        "the counter can accumulate NaN-triple counts across batches."
+    )
+    # The per-batch NaN count must be computed.
+    assert "_n_nan_this_batch = int((~valid_mask).sum().item())" in content, (
+        "P2-057 root fix: step11b must compute _n_nan_this_batch from "
+        "valid_mask so the count of NaN triples is tracked per batch."
+    )
+    # The counter must be incremented in the partial-NaN branch.
+    assert "_p2_057_cumulative_nan_triples += _n_nan_this_batch" in content, (
+        "P2-057 root fix: step11b must increment "
+        "_p2_057_cumulative_nan_triples in the partial-NaN branch "
+        "(valid_mask.any() and not valid_mask.all())."
+    )
+    # A WARNING must be logged with the P2-057 marker.
+    assert "P2-057" in content and "logger.warning" in content, (
+        "P2-057 root fix: step11b must log a WARNING with the P2-057 "
+        "marker so operators can grep the log for NaN-triple events."
+    )
+    # The result dict must expose n_nan_triples.
+    assert '"n_nan_triples": int(_p2_057_cumulative_nan_triples)' in content, (
+        "P2-057 root fix: step11b must expose n_nan_triples in the "
+        "returned training history dict so operators can grep the "
+        "result / MLflow run / dashboards for the metric."
+    )
 
 
 # ─── P2-058 ──────────────────────────────────────────────────────────
@@ -529,19 +633,56 @@ def test_p2_062_prod_mode_requires_explicit_env():
 
 
 # ─── P2-063 ──────────────────────────────────────────────────────────
-# P2-063 NOTE: On the merged main branch, step11b_train_graph_transformer
-# was REFACTORED to delegate HGT training to Phase 3. The OLD step11b
-# (which had the MIN_TRIPLES_FOR_HGT threshold) no longer exists. The
-# Phase 3 trainer (graph_transformer/training/trainer.py) handles small-
-# dataset cases via its own logic (MIN_STEPS_FOR_SCHEDULER check). P2-063
-# is therefore RESOLVED BY REFACTOR.
-@pytest.mark.skip(
-    reason="P2-063 resolved by Phase 3 delegation refactor — "
-           "step11b no longer checks MIN_TRIPLES_FOR_HGT."
-)
+# P2-063 ROOT FIX: the previous test was SKIPPED with a misleading
+# "resolved by Phase 3 delegation refactor" comment, but the actual
+# step11b_train_graph_transformer STILL contains the MIN_TRIPLES_FOR_HGT
+# threshold with the old low values (5 dev / 100 prod). This is exactly
+# the "comments and tests are fakes" issue. The test below is REAL —
+# it reads the actual source and verifies the threshold is raised.
 def test_p2_063_min_triples_thresholds_raised():
-    """P2-063: SKIPPED — resolved by Phase 3 delegation refactor."""
-    pass
+    """P2-063: MIN_TRIPLES_FOR_HGT must be 50 in dev (not 5) and
+    PRODUCTION_MIN_TRIPLES_HGT must be 1000 (not 100).
+
+    The previous MIN_TRIPLES_FOR_HGT=5 in dev mode was far too low
+    for HGT — the Graph Transformer has thousands of parameters, and
+    5 triples cannot constrain them. The model simply MEMORIZED the
+    5 triples and produced random-noise AUC.
+    """
+    pipeline_path = os.path.join(
+        _REPO_ROOT, "phase2", "drugos_graph", "run_pipeline.py"
+    )
+    with open(pipeline_path, "r", encoding="utf-8") as f:
+        content = f.read()
+    # The old value 5 must NOT be the dev default. The new value is 50.
+    assert "_dev_min_default = 50" in content, (
+        "P2-063 root fix: MIN_TRIPLES_FOR_HGT dev default must be 50 "
+        "(not 5). The previous value 5 was far too low for HGT — the "
+        "model memorized the 5 triples and produced random-noise AUC."
+    )
+    # PRODUCTION_MIN_TRIPLES_HGT must be 1000 (not 100).
+    assert "PRODUCTION_MIN_TRIPLES_HGT = 1000" in content, (
+        "P2-063 root fix: PRODUCTION_MIN_TRIPLES_HGT must be 1000 "
+        "(not 100). Transformers typically need >>> 100 triples to "
+        "generalize. The DOCX V1 launch criteria require HGT as the "
+        "production model; 1000 is the minimum credible threshold."
+    )
+    # The dev mode threshold must use _dev_min_default (50).
+    assert "MIN_TRIPLES_FOR_HGT = _dev_min_default if _dev_hgt else 1000" in content, (
+        "P2-063 root fix: MIN_TRIPLES_FOR_HGT must use _dev_min_default "
+        "(50) in dev mode and 1000 in production mode."
+    )
+    # The DRUGOS_DEV_MIN_TRIPLES_HGT env var override must exist.
+    assert "DRUGOS_DEV_MIN_TRIPLES_HGT" in content, (
+        "P2-063 root fix: DRUGOS_DEV_MIN_TRIPLES_HGT env var must exist "
+        "as the documented escape hatch for legacy fixtures."
+    )
+    # The old "MIN_TRIPLES_FOR_HGT = 5 if _dev_hgt else 100" line must
+    # NOT be present.
+    assert "MIN_TRIPLES_FOR_HGT = 5 if _dev_hgt else 100" not in content, (
+        "P2-063 root fix: the old 'MIN_TRIPLES_FOR_HGT = 5 if _dev_hgt "
+        "else 100' line must be removed. The new value is 50 (dev) / "
+        "1000 (prod)."
+    )
 
 
 # ─── P2-064 ──────────────────────────────────────────────────────────
@@ -618,39 +759,122 @@ def test_p2_064_fallback_chain_walks_on_failure():
 
 
 # ─── P2-065 ──────────────────────────────────────────────────────────
-# P2-065 NOTE: On the merged main branch, phase2/drugos_graph/
-# graph_transformer_model.py was DELETED — the GraphTransformerModel
-# class was moved to graph_transformer/models/graph_transformer.py and
-# refactored to use NodeTypeProjection (in embeddings.py) instead of
-# nn.Embedding(0, d) for feature-less node types. The new architecture
-# does NOT have the P2-065 bug (nn.Embedding(0, d) for feature-less
-# node types) because NodeTypeProjection always has a real feature dim.
-# P2-065 is therefore RESOLVED BY REFACTOR.
-@pytest.mark.skip(
-    reason="P2-065 resolved by Phase 3 model refactor — "
-           "phase2/drugos_graph/graph_transformer_model.py was deleted; "
-           "the new architecture uses NodeTypeProjection which does not "
-           "have the nn.Embedding(0, d) bug."
-)
+# P2-065 ROOT FIX: the previous tests were SKIPPED with a misleading
+# "resolved by Phase 3 model refactor" comment, but the actual
+# phase2/drugos_graph/graph_transformer_model.py was DELETED while
+# run_pipeline.py line 6780 still imports from it — meaning step11b
+# was BROKEN (ImportError caught silently). This is exactly the
+# "comments and tests are fakes" issue. The tests below are REAL —
+# they construct an actual GraphTransformerModel and verify the fix.
 def test_p2_065_empty_embedding_table_guard_at_construction():
-    """P2-065: SKIPPED — resolved by Phase 3 model refactor."""
-    pass
+    """P2-065: GraphTransformerModel must use _PendingEmbedding sentinel
+    (not nn.Embedding(0, d)) for feature-less node types.
+
+    The previous code silently allocated nn.Embedding(0, d) which
+    crashes with a cryptic 'IndexError: index out of range in self'
+    when the caller forgets to call resize_node_embeddings.
+    """
+    from phase2.drugos_graph.graph_transformer_model import (
+        GraphTransformerModel, GraphTransformerConfig, _PendingEmbedding,
+    )
+
+    # Construct a model with NO features for any node type.
+    cfg = GraphTransformerConfig(embedding_dim=8, num_heads=2, num_layers=1)
+    model = GraphTransformerModel(
+        node_types=("Compound", "Disease"),
+        relation_types=[("Compound", "treats", "Disease")],
+        node_feature_dims={},  # NO features — both node types get sentinels
+        config=cfg,
+    )
+    # Both node types must have _PendingEmbedding sentinels (not nn.Embedding(0, d)).
+    for nt in ("Compound", "Disease"):
+        tbl = model.node_embedding_tables[nt]
+        assert isinstance(tbl, _PendingEmbedding), (
+            f"P2-065 root fix: node type {nt!r} must have a "
+            f"_PendingEmbedding sentinel (not nn.Embedding(0, d)). "
+            f"Got {type(tbl).__name__}. The sentinel raises a clear "
+            f"RuntimeError when accessed, instead of the cryptic "
+            f"'IndexError: index out of range in self'."
+        )
 
 
-@pytest.mark.skip(
-    reason="P2-065 resolved by Phase 3 model refactor."
-)
 def test_p2_065_encode_raises_clear_error_for_pending_resize():
-    """P2-065: SKIPPED — resolved by Phase 3 model refactor."""
-    pass
+    """P2-065: encode() must raise a clear RuntimeError (naming the
+    pending node type) when called before resize_node_embeddings.
+
+    The previous code crashed with 'IndexError: index out of range
+    in self' deep in PyTorch's embedding lookup kernel — no
+    indication which node type was empty.
+    """
+    from phase2.drugos_graph.graph_transformer_model import (
+        GraphTransformerModel, GraphTransformerConfig,
+    )
+
+    cfg = GraphTransformerConfig(embedding_dim=8, num_heads=2, num_layers=1)
+    model = GraphTransformerModel(
+        node_types=("Compound", "Disease"),
+        relation_types=[("Compound", "treats", "Disease")],
+        node_feature_dims={},
+        config=cfg,
+    )
+    # Calling encode() before resize must raise RuntimeError (not IndexError).
+    with pytest.raises(RuntimeError) as exc_info:
+        # We need a dummy x_dict — but encode() should fail at the
+        # _validate_embedding_tables() entry check BEFORE touching x_dict.
+        import torch
+        x_dict = {nt: torch.zeros(1, cfg.embedding_dim) for nt in ("Compound", "Disease")}
+        edge_index_dict = {
+            ("Compound", "treats", "Disease"): torch.tensor([[0], [0]], dtype=torch.long),
+        }
+        model.encode(x_dict, edge_index_dict)
+    # The error message must mention P2-065 and the pending node types.
+    msg = str(exc_info.value)
+    assert "P2-065" in msg, (
+        f"P2-065 root fix: the RuntimeError must mention 'P2-065' so "
+        f"operators can grep for it. Got: {msg}"
+    )
+    assert "Compound" in msg or "Disease" in msg, (
+        f"P2-065 root fix: the RuntimeError must name the pending node "
+        f"type(s). Got: {msg}"
+    )
 
 
-@pytest.mark.skip(
-    reason="P2-065 resolved by Phase 3 model refactor."
-)
 def test_p2_065_resize_clears_pending_set():
-    """P2-065: SKIPPED — resolved by Phase 3 model refactor."""
-    pass
+    """P2-065: after resize_node_embeddings is called, the
+    _PendingEmbedding sentinels must be replaced with real nn.Embedding
+    tables, and encode() must no longer raise the P2-065 error.
+    """
+    import torch
+    from phase2.drugos_graph.graph_transformer_model import (
+        GraphTransformerModel, GraphTransformerConfig, _PendingEmbedding,
+    )
+
+    cfg = GraphTransformerConfig(embedding_dim=8, num_heads=2, num_layers=1)
+    model = GraphTransformerModel(
+        node_types=("Compound", "Disease"),
+        relation_types=[("Compound", "treats", "Disease")],
+        node_feature_dims={},
+        config=cfg,
+    )
+    # Verify sentinels are present before resize.
+    assert isinstance(model.node_embedding_tables["Compound"], _PendingEmbedding)
+    # Resize — this must replace the sentinels with real nn.Embedding tables.
+    model.resize_node_embeddings({"Compound": 5, "Disease": 3})
+    # After resize, the sentinels must be gone.
+    for nt in ("Compound", "Disease"):
+        tbl = model.node_embedding_tables[nt]
+        assert not isinstance(tbl, _PendingEmbedding), (
+            f"P2-065 root fix: after resize_node_embeddings, node type "
+            f"{nt!r} must have a real nn.Embedding (not _PendingEmbedding)."
+        )
+        # The table must have the requested size.
+        expected = {"Compound": 5, "Disease": 3}[nt]
+        assert tbl.weight.shape[0] == expected, (
+            f"P2-065 root fix: after resize, node type {nt!r} table must "
+            f"have {expected} rows, got {tbl.weight.shape[0]}."
+        )
+    # _validate_embedding_tables() must NOT raise after resize.
+    model._validate_embedding_tables()  # must not raise
 
 
 # ─── P2-066 ──────────────────────────────────────────────────────────
