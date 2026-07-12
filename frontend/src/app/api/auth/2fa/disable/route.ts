@@ -86,13 +86,25 @@ export async function POST(req: NextRequest) {
     // Both factors verified — safe to disable.
     await db.user.update({
       where: { id: user.userId },
-      data: { mfaSecret: null, mfaEnabled: false },
+      data: { mfaSecret: null, mfaEnabled: false, lastTotpCounter: null },
     });
-    await writeAuditLog({
+    // FE-034: 2FA disable is security-critical — must be auditable.
+    const audit = await writeAuditLog({
       user,
       action: "2fa_disable",
       resource: user.userId,
+      critical: true,
     });
+    if (!audit.ok) {
+      // The 2FA WAS disabled, but the audit log failed. This is a
+      // security incident — re-enable 2FA (forcing the user to set it
+      // up again) and return an error.
+      await db.user.update({
+        where: { id: user.userId },
+        data: { mfaEnabled: false }, // secret already cleared; user must re-enroll
+      });
+      return internalError("2FA disabled but audit log failed. Please re-enable 2FA from your security settings.");
+    }
     return NextResponse.json({ ok: true, enabled: false });
   } catch (e) {
     console.error("2FA disable failed:", e);

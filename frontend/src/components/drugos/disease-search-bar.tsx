@@ -4,6 +4,9 @@ import { useState, useMemo, useRef } from 'react';
 import { Search, X, Clock, ArrowRight } from 'lucide-react';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
+// FE-026 ROOT FIX: diseases array is now empty (was fabricated data).
+// Use useDiseaseSearch() hook in use-api-data.tsx to fetch real diseases
+// from /api/diseases/search (backed by NLM MeSH).
 import { diseases } from '@/lib/mock-data';
 
 interface DiseaseSearchBarProps {

@@ -22,7 +22,12 @@ export const metadata: Metadata = {
   keywords: ["DrugOS", "drug repurposing", "AI", "knowledge graph", "clinical trials", "pharmaceutical"],
   authors: [{ name: "DrugOS Team" }],
   icons: {
-    icon: "https://z-cdn.chatglm.cn/z-ai/static/logo.svg",
+    // FE-030 ROOT FIX: was loaded from https://z-cdn.chatglm.cn/z-ai/static/logo.svg
+    // — a third-party CDN. Every page load leaked visitor IPs to an
+    // unrelated operator, created an availability dependency on the CDN,
+    // and (for SVG favicons in older browsers) was a potential script-
+    // injection vector. Bundled locally in /public/logo.svg instead.
+    icon: "/logo.svg",
   },
   openGraph: {
     title: "DrugOS — Drug Repurposing Platform",

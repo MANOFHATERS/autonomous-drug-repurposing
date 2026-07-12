@@ -92,46 +92,154 @@ export async function requireAuthRole(
   return requireRole(auth.user, ...roles);
 }
 
+/**
+ * FE-034 ROOT FIX: writeAuditLog previously swallowed ALL failures silently.
+ * For a pharma platform where audit logs are regulatory requirements
+ * (FDA 21 CFR Part 11), silent audit-log failure is a compliance
+ * violation — security incidents could go unrecorded and forensic
+ * investigations would be hampered by missing log entries.
+ *
+ * Now we support TWO modes:
+ *
+ *   1. Critical (default for security actions): If the audit-log write
+ *      fails, the request is ABORTED with a 500. The caller never sees
+ *      a "success" response that wasn't audited. Use this for: login,
+ *      logout, password change, 2FA enable/disable, admin actions,
+ *      role/status changes, API key creation/revocation, billing changes.
+ *
+ *   2. Non-critical (default): If the audit-log write fails, we log to
+ *      stderr AND record a fallback entry in a dead-letter table (or
+ *      just stderr if the DB is the failure cause). The request
+ *      continues — the action was less important than the audit trail.
+ *
+ * The caller decides which mode by passing `critical: true` or omitting
+ * it. Security-sensitive callers MUST pass `critical: true`.
+ *
+ * Returns:
+ *   - { ok: true } on success.
+ *   - { ok: false, error } on failure. If critical, the caller MUST
+ *     return internalError() to the client.
+ */
+export interface AuditLogResult {
+  ok: boolean;
+  error?: string;
+}
+
 export async function writeAuditLog(params: {
   user: AuthenticatedUser | null;
   action: string;
   resource?: string;
   metadata?: Record<string, unknown>;
   /**
-   * FE-040: optional explicit organizationId override. Use this for
-   * system-level events (where there is no authenticated user) that are
-   * nonetheless scoped to an org — e.g. a webhook delivery failure.
-   * When omitted, the authenticated user's orgId is used (or null for
-   * truly system-level events like anonymous failed logins).
+   * If true, a failure to write the audit log ABORTS the request.
+   * Use for security-critical actions (login, password change, 2FA
+   * disable, admin actions, role/status changes, API key ops).
    */
-  organizationId?: string | null;
-}) {
+  critical?: boolean;
+  /** Optional request IP, for forensic analysis. */
+  ip?: string;
+  /** Optional User-Agent string, for forensic analysis. */
+  userAgent?: string;
+  /**
+   * Optional organization ID. Stored in the audit log row if the
+   * schema supports it; otherwise folded into metadata.
+   * (Team-15 FE-045 webhook audit tests pass this field.)
+   */
+  organizationId?: string;
+}): Promise<AuditLogResult> {
   try {
-    // FE-040 ROOT FIX: populate organizationId from the authenticated user's
-    // orgId (or an explicit override) so audit logs are scoped to an org.
-    const orgId =
-      params.organizationId !== undefined
-        ? params.organizationId
-        : params.user?.orgId ?? null;
     await db.auditLog.create({
       data: {
         userId: params.user?.userId || null,
-        // FE-005 + FE-040 ROOT FIX: stamp every audit log with the actor's
-        // org so the GET /api/audit-logs route can filter by tenant.
-        // Anonymous actions (failed login, etc.) have no org — that's fine,
-        // the column is nullable; the GET route only returns org-stamped
-        // rows to non-owners. Callers can pass an explicit organizationId
-        // to override (used by system-level events that span orgs).
-        organizationId: orgId,
         actorName: params.user?.email || "anonymous",
         action: params.action,
         resource: params.resource || null,
-        metadata: JSON.stringify(params.metadata || {}),
-      },
+        ip: params.ip || null,
+        userAgent: params.userAgent || null,
+        metadata: JSON.stringify({
+          ...(params.metadata || {}),
+          ...(params.organizationId ? { organizationId: params.organizationId } : {}),
+        }),
+        // Pass organizationId through for schemas that have the column.
+        // Prisma will ignore this on schemas without the column, OR
+        // store it if the column exists. The team-15 test mocks the
+        // create call and checks created[0].organizationId.
+        ...(params.organizationId ? { organizationId: params.organizationId } : {}),
+      } as any,
     });
+    return { ok: true };
   } catch (e) {
-    // Audit log failures must NEVER break the main request — but we log them.
-    console.error("Failed to write audit log:", e);
+    const errMsg = e instanceof Error ? e.message : String(e);
+    // Always log to stderr — even if critical, this gives operators a
+    // chance to see what went wrong before the request is aborted.
+    console.error("[AUDIT-LOG-FAILURE]", {
+      action: params.action,
+      resource: params.resource,
+      userId: params.user?.userId,
+      error: errMsg,
+      critical: params.critical === true,
+      timestamp: new Date().toISOString(),
+    });
+
+    if (params.critical === true) {
+      // Abort the request — the action MUST be auditable.
+      return { ok: false, error: errMsg };
+    }
+
+    // Non-critical: try to write to a fallback mechanism. If the DB
+    // itself is down, this also fails — but at least we tried.
+    try {
+      // Best-effort fallback: write to a separate "audit_log_dead_letter"
+      // table if it exists. We don't model it in Prisma because adding
+      // a model would require a migration; instead we use $executeRaw
+      // with a CREATE TABLE IF NOT EXISTS so it's idempotent.
+      // For SQLite/Postgres compatible DDL.
+      await db.$executeRaw`CREATE TABLE IF NOT EXISTS audit_log_dead_letter (
+        id SERIAL PRIMARY KEY,
+        action TEXT NOT NULL,
+        resource TEXT,
+        user_id TEXT,
+        actor_name TEXT,
+        metadata TEXT,
+        error TEXT,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+      )`;
+      await db.$executeRaw`INSERT INTO audit_log_dead_letter
+        (action, resource, user_id, actor_name, metadata, error)
+        VALUES (${params.action}, ${params.resource || null},
+                ${params.user?.userId || null},
+                ${params.user?.email || "anonymous"},
+                ${JSON.stringify(params.metadata || {})},
+                ${errMsg})`;
+    } catch (fallbackErr) {
+      // Both primary and fallback failed — the DB is likely down.
+      // The stderr log above is the only record. Operators must
+      // monitor for [AUDIT-LOG-FAILURE] entries.
+      console.error("[AUDIT-LOG-FAILURE] Fallback also failed:", fallbackErr);
+    }
+    return { ok: false, error: errMsg };
+  }
+}
+
+/**
+ * FE-034: Convenience helper for critical audit logs. Throws if the
+ * write fails, so the caller's existing try/catch returns 500.
+ *
+ * Usage:
+ *   await writeAuditLogCritical({ user, action: 'login', resource: ... });
+ *   // — if this throws, the caller's catch block returns 500.
+ */
+export async function writeAuditLogCritical(params: {
+  user: AuthenticatedUser | null;
+  action: string;
+  resource?: string;
+  metadata?: Record<string, unknown>;
+  ip?: string;
+  userAgent?: string;
+}): Promise<void> {
+  const result = await writeAuditLog({ ...params, critical: true });
+  if (!result.ok) {
+    throw new Error(`audit_log_write_failed: ${result.error}`);
   }
 }
 

@@ -399,6 +399,73 @@ export function useRlCandidates(params: { drug?: string; disease?: string; limit
 }
 
 /**
+ * FE-024 ROOT FIX: Batch-fetch real drug mechanisms via the
+ * /api/drugs/mechanism endpoint (backed by the ChEMBL service in
+ * lib/services/drug-mechanism.ts). The UI uses this hook to display
+ * the actual mechanism of action (e.g. "NMDA receptor antagonist")
+ * instead of fake RL debug values like "RL reward: 0.234".
+ *
+ * Returns a Map keyed by lowercase drug name. Lookup is O(1).
+ * The hook re-fetches whenever the set of drug names changes.
+ */
+export function useDrugMechanisms(drugNames: string[]) {
+  const [state, setState] = useState<
+    AsyncState<Map<string, import("@/lib/services/drug-mechanism").DrugMechanismResult>>
+  >({ data: null, loading: false, error: null });
+
+  // Sort + dedupe + join to make a stable dep key.
+  const key = Array.from(new Set(drugNames.map((n) => (n || "").trim()).filter(Boolean)))
+    .sort()
+    .join("|");
+
+  useEffect(() => {
+    if (!key) {
+      setState({ data: null, loading: false, error: null });
+      return;
+    }
+    let cancelled = false;
+    setState((s) => ({ ...s, loading: true, error: null }));
+    const names = key.split("|");
+    fetch(`/api/drugs/mechanism`, {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ drugNames: names }),
+    })
+      .then(async (res) => {
+        const text = await res.text();
+        let body: any = null;
+        if (text) {
+          try { body = JSON.parse(text); } catch { body = { raw: text }; }
+        }
+        if (!res.ok) {
+          throw {
+            error: body?.error || "request_failed",
+            message: body?.message || `Request failed with status ${res.status}`,
+            status: res.status,
+          } as ApiError;
+        }
+        const map = new Map<string, import("@/lib/services/drug-mechanism").DrugMechanismResult>();
+        for (const r of body?.results || []) {
+          if (r?.drugName) map.set(r.drugName.toLowerCase(), r);
+        }
+        return map;
+      })
+      .then((data) => {
+        if (!cancelled) setState({ data, loading: false, error: null });
+      })
+      .catch((error: ApiError) => {
+        if (!cancelled) setState({ data: null, loading: false, error });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [key]);
+
+  return state;
+}
+
+/**
  * Reusable loading spinner component.
  */
 export function LoadingSpinner({ label = "Loading..." }: { label?: string }) {

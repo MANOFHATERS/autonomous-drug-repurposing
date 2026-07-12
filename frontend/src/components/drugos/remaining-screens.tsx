@@ -26,6 +26,8 @@ import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, ResponsiveContainer, PieChart, Pie, Cell, LineChart, Line, AreaChart, Area, Legend } from 'recharts';
 import { Search, Plus, Download, ChevronRight, ChevronDown, Check, X, AlertTriangle, Star, ExternalLink, Copy, Trash2, Edit, MoreHorizontal, Filter, ArrowRight, RefreshCw, Eye, Settings, Users, Shield, Key, Activity, TrendingUp, FileText, Clock, Zap, Globe, Lock, Bell, Mail, CreditCard, Database, Code, BookOpen, GitFork, Server, Building, User, Play, Send, HelpCircle, MessageSquare, BarChart3, Target, Award, Heart, LayoutDashboard, GitBranch, FolderKanban, Share2, Bookmark, Layers, Monitor, Smartphone, Calendar, DollarSign, Percent, Package, AlertCircle, CheckCircle2, XCircle, Info, ArrowUpRight, ArrowDownRight, ToggleLeft, ShieldCheck, Scale, Sun, Moon, MonitorSmartphone, QrCode } from 'lucide-react';
 import { motion } from 'framer-motion';
+// FE-026 ROOT FIX: All data exports from mock-data.ts are now EMPTY arrays.
+// Components render empty states until migrated to real API calls.
 import { diseases, drugCandidates, clinicalTrials, users, auditLogs, subscriptionPlans, billingHistory, apiKeys, webhooks, usageMetrics, dataSources, dealPipeline, organization, featureFlags, systemStatus, savedQueries, blogPosts, careers } from '@/lib/mock-data';
 
 const PRIMARY = '#5B4FCF';

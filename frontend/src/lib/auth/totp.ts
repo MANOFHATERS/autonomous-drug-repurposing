@@ -101,6 +101,71 @@ export function verifyTotp(secretBase32: string, code: string): boolean {
   return false;
 }
 
+/**
+ * FE-033 ROOT FIX: TOTP replay protection.
+ *
+ * RFC 6238 §5.2 recommends rejecting reused TOTP codes. Without replay
+ * protection, an attacker who phishes a single TOTP code (e.g. via a
+ * reverse-proxy phishing site) has a 60-second window to replay it.
+ * Combined with FE-003 (no rate limit on the 2FA verify endpoint at
+ * the time of the audit), this allowed multiple replay attempts.
+ *
+ * This function:
+ *   1. Computes the counter (30s window index) for each of the 3 windows
+ *      (-30s, 0, +30s) we accept.
+ *   2. Finds the matching window (if any) using a constant-time compare.
+ *   3. Rejects the code if the matching counter is <= lastUsedCounter
+ *      (the code has already been used).
+ *   4. Returns the matching counter so the caller can persist it as the
+ *      new lastUsedCounter.
+ *
+ * The caller is responsible for atomically updating lastTotpCounter in
+ * the DB (e.g. via a Prisma `updateMany` with `where: { lastTotpCounter:
+ * { lt: counter } }` to avoid races between concurrent verifications).
+ *
+ * Returns:
+ *   - { ok: true, counter } on success (caller persists counter).
+ *   - { ok: false, reason: 'invalid_code' } if no window matched.
+ *   - { ok: false, reason: 'replayed' } if the matching counter is
+ *     <= lastUsedCounter.
+ */
+export function verifyTotpWithReplayCheck(
+  secretBase32: string,
+  code: string,
+  lastUsedCounter: bigint | null
+): { ok: true; counter: bigint } | { ok: false; reason: "invalid_code" | "replayed" } {
+  if (!/^\d{6}$/.test(code)) return { ok: false, reason: "invalid_code" };
+  const now = Date.now();
+  // Build the three candidate (counter, code) pairs.
+  const candidates: Array<{ counter: bigint; code: string }> = [];
+  for (const offset of [-30000, 0, 30000]) {
+    const t = new Date(now + offset);
+    const counter = BigInt(Math.floor(t.getTime() / 1000 / 30));
+    candidates.push({ counter, code: computeTotp(secretBase32, t) });
+  }
+
+  // Find the matching window. Use timingSafeEqual for constant-time
+  // comparison to avoid timing side-channels.
+  const b = Buffer.from(code);
+  let matched: { counter: bigint; code: string } | null = null;
+  for (const cand of candidates) {
+    const a = Buffer.from(cand.code);
+    if (a.length === b.length && timingSafeEqual(a, b)) {
+      matched = cand;
+      break;
+    }
+  }
+  if (!matched) return { ok: false, reason: "invalid_code" };
+
+  // Replay check: reject if the matching counter has already been used.
+  // We pick the LOWEST counter among the candidates that matches the
+  // code (in practice only one matches, but this is defensive).
+  if (lastUsedCounter !== null && matched.counter <= lastUsedCounter) {
+    return { ok: false, reason: "replayed" };
+  }
+  return { ok: true, counter: matched.counter };
+}
+
 /** Build an `otpauth://` URI for QR-code generators. */
 export function buildOtpAuthUri(opts: {
   issuer: string;

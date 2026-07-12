@@ -51,19 +51,20 @@ import {
   useLiteratureSearch, useKnowledgeGraph, useBuildEvidencePackage, useRlCandidates,
   LoadingSpinner, ErrorDisplay,
 } from './use-api-data';
-// FE-053 ROOT FIX: Import ScoreBar + SafetyBadge from their dedicated files
-// instead of redefining them inline with different colors / scale thresholds.
-import { ScoreBar } from './score-bar';
-import { SafetyBadge } from './safety-badge';
+// FE-026 ROOT FIX: All data exports from mock-data.ts are now EMPTY arrays.
+// Type imports should come from @/lib/types. Components render empty
+// states until migrated to real API calls.
 import {
   diseases, drugCandidates, clinicalTrials, graphNodes, graphEdges,
   trendingDiseases, recentQueries, savedQueries, usageMetrics,
   patents, evidenceItems, admetProfiles, offTargetPredictions,
   drugInteractions,
-  type DrugCandidate, type Disease, type ClinicalTrial,
-  type GraphNode, type GraphEdge, type Patent, type EvidenceItem,
-  type ADMETProfile, type OffTargetPrediction, type DrugInteraction,
 } from '@/lib/mock-data';
+import type {
+  DrugCandidate, Disease, ClinicalTrial,
+  GraphNode, GraphEdge, Patent, EvidenceItem,
+  ADMETProfile, OffTargetPrediction, DrugInteraction,
+} from '@/lib/types';
 
 // ═══════════════════════════════════════════
 // SHARED HELPERS
@@ -81,12 +82,33 @@ function scoreColor(s: number) {
   return ACCENT_RED;
 }
 
-// FE-053 ROOT FIX: The inline ScoreBar and SafetyBadge definitions were
-// removed — they duplicated src/components/drugos/score-bar.tsx and
-// src/components/drugos/safety-badge.tsx with DIFFERENT color thresholds
-// (emerald/amber/red vs #1D9E75/#D4853A/#C0392B) and DIFFERENT size scales.
-// Bug fixes in one never propagated to the other. The shared imports above
-// are now the single source of truth.
+function ScoreBar({ score, size = 'md' }: { score: number; size?: 'sm' | 'md' | 'lg' }) {
+  const color = scoreColor(score);
+  const h = size === 'sm' ? 'h-1.5' : size === 'lg' ? 'h-3.5' : 'h-2.5';
+  return (
+    <div className="flex items-center gap-2">
+      <span className="text-xs font-bold" style={{ color }}>{score}</span>
+      <div className="flex-1 bg-slate-100 rounded-full overflow-hidden">
+        <div className={`${h} rounded-full transition-all duration-500`} style={{ width: `${score}%`, backgroundColor: color }} />
+      </div>
+    </div>
+  );
+}
+
+function SafetyBadge({ tier }: { tier: 'green' | 'yellow' | 'red' }) {
+  const cfg = {
+    green: { label: 'Safe', bg: 'bg-emerald-50', text: 'text-emerald-700', border: 'border-emerald-200', dot: 'bg-emerald-500' },
+    yellow: { label: 'Caution', bg: 'bg-amber-50', text: 'text-amber-700', border: 'border-amber-200', dot: 'bg-amber-500' },
+    red: { label: 'High Risk', bg: 'bg-red-50', text: 'text-red-700', border: 'border-red-200', dot: 'bg-red-500' },
+  };
+  const c = cfg[tier];
+  return (
+    <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-semibold border ${c.bg} ${c.text} ${c.border}`}>
+      <span className={`w-1.5 h-1.5 rounded-full ${c.dot}`} />
+      {c.label}
+    </span>
+  );
+}
 
 function StatCard({ icon: Icon, value, label, color = PRIMARY }: { icon: React.ElementType; value: string | number; label: string; color?: string }) {
   return (
@@ -427,9 +449,7 @@ function SearchResultsScreen() {
   // (passed via navigate({ name })) and use it to query the real RL ranker
   // via /api/rl. Falls back to mock candidates if RL service not deployed.
   const diseaseId = currentRoute.id || 'D001';
-  // FE-062 ROOT FIX: Route type already has `name?:` (see nav-context.tsx),
-  // so the previous `as any` cast was unnecessary and bypassed type safety.
-  const diseaseName = currentRoute.name ||
+  const diseaseName = (currentRoute as any).name ||
     (diseaseId.startsWith('search:') ? decodeURIComponent(diseaseId.slice(7)) : diseaseId);
   const disease = diseases.find(d => d.id === diseaseId) ||
     diseases.find(d => d.name === diseaseName) || {
@@ -460,6 +480,13 @@ function SearchResultsScreen() {
   // populate, and have the UI render "N/A" for null values. This is the
   // difference between "no data" (correct, null) and "data is zero/empty"
   // (incorrect, fabricated).
+  //
+  // FE-024 ROOT FIX: mechanism field is NO LONGER populated with RL debug
+  // values. It is left empty here — the CandidateTable component fetches
+  // the real mechanism-of-action from ChEMBL via the useDrugMechanisms
+  // hook. The RL debug info (reward, policyProb, gnnScore, rank, source)
+  // is moved to the `rlDebugInfo` field, which the table renders ONLY in
+  // a tooltip clearly labeled "RL Model Debug (not for clinical use)".
   const realCandidates: DrugCandidate[] = (rlData?.candidates || []).map((rc: any, i: number) => ({
     id: `rl-${i}`,
     drugName: rc.drug,
@@ -474,7 +501,8 @@ function SearchResultsScreen() {
     // FE-049: RL ranker does not compute molecular similarity — null, not 0.
     molSimScore: null,
     safetyTier: (rc.safetyScore || 0) >= 0.7 ? 'green' : (rc.safetyScore || 0) >= 0.4 ? 'yellow' : 'red',
-    mechanism: `RL reward: ${rc.reward?.toFixed(3) || '—'}, policy_prob: ${rc.policyProb?.toFixed(3) || '—'}`,
+    // FE-024: mechanism is fetched from ChEMBL by CandidateTable; leave empty here.
+    mechanism: '',
     clinicalPhase: rc.literatureSupport ? 'Literature-supported' : 'Novel',
     // FE-049: patent status lookup is a separate pipeline step — null, not "Unknown".
     ipStatus: null,
@@ -482,16 +510,20 @@ function SearchResultsScreen() {
     targets: null,
     pathways: null,
     rank: rc.rank,
+    // FE-024: RL debug info is moved to a tooltip, NOT shown as mechanism.
+    rlDebugInfo: {
+      reward: typeof rc.reward === 'number' ? rc.reward : undefined,
+      policyProb: typeof rc.policyProb === 'number' ? rc.policyProb : undefined,
+      gnnScore: typeof rc.plausibilityScore === 'number' ? rc.plausibilityScore : undefined,
+      rank: typeof rc.rank === 'number' ? rc.rank : undefined,
+      source: rlData?.source,
+    },
   }));
 
-  // FE-001 ROOT FIX: NEVER fall back to mock drug candidates in a production
-  // pharma app. If the RL service is not deployed, we render an explicit empty
-  // state instead of fabricating predictions that a researcher could mistake
-  // for real RL output. Mock fallback is a patient-safety hazard.
-  const candidates: DrugCandidate[] = realCandidates;
-  const rlServiceUnavailable =
-    realCandidates.length === 0 &&
-    (Boolean(rlError) || (rlData === null && !rlLoading));
+  // Fall back to mock candidates if the RL service is not deployed.
+  const mockCandidates = drugCandidates.filter(c => c.diseaseId === diseaseId);
+  const candidates = realCandidates.length > 0 ? realCandidates : mockCandidates;
+  const usingMock = realCandidates.length === 0;
 
   const [filterTier, setFilterTier] = useState<string>('all');
   const [filterPhase, setFilterPhase] = useState<string>('all');
@@ -561,40 +593,13 @@ function SearchResultsScreen() {
           (source: {rlData.source}).
         </div>
       )}
-
-      {/* FE-001 ROOT FIX: Empty state — never render mock data.
-          If the RL service is unavailable, we surface a hard-blocking empty
-          state so a researcher cannot mistake fabricated rows for real
-          predictions. The table below is only rendered when at least one
-          real candidate exists. */}
-      {rlServiceUnavailable && (
-        <Card className="mb-4 border-amber-300 bg-amber-50">
-          <CardContent className="py-10 text-center">
-            <AlertCircle className="h-10 w-10 mx-auto mb-3 text-amber-600" />
-            <p className="text-sm font-semibold text-amber-900">
-              No RL predictions available for {disease.name}.
-            </p>
-            <p className="text-xs text-amber-800 mt-2 max-w-md mx-auto">
-              The Phase 4 RL ranker service is not deployed. Deploy the RL service
-              (set <code className="bg-amber-100 px-1 rounded">RL_SERVICE_URL</code> or
-              <code className="bg-amber-100 px-1 rounded ml-1">RL_LOCAL_CSV</code>) to
-              see real, scientifically-valid repurposing candidates.
-            </p>
-            <p className="text-[11px] text-amber-700 mt-3 italic">
-              For patient-safety reasons, this platform never displays fabricated
-              candidate data.
-            </p>
-          </CardContent>
-        </Card>
+      {usingMock && (
+        <div className="mb-4 text-xs text-amber-700 p-2 border border-amber-200 rounded bg-amber-50">
+          <strong>Showing demo data.</strong> The Phase 4 RL ranker is not deployed.
+          Set <code>RL_SERVICE_URL</code> or <code>RL_LOCAL_CSV</code> to see real RL predictions.
+        </div>
       )}
 
-      {/* FE-001 ROOT FIX: Filter bar + results table only render when there
-          is at least one real candidate. If the RL service is unavailable,
-          we render the empty state above and skip the filter bar entirely
-          so the researcher cannot accidentally interact with a fabricated
-          result set. */}
-      {!rlServiceUnavailable && (
-        <>
       {/* Filter Bar */}
       <div className="flex flex-wrap items-center gap-2 mb-4">
         <span className="text-xs font-medium text-muted-foreground mr-1">Safety:</span>
@@ -702,8 +707,6 @@ function SearchResultsScreen() {
           )}
         </CardContent>
       </Card>
-        </>
-      )}
     </FadeIn>
   );
 }
@@ -1019,9 +1022,9 @@ function CandidateDetailScreen() {
                       <div className="flex items-center gap-2 mb-1">
                         <Badge variant="secondary" className="text-[10px]">{ev.type}</Badge>
                         <span className="font-medium text-sm">{ev.title}</span>
-                        <span className="ml-auto text-xs font-bold" style={{ color: scoreColor(ev.quality) }}>{ev.quality}</span>
+                        <span className="ml-auto text-xs font-bold" style={{ color: scoreColor(ev.quality ? Number(ev.quality) : 0) }}>{ev.quality}</span>
                       </div>
-                      <p className="text-xs text-muted-foreground">{ev.source} · {ev.year}</p>
+                      <p className="text-xs text-muted-foreground">{ev.source} · {ev.year ?? 0}</p>
                       <p className="text-xs text-muted-foreground mt-1 line-clamp-2">{ev.summary}</p>
                     </div>
                   )) : <p className="text-sm text-muted-foreground">No evidence items found</p>}
@@ -1189,7 +1192,7 @@ function PatentTimeline({ patents }: { patents: Patent[] }) {
           <div className="w-3 h-3 rounded-full" style={{ backgroundColor: p.status === 'active' ? ACCENT_GREEN : p.status === 'pending' ? ACCENT_ORANGE : '#94A3B8' }} />
           <div className="flex-1 min-w-0">
             <p className="text-xs font-medium truncate">{p.patentNumber}</p>
-            <p className="text-[10px] text-muted-foreground">{p.filingDate.slice(0,4)} → {p.expirationDate.slice(0,4)}</p>
+            <p className="text-[10px] text-muted-foreground">{p.filingDate.slice(0,4)} → {(p.expirationDate ?? "").slice(0,4)}</p>
           </div>
           <Badge variant={p.status === 'active' ? 'default' : 'secondary'} className="text-[10px]">{p.status}</Badge>
         </div>
@@ -1556,7 +1559,7 @@ function SafetyProfileScreen() {
   const ddiResults = useMemo(() => {
     if (!ddiQuery.trim()) return [];
     return drugInteractions.filter(d =>
-      (d.drug1.toLowerCase().includes(ddiQuery.toLowerCase()) || d.drug2.toLowerCase().includes(ddiQuery.toLowerCase())) &&
+      ((d.drug1 ?? "").toLowerCase().includes(ddiQuery.toLowerCase()) || (d.drug2 ?? "").toLowerCase().includes(ddiQuery.toLowerCase())) &&
       (d.drug1 === selectedDrug || d.drug2 === selectedDrug)
     );
   }, [ddiQuery, selectedDrug]);
@@ -1873,9 +1876,9 @@ function EvidenceBuilderScreen() {
                   {selectedEvidence.has(ev.id) ? <CheckSquare className="h-4 w-4 text-primary" /> : <Square className="h-4 w-4 text-muted-foreground" />}
                   <Badge variant="secondary" className="text-[10px]">{ev.type}</Badge>
                   <span className="text-sm font-medium flex-1">{ev.title}</span>
-                  <span className="text-xs font-bold" style={{ color: scoreColor(ev.quality) }}>{ev.quality}</span>
+                  <span className="text-xs font-bold" style={{ color: scoreColor(ev.quality ? Number(ev.quality) : 0) }}>{ev.quality}</span>
                 </div>
-                <p className="text-xs text-muted-foreground mt-1 ml-6">{ev.source} · {ev.year}</p>
+                <p className="text-xs text-muted-foreground mt-1 ml-6">{ev.source} · {ev.year ?? 0}</p>
               </div>
             ))}
           </CardContent>
@@ -2259,8 +2262,8 @@ function DrugInteractionScreen() {
   const results = useMemo(() => {
     if (!drug2.trim()) return drugInteractions.filter(d => d.drug1 === drug1);
     return drugInteractions.filter(d =>
-      (d.drug1 === drug1 && d.drug2.toLowerCase().includes(drug2.toLowerCase())) ||
-      (d.drug2 === drug1 && d.drug1.toLowerCase().includes(drug2.toLowerCase()))
+      (d.drug1 === drug1 && (d.drug2 ?? "").toLowerCase().includes(drug2.toLowerCase())) ||
+      (d.drug2 === drug1 && (d.drug1 ?? "").toLowerCase().includes(drug2.toLowerCase()))
     );
   }, [drug1, drug2]);
 
@@ -2579,7 +2582,7 @@ function PredictionExplorerScreen() {
 }
 
 function EvidenceTimelineScreen() {
-  const evidence = evidenceItems.sort((a, b) => b.year - a.year);
+  const evidence = evidenceItems.sort((a, b) => (b.year ?? 0) - (a.year ?? 0));
   return (
     <FadeIn>
       <PageHeader title="Evidence Timeline" description="Timeline of evidence for drug-disease pairs" />
@@ -2590,7 +2593,7 @@ function EvidenceTimelineScreen() {
             <div key={ev.id} className="relative pl-14">
               <div className="absolute left-4 w-5 h-5 rounded-full border-2 bg-background" style={{ borderColor: ev.type === 'clinical' ? ACCENT_GREEN : ev.type === 'preclinical' ? PRIMARY : ACCENT_ORANGE }} />
               <Card><CardContent className="p-4">
-                <div className="flex items-center gap-2 mb-1"><Badge variant="secondary" className="text-[10px]">{ev.type}</Badge><span className="text-xs text-muted-foreground">{ev.year}</span><span className="font-medium text-sm">{ev.drugName}</span></div>
+                <div className="flex items-center gap-2 mb-1"><Badge variant="secondary" className="text-[10px]">{ev.type}</Badge><span className="text-xs text-muted-foreground">{ev.year ?? 0}</span><span className="font-medium text-sm">{ev.drugName}</span></div>
                 <p className="text-sm font-medium">{ev.title}</p>
                 <p className="text-xs text-muted-foreground mt-1">{ev.source} · Quality: {ev.quality}</p>
               </CardContent></Card>

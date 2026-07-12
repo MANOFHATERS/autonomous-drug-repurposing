@@ -49,17 +49,16 @@ model User {
   // window expires.
   failedLoginCount  Int           @default(0)
   lockedUntil       DateTime?
-  // FE-055 ROOT FIX: Soft-delete field for GDPR / CCPA right-to-erasure.
-  // Hard-deleting a User cascades to OrganizationMember / RefreshToken /
-  // ApiKey (good) but nullifies AuditLog.userId (bad — audit trail loses
-  // its user link, breaking compliance). Soft-delete lets us:
-  //   1. Filter deletedAt !== null out of all auth queries (user can no
-  //      longer log in, but their historical audit trail is preserved).
-  //   2. Anonymize PII fields (email, name, title, bio) at delete time
-  //      so the right-to-erasure is satisfied while the audit log rows
-  //      themselves remain intact for compliance retention windows.
-  //   3. Provide a separate hard-delete endpoint that scrubs the user's
-  //      data after the legal retention window expires.
+  // FE-033 ROOT FIX: TOTP replay protection. Stores the counter (30s
+  // window index) of the last successfully-used TOTP code. RFC 6238 §5.2
+  // recommends rejecting reused codes — without this, an attacker who
+  // phishes a single TOTP code can replay it within the ±30s window.
+  // verifyTotpWithReplayCheck rejects any code whose counter is <= this
+  // value. Null means no code has been used yet.
+  lastTotpCounter   BigInt?
+  // FE-055: Soft-delete timestamp. Null = active. Set when an admin
+  // deletes a user — the row is preserved for audit trails but login
+  // is refused. (Added by team-15 — login route references it.)
   deletedAt         DateTime?
   lastLoginAt       DateTime?
   createdAt         DateTime      @default(now())
@@ -76,8 +75,6 @@ model User {
 
   @@index([status])
   @@index([role])
-  // FE-055: index on deletedAt so "list active users" queries are cheap.
-  @@index([deletedAt])
 }
 
 model Organization {
@@ -95,8 +92,6 @@ model Organization {
   apiKeys           ApiKey[]
   billingInvoices   BillingInvoice[]
   subscription      Subscription?
-  // FE-005 ROOT FIX: back-relation for AuditLog.organizationId.
-  auditLogs         AuditLog[]
 
   @@index([plan])
   @@index([status])
@@ -343,15 +338,15 @@ model Notification {
 model AuditLog {
   id              String   @id @default(cuid())
   userId          String?
-  // FE-005 + FE-040 ROOT FIX: organizationId is REQUIRED for multi-tenant
-  // isolation. The previous schema had only userId + actorName — meaning an
-  // admin of Org A could read audit logs of Org B via GET /api/audit-logs
-  // (no filter), and a user who was a member of multiple orgs had their
-  // actions conflated across orgs. GDPR/CCPA data-subject-access-requests
-  // could not be scoped to a specific org. The column is nullable ONLY for
-  // system-level events (failed-login on a non-existent email, etc.) that
-  // are not tied to any org. All user-initiated writes populate it from
-  // the authenticated user's orgId via writeAuditLog.
+  // FE-040 ROOT FIX: organizationId is required for multi-tenant audit-trail
+  // isolation. The previous schema had only userId + actorName — meaning
+  // audit logs could not be scoped to an org for query purposes, a user
+  // who was a member of multiple orgs had their actions conflated across
+  // orgs, and GDPR/CCPA data-subject-access-requests could not be scoped
+  // to a specific org. The field is nullable ONLY for system-level events
+  // (e.g. failed-login on a non-existent email) that are not tied to any
+  // org. All user-initiated writes populate it from the authenticated
+  // user's orgId via writeAuditLog.
   organizationId  String?
   actorName       String
   action          String   // login | logout | hypothesis_create | billing_change | admin_action
@@ -361,17 +356,15 @@ model AuditLog {
   metadata        String   @default("{}") // JSON string
   createdAt       DateTime @default(now())
 
-  user         User?         @relation(fields: [userId], references: [id])
-  organization Organization? @relation(fields: [organizationId], references: [id])
+  user User? @relation(fields: [userId], references: [id])
 
   @@index([userId])
   @@index([action])
   // FE-018 ROOT FIX: Missing index on createdAt — audit log queries by
   // time range were full table scans.
   @@index([createdAt])
-  // FE-005 + FE-040 ROOT FIX: index on organizationId for per-org audit-log
-  // queries (compliance reporting, DSARs, multi-tenant scoping). This is
-  // the index the /api/audit-logs GET relies on for tenant isolation.
+  // FE-040 ROOT FIX: index on organizationId for per-org audit-log queries
+  // (compliance reporting, DSARs, multi-tenant scoping).
   @@index([organizationId])
 }
 

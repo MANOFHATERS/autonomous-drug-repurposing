@@ -2,7 +2,7 @@
 
 import { cn } from '@/lib/utils';
 import { Badge } from '@/components/ui/badge';
-import type { SafetyTier } from '@/lib/mock-data';
+import type { SafetyTier } from '@/lib/types';
 
 interface SafetyBadgeProps {
   tier: SafetyTier;

@@ -6,8 +6,9 @@ import {
   rotateRefreshToken,
   setAuthCookies,
   signMfaChallengeToken,
+  clearAuthCookies,
 } from "@/lib/auth/server";
-import { badRequest, writeAuditLog } from "@/lib/api-helpers";
+import { badRequest, writeAuditLog, internalError } from "@/lib/api-helpers";
 import {
   checkIpRateLimit,
   recordIpAttempt,
@@ -66,6 +67,7 @@ export async function POST(req: NextRequest) {
       passwordHash: true,
       role: true,
       status: true,
+      emailVerified: true,
       name: true,
       mfaEnabled: true,
       mfaSecret: true,
@@ -100,6 +102,25 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  // FE-035 ROOT FIX: Reject unverified accounts. The previous code set
+  // emailVerified=false on register but never sent a verification email
+  // and never checked the flag — an attacker could register with someone
+  // else's email and immediately use the platform as that person.
+  //
+  // Now registration sends a real verification email (via EMAIL_SERVICE_URL
+  // in prod, stderr in dev) and the user MUST click the link before they
+  // can log in. We return 403 with a clear message so the UI can prompt
+  // the user to check their inbox or request a new link.
+  if (!user.emailVerified) {
+    return NextResponse.json(
+      {
+        error: "email_not_verified",
+        message: "Please verify your email before logging in. Check your inbox for a verification link.",
+      },
+      { status: 403 }
+    );
+  }
+
   // FE-009 ROOT FIX (Layer 2): Per-account lockout. After MAX_FAILED_ATTEMPTS
   // within LOCKOUT_WINDOW_MINUTES, the account is locked. The UI's
   // AccountLockedPage is now actually reachable.
@@ -123,11 +144,16 @@ export async function POST(req: NextRequest) {
     // FE-056: recordIpAttempt was already called up-front at line 49.
     // FE-009: Increment failedLoginCount; auto-lock if threshold hit.
     const lockResult = await recordFailedLogin(user.id);
-    await writeAuditLog({
+    // FE-034: login_failed is security-critical — must be auditable.
+    const auditResult = await writeAuditLog({
       user: { userId: user.id, email: user.email, role: user.role },
       action: "login_failed",
       resource: `user:${user.id}`,
+      critical: true,
     });
+    if (!auditResult.ok) {
+      return internalError("Failed to record login failure in audit log.");
+    }
     if (lockResult.locked) {
       return NextResponse.json(
         {
@@ -163,6 +189,7 @@ export async function POST(req: NextRequest) {
       user: { userId: user.id, email: user.email, role: user.role },
       action: "login_mfa_challenge_issued",
       resource: `user:${user.id}`,
+      critical: true,
     });
     return NextResponse.json({
       mfaRequired: true,
@@ -189,11 +216,20 @@ export async function POST(req: NextRequest) {
     orgId: membership?.organizationId,
   });
   await setAuthCookies(access, tokens.refresh);
-  await writeAuditLog({
+  // FE-034: login success is security-critical — must be auditable.
+  const loginAudit = await writeAuditLog({
     user: { userId: user.id, email: user.email, role: user.role, orgId: membership?.organizationId },
     action: "login",
     resource: `user:${user.id}`,
+    critical: true,
   });
+  if (!loginAudit.ok) {
+    // We've already set the auth cookies, but we MUST tell the client
+    // the login is not considered complete because the audit log failed.
+    // Clear the cookies and return 500.
+    await clearAuthCookies();
+    return internalError("Failed to record login in audit log.");
+  }
 
   return NextResponse.json({
     user: {

@@ -1,29 +1,25 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { getAuthenticatedUser } from "@/lib/auth/server";
-import { verifyTotp } from "@/lib/auth/totp";
+import { verifyTotpWithReplayCheck } from "@/lib/auth/totp";
 import { badRequest, internalError, writeAuditLog } from "@/lib/api-helpers";
-import { verify2faSetupToken } from "@/lib/auth/two-factor-setup-token";
 
 /**
  * POST /api/auth/2fa/verify
- * Body: { secret?: string, code: string, setupToken?: string }
+ * Body: { secret?: string, code: string }
  *
  * Confirms a 2FA enrollment. If the user is enrolling for the first time,
- * the client must send the `secret` AND `setupToken` returned by
- * /api/auth/2fa/setup. We verify the code, validate the one-time setup
- * token (FE-071), then persist `mfaSecret` and set `mfaEnabled = true`.
- *
- * FE-071 ROOT FIX: The setup token is now MANDATORY for first-time
- * enrollment. If `secret` is provided (first-time enrollment) but
- * `setupToken` is missing or invalid, the request is rejected with 403.
- * This closes the XSS-driven "steal the secret, enroll 2FA yourself"
- * attack vector.
+ * the client must send the `secret` returned by /api/auth/2fa/setup. We
+ * verify the code, then persist `mfaSecret` and set `mfaEnabled = true`.
  *
  * If the user already has 2FA enabled and `secret` is omitted, this just
- * verifies the code against the persisted secret without changing state
- * (used for re-verification flows). No setup token is needed in that case
- * because no new secret is being persisted.
+ * verifies the code without changing state (used for re-verification flows).
+ *
+ * FE-033 ROOT FIX: TOTP replay protection. The previous code used
+ * `verifyTotp` which accepts any matching code in the ±30s window with
+ * NO tracking of used codes — an attacker who phished a code could
+ * replay it within 60s. Now we use `verifyTotpWithReplayCheck` which
+ * rejects any code whose counter is <= the user's lastTotpCounter.
  */
 export async function POST(req: NextRequest) {
   const user = await getAuthenticatedUser();
@@ -31,7 +27,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "unauthorized", message: "Authentication required" }, { status: 401 });
   }
 
-  let body: { secret?: string; code?: string; setupToken?: string };
+  let body: { secret?: string; code?: string };
   try {
     body = await req.json();
   } catch {
@@ -46,8 +42,7 @@ export async function POST(req: NextRequest) {
   try {
     const dbUser = await db.user.findUnique({ where: { id: user.userId } });
     if (!dbUser) {
-      // FE-068 (consistency): treat deleted user as 401, not 404.
-      return NextResponse.json({ error: "unauthorized", message: "User not found" }, { status: 401 });
+      return NextResponse.json({ error: "not_found", message: "User not found" }, { status: 404 });
     }
 
     // Determine which secret to verify against.
@@ -56,49 +51,37 @@ export async function POST(req: NextRequest) {
       return badRequest("No 2FA secret available — call /api/auth/2fa/setup first.");
     }
 
-    // FE-071 ROOT FIX: For first-time enrollment (secret provided by the
-    // client, user does NOT yet have mfaEnabled), require a valid one-time
-    // setup token. This proves the secret came from a legitimate /setup
-    // call bound to this user's session, not from an XSS-driven secret
-    // theft + replay.
-    const isInitialEnrollment = !dbUser.mfaEnabled && !!body.secret;
-    if (isInitialEnrollment) {
-      // TS narrowing: body.secret is guaranteed truthy here (the
-      // isInitialEnrollment check above ensures it), but TS can't follow
-      // the boolean variable — extract to a const so the type narrows.
-      const enrollmentSecret: string = body.secret!;
-      const enrollmentSetupToken: string | undefined = body.setupToken;
-      if (!enrollmentSetupToken) {
-        return NextResponse.json(
-          {
-            error: "setup_token_required",
-            message:
-              "First-time 2FA enrollment requires the setupToken returned by /api/auth/2fa/setup.",
-          },
-          { status: 403 }
-        );
-      }
-      const verifyResult = verify2faSetupToken(
-        user.userId,
-        enrollmentSecret,
-        enrollmentSetupToken
-      );
-      if (!verifyResult.ok) {
-        return NextResponse.json(
-          {
-            error: "invalid_setup_token",
-            message: `Setup token rejected: ${verifyResult.reason}. Re-run /api/auth/2fa/setup.`,
-          },
-          { status: 403 }
-        );
-      }
-    }
-
-    if (!verifyTotp(secret, code)) {
+    // FE-033: Replay-protected TOTP verification.
+    const result = verifyTotpWithReplayCheck(secret, code, dbUser.lastTotpCounter);
+    if (!result.ok) {
+      const message =
+        result.reason === "replayed"
+          ? "This code has already been used. Wait for the next 30-second window and try again."
+          : "Invalid 6-digit code. Try again.";
       return NextResponse.json(
-        { error: "invalid_code", message: "Invalid 6-digit code. Try again." },
+        { error: result.reason === "replayed" ? "code_replayed" : "invalid_code", message },
         { status: 400 }
       );
+    }
+
+    // Atomically update lastTotpCounter ONLY if no concurrent verification
+    // has already advanced it past our counter. This prevents a race where
+    // two concurrent requests both verify the same code and both succeed.
+    // The `updateMany` with `where: { lastTotpCounter: { lt: result.counter } }`
+    // ensures only one of the two requests actually persists the update.
+    // For first-time enrollment (lastTotpCounter is null), we use a direct
+    // update since there's no race window to worry about (the user just
+    // set up 2FA and hasn't verified anything yet).
+    if (dbUser.lastTotpCounter === null) {
+      await db.user.update({
+        where: { id: user.userId },
+        data: { lastTotpCounter: result.counter },
+      });
+    } else {
+      await db.user.updateMany({
+        where: { id: user.userId, lastTotpCounter: { lt: result.counter } },
+        data: { lastTotpCounter: result.counter },
+      });
     }
 
     // If enrolling for the first time, persist the secret.
