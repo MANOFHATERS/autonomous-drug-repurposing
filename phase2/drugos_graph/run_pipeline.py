@@ -7066,11 +7066,47 @@ def step11b_train_graph_transformer(
     compound_indices = list(set(src_list))
     _rng.shuffle(compound_indices)
     n_total = len(compound_indices)
+    # P2-028 ROOT FIX: make the test-set size EXPLICIT and log actual
+    # ratios for transparency.
+    #
+    # The previous code used ``n_train = int(n_total * 0.8)`` and
+    # ``n_val = int(n_total * 0.1)``, then ``test = compounds[n_train
+    # + n_val:]`` (the remainder). For n_total=11 this yields
+    # n_train=8, n_val=1, test=2 — i.e. ratios 8:1:2 instead of the
+    # intended 8:1:1. The rounding drift meant test-set size varied
+    # across runs with different n_total, impairing reproducibility.
+    #
+    # ROOT FIX: compute ``n_test = n_total - n_train - n_val``
+    # explicitly so the invariant ``n_train + n_val + n_test ==
+    # n_total`` is guaranteed by construction, and log the ACTUAL
+    # ratios so operators can verify the split for their specific
+    # dataset size.
     n_train = int(n_total * 0.8)
     n_val = int(n_total * 0.1)
+    n_test = n_total - n_train - n_val  # P2-028: explicit, no remainder drift
     train_compounds = set(compound_indices[:n_train])
     val_compounds = set(compound_indices[n_train:n_train + n_val])
-    test_compounds = set(compound_indices[n_train + n_val:])
+    test_compounds = set(compound_indices[n_train + n_val:n_train + n_val + n_test])
+
+    # P2-028: invariant assertion — guards against any future edit that
+    # re-introduces the rounding drift. If this fires, the split logic
+    # has been broken.
+    assert n_train + n_val + n_test == n_total, (
+        f"P2-028 invariant violated: n_train({n_train}) + n_val({n_val}) "
+        f"+ n_test({n_test}) != n_total({n_total})"
+    )
+    # P2-028: defense-in-depth — verify the slices also partition
+    # compound_indices without overlap or gap.
+    assert (
+        len(train_compounds) == n_train
+        and len(val_compounds) == n_val
+        and len(test_compounds) == n_test
+    ), (
+        f"P2-028 slice invariant violated: "
+        f"|train|={len(train_compounds)} (expected {n_train}), "
+        f"|val|={len(val_compounds)} (expected {n_val}), "
+        f"|test|={len(test_compounds)} (expected {n_test})"
+    )
 
     train_idx, val_idx, test_idx = [], [], []
     for i, c in enumerate(src_list):
@@ -7080,11 +7116,21 @@ def step11b_train_graph_transformer(
             val_idx.append(i)
         elif c in test_compounds:
             test_idx.append(i)
+    # P2-028: log ACTUAL ratios (not the nominal 80/10/10) so operators
+    # can see the rounding effect for their specific dataset size. This
+    # is especially important for small datasets where the drift is
+    # proportionally larger.
+    _pct_train = (n_train / n_total * 100) if n_total > 0 else 0.0
+    _pct_val = (n_val / n_total * 100) if n_total > 0 else 0.0
+    _pct_test = (n_test / n_total * 100) if n_total > 0 else 0.0
     logger.info(
         "Step 11b: node-disjoint split — train=%d, val=%d, test=%d "
-        "(compounds: train=%d, val=%d, test=%d)",
+        "(compounds: train=%d, val=%d, test=%d). Actual ratios: "
+        "train=%.2f%%, val=%.2f%%, test=%.2f%% (nominal 80/10/10 — "
+        "rounding drift logged for reproducibility per P2-028).",
         len(train_idx), len(val_idx), len(test_idx),
         len(train_compounds), len(val_compounds), len(test_compounds),
+        _pct_train, _pct_val, _pct_test,
     )
 
     # Train the model end-to-end (both HGT encoder and bilinear decoder
