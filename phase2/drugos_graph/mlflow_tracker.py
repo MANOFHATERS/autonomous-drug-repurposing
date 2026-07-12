@@ -21,15 +21,70 @@ P2-014 ROOT FIX (deterministic shutdown via atexit):
     ``__del__`` remains as a last-resort safety net but is
     documented as best-effort only — operators should use
     ``with MLflowTracker() as t:`` or call ``close()`` explicitly.
+
+P2-024 ROOT FIX (Team 8 — heartbeat for SIGKILL / OOM-kill recovery):
+    atexit handlers do NOT fire on SIGKILL (OOM kill, kernel panic,
+    ``os._exit``). The MLflow run is left in RUNNING state forever.
+    After 100 OOM-killed runs, the MLflow UI shows 100 "RUNNING" runs
+    that are actually dead — ops cannot find the real active run, and
+    the audit trail is corrupted.
+
+    ROOT FIX: a daemon heartbeat thread updates an MLflow tag
+    ``drugos.heartbeat_ts`` with the current epoch timestamp every
+    ``heartbeat_interval`` seconds (default 30, env override
+    ``DRUGOS_MLFLOW_HEARTBEAT_INTERVAL_SECONDS``). After a SIGKILL,
+    the heartbeat stops updating. A periodic reaper (or operator
+    inspecting the MLflow UI) can compare ``drugos.heartbeat_ts`` to
+    the current time: if the gap exceeds
+    ``heartbeat_stale_threshold`` seconds (default 300 = 5 minutes,
+    env override ``DRUGOS_MLFLOW_HEARTBEAT_STALE_THRESHOLD``), the
+    run is marked FAILED.
+
+    The heartbeat thread is a Python daemon thread — it does NOT
+    block interpreter shutdown (unlike atexit, daemon threads are
+    killed abruptly on shutdown). This is correct: the heartbeat's
+    job is to UPDATE the run's liveness signal, not to perform
+    cleanup. Cleanup is atexit's job (close()).
+
+    When MLflow is not installed, the heartbeat falls back to
+    appending to ``self._local_log`` so the heartbeat trail is still
+    available to operators via ``get_local_log()`` (useful for
+    debugging in CI / local environments without an MLflow server).
 """
 
 import atexit
 import logging
+import os
+import threading
+import time
 from typing import Any, Dict, Optional
 
 from .config import ensure_dirs
 
 logger = logging.getLogger(__name__)
+
+
+# ─── P2-024 heartbeat constants ───────────────────────────────────────────────
+# Env var overrides let ops tune the heartbeat for their environment:
+#   * Short interval (e.g. 10s) for fast-feedback dev environments.
+#   * Long interval (e.g. 300s) for production where MLflow write rate
+#     is a cost concern (each heartbeat is an MLflow tag write).
+#   * Stale threshold MUST be >= 3x the interval to avoid false
+#     positives during transient network slowness.
+DEFAULT_HEARTBEAT_INTERVAL_SECONDS = int(
+    os.environ.get("DRUGOS_MLFLOW_HEARTBEAT_INTERVAL_SECONDS", "30")
+)
+DEFAULT_HEARTBEAT_STALE_THRESHOLD_SECONDS = int(
+    os.environ.get("DRUGOS_MLFLOW_HEARTBEAT_STALE_THRESHOLD_SECONDS", "300")
+)
+# The MLflow tag name used to store the heartbeat timestamp. Ops
+# queries this tag to detect stale RUNNING runs:
+#   SELECT run_id, tags['drugos.heartbeat_ts']
+#   FROM runs
+#   WHERE status = 'RUNNING'
+#     AND (current_timestamp - tags['drugos.heartbeat_ts']) > 300
+HEARTBEAT_TAG_NAME = "drugos.heartbeat_ts"
+HEARTBEAT_PID_TAG_NAME = "drugos.heartbeat_pid"
 
 
 class MLflowTracker:
@@ -40,6 +95,14 @@ class MLflowTracker:
     P2-014: callers should use ``with MLflowTracker() as t:`` or
     call ``close()`` explicitly. ``__del__`` is a best-effort
     safety net only; ``atexit`` handles the deterministic shutdown.
+
+    P2-024 (Team 8): a daemon heartbeat thread updates
+    ``drugos.heartbeat_ts`` on the MLflow run every
+    ``heartbeat_interval`` seconds. After SIGKILL (which atexit
+    cannot catch), the heartbeat stops; ops can compare the
+    heartbeat timestamp to the current time to detect stale
+    RUNNING runs and reap them. The heartbeat is started in
+    ``start_run`` and stopped in ``close``.
     """
 
     def __init__(
@@ -57,6 +120,16 @@ class MLflowTracker:
         # name like "DrugOS_Phase2_TransE_v3" or "DrugOS_Phase2_HGT_v1".
         experiment_name: str = "DrugOS_Phase2",
         tracking_uri: Optional[str] = None,
+        # P2-024 ROOT FIX (Team 8): heartbeat interval for the daemon
+        # thread that updates ``drugos.heartbeat_ts`` on the MLflow run.
+        # Default 30s; override via the
+        # ``DRUGOS_MLFLOW_HEARTBEAT_INTERVAL_SECONDS`` env var or this
+        # parameter. Set to 0 to DISABLE the heartbeat (useful for unit
+        # tests; NOT recommended for production — disabling the
+        # heartbeat means SIGKILL'd runs stay RUNNING forever, which is
+        # the exact bug P2-024 fixes).
+        heartbeat_interval: Optional[int] = None,
+        heartbeat_stale_threshold: Optional[int] = None,
     ):
         self.experiment_name = experiment_name
         self.tracking_uri = tracking_uri
@@ -72,6 +145,36 @@ class MLflowTracker:
         # times — see the ``self.run = None`` reset in ``end_run``).
         self._closed: bool = False
         atexit.register(self._atexit_close)
+
+        # P2-024 ROOT FIX (Team 8): heartbeat state. The thread is
+        # created in start_run and joined in close. The
+        # ``_heartbeat_stop`` event lets the loop exit cleanly
+        # between intervals (so close doesn't have to wait up to 30s
+        # for the next iteration).
+        self._heartbeat_interval: int = (
+            heartbeat_interval
+            if heartbeat_interval is not None
+            else DEFAULT_HEARTBEAT_INTERVAL_SECONDS
+        )
+        self._heartbeat_stale_threshold: int = (
+            heartbeat_stale_threshold
+            if heartbeat_stale_threshold is not None
+            else DEFAULT_HEARTBEAT_STALE_THRESHOLD_SECONDS
+        )
+        self._heartbeat_thread: Optional[threading.Thread] = None
+        self._heartbeat_stop: threading.Event = threading.Event()
+        # Exposed for tests / ops dashboards: the last heartbeat
+        # timestamp successfully written. ``None`` until the first
+        # iteration of the heartbeat loop completes.
+        self.last_heartbeat_ts: Optional[float] = None
+        # Number of heartbeats written — useful for tests that verify
+        # the thread is actually running (not just instantiated).
+        self.heartbeat_count: int = 0
+        # Number of heartbeat write failures (e.g. MLflow server
+        # unreachable). A high count indicates a degraded MLflow
+        # connection — the heartbeat trail will be stale even though
+        # the process is alive.
+        self.heartbeat_failure_count: int = 0
 
         try:
             import mlflow
@@ -118,11 +221,104 @@ class MLflowTracker:
         ``"MLflowTracker"`` so static analysers and IDEs match the
         ``return self`` statement and the documented context-manager
         usage.
+
+        P2-024 ROOT FIX (Team 8): start the heartbeat daemon thread
+        AFTER the run is created. The thread writes the current epoch
+        timestamp to the ``drugos.heartbeat_ts`` MLflow tag every
+        ``self._heartbeat_interval`` seconds. If the process is
+        SIGKILL'd, the heartbeat stops; ops can compare the heartbeat
+        timestamp to the current time to detect stale RUNNING runs.
+        The thread is a Python daemon so it does NOT block interpreter
+        shutdown — atexit's close() is still the deterministic
+        cleanup path.
         """
         if self.mlflow:
             self.run = self.mlflow.start_run(run_name=run_name)
         logger.info(f"Started experiment run: {run_name}")
+
+        # P2-024 ROOT FIX (Team 8): start the heartbeat daemon thread.
+        # Setting ``_heartbeat_stop`` ensures a stale event from a
+        # previous run is cleared before the new thread starts.
+        self._heartbeat_stop.clear()
+        if self._heartbeat_interval > 0:
+            self._heartbeat_thread = threading.Thread(
+                target=self._heartbeat_loop,
+                name="drugos-mlflow-heartbeat",
+                daemon=True,  # P2-024: daemon so it doesn't block shutdown
+            )
+            self._heartbeat_thread.start()
+            logger.info(
+                "P2-024: heartbeat thread started (interval=%ds, "
+                "stale_threshold=%ds, tag=%s). If this process is "
+                "SIGKILL'd, ops can detect the stale run by comparing "
+                "the heartbeat tag to the current time.",
+                self._heartbeat_interval,
+                self._heartbeat_stale_threshold,
+                HEARTBEAT_TAG_NAME,
+            )
         return self  # v40: enable ``with tracker.start_run() as t:`` usage
+
+    def _heartbeat_loop(self) -> None:
+        """P2-024 ROOT FIX (Team 8): daemon thread that writes the heartbeat.
+
+        Runs until ``_heartbeat_stop`` is set (by ``close()``) or the
+        interpreter exits (daemon threads are killed abruptly on
+        shutdown — this is correct: the heartbeat's job is to UPDATE
+        the run's liveness signal while the process is alive; it does
+        NOT need to perform cleanup).
+
+        Each iteration:
+          1. Compute the current epoch timestamp.
+          2. Write it to the ``drugos.heartbeat_ts`` MLflow tag (or
+             append to ``_local_log`` if MLflow is not installed).
+          3. Increment ``heartbeat_count`` (or ``heartbeat_failure_count``
+             on failure).
+          4. Update ``last_heartbeat_ts``.
+          5. Wait ``_heartbeat_interval`` seconds (interruptible by
+             ``_heartbeat_stop.wait()`` so close() returns promptly).
+        """
+        # P2-024: write an immediate first heartbeat so the run is
+        # marked alive BEFORE the first interval elapses. This lets
+        # ops dashboards see the run as "live" immediately after
+        # start_run returns, without waiting up to 30s.
+        while not self._heartbeat_stop.is_set():
+            try:
+                ts = time.time()
+                pid = os.getpid()
+                if self.mlflow and self.run:
+                    # set_tag is the cheapest MLflow write (no metric
+                    # history). Two tags: the timestamp (for staleness
+                    # detection) and the PID (for ops to identify the
+                    # process that owns the run, useful when killing a
+                    # zombie).
+                    self.mlflow.set_tag(HEARTBEAT_TAG_NAME, str(ts))
+                    self.mlflow.set_tag(HEARTBEAT_PID_TAG_NAME, str(pid))
+                else:
+                    # Fallback: append to local log so the heartbeat
+                    # trail is still available without an MLflow server.
+                    self._local_log.append({
+                        "type": "heartbeat",
+                        "ts": ts,
+                        "pid": pid,
+                    })
+                self.last_heartbeat_ts = ts
+                self.heartbeat_count += 1
+            except Exception as e:
+                # The heartbeat MUST NOT raise — it would kill the
+                # daemon thread and silently disable liveness tracking.
+                # Log and continue; the next iteration will retry.
+                self.heartbeat_failure_count += 1
+                logger.warning(
+                    "P2-024: heartbeat write failed (count=%d): %s. "
+                    "The MLflow run will appear stale even though the "
+                    "process is alive. Check MLflow server health.",
+                    self.heartbeat_failure_count, e,
+                )
+            # Wait for the interval OR until close() sets the stop
+            # event — whichever comes first. This ensures close()
+            # returns promptly without waiting up to 30s for the
+            # next iteration.
+            self._heartbeat_stop.wait(self._heartbeat_interval)
 
     def log_params(self, params: Dict[str, Any]) -> None:
         """Log hyperparameters."""
@@ -235,6 +431,14 @@ class MLflowTracker:
         shutdown, so callers using the context manager
         (``with MLflowTracker() as t:``) AND the atexit handler can
         BOTH fire without producing "Run not active" warnings.
+
+        P2-024 ROOT FIX (Team 8): stop the heartbeat daemon thread
+        BEFORE ending the run. This ensures no heartbeat fires AFTER
+        end_run (which would log a spurious "Run not active" warning).
+        The thread is joined with a short timeout (5s) so a stuck
+        heartbeat doesn't block shutdown; if the join times out, the
+        daemon flag means Python will kill the thread at interpreter
+        exit anyway.
         """
         # P2-014: idempotency guard. ``end_run`` resets ``self.run``
         # to None, but if multiple shutdown paths fire (atexit +
@@ -246,6 +450,24 @@ class MLflowTracker:
         if self._closed:
             return
         self._closed = True
+
+        # P2-024 ROOT FIX (Team 8): stop the heartbeat thread BEFORE
+        # ending the run. Setting the stop event causes the loop's
+        # ``_heartbeat_stop.wait()`` to return immediately, the loop
+        # checks ``is_set()`` and exits. The join(timeout=5) ensures
+        # close doesn't block for the full heartbeat interval.
+        self._heartbeat_stop.set()
+        if self._heartbeat_thread is not None and self._heartbeat_thread.is_alive():
+            self._heartbeat_thread.join(timeout=5.0)
+            if self._heartbeat_thread.is_alive():
+                logger.warning(
+                    "P2-024: heartbeat thread did not exit within 5s "
+                    "timeout — it will be killed at interpreter exit "
+                    "(daemon=True). This may indicate a stuck MLflow "
+                    "write."
+                )
+        self._heartbeat_thread = None
+
         try:
             self.end_run()
         except Exception:

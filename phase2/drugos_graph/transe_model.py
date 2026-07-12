@@ -549,11 +549,24 @@ class TransEModel(nn.Module):
         # and V1 launch criterion ``auc_meets_threshold`` always failed
         # (held_out_auc=-1.0). Save both as attributes here.
         self.num_entities = int(num_entities)
-        # v88 ROOT FIX (BUG #43 — expose score_higher_is_better for
-        # explicit duck-typing in train_transe): TransE's score function
-        # is ||h+r-t||_1 (LOWER = more plausible), so
-        # score_higher_is_better = False.
-        self.score_higher_is_better = False
+        # P2-028 ROOT FIX (Team 8 — side-fix required for Protocol
+        # verification): the previous v88 ROOT FIX (BUG #43) added
+        # ``self.score_higher_is_better = False`` here, but a later
+        # change defined ``score_higher_is_better`` as a PROPERTY at
+        # line 791 (returning False, no setter). The property made the
+        # __init__ assignment raise
+        # ``AttributeError: property 'score_higher_is_better' has no setter``
+        # — meaning TransEModel could NOT be instantiated. This blocked
+        # the P2-028 CI test from verifying TransEModel satisfies the
+        # KGEmbeddingModel Protocol.
+        #
+        # ROOT FIX: remove the redundant assignment. The property at
+        # line 791 already returns False (the correct TransE value:
+        # lower score = more plausible, so higher_is_better=False).
+        # The assignment was redundant AND broken. Removing it makes
+        # instantiation work AND preserves the v88 duck-typing contract
+        # (callers that read ``model.score_higher_is_better`` still get
+        # False via the property).
         self.num_relations = int(num_relations)
         self.embedding_dim = int(embedding_dim)
         self.entity_embeddings = nn.Embedding(num_entities, embedding_dim)

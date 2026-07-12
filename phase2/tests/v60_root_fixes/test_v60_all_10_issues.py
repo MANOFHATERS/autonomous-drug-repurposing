@@ -156,13 +156,17 @@ def test_issue_3_hgt_uses_bcewithlogitsloss_not_bceloss():
                 f"instability on confident predictions."
             )
 
-    # Verify score_triples returns LOGITS (not sigmoid).
-    model_path = _PHASE2_DIR / "drugos_graph" / "graph_transformer_model.py"
-    model_source = model_path.read_text(encoding="utf-8")
-    assert "BCEWithLogitsLoss" in model_source or "LOGITS" in model_source.upper(), (
-        "FAIL: graph_transformer_model.py does not document BCEWithLogitsLoss "
-        "or LOGITS -- score_triples must return logits, not sigmoided scores"
-    )
+    # P2-026 ROOT FIX (Team 8): the previous block read
+    # ``phase2/drugos_graph/graph_transformer_model.py`` to verify the
+    # BCEWithLogitsLoss documentation. That file was DEAD CODE (no
+    # module imported it) and has been DELETED by P2-026. The
+    # canonical Phase 3 model is
+    # ``graph_transformer/models/graph_transformer.py``. The
+    # BCEWithLogitsLoss guarantee is now verified via run_pipeline.py
+    # (the training entry point) above -- the run_pipeline check at
+    # line 135 already covers the production training path. The dead
+    # file check is removed because it would crash with
+    # FileNotFoundError after P2-026.
 
     print("PASS: Issue #3 -- HGT uses BCEWithLogitsLoss on raw logits")
 
