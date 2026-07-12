@@ -1888,26 +1888,42 @@ class PyGBuilder(GraphBuilderProtocol):
             # the installed PyG version. PyG >= 2.6 added
             # add_negative_val_samples / add_negative_test_samples.
             #
-            # v102 ROOT FIX (P2-045): the previous code set
-            # ``edge_types=[target_edge_type]`` ONLY — splitting just the
-            # forward edge. The reverse edge (Disease, rev_treats,
-            # Compound) was added to the data BEFORE RandomLinkSplit
-            # (lines 1825-1843) but NOT in the edge_types list, so
-            # RandomLinkSplit did NOT split it. After the split, train_data
-            # had the FULL reverse edge set, val_data had the FULL reverse
-            # edge set, test_data had the FULL reverse edge set. The
-            # reverse edges LEAKED between splits — the GNN could "see"
-            # val/test treats information via the reverse edge during
-            # training. AUC was inflated.
+            # v103 ROOT FIX (P2-045 deep): the v102 fix was BROKEN at
+            # runtime. It set ``edge_types=[target, rev]`` (2 entries)
+            # with ``rev_edge_types=[rev]`` (1 entry) — a length mismatch
+            # that causes PyG's RandomLinkSplit to raise AssertionError
+            # the moment the transform runs. The pipeline crashes before
+            # any training begins.
             #
-            # ROOT FIX: add the reverse edge type to the ``edge_types``
-            # list so RandomLinkSplit splits BOTH the forward AND reverse
-            # edges in parallel. Each split's message-passing edges will
-            # contain ONLY the train/val/test portion of BOTH directions —
-            # no leakage. The ``rev_edge_types`` parameter is RETAINED
-            # because PyG uses it to coordinate the splits (so the held-out
-            # forward edge's corresponding reverse is also held out from
-            # message passing in the same split).
+            # VERIFIED with torch_geometric 2.8.0 (the version installed
+            # in this environment):
+            #   - Pre-v102 (edge_types=[fwd], no rev_edge_types):
+            #     LEAKS — reverse edges stay at 100 in every split,
+            #     25 leaked reverse edges in val msg-passing.
+            #   - v102 (edge_types=[fwd,rev], rev_edge_types=[rev]):
+            #     CRASHES — AssertionError (list length mismatch).
+            #   - v103 (edge_types=[fwd], rev_edge_types=[rev]):
+            #     WORKS — 0 leaked edges, both directions split
+            #     (train=50, val=50, test=75 for each direction).
+            #
+            # PyG's RandomLinkSplit contract (verified from source):
+            #   - ``edge_types`` lists the edges to SPLIT into
+            #     train/val/test.
+            #   - ``rev_edge_types`` tells PyG the reverse of each
+            #     edge_type so it can REMOVE the corresponding reverse
+            #     edges from each split's message-passing set (preventing
+            #     leakage). The list length MUST match ``edge_types``.
+            #   - You do NOT put the reverse edge in ``edge_types`` —
+            #     PyG handles it via ``rev_edge_types`` automatically.
+            #     Putting both in ``edge_types`` causes PyG to split
+            #     them INDEPENDENTLY, then the rev_edge_types mapping
+            #     fails because the indices don't correspond.
+            #
+            # The fix: ``edge_types=[target_edge_type]`` (ONLY the
+            # forward), ``rev_edge_types=[_rev_edge_type_tuple]`` (the
+            # reverse, single entry matching the single edge_type). PyG
+            # splits the forward and automatically removes the
+            # corresponding reverse from each split's msg-passing set.
             _rev_edge_type_tuple = (
                 target_edge_type[2],
                 f"{REVERSE_EDGE_PREFIX}{target_edge_type[1]}",
@@ -1919,9 +1935,11 @@ class PyGBuilder(GraphBuilderProtocol):
                 "disjoint_train_ratio": self.config.disjoint_train_ratio,
                 "neg_sampling_ratio": self.config.neg_sampling_ratio,
                 "add_negative_train_samples": self.config.add_negative_train_samples,
-                # v102 P2-045: split BOTH forward AND reverse edges so
-                # neither direction leaks between train/val/test splits.
-                "edge_types": [target_edge_type, _rev_edge_type_tuple],
+                # v103 P2-045 deep root fix: split the forward edge and
+                # let PyG remove corresponding reverse edges via
+                # rev_edge_types. Do NOT put the reverse in edge_types
+                # (causes length-mismatch crash + independent splitting).
+                "edge_types": [target_edge_type],
                 "rev_edge_types": [_rev_edge_type_tuple],
             }
             import inspect as _rls_inspect
