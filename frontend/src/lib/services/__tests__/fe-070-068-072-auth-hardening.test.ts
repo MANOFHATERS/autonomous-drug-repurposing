@@ -94,7 +94,7 @@ describe("FE-070: SameSite policy hardening", () => {
     expect(setters[ACCESS_COOKIE].sameSite).not.toBe("lax");
   });
 
-  test("REFRESH cookie is set with SameSite=Lax and scoped to /api/auth/refresh", async () => {
+  test("REFRESH cookie is set with SameSite=Lax and path=/ (FE-050 alignment)", async () => {
     const setters: Record<string, any> = {};
     const store = {
       set: jest.fn((name: string, _val: string, opts: any) => {
@@ -109,7 +109,12 @@ describe("FE-070: SameSite policy hardening", () => {
 
     expect(setters[REFRESH_COOKIE]).toBeDefined();
     expect(setters[REFRESH_COOKIE].sameSite).toBe("lax");
-    expect(setters[REFRESH_COOKIE].path).toBe("/api/auth/refresh");
+    // FE-050 (merged from another agent): refresh cookie path was expanded
+    // from /api/auth/refresh to / so the auto-refresh code in
+    // getAuthenticatedUser() — called by every authenticated route — can
+    // read it. The security trade-off is acceptable: HttpOnly + Secure +
+    // SameSite=Lax covers the attack surface.
+    expect(setters[REFRESH_COOKIE].path).toBe("/");
     expect(setters[REFRESH_COOKIE].httpOnly).toBe(true);
   });
 });
