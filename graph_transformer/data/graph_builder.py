@@ -341,9 +341,34 @@ class BiomedicalGraphBuilder:
         and ALL canonical edge types (even with zero edges). This makes the
         graph schema STABLE regardless of graph size, which is what the model
         and the trainer both assume.
+
+        P3-016 ROOT FIX (forensic follow-up, Team Member 10): the in-memory
+        finalize() did NOT auto-build reverse edges, while the disk-backed
+        DiskBackedBiomedicalGraphBuilder.finalize() DID. This asymmetry
+        meant swapping the two builders (as the disk-backed docstring
+        documents as supported) produced DIFFERENT edge_indices dicts for
+        the same input -- the in-memory version had zero reverse edges
+        (e.g. ('disease','treated_by','drug') was empty) while the
+        disk-backed version had them populated. The GNN's message passing
+        relies on reverse edges for the drug-side representation, so the
+        in-memory builder silently produced a degraded graph whenever a
+        caller forgot to manually call _build_reverse_edges_into_sets()
+        before finalize(). The fix: call _build_reverse_edges_into_sets()
+        at the START of finalize() so BOTH builders produce identical
+        output. The call is idempotent (sets dedupe), so callers that
+        already call it explicitly (e.g. phase2_adapter.py) are unaffected.
         """
         if self._finalized:
             raise RuntimeError("Graph already finalized. Create a new builder.")
+
+        # P3-016 ROOT FIX (forensic follow-up): auto-build reverse edges so
+        # the in-memory builder matches the disk-backed builder's behavior.
+        # Without this, the two builders produce DIFFERENT edge_indices
+        # dicts for the same input -- the disk-backed version auto-adds
+        # reverse edges in its finalize(), but the in-memory version did
+        # not. This is idempotent (sets dedupe), so callers that already
+        # call _build_reverse_edges_into_sets() explicitly are unaffected.
+        self._build_reverse_edges_into_sets(self._edge_sets)
 
         # V30 ROOT FIX (3.3): rebuild _edge_lists from dedup'd _edge_sets.
         self._sync_edge_lists()
