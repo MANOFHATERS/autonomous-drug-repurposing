@@ -2797,7 +2797,15 @@ class DisGeNETPipeline(BasePipeline):
         reason: str,
         details: dict[str, Any],
     ) -> None:
-        """Add a row to the dead-letter queue (DQ-18, LIN-11, LIN-12, LIN-13)."""
+        """Add a row to the dead-letter queue (DQ-18, LIN-11, LIN-12, LIN-13).
+
+        P1-030 ROOT FIX: also snapshot the row's ``confidence_tier`` into
+        the record so downstream dead-letter consumers (CSV, DB, DataFrame)
+        see the value AT THE TIME OF THE DROP — which, for ``below_min_score``
+        drops, has already been cleared to ``None`` by ``_apply_score_filter``
+        to avoid the misleading "sub_weak" label. The original tier is
+        preserved inside ``details_json.original_confidence_tier`` for audit.
+        """
         row = df.loc[idx].to_dict() if idx in df.index else {}
         record = {
             "gene_symbol": row.get("gene_symbol"),
@@ -2806,6 +2814,11 @@ class DisGeNETPipeline(BasePipeline):
             "reason": reason,
             "details_json": json.dumps(details, default=str),
             "run_id": self.run_id,
+            # P1-030 ROOT FIX: persist the (already-cleared) confidence_tier
+            # so dead-letter consumers see None for below_min_score drops
+            # instead of the stale "sub_weak" label computed before the
+            # filter. The original tier is preserved in details_json above.
+            "confidence_tier": row.get("confidence_tier"),
         }
         self._dead_letter_rows.append(record)
         # LOG-1: contextual log.
@@ -3141,6 +3154,30 @@ class DisGeNETPipeline(BasePipeline):
     def _apply_score_filter(self, df: pd.DataFrame) -> pd.DataFrame:
         """Apply the MIN_SCORE filter with weak-evidence escape hatch (SCI-1,
         SCI-22, LOG-8, LIN-12).
+
+        P1-030 ROOT FIX (dead-letter ``confidence_tier`` misleading state):
+          ``confidence_tier`` is computed in Step 8 (line ~2432) BEFORE this
+          filter runs. For a row with ``score=0.0`` (no publications, no
+          curated evidence), ``_classify_confidence(0.0)`` returns
+          ``"sub_weak"`` — the lowest tier. The previous code then added the
+          row to the dead-letter queue WITH ``confidence_tier="sub_weak"``
+          still set on the row, while the drop reason was ``below_min_score``.
+          An operator inspecting the dead-letter CSV/DB saw
+          ``confidence_tier=sub_weak`` for a row that was dropped for having
+          ZERO evidence — misleading them into thinking "weak evidence was
+          dropped" and potentially re-ingesting with a lower threshold,
+          re-introducing zero-evidence rows.
+
+          ROOT FIX: for every row about to be dropped via
+          ``below_min_score``, capture the ORIGINAL ``confidence_tier`` in
+          ``details_json`` (for audit) and then CLEAR the row's
+          ``confidence_tier`` to ``None`` BEFORE calling
+          ``_add_to_dead_letter``. The dead-letter record now carries
+          ``confidence_tier=None`` (no misleading tier) plus
+          ``details_json.original_confidence_tier`` (the audit value). The
+          ``_add_to_dead_letter`` helper was also extended to persist the
+          row's ``confidence_tier`` snapshot into the record so downstream
+          dead-letter consumers see the cleared value, not the stale tier.
         """
         if df.empty or "score" not in df.columns:
             return df
@@ -3161,11 +3198,29 @@ class DisGeNETPipeline(BasePipeline):
             # Drop only rows below DISGENET_MIN_SCORE.
             drop_mask = df["score"].notna() & (df["score"] < DISGENET_MIN_SCORE)
             for idx in df.index[drop_mask]:
+                # P1-030 ROOT FIX: snapshot the stale tier, then clear it
+                # so the dead-letter record does not carry a misleading
+                # "sub_weak" label for a row dropped due to NO evidence.
+                _stale_tier = (
+                    df.at[idx, "confidence_tier"]
+                    if "confidence_tier" in df.columns
+                    and pd.notna(df.at[idx, "confidence_tier"])
+                    else None
+                )
+                if "confidence_tier" in df.columns:
+                    df.at[idx, "confidence_tier"] = None
                 self._add_to_dead_letter(
                     df, idx, reason="below_min_score",
                     details={
                         "score": float(df.at[idx, "score"]),
                         "threshold": DISGENET_MIN_SCORE,
+                        "original_confidence_tier": _stale_tier,
+                        "cleared_reason": (
+                            "P1-030: confidence_tier was computed before "
+                            "the score filter; cleared to None to avoid "
+                            "misleading dead-letter consumers (the row was "
+                            "dropped for zero evidence, not for weak evidence)"
+                        ),
                     },
                 )
             df = df[~drop_mask].copy()
@@ -3173,11 +3228,27 @@ class DisGeNETPipeline(BasePipeline):
             # Hard filter at DISGENET_MIN_SCORE.
             drop_mask = df["score"].notna() & (df["score"] < DISGENET_MIN_SCORE)
             for idx in df.index[drop_mask]:
+                # P1-030 ROOT FIX: same snapshot-and-clear pattern as above.
+                _stale_tier = (
+                    df.at[idx, "confidence_tier"]
+                    if "confidence_tier" in df.columns
+                    and pd.notna(df.at[idx, "confidence_tier"])
+                    else None
+                )
+                if "confidence_tier" in df.columns:
+                    df.at[idx, "confidence_tier"] = None
                 self._add_to_dead_letter(
                     df, idx, reason="below_min_score",
                     details={
                         "score": float(df.at[idx, "score"]),
                         "threshold": DISGENET_MIN_SCORE,
+                        "original_confidence_tier": _stale_tier,
+                        "cleared_reason": (
+                            "P1-030: confidence_tier was computed before "
+                            "the score filter; cleared to None to avoid "
+                            "misleading dead-letter consumers (the row was "
+                            "dropped for zero evidence, not for weak evidence)"
+                        ),
                     },
                 )
             df = df[~drop_mask].copy()
