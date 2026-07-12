@@ -478,12 +478,26 @@ class BiomedicalGraphBuilder:
     REAL_DRUG_NAMES: List[str] = [
         # KNOWN_POSITIVES drugs (first 5, in order)
         "dexamethasone", "aspirin", "metformin", "prednisone", "ibuprofen",
+        # P4-001 ROOT FIX (CRITICAL — Team Cosmic / Phase 4): the 4 validated-
+        # hypothesis drugs come IMMEDIATELY AFTER the 5 KP drugs so that even
+        # the smallest demo graph (num_drugs=10) includes them. The previous
+        # list had topiramate at position 49 and sildenafil at position 50
+        # (way past the default num_drugs=25 cutoff), and thalidomide /
+        # mifepristone were MISSING ENTIRELY. This meant the data flywheel
+        # (DOCX §10) was dead code: the +0.1 validated_bonus in the reward
+        # function could NEVER fire because the validated (drug, disease)
+        # pairs never appeared in the env's data. Front-loading the 4 VH
+        # drugs here is the root fix — they're now in EVERY demo graph
+        # regardless of num_drugs size. The CI test
+        # test_p4_001_validated_drugs_in_demo_graph verifies this invariant.
+        # Sources: validated_hypotheses.csv (the data flywheel).
+        "thalidomide", "sildenafil", "mifepristone", "topiramate",
         # V31 ROOT FIX (P0-1): training-positive drugs come FIRST (right
-        # after the 5 KPs) so that even small demo graphs (num_drugs=25-40)
-        # include enough training positives for the GT model to learn.
-        # The order below matches the TRAINING_POSITIVES list, grouping by
-        # therapeutic area. This ensures the GT model always has real
-        # DrugBank/RepoDB signal to learn from.
+        # after the 5 KPs + 4 VH drugs) so that even small demo graphs
+        # (num_drugs=25-40) include enough training positives for the GT
+        # model to learn. The order below matches the TRAINING_POSITIVES
+        # list, grouping by therapeutic area. This ensures the GT model
+        # always has real DrugBank/RepoDB signal to learn from.
         "lisinopril", "losartan", "amlodipine", "atorvastatin", "simvastatin",
         "metoprolol", "warfarin",
         "sertraline", "fluoxetine", "citalopram", "venlafaxine",
@@ -501,10 +515,10 @@ class BiomedicalGraphBuilder:
         "levothyroxine", "azathioprine", "cyclosporine", "tacrolimus",
         "sirolimus", "mycophenolate",
         "rituximab", "etanercept", "abatacept",
-        "pregabalin", "phenytoin", "topiramate", "zonisamide",
+        "pregabalin", "phenytoin", "zonisamide",
         "insulin", "glipizide", "glyburide", "pioglitazone", "sitagliptin",
         "exenatide", "liraglutide", "empagliflozin", "canagliflozin",
-        "sildenafil", "tadalafil", "finasteride", "tamsulosin", "dutasteride",
+        "tadalafil", "finasteride", "tamsulosin", "dutasteride",
         "risendronate", "denosumab", "teriparatide",
         "anastrozole", "exemestane",
         "bevacizumab", "cetuximab", "gefitinib", "erlotinib",
@@ -519,10 +533,25 @@ class BiomedicalGraphBuilder:
         # KNOWN_POSITIVES diseases (first 5, in order)
         "inflammation", "cardiovascular disease", "type 2 diabetes",
         "rheumatoid arthritis", "pain",
+        # P4-001 ROOT FIX (CRITICAL — Team Cosmic / Phase 4): the 3 validated-
+        # hypothesis diseases that are NOT already in the list come
+        # IMMEDIATELY AFTER the 5 KP diseases so that even the smallest demo
+        # graph (num_diseases=8) includes them. The previous list was MISSING
+        # "multiple myeloma", "pulmonary arterial hypertension", and
+        # "cushing syndrome" entirely — only "migraine" was present (at
+        # position 12). This meant 3 of the 4 validated (drug, disease)
+        # pairs could NEVER appear in the env's data, so the +0.1
+        # validated_bonus could never fire for them. Front-loading the 3
+        # missing VH diseases here is the root fix. The CI test
+        # test_p4_001_validated_diseases_in_demo_graph verifies this.
+        # Sources: validated_hypotheses.csv (the data flywheel).
+        # (migraine is added below in the main list — it was already there.)
+        "multiple myeloma", "pulmonary arterial hypertension", "cushing syndrome",
         # v89 ROOT FIX: training-positive diseases come FIRST (right after
-        # the 5 KP diseases) so that even small demo graphs (num_diseases=18)
-        # include enough training-positive diseases for the GT model to learn.
-        # The order below matches the TRAINING_POSITIVES list.
+        # the 5 KP diseases + 3 VH diseases) so that even small demo graphs
+        # (num_diseases=18) include enough training-positive diseases for
+        # the GT model to learn. The order below matches the TRAINING_POSITIVES
+        # list.
         "hypertension", "coronary artery disease", "heart failure",
         "atrial fibrillation",
         "depression", "anxiety", "bipolar disorder",
@@ -636,6 +665,7 @@ class BiomedicalGraphBuilder:
         num_known_treatments: int = 15,
         seed: int = 42,
         known_positives: Optional[List[Tuple[str, str]]] = None,
+        validated_hypotheses: Optional[List[Tuple[str, str]]] = None,
     ) -> Tuple[
         Dict[str, torch.Tensor],
         Dict[Tuple[str, str, str], torch.Tensor],
@@ -772,6 +802,58 @@ class BiomedicalGraphBuilder:
                 if disease_name not in disease_names:
                     disease_names.append(disease_name)
                 injected_pairs.append((drug_name, disease_name))
+
+        # P4-001 ROOT FIX (CRITICAL — Team Cosmic / Phase 4): inject the
+        # validated-hypothesis pairs into the graph the SAME WAY as known
+        # positives. The data flywheel (DOCX §10) requires that validated
+        # pairs appear in the graph so:
+        #   (a) the GT model can learn from them (they become "treats"
+        #       edges, so the GT gnn_score for these pairs is high after
+        #       training), AND
+        #   (b) the RL agent sees these pairs in its input data (the
+        #       bridge generates RL input from the cross-product of
+        #       graph drugs × graph diseases), so the +0.1
+        #       validated_bonus in the reward function can fire.
+        #
+        # Without this injection, the 4 validated drugs/diseases are in
+        # the name lists (P4-001 fix above), but the (drug, disease)
+        # pairs are NOT in the env's input data unless the bridge happens
+        # to generate them via the cross-product. The cross-product DOES
+        # generate them (every drug × every disease), so the pairs ARE
+        # in the env data. But the "treats" edges are NOT in the graph
+        # → the GT model has no signal that these are real pairs →
+        # gnn_score for them is low → the RL agent sees low gnn_score
+        # and may rank them LOW despite the +0.1 bonus.
+        #
+        # By injecting the validated pairs as "treats" edges, the GT
+        # model learns them, gnn_score becomes high, and the RL agent
+        # ranks them HIGH (both gnn_score AND validated_bonus push them
+        # up). This is the data flywheel in action: validated pairs
+        # become GT training data → GT gnn_score improves → RL ranks
+        # them HIGH → pharma partner sees them at the top.
+        #
+        # CRITICAL: validated_hypotheses are kept SEPARATE from
+        # known_positives in the RL reward function (VALIDATED_HYPOTHESES
+        # gives +0.1 bonus, KNOWN_POSITIVES is the AUC label set). The
+        # AUC label set does NOT include validated pairs, so there is NO
+        # circular leakage. The GT model seeing them as "treats" edges
+        # is fine — that's the data flywheel (validated pairs become new
+        # GT training data).
+        validated_pairs: List[Tuple[str, str]] = []
+        if validated_hypotheses:
+            for drug_name, disease_name in validated_hypotheses:
+                if drug_name not in drug_names:
+                    drug_names.append(drug_name)
+                if disease_name not in disease_names:
+                    disease_names.append(disease_name)
+                validated_pairs.append((drug_name, disease_name))
+            logger.info(
+                f"P4-001 ROOT FIX: injecting {len(validated_pairs)} validated "
+                f"hypothesis pairs as 'treats' edges in the demo graph. "
+                f"Pairs: {validated_pairs}. The GT model will learn these "
+                f"(data flywheel), and the RL agent will see them in its "
+                f"input data so the +0.1 validated_bonus can fire."
+            )
 
         # ------------------------------------------------------------------
         # ROOT FIX (S-05 / X-01 / X-09): use REALISTIC feature magnitude
@@ -1060,6 +1142,18 @@ class BiomedicalGraphBuilder:
             # 3-hop path injection (drug->inhibits->protein->part_of->pathway->
             # disrupted_in->disease) for KNOWN POSITIVES.
             #
+
+        # P4-001 ROOT FIX: inject validated_hypotheses as "treats" edges
+        # (data flywheel). These pairs become GT training data so the GT
+        # model learns them (gnn_score for them will be high after
+        # training). The RL agent will then see high gnn_score + the
+        # +0.1 validated_bonus → ranks them HIGH → pharma partner sees
+        # them at the top. This is the data flywheel (DOCX §10) in action.
+        # They are also added to known_pairs so the bridge's RL input
+        # generator includes them in the cross-product.
+        for drug_name, disease_name in validated_pairs:
+            builder.add_edge("drug", "treats", "disease", drug_name, disease_name)
+            known_pairs.append((drug_name, disease_name))
             # The previous V31 "fix" REINTRODUCED the exact label leakage
             # that V30 had removed. The audit (v89) confirmed:
             #   - For every KP, a GUARANTEED drug->protein->pathway->disease
