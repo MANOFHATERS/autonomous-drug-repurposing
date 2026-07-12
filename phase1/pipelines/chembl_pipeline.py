@@ -1148,11 +1148,47 @@ class ChEMBLPipeline(BasePipeline):
                 # explicit-strict signal (takes precedence over the
                 # permissive opt-in for operators who set both).
                 _strict = (_os.environ.get("DRUGOS_STRICT", "") == "1") or (not _permissive)
-                logger.error(
+                # P1-041 ROOT FIX (DRUGOS_ALLOW_PERMISSIVE_DPI silent escape):
+                #   The previous code logged at ERROR level and emitted
+                #   ``chembl_dpi_missing=1`` as a metric, but the KG
+                #   appeared healthy (drugs loaded) and operators could
+                #   miss the ERROR log if the DAG showed success. An
+                #   operator who set DRUGOS_ALLOW_PERMISSIVE_DPI=1 to
+                #   unblock a Sunday run after a ChEMBL API change
+                #   silently produced a KG with ZERO drug-protein
+                #   interactions. The KG looked normal but had no
+                #   pharmacological edges — every drug-target prediction
+                #   was broken.
+                #
+                #   ROOT FIX (three layers):
+                #   (1) Escalate the log level to CRITICAL when permissive
+                #       mode is active (ERROR is for "something failed
+                #       but we recovered"; CRITICAL is for "the KG is
+                #       silently degraded — operator must acknowledge").
+                #   (2) Set ``self._metrics["dpi_missing"] = True`` so
+                #       the flag is persisted to ``pipeline_run.metadata_json``
+                #       via ``BasePipeline._write_run_log``. Downstream
+                #       consumers can query this flag.
+                #   (3) Require TWO-STEP opt-in: DRUGOS_ALLOW_PERMISSIVE_DPI=1
+                #       marks DPI missing + raises (so the task fails RED);
+                #       DRUGOS_ALLOW_PERMISSIVE_DPI=2 is the explicit
+                #       operator acknowledgement that proceeds with the
+                #       DPI-degraded KG. The two-step opt-in prevents
+                #       the silent escape hatch from producing a silently
+                #       degraded KG.
+                _log_level = (
+                    logger.critical if (_permissive and not _strict) else logger.error
+                )
+                _log_level(
                     "[%s] clean_activities() failed%s — ChEMBL DPI edge set "
                     "will be missing. %s: %s",
                     self.source_name,
-                    " (STRICT MODE — FATAL)" if _strict else " (continuing with drugs only)",
+                    " (STRICT MODE — FATAL)" if _strict else (
+                        " (PERMISSIVE MODE — KG WILL BE DPI-DEGRADED; "
+                        "trigger_phase2 pre-flight check will FAIL until "
+                        "operator sets DRUGOS_ALLOW_PERMISSIVE_DPI=2 to "
+                        "acknowledge)"
+                    ),
                     type(exc).__name__, exc,
                     exc_info=True,
                 )
@@ -1163,6 +1199,16 @@ class ChEMBLPipeline(BasePipeline):
                 )
                 # Tag the pipeline run so downstream consumers know DPI is missing.
                 self._emit_metric("chembl_dpi_missing", 1)
+                # P1-041 ROOT FIX layer 2: persist dpi_missing flag in
+                # pipeline_run.metadata_json (via _metrics → _write_run_log).
+                self._metrics["dpi_missing"] = True
+                self._metrics["dpi_missing_reason"] = (
+                    f"clean_activities_failed:{type(exc).__name__}"
+                )
+                _acknowledged = (
+                    _os.environ.get("DRUGOS_ALLOW_PERMISSIVE_DPI", "") == "2"
+                )
+                self._metrics["dpi_missing_acknowledged"] = _acknowledged
                 if _strict:
                     raise RuntimeError(
                         f"ChEMBL clean_activities() failed in STRICT mode "
@@ -1171,6 +1217,29 @@ class ChEMBLPipeline(BasePipeline):
                         f"{type(exc).__name__}: {exc}. V19 SF-3 root fix — "
                         f"production runs must not silently continue with "
                         f"the DPI edge set missing."
+                    ) from exc
+                # P1-041 ROOT FIX layer 3: two-step opt-in.
+                #   DRUGOS_ALLOW_PERMISSIVE_DPI=1 → mark DPI missing +
+                #   RAISE so the task fails RED. The operator sees the
+                #   failure in the Airflow UI and must explicitly set
+                #   DRUGOS_ALLOW_PERMISSIVE_DPI=2 to acknowledge and
+                #   proceed with the DPI-degraded KG.
+                #   DRUGOS_ALLOW_PERMISSIVE_DPI=2 → mark DPI missing +
+                #   CONTINUE (the operator has acknowledged). The KG is
+                #   DPI-degraded but the operator has explicitly opted in.
+                if not _acknowledged:
+                    raise RuntimeError(
+                        f"P1-041 ROOT FIX: clean_activities() failed and "
+                        f"DRUGOS_ALLOW_PERMISSIVE_DPI=1 is set (permissive "
+                        f"mode). The KG would be DPI-degraded (ZERO "
+                        f"drug-protein interactions). To proceed with the "
+                        f"DPI-degraded KG, the operator MUST explicitly "
+                        f"acknowledge by setting "
+                        f"DRUGOS_ALLOW_PERMISSIVE_DPI=2 (override-"
+                        f"acknowledged). This two-step opt-in prevents "
+                        f"the silent escape hatch from producing a "
+                        f"silently degraded KG. Original error: "
+                        f"{type(exc).__name__}: {exc}."
                     ) from exc
 
         self._metrics["duration_clean_sec"] = round(
