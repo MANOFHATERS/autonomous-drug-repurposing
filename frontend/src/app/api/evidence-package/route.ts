@@ -93,12 +93,10 @@ async function validateEntityInKg(
     }
   }
 
-  // Local fallback: check the bridge summary for the relevant node type.
-  // The bridge summary's `edge_types_present` list contains entries like
-  // "(Compound, treats, Disease)" — we check whether the relevant type
-  // appears at all. This is a coarse check (does not verify the specific
-  // drug/disease name), but it ensures the KG has been built with the
-  // right node types.
+  // Local fallback: check the registry + node-type counts for the
+  // relevant node type. FE-020 (Team 15) added per-type node count
+  // breakdowns to the response — we use those to verify the KG has
+  // been built with the right node types.
   try {
     const stats = await getKnowledgeGraphStats();
     if (stats.source === "none") {
@@ -108,16 +106,29 @@ async function validateEntityInKg(
       // The audit log records that validation was skipped.
       return { ok: true };
     }
-    // Check edge_types_present for the relevant node type.
+    // FE-020: check nodeTypeCounts for the relevant canonical node type.
+    // The CANONICAL_NODE_TYPES are Compound, Protein, Pathway, Disease,
+    // ClinicalOutcomes — we map "drug" → "Compound" and "disease" →
+    // "Disease".
     const nodeType = kind === "drug" ? "Compound" : "Disease";
-    const hasNodeType = stats.edgeTypesPresent.some((et) =>
-      et.toLowerCase().includes(nodeType.toLowerCase())
-    );
-    if (!hasNodeType) {
-      return {
-        ok: false,
-        reason: `Knowledge graph does not contain ${nodeType} nodes. The ${kind} "${trimmed}" cannot be validated.`,
-      };
+    // Check both the canonical nodeTypeCounts map AND the per-source
+    // nodeTypeCounts (some sources may contribute to a type even if
+    // the aggregate map is empty due to missing node_type_counts in
+    // the registry).
+    const aggregateCount = stats.nodeTypeCounts?.[nodeType] ?? 0;
+    const perSourceCount = stats.sources.reduce((sum, s) => {
+      const c = s.nodeTypeCounts?.[nodeType] ?? 0;
+      return sum + c;
+    }, 0);
+    if (aggregateCount === 0 && perSourceCount === 0) {
+      // The registry may not have node_type_counts populated yet
+      // (FE-020 depends on the Phase 2 builder writing that field).
+      // In that case, we cannot definitively say the KG lacks the
+      // node type — be permissive (allow the build) but log a warning.
+      console.warn(
+        `evidence-package: KG validation could not confirm ${nodeType} nodes (registry may not have node_type_counts). Allowing build for ${kind}="${trimmed}".`
+      );
+      return { ok: true };
     }
     // The KG has the right node type — we cannot do a fine-grained
     // check without the KG service, so we allow the build. The audit

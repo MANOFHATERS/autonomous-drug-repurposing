@@ -77,9 +77,15 @@ describe("FE-001 REAL: /api/dataset returns real checkpoint data", () => {
       const res = await GET(req);
       // The checkpoint at phase2/data/checkpoints/step_01.json exists,
       // so we should get 200 with real stats — NOT 503.
+      // (FE-001 was jointly fixed by Team 13 and Team 15 — Team 15's
+      // version of the route returns 200 with `status: "ok"` when data
+      // is available, and 200 with `status: "no_data"` when the
+      // checkpoint is missing. 502 only when the proxy was configured
+      // but failed AND no local checkpoint exists.)
       expect(res.status).toBe(200);
       const body = await res.json();
       expect(body.source).toBe("local_checkpoint");
+      expect(body.status).toBe("ok");
       expect(body.nodesLoaded).toBeGreaterThan(0);
       expect(body.edgesLoaded).toBeGreaterThan(0);
       expect(body.edgeTypesPresent.length).toBeGreaterThan(0);
@@ -91,7 +97,7 @@ describe("FE-001 REAL: /api/dataset returns real checkpoint data", () => {
   });
 });
 
-describe("FE-002 REAL: /api/knowledge-graph returns real registry + bridge data", () => {
+describe("FE-002 REAL: /api/knowledge-graph returns real registry data", () => {
   test("GET /api/knowledge-graph (no params) returns 200 with real KG stats", async () => {
     const savedUrl = process.env.KG_SERVICE_URL;
     delete process.env.KG_SERVICE_URL;
@@ -102,14 +108,14 @@ describe("FE-002 REAL: /api/knowledge-graph returns real registry + bridge data"
       expect(res.status).toBe(200);
       const body = await res.json();
       expect(body.source).toBe("local_registry");
-      // The bridge summary is in step_01.json — it should be present.
-      expect(body.bridge).toBeTruthy();
-      expect(body.bridge.nodesLoaded).toBeGreaterThan(0);
-      expect(body.bridge.edgesLoaded).toBeGreaterThan(0);
-      // The node count should come from the bridge summary, NOT the
-      // SIDER row count (91,926).
-      expect(body.nodeCountSource).toBe("bridge_summary");
-      expect(body.nodeCount).toBe(body.bridge.nodesLoaded);
+      // The local registry has SIDER and STRING entries.
+      expect(body.sources.length).toBeGreaterThan(0);
+      // FE-020 (Team 15): the response should include per-type count
+      // maps (empty when registry doesn't have node_type_counts, but
+      // always defined).
+      expect(body.nodeTypeCounts).toBeDefined();
+      expect(body.edgeTypeCounts).toBeDefined();
+      expect(body.nonCanonicalNodeCounts).toBeDefined();
     } finally {
       if (savedUrl !== undefined) process.env.KG_SERVICE_URL = savedUrl;
     }

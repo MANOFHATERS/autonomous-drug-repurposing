@@ -29,6 +29,12 @@ import {
 // (no env vars set) as long as the Phase 2 builder has written its
 // registry to disk. The 503-only behavior was a credibility killer.
 //
+// FE-020 (Team Member 15) enhanced the lib service to break down node
+// counts by canonical type (Compound, Protein, Pathway, Disease,
+// ClinicalOutcomes) — excluding non-canonical types like AdverseEvent
+// from `nodeCount`. This route forwards those fields to the dashboard
+// unchanged.
+//
 // FE-008 ROOT FIX: shared validator extracted so unit tests can exercise it
 // without spinning up the route handler.
 import { validateReadOnlyCypher } from "./cypher-validator";

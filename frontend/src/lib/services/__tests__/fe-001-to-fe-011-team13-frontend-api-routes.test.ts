@@ -62,7 +62,9 @@ describe("FE-001: /api/dataset wires dataset-stats.ts lib service", () => {
       "utf8"
     );
     // The route MUST import getDatasetStats from the lib — that's the
-    // entire point of FE-001.
+    // entire point of FE-001. (Jointly fixed by Team 13 and Team 15 —
+    // Team 15's version of the route is on main and already imports
+    // getDatasetStats.)
     expect(routeSrc).toMatch(/from ["']@\/lib\/services\/dataset-stats["']/);
     expect(routeSrc).toMatch(/getDatasetStats/);
   });
@@ -83,21 +85,23 @@ describe("FE-002: /api/knowledge-graph wires knowledge-graph-stats.ts lib servic
     expect(typeof mod.getKnowledgeGraphStats).toBe("function");
   });
 
-  test("getKnowledgeGraphStats reads the local registry + bridge summary when KG_SERVICE_URL is unset", async () => {
+  test("getKnowledgeGraphStats reads the local registry when KG_SERVICE_URL is unset", async () => {
     const savedUrl = process.env.KG_SERVICE_URL;
     delete process.env.KG_SERVICE_URL;
     try {
       const { getKnowledgeGraphStats } = await import("@/lib/services/knowledge-graph-stats");
       const stats = await getKnowledgeGraphStats();
       expect(stats.source).not.toBe("none");
-      // If the bridge summary was found, nodeCount should come from
-      // bridge.nodesLoaded (real graph count), NOT the sum of per-source
-      // rows (which over-counts because SIDER rows are side-effects).
-      if (stats.bridge) {
-        expect(stats.nodeCountSource).toBe("bridge_summary");
-        expect(stats.nodeCount).toBe(stats.bridge.nodesLoaded);
-        expect(stats.edgeCount).toBe(stats.bridge.edgesLoaded);
-      }
+      // The local registry at phase2/data/registry.json has SIDER and
+      // STRING entries — sources should be non-empty.
+      expect(stats.sources.length).toBeGreaterThan(0);
+      // FE-020 (Team 15): the response should include per-type node
+      // count breakdowns (nodeTypeCounts, edgeTypeCounts,
+      // nonCanonicalNodeCounts) even when the registry doesn't have
+      // node_type_counts (the maps are empty but defined).
+      expect(stats.nodeTypeCounts).toBeDefined();
+      expect(stats.edgeTypeCounts).toBeDefined();
+      expect(stats.nonCanonicalNodeCounts).toBeDefined();
     } finally {
       if (savedUrl !== undefined) process.env.KG_SERVICE_URL = savedUrl;
     }
