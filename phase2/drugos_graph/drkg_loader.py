@@ -1312,16 +1312,36 @@ def parse_drkg_tsv(
     df["tail_type"] = tail_parsed[0]
     df["tail_id"] = tail_parsed[1]
 
-    # BUG #74 ROOT FIX: validate DRKG entity ID format with regex
-    # ^\w+::[\w:]+$. The structural split above catches missing-separator
-    # cases but does NOT validate the format — malformed IDs like
-    # "Compound:DB00945" (single colon, would produce head_type="Compound"
+    # BUG #74 ROOT FIX: validate DRKG entity ID format with regex.
+    #
+    # v102 ROOT FIX (P2-035): the previous pattern ``^\w+::[\w:]+$``
+    # only matched word characters and colons in the ID portion. Hyphens
+    # and dots were rejected, dead-lettering DRKG variants that use
+    # hyphenated IDs (e.g. ``Compound::DB-00945`` from augmented DRKG,
+    # ``Compound::CHEMBL-12345`` from some DRKG v2 builds). DRKG ID
+    # format has evolved over time; the canonical v1 form is
+    # ``Type::ID`` where ID may contain word chars, colons (for
+    # composite IDs), hyphens (for CHEMBL/DB-Prefixed variants), and
+    # dots (for versioned IDs). Loosen the pattern to
+    # ``^\w+::[\w:.-]+$`` and document the accepted variants.
+    #
+    # Accepted ID forms after this fix:
+    #   - ``Compound::DB00945``              (canonical DrugBank)
+    #   - ``Compound::DB-00945``             (hyphenated DrugBank variant)
+    #   - ``Compound::CHEMBL1234567``        (canonical ChEMBL)
+    #   - ``Compound::CHEMBL-1234567``       (hyphenated ChEMBL variant)
+    #   - ``Compound::CHEMBL.foo.1``         (versioned ChEMBL variant)
+    #   - ``Disease::MESH:D006932``          (MeSH composite)
+    #   - ``Disease::DOID:0050133``          (DOID composite)
+    # The structural split above catches missing-separator cases but
+    # does NOT validate the format — malformed IDs like
+    # ``Compound:DB00945`` (single colon, would produce head_type="Compound"
     # and head_id="DB00945" but the original was malformed) or IDs with
     # spaces/special chars would pass through and become canonical node
     # IDs, fragmenting entity resolution. Validate per-row and flag
-    # malformed rows for the downstream dead-letter filter (line ~1721).
+    # malformed rows for the downstream dead-letter filter.
     import re as _re
-    _DRKG_ID_PATTERN = _re.compile(r"^\w+::[\w:]+$")
+    _DRKG_ID_PATTERN = _re.compile(r"^\w+::[\w:.-]+$")
     _malformed_entity_mask = (
         ~df["head_entity"].astype(str).str.match(_DRKG_ID_PATTERN)
         | ~df["tail_entity"].astype(str).str.match(_DRKG_ID_PATTERN)
@@ -1330,8 +1350,8 @@ def parse_drkg_tsv(
     if _n_malformed_ids > 0:
         logger.warning(
             "drkg_loader: %d rows have malformed entity IDs (do not "
-            "match ^\\w+::[\\w:]+$ pattern). These rows will be "
-            "filtered downstream (BUG #74 root fix). Sample: %s",
+            "match ^\\w+::[\\w:.-]+$ pattern). These rows will be "
+            "filtered downstream (BUG #74 root fix, P2-035). Sample: %s",
             _n_malformed_ids,
             df.loc[_malformed_entity_mask, ["head_entity", "tail_entity"]]
             .head(3).to_dict("records"),
