@@ -1400,7 +1400,7 @@ def temporal_split_pairs(
     When approval_years is None or empty, falls back to deterministic
     random split using SEED from config (IDE-001).
 
-    P2-020 ROOT FIX (v104): the previous default
+    P2-020 ROOT FIX (v104 + v105): the previous default
     ``split_mode="drug_first_approval"`` (v88 BUG #34) evaluates the
     COLD-START DRUG task — can the model predict drug-disease
     interactions for NEW drugs? The platform's stated use case (DOCX
@@ -1415,7 +1415,7 @@ def temporal_split_pairs(
     Y); the test AUC measures extrapolation to NEW INDICATIONS for
     KNOWN drugs, which is exactly what a pharma partner pays for.
 
-    Split modes (v100 ROOT FIX BUG P2-042 + v104 P2-020 default change):
+    Split modes (v100 ROOT FIX BUG P2-042 + v104/v105 P2-020 default change):
       - "indication_first_approval" (DEFAULT since v104 / P2-020):
         alias for ``pair_level``. Splits by the (drug, disease)
         pair's OWN approval year. The same drug may appear in train
@@ -1437,7 +1437,7 @@ def temporal_split_pairs(
         positive_pairs: Positive example dicts with 'drug_id' and 'disease_id'.
         cutoff_year: Year boundary for temporal split.
         approval_years: Optional {(drug_id, disease_id): year} mapping.
-        split_mode: (v104 P2-020 root fix) Default is now
+        split_mode: (v104/v105 P2-020 root fix) Default is now
             ``"indication_first_approval"`` — evaluates the drug-
             repurposing task (new indications for known drugs). This
             is an alias for ``"pair_level"``. Use
@@ -1680,6 +1680,10 @@ def temporal_split_pairs(
         #   INDICATIONS for known drugs (the drug-repurposing use case).
         #   "indication_first_approval" is the v104 default name;
         #   "pair_level" is kept as a backward-compat alias.
+        # v105 P2-020 ROOT FIX: confirmed "indication_first_approval" as
+        # the DEFAULT. The new name makes the intent explicit: we
+        # evaluate the repurposing task (new indications for known
+        # drugs), not the new-drug extrapolation task.
         if split_mode in ("pair_level", "indication_first_approval"):
             split_year = year
         elif split_mode == "drug_first_approval":

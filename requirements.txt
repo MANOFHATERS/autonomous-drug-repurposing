@@ -85,7 +85,7 @@ biopython>=1.83
 # pytest is needed by the Phase 3/4 test suites (tests/test_*.py).
 pytest>=7.4
 
-# ─── RT-005 ROOT FIX (Team Member 17): Literature Cross-Check (Phase 6 V1 criterion) ──
+# ─── RT-005 ROOT FIX (Team Member 17) + Phase 6 V1 launch: Literature Cross-Check ──
 # The V1 launch contract (project docx Section 8) requires:
 #   "At least 5 top predictions are supported by published literature"
 # Phase 4's rl_drug_ranker.py performs an automated PubMed literature cross-check
@@ -98,7 +98,7 @@ pytest>=7.4
 # FAILS (not skips) if biopython is missing.
 biopython>=1.83
 
-# ─── RT-014 ROOT FIX (Team Member 17): HTTP API layer (Phase 5/6) ──────────
+# ─── RT-014 ROOT FIX (Team Member 17) + Step 1 integration plan: HTTP API layer ──
 # The project docx (Section 7) specifies FastAPI as the REST API framework.
 # The frontend's /api/dataset, /api/knowledge-graph, /api/rl routes proxy to
 # DATASET_SERVICE_URL, KG_SERVICE_URL, RL_SERVICE_URL — expecting FastAPI

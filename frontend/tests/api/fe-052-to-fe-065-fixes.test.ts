@@ -203,17 +203,35 @@ describe("FE-056: IP rate-limit attempt recorded up-front", () => {
 // ---------------------------------------------------------------------------
 // FE-057: Mock audit logs do NOT contain PHI_ACCESSED
 // ---------------------------------------------------------------------------
+//
+// FE-034 ROOT FIX UPDATE: `mock-data.ts` has been DELETED entirely (dangerous
+// name invited future engineers to re-add fabricated data). The empty
+// defaults now live in `@/lib/empty-defaults`. The FE-057 contract is
+// therefore strengthened: not only does the file not contain PHI references,
+// the file does not exist at all. We assert both invariants below.
 
 describe("FE-057: PHI references removed from mock data", () => {
-  it("mock-data.ts auditLogs array does not contain PHI_ACCESSED", () => {
-    const src = readSrc("src/lib/mock-data.ts");
+  it("mock-data.ts has been DELETED (FE-034 root fix)", () => {
+    const root = path.resolve(__dirname, "../../");
+    const mockDataPath = path.join(root, "src/lib/mock-data.ts");
+    expect(fs.existsSync(mockDataPath)).toBe(false);
+  });
+
+  it("empty-defaults.ts exists as the replacement (FE-034 root fix)", () => {
+    const root = path.resolve(__dirname, "../../");
+    const emptyDefaultsPath = path.join(root, "src/lib/empty-defaults.ts");
+    expect(fs.existsSync(emptyDefaultsPath)).toBe(true);
+  });
+
+  it("empty-defaults.ts auditLogs array does not contain PHI_ACCESSED", () => {
+    const src = readSrc("src/lib/empty-defaults.ts");
     const stripped = stripComments(src);
     // PHI_ACCESSED must not appear as an action in the auditLogs array.
     expect(stripped).not.toMatch(/action:\s*['"]PHI_ACCESSED['"]/);
   });
 
-  it("mock-data.ts does not reference 'Patient Dataset' or 'PHI records'", () => {
-    const src = readSrc("src/lib/mock-data.ts");
+  it("empty-defaults.ts does not reference 'Patient Dataset' or 'PHI records'", () => {
+    const src = readSrc("src/lib/empty-defaults.ts");
     const stripped = stripComments(src);
     expect(stripped).not.toMatch(/Patient Dataset/);
     expect(stripped).not.toMatch(/PHI records/);

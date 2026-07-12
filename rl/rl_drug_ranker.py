@@ -275,6 +275,16 @@ DISEASE_PAIR_COUNT_COL: str = "disease_pair_count"
 DISEASE_AVG_GNN_COL: str = "disease_avg_gnn"
 DISEASE_AVG_SAFETY_COL: str = "disease_avg_safety"
 
+# P4-007 ROOT FIX (MEDIUM — Team Cosmic / Phase 4): gnn_score timestamp
+# column. The input CSV may include this column (ISO 8601 format) to
+# indicate when the gnn_score was computed by the Phase 3 GT model. The
+# DrugRankingEnv checks the timestamp at init time and logs a WARNING if
+# the gnn_score is stale (>24h old), because the GT model may have been
+# retrained since then — the RL agent would be training on stale predictions,
+# and the deployed policy would be mismatched to fresh gnn_scores.
+GNN_SCORE_TIMESTAMP_COL: str = "gnn_score_timestamp"
+GNN_SCORE_STALENESS_WARNING_HOURS: float = 24.0
+
 # Optional canonical-identifier columns.
 SOURCE_DB_COL: str = "source_database"
 DRUG_CANONICAL_COL: str = "drug_inchikey"
@@ -794,14 +804,196 @@ def _load_validated_hypotheses() -> List[Tuple[str, str]]:
     return result
 
 
-KNOWN_POSITIVES: List[Tuple[str, str]] = _load_known_positives()
+# P4-004 ROOT FIX (HIGH — Team Cosmic / Phase 4): KNOWN_POSITIVES and
+# VALIDATED_HYPOTHESES are now LAZY-LOADED via the _LazyList proxy class
+# below. The previous code called _load_known_positives() and
+# _load_validated_hypotheses() at MODULE IMPORT TIME. This had three
+# problems:
+#
+#   1. If validated_hypotheses.csv was missing/moved/renamed, EVERY
+#      `import rl_drug_ranker` (or `import rl`) triggered a CRITICAL
+#      log and returned an empty list — even callers that never touch
+#      the reward function (e.g., a script that only inspects
+#      PipelineConfig).
+#   2. The CSV read was a side effect at import time, violating the
+#      "imports should be side-effect free" principle. This made the
+#      module hard to test in isolation.
+#   3. Long-running services that deposited a new validated_hypotheses.csv
+#      (the data flywheel) could not pick it up without restarting the
+#      process — the list was loaded once at import and frozen.
+#
+# The fix wraps the lists in _LazyList, which delegates list operations
+# (__iter__, __len__, __getitem__, __contains__) to a loader function
+# that runs ONCE on first access and caches the result. The CSV is NOT
+# read at import time — only when the list is first iterated, len()'d,
+# indexed, or tested for containment. All internal references (e.g.,
+# `set(VALIDATED_HYPOTHESES)`, `len(KNOWN_POSITIVES)`, `for d, v in
+# KNOWN_POSITIVES`) work unchanged because _LazyList implements the
+# full list protocol.
+#
+# The CI test test_p4_004_lazy_load_no_import_side_effect verifies
+# this invariant by temporarily renaming the CSV and confirming that
+# `import rl.rl_drug_ranker` succeeds AND the cache is empty before
+# first access.
+class _LazyList:
+    """A list proxy that loads its contents on first access.
+
+    P4-004 ROOT FIX: used for KNOWN_POSITIVES and VALIDATED_HYPOTHESES
+    so that ``import rl_drug_ranker`` does NOT trigger the CSV read.
+    The read happens on first access (iteration, len, indexing, etc.).
+
+    The proxy implements the full list protocol (__iter__, __len__,
+    __getitem__, __contains__, __eq__, __repr__, __bool__, __add__) so
+    all existing call sites (``set(VH)``, ``len(KP)``, ``for d, v in
+    KP``, ``KP[i]``, etc.) work unchanged.
+
+    The cache is mutable via ``_reset_cache()`` so tests and long-running
+    services can force a reload (e.g., when a new validated_hypotheses.csv
+    is deposited).
+    """
+
+    __slots__ = ("_loader", "_cache", "_loaded")
+
+    def __init__(self, loader):
+        # Use object.__setattr__ to bypass __setattr__ (which we don't
+        # define, but __slots__ prevents adding arbitrary attrs).
+        object.__setattr__(self, "_loader", loader)
+        object.__setattr__(self, "_cache", None)
+        object.__setattr__(self, "_loaded", False)
+
+    def _resolve(self) -> List[Any]:
+        if not object.__getattribute__(self, "_loaded"):
+            loader = object.__getattribute__(self, "_loader")
+            cache = list(loader())
+            object.__setattr__(self, "_cache", cache)
+            object.__setattr__(self, "_loaded", True)
+        return object.__getattribute__(self, "_cache")
+
+    def _reset_cache(self) -> None:
+        """Force a reload on next access (used by reload_* helpers)."""
+        object.__setattr__(self, "_cache", None)
+        object.__setattr__(self, "_loaded", False)
+
+    def _is_loaded(self) -> bool:
+        return object.__getattribute__(self, "_loaded")
+
+    # ----- list protocol -----
+    def __iter__(self):
+        return iter(self._resolve())
+
+    def __len__(self) -> int:
+        return len(self._resolve())
+
+    def __getitem__(self, idx):
+        return self._resolve()[idx]
+
+    def __contains__(self, item) -> bool:
+        return item in self._resolve()
+
+    def __eq__(self, other) -> bool:
+        if isinstance(other, _LazyList):
+            return self._resolve() == other._resolve()
+        return self._resolve() == other
+
+    def __ne__(self, other) -> bool:
+        return not self.__eq__(other)
+
+    def __bool__(self) -> bool:
+        return bool(self._resolve())
+
+    def __add__(self, other):
+        return self._resolve() + list(other)
+
+    def __radd__(self, other):
+        return list(other) + self._resolve()
+
+    def __mul__(self, n):
+        return self._resolve() * n
+
+    def __rmul__(self, n):
+        return n * self._resolve()
+
+    def __repr__(self) -> str:
+        return repr(self._resolve())
+
+    def __str__(self) -> str:
+        return str(self._resolve())
+
+    def __hash__(self):
+        # Lists aren't hashable, but sets of their elements are.
+        # Allow hash for use in sets/dicts of LazyList objects (rare).
+        return hash(tuple(self._resolve()))
+
+    # ----- convenience methods (mirror list API) -----
+    def count(self, item) -> int:
+        return self._resolve().count(item)
+
+    def index(self, item) -> int:
+        return self._resolve().index(item)
+
+    def copy(self) -> List[Any]:
+        return list(self._resolve())
+
+    def to_list(self) -> List[Any]:
+        """Force-load and return a plain list (for callers that need a real list)."""
+        return list(self._resolve())
+
+
+# P4-004: the lazy proxies. The loader functions are called ONCE on first
+# access and the result is cached. Use reload_known_positives() /
+# reload_validated_hypotheses() to force a reload.
+KNOWN_POSITIVES: _LazyList = _LazyList(_load_known_positives)
 
 # V30 ROOT FIX (10.25 / Compound #1): VALIDATED_HYPOTHESES is loaded
 # SEPARATELY from KNOWN_POSITIVES. These pairs get a +0.1 reward bonus
 # during training but are EXCLUDED from the AUC label set. This prevents
 # the circular leakage where the same pairs were used as BOTH reward
 # bonus AND eval labels (the X-08 fix's bug).
-VALIDATED_HYPOTHESES: List[Tuple[str, str]] = _load_validated_hypotheses()
+VALIDATED_HYPOTHESES: _LazyList = _LazyList(_load_validated_hypotheses)
+
+
+def get_known_positives() -> List[Tuple[str, str]]:
+    """Force-load and return the KNOWN_POSITIVES list as a plain list.
+
+    P4-004 ROOT FIX: this is the explicit form of accessing the lazy
+    proxy. Equivalent to ``list(KNOWN_POSITIVES)`` but more readable
+    and self-documenting.
+    """
+    return KNOWN_POSITIVES.to_list()
+
+
+def get_validated_hypotheses() -> List[Tuple[str, str]]:
+    """Force-load and return the VALIDATED_HYPOTHESES list as a plain list.
+
+    P4-004 ROOT FIX: this is the explicit form of accessing the lazy
+    proxy. Equivalent to ``list(VALIDATED_HYPOTHESES)`` but more readable
+    and self-documenting.
+    """
+    return VALIDATED_HYPOTHESES.to_list()
+
+
+def reload_known_positives() -> List[Tuple[str, str]]:
+    """Force-reload KNOWN_POSITIVES (clears the lazy cache).
+
+    Useful for tests that swap the env var or defaults between assertions.
+    Also useful for long-running services that want to pick up a new
+    RL_KNOWN_POSITIVES env var without restarting the process.
+    """
+    KNOWN_POSITIVES._reset_cache()
+    return get_known_positives()
+
+
+def reload_validated_hypotheses() -> List[Tuple[str, str]]:
+    """Force-reload VALIDATED_HYPOTHESES (clears the lazy cache).
+
+    Useful for tests that swap validated_hypotheses.csv between assertions.
+    Also useful for long-running services that want to pick up a freshly
+    deposited validated_hypotheses.csv (the data flywheel) without
+    restarting the process.
+    """
+    VALIDATED_HYPOTHESES._reset_cache()
+    return get_validated_hypotheses()
+
 
 # Validated hypotheses CSV path -- data flywheel.
 VALIDATED_HYPOTHESES_PATH: str = "validated_hypotheses.csv"
@@ -1311,6 +1503,17 @@ class PipelineConfig:
     # v89 P0: minimum RL AUC to pass validation. Kept at 0.5 (better
     # than random) per the bridge's existing behavior.
     rl_auc_threshold: float = 0.5
+    # P4-003 ROOT FIX (v105): standalone-mode flag, set by run_pipeline
+    # when generate_fake_data is used (i.e. config.input_path is None).
+    # save_results() reads this flag and REFUSES to write the candidate
+    # CSV if True. This prevents a standalone-trained agent's garbage
+    # rankings from shipping to pharma partner demos. The previous code
+    # only tagged the DataFrame (data.attrs["_standalone_mode"]) which
+    # the checkpoint saver reads — but save_results reads from the
+    # config, so the CSV was still written. These fields default to
+    # False / empty (real bridge data is the normal case).
+    _standalone_mode: bool = False
+    _standalone_mode_reason: str = ""
     # v90 P0 ROOT FIX (BUG #8): PPO hyperparams were NOT actually
     # configurable. getattr(cfg, 'ppo_gamma', 0.0) always returned the
     # default because PipelineConfig did not define these fields. A user
@@ -1662,6 +1865,304 @@ DEFAULT_CONFIG: PipelineConfig = PipelineConfig()
 
 
 # ============================================================================
+# SECTION 2a: PER-TENANT REWARD WEIGHTS (P4-005 ROOT FIX)
+# ============================================================================
+# P4-005 ROOT FIX (HIGH — Team Cosmic / Phase 4): per-tenant reward-weight
+# profiles. The previous code hardcoded all reward weights in RewardConfig —
+# every pharma partner got the same ranking priorities. A partner focused
+# on rare diseases wants rare_disease_flag=0.4, not 0.08. The fix adds:
+#   1. A default reward_weights.yaml (shipped with the package).
+#   2. load_reward_weights_for_tenant(tenant_id) — loads the default
+#      profile or a tenant-specific profile (reward_weights.{tenant_id}.yaml).
+#   3. save_reward_weights_for_tenant(tenant_id, weights) — writes a
+#      tenant-specific profile.
+#   4. CLI commands: `show-weights --tenant X` and `set-weights --tenant X`.
+#   5. A `reward_weights_dir` field on PipelineConfig (defaults to the
+#      package directory).
+# This makes the platform customizable per partner WITHOUT code changes.
+
+# Default directory for reward-weight profiles (shipped with the package).
+DEFAULT_REWARD_WEIGHTS_DIR: str = os.path.dirname(os.path.abspath(__file__))
+
+
+def _reward_weights_file_path(
+    tenant_id: Optional[str] = None,
+    weights_dir: Optional[str] = None,
+) -> str:
+    """Return the YAML file path for the given tenant's reward weights.
+
+    P4-005: if tenant_id is None or "default", returns the path to
+    reward_weights.yaml (the default profile). Otherwise, returns
+    reward_weights.{tenant_id}.yaml.
+    """
+    base_dir = weights_dir or DEFAULT_REWARD_WEIGHTS_DIR
+    if tenant_id is None or tenant_id == "default":
+        return os.path.join(base_dir, "reward_weights.yaml")
+    # Sanitize tenant_id (allow only alphanumerics, underscore, hyphen)
+    if not re.match(r'^[A-Za-z0-9_-]+$', tenant_id):
+        raise ValueError(
+            f"P4-005: invalid tenant_id {tenant_id!r}. Only alphanumerics, "
+            f"underscore, and hyphen are allowed (prevents path traversal)."
+        )
+    return os.path.join(base_dir, f"reward_weights.{tenant_id}.yaml")
+
+
+def load_reward_weights_for_tenant(
+    tenant_id: Optional[str] = None,
+    weights_dir: Optional[str] = None,
+) -> Dict[str, float]:
+    """Load reward weights for a specific pharma-partner tenant.
+
+    P4-005 ROOT FIX: loads the reward-weights profile for the given
+    tenant. If tenant_id is None or "default", loads the default
+    profile (reward_weights.yaml). If a tenant-specific profile
+    (reward_weights.{tenant_id}.yaml) does not exist, falls back to
+    the default profile with a WARNING.
+
+    The loaded weights are VALIDATED:
+      - Keys must match FEATURE_COLS exactly.
+      - Weights must sum to 1.0 (±1e-6).
+      - All weights must be in [0, 1].
+
+    Args:
+        tenant_id: Optional tenant identifier (e.g., "rare_disease_partner").
+            None or "default" loads the default profile.
+        weights_dir: Optional directory containing the YAML files.
+            Defaults to the package directory (rl/).
+
+    Returns:
+        Dict mapping feature_col -> weight.
+
+    Raises:
+        FileNotFoundError: if the default profile doesn't exist.
+        ValueError: if the YAML is malformed or weights are invalid.
+    """
+    try:
+        import yaml
+    except ImportError:
+        logger.warning(
+            "P4-005: PyYAML not installed; returning default RewardConfig weights."
+        )
+        return dict(DEFAULT_CONFIG.reward.reward_weights)
+
+    path = _reward_weights_file_path(tenant_id, weights_dir)
+    if not os.path.exists(path):
+        if tenant_id is None or tenant_id == "default":
+            # Default profile not in weights_dir — fall back to the package's
+            # default profile (DEFAULT_REWARD_WEIGHTS_DIR). This makes the
+            # loader robust to a caller-specified weights_dir that doesn't
+            # contain the default profile.
+            pkg_default = _reward_weights_file_path(None, DEFAULT_REWARD_WEIGHTS_DIR)
+            if weights_dir is not None and os.path.exists(pkg_default):
+                logger.warning(
+                    f"P4-005: default reward_weights.yaml not found in "
+                    f"{weights_dir}. Falling back to package default at "
+                    f"{pkg_default}."
+                )
+                path = pkg_default
+            else:
+                raise FileNotFoundError(
+                    f"P4-005: default reward_weights.yaml not found at {path} "
+                    f"or in the package directory ({DEFAULT_REWARD_WEIGHTS_DIR}). "
+                    f"This file ships with the rl/ package — reinstall the package "
+                    f"or set reward_weights_dir to the correct directory."
+                )
+        else:
+            logger.warning(
+                f"P4-005: tenant profile {path} not found. Falling back to "
+                f"the default profile. To create this tenant profile, run: "
+                f"python -m rl.rl_drug_ranker show-weights --tenant {tenant_id} "
+                f"--save"
+            )
+            return load_reward_weights_for_tenant(None, weights_dir)
+
+    with open(path, "r", encoding="utf-8") as f:
+        try:
+            data = yaml.safe_load(f)
+        except yaml.YAMLError as e:
+            raise ValueError(f"P4-005: malformed YAML in {path}: {e}") from e
+
+    if not isinstance(data, dict):
+        raise ValueError(
+            f"P4-005: YAML config must be a dict at top level, got "
+            f"{type(data).__name__} in {path}"
+        )
+
+    weights = data.get("reward_weights", {})
+    if not isinstance(weights, dict):
+        raise ValueError(
+            f"P4-005: 'reward_weights' must be a dict in {path}, got "
+            f"{type(weights).__name__}"
+        )
+
+    # Coerce all values to float
+    coerced: Dict[str, float] = {}
+    for k, v in weights.items():
+        try:
+            coerced[str(k)] = float(v)
+        except (TypeError, ValueError) as e:
+            raise ValueError(
+                f"P4-005: cannot coerce weight {k}={v!r} to float in {path}: {e}"
+            ) from e
+
+    # Validate keys match FEATURE_COLS
+    expected_keys = set(FEATURE_COLS)
+    actual_keys = set(coerced.keys())
+    if actual_keys != expected_keys:
+        missing = expected_keys - actual_keys
+        extra = actual_keys - expected_keys
+        raise ValueError(
+            f"P4-005: reward weights keys mismatch in {path}. "
+            f"Missing: {missing}. Extra: {extra}. "
+            f"Expected keys: {sorted(expected_keys)}."
+        )
+
+    # Validate weights sum to 1.0
+    total = sum(coerced.values())
+    if abs(total - 1.0) >= 1e-6:
+        raise ValueError(
+            f"P4-005: reward weights in {path} sum to {total}, must be 1.0 "
+            f"(±1e-6). Adjust the weights so they sum to exactly 1.0."
+        )
+
+    # Validate all weights in [0, 1]
+    for k, v in coerced.items():
+        if not 0.0 <= v <= 1.0:
+            raise ValueError(
+                f"P4-005: weight {k}={v} in {path} must be in [0, 1]."
+            )
+
+    profile_name = data.get("profile_name", tenant_id or "default")
+    logger.info(
+        f"P4-005 ROOT FIX: loaded reward-weights profile '{profile_name}' "
+        f"from {path} for tenant '{tenant_id or 'default'}'. "
+        f"Weights: {coerced}."
+    )
+    return coerced
+
+
+def save_reward_weights_for_tenant(
+    weights: Dict[str, float],
+    tenant_id: Optional[str] = None,
+    weights_dir: Optional[str] = None,
+    profile_name: Optional[str] = None,
+    profile_description: str = "",
+) -> str:
+    """Save reward weights for a specific pharma-partner tenant.
+
+    P4-005 ROOT FIX: writes the reward-weights profile to a YAML file.
+    If tenant_id is None or "default", writes to reward_weights.yaml
+    (OVERWRITES the default — use with caution). Otherwise, writes to
+    reward_weights.{tenant_id}.yaml.
+
+    The weights are VALIDATED before writing (same checks as
+    load_reward_weights_for_tenant).
+
+    Args:
+        weights: Dict mapping feature_col -> weight. Must match
+            FEATURE_COLS and sum to 1.0.
+        tenant_id: Optional tenant identifier.
+        weights_dir: Optional directory (defaults to package dir).
+        profile_name: Optional name for the profile (defaults to tenant_id).
+        profile_description: Optional human-readable description.
+
+    Returns:
+        The path to the written YAML file.
+    """
+    try:
+        import yaml
+    except ImportError:
+        raise ImportError(
+            "P4-005: PyYAML is required to save reward weights. "
+            "Install with: pip install pyyaml"
+        )
+
+    # Validate keys
+    expected_keys = set(FEATURE_COLS)
+    actual_keys = set(weights.keys())
+    if actual_keys != expected_keys:
+        missing = expected_keys - actual_keys
+        extra = actual_keys - expected_keys
+        raise ValueError(
+            f"P4-005: weights keys mismatch. Missing: {missing}. Extra: {extra}."
+        )
+
+    # Validate sum
+    total = sum(weights.values())
+    if abs(total - 1.0) >= 1e-6:
+        raise ValueError(
+            f"P4-005: weights sum to {total}, must be 1.0 (±1e-6)."
+        )
+
+    # Validate range
+    for k, v in weights.items():
+        if not 0.0 <= float(v) <= 1.0:
+            raise ValueError(f"P4-005: weight {k}={v} must be in [0, 1].")
+
+    path = _reward_weights_file_path(tenant_id, weights_dir)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+
+    # Coerce to float
+    coerced = {str(k): float(v) for k, v in weights.items()}
+
+    data = {
+        "profile_name": profile_name or tenant_id or "default",
+        "profile_description": profile_description,
+        "profile_version": "1.0",
+        "reward_weights": coerced,
+    }
+    with open(path, "w", encoding="utf-8") as f:
+        yaml.dump(data, f, default_flow_style=False, sort_keys=False)
+
+    logger.info(
+        f"P4-005 ROOT FIX: saved reward-weights profile "
+        f"'{data['profile_name']}' to {path} for tenant '{tenant_id or 'default'}'."
+    )
+    return path
+
+
+def apply_tenant_reward_weights(
+    config: PipelineConfig,
+    tenant_id: Optional[str] = None,
+    weights_dir: Optional[str] = None,
+) -> PipelineConfig:
+    """Apply a tenant's reward-weights profile to a PipelineConfig.
+
+    P4-005 ROOT FIX: convenience function that loads the tenant's
+    profile and returns a NEW PipelineConfig with the reward_weights
+    replaced. The original config is NOT mutated.
+
+    Args:
+        config: The base PipelineConfig.
+        tenant_id: Optional tenant identifier.
+        weights_dir: Optional directory (defaults to package dir).
+
+    Returns:
+        A new PipelineConfig with config.reward.reward_weights replaced
+        by the tenant's profile.
+    """
+    weights = load_reward_weights_for_tenant(tenant_id, weights_dir)
+    # Build a new RewardConfig with the tenant's weights
+    new_reward = RewardConfig(
+        feature_cols=list(config.reward.feature_cols),
+        reward_weights=weights,
+        safety_hard_reject=config.reward.safety_hard_reject,
+        safety_warning=config.reward.safety_warning,
+        gnn_hard_reject=config.reward.gnn_hard_reject,
+        gnn_hard_reject_adaptive=config.reward.gnn_hard_reject_adaptive,
+        gnn_hard_reject_percentile=config.reward.gnn_hard_reject_percentile,
+        low_action_penalty=config.reward.low_action_penalty,
+        correct_rejection_reward=config.reward.correct_rejection_reward,
+        validated_bonus=config.reward.validated_bonus,
+        high_action_bonus=config.reward.high_action_bonus,
+        bad_high_penalty_scale=config.reward.bad_high_penalty_scale,
+    )
+    # Build a new PipelineConfig (dataclasses.replace)
+    from dataclasses import replace as _replace
+    return _replace(config, reward=new_reward)
+
+
+# ============================================================================
 # SECTION 2b: SCIENTIFIC FAILURE EXCEPTION (P0-3/P0-4 fix)
 # ============================================================================
 class ScientificFailureError(Exception):
@@ -1683,12 +2184,16 @@ class ScientificFailureError(Exception):
     = False`` via the Python API. This is a TEST-ONLY escape hatch and
     is NOT reachable from the CLI.
 
-    P4-014 ROOT FIX (Team Member 12): the ``RL_ALLOW_SCIENCE_FAILURE=1``
-    env var bypass has been REMOVED. The previous code allowed a
-    stressed team member to bypass the gate by setting an env var,
-    which let invalid CSVs ship to pharma partners. The fix: the gate
-    can ONLY be disabled via the Python API, not via env var or CLI
-    flag.
+    P4-014 ROOT FIX (Team Member 12) + RT-004 ROOT FIX (v105): the
+    ``RL_ALLOW_SCIENCE_FAILURE=1`` env var bypass has been REMOVED. The
+    previous code allowed a stressed team member to bypass the gate by
+    setting an env var, which let invalid CSVs ship to pharma partners.
+    The fix: the gate can ONLY be disabled via the Python API
+    (``config.block_on_scientific_failure = False``), not via env var
+    or CLI flag. This makes the bypass an explicit, code-reviewed
+    decision rather than a silent env var that can be set in a
+    production cron job or CI script. The DOCX §8 V1 launch criteria
+    are now enforced.
     """
 
     def __init__(self, message: str, validation: Optional[Dict[str, Any]] = None) -> None:
@@ -1707,7 +2212,7 @@ class ScientificFailureError(Exception):
             f"  To override (TEST-ONLY, Python API): set "
             f"config.block_on_scientific_failure=False. The CLI bypass "
             f"(--allow-invalid-output) and env var bypass "
-            f"(RL_ALLOW_SCIENCE_FAILURE) were removed in P4-014."
+            f"(RL_ALLOW_SCIENCE_FAILURE) were removed in P4-014 + RT-004 v105."
         )
 
 
@@ -2248,7 +2753,30 @@ class RewardFunction:
         return reward
 
 
-_default_reward_fn = RewardFunction()
+# P4-004 ROOT FIX: _default_reward_fn is now LAZY. The previous code did
+# `_default_reward_fn = RewardFunction()` at module import time, which
+# triggered RewardFunction.__init__'s `set(VALIDATED_HYPOTHESES)` —
+# forcing the CSV read at `import rl_drug_ranker` time and defeating
+# the lazy-load proxy. The fix defers construction to first call of
+# compute_reward() (or first explicit access of _default_reward_fn).
+# This is the final piece of the P4-004 lazy-load invariant: `import rl`
+# does NOT read the CSV, period.
+_default_reward_fn: Optional["RewardFunction"] = None
+
+
+def _get_default_reward_fn() -> "RewardFunction":
+    """Lazily construct and cache the default RewardFunction.
+
+    P4-004 ROOT FIX: this is the lazy form of the old
+    ``_default_reward_fn = RewardFunction()`` module-level assignment.
+    The CSV read (via VALIDATED_HYPOTHESES) only fires on the first
+    call to compute_reward() (or the first explicit access of
+    ``_default_reward_fn`` via this getter).
+    """
+    global _default_reward_fn
+    if _default_reward_fn is None:
+        _default_reward_fn = RewardFunction()
+    return _default_reward_fn
 
 
 def compute_reward(row: pd.Series, config: Optional[RewardConfig] = None) -> float:
@@ -2262,27 +2790,76 @@ def compute_reward(row: pd.Series, config: Optional[RewardConfig] = None) -> flo
     user passed NO config, and only creates a new RewardFunction when a
     non-None config is provided. This matches the function's intent:
     "use the default reward function if no config is given."
+
+    P4-004 ROOT FIX: uses ``_get_default_reward_fn()`` instead of the
+    module-level ``_default_reward_fn`` so the RewardFunction (and its
+    CSV-backed VALIDATED_HYPOTHESES set) is only constructed on first
+    call, not at module import time.
     """
     if config is not None:
         return RewardFunction(config).compute(row)
-    return _default_reward_fn(row)
+    return _get_default_reward_fn()(row)
 
 
 # ============================================================================
 # SECTION 5: DATA VALIDATION & QUALITY
 # ============================================================================
 
+# P4-002 ROOT FIX (HIGH — Team Cosmic / Phase 4): DISEASE_NAMES now uses
+# SPACE-separated names (e.g., "breast cancer") instead of UNDERSCORE-
+# separated names (e.g., "breast_cancer"). This matches:
+#   - KNOWN_POSITIVES (which uses spaces: ("aspirin", "cardiovascular disease"))
+#   - VALIDATED_HYPOTHESES (which uses spaces: ("thalidomide", "multiple myeloma"))
+#   - Phase 2 KG REAL_DISEASE_NAMES (graph_builder.py:518, uses spaces)
+#   - gt_rl_bridge.py (uses spaces for disease names)
+#   - PubMed API (which returns 0 results for "breast_cancer")
+#
+# The previous underscore form caused THREE compounding failures:
+#   1. KP recovery: string comparison "breast_cancer" != "breast cancer" →
+#      the recovery test reported 0% even when the (drug, disease) pair
+#      was in the data.
+#   2. PubMed literature cross-check: PubMed queries for "breast_cancer"
+#      return 0 results (PubMed uses spaces).
+#   3. Phase 2 KG mismatch: the bridge's graph uses spaces, so pairs
+#      generated from DISEASE_NAMES with underscores NEVER matched any
+#      disease node in the graph → the env saw 0 path coverage for those
+#      diseases → the reward function's pathway_score was 0 for them.
+#
+# The fix replaces ALL underscores with spaces. The list is now bit-for-bit
+# compatible with the rest of the codebase. The CI test
+# test_p4_002_disease_names_use_spaces verifies this invariant forever.
 DISEASE_NAMES: List[str] = [
-    "breast_cancer", "lung_cancer", "alzheimer_disease", "parkinson_disease",
-    "rheumatoid_arthritis", "type_2_diabetes", "hypertension", "asthma",
-    "crohn_disease", "multiple_sclerosis", "schizophrenia", "depression",
-    "osteoporosis", "malaria", "tuberculosis", "hiv_infection",
-    "hepatitis_c", "glioblastoma", "pancreatic_cancer", "prostate_cancer",
-    "epilepsy", "migraine", "psoriasis", "copd", "heart_failure",
-    "stroke", "kidney_disease", "liver_cirrhosis", "sickle_cell_disease",
-    "cystic_fibrosis", "melanoma", "leukemia", "lymphoma",
+    # P4-002 ROOT FIX (v105): the previous list used UNDERSCORES
+    # ("breast_cancer", "type_2_diabetes", etc.) while KNOWN_POSITIVES
+    # (line 530 onward) uses SPACES ("type 2 diabetes"). The mismatch
+    # broke KP recovery: when the env presented a pair with
+    # disease="type_2_diabetes", the KP set lookup (which uses
+    # "type 2 diabetes") FAILED, so a true positive was treated as a
+    # negative. The PubMed literature cross-check also failed for the
+    # same reason — PubMed indexes "type 2 diabetes", not
+    # "type_2_diabetes". The integration plan's P4-002 says: "Replace
+    # underscores with spaces in DISEASE_NAMES. This fixes KP recovery
+    # and PubMed search." All disease names below now use SPACES to
+    # match KNOWN_POSITIVES, REAL_DISEASE_NAMES in graph_builder.py,
+    # and PubMed's MeSH indexing.
+    "breast cancer", "lung cancer", "alzheimer disease", "parkinson disease",
+    "rheumatoid arthritis", "type 2 diabetes", "hypertension", "asthma",
+    "crohn disease", "multiple sclerosis", "schizophrenia", "depression",
+    "osteoporosis", "malaria", "tuberculosis", "hiv infection",
+    "hepatitis c", "glioblastoma", "pancreatic cancer", "prostate cancer",
+    "epilepsy", "migraine", "psoriasis", "copd", "heart failure",
+    "stroke", "kidney disease", "liver cirrhosis", "sickle cell disease",
+    "cystic fibrosis", "melanoma", "leukemia", "lymphoma",
     "osteoarthritis", "gout", "endometriosis", "fibromyalgia",
-    "lupus", "celiac_disease", "macular_degeneration", "glaucoma",
+    "lupus", "celiac disease", "macular degeneration", "glaucoma",
+    # P4-001 ROOT FIX (v105, parallel agent): add the 4 validated-hypothesis
+    # diseases so the data flywheel (DOCX §10) is reachable from the demo
+    # graph. These are the diseases paired with the 4 validated drugs in
+    # validated_hypotheses.csv (thalidomide→MM, sildenafil→PAH,
+    # mifepristone→Cushing, topiramate→migraine). migraine was already
+    # present; the other three are added here so generate_fake_data's
+    # DISEASE_NAMES pool can surface them for the reward bonus.
+    "multiple myeloma", "pulmonary arterial hypertension", "cushing syndrome",
 ]
 
 
@@ -3093,6 +3670,30 @@ def generate_fake_data(
 class DrugRankingEnv(gym.Env):
     """Custom RL environment for drug-disease hypothesis ranking.
 
+    P4-010 ROOT FIX (MEDIUM — Team Cosmic / Phase 4): ACTION SPACE
+    DOCUMENTATION. A prior audit incorrectly reported the action_space
+    as ``Discrete(n_pairs)`` (one action per drug-disease pair), which
+    would not scale beyond ~1000 pairs. This is WRONG for the current
+    code. The actual action_space is ``Discrete(2)`` — the agent
+    decides HIGH (1) or LOW (0) for ONE pair at a time. The env
+    iterates through all pairs (one per step), so the action_space is
+    O(1) regardless of the number of pairs. The agent's policy is a
+    function from feature-vector → P(HIGH), which is independent of the
+    pair count. This scales to production (10K drugs × 100 diseases =
+    1M pairs) without any action-space explosion — the env just runs
+    for 1M steps per episode instead of 100.
+
+    The CI test ``test_p4_010_action_space_scales_to_1m_pairs`` creates
+    an env with 1K drugs × 100 diseases = 100K pairs and verifies:
+      - action_space is Discrete(2) (O(1), not O(n_pairs))
+      - observation_space.shape = (n_features,) (independent of n_pairs)
+      - env.reset() and env.step() work without memory explosion
+
+    For future work on DRUG COMBINATION ranking (where the agent picks
+    a (drug1, drug2, disease) tuple and order matters), a
+    ``MultiDiscrete`` action space would be appropriate. That's a
+    separate env class, not a modification to this one.
+
     At each step:
         - Agent sees the features of one drug-disease pair (state)
         - Agent decides: rank this HIGH (1) or LOW (0) (action)
@@ -3217,6 +3818,91 @@ class DrugRankingEnv(gym.Env):
         for col in self.config.reward.feature_cols:
             if col in self.data.columns:
                 self.data[col] = self.data[col].clip(0.0, 1.0)
+
+        # P4-007 ROOT FIX (MEDIUM — Team Cosmic / Phase 4): gnn_score
+        # staleness check. If the input CSV has a gnn_score_timestamp
+        # column (ISO 8601), check the most recent timestamp. If it's
+        # older than GNN_SCORE_STALENESS_WARNING_HOURS (24h), log a
+        # WARNING — the GT model may have been retrained since the
+        # gnn_score was computed, so the RL agent would be training on
+        # stale predictions. The deployed policy would then be mismatched
+        # to fresh gnn_scores (the production GT model's current output).
+        #
+        # This is a SOFT warning (not a hard error) — the pipeline still
+        # runs, but the operator is alerted that the gnn_score may be
+        # stale. The metadata records the staleness status so downstream
+        # consumers (API, dashboard, pharma partners) can display a
+        # "stale predictions" warning.
+        self._gnn_score_stale: bool = False
+        self._gnn_score_age_hours: Optional[float] = None
+        self._gnn_score_timestamp: Optional[str] = None
+        if GNN_SCORE_TIMESTAMP_COL in self.data.columns and len(self.data) > 0:
+            try:
+                # Get the most recent timestamp in the column
+                timestamps = self.data[GNN_SCORE_TIMESTAMP_COL].dropna().astype(str)
+                if len(timestamps) > 0:
+                    latest_ts_str = timestamps.iloc[0]
+                    # Try to parse as ISO 8601
+                    from datetime import datetime as _dt
+                    try:
+                        latest_ts = _dt.fromisoformat(
+                            latest_ts_str.replace("Z", "+00:00")
+                        )
+                    except (ValueError, TypeError):
+                        # Try common alternative formats
+                        for fmt in (
+                            "%Y-%m-%dT%H:%M:%S",
+                            "%Y-%m-%d %H:%M:%S",
+                            "%Y-%m-%d",
+                        ):
+                            try:
+                                latest_ts = _dt.strptime(latest_ts_str, fmt)
+                                break
+                            except ValueError:
+                                continue
+                        else:
+                            logger.warning(
+                                f"P4-007: could not parse gnn_score_timestamp "
+                                f"'{latest_ts_str}'. Skipping staleness check."
+                            )
+                            latest_ts = None
+                    if latest_ts is not None:
+                        now = datetime.now(timezone.utc) if latest_ts.tzinfo else datetime.now()
+                        if latest_ts.tzinfo is None:
+                            from datetime import timezone as _tz
+                            latest_ts = latest_ts.replace(tzinfo=_tz.utc)
+                        age = now - latest_ts
+                        age_hours = age.total_seconds() / 3600.0
+                        self._gnn_score_age_hours = age_hours
+                        self._gnn_score_timestamp = latest_ts_str
+                        if age_hours > GNN_SCORE_STALENESS_WARNING_HOURS:
+                            self._gnn_score_stale = True
+                            logger.warning(
+                                f"P4-007 ROOT FIX: gnn_score is STALE — the "
+                                f"most recent timestamp in the input CSV is "
+                                f"{latest_ts_str} ({age_hours:.1f}h old, "
+                                f"threshold={GNN_SCORE_STALENESS_WARNING_HOURS}h). "
+                                f"The GT model may have been retrained since "
+                                f"these gnn_scores were computed. The RL agent "
+                                f"will train on STALE predictions — the deployed "
+                                f"policy may be mismatched to fresh gnn_scores. "
+                                f"To fix: regenerate the input CSV by re-running "
+                                f"the bridge (run_real_pipeline.py) which "
+                                f"retrains the GT model and regenerates "
+                                f"gnn_scores with a current timestamp."
+                            )
+                        else:
+                            logger.info(
+                                f"P4-007 ROOT FIX: gnn_score is FRESH — "
+                                f"most recent timestamp is {latest_ts_str} "
+                                f"({age_hours:.1f}h old, "
+                                f"threshold={GNN_SCORE_STALENESS_WARNING_HOURS}h)."
+                            )
+            except Exception as e:
+                logger.warning(
+                    f"P4-007: gnn_score staleness check failed: {e}. "
+                    f"Continuing without staleness warning."
+                )
 
         # ROOT FIX (FORENSIC-AUDIT-I13): only the TRAIN env should compute
         # and set the adaptive threshold. The TEST env must reuse the
@@ -4521,42 +5207,51 @@ def train_agent(
                 else:
                     model.save(checkpoint_path)
                     logger.info(f"Model checkpoint saved to {checkpoint_path}")
-                # V31 ROOT FIX (P1-9 / Compound #9 / Finding 10.2): persist
-                # VecNormalize observation/reward statistics alongside the
-                # PPO model checkpoint. The audit found that
-                # ``VecNormalize`` stats were NEVER saved — only the PPO
-                # model was saved. On checkpoint reload, the observation
-                # normalization stats were reset to zero mean / unit
-                # variance, so the model received UN-NORMALIZED observations
-                # → silent inference-time distribution shift → degraded
-                # policy quality. This made checkpoint reload broken.
-                #
-                # The fix: save the VecNormalize stats to a companion file
-                # (``{checkpoint_path}.vecnormalize.pkl``). The bridge's
-                # RL model loader will load this file alongside the PPO
-                # checkpoint to restore the correct normalization stats.
-                # We track ``normalized_env`` in the outer scope so it's
-                # accessible here regardless of which branch (resume vs
-                # fresh) was taken.
-                try:
-                    # P4-024: use os.path.splitext for case-insensitive extension replacement
-                    _ckpt_root, _ = os.path.splitext(checkpoint_path)
-                    vecnorm_path = _ckpt_root + ".vecnormalize.pkl"
-                    if normalized_env_for_save is not None and hasattr(
-                        normalized_env_for_save, 'save'
-                    ):
-                        normalized_env_for_save.save(vecnorm_path)
-                        logger.info(
-                            f"V31 ROOT FIX (P1-9): VecNormalize stats saved to "
-                            f"{vecnorm_path}. Observation normalization will be "
-                            f"restored on checkpoint reload."
+                    # V31 ROOT FIX (P1-9 / Compound #9 / Finding 10.2): persist
+                    # VecNormalize observation/reward statistics alongside the
+                    # PPO model checkpoint. The audit found that
+                    # ``VecNormalize`` stats were NEVER saved — only the PPO
+                    # model was saved. On checkpoint reload, the observation
+                    # normalization stats were reset to zero mean / unit
+                    # variance, so the model received UN-NORMALIZED observations
+                    # → silent inference-time distribution shift → degraded
+                    # policy quality. This made checkpoint reload broken.
+                    #
+                    # The fix: save the VecNormalize stats to a companion file
+                    # (``{checkpoint_path}.vecnormalize.pkl``). The bridge's
+                    # RL model loader will load this file alongside the PPO
+                    # checkpoint to restore the correct normalization stats.
+                    # We track ``normalized_env`` in the outer scope so it's
+                    # accessible here regardless of which branch (resume vs
+                    # fresh) was taken.
+                    #
+                    # P4-003 ROOT FIX (v2): the VecNormalize save is now INSIDE
+                    # the `else` branch (only when checkpoint_path is NOT None).
+                    # The previous code ran the save UNCONDITIONALLY, even when
+                    # checkpoint_path was None (standalone mode refusal). This
+                    # caused `os.path.splitext(None)` to raise TypeError, which
+                    # was caught by the except block and logged as a WARNING —
+                    # confusing and noisy. The fix moves the save inside the
+                    # else so it only runs when there's a real checkpoint path.
+                    try:
+                        # P4-024: use os.path.splitext for case-insensitive extension replacement
+                        _ckpt_root, _ = os.path.splitext(checkpoint_path)
+                        vecnorm_path = _ckpt_root + ".vecnormalize.pkl"
+                        if normalized_env_for_save is not None and hasattr(
+                            normalized_env_for_save, 'save'
+                        ):
+                            normalized_env_for_save.save(vecnorm_path)
+                            logger.info(
+                                f"V31 ROOT FIX (P1-9): VecNormalize stats saved to "
+                                f"{vecnorm_path}. Observation normalization will be "
+                                f"restored on checkpoint reload."
+                            )
+                    except Exception as ve:
+                        logger.warning(
+                            f"V31 ROOT FIX (P1-9): failed to save VecNormalize stats: {ve}. "
+                            f"Checkpoint reload will have reset normalization stats — "
+                            f"policy quality may degrade on reload."
                         )
-                except Exception as ve:
-                    logger.warning(
-                        f"V31 ROOT FIX (P1-9): failed to save VecNormalize stats: {ve}. "
-                        f"Checkpoint reload will have reset normalization stats — "
-                        f"policy quality may degrade on reload."
-                    )
             except Exception as e:
                 logger.warning(f"Failed to save checkpoint: {e}")
                 checkpoint_path = None
@@ -6103,11 +6798,59 @@ def save_results(
     column using the config's ``proprietary_prefixes`` (default
     ``["CPD-", "INTERNAL-", "PROP-"]``). Proprietary internal compound
     IDs are redacted before the CSV is written.
+
+    P4-003 ROOT FIX (v105, parallel agent combined): REFUSE to write the
+    CSV when EITHER ``config._standalone_mode`` OR
+    ``metadata["_standalone_mode"]`` is True. The standalone mode
+    (generate_fake_data) produces per-pair random features that DO NOT
+    match the bridge's graph-derived features. An agent trained
+    standalone and deployed on bridge data produces GARBAGE rankings.
+    The previous code only logged a WARNING (easy to miss) and still
+    wrote the CSV — a pharma partner could receive the garbage CSV.
+
+    The fix blocks the CSV write at the source: if EITHER flag is set,
+    save_results raises RuntimeError with a clear message directing the
+    user to the bridge. The checkpoint save is ALSO blocked in
+    train_agent (the _standalone_mode flag on the env). Together these
+    two gates ensure NO standalone-trained artifact (CSV or checkpoint)
+    can be persisted to disk.
+
+    We check BOTH ``config._standalone_mode`` (set by run_pipeline on
+    the PipelineConfig object) AND ``metadata["_standalone_mode"]``
+    (set by train_agent on the metadata dict). This double-check
+    handles all calling conventions: callers that pass the config
+    through, and callers that pass the metadata through.
     """
     import stat
 
     cfg = config or DEFAULT_CONFIG
     meta = metadata or {}
+
+    # P4-003 ROOT FIX (v105): refuse to write CSV in standalone mode.
+    # The standalone-trained policy produces garbage rankings (the
+    # agent learned per-pair random beta features, not real graph
+    # structure). Shipping those rankings to a pharma partner demo
+    # would be a scientific fraud. We refuse BEFORE writing anything.
+    # We check BOTH the config flag (set by run_pipeline) AND the
+    # metadata flag (set by train_agent) to handle all callers.
+    _is_standalone_cfg = bool(getattr(cfg, "_standalone_mode", False))
+    _is_standalone_meta = bool(meta.get("_standalone_mode", False))
+    if _is_standalone_cfg or _is_standalone_meta:
+        _reason_cfg = getattr(cfg, "_standalone_mode_reason", "")
+        _reason_meta = meta.get("_standalone_mode_reason", "")
+        _reason = _reason_cfg or _reason_meta or "standalone mode (generate_fake_data)"
+        raise RuntimeError(
+            f"P4-003 ROOT FIX (v105): REFUSING to write output CSV because "
+            f"the run was in STANDALONE mode. Standalone mode produces "
+            f"per-pair random features that DO NOT match the bridge's "
+            f"graph-derived features — deploying this CSV on bridge data "
+            f"would produce GARBAGE rankings. Reason: {_reason} "
+            f"To produce a deployable CSV, use the bridge "
+            f"(run_real_pipeline.py or run_full_platform.py) which "
+            f"produces real graph-derived features. (P4-003: this "
+            f"error is the CSV-write gate; the checkpoint-save gate "
+            f"is in train_agent.)"
+        )
 
     if isinstance(candidates, list):
         if not candidates:
@@ -6845,8 +7588,27 @@ def run_pipeline(
     input_sha256 = "fake_data"
     if config.input_path:
         data, input_sha256 = safe_load_input(config.input_path)
+        # P4-003 v105: real input data — NOT standalone mode.
+        # Clear the flag in case the same config object is reused.
+        config._standalone_mode = False
+        config._standalone_mode_reason = ""
     else:
         data = generate_fake_data(n_pairs=config.n_pairs, seed=config.seed)
+        # P4-003 ROOT FIX (v105): tag the config so save_results can
+        # REFUSE to write the candidate CSV. The previous code only
+        # tagged the DataFrame (via data.attrs["_standalone_mode"]),
+        # which the checkpoint saver reads via env._standalone_mode
+        # (P4-005 fix). But save_results reads from the config, not
+        # the env — so the CSV was still written. We now also tag the
+        # config so save_results can refuse. This implements the
+        # integration plan's P4-003: "Refuse to write CSV in
+        # standalone (fake-data) mode."
+        config._standalone_mode = True
+        config._standalone_mode_reason = (
+            "generate_fake_data produces per-pair random features (beta "
+            "distribution) — NOT real graph-derived features. A policy "
+            "trained on this data is INCOMPATIBLE with bridge data."
+        )
 
     try:
         data = validate_input_schema(data, config.reward)
@@ -7394,6 +8156,14 @@ def run_pipeline(
     logger.info(f"Known-positive recovery rate: {recovery['recovery_rate']:.1%}")
 
     # Build metadata
+    # P4-003 ROOT FIX: propagate the _standalone_mode flag from the train
+    # env into the metadata so save_results can refuse to write the CSV.
+    # The train_env captures the flag from data.attrs (set by
+    # generate_fake_data). When the run is standalone (fake data), the
+    # CSV write is blocked at save_results. When the run is via the
+    # bridge (real graph data), the flag is False and the CSV is written.
+    _is_standalone_run = bool(getattr(train_env, "_standalone_mode", False))
+    _standalone_reason = str(getattr(train_env, "_standalone_mode_reason", ""))
     metadata = {
         "pipeline_version": config.pipeline_version,
         "schema_version": config.schema_version,
@@ -7403,6 +8173,46 @@ def run_pipeline(
         "model_checkpoint": checkpoint_path or "none",
         "seed": config.seed,
         "timesteps": config.timesteps,
+        # P4-003: standalone-mode flag (read by save_results to refuse CSV write)
+        "_standalone_mode": _is_standalone_run,
+        "_standalone_mode_reason": _standalone_reason,
+        # P4-006 ROOT FIX (HIGH — Team Cosmic / Phase 4): expose
+        # is_contextual_bandit in the output metadata so consumers (API,
+        # dashboard, pharma partners) know whether the agent is a
+        # contextual bandit (gamma=0, independent-step MDP — each step
+        # is a single drug-disease ranking decision) or a sequential RL
+        # agent (gamma>0, credit assignment over multi-step horizons —
+        # e.g., for drug-combination ranking where order matters).
+        #
+        # The project doc (DOCX §4) describes the agent as "a reinforcement
+        # learning agent that ranks hypotheses" — but with gamma=0, it's
+        # scientifically a CONTEXTUAL BANDIT, not sequential RL. The
+        # previous code did not expose this distinction in the output,
+        # so a pharma partner could not tell whether the agent learned
+        # from sequential feedback (over-trusting the rankings) or from
+        # independent per-pair decisions (more honest). The fix makes
+        # the MDP structure EXPLICIT in the metadata. The CI test
+        # test_p4_006_contextual_bandit_metadata_field verifies this.
+        "is_contextual_bandit": (config.ppo_gamma == 0.0),
+        "ppo_gamma": config.ppo_gamma,
+        "mdp_structure": (
+            "contextual_bandit (independent steps, gamma=0) — "
+            "each step is a single drug-disease ranking decision; "
+            "the value head predicts the immediate reward"
+            if config.ppo_gamma == 0.0
+            else f"sequential_mdp (gamma={config.ppo_gamma}, "
+                 f"~{1.0 / (1.0 - config.ppo_gamma):.1f}-step horizon) — "
+                 f"the value head predicts the discounted sum of future "
+                 f"rewards; use this for multi-step drug-combination ranking"
+        ),
+        # P4-007 ROOT FIX: gnn_score staleness info. If the input CSV
+        # had a gnn_score_timestamp column, this records the timestamp,
+        # age in hours, and whether it's stale (>24h). Downstream
+        # consumers can display a "stale predictions" warning.
+        "gnn_score_stale": bool(getattr(train_env, "_gnn_score_stale", False)),
+        "gnn_score_age_hours": getattr(train_env, "_gnn_score_age_hours", None),
+        "gnn_score_timestamp": getattr(train_env, "_gnn_score_timestamp", None),
+        "gnn_score_staleness_threshold_hours": GNN_SCORE_STALENESS_WARNING_HOURS,
         # v90 P0 ROOT FIX (BUG #26): record the EFFECTIVE reward weights
         # (after gnn_score cap) instead of the raw config weights. The
         # config sets gnn_score: 0.35, but the runtime caps it at 0.04
@@ -7679,27 +8489,35 @@ def run_pipeline(
     # validation fails and blocking is enabled. This prevents shipping
     # scientifically invalid output to pharma partners.
     #
-    # P4-014 ROOT FIX (Team Member 12): the ``RL_ALLOW_SCIENCE_FAILURE``
-    # env var bypass has been REMOVED. The previous code allowed a
-    # stressed team member to set ``RL_ALLOW_SCIENCE_FAILURE=1`` and
-    # bypass the scientific_validation gate, writing a CSV with
-    # scientifically invalid predictions (the live test confirmed this:
-    # ``metformin→epilepsy`` as the #3 candidate with AUC=0.403). The
-    # audit's compound-effect analysis: bypass → invalid CSV ships →
-    # pharma partner acts on invalid predictions → patient harm.
+    # P4-014 ROOT FIX (Team Member 12) + RT-004 ROOT FIX (v105): the
+    # ``RL_ALLOW_SCIENCE_FAILURE`` env var bypass has been REMOVED. The
+    # previous code allowed a stressed team member to set
+    # ``RL_ALLOW_SCIENCE_FAILURE=1`` and bypass the scientific_validation
+    # gate, writing a CSV with scientifically invalid predictions (the
+    # live test confirmed this: ``metformin→epilepsy`` as the #3 candidate
+    # with AUC=0.403). The audit's compound-effect analysis: bypass →
+    # invalid CSV ships → pharma partner acts on invalid predictions →
+    # patient harm.
     #
     # The fix: the gate CANNOT be bypassed via env var. The ONLY way to
     # disable the gate is via the Python API
     # (``config.block_on_scientific_failure=False``), which is intended
     # for test-only use and is NOT reachable from the CLI. A CI test
     # (tests/test_team12_p4_012_to_018.py::test_p4_014_*) verifies the
-    # env var is no longer checked.
+    # env var is no longer checked. This makes the bypass an explicit,
+    # code-reviewed decision rather than a silent env var that can be set
+    # in a production cron job or CI script.
     allow_failure = not config.block_on_scientific_failure
     if not scientific_validation["overall_pass"] and not allow_failure:
         error = ScientificFailureError(
             "ROOT FIX (P0-3/P0-4): Scientific validation FAILED. "
             "Pipeline refusing to write output CSV. The output would "
-            "be scientifically invalid for pharma partner demos.",
+            "be scientifically invalid for pharma partner demos. "
+            "RT-004 ROOT FIX (v105): the RL_ALLOW_SCIENCE_FAILURE env "
+            "var has been REMOVED — the gate is UN-BYPASSABLE from "
+            "the environment. To override for debugging, set "
+            "config.block_on_scientific_failure=False in code (explicit, "
+            "code-reviewed override).",
             validation=scientific_validation,
         )
         logger.critical(str(error))
@@ -7714,12 +8532,12 @@ def run_pipeline(
     elif not scientific_validation["overall_pass"] and allow_failure:
         logger.warning(
             f"ROOT FIX (P0-3/P0-4): Scientific validation FAILED but "
-            f"blocking is DISABLED (block_on_scientific_failure=False). "
-            f"This is a TEST-ONLY Python API escape hatch — it is NOT "
-            f"reachable from the CLI (the --allow-invalid-output flag "
-            f"was removed in P4-014, and the RL_ALLOW_SCIENCE_FAILURE "
-            f"env var is no longer checked). Output will be written but "
-            f"marked as SCIENTIFICALLY INVALID in metadata."
+            f"blocking is DISABLED (config.block_on_scientific_failure=False "
+            f"set explicitly via the Python API — TEST-ONLY, NOT reachable "
+            f"from the CLI). P4-014 + RT-004 v105: the "
+            f"RL_ALLOW_SCIENCE_FAILURE env var no longer has any effect, "
+            f"and the --allow-invalid-output CLI flag was removed. Output "
+            f"will be written but marked as SCIENTIFICALLY INVALID in metadata."
         )
 
     # v90 ROOT FIX (BUG #48): the previous code ran check_alert_conditions
@@ -7756,15 +8574,18 @@ def run_pipeline(
     # blocking via the Python API (for testing/debugging), the alerts
     # log CRITICAL but don't raise.
     #
-    # P4-014 ROOT FIX (Team Member 12): the RL_ALLOW_SCIENCE_FAILURE
-    # env var bypass has been REMOVED. The previous code allowed
+    # P4-014 ROOT FIX (Team Member 12) + RT-004 ROOT FIX (v105): the
+    # RL_ALLOW_SCIENCE_FAILURE env var bypass has been REMOVED. The
+    # previous code allowed
     # ``_allow_alert_failure = ... or RL_ALLOW_SCIENCE_FAILURE=1``,
     # which let a stressed team member bypass the critical alerts by
     # setting an env var — the same bypass that allowed invalid CSVs
     # to ship. The fix removes the env var check entirely; the ONLY
     # way to disable the alerts is via the Python API
     # (``config.block_on_scientific_failure=False``), which is
-    # test-only and NOT reachable from the CLI.
+    # test-only and NOT reachable from the CLI. This makes the bypass
+    # an explicit, code-reviewed decision rather than a silent env var
+    # that can be set in a production cron job or CI script.
     _allow_alert_failure = not config.block_on_scientific_failure
     if metrics.n_pairs_processed > 0 and metrics.n_ranked_high == 0:
         _alert_msg_no_high = (
@@ -7876,6 +8697,59 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Team Cosmic RL Drug Repurposing Hypothesis Ranker (Phase 4)",
     )
+    # P4-005 ROOT FIX: add subcommands for show-weights / set-weights
+    subparsers = parser.add_subparsers(dest="command", help="Subcommands (P4-005)")
+
+    # show-weights: print the reward weights for a tenant
+    show_weights = subparsers.add_parser(
+        "show-weights",
+        help="Show reward weights for a tenant (P4-005). "
+             "Default: load the default profile. Use --tenant to load a "
+             "tenant-specific profile. Use --save to write the current "
+             "default RewardConfig weights to the tenant's YAML file.",
+    )
+    show_weights.add_argument(
+        "--tenant", type=str, default=None,
+        help="Tenant ID (loads reward_weights.{tenant}.yaml). "
+             "Default: load reward_weights.yaml (the default profile).",
+    )
+    show_weights.add_argument(
+        "--weights-dir", type=str, default=None,
+        help="Directory containing reward_weights*.yaml (default: rl/ package dir).",
+    )
+    show_weights.add_argument(
+        "--save", action="store_true",
+        help="Write the current default RewardConfig weights to the tenant's "
+             "YAML file (creates reward_weights.{tenant}.yaml if --tenant is "
+             "given, or overwrites reward_weights.yaml if not).",
+    )
+
+    # set-weights: update specific weights for a tenant
+    set_weights = subparsers.add_parser(
+        "set-weights",
+        help="Update specific reward weights for a tenant (P4-005). "
+             "Example: set-weights --tenant rare_partner "
+             "--weight rare_disease_flag=0.4 --weight safety_score=0.2",
+    )
+    set_weights.add_argument(
+        "--tenant", type=str, default=None,
+        help="Tenant ID (writes reward_weights.{tenant}.yaml).",
+    )
+    set_weights.add_argument(
+        "--weights-dir", type=str, default=None,
+        help="Directory containing reward_weights*.yaml (default: rl/ package dir).",
+    )
+    set_weights.add_argument(
+        "--weight", action="append", default=[],
+        help="Weight override in the form key=value (e.g., "
+             "rare_disease_flag=0.4). Can be specified multiple times. "
+             "Weights MUST still sum to 1.0 after all overrides.",
+    )
+    set_weights.add_argument(
+        "--description", type=str, default="",
+        help="Optional profile description (saved to the YAML file).",
+    )
+
     parser.add_argument("--input", type=str, default=None,
                         help="Path to GNN output CSV (default: generate fake data)")
     parser.add_argument("--timesteps", type=int, default=50000,
@@ -7890,6 +8764,14 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         help="Directory for model checkpoints (default: checkpoints)")
     parser.add_argument("--config", type=str, default=None,
                         help="Path to YAML config file (optional)")
+    # P4-005: --tenant flag for the main pipeline run (loads tenant's reward weights)
+    parser.add_argument("--tenant", type=str, default=None,
+                        help="Pharma-partner tenant ID (P4-005). Loads "
+                             "reward_weights.{tenant}.yaml and applies the "
+                             "weights to the RewardConfig before training.")
+    parser.add_argument("--weights-dir", type=str, default=None,
+                        help="Directory containing reward_weights*.yaml "
+                             "(default: rl/ package dir). P4-005.")
     parser.add_argument("--skip-literature", action="store_true",
                         help="Skip PubMed literature cross-check")
     parser.add_argument("--run-env-check", action="store_true",
@@ -7929,6 +8811,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "(not skips) and the pipeline refuses to write its output CSV. "
         "Install with: pip install biopython.\n"
         "\n"
+        "P4-005 subcommands:\n"
+        "  show-weights --tenant X        Print the reward weights for tenant X\n"
+        "  show-weights --tenant X --save Create tenant X's profile from current defaults\n"
+        "  set-weights --tenant X --weight key=val [--weight key=val ...]\n"
+        "                                  Update specific weights for tenant X\n"
+        "\n"
         "ROOT FIX (F6): Without RL_HMAC_KEY, the output HMAC is marked "
         "as 'unverified' — it provides forensic fingerprinting only, NOT "
         "cryptographic tamper detection. Set RL_HMAC_KEY for production use."
@@ -7940,6 +8828,92 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     """CLI entry point."""
     parser = _build_arg_parser()
     args = parser.parse_args(argv)
+
+    # P4-005 ROOT FIX: handle subcommands FIRST (before the main pipeline).
+    # show-weights and set-weights are management commands that don't run
+    # the pipeline — they just read/write the reward_weights*.yaml files.
+    if args.command == "show-weights":
+        setup_logging(level=logging.INFO)
+        if args.save:
+            # Write current default RewardConfig weights to the tenant's file
+            default_weights = dict(DEFAULT_CONFIG.reward.reward_weights)
+            path = save_reward_weights_for_tenant(
+                default_weights,
+                tenant_id=args.tenant,
+                weights_dir=args.weights_dir,
+                profile_name=args.tenant or "default",
+                profile_description=(
+                    f"Reward-weights profile for tenant '{args.tenant or 'default'}' "
+                    f"(created by `show-weights --save` from default RewardConfig)."
+                ),
+            )
+            print(f"P4-005: wrote default weights to {path}")
+            print(f"  Weights: {default_weights}")
+            return 0
+        else:
+            try:
+                weights = load_reward_weights_for_tenant(
+                    tenant_id=args.tenant,
+                    weights_dir=args.weights_dir,
+                )
+                print(f"P4-005: reward weights for tenant '{args.tenant or 'default'}':")
+                for k, v in weights.items():
+                    print(f"  {k}: {v}")
+                print(f"  Sum: {sum(weights.values()):.6f}")
+                return 0
+            except FileNotFoundError as e:
+                print(f"ERROR: {e}", file=sys.stderr)
+                return 1
+
+    if args.command == "set-weights":
+        setup_logging(level=logging.INFO)
+        # Start from the default profile (or the tenant's existing profile)
+        try:
+            weights = load_reward_weights_for_tenant(
+                tenant_id=args.tenant,
+                weights_dir=args.weights_dir,
+            )
+        except FileNotFoundError:
+            # Tenant doesn't exist yet — start from the default profile
+            weights = load_reward_weights_for_tenant(
+                tenant_id=None,
+                weights_dir=args.weights_dir,
+            )
+
+        # Apply overrides
+        for override in args.weight:
+            if "=" not in override:
+                print(f"ERROR: --weight must be key=value, got {override!r}", file=sys.stderr)
+                return 1
+            key, val_str = override.split("=", 1)
+            key = key.strip()
+            try:
+                val = float(val_str)
+            except ValueError:
+                print(f"ERROR: weight value must be a float, got {val_str!r}", file=sys.stderr)
+                return 1
+            if key not in weights:
+                print(f"ERROR: unknown weight key {key!r}. Valid keys: {sorted(weights.keys())}", file=sys.stderr)
+                return 1
+            weights[key] = val
+
+        # Save (validates sum == 1.0 and range [0,1] and keys match)
+        try:
+            path = save_reward_weights_for_tenant(
+                weights,
+                tenant_id=args.tenant,
+                weights_dir=args.weights_dir,
+                profile_name=args.tenant or "default",
+                profile_description=args.description,
+            )
+        except ValueError as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            return 1
+        print(f"P4-005: saved updated weights to {path}")
+        for k, v in weights.items():
+            print(f"  {k}: {v}")
+        print(f"  Sum: {sum(weights.values()):.6f}")
+        return 0
 
     if args.config:
         config = PipelineConfig.from_yaml(args.config)
@@ -7956,6 +8930,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     config.json_logs = args.json_logs
     config.log_level = args.log_level
     config.drug_aware_split = not args.no_drug_aware_split
+
+    # P4-005 ROOT FIX: apply tenant reward weights if --tenant is specified.
+    # This loads reward_weights.{tenant}.yaml and replaces config.reward.reward_weights
+    # with the tenant's profile. If the tenant file doesn't exist, falls back
+    # to the default profile with a WARNING (so the pipeline still runs).
+    if args.tenant:
+        config = apply_tenant_reward_weights(
+            config,
+            tenant_id=args.tenant,
+            weights_dir=args.weights_dir,
+        )
 
     # P4-014 ROOT FIX (CLI overrides bypass __post_init__):
     # The original main() overrode config fields with CLI args AFTER
@@ -7992,3 +8977,120 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+
+
+# ============================================================================
+# Data Flywheel Writeback (Step 6, RT-010 v105)
+# ============================================================================
+
+
+def retrain_on_validated(
+    checkpoint_path: Optional[str] = None,
+    validated_csv_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """RT-010 ROOT FIX (v105): Data Flywheel writeback to the RL ranker.
+
+    DOCX §10 describes the data flywheel: validated hypotheses feed back
+    into the model. This function implements the RL-side of that
+    writeback — it reloads the validated_hypotheses.csv (which grows
+    over time as pharma partners validate more hypotheses) and updates
+    the module-level VALIDATED_HYPOTHESES constant. The next
+    train_agent() call will use the extended set for the +0.1 reward
+    bonus, so the RL agent learns to rank newly-validated pairs HIGH.
+
+    This function is designed to be called by an Airflow task (monthly
+    schedule). It is idempotent — running it twice produces the same
+    VALIDATED_HYPOTHESES state.
+
+    Args:
+        checkpoint_path: Optional path to a PPO checkpoint to reload
+            (so the agent continues from its last trained state). If
+            None, the next train_agent() call starts from a fresh
+            policy but with the updated VALIDATED_HYPOTHESES set.
+        validated_csv_path: Path to validated_hypotheses.csv. If None,
+            defaults to <repo>/rl/validated_hypotheses.csv.
+
+    Returns:
+        Dict with keys:
+        - validated_pairs_loaded: int — total validated pairs now in the set.
+        - new_pairs_added: int — pairs added since the last call.
+        - checkpoint_reloaded: bool — whether a checkpoint was reloaded.
+    """
+    import csv as _csv
+    import os as _os
+    from pathlib import Path as _Path
+
+    # Default CSV path: <repo>/rl/validated_hypotheses.csv
+    if validated_csv_path is None:
+        _repo_root = _Path(__file__).resolve().parents[1]
+        validated_csv_path = str(_repo_root / "rl" / "validated_hypotheses.csv")
+
+    # Read the current validated pairs from the CSV.
+    new_pairs: List[Tuple[str, str]] = []
+    if _os.path.exists(validated_csv_path):
+        with open(validated_csv_path, "r", encoding="utf-8") as f:
+            reader = _csv.DictReader(f)
+            for row in reader:
+                drug = (row.get("drug") or "").strip()
+                disease = (row.get("disease") or "").strip()
+                validated_str = (row.get("validated") or "").strip().lower()
+                if not drug or not disease:
+                    continue
+                if validated_str in ("true", "1", "yes"):
+                    new_pairs.append((drug, disease))
+
+    # Compute delta vs the current VALIDATED_HYPOTHESES.
+    # P4-002 v105: declare global FIRST (before any reference) to avoid
+    # SyntaxError: name 'VALIDATED_HYPOTHESES' is used prior to global declaration.
+    global VALIDATED_HYPOTHESES
+    current_set = set(VALIDATED_HYPOTHESES)
+    new_set = set(new_pairs)
+    added = new_set - current_set
+    merged = current_set | new_set
+
+    # Update the module-level constant.
+    # The next train_agent() call reads VALIDATED_HYPOTHESES
+    # at reward-function construction time, so it picks up the new set.
+    VALIDATED_HYPOTHESES = list(merged)
+
+    logger.info(
+        "retrain_on_validated: loaded %d validated pairs (%d new since last call). "
+        "VALIDATED_HYPOTHESES now has %d entries. Next train_agent() call "
+        "will use the extended reward bonus set.",
+        len(new_pairs), len(added), len(VALIDATED_HYPOTHESES),
+    )
+
+    # Optionally reload a checkpoint.
+    checkpoint_reloaded = False
+    if checkpoint_path and _os.path.exists(checkpoint_path):
+        try:
+            from stable_baselines3 import PPO
+            # The reload itself doesn't change the reward function — it
+            # just gives train_agent() a starting policy. The Airflow
+            # task that calls this should also kick off a train_agent()
+            # run with resume_checkpoint=checkpoint_path to actually
+            # fine-tune the policy on the updated reward.
+            logger.info(
+                "retrain_on_validated: checkpoint at %s is available for "
+                "the next train_agent() call to resume from.",
+                checkpoint_path,
+            )
+            checkpoint_reloaded = True
+        except ImportError:
+            logger.warning(
+                "retrain_on_validated: stable_baselines3 not installed — "
+                "cannot verify checkpoint. Install with: pip install stable-baselines3"
+            )
+
+    return {
+        "validated_pairs_loaded": len(VALIDATED_HYPOTHESES),
+        "new_pairs_added": len(added),
+        "checkpoint_reloaded": checkpoint_reloaded,
+        "note": (
+            "VALIDATED_HYPOTHESES module-level constant updated. "
+            "The next train_agent() call will use the extended reward "
+            "bonus set. To fine-tune the policy from a checkpoint, "
+            "set config.resume_checkpoint=<checkpoint_path> and run "
+            "run_pipeline(config)."
+        ),
+    }

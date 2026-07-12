@@ -143,7 +143,45 @@ def _get_known_positives() -> List[Tuple[str, str]]:
             "installed for the full production pipeline."
         )
         return []
+    # P4-004: KNOWN_POSITIVES is now a _LazyList proxy. Force-load it
+    # into a plain list so the bridge gets a snapshot (not a proxy).
     return list(_KP)
+
+
+def _get_validated_hypotheses() -> List[Tuple[str, str]]:
+    """Lazily import and return the RL ranker's VALIDATED_HYPOTHESES list.
+
+    P4-001 ROOT FIX (CRITICAL — Team Cosmic / Phase 4): the bridge passes
+    this list to ``BiomedicalGraphBuilder.build_demo_graph`` so the 4
+    validated pairs (thalidomide→MM, sildenafil→PAH, mifepristone→Cushing,
+    topiramate→migraine) are injected as "treats" edges in the demo graph.
+    This makes the data flywheel (DOCX §10) functional:
+      - The GT model learns these pairs (gnn_score becomes high).
+      - The RL agent sees them in its input data (cross-product of graph
+        drugs × graph diseases).
+      - The +0.1 validated_bonus in the reward function FIRES.
+      - The RL agent ranks them HIGH → pharma partner sees them at top.
+
+    Without this, the validated pairs NEVER appear in the env's input
+    data, so the +0.1 validated_bonus is dead code (P4-001 bug).
+
+    Returns an empty list (with a WARNING) if Phase 4 is not installed.
+    The empty-list case makes the validated-hypothesis injection a no-op
+    (the bridge still works, just without the data flywheel).
+    """
+    try:
+        from rl.rl_drug_ranker import VALIDATED_HYPOTHESES as _VH
+    except ImportError:
+        logger.warning(
+            "P4-001: rl.rl_drug_ranker.VALIDATED_HYPOTHESES not importable "
+            "(Phase 4 package not installed). Returning empty list. "
+            "Validated-hypothesis injection will be a no-op -- the data "
+            "flywheel (DOCX §10) will be non-functional. Install Phase 4 "
+            "for the full production pipeline."
+        )
+        return []
+    # P4-004: VALIDATED_HYPOTHESES is now a _LazyList proxy. Force-load.
+    return list(_VH)
 
 
 def _deterministic_name_seed(seed: int, name: str, offset: int) -> int:
@@ -320,6 +358,7 @@ class GTRLBridge:
         num_diseases: int = 15,
         num_known_treatments: int = 15,
         inject_known_positives: bool = True,
+        inject_validated_hypotheses: bool = True,
     ) -> None:
         """Build a demo knowledge graph for testing the pipeline.
 
@@ -337,12 +376,26 @@ class GTRLBridge:
         package (``rl/__init__.py``), structurally symmetric to
         ``graph_transformer``.
 
+        P4-001 ROOT FIX (CRITICAL — Team Cosmic / Phase 4): if
+        ``inject_validated_hypotheses`` is True (default), the bridge
+        ALSO passes the RL ranker's ``VALIDATED_HYPOTHESES`` list to the
+        graph builder. These are the 4 pharma-validated repurposing
+        pairs (thalidomide→MM, sildenafil→PAH, mifepristone→Cushing,
+        topiramate→migraine) from validated_hypotheses.csv — the data
+        flywheel (DOCX §10). Injecting them as "treats" edges makes the
+        GT model learn them (gnn_score becomes high), and the RL agent
+        sees them in its input data so the +0.1 validated_bonus can
+        fire. Without this injection, the data flywheel is dead code.
+
         Args:
             num_drugs: Number of drug nodes.
             num_diseases: Number of disease nodes.
             num_known_treatments: Number of known drug-disease pairs.
             inject_known_positives: If True, inject the RL ranker's
                 KNOWN_POSITIVES list into the graph.
+            inject_validated_hypotheses: If True (default), inject the
+                RL ranker's VALIDATED_HYPOTHESES list into the graph
+                (P4-001 data flywheel fix).
         """
         # P3-032 ROOT FIX: lazily fetch KNOWN_POSITIVES via the helper
         # instead of referencing the top-level constant. The helper returns
@@ -351,6 +404,14 @@ class GTRLBridge:
         known_positives: Optional[List[Tuple[str, str]]] = None
         if inject_known_positives:
             known_positives = _get_known_positives()
+
+        # P4-001 ROOT FIX: lazily fetch VALIDATED_HYPOTHESES via the helper.
+        # The helper returns [] (with a warning) when Phase 4 is not
+        # installed. When Phase 4 IS installed, this injects the 4
+        # validated pairs as "treats" edges → data flywheel functional.
+        validated_hypotheses: Optional[List[Tuple[str, str]]] = None
+        if inject_validated_hypotheses:
+            validated_hypotheses = _get_validated_hypotheses()
 
         logger.info("Building demo knowledge graph...")
 
@@ -365,6 +426,7 @@ class GTRLBridge:
             num_known_treatments=num_known_treatments,
             seed=self.seed,
             known_positives=known_positives,
+            validated_hypotheses=validated_hypotheses,
         )
 
         self.drug_names = list(self.node_maps.get("drug", {}).keys())
@@ -381,7 +443,8 @@ class GTRLBridge:
             f"Graph built: {len(self.drug_names)} drugs, "
             f"{len(self.disease_names)} diseases, "
             f"{len(self.known_pairs)} known treatment pairs "
-            f"(kg_built_at={self._kg_built_at:.3f})"
+            f"({len(validated_hypotheses) if validated_hypotheses else 0} validated, "
+            f"kg_built_at={self._kg_built_at:.3f})"
         )
 
     # ------------------------------------------------------------------

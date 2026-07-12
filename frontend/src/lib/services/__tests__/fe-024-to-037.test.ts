@@ -83,12 +83,16 @@ describe("FE-025: composite score column rename", () => {
 });
 
 // ---------------------------------------------------------------------------
-// FE-026: mock-data.ts no longer contains fabricated data.
+// FE-026 / FE-034: mock-data.ts is DELETED; empty-defaults.ts is the replacement.
 // ---------------------------------------------------------------------------
 
-describe("FE-026: mock-data.ts is empty", () => {
-  it("all data exports should be empty arrays or empty objects", async () => {
-    const mod = await import("@/lib/mock-data");
+describe("FE-026 / FE-034: mock-data.ts deleted, empty-defaults.ts is empty", () => {
+  it("all data exports in empty-defaults.ts should be empty arrays or empty objects", async () => {
+    // FE-034 ROOT FIX: mock-data.ts was DELETED (dangerous name invited
+    // future engineers to re-add fabricated data). The empty defaults now
+    // live in @/lib/empty-defaults. The contract is the same: every data
+    // export is an empty array or zeroed object.
+    const mod = await import("@/lib/empty-defaults");
     // Diseases — was 10 fake entries, now must be empty.
     expect(Array.isArray(mod.diseases)).toBe(true);
     expect(mod.diseases.length).toBe(0);
@@ -119,10 +123,10 @@ describe("FE-026: mock-data.ts is empty", () => {
     expect(mod.dashboardStats.knowledgeGraphNodes).toBe(0);
   });
 
-  it("types should still be re-exported for backward compat", async () => {
-    const mod = await import("@/lib/mock-data");
-    // Type re-exports are erased at runtime, but the module should still
-    // load without error.
+  it("empty-defaults.ts module loads without error", async () => {
+    // FE-034: empty-defaults.ts is the canonical replacement. It must load
+    // cleanly. Types are NOT re-exported here — they live in @/lib/types.
+    const mod = await import("@/lib/empty-defaults");
     expect(mod).toBeDefined();
   });
 
