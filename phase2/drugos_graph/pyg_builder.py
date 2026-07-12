@@ -1629,7 +1629,7 @@ class PyGBuilder(GraphBuilderProtocol):
         data: HeteroData,
         target_edge_type: Optional[Tuple[str, str, str]] = None,
         *,
-        node_disjoint: bool = False,
+        node_disjoint: bool = True,
     ) -> Tuple[HeteroData, HeteroData, HeteroData]:
         """Split the graph for drug-disease link prediction.
 
@@ -1654,6 +1654,27 @@ class PyGBuilder(GraphBuilderProtocol):
             routes ALL edge types through the partition. This method
             remains for: (a) TransE training, (b) temporal_split's
             random fallback, (c) direct callers from notebooks/tests.
+
+        .. warning:: P2-006 ROOT FIX (Team 4) — default changed.
+            The previous default was ``node_disjoint: bool = False``,
+            which used PyG's ``RandomLinkSplit`` (EDGE-disjoint). The
+            same node could appear in BOTH train and test. For a TransE
+            model (scoring triples in isolation) this is fine. But for
+            a GNN (HGT, GraphTransformer), message-passing propagates
+            features across edges — a node in both train and test lets
+            the GNN "see" the test node's neighborhood during training.
+            Hu et al. 2020 warns this inflates AUC by 0.10-0.30. The
+            code's own docstring acknowledged this but the DEFAULT
+            remained the leaky path. Phase 3's Graph Transformer (the
+            V1 launch-critical model) was evaluated with INFLATED AUC.
+
+            ROOT FIX: the default is now ``node_disjoint=True`` (GNN-
+            safe). TransE callers MUST explicitly pass
+            ``node_disjoint=False`` with a comment explaining why.
+            A runtime WARNING is logged when ``node_disjoint=False`` is
+            explicitly passed AND the ``DRUGOS_ALLOW_EDGE_DISJOINT_SPLIT``
+            env var is not set — this catches any caller that silently
+            uses the leaky path for GNN training.
 
         Only the target edge type is split. All other edge types
         remain intact for message passing. ToUndirected is applied
@@ -1683,8 +1704,50 @@ class PyGBuilder(GraphBuilderProtocol):
             - Issue 66: negative sampling flags configurable
             - Issue 71: rationale documented at call site
             - Issue 84: post-transform structural validation
+            - P2-006: default flipped to node_disjoint=True (GNN-safe)
         """
         with self._timed("split_for_link_prediction"):
+            # P2-006 ROOT FIX (Team 4): emit a WARNING when the caller
+            # explicitly passes ``node_disjoint=False``. This catches
+            # GNN training paths that silently use the leaky edge-
+            # disjoint split. TransE callers that score triples in
+            # isolation can silence this by setting
+            # ``DRUGOS_ALLOW_EDGE_DISJOINT_SPLIT=1``. The warning is
+            # NOT raised when ``node_disjoint=True`` (the new GNN-safe
+            # default) — only when the caller EXPLICITLY opts into the
+            # leaky path. This makes the leakage VISIBLE in production
+            # logs without breaking TransE callers that legitimately
+            # need edge-disjoint splits.
+            if node_disjoint is False:
+                import os as _os_p2_006
+                _allow_edge_disjoint = _os_p2_006.environ.get(
+                    "DRUGOS_ALLOW_EDGE_DISJOINT_SPLIT", "0"
+                ) == "1"
+                if not _allow_edge_disjoint:
+                    self.logger.warning(
+                        "P2-006 ROOT FIX: split_for_link_prediction called "
+                        "with node_disjoint=False (edge-disjoint split). "
+                        "This is GNN-unsafe — the same node can appear in "
+                        "BOTH train and test, causing message-passing "
+                        "leakage that inflates AUC by 0.1-0.3 (Hu et al. "
+                        "2020). Only use this for TransE-style models that "
+                        "score triples in isolation. To silence this "
+                        "warning for legitimate TransE use, set "
+                        "DRUGOS_ALLOW_EDGE_DISJOINT_SPLIT=1. For GNN "
+                        "training (HGT, GraphTransformer), use "
+                        "node_disjoint=True (the new default) or call "
+                        "node_disjoint_split() directly."
+                    )
+                else:
+                    self.logger.info(
+                        "P2-006 ROOT FIX: split_for_link_prediction called "
+                        "with node_disjoint=False AND "
+                        "DRUGOS_ALLOW_EDGE_DISJOINT_SPLIT=1 — operator "
+                        "has acknowledged the edge-disjoint leakage risk "
+                        "(TransE-only use). Proceeding with edge-disjoint "
+                        "split."
+                    )
+
             # BUG #54 ROOT FIX: for GNN models (HGT, GraphTransformer), an
             # edge-disjoint split (RandomLinkSplit) causes message-passing
             # leakage — the same node appears in both train and test, so
