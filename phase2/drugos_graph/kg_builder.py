@@ -2684,7 +2684,27 @@ class GraphEdgeLoader:
                             )
 
                     # Progress logging (C-6)
-                    if (i // batch_size) % _LOG_FREQUENCY == 0:
+                    # P2-059 ROOT FIX: the previous ``(i // batch_size) %
+                    # _LOG_FREQUENCY == 0`` pattern ALWAYS logged the
+                    # first batch (i=0 → 0 % log_freq == 0) even in
+                    # quiet mode (log_freq=10). That's because i=0 is
+                    # the batch START index, and 0 // batch_size = 0,
+                    # 0 % anything = 0. The first batch's log is
+                    # ALWAYS emitted, even in quiet mode — minor noise
+                    # but inconsistent with the node-loader path which
+                    # uses the 1-indexed batch_count pattern (line 2054).
+                    # Root fix: use ``batch_count = i // batch_size + 1``
+                    # (1-indexed) and log when ``batch_count % log_freq
+                    # == 0``. This logs at batches log_freq, 2*log_freq,
+                    # 3*log_freq, ... — i.e. every log_freq batches
+                    # starting from batch log_freq (NOT batch 0). The
+                    # first batch is NOT specially logged. This matches
+                    # the node-loader pattern at line 2054 so the two
+                    # progress-log paths are stylistically consistent
+                    # (P2-060 aims to eliminate exactly this kind of
+                    # stylistic drift).
+                    batch_count = i // batch_size + 1  # 1-indexed
+                    if batch_count % _LOG_FREQUENCY == 0:
                         logger.info(
                             "  %s-%s->%s: loaded %d/%d edges mode=%s",
                             safe_src, safe_rel, safe_dst,
