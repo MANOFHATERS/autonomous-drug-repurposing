@@ -4822,9 +4822,18 @@ def stage_phase1_to_phase2(
             if not chembl_id:
                 continue
             # Stage the compound if not already present.
-            # v27 ROOT FIX (P2-B-2): uppercase InChIKey so kg_builder.ID_PATTERNS
-            # accepts it (lowercase InChIKeys are dead-lettered).
-            canonical = (inchi.upper() if inchi and not inchi.startswith("SYNTH") else chembl_id)
+            # v103 ROOT FIX (P2-036 deep): route ALL InChIKey normalization
+            # through the centralized ``_normalize_inchikey`` helper so
+            # every loader (chembl_drugs, chembl_activities, pubchem,
+            # drugbank) produces the SAME canonical form. The previous
+            # v27 fix used ``inchi.upper()`` which (a) does NOT strip
+            # whitespace (causing " ABCD..." dead-letters) and (b) does
+            # NOT collapse "nan"/"none"/"null" placeholders to empty
+            # (causing literal "NAN" to leak through as a canonical ID).
+            # The helper is the SINGLE source of truth — see
+            # utils.normalize_inchikey docstring.
+            _norm_inchi = _normalize_inchikey(inchi)
+            canonical = (_norm_inchi if _norm_inchi and not _norm_inchi.startswith("SYNTH") else chembl_id)
             if canonical not in extra_compound_seen:
                 # ROOT FIX (schema consistency / DC-2 follow-up):
                 # ChEMBL-sourced Compound nodes MUST carry the SAME schema
@@ -4854,7 +4863,10 @@ def stage_phase1_to_phase2(
                     "id": canonical,
                     "drugbank_id": _safe_str(row.get("drugbank_id")) or None,
                     "chembl_id": chembl_id,
-                    "inchikey": (inchi.upper() if inchi else inchi),
+                    # v103 ROOT FIX (P2-036 deep): use normalized inchikey
+                    # (strip + uppercase + placeholder-collapse) so the
+                    # stored property matches the canonical ID form.
+                    "inchikey": (_norm_inchi or None),
                     "smiles": smiles,
                     "name": _safe_str(row.get("name")),
                     "molecular_weight": _safe_float(row.get("molecular_weight")),
@@ -4890,7 +4902,16 @@ def stage_phase1_to_phase2(
                             chembl_id,
                             _safe_str(row.get("pubchem_cid")),
                             _safe_str(row.get("chebi_id")),
-                            (inchi.upper() if inchi and inchi.upper() != canonical else None),
+                            # v103 ROOT FIX (P2-036 deep): use the
+                            # pre-computed normalized InChIKey (_norm_inchi
+                            # from line ~4835) so the alias list matches
+                            # the canonical ID form exactly. Previously
+                            # this used ``inchi.upper()`` inline which (a)
+                            # did NOT strip whitespace and (b) did NOT
+                            # collapse "nan"/"none"/"null" placeholders —
+                            # causing aliases like " ABCD..." or "NAN" to
+                            # be stored, fragmenting entity resolution.
+                            _norm_inchi if _norm_inchi and _norm_inchi != canonical else None,
                         ]
                         if alias and alias != canonical
                     ],
@@ -5054,11 +5075,19 @@ def stage_phase1_to_phase2(
                 else:
                     _act_withdrawn_val = _to_bool(_act_w_raw)
                     _act_safety_missing = False
+                # v103 ROOT FIX (P2-036 deep): normalize InChIKey ONCE
+                # via the centralized helper and reuse for both the
+                # ``inchikey`` property and the ``compound_id_aliases``
+                # entry. The previous v102 fix only patched chembl_drugs;
+                # this chembl_activities path still used raw ``.upper()``
+                # which dead-lettered lowercase / whitespace-padded / NaN-
+                # placeholder InChIKeys. Computing once avoids 3x calls.
+                _act_norm_inchi = _normalize_inchikey(row.get("inchikey")) or None
                 staged.compound_nodes.append({
                     "id": canonical_compound,
                     "drugbank_id": _safe_str(row.get("drugbank_id")) or None,
                     "chembl_id": mol_chembl,
-                    "inchikey": (_safe_str(row.get("inchikey")).upper() or None) if _safe_str(row.get("inchikey")) else None,
+                    "inchikey": _act_norm_inchi,
                     "smiles": _safe_str(row.get("smiles")) or None,
                     "name": _safe_str(row.get("molecule_name")),
                     "molecular_weight": _safe_float(row.get("molecular_weight")),
@@ -5085,7 +5114,11 @@ def stage_phase1_to_phase2(
                             mol_chembl,
                             _safe_str(row.get("pubchem_cid")),
                             _safe_str(row.get("chebi_id")),
-                            (_safe_str(row.get("inchikey")).upper() or None) if _safe_str(row.get("inchikey")) and _safe_str(row.get("inchikey")).upper() != canonical_compound else None,
+                            # v103 ROOT FIX (P2-036 deep): use the
+                            # pre-computed normalized InChIKey instead of
+                            # calling ``.upper()`` inline (which skipped
+                            # strip and placeholder-collapse).
+                            _act_norm_inchi if _act_norm_inchi and _act_norm_inchi != canonical_compound else None,
                         ]
                         if alias and alias != canonical_compound
                     ],

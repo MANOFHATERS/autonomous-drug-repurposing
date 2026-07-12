@@ -303,6 +303,24 @@ from .config import (
     resolve_canonical_id,
     validate_inchikey,
 )
+# v103 ROOT FIX (P2-036 deep): centralize InChIKey normalization so every
+# call site in the resolver produces the SAME canonical form. The previous
+# code used ``str(x).strip().upper()`` inline (no placeholder-collapse,
+# no None safety) — two of three call sites had subtly different behavior.
+# See utils.normalize_inchikey for the contract.
+try:
+    from .utils import normalize_inchikey as _normalize_inchikey
+except Exception:  # pragma: no cover — fallback for direct-script execution
+    def _normalize_inchikey(inchikey):  # type: ignore[no-redef]
+        if inchikey is None:
+            return ""
+        try:
+            ik = str(inchikey).strip()
+        except Exception:
+            return ""
+        if not ik or ik.lower() in ("nan", "none", "null", "na"):
+            return ""
+        return ik.upper()
 from .exceptions import (
     ResolverConfigurationError,
     ResolverConflictError,
@@ -2316,7 +2334,11 @@ class EntityResolver:
                     continue
                 p1_records.append({
                     "name": str(drug.get("name", "") or db_id),
-                    "inchikey": str(drug.get("inchikey", "") or "").strip().upper(),
+                    # v103 ROOT FIX (P2-036 deep): route through the
+                    # centralized ``_normalize_inchikey`` helper so this
+                    # resolver produces the SAME canonical InChIKey form
+                    # as chembl_loader / pubchem_loader / phase1_bridge.
+                    "inchikey": _normalize_inchikey(drug.get("inchikey", "")),
                     "drugbank_id": db_id,
                     "chembl_id": str(drug.get("chembl_id", "") or "").strip() or None,
                     "pubchem_cid": str(drug.get("pubchem_cid", "") or "").strip() or None,
@@ -2563,10 +2585,11 @@ class EntityResolver:
                 safety_flags.append("illicit")
 
             # D3-001 / D3-002 / D3-014 -- extract & validate InChIKey
-            inchikey_raw = drug.get("inchikey", "")
-            inchikey = (
-                str(inchikey_raw).strip().upper() if inchikey_raw else ""
-            )
+            # v103 ROOT FIX (P2-036 deep): use the centralized helper so
+            # this code path matches chembl_loader / pubchem_loader /
+            # phase1_bridge exactly. Previously this used
+            # ``str(x).strip().upper()`` (no None / placeholder handling).
+            inchikey = _normalize_inchikey(drug.get("inchikey", ""))
             if inchikey and not validate_inchikey(inchikey):
                 self.logger.warning(
                     "invalid_inchikey_format",

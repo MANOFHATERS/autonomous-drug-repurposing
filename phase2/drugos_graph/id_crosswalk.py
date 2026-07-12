@@ -126,6 +126,27 @@ try:  # pragma: no cover -- exercised only when PyYAML is missing
 except ImportError:  # pragma: no cover
     _yaml = None  # type: ignore[assignment]
 
+# v103 ROOT FIX (P2-036 deep): centralize InChIKey normalization. The
+# crosswalk is the canonical ID-mapping table; if it stores InChIKeys in
+# a different form than the loaders emit, lookups silently fail and
+# compounds fragment into duplicate nodes. The previous code used
+# ``str(x).strip().upper()`` inline — no placeholder-collapse, no None
+# safety. Route through the single helper so every loader, the resolver,
+# and the crosswalk all agree on canonical form.
+try:
+    from .utils import normalize_inchikey as _normalize_inchikey
+except Exception:  # pragma: no cover — fallback for direct-script execution
+    def _normalize_inchikey(inchikey):  # type: ignore[no-redef]
+        if inchikey is None:
+            return ""
+        try:
+            ik = str(inchikey).strip()
+        except Exception:
+            return ""
+        if not ik or ik.lower() in ("nan", "none", "null", "na"):
+            return ""
+        return ik.upper()
+
 # ─── Module-level logger ──────────────────────────────────────────────────
 # ARCH-5: class uses an injectable logger; this module-level logger is used
 # by module-level functions (``get_default_crosswalk`` etc.) only.
@@ -2215,7 +2236,13 @@ class IDCrosswalk:
         if compound_id is None or inchikey is None:
             return 0
         key = str(compound_id).strip()
-        ik = str(inchikey).strip().upper()
+        # v103 ROOT FIX (P2-036 deep): use the centralized helper so
+        # the crosswalk stores InChIKeys in the SAME canonical form
+        # that loaders emit (strip + uppercase + placeholder-collapse).
+        # Previously ``str(x).strip().upper()`` let " nan " through as
+        # "NAN" and got stored as a real canonical ID, fragmenting
+        # every compound that resolved to it.
+        ik = _normalize_inchikey(inchikey)
         if not key or not ik:
             return 0
         if not _INCHIKEY_PATTERN.match(ik):
@@ -2319,7 +2346,13 @@ class IDCrosswalk:
                         )
                         continue
                     compound_id = parts[0].strip()
-                    inchikey = parts[1].strip().upper()
+                    # v103 ROOT FIX (P2-036 deep): centralize InChIKey
+                    # normalization so the crosswalk loader produces
+                    # the SAME canonical form as the in-memory register
+                    # path above. Previously this used
+                    # ``parts[1].strip().upper()`` (no placeholder-
+                    # collapse, no None safety).
+                    inchikey = _normalize_inchikey(parts[1])
                     src_tag = parts[2].strip() if len(parts) > 2 else source_name
                     conf_tag = parts[3].strip() if len(parts) > 3 else "resolved"
                     added += self.register_compound_inchikey(

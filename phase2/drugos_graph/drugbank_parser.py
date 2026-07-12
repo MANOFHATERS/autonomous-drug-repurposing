@@ -253,6 +253,27 @@ from .exceptions import (
     DrugBankParseError,
     DrugOSDataError,
 )
+# v103 ROOT FIX (P2-036 deep): centralize InChIKey normalization so the
+# DrugBank parser produces the SAME canonical form as ChEMBL / PubChem /
+# phase1_bridge / entity_resolver / id_crosswalk. The previous code used
+# three different inline normalizations (``.upper()`` with a "nan"
+# string check, no strip in one path, strip+upper in another) — any
+# source emitting a whitespace-padded or mixed-case InChIKey produced a
+# different canonical ID than the rest of the pipeline, fragmenting the
+# Compound subgraph.
+try:
+    from .utils import normalize_inchikey as _normalize_inchikey
+except Exception:  # pragma: no cover — fallback for direct-script execution
+    def _normalize_inchikey(inchikey):  # type: ignore[no-redef]
+        if inchikey is None:
+            return ""
+        try:
+            ik = str(inchikey).strip()
+        except Exception:
+            return ""
+        if not ik or ik.lower() in ("nan", "none", "null", "na"):
+            return ""
+        return ik.upper()
 from .schemas import (
     DRUGBANK_EDGE_SCHEMA,
     DRUGBANK_NODE_SCHEMA,
@@ -5053,8 +5074,16 @@ def drugbank_to_node_records_from_phase1(
         # v28 ROOT FIX (P2-L-10): canonical ``id`` is required by
         # kg_builder.load_nodes_batch. Prefer uppercased InChIKey (matches
         # ID_PATTERNS["Compound"] regex), fall back to drugbank_id.
-        inchikey_raw = str(row.get("inchikey", "") or "").strip()
-        inchikey = inchikey_raw.upper() if inchikey_raw and inchikey_raw.lower() != "nan" else None
+        # v103 ROOT FIX (P2-036 deep): route through the centralized
+        # ``_normalize_inchikey`` helper so the DrugBank CSV path produces
+        # the SAME canonical InChIKey form as the raw-XML path, ChEMBL,
+        # PubChem, phase1_bridge, and entity_resolver. Previously this
+        # used ``inchikey_raw.upper() if ... != "nan" else None`` which
+        # (a) did NOT strip whitespace, (b) only collapsed the literal
+        # "nan" string (not "none"/"null"/"na"), and (c) returned None
+        # instead of "" for falsy inputs — diverging from every other
+        # loader and fragmenting the Compound subgraph.
+        inchikey = _normalize_inchikey(row.get("inchikey", "")) or None
         drugbank_id_raw = str(row.get("drugbank_id", "") or "").strip()
         drugbank_id = drugbank_id_raw or None
         canonical_id = inchikey or drugbank_id
@@ -5156,15 +5185,19 @@ def drugbank_to_target_edges_from_phase1(
         inchikey: Optional[str] = None
         if drug_canonical_map is not None and drugbank_id:
             mapped = drug_canonical_map.get(drugbank_id)
-            if mapped and str(mapped).strip() and str(mapped).lower() != "nan":
-                inchikey = str(mapped).strip().upper()
+            # v103 ROOT FIX (P2-036 deep): use the centralized helper so
+            # the crosswalk-sourced InChIKey is normalized identically
+            # to the row-sourced one below.
+            _mapped_norm = _normalize_inchikey(mapped) if mapped is not None else ""
+            if _mapped_norm:
+                inchikey = _mapped_norm
         if inchikey is None:
-            inchikey_raw = str(row.get("inchikey", "") or "").strip()
-            inchikey = (
-                inchikey_raw.upper()
-                if inchikey_raw and inchikey_raw.lower() != "nan"
-                else None
-            )
+            # v103 ROOT FIX (P2-036 deep): same centralized helper for
+            # the row-sourced fallback. Previously this used
+            # ``inchikey_raw.upper() if ... != "nan" else None`` which
+            # diverged from every other loader.
+            _row_norm = _normalize_inchikey(row.get("inchikey", ""))
+            inchikey = _row_norm or None
         canonical_id = inchikey or drugbank_id
         if not canonical_id:
             # Without any identifier the edge cannot be loaded -- skip.
