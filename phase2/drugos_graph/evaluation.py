@@ -2655,6 +2655,26 @@ def evaluate_link_prediction(
         # EvaluationResult.metrics docstring).
         metrics: Dict[str, Any] = {"auc": _to_native_float(auc_value)}
 
+        # P2-021 ROOT FIX (v104): store ``higher_is_better`` on the
+        # result so ``_compute_bootstrap_ci`` can pass it to
+        # ``_manual_auc``. The previous code resolved
+        # ``higher_is_better`` (from the explicit arg, from
+        # ``model_score_direction``, or from
+        # ``model.score_direction``) and used it to compute the point
+        # AUC — but did NOT store it on the result. The bootstrap CI
+        # then called ``_manual_auc(pos_sample, neg_sample)`` WITHOUT
+        # ``higher_is_better``, which defaults to ``False`` (TransE
+        # direction). For an HGT model (``higher_is_better=True``),
+        # every bootstrap iteration computed ``1 - true_AUC``, so the
+        # CI was INVERTED around the (correct) point estimate — e.g.
+        # "AUC = 0.85, CI = [0.10, 0.20]" — which is absurd and would
+        # get an FDA submission rejected. The bug was dormant in the
+        # default pipeline (``bootstrap_ci=False``) but would fire
+        # the moment a regulatory submission path enabled it. Root
+        # fix: record the resolved direction on the result so the
+        # bootstrap path reads the SAME direction the point AUC used.
+        metrics["auc_higher_is_better"] = bool(higher_is_better)
+
         # Compute ranking metrics via single-pass
         input_quality: Dict[str, int] = {}
         if ranked_lists is not None:
@@ -3445,6 +3465,28 @@ def _compute_bootstrap_ci(
         # behaviour, kept as the default for backward compatibility)
         # destroys that pairing and yields CIs that misrepresent the
         # variance of the per-query metric.
+        #
+        # P2-021 ROOT FIX (v104): read ``higher_is_better`` from the
+        # result's metrics dict (set by ``evaluate_link_prediction``
+        # at line ~2676) and pass it to every ``_manual_auc`` call.
+        # The previous code called ``_manual_auc(pos_sample,
+        # neg_sample)`` WITHOUT ``higher_is_better``, which defaults
+        # to ``False`` (TransE direction). For HGT models
+        # (``higher_is_better=True``), every bootstrap iteration
+        # computed ``1 - true_AUC``, producing an INVERTED CI around
+        # the (correct) point estimate — e.g. "AUC = 0.85,
+        # CI = [0.10, 0.20]". This bug was dormant in the default
+        # pipeline (``bootstrap_ci=False``) but would fire the moment
+        # a regulatory submission path enabled it.
+        #
+        # The resolved direction defaults to ``False`` (TransE) for
+        # backward compatibility with EvaluationResult instances
+        # constructed by older code paths that did not set
+        # ``metrics["auc_higher_is_better"]``. New code paths
+        # (evaluate_link_prediction) always set it.
+        _p2_021_hib = bool(
+            result.metrics.get("auc_higher_is_better", False)
+        )
         if paired:
             if len(pos_scores) != len(neg_scores):
                 raise ValueError(
@@ -3458,13 +3500,23 @@ def _compute_bootstrap_ci(
                 idx = rng.integers(0, n_paired, size=n_paired)
                 pos_sample = pos_scores[idx]
                 neg_sample = neg_scores[idx]
-                bootstrap_aucs.append(_manual_auc(pos_sample, neg_sample))
+                bootstrap_aucs.append(
+                    _manual_auc(
+                        pos_sample, neg_sample,
+                        higher_is_better=_p2_021_hib,
+                    )
+                )
         else:
             bootstrap_aucs = []
             for _ in range(n_bootstrap):
                 pos_sample = rng.choice(pos_scores, size=n_pos, replace=True)
                 neg_sample = rng.choice(neg_scores, size=n_neg, replace=True)
-                bootstrap_aucs.append(_manual_auc(pos_sample, neg_sample))
+                bootstrap_aucs.append(
+                    _manual_auc(
+                        pos_sample, neg_sample,
+                        higher_is_better=_p2_021_hib,
+                    )
+                )
 
     bootstrap_aucs = np.array(bootstrap_aucs)
     return {
