@@ -1181,7 +1181,30 @@ class PipelineConfig:
     # default because PipelineConfig did not define these fields. A user
     # who set ppo_gamma: 0.9 in YAML got TypeError (unknown field) or
     # silent ignore. Now they are first-class config fields.
-    ppo_gamma: float = 0.95  # P4-018 v2: aligned with parallel agent's choice (sequential MDP)
+    #
+    # P4-001 ROOT FIX (Team Cosmic / Phase 4): ppo_gamma=0.0 (contextual
+    # bandit). The DrugRankingEnv is a CONTEXTUAL BANDIT: each step is
+    # INDEPENDENT (action at step N does NOT affect observation at step
+    # N+1). With gamma=0.95, PPO's value head targets the discounted sum
+    # of ~20 future rewards. Since each reward is independent (no temporal
+    # correlation), the discounted sum is NOISY
+    # (std ≈ sqrt(sum(gamma^(2t))) * reward_std). The value head CANNOT
+    # learn this noisy target → explained_variance ≈ 0 (the audit's
+    # finding). PPO's advantage estimates become noise → the policy
+    # gradient is unreliable → PPO may collapse to always-HIGH or
+    # always-LOW depending on the noise → RL AUC ≈ random.
+    #
+    # The V30 (10.29) fix correctly set gamma=0.0, but P4-018 v2
+    # REVERTED it to 0.95 with the comment "aligned with parallel
+    # agent's choice (sequential MDP)" — but this is NOT a sequential
+    # MDP. This re-fix reverts P4-018 v2 and restores gamma=0.0 as the
+    # scientifically-correct default for the contextual-bandit MDP.
+    #
+    # If a future caller genuinely needs sequential credit assignment
+    # (e.g., multi-step drug combination ranking), they can set
+    # ppo_gamma > 0 in their PipelineConfig — the value is honored by
+    # train_agent (see the P4-018 logging block there).
+    ppo_gamma: float = 0.0  # P4-001 ROOT FIX: contextual bandit (independent steps)
     ppo_ent_coef: float = 0.01
     ppo_clip_range: float = 0.2
     ppo_net_arch: Optional[Dict[str, List[int]]] = None  # default: dict(pi=[128,64], vf=[64,32])
@@ -4013,53 +4036,60 @@ def train_agent(
                         f"fixed without normalization)."
                     )
 
-                # V30 ROOT FIX (10.8 / 10.29): the original PPO setup hardcoded
-                # learning_rate=7e-4, gamma=0.95, ent_coef=0.01, clip_range=0.2,
-                # and net_arch=[256,256,128] — all ignoring the PipelineConfig
-                # values (cfg.ppo_learning_rate=3e-4, etc.). The audit confirmed
-                # the metadata reported the config values while the actual PPO
-                # used the hardcoded ones (provenance lie).
+                # P4-001 ROOT FIX: PPO hyperparams come from PipelineConfig
+                # (ppo_learning_rate, ppo_gamma, ppo_ent_coef, ppo_clip_range,
+                # ppo_net_arch). The original code hardcoded learning_rate=7e-4,
+                # gamma=0.95, ent_coef=0.01, clip_range=0.2, and
+                # net_arch=[256,256,128] — all ignoring the PipelineConfig
+                # values. The audit confirmed the metadata reported the config
+                # values while the actual PPO used the hardcoded ones
+                # (provenance lie). The V30 (10.8) fix wired config through;
+                # P4-001 re-fixes the default ppo_gamma to 0.0 (contextual
+                # bandit — see PipelineConfig.ppo_gamma docstring).
                 #
-                # V30 (10.29): gamma=0.95 is POINTLESS for this MDP because
-                # the steps are INDEPENDENT (action at step N does not affect
-                # observation at step N+1). This is a CONTEXTUAL BANDIT, not
-                # a sequential MDP. The value head learns to predict a constant
-                # (mean reward) → explained_variance ≈ 0. The fix sets gamma=0.0
-                # (pure contextual bandit) so the value head's target is the
-                # immediate reward (no discounting), which it CAN learn.
+                # P4-010 ROOT FIX (stale comment cleanup): the V30 (10.29)
+                # comment block here claimed gamma=0.0 was in effect, but
+                # P4-018 v2 had reverted the default to 0.95. The stale
+                # comment is removed. The actual default is now 0.0
+                # (P4-001), matching the comment.
                 _ppo_lr = float(getattr(cfg, 'ppo_learning_rate', 3e-4))
-                _ppo_gamma = float(getattr(cfg, 'ppo_gamma', 0.0))  # V30 (10.29): 0.0 for contextual bandit
+                # P4-001 ROOT FIX: read ppo_gamma from config (default now 0.0
+                # for the contextual-bandit MDP — see PipelineConfig.ppo_gamma).
+                _ppo_gamma = float(getattr(cfg, 'ppo_gamma', 0.0))
                 _ppo_ent_coef = float(getattr(cfg, 'ppo_ent_coef', 0.01))
                 _ppo_clip_range = float(getattr(cfg, 'ppo_clip_range', 0.2))
                 _ppo_net_arch = getattr(cfg, 'ppo_net_arch', None) or dict(pi=[128, 64], vf=[64, 32])
 
-                # P4-018 ROOT FIX (ppo_gamma=0.0 contextual bandit):
-                # The audit flagged that ppo_gamma=0.0 makes PPO a
-                # contextual bandit (no credit assignment). PPO's clip
-                # mechanism and entropy bonus are designed for sequential
-                # MDPs, so with gamma=0, PPO is "overkill" — a simpler
-                # bandit algorithm (e.g., LinUCB) would work too. The
-                # audit suggested two options:
-                #   1. Acknowledge this is a contextual bandit and use a
-                #      simpler algorithm.
-                #   2. If sequential credit assignment is intended, set
-                #      gamma > 0 and design the episode structure
-                #      accordingly.
+                # P4-001 + P4-018 ROOT FIX (ppo_gamma documentation):
+                # The DrugRankingEnv is a CONTEXTUAL BANDIT (each step is
+                # independent — action at step N does NOT affect the
+                # observation at step N+1). The scientifically-correct
+                # gamma for a contextual bandit is 0.0 (no discounting —
+                # the value head predicts the IMMEDIATE reward, which it
+                # CAN learn). With gamma=0.95, the value head targets the
+                # discounted sum of ~20 future INDEPENDENT rewards, which
+                # is NOISY → explained_variance ≈ 0 → advantage estimates
+                # are noise → policy gradient unreliable → PPO collapses.
                 #
-                # The fix: keep PPO (it's the chosen RL framework per the
-                # DOCX tech stack table: "RL Framework: Stable-Baselines3
-                # — Proven, well-documented RL library with PPO support
-                # out of the box"), but:
-                #   - Make the bandit-vs-MDP choice EXPLICIT via a runtime
-                #     WARNING when gamma=0.
-                #   - Record the choice in the metadata so downstream
-                #     consumers know the MDP structure.
-                #   - Allow users to set gamma > 0 via config if they
-                #     want sequential credit assignment (e.g., for
-                #     multi-step drug combination ranking).
-                # This preserves the existing behavior (gamma=0 is the
-                # scientifically correct choice for independent-step
-                # drug-disease ranking) while making the choice transparent.
+                # The V30 (10.29) fix correctly set gamma=0.0; P4-018 v2
+                # REVERTED it to 0.95 with a stale comment claiming
+                # "sequential MDP" (P4-010 — provenance lie). P4-001 re-
+                # fixes the default to 0.0; P4-010 updates ALL stale
+                # comments referencing the reverted V30 fix.
+                #
+                # PPO's clip mechanism and entropy bonus are STILL useful
+                # at gamma=0.0 (they stabilize policy updates and encourage
+                # exploration), so we keep PPO rather than switching to a
+                # simpler bandit algorithm (per the DOCX tech stack: "RL
+                # Framework: Stable-Baselines3 — PPO support out of the
+                # box"). The metadata records the actual gamma value so a
+                # 21 CFR Part 11 auditor can verify the MDP structure.
+                #
+                # If a future caller needs sequential credit assignment
+                # (e.g., multi-step drug combination ranking), they can
+                # set ppo_gamma > 0 in their PipelineConfig — the value
+                # is honored here. The logging below tells them which
+                # mode is active.
                 if _ppo_gamma == 0.0:
                     logger.info(
                         "P4-018 ROOT FIX: ppo_gamma=0.0 — PPO is operating "
@@ -4085,10 +4115,14 @@ def train_agent(
                         f"(e.g., multi-step drug combination ranking)."
                     )
 
-                # V30 (10.29): use gamma=0.0 for the VecNormalize wrapper too
-                # (was 0.95). With gamma=0, VecNormalize's reward discounting
-                # becomes a no-op (1-step horizon), which is correct for a
-                # contextual bandit.
+                # P4-001 ROOT FIX: VecNormalize gamma follows ppo_gamma from
+                # config (default 0.0 for contextual bandit — see
+                # PipelineConfig.ppo_gamma). With gamma=0.0, VecNormalize's
+                # reward discounting becomes a 1-step horizon (a no-op for
+                # running reward normalization), which is correct for a
+                # contextual bandit. The previous "V30 (10.29)" comment
+                # claimed gamma=0.0 but the actual default was 0.95 (P4-018
+                # v2 reversion) — that stale comment is removed (P4-010).
                 try:
                     from stable_baselines3.common.vec_env import VecNormalize
                     normalized_env = VecNormalize(
@@ -4101,14 +4135,15 @@ def train_agent(
                         # to 5.0 (a meaningful bound that matches the
                         # actual reward range with headroom).
                         clip_reward=5.0,
-                        gamma=_ppo_gamma,  # V30 (10.29): 0.0 for contextual bandit
+                        gamma=_ppo_gamma,  # P4-001: from config (default 0.0, contextual bandit)
                     )
                     # V31 ROOT FIX (P1-9): track the VecNormalize wrapper so
                     # we can save its stats alongside the PPO checkpoint.
                     normalized_env_for_save = normalized_env
                     logger.info(
-                        f"V30 ROOT FIX (10.8/10.29): PPO hyperparams from config: "
-                        f"lr={_ppo_lr}, gamma={_ppo_gamma} (contextual bandit), "
+                        f"P4-001 ROOT FIX: PPO hyperparams from config: "
+                        f"lr={_ppo_lr}, gamma={_ppo_gamma} "
+                        f"(contextual bandit — independent steps), "
                         f"ent_coef={_ppo_ent_coef}, clip_range={_ppo_clip_range}, "
                         f"net_arch={_ppo_net_arch}. VecNormalize gamma={_ppo_gamma}."
                     )
@@ -4130,9 +4165,9 @@ def train_agent(
                     n_steps=effective_n_steps,
                     batch_size=effective_batch_size,
                     n_epochs=cfg.ppo_n_epochs,
-                    gamma=_ppo_gamma,  # V30 (10.29): 0.0 for contextual bandit (was 0.95)
-                    ent_coef=_ppo_ent_coef,  # V30 (10.8): from config
-                    clip_range=_ppo_clip_range,  # V30 (10.8): from config
+                    gamma=_ppo_gamma,  # P4-001: from config (default 0.0, contextual bandit)
+                    ent_coef=_ppo_ent_coef,  # from config
+                    clip_range=_ppo_clip_range,  # from config
                     seed=attempt_seed,  # v90 BUG #36: per-attempt seed (was `seed`)
                     device=device,
                     tensorboard_log=tensorboard_log,
