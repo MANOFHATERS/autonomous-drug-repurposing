@@ -223,6 +223,31 @@ def main() -> int:
         format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
     )
 
+    # ORCH-003 ROOT FIX (v2): deprecation notice. This runner is a DUPLICATE
+    # of run_4phase.py with a different default adapter path
+    # (from_phase1_staged_data vs adapt_phase2_to_phase3) and different
+    # default hyperparameters. Per the ORCH-003 root fix, the platform
+    # consolidates on run_4phase.py as the SINGLE canonical 4-phase runner.
+    # This file is preserved for backward compatibility (CI workflows,
+    # team muscle memory) but emits a stderr deprecation warning on every
+    # invocation. To silence, switch to run_4phase.py.
+    import sys as _sys
+    _sys.stderr.write(
+        "=" * 72 + "\n"
+        "ORCH-003 DEPRECATION NOTICE: run_full_platform.py is deprecated.\n"
+        "  The canonical 4-phase runner is now `run_4phase.py`.\n"
+        "  Reason: ORCH-003 root fix — three runners (run_4phase,\n"
+        "    run_full_platform, run_real_pipeline) did the same thing\n"
+        "    with different code paths and different defaults, causing\n"
+        "    'works in CI, breaks in prod' situations.\n"
+        "  Action: replace `python run_full_platform.py` with\n"
+        "    `python run_4phase.py` in your workflow. The defaults\n"
+        "    (gt_epochs=80, rl_timesteps=5000) match this runner, so\n"
+        "    behavior is identical for the same CLI args.\n"
+        "  This file will be REMOVED in a future release.\n"
+        "=" * 72 + "\n"
+    )
+
     parser = argparse.ArgumentParser(
         description=(
             "Run the FULL 4-phase Autonomous Drug Repurposing Platform "

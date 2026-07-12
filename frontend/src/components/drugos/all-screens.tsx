@@ -105,6 +105,11 @@ function SC({ title, value, subtitle, icon: Icon, trend }: { title: string; valu
 // ═══════════════════════════════════════════
 function PipelineScreen() {
   const [filter, setFilter] = useState('all')
+  // FE-009 ROOT FIX (v2): DemoDataBanner added — no /api/pipeline endpoint
+  // exists yet. The previous code rendered 8 hardcoded candidates
+  // (Memantine/Huntington's Phase II, etc.) as if they were real
+  // wet-lab-tracked pipeline candidates — a pharma researcher could
+  // mistake these for real clinical-trial entries.
   const stages = [
     { name: 'Discovery', count: 142, color: P },
     { name: 'Preclinical', count: 48, color: '#8B5CF6' },
@@ -128,6 +133,7 @@ function PipelineScreen() {
   const filtered = filter === 'all' ? pipelineItems : pipelineItems.filter(i => i.stage === filter)
   return (
     <FadeIn><div className="space-y-6">
+      <DemoDataBanner screenName="Repurposing Pipeline" />
       <PH title="Repurposing Pipeline" desc="Track drug candidates through the repurposing pipeline" actions={<Button variant="outline" size="sm"><Download className="h-4 w-4 mr-1.5" />Export</Button>} />
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
         {stages.map(s => (<Card key={s.name} className="cursor-pointer hover:shadow-md transition-shadow border-l-4" style={{ borderLeftColor: s.color }} onClick={() => setFilter(filter === s.name ? 'all' : s.name)}>
@@ -152,11 +158,15 @@ function PipelineScreen() {
 // ═══════════════════════════════════════════
 function AnalyticsScreen() {
   const [timeRange, setTimeRange] = useState('6m')
+  // FE-009 ROOT FIX (v2): DemoDataBanner added — no /api/analytics endpoint
+  // exists yet. The previous code rendered 6 months of fabricated query
+  // volumes and API call counts as if they were real usage telemetry.
   const queryData = [{ month: 'Jan', queries: 180, api: 22000 },{ month: 'Feb', queries: 220, api: 28000 },{ month: 'Mar', queries: 290, api: 35000 },{ month: 'Apr', queries: 310, api: 38000 },{ month: 'May', queries: 340, api: 42000 },{ month: 'Jun', queries: 342, api: 45230 }]
   const topDiseases = [{ name: "Huntington's", queries: 342, growth: '+24%' },{ name: "Alzheimer's", queries: 289, growth: '+18%' },{ name: 'Glioblastoma', queries: 234, growth: '+31%' },{ name: 'ALS', queries: 198, growth: '+12%' },{ name: 'MS', queries: 167, growth: '+8%' }]
   const successData = [{ name: 'Discovery', value: 142 },{ name: 'Preclinical', value: 48 },{ name: 'Clinical', value: 42 },{ name: 'Approved', value: 3 }]
   return (
     <FadeIn><div className="space-y-6">
+      <DemoDataBanner screenName="Analytics" />
       <PH title="Analytics" desc="Platform usage and performance metrics" actions={<Select value={timeRange} onValueChange={setTimeRange}><SelectTrigger className="w-32"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="1m">1 Month</SelectItem><SelectItem value="3m">3 Months</SelectItem><SelectItem value="6m">6 Months</SelectItem><SelectItem value="1y">1 Year</SelectItem></SelectContent></Select>} />
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <SC title="Total Queries" value="1,682" icon={Search} trend="+24%" />
@@ -369,32 +379,49 @@ function AnnotationsScreen() {
 // ═══════════════════════════════════════════
 function DataSourcesScreen() {
   const [syncing, setSyncing] = useState<string | null>(null)
-  const sources = [
-    { name: 'DrugBank', records: '13,481 drugs', lastSync: '2 hours ago', status: 'synced', coverage: 96 },
-    { name: 'ChEMBL', records: '2.1M compounds', lastSync: '4 hours ago', status: 'synced', coverage: 91 },
-    { name: 'OpenTargets', records: '19,524 targets', lastSync: '6 hours ago', status: 'synced', coverage: 88 },
-    { name: 'ClinicalTrials.gov', records: '430K trials', lastSync: '1 day ago', status: 'synced', coverage: 94 },
-    { name: 'UniProt', records: '570K proteins', lastSync: '1 day ago', status: 'synced', coverage: 97 },
-    { name: 'PubMed', records: '36M articles', lastSync: '3 hours ago', status: 'synced', coverage: 90 },
-    { name: 'KEGG Pathways', records: '580 pathways', lastSync: '1 week ago', status: 'stale', coverage: 85 },
-    { name: 'Orphanet', records: '6,187 diseases', lastSync: '2 days ago', status: 'synced', coverage: 92 },
-  ]
-  const handleSync = (name: string) => { setSyncing(name); setTimeout(() => setSyncing(null), 2000) }
+  // FE-009 ROOT FIX (v2): call the real /api/dataset endpoint. The previous
+  // code rendered 8 hardcoded "synced" data sources with fabricated record
+  // counts ("13,481 drugs", "2.1M compounds", etc.) — an admin could not
+  // tell whether the sources were actually loaded or whether the green
+  // checkmarks were real. Now we render the REAL Phase 1 dataset stats
+  // returned by the dataset service (or local checkpoint), with an explicit
+  // "loaded / not loaded" status, the real row count, and the real SHA256
+  // so an admin can verify the data integrity.
+  const { data, loading, error, refetch } = useApiResource(() => api.getDatasetStats(), [])
+  const sources = data?.sources ?? []
+  const handleSync = (name: string) => { setSyncing(name); setTimeout(() => { setSyncing(null); refetch() }, 2000) }
   return (
     <FadeIn><div className="space-y-6">
-      <PH title="Data Sources" desc={`${sources.length} connected data sources`} actions={<Button style={{ backgroundColor: P }}><Plus className="h-4 w-4 mr-1.5" />Add Source</Button>} />
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-4">
-        <SC title="Total Sources" value={sources.length} icon={Database} />
-        <SC title="Total Records" value="10M+" icon={Layers} />
-        <SC title="Avg Coverage" value="91.6%" icon={CheckCircle2} />
-        <SC title="Last Sync" value="2 hrs ago" icon={RefreshCw} />
-      </div>
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        {sources.map(s => (<Card key={s.name} className="hover:shadow-md transition-shadow"><CardContent className="p-5"><div className="flex items-start justify-between mb-3"><div><h3 className="font-semibold text-sm">{s.name}</h3><p className="text-xs text-muted-foreground">{s.records}</p></div><Badge variant={s.status === 'synced' ? 'default' : 'secondary'}>{s.status}</Badge></div>
-          <div className="space-y-2"><div className="flex justify-between text-xs"><span className="text-muted-foreground">Coverage</span><span className="font-medium">{s.coverage}%</span></div><Progress value={s.coverage} className="h-1.5" /></div>
-          <div className="flex items-center justify-between mt-3"><span className="text-xs text-muted-foreground">Last sync: {s.lastSync}</span><Button variant="outline" size="sm" onClick={() => handleSync(s.name)} disabled={syncing === s.name}>{syncing === s.name ? <><RefreshCw className="h-3 w-3 mr-1 animate-spin" />Syncing</> : <><RefreshCw className="h-3 w-3 mr-1" />Sync</>}</Button></div>
-        </CardContent></Card>))}
-      </div>
+      <PH title="Data Sources" desc={`${sources.length} data source${sources.length === 1 ? '' : 's'} (Phase 1 pipeline)`} actions={<><Button variant="outline" size="sm" onClick={() => refetch()}><RefreshCw className="h-4 w-4 mr-1.5" />Refresh</Button><Button style={{ backgroundColor: P }}><Plus className="h-4 w-4 mr-1.5" />Add Source</Button></>} />
+      {error && <ErrorDisplay error={error} onRetry={refetch} />}
+      {loading && <LoadingSpinner label="Loading dataset stats..." />}
+      {!loading && !error && sources.length === 0 && (
+        <EmptyState title="No data sources loaded" description="Run the Phase 1 pipeline (python run_4phase.py) to ingest data from ChEMBL, DrugBank, UniProt, STRING, DisGeNET, OMIM, PubChem." />
+      )}
+      {!loading && !error && sources.length > 0 && (
+        <>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-4">
+            <SC title="Sources Loaded" value={sources.filter(s => s.loaded).length + '/' + sources.length} icon={Database} />
+            <SC title="Nodes Loaded" value={(data?.nodesLoaded ?? 0).toLocaleString()} icon={Layers} />
+            <SC title="Edges Loaded" value={(data?.edgesLoaded ?? 0).toLocaleString()} icon={CheckCircle2} />
+            <SC title="Pipeline Backend" value={data?.backend ?? '—'} icon={RefreshCw} />
+          </div>
+          {(data?.warnings?.length ?? 0) > 0 && (
+            <div className="rounded-md border border-amber-300 bg-amber-50 px-4 py-3 text-amber-900 text-sm">
+              <strong>Warnings:</strong> <ul className="list-disc list-inside mt-1">{data!.warnings.map((w, i) => <li key={i}>{w}</li>)}</ul>
+            </div>
+          )}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {sources.map(s => (<Card key={s.name} className="hover:shadow-md transition-shadow"><CardContent className="p-5"><div className="flex items-start justify-between mb-3"><div><h3 className="font-semibold text-sm">{s.name}</h3><p className="text-xs text-muted-foreground">{s.rowsLoaded != null ? `${s.rowsLoaded.toLocaleString()} rows` : '—'}</p></div><Badge variant={s.loaded ? 'default' : 'secondary'}>{s.loaded ? 'loaded' : 'not loaded'}</Badge></div>
+              <div className="space-y-1.5 text-xs text-muted-foreground">
+                {s.sha256 && <div className="font-mono text-[10px] truncate"><span className="font-medium">SHA256:</span> {s.sha256.slice(0, 16)}…</div>}
+              </div>
+              <div className="flex items-center justify-between mt-3"><span className="text-xs text-muted-foreground">{s.loaded ? 'Loaded into Phase 2 graph' : 'Not yet loaded'}</span><Button variant="outline" size="sm" onClick={() => handleSync(s.name)} disabled={syncing === s.name}>{syncing === s.name ? <><RefreshCw className="h-3 w-3 mr-1 animate-spin" />Syncing</> : <><RefreshCw className="h-3 w-3 mr-1" />Sync</>}</Button></div>
+            </CardContent></Card>))}
+          </div>
+          {data?.generatedAt && <p className="text-xs text-muted-foreground text-center">Stats generated: {new Date(data.generatedAt).toLocaleString()} · Source: {data.source}</p>}
+        </>
+      )}
     </div></FadeIn>
   )
 }
@@ -403,19 +430,48 @@ function DataSourcesScreen() {
 // GRAPH STATISTICS SCREEN
 // ═══════════════════════════════════════════
 function GraphStatisticsScreen() {
-  const nodeTypes = [{ type: 'Drug', count: 13481, color: P },{ type: 'Disease', count: 7243, color: G },{ type: 'Gene', count: 19524, color: O },{ type: 'Pathway', count: 580, color: R },{ type: 'Protein', count: 570321, color: '#8B5CF6' }]
-  const growthData = [{ month: 'Jan', nodes: 480000, edges: 3200000 },{ month: 'Feb', nodes: 490000, edges: 3350000 },{ month: 'Mar', nodes: 510000, edges: 3500000 },{ month: 'Apr', nodes: 530000, edges: 3700000 },{ month: 'May', nodes: 558000, edges: 3900000 },{ month: 'Jun', nodes: 611000, edges: 4200000 }]
-  const totalNodes = nodeTypes.reduce((s, n) => s + n.count, 0)
+  // FE-009 ROOT FIX (v2): call the real /api/knowledge-graph endpoint. The
+  // previous code rendered 5 hardcoded node-type counts ("Drug 13481",
+  // "Disease 7243", "Protein 570321", etc.) and a fabricated 6-month
+  // growth chart — none of which reflected the actual Phase 2 graph
+  // construction state. An admin looking at this screen had NO way to
+  // tell whether the KG was actually built or whether the numbers were
+  // real. Now we render the REAL Phase 2 KG stats: per-source loaded
+  // status, actual node/edge counts from the KG service or local
+  // registry, and the SHA256 of each loaded source file for integrity
+  // verification.
+  const { data, loading, error, refetch } = useApiResource(() => api.getKnowledgeGraphStats(), [])
+  const sources = data?.sources ?? []
+  const totalNodes = data?.nodeCount ?? 0
+  const totalEdges = data?.edgeCount ?? 0
   return (
     <FadeIn><div className="space-y-6">
-      <PH title="Knowledge Graph Statistics" desc={`${totalNodes.toLocaleString()} total nodes across 5 entity types`} />
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-4">
-        {nodeTypes.map(n => (<Card key={n.type}><CardContent className="p-4"><div className="flex items-center gap-2 mb-2"><div className="w-3 h-3 rounded-full" style={{ backgroundColor: n.color }} /><span className="text-xs font-medium text-muted-foreground">{n.type}</span></div><p className="text-xl font-bold">{n.count.toLocaleString()}</p></CardContent></Card>))}
-      </div>
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <Card><CardHeader className="pb-2"><CardTitle className="text-base">Node Distribution</CardTitle></CardHeader><CardContent><div className="h-64"><ResponsiveContainer width="100%" height="100%"><PieChart><Pie data={nodeTypes.map(n => ({ name: n.type, value: n.count }))} cx="50%" cy="50%" innerRadius={50} outerRadius={80} paddingAngle={3} dataKey="value">{nodeTypes.map((n, i) => <Cell key={i} fill={n.color} />)}</Pie><RechartsTooltip /><Legend /></PieChart></ResponsiveContainer></div></CardContent></Card>
-        <Card><CardHeader className="pb-2"><CardTitle className="text-base">Graph Growth</CardTitle></CardHeader><CardContent><div className="h-64"><ResponsiveContainer width="100%" height="100%"><AreaChart data={growthData}><CartesianGrid strokeDasharray="3 3" /><XAxis dataKey="month" /><YAxis /><RechartsTooltip /><Area type="monotone" dataKey="nodes" stroke={P} fill={`${P}20`} /></AreaChart></ResponsiveContainer></div></CardContent></Card>
-      </div>
+      <PH title="Knowledge Graph Statistics" desc={`${totalNodes.toLocaleString()} nodes · ${totalEdges.toLocaleString()} edges`} actions={<Button variant="outline" size="sm" onClick={() => refetch()}><RefreshCw className="h-4 w-4 mr-1.5" />Refresh</Button>} />
+      {error && <ErrorDisplay error={error} onRetry={refetch} />}
+      {loading && <LoadingSpinner label="Loading KG stats..." />}
+      {!loading && !error && sources.length === 0 && (
+        <EmptyState title="Knowledge graph not built" description="Run the Phase 2 pipeline (python run_4phase.py) to construct the Neo4j knowledge graph from the Phase 1 staged data." />
+      )}
+      {!loading && !error && sources.length > 0 && (
+        <>
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+            <SC title="Total Nodes" value={totalNodes.toLocaleString()} icon={Database} />
+            <SC title="Total Edges" value={totalEdges.toLocaleString()} icon={Layers} />
+            <SC title="KG Backend" value={data?.source ?? '—'} icon={CheckCircle2} />
+          </div>
+          <Card><CardHeader className="pb-2"><CardTitle className="text-base">Source Files Loaded into Graph</CardTitle></CardHeader><CardContent className="p-0"><Table><TableHeader><TableRow><TableHead>Source</TableHead><TableHead>Status</TableHead><TableHead>Rows</TableHead><TableHead>Edges</TableHead><TableHead>Version</TableHead><TableHead>SHA256</TableHead><TableHead>Produced</TableHead></TableRow></TableHeader>
+            <TableBody>{sources.map(s => (<TableRow key={s.name}><TableCell className="font-medium">{s.name}</TableCell>
+              <TableCell><Badge variant={s.loaded ? 'default' : 'secondary'}>{s.loaded ? 'loaded' : 'not loaded'}</Badge></TableCell>
+              <TableCell>{s.rows != null ? s.rows.toLocaleString() : '—'}</TableCell>
+              <TableCell>{s.edgeCount != null ? s.edgeCount.toLocaleString() : '—'}</TableCell>
+              <TableCell className="text-xs">{s.version ?? '—'}</TableCell>
+              <TableCell className="font-mono text-[10px] text-muted-foreground">{s.sha256 ? s.sha256.slice(0, 16) + '…' : '—'}</TableCell>
+              <TableCell className="text-xs text-muted-foreground">{s.producedAt ? new Date(s.producedAt).toLocaleString() : '—'}</TableCell>
+            </TableRow>))}</TableBody></Table></CardContent></Card>
+          {data?.note && <p className="text-xs text-muted-foreground text-center">{data.note}</p>}
+          {data?.generatedAt && <p className="text-xs text-muted-foreground text-center">Stats generated: {new Date(data.generatedAt).toLocaleString()}</p>}
+        </>
+      )}
     </div></FadeIn>
   )
 }
@@ -424,9 +480,15 @@ function GraphStatisticsScreen() {
 // QUALITY SCREEN
 // ═══════════════════════════════════════════
 function QualityScreen() {
+  // FE-009 ROOT FIX (v2): DemoDataBanner added — no /api/data-quality
+  // endpoint exists yet. The previous code rendered fabricated
+  // completeness/freshness/duplicate/reliability percentages per source
+  // as if they were real QA audit results. For real per-source integrity,
+  // see DataSourcesScreen which now shows actual SHA256 + loaded status.
   const qualityMetrics = [{ source: 'DrugBank', completeness: 96, freshness: 98, duplicates: 2, reliability: 97 },{ source: 'ChEMBL', completeness: 91, freshness: 94, duplicates: 5, reliability: 95 },{ source: 'OpenTargets', completeness: 88, freshness: 92, duplicates: 8, reliability: 90 },{ source: 'ClinicalTrials.gov', completeness: 94, freshness: 96, duplicates: 3, reliability: 98 },{ source: 'UniProt', completeness: 97, freshness: 95, duplicates: 1, reliability: 99 }]
   return (
     <FadeIn><div className="space-y-6">
+      <DemoDataBanner screenName="Data Quality" />
       <PH title="Data Quality" desc="Monitor and improve data quality across all sources" actions={<Button variant="outline" size="sm"><RefreshCw className="h-4 w-4 mr-1.5" />Run Audit</Button>} />
       <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
         <SC title="Avg Completeness" value="93.2%" icon={CheckCircle2} />
@@ -485,9 +547,16 @@ function SubscriptionScreen() {
 // USAGE SCREEN
 // ═══════════════════════════════════════════
 function UsageScreen() {
+  // FE-009 ROOT FIX (v2): DemoDataBanner added — no /api/billing/usage
+  // endpoint exists yet. The previous code rendered fabricated 7-day
+  // query/api-call volumes and hardcoded stat cards ("342/1,000 queries",
+  // "4,523 API calls today") as if they were real metering data. A
+  // billing admin could mistake these for real usage and trigger
+  // incorrect overage charges or upgrade prompts.
   const usageData = [{ day: 'Mon', queries: 45, api: 6800 },{ day: 'Tue', queries: 52, api: 7200 },{ day: 'Wed', queries: 38, api: 5400 },{ day: 'Thu', queries: 61, api: 8900 },{ day: 'Fri', queries: 55, api: 7600 },{ day: 'Sat', queries: 22, api: 3200 },{ day: 'Sun', queries: 18, api: 2800 }]
   return (
     <FadeIn><div className="space-y-6">
+      <DemoDataBanner screenName="Usage" />
       <PH title="Usage" desc="Monitor your platform usage and limits" />
       <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
         <SC title="Queries This Month" value="342/1,000" icon={Search} /><SC title="API Calls Today" value="4,523" icon={Code} trend="+12%" /><SC title="Storage Used" value="2.4 GB" icon={Database} /><SC title="Team Seats" value="8/25" icon={Users} />
@@ -502,6 +571,11 @@ function UsageScreen() {
 // DEALS SCREEN
 // ═══════════════════════════════════════════
 function DealsScreen() {
+  // FE-009 ROOT FIX (v2): DemoDataBanner added — no /api/deals endpoint
+  // exists yet. The previous code rendered 4 fabricated licensing deals
+  // ("Memantine/Huntington's/NeuroPharm Inc/$2.4M/Term Sheet", etc.) as
+  // if they were real BD pipeline entries — a biz-dev user could mistake
+  // these for live deals and contact fictional licensees.
   const deals = [
     { drug: 'Memantine', disease: "Huntington's", licensee: 'NeuroPharm Inc', stage: 'Term Sheet', value: '$2.4M' },
     { drug: 'Naltrexone', disease: 'Multiple Sclerosis', licensee: 'BioRepath Corp', stage: 'Due Diligence', value: '$5.1M' },
@@ -511,6 +585,7 @@ function DealsScreen() {
   const stageColors: Record<string, string> = { 'LOI Signed': G, 'Due Diligence': O, 'Term Sheet': P, 'Negotiation': '#8B5CF6' }
   return (
     <FadeIn><div className="space-y-6">
+      <DemoDataBanner screenName="Discovery Deals" />
       <PH title="Discovery Deals" desc="Manage licensing deals for repurposing candidates" actions={<Button style={{ backgroundColor: P }}><Plus className="h-4 w-4 mr-1.5" />New Deal</Button>} />
       <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
         <SC title="Active Deals" value={deals.length} icon={DollarSign} /><SC title="Pipeline Value" value="$19.5M" icon={TrendingUp} /><SC title="Avg Deal Size" value="$4.9M" icon={BarChart3} /><SC title="Close Rate" value="68%" icon={Target} />
@@ -823,6 +898,12 @@ function PlaygroundScreen() {
 // ═══════════════════════════════════════════
 function WebhooksScreen() {
   const [addOpen, setAddOpen] = useState(false)
+  // FE-009 ROOT FIX (v2): DemoDataBanner added — no /api/webhooks endpoint
+  // exists yet. The previous code rendered 3 fabricated webhook
+  // endpoints ("https://api.myapp.com/webhooks/drugos" with 99.8%
+  // success rate, etc.) as if they were real registered webhooks. An
+  // admin could mistake these for live integrations and miss that real
+  // webhook deliveries were never configured.
   const hooks = [
     { url: 'https://api.myapp.com/webhooks/drugos', events: ['candidate.found', 'report.ready'], status: 'active', lastDelivery: '5 min ago', success: 99.8 },
     { url: 'https://hooks.slack.com/services/T0/B0/xxx', events: ['alert.critical'], status: 'active', lastDelivery: '1 hr ago', success: 100 },
@@ -830,6 +911,7 @@ function WebhooksScreen() {
   ]
   return (
     <FadeIn><div className="space-y-6">
+      <DemoDataBanner screenName="Webhooks" />
       <PH title="Webhooks" desc="Configure webhook endpoints for real-time notifications" actions={<Button style={{ backgroundColor: P }} onClick={() => setAddOpen(true)}><Plus className="h-4 w-4 mr-1.5" />Add Webhook</Button>} />
       <Card><CardContent className="p-0"><Table><TableHeader><TableRow><TableHead>URL</TableHead><TableHead>Events</TableHead><TableHead>Status</TableHead><TableHead>Last Delivery</TableHead><TableHead>Success Rate</TableHead></TableRow></TableHeader>
         <TableBody>{hooks.map(h => (<TableRow key={h.url}><TableCell><code className="text-sm font-mono">{h.url}</code></TableCell><TableCell><div className="flex gap-1 flex-wrap">{h.events.map(e => <Badge key={e} variant="outline" className="text-xs">{e}</Badge>)}</div></TableCell>
@@ -1135,10 +1217,15 @@ function SystemStatusScreen() {
 // INVESTOR DASHBOARD SCREEN
 // ═══════════════════════════════════════════
 function InvestorDashboardScreen() {
+  // FE-009 ROOT FIX (v2): DemoDataBanner added — no /api/investor-metrics
+  // endpoint exists. The previous code rendered fabricated ARR / NRR /
+  // LTV/CAC / revenue projections as if they were real financials.
+  // These numbers are strategy-team projections, NOT operational data.
   const revenueData = [{ year: '2026', revenue: 12, expense: 18, ebitda: -6 },{ year: '2027', revenue: 35, expense: 28, ebitda: 7 },{ year: '2028', revenue: 85, expense: 42, ebitda: 43 },{ year: '2029', revenue: 180, expense: 65, ebitda: 115 },{ year: '2030', revenue: 350, expense: 95, ebitda: 255 }]
   const marketData = [{ name: 'TAM', value: 50, fill: P },{ name: 'SAM', value: 15, fill: G },{ name: 'SOM', value: 3, fill: O }]
   return (
     <FadeIn><div className="space-y-6">
+      <DemoDataBanner screenName="Investor Dashboard" />
       <PH title="Investor Dashboard" desc="Financial metrics and growth projections" />
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <SC title="ARR" value="$12M" icon={DollarSign} trend="+190%" /><SC title="Customers" value="142" icon={Users} trend="+85%" /><SC title="NRR" value="135%" icon={TrendingUp} /><SC title="LTV/CAC" value="8.2x" icon={Target} />
@@ -1157,6 +1244,11 @@ function InvestorDashboardScreen() {
 // CAP TABLE SCREEN
 // ═══════════════════════════════════════════
 function CapTableScreen() {
+  // FE-009 ROOT FIX (v2): DemoDataBanner added — no /api/cap-table endpoint
+  // exists. The previous code rendered fabricated equity distribution
+  // ("Founders 40M / 40%", etc.) as if it were real ownership data.
+  // Cap table data is sensitive legal information that would live in
+  // Carta/Pulley, not in this app's DB. The numbers below are illustrative.
   const holders = [
     { name: 'Founders', shares: '40M', pct: 40, type: 'Common', vesting: '4yr cliff' },
     { name: 'Series A Investors', shares: '20M', pct: 20, type: 'Preferred', vesting: '-' },
@@ -1168,6 +1260,7 @@ function CapTableScreen() {
   ]
   return (
     <FadeIn><div className="space-y-6">
+      <DemoDataBanner screenName="Cap Table" />
       <PH title="Cap Table" desc="Equity distribution and ownership" actions={<Button variant="outline" size="sm"><Download className="h-4 w-4 mr-1.5" />Export</Button>} />
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
         <SC title="Total Shares" value="100M" icon={Layers} /><SC title="Fully Diluted Valuation" value="$180M" icon={DollarSign} /><SC title="Price per Share" value="$1.80" icon={TrendingUp} />

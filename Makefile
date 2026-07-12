@@ -21,13 +21,14 @@ help:
 	@echo ""
 	@echo "Run (all 4 phases):"
 	@echo "  make run             Full 4-phase run (Phase 1+2+3+4) — DEFAULT"
-	@echo "  make run-full-platform  Same as make run (explicit name)"
-	@echo "  make run-4phase      Alternate 4-phase runner (was run_pipeline.py, R-019)"
+	@echo "                       (invokes run_4phase.py — the CANONICAL runner per ORCH-003)"
+	@echo "  make run-4phase      Explicit alias for make run"
+	@echo "  make run-full-platform  DEPRECATED (ORCH-003) — emits warning, same as make run"
 	@echo "  make dry-run         Same as make run (alias)"
 	@echo ""
 	@echo "Run (partial):"
-	@echo "  make run-unified     Phase 1+2 (+3+4 via --full-pipeline flag)"
-	@echo "  make run-real        Real data pipeline (Phase 1+2+3+4 on real KG)"
+	@echo "  make run-unified     Phase 1+2 (+3+4 via --run-gt-rl flag per ORCH-002)"
+	@echo "  make run-real        DEPRECATED (ORCH-003) — emits warning, use make run"
 	@echo ""
 	@echo "Test:"
 	@echo "  make test-all        Run ALL tests across both phases + bridge"
@@ -49,15 +50,22 @@ install:
 	@echo ""
 	@echo "Dependencies installed. Run 'make run' for the full 4-phase pipeline."
 
-# v100 ROOT FIX (R-016): the DEFAULT run target now invokes
-# run_full_platform.py (the REAL 4-phase runner: Phase 1 → 2 → 3 → 4
-# on REAL biomedical data). The previous default invoked run_unified.py
-# which only ran Phase 1+2 (BUG R-007) — Phase 3 (Graph Transformer)
-# and Phase 4 (RL ranker) were NEVER invoked by the default entry point.
+# v100 ROOT FIX (R-016) + ORCH-003 ROOT FIX (v2): the DEFAULT run
+# target now invokes run_4phase.py — the CANONICAL 4-phase runner per
+# ORCH-003 (Phase 1 -> 2 -> 3 -> 4 on REAL biomedical data). The previous
+# default invoked run_full_platform.py — a DUPLICATE runner with a
+# different adapter path and different defaults, which caused
+# "works in CI, breaks in prod" situations (ORCH-003 root cause).
+# run_full_platform.py and run_real_pipeline.py are now DEPRECATED and
+# emit a stderr warning on every invocation; run_4phase.py is the single
+# source of truth.
 dry-run: run
 
-run: run-full-platform
+run: run-4phase
 
+# ORCH-003 ROOT FIX (v2): run-full-platform is kept for backward
+# compatibility but emits a deprecation warning. Switch to `make run`
+# (which calls run_4phase.py).
 run-full-platform:
 	$(PYTHON) run_full_platform.py
 

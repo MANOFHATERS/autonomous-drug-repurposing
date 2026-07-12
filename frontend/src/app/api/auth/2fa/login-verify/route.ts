@@ -8,7 +8,13 @@ import {
 } from "@/lib/auth/server";
 import { verifyTotpWithReplayCheck } from "@/lib/auth/totp";
 import { badRequest, internalError, writeAuditLog, issueCsrfToken, setCsrfCookie } from "@/lib/api-helpers";
-import { recordSuccessfulLogin, recordFailedLogin } from "@/lib/auth/rate-limit";
+import {
+  recordSuccessfulLogin,
+  recordFailedLogin,
+  checkTotpRateLimit,
+  recordFailedTotp,
+  clearTotpAttempts,
+} from "@/lib/auth/rate-limit";
 import jwt from "jsonwebtoken";
 
 /**
@@ -33,7 +39,24 @@ import jwt from "jsonwebtoken";
  * the 5-minute window. Each successful replay issued fresh access+refresh
  * tokens.
  *
- * Root fix:
+ * Security properties:
+ *   - The challenge token is signed with the same JWT_SECRET but has
+ *     type="mfa_challenge", so it CANNOT be used as an access token.
+ *   - The challenge token expires in 5 minutes.
+ *   - TOTP verification uses constant-time comparison (timingSafeEqual).
+ *   - TOTP codes cannot be replayed (lastTotpCounter monotonically
+ *     advances on each successful verification).
+ *   - FE-003 ROOT FIX (v2): Per-user TOTP brute-force rate limiting is
+ *     ENFORCED in this route via checkTotpRateLimit / recordFailedTotp.
+ *     After 5 wrong TOTP codes within 5 minutes the account is locked
+ *     for 15 minutes. The previous version had the rate-limit primitives
+ *     in rate-limit.ts but NEVER CALLED THEM from this route — the test
+ *     file totp-rate-limit.test.ts passed because it tested the primitives
+ *     in isolation, but the actual HTTP endpoint was still brute-forceable
+ *     (1M codes / 1000 req/s = 17 minutes for full keyspace). This is
+ *     wired in NOW.
+ *
+ * Root fix (FE-016):
  *   1. The challenge token now carries a jti (JWT ID). On first use, we
  *      atomically insert the jti into the MfaChallenge table (unique on
  *      jti). A second insert fails (Prisma P2002) → reject as replay.
@@ -50,7 +73,10 @@ import jwt from "jsonwebtoken";
  *
  * Additionally, on TOTP failure we increment failedLoginCount via
  * recordFailedLogin — so repeated MFA failures DO accumulate toward
- * account lockout.
+ * account lockout. This is COMPLEMENTARY to FE-003's TOTP-specific
+ * rate limiter (recordFailedTotp): the password counter tracks total
+ * auth failures, while the TOTP counter tracks 2FA-specific brute-force
+ * attempts. Both must trip independently.
  *
  * FE-011: CSRF cookie issued on success so the client can make
  * state-changing requests after MFA verification.
@@ -177,13 +203,45 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    // FE-003 ROOT FIX (v2): Per-user TOTP brute-force gate.
+    // BEFORE we spend a TOTP verification attempt, check whether the user
+    // is currently locked. This must come AFTER the user lookup (we need
+    // the userId) but BEFORE the TOTP verify (so a locked user cannot
+    // burn attempts). The IP-level rate limit (checkIpRateLimit) is a
+    // separate outer layer that limits raw request volume; this inner
+    // layer limits per-user TOTP guesses regardless of source IP.
+    const totpLock = checkTotpRateLimit(user.id);
+    if (totpLock.locked) {
+      await writeAuditLog({
+        user: { userId: user.id, email: user.email, role: user.role },
+        action: "login_mfa_locked",
+        resource: `user:${user.id}`,
+      });
+      return NextResponse.json(
+        {
+          error: "totp_locked",
+          message: `Too many incorrect 2FA codes. Try again in ${Math.ceil(totpLock.retryAfterSeconds / 60)} minute(s).`,
+          retryAfterSeconds: totpLock.retryAfterSeconds,
+        },
+        { status: 429, headers: { "Retry-After": String(totpLock.retryAfterSeconds) } }
+      );
+    }
+
     // FE-033: Replay-protected TOTP verification.
     const result = verifyTotpWithReplayCheck(user.mfaSecret, code, user.lastTotpCounter);
     if (!result.ok) {
-      // FE-018 ROOT FIX: increment failedLoginCount on MFA failure so
-      // repeated MFA failures accumulate toward account lockout. This
-      // closes the gap left by removing recordSuccessfulLogin from the
-      // password-verification path.
+      // FE-003 ROOT FIX (v2): Record the failed TOTP attempt. This
+      // increments the per-user TOTP sliding-window counter and locks
+      // 2FA after TOTP_MAX_ATTEMPTS (5) wrong codes within
+      // TOTP_WINDOW_MINUTES (5). This is SEPARATE from the password
+      // failed-login counter (FE-018 below) — both must trip independently.
+      const afterFail = recordFailedTotp(user.id);
+      // FE-018 ROOT FIX: ALSO increment failedLoginCount on MFA failure
+      // so repeated MFA failures accumulate toward account-wide lockout.
+      // This closes the gap left by removing recordSuccessfulLogin from
+      // the password-verification path. The two counters are
+      // complementary: FE-003 tracks 2FA brute-force, FE-018 tracks
+      // total auth failures.
       const lockResult = await recordFailedLogin(user.id);
       await writeAuditLog({
         user: { userId: user.id, email: user.email, role: user.role },
@@ -191,6 +249,7 @@ export async function POST(req: NextRequest) {
         resource: `user:${user.id}`,
       });
       await clearMfaChallengeCookie();
+      // FE-018: account-wide lock (password failed-login counter tripped).
       if (lockResult.locked) {
         return NextResponse.json(
           {
@@ -201,17 +260,43 @@ export async function POST(req: NextRequest) {
           { status: 423 }
         );
       }
+      // FE-003: 2FA-specific lock (TOTP brute-force counter tripped).
+      if (afterFail.locked) {
+        return NextResponse.json(
+          {
+            error: "totp_locked",
+            message: `Invalid 6-digit code. 2FA is now locked for ${Math.ceil(afterFail.retryAfterSeconds / 60)} minute(s) due to too many failed 2FA attempts.`,
+            attemptsRemaining: 0,
+            retryAfterSeconds: afterFail.retryAfterSeconds,
+          },
+          { status: 429, headers: { "Retry-After": String(afterFail.retryAfterSeconds) } }
+        );
+      }
       const message =
         result.reason === "replayed"
           ? "This code has already been used. Wait for the next 30-second window."
-          : "Invalid 6-digit code. Try again.";
+          : `Invalid 6-digit code. ${afterFail.attemptsRemaining} attempt(s) remaining before 2FA is locked.`;
       return NextResponse.json(
-        { error: result.reason === "replayed" ? "code_replayed" : "invalid_code", message },
+        {
+          error: result.reason === "replayed" ? "code_replayed" : "invalid_code",
+          message,
+          attemptsRemaining: afterFail.attemptsRemaining,
+        },
         { status: 400 }
       );
     }
 
-    // FE-033: Atomically advance lastTotpCounter.
+    // FE-003 ROOT FIX (v2): Successful verification — clear the per-user
+    // TOTP attempt counter so a user who eventually gets it right doesn't
+    // carry a partial lock forward. This is the OWASP-recommended reset-
+    // on-success pattern.
+    clearTotpAttempts(user.id);
+
+    // FE-033: Atomically advance lastTotpCounter. The `updateMany` with
+    // `where: { lastTotpCounter: { lt: result.counter } }` ensures that
+    // if two concurrent verifications of the same code race, only one
+    // actually persists the update — the other is a no-op. This is the
+    // standard RFC 6238 §5.2 replay-protection race prevention.
     if (user.lastTotpCounter === null) {
       await db.user.update({
         where: { id: user.id },
