@@ -510,3 +510,38 @@ Stage Summary:
 - New files: `frontend/src/components/drugos/use-account-data.tsx`, `frontend/src/lib/static-content.ts`, `frontend/tests/api/fe-052-to-fe-065-fixes.test.ts`.
 - Modified files: `frontend/package.json`, `frontend/prisma/schema.prisma`, `frontend/src/lib/mock-data.ts`, `frontend/src/lib/auth/rate-limit.ts`, `frontend/src/app/api/auth/activity/route.ts`, `frontend/src/app/api/auth/me/route.ts`, `frontend/src/app/api/auth/login/route.ts`, `frontend/src/app/api/rl/route.ts`, `frontend/src/components/drugos/admin-billing-etc-screens.tsx`, `frontend/src/components/drugos/app-router.tsx`, `frontend/src/components/drugos/core-screens.tsx`, `frontend/src/components/drugos/session-provider.tsx`.
 - Ready to commit, push, merge to main, then re-clone to verify.
+
+---
+Task ID: team-15-fe038-to-fe051-verification
+Agent: Team 15 (Frontend - Public API Proxies & Clinical) — verification pass
+Task: Verify FE-038..FE-051 fixes are REAL (not surface-level comment-only), fix any that are fake, write root-level regression tests, run real build/tsc/lint/tests, push branch, merge to main, re-clone to verify.
+
+Work Log:
+- Read the project docx (Team_Cosmic_Build_Process_Updated.docx) to understand the 4-phase Autonomous Drug Repurposing Platform (Data Ingestion → Knowledge Graph → Graph Transformer → RL Ranker → API+Dashboard).
+- Cloned repo, created branch fix/fe-038-to-051-team-15-public-api-clinical.
+- Discovered prior Team 15 agent already committed c8e08b1 "fix(FE-038..FE-051)" and merged to main (8c71ee7). User warned: "comments and tests are fakes — when I manually check code it's 100 percent broken".
+- Read EVERY target file LINE-BY-LINE (api-keys.ts, billing/subscription/route.ts, server.ts, totp.ts, billing.ts, projects/route.ts, openfda.ts, rxnorm.ts, evidence-package/route.ts, notifications/route.ts, team/route.ts, auth/activity/route.ts, auth/me/route.ts, clinical-trials.ts, core-screens.tsx, remaining-screens.tsx, schema.prisma, api-helpers.ts, pagination.ts, types.ts, audit-logs/route.ts).
+- VERIFIED 13 of 14 fixes are REAL (FE-038, FE-039, FE-041, FE-042, FE-043, FE-044, FE-045, FE-046, FE-047, FE-048, FE-049, FE-050, FE-051) — the actual code logic matches the issue's required fix.
+- FOUND 1 CRITICAL SURFACE-LEVEL FIX: FE-040. The prior agent added `organizationId String?` to the AuditLog schema and an `organizationId?: string` param to writeAuditLog — BUT none of the ~20 production callers (billing, evidence-package, kg, rl, admin, auth/*) ever passed it. So the column was ALWAYS NULL in production. This completely defeated FE-040's purpose (multi-tenant audit-trail isolation) AND broke FE-005 (the audit-logs route filters by organizationId for non-owners, so non-owner admins saw EMPTY audit logs).
+- APPLIED ROOT FIX to api-helpers.ts writeAuditLog: auto-populate `organizationId` from `params.user?.orgId` when the caller does not explicitly pass one. This makes EVERY user-initiated audit-log row org-scoped automatically. Callers that need to override (webhook/system events) can still pass `organizationId` explicitly.
+- Cleaned up unused imports in projects/route.ts (FE-044).
+- Fixed stale test in team-15-fe038-to-fe051.test.ts: FE-049 type-declaration test was reading mock-data.ts, but FE-026 moved the DrugCandidate interface to types.ts. Updated test to read types.ts.
+- Wrote NEW root-verification test file: team-15-fe038-to-fe051-root-verification.test.ts (29 tests). Each test exercises the ACTUAL code path and would FAIL if the fix were reverted. Includes the critical FE-040 test that would have caught the surface-level fix (asserts writeAuditLog auto-populates organizationId from user.orgId when no explicit param is passed).
+- Installed all npm dependencies (1092 packages).
+- Ran `npx prisma generate` → success.
+- Ran `npx tsc --noEmit` → ZERO errors.
+- Ran `npx eslint` on all 17 touched files → ZERO errors (11 pre-existing warnings only).
+- Ran `npx jest team-15-fe038-to-fe051-root-verification.test.ts` → 29/29 PASS.
+- Ran `npx jest team-15-fe038-to-fe051.test.ts` → 47/47 PASS.
+- Ran `npx next build` → ZERO errors, all 33 API routes + pages compiled.
+
+Stage Summary:
+- 1 REAL root fix applied: FE-040 writeAuditLog auto-populates organizationId (prior fix was surface-level — column always NULL).
+- 13 fixes verified as REAL (prior agent's work was correct for these).
+- 1 unused-import cleanup (FE-044).
+- 1 stale test fixed (FE-049 type-declaration test now reads types.ts).
+- 29 new root-verification tests added (would catch each bug if reverted).
+- All verification passed: tsc 0 errors, lint 0 errors, build 0 errors, 76/76 tests pass.
+- Files modified: frontend/src/lib/api-helpers.ts, frontend/src/app/api/projects/route.ts, frontend/src/lib/services/__tests__/team-15-fe038-to-fe051.test.ts.
+- Files added: frontend/src/lib/services/__tests__/team-15-fe038-to-fe051-root-verification.test.ts.
+- Next: commit, push branch, merge to main, re-clone to verify.
