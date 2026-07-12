@@ -1877,7 +1877,28 @@ class PyGBuilder(GraphBuilderProtocol):
                             # from ``torch_geometric.transforms`` which
                             # handles both ``edge_index`` and
                             # ``edge_attr``.
-                            _existing_edge_attr = data[et].get(
+                            #
+                            # v106 ROOT FIX (P2-017 — dead guard): the
+                            # v104 guard read ``data[et].get("edge_attr")``
+                            # but ``data`` is the SHALLOW COPY built at
+                            # line ~1840 which copies ONLY ``edge_index``
+                            # and node ``x`` — it does NOT copy
+                            # ``edge_attr``. So the guard ALWAYS read
+                            # ``None`` and NEVER fired, even when the
+                            # caller's input HeteroData had ``edge_attr``
+                            # on a non-target edge type. The manual
+                            # ``torch.flip(edge_index, [0])`` below then
+                            # silently added reverse edges with NO
+                            # ``edge_attr`` while the forward edges'
+                            # ``edge_attr`` was silently DROPPED by the
+                            # shallow copy. The guard was aspirational
+                            # (comment-only effective) — exactly the
+                            # "fake fix" pattern the audit warned about.
+                            # ROOT FIX: read ``original[et]`` (the
+                            # caller's ACTUAL input) instead of ``data[et]``
+                            # (the stripped copy). This makes the guard
+                            # fire on the real input, as intended.
+                            _existing_edge_attr = original[et].get(
                                 "edge_attr", None
                             )
                             # P2-017 ROOT FIX (v104): replace `assert` with
@@ -1929,7 +1950,16 @@ class PyGBuilder(GraphBuilderProtocol):
                     # is ever added, the reverse edges would carry the
                     # WRONG attributes. Runtime assertion enforces the
                     # invariant.
-                    _existing_edge_attr_t = data[target_edge_type].get(
+                    #
+                    # v106 ROOT FIX (P2-017 — dead guard, second call
+                    # site): same fix as the first call site above.
+                    # The v104 guard read ``data[target_edge_type].get``
+                    # but ``data`` is the shallow copy that strips
+                    # ``edge_attr``. Read ``original[target_edge_type]``
+                    # (the caller's ACTUAL input) so the guard actually
+                    # fires when the input has edge_attr on the target
+                    # edge type.
+                    _existing_edge_attr_t = original[target_edge_type].get(
                         "edge_attr", None
                     )
                     # P2-017 ROOT FIX (v104): replace `assert` with an
