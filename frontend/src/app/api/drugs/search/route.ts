@@ -10,7 +10,7 @@ import {
 // the internet could use it as an open proxy to deplete our RxNorm / NLM
 // API quota. Now it requires auth + enforces a per-user rate limit.
 export async function GET(req: NextRequest) {
-  const guard = await requireAuthAndRateLimit();
+  const guard = await requireAuthAndRateLimit(req);
   if (guard.response !== null) return guard.response;
 
   const q = req.nextUrl.searchParams.get("q") || "";

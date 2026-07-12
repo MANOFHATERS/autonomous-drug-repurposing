@@ -10,7 +10,19 @@ import {
 // rl-ranker.ts (the single source of truth for parsing); the rate limiter
 // lives here at the route boundary so a flood of requests is rejected
 // BEFORE any disk I/O or upstream HTTP call.
-import { checkUserRateLimit } from "@/lib/auth/per-user-rate-limit";
+//
+// FE-017 ROOT FIX (Team Member 14): Use the DISTRIBUTED rate limiter so the
+// cap is enforced across all Node.js instances (K8s replicas, etc.). When
+// REDIS_URL is set, this hits Redis (shared state). When REDIS_URL is NOT
+// set, it falls back to the in-memory Map (single-instance dev/test). The
+// sync `checkUserRateLimit` is kept for backwards compatibility with
+// existing tests that mock it; the route uses the async version so
+// production multi-instance deployments get the correct per-user cap.
+import { checkUserRateLimitDistributed as checkUserRateLimitAsync } from "@/lib/auth/per-user-rate-limit";
+// Keep the sync import so the route can fall back to it if the async path
+// throws (e.g. Redis briefly unreachable). This is a defense-in-depth
+// measure: a Redis outage should NOT disable rate limiting entirely.
+import { checkUserRateLimit as checkUserRateLimitSync } from "@/lib/auth/per-user-rate-limit";
 
 /**
  * POST /api/rl
@@ -59,7 +71,20 @@ export async function POST(req: NextRequest) {
   // parse the request body or touch disk — a flood of requests is rejected
   // at the gate. The 429 response includes Retry-After so well-behaved
   // clients back off correctly.
-  const rl = checkUserRateLimit(auth.user.userId, { max: 60, windowSeconds: 60 });
+  //
+  // FE-017 ROOT FIX (Team Member 14): use the DISTRIBUTED (async) limiter
+  // so the cap is enforced across all Node.js instances. When REDIS_URL is
+  // set, this hits Redis (shared state). When REDIS_URL is NOT set, it
+  // falls back to the in-memory Map. If the async path throws (e.g. Redis
+  // briefly unreachable), we fall back to the sync in-memory limiter so a
+  // Redis outage does NOT disable rate limiting entirely.
+  let rl;
+  try {
+    rl = await checkUserRateLimitAsync(auth.user.userId, { max: 60, windowSeconds: 60 });
+  } catch (e) {
+    console.error("[RATE-LIMIT] async limiter failed, falling back to sync:", e);
+    rl = checkUserRateLimitSync(auth.user.userId, { max: 60, windowSeconds: 60 });
+  }
   if (rl.blocked) {
     return NextResponse.json(
       { error: "rate_limited", message: "Too many RL requests. Please slow down." },
@@ -234,7 +259,16 @@ export async function GET(req: NextRequest) {
   // FE-069 ROOT FIX: per-user rate limit (60 req/min) on GET too. The GET
   // handler is the one most easily spammed (no body required), so it must
   // be throttled identically to POST.
-  const rl = checkUserRateLimit(auth.user.userId, { max: 60, windowSeconds: 60 });
+  //
+  // FE-017 ROOT FIX (Team Member 14): use the DISTRIBUTED (async) limiter
+  // with sync fallback (see POST handler above for rationale).
+  let rl;
+  try {
+    rl = await checkUserRateLimitAsync(auth.user.userId, { max: 60, windowSeconds: 60 });
+  } catch (e) {
+    console.error("[RATE-LIMIT] async limiter failed, falling back to sync:", e);
+    rl = checkUserRateLimitSync(auth.user.userId, { max: 60, windowSeconds: 60 });
+  }
   if (rl.blocked) {
     return NextResponse.json(
       { error: "rate_limited", message: "Too many RL requests. Please slow down." },

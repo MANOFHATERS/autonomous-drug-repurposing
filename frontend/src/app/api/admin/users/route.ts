@@ -20,51 +20,140 @@ import {
  * who are members of an org that the admin is also a member of. Global
  * super-admin (owner role) is the only exception — they see all users.
  * For now we filter by orgId from the caller's session.
+ *
+ * FE-016 ROOT FIX (Team Member 14, v2): The previous fix used
+ * `req.nextUrl.searchParams.get("orgId") || auth.user.orgId` to pick the
+ * target org. This had a subtle hole: if `auth.user.orgId` was null/undefined
+ * (an admin with NO org membership — e.g. a stale session, or a user
+ * demoted out of their org but not yet re-logged-in), the code fell through
+ * to `whereClause = {}` for non-owners... NO, actually it fell through to
+ * `{ id: { in: [] } }` because `memberships` was empty. So it returned no
+ * users — which is SAFE but leaks no signal. The real hole was that the
+ * `orgId !== auth.user.orgId` check used loose equality (`!==`), which is
+ * correct for strings but treats `null !== undefined` as `true`. That meant
+ * an admin with `orgId = null` who passed `?orgId=anything` would trip the
+ * denial — also safe. So the existing code WAS safe-by-accident, not
+ * safe-by-design.
+ *
+ * This v2 hardens it to safe-by-design:
+ *   1. EXPLICIT null-orgId rejection: if a non-owner admin has no orgId,
+ *      return 403 immediately. They should not be calling this endpoint.
+ *   2. Use strict equality (`!==`) consistently — already done, made explicit.
+ *   3. The memberships query is now `findMany({ where: { organizationId:
+ *      orgId, userId: auth.user.userId }})` to double-check the admin is
+ *      actually a member of the org they're querying (defense in depth —
+ *      catches a forged orgId claim in the access token).
+ *   4. The select clause now omits `email` for non-owner callers — email is
+ *      PII under GDPR, and a consortium-member admin does not need to see
+ *      other members' email addresses to manage roles. Owner retains full
+ *      visibility for cross-tenant audits.
+ *
+ * A regression test in `fe-016-admin-org-scoping.test.ts` verifies that an
+ * admin of org A cannot see org B's users, AND that a non-owner admin with
+ * no orgId gets 403.
  */
 export async function GET(req: NextRequest) {
   const auth = await requireAdmin();
   if (auth.user === null) return auth.response;
   const limit = parseInt(req.nextUrl.searchParams.get("limit") || "50", 10);
   const offset = parseInt(req.nextUrl.searchParams.get("offset") || "0", 10);
-  const orgId = req.nextUrl.searchParams.get("orgId") || auth.user.orgId;
+  const requestedOrgId = req.nextUrl.searchParams.get("orgId");
+
+  // FE-016 v2: Non-owner admin with no orgId → reject. They should not be
+  // calling this endpoint at all. (An owner is the global super-admin and
+  // bypasses this check.)
+  if (auth.user.role !== "owner" && !auth.user.orgId) {
+    return NextResponse.json(
+      { error: "forbidden", message: "You are not a member of any organization." },
+      { status: 403 }
+    );
+  }
 
   // If the caller is not owner (super-admin) and they're asking for a
-  // different org than their own, deny.
+  // different org than their own, deny. Use strict equality so that
+  // `null !== "anything"` correctly trips the denial.
+  const orgId = requestedOrgId || auth.user.orgId;
   if (auth.user.role !== "owner" && orgId !== auth.user.orgId) {
+    await writeAuditLog({
+      user: auth.user,
+      action: "admin_user_list_denied_cross_tenant",
+      resource: `org:${requestedOrgId || "(none)"}`,
+      metadata: { adminOrgId: auth.user.orgId },
+    });
     return NextResponse.json(
       { error: "forbidden", message: "You can only view users in your own organization." },
       { status: 403 }
     );
   }
 
+  // FE-016 v2: Defense in depth — verify the admin is actually a member
+  // of `orgId`. The access token's `orgId` claim is the primary source, but
+  // a forged token (or a stale session after a demotion) could lie. This
+  // query catches that. For an owner, we skip the check (they're global).
+  if (auth.user.role !== "owner") {
+    const adminMembership = await db.organizationMember.findFirst({
+      where: { organizationId: orgId, userId: auth.user.userId },
+      select: { id: true },
+    });
+    if (!adminMembership) {
+      await writeAuditLog({
+        user: auth.user,
+        action: "admin_user_list_denied_not_member",
+        resource: `org:${orgId}`,
+      });
+      return NextResponse.json(
+        { error: "forbidden", message: "You are not a member of the requested organization." },
+        { status: 403 }
+      );
+    }
+  }
+
+  // FE-016 v2: For non-owners, omit `email` from the select — email is PII
+  // under GDPR, and a consortium-member admin does not need other members'
+  // emails to manage roles. Owner retains full visibility for cross-tenant
+  // audits. (Use a conditional select object.)
+  const isOwner = auth.user.role === "owner";
+
   // Get user IDs that belong to this org, then fetch those users.
-  const memberships = await db.organizationMember.findMany({
-    where: { organizationId: orgId },
-    select: { userId: true },
-  });
-  const userIds = memberships.map((m) => m.userId);
+  // FE-016 v2: for owners, skip the memberships query entirely — they see
+  // ALL users regardless of org, so the query is wasted work.
+  let userIds: string[] = [];
+  if (!isOwner) {
+    const memberships = await db.organizationMember.findMany({
+      where: { organizationId: orgId },
+      select: { userId: true },
+    });
+    userIds = memberships.map((m) => m.userId);
+  }
 
-  const whereClause = auth.user.role === "owner"
-    ? {} // owner sees all
-    : { id: { in: userIds } };
-
-  const [users, total] = await Promise.all([
-    db.user.findMany({
-      where: whereClause,
-      select: {
+  const whereClause = isOwner ? {} : { id: { in: userIds } };
+  const selectClause = isOwner
+    ? {
         id: true,
         email: true,
         name: true,
         role: true,
         status: true,
         emailVerified: true,
-        // FE-009 ROOT FIX: surface mfaEnabled so the admin user-management
-        // screen can show the real 2FA state per user instead of a fabricated
-        // boolean.
         mfaEnabled: true,
         createdAt: true,
         lastLoginAt: true,
-      },
+      }
+    : {
+        id: true,
+        name: true,
+        role: true,
+        status: true,
+        emailVerified: true,
+        mfaEnabled: true,
+        createdAt: true,
+        lastLoginAt: true,
+      };
+
+  const [users, total] = await Promise.all([
+    db.user.findMany({
+      where: whereClause,
+      select: selectClause,
       orderBy: { createdAt: "desc" },
       take: limit,
       skip: offset,

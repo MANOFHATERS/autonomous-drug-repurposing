@@ -14,7 +14,7 @@ export async function GET(
   req: NextRequest,
   { params }: { params: Promise<{ drug: string }> }
 ) {
-  const guard = await requireAuthAndRateLimit();
+  const guard = await requireAuthAndRateLimit(req);
   if (guard.response !== null) return guard.response;
 
   const { drug } = await params;
