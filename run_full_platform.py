@@ -386,15 +386,42 @@ def main() -> int:
     )
 
     try:
+        # ORCH-001 ROOT FIX (Team Cosmic / Phase 4): use the
+        # adapt_phase2_to_phase3() adapter (the graph_data= path) instead
+        # of phase1_staged_data= (the from_phase1_staged_data path).
+        #
+        # The phase1_staged_data= path invokes
+        # BiomedicalGraphBuilder.from_phase1_staged_data(), which only
+        # reads whatever edges are ALREADY in staged_data.edges. Phase 1→2
+        # staging produces (Gene, associated_with, Disease) edges but NOT
+        # (Pathway, disrupted_in, Disease) edges. The GT model trained on
+        # this graph has ZERO pathway→disease edges and CANNOT learn the
+        # 3-hop drug→protein→pathway→disease pattern (the core scientific
+        # requirement per DOCX §4). GT AUC will be at or below random.
+        #
+        # The adapt_phase2_to_phase3() adapter DERIVES the missing
+        # (Pathway, disrupted_in, Disease) edges from the existing
+        # (Gene, associated_with, Disease) edges via the
+        # gene_symbol → protein → pathway mapping (see
+        # graph_transformer/data/phase2_adapter.py:272-294). This gives
+        # the GT model the 3-hop topology it needs to learn the multi-hop
+        # drug→protein→pathway→disease reasoning pattern.
+        #
+        # run_4phase.py already uses this correct path; this fix makes
+        # run_full_platform.py consistent with it. The Makefile's default
+        # `make run` invokes run_full_platform.py, so the default entry
+        # point now produces a graph that supports the 3-hop pattern.
+        from graph_transformer.data.phase2_adapter import adapt_phase2_to_phase3
+        graph_data = adapt_phase2_to_phase3(builder, seed=args.seed)
         candidates_df, results = bridge.run_full_pipeline(
             gt_epochs=args.gt_epochs,
             rl_timesteps=args.rl_timesteps,
             rl_top_n=args.rl_top_n,
             allow_invalid_output=args.allow_invalid_output,
-            # ROOT FIX (Phase 1+2+3+4): pass the REAL Phase 1→2 staged
-            # data so the GT model trains on the actual biomedical KG
-            # instead of a synthetic demo graph.
-            phase1_staged_data=staged,
+            # ORCH-001: use graph_data= (with derived pathway→disease
+            # edges) instead of phase1_staged_data= (which has zero
+            # pathway→disease edges).
+            graph_data=graph_data,
             # V31 ROOT FIX (P0-1): 3-layer model for 3-hop
             # drug→protein→pathway→disease pattern.
             gt_embedding_dim=args.gt_embedding_dim,
