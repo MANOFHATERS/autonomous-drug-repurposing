@@ -183,27 +183,14 @@ def test_p2_028_graph_transformer_satisfies_drug_repurposing_model_protocol():
         KGEmbeddingModel,
     )
 
-    # Construct a minimal model. We need a valid config: 14+ edge types
-    # (the model enforces this for production safety).
-    # Use the canonical 7-forward + 7-reverse schema.
-    edge_types = [
-        ("Compound", "targets", "Protein"),
-        ("Compound", "inhibits", "Protein"),
-        ("Compound", "activates", "Protein"),
-        ("Protein", "part_of", "Pathway"),
-        ("Pathway", "disrupted_in", "Disease"),
-        ("Compound", "treats", "Disease"),
-        ("Compound", "causes", "AdverseEvent"),
-        # Reverse edges
-        ("Protein", "rev_targets", "Compound"),
-        ("Protein", "rev_inhibits", "Compound"),
-        ("Protein", "rev_activates", "Compound"),
-        ("Pathway", "rev_part_of", "Protein"),
-        ("Disease", "rev_disrupted_in", "Pathway"),
-        ("Disease", "rev_treats", "Compound"),
-        ("AdverseEvent", "rev_causes", "Compound"),
-    ]
-    node_types = ["Compound", "Protein", "Pathway", "Disease", "AdverseEvent"]
+    # Construct a minimal model. Use the CANONICAL edge_types and
+    # node_types from graph_transformer.data so the test is resilient
+    # to future schema changes (e.g. P3-001 v104 bumped the minimum
+    # from 14 to 18 edge types — using DEFAULT_EDGE_TYPES means this
+    # test automatically tracks the canonical schema).
+    from graph_transformer.data import DEFAULT_EDGE_TYPES, DEFAULT_NODE_TYPES
+    edge_types = list(DEFAULT_EDGE_TYPES)
+    node_types = list(DEFAULT_NODE_TYPES)
     feature_dims = {nt: 8 for nt in node_types}
 
     model = DrugRepurposingGraphTransformer(
