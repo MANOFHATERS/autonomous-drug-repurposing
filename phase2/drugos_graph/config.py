@@ -5668,9 +5668,35 @@ CANONICAL_IDS: dict[str, str] = {
     # backward compat is preserved). Richer metadata (description +
     # validator function name) lives in ``CANONICAL_IDS_METADATA``
     # below.
-    "ClinicalOutcome": "meddra_id",   # MedDRA code (e.g. 10002083)
-    "MedDRA_Term": "meddra_id",       # MedDRA code (e.g. 10002083)
-    "Anatomy": "uberon_id",           # UBERON ontology ID (e.g. UBERON:0000061)
+    #
+    # P2-001 FORENSIC ROOT FIX (Team 4 — namespace collision):
+    #   The previous value was ``"ClinicalOutcome": "meddra_id"`` —
+    #   IDENTICAL to ``"MedDRA_Term": "meddra_id"``. Both node types
+    #   shared the same canonical ID field. The entity_resolver's
+    #   ``resolve_canonical_id()`` looks up the canonical ID field per
+    #   node type — but when two node types share the same ID field
+    #   name, any code that resolves by ID field alone (rather than by
+    #   ``(node_type, id_field)`` tuple) conflates the two. A
+    #   ClinicalOutcome node with ``meddra_id=10002083`` and a
+    #   MedDRA_Term node with ``meddra_id=10002083`` are biologically
+    #   distinct objects (one is a clinical-trial-derived outcome
+    #   record, the other is a vocabulary term), but they shared the
+    #   canonical identifier — so edges of type
+    #   ``(Compound, has_clinical_outcome, ClinicalOutcome)`` could be
+    #   misrouted to MedDRA_Term nodes, and cross-database queries
+    #   that JOIN on canonical_id silently merged the two node types.
+    #
+    # ROOT FIX: ClinicalOutcome now uses ``clinical_outcome_id`` — the
+    #   ``CO:<drugbank_id>:<disease_key>:<indication_type>`` format
+    #   already produced by ``phase1_bridge._build_clinical_outcome_nodes``
+    #   (line ~3543) and already registered in
+    #   ``kg_builder.ID_PATTERNS["ClinicalOutcome"]``. MedDRA_Term
+    #   keeps ``meddra_id`` (its rightful namespace — the 8-digit
+    #   MedDRA vocabulary code). The ``(node_type, id_field)`` tuples
+    #   are now unique across the schema.
+    "ClinicalOutcome": "clinical_outcome_id",  # CO:<dbid>:<disease_key>:<indication_type> (P2-001 root fix)
+    "MedDRA_Term": "meddra_id",                # MedDRA code (e.g. 10002083) — vocabulary term namespace
+    "Anatomy": "uberon_id",                    # UBERON ontology ID (e.g. UBERON:0000061)
     # v71 ROOT FIX (P2C-002 + P2C-007 completion): canonical IDs for
     # the 10 DRKG_NODE_TYPES that were missing entries. The reverse
     # schema check (_validate_canonical_ids_reverse) caught these —
@@ -5725,9 +5751,9 @@ CANONICAL_IDS_METADATA: dict[str, dict[str, str]] = {
         "validator": "is_reactome_id",
     },
     "ClinicalOutcome": {
-        "field": "meddra_id",
-        "description": "MedDRA code (e.g. 10002083) — canonical ID for clinical outcomes",
-        "validator": "is_meddra_code",
+        "field": "clinical_outcome_id",
+        "description": "Clinical outcome canonical ID (CO:<drugbank_id>:<disease_key>:<indication_type>) — distinct from MedDRA_Term's meddra_id namespace per P2-001 root fix",
+        "validator": "is_clinical_outcome_id",
     },
     "MedDRA_Term": {
         "field": "meddra_id",
@@ -5762,7 +5788,15 @@ ID_MAPPING_PRIORITY: dict[str, list[str]] = {
     "Pathway": ["reactome_id", "kegg_id", "drkg_id"],
     # v57 ROOT FIX (P2C-002 + P2C-007): canonical ID priority for the
     # 3 previously-missing node types.
-    "ClinicalOutcome": ["meddra_id", "mesh_id", "name"],
+    # P2-001 FORENSIC ROOT FIX (Team 4): ClinicalOutcome's FIRST priority
+    # is now ``clinical_outcome_id`` (the CO:<dbid>:<disease>:<indication>
+    # format) — NOT ``meddra_id``. This ensures ``resolve_canonical_id``
+    # returns the ClinicalOutcome's OWN namespace ID, not the MedDRA
+    # vocabulary code (which belongs to MedDRA_Term). ``meddra_id`` is
+    # kept as a LOWER priority fallback because some legacy
+    # ClinicalOutcome nodes may still carry it (e.g. from SIDER
+    # crosswalks) — but it is no longer the primary canonical ID.
+    "ClinicalOutcome": ["clinical_outcome_id", "meddra_id", "mesh_id", "name"],
     "MedDRA_Term": ["meddra_id", "meddra_name", "name"],
     "Anatomy": ["uberon_id", "mesh_id", "name"],
     # v71 ROOT FIX (P2C-002 + P2C-007 completion): ID_MAPPING_PRIORITY

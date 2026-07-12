@@ -101,23 +101,25 @@ SCHEMA_VERSION: int = _derive_schema_version()
 # the safety floor stays correct for stripped-down installs (test
 # isolation, docker images without the migrations/ directory, etc.).
 # P1-048 FORENSIC ROOT FIX (Team 4 -- stale SCHEMA_VERSION_FALLBACK):
-# The migrations directory contains files 001 through 013 (13 migrations
-# after the P1-049 fix added migration 013). The auto-derivation
-# ``_derive_schema_version()`` (line 66-87) correctly returns 13. But the
-# ``SCHEMA_VERSION_FALLBACK = 9`` was used ONLY when
-# ``_derive_schema_version()`` returned 0 (migrations dir missing or empty
-# -- e.g. stripped-down Docker image, test isolation). Migrations 010, 011,
-# 012, 013 were added but the fallback was NOT bumped. In a stripped-down
-# install (no migrations/ dir), ``SCHEMA_VERSION`` fell back to 9 instead
-# of 13. ``check_migrations()`` reported ``schema_version_matches=False``
-# forever -- operators saw a false-positive schema drift warning on every
-# pipeline run.
+# The migrations directory contains files 001 through 015 (15 migrations
+# total — migrations 014 and 015 were added AFTER the previous P1-048
+# fix that bumped the fallback to 13). The auto-derivation
+# ``_derive_schema_version()`` (line 66-87) correctly returns 15. But
+# ``SCHEMA_VERSION_FALLBACK = 13`` (the previous value) was used ONLY
+# when ``_derive_schema_version()`` returned 0 (migrations dir missing
+# or empty -- e.g. stripped-down Docker image, test isolation). With
+# the previous value of 13, a stripped-down install fell back to 13
+# instead of 15. ``check_migrations()`` reported
+# ``schema_version_matches=False`` forever -- operators saw a false-
+# positive schema drift warning on every pipeline run.
 #
-# ROOT FIX: bump ``SCHEMA_VERSION_FALLBACK`` to 13 (the current max
+# ROOT FIX: bump ``SCHEMA_VERSION_FALLBACK`` to 15 (the current max
 # migration version). The BUMP INSTRUCTIONS in the comment above are now
 # backed by a CI check (test_schema_version_fallback_matches_migrations)
-# that asserts ``SCHEMA_VERSION_FALLBACK == max(migration_version_numbers)``.
-SCHEMA_VERSION_FALLBACK: int = 13
+# that asserts ``SCHEMA_VERSION_FALLBACK == max(migration_version_numbers)``
+# -- this test FAILS if a new migration is added without bumping the
+# fallback, preventing this exact bug from recurring.
+SCHEMA_VERSION_FALLBACK: int = 15
 if SCHEMA_VERSION == 0:
     SCHEMA_VERSION = SCHEMA_VERSION_FALLBACK
 
