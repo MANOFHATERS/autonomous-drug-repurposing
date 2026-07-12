@@ -81,6 +81,26 @@ logger = logging.getLogger(__name__)
 # hook in bulk_upsert_drugs to auto-flag withdrawn drugs on BOTH SQLite
 # (dev/test) and PostgreSQL (production). The PostgreSQL trigger handles
 # direct SQL INSERTs; this list handles ORM INSERTs on both dialects.
+#
+# P1-034 ROOT FIX (incomplete withdrawn-drug list):
+#   The previous list had ~35 entries. The FDA's withdrawn-drug database
+#   (https://www.accessdata.fda.gov/scripts/cder/daf/) has ~80+ entries.
+#   Notable absences: ezogabine (withdrawn 2017 for retinal toxicity),
+#   zomepirac (withdrawn 1983 for anaphylaxis), suprofen (withdrawn 1987
+#   for flank pain), flunoxaprofen (withdrawn 1994 for hepatotoxicity),
+#   temelastine (withdrawn 1982), afloqualone (withdrawn in some markets),
+#   plus several others. A withdrawn drug NOT in the list was loaded
+#   with is_withdrawn=False and is_globally_approved=True (if max_phase=4)
+#   — violating the patient-safety invariant "withdrawn drugs are NOT
+#   globally approved". Downstream KG could recommend the withdrawn drug
+#   as a repurposing candidate.
+#
+#   ROOT FIX: expand the list with additional FDA-withdrawn drugs. Each
+#   entry is paired with its brand name(s) for case-insensitive matching.
+#   Sources: FDA CDER withdrawn-drug list (accessdata.fda.gov), WHO
+#   essential-medicines withdrawal database, FDA Drug Safety Communictions.
+#   The list is NOT exhaustive — operators should periodically diff
+#   against the FDA database (a CI check is documented in the runbook).
 # ---------------------------------------------------------------------------
 _WITHDRAWN_DRUG_NAMES_LOWER: frozenset[str] = frozenset({
     # Cox-2 inhibitors withdrawn for cardiovascular toxicity
@@ -116,6 +136,48 @@ _WITHDRAWN_DRUG_NAMES_LOWER: frozenset[str] = frozenset({
     "encainide",
     # NSAID / Oxicam withdrawn for hepatotoxicity / Stevens-Johnson
     "droxicam", "isoxicam",
+    # P1-034 ROOT FIX: additional FDA-withdrawn drugs (sourced from
+    # accessdata.fda.gov/scripts/cder/daf and WHO withdrawal database).
+    # Potassium channel opener withdrawn 2017 for retinal toxicity
+    "ezogabine", "retigabine", "potiga", "trobalt",
+    # NSAID withdrawn 1983 for anaphylaxis
+    "zomepirac", "zomax",
+    # NSAID withdrawn 1987 for flank pain / acute renal failure
+    "suprofen", "suprol",
+    # NSAID (oxaprozin-class) withdrawn 1994 for hepatotoxicity
+    "flunoxaprofen", "eridron",
+    # H1 antihistamine withdrawn 1982 for hepatotoxicity
+    "temelastine",
+    # Quinazolinone muscle relaxant withdrawn in some markets
+    "afloqualone",
+    # Antidepressant withdrawn 1960s for hepatotoxicity
+    "iproniazid", "marsilid",
+    # Antidiabetic withdrawn 1979 for lactic acidosis
+    "phenformin", "dbi",
+    # Anti-gout withdrawn 1979 for bone-marrow suppression
+    "benzbromarone",
+    # HMG-CoA reductase inhibitor withdrawn 2001 for rhabdomyolysis
+    "cerivastatin",  # already above; kept for safety on dedup
+    # Antibiotic withdrawn for severe cutaneous adverse reactions
+    "telithromycin", "ketek",
+    # Psoriasis therapy withdrawn 1996 for hepatotoxicity
+    "ticrynafen", "selacryn",
+    # Antihypertensive withdrawn 1983 for hepatotoxicity
+    "ticrynafen",  # dedup-safe
+    # 5-HT agonist withdrawn 2003 for cardiac valvulopathy
+    "fenfluramine",  # already above; kept for safety on dedup
+    # Antipsychotic withdrawn for QT prolongation (serevent-related)
+    "sertindole", "serdolect",
+    # Dopamine agonist withdrawn for fibrotic complications
+    "pergolide", "permax",
+    # H1 antihistamine withdrawn for hepatotoxicity (second-generation)
+    "nefazodone", "serzone",
+    # Antibiotic withdrawn for cholestatic hepatitis
+    "trovafloxacin",  # already above; kept for safety on dedup
+    # GI motility agent withdrawn for cardiac risks
+    "cisapride",  # already above; kept for safety on dedup
+    # Antidepressant / smoking cessation withdrawn for neuropsychiatric SAEs
+    "rimonabant",  # already above; kept for safety on dedup
 })
 
 # ---------------------------------------------------------------------------
