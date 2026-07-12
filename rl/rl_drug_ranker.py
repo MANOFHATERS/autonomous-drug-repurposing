@@ -285,6 +285,30 @@ DISEASE_AVG_SAFETY_COL: str = "disease_avg_safety"
 GNN_SCORE_TIMESTAMP_COL: str = "gnn_score_timestamp"
 GNN_SCORE_STALENESS_WARNING_HOURS: float = 24.0
 
+# P4-013 ROOT FIX (v2 — Team Member 12): import the shared threshold
+# resolver at module load time so the scientific_validation gate (line ~8379)
+# and PipelineConfig.__post_init__ both use the SAME helper as the GT-RL
+# bridge. The import is wrapped in try/except so direct-script execution
+# (without the rl/ package on sys.path) still works — in that case we fall
+# back to a local implementation that is mathematically identical.
+try:
+    from .scientific_thresholds import (
+        KP_RECOVERY_THRESHOLD as _SHARED_KP_RECOVERY_THRESHOLD,
+        resolve_kp_recovery_threshold as _resolve_kp_recovery_threshold,
+    )
+except ImportError:
+    _SHARED_KP_RECOVERY_THRESHOLD: float = 0.5  # type: ignore[no-redef]
+
+    def _resolve_kp_recovery_threshold(config_threshold: float) -> float:  # type: ignore[no-redef]
+        """Local fallback identical to scientific_thresholds.resolve_kp_recovery_threshold."""
+        try:
+            cfg = float(config_threshold)
+        except (TypeError, ValueError):
+            return _SHARED_KP_RECOVERY_THRESHOLD
+        if cfg < 0.0 or cfg > 1.0:
+            return _SHARED_KP_RECOVERY_THRESHOLD
+        return max(cfg, _SHARED_KP_RECOVERY_THRESHOLD)
+
 # Optional canonical-identifier columns.
 SOURCE_DB_COL: str = "source_database"
 DRUG_CANONICAL_COL: str = "drug_inchikey"
@@ -1559,13 +1583,19 @@ class PipelineConfig:
         sound bounds at construction time, so misconfiguration is caught
         IMMEDIATELY with a clear error message.
         """
-        # P4-013 ROOT FIX (Team Member 12): resolve the
+        # P4-013 ROOT FIX (v2 — Team Member 12): resolve the
         # min_kp_recovery_rate sentinel. The dataclass default is -1.0
         # (a sentinel meaning "use the shared constant"). We resolve it
         # to the shared KP_RECOVERY_THRESHOLD from
         # rl.scientific_thresholds so the RL ranker and the GT-RL bridge
         # use the SAME threshold by default. If the user explicitly
         # passed a non-negative value, that override is preserved.
+        # NOTE: the actual gate (line ~8379) uses
+        # ``_resolve_kp_recovery_threshold(config.min_kp_recovery_rate)``
+        # which applies ``max(cfg, KP_RECOVERY_THRESHOLD)`` — so even if
+        # the user sets a value below 0.5, the gate will still use 0.5.
+        # We keep the user's value here for metadata/provenance, but the
+        # gate is GUARANTEED to use >= 0.5 (the shared floor).
         if self.min_kp_recovery_rate < 0.0:
             try:
                 from .scientific_thresholds import KP_RECOVERY_THRESHOLD
@@ -8376,7 +8406,23 @@ def run_pipeline(
         ),
         "rl_auc_threshold": config.rl_auc_threshold,
         "kp_recovery_rate": recovery["recovery_rate"],
-        "kp_recovery_pass": recovery["recovery_rate"] >= config.min_kp_recovery_rate,
+        # P4-013 ROOT FIX (v2 — Team Member 12): use the SHARED
+        # ``resolve_kp_recovery_threshold`` helper from
+        # ``rl.scientific_thresholds`` so the ranker and the bridge
+        # compute the EXACT SAME threshold. The previous "fix" left a
+        # subtle inconsistency: the ranker used
+        # ``config.min_kp_recovery_rate`` directly (no floor), while the
+        # bridge used ``max(config.min_kp_recovery_rate, 0.5)``. When a
+        # caller set ``min_kp_recovery_rate=0.2``, the ranker's gate used
+        # 0.2 but the bridge's gate used 0.5 — a run with
+        # ``kp_recovery_rate=0.3`` PASSED the ranker but FAILED the
+        # bridge, leaving the pipeline state inconsistent. The shared
+        # helper applies the SAME ``max(cfg, KP_RECOVERY_THRESHOLD)``
+        # formula in BOTH files, so they can NEVER disagree.
+        "kp_recovery_pass": (
+            recovery["recovery_rate"]
+            >= _resolve_kp_recovery_threshold(config.min_kp_recovery_rate)
+        ),
         "n_candidates": len(candidates),
         # P4-012 ROOT FIX (LOW — Team Cosmic / Phase 4): the literature
         # cross-check is now a FIRST-CLASS field in scientific_validation.
