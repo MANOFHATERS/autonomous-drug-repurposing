@@ -96,10 +96,49 @@ class DrugDiseaseLinkPredictor(nn.Module):
         hidden_dims: Optional[List[int]] = None,
         dropout: float = 0.2,
         activation: str = "relu",
+        num_pairs: Optional[int] = None,
     ) -> None:
         super().__init__()
         self.embedding_dim = embedding_dim
-        hidden_dims = hidden_dims or [256, 128]
+
+        # P3-002 ROOT FIX (v105): scale hidden_dims with graph size.
+        #
+        # The previous code hardcoded ``hidden_dims = hidden_dims or [256, 128]``
+        # regardless of how many drug-disease pairs the graph contained.
+        # On a small demo graph (~50 pairs), a [256, 128] MLP has
+        # ~25K parameters — far more than the training data can
+        # constrain, causing severe overfitting: train AUC -> 1.0 while
+        # test AUC sits at ~0.4 (the GT model's reported AUC=0.403 in
+        # the audit). On a production graph (10M+ pairs), [256, 128]
+        # is fine but not optimal.
+        #
+        # ROOT FIX: when ``hidden_dims`` is None (caller did not
+        # explicitly set it), pick the architecture based on
+        # ``num_pairs`` (the number of known drug-disease pairs the
+        # trainer will see). The caller (trainer / bridge) passes
+        # num_pairs from len(known_pairs). When num_pairs is also
+        # None (unknown at construction time), default to the SAFE
+        # small-graph configuration [64, 32] — overfitting on a tiny
+        # demo is worse than underfitting on a large graph, because
+        # the small-graph case is the V1 demo / CI path.
+        #
+        # Tier ladder (per the integration plan):
+        #   num_pairs <  1_000   -> [64, 32]    (~2K params, safe for demo)
+        #   1_000 <= num_pairs < 100_000  -> [128, 64]  (~10K params)
+        #   num_pairs >= 100_000  -> [256, 128]  (~25K params, production)
+        if hidden_dims is not None:
+            # Caller explicitly set hidden_dims — respect their choice.
+            pass
+        elif num_pairs is None:
+            # Unknown graph size — use the safe small-graph default.
+            hidden_dims = [64, 32]
+        elif num_pairs < 1_000:
+            hidden_dims = [64, 32]
+        elif num_pairs < 100_000:
+            hidden_dims = [128, 64]
+        else:
+            hidden_dims = [256, 128]
+        self.hidden_dims = hidden_dims
 
         # P3-016 ROOT FIX (REVERT B-06): Input is 5*D, not 4*D. The B-06
         # fix removed ``abs_diff = |signed_diff|`` claiming the MLP can

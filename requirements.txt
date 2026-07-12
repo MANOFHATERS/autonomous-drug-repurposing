@@ -70,3 +70,32 @@ gymnasium>=0.29
 stable-baselines3>=2.2
 # pytest is needed by the Phase 3/4 test suites (tests/test_*.py).
 pytest>=7.4
+
+# ─── Phase 6 V1 launch: Literature Cross-Check (RT-005 ROOT FIX) ──────────
+# DOCX §8 "Layer 2: Literature Cross-Check" requires an automated PubMed
+# literature search for the top 50 novel predictions. DOCX §8 "V1 Launch
+# Criteria" lists "At least 5 top predictions are supported by published
+# literature" as a HARD launch gate.
+#
+# The literature cross-check lives in rl/rl_drug_ranker.py (search_pubmed
+# via Bio.Entrez). Without biopython installed, the cross-check raises
+# RuntimeError at runtime, which the scientific_validation gate catches
+# and DOWNGRADES to a warning (literature_check_skipped=True). This
+# silently disables a V1 launch criterion — exactly the failure mode the
+# integration plan calls out as RT-005.
+#
+# ROOT FIX: declare biopython as a HARD dependency so the literature
+# cross-check is always available. The scientific_validation gate can
+# then ENFORCE the "≥5 literature-supported predictions" criterion
+# instead of silently skipping it.
+biopython>=1.83
+
+# ─── HTTP services for Phase 1/2/3/4 (Step 1 integration plan) ────────────
+# The 4 FastAPI services (phase1/service.py, phase2/service.py,
+# graph_transformer/service.py, rl/service.py) expose each phase as an
+# HTTP endpoint so the Next.js frontend can proxy to them. Without
+# fastapi + uvicorn installed, the services crash at import time and
+# the frontend's proxy pattern (DATASET_SERVICE_URL / KG_SERVICE_URL /
+# RL_SERVICE_URL / GT_SERVICE_URL) returns 503.
+fastapi>=0.110
+uvicorn[standard]>=0.27

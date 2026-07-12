@@ -326,12 +326,23 @@ def run_phase3_and_4(
     rl_top_n: int,
     output_dir: str,
     seed: int,
-    allow_invalid_output: bool,
 ) -> Tuple[Any, Dict[str, Any]]:
     """Phase 3 + 4: GT training + RL ranking via ``GTRLBridge``.
 
     Uses the REAL Phase 2 HeteroData (passed as ``graph_data``) instead
     of ``build_demo_graph``.
+
+    RT-004 ROOT FIX (v105): the ``allow_invalid_output`` parameter has
+    been REMOVED. The scientific_validation gate is now UN-BYPASSABLE
+    from this runner — if validation fails, the pipeline exits non-zero
+    (return code 4). The previous ``--allow-invalid-output`` CLI flag
+    was a silent escape hatch that let scientifically invalid output
+    (e.g. GT AUC < 0.85, all-metformin RL output) ship to pharma
+    partner demos, violating the DOCX §8 V1 launch criteria. The
+    underlying GTRLBridge.run_full_pipeline still accepts the kwarg
+    for backward compatibility with old scripts, but we ALWAYS pass
+    ``allow_invalid_output=False`` from this runner. There is NO way
+    to opt back in from the run_4phase.py CLI.
     """
     logger.info("=" * 70)
     logger.info("PHASE 3 + 4: Graph Transformer Training + RL Ranking")
@@ -348,7 +359,7 @@ def run_phase3_and_4(
         gt_epochs=gt_epochs,
         rl_timesteps=rl_timesteps,
         rl_top_n=rl_top_n,
-        allow_invalid_output=allow_invalid_output,
+        allow_invalid_output=False,  # RT-004 ROOT FIX: UN-BYPASSABLE
         graph_data=graph_data,
     )
     return candidates_df, results
@@ -391,10 +402,14 @@ def main() -> int:
         "--seed", type=int, default=42,
         help="Random seed for RNG initialization (default 42)",
     )
-    parser.add_argument(
-        "--allow-invalid-output", action="store_true",
-        help="Bypass scientific-validation safety net (DEBUGGING ONLY)",
-    )
+    # RT-004 ROOT FIX (v105): --allow-invalid-output has been REMOVED.
+    # The scientific_validation gate is now UN-BYPASSABLE from this
+    # runner. If a developer genuinely needs to inspect invalid output
+    # for debugging, they must edit run_phase3_and_4() to pass
+    # allow_invalid_output=True directly to the bridge — making the
+    # bypass an explicit code change that survives code review, not a
+    # silent CLI flag that can be set by accident in a production
+    # cron job or CI script.
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir)
@@ -410,7 +425,9 @@ def main() -> int:
         "rl_timesteps": args.rl_timesteps,
         "rl_top_n": args.rl_top_n,
         "seed": args.seed,
-        "allow_invalid_output": args.allow_invalid_output,
+        # RT-004 ROOT FIX (v105): allow_invalid_output is HARD-CODED to
+        # False. It is no longer a per-run config option.
+        "allow_invalid_output": False,
     }
     _write_manifest(output_dir, phase1_dir, config_snapshot)
 
@@ -485,7 +502,6 @@ def main() -> int:
             rl_top_n=args.rl_top_n,
             output_dir=str(output_dir),
             seed=args.seed,
-            allow_invalid_output=args.allow_invalid_output,
         )
 
         # ─── Summary (R-022: removed duplicate 9-line block) ───────────
@@ -527,8 +543,13 @@ def main() -> int:
 
         if not overall_pass:
             print("\n" + "=" * 70)
-            print("SCIENTIFIC VALIDATION FAILED. Exiting non-zero.")
-            print("Use --allow-invalid-output for debugging.")
+            print("SCIENTIFIC VALIDATION FAILED. Exiting non-zero (return 4).")
+            print("RT-004 ROOT FIX (v105): the --allow-invalid-output CLI flag "
+                  "has been REMOVED. The scientific_validation gate is now "
+                  "UN-BYPASABLE from run_4phase.py. To debug invalid output, "
+                  "edit run_phase3_and_4() to pass allow_invalid_output=True "
+                  "DIRECTLY to GTRLBridge.run_full_pipeline (explicit code "
+                  "change, not a silent CLI flag).")
             print("=" * 70)
             return 4
         return 0

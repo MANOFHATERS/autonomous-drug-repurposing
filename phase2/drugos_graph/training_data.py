@@ -1379,7 +1379,7 @@ def temporal_split_pairs(
     positive_pairs: List[Dict],
     cutoff_year: int = DEFAULT_CUTOFF_YEAR,
     approval_years: Optional[Dict[Tuple[str, str], int]] = None,
-    split_mode: str = "drug_first_approval",
+    split_mode: str = "indication_first_approval",
 ) -> Dict[str, Any]:
     """Split positive pairs by approval year for temporal evaluation.
 
@@ -1399,42 +1399,57 @@ def temporal_split_pairs(
     When approval_years is None or empty, falls back to deterministic
     random split using SEED from config (IDE-001).
 
-    KNOWN LIMITATION (v100 ROOT FIX BUG P2-042):
-    The default split_mode="drug_first_approval" (v88 BUG #34) assigns each
-    (drug, disease) pair to a split based on the drug's FIRST approval year
-    across ALL diseases. This guarantees no drug appears in both train and
-    test (no drug-level leakage in that direction). HOWEVER, it also means
-    the test set NEVER contains a drug the model has already seen in
-    training -- the model's drug embeddings for test drugs are randomly
-    initialized, so the test AUC reflects ZERO extrapolation to new drugs.
-    Concrete example: a drug approved in 2018 for Disease X (train) and in
-    2022 for Disease Y is placed in TRAIN for BOTH pairs (because
-    drug_first_approval=2018 <= cutoff-2=2018); Disease Y never makes it to
-    test. The reported AUC thus measures performance on completely-unseen
-    drugs, NOT on new indications for known drugs. For the drug-repurposing
-    use case (predicting new indications for APPROVED drugs), use
-    split_mode="pair_level".
+    P2-020 ROOT FIX (v105): default split_mode changed from
+    "drug_first_approval" to "indication_first_approval". The previous
+    default ("drug_first_approval") splits each (drug, disease) pair
+    based on the drug's FIRST approval year across ALL diseases. This
+    guarantees no drug appears in both train and test (no drug-level
+    leakage), BUT it also means the test set NEVER contains a drug the
+    model has already seen in training. The model's drug embeddings for
+    test drugs are randomly initialized, so the test AUC reflects ZERO
+    extrapolation to new drugs. Worse: a drug approved in 2018 for
+    Disease X (train) and in 2022 for Disease Y is placed in TRAIN for
+    BOTH pairs (drug_first_approval=2018 <= cutoff-2=2018); Disease Y
+    never makes it to test. The reported AUC thus measures performance
+    on completely-unseen drugs, NOT on new indications for known drugs.
 
-    Split modes (v100 ROOT FIX BUG P2-042):
-      - "drug_first_approval" (default, v88 BUG #34): split by the drug's
-        FIRST approval year across all diseases. No drug appears in both
-        train and test. Test AUC measures extrapolation to NEW DRUGS.
-        Backward-compatible default.
-      - "pair_level": split by the (drug, disease) pair's OWN approval
-        year. The same drug may appear in train (for disease X) and test
-        (for disease Y). Test AUC measures extrapolation to NEW
-        INDICATIONS for known drugs -- the drug-repurposing use case.
+    The DOCX says the platform's core use case is REPURPOSING: finding
+    NEW indications for APPROVED drugs (DOCX §1: "finds hidden
+    therapeutic value in drugs that already passed safety trials"). The
+    correct evaluation split for this use case is: the same drug may
+    appear in train (for disease X) and test (for disease Y). Test AUC
+    measures extrapolation to NEW INDICATIONS for known drugs. This is
+    exactly what "indication_first_approval" (alias of "pair_level")
+    implements.
+
+    Split modes (v105 P2-020 ROOT FIX):
+      - "indication_first_approval" (DEFAULT v105): split by the
+        (drug, indication) pair's OWN approval year. The same drug may
+        appear in train (for disease X) and test (for disease Y). Test
+        AUC measures extrapolation to NEW INDICATIONS for known drugs
+        -- the drug-repurposing use case. This is the scientifically
+        correct default for this platform.
+      - "pair_level": ALIAS of "indication_first_approval" (kept for
+        backward compat with v100 ROOT FIX BUG P2-042 callers). Exact
+        same behavior.
+      - "drug_first_approval" (v88 BUG #34, KEPT FOR BACKWARD COMPAT):
+        split by the drug's FIRST approval year across all diseases.
+        No drug appears in both train and test. Test AUC measures
+        extrapolation to NEW DRUGS (NOT the repurposing use case).
+        Don't use this for the repurposing platform's V1 launch
+        evaluation -- it produces a misleadingly low AUC that doesn't
+        reflect the actual use case.
 
     Args:
         positive_pairs: Positive example dicts with 'drug_id' and 'disease_id'.
         cutoff_year: Year boundary for temporal split.
         approval_years: Optional {(drug_id, disease_id): year} mapping.
-        split_mode: (v100 ROOT FIX BUG P2-042) "drug_first_approval"
-            (default) splits by the drug's first approval year across all
-            diseases -- backward compatible with v88 BUG #34. "pair_level"
-            splits by the (drug, disease) pair's own approval year --
-            stricter; allows the same drug in train and test for different
-            diseases (tests new-indication extrapolation).
+        split_mode: (v105 P2-020 ROOT FIX) "indication_first_approval"
+            (DEFAULT) splits by the (drug, indication) pair's own
+            approval year -- the drug-repurposing use case. "pair_level"
+            is an alias. "drug_first_approval" (v88 BUG #34) splits by
+            the drug's first approval year across all diseases (kept
+            for backward compat; don't use for repurposing eval).
 
     Returns
     -------
@@ -1619,7 +1634,7 @@ def temporal_split_pairs(
         drug_year = drug_first_approval.get(drug_id_v88)
 
         # v100 ROOT FIX (BUG P2-042): honor split_mode.
-        # - "drug_first_approval" (default, v88 BUG #34): split by the
+        # - "drug_first_approval" (v88 BUG #34): split by the
         #   drug's FIRST approval year across all diseases. Guarantees
         #   no drug appears in both train and test, but the test set
         #   then never contains a drug the model has already learned
@@ -1629,9 +1644,16 @@ def temporal_split_pairs(
         #   approval year. The same drug may appear in train (disease X)
         #   and test (disease Y) -- tests temporal extrapolation to NEW
         #   INDICATIONS for known drugs (the drug-repurposing use case).
-        if split_mode == "pair_level":
+        #
+        # v105 P2-020 ROOT FIX: "indication_first_approval" is now the
+        # DEFAULT and is an ALIAS of "pair_level" (semantically: split
+        # by the (drug, indication)'s first approval year, which IS the
+        # pair's approval year). The new name makes the intent explicit:
+        # we evaluate the repurposing task (new indications for known
+        # drugs), not the new-drug extrapolation task.
+        if split_mode in ("pair_level", "indication_first_approval"):
             split_year = year
-        else:  # "drug_first_approval" (default; v88 BUG #34 logic)
+        else:  # "drug_first_approval" (v88 BUG #34 logic, backward compat)
             split_year = drug_year if drug_year is not None else year
 
         if split_year is None:

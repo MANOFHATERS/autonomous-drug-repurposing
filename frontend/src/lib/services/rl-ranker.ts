@@ -104,7 +104,62 @@ export interface RlRankerResponse {
   note?: string;
 }
 
-const DEFAULT_CSV_PATH = path.resolve(process.cwd(), "..", "rl", "validated_hypotheses.csv");
+// FE-003 ROOT FIX (v105): the previous DEFAULT_CSV_PATH pointed to
+// `../rl/validated_hypotheses.csv`, which is the INPUT file (a static
+// curated list of validated pairs used by the RL reward function), NOT
+// the OUTPUT file the RL ranker actually writes. The RL ranker writes
+// to `top_candidates_<timestamp>_<runid>.csv` (see
+// generate_output_filename() in rl_drug_ranker.py). The frontend was
+// reading the wrong file — when it found anything at all, it served
+// stale validated pairs as if they were fresh model predictions.
+//
+// ROOT FIX: at request time, scan `../rl/` for the LATEST
+// `top_candidates_*.csv` (highest mtime) and read that. If no output
+// exists yet, return source:"none" with a helpful message directing
+// the operator to run `python run_4phase.py`. We NEVER fall back to
+// the INPUT file.
+const RL_OUTPUT_DIR = path.resolve(process.cwd(), "..", "rl");
+
+function findLatestOutputCsv(): string | null {
+  // FE-003 v105: scan RL_OUTPUT_DIR for the newest top_candidates_*.csv.
+  // Returns the absolute path, or null if none exists. Used as the
+  // default when RL_OUTPUT_CSV_PATH / RL_LOCAL_CSV are not set.
+  let files: string[];
+  try {
+    files = nodeFs.readdirSync(RL_OUTPUT_DIR);
+  } catch {
+    return null;
+  }
+  const candidates: { f: string; mtime: number }[] = [];
+  for (const f of files) {
+    // Match top_candidates_*.csv (the RL ranker's actual output pattern).
+    // Also match validated_hypotheses.csv ONLY when explicitly requested
+    // via env var (RL_ALLOW_VALIDATED_AS_OUTPUT=1) — never by default.
+    if (f.startsWith("top_candidates_") && f.endsWith(".csv")) {
+      try {
+        const stat = nodeFs.statSync(path.join(RL_OUTPUT_DIR, f));
+        candidates.push({ f, mtime: stat.mtimeMs });
+      } catch {
+        // stat failed — skip this file
+      }
+    }
+  }
+  if (candidates.length === 0) return null;
+  candidates.sort((a, b) => b.mtime - a.mtime);
+  return path.join(RL_OUTPUT_DIR, candidates[0].f);
+}
+
+function getDefaultCsvPath(): string {
+  // FE-003 v105: returns the latest top_candidates_*.csv if one exists,
+  // otherwise returns a sentinel path (which will fail gracefully in
+  // readLocalCsv with source:"none"). We NEVER return the INPUT
+  // validated_hypotheses.csv path — that's the bug we're fixing.
+  const latest = findLatestOutputCsv();
+  if (latest) return latest;
+  // No output exists yet. Return a non-existent path under RL_OUTPUT_DIR
+  // so readLocalCsv's fs.stat fails cleanly and we return source:"none".
+  return path.join(RL_OUTPUT_DIR, "top_candidates_NONE_YET.csv");
+}
 
 function parseNumber(s: string | undefined): number | undefined {
   if (s === undefined || s === null || s === "") return undefined;
@@ -287,7 +342,10 @@ export async function getRankedHypotheses(opts?: {
     }
   }
 
-  const csvPath = process.env.RL_OUTPUT_CSV_PATH || process.env.RL_LOCAL_CSV || DEFAULT_CSV_PATH;
+  // FE-003 v105: prefer env-var override; otherwise auto-discover the
+  // latest top_candidates_*.csv in ../rl/. We NEVER fall back to the
+  // INPUT validated_hypotheses.csv — that was the bug.
+  const csvPath = process.env.RL_OUTPUT_CSV_PATH || process.env.RL_LOCAL_CSV || getDefaultCsvPath();
   let candidates = await readLocalCsv(csvPath);
 
   if (opts?.drug) {
@@ -309,8 +367,10 @@ export async function getRankedHypotheses(opts?: {
       csvPath,
       note:
         "No RL-ranked candidates found. Set RL_SERVICE_URL to proxy to the " +
-        "Phase 4 service, or ensure the ranker has written its output to " +
-        `${csvPath}.`,
+        "Phase 4 service, OR run `python run_4phase.py` to generate " +
+        "top_candidates_*.csv output. FE-003 v105: the default scan looks " +
+        `for top_candidates_*.csv in ${RL_OUTPUT_DIR} (NOT the INPUT ` +
+        "validated_hypotheses.csv file — that was the previous bug).",
     };
   }
 
