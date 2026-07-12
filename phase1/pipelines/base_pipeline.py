@@ -4953,7 +4953,19 @@ class BasePipeline(ABC):
             completeness = 1.0
 
         # Uniqueness
+        # P1-024 ROOT FIX (Team-2 — document the div-by-zero guard):
+        #   The ``len(df) > 0`` check below guards the division
+        #   ``int(df.duplicated().sum()) / len(df)`` from div-by-zero.
+        #   The guard is correct but the previous code did NOT document
+        #   WHY it's there — a future refactor that moves the division
+        #   out of the guarded block would introduce a div-by-zero.
+        #   ROOT FIX: add an explicit comment on the division line so
+        #   the invariant is visible at the point of risk. This is a
+        #   documentation-only fix; no code change.
         if len(df) > 0:
+            # Safe: guarded by ``len(df) > 0`` check above — no div-by-zero.
+            # If a future refactor moves this division out of the guarded
+            # block, add an explicit ``if len(df) == 0: return 1.0`` guard.
             uniqueness = 1.0 - (int(df.duplicated().sum()) / len(df))
         else:
             uniqueness = 1.0

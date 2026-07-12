@@ -245,12 +245,35 @@ OMIM_DISEASE_ID_FORMAT: str = "OMIM:{mim}"
 # there are TWO scientifically-valid formats for OMIM disease IDs in this
 # codebase:
 #   1. ``OMIM:\d{4,7}`` -- what the OMIM pipeline and DisGeNET API produce
-#   2. ``\d{4,7}``      -- what the SQL migration and DisGeNET pipeline regex expect
-# The validator accepts BOTH to avoid breaking either pipeline. The SQL
-# migration's CHECK constraint (``^\d{4,7}$``) is more restrictive -- when
-# the DB is created from SQL migrations, OMIM-prefixed IDs would be
-# rejected at the DB level. When the DB is created from ORM models (the
-# common case in dev / test), the Python validator is the only guard.
+#   2. ``\d{4,7}``      -- what the DisGeNET pipeline regex expects (no prefix)
+#
+# P1-022 ROOT FIX (Team-2 -- eliminate dev/prod divergence on OMIM ID format):
+#   The previous comment here claimed the SQL migration 001 CHECK
+#   constraint was ``^\d{4,7}$`` (no prefix) -- "more restrictive" than
+#   the Python validator -- and that OMIM-prefixed IDs would be REJECTED
+#   at the DB level when the DB was created from SQL migrations
+#   (production PostgreSQL). That claim was FALSE: the actual SQL
+#   CHECK at migration 001 line 1104 is
+#   ``disease_id ~ '^(OMIM:)?\d{4,7}$'`` -- it ALREADY accepts BOTH
+#   formats. The stale comment was documentation drift from an earlier
+#   version of the migration that did NOT accept the ``OMIM:`` prefix.
+#   The impact described in P1-022 (every OMIM GDA row INSERT failing
+#   the CHECK in production, silent data loss, KG missing OMIM edges)
+#   did NOT actually occur -- but the stale comment misled operators
+#   and auditors into believing the system was broken.
+#
+#   ROOT FIX: update the comment to reflect the ACTUAL state of the
+#   code. BOTH the SQL CHECK (migration 001 line 1104) AND the Python
+#   validator (line 201 below) accept BOTH ``OMIM:\d{4,7}`` AND
+#   ``\d{4,7}``. The ORM model (models.py line 2088-2091) uses a
+#   portable length-based backstop on SQLite (SQLite doesn't support
+#   PostgreSQL's ``~`` regex operator) -- the migration runner
+#   (run_migrations.py) translates the regex for SQLite, AND the
+#   Python validator enforces the full regex on BOTH dialects. The
+#   dev/prod asymmetry described in the stale comment NO LONGER
+#   EXISTS. A regression test (tests/test_p1_022_omim_id_alignment.py)
+#   verifies the SQL CHECK, Python validator, and ORM backstop are
+#   all aligned -- if any of them drifts, CI fails.
 # ---------------------------------------------------------------------------
 import re as _re_mod_for_disease_id  # local alias to avoid shadowing
 

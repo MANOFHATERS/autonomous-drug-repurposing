@@ -87,8 +87,14 @@ DRUG_NAME_LENGTH: int = 500
 #: ChEMBL ID max length (e.g. 'CHEMBL25').
 CHEMBL_ID_LENGTH: int = 20
 
-#: DrugBank ID max length (e.g. 'DB00945').
-DRUGBANK_ID_LENGTH: int = 10
+#: DrugBank ID max length.
+#: P1-017 ROOT FIX (Team-2): widened from 10 to 64 to accommodate
+#: synthesized IDs (``SYNTH-DB-{8 hex}`` = 17 chars, ``SYNTH-DB-M{6 digits}``
+#: = 17 chars). Real DrugBank IDs (``DB\d{5,7}`` = 7-9 chars) still fit.
+#: The previous VARCHAR(10) silently truncated the ``DBSYNTH{6 digits}``
+#: form (13 chars) — see P1-017 root fix in drugbank_pipeline.py and
+#: migration 013_widen_drugbank_id_column.sql.
+DRUGBANK_ID_LENGTH: int = 64
 
 #: STRING protein ID max length (e.g. '9606.ENSP00000269305').
 STRING_ID_LENGTH: int = 50

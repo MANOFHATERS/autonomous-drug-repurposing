@@ -886,9 +886,42 @@ def download_drugbank_open_data(raw_dir: Path) -> dict[str, Path]:
     # of the SHA-256 hash (DB + 8 hex digits = ~4.3 billion IDs, collision
     # probability negligible for any realistic drug corpus). Switched
     # MD5 -> SHA-256 for cryptographic robustness (MD5 is deprecated for
-    # any collision-sensitive use). Schema allows `DB\d{5,6}` historically,
-    # but the load() path accepts longer DB-prefixed IDs and the
-    # Drug model's drugbank_id column is VARCHAR(64) -- so 8-hex IDs fit.
+    # any collision-sensitive use).
+    #
+    # P1-017 ROOT FIX (Team-2 -- use clearly non-DrugBank prefix for
+    #   synthesized IDs):
+    #   The previous code generated synthesized IDs as ``DB{8 hex}``
+    #   (e.g. ``DBA1B2C3D4``) and ``DBSYNTH{6 digits}`` (e.g.
+    #   ``DBSYNTH000001``). Both forms used the ``DB`` prefix -- the
+    #   SAME prefix used by REAL DrugBank IDs (``DB00945``, etc.).
+    #   This created two problems:
+    #     1. COLLISION RISK: if DrugBank ever emits an 8-hex ID
+    #        (``DBA1B2C3D4``), it would collide with the synthesized
+    #        sentinel. Real DrugBank has never emitted this form, but
+    #        the collision risk is structural.
+    #     2. DOWNSTREAM CONFUSION: downstream consumers that query
+    #        DrugBank's API with synthesized IDs get 404s (silently).
+    #        The KG has phantom drug nodes with no real DrugBank backing.
+    #        The ``uq_drugs_drugbank_id`` partial unique index treats
+    #        synthesized IDs as unique, preventing future merges with
+    #        real DrugBank records.
+    #   ADDITIONAL BUG: the ``DBSYNTH{6 digits}`` form is 13 chars,
+    #   but the ``drugbank_id`` column was VARCHAR(10) -- the DBSYNTH
+    #   form was SILENTLY TRUNCATED or REJECTED at the DB level. The
+    #   v50 fallback was effectively dead code for missing-InChIKey drugs.
+    #   ROOT FIX:
+    #     1. Change the synthesized prefix from ``DB`` to ``SYNTH-DB-``
+    #        (clearly non-DrugBank -- no collision risk).
+    #     2. Hash form: ``SYNTH-DB-{8 hex}`` (e.g. ``SYNTH-DB-A1B2C3D4``).
+    #     3. Missing-InChIKey form: ``SYNTH-DB-M{6 digits}`` (e.g.
+    #        ``SYNTH-DB-M000001`` -- ``M`` for Missing).
+    #     4. Widen ``DRUGBANK_ID_LENGTH`` from 10 to 64 (see models.py
+    #        and migration 013) so the longer synthesized IDs fit.
+    #     5. Update ``_DRUGBANK_ID_RE`` to ONLY accept real DrugBank IDs
+    #        (``^DB\d{5,7}$``). Add a SEPARATE ``_SYNTHESIZED_DRUG_ID_RE``
+    #        for the synthesized form. Validation accepts EITHER.
+    #     6. Downstream consumers can distinguish real vs synthesized by
+    #        the prefix (``DB`` = real, ``SYNTH-DB-`` = synthesized).
     def _synthesize_drugbank_id(inchikey: str) -> str:
         # v90 ROOT FIX (BUG #12): the previous code returned
         # "DBSYNTH000000" (a FIXED sentinel) for ALL drugs missing
@@ -902,9 +935,13 @@ def download_drugbank_open_data(raw_dir: Path) -> dict[str, Path]:
             _synthesize_drugbank_id._counter = getattr(
                 _synthesize_drugbank_id, "_counter", 0
             ) + 1
-            return f"DBSYNTH{_synthesize_drugbank_id._counter:06d}"
+            # P1-017: SYNTH-DB-M prefix (M for Missing InChIKey).
+            # 17 chars total — fits in VARCHAR(64).
+            return f"SYNTH-DB-M{_synthesize_drugbank_id._counter:06d}"
         h = hashlib.sha256(inchikey.encode()).hexdigest()
-        return f"DB{h[:8].upper()}"
+        # P1-017: SYNTH-DB- prefix + 8 hex chars = 17 chars total.
+        # Fits in VARCHAR(64).
+        return f"SYNTH-DB-{h[:8].upper()}"
 
     drugs_df = pd.DataFrame({
         "drugbank_id": chembl_df["inchikey"].apply(_synthesize_drugbank_id),
