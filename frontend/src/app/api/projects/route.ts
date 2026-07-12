@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requireAuth, requireRole, badRequest, notFound } from "@/lib/api-helpers";
+import { requireAuth, requireRole, badRequest, notFound, requireCsrfOrSend } from "@/lib/api-helpers";
 import { createProject, listProjects } from "@/lib/services/projects";
 import { db } from "@/lib/db";
 
@@ -83,6 +83,10 @@ export async function GET() {
 }
 
 export async function POST(req: NextRequest) {
+  // FE-011: CSRF protection on every state-changing route.
+  const csrf = await requireCsrfOrSend(req);
+  if (csrf.response) return csrf.response;
+
   const auth = await requireOrgProjectRole();
   if (auth.user === null) return auth.response;
   let body: { name: string; description?: string; visibility?: "private" | "org" | "public"; tags?: string[] };

@@ -5,7 +5,7 @@ import {
   revokeAllRefreshTokensForUser,
   REFRESH_COOKIE,
 } from "@/lib/auth/server";
-import { writeAuditLog } from "@/lib/api-helpers";
+import { writeAuditLog, requireCsrfOrSend, clearCsrfCookie } from "@/lib/api-helpers";
 import { cookies } from "next/headers";
 
 /**
@@ -25,7 +25,11 @@ import { cookies } from "next/headers";
  * token (currently redundant with the user-wide revocation but provides
  * defense-in-depth if the user object ever fails to resolve).
  */
-export async function POST(_req: NextRequest) {
+export async function POST(req: NextRequest) {
+  // FE-011: CSRF protection on every state-changing route.
+  const csrf = await requireCsrfOrSend(req);
+  if (csrf.response) return csrf.response;
+
   const user = await getAuthenticatedUser();
 
   // Read the raw refresh-cookie value BEFORE clearing cookies. The cookie
@@ -78,5 +82,7 @@ export async function POST(_req: NextRequest) {
   }
 
   await clearAuthCookies();
+  // FE-011: clear the CSRF cookie too so a re-login gets a fresh token.
+  await clearCsrfCookie();
   return NextResponse.json({ ok: true });
 }

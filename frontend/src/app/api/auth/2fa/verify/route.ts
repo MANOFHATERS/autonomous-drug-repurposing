@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { getAuthenticatedUser } from "@/lib/auth/server";
 import { verifyTotpWithReplayCheck } from "@/lib/auth/totp";
-import { badRequest, internalError, writeAuditLog } from "@/lib/api-helpers";
+import { badRequest, internalError, writeAuditLog, requireCsrfOrSend } from "@/lib/api-helpers";
 
 /**
  * POST /api/auth/2fa/verify
@@ -22,6 +22,10 @@ import { badRequest, internalError, writeAuditLog } from "@/lib/api-helpers";
  * rejects any code whose counter is <= the user's lastTotpCounter.
  */
 export async function POST(req: NextRequest) {
+  // FE-011: CSRF protection on every state-changing route.
+  const csrf = await requireCsrfOrSend(req);
+  if (csrf.response) return csrf.response;
+
   const user = await getAuthenticatedUser();
   if (!user) {
     return NextResponse.json({ error: "unauthorized", message: "Authentication required" }, { status: 401 });

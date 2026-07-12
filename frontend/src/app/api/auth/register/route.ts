@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { hashPassword, validateEmail, validatePasswordPolicy, signAccessToken, rotateRefreshToken, setAuthCookies } from "@/lib/auth/server";
-import { badRequest, internalError, writeAuditLog } from "@/lib/api-helpers";
+import { badRequest, internalError, writeAuditLog, requireCsrfOrSend, issueCsrfToken, setCsrfCookie } from "@/lib/api-helpers";
 import { checkIpRateLimit, recordIpAttempt } from "@/lib/auth/rate-limit";
 import { Prisma } from "@prisma/client";
 import { createHmac, randomBytes } from "crypto";
@@ -157,6 +157,10 @@ async function sendVerificationEmail(email: string, token: string, userId: strin
 }
 
 export async function POST(req: NextRequest) {
+  // FE-011: CSRF protection on every state-changing route.
+  const csrf = await requireCsrfOrSend(req);
+  if (csrf.response) return csrf.response;
+
   // FE-035 ROOT FIX: IP-based rate limiting on registration. Without this,
   // an attacker could spam account creation indefinitely, filling the User
   // table with garbage accounts. We reuse the same checkIpRateLimit /

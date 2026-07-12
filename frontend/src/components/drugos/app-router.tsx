@@ -154,10 +154,16 @@ function ScoreBar({ score, size = 'md' }: { score: number; size?: 'sm' | 'md' | 
   )
 }
 
-function SafetyBadge({ tier }: { tier: 'green' | 'yellow' | 'red' }) {
-  const c = { green: 'bg-emerald-50 text-emerald-700 border-emerald-200', yellow: 'bg-amber-50 text-amber-700 border-amber-200', red: 'bg-red-50 text-red-700 border-red-200' }
-  const l = { green: 'Safe', yellow: 'Caution', red: 'Risk' }
-  return <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold border ${c[tier]}`}>{l[tier]}</span>
+function SafetyBadge({ tier }: { tier: 'green' | 'yellow' | 'red' | 'unknown' }) {
+  // FE-023: 'unknown' tier — neutral gray for RL model predictions.
+  const c: Record<string, string> = {
+    green: 'bg-emerald-50 text-emerald-700 border-emerald-200',
+    yellow: 'bg-amber-50 text-amber-700 border-amber-200',
+    red: 'bg-red-50 text-red-700 border-red-200',
+    unknown: 'bg-slate-100 text-slate-600 border-slate-300',
+  };
+  const l: Record<string, string> = { green: 'Safe', yellow: 'Caution', red: 'Risk', unknown: 'Model score only' };
+  return <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold border ${c[tier] || c.unknown}`} title={tier === 'unknown' ? 'Model-derived safety score — not a substitute for clinical review.' : undefined}>{l[tier] || l.unknown}</span>
 }
 
 function StatusDot({ status }: { status: string }) {
