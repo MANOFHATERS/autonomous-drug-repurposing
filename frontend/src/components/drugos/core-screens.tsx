@@ -95,16 +95,21 @@ function ScoreBar({ score, size = 'md' }: { score: number; size?: 'sm' | 'md' | 
   );
 }
 
-function SafetyBadge({ tier }: { tier: 'green' | 'yellow' | 'red' }) {
-  const cfg = {
+function SafetyBadge({ tier }: { tier: 'green' | 'yellow' | 'red' | 'unknown' }) {
+  // FE-023: 'unknown' tier — neutral gray for RL model predictions.
+  const cfg: Record<string, { label: string; bg: string; text: string; border: string; dot?: string }> = {
     green: { label: 'Safe', bg: 'bg-emerald-50', text: 'text-emerald-700', border: 'border-emerald-200', dot: 'bg-emerald-500' },
     yellow: { label: 'Caution', bg: 'bg-amber-50', text: 'text-amber-700', border: 'border-amber-200', dot: 'bg-amber-500' },
     red: { label: 'High Risk', bg: 'bg-red-50', text: 'text-red-700', border: 'border-red-200', dot: 'bg-red-500' },
+    unknown: { label: 'Model score only', bg: 'bg-slate-100', text: 'text-slate-600', border: 'border-slate-300' },
   };
-  const c = cfg[tier];
+  const c = cfg[tier] || cfg.unknown;
   return (
-    <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-semibold border ${c.bg} ${c.text} ${c.border}`}>
-      <span className={`w-1.5 h-1.5 rounded-full ${c.dot}`} />
+    <span
+      className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-semibold border ${c.bg} ${c.text} ${c.border}`}
+      title={tier === 'unknown' ? 'Model-derived safety score — not a substitute for clinical review.' : undefined}
+    >
+      {c.dot && <span className={`w-1.5 h-1.5 rounded-full ${c.dot}`} />}
       {c.label}
     </span>
   );
@@ -500,7 +505,17 @@ function SearchResultsScreen() {
     clinicalScore: Math.round((rc.efficacyScore || 0) * 100),
     // FE-049: RL ranker does not compute molecular similarity — null, not 0.
     molSimScore: null,
-    safetyTier: (rc.safetyScore || 0) >= 0.7 ? 'green' : (rc.safetyScore || 0) >= 0.4 ? 'yellow' : 'red',
+    // FE-023 ROOT FIX: safetyTier is 'unknown' for RL candidates. The
+    // previous code mapped the model's safetyScore to green/yellow/red with
+    // hardcoded thresholds (>=0.7 green, >=0.4 yellow) that were never
+    // clinically validated. Showing a green "Safe" badge on a drug because
+    // a model output exceeded 0.7 is scientifically irresponsible — many
+    // drugs with high model scores have serious adverse events (black-box
+    // warnings, REMS programs). Real safety tiering must come from openFDA
+    // label data (black-box warning = red, etc.) or FAERS adverse-event
+    // counts. Until that integration is in place, RL candidates show
+    // 'unknown' with a disclaimer banner.
+    safetyTier: 'unknown' as const,
     // FE-024: mechanism is fetched from ChEMBL by CandidateTable; leave empty here.
     mechanism: '',
     clinicalPhase: rc.literatureSupport ? 'Literature-supported' : 'Novel',
@@ -591,6 +606,19 @@ function SearchResultsScreen() {
         <div className="mb-4 text-xs text-emerald-700 p-2 border border-emerald-200 rounded bg-emerald-50">
           <strong>Live RL predictions:</strong> {realCandidates.length} candidates from the Phase 4 RL ranker
           (source: {rlData.source}).
+        </div>
+      )}
+      {/* FE-023 ROOT FIX: Patient-safety disclaimer. RL safety scores are
+          model outputs, NOT clinical safety determinations. */}
+      {realCandidates.length > 0 && (
+        <div className="mb-4 text-xs text-slate-700 p-3 border border-slate-300 rounded bg-slate-50">
+          <strong className="text-slate-900">Patient-safety disclaimer:</strong>{' '}
+          Safety scores shown here are model-derived outputs from the Phase 4 RL ranker.
+          They are <strong>not</strong> a substitute for clinical review, FDA label review,
+          or FAERS adverse-event analysis. The "Safety" column shows "Model score only"
+          because the model's safety score has not been calibrated against real clinical data.
+          Do not advance any candidate into a clinical-trial enrollment decision based on
+          these scores alone — consult openFDA labels, FAERS, and a qualified pharmacist.
         </div>
       )}
       {usingMock && (
@@ -865,7 +893,8 @@ function CandidateDetailScreen() {
                 <p className="text-sm text-muted-foreground mb-4">
                   {candidate.safetyTier === 'green' ? 'Low risk profile — suitable for repurposing investigation with standard monitoring.' :
                    candidate.safetyTier === 'yellow' ? 'Moderate risk — requires enhanced monitoring and risk mitigation strategies.' :
-                   'High risk — significant safety concerns require careful benefit-risk assessment.'}
+                   candidate.safetyTier === 'red' ? 'High risk — significant safety concerns require careful benefit-risk assessment.' :
+                   'Model-derived safety score only — NOT a clinical safety determination. Tier will be assigned once openFDA label data (black-box warnings, REMS) and FAERS adverse-event counts are loaded. Do not advance into clinical-trial enrollment decisions without consulting FDA labels and a qualified pharmacist.'}
                 </p>
                 {admet && <ADMETRadarChart data={admet} />}
               </CardContent>
@@ -1710,7 +1739,7 @@ function SafetyProfileScreen() {
             })}
             <div className="mt-3 p-2.5 bg-red-50 border border-red-200 rounded-lg">
               <div className="flex items-center gap-2"><AlertTriangle className="h-4 w-4 text-red-600" /><span className="text-sm font-medium text-red-700">Black Box Warning</span></div>
-              <p className="text-xs text-red-600 mt-1">{candidate.safetyTier === 'red' ? 'This drug carries significant safety risks requiring close monitoring.' : 'No black box warnings identified for repurposing context.'}</p>
+              <p className="text-xs text-red-600 mt-1">{candidate.safetyTier === 'red' ? 'This drug carries significant safety risks requiring close monitoring.' : candidate.safetyTier === 'unknown' ? 'Safety tier not assigned — model-derived score only. Verify black-box warning status via openFDA labels before proceeding.' : 'No black box warnings identified for repurposing context.'}</p>
             </div>
           </CardContent>
         </Card>

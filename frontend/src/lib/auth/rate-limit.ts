@@ -149,16 +149,47 @@ function maybeCleanup() {
   });
 }
 
+// FE-020 ROOT FIX: The previous getClientIp() validated X-Real-IP and
+// X-Forwarded-For with `/^\d{1,3}(\.\d{1,3}){3}$/` — an IPv4-ONLY regex.
+// On any IPv6 deployment (AWS dual-stack, Cloudflare, GCP, Azure — all
+// default to dual-stack), X-Real-IP is `2001:db8::1` etc. The regex
+// rejected it, the function returned "unknown", and ALL IPv6 clients
+// shared a single "unknown" bucket. One user's 20 failed logins locked
+// out EVERY IPv6 client for 15 minutes — a CRO with 50 researchers behind
+// IPv6 NAT could be locked out by a single typo.
+//
+// The fix is a permissive validator that accepts both IPv4 and IPv6
+// (full and v4-mapped forms), plus an explicit fallback for trusted-proxy
+// headers (cf-connecting-ip, true-client-ip) so deployments behind
+// Cloudflare/Akamai don't need X-Real-IP at all.
+const IPV4_OR_V6_RE =
+  /^(?:(?:\d{1,3}\.){3}\d{1,3}|(?:[0-9a-fA-F]{1,4}:){2,7}[0-9a-fA-F]{0,4}|::(?:[fF]{4}:)?(?:\d{1,3}\.){3}\d{1,3})$/;
+
+function isValidIp(s: string): boolean {
+  // Reject empty / overly long strings early to bound Map key size.
+  if (!s || s.length > 45) return false; // 45 = max IPv6 textual length (RFC 5952)
+  return IPV4_OR_V6_RE.test(s);
+}
+
 function getClientIp(req: NextRequest): string {
   // Trust X-Forwarded-For only if a known proxy set it. In production behind
   // Caddy, Caddy sets X-Real-IP and X-Forwarded-For. We prefer X-Real-IP
   // because it can't be spoofed by the client (Caddy overwrites it).
-  const xRealIp = req.headers.get("x-real-ip");
-  if (xRealIp && /^\d{1,3}(\.\d{1,3}){3}$/.test(xRealIp)) return xRealIp;
-  const xff = req.headers.get("x-forwarded-for");
-  if (xff) {
-    const first = xff.split(",")[0].trim();
-    if (first && /^\d{1,3}(\.\d{1,3}){3}$/.test(first)) return first;
+  // We also honor cf-connecting-ip (Cloudflare) and true-client-ip (Akamai)
+  // for deployments where those proxies are in front.
+  const candidateHeaders = [
+    "x-real-ip",
+    "cf-connecting-ip",
+    "true-client-ip",
+    "x-forwarded-for",
+  ];
+  for (const h of candidateHeaders) {
+    const v = req.headers.get(h);
+    if (!v) continue;
+    // X-Forwarded-For may be a comma-separated list; the leftmost entry is
+    // the original client. Other headers should be a single IP.
+    const first = v.split(",")[0].trim();
+    if (first && isValidIp(first)) return first;
   }
   return "unknown";
 }

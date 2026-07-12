@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { getAuthenticatedUser, verifyPassword } from "@/lib/auth/server";
 import { verifyTotp } from "@/lib/auth/totp";
-import { badRequest, internalError, writeAuditLog } from "@/lib/api-helpers";
+import { badRequest, internalError, writeAuditLog, requireCsrfOrSend } from "@/lib/api-helpers";
 
 /**
  * POST /api/auth/2fa/disable
@@ -28,6 +28,10 @@ import { badRequest, internalError, writeAuditLog } from "@/lib/api-helpers";
  * a separate /api/auth/2fa/recover endpoint with its own audit trail).
  */
 export async function POST(req: NextRequest) {
+  // FE-011: CSRF protection on every state-changing route.
+  const csrf = await requireCsrfOrSend(req);
+  if (csrf.response) return csrf.response;
+
   const user = await getAuthenticatedUser();
   if (!user) {
     return NextResponse.json(

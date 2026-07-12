@@ -807,6 +807,8 @@ describe("FE-044: project creation checks OrgMember.role", () => {
     const { POST } = await import("@/app/api/projects/route");
     const req = {
       json: async () => ({ name: "p" }),
+      // FE-011 CSRF check reads req.headers.get('authorization').
+      headers: { get: () => null },
     } as any;
     const res = await POST(req);
     expect(res.status).toBe(403);
@@ -844,6 +846,8 @@ describe("FE-044: project creation checks OrgMember.role", () => {
     const { POST } = await import("@/app/api/projects/route");
     const req = {
       json: async () => ({ name: "My Project" }),
+      // FE-011 CSRF check reads req.headers.get('authorization').
+      headers: { get: () => null },
     } as any;
     const res = await POST(req);
     expect(res.status).toBe(201);
