@@ -222,7 +222,17 @@ class HeterogeneousMultiHeadAttention(nn.Module):
         # The fix: count active edge types per forward call and use
         # 1/sqrt(active_count). This is computed lazily (no buffer)
         # so it adapts to graph sparsity.
-        self._static_num_edge_types = max(1, len(self.edge_types))
+        #
+        # P3-017 ROOT FIX (DEAD CODE): removed
+        # ``self._static_num_edge_types = max(1, len(self.edge_types))``.
+        # This attribute was a LEFTOVER from the pre-V90 code that used a
+        # static buffer for the cross_type_norm divisor. After the V90
+        # BUG #17 fix made the divisor DYNAMIC (computed per forward call
+        # from active_edge_type_count), the static attribute was NEVER
+        # READ anywhere — not in forward(), not in any other method, not
+        # by any external caller. It was dead code that misled readers
+        # into thinking it was used for the divisor. Removing it makes
+        # the code honest about what's actually used at runtime.
 
         self.attn_dropout = nn.Dropout(dropout)
 

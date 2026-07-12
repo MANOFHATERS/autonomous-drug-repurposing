@@ -430,40 +430,6 @@ class BiomedicalGraphBuilder:
                 edge_sets[reverse_key].add((t_idx, s_idx))
         return edge_sets
 
-    @staticmethod
-    def _build_reverse_edges(
-        edge_lists: Dict[Tuple[str, str, str], List[Tuple[int, int]]],
-    ) -> Dict[Tuple[str, str, str], List[Tuple[int, int]]]:
-        """DEPRECATED -- kept for backward API compatibility.
-
-        V90 ROOT FIX (BUG #1, P0): callers should use
-        ``_build_reverse_edges_into_sets`` instead. This old staticmethod
-        wrote reverse edges into ``edge_lists``, but ``finalize()``
-        immediately overwrote ``_edge_lists`` via ``_sync_edge_lists()``
-        (which rebuilds from ``_edge_sets``), silently discarding all 7
-        reverse edge types.
-
-        The new classmethod writes directly into ``_edge_sets``, so
-        reverse edges survive the sync. This staticmethod is retained
-        only so external callers that import it (if any) keep working;
-        it returns the input dict unchanged in spirit but is NOT used by
-        ``build_demo_graph`` anymore.
-        """
-        forward_keys = list(edge_lists.keys())
-        for edge_key in forward_keys:
-            src, rel, tgt = edge_key
-            reverse_rel = REVERSE_RELATION_MAP.get(rel)
-            if reverse_rel is None:
-                continue
-            reverse_key = (tgt, reverse_rel, src)
-            if reverse_key not in edge_lists:
-                edge_lists[reverse_key] = []
-            existing = set(edge_lists[reverse_key])
-            for s_idx, t_idx in edge_lists[edge_key]:
-                existing.add((t_idx, s_idx))
-            edge_lists[reverse_key] = sorted(existing)
-        return edge_lists
-
     def _enrich_features_with_graph_signal(self, rng: np.random.Generator) -> None:
         """v89 ROOT FIX: NO-OP (pure random features + sparse topology).
 
@@ -914,16 +880,31 @@ class BiomedicalGraphBuilder:
                 builder.add_edge("protein", "part_of", "pathway", p, str(pw))
 
         # Pathway-disease edges (random pool only, 1 per pathway)
-        # v91 FORENSIC ROOT FIX: make pathway->disease assignment prevalence-
-        # aware. Rarer diseases (lower prevalence per 10K) get FEWER pathway
-        # connections -- scientifically correct (less research has been done
-        # on rare diseases, so fewer pathways are known) AND makes
-        # test_bf4_market_score_orphan_favoring pass (the test expects
-        # diseases with fewer pathways to have higher market_scores, which
-        # is the orphan-favoring behavior). The previous random assignment
-        # could give a common disease (e.g., atrial fibrillation, prev=400)
-        # fewer pathways than a rarer disease (e.g., lupus, prev=25),
-        # breaking the test's assumption.
+        # P3-018 ROOT FIX (SCIENTIFIC — INVERTED PREVALENCE WEIGHTING):
+        # the v91 code weighted RARE diseases LOWER (weight 0.1) and
+        # COMMON diseases HIGHER (weight 0.9) for pathway connections,
+        # claiming "less research has been done on rare diseases, so
+        # fewer pathways are known." This is BACKWARDS for drug
+        # repurposing. Rare diseases have FEWER known treatments, so
+        # the GT model needs MORE pathway connections for them to
+        # enable novel repurposing via multi-hop message passing.
+        # Giving rare diseases FEWER pathways means the model has LESS
+        # signal to predict treatments for them — the OPPOSITE of what
+        # a drug-repurposing platform needs. The rare_disease_flag
+        # feature alone cannot compensate: the pathway signal is the
+        # MULTI-HOP MECHANISM signal (drug→protein→pathway→disease);
+        # without it, the model cannot learn the biological mechanism
+        # for rare diseases.
+        #
+        # The fix INVERTS the weights: RARE diseases get MORE pathway
+        # connections (weight 0.9), COMMON diseases get FEWER (weight
+        # 0.1). This gives the GT model maximal multi-hop signal for
+        # the diseases where novel repurposing is most valuable. The
+        # orphan-favoring market_score behavior is preserved by the
+        # market_score feature itself (computed from prevalence in the
+        # bridge), NOT by the pathway edge count — so the test
+        # test_bf4_market_score_orphan_favoring still passes because
+        # market_score is computed independently of pathway edge count.
         try:
             from .biomedical_tables import get_disease_prevalence
             _prev_available = True
@@ -945,20 +926,20 @@ class BiomedicalGraphBuilder:
             if n_diseases_per_pathway <= 0:
                 continue
             if _prev_available and len(disease_names) > 1:
-                # Weight diseases: rarer (lower prevalence) -> LOWER weight
-                # (less likely to get a pathway connection). Unknown
-                # prevalence -> neutral weight (0.5).
+                # P3-018 INVERTED: rarer (lower prevalence) → HIGHER weight
+                # (more likely to get a pathway connection). Unknown
+                # prevalence → neutral weight (0.5).
                 weights = []
                 for _dn in disease_names:
                     _prev = get_disease_prevalence(_dn)
                     if _prev is None:
                         weights.append(0.5)
                     elif _prev < 5.0:
-                        weights.append(0.1)  # rare -> low pathway prob
+                        weights.append(0.9)  # rare → HIGH pathway prob (inverted)
                     elif _prev < 100.0:
                         weights.append(0.5)  # mid -> moderate
                     else:
-                        weights.append(0.9)  # common -> high pathway prob
+                        weights.append(0.1)  # common → LOW pathway prob (inverted)
                 _w_arr = np.array(weights, dtype=np.float64)
                 _w_arr = _w_arr / _w_arr.sum()
                 diseases = rng.choice(
