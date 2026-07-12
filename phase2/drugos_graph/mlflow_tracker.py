@@ -18,7 +18,22 @@ class MLflowTracker:
     Falls back to local file logging if MLflow is not installed.
     """
 
-    def __init__(self, experiment_name: str = "DrugOS_Week2", tracking_uri: Optional[str] = None):
+    def __init__(
+        self,
+        # P2-050 ROOT FIX: the previous default "DrugOS_Week2" was a
+        # misleading artifact of an early sprint plan that confined
+        # Phase 2 to a single week. Per the DOCX build plan, Phase 2
+        # (Knowledge Graph Construction) actually spans Weeks 2-5, and
+        # the KG is the deliverable — not a per-week artefact. Operators
+        # who didn't override got EVERY Phase 2 run rolled up under one
+        # experiment called "Week2", which made the MLflow UI useless
+        # for filtering Week 4 TransE runs vs Week 5 HGT runs. Root fix:
+        # default to "DrugOS_Phase2" (the phase, not the week). Callers
+        # who want a tighter scope should override with a more specific
+        # name like "DrugOS_Phase2_TransE_v3" or "DrugOS_Phase2_HGT_v1".
+        experiment_name: str = "DrugOS_Phase2",
+        tracking_uri: Optional[str] = None,
+    ):
         self.experiment_name = experiment_name
         self.tracking_uri = tracking_uri
         self.mlflow = None

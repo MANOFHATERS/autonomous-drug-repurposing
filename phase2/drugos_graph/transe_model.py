@@ -433,6 +433,33 @@ class TransEModel(nn.Module):
     Implements ``model_protocol.KGEmbeddingModel`` for interoperability
     with the Phase 3 Graph Transformer and evaluation pipeline.
 
+    P2-067 ROOT FIX — Phase 2 ↔ Phase 3 embedding_dim MISMATCH:
+    ``TransEConfig.embedding_dim`` defaults to 256 (see config.py), but
+    Phase 3's ``DrugRepurposingGraphTransformer`` defaults to
+    ``embedding_dim=128``. A TransE checkpoint trained with
+    ``embedding_dim=256`` CANNOT be loaded into a Phase 3 model expecting
+    128-dim embeddings — the shape mismatch raises
+    ``RuntimeError: size mismatch for entity_embeddings.weight``.
+
+    The DOCX architecture (§5 Phase 3) suggests Phase 2 TransE
+    embeddings COULD warm-start Phase 3 — but this is impossible with
+    mismatched dims AND mismatched architectures. TransE is a BASELINE
+    KGE model (shared entity+relation embedding space, Bordes et al.
+    2013); the GraphTransformer is the PRODUCTION model (HGT attention
+    with per-node-type projections). Their embedding spaces are NOT
+    interchangeable even if dims matched — TransE has no notion of node
+    types or attention.
+
+    Operators who want to USE Phase 2 TransE embeddings in Phase 3 must
+    EXPLICITLY project them: train TransE with ``embedding_dim=128``
+    (override via ``DRUGOS_TRANSE_EMBEDDING_DIM=128``), then pass the
+    embeddings as ``node_features`` to the GraphTransformer's Compound
+    node type (which projects them through ``input_projections["Compound"]``
+    to the GraphTransformer's embedding_dim). This is the ONLY supported
+    warm-start path. Direct ``load_state_dict`` from TransE to
+    GraphTransformer is NOT supported and will fail with a shape
+    mismatch.
+
     Args:
         num_entities: Total number of unique entities in the KG.
         num_relations: Total number of unique relation types.
@@ -2193,11 +2220,28 @@ def train_transe(
 
     # ── Input validation ─────────────────────────────────────────────────
     # FIX C4.10: Reject empty train_triples at function entry.
-    if train_triples is None or len(train_triples[0]) == 0:
+    # P2-061 ROOT FIX: the previous check ``len(train_triples[0]) == 0``
+    # accessed index 0 BEFORE checking if train_triples was an empty
+    # tuple ``()``. For ``train_triples = ()``, ``train_triples[0]``
+    # raises ``IndexError: tuple index out of range`` — which is NOT
+    # the intended ``ValueError`` with the helpful message. Operators
+    # saw an unhelpful IndexError traceback instead of the "train_triples
+    # is empty" message. Root fix: add ``len(train_triples) == 0`` to
+    # the check BEFORE accessing index 0. The check now handles three
+    # cases: (1) None, (2) empty tuple/list (len 0), (3) tuple/list
+    # whose first element is empty. All three raise the same helpful
+    # ValueError.
+    if (
+        train_triples is None
+        or len(train_triples) == 0
+        or len(train_triples[0]) == 0
+    ):
         raise ValueError(
             f"train_triples is empty — cannot train. "
             f"Minimum {config.min_train_triples} triples required. "
-            f"Check data pipeline output before calling train_transe."
+            f"Check data pipeline output before calling train_transe. "
+            f"(P2-061 root fix: handles None, empty tuple, and "
+            f"empty first element uniformly.)"
         )
     if len(train_triples[0]) < config.min_train_triples:
         raise ValueError(

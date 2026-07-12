@@ -2005,8 +2005,16 @@ def store_label_map_metadata_in_graph(builder: Any) -> None:
     Args:
         builder: A DrugOSGraphBuilder (or compatible) instance.
     """
-    session = builder.driver.session()
-    try:
+    # P2-060 ROOT FIX: convert to ``with builder.driver.session() as session:``
+    # pattern for consistency with migrate_labels (line 1927). The previous
+    # ``session = builder.driver.session()`` + try/finally + ``session.close()``
+    # pattern was functionally equivalent but stylistically inconsistent — a
+    # new developer copying the wrong pattern might forget the close(). The
+    # ``with`` form guarantees the session is closed even on exception, with
+    # no chance of forgetting the finally block. This matches the modern
+    # neo4j-python-driver idiom and the pattern already used by
+    # migrate_labels in this same file.
+    with builder.driver.session() as session:
         session.run(
             "CALL dbms.setGraphProperty('label_map_version', $v)",
             v=LABEL_MAP_VERSION,
@@ -2031,8 +2039,6 @@ def store_label_map_metadata_in_graph(builder: Any) -> None:
             "label_map_metadata_stored_in_graph",
             extra={"version": LABEL_MAP_VERSION, "hash": LABEL_MAP_HASH},
         )
-    finally:
-        session.close()
 
 
 def check_label_map_version_matches_graph(builder: Any) -> None:
@@ -2048,8 +2054,11 @@ def check_label_map_version_matches_graph(builder: Any) -> None:
     Raises:
         RuntimeError: If the graph's stored version differs from the code version.
     """
-    session = builder.driver.session()
-    try:
+    # P2-060 ROOT FIX: convert to ``with builder.driver.session() as session:``
+    # pattern for consistency with migrate_labels and
+    # store_label_map_metadata_in_graph (above). The previous try/finally
+    # pattern was functionally equivalent but stylistically inconsistent.
+    with builder.driver.session() as session:
         result = session.run(
             "CALL dbms.graphproperty('label_map_version') YIELD value "
             "RETURN value"
@@ -2069,8 +2078,6 @@ def check_label_map_version_matches_graph(builder: Any) -> None:
                 f"code has {LABEL_MAP_VERSION!r}. Run migrate_labels() first "
                 f"(audit issue 12.6)."
             )
-    finally:
-        session.close()
 
 
 # Fixes audit issue 16.2 — commit_label_map_change audit trail

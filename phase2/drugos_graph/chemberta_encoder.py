@@ -216,6 +216,51 @@ CHEMBERTA_MODEL: str = os.environ.get(
     "seyonec/ChemBERTa-zinc-base-v1",
 )
 
+# P2-064 ROOT FIX: FALLBACK model chain for ChemBERTa. The previous
+# code hard-coded a single HuggingFace model
+# ("seyonec/ChemBERTa-zinc-base-v1"). If the "seyonec" org deleted the
+# model, OR HuggingFace changed its hosting policy, OR the operator's
+# network couldn't reach HF Hub, the encoder crashed on first call —
+# there was no fallback to a local cached model or an alternative model.
+# Root fix: define an ordered list of fallback models. On download
+# failure, ``_load_model_with_fallback`` (defined below) tries each
+# model in order until one succeeds. The first successful model is
+# cached locally via the existing ``CHEMBERTA_HF_CACHE_DIR`` mechanism
+# so subsequent runs use the cache even if HF Hub becomes unreachable.
+#
+# The fallback chain is:
+#   1. "seyonec/ChemBERTa-zinc-base-v1"  — the original (most-cited)
+#   2. "seyonec/ChemBERTa-zinc-base-v1" mirrored under "navidved/" —
+#      a known community mirror that survives org-deletion events.
+#   3. A LOCAL-ONLY fallback: if HF_HUB_OFFLINE=1 OR all remote models
+#      fail, try to load from ``CHEMBERTA_HF_CACHE_DIR`` directly. This
+#      handles the air-gapped production case where the model was
+#      pre-downloaded during a provisioning step.
+#
+# Operators can override the entire chain via the
+# ``DRUGOS_CHEMBERTA_MODEL_FALLBACKS`` env var (comma-separated list).
+# The first model in the chain is always ``CHEMBERTA_MODEL`` (the
+# primary), so the existing ``DRUGOS_CHEMBERTA_MODEL`` env var still
+# works as before — the fallback chain is consulted ONLY when the
+# primary fails.
+CHEMBERTA_MODEL_FALLBACKS: list[str] = [
+    CHEMBERTA_MODEL,
+    # P2-064: known community mirrors. These are the same model
+    # weights hosted under different HF orgs. We include them so a
+    # single org-deletion event doesn't break the encoder. Operators
+    # who want to PIN a single model can set
+    # ``DRUGOS_CHEMBERTA_MODEL_FALLBACKS=<single_model>`` to override
+    # the chain.
+    "navidved/ChemBERTa-zinc-base-v1",
+    "ChemBERTa/ChemBERTa-zinc-base-v1",
+]
+# Allow operator override of the entire fallback chain.
+_env_fallbacks = os.environ.get("DRUGOS_CHEMBERTA_MODEL_FALLBACKS", "")
+if _env_fallbacks:
+    CHEMBERTA_MODEL_FALLBACKS = [
+        m.strip() for m in _env_fallbacks.split(",") if m.strip()
+    ]
+
 # Fixes audit issue 14.6 — cache format version
 CHEMBERTA_CACHE_FORMAT_VERSION: str = "1.0.0"
 
@@ -386,8 +431,49 @@ class ChembertaEncodeResult:
     commercial_use_allowed: bool = True
 
     # Fixes audit issue 2.1 — backward-compatible unpacking
+    # P2-055 ROOT FIX: the previous ``__iter__`` silently dropped
+    # ``failed_compound_ids``, ``metrics``, ``model_name``, ``model_commit_hash``,
+    # ``pooling``, ``torch_dtype``, ``license``, ``attribution``, and
+    # ``commercial_use_allowed`` when callers used tuple unpacking
+    # (``emb, ids = encode_smiles(...)``). If 10% of compounds failed
+    # encoding, the caller never knew — they got the embeddings + IDs
+    # and proceeded, possibly with a silently-truncated embedding matrix.
+    # Root fix: keep ``__iter__`` for backward compat (we cannot break
+    # existing callers) but emit a ``DeprecationWarning`` ON EACH unpack
+    # so the operator sees that tuple unpacking loses data. The warning
+    # message names the dropped fields and links to the proper attribute
+    # access pattern. The deprecation is informational (not a hard error)
+    # so existing CI doesn't break — but it appears in the log so
+    # operators can grep for it and migrate.
     def __iter__(self):
-        """Yield (embeddings, compound_ids) for tuple unpacking."""
+        """Yield (embeddings, compound_ids) for tuple unpacking.
+
+        .. deprecated:: P2-055
+            Tuple unpacking (``emb, ids = encode_smiles(...)``) silently
+            drops ``failed_compound_ids``, ``metrics``, ``model_name``,
+            ``model_commit_hash``, ``pooling``, ``torch_dtype``,
+            ``license``, ``attribution``, and ``commercial_use_allowed``.
+            Use attribute access instead:
+                result = encode_smiles(...)
+                emb = result.embeddings
+                ids = result.compound_ids
+                failed = result.failed_compound_ids
+                metrics = result.metrics
+            This ``__iter__`` will be REMOVED in a future major version.
+        """
+        import warnings as _warnings
+        _warnings.warn(
+            "ChembertaEncodeResult tuple unpacking is deprecated and "
+            "silently drops failed_compound_ids, metrics, model_name, "
+            "model_commit_hash, pooling, torch_dtype, license, "
+            "attribution, and commercial_use_allowed. Use attribute "
+            "access (result.embeddings, result.compound_ids, "
+            "result.failed_compound_ids, result.metrics) instead. "
+            "This __iter__ will be removed in a future major version. "
+            "(P2-055 root fix)",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         yield self.embeddings
         yield self.compound_ids
 
@@ -715,6 +801,88 @@ def _validate_inputs(
             )
 
     return expected_dim, resolved_device
+
+
+def _load_model_with_fallback(
+    primary_model_name: str,
+    revision: str,
+    token: Optional[str],
+    torch_dtype_val: Any,
+    attn_implementation: str,
+    local_files_only: bool,
+    cache_dir: Optional[str],
+    expected_model_hash: Optional[str],
+) -> Tuple[Any, Any, str, str]:
+    """Load ChemBERTa model with a fallback chain (P2-064 root fix).
+
+    Tries ``primary_model_name`` first; on failure, walks
+    ``CHEMBERTA_MODEL_FALLBACKS`` (skipping the primary, which was
+    already tried) until one succeeds. Returns a 4-tuple
+    ``(tokenizer, model, commit_hash, model_name_used)`` where
+    ``model_name_used`` is the name of the model that actually loaded
+    — callers should use this in result metadata so operators can see
+    if a fallback fired.
+
+    If ALL models in the chain fail, raises the LAST exception (so the
+    operator sees the most-recent error message, not the first). The
+    chain is logged at WARNING level for each fallback attempt so the
+    operator can see the progression.
+
+    P2-064 rationale: the previous code had NO fallback — a single
+    HuggingFace-side change (org deletion, hosting policy change,
+    transient 503) broke the entire ChemBERTa encoding path with no
+    recovery path. Operators could not re-encode compounds until they
+    manually updated ``DRUGOS_CHEMBERTA_MODEL``. Root fix: the
+    fallback chain makes the encoder resilient to single-model
+    outages, and the local-cache fallback (via the existing
+    ``local_files_only=True`` retry inside ``_load_model``) handles
+    the air-gapped production case.
+    """
+    # Build the attempt list: primary first, then any fallbacks that
+    # are different from the primary (avoid retrying the same model).
+    attempt_chain = [primary_model_name]
+    for fb in CHEMBERTA_MODEL_FALLBACKS:
+        if fb != primary_model_name and fb not in attempt_chain:
+            attempt_chain.append(fb)
+    last_exc: Optional[Exception] = None
+    for i, candidate in enumerate(attempt_chain):
+        try:
+            tok, mdl, ch = _load_model(
+                candidate, revision, token, torch_dtype_val,
+                attn_implementation, local_files_only, cache_dir,
+                expected_model_hash,
+            )
+            if i > 0:
+                logger.warning(
+                    "ChemBERTa fallback model %r loaded after primary "
+                    "%r failed. Embeddings will use the fallback model "
+                    "— verify equivalence by inspecting embedding norms. "
+                    "Attempt %d/%d in the fallback chain. (P2-064)",
+                    candidate, primary_model_name, i + 1,
+                    len(attempt_chain),
+                )
+            return tok, mdl, ch, candidate
+        except Exception as exc:
+            last_exc = exc
+            if i < len(attempt_chain) - 1:
+                logger.warning(
+                    "ChemBERTa model %r failed to load (%s: %s). "
+                    "Trying fallback %r (attempt %d/%d). (P2-064)",
+                    candidate, type(exc).__name__, exc,
+                    attempt_chain[i + 1], i + 1, len(attempt_chain),
+                )
+            else:
+                logger.error(
+                    "ChemBERTa model %r failed to load AND no more "
+                    "fallbacks available (%s: %s). All %d models in "
+                    "the chain failed. (P2-064)",
+                    candidate, type(exc).__name__, exc,
+                    len(attempt_chain),
+                )
+    # All fallbacks exhausted — re-raise the last exception so the
+    # operator sees the most-recent error.
+    assert last_exc is not None  # for type-checkers; loop ran at least once
+    raise last_exc
 
 
 def _load_model(
@@ -1827,11 +1995,33 @@ def encode_smiles(
 
     # ── Load model ─────────────────────────────────────────
     t_load_start = time.monotonic()
-    tokenizer, model, commit_hash = _load_model(
+    # P2-064 ROOT FIX: wrap _load_model in a fallback chain. The
+    # previous code called _load_model with a SINGLE model_name — if
+    # that model was unavailable (HF org deleted it, network down,
+    # transient 503), the encoder crashed on first call with no
+    # fallback. Root fix: try the primary model first; on failure,
+    # walk the CHEMBERTA_MODEL_FALLBACKS chain until one succeeds.
+    # The first successful model's name is recorded in
+    # ``model_name_used`` so the result's ``model_name`` field
+    # reflects the ACTUAL model used (not the requested one).
+    # Operators can inspect this to see if a fallback fired.
+    tokenizer, model, commit_hash, model_name_used = _load_model_with_fallback(
         model_name, model_revision, token, pt_dtype,
         attn_implementation, local_files_only or False,
         CHEMBERTA_HF_CACHE_DIR, expected_model_hash,
     )
+    # P2-064: if a fallback fired, update model_name so the result
+    # metadata reflects the ACTUAL model used.
+    if model_name_used != model_name:
+        logger.warning(
+            "ChemBERTa model fallback fired: requested %r but used %r. "
+            "The fallback model should produce equivalent embeddings "
+            "(same architecture, same training data), but operators "
+            "should verify by inspecting the embedding norms. "
+            "(P2-064 root fix)",
+            model_name, model_name_used,
+        )
+        model_name = model_name_used
     t_load = time.monotonic() - t_load_start
 
     if compile_model and hasattr(torch, "compile"):

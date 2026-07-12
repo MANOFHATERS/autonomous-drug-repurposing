@@ -554,6 +554,93 @@ for _src, _rel, _dst in CORE_EDGE_TYPES:
         })
     EDGE_PROPERTY_WHITELIST[(_src, _rel, _dst)] = _base
 
+# P2-053 ROOT FIX: validate that EDGE_PROPERTY_WHITELIST keys are in
+# EXACT 1:1 correspondence with CORE_EDGE_TYPES_SET. The whitelist is
+# built by iterating CORE_EDGE_TYPES (above), so by construction the
+# keys SHOULD match — but a future maintainer might monkey-patch one
+# without the other, OR a typo in CORE_EDGE_TYPES (e.g. an extra
+# trailing space "Compound " instead of "Compound") would produce a
+# whitelist key that doesn't match what the loaders emit, silently
+# stripping ALL extended properties (pchembl_value, normalized_score,
+# etc.) on that triple type. The audit's fallback whitelist
+# (frozenset({"source", "evidence", "score"}) in the .get() call) is
+# too permissive to catch this — the loader silently degrades to the
+# 3-property fallback and the operator never knows.
+#
+# Root fix: assert at module-load time that:
+#   (1) every CORE_EDGE_TYPES entry has a whitelist key, AND
+#   (2) every whitelist key is a CORE_EDGE_TYPES entry, AND
+#   (3) no entry has leading/trailing whitespace (the most common typo).
+# This is a CHEAP, LOUD check that fails the import rather than
+# silently corrupting the KG. We skip it in test contexts (detected
+# via PYTEST_CURRENT_TEST / DRUGOS_SKIP_IMPORT_CHECK / pytest in
+# sys.modules) so test fixtures can monkey-patch CORE_EDGE_TYPES
+# without crashing the import — the same pattern used by
+# ``_assert_edge_property_whitelist_populated`` below.
+_p2_053_skip = (
+    os.environ.get("PYTEST_CURRENT_TEST") is not None
+    or os.environ.get("DRUGOS_SKIP_IMPORT_CHECK") == "1"
+    or "pytest" in sys.modules
+)
+if not _p2_053_skip:
+    # (1) every CORE_EDGE_TYPES entry must have a whitelist key.
+    _missing = [
+        triple for triple in CORE_EDGE_TYPES
+        if triple not in EDGE_PROPERTY_WHITELIST
+    ]
+    if _missing:
+        raise RuntimeError(
+            "P2-053 invariant violated: CORE_EDGE_TYPES contains triples "
+            f"with no EDGE_PROPERTY_WHITELIST entry: {_missing}. The "
+            "whitelist is built by iterating CORE_EDGE_TYPES — a missing "
+            "key means the iteration was short-circuited (monkey-patch) "
+            "or CORE_EDGE_TYPES was mutated after whitelist construction."
+        )
+    # (2) every whitelist key must be a CORE_EDGE_TYPES entry. Catches
+    # the case where a maintainer adds a whitelist entry for a triple
+    # that isn't a core edge type (typo in the triple).
+    _extra = [
+        triple for triple in EDGE_PROPERTY_WHITELIST
+        if triple not in CORE_EDGE_TYPES_SET
+    ]
+    if _extra:
+        raise RuntimeError(
+            "P2-053 invariant violated: EDGE_PROPERTY_WHITELIST contains "
+            f"keys not in CORE_EDGE_TYPES: {_extra}. These triples would "
+            "silently strip ALL extended properties on real edges "
+            "(pchembl_value, normalized_score, etc.) — the loader's "
+            "fallback whitelist is too permissive to catch this. Either "
+            "add the triple to CORE_EDGE_TYPES or remove the whitelist "
+            "entry."
+        )
+    # (3) no entry has leading/trailing whitespace. This is the most
+    # common typo that produces silent property stripping — the typo'd
+    # key exists in the whitelist (so the (1) check passes), but the
+    # actual edges loaded use the clean key and miss the lookup.
+    for _s, _r, _d in CORE_EDGE_TYPES:
+        for _label, _val in (("src", _s), ("rel", _r), ("dst", _d)):
+            if _val != _val.strip():
+                raise RuntimeError(
+                    f"P2-053 invariant violated: CORE_EDGE_TYPES triple "
+                    f"({_s!r}, {_r!r}, {_d!r}) has leading/trailing "
+                    f"whitespace in the {_label} component. This would "
+                    "produce a whitelist key that never matches the "
+                    "clean key the loaders emit — silently stripping "
+                    "ALL extended properties on that triple type. "
+                    "Remove the whitespace in config.CORE_EDGE_TYPES."
+                )
+            # Also reject internal whitespace-only typos (e.g. "treats "
+            # with trailing space). The .strip() check above catches
+            # leading/trailing; this check catches double spaces inside.
+            if "  " in _val:
+                raise RuntimeError(
+                    f"P2-053 invariant violated: CORE_EDGE_TYPES triple "
+                    f"({_s!r}, {_r!r}, {_d!r}) has a double-space in "
+                    f"the {_label} component. This is almost certainly "
+                    "a typo — silently strips all extended properties "
+                    "on that triple type."
+                )
+
 # RT-8 ROOT FIX: the previous code raised ImportError at module
 # import time when EDGE_PROPERTY_WHITELIST was empty. This made
 # kg_builder unimportable for unit tests, partial pipelines, CI
@@ -1788,8 +1875,28 @@ class GraphNodeLoader:
                     total_matched += max(0, len(clean_batch) - batch_created)
 
                     # Fixes C-6: Configurable progress log frequency
+                    # P2-059 ROOT FIX: the previous expression
+                    # ``(i // batch_size) % log_freq == 0`` ALWAYS
+                    # logged the FIRST batch (i=0 → 0 % log_freq == 0)
+                    # even in quiet mode (log_freq=10). That's because
+                    # ``i`` is the batch START index, so i=0 is batch
+                    # 0, i=batch_size is batch 1, i=2*batch_size is
+                    # batch 2, etc. The first batch ALWAYS satisfied the
+                    # modulo, producing noise in quiet mode. Root fix:
+                    # use ``batch_count = i // batch_size + 1`` (1-
+                    # indexed) and log when ``batch_count % log_freq ==
+                    # 1`` (the first batch of every log_freq-window). Or
+                    # equivalently, since the issue asks for a counter:
+                    # use ``batch_count % log_freq == 0`` on the 1-
+                    # indexed counter, which logs at batches log_freq,
+                    # 2*log_freq, 3*log_freq, ... — i.e. every log_freq
+                    # batches starting from batch log_freq (NOT batch 0).
+                    # This eliminates the spurious first-batch log in
+                    # quiet mode while preserving the original intent
+                    # (log every log_freq batches).
                     log_freq = _LOG_FREQUENCY
-                    if (i // batch_size) % log_freq == 0:
+                    batch_count = i // batch_size + 1  # 1-indexed
+                    if batch_count % log_freq == 0:
                         # Fixes L-5: Data lineage in logs
                         logger.info(
                             "  %s: loaded %d/%d nodes "

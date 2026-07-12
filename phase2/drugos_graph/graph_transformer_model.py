@@ -281,6 +281,23 @@ class GraphTransformerModel(nn.Module):
         self.input_projections = nn.ModuleDict()
         self.node_embedding_tables = nn.ModuleDict()
         node_feature_dims = node_feature_dims or {}
+        # P2-065 ROOT FIX: track which node types have no features AND
+        # no embedding size, so we can raise a CLEAR RuntimeError at
+        # forward() time if the caller forgot to call
+        # ``resize_node_embeddings``. The previous code silently created
+        # ``nn.Embedding(0, d)`` (zero-size) for these node types — the
+        # first forward() that tried to look up a node index in this
+        # table raised a cryptic ``IndexError: index out of range in
+        # self`` with no indication WHICH node type's table was empty.
+        # Root fix: keep the size-0 embedding (so the model is still
+        # constructible for testing / inspection) but record the
+        # offending node types in ``_node_types_pending_resize``. The
+        # ``forward()`` method checks this set at entry and raises a
+        # clear RuntimeError naming the offending node type(s) and the
+        # fix (``call resize_node_embeddings(<nt>, N) before forward()``).
+        # This turns a cryptic CUDA-side IndexError into an actionable
+        # Python-side error message at the call site.
+        self._node_types_pending_resize: set = set()
         for nt in self.node_types:
             in_dim = node_feature_dims.get(nt, 0)
             if in_dim and in_dim > 0:
@@ -290,6 +307,9 @@ class GraphTransformerModel(nn.Module):
                 # caller must call ``resize_node_embeddings`` after
                 # construction with the actual node count.
                 self.node_embedding_tables[nt] = nn.Embedding(0, d)
+                # P2-065: record that this node type needs a resize
+                # before forward() can be called safely.
+                self._node_types_pending_resize.add(nt)
         # Track current sizes for lazy resize.
         self._node_counts: Dict[str, int] = {nt: 0 for nt in self.node_types}
 
@@ -514,6 +534,11 @@ class GraphTransformerModel(nn.Module):
                     with torch.no_grad():
                         new_table.weight[: old.weight.shape[0]] = old.weight
                 self.node_embedding_tables[nt] = new_table.to(self._device)
+                # P2-065 ROOT FIX: this node type now has a non-zero
+                # embedding table — remove it from the pending-resize
+                # set so forward() no longer raises the "call
+                # resize_node_embeddings first" guard.
+                self._node_types_pending_resize.discard(nt)
 
     # -- KGEmbeddingModel Protocol properties ----------------------------
     @property
@@ -779,6 +804,44 @@ class GraphTransformerModel(nn.Module):
         """
         # Project input features to common dim if needed.
         h_dict: Dict[str, torch.Tensor] = {}
+        # P2-065 ROOT FIX: pre-flight check that all node types with
+        # size-0 embedding tables have been resized via
+        # ``resize_node_embeddings``. The previous code created
+        # ``nn.Embedding(0, d)`` for feature-less node types and let
+        # the first embedding lookup crash with a cryptic CUDA
+        # ``IndexError: index out of range in self`` — no indication
+        # which node type was the offender. Root fix: check the
+        # ``_node_types_pending_resize`` set at encode() entry and
+        # raise a CLEAR RuntimeError naming the offending node type(s)
+        # and the fix. This turns a cryptic CUDA-side error into an
+        # actionable Python-side error at the call site.
+        if self._node_types_pending_resize:
+            # Filter to only those that are actually used in this
+            # forward pass (x_dict keys for feature-less types). A node
+            # type in the pending set that does NOT appear in x_dict
+            # is fine (it's just not used in this forward). A node
+            # type in the pending set that DOES appear in x_dict with
+            # a non-empty tensor WOULD crash on lookup — flag it.
+            _offending = [
+                nt for nt in self._node_types_pending_resize
+                if nt in x_dict and x_dict[nt].numel() > 0
+            ]
+            if _offending:
+                _fix_example = (
+                    "{" + repr(_offending[0]) + ": N, ...}"
+                )
+                raise RuntimeError(
+                    "GraphTransformerModel.encode(): node type(s) "
+                    f"{_offending} have size-0 embedding tables (no "
+                    "input features were declared at construction, "
+                    "AND resize_node_embeddings() was not called "
+                    "before encode()). The first embedding lookup "
+                    "would crash with a cryptic CUDA IndexError. "
+                    f"Fix: call model.resize_node_embeddings("
+                    f"{_fix_example}) with the actual "
+                    "node count(s) BEFORE calling encode() / "
+                    "forward(). (P2-065 root fix)"
+                )
         for nt, x in x_dict.items():
             if nt in self.input_projections:
                 h_dict[nt] = self.input_projections[nt](x)
