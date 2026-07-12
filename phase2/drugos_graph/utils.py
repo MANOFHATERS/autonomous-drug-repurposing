@@ -125,6 +125,8 @@ __all__: list[str] = [
     "DEPRECATED_TYPES", "LEGACY_LABEL_ALIASES", "CASE_ALIASES",
     "LABEL_MAP_HASH", "LABEL_MAP_VERSION", "LABEL_API_VERSION",
     "LABEL_MAP_METADATA", "LABEL_SCHEMA_VERSION", "MAX_IDENTIFIER_LENGTH",
+    # Compound ID normalization (P2-036)
+    "normalize_inchikey",
 ]
 
 # ─── Type Aliases ──────────────────────────────────────────────────────────
@@ -1015,6 +1017,87 @@ def sanitize_rel_type(name: str) -> RelType:
         'causes_side_effect'
     """
     return RelType(_sanitize_identifier_core(name, "identifier"))
+
+
+# ─── Compound ID normalization (P2-036) ───────────────────────────────────
+# v102 ROOT FIX (P2-036): centralize InChIKey normalization in a single
+# helper so EVERY loader that emits an InChIKey produces the SAME canonical
+# form. The previous implementation had THREE call sites with three
+# different behaviors:
+#
+#   - phase1_bridge.py:3547 — ``inchikey.upper() if inchikey else ""``
+#       (uppercase, no strip, returns "" for falsy)
+#   - chembl_loader.py:2557 — ``str(inchikey).strip().upper()``
+#       (uppercase + strip, no None handling)
+#   - pubchem_loader.py:330 — ``inchikey = "" if inchikey.lower() == "nan" else inchikey.upper()``
+#       (uppercase, no strip, "nan" → "")
+#
+# The kg_builder.ID_PATTERNS["Compound"] regex requires UPPERCASE
+# InChIKeys (``[A-Z]{14}-[A-Z]{10}-[A-Z]`` per IUPAC). Any source
+# emitting a lowercase or mixed-case InChIKey would be dead-lettered.
+# Centralizing the normalization here guarantees:
+#   1. Whitespace is stripped (avoids " ABCD..." dead-letters).
+#   2. Case is uppercased (matches ID_PATTERNS regex).
+#   3. "nan"/"None"/"null" placeholders become empty string (so
+#      callers can falsy-check the result).
+#   4. None input returns "" (so callers don't crash on .upper()).
+#
+# This is the SAME class of bug as P2-010 (STITCH CIDm case mismatch)
+# — two code paths producing different canonical forms for the same
+# logical ID. Centralizing eliminates the entire bug class.
+
+# IUPAC canonical InChIKey format: 14 uppercase letters, hyphen, 10
+# uppercase letters, hyphen, 1 uppercase letter (protonation flag).
+_INCHIKEY_PATTERN = re.compile(r"^[A-Z]{14}-[A-Z]{10}-[A-Z]$")
+
+
+def normalize_inchikey(inchikey: Any) -> str:
+    """Normalize an InChIKey to its canonical uppercase, stripped form.
+
+    This is the SINGLE source of truth for InChIKey normalization across
+    the DrugOS pipeline. Every loader that emits a Compound node or edge
+    with an InChIKey canonical_id MUST route through this helper so the
+    kg_builder.ID_PATTERNS["Compound"] regex matches and dead-lettering
+    does not fragment entity resolution.
+
+    Canonicalization rules (applied in order):
+      1. ``None`` / non-string input → ``""`` (empty string).
+      2. Strip leading/trailing whitespace.
+      3. Uppercase (InChIKeys are case-sensitive per IUPAC; the
+         canonical form is UPPERCASE).
+      4. Placeholder values ``"nan"``, ``"none"``, ``"null"`` (case-
+         insensitive) → ``""`` (so callers can falsy-check).
+
+    Args:
+        inchikey: Raw InChIKey string (or None / NaN-like value).
+
+    Returns:
+        Canonical InChIKey string (uppercase, stripped). Returns ``""``
+        if the input is None, empty, or a placeholder. Callers should
+        falsy-check the return value before using it as a canonical_id.
+
+    Example:
+        >>> normalize_inchikey("  rzbjqzwdzgozio-uhfffaoyan  ")
+        'RZBJQZWDZGOZIO-UHFFFAOYAN'
+        >>> normalize_inchikey(None)
+        ''
+        >>> normalize_inchikey("nan")
+        ''
+        >>> normalize_inchikey("RZBJQZWDZGOZIO-UHFFFAOYAN-N")
+        'RZBJQZWDZGOZIO-UHFFFAOYAN-N'
+    """
+    if inchikey is None:
+        return ""
+    try:
+        ik = str(inchikey).strip()
+    except Exception:
+        return ""
+    if not ik:
+        return ""
+    ik_lower = ik.lower()
+    if ik_lower in ("nan", "none", "null", "na"):
+        return ""
+    return ik.upper()
 
 
 def sanitize_identifier(
@@ -2032,8 +2115,9 @@ def store_label_map_metadata_in_graph(builder: Any) -> None:
     Args:
         builder: A DrugOSGraphBuilder (or compatible) instance.
     """
-    session = builder.driver.session()
-    try:
+    # v102 ROOT FIX (P2-038): use ``with`` context manager for style
+    # consistency with migrate_labels() and check_label_map_version_matches_graph.
+    with builder.driver.session() as session:
         session.run(
             "CALL dbms.setGraphProperty('label_map_version', $v)",
             v=LABEL_MAP_VERSION,
@@ -2058,8 +2142,6 @@ def store_label_map_metadata_in_graph(builder: Any) -> None:
             "label_map_metadata_stored_in_graph",
             extra={"version": LABEL_MAP_VERSION, "hash": LABEL_MAP_HASH},
         )
-    finally:
-        session.close()
 
 
 def check_label_map_version_matches_graph(builder: Any) -> None:
@@ -2075,8 +2157,13 @@ def check_label_map_version_matches_graph(builder: Any) -> None:
     Raises:
         RuntimeError: If the graph's stored version differs from the code version.
     """
-    session = builder.driver.session()
-    try:
+    # v102 ROOT FIX (P2-038): use ``with`` context manager for style
+    # consistency with migrate_labels() (line 1927). The previous
+    # try/finally + session.close() was SAFE (the finally DID close)
+    # but style-inconsistent — the codebase standard is the ``with``
+    # form which guarantees close on ANY control-flow path including
+    # early returns and unexpected exceptions inside the body.
+    with builder.driver.session() as session:
         result = session.run(
             "CALL dbms.graphproperty('label_map_version') YIELD value "
             "RETURN value"
@@ -2096,8 +2183,6 @@ def check_label_map_version_matches_graph(builder: Any) -> None:
                 f"code has {LABEL_MAP_VERSION!r}. Run migrate_labels() first "
                 f"(audit issue 12.6)."
             )
-    finally:
-        session.close()
 
 
 # Fixes audit issue 16.2 -- commit_label_map_change audit trail

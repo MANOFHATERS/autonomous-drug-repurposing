@@ -1880,20 +1880,42 @@ class PyGBuilder(GraphBuilderProtocol):
             # Build kwargs dict, only including parameters supported by
             # the installed PyG version. PyG >= 2.6 added
             # add_negative_val_samples / add_negative_test_samples.
+            #
+            # v102 ROOT FIX (P2-045): the previous code set
+            # ``edge_types=[target_edge_type]`` ONLY — splitting just the
+            # forward edge. The reverse edge (Disease, rev_treats,
+            # Compound) was added to the data BEFORE RandomLinkSplit
+            # (lines 1825-1843) but NOT in the edge_types list, so
+            # RandomLinkSplit did NOT split it. After the split, train_data
+            # had the FULL reverse edge set, val_data had the FULL reverse
+            # edge set, test_data had the FULL reverse edge set. The
+            # reverse edges LEAKED between splits — the GNN could "see"
+            # val/test treats information via the reverse edge during
+            # training. AUC was inflated.
+            #
+            # ROOT FIX: add the reverse edge type to the ``edge_types``
+            # list so RandomLinkSplit splits BOTH the forward AND reverse
+            # edges in parallel. Each split's message-passing edges will
+            # contain ONLY the train/val/test portion of BOTH directions —
+            # no leakage. The ``rev_edge_types`` parameter is RETAINED
+            # because PyG uses it to coordinate the splits (so the held-out
+            # forward edge's corresponding reverse is also held out from
+            # message passing in the same split).
+            _rev_edge_type_tuple = (
+                target_edge_type[2],
+                f"{REVERSE_EDGE_PREFIX}{target_edge_type[1]}",
+                target_edge_type[0],
+            )
             _rls_kwargs: Dict[str, Any] = {
                 "num_val": self.config.val_ratio,
                 "num_test": self.config.test_ratio,
                 "disjoint_train_ratio": self.config.disjoint_train_ratio,
                 "neg_sampling_ratio": self.config.neg_sampling_ratio,
                 "add_negative_train_samples": self.config.add_negative_train_samples,
-                "edge_types": [target_edge_type],
-                "rev_edge_types": [
-                    (
-                        target_edge_type[2],
-                        f"{REVERSE_EDGE_PREFIX}{target_edge_type[1]}",
-                        target_edge_type[0],
-                    )
-                ],
+                # v102 P2-045: split BOTH forward AND reverse edges so
+                # neither direction leaks between train/val/test splits.
+                "edge_types": [target_edge_type, _rev_edge_type_tuple],
+                "rev_edge_types": [_rev_edge_type_tuple],
             }
             import inspect as _rls_inspect
             _rls_params = set(_rls_inspect.signature(
@@ -2104,12 +2126,29 @@ class PyGBuilder(GraphBuilderProtocol):
                     "val": perm[n_train:n_train + n_val],
                     "test": perm[n_train + n_val:n_train + n_val + n_test],
                 }
-                self.logger.info(
-                    f"node_disjoint_split partition[{ntype}]: "
-                    f"train={n_nodes and n_train} ({n_nodes and n_train/n_nodes:.1%}), "
-                    f"val={n_nodes and n_val} ({n_nodes and n_val/n_nodes:.1%}), "
-                    f"test={n_nodes and n_test} ({n_nodes and n_test/n_nodes:.1%})"
-                )
+                # v102 ROOT FIX (P2-040): replace the cryptic
+                # ``n_nodes and n_train`` short-circuit (which evaluates
+                # to ``n_train`` when ``n_nodes > 0`` else ``0``) with
+                # explicit guards. The previous form produced
+                # "train=0 (0.0%)" when n_nodes=0, which was technically
+                # correct but unreadable — operators couldn't tell
+                # whether the split was empty because there were no
+                # nodes OR because of a partition bug. Now the log
+                # clearly distinguishes the two cases AND shows the
+                # total node count for context.
+                if n_nodes > 0:
+                    self.logger.info(
+                        f"node_disjoint_split partition[{ntype}]: "
+                        f"train={n_train} ({n_train/n_nodes:.1%} of {n_nodes}), "
+                        f"val={n_val} ({n_val/n_nodes:.1%} of {n_nodes}), "
+                        f"test={n_test} ({n_test/n_nodes:.1%} of {n_nodes})"
+                    )
+                else:
+                    self.logger.info(
+                        f"node_disjoint_split partition[{ntype}]: "
+                        f"train=0 (no nodes), val=0 (no nodes), "
+                        f"test=0 (no nodes)"
+                    )
 
             # Step 2: build the three HeteroData outputs. For each
             # edge type, assign an edge to a split IFF both its

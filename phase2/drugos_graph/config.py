@@ -3836,6 +3836,17 @@ CORE_EDGE_TYPES: list[Tuple[str, str, str]] = [
     # diseases (not yet approved). Using "treats" for these would be
     # scientifically incorrect — the drug has not been proven to treat.
     ("Compound", "tested_for", "Disease"),
+    # v102 ROOT FIX (P2-042): "failed_for" edge for clinical trials that
+    # completed but FAILED their primary endpoint (drug proven INEFFECTIVE
+    # in Phase 3). The previous pipeline emitted these as "tested_for" —
+    # a WEAK POSITIVE signal in the RL ranker — so known-failed drugs
+    # got a small positive bump in repurposing score, OPPOSITE of correct.
+    # The new "failed_for" edge is an explicit NEGATIVE signal:
+    # downstream training can filter out "failed_for" drug-disease pairs
+    # from positive labels AND use them as hard negatives for contrastive
+    # training. See clinicaltrials_loader.py:_classify_trial_status for
+    # the canonical status classifier that drives this rel_type.
+    ("Compound", "failed_for", "Disease"),
     # Fixes audit issue 3.3 — protein-disease associations (GWAS/PheWAS)
     # RATIONALE: GWAS associate gene PRODUCTS (proteins) with disease
     # risk. The Gene-associated_with-Disease edge captures the genetic

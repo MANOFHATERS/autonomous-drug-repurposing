@@ -169,6 +169,22 @@ from .schemas import (
     ChEMBLActivityRecord,
     ChEMBLEdgeRecord,
 )
+# v102 ROOT FIX (P2-036): route InChIKey normalization through the
+# centralized helper so this loader produces the SAME canonical form
+# as phase1_bridge.py and pubchem_loader.py.
+try:
+    from .utils import normalize_inchikey as _normalize_inchikey
+except Exception:  # pragma: no cover — fallback for direct-script execution
+    def _normalize_inchikey(inchikey):  # type: ignore[no-redef]
+        if inchikey is None:
+            return ""
+        try:
+            ik = str(inchikey).strip()
+        except Exception:
+            return ""
+        if not ik or ik.lower() in ("nan", "none", "null", "na"):
+            return ""
+        return ik.upper()
 
 # =============================================================================
 # Section 1 -- Module-level constants & metadata
@@ -2381,11 +2397,14 @@ def chembl_to_edge_records_from_phase1(
         if compound_canonical_map is not None:
             looked_up = compound_canonical_map.get(compound_id)
             if looked_up and str(looked_up).strip():
-                src_id = str(looked_up).strip().upper()
+                # v102 P2-036: centralized normalization (strip + upper +
+                # placeholder-collapse) so this loader's canonical_id
+                # matches the form produced by phase1_bridge and pubchem.
+                src_id = _normalize_inchikey(looked_up) or str(looked_up).strip().upper()
         if src_id is None:
             row_inchikey = row.get("inchikey")
             if row_inchikey is not None and str(row_inchikey).strip() not in ("", "nan"):
-                src_id = str(row_inchikey).strip().upper()
+                src_id = _normalize_inchikey(row_inchikey) or None
         if src_id is None:
             # Fall back to the raw ChEMBL ID (last resort).
             src_id = compound_id
@@ -2553,11 +2572,17 @@ def chembl_to_node_records_from_phase1(
         chembl_id = str(chembl_id).strip()
 
         inchikey = row.get("inchikey")
-        inchikey_s = (
-            str(inchikey).strip().upper()
-            if inchikey is not None and str(inchikey) != "nan" and str(inchikey).strip() != ""
-            else None
-        )
+        # v102 P2-036: route through centralized normalize_inchikey so
+        # every loader (chembl / pubchem / phase1_bridge) produces the
+        # SAME canonical form. Previously this loader used
+        # ``str(inchikey).strip().upper()`` while pubchem_loader used
+        # ``inchikey.upper()`` (no strip) and phase1_bridge used
+        # ``inchikey.upper() if inchikey else ""`` (no strip, None-
+        # unsafe). The three forms produced different canonical IDs for
+        # the same compound when whitespace or "nan" placeholders were
+        # present, fragmenting entity resolution.
+        _ik_norm = _normalize_inchikey(inchikey)
+        inchikey_s = _ik_norm if _ik_norm else None
 
         smiles = row.get("smiles")
         smiles_s = (
