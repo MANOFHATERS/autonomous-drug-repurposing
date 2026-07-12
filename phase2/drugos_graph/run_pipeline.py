@@ -7286,12 +7286,62 @@ def step11b_train_graph_transformer(
     )
     # P1 fix: cosine LR scheduler with warmup (transformers diverge with fixed LR).
     _total_steps = max(1, cfg.epochs * max(1, len(train_idx) // 256))
+    # P2-054 ROOT FIX: the previous ``try/except Exception`` was too broad
+    # — it silently swallowed ``ValueError`` (the actual exception OneCycleLR
+    # raises when ``total_steps < len(optimizer.param_groups) * 2``), and
+    # also swallowed ``TypeError``, ``AttributeError`` and any other bug in
+    # the scheduler construction path. The result was that on small datasets
+    # the scheduler was set to ``None`` with NO log, NO fallback, and the
+    # HGT transformer trained with a FIXED learning rate. Transformers
+    # without warmup+decay diverge on small datasets — operators saw
+    # "training loss = NaN" without realizing the LR scheduler was disabled.
+    #
+    # Root fix (3 layers):
+    #   (1) Catch ONLY ``ValueError`` — the documented exception OneCycleLR
+    #       raises for insufficient total_steps. Any other exception
+    #       (TypeError, AttributeError, etc.) is a real bug and must
+    #       propagate.
+    #   (2) Log a WARNING so operators know the 1cycle policy was skipped.
+    #       Without the warning, the silent ``scheduler = None`` produced
+    #       false confidence — the run "succeeded" but the LR was flat.
+    #   (3) Fall back to ``CosineAnnealingLR`` with ``T_max = _total_steps``.
+    #       CosineAnnealingLR has no minimum-steps requirement, so it works
+    #       on the tiniest datasets. We use ``T_max = _total_steps`` (not
+    #       ``cfg.epochs``) because the existing training loop calls
+    #       ``scheduler.step()`` once per BATCH (not per epoch) — setting
+    #       ``T_max = cfg.epochs`` would complete the cosine schedule in
+    #       the first few batches of epoch 0, leaving the rest of training
+    #       at the minimum LR. Using ``T_max = _total_steps`` matches the
+    #       per-batch call pattern and gives a smooth cosine decay across
+    #       all batches of all epochs, which is the behaviour OneCycleLR
+    #       would have provided.
+    scheduler = None
+    _fallback_scheduler = False
     try:
         scheduler = torch.optim.lr_scheduler.OneCycleLR(
             optimizer, max_lr=cfg.lr, total_steps=_total_steps,
         )
-    except Exception:
-        scheduler = None  # fallback for very small datasets
+    except ValueError as _p2_054_err:
+        # OneCycleLR raises ValueError when total_steps < 2 *
+        # len(param_groups) — i.e. very small datasets. This is the
+        # documented precondition; fall back to CosineAnnealingLR which
+        # has no minimum-steps requirement.
+        _fallback_scheduler = True
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=max(1, _total_steps),
+            eta_min=cfg.lr * 0.01,  # decay to 1% of peak LR
+        )
+        logger.warning(
+            "P2-054 ROOT FIX: OneCycleLR unavailable for total_steps=%d "
+            "(raised ValueError: %s). Falling back to CosineAnnealingLR "
+            "with T_max=%d, eta_min=%.6f. Transformers without warmup+decay "
+            "diverge on small datasets — operators should sanity-check the "
+            "final training loss is NOT NaN. To force OneCycleLR, increase "
+            "the training set or reduce batch_size so total_steps >= %d.",
+            _total_steps, _p2_054_err, max(1, _total_steps),
+            cfg.lr * 0.01, 2 * max(1, len(optimizer.param_groups)),
+        )
 
     bce = torch.nn.BCEWithLogitsLoss()
     # v57 ROOT FIX (P2C-009): init best_val_auc=-1.0 (not 0.0) so the
@@ -7526,6 +7576,14 @@ def step11b_train_graph_transformer(
         _batch_size, n_batches_per_epoch,
     )
 
+    # P2-057 ROOT FIX: cumulative counter for triples skipped due to NaN
+    # scores (unknown decoder keys). Initialized to 0 before training and
+    # added to the training history dict at the end so operators can grep
+    # the final training log for the metric. A non-zero value indicates
+    # the HGT decoder is missing a relation embedding — see P2-057
+    # warning in the per-batch NaN-filter branch below.
+    _p2_057_cumulative_nan_triples = 0
+
     for epoch in range(cfg.epochs):
         model.train()
         # Re-encode the graph ONCE per epoch (graph-level caching — the
@@ -7607,11 +7665,63 @@ def step11b_train_graph_transformer(
             ])
             scores = torch.cat([pos_scores, neg_scores])
             # Filter NaN entries (unknown decoder keys — see P2C-005).
+            # P2-057 ROOT FIX: the previous code filtered NaN scores but
+            # never LOGGED which triples produced them. A relation type
+            # missing from the HGT decoder produces NaN for ALL its
+            # triples — silently dropped from training. Operators cannot
+            # debug which relations are missing decoder coverage. Root
+            # fix (3 layers):
+            #   (1) When partial-NaN (valid_mask.any() and not
+            #       valid_mask.all()), log the COUNT of NaN triples in
+            #       this batch + their relation types. We don't log the
+            #       full triple indices (could be 1000s) but we DO log
+            #       the relation distribution so operators can see which
+            #       relations are missing decoder coverage.
+            #   (2) Track a cumulative ``n_nan_triples`` counter on the
+            #       training history dict so operators can grep the
+            #       final training log for the metric.
+            #   (3) Throttle the per-batch WARNING to every 50 batches so
+            #       we don't flood the log on a chronically-broken
+            #       decoder (the cumulative counter is always accurate).
             valid_mask = ~torch.isnan(scores)
+            _n_nan_this_batch = int((~valid_mask).sum().item())
             if valid_mask.all():
                 loss = bce(scores, labels)
             elif valid_mask.any():
                 loss = bce(scores[valid_mask], labels[valid_mask])
+                # P2-057: log the NaN triples. The scores tensor is
+                # [pos_scores; neg_scores] where pos_scores has length
+                # len(batch_train_idx) and neg_scores has length
+                # len(batch_neg). The relation type for both is "treats"
+                # (this is the HGT target-edge training loop). The NaN
+                # comes from score_triples returning NaN when the
+                # decoder has no embedding for the relation key. Log
+                # the COUNT + the relation name so operators can grep
+                # the decoder's relation_keys to find the missing one.
+                n_nan_pos = min(_n_nan_this_batch, len(batch_train_idx))
+                n_nan_neg = max(0, _n_nan_this_batch - len(batch_train_idx))
+                # P2-057: update the function-scope cumulative counter.
+                # ``nonlocal`` is unnecessary because we're mutating a
+                # mutable int reference via attribute, but Python ints
+                # are immutable — so we MUST use ``nonlocal`` to rebind.
+                # Actually, since we're inside the same function scope
+                # (the inner ``_make_negatives`` is a separate function
+                # but THIS code is at the step11b_train_graph_transformer
+                # function body level), we can directly reassign.
+                _p2_057_cumulative_nan_triples += _n_nan_this_batch
+                if batch_idx % 50 == 0:
+                    logger.warning(
+                        "P2-057: batch %d had %d NaN scores (out of %d) "
+                        "— %d positive triples + %d negative triples "
+                        "skipped due to unknown decoder key for relation "
+                        "'treats'. Cumulative NaN triples so far: %d. "
+                        "If this is non-zero, the HGT decoder is missing "
+                        "the 'treats' relation embedding — check "
+                        "model.decoder.relation_keys. (P2-057 root fix)",
+                        batch_idx, _n_nan_this_batch, len(scores),
+                        n_nan_pos, n_nan_neg,
+                        _p2_057_cumulative_nan_triples,
+                    )
             else:
                 # No valid scores in this batch — skip backward/step.
                 logger.warning(
@@ -8166,6 +8276,17 @@ def step11b_train_graph_transformer(
         "hits_at_10": best_test_hits_at_10,
         "mrr": best_test_mrr,
         "elapsed": elapsed,
+        # P2-057 ROOT FIX: cumulative count of triples silently skipped
+        # during HGT training because the decoder returned NaN (unknown
+        # relation key). A non-zero value indicates the decoder is
+        # missing a relation embedding — the per-batch WARNING log
+        # (throttled every 50 batches) names the relation. Exposed here
+        # so operators can grep the final result dict / MLflow run for
+        # ``n_nan_triples`` and surface it on dashboards. Without this
+        # metric, decoder coverage bugs were invisible — a relation
+        # type missing from the decoder produced NaN for ALL its
+        # triples and they were silently dropped from training.
+        "n_nan_triples": int(_p2_057_cumulative_nan_triples),
         # v35 M-11: now a path string (truthy) on success, False
         # (falsy) on failure. Was previously a bool — callers that
         # did ``if r["model_saved"]:`` continue to work correctly.
