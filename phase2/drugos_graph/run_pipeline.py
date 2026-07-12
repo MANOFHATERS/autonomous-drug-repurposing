@@ -7018,8 +7018,46 @@ def step11b_train_graph_transformer(
         _dev_hgt = _v43_dev_mode()
     except Exception:
         _dev_hgt = True
-    MIN_TRIPLES_FOR_HGT = 5 if _dev_hgt else 100
-    PRODUCTION_MIN_TRIPLES_HGT = 100
+    # P2-063 ROOT FIX: the previous ``MIN_TRIPLES_FOR_HGT = 5`` in dev
+    # mode was far too low for HGT — the Graph Transformer has thousands
+    # of parameters (encoder + per-relation bilinear decoder), and 5
+    # triples cannot constrain them. The model simply MEMORIZED the 5
+    # triples and produced random-noise AUC on any held-out set. Operators
+    # testing in dev saw AUC=0.5 (random) or AUC=1.0 (perfect memorization
+    # of the 5 triples) — neither is informative.
+    #
+    # Root fix: raise the dev threshold to 50. This is still small enough
+    # for unit tests (the toy fixture produces ~50-100 triples when
+    # configured; tests that need fewer can monkey-patch the threshold
+    # OR set ``DRUGOS_DEV_MIN_TRIPLES_HGT`` env var to override). 50 is
+    # large enough that the HGT cannot trivially memorize all triples —
+    # at least some generalization is required.
+    #
+    # We also raise ``PRODUCTION_MIN_TRIPLES_HGT`` from 100 to 1000.
+    # The DOCX V1 launch criteria require the HGT to be the production
+    # model — but transformers typically need >>> 100 triples to
+    # generalize (the original 100 was a placeholder from the v35 dev
+    # era). 1000 is the minimum credible threshold for a transformer
+    # on a heterogeneous biomedical KG; the actual production KG (~10K
+    # drugs × ~50K interactions) will far exceed this.
+    #
+    # Backward-compat: ``DRUGOS_DEV_MIN_TRIPLES_HGT`` env var lets
+    # operators (and CI) lower the dev threshold for legacy fixtures
+    # without code changes. This is the documented escape hatch —
+    # operators who set it accept the risk of memorization noise.
+    _dev_min_default = 50
+    _dev_min_override = os.environ.get("DRUGOS_DEV_MIN_TRIPLES_HGT")
+    if _dev_min_override is not None:
+        try:
+            _dev_min_default = max(1, int(_dev_min_override))
+        except ValueError:
+            logger.warning(
+                "DRUGOS_DEV_MIN_TRIPLES_HGT=%r is not an int — using "
+                "default 50. (P2-063)",
+                _dev_min_override,
+            )
+    MIN_TRIPLES_FOR_HGT = _dev_min_default if _dev_hgt else 1000
+    PRODUCTION_MIN_TRIPLES_HGT = 1000
     if n_triples < MIN_TRIPLES_FOR_HGT:
         logger.warning(
             "Step 11b SKIPPED: only %d triples available (minimum %d). "
