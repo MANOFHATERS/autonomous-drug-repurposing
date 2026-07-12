@@ -305,26 +305,33 @@ def test_p3_023_deprecated_build_reverse_edges_removed():
 
 
 # ---------------------------------------------------------------------------
-# P3-024: DrugRepurposingGraphTransformer must RAISE if len(edge_types) < 14.
+# P3-024 / P3-001 v104: DrugRepurposingGraphTransformer must RAISE if
+# len(edge_types) < 18 (canonical Phase 2 schema: 9 forward + 9 reverse).
+# Pre-v104 this was < 14, allowing the OLD 14-type schema to pass silently.
 # ---------------------------------------------------------------------------
-def test_p3_024_raises_value_error_for_fewer_than_14_edge_types():
-    """Model construction with <14 edge types must raise ValueError."""
+def test_p3_024_raises_value_error_for_fewer_than_18_edge_types():
+    """Model construction with <18 edge types must raise ValueError.
+
+    Updated for P3-001 ROOT FIX v104: threshold raised from 14 to 18.
+    """
     from graph_transformer.models.graph_transformer import DrugRepurposingGraphTransformer
     from graph_transformer.data import DEFAULT_FEATURE_DIMS
-    # Default (14 edge types) must succeed.
+    # Default (18 edge types) must succeed.
     m = DrugRepurposingGraphTransformer(
         feature_dims=DEFAULT_FEATURE_DIMS, embedding_dim=16, num_layers=3, num_heads=2,
     )
-    assert len(m.edge_types) >= 14
+    assert len(m.edge_types) == 18, (
+        f"expected canonical 18 edge types, got {len(m.edge_types)}"
+    )
     # 1 edge type must raise.
-    with pytest.raises(ValueError, match="at least 14 edge types"):
+    with pytest.raises(ValueError, match="at least 18 edge types"):
         DrugRepurposingGraphTransformer(
             feature_dims=DEFAULT_FEATURE_DIMS, embedding_dim=16, num_layers=3, num_heads=2,
             edge_types=[("drug", "inhibits", "protein")],
         )
-    # 7 edge types (forward only, no reverse) must raise.
+    # 9 edge types (forward only, no reverse) must raise.
     from graph_transformer.data import FORWARD_EDGE_TYPES
-    with pytest.raises(ValueError, match="at least 14 edge types"):
+    with pytest.raises(ValueError, match="at least 18 edge types"):
         DrugRepurposingGraphTransformer(
             feature_dims=DEFAULT_FEATURE_DIMS, embedding_dim=16, num_layers=3, num_heads=2,
             edge_types=FORWARD_EDGE_TYPES,
@@ -467,7 +474,7 @@ if __name__ == "__main__":
         ("test_p3_021_kp_drugs_in_negative_sampling_pool", test_p3_021_kp_drugs_in_negative_sampling_pool),
         ("test_p3_022_honest_documentation_of_verified_auc", test_p3_022_honest_documentation_of_verified_auc),
         ("test_p3_023_deprecated_build_reverse_edges_removed", test_p3_023_deprecated_build_reverse_edges_removed),
-        ("test_p3_024_raises_value_error_for_fewer_than_14_edge_types", test_p3_024_raises_value_error_for_fewer_than_14_edge_types),
+        ("test_p3_024_raises_value_error_for_fewer_than_18_edge_types", test_p3_024_raises_value_error_for_fewer_than_18_edge_types),
         ("test_p3_025_safe_batchnorm_documented", test_p3_025_safe_batchnorm_documented),
         ("test_p3_026_demo_auc_threshold_is_0_65", test_p3_026_demo_auc_threshold_is_0_65),
         # tests requiring the trained_bridge fixture:
