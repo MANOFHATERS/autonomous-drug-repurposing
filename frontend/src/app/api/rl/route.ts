@@ -6,6 +6,11 @@ import {
   getRankedHypotheses,
   type RankedHypothesis,
 } from "@/lib/services/rl-ranker";
+// FE-069 ROOT FIX: per-user rate limiting. The CSV cache lives inside
+// rl-ranker.ts (the single source of truth for parsing); the rate limiter
+// lives here at the route boundary so a flood of requests is rejected
+// BEFORE any disk I/O or upstream HTTP call.
+import { checkUserRateLimit } from "@/lib/auth/per-user-rate-limit";
 
 /**
  * POST /api/rl
@@ -26,6 +31,11 @@ import {
  * scientific record. Root fix: status="predicted", rlPredicted=true.
  *
  * FE-011: CSRF protection applied to POST.
+ *
+ * FE-069 ROOT FIX: per-user rate limiting (60 req/min) added to BOTH GET
+ * and POST. The CSV cache lives inside rl-ranker.ts's readLocalCsv (TTL +
+ * mtime + fs.watch). The rate limiter is checked BEFORE any disk I/O so a
+ * flood of requests is rejected at the gate with 429 + Retry-After.
  */
 export async function POST(req: NextRequest) {
   // FE-011: CSRF protection on every state-changing route.
@@ -34,6 +44,18 @@ export async function POST(req: NextRequest) {
 
   const auth = await requireAuth();
   if (auth.user === null) return auth.response;
+
+  // FE-069 ROOT FIX: per-user rate limit (60 req/min). Checked BEFORE we
+  // parse the request body or touch disk — a flood of requests is rejected
+  // at the gate. The 429 response includes Retry-After so well-behaved
+  // clients back off correctly.
+  const rl = checkUserRateLimit(auth.user.userId, { max: 60, windowSeconds: 60 });
+  if (rl.blocked) {
+    return NextResponse.json(
+      { error: "rate_limited", message: "Too many RL requests. Please slow down." },
+      { status: 429, headers: { "Retry-After": String(rl.retryAfterSeconds) } }
+    );
+  }
 
   let body: { drug?: string; disease?: string; limit?: number };
   try {
@@ -79,14 +101,27 @@ export async function POST(req: NextRequest) {
       total: result.candidates.length,
       note: result.note,
     });
-  } catch (e: any) {
-    return internalError(`RL query failed: ${e.message}`);
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return internalError(`RL query failed: ${msg}`);
   }
 }
 
 export async function GET() {
   const auth = await requireAuth();
   if (auth.user === null) return auth.response;
+
+  // FE-069 ROOT FIX: per-user rate limit (60 req/min) on GET too. The GET
+  // handler is the one most easily spammed (no body required), so it must
+  // be throttled identically to POST.
+  const rl = checkUserRateLimit(auth.user.userId, { max: 60, windowSeconds: 60 });
+  if (rl.blocked) {
+    return NextResponse.json(
+      { error: "rate_limited", message: "Too many RL requests. Please slow down." },
+      { status: 429, headers: { "Retry-After": String(rl.retryAfterSeconds) } }
+    );
+  }
+
   try {
     const result = await getRankedHypotheses({ limit: 50 });
     return NextResponse.json({
@@ -96,8 +131,9 @@ export async function GET() {
       total: result.candidates.length,
       note: result.note,
     });
-  } catch (e: any) {
-    return internalError(`RL query failed: ${e.message}`);
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return internalError(`RL query failed: ${msg}`);
   }
 }
 
