@@ -52,6 +52,16 @@ v2.0.0 — Complete institutional-grade rewrite addressing 109 issues across
     session context, health-check dataclass, retry logic, circuit breaker,
     credential masking, SQLite PRAGMA tuning, structured logging, lineage
     tracking, schema verification, and comprehensive testability hooks.
+
+P1-029 PROCESS-WIDE SIDE EFFECT (documented):
+    This module registers a process-wide ``sqlite3.register_adapter`` that
+    converts ``decimal.Decimal`` → ``float`` on EVERY ``sqlite3.connect()``
+    in the process (not just SQLAlchemy-managed connections). This is a
+    deliberate, documented trade-off — see the inline comment at the
+    ``import sqlite3`` block below for the full rationale. Operators
+    running this platform in a SHARED Python process with other libraries
+    that depend on ``sqlite3`` raising on ``Decimal`` MUST spin the
+    platform up in its own process (see ``docker-compose.yml``).
 """
 
 from __future__ import annotations

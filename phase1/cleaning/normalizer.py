@@ -4270,23 +4270,40 @@ def normalize_activity_value(
         #   magnitude). The ``unit="nan"`` string in the DB CHECK
         #   constraint may or may not pass depending on the constraint.
         #
-        #   ROOT FIX: explicitly check for NaN/NA values using
-        #   ``pd.isna()`` (which catches ``float('nan')``, ``np.nan``,
-        #   ``pd.NA``, ``pd.NaT``, and Python ``None``). For NaN/NA we
-        #   log a warning and return ``value=None`` with ``unit=""`` —
-        #   the same behavior as the ``units is None`` branch above.
-        #   This prevents the silent "nan"-string passthrough.
-        try:
-            _is_na = bool(pd.isna(units))
-        except (TypeError, ValueError):
-            # pd.isna on some non-scalar types (e.g. lists) raises; treat
-            # as "not NA" and fall through to the str() coercion below.
-            _is_na = False
+        #   ROOT FIX: explicitly check for NaN/NA values WITHOUT
+        #   requiring pandas (normalizer.py is imported lazily and pd
+        #   may not be in scope at this point). Use ``math.isnan`` for
+        #   floats, ``is None`` for None, and a defensive string check
+        #   for pandas NA sentinels (``str(pd.NA) == "<NA>"``). For
+        #   NaN/NA we log a warning and return ``value=None`` with
+        #   ``unit=""`` — the same behavior as the ``units is None``
+        #   branch above. This prevents the silent "nan"-string
+        #   passthrough.
+        import math as _math
+        _is_na = False
+        if units is None:
+            _is_na = True  # defensive — the early-return above should have caught this
+        elif isinstance(units, float) and _math.isnan(units):
+            _is_na = True
+        elif isinstance(units, str) and units.lower() in ("nan", "<na>", "na"):
+            # Already a string NaN/NA sentinel (e.g. from a previous
+            # str() coercion upstream) — treat as missing.
+            _is_na = True
+        else:
+            # Catch pandas NA sentinels (pd.NA, pd.NaT) without importing
+            # pandas. ``str(pd.NA) == "<NA>"``, ``str(pd.NaT) == "NaT"``.
+            try:
+                _s = str(units)
+                if _s in ("<NA>", "NaT", "<NA>", "nan", "NaN"):
+                    _is_na = True
+            except Exception:
+                pass
         if _is_na:
             logger.warning(
-                "normalize_activity_value: units is NaN/NA (type=%s) — "
-                "treating as missing (returning value=None, unit='')",
-                type(units).__name__,
+                "normalize_activity_value: units is NaN/NA (type=%s, "
+                "value=%r) — treating as missing (returning value=None, "
+                "unit='')",
+                type(units).__name__, units,
             )
             warnings_tuple.append("units_is_nan")
             return ActivityValue(

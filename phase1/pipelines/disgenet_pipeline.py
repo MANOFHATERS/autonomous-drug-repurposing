@@ -967,12 +967,11 @@ def _compute_normalized_score(
         # Use a module-level set to warn ONCE per unknown source per
         # process (avoids log spam on every row of a 1M-row DataFrame).
         global _warned_unknown_sources
-        try:
-            _warned_unknown_sources
-        except NameError:
-            _warned_unknown_sources: set[str] = set()
-        if source_id not in _warned_unknown_sources:
-            _warned_unknown_sources.add(source_id)
+        if "_warned_unknown_sources" not in globals():
+            globals()["_warned_unknown_sources"] = set()
+        _warned = globals()["_warned_unknown_sources"]
+        if source_id not in _warned:
+            _warned.add(source_id)
             logger.warning(
                 "P1-039: unknown DisGeNET sub-source %r not in "
                 "DISGENET_SOURCE_WEIGHTS — using default weight %.2f "
@@ -2860,8 +2859,23 @@ class DisGeNETPipeline(BasePipeline):
         drops, has already been cleared to ``None`` by ``_apply_score_filter``
         to avoid the misleading "sub_weak" label. The original tier is
         preserved inside ``details_json.original_confidence_tier`` for audit.
+
+        Note: pandas may store ``None`` as ``NaN`` in object columns. We
+        normalize NaN → None when building the record so downstream
+        consumers (CSV writers, JSON serializers) see a clean None.
         """
         row = df.loc[idx].to_dict() if idx in df.index else {}
+        # P1-030 ROOT FIX: normalize pandas NaN → Python None for the
+        # confidence_tier field. When _apply_score_filter sets
+        # df.at[idx, "confidence_tier"] = None on an object column,
+        # pandas may convert None to NaN. The dead-letter record must
+        # carry a clean None (not NaN) so CSV/JSON serialization works.
+        _tier = row.get("confidence_tier")
+        try:
+            if _tier is not None and pd.isna(_tier):
+                _tier = None
+        except (TypeError, ValueError):
+            pass  # pd.isna raises on some non-scalar types; leave as-is
         record = {
             "gene_symbol": row.get("gene_symbol"),
             "disease_id": row.get("disease_id"),
@@ -2873,7 +2887,7 @@ class DisGeNETPipeline(BasePipeline):
             # so dead-letter consumers see None for below_min_score drops
             # instead of the stale "sub_weak" label computed before the
             # filter. The original tier is preserved in details_json above.
-            "confidence_tier": row.get("confidence_tier"),
+            "confidence_tier": _tier,
         }
         self._dead_letter_rows.append(record)
         # LOG-1: contextual log.
