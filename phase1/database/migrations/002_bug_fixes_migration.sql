@@ -5,6 +5,32 @@
 -- Author: Team Cosmic
 -- Last Modified: 2026-06-16
 --
+-- P1-040 ROOT FIX (mark migration 002 as DEPRECATED / NO-OP on fresh DBs):
+--   This migration was originally written to fix 86 issues identified in a
+--   16-domain forensic audit. However, migration 001 was subsequently
+--   updated to include all the columns and constraints that 002 adds
+--   (gene_symbol, protein_name, function_desc on proteins; UNIQUE
+--   constraints on GDA / entity_mapping natural keys; etc.). The
+--   ``ADD COLUMN IF NOT EXISTS`` / ``CREATE INDEX IF NOT EXISTS`` /
+--   ``CREATE UNIQUE INDEX IF NOT EXISTS`` guards make every statement
+--   in this migration a no-op on a fresh DB that has already applied 001.
+--   The migration is 1,444 lines of effectively dead code that future
+--   maintainers may waste time understanding.
+--
+--   ROOT FIX: do NOT skip the migration (it is still relevant for
+--   legacy DBs that applied an older version of 001 before the columns
+--   were folded in). Instead, mark it as DEPRECATED in the description
+--   and add an early-return guard in the migration runner so operators
+--   see a clear INFO log: "migration 002 is a no-op on this DB
+--   (migration 001 already applied all fixes)". The migration body
+--   remains intact for legacy DB compatibility.
+--
+--   DEPRECATION STATUS: deprecated for fresh DBs (2026-06-16). Retained
+--   for legacy DBs that applied an older version of migration 001.
+--   Do NOT add new fixes to this migration — add them to a new
+--   migration 014+ instead.
+-- ============================================================================
+--
 -- v21 ROOT FIX (Audit section 5 finding 6 / Chain 5 - "Migration 002
 -- missing BEGIN/COMMIT"): the previous version of this file had NO
 -- outer BEGIN/COMMIT wrapper. When applied via `psql -f`, PostgreSQL
