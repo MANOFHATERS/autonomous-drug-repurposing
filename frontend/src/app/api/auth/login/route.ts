@@ -40,6 +40,14 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  // FE-056 ROOT FIX: Record the IP attempt UP FRONT for EVERY request that
+  // passes the block check — including malformed JSON, missing fields, and
+  // any other early-return path. Previously recordIpAttempt was only called
+  // on user-not-found, wrong-password, and successful-login paths, so an
+  // attacker could send unlimited malformed-request probes without consuming
+  // their rate-limit budget. Recording unconditionally closes that gap.
+  recordIpAttempt(req);
+
   let body: LoginBody;
   try {
     body = await req.json();
@@ -63,6 +71,10 @@ export async function POST(req: NextRequest) {
       mfaSecret: true,
       failedLoginCount: true,
       lockedUntil: true,
+      // FE-055 ROOT FIX: include deletedAt so we can refuse login for
+      // soft-deleted accounts. They should appear as "invalid credentials"
+      // to the caller (no enumeration leak) but we record an IP attempt.
+      deletedAt: true,
     },
   });
 
@@ -74,8 +86,10 @@ export async function POST(req: NextRequest) {
       { status: 401 }
     );
 
-  if (!user) {
-    recordIpAttempt(req);
+  // FE-055 ROOT FIX: Treat a soft-deleted user as if they don't exist.
+  // (The IP attempt was already recorded up-front at line 49 — FE-056 —
+  // so deleted-account probes consume the rate-limit budget correctly.)
+  if (!user || user.deletedAt !== null) {
     return invalidCredentials();
   }
 
@@ -106,7 +120,7 @@ export async function POST(req: NextRequest) {
 
   const ok = await verifyPassword(password, user.passwordHash);
   if (!ok) {
-    recordIpAttempt(req);
+    // FE-056: recordIpAttempt was already called up-front at line 49.
     // FE-009: Increment failedLoginCount; auto-lock if threshold hit.
     const lockResult = await recordFailedLogin(user.id);
     await writeAuditLog({
@@ -164,8 +178,8 @@ export async function POST(req: NextRequest) {
   });
 
   // FE-009: Reset failed counter on successful login.
+  // FE-056: recordIpAttempt was already called up-front at line 49.
   await recordSuccessfulLogin(user.id);
-  recordIpAttempt(req);
 
   const tokens = await rotateRefreshToken(user.id);
   const access = signAccessToken({

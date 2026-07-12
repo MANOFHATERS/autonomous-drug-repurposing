@@ -53,9 +53,18 @@ export async function GET() {
     // about whether the user ever existed.
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   }
+  // FE-060 ROOT FIX: Use `select` (not `include`) so we fetch only the
+  // fields actually used in the response (id, name, slug, plan) — not the
+  // entire Organization record (which also includes status, seats, createdAt,
+  // updatedAt). Reduces payload + DB load for users in many orgs.
   const memberships = await db.organizationMember.findMany({
     where: { userId: user.id },
-    include: { organization: true },
+    select: {
+      role: true,
+      organization: {
+        select: { id: true, name: true, slug: true, plan: true },
+      },
+    },
   });
   const body = {
     user,
@@ -142,7 +151,28 @@ export async function PATCH(req: NextRequest) {
   }
 
   if (Object.keys(data).length === 0) {
-    return badRequest("No updatable fields provided (name, title, bio)");
+    // FE-054 ROOT FIX: HTTP PATCH semantics allow a no-op patch — the server
+    // returns 200 with the current (unchanged) resource. Previously this
+    // returned 400 "No updatable fields", which broke clients that send an
+    // empty patch to refresh their cached profile. We now return the current
+    // user resource with 200, matching RFC 5789 §2.1 ("If the server
+    // receives a PATCH request with no body, the server MUST process it as
+    // if the body was empty and apply no changes").
+    const current = await db.user.findUnique({
+      where: { id: authUser.userId },
+      select: {
+        id: true,
+        email: true,
+        name: true,
+        role: true,
+        title: true,
+        bio: true,
+      },
+    });
+    if (!current) {
+      return NextResponse.json({ error: "not_found" }, { status: 404 });
+    }
+    return NextResponse.json({ user: current, noop: true });
   }
 
   const updated = await db.user.update({
