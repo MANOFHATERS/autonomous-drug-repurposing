@@ -1825,6 +1825,26 @@ class ProteinResolver(Resolver):
             uniprot_id = new_uid
 
         # FIX SCI-09: isoform handling.
+        # P1-023 ROOT FIX (Team Member 3 -- isoform collapse loses drug
+        #   specificity):
+        #   The previous code stripped the isoform suffix (Q07817-2 ->
+        #   base_uid=Q07817) and MERGED every isoform record into the
+        #   parent entry. For genes with functionally distinct isoforms
+        #   (e.g. BCL2L1 encodes both anti-apoptotic BCL-XL = Q07817 and
+        #   pro-apoptotic BCL-XS = Q07817-2), this collapsed them into
+        #   ONE Protein node. Drugs targeting one isoform but not the
+        #   other appeared to target both -- the KG learned wrong drug-
+        #   protein specificity, and the RL ranker could recommend a
+        #   BCL-XL inhibitor for a disease requiring BCL-XS inhibition.
+        #
+        #   ROOT FIX: keep the FULL UniProt accession (including isoform
+        #   suffix) as the PRIMARY KEY (``primary_uid``). Each isoform
+        #   becomes its OWN Protein node in the KG. A ``parent_accession``
+        #   field on the isoform entry points back to the canonical
+        #   parent (Q07817) for cross-reference. The parent entry's
+        #   ``isoforms`` list still tracks its isoforms (for graph
+        #   traversal), but isoform-specific data (sequence, drug
+        #   targeting) is NO LONGER merged into the parent.
         isoform_id = None
         base_uid = uniprot_id
         if "-" in uniprot_id:
@@ -1832,6 +1852,9 @@ class ProteinResolver(Resolver):
             if parts[1].isdigit():
                 base_uid = parts[0]
                 isoform_id = uniprot_id
+        # P1-023: the primary key is the FULL accession when an isoform
+        # suffix is present, else the base accession.
+        primary_uid = isoform_id if isoform_id else base_uid
 
         # FIX ARCH-02: check if a provisional entry should be promoted.
         #
@@ -1883,7 +1906,11 @@ class ProteinResolver(Resolver):
         # v82 P0-D3b STEP 1: O(1) lookup by the UniProt record's
         # ``uniprot_id`` in the alias-uniprot index. This is the fast
         # path for STRING-alias-derived provisionals.
-        if not promotion_done and base_uid:
+        # P1-023: skip promotion for isoforms. Promotion uses base_uid
+        # (stripped), which would promote an isoform into a PARENT
+        # provisional -- losing isoform specificity. Isoforms must get
+        # their own entries.
+        if not promotion_done and base_uid and not isoform_id:
             _alias_candidates = self._provisional_by_alias_uniprot.get(
                 base_uid.strip().upper(), []
             )
@@ -1912,7 +1939,8 @@ class ProteinResolver(Resolver):
             return
 
         # v80 P0-D3 STEP 2: O(1) lookup by (gene, organism).
-        if rec_gene and rec_org:
+        # P1-023: skip for isoforms (see comment above).
+        if rec_gene and rec_org and not isoform_id:
             _key = (rec_gene, rec_org)
             _candidates = self._provisional_by_gene_organism.get(_key, [])
             # Iterate over a SNAPSHOT of the candidates list because
@@ -1944,7 +1972,8 @@ class ProteinResolver(Resolver):
         # single O(N) scan over ONLY provisional entries (much smaller
         # than the full mapping on real datasets where provisionals are
         # typically <<1% of canonicals).
-        if not promotion_done and rec_gene and rec_org:
+        # P1-023: skip defensive fallback for isoforms (see comment above).
+        if not promotion_done and rec_gene and rec_org and not isoform_id:
             for prov_uid in list(self.mapping.keys()):
                 if not self.is_synthetic_uid(prov_uid):
                     continue
@@ -1969,16 +1998,30 @@ class ProteinResolver(Resolver):
         if promotion_done:
             return
 
-        if base_uid in self.mapping:
-            # Merge into existing entry.
-            if isoform_id:
-                entry = self.mapping[base_uid]
-                iso_list = entry.setdefault("isoforms", [])
-                if isoform_id not in iso_list:
-                    iso_list.append(isoform_id)
-            self._merge_uniprot_record(base_uid, record)
+        # P1-023 ROOT FIX: check the PRIMARY uid (full accession incl.
+        # isoform suffix) for an existing entry. If this exact isoform was
+        # already ingested, merge into it (safe -- same isoform, same
+        # specificity). We NO LONGER merge isoforms into the parent --
+        # each isoform is a distinct Protein node.
+        if primary_uid in self.mapping:
+            self._merge_uniprot_record(primary_uid, record)
             self._stats.inc("records_matched")
             return
+        # P1-023: if this is an isoform AND the parent canonical entry
+        # already exists, register the isoform on the parent's ``isoforms``
+        # list (cross-reference for graph traversal) but do NOT merge the
+        # isoform's data into the parent. Fall through to create a new,
+        # separate entry for the isoform.
+        if isoform_id and base_uid in self.mapping:
+            parent_entry = self.mapping[base_uid]
+            iso_list = parent_entry.setdefault("isoforms", [])
+            if isoform_id not in iso_list:
+                iso_list.append(isoform_id)
+            logger.debug(
+                "add_uniprot_records: isoform %s registered on parent %s "
+                "isoforms list (cross-ref only, no data merge -- P1-023)",
+                isoform_id, base_uid,
+            )
 
         gene_symbol = self._normalize_gene_symbol(record.get("gene_symbol", ""))
         gene_name = record.get("gene_name", "") or ""
@@ -2009,8 +2052,14 @@ class ProteinResolver(Resolver):
         except (TypeError, ValueError):
             input_checksum = ""
 
+        # P1-023 ROOT FIX: ``uniprot_id`` is the FULL accession (primary_uid,
+        #        incl. isoform suffix). ``parent_accession`` is the base
+        #        accession (without suffix) for isoform entries, None for
+        #        canonical entries. This keeps functionally distinct
+        #        isoforms (BCL-XL vs BCL-XS) as separate Protein nodes.
         entry: dict = {
-            "uniprot_id": base_uid,
+            "uniprot_id": primary_uid,
+            "parent_accession": base_uid if isoform_id else None,
             "gene_symbol": gene_symbol,
             "gene_name": gene_name or None,
             "organism": organism or self._config.default_organism,
@@ -2018,7 +2067,7 @@ class ProteinResolver(Resolver):
             "protein_name": record.get("protein_name") or None,
             "string_id": string_id,
             "chembl_target_id": record.get("chembl_target_id") or None,
-            "canonical_name": gene_symbol or gene_name or base_uid,
+            "canonical_name": gene_symbol or gene_name or primary_uid,
             "sources": ["uniprot"],
             "match_method": "uniprot_exact",
             "match_confidence": compute_match_confidence("uniprot_exact"),
@@ -2040,7 +2089,8 @@ class ProteinResolver(Resolver):
         except (TypeError, ValueError):
             entry["canonical_checksum"] = ""
 
-        self.mapping[base_uid] = entry
+        # P1-023: store under the PRIMARY uid (full accession).
+        self.mapping[primary_uid] = entry
         self._stats.inc("records_created")
 
         if gene_symbol:
@@ -2053,41 +2103,28 @@ class ProteinResolver(Resolver):
             # the multi-valued index tracks ALL uids so lookups can
             # detect ambiguity.
             if key not in self._gene_index:
-                self._gene_index[key] = base_uid
-            self._gene_index_multi.setdefault(key, []).append(base_uid)
+                self._gene_index[key] = primary_uid
+            self._gene_index_multi.setdefault(key, []).append(primary_uid)
 
         # v89 ROOT FIX (BUG #35): populate the case-preserving gene
-        # symbol index. ``_gene_index`` above is keyed by
-        # (gene_symbol, organism) -- case-sensitive on gene_symbol, but
-        # requires the organism to be known. ``_name_index`` below is
-        # case-folded (``normalize_name`` lowercases), so ``TP53`` and
-        # ``Tp53`` collide. The new ``_gene_symbol_index`` is keyed by
-        # the EXACT gene symbol (case-sensitive, organism-agnostic) --
-        # human ``TP53`` and mouse ``Tp53`` are DISTINCT keys. This
-        # preserves species distinction even when the organism filter
-        # fails (BUG #6). Fuzzy matching on gene symbols can consult
-        # this index instead of the case-folded ``_name_index``.
+        # symbol index.
         if gene_symbol:
             if gene_symbol not in self._gene_symbol_index:
-                self._gene_symbol_index[gene_symbol] = base_uid
-            self._gene_symbol_index_multi.setdefault(gene_symbol, []).append(base_uid)
+                self._gene_symbol_index[gene_symbol] = primary_uid
+            self._gene_symbol_index_multi.setdefault(gene_symbol, []).append(primary_uid)
 
         norm_name = normalize_name(gene_symbol or gene_name or "")
         if norm_name:
-            self._name_index[norm_name] = base_uid
+            self._name_index[norm_name] = primary_uid
             self._name_index_multi.setdefault(
                 norm_name, []
-            ).append(base_uid)
+            ).append(primary_uid)
 
         if string_id:
-            # v89 BUG #15: maintain multi-valued index alongside the
-            # single-valued one. The single-valued index keeps the LAST
-            # registered uid (backward compat); the multi-valued index
-            # tracks ALL uids so lookups can detect ambiguity.
-            self._string_to_uniprot[string_id] = base_uid
-            self._string_to_uniprot_multi.setdefault(string_id, []).append(base_uid)
+            self._string_to_uniprot[string_id] = primary_uid
+            self._string_to_uniprot_multi.setdefault(string_id, []).append(primary_uid)
 
-        self._append_audit(base_uid, {
+        self._append_audit(primary_uid, {
             "action": "create",
             "source": "uniprot",
             "method": "uniprot_exact",
