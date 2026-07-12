@@ -432,10 +432,19 @@ _install_omim_api_key_redaction_filter()
 SCORE_TYPE_OMIM: str = "omim_mapping_key"
 SCORE_METHOD_DEFAULT: str = "omim_v1"
 SCORE_BY_MAPPING_KEY: dict[int, float] = {
-    3: OMIM_CONFIRMED_SCORE,          # 0.9 -- molecular basis known (strongest)
-    4: OMIM_CONTIGUOUS_SCORE,         # 0.8 -- contiguous gene syndrome
-    2: OMIM_PHENOTYPE_MAPPED_SCORE,   # 0.6 -- phenotype mapped
-    1: OMIM_GENE_MAPPED_SCORE,        # 0.5 -- wild-type gene mapped
+    3: OMIM_CONFIRMED_SCORE,          # 0.9 -- molecular basis known (strongest, "strong" tier per Piñero 2020 §2.3)
+    4: OMIM_CONTIGUOUS_SCORE,         # 0.8 -- contiguous gene syndrome ("strong" tier)
+    # P1-005 ROOT FIX: lowered from 0.6 to 0.25 so mk=2 falls in the
+    # "weak" tier (score in [0.06, 0.3)) per Piñero 2020 §2.3. mk=2
+    # means the disease phenotype was mapped but the gene itself was
+    # NOT identified -- this is weak evidence, not strong.
+    2: OMIM_PHENOTYPE_MAPPED_SCORE,   # 0.25 -- phenotype mapped ("weak" tier)
+    # P1-005 ROOT FIX: lowered from 0.5 to 0.2 so mk=1 falls in the
+    # "weak" tier (score in [0.06, 0.3)) per Piñero 2020 §2.3. mk=1
+    # means the gene was mapped but NO phenotype association has been
+    # established by OMIM -- labelling this "strong" (>=0.3) was a
+    # patient-safety risk.
+    1: OMIM_GENE_MAPPED_SCORE,        # 0.2 -- wild-type gene mapped ("weak" tier)
 }
 DEFAULT_MAPPING_KEY_SCORE: float = 0.4   # for mk=0 (unknown) or out-of-range
 PMID_BONUS_COEFFICIENT: float = 0.05     # 0.05 · log1p(num_pmids)

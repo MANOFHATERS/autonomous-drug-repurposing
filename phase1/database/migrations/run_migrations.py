@@ -3652,15 +3652,39 @@ def run_migrations(
                     pass
                 lock_conn = None
     elif dialect_name == DIALECT_SQLITE:
-        # File-based lock for SQLite
+        # File-based lock for SQLite.
+        # P1-003 ROOT FIX (Team-1 -- SQLite :memory: creates junk lock file):
+        #   For SQLite dialect, ``engine.url.database`` returns the string
+        #   ``:memory:`` when the URL is ``sqlite:///:memory:``. The previous
+        #   code computed ``lock_path = Path(":memory:").parent / f"{Path(':memory:').name}.migration.lock"``
+        #   = ``./:memory:.migration.lock`` and opened it for flock-based
+        #   locking. The file was created in the current working directory
+        #   and stayed there forever (the cleanup code below closed the file
+        #   handle but did NOT delete the file). The file
+        #   ``phase1/:memory:.migration.lock`` was observed in the audit --
+        #   confirming this bug fires in production (CI/test runs that use
+        #   ``:memory:``).
+        #   ROOT FIX: add an explicit guard. In-memory databases don't need
+        #   file-based locking because each connection gets its own private
+        #   DB -- there's no shared state to serialize. For file-based SQLite
+        #   (dev/test/prod), the flock-based lock on the sidecar file
+        #   continues to work as before.
         try:
             db_path = engine.url.database
-            if db_path:
+            # P1-003: skip file locking for in-memory SQLite (each
+            # connection gets its own private DB; no serialization needed).
+            if db_path == ":memory:":
+                logger.debug(
+                    "Skipping SQLite file lock for :memory: database "
+                    "(P1-003 ROOT FIX -- in-memory DBs need no file lock)"
+                )
+                lock_file = None
+            elif db_path:
                 lock_path = Path(db_path).parent / f"{Path(db_path).name}.migration.lock"
                 lock_file = open(lock_path, "w")
                 import fcntl
                 fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                logger.debug("Acquired SQLite file lock for migrations")
+                logger.debug("Acquired SQLite file lock for migrations at %s", lock_path)
             else:
                 lock_file = None
         except (ImportError, OSError) as exc:
@@ -3692,6 +3716,33 @@ def run_migrations(
                 fcntl.flock(lock_file, fcntl.LOCK_UN)
                 lock_file.close()
                 logger.debug("Released SQLite file lock")
+                # P1-003 ROOT FIX (Team-1 -- cleanup the lock sidecar file):
+                #   The previous code closed the file handle but did NOT
+                #   delete the sidecar file. The file accumulated in the
+                #   working directory across runs (at most one file per
+                #   SQLite DB, but it's directory pollution). ROOT FIX:
+                #   unlink the sidecar file after releasing the flock.
+                #   The file was created by US (in the acquire block above),
+                #   so it's safe to delete -- no other process should be
+                #   relying on it (the flock was our coordination primitive,
+                #   not the file's existence).
+                try:
+                    lock_path_to_unlink = getattr(lock_file, "name", None)
+                    if lock_path_to_unlink:
+                        from pathlib import Path as _P
+                        _lp = _P(lock_path_to_unlink)
+                        if _lp.exists() and _lp.name.endswith(".migration.lock"):
+                            _lp.unlink()
+                            logger.debug(
+                                "Removed SQLite migration lock sidecar file %s",
+                                _lp,
+                            )
+                except OSError as unlink_exc:
+                    # Best-effort cleanup -- do not mask migration errors.
+                    logger.debug(
+                        "Could not remove SQLite migration lock sidecar "
+                        "file: %s", unlink_exc,
+                    )
             except Exception:
                 pass
 

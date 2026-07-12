@@ -238,6 +238,24 @@ _UNIPROT_ORGANISM_OVERRIDES: Dict[str, str] = {
     "P68871": "Homo sapiens",   # HBB
     "P00533": "Homo sapiens",   # EGFR
     "P04626": "Homo sapiens",   # ERBB2 (HER2)  -- FIX-P4-5: was mislabeled 'BRCA1'; BRCA1 is P38398.
+    # P1-006 ROOT FIX (Team-1 -- BRCA1 missing from organism overrides):
+    #   The comment above (line 240) acknowledged that BRCA1 is P38398,
+    #   but P38398 was NEVER added to the override dict. A UniProt
+    #   record for P38398 with a corrupted/mislabeled organism field
+    #   (e.g. "Mus musculus" due to an upstream data-entry error) would
+    #   pass the organism validator with no override check. The
+    #   mislabeled BRCA1 would enter the proteins table as a mouse
+    #   protein, then fail gene-disease association resolution (DisGeNET
+    #   and OMIM pipelines expect human BRCA1), silently dropping every
+    #   BRCA1-related GDA edge. PARP-inhibitor sensitivity predictions
+    #   for BRCA1-mutant cancers would be silently broken.
+    #   ROOT FIX: add P38398 to the override dict with the correct
+    #   organism (Homo sapiens). The YAML crosswalk
+    #   (data/uniprot_organism_crosswalk.yaml) is also fixed -- the
+    #   previous version had P04626 mislabeled as "BRCA1" (P04626 is
+    #   actually ERBB2/HER2); P04626's comment is corrected and P38398
+    #   is added with the correct "BRCA1" label.
+    "P38398": "Homo sapiens",   # BRCA1 (P1-006 ROOT FIX -- was MISSING, breaking PARP-inhibitor predictions)
     "P51587": "Homo sapiens",   # BRCA2
     "P01112": "Homo sapiens",   # KRAS
     "P01116": "Homo sapiens",   # NRAS

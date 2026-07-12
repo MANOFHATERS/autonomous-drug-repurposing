@@ -452,6 +452,61 @@ if not os.getenv("DRUGOS_ENVIRONMENT") and not os.getenv("ENVIRONMENT"):
         "explicitly set DRUGOS_ENVIRONMENT=development."
     )
 
+
+def recompute_environment() -> str:
+    """Re-read DRUGOS_ENVIRONMENT / ENVIRONMENT env vars and update ENVIRONMENT.
+
+    P1-012 ROOT FIX (Team-1 -- ENVIRONMENT eager-read breaks test ergonomics):
+      The module-level ``_raw_environment`` (line 406 above) is read EAGERLY
+      at import time. The docstring documents this exception, but tests
+      that use ``monkeypatch.setenv("DRUGOS_ENVIRONMENT", "development")``
+      in a fixture that runs AFTER ``import config.settings`` see no
+      effect -- the module-level ``ENVIRONMENT`` constant has already been
+      bound and is not re-read.
+
+      The previous workaround was "set the env var BEFORE importing
+      config.settings" -- fragile and incompatible with pytest fixtures
+      that run after import.
+
+      ROOT FIX: provide a ``recompute_environment()`` function that tests
+      can call AFTER ``monkeypatch.setenv(...)`` to re-resolve ENVIRONMENT
+      from the current env vars. The function:
+        1. Re-reads ``DRUGOS_ENVIRONMENT`` / ``ENVIRONMENT`` from ``os.environ``.
+        2. Normalizes via ``_ENV_NORMALIZATION``.
+        3. Updates the module-level ``ENVIRONMENT`` global.
+        4. Returns the new value (for assertability).
+
+      Production code should NOT call this -- the eager read at import
+      time is intentional (ENVIRONMENT is consumed by many module-level
+      constants). This function is for TEST ERGONOMICS only.
+
+    Usage in tests::
+
+        import config.settings as s
+
+        def test_dev_mode(monkeypatch):
+            monkeypatch.setenv("DRUGOS_ENVIRONMENT", "development")
+            new_env = s.recompute_environment()
+            assert new_env == "development"
+            assert s.ENVIRONMENT == "development"
+            # ... test dev-mode behavior ...
+
+    Returns
+    -------
+    str
+        The new environment value (one of "development", "staging",
+        "production", or the raw value if not in _ENV_NORMALIZATION).
+    """
+    global ENVIRONMENT, _raw_environment
+    _raw_environment = (
+        os.getenv("DRUGOS_ENVIRONMENT")
+        or os.getenv("ENVIRONMENT", "production")
+        or "production"
+    ).lower()
+    ENVIRONMENT = _ENV_NORMALIZATION.get(_raw_environment, _raw_environment)
+    return ENVIRONMENT
+
+
 BASE_DIR: Path = Path(_getenv("PROJECT_ROOT", str(Path(__file__).parent.parent)))
 
 # Validate BASE_DIR points to a real project root (ARCH-6)
@@ -1421,23 +1476,30 @@ weak-evidence floor). Must be > ``DISGENET_MIN_SCORE`` to be meaningful."""
 # removed (no publication supports it).
 DISGENET_CONFIDENCE_TIERS_JSON: str = _getenv(
     "DISGENET_CONFIDENCE_TIERS",
-    # P1-004 ROOT FIX (v100 forensic): labels aligned with Piñero 2020 §2.3
-    # -- sub_weak / weak / strong. The previous default was
-    # [[0.0,"weak"],[0.06,"moderate"],[0.3,"strong"]] which mislabeled the
-    # [0.0, 0.06) sub-floor band as "weak" and the [0.06, 0.3) weak band
-    # as "moderate" (Piñero does not define a "moderate" band). The DB
-    # CHECK constraint, ORM CheckConstraint, JSON schema, and migration 012
-    # are updated in lockstep to accept the new label set.
-    # (Parallel V100 fix BUG #4 applied the same root fix.)
-    default='[[0.0,"sub_weak"],[0.06,"weak"],[0.3,"strong"]]',
+    # P1-004 ROOT FIX (v100 forensic + Team-1 v102 extension):
+    #   v100: labels aligned with Piñero 2020 §2.3 -- sub_weak / weak / strong.
+    #   The previous default was [[0.0,"weak"],[0.06,"moderate"],[0.3,"strong"]]
+    #   which mislabeled the [0.0, 0.06) sub-floor band as "weak" and the
+    #   [0.06, 0.3) weak band as "moderate" (Piñero does not define a
+    #   "moderate" band).
+    #   v102 (Team-1 P1-004 EXTENSION): split the strong band [0.3, 1.0] into
+    #   "strong" [0.3, 0.5) and "very_strong" [0.5, 1.0] so the gradation
+    #   between a score of 0.31 (marginal evidence) and 0.95 (very strong,
+    #   curated multi-source) is preserved. Downstream ML models that bin on
+    #   confidence_tier no longer weight them identically. The DB CHECK
+    #   constraint, ORM CheckConstraint, JSON schema, migration 012 (label
+    #   rename) and migration 017 (very_strong split) are updated in lockstep
+    #   to accept the new label set.
+    default='[[0.0,"sub_weak"],[0.06,"weak"],[0.3,"strong"],[0.5,"very_strong"]]',
 )
 """JSON-encoded list of [threshold, label] pairs for confidence tier
-classification.  P1-004 v100 ROOT FIX: default follows Piñero et al.
-2020 §2.3 ACTUAL vocabulary:
-``[[0.0,"sub_weak"],[0.06,"weak"],[0.3,"strong"]]``. The [0.06, 0.3)
-band is the WEAK-evidence band (not "moderate" as the previous code
-wrongly labeled it). Thresholds must be sorted ascending; labels must
-be non-empty strings."""
+classification.  P1-004 v100+v102 ROOT FIX: default follows Piñero et al.
+2020 §2.3 ACTUAL vocabulary with the v102 very_strong split:
+``[[0.0,"sub_weak"],[0.06,"weak"],[0.3,"strong"],[0.5,"very_strong"]]``.
+The [0.06, 0.3) band is the WEAK-evidence band (not "moderate" as the
+previous code wrongly labeled it). The [0.3, 1.0] band is split into
+"strong" [0.3, 0.5) and "very_strong" [0.5, 1.0] to preserve gradation.
+Thresholds must be sorted ascending; labels must be non-empty strings."""
 
 # SCI-17 / CONF-3: PMID cap.
 # The GeneDiseaseAssociation.pmid_list column is String(2000).  Each PMID is
@@ -2455,12 +2517,52 @@ OMIM_DEDUP_KEEP_POLICY: str = _getenv("OMIM_DEDUP_KEEP_POLICY", "last")
 #     single signal -- chosen to match DisGeNET's strong-evidence threshold.
 #   - mk=4 (0.8): contiguous gene deletion/duplication syndrome. Clinically
 #     validated, but the gene-disease causal chain is less direct than mk=3.
-#   - mk=2 (0.6): the disease phenotype itself was mapped (no gene identified).
-#   - mk=1 (0.5): the wild-type gene was mapped (weakest OMIM evidence tier).
+#   - mk=2 (0.25): the disease phenotype itself was mapped (no gene identified).
+#     P1-005 ROOT FIX: lowered from 0.6 to 0.25 so it falls in the "weak"
+#     tier per Piñero 2020 §2.3 (score < 0.3). mk=2 means the gene was NOT
+#     identified -- only the phenotype was mapped. This is weak evidence,
+#     not strong.
+#   - mk=1 (0.2): the wild-type gene was mapped (weakest OMIM evidence tier).
+#     P1-005 ROOT FIX: lowered from 0.5 to 0.2 so it falls in the "weak"
+#     tier per Piñero 2020 §2.3 (score < 0.3). mk=1 means NO phenotype
+#     association has been established by OMIM -- the gene-disease link is
+#     NOT confirmed. Labelling this "strong" (>=0.3) was a patient-safety
+#     risk.
 OMIM_CONFIRMED_SCORE: float = _getenv_float("OMIM_CONFIRMED_SCORE", 0.9)
 OMIM_CONTIGUOUS_SCORE: float = _getenv_float("OMIM_CONTIGUOUS_SCORE", 0.8)
-OMIM_PHENOTYPE_MAPPED_SCORE: float = _getenv_float("OMIM_PHENOTYPE_MAPPED_SCORE", 0.6)
-OMIM_GENE_MAPPED_SCORE: float = _getenv_float("OMIM_GENE_MAPPED_SCORE", 0.5)
+# P1-005 ROOT FIX (Team-1 -- OMIM mapping_key scoring scientific mislabel):
+#   Per Piñero et al. 2020 §2.3 (the same publication cited by
+#   ``cleaning/confidence.py`` for the DSGP tier bands), the
+#   ``confidence_tier`` classifier labels any score >= 0.3 as "strong".
+#   The previous values (0.6 for mk=2, 0.5 for mk=1) put BOTH mapping
+#   keys in the "strong" tier -- but OMIM explicitly states that:
+#     * mk=1 ("wild-type gene mapped") means "the gene has been mapped
+#       but NO phenotype association has been established". This is
+#       the WEAKEST OMIM evidence tier -- the gene-disease link is
+#       NOT established by OMIM. Labelling it "strong" is
+#       scientifically wrong and a patient-safety risk: downstream
+#       drug-repurposing models may recommend drugs targeting genes
+#       with NO established disease association.
+#     * mk=2 ("phenotype mapped") means the disease phenotype was
+#       mapped but the gene itself was not identified. This is also
+#       weak evidence -- the gene-disease link is inferred, not
+#       confirmed.
+#   Only mk=3 (molecular basis known) and mk=4 (contiguous gene
+#   syndrome) reflect OMIM-confirmed gene-phenotype associations and
+#   should be scored as "strong" (>= 0.3).
+#
+#   ROOT FIX: lower mk=1 to 0.2 (falls in the [0.06, 0.3) "weak"
+#   tier per Piñero §2.3) and mk=2 to 0.25 (also in the "weak" tier).
+#   mk=3 (0.9) and mk=4 (0.8) stay above 0.3 ("strong" tier). The
+#   default ``OMIM_MAPPING_KEYS_INCLUDE={3,4}`` means mk=1 and mk=2
+#   records are filtered out at clean time -- but the scoring
+#   function ``_compute_omim_score`` is exported and may be called
+#   by other code paths (or by an operator who sets
+#   ``OMIM_MAPPING_KEYS_INCLUDE=1,2,3,4`` to include all OMIM
+#   records). With this fix, those records enter the KG correctly
+#   tagged as "weak" evidence, NOT "strong".
+OMIM_PHENOTYPE_MAPPED_SCORE: float = _getenv_float("OMIM_PHENOTYPE_MAPPED_SCORE", 0.25)
+OMIM_GENE_MAPPED_SCORE: float = _getenv_float("OMIM_GENE_MAPPED_SCORE", 0.2)
 
 # BUG-12.20: User-Agent string sent with every OMIM HTTP request.
 OMIM_USER_AGENT: str = _getenv(

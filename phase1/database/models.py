@@ -2047,9 +2047,17 @@ class GeneDiseaseAssociation(Base, IDMixin, TimestampMixin):
         # V100 ROOT FIX (BUG #4): aligned to Piñero et al. 2020 §2.3 actual
         # vocabulary -- sub_weak / weak / strong. The [0.06, 0.3) band is
         # "weak" (not "moderate" as the previous code wrongly labeled it).
+        # P1-004 ROOT FIX EXTENSION (Team-1 v102): split the strong band
+        # [0.3, 1.0] into "strong" [0.3, 0.5) and "very_strong" [0.5, 1.0]
+        # so the gradation between a score of 0.31 (marginal evidence) and
+        # 0.95 (very strong, curated multi-source) is preserved. Downstream
+        # ML models that bin on confidence_tier no longer weight them
+        # identically. Migration 017 backfills existing rows with score
+        # >= 0.5 from "strong" to "very_strong" and updates the DB CHECK
+        # constraint in lockstep.
         CheckConstraint(
             "confidence_tier IS NULL OR confidence_tier IN "
-            "('sub_weak', 'weak', 'strong')",
+            "('sub_weak', 'weak', 'strong', 'very_strong')",
             name="chk_gda_confidence_tier",
         ),
         # [SCI-24] evidence_strength must be a known label when non-NULL
