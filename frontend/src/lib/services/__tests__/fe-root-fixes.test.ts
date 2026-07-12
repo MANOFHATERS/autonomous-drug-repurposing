@@ -241,8 +241,12 @@ describe("FE-018: Prisma indexes added", () => {
     // Use a greedy match to capture the full AuditLog model block.
     const auditStart = schema.indexOf("model AuditLog");
     expect(auditStart).toBeGreaterThanOrEqual(0);
-    const auditBlock = schema.slice(auditStart, auditStart + 800);
+    // FE-005 ROOT FIX: AuditLog now has an organizationId column + index,
+    // which makes the model block longer than 800 chars. Bumped to 1500.
+    const auditBlock = schema.slice(auditStart, auditStart + 1500);
     expect(auditBlock).toMatch(/@@index\(\[createdAt\]\)/);
+    // FE-005 ROOT FIX: also verify the new organizationId index exists.
+    expect(auditBlock).toMatch(/@@index\(\[organizationId\]\)/);
   });
 });
 
