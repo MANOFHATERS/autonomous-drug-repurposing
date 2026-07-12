@@ -1,5 +1,5 @@
 """
-DrugOS Graph Module — CLI Entry Point
+DrugOS Graph Module -- CLI Entry Point
 ======================================
 Institutional-grade entry point for the DrugOS Autonomous Drug Repurposing
 Platform.
@@ -8,46 +8,46 @@ This module is the SOLE gateway for ``python -m drugos_graph`` invocations.
 It implements every cross-cutting concern that a clinical-grade pipeline
 requires at process start-up:
 
-* **Reproducibility** — global seed is set before any drugos_graph import
+* **Reproducibility** -- global seed is set before any drugos_graph import
   so that hash randomisation, NumPy, and PyTorch all use the configured
   seed (D3-SCI-01).
-* **Scientific environment validation** — Python >= 3.10, NumPy / PyTorch
+* **Scientific environment validation** -- Python >= 3.10, NumPy / PyTorch
   presence and version (D3-SCI-02).
-* **Pre-flight architectural validation** — every critical submodule is
+* **Pre-flight architectural validation** -- every critical submodule is
   importable (D1-ARCH-02).
-* **Data directory accessibility** — PROJECT_ROOT, RAW_DIR, LOGS_DIR,
+* **Data directory accessibility** -- PROJECT_ROOT, RAW_DIR, LOGS_DIR,
   MODEL_DIR must be writable (D5-DQ-01).
-* **Input-file existence check** — if ``--skip-download`` is passed, the
+* **Input-file existence check** -- if ``--skip-download`` is passed, the
   primary DRKG TSV must be on disk (D5-DQ-02).
-* **Stale-data detection** — optional ``--require-fresh`` flag (D5-DQ-03).
-* **Idempotency** — re-run detection via ``pipeline_results.json`` and
+* **Stale-data detection** -- optional ``--require-fresh`` flag (D5-DQ-03).
+* **Idempotency** -- re-run detection via ``pipeline_results.json`` and
   config-hash comparison (D7-IDP-01, D7-IDP-02).
-* **Security** — root check, Neo4j credential check, secret masking,
+* **Security** -- root check, Neo4j credential check, secret masking,
   module-path tampering detection (D9-SEC-01..04).
-* **Reliability** — top-level exception handler, signal handlers for
+* **Reliability** -- top-level exception handler, signal handlers for
   SIGINT/SIGTERM/SIGBREAK, atexit cleanup, file-based concurrency lock
   (D6-REL-01..04).
-* **Testing** — importable ``run(argv=None)`` returning an integer exit
+* **Testing** -- importable ``run(argv=None)`` returning an integer exit
   code, plus a ``--self-test`` smoke check (D10-TST-01, D10-TST-02).
-* **Coding** — comprehensive docstring, type annotations, guard comment
+* **Coding** -- comprehensive docstring, type annotations, guard comment
   (D4-COD-01..03).
-* **Performance** — lazy import of ``run_pipeline`` (only triggered when
+* **Performance** -- lazy import of ``run_pipeline`` (only triggered when
   actually needed); system-resource logging (D8-PERF-01, D8-PERF-02).
-* **Logging** — fallback ``stderr`` logging configured before any
+* **Logging** -- fallback ``stderr`` logging configured before any
   drugos_graph import; preamble log entry on every run; structured
   exit log entry (D11-LOG-01..03).
-* **Configuration** — lightweight ``.env`` loader; configuration dump to
+* **Configuration** -- lightweight ``.env`` loader; configuration dump to
   ``pipeline_config.json``; config-drift detection (D12-CONF-01..03).
-* **Compliance** — Python version enforcement, data-source license
+* **Compliance** -- Python version enforcement, data-source license
   display (``--show-licenses``), schema-version compatibility check
   (D14-COMP-01..03).
-* **Interoperability** — clear error message when invoked as
+* **Interoperability** -- clear error message when invoked as
   ``python drugos_graph/__main__.py``; programmatic API via ``run()``
   (D15-INT-01, D15-INT-02).
-* **Data lineage** — ``run_id`` generated in this module (not in
+* **Data lineage** -- ``run_id`` generated in this module (not in
   ``run_pipeline``); preliminary lineage manifest written BEFORE step 1
   so it survives a crash (D16-LIN-01, D16-LIN-02).
-* **Documentation** — comprehensive module docstring (this block),
+* **Documentation** -- comprehensive module docstring (this block),
   inline comments explaining the WHY of every block, startup banner
   with version & license attribution, interactive confirmation prompt
   before launching the hours-long pipeline (D13-DOC-01..03).
@@ -56,12 +56,12 @@ Exit Codes
 ----------
 The contract with ``run_pipeline.main()`` is:
 
-* ``0`` — Success (pipeline completed all requested steps and validation).
-* ``1`` — Generic error (step failure, pre-flight check failure).
-* ``2`` — Validation failure (Step 12 skipped or exit criteria not met).
-* ``3`` — Configuration failure (Python version, schema mismatch,
+* ``0`` -- Success (pipeline completed all requested steps and validation).
+* ``1`` -- Generic error (step failure, pre-flight check failure).
+* ``2`` -- Validation failure (Step 12 skipped or exit criteria not met).
+* ``3`` -- Configuration failure (Python version, schema mismatch,
   missing required env vars).
-* ``4`` — Aborted OR V1 launch criteria not met. v35 ROOT FIX (N-5):
+* ``4`` -- Aborted OR V1 launch criteria not met. v35 ROOT FIX (N-5):
   the docstring previously claimed exit 4 meant ONLY "aborted", but
   exit code 4 is ALSO returned when V1 launch criteria fail in some
   code paths (e.g., ``run_pipeline.py`` ``V1LaunchCriteriaFailed``
@@ -114,12 +114,12 @@ Invocation Examples
     # Allow running as root (NOT recommended for production)
     python -m drugos_graph --allow-root
 
-Team Cosmic / VentureLab — Autonomous Drug Repurposing Platform.
+Team Cosmic / VentureLab -- Autonomous Drug Repurposing Platform.
 Package: drugos-graph v2.0.0 | Pipeline: 2.0.0-week2 | Schema: 2.0.0
 """
 
 # ──────────────────────────────────────────────────────────────────────────────
-# FUTURE IMPORTS — `annotations` MUST come before any other import so that
+# FUTURE IMPORTS -- `annotations` MUST come before any other import so that
 # PEP 604 `X | Y` syntax in type hints is lazily evaluated on Python 3.10
 # where some optional packages may not be installed. Fixes D14-COMP-01
 # (Python version enforcement is the next statement).
@@ -127,14 +127,14 @@ Package: drugos-graph v2.0.0 | Pipeline: 2.0.0-week2 | Schema: 2.0.0
 from __future__ import annotations
 
 # ──────────────────────────────────────────────────────────────────────────────
-# D14-COMP-01: Python version enforcement — FIRST executable statement.
+# D14-COMP-01: Python version enforcement -- FIRST executable statement.
 # This MUST run before any drugos_graph import because config.py uses
 # PEP 604 union syntax throughout (`X | Y`) which raises SyntaxError on
 # Python < 3.10.  The error message tells the operator exactly what to do.
 # ──────────────────────────────────────────────────────────────────────────────
 import sys as _sys
 
-if _sys.version_info < (3, 10):  # pragma: no cover — environment guard
+if _sys.version_info < (3, 10):  # pragma: no cover -- environment guard
     raise SystemExit(
         "DrugOS requires Python >= 3.10 "
         f"(got {_sys.version_info.major}.{_sys.version_info.minor})."
@@ -150,7 +150,7 @@ if _sys.version_info < (3, 10):  # pragma: no cover — environment guard
 __all__: list[str] = ["run", "main"]
 
 # ──────────────────────────────────────────────────────────────────────────────
-# STANDARD-LIBRARY IMPORTS — only stdlib is imported at module load time.
+# STANDARD-LIBRARY IMPORTS -- only stdlib is imported at module load time.
 # This is critical: the entire pre-flight phase (D1-ARCH-01, D8-PERF-01)
 # must execute WITHOUT importing config.py (6,831 lines) or run_pipeline.py
 # (2,974 lines), so that `--help`, `--self-test`, and `--show-licenses`
@@ -185,13 +185,13 @@ _FALLBACK_HANDLER.setFormatter(
 )
 logging.basicConfig(level=logging.WARNING, handlers=[_FALLBACK_HANDLER])
 
-# Dedicated module logger — used for pre-flight and lifecycle messages.
+# Dedicated module logger -- used for pre-flight and lifecycle messages.
 # The name "drugos_graph.__main__" ensures it inherits the root logger's
 # fallback handler until run_pipeline's `_configure_logging` overrides it.
 _logger = logging.getLogger("drugos_graph.__main__")
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Module-level state — these mirror the pattern used by run_pipeline.py
+# Module-level state -- these mirror the pattern used by run_pipeline.py
 # but live HERE so that __main__ retains control of the process lifecycle
 # even if run_pipeline is never imported (e.g. during --self-test).
 # ──────────────────────────────────────────────────────────────────────────────
@@ -203,7 +203,7 @@ _SHUTDOWN_REQUESTED: bool = False     # Set by signal handler
 _LIFECYCLE_LOG_PATH: Optional[Path] = None  # Set after logging is configured
 _PRELIMINARY_MANIFEST_PATH: Optional[Path] = None  # Set in run()
 
-# Exit-code constants — single source of truth for the entire module.
+# Exit-code constants -- single source of truth for the entire module.
 # Fixes D2-DES-02: formal exit-code contract.
 EXIT_SUCCESS = 0
 EXIT_ERROR = 1
@@ -212,13 +212,13 @@ EXIT_CONFIG_FAILURE = 3
 EXIT_ABORTED = 4
 
 # Sensitive-environment-variable pattern (D9-SEC-03).
-# Case-insensitive substring match — any env var whose name contains one
+# Case-insensitive substring match -- any env var whose name contains one
 # of these tokens is masked in the config dump and the log preamble.
 _SENSITIVE_ENV_PATTERN = re.compile(
     r"PASSWORD|SECRET|KEY|TOKEN|CREDENTIAL", re.IGNORECASE
 )
 
-# Critical submodules verified by _verify_package_integrity() — D1-ARCH-02.
+# Critical submodules verified by _verify_package_integrity() -- D1-ARCH-02.
 # These are the modules whose absence would cause a deep, confusing
 # ModuleNotFoundError inside step N of the pipeline. Verifying them at
 # entry point means the operator sees a clean error immediately.
@@ -227,7 +227,7 @@ _CRITICAL_SUBMODULES: tuple[tuple[str, str], ...] = (
     ("exceptions",        "Domain-specific exception hierarchy"),
     ("schemas",           "Pydantic/dataclass record schemas"),
     ("utils",             "Shared identifier and type utilities"),
-    ("id_crosswalk",      "External-ID → canonical UniProt translation"),
+    ("id_crosswalk",      "External-ID -> canonical UniProt translation"),
     ("run_pipeline",      "13-step pipeline orchestrator"),
     ("drkg_loader",       "DRKG download and TSV parser"),
     ("drugbank_parser",   "DrugBank XML parser"),
@@ -241,14 +241,14 @@ _CRITICAL_SUBMODULES: tuple[tuple[str, str], ...] = (
     ("graph_queries",     "Cypher query utilities"),
 )
 
-# Stale-data threshold (days). Fixes D5-DQ-03 — defaults to 90, overridable
+# Stale-data threshold (days). Fixes D5-DQ-03 -- defaults to 90, overridable
 # via DRUGOS_STALENESS_THRESHOLD_DAYS env var. 90 days matches the
 # approximate release cadence of ChEMBL and DrugBank.
 _STALENESS_THRESHOLD_DAYS_DEFAULT = 90
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# SECTION 1 — PHASE 1: FOUNDATION (must run first, stdlib-only)
+# SECTION 1 -- PHASE 1: FOUNDATION (must run first, stdlib-only)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
@@ -264,7 +264,7 @@ def _load_dotenv() -> None:
     The pipeline reads 10+ env vars (``DRUGOS_NEO4J_URI``,
     ``DRUGOS_NEO4J_PASSWORD``, ``DRUGOS_SEED``, etc.).  Forgetting to
     ``source .env`` causes wrong config, wrong Neo4j instance, missing
-    password — all silent until step 3+ fails 30 minutes in.  Loading
+    password -- all silent until step 3+ fails 30 minutes in.  Loading
     ``.env`` at entry point removes that footgun without adding a
     ``python-dotenv`` dependency (constraint 3.4: stdlib only).
     """
@@ -273,7 +273,7 @@ def _load_dotenv() -> None:
     if project_root_str:
         env_path = Path(project_root_str).resolve() / ".env"
     else:
-        # __file__ is .../drugos_graph/__main__.py → parent.parent is the
+        # __file__ is .../drugos_graph/__main__.py -> parent.parent is the
         # project root in development.  In an installed package, .env is
         # typically in cwd.
         env_path = Path(__file__).resolve().parent.parent / ".env"
@@ -286,7 +286,7 @@ def _load_dotenv() -> None:
     try:
         text = env_path.read_text(encoding="utf-8")
     except OSError as exc:
-        # Fail soft — never let .env loading block pipeline start.
+        # Fail soft -- never let .env loading block pipeline start.
         _logger.warning("Could not read .env file at %s: %s", env_path, exc)
         return
 
@@ -300,14 +300,14 @@ def _load_dotenv() -> None:
         if line.startswith("export "):
             line = line[len("export "):].lstrip()
         if "=" not in line:
-            _logger.debug(".env:%d: missing '=' — skipping: %r", lineno, raw_line)
+            _logger.debug(".env:%d: missing '=' -- skipping: %r", lineno, raw_line)
             continue
         key, _, value = line.partition("=")
         key = key.strip()
         # Strip matching surrounding quotes.
         value = value.strip().strip('"').strip("'")
         if key and not key.isidentifier():
-            _logger.warning(".env:%d: invalid key %r — skipping", lineno, key)
+            _logger.warning(".env:%d: invalid key %r -- skipping", lineno, key)
             continue
         # setdefault: shell env vars take precedence over .env file.
         os.environ.setdefault(key, value)
@@ -329,7 +329,7 @@ def _generate_run_id() -> str:
     --------
     1. ``DRUGOS_RUN_ID`` env var (set by Airflow / cron wrapper for
        back-fill traceability).
-    2. ``YYYYMMDD_HHMMSS_<8-hex>`` — timestamp + UUID4 prefix.
+    2. ``YYYYMMDD_HHMMSS_<8-hex>`` -- timestamp + UUID4 prefix.
 
     The generated value is written back to ``os.environ['DRUGOS_RUN_ID']``
     so that downstream modules (run_pipeline, config.RUN_ID) read the same
@@ -352,14 +352,14 @@ def _init_global_seed() -> None:
     PyTorch (if installed), and ``PYTHONHASHSEED``.  Without calling it
     at the very top of execution, hash randomisation produces different
     import ordering and dict iteration orders on every run, which
-    silently changes TransE embeddings and drug-disease predictions —
+    silently changes TransE embeddings and drug-disease predictions --
     a regulatory reproducibility failure (FDA 21 CFR Part 11).
 
     We import SEED lazily so that an invalid value in the env var
     (e.g. ``DRUGOS_SEED=abc``) raises a clear error here, not deep
     inside config.py's module load.
     """
-    # Lazy import — only config.py's seed bits are needed, NOT the full
+    # Lazy import -- only config.py's seed bits are needed, NOT the full
     # 6,831-line module.  In practice importing config eagerly is fine
     # (it has no heavy third-party deps at module top), but we still
     # defer to keep the pre-flight phase honest about "stdlib only".
@@ -376,7 +376,7 @@ def _init_global_seed() -> None:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# SECTION 2 — PHASE 2: PRE-FLIGHT GUARDS
+# SECTION 2 -- PHASE 2: PRE-FLIGHT GUARDS
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
@@ -384,7 +384,7 @@ def _validate_scientific_environment() -> int:
     """Verify Python, NumPy, and PyTorch are present and compatible (D3-SCI-02).
 
     Uses ``importlib.util.find_spec`` so missing optional dependencies
-    don't raise ImportError — they're reported as structured warnings
+    don't raise ImportError -- they're reported as structured warnings
     instead.  The pipeline may legitimately run without PyTorch (e.g.
     --skip-training), so PyTorch is a WARNING not an error.
 
@@ -396,7 +396,7 @@ def _validate_scientific_environment() -> int:
     """
     import importlib.util
 
-    # 1) Python version (re-check — the import-time guard at the top of
+    # 1) Python version (re-check -- the import-time guard at the top of
     #    this module handles <3.10, but we also surface it cleanly here
     #    for --self-test).
     if _sys.version_info < (3, 10):
@@ -406,7 +406,7 @@ def _validate_scientific_environment() -> int:
         )
         return EXIT_CONFIG_FAILURE
 
-    # 2) NumPy — required by virtually every loader.
+    # 2) NumPy -- required by virtually every loader.
     numpy_spec = importlib.util.find_spec("numpy")
     if numpy_spec is None:
         _logger.error(
@@ -421,11 +421,11 @@ def _validate_scientific_environment() -> int:
             getattr(_np, "__version__", "?"),
             "yes" if hasattr(_np, "show_config") else "unknown",
         )
-    except ImportError as exc:  # pragma: no cover — defensive
+    except ImportError as exc:  # pragma: no cover -- defensive
         _logger.error("NumPy import failed: %s", exc)
         return EXIT_CONFIG_FAILURE
 
-    # 3) PyTorch — required for TransE training.  WARNING only.
+    # 3) PyTorch -- required for TransE training.  WARNING only.
     torch_spec = importlib.util.find_spec("torch")
     if torch_spec is None:
         _logger.warning(
@@ -444,10 +444,10 @@ def _validate_scientific_environment() -> int:
                 "Scientific env: torch=%s cuda_available=%s cuda_version=%s",
                 _torch.__version__, cuda_available, cuda_version,
             )
-        except ImportError as exc:  # pragma: no cover — defensive
+        except ImportError as exc:  # pragma: no cover -- defensive
             _logger.warning("PyTorch import failed: %s", exc)
 
-    # 4) pandas — required by every loader.
+    # 4) pandas -- required by every loader.
     pd_spec = importlib.util.find_spec("pandas")
     if pd_spec is None:
         _logger.error(
@@ -481,7 +481,7 @@ def _verify_package_integrity() -> int:
 
     if missing:
         _logger.error(
-            "Package integrity check FAILED — %d critical submodule(s) missing:\n%s",
+            "Package integrity check FAILED -- %d critical submodule(s) missing:\n%s",
             len(missing), "\n".join(missing),
         )
         _logger.error(
@@ -514,7 +514,7 @@ def _check_data_directories() -> int:
     from drugos_graph import config as _cfg
 
     # The dirs we test for write access.  We don't try to *create* them
-    # here — that's ensure_dirs()'s job.  We just verify the parent
+    # here -- that's ensure_dirs()'s job.  We just verify the parent
     # chain is writable so that ensure_dirs() will succeed.
     critical_dirs: list[tuple[str, Path]] = [
         ("PROJECT_ROOT", _cfg.PROJECT_ROOT),
@@ -539,7 +539,7 @@ def _check_data_directories() -> int:
 
     if failed:
         _logger.error(
-            "Data-directory pre-flight FAILED — %d issue(s):\n%s",
+            "Data-directory pre-flight FAILED -- %d issue(s):\n%s",
             len(failed), "\n".join(failed),
         )
         _logger.error(
@@ -626,13 +626,13 @@ def _check_module_path_tampering() -> int:
     cloud VM with a stale working directory).
 
     We refuse to proceed if this file is loaded from a world-writable
-    parent (``/tmp``, cwd on a shared host) — but we only WARN, because
+    parent (``/tmp``, cwd on a shared host) -- but we only WARN, because
     legitimate dev workflows sometimes run from cwd.
 
     Returns
     -------
     int
-        Always ``EXIT_SUCCESS`` — this is a WARNING-only check.
+        Always ``EXIT_SUCCESS`` -- this is a WARNING-only check.
     """
     try:
         resolved = Path(__file__).resolve()
@@ -713,24 +713,24 @@ def _check_input_files(argv: Sequence[str]) -> int:
 
     missing: list[str] = []
 
-    # Primary DRKG TSV — required ONLY when data-source is drkg.
+    # Primary DRKG TSV -- required ONLY when data-source is drkg.
     if not data_source_phase1:
         drkg_tsv = _cfg.RAW_DIR / "drkg.tsv"
         if not drkg_tsv.exists():
             missing.append(
-                f"  - {drkg_tsv}\n      → DRKG TSV. Download via"
+                f"  - {drkg_tsv}\n      -> DRKG TSV. Download via"
                 " `python -m drugos_graph` (without --skip-download) or"
                 " from " + _cfg.DATA_SOURCES.get("drkg", {}).get("url", "(url unknown)")
             )
 
-    # DrugBank XML — required for step 4 enrichment (unless --skip-neo4j).
+    # DrugBank XML -- required for step 4 enrichment (unless --skip-neo4j).
     # On the phase1 path, DrugBank data comes from Phase 1's processed_data
     # so the raw XML is not required.
     if not data_source_phase1 and "--skip-neo4j" not in argv:
         drugbank_xml = _cfg.RAW_DIR / "drugbank.xml"
         if not drugbank_xml.exists():
             missing.append(
-                f"  - {drugbank_xml}\n      → DrugBank XML. Apply for"
+                f"  - {drugbank_xml}\n      -> DrugBank XML. Apply for"
                 " access at https://go.drugbank.com/ and place the file"
                 " in RAW_DIR."
             )
@@ -755,13 +755,13 @@ def _check_data_freshness(argv: Sequence[str]) -> int:
 
     Triggered by the ``--require-fresh`` flag.  Stale data means missing
     drug approvals, missing safety signals, missing disease-gene
-    associations — a drug with a new black-box warning would be missing
+    associations -- a drug with a new black-box warning would be missing
     from the safety profile, leading to dangerous repurposing recommendations.
 
     Returns
     -------
     int
-        Always ``EXIT_SUCCESS`` — this is a WARNING-only check (pipeline
+        Always ``EXIT_SUCCESS`` -- this is a WARNING-only check (pipeline
         still proceeds; operator is informed of drift).
     """
     if "--require-fresh" not in argv:
@@ -808,13 +808,13 @@ def _check_config_drift() -> int:
     If ``pipeline_results.json`` exists in ``PROCESSED_DIR`` and its
     ``config_hash`` differs from the current one, the configuration has
     drifted since the last successful run.  This means string thresholds,
-    data source URLs, or seed values changed — predictions from this run
+    data source URLs, or seed values changed -- predictions from this run
     are NOT directly comparable to predictions from the previous run.
 
     Returns
     -------
     int
-        Always ``EXIT_SUCCESS`` — WARNING only. Pipeline still proceeds;
+        Always ``EXIT_SUCCESS`` -- WARNING only. Pipeline still proceeds;
         operator is informed of drift.
     """
     from drugos_graph import config as _cfg
@@ -838,10 +838,10 @@ def _check_config_drift() -> int:
     # that a failure inside ``compute_config_hash()`` (e.g. an env var with
     # an unexpected type, or a transient import error) does NOT propagate as
     # an unhandled exception.  The drift check is an informational WARNING,
-    # not a data-pipeline error — it must never crash the pipeline.
+    # not a data-pipeline error -- it must never crash the pipeline.
     try:
         current_hash = _cfg.CONFIG_HASH or _cfg.compute_config_hash()
-    except Exception as exc:  # noqa: BLE001 — informational check, fail soft
+    except Exception as exc:  # noqa: BLE001 -- informational check, fail soft
         _logger.debug(
             "Could not compute current config_hash for drift comparison: %s."
             " Skipping drift check (this is informational, not a failure).", exc,
@@ -913,11 +913,11 @@ def _detect_incomplete_run() -> int:
     Returns
     -------
     int
-        Always ``EXIT_SUCCESS`` — WARNING only.
+        Always ``EXIT_SUCCESS`` -- WARNING only.
     """
     from drugos_graph import config as _cfg
 
-    # 1) pipeline_results.json with status != success → incomplete.
+    # 1) pipeline_results.json with status != success -> incomplete.
     results_path = _cfg.PROCESSED_DIR / "pipeline_results.json"
     if results_path.exists():
         try:
@@ -935,7 +935,7 @@ def _detect_incomplete_run() -> int:
         except (OSError, json.JSONDecodeError):
             pass
 
-    # 2) Orphaned checkpoint files → likely crashed mid-step.
+    # 2) Orphaned checkpoint files -> likely crashed mid-step.
     if _cfg.CHECKPOINT_DIR.exists():
         try:
             checkpoints = list(_cfg.CHECKPOINT_DIR.glob("*.json"))
@@ -956,7 +956,7 @@ def _check_idempotency() -> int:
     Returns
     -------
     int
-        Always ``EXIT_SUCCESS`` — WARNING only.
+        Always ``EXIT_SUCCESS`` -- WARNING only.
     """
     from drugos_graph import config as _cfg
 
@@ -972,11 +972,11 @@ def _check_idempotency() -> int:
 
     if prev.get("status") in ("success", "completed"):
         prev_hash = prev.get("config_hash")
-        # D7-IDP-01: Wrap hash computation in try/except — informational
+        # D7-IDP-01: Wrap hash computation in try/except -- informational
         # idempotency warning must not crash the pipeline.
         try:
             current_hash = _cfg.CONFIG_HASH or _cfg.compute_config_hash()
-        except Exception as exc:  # noqa: BLE001 — fail soft
+        except Exception as exc:  # noqa: BLE001 -- fail soft
             _logger.debug(
                 "Could not compute config_hash for idempotency check: %s.", exc,
             )
@@ -992,7 +992,7 @@ def _check_idempotency() -> int:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# SECTION 3 — PHASE 3: ENTRY POINT STRUCTURE (lifecycle & concurrency)
+# SECTION 3 -- PHASE 3: ENTRY POINT STRUCTURE (lifecycle & concurrency)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
@@ -1010,12 +1010,12 @@ def _signal_handler(signum: int, frame: Any) -> None:
     sig_name = signal.Signals(signum).name if hasattr(signal, "Signals") else str(signum)
     if _SHUTDOWN_REQUESTED:
         _logger.warning(
-            "Received %s again — forcing immediate exit.", sig_name,
+            "Received %s again -- forcing immediate exit.", sig_name,
         )
         raise KeyboardInterrupt()
     _SHUTDOWN_REQUESTED = True
     _logger.warning(
-        "Received %s — requesting graceful shutdown."
+        "Received %s -- requesting graceful shutdown."
         " Send the signal again to force exit.", sig_name,
     )
 
@@ -1075,7 +1075,7 @@ def _acquire_concurrency_lock() -> int:
     except OSError as exc:
         _logger.warning(
             "Could not open lock file %s: %s. Proceeding without lock"
-            " — concurrent runs may corrupt state.",
+            " -- concurrent runs may corrupt state.",
             _PIPELINE_LOCK_PATH, exc,
         )
         return EXIT_SUCCESS
@@ -1106,7 +1106,7 @@ def _acquire_concurrency_lock() -> int:
             except OSError:
                 locked = False
         except ImportError:
-            # No locking primitive available — fail open.
+            # No locking primitive available -- fail open.
             locked = True
 
     if not locked:
@@ -1171,7 +1171,7 @@ def _write_preliminary_manifest(run_id: str, argv: Sequence[str]) -> None:
     by ``run_full_pipeline()`` is never created.  This preliminary
     manifest survives the crash and provides regulators with the
     invocation context (run_id, timestamp, config_hash, CLI args,
-    system env) — without which we cannot explain how a prediction was
+    system env) -- without which we cannot explain how a prediction was
     generated.
 
     Uses atomic write (temp file + ``os.rename``) so a partial write
@@ -1219,13 +1219,13 @@ def _write_preliminary_manifest(run_id: str, argv: Sequence[str]) -> None:
 def _log_system_resources() -> None:
     """Log available RAM, CPU count, GPU availability (D8-PERF-02).
 
-    OOM kill is the #1 production failure mode for graph pipelines —
+    OOM kill is the #1 production failure mode for graph pipelines --
     DRKG alone needs 2-4 GB and PyG HeteroData can exceed 8 GB.  Logging
     the baseline at startup gives ops a debugging starting point.
     """
-    # CPU count — stdlib.
+    # CPU count -- stdlib.
     cpu_count = os.cpu_count() or "unknown"
-    # RAM — try psutil, fall back to /proc/meminfo on Linux.
+    # RAM -- try psutil, fall back to /proc/meminfo on Linux.
     ram_str = "unknown"
     try:
         import psutil  # type: ignore
@@ -1242,7 +1242,7 @@ def _log_system_resources() -> None:
                             break
             except OSError:
                 pass
-    # GPU — try torch (already imported by _validate_scientific_environment).
+    # GPU -- try torch (already imported by _validate_scientific_environment).
     gpu_str = "n/a"
     try:
         import torch  # type: ignore
@@ -1332,7 +1332,7 @@ def _show_licenses() -> int:
     print("\nDrugOS Data Source Licenses")
     print("=" * 78)
     for source_key, info in sorted(_cfg.DATA_SOURCES.items()):
-        name = info.get("description", source_key).split("—")[0].strip()
+        name = info.get("description", source_key).split("--")[0].strip()
         url = info.get("url", "(no url)")
         license_ = info.get("license", "(unspecified)")
         version = info.get("version", "(unversioned)")
@@ -1362,14 +1362,14 @@ def _print_startup_banner() -> None:
         f"Schema v{_cfg.SCHEMA_VERSION:<8}              ║\n"
         f"║  Python {_sys.version.split()[0]:<12} "
         f"Package v{_cfg.PACKAGE_VERSION:<8}                      ║\n"
-        f"║  Team Cosmic / VentureLab — Autonomous Drug Repurposing Platform ║\n"
+        f"║  Team Cosmic / VentureLab -- Autonomous Drug Repurposing Platform ║\n"
         f"╚══════════════════════════════════════════════════════════════════╝\n"
     )
     # Use print() (not logging) so the banner appears even before
     # run_pipeline._configure_logging() runs.
     print(banner, flush=True)
     _logger.info(
-        "DrugOS starting — run_id=%s config_hash=%s argv=%s",
+        "DrugOS starting -- run_id=%s config_hash=%s argv=%s",
         _RUN_ID, _cfg.CONFIG_HASH or _cfg.compute_config_hash(), _sys.argv,
     )
 
@@ -1455,11 +1455,11 @@ def _install_atexit_handler(start_time: float, run_id: str) -> None:
                 " | shutdown_requested=%s",
                 run_id, elapsed, _SHUTDOWN_REQUESTED,
             )
-        except Exception:  # pragma: no cover — defensive
+        except Exception:  # pragma: no cover -- defensive
             pass
         try:
             logging.shutdown()
-        except Exception:  # pragma: no cover — defensive
+        except Exception:  # pragma: no cover -- defensive
             pass
         _release_concurrency_lock()
 
@@ -1467,7 +1467,7 @@ def _install_atexit_handler(start_time: float, run_id: str) -> None:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# SECTION 4 — PHASE 4: PIPELINE INTEGRATION (run() + self-test)
+# SECTION 4 -- PHASE 4: PIPELINE INTEGRATION (run() + self-test)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
@@ -1489,7 +1489,7 @@ def _run_self_test() -> int:
     int
         ``EXIT_SUCCESS`` if all checks pass, else ``EXIT_ERROR``.
     """
-    print("DrugOS self-test — verifying installation...")
+    print("DrugOS self-test -- verifying installation...")
     failures: list[str] = []
 
     # 1) Critical module imports.
@@ -1555,7 +1555,7 @@ def _run_self_test() -> int:
             real_pwd = os.environ.get("DRUGOS_NEO4J_PASSWORD", "")
             if real_pwd and real_pwd in pwd_repr:
                 failures.append(
-                    "safe_config_dict() leaks Neo4j password — "
+                    "safe_config_dict() leaks Neo4j password -- "
                     f"unmasked value found in {pwd_repr!r}"
                 )
     except Exception as exc:
@@ -1563,12 +1563,12 @@ def _run_self_test() -> int:
 
     # Report.
     if failures:
-        print(f"\nSelf-test FAILED — {len(failures)} issue(s):")
+        print(f"\nSelf-test FAILED -- {len(failures)} issue(s):")
         for f in failures:
             print(f"  - {f}")
         return EXIT_ERROR
 
-    print("\nSelf-test PASSED — installation is healthy.")
+    print("\nSelf-test PASSED -- installation is healthy.")
     print(f"  Package: {_cfg.PACKAGE_VERSION}")
     print(f"  Pipeline: {_cfg.PIPELINE_VERSION}")
     print(f"  Schema: {_cfg.SCHEMA_VERSION}")
@@ -1630,14 +1630,14 @@ def _run_pipeline_main(argv: Sequence[str]) -> int:
     args of whatever wrapper invoked us (e.g. pytest).
 
     After step 12 validation logic is fully migrated into __main__,
-    future versions of run_pipeline may return an int directly — that
+    future versions of run_pipeline may return an int directly -- that
     transition is transparent here.
     """
     from drugos_graph.run_pipeline import main as _pipeline_main
 
     # Set sys.argv so argparse.parse_args() inside _pipeline_main sees
     # exactly the args we want (not pytest's args, not the host's args).
-    # This is critical for programmatic use via run([...]) — D15-INT-02.
+    # This is critical for programmatic use via run([...]) -- D15-INT-02.
     original_argv = _sys.argv
     _sys.argv = ["drugos_graph"] + list(argv)
     try:
@@ -1654,7 +1654,7 @@ def _run_pipeline_main(argv: Sequence[str]) -> int:
             if code == 1:
                 return EXIT_ERROR
             return code
-        # Non-int code (rare) → treat as error.
+        # Non-int code (rare) -> treat as error.
         _logger.error("Pipeline exited with non-int code: %r", code)
         return EXIT_ERROR
     finally:
@@ -1662,7 +1662,7 @@ def _run_pipeline_main(argv: Sequence[str]) -> int:
 
 
 def run(argv: Optional[Sequence[str]] = None) -> int:
-    """Programmatic entry point — returns an integer exit code (D2-DES-01, D10-TST-01).
+    """Programmatic entry point -- returns an integer exit code (D2-DES-01, D10-TST-01).
 
     This is the SOLE entry point for both CLI and programmatic use.
     ``argv`` defaults to ``sys.argv[1:]``.  Returns an integer exit code
@@ -1672,7 +1672,7 @@ def run(argv: Optional[Sequence[str]] = None) -> int:
     Why a separate ``run()`` function?
     ----------------------------------
     * Tests can call ``run(['--self-test'])`` directly without spawning
-      a subprocess (D10-TST-01 — saves 2-3s per test).
+      a subprocess (D10-TST-01 -- saves 2-3s per test).
     * Jupyter notebooks, Airflow DAGs, and FastAPI endpoints can call
       ``run(['--step', '1'])`` as a library function (D15-INT-02).
     * ``__main__.py`` becomes a thin wrapper, making the lifecycle
@@ -1704,7 +1704,7 @@ def run(argv: Optional[Sequence[str]] = None) -> int:
     _RUN_ID = _generate_run_id()
 
     # ─── EARLY-EXIT FLAGS (must be checked before heavy work) ──────────────
-    # These don't need drugos_graph imports — they parse argv locally.
+    # These don't need drugos_graph imports -- they parse argv locally.
     argv_list = list(argv) if argv is not None else list(_sys.argv[1:])
 
     # --help / -h: argparse in run_pipeline.main() handles it.  We let it
@@ -1715,7 +1715,7 @@ def run(argv: Optional[Sequence[str]] = None) -> int:
     try:
         _init_global_seed()
     except SystemExit as exc:
-        # Re-raise — D14-COMP-01 style hard exit on invalid seed.
+        # Re-raise -- D14-COMP-01 style hard exit on invalid seed.
         return int(exc.code) if isinstance(exc.code, int) else EXIT_CONFIG_FAILURE
 
     # ─── D14-COMP-01: Python version (re-checked here for --self-test) ─────
@@ -1833,14 +1833,14 @@ def run(argv: Optional[Sequence[str]] = None) -> int:
         return rc
 
     # ─── PHASE 4: PIPELINE INTEGRATION ─────────────────────────────────────
-    # D1-ARCH-01 / D8-PERF-01: lazy import — only triggered when actually
+    # D1-ARCH-01 / D8-PERF-01: lazy import -- only triggered when actually
     # needed.  --help / --self-test / --show-licenses never reach here.
     # v37 ROOT FIX (Phase 2 Issue #1): track the ACTUAL exit status in a
     # separate variable that's always in sync with what's being returned.
     # The previous code's ``finally`` block referenced ``rc``, but if
     # ``_run_pipeline_main`` raised and an ``except`` clause returned,
     # the ``finally`` block saw the STALE ``rc`` from line 1831
-    # (``_confirm_proceed``'s return value, typically EXIT_SUCCESS) —
+    # (``_confirm_proceed``'s return value, typically EXIT_SUCCESS) --
     # causing the structured log to claim "success" for a crashed run.
     # The fix: ``_actual_exit_code`` is updated whenever an except clause
     # decides to return, so the finally block always logs the TRUE status.
@@ -1876,7 +1876,7 @@ def run(argv: Optional[Sequence[str]] = None) -> int:
                     # (it does NOT raise ``V1LaunchCriteriaFailed`` when
                     # the env var is set), but this ``__main__`` re-check
                     # INCORRECTLY OVERRRODE the operator's explicit allow-
-                    # fail decision — the operator said "allow the failure"
+                    # fail decision -- the operator said "allow the failure"
                     # but ``__main__`` exited 2 anyway. The fix respects
                     # ``DRUGOS_ALLOW_LAUNCH_FAIL``: if set, log a warning
                     # and keep rc=0; if unset, log an error and set rc=2.
@@ -1886,7 +1886,7 @@ def run(argv: Optional[Sequence[str]] = None) -> int:
                     if _allow_launch_fail:
                         _logger.warning(
                             "V1 LAUNCH CRITERIA FAILED: %s. "
-                            "DRUGOS_ALLOW_LAUNCH_FAIL=1 is set — operator "
+                            "DRUGOS_ALLOW_LAUNCH_FAIL=1 is set -- operator "
                             "explicitly allowed the failure. Exit code "
                             "remains 0, but the model is NOT production-"
                             "ready. See criteria dict for details.",
@@ -1906,12 +1906,12 @@ def run(argv: Optional[Sequence[str]] = None) -> int:
                 # ImportError and silently SKIPPED the V1 launch criteria
                 # check (defeating the entire ML-honesty audit fix). Now
                 # catch only the specific import/attr errors that the
-                # dead-name reference produced — every other exception
+                # dead-name reference produced -- every other exception
                 # (JSON decode, file IO, criteria-check crash) propagates
                 # so the operator sees the real failure mode.
                 _logger.warning(
                     "V1 launch criteria check could not be wired up "
-                    "(config import error: %s). This is a regression — "
+                    "(config import error: %s). This is a regression -- "
                     "RESULTS_PERSIST_PATH is defined in config.py and "
                     "_check_v1_launch_criteria is defined in run_pipeline.py. "
                     "Exit code remains %d (success), but the launch "
@@ -1949,7 +1949,7 @@ def run(argv: Optional[Sequence[str]] = None) -> int:
         _actual_exit_code = EXIT_ERROR
         return EXIT_ERROR
     finally:
-        # D3-SCI-04: validation check — if pipeline completed but validation
+        # D3-SCI-04: validation check -- if pipeline completed but validation
         # was skipped (--skip-neo4j, --step < 12), surface it as a WARNING
         # BEFORE logging.shutdown() so the warning actually reaches every
         # configured handler (file handler, stderr handler, etc.).
@@ -1961,7 +1961,7 @@ def run(argv: Optional[Sequence[str]] = None) -> int:
         #
         # The warning is emitted from inside the finally block so it is
         # guaranteed to run even if the try block raised.  It MUST be
-        # emitted BEFORE logging.shutdown() — otherwise the file handler
+        # emitted BEFORE logging.shutdown() -- otherwise the file handler
         # is closed and the warning is lost (only stderr's last-resort
         # handler would emit it, which is fragile and easy to miss).
         #
@@ -1993,7 +1993,7 @@ def run(argv: Optional[Sequence[str]] = None) -> int:
                 #       the v25 ROOT FIX (config.py:4862); the 0.78
                 #       threshold was stale.
                 #   (2) ``_check_v1_launch_criteria`` does NOT check
-                #       node/edge counts — those are checked by
+                #       node/edge counts -- those are checked by
                 #       ``graph_stats.check_exit_criteria`` (separate
                 #       gate). The "500K nodes / 6M edges" claim was
                 #       false for the V1 launch criteria contract.
@@ -2041,7 +2041,7 @@ def run(argv: Optional[Sequence[str]] = None) -> int:
 
 
 def main() -> None:
-    """Legacy entry point — preserved for backward compatibility.
+    """Legacy entry point -- preserved for backward compatibility.
 
     New code should call ``run()`` directly.  This wrapper exists so
     that ``from drugos_graph.run_pipeline import main`` (which some
@@ -2050,15 +2050,15 @@ def main() -> None:
     Raises
     ------
     SystemExit
-        Always — translates the int return of ``run()`` into a sys.exit.
+        Always -- translates the int return of ``run()`` into a sys.exit.
     """
     _sys.exit(run())
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# SECTION 5 — ENTRY POINT GUARD
+# SECTION 5 -- ENTRY POINT GUARD
 # ═══════════════════════════════════════════════════════════════════════════════
-# Entry point guard — pipeline only executes when run as:
+# Entry point guard -- pipeline only executes when run as:
 #   python -m drugos_graph
 # Direct execution (`python drugos_graph/__main__.py`) is detected at
 # import time and produces a clear error message (D15-INT-01).

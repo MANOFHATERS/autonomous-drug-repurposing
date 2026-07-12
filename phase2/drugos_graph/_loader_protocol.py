@@ -1,17 +1,17 @@
-"""DrugOS Graph Module — Loader Protocol
+"""DrugOS Graph Module -- Loader Protocol
 =========================================
 A ``Loader`` Protocol (PEP 544) that standardises the public surface of
 every data-source loader in the package.
 
 Why a Protocol?
   * ``run_pipeline.py`` currently special-cases every loader
-    (``download_chembl`` vs ``download_uniprot`` vs ``download_drkg`` …).
+    (``download_chembl`` vs ``download_uniprot`` vs ``download_drkg`` ...).
     A Protocol lets the pipeline treat loaders polymorphically without a
-    shared base class (composition over inheritance — D1-002).
+    shared base class (composition over inheritance -- D1-002).
   * ``@runtime_checkable`` means ``isinstance(obj, Loader)`` works at
     runtime, so the pipeline can assert a loader conforms before calling
     it.
-  * A Protocol is *structural* — existing module-level functions do not
+  * A Protocol is *structural* -- existing module-level functions do not
     need to inherit from anything. The ``UniProtLoader`` adapter class in
     ``uniprot_loader.py`` satisfies the Protocol by *duck typing*.
 
@@ -32,7 +32,7 @@ endpoint keys in priority order:
     aliases ``target_uniprot_id``, ``target``, ``tail``, ``to_id``,
     ``object_id``.
 
-IMPORTANT — "source" is BOTH an endpoint alias AND a legitimate
+IMPORTANT -- "source" is BOTH an endpoint alias AND a legitimate
 data-source PROPERTY:
   * When ``src_id`` is ABSENT, ``source`` (if present) is interpreted as
     the head endpoint ID, then REMOVED from the edge dict (it cannot
@@ -43,7 +43,7 @@ data-source PROPERTY:
 
 Contract for loader authors:
   * Loaders MUST emit either ``src_id`` / ``dst_id`` (preferred) OR one
-    of the aliases — never both. Emitting both ``src_id`` and ``source``
+    of the aliases -- never both. Emitting both ``src_id`` and ``source``
     on the same edge is ambiguous and the alias resolution may strip
     the property.
   * Loaders that need to tag the data source SHOULD set the
@@ -84,7 +84,7 @@ class Loader(Protocol):
     into an iterator of record dicts, and ``to_graph`` those records into
     a ``(nodes, edges)`` pair of lists.
 
-    Implementations are NOT required to subclass this Protocol — any
+    Implementations are NOT required to subclass this Protocol -- any
     object with the three methods and a ``name`` attribute satisfies it
     (structural typing). The ``UniProtLoader`` adapter in
     ``uniprot_loader.py`` is the reference implementation.
@@ -94,7 +94,7 @@ class Loader(Protocol):
     download(force=False) -> Path
         Download (or cached-load) the raw source file.
     parse(path=None) -> Iterator[dict]
-        Yield parsed records. Pure parser — no organism filter.
+        Yield parsed records. Pure parser -- no organism filter.
     to_graph(records) -> Tuple[List[dict], List[dict]]
         Convert records into ``(nodes, edges)`` for the KG.
     """

@@ -409,7 +409,7 @@ class TestCoding:
         assert _normalize_value(True) == "1"
         assert _normalize_value(False) == "0"
         assert _normalize_value(0) == "0"
-        # 0.0 and False both normalize to '0' by design — bool check comes first
+        # 0.0 and False both normalize to '0' by design -- bool check comes first
         assert _normalize_value(True) == "1"
         assert _normalize_value(1) == "1"  # int 1 normalizes to '1'
 

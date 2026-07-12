@@ -1,10 +1,10 @@
-# MIT License — Copyright (c) 2026 Team Cosmic / VentureLab — see LICENSE
+# MIT License -- Copyright (c) 2026 Team Cosmic / VentureLab -- see LICENSE
 """v65 ROOT FIX (P1-026): backwards-compatibility shim.
 
 The canonical home for the ChEMBL HTTP client is now
 :mod:`pipelines._chembl_http_client`. The previous file name
 ``_http_client.py`` was misleading because it implied a generic,
-pipeline-agnostic HTTP utility — but the implementation hard-codes
+pipeline-agnostic HTTP utility -- but the implementation hard-codes
 ChEMBL-specific behaviour (token-bucket parameters tuned for ChEMBL's
 rate limits, ``CHEMBL_MAX_RESPONSE_BYTES`` size cap, the ChEMBL
 User-Agent string, and the ChEMBL REST API URL contract). Only

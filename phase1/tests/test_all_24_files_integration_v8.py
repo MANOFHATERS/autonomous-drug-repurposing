@@ -1,11 +1,11 @@
-"""Test 2 of 3 — Real integration test for all 24 files working together.
+"""Test 2 of 3 -- Real integration test for all 24 files working together.
 
 This is the second of the three test suites the user mandated.  It
 verifies that the newly-upgraded ``pipelines/string_pipeline.py`` works
-correctly with ALL other files in the codebase — the 23 already-fixed
-files plus the one we just upgraded — for a total of 24 files.
+correctly with ALL other files in the codebase -- the 23 already-fixed
+files plus the one we just upgraded -- for a total of 24 files.
 
-The 24 files covered (no files removed — all originals preserved):
+The 24 files covered (no files removed -- all originals preserved):
 
   1.  config/__init__.py
   2.  config/settings.py                              (additive STRING knobs added)
@@ -50,7 +50,7 @@ Test coverage
    ``protein_resolver``) can resolve the pipeline's output.
 6. ``BasePipeline`` audit-trail infrastructure (``PipelineRun`` rows)
    works with the upgraded ``StringPipeline``.
-7. End-to-end: download (mocked) → clean → load into SQLite, verify
+7. End-to-end: download (mocked) -> clean -> load into SQLite, verify
    DB contains expected ``ProteinProteinInteraction`` rows with full
    lineage (``pipeline_run_id`` non-NULL on every row).
 8. Idempotency: running ``clean()`` + ``load()`` twice produces
@@ -242,7 +242,7 @@ def string_pipeline(tmp_path, tmp_processed_dir):
 
 
 # ============================================================================
-# Section 1 — Import sanity (all 24 files import cleanly)
+# Section 1 -- Import sanity (all 24 files import cleanly)
 # ============================================================================
 
 
@@ -292,7 +292,7 @@ class TestAllFilesImport:
 
 
 # ============================================================================
-# Section 2 — Config integration
+# Section 2 -- Config integration
 # ============================================================================
 
 
@@ -363,7 +363,7 @@ class TestConfigIntegration:
 
 
 # ============================================================================
-# Section 3 — Database model integration
+# Section 3 -- Database model integration
 # ============================================================================
 
 
@@ -422,7 +422,7 @@ class TestDatabaseIntegration:
 
 
 # ============================================================================
-# Section 4 — Cleaning module integration
+# Section 4 -- Cleaning module integration
 # ============================================================================
 
 
@@ -448,9 +448,9 @@ class TestCleaningIntegration:
         assert hasattr(deduplicator, "__name__")
 
     def test_string_pipeline_does_not_use_drug_cleaning(self, string_pipeline):
-        """STRING pipeline doesn't need drug-specific cleaning (SMILES→InChIKey).
+        """STRING pipeline doesn't need drug-specific cleaning (SMILES->InChIKey).
 
-        This is a negative test — confirms the architecture is correct.
+        This is a negative test -- confirms the architecture is correct.
         """
         import pipelines.string_pipeline as spmod
 
@@ -460,14 +460,14 @@ class TestCleaningIntegration:
         # It's OK to import missing_values or deduplicator if needed, but
         # not normalizer (which is SMILES-specific).
         # Actually, the current STRING pipeline doesn't import any cleaning
-        # module — clean() is self-contained. Verify this.
+        # module -- clean() is self-contained. Verify this.
         assert "from cleaning" not in source or "from cleaning.missing_values" in source, (
             "STRING pipeline should not depend on drug-specific cleaning"
         )
 
 
 # ============================================================================
-# Section 5 — Entity resolution integration
+# Section 5 -- Entity resolution integration
 # ============================================================================
 
 
@@ -497,7 +497,7 @@ class TestEntityResolutionIntegration:
 
 
 # ============================================================================
-# Section 6 — BasePipeline audit-trail integration
+# Section 6 -- BasePipeline audit-trail integration
 # ============================================================================
 
 
@@ -545,15 +545,15 @@ class TestAuditTrailIntegration:
 
 
 # ============================================================================
-# Section 7 — End-to-end integration
+# Section 7 -- End-to-end integration
 # ============================================================================
 
 
 class TestEndToEndIntegration:
-    """End-to-end: download (mocked) → clean → load into SQLite."""
+    """End-to-end: download (mocked) -> clean -> load into SQLite."""
 
     def test_full_lifecycle_mock(self, string_pipeline, populated_db_session, tmp_processed_dir):
-        """Full download → clean → load lifecycle with mocked download.
+        """Full download -> clean -> load lifecycle with mocked download.
 
         Verifies that:
         - The pipeline can be instantiated with default config.
@@ -595,7 +595,7 @@ class TestEndToEndIntegration:
 
 
 # ============================================================================
-# Section 8 — Idempotency
+# Section 8 -- Idempotency
 # ============================================================================
 
 
@@ -618,7 +618,7 @@ class TestIdempotencyIntegration:
         count2 = populated_db_session.query(ProteinProteinInteraction).count()
 
         assert count1 == count2, (
-            f"Idempotency violated: {count1} → {count2} after second load"
+            f"Idempotency violated: {count1} -> {count2} after second load"
         )
 
     def test_clean_twice_identical_output(self, string_pipeline):
@@ -630,7 +630,7 @@ class TestIdempotencyIntegration:
 
 
 # ============================================================================
-# Section 9 — Cross-module consistency
+# Section 9 -- Cross-module consistency
 # ============================================================================
 
 
@@ -647,7 +647,7 @@ class TestCrossModuleConsistency:
         df = p.clean(p._links_path)
         loaded = p.load(df, session=populated_db_session)
         populated_db_session.commit()
-        # No exception raised → cross-module consistency OK.
+        # No exception raised -> cross-module consistency OK.
         assert loaded > 0
 
     def test_get_uniprot_to_protein_id_map_consumes_session(
@@ -665,7 +665,7 @@ class TestCrossModuleConsistency:
 
 
 # ============================================================================
-# Section 10 — Schema compliance
+# Section 10 -- Schema compliance
 # ============================================================================
 
 
@@ -712,7 +712,7 @@ class TestSchemaCompliance:
 
 
 # ============================================================================
-# Section 11 — Lineage: provenance sidecar
+# Section 11 -- Lineage: provenance sidecar
 # ============================================================================
 
 
@@ -781,7 +781,7 @@ class TestLineageIntegration:
 
 
 # ============================================================================
-# Section 12 — Master DAG consumes schema-conformant column names
+# Section 12 -- Master DAG consumes schema-conformant column names
 # ============================================================================
 
 
@@ -802,7 +802,7 @@ class TestMasterDagIntegration:
 
 
 # ============================================================================
-# Section 13 — STRING pipeline fits with the broader 7-pipeline architecture
+# Section 13 -- STRING pipeline fits with the broader 7-pipeline architecture
 # ============================================================================
 
 
@@ -850,7 +850,7 @@ class TestPipelineFitsInArchitecture:
 
 
 # ============================================================================
-# Section 14 — Scientific correctness across modules
+# Section 14 -- Scientific correctness across modules
 # ============================================================================
 
 

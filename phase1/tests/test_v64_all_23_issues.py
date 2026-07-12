@@ -1,4 +1,4 @@
-"""v64 ROOT FIX verification — all 23 P1-001..P1-023 issues.
+"""v64 ROOT FIX verification -- all 23 P1-001..P1-023 issues.
 
 This test file verifies that EVERY issue from the audit report has been
 root-fixed in the v64 codebase. Each test reads the ACTUAL production code
@@ -36,7 +36,7 @@ def test_p1_001_uniprot_method_name_matches():
     from pipelines.uniprot_pipeline import UniProtPipeline
     # The method must exist with the plural name (matching the call site).
     assert hasattr(UniProtPipeline, "_get_load_columns"), (
-        "UniProtPipeline must define _get_load_columns (plural) — "
+        "UniProtPipeline must define _get_load_columns (plural) -- "
         "P1-001 regression: singular _get_load_column would crash on load()"
     )
     # The singular form must NOT be the canonical name (regression check).
@@ -91,7 +91,7 @@ def test_p1_004_chembl_raw_data_dir_imported():
     from pipelines import chembl_pipeline
     assert hasattr(chembl_pipeline, "RAW_DATA_DIR"), (
         "P1-004 regression: RAW_DATA_DIR not imported at module level in "
-        "chembl_pipeline.py — download() would raise NameError when called "
+        "chembl_pipeline.py -- download() would raise NameError when called "
         "standalone (bypassing BasePipeline.run())."
     )
     assert chembl_pipeline.RAW_DATA_DIR is not None
@@ -169,7 +169,7 @@ def test_p1_008_sha256_verified_on_resume():
     # The fix adds a full-file re-hash when mode == "ab".
     assert "ab" in src and "full_sha" in src, (
         "P1-008 regression: _stream_to_file does not re-hash the full file "
-        "after resume — checksum verification is silently skipped for "
+        "after resume -- checksum verification is silently skipped for "
         "resumed downloads."
     )
 
@@ -184,7 +184,7 @@ def test_p1_009_chembl_cursor_pagination():
     src = inspect.getsource(download_chembl_full)
     assert "next_uri" in src, (
         "P1-009 regression: download_chembl_full does not use cursor-based "
-        "next_uri pagination — offset-based paging breaks at offset >10000."
+        "next_uri pagination -- offset-based paging breaks at offset >10000."
     )
     assert "page_meta" in src, "P1-009: page_meta not referenced"
 
@@ -222,14 +222,14 @@ def test_p1_010_drugbank_id_no_collision():
     assert "hashlib.sha256" in func_src, (
         f"P1-010 regression: _synthesize_drugbank_id must call hashlib.sha256:\n{func_src}"
     )
-    # Verify collision resistance: 1000 distinct InChIKeys → 1000 distinct IDs.
+    # Verify collision resistance: 1000 distinct InChIKeys -> 1000 distinct IDs.
     import hashlib
     def _synth(inchikey):
         h = hashlib.sha256(inchikey.encode()).hexdigest()
         return f"DB{h[:8].upper()}"
     ids = {_synth(f"AAAA-{i:013d}-X") for i in range(1000)}
     assert len(ids) == 1000, (
-        f"P1-010: collision detected — 1000 distinct InChIKeys produced "
+        f"P1-010: collision detected -- 1000 distinct InChIKeys produced "
         f"{1000 - len(ids)} collisions"
     )
 
@@ -238,7 +238,7 @@ def test_p1_010_drugbank_id_no_collision():
 # P1-011: Embedded ChEMBL target_name matches UniProt ID
 # =========================================================================
 def test_p1_011_chembl_target_name_matches_uniprot():
-    """P1-011: CHEMBL218 + P23219 → target_name must be PTGS1 (COX-1)."""
+    """P1-011: CHEMBL218 + P23219 -> target_name must be PTGS1 (COX-1)."""
     from pipelines._embedded_samples import embedded_chembl_activities
     df = embedded_chembl_activities()
     # The acetaminophen row (CHEMBL21) targets CHEMBL218 / P23219 = PTGS1.
@@ -260,11 +260,11 @@ def test_p1_011_chembl_target_name_matches_uniprot():
 def test_p1_012_fda_approved_falls_back_to_globally():
     """P1-012: _resolve_fda_approved falls back to is_globally_approved."""
     from drugos_graph.phase1_bridge import _resolve_fda_approved
-    # Case 1: explicit True (DrugBank source) → True.
+    # Case 1: explicit True (DrugBank source) -> True.
     assert _resolve_fda_approved({"is_fda_approved": True}) is True
-    # Case 2: explicit False (DrugBank source) → False.
+    # Case 2: explicit False (DrugBank source) -> False.
     assert _resolve_fda_approved({"is_fda_approved": False}) is False
-    # Case 3: None (ChEMBL source) + is_globally_approved=True → True.
+    # Case 3: None (ChEMBL source) + is_globally_approved=True -> True.
     # THIS IS THE BUG FIX: previously _to_bool(None) = False.
     assert _resolve_fda_approved(
         {"is_fda_approved": None, "is_globally_approved": True}
@@ -272,11 +272,11 @@ def test_p1_012_fda_approved_falls_back_to_globally():
         "P1-012 regression: ChEMBL drug (is_fda_approved=None) with "
         "max_phase=4 should resolve to fda_approved=True via fallback"
     )
-    # Case 4: None + is_globally_approved=False → False.
+    # Case 4: None + is_globally_approved=False -> False.
     assert _resolve_fda_approved(
         {"is_fda_approved": None, "is_globally_approved": False}
     ) is False
-    # Case 5: NaN + is_globally_approved=True → True (pandas NaN case).
+    # Case 5: NaN + is_globally_approved=True -> True (pandas NaN case).
     assert _resolve_fda_approved(
         {"is_fda_approved": float("nan"), "is_globally_approved": True}
     ) is True
@@ -292,7 +292,7 @@ def test_p1_013_clean_activities_v50_path():
     src = inspect.getsource(ChEMBLPipeline.clean)
     assert "chembl_activities_clean.csv" in src, (
         "P1-013 regression: clean() does not look for the v50 output name "
-        "'chembl_activities_clean.csv' — DPI edge set silently missing in v50 mode."
+        "'chembl_activities_clean.csv' -- DPI edge set silently missing in v50 mode."
     )
     assert "chembl_activities.jsonl" in src, (
         "P1-013 regression: clean() does not look for the v50 live-API name "
@@ -314,7 +314,7 @@ def test_p1_014_retry_after_parses_http_date():
     assert isinstance(result, int) and 0 <= result <= 300, (
         f"P1-014: HTTP-date Retry-After should return a clamped int, got {result}"
     )
-    # Garbage → default.
+    # Garbage -> default.
     assert _parse_retry_after("garbage") == 5
     assert _parse_retry_after("") == 5
     assert _parse_retry_after(None) == 5
@@ -330,7 +330,7 @@ def test_p1_015_pubchem_url_encoded():
     src = inspect.getsource(download_pubchem_full)
     assert "quote" in src, (
         "P1-015 regression: download_pubchem_full does not percent-encode "
-        "the comma-separated property list — strict proxies may 400."
+        "the comma-separated property list -- strict proxies may 400."
     )
 
 
@@ -370,7 +370,7 @@ def test_p1_017_drugbank_has_chembl_and_pubchem():
     assert "pubchem_cid" in df.columns, (
         "P1-017 regression: drugbank_drugs missing pubchem_cid column"
     )
-    # Spot-check: Aspirin (DB00945) → CHEMBL112 / CID 2244.
+    # Spot-check: Aspirin (DB00945) -> CHEMBL112 / CID 2244.
     aspirin = df[df["drugbank_id"] == "DB00945"].iloc[0]
     assert aspirin["chembl_id"] == "CHEMBL112", (
         f"P1-017: Aspirin chembl_id should be CHEMBL112, got {aspirin['chembl_id']}"
@@ -417,7 +417,7 @@ def test_p1_019_validate_output_filters_nan_string():
     # The fix filters out nan/none/null/ empty strings before the pattern check.
     assert "nan" in src.lower() and "sentinel" in src.lower(), (
         "P1-019 regression: validate_output does not filter NaN-string sentinels "
-        "before pattern check — CSV round-trip 'nan' would cause false positives."
+        "before pattern check -- CSV round-trip 'nan' would cause false positives."
     )
 
 
@@ -427,13 +427,13 @@ def test_p1_019_validate_output_filters_nan_string():
 def test_p1_020_formal_charge_returns_none_when_unparseable():
     """P1-020: _extract_formal_charge returns None for unparseable SMILES."""
     from pipelines.pubchem_pipeline import _extract_formal_charge
-    # SMILES with no charge tokens → None (not 0).
-    result = _extract_formal_charge("CCO")  # ethanol — genuinely neutral
-    # Note: "CCO" has no [..] brackets, so found=False → None.
+    # SMILES with no charge tokens -> None (not 0).
+    result = _extract_formal_charge("CCO")  # ethanol -- genuinely neutral
+    # Note: "CCO" has no [..] brackets, so found=False -> None.
     assert result is None, (
         f"P1-020 regression: unparseable SMILES should return None, got {result}"
     )
-    # SMILES with charge tokens → integer.
+    # SMILES with charge tokens -> integer.
     assert _extract_formal_charge("[NH4+]") == 1
     assert _extract_formal_charge("[Cl-]") == -1
 
@@ -451,7 +451,7 @@ def test_p1_021_decimal_nan_handled():
     from pipelines import pubchem_pipeline as pp_mod
     src = inspect.getsource(pp_mod)
     assert "_v.is_nan()" in src or "_Decimal_v39 and" in src, (
-        "P1-021 regression: Decimal NaN check missing — Decimal('NaN') would "
+        "P1-021 regression: Decimal NaN check missing -- Decimal('NaN') would "
         "propagate into the DB insert and cause IntegrityError."
     )
     # Functional test: Decimal('NaN') is converted to None.
@@ -478,17 +478,17 @@ def test_p1_022_disgenet_omim_range():
     from pipelines.disgenet_pipeline import (
         _RE_OMIM, _validate_omim_mim_range, _infer_disease_id_type,
     )
-    # 4-digit ID (out of range) — must be rejected.
+    # 4-digit ID (out of range) -- must be rejected.
     assert _infer_disease_id_type("OMIM:1024") is None, (
         "P1-022 regression: 4-digit OMIM ID 'OMIM:1024' should be rejected "
         "(out of range, would never join with OMIM pipeline records)"
     )
-    # 6-digit ID in range — accepted.
+    # 6-digit ID in range -- accepted.
     assert _infer_disease_id_type("OMIM:100100") == "omim"
     assert _infer_disease_id_type("OMIM:176805") == "omim"
-    # 6-digit ID out of range (below 100100) — rejected.
+    # 6-digit ID out of range (below 100100) -- rejected.
     assert _infer_disease_id_type("OMIM:099999") is None, (
-        "P1-022: OMIM:099999 is below the 100100 lower bound — should be rejected"
+        "P1-022: OMIM:099999 is below the 100100 lower bound -- should be rejected"
     )
     # Validate the regex itself.
     assert _RE_OMIM.match("OMIM:100100"), "6-digit OMIM should match regex"
@@ -529,13 +529,13 @@ def test_p1_023_inchikey_pattern_documented():
 
 
 # =========================================================================
-# Phase 1 ↔ Phase 2 integration: embedded samples → Phase 2 staging
+# Phase 1 ↔ Phase 2 integration: embedded samples -> Phase 2 staging
 # =========================================================================
 def test_phase1_phase2_integration_embedded_samples():
     """Phase 1 embedded samples flow through the Phase 2 bridge cleanly.
 
     This is the user's core requirement: 'phase 1 and phase 2 100 percent
-    connected — the graph explorer should be 100 percent connected with the
+    connected -- the graph explorer should be 100 percent connected with the
     dataset part of phase 1'.
     """
     from pipelines._embedded_samples import (
@@ -548,7 +548,7 @@ def test_phase1_phase2_integration_embedded_samples():
     )
     from drugos_graph.phase1_bridge import _resolve_fda_approved, _to_bool, _safe_str
 
-    # DrugBank drugs → Phase 2 Drug nodes.
+    # DrugBank drugs -> Phase 2 Drug nodes.
     drugs_df = embedded_drugbank_drugs()
     assert len(drugs_df) == 10, f"Expected 10 embedded drugs, got {len(drugs_df)}"
     drug_nodes = []
@@ -563,25 +563,25 @@ def test_phase1_phase2_integration_embedded_samples():
         }
         drug_nodes.append(node)
     assert all(n["fda_approved"] for n in drug_nodes), (
-        "All 10 embedded drugs are FDA-approved — fda_approved must be True "
+        "All 10 embedded drugs are FDA-approved -- fda_approved must be True "
         "for all of them (P1-012 fix)."
     )
     assert all(n["chembl_id"] for n in drug_nodes), (
         "All embedded drugs must have a chembl_id (P1-017 fix)."
     )
 
-    # UniProt proteins → Phase 2 Protein nodes.
+    # UniProt proteins -> Phase 2 Protein nodes.
     proteins_df = embedded_uniprot_proteins()
     assert len(proteins_df) == 8, f"Expected 8 embedded proteins, got {len(proteins_df)}"
 
-    # STRING PPI → Phase 2 Protein-Protein edges (no self-interactions).
+    # STRING PPI -> Phase 2 Protein-Protein edges (no self-interactions).
     ppi_df = embedded_string_ppi()
     assert len(ppi_df) > 0
     assert (ppi_df["uniprot_ac_a"] != ppi_df["uniprot_ac_b"]).all(), (
         "P1-018: self-interactions must be removed"
     )
 
-    # OMIM + DisGeNET GDA → Phase 2 Gene-Disease edges.
+    # OMIM + DisGeNET GDA -> Phase 2 Gene-Disease edges.
     omim_df = embedded_omim_gda()
     disgenet_df = embedded_disgenet_gda()
     assert len(omim_df) > 0 and len(disgenet_df) > 0

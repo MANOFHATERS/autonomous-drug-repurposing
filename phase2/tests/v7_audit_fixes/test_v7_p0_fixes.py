@@ -10,7 +10,7 @@ Test philosophy:
 - NO surface-level "does the function exist" tests.
 - Each test exercises the EXACT code path the audit identified.
 - Each test asserts the EXACT invariant the audit said was broken.
-- Tests are independent — no shared mutable state.
+- Tests are independent -- no shared mutable state.
 """
 
 import os
@@ -30,7 +30,7 @@ import pandas as pd
 # v14 ROOT FIX: PROJECT_ROOT must point to the actual codebase root
 # (the directory containing phase1/ and phase2/). The previous
 # calculation parents[4] pointed one level too high, and every path
-# was prefixed with a non-existent "unified/" subdirectory — causing
+# was prefixed with a non-existent "unified/" subdirectory -- causing
 # every file-read assertion in this test module to raise FileNotFoundError.
 # parents[3] resolves to the codebase root regardless of where the
 # repo is checked out.
@@ -40,7 +40,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 
 # =============================================================================
-# BUG-E-001 — entity_to_idx built but never used in step11_train_transe.
+# BUG-E-001 -- entity_to_idx built but never used in step11_train_transe.
 # Compound 0, Protein 0, Gene 0, Disease 0 all shared embedding row 0.
 # =============================================================================
 
@@ -118,7 +118,7 @@ class TestBUGE001EntityToIdxUsed(unittest.TestCase):
 
 
 # =============================================================================
-# BUG-C-001 — Bootstrap CI is fabricated. EvaluationResult has no
+# BUG-C-001 -- Bootstrap CI is fabricated. EvaluationResult has no
 # pos_scores field, getattr always returns [], synthetic Gaussian fires.
 # =============================================================================
 
@@ -152,7 +152,7 @@ class TestBUGC001PosScoresField(unittest.TestCase):
         result = evaluate_link_prediction(pos, neg, log_results=False)
         # The fix ensures these are populated.
         self.assertIsNotNone(result.pos_scores,
-            "BUG-C-001 regression: pos_scores is None — bootstrap CI "
+            "BUG-C-001 regression: pos_scores is None -- bootstrap CI "
             "will fall back to synthetic Gaussian.")
         self.assertIsNotNone(result.neg_scores)
         self.assertEqual(len(result.pos_scores), 5)
@@ -180,7 +180,7 @@ class TestBUGC001PosScoresField(unittest.TestCase):
 
 
 # =============================================================================
-# BUG-D-003 — 11 instances of min(coalesce(...), 1.0) in Cypher queries.
+# BUG-D-003 -- 11 instances of min(coalesce(...), 1.0) in Cypher queries.
 # Cypher has no scalar two-arg min(x,y); every multi-hop query crashed.
 # =============================================================================
 
@@ -216,7 +216,7 @@ class TestBUGD003CypherMinSyntax(unittest.TestCase):
 
 
 # =============================================================================
-# BUG-C-008 — NegativeSampler corrupts tail with neg_drug_idx (Compound)
+# BUG-C-008 -- NegativeSampler corrupts tail with neg_drug_idx (Compound)
 # instead of neg_disease_idx (Disease). neg_disease_idx was dead code.
 # =============================================================================
 
@@ -231,7 +231,7 @@ class TestBUGC008NegativeSamplingTailCorruption(unittest.TestCase):
         source = tm_path.read_text()
         # v14 ROOT FIX: the previous assertion required an EXACT 20-space
         # indentation pattern that broke whenever the code was re-indented.
-        # Use a whitespace-flexible regex instead — the invariant we care
+        # Use a whitespace-flexible regex instead -- the invariant we care
         # about is "torch.tensor is called with neg_disease_idx as the
         # first argument", not the exact whitespace.
         pattern = re.compile(
@@ -253,7 +253,7 @@ class TestBUGC008NegativeSamplingTailCorruption(unittest.TestCase):
 
 
 # =============================================================================
-# BUG-C-002 — AUC enforcement bypassed when best_val_auc <= 0.
+# BUG-C-002 -- AUC enforcement bypassed when best_val_auc <= 0.
 # A perfectly wrong model (AUC=0.0) was saved without enforcement.
 # =============================================================================
 
@@ -282,7 +282,7 @@ class TestBUGC002AUCEnforcementBypass(unittest.TestCase):
 
 
 # =============================================================================
-# BUG-C-006 — target_auc default = 0.78 but DOCX claims >0.85.
+# BUG-C-006 -- target_auc default = 0.78 but DOCX claims >0.85.
 # =============================================================================
 
 class TestBUGC006TargetAUCDefault(unittest.TestCase):
@@ -304,7 +304,7 @@ class TestBUGC006TargetAUCDefault(unittest.TestCase):
 
 
 # =============================================================================
-# BUG-C-005 — torch.load(weights_only=False) despite security comment.
+# BUG-C-005 -- torch.load(weights_only=False) despite security comment.
 # =============================================================================
 
 class TestBUGC005WeightsOnlySecurity(unittest.TestCase):
@@ -332,7 +332,7 @@ class TestBUGC005WeightsOnlySecurity(unittest.TestCase):
 
 
 # =============================================================================
-# BUG-E-002 / BUG-E-003 — df shim lacks head_id/tail_id columns.
+# BUG-E-002 / BUG-E-003 -- df shim lacks head_id/tail_id columns.
 # step8_entity_resolution and step10_training_data crashed silently.
 # =============================================================================
 
@@ -355,7 +355,7 @@ class TestBUGE002E003DfShimColumns(unittest.TestCase):
 
 
 # =============================================================================
-# BUG-E-008 — Pipeline exits 0 even when steps silently fail.
+# BUG-E-008 -- Pipeline exits 0 even when steps silently fail.
 # =============================================================================
 
 class TestBUGE008ExitCodeContract(unittest.TestCase):
@@ -374,7 +374,7 @@ class TestBUGE008ExitCodeContract(unittest.TestCase):
 
 
 # =============================================================================
-# BUG-D-005 — Atc ID_PATTERN required 9 chars; real ATC codes are 7.
+# BUG-D-005 -- Atc ID_PATTERN required 9 chars; real ATC codes are 7.
 # =============================================================================
 
 class TestBUGD005AtcPattern(unittest.TestCase):
@@ -392,7 +392,7 @@ class TestBUGD005AtcPattern(unittest.TestCase):
 
 
 # =============================================================================
-# BUG-D-015 — Disease ID_PATTERN allowed bare '[A-Z]+:\w+' catch-all.
+# BUG-D-015 -- Disease ID_PATTERN allowed bare '[A-Z]+:\w+' catch-all.
 # 'FOO:bar' was accepted as a Disease ID.
 # =============================================================================
 
@@ -403,7 +403,7 @@ class TestBUGD015DiseaseCatchAllPattern(unittest.TestCase):
     def test_foo_bar_rejected(self):
         from drugos_graph.kg_builder import ID_PATTERNS
         pattern = ID_PATTERNS["Disease"]
-        # The catch-all must be gone — 'FOO:bar' must be rejected.
+        # The catch-all must be gone -- 'FOO:bar' must be rejected.
         self.assertIsNone(re.match(pattern, "FOO:bar"),
             f"BUG-D-015 regression: 'FOO:bar' accepted by pattern {pattern}.")
         # But valid biomedical disease IDs must still be accepted.
@@ -413,7 +413,7 @@ class TestBUGD015DiseaseCatchAllPattern(unittest.TestCase):
 
 
 # =============================================================================
-# BUG-D-002 — _load_edges validated only missing/empty, not ID_PATTERNS.
+# BUG-D-002 -- _load_edges validated only missing/empty, not ID_PATTERNS.
 # =============================================================================
 
 class TestBUGD002EdgeIDPatternValidation(unittest.TestCase):
@@ -432,7 +432,7 @@ class TestBUGD002EdgeIDPatternValidation(unittest.TestCase):
 
 
 # =============================================================================
-# BUG-D-004 — RecordingGraphBuilder applied ZERO validation.
+# BUG-D-004 -- RecordingGraphBuilder applied ZERO validation.
 # Tests passed while production silently dropped data.
 # =============================================================================
 
@@ -476,7 +476,7 @@ class TestBUGD004RecordingGraphBuilderValidation(unittest.TestCase):
 
 
 # =============================================================================
-# BUG-B-001 / BUG-B-002 — OMIM/DisGeNET loaders emitted prefixed Gene IDs.
+# BUG-B-001 / BUG-B-002 -- OMIM/DisGeNET loaders emitted prefixed Gene IDs.
 # =============================================================================
 
 class TestBUGB001B002LoaderGeneIDFormat(unittest.TestCase):
@@ -489,7 +489,7 @@ class TestBUGB001B002LoaderGeneIDFormat(unittest.TestCase):
         v61 ROOT FIX (test stale after v37): the v37 fix correctly
         prefixed MIM numbers with ``MIM:`` to namespace-disambiguate
         from NCBI Gene IDs (which share the same numeric space
-        occasionally — a gene with NCBI Gene ID 12345 and a different
+        occasionally -- a gene with NCBI Gene ID 12345 and a different
         gene with OMIM MIM number 12345 would COLLIDE on the same
         ``:Gene {id: "12345"}`` node). The v37 fix is the correct
         behavior; the test was written before v37 and expected bare
@@ -535,7 +535,7 @@ class TestBUGB001B002LoaderGeneIDFormat(unittest.TestCase):
 
 
 # =============================================================================
-# BUG-B-003 — DrugBank/UniProt/GEO emit different edge keys.
+# BUG-B-003 -- DrugBank/UniProt/GEO emit different edge keys.
 # kg_builder required src_id/dst_id only.
 # =============================================================================
 
@@ -559,7 +559,7 @@ class TestBUGB003EdgeKeyAliases(unittest.TestCase):
 
 
 # =============================================================================
-# BUG-B-004 — SIDER emitted bare int 5311025 (Compound ID).
+# BUG-B-004 -- SIDER emitted bare int 5311025 (Compound ID).
 # Pattern requires CID\d+.
 # =============================================================================
 
@@ -575,7 +575,7 @@ class TestBUGB004SiderCompoundIDFormat(unittest.TestCase):
 
 
 # =============================================================================
-# BUG-D-001 / BUG-D-014 — driver = None never reassigned; cleanup branch
+# BUG-D-001 / BUG-D-014 -- driver = None never reassigned; cleanup branch
 # always False. Orphaned drivers leaked on every retry.
 # =============================================================================
 
@@ -595,7 +595,7 @@ class TestBUGD001D014DriverCleanup(unittest.TestCase):
 
 
 # =============================================================================
-# BUG-D-013 — load_drkg_nodes hard-coded source='DRKG' for all node types.
+# BUG-D-013 -- load_drkg_nodes hard-coded source='DRKG' for all node types.
 # =============================================================================
 
 class TestBUGD013SourceParameterized(unittest.TestCase):
@@ -610,7 +610,7 @@ class TestBUGD013SourceParameterized(unittest.TestCase):
 
 
 # =============================================================================
-# BUG-A-007 / BUG-A-008 — OMIM pipeline produces disease_id='FGFR3' or
+# BUG-A-007 / BUG-A-008 -- OMIM pipeline produces disease_id='FGFR3' or
 # gene_symbol='26'. (Note: the audit's specific examples were false
 # positives caused by awk misparsing quoted CSV, but the validation is
 # still root-cause correct as defense-in-depth.)
@@ -638,7 +638,7 @@ class TestBUGA007A008OMIMValidation(unittest.TestCase):
 
 
 # =============================================================================
-# BUG-A-002 — GDA loader set invalid gene_symbols to '' instead of
+# BUG-A-002 -- GDA loader set invalid gene_symbols to '' instead of
 # quarantining. Distinct genes collapsed into one row.
 # =============================================================================
 
@@ -657,13 +657,13 @@ class TestBUGA002GDAQuarantine(unittest.TestCase):
         self.assertNotIn(
             'df["gene_symbol"] = df["gene_symbol"].fillna("")',
             source,
-            "BUG-A-002 regression: fillna('') still present — distinct genes "
+            "BUG-A-002 regression: fillna('') still present -- distinct genes "
             "with empty gene_symbol will collapse into one row."
         )
 
 
 # =============================================================================
-# BUG-A-005 — drugbank_indications.csv expected by bridge but never
+# BUG-A-005 -- drugbank_indications.csv expected by bridge but never
 # produced by the DrugBank pipeline.
 # =============================================================================
 
@@ -680,7 +680,7 @@ class TestBUGA005DrugBankIndicationsProducer(unittest.TestCase):
 
 
 # =============================================================================
-# BUG-C-004 — Validation used 1:1 pos/neg ratio instead of 10:1.
+# BUG-C-004 -- Validation used 1:1 pos/neg ratio instead of 10:1.
 # AUC inflated by 0.05-0.10.
 # =============================================================================
 

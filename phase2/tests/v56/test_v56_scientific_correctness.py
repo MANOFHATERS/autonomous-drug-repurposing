@@ -1,11 +1,11 @@
 """
-v56 SCIENTIFIC CORRECTNESS — BEHAVIORAL test suite (v58 deep rebuild)
+v56 SCIENTIFIC CORRECTNESS -- BEHAVIORAL test suite (v58 deep rebuild)
 =====================================================================
 
 This file REPLACES the v56 "closed audit" test suite that the user
 reported as a string-matching cover-up. The original suite (described in
 the user's issue list) asserted that a COMMENT MARKER existed in the
-file's source code — NOT that the underlying behavior was correct. A
+file's source code -- NOT that the underlying behavior was correct. A
 file with the marker comment but totally broken code passed 20/20.
 
 ROOT FIX (v58): every test in this file exercises the ACTUAL behavior
@@ -19,19 +19,19 @@ ASSERTIONS are behavioral.
 
 Verified issues covered (each test maps to an issue from the user's
 report):
-    test_t002_vioxx_not_safe           — T-002 (Vioxx patient-safety)
-    test_t003_inchikey_regex_real       — T-003 (InChIKey CHECK)
-    test_p2l008_inactivation_inhibits   — P2L-008 (covalent inhibitors)
-    test_p2l008_activation_still_works  — P2L-008 regression guard
-    test_p2l041_completed_no_endpoint   — P2L-041 (Completed ≠ positive)
-    test_p2l041_failed_trial_negative   — P2L-041 (failed = 0.1)
-    test_p2l041_unknown_status_skipped  — P2L-041 (unknown = skip)
-    test_p2c003_chemberta_failure_audited — P2C-003 (silent fallback)
-    test_p2c016_chemberta_strict_mode_raises — P2C-016 (strict mode)
-    test_p2c001_total_nodes_includes_pathway — P2C-001 (total_nodes)
-    test_p2c008_database_url_implies_prod — P2C-008 (prod-by-default)
-    test_p2c008_bridge_fallback_audited — P2C-008 (structured audit)
-    test_t001_no_forward_fk_refs        — T-001 (forward FK)
+    test_t002_vioxx_not_safe           -- T-002 (Vioxx patient-safety)
+    test_t003_inchikey_regex_real       -- T-003 (InChIKey CHECK)
+    test_p2l008_inactivation_inhibits   -- P2L-008 (covalent inhibitors)
+    test_p2l008_activation_still_works  -- P2L-008 regression guard
+    test_p2l041_completed_no_endpoint   -- P2L-041 (Completed ≠ positive)
+    test_p2l041_failed_trial_negative   -- P2L-041 (failed = 0.1)
+    test_p2l041_unknown_status_skipped  -- P2L-041 (unknown = skip)
+    test_p2c003_chemberta_failure_audited -- P2C-003 (silent fallback)
+    test_p2c016_chemberta_strict_mode_raises -- P2C-016 (strict mode)
+    test_p2c001_total_nodes_includes_pathway -- P2C-001 (total_nodes)
+    test_p2c008_database_url_implies_prod -- P2C-008 (prod-by-default)
+    test_p2c008_bridge_fallback_audited -- P2C-008 (structured audit)
+    test_t001_no_forward_fk_refs        -- T-001 (forward FK)
 """
 
 from __future__ import annotations
@@ -44,8 +44,8 @@ from pathlib import Path
 import pytest
 
 # ─── Make both phase1 and phase2 importable from any CWD ───────────────
-# HERE = phase2/tests/v56/  →  PHASE2_TESTS = phase2/tests/  →
-# PHASE2_ROOT = phase2/  →  UNIFIED_ROOT = codebase root  →
+# HERE = phase2/tests/v56/  ->  PHASE2_TESTS = phase2/tests/  ->
+# PHASE2_ROOT = phase2/  ->  UNIFIED_ROOT = codebase root  ->
 # PHASE1_ROOT = codebase/phase1
 HERE = Path(__file__).resolve().parent
 PHASE2_TESTS = HERE.parent            # phase2/tests/
@@ -58,7 +58,7 @@ for p in (str(PHASE2_ROOT), str(PHASE1_ROOT)):
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# T-002 — Vioxx patient-safety (deep: withdrawn-name seed in migration)
+# T-002 -- Vioxx patient-safety (deep: withdrawn-name seed in migration)
 # ═══════════════════════════════════════════════════════════════════════
 
 def test_t002_vioxx_not_safe():
@@ -66,10 +66,10 @@ def test_t002_vioxx_not_safe():
 
     This test reads the actual migration 006 SQL and verifies that the
     curated withdrawn-name list contains rofecoxib / Vioxx / valdecoxib
-    / Bextra / cerivastatin / Baycol — the drugs the user explicitly
+    / Bextra / cerivastatin / Baycol -- the drugs the user explicitly
     called out as the patient-safety bug.
 
-    It does NOT grep for a comment marker — it parses the SQL and
+    It does NOT grep for a comment marker -- it parses the SQL and
     asserts the actual UPDATE statements reference the drug names.
     """
     mig = PHASE1_ROOT / "database" / "migrations" / "006_drug_withdrawn_safety_columns.sql"
@@ -119,7 +119,7 @@ def test_t002_trigger_fires_on_every_update():
     `UPDATE drugs SET is_withdrawn = TRUE WHERE chembl_id = 'CHEMBL123'`)
     bypassed the safety sync entirely. The v73 root fix removed the
     column restriction so EVERY row mutation runs through the safety-sync
-    function — closing the bypass hole for ChEMBL/PubChem-loaded drugs
+    function -- closing the bypass hole for ChEMBL/PubChem-loaded drugs
     (which have name but not groups) AND for direct is_withdrawn updates
     from any loader.
 
@@ -157,7 +157,7 @@ def test_t002_trigger_fires_on_every_update():
         "T-002 v73 root fix: trg_drugs_sync_withdrawn MUST NOT have a "
         "column-list restriction ('UPDATE OF ...'). The column-list form "
         "was bypassed by any UPDATE that did not include the listed "
-        "columns in its SET clause — a patient-safety bypass hole. "
+        "columns in its SET clause -- a patient-safety bypass hole. "
         "The v73 fix removed the restriction entirely."
     )
 
@@ -197,7 +197,7 @@ def test_t002_vioxx_not_globally_approved():
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# T-003 — InChIKey regex (real, not byte-identical to 001)
+# T-003 -- InChIKey regex (real, not byte-identical to 001)
 # ═══════════════════════════════════════════════════════════════════════
 
 def test_t003_inchikey_regex_real():
@@ -222,7 +222,7 @@ def test_t003_inchikey_regex_real():
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# P2L-008 — ChEMBL INACTIVATION classification (BEHAVIORAL)
+# P2L-008 -- ChEMBL INACTIVATION classification (BEHAVIORAL)
 # ═══════════════════════════════════════════════════════════════════════
 
 def test_p2l008_inactivation_inhibits():
@@ -243,7 +243,7 @@ def test_p2l008_inactivation_inhibits():
 def test_p2l008_activation_still_works():
     """Regression guard: ACTIVATION must STILL classify as 'activates'.
     The v58 INACTIVAT addition to _RE_INHIBIT must not break the
-    ACTIVATION → activates path.
+    ACTIVATION -> activates path.
     """
     from drugos_graph.chembl_loader import standard_type_to_relation
     assert standard_type_to_relation("ACTIVATION") == "activates"
@@ -264,12 +264,12 @@ def test_p2l008_inhibits_unchanged():
 
 
 def test_p2l008_inactive_is_not_inhibits():
-    """'INACTIVE' means the compound was tested and showed NO activity —
+    """'INACTIVE' means the compound was tested and showed NO activity --
     it is NOT inhibition. The v58 fix must not over-classify INACTIVE
     as inhibits just because it shares the INACTIVAT stem.
     """
     from drugos_graph.chembl_loader import standard_type_to_relation
-    # INACTIVE should fall through to the default "targets" — it means
+    # INACTIVE should fall through to the default "targets" -- it means
     # "no activity measured", not "inhibited the target".
     result = standard_type_to_relation("INACTIVE")
     assert result in ("targets", "binds"), (
@@ -279,7 +279,7 @@ def test_p2l008_inactive_is_not_inhibits():
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# P2L-041 — ClinicalTrials 'Completed' status (BEHAVIORAL)
+# P2L-041 -- ClinicalTrials 'Completed' status (BEHAVIORAL)
 # ═══════════════════════════════════════════════════════════════════════
 
 def test_p2l041_completed_no_endpoint_is_weak_positive():
@@ -298,7 +298,7 @@ def test_p2l041_completed_endpoint_met_is_strong():
 
 def test_p2l041_failed_trial_negative():
     """A Completed trial that FAILED its primary endpoint MUST get 0.1
-    (negative signal) — NOT 0.9 (the v57 bug treated every Completed
+    (negative signal) -- NOT 0.9 (the v57 bug treated every Completed
     trial as positive evidence).
     """
     from drugos_graph.clinicaltrials_loader import _classify_trial_confidence
@@ -325,7 +325,7 @@ def test_p2l041_unknown_status_skipped():
 
 
 def test_p2l041_active_recruiting_no_override():
-    """Active / Recruiting trials MUST return None (no override — keep
+    """Active / Recruiting trials MUST return None (no override -- keep
     the phase-based evidence_strength).
     """
     from drugos_graph.clinicaltrials_loader import _classify_trial_confidence
@@ -334,17 +334,17 @@ def test_p2l041_active_recruiting_no_override():
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# P2C-003 + P2C-016 — ChEMBERTa silent fallback (BEHAVIORAL)
+# P2C-003 + P2C-016 -- ChEMBERTa silent fallback (BEHAVIORAL)
 # ═══════════════════════════════════════════════════════════════════════
 
 def test_p2c003_chemberta_failure_audited(monkeypatch, tmp_path):
     """When ChEMBERTa fails (e.g. HF_TOKEN missing), the failure MUST
     be recorded in the structured audit log at
     phase2/logs/audit/feature_failures.jsonl. The v57 code only logged
-    at WARNING — invisible to log dashboards.
+    at WARNING -- invisible to log dashboards.
 
     v61 ROOT FIX (test stale after v60): the v60 fix made
-    DRUGOS_STRICT_FEATURES default to "1" (ON) — so just deleting the
+    DRUGOS_STRICT_FEATURES default to "1" (ON) -- so just deleting the
     env var no longer disables strict mode. The test now EXPLICITLY
     sets DRUGOS_STRICT_FEATURES=0 to test the non-strict (silent
     fallback) path, which is what this test is verifying.
@@ -362,7 +362,7 @@ def test_p2c003_chemberta_failure_audited(monkeypatch, tmp_path):
     monkeypatch.delenv("DRUGOS_USE_CHEMBERTA", raising=False)
     # v61: explicitly DISABLE strict mode to test the silent-fallback
     # path. The v60 fix defaults DRUGOS_STRICT_FEATURES to "1" (ON),
-    # so just deleting the env var leaves strict mode ON — which
+    # so just deleting the env var leaves strict mode ON -- which
     # raises FeatureFailureError instead of falling back. This test
     # is verifying the SILENT FALLBACK path, so we must opt out.
     monkeypatch.setenv("DRUGOS_STRICT_FEATURES", "0")
@@ -402,7 +402,7 @@ def test_p2c003_chemberta_failure_audited(monkeypatch, tmp_path):
     audit_file = tmp_path / "audit" / "feature_failures.jsonl"
     assert audit_file.exists(), (
         "feature_failures.jsonl MUST be written when ChEMBERTa fails. "
-        "The v57 code only logged at WARNING — invisible to dashboards."
+        "The v57 code only logged at WARNING -- invisible to dashboards."
     )
     import json
     lines = audit_file.read_text().strip().split("\n")
@@ -450,7 +450,7 @@ def test_p2c016_chemberta_strict_mode_raises(monkeypatch, tmp_path):
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# P2C-001 — Phase1StagedData.total_nodes includes pathway_nodes
+# P2C-001 -- Phase1StagedData.total_nodes includes pathway_nodes
 # ═══════════════════════════════════════════════════════════════════════
 
 def test_p2c001_total_nodes_includes_pathway():
@@ -475,7 +475,7 @@ def test_p2c001_total_nodes_includes_pathway():
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# P2C-008 — prod-by-default when DATABASE_URL is set
+# P2C-008 -- prod-by-default when DATABASE_URL is set
 # ═══════════════════════════════════════════════════════════════════════
 
 def test_p2c008_database_url_implies_prod(monkeypatch):
@@ -499,7 +499,7 @@ def test_p2c008_database_url_implies_prod(monkeypatch):
 
 def test_p2c008_no_database_url_implies_dev(monkeypatch):
     """When DATABASE_URL is NOT set AND DRUGOS_ENVIRONMENT is not prod,
-    _PRODUCTION_ENV MUST be False (dev mode — CSV fallback allowed).
+    _PRODUCTION_ENV MUST be False (dev mode -- CSV fallback allowed).
     """
     monkeypatch.delenv("DATABASE_URL", raising=False)
     monkeypatch.delenv("DRUGOS_ENVIRONMENT", raising=False)
@@ -521,7 +521,7 @@ def test_p2c008_explicit_dev_overrides_database_url(monkeypatch):
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# T-001 — No forward FK references in migration 001 (BEHAVIORAL)
+# T-001 -- No forward FK references in migration 001 (BEHAVIORAL)
 # ═══════════════════════════════════════════════════════════════════════
 
 def test_t001_no_forward_fk_refs():
@@ -553,7 +553,7 @@ def test_t001_no_forward_fk_refs():
                 forward_fks.append((i, parent, "NOT CREATED IN THIS FILE"))
     assert not forward_fks, (
         f"T-001: migration 001 has {len(forward_fks)} forward FK "
-        f"reference(s) — PostgreSQL rejects these at CREATE TABLE time, "
+        f"reference(s) -- PostgreSQL rejects these at CREATE TABLE time, "
         f"breaking the entire migration chain on a fresh DB. Details: "
         f"{forward_fks[:5]}"
     )

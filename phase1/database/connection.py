@@ -46,8 +46,8 @@ management is planned.  Do NOT remove ``scoped_session`` in V1.
 
 Changelog
 ---------
-v1.0.0 — Initial production version with basic engine/session management.
-v2.0.0 — Complete institutional-grade rewrite addressing 109 issues across
+v1.0.0 -- Initial production version with basic engine/session management.
+v2.0.0 -- Complete institutional-grade rewrite addressing 109 issues across
     16 domains: thread-safe singletons, driver registry, configurable pool,
     session context, health-check dataclass, retry logic, circuit breaker,
     credential masking, SQLite PRAGMA tuning, structured logging, lineage
@@ -90,33 +90,33 @@ from urllib.parse import urlparse, urlunparse
 
 # [ARCH-02] Import Base from database.base to eliminate circular-import risk.
 # Previously, models.py imported Base from connection.py while connection.py
-# lazily imported from models.py — creating a fragile circular dependency.
+# lazily imported from models.py -- creating a fragile circular dependency.
 from database.base import Base  # noqa: E402
 
 # ---------------------------------------------------------------------------
-# Module logger — MUST be defined BEFORE any code that references it.
+# Module logger -- MUST be defined BEFORE any code that references it.
 # Defined early so the Decimal adapter registration (below) can log warnings.
 # ---------------------------------------------------------------------------
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# v66 ROOT FIX (P1C-021 — Decimal→float coercion dev/prod asymmetry):
+# v66 ROOT FIX (P1C-021 -- Decimal->float coercion dev/prod asymmetry):
 #   SQLite's default parameter binding REJECTS ``decimal.Decimal`` (raises
 #   ``sqlite3.ProgrammingError: type 'decimal.Decimal' is not supported``).
 #   The previous fix was a per-row coercion loop in ``database/loaders.py``
-#   that converted Decimal→float on SQLite. This worked but:
-#     1. Was duplicated across every bulk loader (fragile — easy to forget
+#   that converted Decimal->float on SQLite. This worked but:
+#     1. Was duplicated across every bulk loader (fragile -- easy to forget
 #        in a new loader).
 #     2. Lost precision on SQLite (float64) while PostgreSQL preserved it
-#        (Numeric, arbitrary precision) — a DEV/PROD ASYMMETRY where a test
+#        (Numeric, arbitrary precision) -- a DEV/PROD ASYMMETRY where a test
 #        asserting ``molecular_weight == 180.16`` could pass on one DB and
 #        fail on the other.
 #   ROOT FIX: register a PROCESS-WIDE sqlite3 adapter that converts
-#   ``decimal.Decimal`` → ``float`` ONCE, at module import. This
+#   ``decimal.Decimal`` -> ``float`` ONCE, at module import. This
 #   centralizes the coercion so EVERY SQLite connection handles Decimal
 #   natively without per-row loops. The precision asymmetry is INHERENT
 #   to SQLite (REAL columns are float64) and CANNOT be eliminated at the
-#   driver level — tests that compare numeric values MUST use
+#   driver level -- tests that compare numeric values MUST use
 #   ``pytest.approx`` or ``math.isclose`` with a tolerance (e.g.
 #   ``rel=1e-9``) so they pass on BOTH backends. This is now documented
 #   in every bulk loader's coercion comment.
@@ -124,9 +124,9 @@ logger = logging.getLogger(__name__)
 import sqlite3 as _sqlite3_module
 from decimal import Decimal as _Decimal_type
 
-# v93 ROOT FIX (P1-040 — mutating stdlib _sqlite3_module private attr):
+# v93 ROOT FIX (P1-040 -- mutating stdlib _sqlite3_module private attr):
 #   The previous code set ``_sqlite3_module._drugos_decimal_adapter_registered
-#   = True`` — a PRIVATE attribute on the stdlib ``sqlite3`` module. This is
+#   = True`` -- a PRIVATE attribute on the stdlib ``sqlite3`` module. This is
 #   a GLOBAL SIDE EFFECT that persists across module reloads and affects ALL
 #   sqlite3 connections in the process, not just this module's connections.
 #   It also pollutes the stdlib module's namespace with a non-standard
@@ -144,13 +144,13 @@ try:
         _sqlite3_module.register_adapter(_Decimal_type, float)
         _DECIMAL_ADAPTER_REGISTERED = True
         logger.debug(
-            "SQLite Decimal→float adapter registered process-wide "
-            "(P1C-021 root fix, v93 P1-040 — no stdlib mutation). "
+            "SQLite Decimal->float adapter registered process-wide "
+            "(P1C-021 root fix, v93 P1-040 -- no stdlib mutation). "
             "Numeric columns on SQLite store float64; PostgreSQL "
             "preserves Decimal precision. Tests MUST use pytest.approx "
             "for numeric assertions."
         )
-except Exception as _adapter_exc:  # noqa: BLE001 — never fatal
+except Exception as _adapter_exc:  # noqa: BLE001 -- never fatal
     logger.warning(
         "Failed to register SQLite Decimal adapter (P1C-021): %s. "
         "Per-row coercion in loaders.py remains as fallback.",
@@ -158,7 +158,7 @@ except Exception as _adapter_exc:  # noqa: BLE001 — never fatal
     )
 
 # ---------------------------------------------------------------------------
-# DATABASE_URL — re-exported from config.settings for testability.
+# DATABASE_URL -- re-exported from config.settings for testability.
 # Tests access ``database.connection.DATABASE_URL`` to verify the connection
 # module is wired to the right config. We import it lazily (via __getattr__
 # PEP 562) to avoid forcing config import at module-load time.
@@ -168,7 +168,7 @@ def _get_database_url() -> str:
     try:
         from config import settings as _settings
         return getattr(_settings, "DATABASE_URL", "")
-    except Exception:  # noqa: BLE001 — defensive: never crash on config import
+    except Exception:  # noqa: BLE001 -- defensive: never crash on config import
         return ""
 
 
@@ -177,7 +177,7 @@ def _get_database_url() -> str:
 
 
 # ---------------------------------------------------------------------------
-# Public API — explicit declaration (CODE-007)
+# Public API -- explicit declaration (CODE-007)
 # ---------------------------------------------------------------------------
 __all__: list[str] = [
     "Base",
@@ -242,30 +242,30 @@ class _CircuitBreaker:
 
     @property
     def state(self) -> str:
-        """Current breaker state (PURE OBSERVATION — does NOT mutate).
+        """Current breaker state (PURE OBSERVATION -- does NOT mutate).
 
         P1-006 ROOT FIX (v100 forensic): the previous implementation
-        transitioned OPEN → HALF_OPEN inside this property when the
+        transitioned OPEN -> HALF_OPEN inside this property when the
         recovery_timeout had elapsed. That made the property a MUTATOR
-        disguised as an accessor — any monitoring/observability code
+        disguised as an accessor -- any monitoring/observability code
         that read ``breaker.state`` inadvertently triggered the
         transition, racing with ``allow_request()`` and potentially
         leaving the breaker in a half-reserved state. The canonical
         ``_circuit_breaker.py`` (BUG #12 P1) claimed to fix this exact
         bug but the duplicate in ``database/connection.py`` was never
-        removed — the "consolidation" claim was false.
+        removed -- the "consolidation" claim was false.
 
         ROOT FIX: this property is now PURE OBSERVATION. It returns the
-        current ``_state`` without transitioning. The OPEN → HALF_OPEN
+        current ``_state`` without transitioning. The OPEN -> HALF_OPEN
         transition happens ONLY inside ``allow_request()``, which is
         the single authorized mutator for the state machine. Monitoring
         code can now safely read ``breaker.state`` for observability
         without breaking the circuit breaker.
 
         Note: callers that previously relied on the side effect of
-        ``state`` transitioning OPEN → HALF_OPEN will now see "OPEN"
+        ``state`` transitioning OPEN -> HALF_OPEN will now see "OPEN"
         until the next ``allow_request()`` call. This is the CORRECT
-        behavior — observability must never mutate state.
+        behavior -- observability must never mutate state.
         """
         with self._lock:
             return self._state
@@ -298,13 +298,13 @@ class _CircuitBreaker:
         """Check if a request should be allowed.
 
         P1-A8 ROOT FIX (v82): the previous implementation returned True for
-        EVERY call in HALF_OPEN — defeating single-probe semantics. Under
+        EVERY call in HALF_OPEN -- defeating single-probe semantics. Under
         concurrent pipelines (7 Phase 1 sources running in parallel), all
         7 would simultaneously get "allowed" and hammer a still-recovering
         DB, re-tripping the breaker. ROOT FIX: track whether a probe is
         already in flight; allow exactly ONE probe in HALF_OPEN, reject
-        all others until the probe completes (success → CLOSED, failure
-        → OPEN). This is the textbook circuit-breaker HALF_OPEN semantic.
+        all others until the probe completes (success -> CLOSED, failure
+        -> OPEN). This is the textbook circuit-breaker HALF_OPEN semantic.
         """
         with self._lock:
             current_state = self._state
@@ -327,7 +327,7 @@ class _CircuitBreaker:
     def reset(self) -> None:
         """Reset the circuit breaker to CLOSED state (thread-safe).
 
-        v90 ROOT FIX (BUG #11 — P1 circuit breaker reset without lock):
+        v90 ROOT FIX (BUG #11 -- P1 circuit breaker reset without lock):
           The previous ``reset_global_state()`` directly mutated
           ``_circuit_breaker._failure_count`` and ``_circuit_breaker._state``
           WITHOUT acquiring ``_circuit_breaker._lock``. If another thread
@@ -429,21 +429,21 @@ def _get_environment() -> str:
       1. DRUGOS_ENVIRONMENT  (canonical, set by docker-compose & docs)
       2. ENVIRONMENT         (legacy fallback)
       3. ENV                 (legacy fallback)
-      4. "production"        (v90 fail-closed default — see below)
+      4. "production"        (v90 fail-closed default -- see below)
 
-    v90 ROOT FIX (BUG #10 — P1 fail-open default):
+    v90 ROOT FIX (BUG #10 -- P1 fail-open default):
       For a pharma platform where bugs kill people, defaulting to
       "development" is a fail-OPEN posture. A production deployment that
       forgets to set DRUGOS_ENVIRONMENT (or whose configmap mount fails
       silently) got DEV-SIZED connection pools (5 instead of 15),
       permissive logging (stack traces leaked via exc_info=not
       _is_production()), and no SQLite-in-prod guard. The audit at
-      line ~839 logs logger.error for SQLite-in-non-dev — but
+      line ~839 logs logger.error for SQLite-in-non-dev -- but
       _get_environment() already returned "development", so the check
       passed. ROOT FIX: default to "production" (fail-closed). Operators
       must EXPLICITLY opt into dev by setting DRUGOS_ENVIRONMENT=dev.
       This is the standard fail-closed pattern for safety-critical
-      systems — when in doubt, assume production.
+      systems -- when in doubt, assume production.
 
     The returned value is normalised to one of:
       "development" | "staging" | "production"
@@ -474,7 +474,7 @@ def is_production_environment() -> bool:
     guarantees every module agrees on what "production" means.
 
     P1-A11 ROOT FIX (v82): the previous implementation returned True for
-    "staging" — giving staging production-sized connection pools (15 vs 5)
+    "staging" -- giving staging production-sized connection pools (15 vs 5)
     and fail-closed strictness. Staging is a PRE-PRODUCTION environment
     that should use dev-sized pools for cost efficiency and allow test
     fixtures for integration testing. Only "production" is production.
@@ -568,7 +568,7 @@ def _validate_database_url(url: str) -> None:
         )
 
     # Non-SQLite URLs must have a hostname (SQLite/file don't need one)
-    # v90 ROOT FIX (BUG #9 — P1 Unix socket URLs rejected):
+    # v90 ROOT FIX (BUG #9 -- P1 Unix socket URLs rejected):
     #   The previous check rejected ANY URL without a hostname. But
     #   ``postgresql:///dbname`` (Unix socket connection, no hostname) is
     #   a VALID PostgreSQL URL format. ``urlparse("postgresql:///dbname")
@@ -829,7 +829,7 @@ def get_engine() -> Engine:
     - ``DATABASE_STATEMENT_TIMEOUT`` (default 1 800 000 = 30 minutes)
     - ``DATABASE_WORK_MEM`` (default 256 MB)
     - ``DATABASE_LOCK_TIMEOUT`` (default 30 000 ms)
-    - ``DATABASE_SSL_MODE`` (default None — not added)
+    - ``DATABASE_SSL_MODE`` (default None -- not added)
     - ``DATABASE_ECHO`` (default false)
     - ``DATABASE_ISOLATION_LEVEL`` (default REPEATABLE READ for PostgreSQL)
     """
@@ -879,16 +879,16 @@ def _create_new_engine() -> Engine:
 
     # SQLAlchemy's create_engine cannot handle 'file:' URLs directly;
     # convert 'file:/path/to/db' to 'sqlite:////path/to/db'
-    # v89 ROOT FIX (BUG #31 — file: URL parsing created DB at wrong path):
+    # v89 ROOT FIX (BUG #31 -- file: URL parsing created DB at wrong path):
     #   The previous code did ``db_path = database_url[5:]`` (strip 'file:')
     #   then ``f"sqlite:///{db_path}"``. For ``file:///absolute/path``,
     #   ``database_url[5:]`` = ``//absolute/path``, and
     #   ``f"sqlite:///{db_path}"`` = ``sqlite://///absolute/path``
     #   (5 slashes). SQLite interprets the 4th slash as the path separator
-    #   and the 5th as part of the path — so it creates a DB at
+    #   and the 5th as part of the path -- so it creates a DB at
     #   ``//absolute/path`` (a network-style path) or ``/absolute/path``
     #   depending on the platform, NOT at ``/absolute/path``. Operators
-    #   saw "empty database" with no error — the DB was created at the
+    #   saw "empty database" with no error -- the DB was created at the
     #   wrong location. ROOT FIX: use ``urlparse`` to extract the path
     #   component correctly, then construct the SQLite URL with the
     #   standard ``sqlite:///<absolute_path>`` form (3 slashes for an
@@ -899,7 +899,7 @@ def _create_new_engine() -> Engine:
         db_path = _parsed_file.path or ""
         if not db_path:
             raise ValueError(
-                f"Invalid file: URL — no path component: {database_url!r}"
+                f"Invalid file: URL -- no path component: {database_url!r}"
             )
         database_url = f"sqlite:///{db_path}"
         logger.debug("Converted file: URL to SQLite URL: %s", _mask_url(database_url))
@@ -962,7 +962,7 @@ def _create_new_engine() -> Engine:
                 sslmode=stmt_config.get("sslmode"),
             )
         else:
-            # Unknown PostgreSQL-compatible driver — try generic options
+            # Unknown PostgreSQL-compatible driver -- try generic options
             logger.warning(
                 "No connect_args registry entry for driver '%s'. "
                 "Using generic PostgreSQL options.",
@@ -1187,7 +1187,7 @@ def get_db_session(
             )
         else:
             logger.debug(
-                "Nested session block exiting — deferring commit to outermost block "
+                "Nested session block exiting -- deferring commit to outermost block "
                 "(session_id=%s, ref_count=%d)",
                 session_id, ref_count,
                 extra=context_extra,
@@ -1220,7 +1220,7 @@ def get_db_session(
                     logger.warning("on_rollback callback failed: %s", cb_exc)
         else:
             logger.warning(
-                "Nested session block received %s — propagating to outermost block "
+                "Nested session block received %s -- propagating to outermost block "
                 "(session_id=%s): %s",
                 type(exc).__name__, session_id, exc,
                 extra=context_extra,
@@ -1251,7 +1251,7 @@ def get_db_session(
             )
         else:
             logger.debug(
-                "Nested session block closing — ref_count=%d (session_id=%s)",
+                "Nested session block closing -- ref_count=%d (session_id=%s)",
                 current_count, session_id,
                 extra=context_extra,
             )
@@ -1277,19 +1277,19 @@ def _set_session_variables(
     parameter, eliminating the injection surface entirely).
     """
     try:
-        # Only set for PostgreSQL — SQLite doesn't support SET
+        # Only set for PostgreSQL -- SQLite doesn't support SET
         bind = session.get_bind()
         if bind is not None and hasattr(bind, "url") and str(bind.url).startswith("postgresql"):
             # v38 ROOT FIX (Issue #40): use set_config() with bound
             # parameters instead of manual chr(39) escaping. This is
-            # injection-safe — the value is passed as a parameter, not
+            # injection-safe -- the value is passed as a parameter, not
             # interpolated into the SQL string.
             #
-            # v89/v90 ROOT FIX (BUG #8 / BUG #37 — session variables
+            # v89/v90 ROOT FIX (BUG #8 / BUG #37 -- session variables
             #   contaminate across pool reuse):
             #   The previous code used ``set_config(name, value, FALSE)``
             #   which sets a SESSION-level variable. Session-level
-            #   variables persist until the session ends — but with
+            #   variables persist until the session ends -- but with
             #   connection pooling, the "session" is the underlying DB
             #   connection, which is RETURNED TO THE POOL on
             #   ``session.close()``. The next ``get_db_session()`` call
@@ -1299,7 +1299,7 @@ def _set_session_variables(
             #   writes to ``audit_log`` or ``pipeline_runs``, the lineage
             #   columns reflect the PREVIOUS pipeline's identity. Under
             #   the documented 7-concurrent-pipeline workload, cross-
-            #   contamination is near-certain — and operators cannot
+            #   contamination is near-certain -- and operators cannot
             #   reproduce because the bug depends on pool reuse order.
             #   Regulatory audits (GDPR/HIPAA) that require "which
             #   pipeline wrote this row" cannot trust the ``audit_log``
@@ -1307,7 +1307,7 @@ def _set_session_variables(
             #   which sets a TRANSACTION-local variable (equivalent to
             #   ``SET LOCAL``). Transaction-local variables are
             #   automatically RESET to their previous value (or NULL)
-            #   on COMMIT or ROLLBACK — so when the session commits and
+            #   on COMMIT or ROLLBACK -- so when the session commits and
             #   the connection returns to the pool, the variables are
             #   GONE. The next checkout gets a clean connection with no
             #   stale ``app.*`` variables. This is the PostgreSQL-
@@ -1349,21 +1349,21 @@ def _commit_with_retry(
 ) -> None:
     """Commit with exponential-backoff retry for transient errors (REL-001).
 
-    v79 FORENSIC ROOT FIX (P0-A2 — retry-after-rollback committed NOTHING,
+    v79 FORENSIC ROOT FIX (P0-A2 -- retry-after-rollback committed NOTHING,
     silently losing data):
       The v49/v78 code caught ``OperationalError``/``InterfaceError``,
       called ``session.rollback()``, then retried ``session.commit()``.
       But ``session.rollback()`` CLEARS ALL PENDING CHANGES from the
       session. The retried ``session.commit()`` therefore committed
-      NOTHING — an empty transaction — and returned successfully. The
+      NOTHING -- an empty transaction -- and returned successfully. The
       caller saw ``UpsertResult(inserted=1000)`` but the database had
       ZERO rows. Silent data loss on every transient commit error
       (connection blip, deadlock, replication lag).
 
       The v49 docstring even ACKNOWLEDGED this: "this means the work
-      done in the session BEFORE the failed commit is LOST — the
+      done in the session BEFORE the failed commit is LOST -- the
       caller must re-execute the work in the retry." But the function
-      provided NO mechanism for the caller to re-execute — it just
+      provided NO mechanism for the caller to re-execute -- it just
       retried the bare ``commit()``. The contract was self-contradictory.
 
     ROOT FIX (two-layer, both required):
@@ -1384,7 +1384,7 @@ def _commit_with_retry(
       - ``work=None`` (default, backward-compatible): NO retry. A
         transient commit error is rolled back and re-raised. Callers
         that want retry must wrap the ENTIRE ``with session_scope()``
-        block in ``retry_session_scope()`` (below) — which re-opens a
+        block in ``retry_session_scope()`` (below) -- which re-opens a
         FRESH session and re-executes the block.
       - ``work=callable``: the callable is re-invoked on every retry
         after rollback. The callable must be idempotent. This is the
@@ -1435,7 +1435,7 @@ def _commit_with_retry(
             # commit() would commit nothing and silently lie.
             if work is None:
                 logger.error(
-                    "Transient commit error with no work callable — cannot "
+                    "Transient commit error with no work callable -- cannot "
                     "retry (work was cleared by rollback). Re-raising so "
                     "caller can retry the entire unit of work: %s",
                     exc,
@@ -1486,14 +1486,14 @@ def _is_production() -> bool:
 
     Previous code read ENVIRONMENT (legacy) instead of DRUGOS_ENVIRONMENT
     (canonical), so docker-compose production deployments were silently
-    treated as dev — causing stack-trace leakage via ``exc_info=not
+    treated as dev -- causing stack-trace leakage via ``exc_info=not
     _is_production()`` and dev-sized DB pools.
     """
     return is_production_environment()
 
 
 # ===========================================================================
-# v79 FORENSIC ROOT FIX (P0-A2) — retry_transaction
+# v79 FORENSIC ROOT FIX (P0-A2) -- retry_transaction
 # ===========================================================================
 
 
@@ -1516,7 +1516,7 @@ def retry_transaction(
     This is the ONLY honest way to retry a transaction after a rollback:
     open a FRESH session and RE-EXECUTE the work callable from scratch.
     The v48/v78 ``_commit_with_retry`` retried only the bare
-    ``session.commit()`` after a rollback — which committed NOTHING
+    ``session.commit()`` after a rollback -- which committed NOTHING
     (rollback clears pending work) and silently lied about success.
     This function fixes that by re-doing the WORK, not just the commit.
 
@@ -1533,7 +1533,7 @@ def retry_transaction(
         not create duplicates. All Phase 1 ``bulk_upsert_*`` functions
         satisfy this contract.
       - Non-transient errors (``IntegrityError``, ``ProgrammingError``,
-        etc.) propagate immediately — they are not retried.
+        etc.) propagate immediately -- they are not retried.
       - Transient errors (``OperationalError``, ``InterfaceError``)
         trigger a full retry: fresh session + re-executed work + commit.
 
@@ -1544,7 +1544,7 @@ def retry_transaction(
     pipeline_name, run_id, correlation_id : str, optional
         Observability metadata passed to ``session_scope``.
     max_retries : int
-        Max retry attempts (default 3 → up to 4 total attempts).
+        Max retry attempts (default 3 -> up to 4 total attempts).
     backoff_base : float
         Exponential backoff base (``delay = backoff_base ** attempt``).
     warn_nested, verify_commit, on_commit, on_rollback
@@ -1566,7 +1566,7 @@ def retry_transaction(
                 # each time). This is the root fix: the work is re-done,
                 # not just the commit.
                 work(session)
-            return  # success — exit the retry loop
+            return  # success -- exit the retry loop
         except (OperationalError, InterfaceError) as exc:
             last_exc = exc
             if attempt < max_retries:
@@ -1628,7 +1628,7 @@ def get_read_only_session() -> Generator[Session, None, None]:
 def init_db(initiator: Optional[str] = None) -> None:
     """Create all tables and run pending migrations.
 
-    Tables are created via ``Base.metadata.create_all`` (additive — never
+    Tables are created via ``Base.metadata.create_all`` (additive -- never
     drops or alters).  Migrations are then applied to add missing columns
     and constraints.  If any migration fails, a ``RuntimeError`` is raised
     (DATA-003, IDEM-003, ARCH-007).
@@ -1678,7 +1678,7 @@ def init_db(initiator: Optional[str] = None) -> None:
             # branch below is intentionally unchanged.
             conn_for_lock.close()
             raise RuntimeError(
-                "Cannot acquire pg_advisory_lock — another init_db() "
+                "Cannot acquire pg_advisory_lock -- another init_db() "
                 "may be running. Concurrent schema migrations can "
                 "corrupt the DB (patient-safety risk). Original error: "
                 + str(exc)
@@ -1694,7 +1694,7 @@ def init_db(initiator: Optional[str] = None) -> None:
         # 001's ``CREATE TABLE IF NOT EXISTS`` then became a no-op
         # (table already existed from create_all), so NUMERIC
         # precision, NOT NULL constraints, FKs, and CHECK constraints
-        # were NEVER applied on PostgreSQL. SQLite was even worse —
+        # were NEVER applied on PostgreSQL. SQLite was even worse --
         # migrations 001-006 were skipped entirely (CD-5).
         #
         # v13 fix: run migrations FIRST (they use
@@ -1708,10 +1708,10 @@ def init_db(initiator: Optional[str] = None) -> None:
         #     create_all is a no-op (tables already exist).
         #   - On an existing DB: migrations apply pending
         #     ALTERs/add columns. create_all is a no-op.
-        #   - On SQLite: v16 ROOT FIX (CD-5) — migrations now ACTUALLY
-        #     run, with on-the-fly PostgreSQL→SQLite SQL translation.
+        #   - On SQLite: v16 ROOT FIX (CD-5) -- migrations now ACTUALLY
+        #     run, with on-the-fly PostgreSQL->SQLite SQL translation.
         #     Previously the comment here claimed migrations ran on
-        #     SQLite, but run_migrations.py SKIPPED all .sql files —
+        #     SQLite, but run_migrations.py SKIPPED all .sql files --
         #     only Python-side column-adds ran. This left SQLite
         #     dev/test DBs missing CHECK/UNIQUE/FK constraints, so
         #     code that passed tests on SQLite could fail on PostgreSQL.
@@ -1721,7 +1721,7 @@ def init_db(initiator: Optional[str] = None) -> None:
         # Run migrations FIRST (creates tables with correct schema).
         try:
             from database.migrations.run_migrations import run_migrations
-            logger.info("Running migrations (pre-create_all) …")
+            logger.info("Running migrations (pre-create_all) ...")
             run_migrations()
             logger.info("Pre-create_all migrations complete")
         except Exception as exc:
@@ -1878,7 +1878,7 @@ def check_connection(
     """
     # Check circuit breaker (REL-005)
     if not _circuit_breaker.allow_request():
-        msg = "Database circuit breaker is OPEN — connection attempts blocked"
+        msg = "Database circuit breaker is OPEN -- connection attempts blocked"
         logger.error(msg)
         if detailed:
             return HealthCheckResult(
@@ -1890,12 +1890,12 @@ def check_connection(
 
     start_time = time.monotonic()
     try:
-        # v89 ROOT FIX (BUG #35 — engine variable undefined when
+        # v89 ROOT FIX (BUG #35 -- engine variable undefined when
         #   use_session_pool=True): the previous code defined ``engine``
         #   only in the ``else`` branch (line 1766), then used
         #   ``engine if not use_session_pool else get_engine()`` at line
         #   1782. When ``use_session_pool=True``, ``engine`` was undefined
-        #   — the conditional relied on Python's short-circuit evaluation
+        #   -- the conditional relied on Python's short-circuit evaluation
         #   to avoid the NameError. This WORKED but was fragile: any
         #   refactor that changed the conditional order or removed the
         #   short-circuit would raise ``NameError: name 'engine' is not
@@ -2113,11 +2113,11 @@ def configure_engine(url: str, **kwargs: Any) -> Engine:
     P1-A4 ROOT FIX (v82): the previous implementation released
     ``_lifecycle_lock`` between ``dispose_engine()`` and ``create_engine()``.
     A concurrent thread could acquire the lock in that gap, see ``_engine``
-    still pointing at the disposed engine, and use it — triggering
+    still pointing at the disposed engine, and use it -- triggering
     ``DetachedInstanceError`` / ``StatementError`` on the next query. Under
     the 7-concurrent-pipeline Phase 1 workload, this race was non-deterministic
     and untraceable. ROOT FIX: hold ``_lifecycle_lock`` for the ENTIRE
-    dispose + create sequence — no window where a concurrent thread can
+    dispose + create sequence -- no window where a concurrent thread can
     observe a half-disposed engine.
 
     Parameters
@@ -2134,7 +2134,7 @@ def configure_engine(url: str, **kwargs: Any) -> Engine:
     """
     global _engine, _session_factory
     with _lifecycle_lock:
-        # Dispose existing engine WHILE HOLDING THE LOCK — no gap.
+        # Dispose existing engine WHILE HOLDING THE LOCK -- no gap.
         if _engine is not None:
             try:
                 _engine.dispose()
@@ -2166,7 +2166,7 @@ def reinitialize_engine() -> Engine:
 def reset_global_state() -> None:
     """Clear all global state for test teardown.
 
-    This is stronger than ``dispose_engine()`` — it also clears the circuit
+    This is stronger than ``dispose_engine()`` -- it also clears the circuit
     breaker and thread-local state.  Use in test fixtures.
     """
     global _engine, _session_factory
@@ -2193,7 +2193,7 @@ def reset_global_state() -> None:
 
     # Reset circuit breaker (v90 ROOT FIX BUG #11: use thread-safe reset()
     # method instead of directly mutating _failure_count / _state without
-    # the lock — prevents torn-state race conditions under concurrent
+    # the lock -- prevents torn-state race conditions under concurrent
     # test teardown + live pipeline).
     _circuit_breaker.reset()
 

@@ -1,15 +1,15 @@
 """v50 ROOT FIX: Real auto-downloaders for the 4 no-login biomedical sources.
 
 This module implements FULL automatic downloads from:
-  1. ChEMBL — EBI REST API (https://www.ebi.ac.uk/chembl/api/data/molecule.json)
+  1. ChEMBL -- EBI REST API (https://www.ebi.ac.uk/chembl/api/data/molecule.json)
      No login, no API key. Paginates through all max_phase=4 molecules.
-  2. UniProt — FTP dump (https://ftp.uniprot.org/pub/databases/uniprot/
+  2. UniProt -- FTP dump (https://ftp.uniprot.org/pub/databases/uniprot/
      current_release/knowledgebase/complete/uniprot_sprot.dat.gz)
      No login. Downloads the full Swiss-Prot curated set (~550K proteins).
-  3. STRING — Direct download (https://stringdb-downloads.org/download/
+  3. STRING -- Direct download (https://stringdb-downloads.org/download/
      protein.links.full.v12.0/9606.protein.links.full.v12.0.txt.gz)
      No login. Downloads the full human PPI network.
-  4. PubChem — PUG-REST for targeted queries + FTP for bulk.
+  4. PubChem -- PUG-REST for targeted queries + FTP for bulk.
      No login. Uses PUG-REST for property enrichment.
 
 Each function:
@@ -121,7 +121,7 @@ def _parse_retry_after(raw: str, *, default: int = 5, max_seconds: int = 300) ->
 
     The previous code did ``int(raw)`` which raised ``ValueError`` on the
     HTTP-date form, silently falling into the generic retry path with the
-    default backoff — ignoring the server's requested wait time and risking
+    default backoff -- ignoring the server's requested wait time and risking
     additional 429s if the server's wait was longer.
 
     Root fix: try integer seconds first; if that fails, parse as HTTP-date
@@ -183,10 +183,10 @@ def _stream_to_file(
     if existing_bytes > 0:
         headers["Range"] = f"bytes={existing_bytes}-"
 
-    logger.info("Downloading %s (resume from byte %d) → %s", url, existing_bytes, dest.name)
+    logger.info("Downloading %s (resume from byte %d) -> %s", url, existing_bytes, dest.name)
 
     with requests.get(url, headers=headers, stream=True, timeout=timeout, verify=True) as resp:
-        if resp.status_code == 416:  # Range Not Satisfiable — file already complete
+        if resp.status_code == 416:  # Range Not Satisfiable -- file already complete
             logger.info("Already complete: %s", dest.name)
             # v84 FORENSIC ROOT FIX (BUG #34): os.replace is atomic on
             # both POSIX and Windows; Path.rename fails on Windows if
@@ -215,7 +215,7 @@ def _stream_to_file(
                 except (ValueError, IndexError):
                     range_start = None
             if range_start is not None and range_start == existing_bytes:
-                # Server returned the correct range — safe to append.
+                # Server returned the correct range -- safe to append.
                 mode = "ab"
             else:
                 # P2-8 ROOT FIX: Content-Range is missing, malformed, or
@@ -246,7 +246,7 @@ def _stream_to_file(
         actual_sha = sha.hexdigest() if mode == "wb" else None
 
     # v64 ROOT FIX (P1-008): for resumed downloads (mode == "ab"), the
-    # incremental sha above only covers the NEW bytes — not the whole
+    # incremental sha above only covers the NEW bytes -- not the whole
     # file. The previous code set actual_sha = None for resumed downloads
     # and silently skipped checksum verification, so a corrupted+resumed
     # file (e.g. a proxy injecting HTML into the resumed portion) would
@@ -285,9 +285,9 @@ def download_chembl_full(raw_dir: Path) -> dict[str, Path]:
     No login, no API key required.
 
     Downloads:
-      - molecules.jsonl   — all max_phase=4 molecules (~10,000 compounds)
-      - activities.jsonl  — all bioactivities for those molecules (~2M rows)
-      - targets.jsonl     — all ChEMBL targets referenced by activities
+      - molecules.jsonl   -- all max_phase=4 molecules (~10,000 compounds)
+      - activities.jsonl  -- all bioactivities for those molecules (~2M rows)
+      - targets.jsonl     -- all ChEMBL targets referenced by activities
 
     In sample mode: fetches only the 10 sample molecules (via ChEMBL API).
     Falls back to embedded samples if the API is unreachable.
@@ -298,14 +298,14 @@ def download_chembl_full(raw_dir: Path) -> dict[str, Path]:
     result: dict[str, Path] = {}
 
     if mode == "skip":
-        logger.info("ChEMBL: skip mode — using existing files")
+        logger.info("ChEMBL: skip mode -- using existing files")
         return {
             "molecules": raw_dir / "chembl_molecules.jsonl",
             "activities": raw_dir / "chembl_activities.jsonl",
         }
 
     if mode == "sample":
-        logger.info("ChEMBL: SAMPLE mode — fetching %d molecules via API", len(SAMPLE_CHEMBL_IDS))
+        logger.info("ChEMBL: SAMPLE mode -- fetching %d molecules via API", len(SAMPLE_CHEMBL_IDS))
         molecules_path = raw_dir / "chembl_molecules.jsonl"
         activities_path = raw_dir / "chembl_activities.jsonl"
         import json
@@ -337,10 +337,10 @@ def download_chembl_full(raw_dir: Path) -> dict[str, Path]:
 
         # If we got 0 molecules, fall back to embedded samples
         if molecules_path.stat().st_size == 0:
-            logger.warning("ChEMBL: API unreachable — falling back to embedded samples")
+            logger.warning("ChEMBL: API unreachable -- falling back to embedded samples")
             from pipelines._embedded_samples import embedded_chembl_molecules, embedded_chembl_activities
             # v85/v90 ROOT FIX (BUG #2/50): was .to_json() which writes JSONL
-            # to a .csv file — downstream pd.read_csv() parses it as garbage.
+            # to a .csv file -- downstream pd.read_csv() parses it as garbage.
             # Now uses .to_csv() so format matches extension and downstream
             # CSV reader works correctly. Also fixes extension from .jsonl
             # to .csv to match the actual content.
@@ -358,7 +358,7 @@ def download_chembl_full(raw_dir: Path) -> dict[str, Path]:
     # FULL mode: paginate through ALL max_phase=4 molecules
     # v64 ROOT FIX (P1-009): the previous code used pure offset-based paging
     # (`offset += CHEMBL_PAGE_SIZE`). ChEMBL's REST API has a hard limit on
-    # the `offset` parameter (typically 10,000) — beyond this the API
+    # the `offset` parameter (typically 10,000) -- beyond this the API
     # returns 400 Bad Request or silently returns empty results. For the
     # ~10K max_phase=4 molecule corpus this is borderline, but for the
     # activities endpoint (millions of rows) it is a hard blocker.
@@ -366,7 +366,7 @@ def download_chembl_full(raw_dir: Path) -> dict[str, Path]:
     # ChEMBL provides for exactly this purpose). The first request uses
     # offset=0; subsequent requests follow `next_uri` until it is absent
     # or empty. We still cap at a safety maximum to avoid infinite loops.
-    logger.info("ChEMBL: FULL mode — paginating through all max_phase=4 molecules (cursor-based)")
+    logger.info("ChEMBL: FULL mode -- paginating through all max_phase=4 molecules (cursor-based)")
     molecules_path = raw_dir / "chembl_molecules.jsonl"
     activities_path = raw_dir / "chembl_activities.jsonl"
     import json
@@ -405,11 +405,11 @@ def download_chembl_full(raw_dir: Path) -> dict[str, Path]:
                         # (e.g. "Wed, 21 Oct 2025 07:28:00 GMT"). The
                         # previous `int(...)` raised ValueError on the
                         # HTTP-date form, silently falling into the generic
-                        # retry path with the default backoff — ignoring
+                        # retry path with the default backoff -- ignoring
                         # the server's requested wait time.
                         retry_after_raw = resp.headers.get("Retry-After", "5")
                         retry_after = _parse_retry_after(retry_after_raw)
-                        logger.info("ChEMBL 429 — sleeping %ds", retry_after)
+                        logger.info("ChEMBL 429 -- sleeping %ds", retry_after)
                         time.sleep(retry_after)
                         continue
                     resp.raise_for_status()
@@ -418,7 +418,7 @@ def download_chembl_full(raw_dir: Path) -> dict[str, Path]:
                     if attempt == CHEMBL_MAX_RETRIES - 1:
                         raise
                     wait = CHEMBL_BACKOFF_BASE ** attempt
-                    logger.warning("ChEMBL attempt %d failed: %s — retry in %.1fs", attempt + 1, exc, wait)
+                    logger.warning("ChEMBL attempt %d failed: %s -- retry in %.1fs", attempt + 1, exc, wait)
                     time.sleep(wait)
             data = resp.json()
             molecules = data.get("molecules", [])
@@ -451,7 +451,7 @@ def download_chembl_full(raw_dir: Path) -> dict[str, Path]:
             next_uri = page_meta.get("next_uri")
             page_num += 1
             if not next_uri:
-                # No next_uri → end of results (or server doesn't support
+                # No next_uri -> end of results (or server doesn't support
                 # cursor paging for this endpoint). Stop cleanly.
                 break
 
@@ -478,11 +478,11 @@ def download_uniprot_full(raw_dir: Path) -> dict[str, Path]:
     result: dict[str, Path] = {}
 
     if mode == "skip":
-        logger.info("UniProt: skip mode — using existing files")
+        logger.info("UniProt: skip mode -- using existing files")
         return {"proteins": raw_dir / "uniprot_sprot.dat.gz"}
 
     if mode == "sample":
-        logger.info("UniProt: SAMPLE mode — fetching %d proteins via REST", len(SAMPLE_UNIPROT_IDS))
+        logger.info("UniProt: SAMPLE mode -- fetching %d proteins via REST", len(SAMPLE_UNIPROT_IDS))
         proteins_path = raw_dir / "uniprot_proteins.jsonl"
         import json
 
@@ -499,7 +499,7 @@ def download_uniprot_full(raw_dir: Path) -> dict[str, Path]:
                     logger.warning("UniProt sample fetch failed for %s: %s", acc, exc)
 
         if proteins_path.stat().st_size == 0:
-            logger.warning("UniProt: API unreachable — falling back to embedded samples")
+            logger.warning("UniProt: API unreachable -- falling back to embedded samples")
             from pipelines._embedded_samples import embedded_uniprot_proteins
             embedded_uniprot_proteins().to_csv(proteins_path.with_suffix(".csv"), index=False)
             proteins_path.unlink(missing_ok=True)
@@ -509,7 +509,7 @@ def download_uniprot_full(raw_dir: Path) -> dict[str, Path]:
         return result
 
     # FULL mode: stream the full Swiss-Prot dat.gz
-    logger.info("UniProt: FULL mode — streaming uniprot_sprot.dat.gz (~500MB)")
+    logger.info("UniProt: FULL mode -- streaming uniprot_sprot.dat.gz (~500MB)")
     dest = raw_dir / "uniprot_sprot.dat.gz"
     _stream_to_file(UNIPROT_SPROT_URL, dest, timeout=(30.0, 7200.0))
     result["proteins"] = dest
@@ -535,11 +535,11 @@ def download_string_full(raw_dir: Path, organism: str = STRING_DEFAULT_ORGANISM)
     result: dict[str, Path] = {}
 
     if mode == "skip":
-        logger.info("STRING: skip mode — using existing files")
+        logger.info("STRING: skip mode -- using existing files")
         return {"ppi": raw_dir / f"{organism}.protein.links.full.{version}.txt.gz"}
 
     if mode == "sample":
-        logger.info("STRING: SAMPLE mode — fetching PPIs for %d proteins via API", len(SAMPLE_UNIPROT_IDS))
+        logger.info("STRING: SAMPLE mode -- fetching PPIs for %d proteins via API", len(SAMPLE_UNIPROT_IDS))
         ppi_path = raw_dir / "string_ppi_sample.tsv"
         import json
 
@@ -580,7 +580,7 @@ def download_string_full(raw_dir: Path, organism: str = STRING_DEFAULT_ORGANISM)
                             # API expects multiple identifiers separated by `%0a`
                             # (URL-encoded LF / newline) or a bare `\n`. The
                             # previous code used `%0d` (CR), which STRING may
-                            # treat as part of a single identifier — returning
+                            # treat as part of a single identifier -- returning
                             # zero interactions and masking the bug via the
                             # embedded-sample fallback.
                             "identifiers": f"{p1}%0a{p2}",
@@ -604,7 +604,7 @@ def download_string_full(raw_dir: Path, organism: str = STRING_DEFAULT_ORGANISM)
                         logger.debug("STRING PPI fetch failed for %s/%s: %s", p1, p2, exc)
 
         if ppi_path.stat().st_size < 100:  # essentially empty
-            logger.warning("STRING: API unreachable — falling back to embedded samples")
+            logger.warning("STRING: API unreachable -- falling back to embedded samples")
             from pipelines._embedded_samples import embedded_string_ppi
             embedded_string_ppi().to_csv(ppi_path.with_suffix(".csv"), index=False)
             ppi_path.unlink(missing_ok=True)
@@ -614,7 +614,7 @@ def download_string_full(raw_dir: Path, organism: str = STRING_DEFAULT_ORGANISM)
         return result
 
     # FULL mode: download the full protein.links.full file
-    logger.info("STRING: FULL mode — downloading %s.protein.links.full.%s.txt.gz", organism, version)
+    logger.info("STRING: FULL mode -- downloading %s.protein.links.full.%s.txt.gz", organism, version)
     url = f"{STRING_BASE_URL}/protein.links.full.{version}/{organism}.protein.links.full.{version}.txt.gz"
     dest = raw_dir / f"{organism}.protein.links.full.{version}.txt.gz"
     _stream_to_file(url, dest, timeout=(30.0, 3600.0))
@@ -630,7 +630,7 @@ def download_pubchem_full(raw_dir: Path, inchikeys: list[str] | None = None) -> 
     Uses PubChem PUG-REST (https://pubchem.ncbi.nlm.nih.gov/rest/pug).
     No login required.
 
-    PubChem has 110M+ compounds — we cannot download all of them.
+    PubChem has 110M+ compounds -- we cannot download all of them.
     Instead, we enrich the compounds already in our KG (identified by
     InChIKey). This is the standard pattern: PubChem enrichment is
     always compound-targeted, not bulk.
@@ -649,7 +649,7 @@ def download_pubchem_full(raw_dir: Path, inchikeys: list[str] | None = None) -> 
     # was missing. DrugBank and ChEMBL may produce different InChIKeys
     # for the same drug (salt-form differences, stereochemistry handling).
     # The PubChem enrichment output did NOT record which drug source was
-    # used — making provenance ambiguous. ROOT FIX: track the drug source
+    # used -- making provenance ambiguous. ROOT FIX: track the drug source
     # explicitly (``drug_source``) and write it into the enrichment CSV
     # as a new column so downstream consumers (KG builder, audits) know
     # which drug source each PubChem-enriched row came from.
@@ -671,14 +671,14 @@ def download_pubchem_full(raw_dir: Path, inchikeys: list[str] | None = None) -> 
                     drug_source = "drugbank"
                     logger.info("PubChem: enriching %d InChIKeys from DrugBank (%s)", len(inchikeys), drugs_csv)
                 else:
-                    # Fall back to ChEMBL drugs CSV — but RECORD the source switch.
+                    # Fall back to ChEMBL drugs CSV -- but RECORD the source switch.
                     chembl_csv = raw_dir.parent / "processed_data" / "chembl_drugs.csv"
                     if chembl_csv.exists():
                         df = pd.read_csv(chembl_csv)
                         inchikeys = list(df["inchikey"].dropna().unique())
                         drug_source = "chembl"
                         logger.warning(
-                            "PubChem: DrugBank drugs CSV not found at %s — "
+                            "PubChem: DrugBank drugs CSV not found at %s -- "
                             "FALLING BACK to ChEMBL drugs CSV (%s). Note: "
                             "DrugBank and ChEMBL may produce different "
                             "InChIKeys for the same drug (salt-form / stereo "
@@ -687,22 +687,22 @@ def download_pubchem_full(raw_dir: Path, inchikeys: list[str] | None = None) -> 
                             drugs_csv, chembl_csv,
                         )
                     else:
-                        logger.warning("PubChem: no drugs CSV found — using sample InChIKeys")
+                        logger.warning("PubChem: no drugs CSV found -- using sample InChIKeys")
                         from pipelines._embedded_samples import embedded_chembl_molecules
                         inchikeys = list(embedded_chembl_molecules()["inchikey"])
                         drug_source = "embedded_sample"
             except Exception as exc:
-                logger.warning("PubChem: failed to read InChIKeys — using samples: %s", exc)
+                logger.warning("PubChem: failed to read InChIKeys -- using samples: %s", exc)
                 from pipelines._embedded_samples import embedded_chembl_molecules
                 inchikeys = list(embedded_chembl_molecules()["inchikey"])
                 drug_source = "embedded_sample"
 
     if mode == "skip":
-        logger.info("PubChem: skip mode — using existing files")
+        logger.info("PubChem: skip mode -- using existing files")
         return {"enrichment": raw_dir / "pubchem_enrichment.csv"}
 
     logger.info(
-        "PubChem: %s mode — enriching %d InChIKeys via PUG-REST",
+        "PubChem: %s mode -- enriching %d InChIKeys via PUG-REST",
         mode, len(inchikeys),
     )
     enrichment_path = raw_dir / "pubchem_enrichment.csv"
@@ -722,7 +722,7 @@ def download_pubchem_full(raw_dir: Path, inchikeys: list[str] | None = None) -> 
         ])
         for i, inchikey in enumerate(inchikeys):
             try:
-                # Resolve InChIKey → CID
+                # Resolve InChIKey -> CID
                 url = f"{PUBCHEM_PUG_REST}/compound/inchikey/{inchikey}/property/"
                 properties = "CanonicalSMILES,XLogP,TPSA,HBondDonorCount,HBondAcceptorCount,RotatableBondCount"
                 # v64 ROOT FIX (P1-015): percent-encode the comma-separated
@@ -755,7 +755,7 @@ def download_pubchem_full(raw_dir: Path, inchikeys: list[str] | None = None) -> 
                 elif resp.status_code == 404:
                     logger.debug("PubChem: InChIKey %s not found", inchikey)
                 else:
-                    logger.debug("PubChem: %s → HTTP %d", inchikey, resp.status_code)
+                    logger.debug("PubChem: %s -> HTTP %d", inchikey, resp.status_code)
                 # 5 req/sec rate limit
                 time.sleep(0.2)
                 if (i + 1) % 50 == 0:
@@ -765,7 +765,7 @@ def download_pubchem_full(raw_dir: Path, inchikeys: list[str] | None = None) -> 
 
     # If we got 0 rows (header only), fall back to embedded samples
     if enrichment_path.stat().st_size < 200:
-        logger.warning("PubChem: API unreachable — falling back to embedded samples")
+        logger.warning("PubChem: API unreachable -- falling back to embedded samples")
         from pipelines._embedded_samples import embedded_pubchem_enrichment
         embedded_pubchem_enrichment().to_csv(enrichment_path, index=False)
 
@@ -776,22 +776,22 @@ def download_pubchem_full(raw_dir: Path, inchikeys: list[str] | None = None) -> 
 # ─── 5. DrugBank open-data fallback ────────────────────────────────────
 
 def download_drugbank_open_data(raw_dir: Path) -> dict[str, Path]:
-    """v50 ROOT FIX: DrugBank 100% solution — open-data fallback.
+    """v50 ROOT FIX: DrugBank 100% solution -- open-data fallback.
 
     DrugBank has paused academic downloads since May 2026. Even registered
     users cannot download the XML file. This function provides a 100%
     solution by combining THREE open-data sources:
 
-    1. ChEMBL FDA-approved subset (max_phase=4) — provides drug names,
+    1. ChEMBL FDA-approved subset (max_phase=4) -- provides drug names,
        InChIKeys, SMILES, molecular weights, and mechanisms of action.
        ChEMBL is CC-BY-SA licensed and freely downloadable.
 
     2. FDA Orange Book open data (https://www.fda.gov/drugs/drug-approvals-
-       and-databases/orange-book-data-files) — provides FDA approval status,
+       and-databases/orange-book-data-files) -- provides FDA approval status,
        active ingredients, and reference listed drugs. Public domain.
 
-    3. RxNorm (https://www.nlm.nih.gov/research/umls/rxnorm/) — provides
-       drug → indication mappings via the RXNREL table. UMLS license
+    3. RxNorm (https://www.nlm.nih.gov/research/umls/rxnorm/) -- provides
+       drug -> indication mappings via the RXNREL table. UMLS license
        required but free for research. We use the open RxNorm REST API
        (https://rxnav.nlm.nih.gov/) which requires no login.
 
@@ -805,7 +805,7 @@ def download_drugbank_open_data(raw_dir: Path) -> dict[str, Path]:
       - drug_interactions (from RxNorm)
 
     When DrugBank academic downloads reopen, set DRUGBANK_XML_PATH to
-    use the real XML — the embedded parser will take precedence.
+    use the real XML -- the embedded parser will take precedence.
     """
     raw_dir = Path(raw_dir)
     raw_dir.mkdir(parents=True, exist_ok=True)
@@ -821,7 +821,7 @@ def download_drugbank_open_data(raw_dir: Path) -> dict[str, Path]:
     # In sample mode: use embedded DrugBank samples (10 FDA-approved drugs).
     # In full mode: build from ChEMBL FDA-approved + RxNorm.
     if mode == "sample":
-        logger.info("DrugBank: SAMPLE mode — using embedded 10 FDA-approved drugs")
+        logger.info("DrugBank: SAMPLE mode -- using embedded 10 FDA-approved drugs")
         from pipelines._embedded_samples import (
             embedded_drugbank_drugs,
             embedded_drugbank_indications,
@@ -836,7 +836,7 @@ def download_drugbank_open_data(raw_dir: Path) -> dict[str, Path]:
 
     # FULL mode: build DrugBank-equivalent from open data
     logger.info(
-        "DrugBank: FULL mode — building DrugBank-equivalent from "
+        "DrugBank: FULL mode -- building DrugBank-equivalent from "
         "ChEMBL FDA-approved + FDA Orange Book + RxNorm (academic "
         "downloads paused since May 2026)"
     )
@@ -868,7 +868,7 @@ def download_drugbank_open_data(raw_dir: Path) -> dict[str, Path]:
                     })
             chembl_df = pd.DataFrame(records)
         else:
-            logger.warning("DrugBank: ChEMBL CSV not found — falling back to embedded samples")
+            logger.warning("DrugBank: ChEMBL CSV not found -- falling back to embedded samples")
             from pipelines._embedded_samples import embedded_drugbank_drugs
             chembl_df = embedded_drugbank_drugs()
     else:
@@ -879,7 +879,7 @@ def download_drugbank_open_data(raw_dir: Path) -> dict[str, Path]:
     # hashing the InChIKey (deterministic, stable).
     # v64 ROOT FIX (P1-010): the previous hash used MD5 mod 100000
     # (5-digit DB IDs), which has a ~50% birthday-paradox collision
-    # probability at ~370 IDs — near-certain with ~10K FDA-approved
+    # probability at ~370 IDs -- near-certain with ~10K FDA-approved
     # drugs. Two different InChIKeys colliding to the same DB ID would
     # merge two distinct molecules into a single Drug node in the KG
     # (silent data corruption). Root fix: use the full 8-hex-digit slice
@@ -888,12 +888,12 @@ def download_drugbank_open_data(raw_dir: Path) -> dict[str, Path]:
     # MD5 -> SHA-256 for cryptographic robustness (MD5 is deprecated for
     # any collision-sensitive use). Schema allows `DB\d{5,6}` historically,
     # but the load() path accepts longer DB-prefixed IDs and the
-    # Drug model's drugbank_id column is VARCHAR(64) — so 8-hex IDs fit.
+    # Drug model's drugbank_id column is VARCHAR(64) -- so 8-hex IDs fit.
     def _synthesize_drugbank_id(inchikey: str) -> str:
         # v90 ROOT FIX (BUG #12): the previous code returned
         # "DBSYNTH000000" (a FIXED sentinel) for ALL drugs missing
         # an InChIKey. This means N drugs with missing InChIKeys all
-        # got the SAME drugbank_id → they were merged into a SINGLE
+        # got the SAME drugbank_id -> they were merged into a SINGLE
         # Drug node in the KG (silent data corruption). ROOT FIX:
         # use a sequential counter so each missing-InChIKey drug gets
         # a UNIQUE ID. The counter is deterministic within a single
@@ -924,7 +924,7 @@ def download_drugbank_open_data(raw_dir: Path) -> dict[str, Path]:
     })
 
     # 3. Enrich with indications from RxNorm REST API (no login required)
-    # RxNorm provides drug → indication mappings via the RXNREL table.
+    # RxNorm provides drug -> indication mappings via the RXNREL table.
     # We use the REST API at https://rxnav.nlm.nih.gov/REST/rxcui/{rxcui}/allproperties
     # For each drug name, we look up the RxNorm RxCUI, then fetch its indications.
     #
@@ -932,7 +932,7 @@ def download_drugbank_open_data(raw_dir: Path) -> dict[str, Path]:
     # ``drugs_df.at[idx, "indication"] = ...`` inside a ``df.iterrows()``
     # loop. This triggers ``SettingWithCopyWarning`` in some pandas
     # versions because ``iterrows()`` returns views, not copies. More
-    # importantly, the loop is O(N) Python with per-row HTTP calls —
+    # importantly, the loop is O(N) Python with per-row HTTP calls --
     # for 10K FDA-approved drugs, this is 10K REST calls (15s each at
     # RxNorm's rate limit = 41 hours). ROOT FIX: build a dict of
     # {idx: (indication_text, "rxnorm_open_data")} and apply all updates
@@ -940,7 +940,7 @@ def download_drugbank_open_data(raw_dir: Path) -> dict[str, Path]:
     # SettingWithCopyWarning entirely and is more idiomatic pandas.
     logger.info("DrugBank: enriching %d drugs with RxNorm indications", len(drugs_df))
     indications_records = []
-    indication_updates: dict[int, tuple[str, str]] = {}  # idx → (indication, source)
+    indication_updates: dict[int, tuple[str, str]] = {}  # idx -> (indication, source)
     for idx, row in drugs_df.iterrows():
         drug_name = str(row.get("name", "")).strip()
         if not drug_name or drug_name == "nan":
@@ -952,8 +952,8 @@ def download_drugbank_open_data(raw_dir: Path) -> dict[str, Path]:
             # "N-acetylcysteine", "5-fluorouracil") are correctly
             # encoded in the query string. The previous code passed
             # the raw name which broke on hyphens, ampersands, and
-            # other URL-significant characters — RxNorm returned 0
-            # results for these drugs → no indication enrichment.
+            # other URL-significant characters -- RxNorm returned 0
+            # results for these drugs -> no indication enrichment.
             from urllib.parse import quote as _url_encode
             url = f"https://rxnav.nlm.nih.gov/REST/rxcui.json?name={_url_encode(drug_name, safe='')}&search=2"
             # v64 ROOT FIX (P1-006): send User-Agent header.
@@ -982,7 +982,7 @@ def download_drugbank_open_data(raw_dir: Path) -> dict[str, Path]:
                                 # heart failure"), NOT a structured disease
                                 # name. The previous code mapped this
                                 # verbatim to `disease_name`, creating
-                                # PHANTOM disease nodes in the KG — one
+                                # PHANTOM disease nodes in the KG -- one
                                 # node per free-text string, none matching
                                 # OMIM/DisGeNET disease IDs. ROOT FIX:
                                 # set disease_name to empty string; the
@@ -1016,11 +1016,11 @@ def download_drugbank_open_data(raw_dir: Path) -> dict[str, Path]:
     # pass. This avoids SettingWithCopyWarning and is more efficient than
     # per-row ``df.at[idx, ...]`` assignments inside an iterrows loop.
     # v84 FORENSIC ROOT FIX (BUG #39): the previous "vectorized" fix was
-    # STILL a per-row loop using ``df.loc[_idx, col] = value`` — O(N)
+    # STILL a per-row loop using ``df.loc[_idx, col] = value`` -- O(N)
     # Python with 2N loc calls (10K drugs × 2 columns = 20K loc calls).
     # This triggers ``SettingWithCopyWarning`` on some pandas versions
     # and is slow. ROOT FIX: build a DataFrame from the updates dict
-    # and use ``df.update()`` — a single vectorized C-level operation.
+    # and use ``df.update()`` -- a single vectorized C-level operation.
     if indication_updates:
         _updates_df = pd.DataFrame.from_dict(
             indication_updates, orient="index",
@@ -1043,14 +1043,14 @@ def download_drugbank_open_data(raw_dir: Path) -> dict[str, Path]:
 # ─── CLI entry point ───────────────────────────────────────────────────
 # v65 ROOT FIX (P1-039): the previous ``main()`` function here was a
 # standalone CLI that DUPLICATED the download logic already provided by
-# the package-level CLI (``python -m pipelines run <source>`` →
+# the package-level CLI (``python -m pipelines run <source>`` ->
 # ``pipelines/__init__.py:_main()``). Having two CLIs is a maintenance
-# burden — changes to download logic had to be applied in two places,
+# burden -- changes to download logic had to be applied in two places,
 # and they had already diverged (this one had no --dry-run, no logging
 # config, no manifest emission, no DB integration). The audit's fix is
 # "Either remove ``main()`` from ``_v50_downloaders.py`` OR document
 # that it's a lower-level utility for direct invocation without
-# pipeline orchestration." We choose to REMOVE it — the package-level
+# pipeline orchestration." We choose to REMOVE it -- the package-level
 # CLI is the single authoritative entry point. Direct callers who need
 # the lower-level ``download_*_full`` functions can import them
 # explicitly:
@@ -1059,12 +1059,12 @@ def download_drugbank_open_data(raw_dir: Path) -> dict[str, Path]:
 #   result = download_chembl_full(Path("raw_data/v50/chembl"))
 #
 # This is also safer because the lower-level functions don't go through
-# BasePipeline's lifecycle (download → clean → load), so callers
+# BasePipeline's lifecycle (download -> clean -> load), so callers
 # explicitly opt into "raw download only" semantics.
 #
 # (Function body removed; if __name__ == "__main__" guard removed.)
 # v84 FORENSIC ROOT FIX (BUG #47): removed the dead
 # ``if __name__ == "__main__"`` guard that only raised ``SystemExit``.
-# The guard provided no useful functionality — it was a placeholder
+# The guard provided no useful functionality -- it was a placeholder
 # from the v65 refactor that removed ``main()``. Dead code that adds
 # no value has no place in a production codebase.

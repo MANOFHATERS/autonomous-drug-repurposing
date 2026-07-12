@@ -73,7 +73,7 @@ class DrugDiseaseLinkPredictor(nn.Module):
     [drug_emb, disease_emb, elementwise_product, signed_difference]
     (4*D dimensions). The V26 code also included ``abs_diff`` (5*D),
     but ``abs_diff = |signed_diff|`` is a deterministic function of
-    ``signed_diff`` — the MLP can learn the ``|·|`` operator from
+    ``signed_diff`` -- the MLP can learn the ``|·|`` operator from
     ``signed_diff`` alone. The extra D dimensions doubled the input
     layer's parameter count for zero information gain (33% of input
     weights were redundant). With ``embedding_dim=32`` the input layer
@@ -138,7 +138,7 @@ class DrugDiseaseLinkPredictor(nn.Module):
         # between self.eval() and self.train(prior_training), it saw
         # the module in eval mode regardless of the prior state. The
         # Phase 5 API server is supposed to handle 100 concurrent
-        # requests (V1 contract item 5) — this race condition silently
+        # requests (V1 contract item 5) -- this race condition silently
         # produced inconsistent predictions: some inference calls ran
         # with dropout disabled (eval mode leaked from a prior call)
         # while others ran with dropout enabled. Predictions were
@@ -159,7 +159,7 @@ class DrugDiseaseLinkPredictor(nn.Module):
 
         ROOT FIX (B-06): the redundant ``abs_diff`` feature has been
         removed. ``abs_diff = |signed_diff|`` is a deterministic function
-        of ``signed_diff`` — the MLP can learn the absolute-value operator
+        of ``signed_diff`` -- the MLP can learn the absolute-value operator
         from ``signed_diff`` alone (a piecewise-linear ReLU suffices).
         The extra D dimensions doubled the input layer's parameter count
         for zero information gain.
@@ -290,7 +290,7 @@ class DrugDiseaseLinkPredictor(nn.Module):
         ACTUALLY CALLED by the bridge's ``train_model`` method as an
         independent verification of the trainer's evaluate() results.
         The V4 docstring claim that evaluate_link_prediction calls this
-        method is now TRUE (it was previously false — the function
+        method is now TRUE (it was previously false -- the function
         existed but was never invoked).
 
         This method delegates to ``forward`` (which applies temperature
@@ -303,8 +303,8 @@ class DrugDiseaseLinkPredictor(nn.Module):
         the link_predictor's dropout was DISABLED for the rest of the
         process. If the bridge called this mid-epoch (which it does via
         ``evaluate_link_prediction``), subsequent training batches
-        trained with NO dropout in the link predictor → silent
-        regularization regime change → link predictor overfits.
+        trained with NO dropout in the link predictor -> silent
+        regularization regime change -> link predictor overfits.
 
         The fix: save the prior training state, switch to eval, run
         inference, then RESTORE the prior state. This makes the method
@@ -327,7 +327,7 @@ class DrugDiseaseLinkPredictor(nn.Module):
         # has already called self.eval() on the full model).
         #
         # BUG #10 root cause: without the lock, concurrent calls to
-        # predict_probability raced — thread A's self.eval() could
+        # predict_probability raced -- thread A's self.eval() could
         # happen between thread B's self.eval() and self.train(prior),
         # leaving B in eval mode regardless of its prior state. The
         # Phase 5 API server (100 concurrent requests) silently
@@ -354,7 +354,7 @@ class DrugDiseaseLinkPredictor(nn.Module):
                 finally:
                     self.train(prior_training)
         else:
-            # Already in eval mode — no toggle needed (BUG #28 fix).
+            # Already in eval mode -- no toggle needed (BUG #28 fix).
             with torch.no_grad():
                 probs = self.forward(drug_emb, disease_emb, apply_temperature=apply_temperature)
         return probs.squeeze(-1)
@@ -421,7 +421,7 @@ class DrugDiseaseLinkPredictor(nn.Module):
         # exception. The previous code froze the MLP at line ~358 but
         # only unfroze at the very end (~470). If an exception happened
         # in between (OOM, NaN loss, CUDA error), the MLP weights
-        # STAYED frozen — a transient calibration failure permanently
+        # STAYED frozen -- a transient calibration failure permanently
         # bricked the link predictor's trainability. The user saw
         # "temperature calibration FAILED" in the log but didn't know
         # the MLP was frozen. Next training run: loss didn't decrease,
@@ -432,7 +432,7 @@ class DrugDiseaseLinkPredictor(nn.Module):
         # restored requires_grad on MLP weights; it did NOT restore
         # ``self.training``. Since the try block calls ``self.eval()``
         # (line below), after fit_temperature returns the link_predictor
-        # is STILL in eval mode — dropout is disabled, BatchNorm uses
+        # is STILL in eval mode -- dropout is disabled, BatchNorm uses
         # running stats. Subsequent training runs would silently train
         # with eval-mode behavior. We now save the prior training state
         # and restore it in the finally block.
@@ -455,7 +455,7 @@ class DrugDiseaseLinkPredictor(nn.Module):
             # pushes ``log_temp`` to a large value (which it can, since
             # ``log_temp`` is unconstrained), the gradient
             # ``dloss/dlog_temp`` is multiplied by ``(1 - tanh^2(log_temp))``
-            # which is essentially 0 — Adam cannot recover. The calibration
+            # which is essentially 0 -- Adam cannot recover. The calibration
             # gets pinned at T_eff = 0.5 or T_eff = 2.0 (the boundaries).
             #
             # The ROOT FIX uses ``T = exp(log_temp)`` whose derivative
@@ -521,7 +521,7 @@ class DrugDiseaseLinkPredictor(nn.Module):
                 loss.backward()
                 # P3-S05 ROOT FIX: clip the gradient on log_temp BEFORE
                 # optimizer.step(). The previous code had NO gradient
-                # clipping — if the cal set had a few misclassified
+                # clipping -- if the cal set had a few misclassified
                 # samples with large loss, the gradient on log_temp could
                 # be large enough to push it outside the [log(0.5),
                 # log(2.0)] range in a single step. The per-iteration
@@ -588,7 +588,7 @@ class DrugDiseaseLinkPredictor(nn.Module):
         finally:
             # V90 ROOT FIX (BUG #13, P1): ALWAYS unfreeze MLP weights,
             # even on exception. The previous code only unfroze at the
-            # very end of the method — if an exception happened during
+            # very end of the method -- if an exception happened during
             # the optimization loop (OOM, NaN loss, CUDA error), the
             # MLP weights STAYED frozen and subsequent training runs
             # silently failed to update them. With try/finally, the

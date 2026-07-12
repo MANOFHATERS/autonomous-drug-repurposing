@@ -22,7 +22,7 @@
 #
 # SPDX-License-Identifier: MIT
 """
-Deduplication utilities for the Drug Repurposing ETL platform — v3.0.0.
+Deduplication utilities for the Drug Repurposing ETL platform -- v3.0.0.
 
 Institutional-grade deduplication module covering 138 issues across 16
 domains: Architecture, Design, Knowledge (Scientific Correctness), Coding,
@@ -46,40 +46,40 @@ the model training set, and every downstream prediction.
 
 Public Functions
 ----------------
-- ``dedup_by_inchikey`` — dedup drug records by InChIKey, keep most-complete
-- ``dedup_interactions`` — dedup DPI rows by composite key, keep most potent
-- ``dedup_by_inchikey_chunked`` — chunked variant for large DataFrames
-- ``compute_completeness_score`` — weighted completeness scoring
-- ``merge_duplicate_groups`` — column-wise merge of duplicate groups
-- ``quality_report`` — pre/post dedup quality metrics
-- ``referential_integrity_check`` — verify foreign-key integrity
-- ``backfill_safety_check`` — safe re-processing guard
-- ``recover_from_failure`` — resume from partial state
-- ``checkpoint_state`` / ``validate_recovery_state`` — fault tolerance
+- ``dedup_by_inchikey`` -- dedup drug records by InChIKey, keep most-complete
+- ``dedup_interactions`` -- dedup DPI rows by composite key, keep most potent
+- ``dedup_by_inchikey_chunked`` -- chunked variant for large DataFrames
+- ``compute_completeness_score`` -- weighted completeness scoring
+- ``merge_duplicate_groups`` -- column-wise merge of duplicate groups
+- ``quality_report`` -- pre/post dedup quality metrics
+- ``referential_integrity_check`` -- verify foreign-key integrity
+- ``backfill_safety_check`` -- safe re-processing guard
+- ``recover_from_failure`` -- resume from partial state
+- ``checkpoint_state`` / ``validate_recovery_state`` -- fault tolerance
 - ``performance_benchmark`` / ``is_reproducible`` / ``reproducibility_report``
-- ``get_metrics`` / ``reset_metrics`` — observability
+- ``get_metrics`` / ``reset_metrics`` -- observability
 - ``get_dead_letters`` / ``clear_dead_letters`` / ``flush_dead_letters``
-- ``set_correlation_id`` / ``get_correlation_id`` — distributed tracing
-- ``get_provenance`` — extract lineage metadata
-- ``timing_report`` / ``health_check`` — observability
+- ``set_correlation_id`` / ``get_correlation_id`` -- distributed tracing
+- ``get_provenance`` -- extract lineage metadata
+- ``timing_report`` / ``health_check`` -- observability
 - ``configure_deduplicator`` / ``validate_config`` / ``validate_environment``
-- ``revert_configuration`` — undo configuration changes
-- ``requires_api_version`` — semver gating
+- ``revert_configuration`` -- undo configuration changes
+- ``requires_api_version`` -- semver gating
 
 Scientific Correctness (Domain 3)
 ---------------------------------
 The "most potent" semantic for interactions respects ``activity_type``:
 
-- ``IC50``, ``Ki``, ``Kd``, ``EC50``, ``AC50``, ``ED50``, ``Kb`` — lower =
+- ``IC50``, ``Ki``, ``Kd``, ``EC50``, ``AC50``, ``ED50``, ``Kb`` -- lower =
   more potent (sort ascending).
-- ``pKi``, ``pIC50``, ``pEC50``, ``pKd`` — higher = more potent
+- ``pKi``, ``pIC50``, ``pEC50``, ``pKd`` -- higher = more potent
   (sort descending). The ``p``-prefix denotes ``-log10`` of the molar
   concentration, so a higher ``pKi`` corresponds to a lower ``Ki``.
-- ``%`` inhibition — higher = more potent (sort descending).
+- ``%`` inhibition -- higher = more potent (sort descending).
 
 ``activity_type`` is part of the dedup segmentation when present: two rows
 with the same ``(drug_id, protein_id, source)`` but different
-``activity_type`` are NOT duplicates — they are different measurements and
+``activity_type`` are NOT duplicates -- they are different measurements and
 both must be retained.
 
 Censored values (``">100"``, ``"<10"``, ``"~50"``) are NOT silently allowed
@@ -97,7 +97,7 @@ A key is valid iff:
 Synthetic InChIKeys (``SYNTH...``) are placeholders for records where the
 true InChIKey could not be computed (e.g., RDKit unavailable, mixture
 compound, or biologic without defined structure). They are NOT collapsed
-together — each ``SYNTH`` key is treated as unique.
+together -- each ``SYNTH`` key is treated as unique.
 
 NaN InChIKeys are NOT collapsed into a single row. The default
 ``drop_duplicates(subset=["inchikey"], keep="first")`` treats
@@ -179,7 +179,7 @@ Copyright (c) 2026 Team Cosmic, VentureLab
 
 from __future__ import annotations
 
-# Standard library imports only — no third-party top-level imports
+# Standard library imports only -- no third-party top-level imports
 # besides pandas (which is the project's data substrate).
 import enum
 import hashlib
@@ -201,7 +201,7 @@ from typing import Any, Callable, Iterator, Literal
 import pandas as pd
 
 # ===========================================================================
-# [ARCH-1] Module metadata — version constants
+# [ARCH-1] Module metadata -- version constants
 # ===========================================================================
 __version__: str = "3.0.0"
 __author__: str = "Team Cosmic / VentureLab"
@@ -219,7 +219,7 @@ try:
     _LOGIC_HASH = hashlib.sha256(
         Path(__file__).read_bytes()
     ).hexdigest()[:16]
-except Exception:  # REL-6 — never crash at import time
+except Exception:  # REL-6 -- never crash at import time
     _LOGIC_HASH = "unknown"
 
 # [ARCH-9] Module load time (captured by importlib on first access).
@@ -229,10 +229,10 @@ _MODULE_LOAD_TIME: float = time.monotonic()
 
 
 # ===========================================================================
-# [ARCH-2] Logger setup — NullHandler + correlation-ID filter
+# [ARCH-2] Logger setup -- NullHandler + correlation-ID filter
 # ===========================================================================
 logger = logging.getLogger(__name__)
-if not logger.handlers:  # library best practice — never propagate NoHandler
+if not logger.handlers:  # library best practice -- never propagate NoHandler
     logger.addHandler(logging.NullHandler())
 
 # Env-driven log level
@@ -300,7 +300,7 @@ def _log_event(level: str, event: str, **fields: Any) -> None:
 # ===========================================================================
 # [ARCH-4] Optional-dependency self-declaration
 # ===========================================================================
-# Mirrors ``cleaning._OPTIONAL_DEPS["dedup_by_inchikey"] = {}`` — this
+# Mirrors ``cleaning._OPTIONAL_DEPS["dedup_by_inchikey"] = {}`` -- this
 # module has NO optional third-party dependencies (only pandas + stdlib).
 _OPTIONAL_DEPS_SELF: dict[str, set[str]] = {
     "dedup_by_inchikey": set(),
@@ -336,35 +336,35 @@ _OPTIONAL_DEPS_SELF: dict[str, set[str]] = {
 
 
 # ===========================================================================
-# [CODE-1] [SCI-7] Scientific constants — activity-type taxonomy
+# [CODE-1] [SCI-7] Scientific constants -- activity-type taxonomy
 # ===========================================================================
-# Lower-is-better (molar concentration) — these are direct measurements
+# Lower-is-better (molar concentration) -- these are direct measurements
 # of the concentration required to achieve a defined effect. Lower =
 # higher binding affinity / potency.
 POTENCY_ACTIVITY_TYPES: frozenset[str] = frozenset({
     "IC50", "Ki", "Kd", "EC50", "AC50", "ED50", "Kb",
 })
 
-# Higher-is-better (negative log of molar concentration) — these are
+# Higher-is-better (negative log of molar concentration) -- these are
 # -log10 transforms of the corresponding potency values. Higher = more potent.
 INVERSE_ACTIVITY_TYPES: frozenset[str] = frozenset({
     "pKi", "pIC50", "pEC50", "pKd",
 })
 
-# Percent-inhibition assays — higher % inhibition at a fixed concentration
+# Percent-inhibition assays -- higher % inhibition at a fixed concentration
 # indicates stronger binding / effect.
 PERCENT_ACTIVITY_TYPES: frozenset[str] = frozenset({
     "%", "percent", "inhibition", "inhibition_%",
 })
 
-# All known activity types — used for validation (DQ-8).
-# v43 ROOT FIX (P1 — _ALLOWED_ACTIVITY_TYPES superset of DB enum):
+# All known activity types -- used for validation (DQ-8).
+# v43 ROOT FIX (P1 -- _ALLOWED_ACTIVITY_TYPES superset of DB enum):
 # The DB CHECK constraint chk_dpi_activity_type allows ONLY:
 #   ('IC50', 'EC50', 'Ki', 'Kd', 'potency', 'AC50', 'unknown')
 # But _ALLOWED_ACTIVITY_TYPES previously included pKi, pIC50, pEC50,
-# pKd, ED50, Kb, %, percent, inhibition, inhibition_% — all of which
+# pKd, ED50, Kb, %, percent, inhibition, inhibition_% -- all of which
 # pass the deduplicator's validation but FAIL the DB INSERT with
-# CheckViolation → silent dead-letter at the DB boundary.
+# CheckViolation -> silent dead-letter at the DB boundary.
 # The fix: _ALLOWED_ACTIVITY_TYPES is now the EXACT DB enum. The
 # superset types are retained as separate constants (POTENCY_,
 # INVERSE_, PERCENT_) for dedup logic that needs to recognize them,
@@ -384,7 +384,7 @@ DEFAULT_DPI_KEYS: list[str] = ["drug_id", "protein_id", "source", "source_id"]
 # Default weights for completeness scoring (DES-3). Higher weight = the
 # column carries more identifying information.
 _DEFAULT_WEIGHTS: dict[str, float] = {
-    "inchikey": 5.0,             # primary identifier — must be present
+    "inchikey": 5.0,             # primary identifier -- must be present
     "name": 4.0,                 # human-readable identifier
     "smiles": 3.5,               # structural representation
     "molecular_weight": 2.5,
@@ -416,7 +416,7 @@ _LINEAGE_COLUMNS: frozenset[str] = frozenset({
     "cleaning_metrics",
 })
 
-# [SEC-3] DoS guard — max rows accepted by single-call APIs.
+# [SEC-3] DoS guard -- max rows accepted by single-call APIs.
 _MAX_DATAFRAME_ROWS: int = int(
     os.environ.get("CLEANING_DEDUP_MAX_ROWS", "10000000")
 )
@@ -440,7 +440,7 @@ MAX_DROPPED_ROWS_IN_RESULT: int = _MAX_DROPPED_ROWS_IN_RESULT
 # treated as data-entry errors and quarantined.
 # v16 ROOT FIX (CD-7): import the non-physical threshold from
 # cleaning._constants so it is shared with normalizer.py (which
-# previously had its own _ACTIVITY_VALUE_MAX = 1e6 — a 3-order-of-
+# previously had its own _ACTIVITY_VALUE_MAX = 1e6 -- a 3-order-of-
 # magnitude divergence). The deduplicator uses the NON-PHYSICAL
 # threshold (1 M) to REJECT corrupt values; normalizer uses the
 # CENSORED threshold (1 mM) to FLAG values that exceed pharmacological
@@ -450,14 +450,14 @@ from cleaning._constants import (
     ACTIVITY_VALUE_CENSORED_THRESHOLD as _ACTIVITY_CENSORED_MAX,
 )
 _ACTIVITY_VALUE_MIN: float = 0.0           # negative concentrations impossible
-# v65 ROOT FIX (P1C-014 — eliminate the _ACTIVITY_VALUE_MAX name conflict):
+# v65 ROOT FIX (P1C-014 -- eliminate the _ACTIVITY_VALUE_MAX name conflict):
 #   The previous line defined a LOCAL ``_ACTIVITY_VALUE_MAX`` alias
 #   pointing at ``_ACTIVITY_NON_PHYSICAL_MAX`` (1e9). But
-#   ``cleaning._constants`` ALSO defines ``_ACTIVITY_VALUE_MAX`` —
+#   ``cleaning._constants`` ALSO defines ``_ACTIVITY_VALUE_MAX`` --
 #   pointing at the CENSORED threshold (1e6). So the SAME name
 #   meant two different things in two modules: 1e9 here, 1e6 in
 #   _constants. A legacy caller doing ``from cleaning._constants
-#   import _ACTIVITY_VALUE_MAX`` got 1e6 (censored) — but if they
+#   import _ACTIVITY_VALUE_MAX`` got 1e6 (censored) -- but if they
 #   expected the deduplicator's rejection threshold (1e9), values in
 #   [1e6, 1e9) nM that are actually valid (just above pharmacological
 #   relevance) were silently dropped. ROOT FIX: remove this local
@@ -465,15 +465,15 @@ _ACTIVITY_VALUE_MIN: float = 0.0           # negative concentrations impossible
 #   ``_ACTIVITY_NON_PHYSICAL_MAX`` directly (the clear, self-
 #   documenting name imported at line 448). The only remaining
 #   ``_ACTIVITY_VALUE_MAX`` in the codebase lives in ``_constants``
-#   (1e6, censored) and ``normalizer`` (1e6, censored) — both agree.
+#   (1e6, censored) and ``normalizer`` (1e6, censored) -- both agree.
 #   No module defines ``_ACTIVITY_VALUE_MAX`` as 1e9 anymore.
 
-# [SCI-3] Censor-mark pattern — captures leading ``<``, ``>``, ``=``, ``~``.
+# [SCI-3] Censor-mark pattern -- captures leading ``<``, ``>``, ``=``, ``~``.
 _CENSOR_PATTERN: re.Pattern[str] = re.compile(
     r"^\s*([<>=~]{1,2})\s*([0-9.eE+-]+)\s*$"
 )
 
-# [SCI-7] InChIKey patterns — v29 ROOT FIX: import the CANONICAL regex
+# [SCI-7] InChIKey patterns -- v29 ROOT FIX: import the CANONICAL regex
 # from cleaning._constants instead of redefining it. The previous code
 # defined its own _INCHIKEY_PATTERN with `^[A-Z]{14}-[A-Z]{10}-[A-Z]$`
 # (strict 27-char), while normalizer.py accepted `^[A-Z]{14}-[A-Z]{10}-
@@ -481,7 +481,7 @@ _CENSOR_PATTERN: re.Pattern[str] = re.compile(
 # a valid InChIKey could pass cleaning, fail dedup, fail DB insert
 # (audit Compound Chain 3).
 #
-# All InChIKey regexes below are now IMPORTED from _constants — the
+# All InChIKey regexes below are now IMPORTED from _constants -- the
 # single source of truth. We keep the underscored names as aliases for
 # backward compatibility with internal callers in this file.
 from ._constants import (
@@ -546,11 +546,11 @@ _UNIT_CONVERSIONS_TO_NM: dict[str, float] = {
 # The previous code did an O(n) linear scan over ALL 14 entries for
 # EVERY unit lookup that missed the exact-case dict. On the 4M-row
 # STRING PPI dataset with mixed-case units, this was 4M × 14 = 56M
-# string comparisons — making the deduplicator unusably slow (hours
+# string comparisons -- making the deduplicator unusably slow (hours
 # on large datasets, potentially timing out the pipeline). This
 # pre-computed dict gives O(1) case-insensitive lookup with zero
 # per-call overhead. Correctness is identical; only performance
-# changes (O(n) → O(1) per lookup).
+# changes (O(n) -> O(1) per lookup).
 _UNIT_CONVERSIONS_TO_NM_CASEFOLDED: dict[str, float] = {
     k.casefold(): v for k, v in _UNIT_CONVERSIONS_TO_NM.items()
 }
@@ -667,7 +667,7 @@ class CompletenessWeight:
         for col, val in row.items():
             if col in self.exclude_columns:
                 continue
-            # Fast NaN check — works for float NaN, pd.NA, None
+            # Fast NaN check -- works for float NaN, pd.NA, None
             try:
                 if val is None or (isinstance(val, float) and val != val):
                     continue
@@ -727,7 +727,7 @@ class CompletenessWeight:
         return scored
 
 
-# Module-level default instance — shared by all calls that don't override.
+# Module-level default instance -- shared by all calls that don't override.
 DEFAULT_COMPLETENESS_WEIGHTS: CompletenessWeight = CompletenessWeight()
 
 
@@ -749,7 +749,7 @@ class DedupResult:
     duplicates_removed : int
         Count of rows removed by the actual dedup groupby pass (true
         merges). Does NOT include pre-filter drops (null InChIKey drops,
-        quarantine, non-numeric activity value quarantine) — those are
+        quarantine, non-numeric activity value quarantine) -- those are
         reported separately as ``pre_filter_drops``.
     pre_filter_drops : int
         Count of rows dropped BEFORE the dedup groupby (null InChIKey
@@ -856,7 +856,7 @@ def _get_helpers() -> SimpleNamespace:
         helpers["get_circuit_breaker"] = get_circuit_breaker
         helpers["SchemaValidationError"] = SchemaValidationError
         helpers["CleaningError"] = CleaningError
-    except Exception as exc:  # pragma: no cover — defensive
+    except Exception as exc:  # pragma: no cover -- defensive
         logger.debug("dedup: package helpers unavailable: %s", exc)
 
     # Sister-module helpers (lazy, never block import)
@@ -983,7 +983,7 @@ def _redact_for_log_local(value: Any, max_len: int = 80) -> str:
 
 
 def _validate_input_size(df: pd.DataFrame) -> None:
-    """[SEC-3] DoS guard — reject DataFrames that exceed the row cap.
+    """[SEC-3] DoS guard -- reject DataFrames that exceed the row cap.
 
     Parameters
     ----------
@@ -1038,7 +1038,7 @@ def _scan_for_pii(df: pd.DataFrame) -> dict[str, int]:
     for pii_type, n in counts.items():
         if n > 0:
             logger.warning(
-                "dedup: detected %d %s-like values in input — they will be "
+                "dedup: detected %d %s-like values in input -- they will be "
                 "redacted from logs and dead-letter entries",
                 n, pii_type,
             )
@@ -1052,7 +1052,7 @@ def _fingerprint_df(df: pd.DataFrame) -> str:
     """[IDEM-4] Compute a stable SHA-256 fingerprint of a DataFrame.
 
     Delegates to ``cleaning.compute_data_fingerprint`` when available
-    (column-sorted CSV → sha256). Falls back to a content-based
+    (column-sorted CSV -> sha256). Falls back to a content-based
     ``pd.util.hash_pandas_object`` approach.
     """
     try:
@@ -1184,15 +1184,15 @@ def _resolve_activity_direction(
         return "asc"
     if explicit_direction == "desc":
         return "desc"
-    # AUTO — infer from activity_type
+    # AUTO -- infer from activity_type
     if activity_type is None:
-        return "asc"  # safe default — matches v1.0.0 behavior
+        return "asc"  # safe default -- matches v1.0.0 behavior
     at = activity_type.strip()
     if at in INVERSE_ACTIVITY_TYPES:
         return "desc"
     if at in PERCENT_ACTIVITY_TYPES:
         return "desc"
-    # POTENCY_ACTIVITY_TYPES, "None", "unknown", or anything else → asc
+    # POTENCY_ACTIVITY_TYPES, "None", "unknown", or anything else -> asc
     return "asc"
 
 
@@ -1234,7 +1234,7 @@ def _validate_activity_type(
             f"Allowed: {sorted(_ALLOWED_ACTIVITY_TYPES)}"
         )
     logger.warning(
-        "dedup: unknown activity_type %r — treating as ASC (lower-is-better). "
+        "dedup: unknown activity_type %r -- treating as ASC (lower-is-better). "
         "Pass strict_activity_type=True to reject.",
         at,
     )
@@ -1255,7 +1255,7 @@ def _normalize_unit_to_nm(value: float, unit: str | None) -> tuple[float, str | 
     u = unit.strip()
     if not u:
         return (value, "empty_unit")
-    # Case-insensitive lookup — O(1) via pre-computed casefolded dict
+    # Case-insensitive lookup -- O(1) via pre-computed casefolded dict
     # (v84 FORENSIC ROOT FIX for BUG #33: was O(n) linear scan).
     factor = _UNIT_CONVERSIONS_TO_NM.get(u)
     if factor is None:
@@ -1271,18 +1271,18 @@ def _normalize_unit_to_nm(value: float, unit: str | None) -> tuple[float, str | 
 _DEAD_LETTERS_LOCK = threading.RLock()
 _dead_letters: list[dict[str, Any]] = []
 # P2-4 ROOT FIX (v82): the ``_dead_letter_queue = _dead_letters`` alias
-# that used to live here was a CONFUSING duplicate-reference — both
+# that used to live here was a CONFUSING duplicate-reference -- both
 # names pointed to the SAME list object, so in-place mutations
 # (.append/.clear/.pop) were visible through either name, BUT
 # ``get_dead_letters()`` returns ``list(_dead_letters)`` (a snapshot
 # copy). Operators inspecting ``_dead_letter_queue`` directly saw LIVE
-# mutations while ``get_dead_letters()`` returned a SNAPSHOT — the two
+# mutations while ``get_dead_letters()`` returned a SNAPSHOT -- the two
 # access paths disagreed.
 #
 # The alias has been REMOVED. The CANONICAL public API for inspecting
 # the queue is ``get_dead_letters()`` (snapshot) /
 # ``clear_dead_letters()`` / ``flush_dead_letters()``. The private
-# list is ``_dead_letters`` only — single name, single source of
+# list is ``_dead_letters`` only -- single name, single source of
 # truth. External code that imported ``_dead_letter_queue`` hits the
 # module-level ``__getattr__`` hook near the end of this file, which
 # returns a SNAPSHOT (matching ``get_dead_letters()``) plus a
@@ -1323,7 +1323,7 @@ def _append_dead_letter(
         # entries actually appended. Callers no longer need to remember
         # to call ``_incr_metric("dead_letters_added")`` after each
         # invocation. The previous pattern (caller increments after each
-        # call) was fragile — any caller that forgot the increment, or
+        # call) was fragile -- any caller that forgot the increment, or
         # any exception path that skipped it, would under-count.
         _incr_metric("dead_letters_added")
     # Mirror to package-level queue
@@ -1363,7 +1363,7 @@ def clear_dead_letters() -> None:
     """Clear the dead-letter queue.
 
     Removes all entries from the in-memory dead-letter queue. This is
-    a destructive operation — once cleared, the records cannot be
+    a destructive operation -- once cleared, the records cannot be
     recovered unless they were previously flushed to disk via
     :func:`flush_dead_letters`.
 
@@ -1394,7 +1394,7 @@ def flush_dead_letters(path: str | Path | None = None) -> int:
     int
         Number of entries flushed.
     """
-    # [SEC-4] Path-traversal guard — validate BEFORE checking queue state
+    # [SEC-4] Path-traversal guard -- validate BEFORE checking queue state
     # so malicious paths are always rejected, even when queue is empty.
     if path is not None:
         path_str = str(Path(path))
@@ -1499,7 +1499,7 @@ def reset_metrics() -> None:
             _metrics[k] = 0
 
 
-# Timing data — per-function wall-clock stats
+# Timing data -- per-function wall-clock stats
 _TIMING_LOCK = threading.RLock()
 _timing_data: dict[str, dict[str, float]] = defaultdict(
     lambda: {"calls": 0, "total_s": 0.0, "min_s": float("inf"), "max_s": 0.0}
@@ -1541,7 +1541,7 @@ def timing_report() -> dict[str, dict[str, float]]:
 # [REL-3] Local circuit breaker
 # ===========================================================================
 class _LocalCircuitBreaker:
-    """Simple circuit breaker — opens after N consecutive failures."""
+    """Simple circuit breaker -- opens after N consecutive failures."""
 
     def __init__(
         self,
@@ -1584,7 +1584,7 @@ class _LocalCircuitBreaker:
                     self.state = "half-open"
                     return True
                 return False
-            # half-open — allow one request
+            # half-open -- allow one request
             return True
 
 
@@ -1747,7 +1747,7 @@ def validate_environment() -> dict[str, Any]:
             issues.append(f"pandas {pd_version} < 2.1.4")
     except Exception:
         pass
-    # P1-054 ROOT FIX: avoid __import__('numpy') — use a lazy helper.
+    # P1-054 ROOT FIX: avoid __import__('numpy') -- use a lazy helper.
     def _get_numpy_version() -> str:
         try:
             import numpy as _np
@@ -1990,7 +1990,7 @@ def dedup_by_inchikey(
     """Remove duplicate drugs by InChIKey, keeping the most complete row.
 
     Backward-compatible with the v1.0.0 signature ``dedup_by_inchikey(df)``
-    — all keyword arguments are optional with defaults that preserve
+    -- all keyword arguments are optional with defaults that preserve
     v1.0.0 behavior exactly.
 
     Parameters
@@ -2025,7 +2025,7 @@ def dedup_by_inchikey(
         (last character) as duplicates.
     null_inchikey_handler : {"keep_all", "drop", "quarantine"}, default "keep_all"
         How to handle rows with null InChIKeys. Default "keep_all"
-        preserves all null rows (does NOT collapse them — fixes the
+        preserves all null rows (does NOT collapse them -- fixes the
         v1.0.0 NaN==NaN data-loss bug).
     skip_if_already_deduped : bool, default True
         If True and the input has ``_dedup_already_applied=True`` attrs,
@@ -2055,7 +2055,7 @@ def dedup_by_inchikey(
     # added to ``dropped_rows`` but not to the dead-letter queue).
     _dead_letters_at_start = _metrics.get("dead_letters_added", 0)
 
-    # [REL-3] Circuit breaker — short-circuit if open
+    # [REL-3] Circuit breaker -- short-circuit if open
     if not _cb_dedup_by_inchikey.allow_request():
         warnings_list.append("circuit_open_short_circuit")
         _log_event("error", f"{func_name}.circuit_open")
@@ -2125,7 +2125,7 @@ def dedup_by_inchikey(
             provenance=dict(empty_result.attrs.get("_provenance", [{}])[-1]),
         )
 
-    # [CODE-2] Missing inchikey column — return unchanged with warning
+    # [CODE-2] Missing inchikey column -- return unchanged with warning
     if "inchikey" not in df.columns:
         transformations.append("missing_inchikey_column")
         warnings_list.append("missing_inchikey_column")
@@ -2192,7 +2192,7 @@ def dedup_by_inchikey(
 
     # [DQ-3] Build the list of columns to score (exclude lineage cols)
     if weight is None:
-        # v29 ROOT FIX (audit C-11): dedup functions ignored configure_deduplicator — used DEFAULT_COMPLETENESS_WEIGHTS. Now reads from _config.
+        # v29 ROOT FIX (audit C-11): dedup functions ignored configure_deduplicator -- used DEFAULT_COMPLETENESS_WEIGHTS. Now reads from _config.
         weight = CompletenessWeight(weights=dict(_config["completeness_weights"]))
 
     # [SCI-5] [SCI-6] [DQ-1] [DQ-2] Build a working copy with normalized inchikey
@@ -2214,7 +2214,7 @@ def dedup_by_inchikey(
     # check uses a case-SENSITIVE regex ``^[A-Z]{14}-[A-Z]{10}-[A-Z]$``.
     # A lowercase InChIKey like "bsynrymutxbxsq-uhfffaoyas-n" failed
     # validation, was not detected as a duplicate of the uppercase form,
-    # and survived dedup as a separate row — creating duplicate drug
+    # and survived dedup as a separate row -- creating duplicate drug
     # nodes in the knowledge graph. ROOT FIX: uppercase after stripping
     # so all InChIKeys are normalized to the canonical uppercase form
     # before the dedup pass.
@@ -2240,7 +2240,7 @@ def dedup_by_inchikey(
     # [SCI-5] SYNTH key handling
     # v34 ROOT FIX (CRITICAL #1): previously the deduplicator assigned
     # sentinel strings like `__SYNTH_UNIQUE_N__` to NaN/SYNTH/mixture
-    # InChIKeys so they survived drop_duplicates — but the sentinels were
+    # InChIKeys so they survived drop_duplicates -- but the sentinels were
     # NEVER restored to the original values, leaking into the output and
     # causing downstream DB loaders to quarantine EVERY NaN/SYNTH/mixture
     # drug. We now snapshot the original inchikey column before applying
@@ -2253,7 +2253,7 @@ def dedup_by_inchikey(
         _incr_metric(f"{func_name}_synth_keys_seen", n_synth)
         _log_event("info", f"{func_name}.synth_keys_seen", count=n_synth)
         if synth_handling == "skip":
-            # Mark SYNTH rows as untouchable — give them unique sentinel keys
+            # Mark SYNTH rows as untouchable -- give them unique sentinel keys
             # so drop_duplicates won't collapse them. Sentinels are written
             # to `_dedup_sentinel_key` so the original `inchikey` column is
             # preserved for downstream consumers (v34 root fix).
@@ -2263,7 +2263,7 @@ def dedup_by_inchikey(
             ]
             transformations.append("skip_synth_keys")
 
-    # [SCI-6] Mixture InChIKey detection (warn-only — don't dedup)
+    # [SCI-6] Mixture InChIKey detection (warn-only -- don't dedup)
     mixture_mask = working["inchikey"].apply(_is_mixture_inchikey)
     n_mixture = int(mixture_mask.sum())
     if n_mixture > 0:
@@ -2298,7 +2298,7 @@ def dedup_by_inchikey(
                 # canonical InChIKey regex INLINE as a string literal
                 # (``r"^[A-Z]{14}-[A-Z]{10}-[A-Z]$"``). The canonical
                 # regex is imported from ``cleaning._constants`` as
-                # ``_INCHIKEY_PATTERN`` (line 471) — the v29 ROOT FIX
+                # ``_INCHIKEY_PATTERN`` (line 471) -- the v29 ROOT FIX
                 # (lines 459-478) was supposed to eliminate exactly this
                 # kind of inline copy so that future edits to the
                 # canonical regex propagate automatically. The inline
@@ -2340,11 +2340,11 @@ def dedup_by_inchikey(
                             # in the version char (last character, 'S' =
                             # standard vs 'N' = non-standard). The previous
                             # implementation logged a WARNING and kept
-                            # both forms separate — callers who set this
+                            # both forms separate -- callers who set this
                             # flag expecting merge behaviour got NO merge
                             # and NO exception (silent no-op). We now
                             # actually perform the merge by normalising
-                            # 'N' → 'S' in the dedup group key. A lineage
+                            # 'N' -> 'S' in the dedup group key. A lineage
                             # column ``_version_char_normalized`` is added
                             # so the merge is traceable (TRUE for every
                             # row whose original key ended in 'N').
@@ -2357,11 +2357,11 @@ def dedup_by_inchikey(
                             # collapsing tautomer-/isotope-/metal-specific
                             # forms onto the canonical form. The INFO log
                             # below makes this explicit.
-                            # v65 ROOT FIX (P1C-013 — dead over-counting
+                            # v65 ROOT FIX (P1C-013 -- dead over-counting
                             # variable):
                             #   The previous code computed ``n_normalised``
                             #   by counting ALL InChIKey values whose last
-                            #   char is "N" — including INVALID strings
+                            #   char is "N" -- including INVALID strings
                             #   like "SYNTH...N", "invalid-N", "FOO-N". The
                             #   actual normalization below uses the strict
                             #   regex ``^[A-Z]{14}-[A-Z]{10}-N$`` (via
@@ -2370,7 +2370,7 @@ def dedup_by_inchikey(
                             #   over-counted. The log message and metric
                             #   below ALREADY use ``_norm_mask.sum()``
                             #   (the correct count), so ``n_normalised`` was
-                            #   DEAD CODE — computed but never read. ROOT FIX:
+                            #   DEAD CODE -- computed but never read. ROOT FIX:
                             #   remove the dead variable entirely. The
                             #   ``_norm_mask`` computed below is the single
                             #   source of truth for the normalized count.
@@ -2390,7 +2390,7 @@ def dedup_by_inchikey(
                                 .str.slice(stop=26) + "S"
                             )
                             # Lineage column (traceable merge)
-                            # P1-021 ROOT FIX (v100 forensic — STEREO
+                            # P1-021 ROOT FIX (v100 forensic -- STEREO
                             # COLLAPSE was silent at INFO level):
                             # The previous code logged this collapse at
                             # INFO level, which is filtered out by
@@ -2399,7 +2399,7 @@ def dedup_by_inchikey(
                             # would NEVER see that stereo-specific drugs
                             # (thalidomide enantiomers, warfarin, etc.)
                             # were being collapsed onto their canonical
-                            # form — a patient-safety risk because the
+                            # form -- a patient-safety risk because the
                             # collapsed node loses stereochemistry
                             # information that may be clinically
                             # meaningful (e.g. one enantiomer is
@@ -2421,14 +2421,14 @@ def dedup_by_inchikey(
                                 int(_norm_mask.sum()),
                             )
                             logger.warning(
-                                "%s: dedup_by_version_char=True — normalized "
+                                "%s: dedup_by_version_char=True -- normalized "
                                 "%d non-standard ('N') InChIKey(s) to standard "
                                 "('S') for dedup grouping. Sample prefixes: %s. "
                                 "WARNING: this COLLAPSES tautomeric/isotopic/"
                                 "metal-specific forms onto the canonical form "
                                 "(caller opt-in). Stereo-specific drugs "
                                 "(thalidomide enantiomers, warfarin) may be "
-                                "merged into a single node — the "
+                                "merged into a single node -- the "
                                 "_stereo_collapsed lineage column is set to "
                                 "True for these rows so downstream consumers "
                                 "can detect and (if needed) re-split them.",
@@ -2439,7 +2439,7 @@ def dedup_by_inchikey(
                             transformations.append(
                                 "version_char_normalized_merge"
                             )
-        except Exception as exc:  # pragma: no cover — defensive
+        except Exception as exc:  # pragma: no cover -- defensive
             logger.debug("version-char mismatch detection failed: %s", exc)
 
     # [DES-3] [PERF-1] Compute weighted completeness scores
@@ -2447,10 +2447,10 @@ def dedup_by_inchikey(
     working["_completeness_score"] = completeness
     transformations.append("compute_completeness_score")
 
-    # [SCI-5] SYNTH "by_name" handling — collapse identical SYNTH values
+    # [SCI-5] SYNTH "by_name" handling -- collapse identical SYNTH values
     if synth_handling == "by_name":
         transformations.append("synth_by_name_collapse")
-        # Don't make SYNTH unique — let identical SYNTH values dedup together
+        # Don't make SYNTH unique -- let identical SYNTH values dedup together
 
     # [DQ-1] NaN InChIKey handling
     # v1.0.0 BUG: drop_duplicates(subset=["inchikey"], keep="first")
@@ -2484,25 +2484,25 @@ def dedup_by_inchikey(
             # `_dedup_sentinel_key` (NOT to `inchikey`). The original
             # NaN value stays in `inchikey` so downstream consumers see
             # the real (NaN) value and can handle it appropriately.
-            # P1-017 ROOT FIX (v100 forensic — n_nan length mismatch):
+            # P1-017 ROOT FIX (v100 forensic -- n_nan length mismatch):
             # The previous code computed ``n_nan`` ONCE at the top of
             # this block, then used ``[f"__NULL_UNIQUE_{i}__" for i in
             # range(n_nan)]`` to assign sentinels to ``nan_mask`` rows.
             # But the ``drop`` and ``quarantine`` branches above REMOVE
-            # rows from ``working`` — so by the time we reach this
+            # rows from ``working`` -- so by the time we reach this
             # ``keep_all`` branch, ``working`` has changed but
             # ``n_nan`` and ``nan_mask`` still reflect the PRE-drop
             # state. The sentinel list length (n_nan) no longer matches
             # the number of True values in ``nan_mask`` (which was
-            # computed against the PRE-drop DataFrame) → pandas raises
+            # computed against the PRE-drop DataFrame) -> pandas raises
             # ``ValueError: length mismatch``.
-            # The ``keep_all`` branch is the ELSE — it only runs when
+            # The ``keep_all`` branch is the ELSE -- it only runs when
             # ``null_inchikey_handler`` is NOT ``drop`` or ``quarantine``.
             # In that case, ``working`` is UNCHANGED from the top of the
             # block, so ``n_nan`` and ``nan_mask`` are still consistent.
             # BUT the original code structured the if/elif/else such
             # that ``n_nan`` and ``nan_mask`` were computed BEFORE the
-            # branch — meaning a future refactor that reorders the
+            # branch -- meaning a future refactor that reorders the
             # branches or adds a new branch that mutates ``working``
             # would silently reintroduce the length-mismatch bug.
             # ROOT FIX: recompute ``nan_mask`` and ``n_nan`` HERE
@@ -2546,7 +2546,7 @@ def dedup_by_inchikey(
             if ratio > max_duplicate_ratio:
                 msg = (
                     f"{func_name}: duplicate ratio {ratio:.2%} exceeds "
-                    f"max_duplicate_ratio={max_duplicate_ratio:.2%} — "
+                    f"max_duplicate_ratio={max_duplicate_ratio:.2%} -- "
                     f"suspicious input"
                 )
                 _log_event("error", f"{func_name}.suspicious_duplicate_ratio",
@@ -2610,7 +2610,7 @@ def dedup_by_inchikey(
         transformations.append("merge_fields")
         strategy_name = DedupStrategy.MERGE_FIELDS.value
     else:
-        # [CODE-3] [CODE-6] Use drop_duplicates (NOT groupby().first()) — required by TestIssue21
+        # [CODE-3] [CODE-6] Use drop_duplicates (NOT groupby().first()) -- required by TestIssue21
         # [DQ-1] NaN/SYNTH/mixture rows have unique sentinels in
         # `_dedup_sentinel_key`, so they survive.
         # v34 ROOT FIX (CRITICAL #1): dedup on `_dedup_sentinel_key` (if
@@ -2638,7 +2638,7 @@ def dedup_by_inchikey(
         if "_dedup_source_indices" in deduped.columns:
             # Already added by merge_fields path
             pass
-        # Drop the sentinel column even when lineage columns are kept —
+        # Drop the sentinel column even when lineage columns are kept --
         # it's an internal-only field that should never appear in output.
         if "_dedup_sentinel_key" in deduped.columns:
             deduped = deduped.drop(columns=["_dedup_sentinel_key"], errors="ignore")
@@ -2685,30 +2685,30 @@ def dedup_by_inchikey(
             pass
         # [LINEAGE-3] Add dead-letter entries for the first N dropped rows
         #
-        # v93 ROOT FIX (P1-045 — inverted dead-letter cap):
+        # v93 ROOT FIX (P1-045 -- inverted dead-letter cap):
         #   The previous code had ``max_dl = 100 if not conservative_defaults
-        #   else 1000`` — this is BACKWARDS. ``conservative_defaults=True``
+        #   else 1000`` -- this is BACKWARDS. ``conservative_defaults=True``
         #   is the SAFER mode (more conservative about data quality), so it
         #   should be MORE conservative about dead-letter SIZE too (smaller
         #   cap), not LESS. The previous code let conservative mode collect
         #   10x MORE dead-letter entries than non-conservative mode,
         #   consuming more memory and disk in exactly the mode where the
         #   operator expects tighter resource limits. Root fix: invert the
-        #   cap — conservative mode gets 100 (smaller), non-conservative
+        #   cap -- conservative mode gets 100 (smaller), non-conservative
         #   gets 1000 (larger, for development/debugging).
         max_dl = 1000 if not conservative_defaults else 100
         for di in dropped_indices[:max_dl]:
             try:
                 row = working[working["_original_index"] == di].iloc[0]
                 # v17 ROOT FIX (DC-5 INCOMPLETE): v16 attempted to record
-                # the survivor but used ``deduped.iloc[0]`` — the FIRST
+                # the survivor but used ``deduped.iloc[0]`` -- the FIRST
                 # row of the ENTIRE deduped DataFrame, NOT the survivor
                 # of THIS specific dropped row's group. Every dead-letter
                 # entry got the SAME survivor_inchikey regardless of
                 # which row was dropped, making the field useless for
                 # debugging. Look up the actual survivor by matching
                 # the dropped row's InChIKey against the deduped frame.
-                # If no match (shouldn't happen — the survivor has the
+                # If no match (shouldn't happen -- the survivor has the
                 # same InChIKey as the dropped row by definition of
                 # group-by-inchikey), fall back to None and log a
                 # warning so the operator knows the lookup missed.
@@ -2719,13 +2719,13 @@ def dedup_by_inchikey(
                     if len(_match) > 0:
                         survivor_row = _match.iloc[0]
                 if survivor_row is None:
-                    # Defensive fallback — keep the v16 behavior so the
+                    # Defensive fallback -- keep the v16 behavior so the
                     # dead-letter is still written, but flag it.
                     survivor_row = deduped.iloc[0] if len(deduped) > 0 else None
                     if survivor_row is not None:
                         logger.warning(
                             "deduplicator: survivor lookup by inchikey=%r "
-                            "missed — falling back to iloc[0]. The "
+                            "missed -- falling back to iloc[0]. The "
                             "survivor_inchikey recorded in this dead-letter "
                             "may not correspond to this dropped row.",
                             _redact_for_log_local(_dropped_ik),
@@ -2866,7 +2866,7 @@ def dedup_interactions(
     """Remove duplicate interaction rows by a composite key, keeping the most potent.
 
     Backward-compatible with the v1.0.0 signature
-    ``dedup_interactions(df, keys)`` — all keyword arguments are optional
+    ``dedup_interactions(df, keys)`` -- all keyword arguments are optional
     with defaults that preserve v1.0.0 behavior exactly. When
     ``activity_value`` is present, the lowest value wins (matching
     v1.0.0 behavior for ``IC50`` / ``Ki`` / ``Kd`` assays). For
@@ -2941,7 +2941,7 @@ def dedup_interactions(
     dropped_rows: list[dict[str, Any]] = []
     # v35 ROOT FIX: capture the dead-letter counter at entry so we can
     # compute the actual delta for this call (counter is incremented
-    # atomically inside _append_dead_letter — see same fix in
+    # atomically inside _append_dead_letter -- see same fix in
     # dedup_by_inchikey above).
     _dead_letters_at_start = _metrics.get("dead_letters_added", 0)
 
@@ -3099,7 +3099,7 @@ def dedup_interactions(
     # from ``pre_filter_drops`` (null-key drops / quarantines that happen
     # BEFORE the groupby). The v35 ROOT FIX applied this split to
     # ``dedup_by_inchikey`` (lines 2535-2541) but NOT to
-    # ``dedup_interactions`` — so operators could not distinguish "N true
+    # ``dedup_interactions`` -- so operators could not distinguish "N true
     # duplicate interactions were merged" from "M rows were dropped for
     # bad data". The conflated ``duplicates_removed = len(df) - len(deduped)``
     # at the end of this function reported EVERY drop as a "duplicate",
@@ -3171,7 +3171,7 @@ def dedup_interactions(
     if activity_value_present and keep == "best":
         # [SCI-3] Parse censored values & extract numeric component
         #
-        # v82 FORENSIC ROOT FIX (P0-D4c — deduplicator ignores pre-existing
+        # v82 FORENSIC ROOT FIX (P0-D4c -- deduplicator ignores pre-existing
         #   activity_censored column from the pipeline):
         #   The previous code UNCONDITIONALLY called
         #   ``_parse_censored_value(working[activity_value_column])`` to
@@ -3179,7 +3179,7 @@ def dedup_interactions(
         #   But after the ChEMBL pipeline's ``_step_normalize_activity_values``
         #   runs, the activity_value column is a FLOAT (e.g. ``1000.0``),
         #   not the original string (``">6"``). ``_parse_censored_value``
-        #   on a float returns ``(False, None, 1000.0)`` — the censor
+        #   on a float returns ``(False, None, 1000.0)`` -- the censor
         #   information is LOST even though the normalizer correctly
         #   detected it and the pipeline propagated it into the
         #   ``activity_censored`` / ``activity_censor_direction`` columns.
@@ -3199,7 +3199,7 @@ def dedup_interactions(
             if _has_preexisting_censored:
                 # v82 P0-D4c: use the pipeline-provided censor metadata
                 # (detected on the ORIGINAL string value, before float
-                # conversion). This is the authoritative source —
+                # conversion). This is the authoritative source --
                 # re-parsing the float would lose the censor info.
                 working["_av_censored"] = working["activity_censored"].fillna(False).astype(bool)
                 working["_av_censor_dir"] = working["activity_censor_direction"]
@@ -3269,11 +3269,11 @@ def dedup_interactions(
             working["_av_normalized"] = working["_av_numeric"]
             working["_av_norm_warning"] = None
 
-        # V18 ROOT FIX (CD-7 — patient-safety + TransE training bias):
+        # V18 ROOT FIX (CD-7 -- patient-safety + TransE training bias):
         # Before v18, deduplicator used _ACTIVITY_VALUE_MAX=1e9 (1 M, the
         # "non-physical" threshold) and treated every value below that as
         # fully valid. But normalizer uses _ACTIVITY_VALUE_MAX=1e6 (1 mM,
-        # the "censored" threshold) — values in [1e6, 1e9) nM are flagged
+        # the "censored" threshold) -- values in [1e6, 1e9) nM are flagged
         # as censored by normalizer but pass through deduplicator as
         # ordinary "valid" rows. Downstream TransE therefore sees a
         # biased sample: censored values get the same dedup priority as
@@ -3285,7 +3285,7 @@ def dedup_interactions(
         # in the sort (uncensored < censored_band < explicitly censored).
         # This eliminates the 3-order-of-magnitude divergence the audit
         # flagged WITHOUT changing the non-physical rejection threshold
-        # (still 1e9 — concentrations above 1 M remain non-physical).
+        # (still 1e9 -- concentrations above 1 M remain non-physical).
         try:
             _censored_band_mask = (
                 working["_av_normalized"].notna()
@@ -3301,7 +3301,7 @@ def dedup_interactions(
                     count=n_censored_band,
                     details=(
                         "values in [1e6, 1e9) nM are tagged "
-                        "_av_in_censored_band — deprioritized in dedup "
+                        "_av_in_censored_band -- deprioritized in dedup "
                         "tiebreak (CD-7 root fix)."
                     ),
                 )
@@ -3388,10 +3388,10 @@ def dedup_interactions(
                 working["_av_sort_value"] = working["_av_normalized"]
             working["_av_direction"] = resolved
 
-        # [SCI-3] Censor penalty — uncensored beats censored
+        # [SCI-3] Censor penalty -- uncensored beats censored
         # Sort key: (censored: 0=uncensored wins, 1=censored loses)
         # V18 ROOT FIX (CD-7): also penalize values in the censored
-        # band [1e6, 1e9) nM — they're not explicitly censored (no
+        # band [1e6, 1e9) nM -- they're not explicitly censored (no
         # leading ``>``/``<`` marker) but they exceed the
         # pharmacologically-relevant range. Sort order:
         #   0 = clean value (< 1 mM, uncensored)
@@ -3399,23 +3399,23 @@ def dedup_interactions(
         #   2 = explicitly censored value (``>X`` / ``<X`` marker)
         #
         # P2-10 ROOT FIX (v82): the previous implementation used
-        # ``working.get("_av_in_censored_band", 0)`` — a DataFrame
+        # ``working.get("_av_in_censored_band", 0)`` -- a DataFrame
         # ``.get()`` that returns the COLUMN if it exists, or the
         # SCALAR ``0`` if it doesn't. When the try/except above (line
         # ~3137-3140) fell into the except branch, the column was set
         # to a constant ``0`` via ``working["_av_in_censored_band"] = 0``
-        # — BUT if any OTHER exception path skipped that assignment
+        # -- BUT if any OTHER exception path skipped that assignment
         # entirely (e.g. an early-return path, a KeyError on a missing
         # upstream column), ``working.get("_av_in_censored_band", 0)``
         # returned the scalar ``0``, and ``censored * 2 + 0`` silently
         # treated censored-band values as CLEAN (sort key 0 instead of
         # 1). The CD-7 root fix's censored-band tagging was silently
-        # lost — a patient-safety issue (censored >X measurements could
+        # lost -- a patient-safety issue (censored >X measurements could
         # win dedup over real measurements).
         #
         # The root fix: EXPLICITLY ensure the column exists before the
         # sort-key computation. If it doesn't exist (defensive fallback),
-        # create it as ``0`` (no censored-band values) — same semantics
+        # create it as ``0`` (no censored-band values) -- same semantics
         # as the except branch, but now GUARANTEED to be a Series (not a
         # scalar) so the addition broadcasts correctly.
         if "_av_in_censored_band" not in working.columns:
@@ -3529,7 +3529,7 @@ def dedup_interactions(
         # (i.e., would have won under plain sort but lost under censor penalty)
         # v16 ROOT FIX (DC-4): the previous code hardcoded
         # ``n_censored_override = 0`` then guarded ``if n_censored_override > 0``
-        # — making the entire block dead code and the metric always 0.
+        # -- making the entire block dead code and the metric always 0.
         # We now ACTUALLY compute the count: for each duplicate group, find
         # groups where the winner is uncensored but at least one censored
         # row had a more "extreme" raw value (would have won under plain sort).
@@ -3546,7 +3546,7 @@ def dedup_interactions(
                     winner = _grp.iloc[0]
                     winner_val = winner.get("_av_normalized")
                     if winner.get("_av_censored") or winner_val is None:
-                        continue  # winner itself is censored — no override
+                        continue  # winner itself is censored -- no override
                     losers = _grp.iloc[1:]
                     censored_losers = losers[losers["_av_censored"] == True]  # noqa: E712
                     if censored_losers.empty:
@@ -3568,7 +3568,7 @@ def dedup_interactions(
                         f"censored_winner_overridden:{n_censored_override}"
                     )
             except Exception as exc:  # noqa: BLE001
-                # Best-effort — never crash dedup on instrumentation.
+                # Best-effort -- never crash dedup on instrumentation.
                 _incr_metric(f"{func_name}_censored_override_check_failed", 1)
     elif keep == "first":
         deduped = working.drop_duplicates(subset=effective_keys, keep="first").copy()
@@ -3587,7 +3587,7 @@ def dedup_interactions(
         transformations.append("mark_duplicates")
         strategy_name = "mark"
     else:
-        # No activity_value column — plain drop_duplicates (v1.0.0 behavior)
+        # No activity_value column -- plain drop_duplicates (v1.0.0 behavior)
         deduped = working.drop_duplicates(subset=effective_keys, keep="first").copy()
         transformations.append("drop_duplicates_no_activity")
         strategy_name = DedupStrategy.FIRST_OCCURRENCE.value
@@ -3632,7 +3632,7 @@ def dedup_interactions(
     # drops / quarantines that happened BEFORE the groupby). The
     # previous conflated formula ``duplicates_removed = len(df) -
     # len(deduped)`` reported EVERY dropped row as a "duplicate",
-    # including null-key drops and quarantines — misleading operators
+    # including null-key drops and quarantines -- misleading operators
     # who could not tell "N true duplicates were merged" from "M rows
     # were dropped for bad data". This mirrors the v35 ROOT FIX applied
     # to ``dedup_by_inchikey`` (lines 2535-2541).
@@ -3812,7 +3812,7 @@ def dedup_by_inchikey_chunked(
     transformations: list[str] = [f"chunked_size_{chunk_size}"]
 
     if df.empty or len(df) <= chunk_size:
-        # Small enough — single pass
+        # Small enough -- single pass
         transformations.append("single_pass")
         return dedup_by_inchikey(df, **kwargs)
 
@@ -3880,7 +3880,7 @@ def merge_duplicate_groups(
     keys : list[str]
         Composite key columns.
     weight : CompletenessWeight, optional
-        Unused — kept for API symmetry. May be used in future versions
+        Unused -- kept for API symmetry. May be used in future versions
         to bias the merge order.
 
     Returns
@@ -3908,7 +3908,7 @@ def merge_duplicate_groups(
     # ``working.groupby(keys, sort=False, dropna=False)`` directly. With
     # ``dropna=False``, pandas treats ALL NaN-keyed rows as a SINGLE group,
     # so they were all merged into ONE output row. Every null-key row beyond
-    # the first was silently dropped — no dead-letter, no warning, no metric.
+    # the first was silently dropped -- no dead-letter, no warning, no metric.
     # On a 1000-row DataFrame with null ``drug_id``, 999 records were lost.
     # ROOT FIX: assign a unique sentinel to each null-key row BEFORE the
     # groupby, mirroring the pattern already used in ``dedup_by_inchikey``
@@ -3969,7 +3969,7 @@ def quality_report(
     df : pd.DataFrame
         Input DataFrame.
     data_type : {"drug", "interaction"}, default "drug"
-        Type of data — controls which checks are applied.
+        Type of data -- controls which checks are applied.
 
     Returns
     -------
@@ -4035,7 +4035,7 @@ def quality_report(
                 av_numeric = pd.to_numeric(av, errors="coerce")
                 # SCI-FIX (DQ correctness): the previous expression
                 # `av_numeric.isna().sum() & av.notna().sum()` did a
-                # bitwise AND on two integer counts — a numerology-style
+                # bitwise AND on two integer counts -- a numerology-style
                 # value with no scientific meaning. The intent is to
                 # count rows where the original activity_value was
                 # non-null BUT numeric coercion failed (i.e., the value
@@ -4175,7 +4175,7 @@ def backfill_safety_check(
     Returns
     -------
     tuple
-        ``(safe_df, warnings)`` — the (possibly filtered) DataFrame and
+        ``(safe_df, warnings)`` -- the (possibly filtered) DataFrame and
         a list of warning strings.
     """
     if not isinstance(df, pd.DataFrame):
@@ -4248,7 +4248,7 @@ def recover_from_failure(
             partial_result.attrs["recovery_mode"] = True
             partial_result.attrs["recovery_error"] = str(error)[:500]
             return partial_result
-    # No partial result — return input unchanged
+    # No partial result -- return input unchanged
     out = df.copy()
     out.attrs["recovery_mode"] = True
     out.attrs["recovery_error"] = str(error)[:500]
@@ -4720,10 +4720,10 @@ __all__ = [
 
 
 # ===========================================================================
-# [COMP-1] [CODE-10] PEP 562 — live-reading aliases & __dir__
+# [COMP-1] [CODE-10] PEP 562 -- live-reading aliases & __dir__
 # ===========================================================================
 def __getattr__(name: str) -> Any:
-    """[COMP-1] PEP 562 — provide live-reading aliases for module constants."""
+    """[COMP-1] PEP 562 -- provide live-reading aliases for module constants."""
     if name == "MAX_ROWS":
         return _MAX_DATAFRAME_ROWS
     if name == "MAX_DL":
@@ -4737,7 +4737,7 @@ def __getattr__(name: str) -> Any:
     # P2-4 ROOT FIX (v82): backward-compat shim for the removed
     # ``_dead_letter_queue`` alias. External code that imported
     # ``_dead_letter_queue`` now gets a SNAPSHOT (matching
-    # ``get_dead_letters()`` semantics) — NOT the live list, because
+    # ``get_dead_letters()`` semantics) -- NOT the live list, because
     # the live-list alias was the source of the operator confusion
     # the audit flagged. The snapshot is taken under the dead-letters
     # lock so it's consistent. A DeprecationWarning nudges callers to
@@ -4746,7 +4746,7 @@ def __getattr__(name: str) -> Any:
         import warnings as _warnings
         _warnings.warn(
             "cleaning.deduplicator._dead_letter_queue is REMOVED (P2-4 v82 "
-            "root fix). The live-list alias was confusing — operators "
+            "root fix). The live-list alias was confusing -- operators "
             "inspecting it saw live mutations while get_dead_letters() "
             "returned snapshots. Use get_dead_letters() for a snapshot, "
             "or clear_dead_letters() / flush_dead_letters() for mutation. "

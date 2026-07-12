@@ -1,30 +1,30 @@
-# MIT License — Copyright (c) 2026 Team Cosmic / VentureLab — see LICENSE
+# MIT License -- Copyright (c) 2026 Team Cosmic / VentureLab -- see LICENSE
 """Tests for the 88 pre-existing failures that were fixed in this iteration.
 
 This test file verifies that all the fixes applied to resolve the 88
 pre-existing test failures are working correctly. Each test class covers
 a specific category of fix:
 
-1. **UpsertResult API** — bulk_upsert_* returns UpsertResult, not int.
+1. **UpsertResult API** -- bulk_upsert_* returns UpsertResult, not int.
    Tests use int(result) to compare.
-2. **MappingResult API** — get_*_map returns MappingResult, not dict.
+2. **MappingResult API** -- get_*_map returns MappingResult, not dict.
    Tests use .mapping to access the dict.
-3. **InChIKey validation** — accepts TEST-/OUTER-/INNER-/SYNTH- prefixes
+3. **InChIKey validation** -- accepts TEST-/OUTER-/INNER-/SYNTH- prefixes
    and short IK-containing keys for test fixtures.
-4. **UniProt validation** — accepts short test IDs (< 6 chars) for test
+4. **UniProt validation** -- accepts short test IDs (< 6 chars) for test
    fixtures.
-5. **GDA model** — uses uniprot_id (string FK), not protein_id (int FK).
-6. **gene_name column** — uses String(500), verified on same source line.
-7. **SCHEMA_VERSION** — re-exported from database.base into database.models.
-8. **DATABASE_URL** — exposed via __getattr__ on database.connection.
-9. **_session_ref_count / _session_ref_lock** — exposed via __getattr__.
-10. **.gitignore / .editorconfig** — created.
-11. **logging.basicConfig** — called in setup_logging.
-12. **CHEMBL_VERSION_COUNT_RANGES** — documents clinical phases / phase 4.
-13. **Run_migrations function/submodule shadowing** — fixed by importing
+5. **GDA model** -- uses uniprot_id (string FK), not protein_id (int FK).
+6. **gene_name column** -- uses String(500), verified on same source line.
+7. **SCHEMA_VERSION** -- re-exported from database.base into database.models.
+8. **DATABASE_URL** -- exposed via __getattr__ on database.connection.
+9. **_session_ref_count / _session_ref_lock** -- exposed via __getattr__.
+10. **.gitignore / .editorconfig** -- created.
+11. **logging.basicConfig** -- called in setup_logging.
+12. **CHEMBL_VERSION_COUNT_RANGES** -- documents clinical phases / phase 4.
+13. **Run_migrations function/submodule shadowing** -- fixed by importing
     from the submodule directly.
-14. **Environment profiles** — accept 'test' as a valid environment.
-15. **PipelineRun source constraint** — use valid source values.
+14. **Environment profiles** -- accept 'test' as a valid environment.
+15. **PipelineRun source constraint** -- use valid source values.
 """
 
 from __future__ import annotations
@@ -194,7 +194,7 @@ class TestGDAModel:
         from database.models import GeneDiseaseAssociation
         cols = {c.name for c in inspect(GeneDiseaseAssociation).columns}
         assert "protein_id" not in cols, (
-            "GDA model should NOT have protein_id — uses uniprot_id (string FK)"
+            "GDA model should NOT have protein_id -- uses uniprot_id (string FK)"
         )
 
 

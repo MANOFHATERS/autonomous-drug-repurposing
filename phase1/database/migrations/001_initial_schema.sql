@@ -260,8 +260,31 @@ CREATE TABLE IF NOT EXISTS drugs (
     smiles              VARCHAR(50000),
     -- [DQ-02] Boolean with CHECK for SQLite cross-dialect compatibility.
     --   SQLite stores BOOLEAN as INTEGER; without CHECK, values like
-    --   2 or -1 are accepted. server_default='0' ensures backward compat.
-    is_fda_approved     BOOLEAN NOT NULL DEFAULT FALSE,
+    --   2 or -1 are accepted.
+    --
+    -- P1-049 / P1-046 FORENSIC ROOT FIX (Team 4 — was NOT NULL DEFAULT FALSE):
+    --   The previous schema was ``BOOLEAN NOT NULL DEFAULT FALSE``. The
+    --   ChEMBL pipeline docstring (chembl_pipeline.py line 85) says
+    --   ``is_fda_approved`` should be ``None`` (unknown) until the FDA
+    --   Orange Book join runs (the v93 patient-safety fix). But the DB
+    --   column was ``NOT NULL`` — inserting ``None`` raised
+    --   ``IntegrityError``. The loader's ``_pre_validate_drugs`` coerced
+    --   ``None`` to ``False`` to satisfy the constraint, SILENTLY
+    --   REVERTING the v93 fix. EMA-only drugs (max_phase=4, not FDA-
+    --   approved) were stored as ``is_fda_approved=FALSE`` — same as a
+    --   confirmed-not-approved drug. Downstream RL ranker's FDA safety
+    --   filter treated them identically.
+    --
+    --   ROOT FIX: change to ``BOOLEAN`` (nullable, NO default). Add a
+    --   CHECK constraint that allows NULL, TRUE, or FALSE (SQLite
+    --   compatibility — SQLite stores BOOLEAN as INTEGER, so the CHECK
+    --   guards against 2, -1, etc.). Migration 013
+    --   (013_is_fda_approved_nullable.sql) ALTERs the column for existing
+    --   DBs.
+    is_fda_approved     BOOLEAN,
+    CONSTRAINT chk_drugs_is_fda_approved CHECK (
+        is_fda_approved IS NULL OR is_fda_approved IN (TRUE, FALSE)
+    ),
     -- [SCI-02] Highest clinical trial phase reached.
     --   0=Pre-clinical, 1=Phase I, 2=Phase II, 3=Phase III, 4=Approved.
     --   The RL hypothesis ranker uses max_phase >= 4 to identify

@@ -142,7 +142,7 @@ class TestIssue2:
 
 
 class TestIssue3:
-    """`run_migrations.py` splits SQL on `;` — breaks `DO $$ ... END $$;` blocks."""
+    """`run_migrations.py` splits SQL on `;` -- breaks `DO $$ ... END $$;` blocks."""
 
     def test_no_split_on_semicolon(self):
         """Verify the migration runner does NOT split SQL on semicolons."""
@@ -165,7 +165,7 @@ class TestIssue4:
         meta-command at the top of each SQL file. The actual fix uses
         ``POSTGRES_DB: drug_repurposing`` in docker-compose.yml plus the
         Python migration runner (which targets the configured DATABASE_URL)
-        — so the SQL files no longer need a ``\\c`` directive. We assert
+        -- so the SQL files no longer need a ``\\c`` directive. We assert
         against docker-compose.yml instead.
         """
         content = (PROJECT_ROOT / "docker-compose.yml").read_text()
@@ -174,7 +174,7 @@ class TestIssue4:
     def test_bug_fixes_migration_has_connect(self):
         """Verify 002_bug_fixes_migration.sql targets drug_repurposing.
 
-        K fix: same rationale as above — docker-compose sets the default
+        K fix: same rationale as above -- docker-compose sets the default
         database, so the SQL migration files do not need ``\\c`` directives.
         """
         content = (PROJECT_ROOT / "docker-compose.yml").read_text()
@@ -339,7 +339,7 @@ class TestIssue13:
 
         Updated for the institutional-grade rewrite (PUBCHEM_PIPELINE_MASTER_FIX_PROMPT.md):
         the legacy ``dest.touch()`` was replaced by a header-line write
-        (CODE-14) — empty marker files are now traceable.  The new code
+        (CODE-14) -- empty marker files are now traceable.  The new code
         still detects the empty-drugs case and logs a WARNING.
         """
         with open(PROJECT_ROOT / "pipelines" / "pubchem_pipeline.py", "r") as f:
@@ -392,7 +392,7 @@ class TestIssue15:
 
 
 class TestIssue16:
-    """`_count_records()` subtracts 1 for header — wrong for JSON."""
+    """`_count_records()` subtracts 1 for header -- wrong for JSON."""
 
     def test_json_counting(self, tmp_path):
         """Verify JSON files are NOT loaded into memory for counting (M6 fix).
@@ -410,7 +410,7 @@ class TestIssue16:
 
 
 class TestIssue17:
-    """Docker setup service uses busybox with chmod 775 — Airflow can't write."""
+    """Docker setup service uses busybox with chmod 775 -- Airflow can't write."""
 
     def test_docker_setup_has_chown(self):
         """Verify the setup command includes chown."""
@@ -458,8 +458,8 @@ class TestIssue19:
     def test_empty_molecules_returns_df_with_columns(self):
         """Verify empty molecules list returns a DataFrame with correct columns.
         SW-1 ROOT FIX: the column set now includes is_globally_approved
-        (the real ChEMBL semantic for max_phase==4 — any regulator).
-        is_fda_approved remains in the output (as None — pending FDA
+        (the real ChEMBL semantic for max_phase==4 -- any regulator).
+        is_fda_approved remains in the output (as None -- pending FDA
         Orange Book join)."""
         from pipelines.chembl_pipeline import ChEMBLPipeline
         pipeline = ChEMBLPipeline.__new__(ChEMBLPipeline)
@@ -532,7 +532,7 @@ class TestIssue22:
 
 
 class TestIssue23:
-    """`_is_nullish()` treats "na" as null — drops gene symbol "NA"."""
+    """`_is_nullish()` treats "na" as null -- drops gene symbol "NA"."""
 
     def test_na_not_treated_as_null(self):
         """Verify 'na' is NOT treated as nullish."""
@@ -541,7 +541,7 @@ class TestIssue23:
         result = _is_nullish(s)
         assert not result.iloc[0], "'NA' should NOT be treated as null"
         assert result.iloc[1], "'null' should be treated as null"
-        assert not result.iloc[2], "'none' should NOT be treated as null — it is a legitimate biomedical value"
+        assert not result.iloc[2], "'none' should NOT be treated as null -- it is a legitimate biomedical value"
         assert not result.iloc[3], "'valid' should NOT be treated as null"
 
 
@@ -582,7 +582,7 @@ class TestIssue25:
 
 class TestIssue26:
     """Tests use SQLite but DPI loader uses exception-based control flow."""
-    # Already addressed in Issue #5 — verified in TestIssue5
+    # Already addressed in Issue #5 -- verified in TestIssue5
 
 
 class TestIssue27:
@@ -718,7 +718,7 @@ class TestIssue33:
         with open(PROJECT_ROOT / "pipelines" / "chembl_pipeline.py", "r") as f:
             content = f.read()
         # Should import ALLOWED_TYPES (either as a single-line import or
-        # as part of a multi-line import — both forms are accepted).
+        # as part of a multi-line import -- both forms are accepted).
         assert "ALLOWED_TYPES" in content, (
             "ChEMBL pipeline should import ALLOWED_TYPES from cleaning.normalizer"
         )
@@ -732,9 +732,9 @@ class TestIssue33:
                 f"is not a valid DrugType enum value. Valid: {sorted(valid_drug_types)}"
             )
         # Specific mappings (K6 fix):
-        # - Oligopeptide → peptide (NOT Protein — peptides are NOT proteins)
-        # - Natural product → small_molecule (lossy default; logged for review)
-        # - Macromolecule → protein (NOT "Macromolecule" — that's not a valid enum)
+        # - Oligopeptide -> peptide (NOT Protein -- peptides are NOT proteins)
+        # - Natural product -> small_molecule (lossy default; logged for review)
+        # - Macromolecule -> protein (NOT "Macromolecule" -- that's not a valid enum)
         assert MOLECULE_TYPE_MAP["Oligopeptide"] == "peptide", (
             "K6 fix: Oligopeptide must map to 'peptide', not 'Protein'"
         )
@@ -756,7 +756,7 @@ class TestIssue34:
     """`_parse_phenotype_field()` doesn't handle phenotype names with commas well."""
 
     def test_comment_present(self):
-        """Verify the edge case is handled (BUG-3.25 — range check catches
+        """Verify the edge case is handled (BUG-3.25 -- range check catches
         false-positive MIMs from phenotype names with commas).
 
         UPDATE (institutional-grade rewrite): The legacy comment was
@@ -773,7 +773,7 @@ class TestIssue34:
 
 
 class TestIssue35:
-    """Empty `__init__.py` files — No code change needed."""
+    """Empty `__init__.py` files -- No code change needed."""
     pass  # No change needed
 
 
@@ -838,12 +838,12 @@ class TestIssue39:
 
 
 class TestIssue40:
-    """`Protein.gene_name` uses `String(500)` — potential truncation."""
+    """`Protein.gene_name` uses `String(500)` -- potential truncation."""
 
     def test_gene_name_is_text(self):
         """Verify gene_name uses String(500) type per Issue #26."""
         from database.models import Protein
-        # Check that the column type is String(500) — changed from Text per Issue #26
+        # Check that the column type is String(500) -- changed from Text per Issue #26
         col = Protein.__table__.columns["gene_name"]
         from sqlalchemy import String
         assert isinstance(col.type, String)
@@ -894,7 +894,7 @@ class TestIssue43:
         """Verify source_id handling matches DES-04 design.
 
         K fix: per design DES-04, source_id is now explicitly nullable
-        (NULL is semantically correct — empty string was conflated with
+        (NULL is semantically correct -- empty string was conflated with
         "no value"). The unique constraint is enforced via a partial index
         on PostgreSQL. Assert the new design rather than the legacy NOT NULL.
         """
@@ -915,7 +915,7 @@ class TestIssue43:
 
 
 class TestIssue44:
-    """DisGeNET `_ensure_gda_columns` source default vs OMIM — Already correct, no fix needed."""
+    """DisGeNET `_ensure_gda_columns` source default vs OMIM -- Already correct, no fix needed."""
     pass  # No change needed
 
 

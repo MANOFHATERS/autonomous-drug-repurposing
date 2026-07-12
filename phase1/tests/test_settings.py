@@ -1,5 +1,5 @@
 """
-Comprehensive tests for config/settings.py — covering all 67 fixes across 16 domains.
+Comprehensive tests for config/settings.py -- covering all 67 fixes across 16 domains.
 
 This test suite verifies every fix identified in the institutional-grade audit.
 Tests are organized by domain and each test references the specific issue ID
@@ -529,7 +529,7 @@ class TestIdempotency:
         settings._logging_configured = False
         settings.setup_logging()
         first_state = settings._logging_configured
-        settings.setup_logging()  # Call again — should be no-op
+        settings.setup_logging()  # Call again -- should be no-op
         assert settings._logging_configured == first_state
 
     def test_idmp4_config_fingerprint(self):
@@ -604,7 +604,7 @@ class TestTesting:
 
     def test_test1_settings_tests_exist(self):
         """TEST-1: This test file exists and covers settings.py."""
-        # This test validates itself — meta!
+        # This test validates itself -- meta!
         assert True
 
     def test_test2_settings_init_contract(self):
@@ -843,7 +843,7 @@ class TestIntegration:
 
         Settings that are legitimately Optional[str] = None when their env
         var is unset are listed in the allowlist below. This is NOT a code
-        smell — it's the documented contract for Optional settings.
+        smell -- it's the documented contract for Optional settings.
         """
         import config.settings as settings
 
@@ -859,7 +859,7 @@ class TestIntegration:
             "ENTITY_RESOLUTION_PUBCHEM_CERT_PEM",
             "ENTITY_RESOLUTION_PUBCHEM_KEY_PEM",
             "ENTITY_RESOLUTION_SOURCE_WHITELIST",
-            # PubChem pipeline — institutional-grade additions (PUBCHEM_PIPELINE_MASTER_FIX_PROMPT.md).
+            # PubChem pipeline -- institutional-grade additions (PUBCHEM_PIPELINE_MASTER_FIX_PROMPT.md).
             "PUBCHEM_PIPELINE_MAX_RECORDS",  # None = unlimited
             "OPERATOR_ID",  # None when run unattended (Airflow)
         }

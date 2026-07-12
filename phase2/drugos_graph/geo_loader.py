@@ -1,4 +1,4 @@
-"""DrugOS Graph Module — GEO Loader (Institutional-Grade v1.0.0)
+"""DrugOS Graph Module -- GEO Loader (Institutional-Grade v1.0.0)
 ==================================================================
 Downloads, parses, validates, and converts GEO (Gene Expression
 Omnibus) data into knowledge-graph edge records for the Autonomous
@@ -16,24 +16,24 @@ Project Context
 The Autonomous Drug Repurposing Platform mines 10,000 FDA-approved
 drugs against every known disease using a chained pipeline:
 
-1. **Knowledge Graph (Neo4j)** — built by this loader + 12 sibling
+1. **Knowledge Graph (Neo4j)** -- built by this loader + 12 sibling
    loaders (ChEMBL, DrugBank, UniProt, STRING, DisGeNET, OMIM,
    PubChem, STITCH, DRKG, ClinicalTrials, OpenTargets, SIDER).
-2. **Graph Transformer (PyTorch + PyG)** — predicts a 0-1 therapeutic-
+2. **Graph Transformer (PyTorch + PyG)** -- predicts a 0-1 therapeutic-
    likelihood score for every untested drug-disease pair by message-
    passing over the graph this loader helps build.
-3. **RL Hypothesis Ranker (Stable-Baselines3, PPO)** — ranks the top
+3. **RL Hypothesis Ranker (Stable-Baselines3, PPO)** -- ranks the top
    predictions by plausibility x safety signal x market opportunity.
-4. **Clinical decision layer** — pharma partners + clinicians consume
+4. **Clinical decision layer** -- pharma partners + clinicians consume
    the ranking.
 
 GEO expression data produces **edges** in that graph. They tell the
 Graph Transformer "Protein P is expressed in Anatomy A." The model
-uses this signal to learn tissue-specificity — i.e., to know that a
+uses this signal to learn tissue-specificity -- i.e., to know that a
 drug target is (or is NOT) expressed in the tissue where the disease
 acts.
 
-**GEO is the SOLE source of ``Protein→expressed_in→Anatomy`` edges in
+**GEO is the SOLE source of ``Protein->expressed_in->Anatomy`` edges in
 the KG** (per ``config.py:3714``, ``EDGE_TYPE_TO_SOURCE``). No other
 loader produces that edge type. If ``geo_loader.py`` silently emits
 zero records, the entire tissue-specificity modality is **missing**
@@ -41,32 +41,32 @@ from the KG. The Graph Transformer cannot learn that a drug target is
 *not* expressed in the tissue where the disease acts. A pharma partner
 can be handed a "high-confidence" repurposing candidate that targets a
 protein absent from the disease tissue. **In a clinical decision, this
-is the kind of error that causes Phase II failure — or worse, a
+is the kind of error that causes Phase II failure -- or worse, a
 clinical-trial harm event.**
 
 .. warning::
-    **PATIENT SAFETY — READ BEFORE MODIFYING THIS FILE**
+    **PATIENT SAFETY -- READ BEFORE MODIFYING THIS FILE**
 
     The 11 ☠️ GUARD findings in the audit (3.10, 6.11, 7.11, 9.10,
     10.11, 11.12, 15.12, 16.11, plus 1.8 and 1.10 indirectly) describe
     patient-safety-adjacent failure modes. **Every GUARD finding must
-    be resolved as if a patient's life depends on it — because it
+    be resolved as if a patient's life depends on it -- because it
     does.**
 
     The four Phase-0 fixes (below) are mandatory and ship FIRST:
 
-    * **Phase 0.1** — Loader produces records (not ``[]``) on success,
+    * **Phase 0.1** -- Loader produces records (not ``[]``) on success,
       raises ``GeoCriticalError`` on zero-record failure when
       ``GEO_REQUIRED=1`` (GUARD 3.10, GUARD 6.11, GUARD 7.11,
       GUARD 9.10, GUARD 10.11, GUARD 11.12, GUARD 15.12, GUARD 16.11).
-    * **Phase 0.2** — Node type is ``Protein`` (not ``Gene`` — that is
-      DRKG's domain; not ``Gene Expression`` — that is the DRKG entity
-      type). GEO emits ``Protein→expressed_in→Anatomy`` edges matching
+    * **Phase 0.2** -- Node type is ``Protein`` (not ``Gene`` -- that is
+      DRKG's domain; not ``Gene Expression`` -- that is the DRKG entity
+      type). GEO emits ``Protein->expressed_in->Anatomy`` edges matching
       ``config.py:3714`` (BUG 3.1, BUG 1.10).
-    * **Phase 0.3** — ``GeoLoader`` adapter wires the module into
+    * **Phase 0.3** -- ``GeoLoader`` adapter wires the module into
       ``run_pipeline.py`` via the ``Loader`` Protocol (BUG 1.1, BUG 1.2,
       BUG 1.3).
-    * **Phase 0.4** — Default ``series_id`` is ``GSE92649`` from
+    * **Phase 0.4** -- Default ``series_id`` is ``GSE92649`` from
       ``DATA_SOURCES["geo"]["version"]`` (NOT the placeholder ``GSE1``)
       (BUG 2.1, BUG 3.14, BUG 7.5, BUG 12.1).
 
@@ -74,7 +74,7 @@ Scientific Scope
 ----------------
 - **Source:** GEO (Barrett T. et al., Nucleic Acids Res. 2013)
 - **URL:** https://www.ncbi.nlm.nih.gov/geo/
-- **FTP URL:** from ``DATA_SOURCES["geo"]["url"]`` — currently
+- **FTP URL:** from ``DATA_SOURCES["geo"]["url"]`` -- currently
   ``https://ftp.ncbi.nlm.nih.gov/geo/series/GSE92nnn/GSE92649/soft/GSE92649_family.soft.gz``
 - **Pinned series:** GSE92649 (Cheng et al., 2018, Sci Rep)
 - **File format:** SOFT (Simple Omnibus Format in Text)
@@ -86,30 +86,30 @@ Scientific Scope
 
 A SOFT ``_family.soft.gz`` file is a gzipped text file containing:
 
-  * ``^SERIES = GSE92649``                        — series header
-  * ``!Series_title = ...``                       — series metadata
-  * ``^SAMPLE = GSM1234567``                      — sample header (repeating)
-  * ``!Sample_title = ...``                       — sample metadata
-  * ``!Sample_organism_ch1 = Homo sapiens``       — organism
-  * ``!Sample_characteristics_ch1 = tissue: lung`` — characteristics
-  * ``!sample_table_begin``                       — expression matrix
-  * ``ID_REF  IDENTIFIER  SAMPLE1  SAMPLE2  ...``  — header row
-  * ``117_at   P23219      8.45     7.92    ...``  — probe row
-  * ``!sample_table_end``                         — end marker
+  * ``^SERIES = GSE92649``                        -- series header
+  * ``!Series_title = ...``                       -- series metadata
+  * ``^SAMPLE = GSM1234567``                      -- sample header (repeating)
+  * ``!Sample_title = ...``                       -- sample metadata
+  * ``!Sample_organism_ch1 = Homo sapiens``       -- organism
+  * ``!Sample_characteristics_ch1 = tissue: lung`` -- characteristics
+  * ``!sample_table_begin``                       -- expression matrix
+  * ``ID_REF  IDENTIFIER  SAMPLE1  SAMPLE2  ...``  -- header row
+  * ``117_at   P23219      8.45     7.92    ...``  -- probe row
+  * ``!sample_table_end``                         -- end marker
 
 This loader:
   1. Streams the gzipped SOFT file line-by-line (GEO-8.2).
   2. Dispatches each line by type (``^SERIES``, ``^SAMPLE``,
      ``!Sample_*``, ``!sample_table_begin/end``, data row) (GEO-5.7).
-  3. Resolves probe → NCBI Gene ID → UniProt accession via
+  3. Resolves probe -> NCBI Gene ID -> UniProt accession via
      ``id_crosswalk.VERIFIED_UNIPROT_GENE_CROSSWALK`` (GEO-3.4).
-  4. Maps sample tissue → UBERON URI via a curated lookup table
+  4. Maps sample tissue -> UBERON URI via a curated lookup table
      (GEO-3.3).
   5. Normalizes expression values to canonical ``log2_rma`` space
      (GEO-3.9).
   6. Optionally performs differential-expression analysis with
      Benjamini-Hochberg FDR correction (GEO-3.5, GEO-3.7).
-  7. Builds ``Protein→expressed_in→Anatomy`` edges with full lineage
+  7. Builds ``Protein->expressed_in->Anatomy`` edges with full lineage
      metadata (R15).
   8. Deduplicates edges by ``(head, tail, relation)`` and aggregates
      evidence across multiple samples / series (GEO-5.11).
@@ -120,7 +120,7 @@ GEO (Gene Expression Omnibus) is the SOLE source of tissue-specific
 protein expression data in this KG. The project doc's 7 data sources
 (ChEMBL, DrugBank, UniProt, STRING, DisGeNET, OMIM, PubChem) provide
 drug-target interactions, protein sequences, PPIs, gene-disease
-associations, and chemical structures — but NONE of them tell the
+associations, and chemical structures -- but NONE of them tell the
 model WHERE in the body a protein is expressed.
 
 Without GEO, the Graph Transformer cannot learn that:
@@ -141,7 +141,7 @@ GEO is in ``OPTIONAL_SOURCES`` because:
 PII Declaration
 ---------------
 GEO series MAY contain patient-derived data (e.g., tumor expression
-profiles with clinical metadata). This loader does NOT redact PII —
+profiles with clinical metadata). This loader does NOT redact PII --
 operators MUST review the series' ``!Sample_characteristics`` fields
 before publishing the KG externally.
 
@@ -190,8 +190,8 @@ ADR-GEO-002: GSE92649 chosen as the pinned series. Rationale:
   it is a well-characterized human expression dataset covering
   multiple tissues. Future versions may add more series.
 
-ADR-GEO-003: GEO emits ``Protein→expressed_in→Anatomy`` edges (not
-  ``Gene→...``). Rationale: the KG is protein-centric (drug targets
+ADR-GEO-003: GEO emits ``Protein->expressed_in->Anatomy`` edges (not
+  ``Gene->...``). Rationale: the KG is protein-centric (drug targets
   are proteins). See Phase 0.2 of the master repair prompt.
 
 ADR-GEO-004: GEO is in OPTIONAL_SOURCES. Rationale: requires manual
@@ -215,21 +215,21 @@ Coding Standards
 
 Design Patterns
 ---------------
-  * **Adapter** — ``GeoLoader`` adapts the module-level functions to
+  * **Adapter** -- ``GeoLoader`` adapts the module-level functions to
     the ``Loader`` Protocol (PEP 544) so ``run_pipeline.py`` can treat
     all loaders polymorphically (Phase 0.3 / GEO-1.1).
-  * **Facade** — ``load_geo()`` orchestrates the full pipeline:
-    download → parse → validate → emit → (optional) audit log.
-  * **Iterator** — ``iter_geo_records`` provides a streaming API for
+  * **Facade** -- ``load_geo()`` orchestrates the full pipeline:
+    download -> parse -> validate -> emit -> (optional) audit log.
+  * **Iterator** -- ``iter_geo_records`` provides a streaming API for
     memory-bounded processing of large SOFT files (GEO-8.2).
-  * **Dead-Letter Queue** — malformed lines / unresolvable probes are
+  * **Dead-Letter Queue** -- malformed lines / unresolvable probes are
     written to ``data/dead_letter/geo_malformed.jsonl`` for forensic
     inspection rather than silently dropped (GEO-6.4).
-  * **Strategy** — ``nan_strategy`` kwarg selects between ``drop``
+  * **Strategy** -- ``nan_strategy`` kwarg selects between ``drop``
     (default), ``zero``, ``impute_mean`` (GEO-5.9).
-  * **Atomic Download** — files are written to ``.part`` then renamed
+  * **Atomic Download** -- files are written to ``.part`` then renamed
     via ``os.replace`` for crash safety (GEO-6.5).
-  * **Circuit Breaker** — after ``GEO_CIRCUIT_BREAKER_THRESHOLD``
+  * **Circuit Breaker** -- after ``GEO_CIRCUIT_BREAKER_THRESHOLD``
     consecutive failures, the loader short-circuits for
     ``GEO_CIRCUIT_BREAKER_COOLDOWN_SECONDS`` (GEO-6.10).
 
@@ -242,13 +242,13 @@ Scalability Ceiling
   * Time ceiling: ~30 seconds per 100 MB SOFT file on a single core.
   * For larger datasets, use ``download_geo_batch`` with
     ``max_workers=3`` and ``iter_geo_records`` for streaming.
-  * If you need to process > 1,000 series, contact the team — the
+  * If you need to process > 1,000 series, contact the team -- the
     UBERON mapping table and probe crosswalk may need extension.
 
 References
 ----------
   * Barrett T, Wilhite SE, Ledoux P, et al. "NCBI GEO: archive for
-    functional genomics data sets—update." Nucleic Acids Res.
+    functional genomics data sets--update." Nucleic Acids Res.
     2013;41(D1):D991-D995. doi:10.1093/nar/gks1193.
   * Edgar R, Domrachev M, Lash AE. "Gene Expression Omnibus: NCBI
     gene expression and hybridization array data repository." Nucleic
@@ -272,7 +272,7 @@ alongside ``UniProtLoader``, ``SiderLoader``, etc.:
     >>> loader = GeoLoader()
     >>> loader.download()              # downloads GSE92649 (pinned)
     >>> records = list(loader.parse())  # yields GeoRawRecord dicts
-    >>> nodes, edges = loader.to_graph(records)  # Protein→expressed_in→Anatomy
+    >>> nodes, edges = loader.to_graph(records)  # Protein->expressed_in->Anatomy
 
 Or via the free-function API (preserved for backward compatibility):
 
@@ -285,7 +285,7 @@ Or via the free-function API (preserved for backward compatibility):
 
 Test Coverage
 -------------
-  * ``tests/test_geo_loader.py`` — 192+ tests covering all audit IDs.
+  * ``tests/test_geo_loader.py`` -- 192+ tests covering all audit IDs.
   * Test coverage: ≥ 90% enforced by CI.
   * Mutation testing: planned for v1.1.0 (GEO-10.13).
 
@@ -325,20 +325,20 @@ Data Dictionary
 #
 # ── Domain 1 (Architecture) ────────────────────────────────────────────────
 # Fixes GEO-1.7: 19-section structure (see section headers throughout).
-# Fixes GEO-1.10: node-type contract — GEO emits Protein→expressed_in→Anatomy
+# Fixes GEO-1.10: node-type contract -- GEO emits Protein->expressed_in->Anatomy
 #                 edges (Phase 0.2 above); config.py:3577 DRKG_ENTITY_TYPE
 #                 "Gene Expression" applies to DRKG, not GEO.
 #
 # ── Domain 2 (Design) ──────────────────────────────────────────────────────
-# Fixes GEO-2.9: download_geo encapsulates retrieval — operator can either
+# Fixes GEO-2.9: download_geo encapsulates retrieval -- operator can either
 #                set GEO_AUTO_DOWNLOAD=1 OR place file manually at the
 #                expected path returned by get_geo_series_path().
 #
 # ── Domain 3 (Scientific Correctness) ──────────────────────────────────────
-# Fixes GEO-3.6: batch-effect detection — GEO_SUPPORTS_BATCH_CORRECTION=False
+# Fixes GEO-3.6: batch-effect detection -- GEO_SUPPORTS_BATCH_CORRECTION=False
 #                in v1.0.0; batch_corrected=False on every record; multi-
 #                platform series log a WARNING (see _parse_soft_file).
-# Fixes GEO-3.10: patient-safety GUARD — Phase 0.1 above (GeoCriticalError
+# Fixes GEO-3.10: patient-safety GUARD -- Phase 0.1 above (GeoCriticalError
 #                 on zero records when GEO_REQUIRED=1).
 #
 # ── Domain 4 (Coding) ──────────────────────────────────────────────────────
@@ -348,7 +348,7 @@ Data Dictionary
 # Fixes GEO-4.6: geo_to_edge_records now accepts Iterable[GeoRawRecord] from
 #                a working parse_geo_series (the v0 bug was that
 #                parse_geo_series always returned []; that's fixed by Phase 0.6).
-# Fixes GEO-4.7: complete type hints — Iterable[GeoRawRecord],
+# Fixes GEO-4.7: complete type hints -- Iterable[GeoRawRecord],
 #                List[GeoEdgeRecord], etc. (PEP 585 / PEP 604).
 # Fixes GEO-4.10: Final annotations on module-level constants where
 #                 applicable; clear self-documenting names (geo_raw_dir,
@@ -363,48 +363,48 @@ Data Dictionary
 # Fixes GEO-5.6: garbage-in-garbage-out path closed by Phase 0.4 (series_id
 #                validation) + GEO-3.4 (probe resolution) + GEO-3.3 (tissue
 #                mapping) + GEO-5.7 (SOFT schema validation).
-# Fixes GEO-5.12: timestamp on every record — _ingested_at and
+# Fixes GEO-5.12: timestamp on every record -- _ingested_at and
 #                 _source_release_date (R15).
 #
 # ── Domain 6 (Reliability & Resilience) ────────────────────────────────────
-# Fixes GEO-6.7: exception hierarchy — 8 GEO exception classes in
+# Fixes GEO-6.7: exception hierarchy -- 8 GEO exception classes in
 #                exceptions.py (GeoConfigurationError, GeoSecurityError,
 #                GeoDownloadError, GeoDownloadRequiredError, GeoParseError,
 #                GeoDataQualityError, GeoCriticalError, GeoNotImplementedError).
-# Fixes GEO-6.8: graceful-degradation mode — GEO_REQUIRED env var controls
+# Fixes GEO-6.8: graceful-degradation mode -- GEO_REQUIRED env var controls
 #                hard-fail (GeoCriticalError) vs soft-fail (GeoDataQualityError).
 # Fixes GEO-6.11: silent-failure-to-KG path closed by Phase 0.1 + Phase 0.6.
 #
 # ── Domain 7 (Idempotency & Reproducibility) ───────────────────────────────
-# Fixes GEO-7.6: backfilling safety — GEO_SUPPORTS_BACKFILL=False; documented
+# Fixes GEO-7.6: backfilling safety -- GEO_SUPPORTS_BACKFILL=False; documented
 #                in module docstring that NCBI does not version series.
-# Fixes GEO-7.9: statelessness — no module-level mutable state for parsed
+# Fixes GEO-7.9: statelessness -- no module-level mutable state for parsed
 #                DataFrames; GeoLoader adapter class holds state per-instance.
-# Fixes GEO-7.11: 3-runs-same-output guarantee — verified by test
+# Fixes GEO-7.11: 3-runs-same-output guarantee -- verified by test
 #                 test_idempotency_3_runs_identical_output.
 #
 # ── Domain 8 (Performance & Scalability) ───────────────────────────────────
-# Fixes GEO-8.4: lazy loading — GeoSeries dataclass holds metadata eagerly,
+# Fixes GEO-8.4: lazy loading -- GeoSeries dataclass holds metadata eagerly,
 #                samples lazily via iter_geo_records.
-# Fixes GEO-8.5: log rate limiting — repeated warnings deduplicated by
+# Fixes GEO-8.5: log rate limiting -- repeated warnings deduplicated by
 #                Python's warnings module (DeprecationWarning) for
 #                parse_geo_series; per-call warnings use structured logging.
-# Fixes GEO-8.6: memory profiling — GEO_DEFAULT_MEMORY_BUDGET_MB constant;
+# Fixes GEO-8.6: memory profiling -- GEO_DEFAULT_MEMORY_BUDGET_MB constant;
 #                tracemalloc integration deferred to v1.1.0.
 # Fixes GEO-8.9: mkdir moved to download path (GEO-1.8); not called on
 #                every invocation.
 # Fixes GEO-8.10: scalability ceiling documented in module docstring
 #                 (1,000 series / 10M records / 50 GB theoretical limit).
-# Fixes GEO-8.11: parallelism safety — thread-safe logger and idempotent
+# Fixes GEO-8.11: parallelism safety -- thread-safe logger and idempotent
 #                 mkdir; download_geo_batch serializes per-series writes.
 #
 # ── Domain 9 (Security & Privacy) ──────────────────────────────────────────
-# Fixes GEO-9.6: log redaction — _sanitize_url_for_logging() masks API key.
-# Fixes GEO-9.8: output encryption — deferred per R8 (cryptography not in
+# Fixes GEO-9.6: log redaction -- _sanitize_url_for_logging() masks API key.
+# Fixes GEO-9.8: output encryption -- deferred per R8 (cryptography not in
 #                deps); GeoNotImplementedError raised if encrypt_outputs=True.
-# Fixes GEO-9.10: if codebase leaked — no hardcoded secrets; NCBI_API_KEY
+# Fixes GEO-9.10: if codebase leaked -- no hardcoded secrets; NCBI_API_KEY
 #                 read from env var; GEO_PINNED_SERIES_ID is public.
-# Fixes GEO-9.11: sensitive flag on output records — ``sensitive: bool`` on
+# Fixes GEO-9.11: sensitive flag on output records -- ``sensitive: bool`` on
 #                 GeoRawRecord and GeoEdgeRecord.
 # Fixes GEO-9.12: GDPR / HIPAA review documented in module docstring
 #                 (Regulatory Compliance section).
@@ -412,41 +412,41 @@ Data Dictionary
 # ── Domain 10 (Testing & Validation) ───────────────────────────────────────
 # Fixes GEO-10.3: edge-case tests in tests/test_geo_loader.py
 #                 (empty series_id, malformed, etc.).
-# Fixes GEO-10.5: regression tests — test_regression_series_id_default_is_
+# Fixes GEO-10.5: regression tests -- test_regression_series_id_default_is_
 #                 gse92649_not_gse1 and 4 others.
-# Fixes GEO-10.6: test fixture — tests/fixtures/geo/sample.soft.gz.
-# Fixes GEO-10.8: integration test — test_end_to_end_download_parse_to_graph.
-# Fixes GEO-10.9: mock NCBI server — tests use mock urllib.request.urlopen.
+# Fixes GEO-10.6: test fixture -- tests/fixtures/geo/sample.soft.gz.
+# Fixes GEO-10.8: integration test -- test_end_to_end_download_parse_to_graph.
+# Fixes GEO-10.9: mock NCBI server -- tests use mock urllib.request.urlopen.
 # Fixes GEO-10.10: test_all.py comment updated to note geo_loader is now
 #                  functional.
-# Fixes GEO-10.12: test coverage — .coveragerc includes geo_loader.py;
+# Fixes GEO-10.12: test coverage -- .coveragerc includes geo_loader.py;
 #                  pytest --cov=drugos_graph.geo_loader --cov-fail-under=90.
-# Fixes GEO-10.13: mutation testing — deferred to v1.1.0 (mutmut not yet
+# Fixes GEO-10.13: mutation testing -- deferred to v1.1.0 (mutmut not yet
 #                  in CI).
 #
 # ── Domain 11 (Logging & Observability) ────────────────────────────────────
-# Fixes GEO-11.3: row-count logging — every parse logs record_count via
+# Fixes GEO-11.3: row-count logging -- every parse logs record_count via
 #                 extra={...} (R10).
-# Fixes GEO-11.4: data-lineage tracking in logs — _input_sha256,
+# Fixes GEO-11.4: data-lineage tracking in logs -- _input_sha256,
 #                 _source_series on every record (R15).
-# Fixes GEO-11.5: metrics emission — GeoLoaderMetrics TypedDict returned
+# Fixes GEO-11.5: metrics emission -- GeoLoaderMetrics TypedDict returned
 #                 by GeoLoader.parse() etc.
-# Fixes GEO-11.6: error context — every exception's context dict includes
+# Fixes GEO-11.6: error context -- every exception's context dict includes
 #                 series_id, line_number, parser_version, file_path.
-# Fixes GEO-11.8: correlation IDs — GeoConfig.run_id field; propagated
+# Fixes GEO-11.8: correlation IDs -- GeoConfig.run_id field; propagated
 #                 via extra={...} (planned for full integration in v1.1.0).
-# Fixes GEO-11.9: log rate limiting — same as GEO-8.5.
-# Fixes GEO-11.10: trace propagation — deferred to v1.2.0 (OpenTelemetry).
+# Fixes GEO-11.9: log rate limiting -- same as GEO-8.5.
+# Fixes GEO-11.10: trace propagation -- deferred to v1.2.0 (OpenTelemetry).
 # Fixes GEO-11.11: %-style placeholder count verified by unit test
 #                  (no TypeError at log time).
 #
 # ── Domain 12 (Configuration & Environment Management) ─────────────────────
-# Fixes GEO-12.8: magic string "geo" — GEO_SUBDIR constant in config.py.
-# Fixes GEO-12.10: secrets separation — NCBI_API_KEY env var (GEO_NCBI_API_KEY
+# Fixes GEO-12.8: magic string "geo" -- GEO_SUBDIR constant in config.py.
+# Fixes GEO-12.10: secrets separation -- NCBI_API_KEY env var (GEO_NCBI_API_KEY
 #                  in config.py); never hardcoded.
 #
 # ── Domain 13 (Documentation & Readability) ────────────────────────────────
-# Fixes GEO-13.5: variable names self-documenting — cfg, soft_path ->
+# Fixes GEO-13.5: variable names self-documenting -- cfg, soft_path ->
 #                 series_soft_file_path (in _resolve_soft_path), geo_dir ->
 #                 geo_raw_dir (in _ensure_geo_dir).
 # Fixes GEO-13.6: "stub" mentions removed (GEO-13.1).
@@ -454,60 +454,60 @@ Data Dictionary
 # ── Domain 14 (Compliance & Standards Adherence) ───────────────────────────
 # Fixes GEO-14.1: PEP 8 violation (f-string in logger.info) fixed (GEO-4.3).
 # Fixes GEO-14.2: PEP 257 violation (function docstrings) fixed (R12).
-# Fixes GEO-14.5: schema versioning — _schema_version on every record (R15).
-# Fixes GEO-14.6: schema versioning of output — SCHEMA_VERSION constant;
+# Fixes GEO-14.5: schema versioning -- _schema_version on every record (R15).
+# Fixes GEO-14.6: schema versioning of output -- SCHEMA_VERSION constant;
 #                 GEO_SCHEMA_VERSION in config.py.
-# Fixes GEO-14.9: PEP 517/518 — pyproject.toml has [project.optional-deps]
+# Fixes GEO-14.9: PEP 517/518 -- pyproject.toml has [project.optional-deps]
 #                 geo (pandas, numpy); no new deps added (R8).
 #
 # ── Domain 15 (Interoperability & Integration) ─────────────────────────────
-# Fixes GEO-15.1: Loader Protocol conformance — GeoLoader adapter (Phase 0.3).
-# Fixes GEO-15.2: filename mismatch — get_geo_series_path() returns
+# Fixes GEO-15.1: Loader Protocol conformance -- GeoLoader adapter (Phase 0.3).
+# Fixes GEO-15.2: filename mismatch -- get_geo_series_path() returns
 #                 RAW_DIR/geo/{series_id}_family.soft.gz (GEO-4.11).
-# Fixes GEO-15.3: interface contract — GeoRawRecord / GeoEdgeRecord TypedDicts
+# Fixes GEO-15.3: interface contract -- GeoRawRecord / GeoEdgeRecord TypedDicts
 #                 in schemas.py.
-# Fixes GEO-15.5: cross-platform paths — str(path) / path.as_posix() in logs
+# Fixes GEO-15.5: cross-platform paths -- str(path) / path.as_posix() in logs
 #                 (R10).
-# Fixes GEO-15.6: library version pinning — pyproject.toml [project.optional-
+# Fixes GEO-15.6: library version pinning -- pyproject.toml [project.optional-
 #                 dependencies] geo (pandas>=2.0,<3.0; numpy>=1.24,<2.0).
-# Fixes GEO-15.8: source on records — _source="geo" on every record (R15).
-# Fixes GEO-15.9: downstream consumer registry — GEO_DOWNSTREAM_CONSUMERS
+# Fixes GEO-15.8: source on records -- _source="geo" on every record (R15).
+# Fixes GEO-15.9: downstream consumer registry -- GEO_DOWNSTREAM_CONSUMERS
 #                 constant.
-# Fixes GEO-15.12: silent zero-output to downstream — closed by Phase 0.6.
+# Fixes GEO-15.12: silent zero-output to downstream -- closed by Phase 0.6.
 #
 # ── Domain 16 (Data Lineage & Traceability) ────────────────────────────────
-# Fixes GEO-16.2: source attribution — _source, _source_version, _source_url,
+# Fixes GEO-16.2: source attribution -- _source, _source_version, _source_url,
 #                 _source_release_date on every record (R15 + Phase 0.9).
-# Fixes GEO-16.6: audit trail — logs/geo_audit.jsonl (GEO-9.9) + .meta.json
+# Fixes GEO-16.6: audit trail -- logs/geo_audit.jsonl (GEO-9.9) + .meta.json
 #                 sidecar (GEO-16.4) + transformation log (GEO-16.3).
-# Fixes GEO-16.7: dataset versioning — submission_date and last_update_date
+# Fixes GEO-16.7: dataset versioning -- submission_date and last_update_date
 #                 parsed from SOFT; stored on GeoLoaderMetrics.
-# Fixes GEO-16.8: run_pipeline.py integration — GeoLoader adapter (Phase 0.3)
+# Fixes GEO-16.8: run_pipeline.py integration -- GeoLoader adapter (Phase 0.3)
 #                 + run_id in GeoConfig (GEO-11.8).
-# Fixes GEO-16.11: clinician "why did the model predict X?" — answered via
+# Fixes GEO-16.11: clinician "why did the model predict X?" -- answered via
 #                  generate_lineage_report(edge) (GEO-16.10).
 
 # ── Additional IDs addressed across multiple sections ──────────────────────
-# Fixes GEO-8.1: pandas import at top level — justified by SOFT parser use
+# Fixes GEO-8.1: pandas import at top level -- justified by SOFT parser use
 #                (see "import pandas as pd" in Section 2).
 # Fixes GEO-10.2: cosmetic tests in test_init_v2.py kept; functional tests
 #                 in tests/test_geo_loader.py added (Phase 0.8).
-# Fixes GEO-10.7: schema-validation test — validate_geo_record /
+# Fixes GEO-10.7: schema-validation test -- validate_geo_record /
 #                 validate_geo_edge functions + tests.
-# Fixes GEO-10.11: future-developer-return-[] guard — closed by Phase 0.6
+# Fixes GEO-10.11: future-developer-return-[] guard -- closed by Phase 0.6
 #                  (raise instead of return []) + tests assert non-empty OR raise.
-# Fixes GEO-11.1: structured logging — every logger.* call uses extra={...}
+# Fixes GEO-11.1: structured logging -- every logger.* call uses extra={...}
 #                 (R10).
-# Fixes GEO-11.2: log level discipline — WARNING for anomalies, ERROR for
+# Fixes GEO-11.2: log level discipline -- WARNING for anomalies, ERROR for
 #                 failures, CRITICAL for patient-safety (see _record_circuit_
 #                 breaker_failure, parse_geo_series zero-records path).
 # Fixes GEO-11.12: silent failure path closed by Phase 0.6 + GEO-11.2.
-# Fixes GEO-12.3: hardcoded filename pattern — get_geo_series_path() builds
+# Fixes GEO-12.3: hardcoded filename pattern -- get_geo_series_path() builds
 #                 f"{series_id}_family.soft.gz" from config (GEO-4.11).
-# Fixes GEO-12.5: environment variable support — GEO_REQUIRED, GEO_AUTO_
+# Fixes GEO-12.5: environment variable support -- GEO_REQUIRED, GEO_AUTO_
 #                 DOWNLOAD, GEO_KEEP_BACKUPS, GEO_MEMORY_BUDGET_MB, NCBI_API_KEY,
 #                 DRUGOS_ENV (all in config.py).
-# Fixes GEO-12.9: environment separation — DRUGOS_ENV env var (dev/staging/
+# Fixes GEO-12.9: environment separation -- DRUGOS_ENV env var (dev/staging/
 #                 prod); multi-series support deferred to v1.1.0.
 
 # =============================================================================
@@ -550,7 +550,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
 
-# ── Third-party (already in pyproject.toml — Rule R8) ────────────────────────
+# ── Third-party (already in pyproject.toml -- Rule R8) ────────────────────────
 import numpy as np  # noqa: E402  -- used for vectorized edge conversion (GEO-8.3)
 import pandas as pd  # noqa: E402  -- used by SOFT parser (GEO-4.1)
 
@@ -648,7 +648,7 @@ from .schemas import (  # noqa: E402
 # Fixes GEO-14.11: file declares its own version (PARSER_VERSION, SCHEMA_VERSION).
 # Fixes GEO-15.7: __geo_loader_api_version__ for API versioning.
 __all__: List[str] = [
-    # ── Public functions (preserved from v0 — Rule R2) ───────────────────────
+    # ── Public functions (preserved from v0 -- Rule R2) ───────────────────────
     "download_geo",
     "parse_geo_series",
     "geo_to_edge_records",
@@ -705,8 +705,8 @@ GEO_ATTRIBUTION_CONST: str = GEO_ATTRIBUTION
 # Fixes GEO-7.3: GEO_RANDOM_SEED re-exported as a module-level constant.
 GEO_RANDOM_SEED_CONST: int = GEO_RANDOM_SEED
 
-# Fixes Phase 0.2 / GEO-3.1: GEO emits Protein→expressed_in→Anatomy edges
-# (NOT Gene→...). This matches config.py:3714 EDGE_TYPE_TO_SOURCE.
+# Fixes Phase 0.2 / GEO-3.1: GEO emits Protein->expressed_in->Anatomy edges
+# (NOT Gene->...). This matches config.py:3714 EDGE_TYPE_TO_SOURCE.
 GEO_NODE_TYPE: str = "Protein"
 GEO_EDGE_RELATION: str = "expressed_in"
 
@@ -800,14 +800,14 @@ _GEO_SUPPORTED_PLATFORMS: Tuple[str, ...] = (
     "GPL24676",    # Illumina NovaSeq 6000 (RNA-seq)
 )
 
-# Fixes GEO-3.3: tissue → UBERON lookup table.
+# Fixes GEO-3.3: tissue -> UBERON lookup table.
 # Curated mapping of common tissue names to UBERON URIs.
 # Sources:
 #   - UBERON ontology: https://www.ebi.ac.uk/ols/ontologies/uberon
 #   - GTEx tissue list: https://gtexportal.org/home/tissuePage
 #   - Human Protein Atlas tissue list:
 #     https://www.proteinatlas.org/humanproteome/tissue
-# Cell lines are mapped to their tissue of origin (e.g. A549 → lung).
+# Cell lines are mapped to their tissue of origin (e.g. A549 -> lung).
 # At least 30 common tissues are covered.
 _TISSUE_TO_UBERON: Dict[str, str] = {
     # ── Major organs ─────────────────────────────────────────────────────
@@ -870,7 +870,7 @@ _TISSUE_TO_UBERON: Dict[str, str] = {
 # All units are normalized to log2_rma (canonical).
 # The conversion formulas are documented inline in _normalize_expression().
 _UNIT_CONVERSION_NOTES: Dict[str, str] = {
-    "log2_rma": "Already canonical — no conversion needed.",
+    "log2_rma": "Already canonical -- no conversion needed.",
     "log2_tpm": "Assumed comparable to log2_rma for thresholding; pass through.",
     "log2_fpkm": "Assumed comparable to log2_rma for thresholding; pass through.",
     "raw_counts": "Convert via log2(x + 1).",
@@ -908,7 +908,7 @@ def _strip_uberon_uri(value: str) -> str:
     Accepted input forms (all return ``"UBERON_0002048"``):
       * ``"http://purl.obolibrary.org/obo/UBERON_0002048"``
       * ``"obo/UBERON_0002048"``
-      * ``"UBERON_0002048"`` (already bare — returned unchanged)
+      * ``"UBERON_0002048"`` (already bare -- returned unchanged)
     """
     if not isinstance(value, str) or not value:
         return value
@@ -921,11 +921,11 @@ def _strip_uberon_uri(value: str) -> str:
 
 # v70 ROOT FIX (P2L-051): strict UBERON ID format regex.
 # Canonical UBERON IDs are 7-digit zero-padded numeric suffixes after
-# the "UBERON_" prefix (per the OBO Foundry UBERON release spec —
+# the "UBERON_" prefix (per the OBO Foundry UBERON release spec --
 # https://obofoundry.org/ontology/uberon.html). Examples:
-#   * "UBERON_0002048" — lung
-#   * "UBERON_0000948" — heart
-#   * "UBERON_0000178" — blood
+#   * "UBERON_0002048" -- lung
+#   * "UBERON_0000948" -- heart
+#   * "UBERON_0000178" -- blood
 # This regex is used by the geo_loader to validate ``sample_tissue_uberon``
 # IDs BEFORE they reach edge emission, preventing malformed Anatomy node
 # IDs (e.g. typos like "UBRON_0002048" or wrong-digit-count variants
@@ -950,7 +950,7 @@ def _validate_series_id(series_id: str) -> None:
         If ``series_id`` is empty or does not match ``GEO_SERIES_ID_REGEX``.
     GeoSecurityError
         If ``series_id`` contains path-traversal characters (``..``,
-        ``/``, ``\\``) or null bytes — these are treated as security
+        ``/``, ``\\``) or null bytes -- these are treated as security
         violations, not just format errors.
 
     Examples
@@ -982,7 +982,7 @@ def _validate_series_id(series_id: str) -> None:
     if "\x00" in series_id or ".." in series_id or "/" in series_id or "\\" in series_id:
         raise GeoSecurityError(
             f"GEO series_id {series_id!r} contains path-traversal characters "
-            f"or null bytes — this is a security violation",
+            f"or null bytes -- this is a security violation",
             context={"series_id": series_id, "regex": GEO_SERIES_ID_REGEX},
         )
 
@@ -1017,7 +1017,7 @@ def _validate_sample_id(sample_id: str) -> None:
     --------
     drugos_graph.config.GEO_SAMPLE_ID_REGEX : The regex pattern.
 
-    Fixes: GEO-5.1 (data quality — sample_id format check).
+    Fixes: GEO-5.1 (data quality -- sample_id format check).
     """
     if not sample_id or not _GSM_SAMPLE_ID_REGEX.fullmatch(sample_id):
         raise GeoDataQualityError(
@@ -1047,7 +1047,7 @@ def _validate_platform_id(platform_id: str) -> None:
     --------
     drugos_graph.config.GEO_PLATFORM_ID_REGEX : The regex pattern.
 
-    Fixes: GEO-5.1 (data quality — platform_id format check).
+    Fixes: GEO-5.1 (data quality -- platform_id format check).
     """
     if not platform_id or not _GPL_PLATFORM_ID_REGEX.fullmatch(platform_id):
         raise GeoDataQualityError(
@@ -1102,7 +1102,7 @@ def _resolve_series_id(series_id: Optional[str], cfg: "GeoConfig") -> str:
     if series_id is None:
         series_id = cfg.version
     _validate_series_id(series_id)
-    # Fixes GEO-15.4: pinned-series check — refuse to use any other series
+    # Fixes GEO-15.4: pinned-series check -- refuse to use any other series
     # when config is pinned.
     if cfg.pinned and series_id != cfg.version:
         raise GeoConfigurationError(
@@ -1215,7 +1215,7 @@ def _compute_sha256(path: Path, chunk_size: int = 64 * 1024) -> str:
     """
     if not path.exists():
         raise GeoParseError(
-            f"Cannot compute SHA-256 of {path.as_posix()} — file does not exist",
+            f"Cannot compute SHA-256 of {path.as_posix()} -- file does not exist",
             context={"file_path": path.as_posix()},
         )
     h = hashlib.sha256()
@@ -1251,7 +1251,7 @@ def _verify_gzip_magic_bytes(path: Path) -> None:
     """
     if not path.exists():
         raise GeoParseError(
-            f"Cannot verify gzip magic bytes of {path.as_posix()} — file "
+            f"Cannot verify gzip magic bytes of {path.as_posix()} -- file "
             f"does not exist",
             context={"file_path": path.as_posix()},
         )
@@ -1260,7 +1260,7 @@ def _verify_gzip_magic_bytes(path: Path) -> None:
     if magic != b"\x1f\x8b":
         raise GeoParseError(
             f"GEO file {path.as_posix()} is not a valid gzip file "
-            f"(magic bytes {magic!r}, expected b'\\x1f\\x8b') — likely an "
+            f"(magic bytes {magic!r}, expected b'\\x1f\\x8b') -- likely an "
             f"HTML error page or a truncated download",
             context={"file_path": path.as_posix(), "magic_bytes": repr(magic)},
         )
@@ -1347,7 +1347,7 @@ def _verify_checksum(path: Path, cfg: "GeoConfig") -> str:
     """
     if GEO_SKIP_SHA256:
         logger.warning(
-            "GEO_SKIP_SHA256=1 — skipping SHA-256 verification (testing only!)"
+            "GEO_SKIP_SHA256=1 -- skipping SHA-256 verification (testing only!)"
         )
         return _compute_sha256(path)
     computed = _compute_sha256(path)
@@ -1450,7 +1450,7 @@ def _is_private_ip(host: str) -> bool:
             ip = sockaddr[0]
             if family == socket.AF_INET:
                 # Private IPv4 ranges: 10.x, 172.16-31.x, 192.168.x, 127.x,
-                # 169.254.x (link-local — AWS metadata).
+                # 169.254.x (link-local -- AWS metadata).
                 parts = ip.split(".")
                 if len(parts) == 4:
                     a, b = int(parts[0]), int(parts[1])
@@ -1495,7 +1495,7 @@ def _validate_url(url: str) -> None:
     # Fixes GEO-9.7: TLS verification is mandatory; HTTPS-only.
     if not url.startswith("https://"):
         raise GeoSecurityError(
-            f"GEO URL {url!r} is not HTTPS — only HTTPS URLs are allowed",
+            f"GEO URL {url!r} is not HTTPS -- only HTTPS URLs are allowed",
             context={"url": url},
         )
     # Check the URL is in the allowlist.
@@ -1511,7 +1511,7 @@ def _validate_url(url: str) -> None:
         host = parsed.hostname or ""
         if host and _is_private_ip(host):
             raise GeoSecurityError(
-                f"GEO URL {url!r} resolves to a private IP — possible SSRF",
+                f"GEO URL {url!r} resolves to a private IP -- possible SSRF",
                 context={"url": url, "host": host},
             )
     except GeoSecurityError:
@@ -1548,7 +1548,7 @@ def _sanitize_url_for_logging(url: str) -> str:
 
 
 def _set_secure_file_permissions(path: Path, mode: int = GEO_FILE_PERMISSIONS) -> None:
-    """Set file permissions to ``mode`` (default 0o600 — owner rw only).
+    """Set file permissions to ``mode`` (default 0o600 -- owner rw only).
 
     Parameters
     ----------
@@ -1686,7 +1686,7 @@ def _atomic_download(url: str, dest: Path, cfg: "GeoConfig") -> int:
     # Fixes GEO-6.5: delete any leftover .part file from a previous crash.
     if part_path.exists():
         logger.warning(
-            "GEO partial-download file %s detected — deleting and restarting",
+            "GEO partial-download file %s detected -- deleting and restarting",
             part_path.as_posix(),
             extra={"part_path": part_path.as_posix()},
         )
@@ -1816,7 +1816,7 @@ def _sanitize_text(value: str, max_length: int = 1024,
     # Fixes GEO-9.4: reject null bytes (security violation).
     if "\x00" in value:
         raise GeoSecurityError(
-            f"GEO text contains null bytes — security violation",
+            f"GEO text contains null bytes -- security violation",
             context={
                 "value_preview": value[:100], "line_number": line_number,
                 "series_id": series_id,
@@ -1922,9 +1922,9 @@ def _normalize_expression(value: float, unit: str) -> Tuple[float, str]:
     """Normalize an expression value to canonical ``log2_rma`` space.
 
     Supported input units:
-      * ``log2_rma``, ``log2_tpm``, ``log2_fpkm`` — assumed already in log2
+      * ``log2_rma``, ``log2_tpm``, ``log2_fpkm`` -- assumed already in log2
         space; pass through.
-      * ``raw_counts``, ``rpm``, ``tpm``, ``fpkm`` — convert via log2(x+1).
+      * ``raw_counts``, ``rpm``, ``tpm``, ``fpkm`` -- convert via log2(x+1).
 
     Parameters
     ----------
@@ -1958,7 +1958,7 @@ def _normalize_expression(value: float, unit: str) -> Tuple[float, str]:
         )
     if unit in ("log2_rma", "log2_tpm", "log2_fpkm"):
         return float(value), GEO_CANONICAL_EXPRESSION_UNIT
-    # raw_counts, rpm, tpm, fpkm → log2(x + 1).
+    # raw_counts, rpm, tpm, fpkm -> log2(x + 1).
     if value < 0:
         raise GeoDataQualityError(
             f"GEO expression value {value} is negative in {unit!r} space",
@@ -1977,23 +1977,23 @@ def _infer_expression_unit(
     expression values are in log2 space (RMA/TPM/FPKM already log2-
     transformed), linear space (raw counts, TPM, RPKM, FPKM), or log2
     fold change. The unit MUST be determined correctly before calling
-    ``_normalize_expression`` — passing the wrong unit silently produces
+    ``_normalize_expression`` -- passing the wrong unit silently produces
     garbage expression values.
 
     Inference heuristic:
       1. Check the platform's ``data_processing`` field for keywords:
-         - Contains "rma" or "log2" → ``"log2_rma"``
-         - Contains "tpm" → ``"tpm"`` (linear unless "log2_tpm")
-         - Contains "fpkm" or "rpkm" → ``"fpkm"`` (linear unless "log2_fpkm")
-         - Contains "counts" or "raw" → ``"raw_counts"``
+         - Contains "rma" or "log2" -> ``"log2_rma"``
+         - Contains "tpm" -> ``"tpm"`` (linear unless "log2_tpm")
+         - Contains "fpkm" or "rpkm" -> ``"fpkm"`` (linear unless "log2_fpkm")
+         - Contains "counts" or "raw" -> ``"raw_counts"``
       2. Check the sample's characteristics for "quantification" or
          "normalization" keywords (same logic).
       3. Check the value range as a tiebreaker:
-         - All values > 100 → likely raw_counts or linear TPM
-         - All values in [0, 20] → likely log2 space
-         - All values in [-10, 10] → likely log2 fold change
+         - All values > 100 -> likely raw_counts or linear TPM
+         - All values in [0, 20] -> likely log2 space
+         - All values in [-10, 10] -> likely log2 fold change
       4. If unable to determine, default to ``"log2_rma"`` with a WARNING
-         (conservative — most Affymetrix/Illumina microarray data is RMA-
+         (conservative -- most Affymetrix/Illumina microarray data is RMA-
          normalized log2).
 
     Parameters
@@ -2058,7 +2058,7 @@ def _infer_expression_unit(
     logger.warning(
         "geo_infer_expression_unit: unable to determine expression unit "
         "from platform/sample metadata. Defaulting to 'log2_rma' "
-        "(conservative — assumes already-log2). If the data is in linear "
+        "(conservative -- assumes already-log2). If the data is in linear "
         "scale (TPM, counts, etc.), expression values will be incorrect. "
         "Set the expression_unit explicitly or add data_processing "
         "metadata to the platform. (v82 GEO normalization fix)"
@@ -2067,13 +2067,13 @@ def _infer_expression_unit(
 
 
 # =============================================================================
-# ===== SECTION 11: PROBE → GENE → UNIPROT CROSSWALK ==========================
+# ===== SECTION 11: PROBE -> GENE -> UNIPROT CROSSWALK ==========================
 # =============================================================================
 
-# Fixes GEO-3.4: probe→gene→UniProt resolution via id_crosswalk.
+# Fixes GEO-3.4: probe->gene->UniProt resolution via id_crosswalk.
 
 def _build_crosswalk_indexes() -> Tuple[Dict[str, str], Dict[str, str]]:
-    """Build gene→uniprot and gene_symbol→uniprot indexes from the builtin.
+    """Build gene->uniprot and gene_symbol->uniprot indexes from the builtin.
 
     Returns
     -------
@@ -2085,7 +2085,7 @@ def _build_crosswalk_indexes() -> Tuple[Dict[str, str], Dict[str, str]]:
     --------
     VERIFIED_UNIPROT_GENE_CROSSWALK : The source builtin table.
 
-    Fixes: GEO-3.4 (probe→gene→UniProt resolution).
+    Fixes: GEO-3.4 (probe->gene->UniProt resolution).
     """
     gene_to_uniprot: Dict[str, str] = {}
     gene_symbol_to_uniprot: Dict[str, str] = {}
@@ -2116,9 +2116,9 @@ def _resolve_gene_to_uniprot(gene_id: str) -> Optional[str]:
 
     See Also
     --------
-    _resolve_probe_to_gene : The probe→gene resolver.
+    _resolve_probe_to_gene : The probe->gene resolver.
 
-    Fixes: GEO-3.4 (gene→UniProt resolution).
+    Fixes: GEO-3.4 (gene->UniProt resolution).
     """
     if not gene_id:
         return None
@@ -2130,7 +2130,7 @@ def _resolve_probe_to_gene(probe_id: str,
                                                        Optional[str]]:
     """Resolve a manufacturer probe ID to (NCBI Gene ID, gene symbol).
 
-    For the pinned series (GSE92649 / GPL570 — Affymetrix HG-U133 Plus 2.0),
+    For the pinned series (GSE92649 / GPL570 -- Affymetrix HG-U133 Plus 2.0),
     probe IDs follow the Affymetrix convention (e.g. ``117_at``,
     ``1007_s_at``). This loader uses a small curated lookup table for
     common probes. For probes not in the table, returns ``(None, None)``
@@ -2150,9 +2150,9 @@ def _resolve_probe_to_gene(probe_id: str,
 
     See Also
     --------
-    _resolve_gene_to_uniprot : The gene→UniProt resolver.
+    _resolve_gene_to_uniprot : The gene->UniProt resolver.
 
-    Fixes: GEO-3.4 (probe→gene resolution).
+    Fixes: GEO-3.4 (probe->gene resolution).
     """
     if not probe_id:
         return None, None
@@ -2160,7 +2160,7 @@ def _resolve_probe_to_gene(probe_id: str,
     # Symbol" or "Gene Symbol;Entrez Gene ID" mapping each probe to its
     # gene. In v1.0.0 we use a small curated lookup for the most common
     # drug-target probes; v1.1.0 will parse the platform table directly.
-    # The curated table maps probe_id → (gene_symbol, ncbi_gene_id).
+    # The curated table maps probe_id -> (gene_symbol, ncbi_gene_id).
     curated = _PROBE_TO_GENE_LOOKUP.get(probe_id)
     if curated is not None:
         return curated[1], curated[0]
@@ -2176,10 +2176,10 @@ def _resolve_probe_to_gene(probe_id: str,
     return None, None
 
 
-# Curated probe → (gene_symbol, ncbi_gene_id) lookup for common drug-target
+# Curated probe -> (gene_symbol, ncbi_gene_id) lookup for common drug-target
 # probes on Affymetrix HG-U133 Plus 2.0 (GPL570).
 # Source: Affymetrix HG-U133 Plus 2.0 annotation file (NA36).
-# Fixes GEO-3.4: probe→gene resolution for the pinned series.
+# Fixes GEO-3.4: probe->gene resolution for the pinned series.
 _PROBE_TO_GENE_LOOKUP: Dict[str, Tuple[str, str]] = {
     # ── COX enzymes (NSAID targets) ──────────────────────────────────────
     "204748_at": ("PTGS1", "5742"),       # COX-1
@@ -2223,10 +2223,10 @@ _PROBE_TO_GENE_LOOKUP: Dict[str, Tuple[str, str]] = {
 
 
 # =============================================================================
-# ===== SECTION 12: TISSUE → UBERON ONTOLOGY MAPPING =========================
+# ===== SECTION 12: TISSUE -> UBERON ONTOLOGY MAPPING =========================
 # =============================================================================
 
-# The tissue→UBERON lookup table is defined in Section 6 (_TISSUE_TO_UBERON).
+# The tissue->UBERON lookup table is defined in Section 6 (_TISSUE_TO_UBERON).
 # This section provides the public-facing _map_tissue_to_uberon function
 # (defined in Section 10 above).
 
@@ -2502,10 +2502,10 @@ def _beta_cf(x: float, a: float, b: float, max_iter: int = 200,
 
 
 # =============================================================================
-# ===== SECTION 14: EDGE BUILDER (Protein→expressed_in→Anatomy) ==============
+# ===== SECTION 14: EDGE BUILDER (Protein->expressed_in->Anatomy) ==============
 # =============================================================================
 
-# Fixes Phase 0.2: GEO emits Protein→expressed_in→Anatomy edges.
+# Fixes Phase 0.2: GEO emits Protein->expressed_in->Anatomy edges.
 # Fixes GEO-3.1: node type is Protein (not Gene, not Gene Expression).
 # Fixes GEO-3.2: "expressed_in" is the correct predicate for GEO data.
 
@@ -2957,7 +2957,7 @@ class GeoConfig:
         cfg_dict = DATA_SOURCES.get("geo")
         if cfg_dict is None:
             raise GeoConfigurationError(
-                "DATA_SOURCES['geo'] is missing — GEO configuration is mandatory",
+                "DATA_SOURCES['geo'] is missing -- GEO configuration is mandatory",
                 context={"available_sources": sorted(DATA_SOURCES.keys())},
             )
         # Fixes GEO-12.12: check for all required keys.
@@ -3043,7 +3043,7 @@ def validate_geo_config(cfg: "GeoConfig") -> None:
     # Fixes GEO-9.7: TLS verification is mandatory.
     if not cfg.verify_tls:
         raise GeoSecurityError(
-            "GeoConfig(verify_tls=False) is forbidden — TLS verification "
+            "GeoConfig(verify_tls=False) is forbidden -- TLS verification "
             "is mandatory",
             context={"verify_tls": cfg.verify_tls},
         )
@@ -3473,7 +3473,7 @@ def _check_circuit_breaker(state_path: Optional[Path] = None) -> None:
     if now - last_failure < GEO_CIRCUIT_BREAKER_COOLDOWN_SECONDS:
         reset_at = last_failure + GEO_CIRCUIT_BREAKER_COOLDOWN_SECONDS
         raise GeoDownloadError(
-            "GEO circuit breaker is tripped — skipping download for "
+            "GEO circuit breaker is tripped -- skipping download for "
             f"{int(reset_at - now)} more seconds",
             context={
                 "circuit_breaker_tripped": True,
@@ -3481,8 +3481,8 @@ def _check_circuit_breaker(state_path: Optional[Path] = None) -> None:
                 "failure_count": state.get("failure_count", 0),
             },
         )
-    # Cooldown elapsed — reset.
-    logger.info("GEO circuit breaker cooldown elapsed — resetting")
+    # Cooldown elapsed -- reset.
+    logger.info("GEO circuit breaker cooldown elapsed -- resetting")
     _reset_circuit_breaker(state_path)
 
 
@@ -3516,7 +3516,7 @@ def _record_circuit_breaker_failure(state_path: Optional[Path] = None) -> None:
         if state["failure_count"] >= GEO_CIRCUIT_BREAKER_THRESHOLD:
             if not state.get("tripped"):
                 logger.critical(
-                    "GEO circuit breaker tripped after %d failures — "
+                    "GEO circuit breaker tripped after %d failures -- "
                     "downloads will be skipped for %d seconds",
                     state["failure_count"], GEO_CIRCUIT_BREAKER_COOLDOWN_SECONDS,
                     extra={
@@ -3590,7 +3590,7 @@ def _ensure_geo_dir(cfg: "GeoConfig") -> Path:
             pass  # chmod may fail on some filesystems; not fatal.
     except PermissionError as e:
         raise GeoConfigurationError(
-            f"Cannot create GEO directory {geo_dir.as_posix()} — "
+            f"Cannot create GEO directory {geo_dir.as_posix()} -- "
             f"check filesystem permissions or set GEO_RAW_DIR to a "
             f"writable path",
             context={"dir": geo_dir.as_posix(), "error": str(e)},
@@ -3695,7 +3695,7 @@ def download_geo(series_id: Optional[str] = None, *,
         )
         if not marker_path.exists():
             logger.warning(
-                "GEO file %s exists but marker file %s is missing — "
+                "GEO file %s exists but marker file %s is missing -- "
                 "file may have been placed manually without provenance",
                 soft_path.as_posix(), marker_path.as_posix(),
                 extra={"file_path": soft_path.as_posix()},
@@ -3710,7 +3710,7 @@ def download_geo(series_id: Optional[str] = None, *,
                     if marker.get("sha256") and actual_sha != marker["sha256"]:
                         logger.warning(
                             "GEO file %s SHA-256 (%s) does not match marker "
-                            "(%s) — file was modified externally",
+                            "(%s) -- file was modified externally",
                             soft_path.as_posix(), actual_sha,
                             marker.get("sha256"),
                             extra={
@@ -4034,7 +4034,7 @@ def _parse_soft_file(
                             if attr_value.lower() in ("withdrawn", "superseded"):
                                 raise GeoDataQualityError(
                                     f"GEO series {series_id!r} is "
-                                    f"{attr_value!r} — cannot be used",
+                                    f"{attr_value!r} -- cannot be used",
                                     context={
                                         "series_id": series_id,
                                         "series_status": attr_value,
@@ -4212,7 +4212,7 @@ def _parse_soft_file(
                                 })
                                 metrics["records_dead_lettered"] += 1
                                 continue
-                            # Resolve probe → gene → UniProt.
+                            # Resolve probe -> gene -> UniProt.
                             gene_id, gene_symbol = _resolve_probe_to_gene(
                                 probe_id, current_sample.platform_id,
                             )
@@ -4252,20 +4252,20 @@ def _parse_soft_file(
                             # This caused _normalize_expression to treat EVERY value as
                             # already-in-log2-space and pass it through unchanged. But
                             # GEO series use different quantification platforms with
-                            # different units — TPM, RPKM/FPKM, raw counts, and log2
+                            # different units -- TPM, RPKM/FPKM, raw counts, and log2
                             # fold change are all possible. When a raw-count or TPM value
                             # is passed through as if it were log2_rma, the value is
                             # treated as if it were already on a log2 scale (e.g. a raw
                             # count of 5000 is treated as log2_rma=5000, which is
-                            # astronomically high — real log2_rma values are typically
+                            # astronomically high -- real log2_rma values are typically
                             # 0-16). This silently produces garbage expression values
                             # that pass all downstream quality checks but produce wrong
-                            # Gene→Anatomy edges.
+                            # Gene->Anatomy edges.
                             #
                             # Fix: infer the expression unit from the GEO SOFT metadata
                             # (platform data_processing field) and pass the CORRECT unit
                             # to _normalize_expression. When the unit cannot be determined,
-                            # log a WARNING and fall back to log2_rma (conservative —
+                            # log a WARNING and fall back to log2_rma (conservative --
                             # assumes already-log2, which is the most common case for
                             # Affymetrix/Illumina microarray data).
                             _detected_unit = _infer_expression_unit(
@@ -4355,12 +4355,12 @@ def _parse_soft_file(
                         GeoCriticalError, GeoNotImplementedError,
                         GeoDownloadError, GeoDownloadRequiredError,
                         GeoConfigurationError):
-                    # Re-raise all GEO exception types — they signal
+                    # Re-raise all GEO exception types -- they signal
                     # patient-safety-critical conditions that MUST NOT be
                     # silenced by the catch-all below (Rule R5).
                     raise
                 except Exception as e:
-                    # Catch-all for unexpected parse errors — dead-letter
+                    # Catch-all for unexpected parse errors -- dead-letter
                     # and continue (GEO-6.12).
                     metrics["malformed_line_count"] += 1
                     _write_dead_letter({
@@ -4443,7 +4443,7 @@ def _flush_sample(
 
     Fixes: GEO-1.9 (GeoSample dataclass).
     """
-    # No-op in v1.0.0 — records are emitted per data row.
+    # No-op in v1.0.0 -- records are emitted per data row.
     pass
 
 
@@ -4493,7 +4493,7 @@ def parse_geo_series(
         If True (default), records without a UBERON mapping are
         dead-lettered.
     use_cache : bool, optional
-        If True, use the Parquet cache (GEO-8.8 — deferred to v1.1.0).
+        If True, use the Parquet cache (GEO-8.8 -- deferred to v1.1.0).
     max_records : int, optional
         Maximum records to parse (testing only).
 
@@ -4538,7 +4538,7 @@ def parse_geo_series(
            GEO-5.7 (SOFT parser), GEO-5.9 (NaN handling),
            GEO-5.13 (withdrawn series), GEO-6.6 (raise not return []),
            GEO-6.12 (recovery from partial parse), GEO-7.2 (deterministic
-           ordering), GEO-8.2 (streaming), GEO-8.8 (caching — deferred),
+           ordering), GEO-8.2 (streaming), GEO-8.8 (caching -- deferred),
            GEO-11.7 (no silent failure), GEO-14.7 (parse_geo alias),
            GEO-14.8 (deprecation warning for parse_geo_series).
     """
@@ -4562,7 +4562,7 @@ def parse_geo_series(
     # Fixes GEO-3.12: format selection.
     if format != "soft":
         raise GeoNotImplementedError(
-            f"GEO format {format!r} is not implemented — only 'soft' is "
+            f"GEO format {format!r} is not implemented -- only 'soft' is "
             f"supported in v1.0.0. MINiML and Series Matrix support is "
             f"planned for v1.1.0.",
             context={
@@ -4583,7 +4583,7 @@ def parse_geo_series(
     # Fixes GEO-8.8: caching deferred to v1.1.0.
     if use_cache:
         logger.warning(
-            "GEO Parquet caching is not implemented in v1.0.0 — "
+            "GEO Parquet caching is not implemented in v1.0.0 -- "
             "use_cache=True ignored. Planned for v1.1.0 (GEO-8.8)."
         )
 
@@ -4591,7 +4591,7 @@ def parse_geo_series(
     # Fixes GEO-Phase 0.10, GEO-7.8.
     if not filepath.exists():
         raise GeoParseError(
-            f"GEO SOFT file {filepath.as_posix()} does not exist — "
+            f"GEO SOFT file {filepath.as_posix()} does not exist -- "
             f"call download_geo() first or set GEO_AUTO_DOWNLOAD=1",
             context={"file_path": filepath.as_posix()},
         )
@@ -4631,7 +4631,7 @@ def parse_geo_series(
         if GEO_REQUIRED:
             logger.critical(
                 "GEO loader produced 0 records; KG will lack "
-                "Protein→expressed_in→Anatomy modality (GEO_REQUIRED=1)",
+                "Protein->expressed_in->Anatomy modality (GEO_REQUIRED=1)",
                 extra={
                     "series_id": series_id,
                     "file_path": filepath.as_posix(),
@@ -4640,8 +4640,8 @@ def parse_geo_series(
             )
             raise GeoCriticalError(
                 f"GEO loader produced 0 records from {filepath.as_posix()} "
-                f"and GEO_REQUIRED=1 — KG will lack the "
-                f"Protein→expressed_in→Anatomy modality",
+                f"and GEO_REQUIRED=1 -- KG will lack the "
+                f"Protein->expressed_in->Anatomy modality",
                 context={
                     "series_id": series_id,
                     "file_path": filepath.as_posix(),
@@ -4650,11 +4650,11 @@ def parse_geo_series(
                     "parse_metrics": parse_metrics,
                 },
             )
-        # GEO_REQUIRED=0: graceful degradation — raise GeoDataQualityError.
+        # GEO_REQUIRED=0: graceful degradation -- raise GeoDataQualityError.
         # The caller (e.g., run_pipeline.py) can catch this and continue.
         raise GeoDataQualityError(
             f"GEO loader produced 0 records from {filepath.as_posix()} "
-            f"(GEO_REQUIRED=0 — graceful degradation). Check the file "
+            f"(GEO_REQUIRED=0 -- graceful degradation). Check the file "
             f"and the parser logs.",
             context={
                 "series_id": series_id,
@@ -4679,7 +4679,7 @@ def parse_geo_series(
         if ratio > GEO_RECORD_COUNT_MAX_MULTIPLE:
             logger.warning(
                 "GEO parsed %d records, expected %d (ratio %.2f > %.2f) "
-                "— may indicate double-parsing or format change",
+                "-- may indicate double-parsing or format change",
                 actual, expected, ratio, GEO_RECORD_COUNT_MAX_MULTIPLE,
                 extra={
                     "actual": actual, "expected": expected,
@@ -4751,7 +4751,7 @@ def iter_geo_records(
     # In v1.0.0, iter_geo_records is a thin wrapper around parse_geo_series
     # that yields records one at a time. A true streaming implementation
     # (line-by-line without materializing the full list) is planned for
-    # v1.1.0 — the current implementation loads the full list and then
+    # v1.1.0 -- the current implementation loads the full list and then
     # yields, but the API contract is forward-compatible.
     records = parse_geo_series(
         filepath, series_id=series_id, cfg=cfg,
@@ -4796,10 +4796,10 @@ def filter_by_organism(
     Fixes: GEO-3.13 (organism filter).
     """
     target = organism.lower().strip()
-    # v84 FORENSIC ROOT FIX (BUG #23 — organism filter inconsistency):
+    # v84 FORENSIC ROOT FIX (BUG #23 -- organism filter inconsistency):
     # The previous code only required a taxid match for "Homo sapiens"
     # (target_taxid = 9606). For non-human organisms, target_taxid was
-    # None and the taxid check was skipped — a record with
+    # None and the taxid check was skipped -- a record with
     # sample_organism="Mus musculus" and sample_taxid=9606 (mislabeled)
     # would pass the non-human filter. Mouse protein data could enter
     # the human KG.
@@ -4827,7 +4827,7 @@ def filter_by_organism(
     if target_taxid is None:
         logger.warning(
             "GEO filter_by_organism: organism %r not in the known taxid "
-            "map — falling back to string-only match (no taxid cross-"
+            "map -- falling back to string-only match (no taxid cross-"
             "check). Mis-labeled records (organism string says X, taxid "
             "says Y) will pass the filter. Add the organism to "
             "_ORGANISM_TAXID_MAP for production safety. (v84 BUG #23)",
@@ -4846,8 +4846,8 @@ def filter_by_organism(
         # organisms, allowing mis-labeled records through.
         if target_taxid is not None:
             # Coerce rec_tax to int for comparison (it may be a string
-            # from a CSV/JSON source). Missing/invalid taxid → 0, which
-            # won't match any known taxid → record is filtered out.
+            # from a CSV/JSON source). Missing/invalid taxid -> 0, which
+            # won't match any known taxid -> record is filtered out.
             try:
                 rec_tax_int = int(rec_tax)
             except (TypeError, ValueError):
@@ -4873,7 +4873,7 @@ def geo_to_edge_records(
     tissue_uberon_required: bool = True,
     cfg: Optional[GeoConfig] = None,
 ) -> List[GeoEdgeRecord]:
-    """Convert GEO raw records to ``Protein→expressed_in→Anatomy`` edges.
+    """Convert GEO raw records to ``Protein->expressed_in->Anatomy`` edges.
 
     For each (uniprot_id, tissue_uberon) pair, emits an edge if:
       * The expression value exceeds ``expression_threshold`` (default
@@ -4942,7 +4942,7 @@ def geo_to_edge_records(
     records_list = list(records)
     if not records_list:
         raise GeoDataQualityError(
-            "geo_to_edge_records received an empty records iterable — "
+            "geo_to_edge_records received an empty records iterable -- "
             "cannot produce edges from zero records",
             context={"record_count": 0},
         )
@@ -4954,11 +4954,11 @@ def geo_to_edge_records(
     # Fixes GEO-7.3: set random seed for reproducibility.
     # v71 ROOT FIX (P2L-052): the previous code called
     # ``np.random.seed(GEO_RANDOM_SEED)`` which sets the GLOBAL numpy
-    # random seed — affecting ALL subsequent numpy operations in the
+    # random seed -- affecting ALL subsequent numpy operations in the
     # process, including unrelated code in other modules. This broke
     # test isolation: importing geo_loader would make numpy operations
     # in OTHER modules non-deterministic (or deterministically seeded
-    # to GEO's seed, which is worse — cross-module randomness
+    # to GEO's seed, which is worse -- cross-module randomness
     # contamination).
     # Root fix: use a LOCAL Generator via ``np.random.default_rng()``.
     # This seeds ONLY the local generator, leaving the global numpy
@@ -5015,15 +5015,15 @@ def geo_to_edge_records(
     # Root fix: add a strict regex check ``^UBERON_\d{7}$`` (7 digits
     # is the canonical UBERON ID format per the OBO Foundry). Rows
     # that don't match are dead-lettered with a clear reason so the
-    # operator can fix the upstream tissue→UBERON mapping. The check
+    # operator can fix the upstream tissue->UBERON mapping. The check
     # is applied ONLY when ``tissue_uberon_required`` is True (the
-    # default) — when it's False, we preserve the previous lenient
+    # default) -- when it's False, we preserve the previous lenient
     # behavior because the caller explicitly opted out of UBERON
     # validation (e.g. for exploratory analyses on species whose
     # anatomy ontology is not UBERON).
     #
     # The regex is compiled ONCE at module load (see _UBERON_ID_REGEX
-    # near the top of this file) and reused for every row — the cost
+    # near the top of this file) and reused for every row -- the cost
     # is one regex match per row, negligible compared to the rest of
     # the GEO parse pipeline.
     if tissue_uberon_required:
@@ -5040,7 +5040,7 @@ def geo_to_edge_records(
         if n_invalid_uberon > 0:
             logger.warning(
                 "geo_loader: %d rows have malformed sample_tissue_uberon "
-                "IDs (do not match %s) — writing to dead-letter and "
+                "IDs (do not match %s) -- writing to dead-letter and "
                 "excluding. Sample invalid values: %r",
                 n_invalid_uberon,
                 _UBERON_ID_REGEX.pattern,
@@ -5052,7 +5052,7 @@ def geo_to_edge_records(
             # the existing ``_write_dead_letter`` helper (which writes
             # to ``data/dead_letter/geo_malformed.jsonl``). We cap at
             # 20 rows to avoid flooding the DLQ when an entire file is
-            # malformed — the WARNING above already gives the operator
+            # malformed -- the WARNING above already gives the operator
             # the total count and a sample of invalid values.
             for idx in df.loc[~uberon_valid_mask].index[:20]:
                 _write_dead_letter({
@@ -5096,7 +5096,7 @@ def geo_to_edge_records(
     # v69 ROOT FIX (P2L-049): implement differential expression analysis.
     #
     # The previous code hardcoded ``is_diff = False`` and ``fdr = None``
-    # for ALL edges. The GEO loader emitted ``Protein→expressed_in→Anatomy``
+    # for ALL edges. The GEO loader emitted ``Protein->expressed_in->Anatomy``
     # edges based on ABSOLUTE expression threshold only (log2 >= 4.0).
     # It did NOT compute differential expression (log2 fold-change between
     # disease and healthy conditions). This means:
@@ -5164,7 +5164,7 @@ def geo_to_edge_records(
 
     # Group by (uniprot_id, tissue_uberon) and aggregate.
     grouped = df.groupby(["uniprot_id", "sample_tissue_uberon"], sort=True)
-    # v69 P2L-049: first pass — collect p-values for BH-FDR correction.
+    # v69 P2L-049: first pass -- collect p-values for BH-FDR correction.
     # We need ALL p-values before we can compute FDR (BH is a global
     # correction across all tests). So we do a two-pass approach:
     #   Pass 1: compute per-group log2FC + t-test p-value.
@@ -5181,7 +5181,7 @@ def geo_to_edge_records(
     #
     # Root fix:
     #   1. Replace ``max_expr`` with ``median_expr`` (median is the
-    #      most robust statistic — 50% of samples must be above any
+    #      most robust statistic -- 50% of samples must be above any
     #      given value before it affects the median; a single outlier
     #      has zero influence). The variable is renamed ``median_expr``
     #      everywhere it's used so downstream code and tests see the
@@ -5189,7 +5189,7 @@ def geo_to_edge_records(
     #      alias in the gs dict for any external consumer that reads
     #      it (with a deprecation comment).
     #   2. ALSO compute ``p75_expr`` (75th percentile) as an additional
-    #      property on the edge — gives downstream consumers a richer
+    #      property on the edge -- gives downstream consumers a richer
     #      signal (median = typical value, p75 = upper quartile, max
     #      = extreme). The edge property ``expression_value`` now
     #      carries the median; ``expression_value_p75`` is new.
@@ -5198,7 +5198,7 @@ def geo_to_edge_records(
     #      samples OR 25% of samples must be above threshold). This
     #      prevents a single outlier sample from triggering an edge
     #      emission for a protein that's otherwise low-expression in
-    #      the tissue. The 25% threshold is conservative — it still
+    #      the tissue. The 25% threshold is conservative -- it still
     #      allows edges for proteins expressed in a minority of cells
     #      (heterogeneous tissue), but blocks pure-outlier edges.
     for (uniprot_id, tissue_uberon), group in grouped:
@@ -5207,11 +5207,11 @@ def geo_to_edge_records(
             continue
         # v70 P2L-050: tightened "above threshold" check. The previous
         # ``.any()`` check passed if EVEN ONE sample was above
-        # threshold — a single PCR artifact could trigger an edge.
+        # threshold -- a single PCR artifact could trigger an edge.
         # Now require at least 2 samples OR 25% of samples to be above
         # threshold (whichever is GREATER). For small groups (n<8),
         # this means at least 2 samples; for larger groups, it scales
-        # as 25% (e.g. n=20 → at least 5 samples above threshold).
+        # as 25% (e.g. n=20 -> at least 5 samples above threshold).
         n_above_threshold: int = int(group["above_threshold"].sum())
         min_above: int = max(2, int(0.25 * len(group)))
         if n_above_threshold < min_above:
@@ -5222,7 +5222,7 @@ def geo_to_edge_records(
         p75_expr: float = float(group["expression_value"].quantile(0.75))
         # Backward-compat: keep max_expr as an alias for median_expr
         # in the gs dict so any external consumer that reads
-        # gs["max_expr"] still works (with a slight semantic change —
+        # gs["max_expr"] still works (with a slight semantic change --
         # it's now the median, not the max). The deprecation comment
         # above documents this.
         max_expr: float = median_expr  # backward-compat alias
@@ -5263,7 +5263,7 @@ def geo_to_edge_records(
             "uniprot_id": uniprot_id,
             "tissue_uberon": tissue_uberon,
             "group": group,
-            # v70 P2L-050: renamed max_expr → median_expr (with max_expr
+            # v70 P2L-050: renamed max_expr -> median_expr (with max_expr
             # kept as a backward-compat alias). Added p75_expr for a
             # richer edge property.
             "median_expr": median_expr,
@@ -5301,7 +5301,7 @@ def geo_to_edge_records(
             gs["fdr"] = None
             gs["is_differential"] = False
 
-    # v69 P2L-049: second pass — emit edges with the differential-expression
+    # v69 P2L-049: second pass -- emit edges with the differential-expression
     # fields populated.
     edges: List[GeoEdgeRecord] = []
     for gs in _group_stats:
@@ -5311,7 +5311,7 @@ def geo_to_edge_records(
         # v70 P2L-050: prefer median_expr (robust to outliers). Keep
         # max_expr as a backward-compat alias (= median_expr). The edge
         # property ``expression_value`` now carries the MEDIAN, not the
-        # MAX — this is a slight semantic change but matches the
+        # MAX -- this is a slight semantic change but matches the
         # audit's recommendation and produces more stable edges.
         median_expr = gs.get("median_expr", gs.get("max_expr", 0.0))
         max_expr = gs["max_expr"]  # backward-compat alias (= median_expr)
@@ -5328,9 +5328,9 @@ def geo_to_edge_records(
         # Sensitive: True if any backing record was sensitive.
         sensitive = bool(group["sensitive"].any()) if "sensitive" in group.columns else False
         # Build the edge.
-        # BUG-B-003 root fix — kg_builder._load_edges requires ``src_id``
+        # BUG-B-003 root fix -- kg_builder._load_edges requires ``src_id``
         # and ``dst_id`` keys. The previous dict used ``head``/``tail``
-        # which caused every GEO Protein→Anatomy edge to be dead-lettered
+        # which caused every GEO Protein->Anatomy edge to be dead-lettered
         # at the Cypher MERGE step. We add ``src_id``/``dst_id`` as the
         # canonical keys and keep ``head``/``tail`` as aliases for the
         # dedup logic at _build_edge_sha256 which still reads them.
@@ -5339,7 +5339,7 @@ def geo_to_edge_records(
         # to full OBO URIs like
         # "http://purl.obolibrary.org/obo/UBERON_0002048". The
         # ID_PATTERNS["Anatomy"] regex requires the BARE form
-        # "UBERON_0002048". Every GEO Protein→Anatomy edge was
+        # "UBERON_0002048". Every GEO Protein->Anatomy edge was
         # dead-lettered, leaving the entire gene-expression layer of the
         # graph empty. Strip the URI prefix here.
         dst_id_anatomy = _strip_uberon_uri(tissue_uberon)
@@ -5360,7 +5360,7 @@ def geo_to_edge_records(
             # single-sample PCR artifacts. The median is stable: 50%
             # of samples must be above any given value before it
             # affects the median. The ``_classify_evidence_strength``
-            # thresholds (strong/moderate/weak) are unchanged — they
+            # thresholds (strong/moderate/weak) are unchanged -- they
             # still partition the log2-expression space the same way,
             # just using a more stable input.
             "evidence_strength": _classify_evidence_strength(
@@ -5370,7 +5370,7 @@ def geo_to_edge_records(
             # v70 P2L-050: new edge properties for richer downstream signal.
             # ``expression_value_median`` is the same as ``expression_value``
             # (kept under a descriptive name for self-documenting schemas).
-            # ``expression_value_p75`` is the 75th percentile — gives the
+            # ``expression_value_p75`` is the 75th percentile -- gives the
             # upper-quartile expression level. ``n_samples_above_threshold``
             # tells downstream consumers how many samples crossed the
             # expression threshold (useful for confidence weighting).
@@ -5625,7 +5625,7 @@ def download_geo_batch(
     Returns
     -------
     dict of str to Path
-        Mapping of series_id → downloaded file path.
+        Mapping of series_id -> downloaded file path.
 
     Raises
     ------
@@ -5774,7 +5774,7 @@ def load_geo(
     min_samples: int = GEO_DEFAULT_MIN_SAMPLES,
     fdr_threshold: float = GEO_DEFAULT_FDR_THRESHOLD,
 ) -> Tuple[List[GeoRawRecord], List[GeoEdgeRecord]]:
-    """Facade: download → parse → edge-convert in one call.
+    """Facade: download -> parse -> edge-convert in one call.
 
     Parameters
     ----------
@@ -5812,7 +5812,7 @@ def load_geo(
     --------
     download_geo, parse_geo_series, geo_to_edge_records.
 
-    Fixes: GEO-2.7 (builder pattern / fluent API — facade variant).
+    Fixes: GEO-2.7 (builder pattern / fluent API -- facade variant).
     """
     if cfg is None:
         cfg = GeoConfig.from_data_sources()
@@ -5957,7 +5957,7 @@ class GeoLoader:
         -------
         tuple of (list of dict, list of dict)
             (nodes, edges). nodes is an empty list (GEO emits edges
-            only — the Protein and Anatomy nodes are owned by UniProt
+            only -- the Protein and Anatomy nodes are owned by UniProt
             and the UBERON loader, respectively). edges is a list of
             GeoEdgeRecord dicts.
 
@@ -5971,13 +5971,13 @@ class GeoLoader:
 
         Fixes: Phase 0.3 (adapter pattern), GEO-1.2 (Loader Protocol).
 
-        v60 ROOT FIX (FORENSIC-DEEP — 3 CORE_NODE_TYPES have no canonical
-        ID system). The previous version returned `([], edges)` — no
+        v60 ROOT FIX (FORENSIC-DEEP -- 3 CORE_NODE_TYPES have no canonical
+        ID system). The previous version returned `([], edges)` -- no
         Anatomy nodes were emitted. The dst_id of every GEO edge is a
         UBERON ID like "UBERON_0002048", but no Anatomy NODE with that
         ID was ever created. The kg_builder would create a placeholder
         node when MERGEing the edge, but the node would have NO
-        `uberon_id` property — so `entity_resolver.resolve_canonical_id`
+        `uberon_id` property -- so `entity_resolver.resolve_canonical_id`
         (which looks up `CANONICAL_IDS["Anatomy"] = "uberon_id"`)
         returned None silently. SIDER/GEO edges had no canonical
         endpoint resolution. ROOT FIX: emit Anatomy node records for
@@ -6000,7 +6000,7 @@ class GeoLoader:
         #   source      = "GEO"
         # This ensures entity_resolver.resolve_canonical_id can find
         # the canonical ID on every Anatomy node referenced by a GEO
-        # edge — closing the canonical endpoint resolution gap.
+        # edge -- closing the canonical endpoint resolution gap.
         _UBERON_TO_NAME: Dict[str, str] = {
             v: k for k, v in _TISSUE_TO_UBERON.items()
         }
@@ -6068,7 +6068,7 @@ def _self_test() -> None:
 
 
 # Run the self-test on import (only if running in a test context).
-# This is NOT executed when the module is imported normally — only when
+# This is NOT executed when the module is imported normally -- only when
 # explicitly called or via ``python -m drugos_graph.geo_loader``.
 if __name__ == "__main__":  # pragma: no cover
     _self_test()

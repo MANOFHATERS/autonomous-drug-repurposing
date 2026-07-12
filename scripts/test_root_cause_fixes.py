@@ -2,7 +2,7 @@
 Root-cause verification tests for the V28 W04-W13-D01-D10-S01-S03 audit fixes.
 
 Each test verifies ONE specific fix from the audit (S-04 through X-10).
-If all tests pass, the fixes are confirmed at the ROOT level — not just
+If all tests pass, the fixes are confirmed at the ROOT level -- not just
 at the surface.
 
 Run: python scripts/test_root_cause_fixes.py
@@ -110,10 +110,10 @@ def test_S04_no_synergy_or_uncertainty_terms():
     # peaked at 0.3).
     assert r_03 >= r_02 - 1e-6, (
         f"S-04 FAIL: uncertainty penalty still present? "
-        f"r(gnn=0.2)={r_02:.4f}, r(gnn=0.3)={r_03:.4f} — r(0.3) should be >= r(0.2)"
+        f"r(gnn=0.2)={r_02:.4f}, r(gnn=0.3)={r_03:.4f} -- r(0.3) should be >= r(0.2)"
     )
     assert r_04 >= r_03 - 1e-6, (
-        f"S-04 FAIL: r(gnn=0.3)={r_03:.4f}, r(gnn=0.4)={r_04:.4f} — should be monotonic"
+        f"S-04 FAIL: r(gnn=0.3)={r_03:.4f}, r(gnn=0.4)={r_04:.4f} -- should be monotonic"
     )
     print(f"  S-04 PASS: no uncertainty penalty (r(0.2)={r_02:.4f}, r(0.3)={r_03:.4f}, r(0.4)={r_04:.4f})")
 
@@ -264,7 +264,7 @@ def test_S11_bridge_uses_default_weight_decay():
     The audit found an undocumented 10x override (1e-4 vs trainer's 1e-5
     default). The fix uses the trainer's default (1e-5).
 
-    We strip comments to check only the actual CODE — the comments
+    We strip comments to check only the actual CODE -- the comments
     reference the old value for documentation purposes.
     """
     import re
@@ -408,7 +408,7 @@ def test_X10_bridge_rejects_partial_gt_config():
             bridge.run_full_pipeline(
                 num_drugs=5, num_diseases=5,
                 gt_epochs=2, rl_timesteps=10, rl_top_n=3,
-                gt_embedding_dim=64,  # PARTIAL — only 1 of 4 provided
+                gt_embedding_dim=64,  # PARTIAL -- only 1 of 4 provided
                 allow_invalid_output=True,
             )
             # If we get here, the test failed

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MIT
-# © 2024-2026 Autonomous Drug Repurposing Platform — Team Cosmic / VentureLab
+# © 2024-2026 Autonomous Drug Repurposing Platform -- Team Cosmic / VentureLab
 """
-Test #2 — All 15 Files Integration Test (v1.0.0)
+Test #2 -- All 15 Files Integration Test (v1.0.0)
 
 This is the combined integration test for the **15 files** that
 comprise the upgraded institutional-grade dataset pipeline:
@@ -23,8 +23,8 @@ comprise the upgraded institutional-grade dataset pipeline:
     14. cleaning/deduplicator.py
 
   Plus the newly-fixed file (this iteration):
-    15. entity_resolution/__init__.py  (v1.0.0 — 99 issues, 16 domains)
-        — together with its sibling modules:
+    15. entity_resolution/__init__.py  (v1.0.0 -- 99 issues, 16 domains)
+        -- together with its sibling modules:
             entity_resolution/base.py            (NEW)
             entity_resolution/drug_resolver.py   (upgraded)
             entity_resolution/protein_resolver.py (upgraded)
@@ -37,11 +37,11 @@ This test verifies that:
   - All 15 files import successfully.
   - All 15 files interoperate cleanly (no broken connections).
   - The end-to-end data pipeline works:
-      config → cleaning → entity_resolution → database
+      config -> cleaning -> entity_resolution -> database
   - The scientific correctness contract is preserved:
-      InChIKey normalization → entity resolution → DB load → DB query
+      InChIKey normalization -> entity resolution -> DB load -> DB query
       produces correct canonical entities with full source provenance.
-  - Provenance flows from raw input → entity_resolution mapping →
+  - Provenance flows from raw input -> entity_resolution mapping ->
     loaded DB rows (the ``sources`` column survives the trip).
   - Backward compatibility: existing call sites in
     ``dags/master_pipeline_dag.py`` still work.
@@ -72,7 +72,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 
 # ===========================================================================
-# §1. Import verification — every one of the 15 files imports cleanly.
+# §1. Import verification -- every one of the 15 files imports cleanly.
 # ===========================================================================
 
 
@@ -155,7 +155,7 @@ class TestAll15FilesImport:
 
 
 # ===========================================================================
-# §2. End-to-end pipeline: config → cleaning → entity_resolution → database
+# §2. End-to-end pipeline: config -> cleaning -> entity_resolution -> database
 # ===========================================================================
 
 
@@ -227,12 +227,12 @@ class TestEndToEndPipeline:
             source="chembl",
         )
         df = r.to_dataframe()
-        # Rename canonical_inchikey → inchikey to match the DB loader.
+        # Rename canonical_inchikey -> inchikey to match the DB loader.
         df = df.rename(columns={"canonical_inchikey": "inchikey",
                                 "canonical_name": "name"})
         # Drop the extra entity-resolution columns the DB loader doesn't
         # know about (they're preserved in the audit trail / state dict).
-        # Updated for audit C.17 — added smiles, smiles_form,
+        # Updated for audit C.17 -- added smiles, smiles_form,
         # molecular_formula, molecular_weight, created_at,
         # data_quality_score to the output schema.
         extra_cols = [
@@ -285,7 +285,7 @@ class TestEndToEndPipeline:
         )
 
     def test_provenance_flows_end_to_end(self, db_session):
-        """Provenance (sources) flows from raw input → loaded DB rows.
+        """Provenance (sources) flows from raw input -> loaded DB rows.
 
         The ``sources`` column produced by entity_resolution must
         survive the trip through database.loaders into the DB.
@@ -378,7 +378,7 @@ class TestPipelineIdempotency:
             db_session.commit()
             count2 = db_session.query(Drug).count()
             assert count1 == count2, (
-                f"DB upsert not idempotent: {count1} → {count2}"
+                f"DB upsert not idempotent: {count1} -> {count2}"
             )
         except Exception as exc:
             pytest.skip(
@@ -417,7 +417,7 @@ class TestScientificCorrectness:
         )
         # They must remain distinct.
         assert len(r.mapping) == 2, (
-            "stereoisomers silently collapsed — patient-safety violation"
+            "stereoisomers silently collapsed -- patient-safety violation"
         )
 
     def test_synthetic_key_source_independence_end_to_end(self):
@@ -433,7 +433,7 @@ class TestScientificCorrectness:
             [{"name": "MysteryDrug", "drugbank_id": "DB_MYST"}],
             source="drugbank",
         )
-        # Should merge — same synthetic InChIKey for both.
+        # Should merge -- same synthetic InChIKey for both.
         assert len(r.mapping) == 1, (
             "source-dependent synthetic key split the records"
         )
@@ -467,7 +467,7 @@ class TestScientificCorrectness:
 
 
 # ===========================================================================
-# §5. Backward compatibility — existing call sites still work
+# §5. Backward compatibility -- existing call sites still work
 # ===========================================================================
 
 
@@ -475,7 +475,7 @@ class TestBackwardCompatibility:
     """Verify existing call sites (e.g. dags/master_pipeline_dag.py) still work."""
 
     def test_submodule_direct_imports_still_work(self):
-        """Existing call sites import from submodules directly — must still work."""
+        """Existing call sites import from submodules directly -- must still work."""
         from entity_resolution.drug_resolver import DrugResolver
         from entity_resolution.protein_resolver import ProteinResolver
         from entity_resolution.resolver_utils import (
@@ -557,7 +557,7 @@ class TestCrossModuleContracts:
                 f"entity_resolution.is_valid_inchikey({ik!r}) mismatch"
             )
             # cleaning.normalizer.is_valid_inchikey should also agree
-            # (or be slightly stricter — both must reject invalid).
+            # (or be slightly stricter -- both must reject invalid).
             if ik:
                 assert cleaning_is_valid(ik) == expected or not expected, (
                     f"cleaning.is_valid_inchikey({ik!r}) mismatch"
@@ -689,15 +689,15 @@ class TestPipelinePerformance:
 
 
 # ===========================================================================
-# §8. Smoke test — full pipeline from raw data → DB query
+# §8. Smoke test -- full pipeline from raw data -> DB query
 # ===========================================================================
 
 
 class TestFullPipelineSmoke:
-    """End-to-end smoke test: raw data → cleaning → entity_resolution → DB."""
+    """End-to-end smoke test: raw data -> cleaning -> entity_resolution -> DB."""
 
     def test_full_drug_pipeline_smoke(self, db_session):
-        """Full pipeline: raw drug records → cleaned → resolved → DB-loaded."""
+        """Full pipeline: raw drug records -> cleaned -> resolved -> DB-loaded."""
         from entity_resolution import DrugResolver
         from database.models import Drug
 
@@ -734,11 +734,11 @@ class TestFullPipelineSmoke:
         assert "sources" in df.columns
 
         # 5. The DataFrame is loadable into the DB (column-shape compatible).
-        # We don't actually load here — see test_entity_resolution_output_loads_into_database
+        # We don't actually load here -- see test_entity_resolution_output_loads_into_database
         # for the load test.
 
     def test_full_protein_pipeline_smoke(self, db_session):
-        """Full pipeline: raw protein records → resolved → DB-ready."""
+        """Full pipeline: raw protein records -> resolved -> DB-ready."""
         from entity_resolution import ProteinResolver
 
         # 1. Raw protein records.
@@ -861,7 +861,7 @@ class TestAuditTrailAndLineage:
 
 
 class TestPipelineReliability:
-    """Verify the pipeline is reliable — handles bad input gracefully."""
+    """Verify the pipeline is reliable -- handles bad input gracefully."""
 
     def test_invalid_records_dead_lettered_not_dropped(self):
         """Invalid records go to the dead-letter queue, not silently dropped."""
@@ -919,12 +919,12 @@ class TestPipelineReliability:
 
 
 # ===========================================================================
-# §11. Final contract — every audit ID is exercised at least once
+# §11. Final contract -- every audit ID is exercised at least once
 # ===========================================================================
 
 
 class TestEveryAuditIdExercised:
-    """Smoke test: every audit ID (D1-1 → D16-7) is exercised by at least
+    """Smoke test: every audit ID (D1-1 -> D16-7) is exercised by at least
     one test in this file OR in tests/test_entity_resolution_init.py."""
 
     def test_all_16_domains_covered(self):

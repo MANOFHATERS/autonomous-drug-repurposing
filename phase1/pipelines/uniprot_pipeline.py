@@ -1,4 +1,4 @@
-"""UniProt Pipeline — institutional-grade production-ready ETL for proteins.
+"""UniProt Pipeline -- institutional-grade production-ready ETL for proteins.
 
 This module implements ``UniProtPipeline``, the data ingestion pipeline that
 downloads human-reviewed (Swiss-Prot) protein records from the UniProt REST
@@ -15,18 +15,18 @@ is life-safety critical.
 Why this file exists (inception)
 ------------------------------------------------------------------------
 The previous version of ``uniprot_pipeline.py`` (384 lines) had 346 issues
-spanning 16 quality domains.  Five of them were FATAL — they silently
+spanning 16 quality domains.  Five of them were FATAL -- they silently
 destroyed or corrupted data:
 
-* F1 — ``load()`` did not accept ``session=``, raising ``TypeError`` on every
+* F1 -- ``load()`` did not accept ``session=``, raising ``TypeError`` on every
   ``run()`` call (no protein data ever loaded).
-* F2 — Sequences were truncated to 10 000 chars, silently destroying titin
+* F2 -- Sequences were truncated to 10 000 chars, silently destroying titin
   (~34 350 aa) and MUC16 (~14 507 aa).
-* F3 — The TSV header was not skipped on subsequent pages, creating phantom
+* F3 -- The TSV header was not skipped on subsequent pages, creating phantom
   ``"Entry"`` rows in the cleaned dataset.
-* F4 — ``gene_name`` stored a protein name, not a gene symbol — every
+* F4 -- ``gene_name`` stored a protein name, not a gene symbol -- every
   downstream GDA join silently failed.
-* F5 — Downloads were non-atomic; a crash mid-download left a partial file
+* F5 -- Downloads were non-atomic; a crash mid-download left a partial file
   that was silently reused forever.
 
 Every fix in this file is traceable to one of the 346 issue IDs documented
@@ -73,15 +73,15 @@ Usage examples
 ------------------------------------------------------------------------
 Changelog
 ------------------------------------------------------------------------
-v2.0.0 (2025-03-05) — Institutional-grade rewrite addressing 346 issues
+v2.0.0 (2025-03-05) -- Institutional-grade rewrite addressing 346 issues
     across 16 domains.  See ``UNIPROT_PIPELINE_346_ISSUES_FIX_PROMPT.md``.
 
-v1.0.0 — Initial implementation (384 lines, deprecated).
+v1.0.0 -- Initial implementation (384 lines, deprecated).
 
 ------------------------------------------------------------------------
 License
 ------------------------------------------------------------------------
-MIT — Team Cosmic / VentureLab.  See the project LICENSE file for details.
+MIT -- Team Cosmic / VentureLab.  See the project LICENSE file for details.
 """
 
 from __future__ import annotations
@@ -136,13 +136,13 @@ def _is_stale_cursor_error(exc: BaseException) -> bool:
 
     UniProt cursor URLs (the ``Link`` header's ``rel="next"`` URL) expire
     after ~15 minutes. A resumed download that reuses an expired cursor
-    receives HTTP 400 (Bad Request — "invalid cursor") or 404 (Not Found
-    — "cursor not found"). These are non-retryable 4xx per R13, so the
+    receives HTTP 400 (Bad Request -- "invalid cursor") or 404 (Not Found
+    -- "cursor not found"). These are non-retryable 4xx per R13, so the
     pipeline would be stuck without stale-cursor recovery.
 
     This helper inspects the exception (and any chained cause) for an
     HTTP status code in {400, 404} and returns True if found. It is
-    intentionally NARROW — only 400/404 trigger recovery. Other 4xx
+    intentionally NARROW -- only 400/404 trigger recovery. Other 4xx
     codes (401, 403, 429) indicate different problems (auth, quota,
     rate-limit) that stale-cursor recovery would not fix.
     """
@@ -166,7 +166,7 @@ def _is_stale_cursor_error(exc: BaseException) -> bool:
                 val = getattr(response, attr, None)
                 if isinstance(val, int) and val in (400, 404):
                     return True
-        # String heuristic — DownloadError messages include "HTTP NNN".
+        # String heuristic -- DownloadError messages include "HTTP NNN".
         msg = str(current)
         if "HTTP 400" in msg or "HTTP 404" in msg:
             return True
@@ -176,7 +176,7 @@ def _is_stale_cursor_error(exc: BaseException) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Module metadata (DOC16–DOC20)
+# Module metadata (DOC16-DOC20)
 # ---------------------------------------------------------------------------
 __all__ = ["UniProtPipeline"]
 __version__ = "2.0.0"
@@ -191,9 +191,9 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Type aliases (DOC14)
 # ---------------------------------------------------------------------------
-UniProtId = str          # e.g. "P69905" — 6- or 10-char Swiss-Prot accession
-GeneSymbol = str         # e.g. "HBA1" — HGNC-canonical uppercase gene symbol
-AminoAcidSequence = str  # e.g. "MVLSPADKTN…" — IUPAC one-letter codes
+UniProtId = str          # e.g. "P69905" -- 6- or 10-char Swiss-Prot accession
+GeneSymbol = str         # e.g. "HBA1" -- HGNC-canonical uppercase gene symbol
+AminoAcidSequence = str  # e.g. "MVLSPADKTN..." -- IUPAC one-letter codes
 
 # ---------------------------------------------------------------------------
 # Compiled regex patterns (S3, S8, S9, S20, S21)
@@ -207,12 +207,12 @@ _UNIPROT_ACCESSION_RE: re.Pattern[str] = re.compile(
     r"^[A-NR-Z][0-9]([A-Z][A-Z0-9]{2}[0-9]){1,2}$"
 )
 
-# HGNC gene symbol: uppercase letter, then 0–49 alphanumeric/hyphen chars.
+# HGNC gene symbol: uppercase letter, then 0-49 alphanumeric/hyphen chars.
 # v35 ROOT FIX: import from cleaning._constants (single source of truth).
 # v42 ROOT FIX (P1-A-8): this is a HUMAN pipeline (queries
 # organism_id:9606 by default). The previous import used
 # ``CANONICAL_NON_HUMAN_GENE_SYMBOL_REGEX`` which allows Title-Case
-# symbols (e.g. ``Tp53`` for mouse) — too permissive for human data.
+# symbols (e.g. ``Tp53`` for mouse) -- too permissive for human data.
 # The HUMAN form ``CANONICAL_HGNC_GENE_SYMBOL_REGEX`` is uppercase-only
 # and rejects non-human symbols, preventing cross-species contamination
 # of the human protein table.
@@ -229,23 +229,23 @@ _STRING_ID_RE: re.Pattern[str] = re.compile(r"^\d+\.ENSP\d+$")
 # Valid amino-acid characters: 20 standard + ambiguity codes B J O U X Z +
 # stop * + alignment gap "-" (v35 root fix: gap char included for
 # consistency with cleaning._constants.CANONICAL_AA_SEQUENCE_REGEX and
-# database.models._SEQUENCE_RE — without it, aligned sequences with gaps
+# database.models._SEQUENCE_RE -- without it, aligned sequences with gaps
 # would pass the DB CHECK but fail this pipeline validator).
 _VALID_AA_PATTERN: re.Pattern[str] = re.compile(
     r"^[ACDEFGHIKLMNPQRSTVWYBJOUXZ\*\-]+$"
 )
 
-# EC number suffix in protein names, e.g. "EC 1.11.1.6" — strict format.
+# EC number suffix in protein names, e.g. "EC 1.11.1.6" -- strict format.
 _EC_NUMBER_RE: re.Pattern[str] = re.compile(r"\s*EC\s+[\d]+(?:\.[\d]+){1,3}\s*$")
 
-# {ECO:...} evidence tags — UniProt uses these to cite literature sources.
+# {ECO:...} evidence tags -- UniProt uses these to cite literature sources.
 _ECO_TAG_RE: re.Pattern[str] = re.compile(r"\s*\{ECO:[^}]*\}")
 
 # Parenthetical content (handles nested parens via manual scan; see below).
 _PAREN_OPEN_RE: re.Pattern[str] = re.compile(r"\(")
 
 # ---------------------------------------------------------------------------
-# UniProt CC sub-section markers (S5, S6, C16) — when ANY of these appears,
+# UniProt CC sub-section markers (S5, S6, C16) -- when ANY of these appears,
 # everything from that marker onward belongs to a different sub-section and
 # must be truncated from the function description.
 # ---------------------------------------------------------------------------
@@ -280,7 +280,7 @@ _SUBSECTION_MARKERS: tuple[str, ...] = (
 )
 
 # ---------------------------------------------------------------------------
-# DATA_DICTIONARY (DOC3) — full per-column documentation embedded in code.
+# DATA_DICTIONARY (DOC3) -- full per-column documentation embedded in code.
 # ---------------------------------------------------------------------------
 DATA_DICTIONARY: dict[str, dict[str, Any]] = {
     "uniprot_id": {
@@ -300,7 +300,7 @@ DATA_DICTIONARY: dict[str, dict[str, Any]] = {
     },
     "gene_name": {
         "type": "None",
-        "description": "DEPRECATED — always None.  Use protein_name_canonical "
+        "description": "DEPRECATED -- always None.  Use protein_name_canonical "
                        "for canonical names and gene_symbol for gene symbols.",
         "source": "N/A",
         "required": False,
@@ -330,11 +330,11 @@ DATA_DICTIONARY: dict[str, dict[str, Any]] = {
         "description": "Protein sequence length in amino acids (UniProt-reported).",
         "source": "UniProt 'Length' column",
         "required": False,
-        "valid_range": "1–100000",
+        "valid_range": "1-100000",
     },
     "sequence": {
         "type": "str | None",
-        "description": "Full amino-acid sequence. NOT truncated — titin (~34 350 aa) is stored in full.",
+        "description": "Full amino-acid sequence. NOT truncated -- titin (~34 350 aa) is stored in full.",
         "source": "UniProt 'Sequence' column",
         "required": False,
         "valid_chars": "ACDEFGHIKLMNPQRSTVWYBJOUXZ*-",
@@ -361,7 +361,7 @@ DATA_DICTIONARY: dict[str, dict[str, Any]] = {
 }
 
 # ---------------------------------------------------------------------------
-# EXPECTED_OUTPUT_COLUMNS (D2-12) — the cleaned DataFrame MUST contain at
+# EXPECTED_OUTPUT_COLUMNS (D2-12) -- the cleaned DataFrame MUST contain at
 # least these columns.  Extra columns (lineage flags, _source, etc.) are
 # tolerated.
 # ---------------------------------------------------------------------------
@@ -392,7 +392,7 @@ _EXPECTED_TSV_COLUMNS: frozenset[str] = frozenset({
     "Function [CC]",
 })
 
-# Columns critical to load() — if missing after rename, raise immediately.
+# Columns critical to load() -- if missing after rename, raise immediately.
 _CRITICAL_COLUMNS: tuple[str, ...] = ("uniprot_id",)
 
 # CSV cells starting with these characters are vulnerable to formula injection
@@ -433,10 +433,10 @@ class UniProtPipeline(BasePipeline):
         UniProt query string (default: human reviewed proteins).
     uniprot_fields : list[str]
         Fields to request from the UniProt API.  ``ft_domain`` is
-        intentionally excluded — domain extraction is not implemented and
+        intentionally excluded -- domain extraction is not implemented and
         requesting the field would waste ~5% of API bandwidth (S13).
     page_size : int
-        Number of records per page (1–500, UniProt hard cap).
+        Number of records per page (1-500, UniProt hard cap).
     max_retries : int
         Maximum retry attempts per page fetch.
     base_retry_delay : float
@@ -448,7 +448,7 @@ class UniProtPipeline(BasePipeline):
 
     Notes
     -----
-    * All sequences are stored in full — titin (~34 350 aa) is preserved
+    * All sequences are stored in full -- titin (~34 350 aa) is preserved
       (F2).  Truncation was a FATAL silent data-corruption bug.
     * ``gene_name`` is deprecated and set to ``None`` (F4).  Use
       ``gene_symbol`` for gene symbols and ``protein_name_canonical`` for
@@ -467,7 +467,7 @@ class UniProtPipeline(BasePipeline):
     """
 
     # ---------------------------------------------------------------------
-    # Class attributes (A10, A12, A13, CFG1–CFG4)
+    # Class attributes (A10, A12, A13, CFG1-CFG4)
     # ---------------------------------------------------------------------
     source_name: str = "uniprot"
 
@@ -475,7 +475,7 @@ class UniProtPipeline(BasePipeline):
     uniprot_search_url: str = "https://rest.uniprot.org/uniprotkb/search"
 
     # Query for human (taxonomy 9606) reviewed (Swiss-Prot) proteins (CFG3).
-    # S23: isoform support is not yet implemented — this query returns
+    # S23: isoform support is not yet implemented -- this query returns
     # canonical entries only.  Adding "AND (isoform:true)" would require
     # a separate download pass and is tracked as a TODO.
     # S24: natural variants (ft_variant) are not requested; variant
@@ -496,7 +496,7 @@ class UniProtPipeline(BasePipeline):
     # Airflow DAG that sets env vars before task execution), the class
     # attribute still had the OLD value. The ``__init__`` method
     # re-constructs the query, but only if ``UNIPROT_QUERY`` env var is
-    # NOT set — so the stale class attribute would be permanently used
+    # NOT set -- so the stale class attribute would be permanently used
     # whenever ``UNIPROT_QUERY`` was set.
     #
     # Root fix: replace the class attribute with a ``@property`` that
@@ -506,7 +506,7 @@ class UniProtPipeline(BasePipeline):
     #   - The ``UNIPROT_QUERY`` env var (full override) still takes
     #     precedence and is also read at access time.
     #   - The ``__init__`` method no longer needs to set
-    #     ``self.uniprot_query`` — the property handles it. We keep the
+    #     ``self.uniprot_query`` -- the property handles it. We keep the
     #     ``__init__`` assignment as a private ``_uniprot_query_override``
     #     for explicit per-instance overrides (e.g. tests that want to
     #     pin a specific query without env var manipulation).
@@ -596,7 +596,7 @@ class UniProtPipeline(BasePipeline):
         http_client : requests.Session | None
             Pre-configured HTTP client for API requests.  If *None*, a
             default ``requests.Session`` is created lazily on first use
-            (A4 — connection pooling).
+            (A4 -- connection pooling).
         db_session_factory : callable | None
             Factory for DB sessions.  If *None*, ``get_db_session`` is used.
         loader : callable | None
@@ -621,7 +621,7 @@ class UniProtPipeline(BasePipeline):
         )
         self._loader: Callable[..., Any] = loader or bulk_upsert_proteins
 
-        # Per-run state (I3, I10 — reset at the start of each download).
+        # Per-run state (I3, I10 -- reset at the start of each download).
         self._consecutive_retry_after: int = 0
         self._total_retries: int = 0
         self._force_refresh: bool = False
@@ -630,12 +630,12 @@ class UniProtPipeline(BasePipeline):
         # now a @property that reads env vars at access time. The previous
         # __init__ logic that set ``self.uniprot_query = ...`` based on
         # ``DRUGOS_UNIPROT_ORGANISM_ID`` and ``UNIPROT_QUERY`` is now
-        # redundant — the property handles both. We ONLY set
+        # redundant -- the property handles both. We ONLY set
         # ``_uniprot_query_override`` if a test or caller explicitly
         # passes a query via constructor kwargs (handled below).
         #
         # The previous v42 ROOT FIX (P1-A-11) "construct at instance
-        # creation time" was a partial fix — it still cached the value at
+        # creation time" was a partial fix -- it still cached the value at
         # __init__ time, so env-var changes AFTER __init__ (but BEFORE
         # the first API call) were ignored. The property approach is the
         # complete root fix: the query is fresh on every access.
@@ -675,7 +675,7 @@ class UniProtPipeline(BasePipeline):
         try:
             if UNIPROT_RELEASE and UNIPROT_RELEASE != "current_release":
                 self.source_version = UNIPROT_RELEASE
-        except (ValueError, TypeError, AttributeError):  # pragma: no cover — defensive  # v85 FORENSIC ROOT FIX (BUG #51)
+        except (ValueError, TypeError, AttributeError):  # pragma: no cover -- defensive  # v85 FORENSIC ROOT FIX (BUG #51)
             pass
 
         # Validate configuration (CFG5).
@@ -694,7 +694,7 @@ class UniProtPipeline(BasePipeline):
         """
         if not 1 <= self.page_size <= 500:
             raise ValueError(
-                f"page_size must be 1–500 (UniProt hard cap), got {self.page_size}"
+                f"page_size must be 1-500 (UniProt hard cap), got {self.page_size}"
             )
         if self.max_retries < 0:
             raise ValueError(
@@ -834,7 +834,7 @@ class UniProtPipeline(BasePipeline):
         Returns
         -------
         dict[str, bool]
-            Mapping of check name → pass/fail.  The base ``run()``
+            Mapping of check name -> pass/fail.  The base ``run()``
             considers the pre-check failed if any value is *False*.
         """
         checks: dict[str, bool] = {}
@@ -898,7 +898,7 @@ class UniProtPipeline(BasePipeline):
         return checks
 
     # ---------------------------------------------------------------------
-    # download() — atomic, paginated, with checksum + checkpoint (F3, F5)
+    # download() -- atomic, paginated, with checksum + checkpoint (F3, F5)
     # ---------------------------------------------------------------------
     # v80 FORENSIC ROOT FIX (P0-C1 + P0-C8): the v50 downloader returns
     # files in three different formats (.jsonl / .dat.gz / .csv) but
@@ -907,17 +907,17 @@ class UniProtPipeline(BasePipeline):
     # Organism, Length, Sequence, Cross-reference (STRING), Function [CC]).
     # The helper below normalizes all three formats to that TSV schema so
     # clean() works unchanged in every v50 mode. This also removes the
-    # previous broken .jsonl→.csv branch (which produced dict-repr columns
-    # that clean() could not parse — P0-C8 dead code).
+    # previous broken .jsonl->.csv branch (which produced dict-repr columns
+    # that clean() could not parse -- P0-C8 dead code).
     def _normalize_v50_to_raw_tsv(self, prot_path: Path) -> Path:
         """Normalize any v50 downloader output to the raw UniProt TSV schema.
 
         Handles three input formats:
-          1. ``.jsonl`` — UniProt REST JSON (sample mode). Flattens the
+          1. ``.jsonl`` -- UniProt REST JSON (sample mode). Flattens the
              nested JSON into the 9 expected TSV columns.
-          2. ``.dat.gz`` — Swiss-Prot DAT format, gzipped (full / skip
+          2. ``.dat.gz`` -- Swiss-Prot DAT format, gzipped (full / skip
              mode). Parses the line-oriented DAT records.
-          3. ``.csv``   — embedded-sample fallback (already-cleaned schema
+          3. ``.csv``   -- embedded-sample fallback (already-cleaned schema
              with columns like uniprot_id, gene_symbol, protein_name).
              Maps the embedded schema back to the raw TSV schema.
 
@@ -937,7 +937,7 @@ class UniProtPipeline(BasePipeline):
         out_path = self.effective_raw_dir / "uniprot_human_reviewed.tsv"
         out_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # TSV header — must match _EXPECTED_TSV_COLUMNS exactly so the
+        # TSV header -- must match _EXPECTED_TSV_COLUMNS exactly so the
         # schema-version guard in clean() passes.
         TSV_HEADER = [
             "Entry",
@@ -961,7 +961,7 @@ class UniProtPipeline(BasePipeline):
             inner = suffix
 
         logger.info(
-            "[%s] Normalizing v50 output %s (format=%s) → %s",
+            "[%s] Normalizing v50 output %s (format=%s) -> %s",
             self.source_name, prot_path.name,
             "dat.gz" if is_gz and inner == ".dat" else inner.lstrip("."),
             out_path.name,
@@ -1204,15 +1204,15 @@ class UniProtPipeline(BasePipeline):
         """Flatten one parsed DAT record to the 9-column TSV row.
 
         DAT field reference:
-          ID  — identification (entry name, data class, length)
-          AC  — accession numbers (semicolon-separated; first is primary)
-          DE  — description (protein names)
-          GN  — gene names
-          OS  — organism species
-          SQ  — sequence header (length, MW, CRC64)
-          SQ_sequence — the actual sequence (set by _iter_uniprot_dat_records)
-          DR  — database cross-references
-          CC  — comments (including FUNCTION)
+          ID  -- identification (entry name, data class, length)
+          AC  -- accession numbers (semicolon-separated; first is primary)
+          DE  -- description (protein names)
+          GN  -- gene names
+          OS  -- organism species
+          SQ  -- sequence header (length, MW, CRC64)
+          SQ_sequence -- the actual sequence (set by _iter_uniprot_dat_records)
+          DR  -- database cross-references
+          CC  -- comments (including FUNCTION)
         """
         def _first(values):
             if not values:
@@ -1301,7 +1301,7 @@ class UniProtPipeline(BasePipeline):
                 in_function = True
                 func_parts.append(line.split("FUNCTION:", 1)[-1].strip())
             elif line.startswith("-!-"):
-                # New comment block — stop FUNCTION collection.
+                # New comment block -- stop FUNCTION collection.
                 in_function = False
             elif in_function:
                 func_parts.append(line.strip())
@@ -1317,7 +1317,7 @@ class UniProtPipeline(BasePipeline):
 
         v50 ROOT FIX: now delegates to `pipelines._v50_downloaders.download_uniprot_full`
         which handles BOTH sample mode (8 proteins via REST) AND full mode
-        (streams uniprot_sprot.dat.gz ~500MB from the public FTP — no login).
+        (streams uniprot_sprot.dat.gz ~500MB from the public FTP -- no login).
 
         Uses cursor-based pagination via the ``Link`` header.  Handles
         HTTP 429 rate-limiting with exponential backoff + jitter (C41,
@@ -1351,11 +1351,11 @@ class UniProtPipeline(BasePipeline):
                 # Function [CC]). However the v50 downloader returns ONE
                 # of three formats depending on mode / fallback path:
                 #
-                #   1. ``.jsonl`` (sample mode)   — REST JSON, deeply nested
-                #   2. ``.dat.gz`` (full/skip)    — Swiss-Prot DAT, gzipped
-                #   3. ``.csv`` (embedded fallback) — already-cleaned schema
+                #   1. ``.jsonl`` (sample mode)   -- REST JSON, deeply nested
+                #   2. ``.dat.gz`` (full/skip)    -- Swiss-Prot DAT, gzipped
+                #   3. ``.csv`` (embedded fallback) -- already-cleaned schema
                 #
-                # The previous code only handled .jsonl → .csv conversion
+                # The previous code only handled .jsonl -> .csv conversion
                 # (and the conversion was BROKEN: ``pd.DataFrame(records)``
                 # on nested JSON produced dict-repr columns that
                 # ``to_csv(index=False)`` wrote as Python repr strings;
@@ -1374,31 +1374,31 @@ class UniProtPipeline(BasePipeline):
         except (OSError, ValueError, pd.errors.ParserError) as exc:
             # v84 FORENSIC ROOT FIX (BUG #31): narrowed from broad
             # ``except Exception``. The previous code caught ALL failures
-            # from ``_normalize_v50_to_raw_tsv`` — including programming
-            # bugs (AttributeError, KeyError) — and silently fell back to
+            # from ``_normalize_v50_to_raw_tsv`` -- including programming
+            # bugs (AttributeError, KeyError) -- and silently fell back to
             # the v49 path. A bug in the v50 normalization was masked as
-            # "v50 failed, using v49" — the pipeline ALWAYS fell back to
+            # "v50 failed, using v49" -- the pipeline ALWAYS fell back to
             # v49, which may be stale or broken, with no visible warning.
             # ROOT FIX: catch ONLY the expected I/O, value, and parse
             # errors. Programming bugs propagate so they surface during
             # development instead of silently degrading to v49 forever.
             logger.warning(
-                "[%s] v50 downloader failed (%s) — falling back to v49 path",
+                "[%s] v50 downloader failed (%s) -- falling back to v49 path",
                 self.source_name, exc,
             )
 
-        # I3 / I10 — reset per-run instance state at the start of each download.
+        # I3 / I10 -- reset per-run instance state at the start of each download.
         self._consecutive_retry_after = 0
         self._total_retries = 0
-        # Note: we do NOT clear dead_letter_queue here — it is owned by
+        # Note: we do NOT clear dead_letter_queue here -- it is owned by
         # BasePipeline and is drained by teardown().
 
         output_path = self.effective_raw_dir / "uniprot_human_reviewed.tsv"
 
-        # I8 / D2-2 — honor force_refresh.
+        # I8 / D2-2 -- honor force_refresh.
         if self._force_refresh and output_path.exists():
             logger.info(
-                "[%s] force_refresh=True — deleting cached file: %s",
+                "[%s] force_refresh=True -- deleting cached file: %s",
                 self.source_name, output_path,
             )
             try:
@@ -1416,7 +1416,7 @@ class UniProtPipeline(BasePipeline):
                 except OSError:
                     pass
 
-        # F5 / I1 / I4 — validate cached file before reuse.
+        # F5 / I1 / I4 -- validate cached file before reuse.
         if self._is_raw_file_valid(output_path):
             logger.info(
                 "[%s] Valid cached file exists: %s",
@@ -1424,7 +1424,7 @@ class UniProtPipeline(BasePipeline):
             )
             return output_path
 
-        # L11–L14 — log the download configuration at the start.
+        # L11-L14 -- log the download configuration at the start.
         logger.info(
             "[%s] Download configuration: url=%s, query=%s, fields=%s, "
             "page_size=%d, max_retries=%d",
@@ -1437,7 +1437,7 @@ class UniProtPipeline(BasePipeline):
             extra=self._log_context(),
         )
 
-        # SEC1 — validate the search URL before fetching.
+        # SEC1 -- validate the search URL before fetching.
         self._validate_url(self.uniprot_search_url)
 
         fields_str = ",".join(self.uniprot_fields)
@@ -1467,7 +1467,7 @@ class UniProtPipeline(BasePipeline):
         # and we'd be re-writing from page N to a fresh temp file
         # (which is fine but operators should know).
         #
-        # v80 FORENSIC ROOT FIX (P0-C6 — silent data loss on resume):
+        # v80 FORENSIC ROOT FIX (P0-C6 -- silent data loss on resume):
         #   The previous implementation opened ``tmp_path`` with mode
         #   ``"w"`` (truncate) UNCONDITIONALLY, even when resuming from
         #   a checkpoint. So pages 1..N-1 that were already fetched in
@@ -1475,7 +1475,7 @@ class UniProtPipeline(BasePipeline):
         #   run opened the temp file. Only page N onward was written.
         #   The final TSV therefore contained ONLY the tail of the
         #   dataset. Operators saw "100K proteins loaded" but reality
-        #   was "last 20K only" — a silent partial-data-load that
+        #   was "last 20K only" -- a silent partial-data-load that
         #   corrupted every downstream KG edge / TransE training run
         #   for weeks without any error signal.
         #
@@ -1519,7 +1519,7 @@ class UniProtPipeline(BasePipeline):
                     # will open it in APPEND mode below and preserve
                     # the existing header (set header_written=True so
                     # the first page of this run does NOT re-write the
-                    # header — that would produce a duplicate header
+                    # header -- that would produce a duplicate header
                     # row in the middle of the file). If the temp file
                     # does NOT exist (e.g. operator deleted it), we
                     # fall back to fresh-write semantics: header_written
@@ -1545,7 +1545,7 @@ class UniProtPipeline(BasePipeline):
             header_written = True
             logger.info(
                 "[%s] P0-C6: resuming with existing temp file (%d bytes) "
-                "— appending pages, header preserved",
+                "-- appending pages, header preserved",
                 self.source_name, tmp_path.stat().st_size,
             )
         else:
@@ -1556,7 +1556,7 @@ class UniProtPipeline(BasePipeline):
                 logger.warning(
                     "[%s] P0-C6: DRUGOS_UNIPROT_RESUME=1 but temp file %s "
                     "does not exist (was deleted?). Starting fresh from "
-                    "checkpoint cursor URL — pages 1..N-1 will be re-fetched.",
+                    "checkpoint cursor URL -- pages 1..N-1 will be re-fetched.",
                     self.source_name, tmp_path,
                 )
 
@@ -1585,7 +1585,7 @@ class UniProtPipeline(BasePipeline):
                         # cursors expire after ~15 minutes; if the
                         # previous run failed mid-way and the operator
                         # re-triggers with DRUGOS_UNIPROT_RESUME=1,
-                        # the saved cursor URL is now stale → HTTP 400
+                        # the saved cursor URL is now stale -> HTTP 400
                         # (invalid cursor) or 404 (cursor not found).
                         # The 4xx is non-retryable per R13, so without
                         # this recovery the pipeline is STUCK until the
@@ -1603,7 +1603,7 @@ class UniProtPipeline(BasePipeline):
                         ):
                             logger.warning(
                                 "[%s] COMP-6 ROOT FIX: resumed cursor "
-                                "URL returned 4xx (stale cursor) — "
+                                "URL returned 4xx (stale cursor) -- "
                                 "deleting checkpoint and restarting "
                                 "from page 1. The previous run's "
                                 "cursor expired (UniProt cursors "
@@ -1632,14 +1632,14 @@ class UniProtPipeline(BasePipeline):
                             is_resuming = False  # we're a fresh run now
                             continue
                         # Not a stale-cursor case, or already recovered
-                        # — re-raise to the outer except.
+                        # -- re-raise to the outer except.
                         raise
 
-                    # First fetch succeeded — clear the flag so subsequent
+                    # First fetch succeeded -- clear the flag so subsequent
                     # 4xx errors are NOT treated as stale-cursor cases.
                     _is_first_resume_fetch = False
 
-                    # DQ13 — capture the total result count from the response.
+                    # DQ13 -- capture the total result count from the response.
                     x_total = response.headers.get("X-Total-Results")
                     if x_total and expected_total is None:
                         try:
@@ -1651,7 +1651,7 @@ class UniProtPipeline(BasePipeline):
                         except ValueError:
                             pass
 
-                    # R12 / R15 / R16 — validate Content-Type.
+                    # R12 / R15 / R16 -- validate Content-Type.
                     content_type = response.headers.get("Content-Type", "")
                     if (
                         "text/tab-separated-values" not in content_type
@@ -1662,7 +1662,7 @@ class UniProtPipeline(BasePipeline):
                             self.source_name, page_num, content_type,
                         )
 
-                    # L5 — warn on empty response body instead of silent break.
+                    # L5 -- warn on empty response body instead of silent break.
                     text = (response.text or "").strip()
                     if not text:
                         logger.warning(
@@ -1671,12 +1671,12 @@ class UniProtPipeline(BasePipeline):
                         )
                         break
 
-                    # C2 — use splitlines() to handle \r\n and \n consistently.
+                    # C2 -- use splitlines() to handle \r\n and \n consistently.
                     lines = text.splitlines()
                     if not lines:
                         break
 
-                    # F3 / C1 — correctly skip the re-emitted TSV header on
+                    # F3 / C1 -- correctly skip the re-emitted TSV header on
                     # subsequent pages.  UniProt re-emits the header on every
                     # cursor page.
                     if not header_written:
@@ -1689,7 +1689,7 @@ class UniProtPipeline(BasePipeline):
                         # v83 FORENSIC ROOT FIX (P2-10): the previous code
                         # checked ``lines[0].startswith("Entry\t") or
                         # lines[0] == "Entry"``. The second condition
-                        # (``== "Entry"`` exactly, no tab) is dead code —
+                        # (``== "Entry"`` exactly, no tab) is dead code --
                         # UniProt TSV always has multiple columns
                         # (``Entry\tEntry Name\t...``), so a bare ``"Entry"``
                         # with no tab is impossible. ROOT FIX: removed the
@@ -1698,14 +1698,14 @@ class UniProtPipeline(BasePipeline):
                         if lines[0].startswith("Entry\t"):
                             data_lines = lines[1:]
                         else:
-                            # No header on this page — keep all lines.
+                            # No header on this page -- keep all lines.
                             data_lines = lines
 
-                    # C4 — filter out blank lines (some pages emit a trailing
+                    # C4 -- filter out blank lines (some pages emit a trailing
                     # blank line which would create a phantom "" uniprot_id row).
                     data_lines = [ln for ln in data_lines if ln.strip()]
 
-                    # P3 — bulk write instead of line-by-line.
+                    # P3 -- bulk write instead of line-by-line.
                     if data_lines:
                         fh.write("\n".join(data_lines) + "\n")
 
@@ -1717,7 +1717,7 @@ class UniProtPipeline(BasePipeline):
                         extra=self._log_context(),
                     )
 
-                    # R8 — write a checkpoint after each page so we can
+                    # R8 -- write a checkpoint after each page so we can
                     # resume from cursor if needed (not yet implemented
                     # end-to-end, but the checkpoint is written for diagnosis).
                     next_url = self._parse_link_header(
@@ -1729,7 +1729,7 @@ class UniProtPipeline(BasePipeline):
                     url = next_url
                     params = None
 
-            # DQ13 — validate total count.
+            # DQ13 -- validate total count.
             if expected_total is not None and total_records != expected_total:
                 logger.warning(
                     "[%s] Record count mismatch: fetched %d, UniProt reported "
@@ -1738,12 +1738,12 @@ class UniProtPipeline(BasePipeline):
                     self.source_name, total_records, expected_total,
                 )
 
-            # F5 — atomic rename.  Only after the full download succeeds.
+            # F5 -- atomic rename.  Only after the full download succeeds.
             tmp_path.replace(output_path)
 
             # v83 COMP-6 ROOT FIX: delete the checkpoint on success so
             # the next run does not reuse a stale cursor URL. The
-            # previous code NEVER deleted the checkpoint — on a failed-
+            # previous code NEVER deleted the checkpoint -- on a failed-
             # then-resumed run, the stale cursor caused HTTP 400 and the
             # pipeline was stuck. Deleting here guarantees the next run
             # starts fresh from page 1 unless the operator explicitly
@@ -1752,13 +1752,13 @@ class UniProtPipeline(BasePipeline):
             self._delete_checkpoint()
 
         except (OSError, PermissionError) as exc:
-            # R24 / R25 — disk full or permission denied.
+            # R24 / R25 -- disk full or permission denied.
             logger.error(
                 "[%s] OS error during download: %s (disk full or permission denied?)",
                 self.source_name, exc,
                 exc_info=getattr(self, "log_exc_info", True),
             )
-            # SEC17 — securely delete the partial temp file.
+            # SEC17 -- securely delete the partial temp file.
             self._secure_delete(tmp_path)
             raise DownloadError(f"OS error during download: {exc}") from exc
         except (OSError, RuntimeError, ValueError):  # v85 FORENSIC ROOT FIX (BUG #51)
@@ -1766,11 +1766,11 @@ class UniProtPipeline(BasePipeline):
             self._secure_delete(tmp_path)
             raise
 
-        # F5 / I4 — write a SHA-256 sidecar so subsequent runs can verify
+        # F5 / I4 -- write a SHA-256 sidecar so subsequent runs can verify
         # the cached file's integrity.
         self._write_checksum(output_path)
 
-        # SEC10 / SEC14 — restrict file permissions to owner-only.
+        # SEC10 / SEC14 -- restrict file permissions to owner-only.
         self._set_secure_permissions(output_path)
 
         elapsed = time.monotonic() - start_time
@@ -1786,7 +1786,7 @@ class UniProtPipeline(BasePipeline):
         return output_path
 
     # ---------------------------------------------------------------------
-    # _fetch_page() — exponential backoff + jitter, rate limiter (C41, C42)
+    # _fetch_page() -- exponential backoff + jitter, rate limiter (C41, C42)
     # ---------------------------------------------------------------------
     def _fetch_page(
         self, url: str, params: Optional[dict[str, Any]] = None,
@@ -1795,7 +1795,7 @@ class UniProtPipeline(BasePipeline):
 
         Uses exponential backoff with jitter (C41, C42) and raises
         ``DownloadError`` on exhaustion (C39).  Distinguishes 4xx
-        (permanent — do not retry) from 5xx (transient — retry) per R13.
+        (permanent -- do not retry) from 5xx (transient -- retry) per R13.
 
         Parameters
         ----------
@@ -1804,7 +1804,7 @@ class UniProtPipeline(BasePipeline):
         params : dict | None
             Query parameters.  Used only for the first page; subsequent
             pages use the cursor URL embedded in the ``Link`` header
-            (C33 — ``params=None`` on subsequent calls).
+            (C33 -- ``params=None`` on subsequent calls).
 
         Returns
         -------
@@ -1820,14 +1820,14 @@ class UniProtPipeline(BasePipeline):
         """
         import random
 
-        # SEC1 — validate URL before fetching.
+        # SEC1 -- validate URL before fetching.
         self._validate_url(url)
 
         last_exception: Optional[Exception] = None
 
         for attempt in range(1, self.max_retries + 1):
             try:
-                # A5 / R21 — be polite to the API; rate-limit before each call.
+                # A5 / R21 -- be polite to the API; rate-limit before each call.
                 if getattr(self, "_rate_limiter", None) is not None:
                     try:
                         self._rate_limiter.wait()
@@ -1835,23 +1835,23 @@ class UniProtPipeline(BasePipeline):
                         # Rate limiter should never raise, but be defensive.
                         pass
 
-                # A4 / R22 / P13 — reuse the HTTP session for connection pooling.
+                # A4 / R22 / P13 -- reuse the HTTP session for connection pooling.
                 session = self._get_http_session()
                 # v42 ROOT FIX (P1-A-12): pass the FULL tuple
                 # ``download_timeout = (connect, read) = (30.0, 600.0)``
                 # rather than just the read timeout. The previous
                 # ``timeout=self.download_timeout[1]`` passed a single
                 # float (600.0), which requests interprets as BOTH the
-                # connect AND read timeout — connect timeout became
+                # connect AND read timeout -- connect timeout became
                 # 600s instead of 30s, so a hung TCP handshake wasted
                 # 10 minutes per page (instead of failing fast at 30s).
                 resp = session.get(
                     url,
                     params=params,
-                    timeout=self.download_timeout,  # CFG16 — (connect, read) tuple
+                    timeout=self.download_timeout,  # CFG16 -- (connect, read) tuple
                 )
 
-                # SEC6 — cap response body size to prevent OOM.
+                # SEC6 -- cap response body size to prevent OOM.
                 content_length = resp.headers.get("Content-Length")
                 if content_length:
                     try:
@@ -1865,7 +1865,7 @@ class UniProtPipeline(BasePipeline):
                         pass
 
                 if resp.status_code == 429:
-                    # C41 — exponential backoff.
+                    # C41 -- exponential backoff.
                     # FIX-P2-C-13 (audit P2): the previous code computed
                     # ``delay = self.base_retry_delay * (2 ** (attempt - 1))``
                     # with NO cap. With ``base_retry_delay=10`` and
@@ -1880,7 +1880,7 @@ class UniProtPipeline(BasePipeline):
                         self.base_retry_delay * (2 ** (attempt - 1)),
                         self.max_retry_after_wait,
                     )
-                    # C42 — random jitter (0 to 50% of delay).
+                    # C42 -- random jitter (0 to 50% of delay).
                     jitter = random.uniform(0, delay * 0.5)
                     total_delay = delay + jitter
                     self._total_retries += 1
@@ -1894,11 +1894,11 @@ class UniProtPipeline(BasePipeline):
                     time.sleep(total_delay)
                     continue
 
-                # R13 — 4xx is permanent (our request is malformed).  Don't retry.
+                # R13 -- 4xx is permanent (our request is malformed).  Don't retry.
                 if 400 <= resp.status_code < 500:
                     resp.raise_for_status()
 
-                # 5xx is transient — raise_for_status will raise, then we retry.
+                # 5xx is transient -- raise_for_status will raise, then we retry.
                 resp.raise_for_status()
 
                 # Handle Retry-After header (UniProt sometimes returns 200 +
@@ -1906,7 +1906,7 @@ class UniProtPipeline(BasePipeline):
                 retry_after = resp.headers.get("Retry-After")
                 if retry_after:
                     self._consecutive_retry_after += 1
-                    # C8 — break the loop after N consecutive Retry-Afters.
+                    # C8 -- break the loop after N consecutive Retry-Afters.
                     if self._consecutive_retry_after > self.consecutive_retry_after_limit:
                         logger.warning(
                             "[%s] %d consecutive Retry-After headers. "
@@ -1925,7 +1925,7 @@ class UniProtPipeline(BasePipeline):
                     time.sleep(wait)
                     continue
 
-                # Success — reset the consecutive-retry counter.
+                # Success -- reset the consecutive-retry counter.
                 self._consecutive_retry_after = 0
                 return resp
 
@@ -1933,7 +1933,7 @@ class UniProtPipeline(BasePipeline):
                 last_exception = exc
 
                 # v29 ROOT FIX (audit P1-15): 4xx errors (except 429) are
-                # permanent client errors — retrying wastes API quota. Only
+                # permanent client errors -- retrying wastes API quota. Only
                 # retry 5xx and network errors.  Although the 4xx branch above
                 # calls raise_for_status() (which raises HTTPError), that
                 # HTTPError is caught here by RequestException and would be
@@ -1945,7 +1945,7 @@ class UniProtPipeline(BasePipeline):
                             and 400 <= status < 500
                             and status != 429):
                         logger.warning(
-                            "[%s] HTTP %d — permanent client error, not "
+                            "[%s] HTTP %d -- permanent client error, not "
                             "retrying: %s",
                             self.source_name, status, exc,
                             extra=self._log_context(),
@@ -1956,13 +1956,13 @@ class UniProtPipeline(BasePipeline):
                         ) from exc
 
                 if attempt == self.max_retries:
-                    # C39 — raise DownloadError, not RuntimeError.
+                    # C39 -- raise DownloadError, not RuntimeError.
                     raise DownloadError(
                         f"Failed to fetch UniProt page after "
                         f"{self.max_retries} retries: {exc}"
                     ) from exc
 
-                # C41 — exponential backoff.
+                # C41 -- exponential backoff.
                 delay = self.base_retry_delay * (2 ** (attempt - 1))
                 jitter = random.uniform(0, delay * 0.5)
                 total_delay = delay + jitter
@@ -1975,14 +1975,14 @@ class UniProtPipeline(BasePipeline):
                 )
                 time.sleep(total_delay)
 
-        # C40 — all retries exhausted without a return.
+        # C40 -- all retries exhausted without a return.
         raise DownloadError(
             f"Failed to fetch UniProt page after {self.max_retries} retries"
             + (f": {last_exception}" if last_exception else "")
         )
 
     # ---------------------------------------------------------------------
-    # _parse_link_header() — URL-validated Link parsing (C5, C32, C34, SEC8)
+    # _parse_link_header() -- URL-validated Link parsing (C5, C32, C34, SEC8)
     # ---------------------------------------------------------------------
     @staticmethod
     def _parse_link_header(link_header: Optional[str]) -> Optional[str]:
@@ -2005,7 +2005,7 @@ class UniProtPipeline(BasePipeline):
         """
         if not link_header or not isinstance(link_header, str):
             return None
-        # C34/C5 — match <URL> ; rel="next" with the URL enclosed in angle
+        # C34/C5 -- match <URL> ; rel="next" with the URL enclosed in angle
         # brackets.  Allow arbitrary whitespace between '>' and ';' and
         # between ';' and 'rel='.  This correctly handles commas inside
         # URLs (rare but possible).
@@ -2025,7 +2025,7 @@ class UniProtPipeline(BasePipeline):
         return None
 
     # ---------------------------------------------------------------------
-    # _parse_retry_after() — delta-seconds and HTTP-date (C6, SEC7, R1)
+    # _parse_retry_after() -- delta-seconds and HTTP-date (C6, SEC7, R1)
     # ---------------------------------------------------------------------
     def _parse_retry_after(self, retry_after: str) -> int:
         """Parse a ``Retry-After`` header value into seconds (C6, SEC7).
@@ -2050,7 +2050,7 @@ class UniProtPipeline(BasePipeline):
         try:
             wait = int(retry_after)
         except (ValueError, TypeError):
-            # C6 — try HTTP-date format.
+            # C6 -- try HTTP-date format.
             try:
                 dt = parsedate_to_datetime(retry_after)
                 if dt is not None:
@@ -2069,7 +2069,7 @@ class UniProtPipeline(BasePipeline):
                 )
                 wait = int(self.base_retry_delay)
 
-        # SEC7 / C43 — cap at maximum.
+        # SEC7 / C43 -- cap at maximum.
         if wait > self.max_retry_after_wait:
             logger.warning(
                 "[%s] Retry-After value %ds exceeds maximum %ds. Capping.",
@@ -2087,7 +2087,7 @@ class UniProtPipeline(BasePipeline):
 
         A file is valid if:
         1. It exists and has non-zero size.
-        2. It has at least 2 lines (header + ≥ 1 data row) — guards
+        2. It has at least 2 lines (header + ≥ 1 data row) -- guards
            against partial downloads where only the header was written.
         3. It is not older than ``max_cache_age_days`` (CFG19).
         4. Its SHA-256 checksum matches the stored checksum (if a
@@ -2122,7 +2122,7 @@ class UniProtPipeline(BasePipeline):
         except (OSError, UnicodeDecodeError):
             return False
 
-        # CFG19 — check age.
+        # CFG19 -- check age.
         try:
             file_age_days = (time.time() - path.stat().st_mtime) / 86400
             if file_age_days > self.max_cache_age_days:
@@ -2134,7 +2134,7 @@ class UniProtPipeline(BasePipeline):
         except OSError:
             return False
 
-        # I4 — check SHA-256 if a sidecar exists.
+        # I4 -- check SHA-256 if a sidecar exists.
         checksum_path = path.with_suffix(path.suffix + ".sha256")
         if checksum_path.exists():
             try:
@@ -2184,7 +2184,7 @@ class UniProtPipeline(BasePipeline):
     def _write_checksum(self, path: Path) -> None:
         """Write a SHA-256 checksum sidecar for *path* (I4).
 
-        Sidecar filename: ``<path>.sha256`` (so ``.tsv`` → ``.tsv.sha256``).
+        Sidecar filename: ``<path>.sha256`` (so ``.tsv`` -> ``.tsv.sha256``).
         Sidecar format: ``<hexdigest>  <filename>\\n`` (the standard
         ``sha256sum`` format so ``sha256sum -c`` works).
         """
@@ -2231,7 +2231,7 @@ class UniProtPipeline(BasePipeline):
         staged_path = staged_dir / raw_path.name
 
         if staged_path.exists():
-            # Verify checksum — if match, skip the copy.
+            # Verify checksum -- if match, skip the copy.
             try:
                 raw_hash = self._compute_sha256(raw_path)
                 staged_hash = self._compute_sha256(staged_path)
@@ -2243,7 +2243,7 @@ class UniProtPipeline(BasePipeline):
         try:
             shutil.copy2(raw_path, staged_path)
             logger.info(
-                "[%s] Staged raw file: %s → %s",
+                "[%s] Staged raw file: %s -> %s",
                 self.source_name, raw_path, staged_path,
             )
         except OSError as exc:
@@ -2318,12 +2318,12 @@ class UniProtPipeline(BasePipeline):
 
         Called after a successful download so the next run does not
         reuse a stale cursor URL. The previous code NEVER deleted the
-        checkpoint — even on full success — so the checkpoint file
+        checkpoint -- even on full success -- so the checkpoint file
         persisted with the LAST ``next_url`` (empty string on success,
         but a valid cursor URL if the download FAILED mid-way). On the
         next run with ``DRUGOS_UNIPROT_RESUME=1``, the stale cursor
         was reused; UniProt returns HTTP 400 (invalid cursor) for
-        expired cursors, which is a non-retryable 4xx → the pipeline
+        expired cursors, which is a non-retryable 4xx -> the pipeline
         was stuck until the operator manually deleted the checkpoint
         file.
 
@@ -2342,17 +2342,17 @@ class UniProtPipeline(BasePipeline):
                     self.source_name, checkpoint_path.name,
                 )
         except OSError as exc:
-            # Non-fatal — the checkpoint will be overwritten on the
+            # Non-fatal -- the checkpoint will be overwritten on the
             # next run's first page write. Log at DEBUG so operators
             # can diagnose permission issues if they arise.
             logger.debug(
                 "[%s] Could not delete checkpoint %s: %s "
-                "(non-fatal — will be overwritten on next run)",
+                "(non-fatal -- will be overwritten on next run)",
                 self.source_name, checkpoint_path.name, exc,
             )
 
     # ---------------------------------------------------------------------
-    # clean() — full cleaning pipeline (F2, F3, F4, S1–S25, DQ1–DQ25, I2, I6)
+    # clean() -- full cleaning pipeline (F2, F3, F4, S1-S25, DQ1-DQ25, I2, I6)
     # ---------------------------------------------------------------------
     def clean(self, raw_path: Path) -> pd.DataFrame:
         """Clean and normalize UniProt protein data.
@@ -2365,7 +2365,7 @@ class UniProtPipeline(BasePipeline):
         4. Validate that critical columns were renamed successfully (C11).
         5. Extract ``gene_symbol`` from ``gene_names`` if missing (S3).
         6. Extract ``protein_name_canonical`` from ``protein_name`` (F4, S4).
-        7. Set ``gene_name = None`` (deprecated — F4).
+        7. Set ``gene_name = None`` (deprecated -- F4).
         8. Clean ``function_desc`` (S5, S6, S7, S16, S17).
         9. Extract ``string_id`` and ``all_string_ids`` (S8, S9).
         10. Validate ``uniprot_id`` format (S20, DQ1).
@@ -2374,9 +2374,9 @@ class UniProtPipeline(BasePipeline):
         13. Cross-validate ``length`` vs ``len(sequence)`` (S11, DQ4).
         14. Detect & log duplicate ``uniprot_id``s with content hash (DQ2, I14).
         15. Sort by ``uniprot_id`` for deterministic dedup (I2, I6).
-        16. Drop rows with null ``uniprot_id`` (DQ19 — dead-letter).
+        16. Drop rows with null ``uniprot_id`` (DQ19 -- dead-letter).
         17. Drop duplicate ``uniprot_id``s (keep first).
-        18. Validate organism — log non-Homo sapiens records (S10, DQ5).
+        18. Validate organism -- log non-Homo sapiens records (S10, DQ5).
         19. Handle missing protein fields via ``handle_missing_protein_fields``
             with ``organism_fill_mode="strict"`` (S10).
         20. Ensure all required output columns exist (F4, C48, DQ18).
@@ -2394,7 +2394,7 @@ class UniProtPipeline(BasePipeline):
         pd.DataFrame
             Cleaned protein DataFrame.  The base class ``run()``
             persists this to ``proteins.csv`` via
-            ``_persist_cleaned_data()`` (A3 — we do NOT write the CSV
+            ``_persist_cleaned_data()`` (A3 -- we do NOT write the CSV
             ourselves).
         """
         with self._timed_operation("clean"):
@@ -2409,7 +2409,7 @@ class UniProtPipeline(BasePipeline):
                     encoding="utf-8",
                 )
             except (pd.errors.ParserError, OSError, UnicodeDecodeError) as exc:
-                # L7 — wrap read failure with file context.
+                # L7 -- wrap read failure with file context.
                 raise DownloadError(
                     f"Failed to read UniProt TSV {raw_path}: {exc}"
                 ) from exc
@@ -2420,7 +2420,7 @@ class UniProtPipeline(BasePipeline):
                 extra=self._log_context(),
             )
 
-            # L19 — log raw vs cleaned ratio at the end.
+            # L19 -- log raw vs cleaned ratio at the end.
             raw_count = len(df)
             self._log_null_counts(df, stage="raw")
 
@@ -2434,7 +2434,7 @@ class UniProtPipeline(BasePipeline):
                     self.source_name, sorted(missing), sorted(actual_columns),
                 )
 
-            # INT14 — log unknown (future) columns gracefully.
+            # INT14 -- log unknown (future) columns gracefully.
             extra_columns = actual_columns - _EXPECTED_TSV_COLUMNS
             if extra_columns:
                 logger.info(
@@ -2452,7 +2452,7 @@ class UniProtPipeline(BasePipeline):
                 "Organism": "organism",
                 "Length": "length",
                 "Sequence": "sequence",
-                # S18 — UniProt REST uses "Cross-reference (STRING)" for xref_string.
+                # S18 -- UniProt REST uses "Cross-reference (STRING)" for xref_string.
                 "Cross-reference (STRING)": "string_xref",
                 "Function [CC]": "function_desc",
             }
@@ -2468,7 +2468,7 @@ class UniProtPipeline(BasePipeline):
                         f"changed. Check UNIPROT_FIELDS and column_map."
                     )
 
-            # L6 — warn for ALL missing important columns, not just gene_symbol.
+            # L6 -- warn for ALL missing important columns, not just gene_symbol.
             self._log_missing_columns(df)
 
             # ---------- Step 5: gene_symbol (S3) ----------
@@ -2497,7 +2497,7 @@ class UniProtPipeline(BasePipeline):
             else:
                 df["protein_name_canonical"] = None
 
-            # F4 — gene_name is DEPRECATED.  Set to None to stop the data
+            # F4 -- gene_name is DEPRECATED.  Set to None to stop the data
             # corruption.  Downstream code MUST use protein_name_canonical
             # (for canonical names) or gene_symbol (for gene symbols).
             df["gene_name"] = None
@@ -2529,7 +2529,7 @@ class UniProtPipeline(BasePipeline):
                 df["string_id"] = None
                 df["all_string_ids"] = None
 
-            # DQ12 — log duplicate string_ids.
+            # DQ12 -- log duplicate string_ids.
             if "string_id" in df.columns:
                 dup_string = df[df["string_id"].notna()]["string_id"].duplicated().sum()
                 if dup_string > 0:
@@ -2553,7 +2553,7 @@ class UniProtPipeline(BasePipeline):
                 # report a MEANINGFUL ``validity_uniprot_id_raw`` metric.
                 # The previous code computed ``validity_uniprot_id`` on the
                 # POST-quarantine DataFrame (after invalid records were
-                # removed at this step), so the metric was ALWAYS 1.0 —
+                # removed at this step), so the metric was ALWAYS 1.0 --
                 # meaningless. ROOT FIX: store the raw counts as instance
                 # attributes; ``_compute_dq_metrics`` reads them to compute
                 # a real validity ratio (valid / total_raw).
@@ -2565,7 +2565,7 @@ class UniProtPipeline(BasePipeline):
                         "[%s] %d records have invalid UniProt accession format: %s",
                         self.source_name, invalid_count, invalid_ids,
                     )
-                    # DQ19 — quarantine invalid records.
+                    # DQ19 -- quarantine invalid records.
                     if hasattr(self, "dead_letter_queue"):
                         invalid_df = df[invalid_mask].copy()
                         for _, row in invalid_df.iterrows():
@@ -2638,7 +2638,7 @@ class UniProtPipeline(BasePipeline):
                         "[%s] Duplicate accessions (first 10): %s",
                         self.source_name, dup_ids,
                     )
-                    # I14 — log content hash for duplicates with different sequences.
+                    # I14 -- log content hash for duplicates with different sequences.
                     self._log_duplicate_content_hash(df)
 
             # ---------- Step 15 & 16: deterministic sort + dedup (I2, I6) ----------
@@ -2669,14 +2669,14 @@ class UniProtPipeline(BasePipeline):
             # common name in parentheses), while the original strict check
             # required an exact match against ``"Homo sapiens"``. As a
             # result EVERY record was being flagged as "non-Homo sapiens"
-            # — a false-positive that polluted the audit log and risked
+            # -- a false-positive that polluted the audit log and risked
             # downstream code paths treating genuine human proteins as
             # non-human. The fix normalises the organism field by:
             #   1. Stripping the parenthetical common-name suffix.
             #   2. Whitespace-trimming.
             #   3. Falling back to "Homo sapiens" for blanks (since the
             #      query is organism_id:9606, we are confident these are
-            #      human — see S10 note below).
+            #      human -- see S10 note below).
             # After normalisation, the strict "Homo sapiens" comparison
             # works correctly and genuine non-human records (if any slip
             # through) still raise the warning.
@@ -2705,7 +2705,7 @@ class UniProtPipeline(BasePipeline):
                         self.source_name, len(non_human),
                         non_human["organism"].unique().tolist()[:5],
                     )
-                # S10 — fill missing organism with "Homo sapiens" only because
+                # S10 -- fill missing organism with "Homo sapiens" only because
                 # the query is organism_id:9606 (we are confident these are human).
                 # The handle_missing_protein_fields(strict) call below will
                 # additionally verify nothing fishy is going on.
@@ -2715,14 +2715,14 @@ class UniProtPipeline(BasePipeline):
                 ] = "Homo sapiens"
 
             # ---------- Step 19: handle missing protein fields (S10) ----------
-            # F2 — Sequences MUST be stored in full (titin ~34 350 aa).
+            # F2 -- Sequences MUST be stored in full (titin ~34 350 aa).
             # ``handle_missing_protein_fields`` truncates at ``_MAX_SEQUENCE_LENGTH``
             # (default 10 000), which would silently destroy long proteins.
             # The cleaning module's ``_MAX_SEQUENCE_LENGTH`` is module-level state
             # that can be modified by other tests (e.g.
             # ``test_cleaning_init_16_domains.py::test_lazy_import_does_not_load_submodules``
             # re-imports the module, resetting the constant).  We therefore
-            # CANNOT rely on temporarily raising the cap — the function may
+            # CANNOT rely on temporarily raising the cap -- the function may
             # still see the OLD module's value.
             #
             # Solution: do sequence missing-value handling ourselves (F2/S21)
@@ -2732,12 +2732,12 @@ class UniProtPipeline(BasePipeline):
             #
             # v83 FORENSIC ROOT FIX (P1-7): the previous code restored the
             # sequence column via ``df["sequence"] = _sequence_col.values``
-            # — POSITIONAL assignment. If ``handle_missing_protein_fields``
+            # -- POSITIONAL assignment. If ``handle_missing_protein_fields``
             # DROPPED rows (e.g. missing organism in strict mode), the
             # ``.values`` array was LONGER than ``df``, and pandas silently
             # truncated it (or raised on length mismatch). If it REORDERED
             # rows (unlikely but possible), sequences got misaligned with
-            # their uniprot_id — a silent, life-safety-critical corruption.
+            # their uniprot_id -- a silent, life-safety-critical corruption.
             # ROOT FIX: restore by INDEX ALIGNMENT via ``.reindex(df.index)``.
             # If a row was dropped, its sequence is gone (correct). If rows
             # were reordered, sequences follow their original rows (correct).
@@ -2759,7 +2759,7 @@ class UniProtPipeline(BasePipeline):
 
             # Restore the sequence column by INDEX ALIGNMENT (v83 P1-7).
             # ``_sequence_col`` is a Series indexed by the ORIGINAL df.index.
-            # ``.reindex(df.index)`` aligns by label — rows that survived
+            # ``.reindex(df.index)`` aligns by label -- rows that survived
             # ``handle_missing_protein_fields`` get their original sequence;
             # dropped rows are absent from df.index and contribute nothing.
             if _sequence_col is not None:
@@ -2792,7 +2792,7 @@ class UniProtPipeline(BasePipeline):
             # ---------- Step 22: DQ metrics (DQ20, L23) ----------
             dq_metrics = self._compute_dq_metrics(df)
 
-            # v29 ROOT FIX (audit P1-24): ID format divergence — normalize
+            # v29 ROOT FIX (audit P1-24): ID format divergence -- normalize
             # to canonical form before writing. UniProt accessions and gene
             # symbols are uppercased + stripped. This guarantees downstream
             # joins against STRING (uniprot_id), DisGeNET (gene_symbol),
@@ -2819,7 +2819,7 @@ class UniProtPipeline(BasePipeline):
             # ``_sanitize_dataframe_for_csv(df)`` on the DataFrame that is
             # BOTH written to CSV AND loaded to DB. The sanitizer prepends
             # ``'`` to any string starting with ``=``, ``+``, ``-``, ``@``,
-            # ``\t``, ``\r`` — but legitimate UniProt protein names CAN
+            # ``\t``, ``\r`` -- but legitimate UniProt protein names CAN
             # start with ``-`` or ``+`` (e.g. chemokine fragment names,
             # charge-tagged peptide names), and ``function_desc`` entries
             # can start with ``-`` (e.g. "-Catalytic activity:..."). The
@@ -2833,10 +2833,10 @@ class UniProtPipeline(BasePipeline):
             # copy. The ``'`` prefix never reaches the DB.
             # (Sanitization moved to ``_persist_cleaned_data`` override below.)
 
-            # Final null-count log (L19) — raw vs cleaned ratio.
+            # Final null-count log (L19) -- raw vs cleaned ratio.
             self._log_null_counts(df, stage="clean")
             logger.info(
-                "[%s] Clean complete: %d raw → %d cleaned (ratio: %.4f, "
+                "[%s] Clean complete: %d raw -> %d cleaned (ratio: %.4f, "
                 "DQ score: %.4f)",
                 self.source_name, raw_count, len(df),
                 (len(df) / raw_count) if raw_count > 0 else 0.0,
@@ -2847,7 +2847,7 @@ class UniProtPipeline(BasePipeline):
             return df
 
     # ---------------------------------------------------------------------
-    # _extract_canonical_name() — nested parens, ECO, EC numbers (S4, S14, S15, C14, C15)
+    # _extract_canonical_name() -- nested parens, ECO, EC numbers (S4, S14, S15, C14, C15)
     # ---------------------------------------------------------------------
     def _extract_canonical_name(self, protein_name: Optional[str]) -> Optional[str]:
         """Extract the canonical protein name (S4, S14, S15, C14, C15).
@@ -2873,13 +2873,13 @@ class UniProtPipeline(BasePipeline):
         if not protein_name.strip():
             return None
 
-        # S14 — strip {ECO:...} tags first (before paren removal, so the
+        # S14 -- strip {ECO:...} tags first (before paren removal, so the
         # paren-stripping regex doesn't get confused by braces).
         cleaned = _ECO_TAG_RE.sub("", protein_name).strip()
         if not cleaned:
             return None
 
-        # S4 — strip nested parentheses via manual scan (regex can't handle
+        # S4 -- strip nested parentheses via manual scan (regex can't handle
         # arbitrary nesting).  We keep everything before the first UNMATCHED
         # open paren.
         result_chars: list[str] = []
@@ -2888,7 +2888,7 @@ class UniProtPipeline(BasePipeline):
             if ch == "(":
                 depth += 1
                 if depth == 1:
-                    # First open paren — stop appending (but continue scanning
+                    # First open paren -- stop appending (but continue scanning
                     # to track depth so nested closes don't end the loop early).
                     continue
             elif ch == ")":
@@ -2900,20 +2900,20 @@ class UniProtPipeline(BasePipeline):
 
         canonical = "".join(result_chars).strip()
 
-        # C15 — strip trailing EC number (strict format: EC + 2–4 dotted ints).
+        # C15 -- strip trailing EC number (strict format: EC + 2-4 dotted ints).
         canonical = _EC_NUMBER_RE.sub("", canonical).strip()
 
-        # S15 — if everything was in parens, return None (not "").
+        # S15 -- if everything was in parens, return None (not "").
         if not canonical:
             return None
 
         return canonical
 
     # ---------------------------------------------------------------------
-    # _clean_function_desc() — case-insensitive, earliest marker (S5, S6, S7, S16, S17, C16, C17, C18)
+    # _clean_function_desc() -- case-insensitive, earliest marker (S5, S6, S7, S16, S17, C16, C17, C18)
     # ---------------------------------------------------------------------
     def _clean_function_desc(self, desc: Optional[str]) -> Optional[str]:
-        """Strip ``FUNCTION:`` prefix, sub-section markers, and ECO tags (S5–S7).
+        """Strip ``FUNCTION:`` prefix, sub-section markers, and ECO tags (S5-S7).
 
         UniProt's ``Function [CC]`` field looks like::
 
@@ -2921,10 +2921,10 @@ class UniProtPipeline(BasePipeline):
              CATALYTIC ACTIVITY: ... SUBUNIT: ..."
 
         We want only the function prose.  Steps:
-        1. Strip the leading ``FUNCTION:`` / ``Function:`` prefix (S16 —
+        1. Strip the leading ``FUNCTION:`` / ``Function:`` prefix (S16 --
            case-insensitive).
         2. Find the EARLIEST sub-section marker (S6) and truncate there.
-        3. Remove ALL ``{ECO:...}`` evidence tags (S7, C18 — both inline
+        3. Remove ALL ``{ECO:...}`` evidence tags (S7, C18 -- both inline
            and trailing).
 
         Parameters
@@ -2945,30 +2945,30 @@ class UniProtPipeline(BasePipeline):
 
         cleaned = desc.strip()
 
-        # S16 — case-insensitive FUNCTION: prefix strip (only the first
+        # S16 -- case-insensitive FUNCTION: prefix strip (only the first
         # occurrence; S17).
         for prefix in ("FUNCTION: ", "Function: ", "FUNCTION:", "Function:"):
             if cleaned.startswith(prefix):
                 cleaned = cleaned[len(prefix):].strip()
                 break
 
-        # S6 — find the EARLIEST sub-section marker (any order) and truncate.
+        # S6 -- find the EARLIEST sub-section marker (any order) and truncate.
         earliest_idx = len(cleaned)
         for marker in _SUBSECTION_MARKERS:
             idx = cleaned.find(marker)
-            # S5 — idx >= 0 (NOT idx > 0) so a marker at position 0 also matches.
+            # S5 -- idx >= 0 (NOT idx > 0) so a marker at position 0 also matches.
             if 0 <= idx < earliest_idx:
                 earliest_idx = idx
         if earliest_idx < len(cleaned):
             cleaned = cleaned[:earliest_idx].strip()
 
-        # S7 / C18 — remove ALL {ECO:...} evidence tags (inline + trailing).
+        # S7 / C18 -- remove ALL {ECO:...} evidence tags (inline + trailing).
         cleaned = _ECO_TAG_RE.sub("", cleaned).strip()
 
         return cleaned if cleaned else None
 
     # ---------------------------------------------------------------------
-    # _extract_string_id() — first valid STRING ID (S8, S9, C19)
+    # _extract_string_id() -- first valid STRING ID (S8, S9, C19)
     # ---------------------------------------------------------------------
     def _extract_string_id(self, xref: Optional[str]) -> Optional[str]:
         """Extract the first valid STRING ID from a cross-reference field (S8, S9).
@@ -2994,12 +2994,12 @@ class UniProtPipeline(BasePipeline):
         if not xref or not isinstance(xref, str):
             return None
 
-        # C19 — iterate through all parts (handles leading semicolon).
+        # C19 -- iterate through all parts (handles leading semicolon).
         parts = [p.strip() for p in xref.split(";") if p.strip()]
         if not parts:
             return None
 
-        # S9 — validate format.
+        # S9 -- validate format.
         valid_ids = [p for p in parts if _STRING_ID_RE.match(p)]
         if not valid_ids:
             logger.debug(
@@ -3008,7 +3008,7 @@ class UniProtPipeline(BasePipeline):
             )
             return None
 
-        # S8 — log when multiple IDs are present (some are discarded from
+        # S8 -- log when multiple IDs are present (some are discarded from
         # the primary column but kept in all_string_ids).
         if len(valid_ids) > 1:
             logger.debug(
@@ -3019,7 +3019,7 @@ class UniProtPipeline(BasePipeline):
         return valid_ids[0]
 
     # ---------------------------------------------------------------------
-    # _extract_all_string_ids() — semicolon-joined list (S8)
+    # _extract_all_string_ids() -- semicolon-joined list (S8)
     # ---------------------------------------------------------------------
     @staticmethod
     def _extract_all_string_ids(xref: Optional[str]) -> Optional[str]:
@@ -3086,7 +3086,7 @@ class UniProtPipeline(BasePipeline):
 
         Non-string values (NaN, float, bytes) are converted to *None*.
         Strings containing invalid characters are logged and set to
-        *None* (do not raise — we want the pipeline to continue).
+        *None* (do not raise -- we want the pipeline to continue).
 
         Parameters
         ----------
@@ -3228,7 +3228,7 @@ class UniProtPipeline(BasePipeline):
         """Log a content hash for duplicate uniprot_ids with different sequences (I14).
 
         If the same ``uniprot_id`` appears multiple times with DIFFERENT
-        sequences, that is a real data-integrity problem — we want to
+        sequences, that is a real data-integrity problem -- we want to
         know about it.
 
         Parameters
@@ -3293,7 +3293,7 @@ class UniProtPipeline(BasePipeline):
         # v83 FORENSIC ROOT FIX (P2-11): the previous code computed
         # ``validity_uniprot_id`` on the POST-quarantine DataFrame (after
         # invalid records were removed at Step 10), so the metric was
-        # ALWAYS 1.0 — meaningless. ROOT FIX: use the PRE-quarantine raw
+        # ALWAYS 1.0 -- meaningless. ROOT FIX: use the PRE-quarantine raw
         # counts (captured at Step 10) to compute a MEANINGFUL validity
         # ratio. The post-quarantine metric is retained as
         # ``validity_uniprot_id_post_quarantine`` for backward compat
@@ -3352,7 +3352,7 @@ class UniProtPipeline(BasePipeline):
         return metrics
 
     # ---------------------------------------------------------------------
-    # _write_provenance_sidecar() (S25, LIN3, LIN9–LIN20, SEC16, SEC20, COMP1, COMP4)
+    # _write_provenance_sidecar() (S25, LIN3, LIN9-LIN20, SEC16, SEC20, COMP1, COMP4)
     # ---------------------------------------------------------------------
     def _write_provenance_sidecar(
         self,
@@ -3360,13 +3360,13 @@ class UniProtPipeline(BasePipeline):
         cleaned_path: Path,
         record_count: int,
     ) -> None:
-        """Write a provenance metadata sidecar JSON file (S25, LIN3–LIN20).
+        """Write a provenance metadata sidecar JSON file (S25, LIN3-LIN20).
 
         The sidecar is named ``<cleaned_filename>.provenance.json`` and
         records the full provenance of the cleaned dataset: pipeline
         name and version, UniProt release, input/output SHA-256
         checksums, record counts, timestamp, run_id, correlation_id,
-        triggered_by (FDA 21 CFR Part 11 — COMP1), and the query /
+        triggered_by (FDA 21 CFR Part 11 -- COMP1), and the query /
         fields used.
 
         Parameters
@@ -3429,7 +3429,7 @@ class UniProtPipeline(BasePipeline):
             )
 
     # ---------------------------------------------------------------------
-    # load() — accepts session=, returns LoadResult (F1, A1, D2-1, D2-4, C22, C23)
+    # load() -- accepts session=, returns LoadResult (F1, A1, D2-1, D2-4, C22, C23)
     # ---------------------------------------------------------------------
     def load(
         self,
@@ -3461,7 +3461,7 @@ class UniProtPipeline(BasePipeline):
         ValueError
             If required column ``uniprot_id`` is missing from *df* (C20).
         """
-        # C20 — validate that required columns are present.
+        # C20 -- validate that required columns are present.
         missing_required = [c for c in _CRITICAL_COLUMNS if c not in df.columns]
         if missing_required:
             raise ValueError(
@@ -3470,7 +3470,7 @@ class UniProtPipeline(BasePipeline):
                 f"{list(df.columns)}"
             )
 
-        # Build the load DataFrame — only include columns that exist on the
+        # Build the load DataFrame -- only include columns that exist on the
         # Protein model (D2-9, INT17, DQ17).  This prevents IntegrityError
         # from extra columns like `length` or `protein_name_canonical`
         # that are in the cleaned CSV (for schema compliance / downstream
@@ -3482,18 +3482,18 @@ class UniProtPipeline(BasePipeline):
         # v29 ROOT FIX (audit P1-6): the previous code did
         #   session = self._db_session_factory()
         # which returns a context manager (get_db_session is a
-        # @contextmanager). The context manager was NEVER entered —
+        # @contextmanager). The context manager was NEVER entered --
         # ``session`` was the context manager, not the Session, so
         # every subsequent session.add() / session.commit() crashed
         # with AttributeError when load() was called standalone.
-        # Also, the finally block only called session.close() — it
+        # Also, the finally block only called session.close() -- it
         # never called __exit__(), so the commit never happened and
         # ALL loaded data was silently rolled back when load() ran
         # standalone.
         _session_cm = None
         if own_session:
             try:
-                _session_cm = self._db_session_factory()  # C21 — factory
+                _session_cm = self._db_session_factory()  # C21 -- factory
                 session = _session_cm.__enter__()  # v29: capture the Session
             except (OperationalError, IntegrityError, OSError) as exc:  # v85 FORENSIC ROOT FIX (BUG #51)
                 logger.error(
@@ -3507,7 +3507,7 @@ class UniProtPipeline(BasePipeline):
             with self._timed_operation("load"):
                 result = self._loader(session, load_df)
 
-                # C22 — convert UpsertResult → LoadResult.
+                # C22 -- convert UpsertResult -> LoadResult.
                 # The loader may be a real callable returning UpsertResult,
                 # or a MagicMock (in tests).  Handle both.
                 if isinstance(result, UpsertResult):
@@ -3556,7 +3556,7 @@ class UniProtPipeline(BasePipeline):
                 _exc_info = _sys.exc_info()
                 try:
                     _session_cm.__exit__(*_exc_info)
-                except (OSError, RuntimeError, ValueError):  # noqa: BLE001 — cleanup must not mask  # v85 FORENSIC ROOT FIX (BUG #51)
+                except (OSError, RuntimeError, ValueError):  # noqa: BLE001 -- cleanup must not mask  # v85 FORENSIC ROOT FIX (BUG #51)
                     pass
 
     # ---------------------------------------------------------------------
@@ -3583,15 +3583,15 @@ class UniProtPipeline(BasePipeline):
             skip = {"id", "created_at", "updated_at", "is_deleted", "deleted_at"}
             return [c for c in model_cols if c not in skip]
         except ImportError:
-            # Fallback — keep in sync with database/models.py.
+            # Fallback -- keep in sync with database/models.py.
             # v83 FORENSIC ROOT FIX (P1-11): the previous fallback list was
             # missing ``length``, ``protein_name_canonical``, and
-            # ``all_string_ids`` — three columns that EXPECTED_OUTPUT_COLUMNS
+            # ``all_string_ids`` -- three columns that EXPECTED_OUTPUT_COLUMNS
             # (line ~319) guarantees. If the fallback fired (e.g.
             # database.models not importable in a test environment), these
             # columns were SILENTLY DROPPED from the load DataFrame. The
             # ``protein_name_canonical`` column is the F4 fix for the
-            # "gene_name stored a protein name" bug — dropping it loses the
+            # "gene_name stored a protein name" bug -- dropping it loses the
             # canonical name and re-introduces the corruption. ROOT FIX:
             # add the three missing columns to the fallback list so the
             # fallback matches the real model's column set.
@@ -3618,7 +3618,7 @@ class UniProtPipeline(BasePipeline):
                     pass
                 self._http_session = None
         finally:
-            # R4 / DQ19 — flush dead-letter queue to disk.
+            # R4 / DQ19 -- flush dead-letter queue to disk.
             try:
                 self._flush_dead_letter_queue()
             except (OSError, RuntimeError, ValueError) as exc:  # v85 FORENSIC ROOT FIX (BUG #51)
@@ -3690,13 +3690,13 @@ class UniProtPipeline(BasePipeline):
         to CSV as-is. The UniProt pipeline needs CSV formula-injection
         protection (SEC4, C27) for Excel safety, but the previous code
         mutated the IN-MEMORY DataFrame (in ``clean()``) before it was
-        loaded to the DB — corrupting ``protein_name`` /
+        loaded to the DB -- corrupting ``protein_name`` /
         ``protein_name_canonical`` / ``function_desc`` with leading ``'``
         for any value starting with ``-`` / ``+`` / ``@``.
 
         ROOT FIX: sanitize a COPY of the DataFrame ONLY at CSV-write time.
         The caller's ``df`` (returned from ``clean()`` and later passed to
-        ``load()``) is NEVER mutated — the DB receives unsanitized (correct)
+        ``load()``) is NEVER mutated -- the DB receives unsanitized (correct)
         data. The CSV receives the sanitized (Excel-safe) copy. The ``'``
         prefix never reaches the DB.
         """
@@ -3727,7 +3727,7 @@ class UniProtPipeline(BasePipeline):
             Additional details about the transformation.
         """
         logger.info(
-            "[%s] Transformation: %s | records: %d → %d | delta: %d",
+            "[%s] Transformation: %s | records: %d -> %d | delta: %d",
             self.source_name,
             transformation,
             record_count_before,
@@ -3767,7 +3767,7 @@ class UniProtPipeline(BasePipeline):
     # ---------------------------------------------------------------------
     @contextlib.contextmanager
     def _timed_operation(self, operation: str) -> Iterator[None]:
-        """Context manager that logs the duration of an operation (L8, L16–L18).
+        """Context manager that logs the duration of an operation (L8, L16-L18).
 
         Parameters
         ----------
@@ -3838,7 +3838,7 @@ class UniProtPipeline(BasePipeline):
         try:
             os.chmod(path, self._SECURE_FILE_MODE)
         except OSError:
-            # On Windows or read-only filesystems, chmod may fail — that's OK.
+            # On Windows or read-only filesystems, chmod may fail -- that's OK.
             logger.debug(
                 "[%s] Could not set permissions on %s",
                 self.source_name, path,
@@ -3972,7 +3972,7 @@ class UniProtPipeline(BasePipeline):
         try:
             from packaging.version import Version
         except ImportError:
-            # packaging is not always available — skip the check.
+            # packaging is not always available -- skip the check.
             return
 
         min_pandas = Version("1.5.0")
@@ -4048,23 +4048,23 @@ class UniProtPipeline(BasePipeline):
 # v80 FORENSIC ROOT FIX (P0-C4): ``uniprot_query`` is a ``@property`` on
 # ``UniProtPipeline`` (see lines 466-485). Accessing it via the class
 # (``UniProtPipeline.uniprot_query``) returns the property DESCRIPTOR
-# object — NOT a string. The previous assignment
+# object -- NOT a string. The previous assignment
 # ``UNIPROT_QUERY: str = UniProtPipeline.uniprot_query`` therefore bound
 # ``UNIPROT_QUERY`` to a ``property`` object, and any downstream code
 # that called ``UNIPROT_QUERY.replace(...)``, ``UNIPROT_QUERY.split(...)``,
 # or used it as a requests params value crashed with
 # ``AttributeError: 'property' object has no attribute 'replace'`` (or
 # was silently passed as the literal string ``"<property object at ...>"``
-# in HTTP query params — a far worse failure mode for a biomedical
+# in HTTP query params -- a far worse failure mode for a biomedical
 # pipeline because the request appeared to succeed but queried nothing).
 #
 # ROOT FIX: compute the default query string at module-import time using
 # the SAME env-var precedence as the property (``UNIPROT_QUERY`` env var
-# → ``DRUGOS_UNIPROT_ORGANISM_ID`` env var → default 9606). This produces
+# -> ``DRUGOS_UNIPROT_ORGANISM_ID`` env var -> default 9606). This produces
 # a real ``str`` (not a descriptor) while still honouring runtime env
 # overrides that were set BEFORE import. Callers who need the live,
 # access-time env-var resolution MUST use ``UniProtPipeline().uniprot_query``
-# (the instance property) — the module-level constant is a snapshot for
+# (the instance property) -- the module-level constant is a snapshot for
 # backward compatibility only.
 # ---------------------------------------------------------------------------
 UNIPROT_SEARCH_URL: str = UniProtPipeline.uniprot_search_url
