@@ -28,7 +28,20 @@ from pathlib import Path
 # v89 ROOT FIX (BUG #39): shared sys.path bootstrap — was duplicated
 # verbatim in all 8 DAG files. Extracted to dags/_dags_init.py.
 # ---------------------------------------------------------------------------
+# P1-050 FORENSIC ROOT FIX (Team 4 — hidden module-level side effect):
+# The previous version relied on a module-level ``ensure_project_root()``
+# call inside ``dags/_dags_init.py`` that fired on ANY import. This
+# mutated ``sys.path`` for the ENTIRE process, breaking test isolation
+# (tests that imported ``dags._dags_init`` to test the function directly
+# polluted ``sys.path`` for all subsequent tests in the same process).
+# The module-level call was REMOVED from ``_dags_init.py``; each DAG
+# file MUST now explicitly call ``ensure_project_root()`` at module top
+# (after the import). This makes the ``sys.path`` side effect EXPLICIT
+# per-DAG, not hidden in an imported module. All 7 standalone DAGs
+# already do this — master_pipeline_dag was the LAST one missing the
+# explicit call (the prior fix only added the import, not the call).
 from dags._dags_init import ensure_project_root  # noqa: F401
+ensure_project_root()  # P1-050 root fix: explicit per-DAG sys.path bootstrap
 
 from airflow.decorators import dag, task
 from airflow.operators.branch import BranchPythonOperator

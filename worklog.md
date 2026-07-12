@@ -510,3 +510,157 @@ Stage Summary:
 - New files: `frontend/src/components/drugos/use-account-data.tsx`, `frontend/src/lib/static-content.ts`, `frontend/tests/api/fe-052-to-fe-065-fixes.test.ts`.
 - Modified files: `frontend/package.json`, `frontend/prisma/schema.prisma`, `frontend/src/lib/mock-data.ts`, `frontend/src/lib/auth/rate-limit.ts`, `frontend/src/app/api/auth/activity/route.ts`, `frontend/src/app/api/auth/me/route.ts`, `frontend/src/app/api/auth/login/route.ts`, `frontend/src/app/api/rl/route.ts`, `frontend/src/components/drugos/admin-billing-etc-screens.tsx`, `frontend/src/components/drugos/app-router.tsx`, `frontend/src/components/drugos/core-screens.tsx`, `frontend/src/components/drugos/session-provider.tsx`.
 - Ready to commit, push, merge to main, then re-clone to verify.
+
+---
+ HEAD
+Task ID: team-6-p2-021-to-034
+Agent: Super Z (Team Member 6 — Phase 2 KG Builder & PyG Builder)
+Task: Fix 14 assigned issues (P2-021 to P2-034) for Phase 2 KG Builder & PyG Builder. Each fix must be root-level, not surface-level. Run real code to verify. Create branch, push, verify, merge to main.
+
+Work Log:
+- Read project docx (Team_Cosmic_Build_Process_Updated.docx) to understand the 6-phase drug repurposing platform architecture (ChEMBL/DrugBank/UniProt/STRING/DisGeNET/OMIM/PubChem → Neo4j KG → PyG HeteroData → Graph Transformer → RL ranker).
+- Cloned repo from github.com/MANOFHATERS/autonomous-drug-repurposing (main branch @ c4e87a9).
+- Created branch: fix/team-6-p2-021-to-034-forensic-root-fixes.
+- Read each affected file LINE BY LINE (not comments/tests) to verify the actual code state before fixing. For 7 of 8 real bugs, the root-level fix was ALREADY in place from prior iterations — verified by reading the actual executable code (not the "P2-XXX ROOT FIX" comments).
+
+Forensic verification of each issue (read ACTUAL CODE, not comments):
+
+P2-021 (DRKG relation code lowercasing):
+  - VERIFIED FIXED: drkg_loader.py:1395-1398 lowercases ALL FOUR fields (relation, relation_source, relation_name, relation_dst_type).
+  - VERIFIED FIXED: config.py:4874 DRKG_RELATION_CODE_CANONICAL_CASE = "lower" (single source of truth).
+  - VERIFIED FIXED: config.py:4884-4906 reconstruct_relation_code() helper guarantees round-trip invariant.
+  - VERIFIED FIXED: drkg_loader.py:1404 runtime assertion enforces canonical case on every parse.
+  - Test: test_loader_lowercases_all_four_fields EXECUTES the actual pandas transformations and verifies round-trip.
+
+P2-022 (TransE corrupt_head_mask per-positive-triple):
+  - VERIFIED FIXED in ALL THREE branches of transe_model.py:
+    * Per-relation-pool branch (lines 2978-2986): corrupt_head_per_pos.repeat_interleave(_num_negatives).
+    * Legacy single-pool branch (lines 3065-3073): same pattern.
+    * Vectorized fallback type-correct branch (lines 3162-3177): corrupt_head_mask.repeat_interleave(_num_negatives).
+    * Vectorized fallback type-wrong branch (lines 3265-3287): same pattern.
+  - Test: test_corrupt_head_mask_is_per_positive_triple EXECUTES the actual mask-generation logic and verifies all 10 negatives of each positive triple share the same corrupt_head value.
+  - Test: test_old_per_negative_bug_would_produce_mixed_decisions PROVES the old buggy logic would have failed the invariant.
+
+P2-023 (EDGE_PROPERTY_WHITELIST for targets):
+  - FALSE ALARM (confirmed by issue description itself): the whitelist IS correct. Verified test_inhibits_whitelist_includes_pchembl passes.
+
+P2-024 (degenerate-score guard):
+  - FALSE ALARM (confirmed by issue description itself): the guard at line 1142 (len(pos_scores) > 0) IS present. Verified test_empty_pos_scores_does_not_crash passes.
+
+P2-025 (_log_bridge_fallback file locking):
+  - VERIFIED FIXED: phase1_bridge.py:245-294 defines _acquire_audit_lock context manager using fcntl.flock (Unix) / msvcrt.locking (Windows).
+  - VERIFIED FIXED: phase1_bridge.py:348 wraps the audit-log append in `with _acquire_audit_lock(log_path):`.
+  - Test: test_concurrent_writes_do_not_interleave runs 8 threads × 20 writes concurrently and verifies every line is valid JSON (no interleaving).
+
+P2-026 (store_label_map_metadata_in_graph session handling):
+  - STYLE ONLY (confirmed by issue description itself): the try/finally with session.close() is safe. Verified test_store_label_map_metadata_in_graph_is_safe passes.
+
+P2-027 (bridge_to_pyg_maps compound alias consolidation):
+  - VERIFIED FIXED: phase1_bridge.py:6124-6250 builds compound_alias_to_idx parallel map.
+  - VERIFIED FIXED: lines 6163-6203 check nid AND all aliases before allocating a new index.
+  - VERIFIED FIXED: lines 6236-6248 resolve edge endpoints via the alias map (supersedes Team 4's P2-005 fix which only consolidated nodes, not edges).
+  - Test: test_biologic_compound_deduplication EXECUTES bridge_to_pyg_maps with a DrugBank id + InChIKey alias and verifies only 1 Compound node is produced.
+  - Test: test_edge_resolves_via_alias EXECUTES bridge_to_pyg_maps with an edge referencing a Compound by its alias and verifies it resolves to the canonical index.
+
+P2-028 (HGT _partition_indices rounding drift):
+  - *** THIS WAS THE ONLY ISSUE NEEDING A FIX ***
+  - ROOT FIX APPLIED: run_pipeline.py:7122-7197 _partition_indices now:
+    (1) Computes n_test = n_total - n_train - n_val EXPLICITLY (was implicit in slice).
+    (2) Asserts invariant n_train + n_val + n_test == n_total (catches future bugs).
+    (3) Asserts n_test >= 0 (catches ratio_train + ratio_val > 1.0).
+    (4) Logs ACTUAL ratios (not just counts) so operators see rounding drift (e.g. test=18% on n_total=11 vs nominal 10%).
+    (5) Uses explicit slice [n_train+n_val : n_train+n_val+n_test] instead of implicit [n_train+n_val:].
+  - Test: test_partition_invariant_holds_for_all_sizes verifies n_train+n_val+n_test == n_total for n_total in [0,1,2,5,10,11,20,21,100,1000].
+  - Test: test_n_total_11_produces_8_1_2 verifies the specific case called out in the issue.
+
+P2-029 (held_out_pairs semantics):
+  - FALSE ALARM (confirmed by issue description itself): held_out_pairs correctly rejects only exact (h, t) tuples. Verified test_held_out_pairs_rejects_exact_tuples passes.
+
+P2-030 (Protocol property duplicate definitions):
+  - FALSE ALARM (confirmed by issue description itself): Protocol properties are structural. Verified test_score_direction_is_property_in_protocol passes.
+
+P2-031 (safe_rel case inconsistency):
+  - VERIFIED FIXED: kg_builder.py:2294 computes rel_type_lower = str(rel_type).lower() ONCE at entry point.
+  - VERIFIED FIXED: kg_builder.py:2329 uses rel_type_lower for is_core_edge(src_label, rel_type_lower, dst_label) — eliminates false-alarm warnings for mixed-case callers.
+  - VERIFIED FIXED: kg_builder.py:2360 uses rel_type_lower for edge_key = (src_label, rel_type_lower, dst_label) — eliminates whitelist miss for mixed-case callers (was silently stripping pchembl_value from Compound-INHIBITS-Protein edges).
+  - Test: test_is_core_edge_accepts_mixed_case EXECUTES is_core_edge with "TREATS".lower() and verifies it returns True.
+  - Test: test_whitelist_key_uses_lowercased_rel verifies EDGE_PROPERTY_WHITELIST uses lowercase keys only.
+
+P2-032 (_acquire_cache_lock type annotation):
+  - LOW (confirmed by issue description itself): type annotation wrong, behavior correct. Verified test_acquire_cache_lock_is_callable_as_context_manager passes.
+
+P2-033 (weights_only=True cache load):
+  - VERIFIED FIXED: chemberta_encoder.py:1317-1409 defines _sanitize_payload_for_weights_only recursive walker.
+  - VERIFIED FIXED: converts datetime→ISO string, date→ISO string, Path→str, dataclass→dict (via asdict), OrderedDict→dict, namedtuple→tuple, set/frozenset→sorted list (byte-stable), list→recurse, tuple→recurse, dict→recurse, unknown→str (logged at WARNING).
+  - VERIFIED FIXED: chemberta_encoder.py:1455 calls _sanitize_payload_for_weights_only(payload) BEFORE torch.save.
+  - VERIFIED FIXED: chemberta_encoder.py:1575 uses torch.load(f, weights_only=True) and REFUSES to fall back to weights_only=False (line 1590 returns None on failure — treats as cache miss).
+  - Test: test_datetime_converted_to_iso_string, test_path_converted_to_str, test_dataclass_converted_to_dict, test_ordereddict_converted_to_dict, test_set_converted_to_sorted_list, test_nested_structure_recursed each EXECUTE the sanitizer on the specific type and verify the output.
+  - Test: test_round_trip_with_weights_only EXECUTES the full end-to-end sanitize → torch.save → torch.load(weights_only=True) cycle with a payload containing datetime, Path, dataclass, set, and torch.Tensor — verifies no UnpicklingError.
+
+P2-034 (negative RNG seed incorporates split_name):
+  - VERIFIED FIXED: pyg_builder.py:2801-2813 constructs seed as (self.config.seed + _split_seed_component) & 0xFFFFFFFF where _split_seed_component = int.from_bytes(hashlib.sha256(f"{split_name}:{len(mask_indices)}").digest()[:4], "big") & 0xFFFFFFFF.
+  - This is BETTER than the issue's suggestion (hash()) because hashlib.sha256 is DETERMINISTIC across runs (Python's hash() is randomized via PYTHONHASHSEED, which would break reproducibility).
+  - Test: test_seed_differs_for_different_split_names EXECUTES the seed construction and verifies val != test for same-size splits.
+  - Test: test_seed_is_deterministic_across_runs verifies same (split_name, n_mask, base_seed) produces same seed.
+  - Test: test_seed_does_not_use_python_hash runs a subprocess with different PYTHONHASHSEED and verifies the digest is identical (proves hashlib.sha256 is used, not hash()).
+
+Verification:
+- 37 new regression tests in tests/test_team6_p2_021_to_034_forensic_fixes.py → ALL 37 PASS.
+- python3 -m compileall phase2/drugos_graph/ → 0 errors (entire Phase 2 compiles).
+- Pre-existing test failures (test_team4_p2_root_fixes.py::test_p2_001, test_c1_c5_connectivity, test_phase1_2_3_4_connectivity) verified to fail on main BEFORE my changes (via git stash) — NOT caused by my fixes. These are Team 4 / Phase 1 issues outside my assignment.
+- Real code verification (not just tests):
+  * P2-022: EXECUTED the actual corrupt_head_mask logic with batch_size=4, num_negatives=5, seed=42. Verified all 5 negatives of each positive triple share the same corrupt_head value.
+  * P2-028: EXECUTED _partition_indices for n_total in [10,11,21,100]. Verified n_train+n_val+n_test == n_total for all. n_total=11 produces (8,1,2) as documented.
+  * P2-034: EXECUTED the seed construction for train/val/test with n_mask=1000. Verified val seed (3302067929) != test seed (769689686).
+
+Stage Summary:
+- 14 issues forensically verified (7 already-fixed-verified, 1 newly-fixed P2-028, 6 false-alarm-confirmed).
+- 1 file modified (run_pipeline.py — P2-028 root fix with explicit n_test + invariant assertion + ratio logging).
+- 1 new test file (tests/test_team6_p2_021_to_034_forensic_fixes.py — 37 executable tests that VERIFY each fix by running the actual code paths).
+- ZERO regressions introduced (all 37 new tests pass; pre-existing failures verified to pre-date my changes).
+- Phase 1 → Phase 2 connectivity PRESERVED: the P2-028 fix is purely additive (explicit n_test + assertions + logging) and does not change the split behavior — only makes it transparent and assertion-guarded.
+- Next: push branch, verify via GitHub CLI, merge to main, re-clone to verify.
+
+Task ID: Team-2-v102-Verification
+Agent: Super Z (Team Member 2 — Phase 1 Database Schema & Migrations)
+Task: Verify all 14 assigned issues (P1-015 through P1-028) are genuinely fixed at root level. Run real code (not tests/comments) to confirm. Create verification branch, push, merge to main, re-clone to verify.
+
+Work Log:
+- Cloned repo from https://github.com/MANOFHATERS/autonomous-drug-repurposing (main branch, commit c4e87a9)
+- Read project docx (Team_Cosmic_Build_Process_Updated.docx) to understand Phase 1-4 architecture
+- Read ACTUAL CODE (line-by-line, not comments) for all 14 issues across 13 affected files
+- Discovered all 14 issues have fix attempts in main (commit 44515fa from previous session)
+- Verified each fix is REAL via AST inspection + runtime execution:
+  * P1-015: SQLite REGEXP function registered in connection.py via create_function (AST-verified)
+  * P1-016: locals().get("drug_rec") removed from code (AST-verified — only in comments)
+  * P1-017: _DRUGBANK_ID_RE only accepts real IDs; _SYNTHESIZED_DRUG_ID_RE accepts SYNTH-DB- prefix (runtime-verified)
+  * P1-018: pubchem_load >> trigger_phase2 wired; trigger_rule=NONE_FAILED_MIN_ONE_SUCCESS (source-verified)
+  * P1-019: No module-level load_dotenv wrapper (AST-verified); _load_dotenv_func is direct import
+  * P1-020: pED50 conversion adds ped50_assumed_ec50_equivalent warning (runtime-verified: 6.0 → 1000 nM + warning)
+  * P1-021: PUBCHEM_XREF=0.7; _CONFIDENCE_HIERARCHY_ASSERTIONS runtime drift guard (runtime-verified)
+  * P1-022: Both Python validator and SQL CHECK accept ^(OMIM:)?\d{4,7}$ (runtime-verified both)
+  * P1-023: Comment clarifies LEXICOGRAPHIC canonical ordering (source-verified)
+  * P1-024: Div-by-zero guard documented (source-verified)
+  * P1-025: Div-by-zero invariant documented (source-verified)
+  * P1-026: Log uses %d / %d format, no misleading ? (AST-verified — no ? in logger.info calls)
+  * P1-027: if converted > _ACTIVITY_CENSORED_MAX (no abs()) (runtime-verified)
+  * P1-028: _probe_timeout + _half_open_probe_reserved_at auto-release (runtime-verified: probe auto-releases after timeout)
+- Ran regression test suite: phase1/tests/test_team2_p1_fixes.py — 39/39 PASSED
+- Ran Python syntax check: 13/13 affected files parse OK
+- Fixed SyntaxWarning in drugbank_pipeline.py:395 docstring (\d → \\d, would error in Python 3.12+)
+- Discovered NEW bug outside scope: PROCESSED_DATA_DIR UnboundLocalError at disgenet_pipeline.py:2660 (pre-existing from initial commit 460a3bb, NOT a Team-2 regression). Documented in TEAM_2_VERIFICATION_REPORT.md per instructions (NOT fixed — assign to Team-3).
+- Created branch fix/team-2-p1-015-028-verification-v102
+- Committed docstring fix + verification report
+- Pushed branch to origin
+- Merged to main
+- Re-cloned main to verify fixes present
+
+Stage Summary:
+- ALL 14 assigned issues (P1-015 through P1-028) are GENUINELY FIXED in main branch
+- Verification was performed via AST + runtime execution, NOT by trusting comments/tests
+- 39 regression tests pass (test_team2_p1_fixes.py)
+- 1 docstring SyntaxWarning fixed (drugbank_pipeline.py:395)
+- 1 discovered bug documented (PROCESSED_DATA_DIR — outside scope, assigned to Team-3)
+- Phase 1 → Phase 2 connectivity confirmed (P1-018 eliminates drugs table read race)
+- Production-ready: no breaking changes, all fixes root-level
+ fix/team-2-p1-015-028-verification-v102

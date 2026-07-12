@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requireAuthRole, badRequest, internalError, writeAuditLog } from "@/lib/api-helpers";
+import { requireAuthRole, badRequest, internalError, writeAuditLog, requireCsrfOrSend } from "@/lib/api-helpers";
 import { changePlan, getOrganizationSubscription, PLANS } from "@/lib/services/billing";
 import { verifyPassword } from "@/lib/auth/server";
 import { verifyMfaTicket, verifyTotp } from "@/lib/auth/totp";
@@ -41,6 +41,10 @@ export async function GET() {
 }
 
 export async function POST(req: NextRequest) {
+  // FE-011: CSRF protection on every state-changing route.
+  const csrf = await requireCsrfOrSend(req);
+  if (csrf.response) return csrf.response;
+
   const auth = await requireAuthRole("billing");
   if (auth.user === null) return auth.response;
   if (!auth.user.orgId) return badRequest("No active organization");
