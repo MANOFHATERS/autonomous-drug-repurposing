@@ -512,6 +512,39 @@ Stage Summary:
 - Ready to commit, push, merge to main, then re-clone to verify.
 
 ---
+Task ID: team-15-fe038-to-fe051-verification
+Agent: Team 15 (Frontend - Public API Proxies & Clinical) — verification pass
+Task: Verify FE-038..FE-051 fixes are REAL (not surface-level comment-only), fix any that are fake, write root-level regression tests, run real build/tsc/lint/tests, push branch, merge to main, re-clone to verify.
+
+Work Log:
+- Read the project docx (Team_Cosmic_Build_Process_Updated.docx) to understand the 4-phase Autonomous Drug Repurposing Platform (Data Ingestion → Knowledge Graph → Graph Transformer → RL Ranker → API+Dashboard).
+- Cloned repo, created branch fix/fe-038-to-051-team-15-public-api-clinical.
+- Discovered prior Team 15 agent already committed c8e08b1 "fix(FE-038..FE-051)" and merged to main (8c71ee7). User warned: "comments and tests are fakes — when I manually check code it's 100 percent broken".
+- Read EVERY target file LINE-BY-LINE (api-keys.ts, billing/subscription/route.ts, server.ts, totp.ts, billing.ts, projects/route.ts, openfda.ts, rxnorm.ts, evidence-package/route.ts, notifications/route.ts, team/route.ts, auth/activity/route.ts, auth/me/route.ts, clinical-trials.ts, core-screens.tsx, remaining-screens.tsx, schema.prisma, api-helpers.ts, pagination.ts, types.ts, audit-logs/route.ts).
+- VERIFIED 13 of 14 fixes are REAL (FE-038, FE-039, FE-041, FE-042, FE-043, FE-044, FE-045, FE-046, FE-047, FE-048, FE-049, FE-050, FE-051) — the actual code logic matches the issue's required fix.
+- FOUND 1 CRITICAL SURFACE-LEVEL FIX: FE-040. The prior agent added `organizationId String?` to the AuditLog schema and an `organizationId?: string` param to writeAuditLog — BUT none of the ~20 production callers (billing, evidence-package, kg, rl, admin, auth/*) ever passed it. So the column was ALWAYS NULL in production. This completely defeated FE-040's purpose (multi-tenant audit-trail isolation) AND broke FE-005 (the audit-logs route filters by organizationId for non-owners, so non-owner admins saw EMPTY audit logs).
+- APPLIED ROOT FIX to api-helpers.ts writeAuditLog: auto-populate `organizationId` from `params.user?.orgId` when the caller does not explicitly pass one. This makes EVERY user-initiated audit-log row org-scoped automatically. Callers that need to override (webhook/system events) can still pass `organizationId` explicitly.
+- Cleaned up unused imports in projects/route.ts (FE-044).
+- Fixed stale test in team-15-fe038-to-fe051.test.ts: FE-049 type-declaration test was reading mock-data.ts, but FE-026 moved the DrugCandidate interface to types.ts. Updated test to read types.ts.
+- Wrote NEW root-verification test file: team-15-fe038-to-fe051-root-verification.test.ts (29 tests). Each test exercises the ACTUAL code path and would FAIL if the fix were reverted. Includes the critical FE-040 test that would have caught the surface-level fix (asserts writeAuditLog auto-populates organizationId from user.orgId when no explicit param is passed).
+- Installed all npm dependencies (1092 packages).
+- Ran `npx prisma generate` → success.
+- Ran `npx tsc --noEmit` → ZERO errors.
+- Ran `npx eslint` on all 17 touched files → ZERO errors (11 pre-existing warnings only).
+- Ran `npx jest team-15-fe038-to-fe051-root-verification.test.ts` → 29/29 PASS.
+- Ran `npx jest team-15-fe038-to-fe051.test.ts` → 47/47 PASS.
+- Ran `npx next build` → ZERO errors, all 33 API routes + pages compiled.
+
+Stage Summary:
+- 1 REAL root fix applied: FE-040 writeAuditLog auto-populates organizationId (prior fix was surface-level — column always NULL).
+- 13 fixes verified as REAL (prior agent's work was correct for these).
+- 1 unused-import cleanup (FE-044).
+- 1 stale test fixed (FE-049 type-declaration test now reads types.ts).
+- 29 new root-verification tests added (would catch each bug if reverted).
+- All verification passed: tsc 0 errors, lint 0 errors, build 0 errors, 76/76 tests pass.
+- Files modified: frontend/src/lib/api-helpers.ts, frontend/src/app/api/projects/route.ts, frontend/src/lib/services/__tests__/team-15-fe038-to-fe051.test.ts.
+- Files added: frontend/src/lib/services/__tests__/team-15-fe038-to-fe051-root-verification.test.ts.
+- Next: commit, push branch, merge to main, re-clone to verify.
 Task ID: TM3-P1-030-TO-P1-042
 Agent: Team Member 3 (Phase 1 - Pipelines & Cleaning)
 Task: Verify and fix 14 assigned issues (P1-030..P1-042) in the autonomous-drug-repurposing repo. Read each affected file line-by-line, run real code (not smoke tests), write tests that would have caught the bug, run them, then branch/push/verify/merge.
@@ -734,3 +767,38 @@ Stage Summary:
 - Phase 1 → Phase 2 connectivity confirmed (P1-018 eliminates drugs table read race)
 - Production-ready: no breaking changes, all fixes root-level
  fix/team-2-p1-015-028-verification-v102
+
+---
+Task ID: P4-verified-v2-team11
+Agent: Team 11 (RL Agent + Orchestration)
+Task: Verify and root-fix 14 issues (P4-001..P4-013, ORCH-001) by running REAL CODE, not trusting comments.
+
+Work Log:
+- Read project DOCX (Team_Cosmic_Build_Process_Updated.docx) to understand 4-phase architecture (Phase 1 data, Phase 2 KG, Phase 3 GT, Phase 4 RL).
+- Cloned repo, installed deps: numpy 2.1.3, pandas 2.2.3, sklearn 1.5.2, torch 2.13.0+cpu, stable_baselines3 2.9.0, gymnasium 1.3.0.
+- Wrote tests/test_p4_verified_fixes.py with 15 tests that exercise ACTUAL CODE PATHS (not comments) for all 14 issues.
+- Initial run: 13/15 passed. Two failures revealed:
+  (a) Test bug: wrong column name (_is_known vs re-derived KP membership).
+  (b) REAL BUG P4-012: RL_SKIP_LITERATURE was only checked inside 'except ImportError' branch, so deployments WITH biopython installed silently made real PubMed network calls, defeating the escape hatch in CI/CD, airgapped environments, and unit tests.
+- Applied root-cause fix to P4-012: moved RL_SKIP_LITERATURE check to the TOP of literature_crosscheck (before importing biopython), so the env var is a TRUE escape hatch regardless of biopython's install state.
+- Re-ran verification tests: 15/15 pass.
+- Ran REAL standalone pipeline: python -m rl.rl_drug_ranker --timesteps 256 --top-n 5 --skip-literature. Pipeline completed with scientific_validation_passed=true, produced top_candidates CSV with 5 ranked candidates (2 KPs), model_checkpoint='none' (P4-005 blocked standalone save), literature_support=0 for all (P4-012 honored RL_SKIP_LITERATURE).
+- Regression check: tests/test_p4_001_024_forensic_fixes.py (38 passed), tests/test_orch_002_to_006_root_fixes.py (5 passed). Total 58 passed, 0 failed.
+- Created branch fix/p4-001-013-verified-v2-team11, committed, pushed.
+- Merged latest origin/main into branch (no conflicts).
+- Merged branch into main with --no-ff.
+- Fresh-cloned repo to /tmp/adr-fresh-verify, confirmed:
+  * Latest commit: f0d7b83 (the merge)
+  * P4-012 fix present at line 5454 of rl/rl_drug_ranker.py
+  * tests/test_p4_verified_fixes.py present
+  * All 15 verification tests pass on fresh clone
+  * Real standalone pipeline runs end-to-end on fresh clone (1024 timesteps, scientific_validation_passed=true)
+
+Stage Summary:
+- 13 of 14 issues were already correctly fixed in main (verified by real code execution, not comments).
+- 1 issue (P4-012) had a real runtime bug that was fixed in this PR.
+- 15 new verification tests added to prevent regression.
+- 58 total tests pass (15 new + 38 P4 + 5 ORCH).
+- Branch: fix/p4-001-013-verified-v2-team11 (pushed)
+- Main commit: f0d7b83 (merge commit)
+- Fresh-clone verification: PASSED

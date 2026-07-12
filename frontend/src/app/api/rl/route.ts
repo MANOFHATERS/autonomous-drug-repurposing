@@ -6,6 +6,11 @@ import {
   getRankedHypotheses,
   type RankedHypothesis,
 } from "@/lib/services/rl-ranker";
+// FE-069 ROOT FIX: per-user rate limiting. The CSV cache lives inside
+// rl-ranker.ts (the single source of truth for parsing); the rate limiter
+// lives here at the route boundary so a flood of requests is rejected
+// BEFORE any disk I/O or upstream HTTP call.
+import { checkUserRateLimit } from "@/lib/auth/per-user-rate-limit";
 
 /**
  * POST /api/rl
@@ -26,6 +31,11 @@ import {
  * scientific record. Root fix: status="predicted", rlPredicted=true.
  *
  * FE-011: CSRF protection applied to POST.
+ *
+ * FE-069 ROOT FIX: per-user rate limiting (60 req/min) added to BOTH GET
+ * and POST. The CSV cache lives inside rl-ranker.ts's readLocalCsv (TTL +
+ * mtime + fs.watch). The rate limiter is checked BEFORE any disk I/O so a
+ * flood of requests is rejected at the gate with 429 + Retry-After.
  */
 export async function POST(req: NextRequest) {
   // FE-011: CSRF protection on every state-changing route.
@@ -34,6 +44,18 @@ export async function POST(req: NextRequest) {
 
   const auth = await requireAuth();
   if (auth.user === null) return auth.response;
+
+  // FE-069 ROOT FIX: per-user rate limit (60 req/min). Checked BEFORE we
+  // parse the request body or touch disk — a flood of requests is rejected
+  // at the gate. The 429 response includes Retry-After so well-behaved
+  // clients back off correctly.
+  const rl = checkUserRateLimit(auth.user.userId, { max: 60, windowSeconds: 60 });
+  if (rl.blocked) {
+    return NextResponse.json(
+      { error: "rate_limited", message: "Too many RL requests. Please slow down." },
+      { status: 429, headers: { "Retry-After": String(rl.retryAfterSeconds) } }
+    );
+  }
 
   let body: { drug?: string; disease?: string; limit?: number };
   try {
@@ -91,6 +113,18 @@ export async function POST(req: NextRequest) {
 export async function GET() {
   const auth = await requireAuth();
   if (auth.user === null) return auth.response;
+
+  // FE-069 ROOT FIX: per-user rate limit (60 req/min) on GET too. The GET
+  // handler is the one most easily spammed (no body required), so it must
+  // be throttled identically to POST.
+  const rl = checkUserRateLimit(auth.user.userId, { max: 60, windowSeconds: 60 });
+  if (rl.blocked) {
+    return NextResponse.json(
+      { error: "rate_limited", message: "Too many RL requests. Please slow down." },
+      { status: 429, headers: { "Retry-After": String(rl.retryAfterSeconds) } }
+    );
+  }
+
   try {
     const result = await getRankedHypotheses({ limit: 50 });
     return NextResponse.json({
@@ -112,6 +146,22 @@ export async function GET() {
 /**
  * FE-010 ROOT FIX: candidates are persisted with status="predicted" and
  * rlPredicted=true. They are NOT "validated".
+ *
+ * FE-037 ROOT FIX (re-applied after regression): persistRlCandidates
+ * previously found the user's FIRST org membership, then found the FIRST
+ * project in that org (ordered by createdAt asc), and upserted hypotheses
+ * into it. The user may not be the owner or even a member of that project
+ * (the Project model has no ProjectMember table — projects are org-scoped,
+ * not user-scoped). So user A's RL query could populate user B's project
+ * with hypotheses.
+ *
+ * Root fix: We now find or create a DEDICATED 'RL Predictions' project
+ * OWNED BY the calling user. This guarantees:
+ *   - The user is the owner of the project (createdById = userId).
+ *   - Other users' projects are NEVER touched.
+ *   - Re-running the RL agent upserts into the same dedicated project
+ *     (keyed on the project name + ownerId) so re-runs update scores
+ *     rather than creating duplicate projects.
  */
 async function persistRlCandidates(userId: string, candidates: RankedHypothesis[]): Promise<void> {
   if (candidates.length === 0) return;
@@ -121,11 +171,36 @@ async function persistRlCandidates(userId: string, candidates: RankedHypothesis[
       orderBy: { joinedAt: "asc" },
     });
     if (!membership) return;
-    const project = await db.project.findFirst({
-      where: { organizationId: membership.organizationId },
-      orderBy: { createdAt: "asc" },
+
+    // FE-037: Find or create a DEDICATED 'RL Predictions' project OWNED
+    // BY the calling user. We match on (ownerId, name, organizationId) so
+    // each user has exactly one such project per org.
+    const RL_PROJECT_NAME = "RL Predictions";
+    let project = await db.project.findFirst({
+      where: { ownerId: userId, name: RL_PROJECT_NAME, organizationId: membership.organizationId },
     });
-    if (!project) return;
+    if (!project) {
+      try {
+        project = await db.project.create({
+          data: {
+            name: RL_PROJECT_NAME,
+            description: "Auto-populated by the Phase 4 RL ranker. Hypotheses here are derived from RL predictions — verify before acting on them.",
+            status: "active",
+            visibility: "private", // FE-037: private — never org-visible by default.
+            ownerId: userId,
+            organizationId: membership.organizationId,
+            tags: "rl,predictions,auto-generated",
+          },
+        });
+      } catch {
+        // Race: another concurrent request created the project between
+        // our findFirst and create. Re-fetch.
+        project = await db.project.findFirst({
+          where: { ownerId: userId, name: RL_PROJECT_NAME, organizationId: membership.organizationId },
+        });
+        if (!project) return;
+      }
+    }
 
     for (const c of candidates.slice(0, 50)) {
       const existing = await db.hypothesis.findFirst({

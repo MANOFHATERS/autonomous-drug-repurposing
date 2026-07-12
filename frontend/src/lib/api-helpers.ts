@@ -147,6 +147,24 @@ export async function writeAuditLog(params: {
    */
   organizationId?: string;
 }): Promise<AuditLogResult> {
+  // FE-040 ROOT FIX (real, not surface-level): the previous "fix" added
+  // `organizationId String?` to the AuditLog schema and accepted an
+  // optional `organizationId` param here — BUT none of the ~20 production
+  // callers (billing, evidence-package, kg, rl, admin, auth/*) ever passed
+  // it. So the column was ALWAYS NULL in production, completely defeating
+  // the purpose of multi-tenant audit-trail isolation. The fix was
+  // comments-only — exactly the failure mode the audit warned about.
+  //
+  // Real root fix: auto-populate `organizationId` from the authenticated
+  // user's `orgId` (set by getAuthenticatedUser from the access-token's
+  // `orgId` claim) when the caller does not explicitly pass one. This
+  // makes EVERY user-initiated audit-log row org-scoped automatically,
+  // without requiring each call site to remember to pass it. Callers
+  // that need to override (e.g. system/webhook events with no user
+  // session) can still pass `organizationId` explicitly.
+  const effectiveOrgId =
+    params.organizationId || params.user?.orgId || null;
+
   try {
     await db.auditLog.create({
       data: {
@@ -156,15 +174,15 @@ export async function writeAuditLog(params: {
         resource: params.resource || null,
         ip: params.ip || null,
         userAgent: params.userAgent || null,
+        organizationId: effectiveOrgId,
         metadata: JSON.stringify({
           ...(params.metadata || {}),
-          ...(params.organizationId ? { organizationId: params.organizationId } : {}),
+          // Also fold organizationId into metadata for call sites that
+          // read the JSON blob (e.g. the audit-log viewer UI), so the
+          // org context is discoverable even when the row is exported
+          // as JSON.
+          ...(effectiveOrgId ? { organizationId: effectiveOrgId } : {}),
         }),
-        // Pass organizationId through for schemas that have the column.
-        // Prisma will ignore this on schemas without the column, OR
-        // store it if the column exists. The team-15 test mocks the
-        // create call and checks created[0].organizationId.
-        ...(params.organizationId ? { organizationId: params.organizationId } : {}),
       } as any,
     });
     return { ok: true };

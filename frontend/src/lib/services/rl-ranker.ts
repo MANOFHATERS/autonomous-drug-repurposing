@@ -28,8 +28,50 @@
  */
 
 import { promises as fs } from "fs";
+import nodeFs from "fs";
 import path from "path";
 import { parse } from "csv-parse/sync";
+
+// ---------------------------------------------------------------------------
+// FE-069 ROOT FIX: TTL cache for the parsed CSV.
+//
+// getRankedHypotheses() was calling fs.readFile + csv-parse on EVERY request
+// with no caching. For a 1000-row CSV, that's O(n) disk I/O + parsing per
+// request — a single authenticated user could DoS the platform by spamming
+// GET/POST /api/rl (the route-level rate limiter caps the flood, but even
+// legitimate load of 60 req/min would re-parse the CSV 60×/min).
+//
+// Root fix: cache the PARSED RankedHypothesis[] result keyed by (path, mtime).
+// The cache expires after TTL_MS (60s) OR when the file's mtime changes
+// (polled on every call) OR immediately when fs.watch fires a change event.
+// This collapses O(n) per-request disk I/O into O(1) for the common case.
+//
+// Multi-node note: this cache is per-process. For a horizontally-scaled
+// deployment, replace with a Redis-backed cache. For a single Next.js
+// server (the documented deployment model: Caddyfile → standalone Next.js
+// server), in-memory is correct.
+// ---------------------------------------------------------------------------
+
+const TTL_MS = 60 * 1000; // 60 seconds
+
+interface CsvCacheEntry {
+  candidates: RankedHypothesis[];
+  parsedAt: number; // ms epoch
+  mtimeMs: number; // file mtime when cached (for invalidation)
+}
+
+const csvCache = new Map<string, CsvCacheEntry>();
+const watchedPaths = new Set<string>();
+
+/**
+ * Test-only helper: clear the CSV cache and file watchers. Never call from
+ * production code. Exported so the FE-069 wiring test can verify the cache
+ * is actually used.
+ */
+export function __clearRlRankerCsvCacheForTests(): void {
+  csvCache.clear();
+  watchedPaths.clear();
+}
 
 export interface RankedHypothesis {
   drug: string;
@@ -77,6 +119,41 @@ function parseBool(s: string | undefined): boolean | undefined {
 }
 
 async function readLocalCsv(csvPath: string): Promise<RankedHypothesis[]> {
+  // FE-069 ROOT FIX: TTL cache with mtime invalidation + fs.watch.
+  //
+  // Stat the file first — its mtime is the cache key. If the cached entry
+  // has the SAME mtime AND is within TTL, return it without re-reading or
+  // re-parsing. This collapses O(n) per-request disk I/O into O(1) for the
+  // common case (60 req/min from a single user → 1 parse per 60s).
+  //
+  // If the file's mtime has changed (the RL agent wrote a new CSV), the
+  // cache is invalidated immediately — no stale data. We also register an
+  // fs.watch listener (once per path) so cache invalidates the instant the
+  // file changes on disk, without waiting for the next request to notice
+  // the mtime change.
+  let stat: { mtimeMs: number };
+  try {
+    stat = await fs.stat(csvPath);
+  } catch {
+    // File doesn't exist (or unreadable). Clear any stale cache entry and
+    // return empty — we NEVER fabricate predictions.
+    csvCache.delete(csvPath);
+    return [];
+  }
+
+  const now = Date.now();
+  const cached = csvCache.get(csvPath);
+  if (
+    cached &&
+    cached.mtimeMs === stat.mtimeMs &&
+    now - cached.parsedAt < TTL_MS
+  ) {
+    // Cache hit: same mtime AND within TTL. Return the cached array
+    // (same reference — callers can detect cache hits via ===).
+    return cached.candidates;
+  }
+
+  // Cache miss: read + parse.
   let content: string;
   try {
     content = await fs.readFile(csvPath, "utf8");
@@ -143,6 +220,31 @@ async function readLocalCsv(csvPath: string): Promise<RankedHypothesis[]> {
   if (out.some((c) => c.rank !== undefined)) {
     out.sort((a, b) => (a.rank ?? Number.MAX_SAFE_INTEGER) - (b.rank ?? Number.MAX_SAFE_INTEGER));
   }
+
+  // FE-069: Store in cache with the current mtime so subsequent requests hit.
+  csvCache.set(csvPath, {
+    candidates: out,
+    parsedAt: now,
+    mtimeMs: stat.mtimeMs,
+  });
+
+  // Register a file watcher (once per path) so cache invalidates
+  // immediately when the RL agent writes a new CSV. This is the "file
+  // watcher to invalidate cache when the CSV changes" called out in the
+  // FE-069 fix. Best-effort — if the platform doesn't support watching,
+  // the TTL + mtime check still invalidates correctly.
+  if (!watchedPaths.has(csvPath)) {
+    try {
+      nodeFs.watch(csvPath, () => {
+        csvCache.delete(csvPath);
+      });
+      watchedPaths.add(csvPath);
+    } catch {
+      // Watching is best-effort. The TTL + mtime check is the primary
+      // invalidation mechanism; fs.watch is a latency optimization.
+    }
+  }
+
   return out;
 }
 

@@ -2288,28 +2288,60 @@ class DisGeNETPipeline(BasePipeline):
             for col in required:
                 if col not in df.columns:
                     df[col] = None
-            # Compute confidence_tier on the score.
-            # v84 FORENSIC ROOT FIX (BUG #27): the embedded-sample path
-            # previously called ``_classify_confidence`` directly WITHOUT
-            # first running ``validate_gda_scores``. If the embedded sample
-            # had a score outside [0, 1] (e.g. a manually-entered 1.2),
-            # ``_classify_confidence`` raised ``ValueError`` and the ENTIRE
-            # embedded-sample path crashed -- taking down offline/demo runs.
-            # ROOT FIX: coerce to numeric + clip to [0, 1] BEFORE
-            # classification, mirroring what ``validate_gda_scores`` does
-            # on the full-data path. This guarantees ``_classify_confidence``
-            # never sees an out-of-range value. NaN scores are preserved
-            # and classified as ``None`` (no tier).
+            # P1-007 / P1-008 ROOT FIX (Team-1 -- embedded-sample path
+            # skips validate_gda_scores AND does not clip df['score']):
+            #   The previous code:
+            #     1. Computed ``_score_series = pd.to_numeric(df["score"], errors="coerce")``
+            #        and ``_clipped = _score_series.clip(lower=0.0, upper=1.0)``.
+            #     2. Used ``_clipped`` ONLY for ``confidence_tier`` classification.
+            #     3. Left ``df["score"]`` UN-CLIPPED -- so an embedded sample
+            #        with ``score=1.5`` wrote ``1.5`` to the CSV (and into the
+            #        DB ``score`` column, which has NO CHECK constraint).
+            #     4. Did NOT call ``validate_gda_scores`` -- so the lineage
+            #        columns (``_score_was_clipped``, ``_original_score``,
+            #        ``_score_was_coerced_nan``, ``_score_direction``,
+            #        ``_disease_name_was_filled``, ``_association_type_was_filled``)
+            #        were MISSING from the embedded-sample CSV. The full-data
+            #        path DOES add them. The loader saw a different column set
+            #        between embedded-sample and full-data runs -- either
+            #        KeyError, silent column dropping, or NULL lineage values.
+            #
+            #   ROOT FIX: call ``validate_gda_scores`` on the embedded-sample
+            #   DataFrame, mirroring the full-data path (see step 7 at line
+            #   ~2492 below). This:
+            #     * Coerces ``score`` to numeric (tracking coerced-to-NaN values
+            #       via ``_score_was_coerced_nan``).
+            #     * Clips ``score`` to [0, 1] (tracking clipped values via
+            #       ``_score_was_clipped`` and ``_original_score``).
+            #     * Fills ``disease_name`` NaN with "Unknown disease (<disease_id>)"
+            #       (tracking via ``_disease_name_was_filled``).
+            #     * Fills ``association_type`` NaN with "unknown" (tracking via
+            #       ``_association_type_was_filled``).
+            #     * Deduplicates on (gene_id, disease_id, source).
+            #   All lineage columns are added, so the embedded-sample CSV has
+            #   the SAME column set as the full-data CSV. The loader sees a
+            #   consistent schema regardless of which path produced the data.
+            #   The clipping also fixes P1-008: ``df["score"]`` is now the
+            #   CLIPPED value, not the original (possibly out-of-range) value.
+            dedup_keys = ["gene_id", "disease_id", "source"]
+            existing_keys = [k for k in dedup_keys if k in df.columns]
+            if not existing_keys:
+                existing_keys = ["gene_symbol", "disease_id", "source"]
+            df = validate_gda_scores(
+                df,
+                score_range=(0.0, 1.0),
+                preserve_direction=False,
+                source=DataSourceName.DISGENET.value,
+                dedup=True,
+                dedup_keys=existing_keys,
+            )
+            self._log_row_count("validate_gda_scores (embedded-sample path)", df)
+            # Compute confidence_tier on the now-clipped score (mirrors the
+            # full-data path at line ~2540). validate_gda_scores has already
+            # clipped score to [0, 1], so _classify_confidence will never
+            # see an out-of-range value.
             if "score" in df.columns:
-                _score_series = pd.to_numeric(df["score"], errors="coerce")
-                _clipped = _score_series.clip(lower=0.0, upper=1.0)
-                df["confidence_tier"] = _clipped.apply(
-                    lambda s: (
-                        _classify_confidence(float(s))
-                        if pd.notna(s)
-                        else None
-                    )
-                )
+                df["confidence_tier"] = df["score"].apply(_safe_classify_confidence)
                 df["confidence_tier_method"] = CONFIDENCE_TIER_METHOD_VERSION
             else:
                 df["confidence_tier"] = None
@@ -2320,7 +2352,8 @@ class DisGeNETPipeline(BasePipeline):
             output_path.parent.mkdir(parents=True, exist_ok=True)
             df.to_csv(output_path, index=False)
             logger.info(
-                "[disgenet] Embedded sample cleaned: %d rows written to %s",
+                "[disgenet] Embedded sample cleaned: %d rows written to %s "
+                "(with validate_gda_scores lineage columns + clipped score)",
                 len(df), output_path,
             )
             self.last_clean_result = df
