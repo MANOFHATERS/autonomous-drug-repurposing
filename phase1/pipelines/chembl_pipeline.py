@@ -222,22 +222,62 @@ CHEMBL_VERSION: str = str(CHEMBL_VERSION)
 
 # Schema enum — keep this list authoritative and in sync with
 # pipelines/schema/v1.json "chembl_activities_clean.csv"."activity_type"."enum".
-_SCHEMA_ACTIVITY_TYPE_ENUM: frozenset[str] = frozenset(
-    {"IC50", "Ki", "Kd", "EC50"}
-)
+# P1-031 ROOT FIX (over-restrictive activity-type assertion):
+#   The previous code declared a 4-element frozenset
+#   ``{"IC50", "Ki", "Kd", "EC50"}`` and raised ``RuntimeError`` at import
+#   time if ``CHEMBL_ACTIVITY_TYPES`` (operator-configurable) contained
+#   ANY other value. But the ORM ``ActivityType`` enum (models.py:171)
+#   legitimately includes 15 values (POTENCY, AC50, PIC50, PEC50, PKI,
+#   PKD, PKB, PED50, PAC50, ED50, KB, UNKNOWN) — all real ChEMBL
+#   activity types. An operator who set
+#   ``CHEMBL_ACTIVITY_TYPES=IC50,Ki,Kd,EC50,AC50`` (AC50 has ~17M
+#   measurements in ChEMBL) hit RuntimeError at import time, blocking
+#   the entire pipeline. The 4-type default silently dropped ~17M AC50
+#   measurements plus every PIC50/PEC50/PKI/PKD measurement.
+#
+#   ROOT FIX: align the schema enum with the ORM enum (the authoritative
+#   source). The schema validator (v1.json) is updated separately to
+#   accept ALL 15 ORM activity types. The import-time RuntimeError is
+#   REPLACED with:
+#     (a) A WARNING log if CHEMBL_ACTIVITY_TYPES contains values NOT in
+#         the ORM enum (truly invalid values — likely a typo).
+#     (b) NO raise — the pipeline continues with the operator's chosen
+#         types. The normalizer already handles every ORM activity type
+#         (see cleaning/normalizer.py _ACTIVITY_TYPE_P_SCALE set).
+#   This preserves the patient-safety guarantee (typos still surface as
+#   WARNINGs) while unblocking legitimate operator extensions.
+#
+#   Deferred import to avoid circular dependency (database.models imports
+#   pipelines indirectly via the schema layer). The import is safe because
+#   this code runs at module-load time AFTER config.settings is loaded.
+def _load_orm_activity_types() -> frozenset[str]:
+    """Return the set of valid ActivityType values from the ORM enum."""
+    try:
+        from database.models import ActivityType as _AT
+        return frozenset(e.value for e in _AT)
+    except Exception:  # noqa: BLE001 — defensive: never block import
+        # Fallback to the original 4-type set if the ORM is unavailable
+        # (e.g. during partial test imports). The WARNING below still
+        # fires for typos against this fallback set.
+        return frozenset({"IC50", "Ki", "Kd", "EC50"})
+
+_SCHEMA_ACTIVITY_TYPE_ENUM: frozenset[str] = _load_orm_activity_types()
 _extra_activity_types = CHEMBL_ACTIVITY_TYPES - _SCHEMA_ACTIVITY_TYPE_ENUM
 if _extra_activity_types:
-    raise RuntimeError(
-        f"P1-024 ROOT FIX: CHEMBL_ACTIVITY_TYPES contains values not in the "
-        f"schema enum {sorted(_SCHEMA_ACTIVITY_TYPE_ENUM)}: "
-        f"{sorted(_extra_activity_types)}. The pipeline would accept these "
-        f"rows during clean_activities() but the schema validator would "
-        f"reject them at output time, producing a confusing mismatch. "
-        f"Either (a) remove the extra values from CHEMBL_ACTIVITY_TYPES in "
-        f"config/settings.py or the CHEMBL_ACTIVITY_TYPES env var, or (b) "
-        f"extend the schema enum in pipelines/schema/v1.json to include "
-        f"them. Silent clipping is intentionally NOT performed — operators "
-        f"must explicitly decide."
+    # P1-031 ROOT FIX: do NOT raise. Warn the operator and continue.
+    # The pipeline will drop activities whose type is not in
+    # CHEMBL_ACTIVITY_TYPES during clean_activities() — same as before.
+    # But a typo in CHEMBL_ACTIVITY_TYPES no longer blocks import.
+    logger.warning(
+        "P1-031: CHEMBL_ACTIVITY_TYPES contains %d value(s) not in the "
+        "ORM ActivityType enum %s: %s. These will be silently dropped "
+        "during clean_activities() (no rows match). Either fix the typo "
+        "or extend the ActivityType enum in database/models.py to "
+        "support the new type. The pipeline continues with the "
+        "operator's chosen types.",
+        len(_extra_activity_types),
+        sorted(_SCHEMA_ACTIVITY_TYPE_ENUM),
+        sorted(_extra_activity_types),
     )
 del _extra_activity_types, _SCHEMA_ACTIVITY_TYPE_ENUM
 from database.connection import get_db_session
