@@ -1020,3 +1020,43 @@ Stage Summary:
 - Files modified: phase1/entity_resolution/protein_resolver.py (removed 2 wrong redirect entries, added scientific justification).
 - Files added: phase1/tests/test_team3_p1_022_to_030_regression.py (27 regression tests).
 - Forensic findings outside Team 3 scope (notified): test_resolver_utils_113_issues.py has 22 pre-existing failures (expects fuzzy=0.85 but code correctly has 0.65 per v29 audit C-1/C-2 confidence-inversion fix — the test was never updated). test_normalizer_v21_comprehensive.py has 2 pre-existing failures (multicomponent SMILES largest-fragment selection). These belong to the resolver_utils and normalizer owners respectively.
+
+---
+Task ID: P3-TM9-v106
+Agent: Team Member 9 (Phase 3 Graph Transformer)
+Task: Forensic verification + regression tests for P3-001 through P3-010 + Makefile tab fix
+
+Work Log:
+- Read project docx (Team_Cosmic_Build_Process_Updated.docx) to understand 6-phase architecture
+- Cloned repo and read ALL 4 target files line by line (3333 lines total):
+  graph_transformer/models/graph_transformer.py (1046 lines)
+  graph_transformer/models/link_predictor.py (738 lines)
+  graph_transformer/models/layers.py (936 lines)
+  graph_transformer/models/embeddings.py (590 lines)
+- Installed dependencies: torch 2.13.0+cpu, gymnasium 1.3.0, stable_baselines3 2.9.0, sqlalchemy
+- Wrote forensic verification script (scripts/forensic_verify_p3.py) with 19 checks
+- Ran forensic verification: ALL 19 checks PASS
+- Ran existing test suite (test_p3_tm9_model_issues.py): 32 tests PASS
+- Ran real 4-phase pipeline (run_4phase.py): Phase 1->2->3->4 all ran, KP recovery 100%
+- Wrote 49 NEW stringent regression tests (tests/test_p3_tm9_forensic_regression.py)
+- Ran new tests: ALL 49 PASS
+- Fixed pre-existing Makefile bug (8 spaces -> TABs) that was blocking 2 tests
+- Ran full Phase 3 test suite: 106 passed, 1 xfailed, 0 failed
+- Created branch fix/phase3-tm9-p3-001-to-010-verified-v106
+- Committed + pushed branch
+- Merged to main (commit 0f6fbd9)
+- Re-cloned repo to fresh location (autonomous-drug-repurposing-verify)
+- Verified all 10 fixes present in fresh clone via grep
+- Ran forensic verification on fresh clone: 19/19 PASS
+- Ran pytest suite on fresh clone: 106 passed, 1 xfailed
+- Ran real 4-phase pipeline on fresh clone: KP recovery 100%, all phases ran
+
+Stage Summary:
+- All 10 issues (P3-001 to P3-010) verified FIXED at runtime (not just in comments)
+- 100 total verification points: 19 forensic + 32 existing + 49 new regression tests
+- Real 4-phase pipeline runs end-to-end on fresh clone
+- Phase 3 -> Phase 4 connectivity verified (KP recovery 100%)
+- Makefile pre-existing bug fixed (spaces -> tabs)
+- Branch: fix/phase3-tm9-p3-001-to-010-verified-v106 (merged to main)
+- Main branch commit: 0f6fbd9
+- Fresh clone verification: ALL PASS
