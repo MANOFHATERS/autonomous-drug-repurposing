@@ -366,6 +366,32 @@ def _configure_logging() -> None:
         root_logger.addHandler(file_handler)
         root_logger.addFilter(_RunIdFilter(_pipeline_run_id))
 
+        # P2-027 ROOT FIX (Team 8 — forensic completion): ALSO configure
+        # the ``drugos.phase2`` named logger via ``setup_logging()`` from
+        # utils.py. The existing ``drugos_pipeline`` logger above is
+        # correct, but modules that use ``logging.getLogger('drugos.phase2.*')``
+        # (the canonical phase2 logger name per utils.py) would NOT be
+        # routed to the file handler without this call. In an Airflow
+        # deployment, those modules' records would fall through to the
+        # root logger (which Airflow controls) — the exact P2-027 bug.
+        # ``setup_logging()`` is idempotent and attaches a FileHandler +
+        # StreamHandler to the ``drugos.phase2`` logger with
+        # ``propagate=False``, so its records go to
+        # ``${DRUGOS_LOG_DIR:-/var/log/drugos}/phase2.log`` regardless
+        # of Airflow's root configuration.
+        try:
+            from .utils import setup_logging as _setup_phase2_logging
+            _setup_phase2_logging()
+        except Exception:
+            # Defensive: if utils.setup_logging is unavailable (e.g.
+            # partial install), the ``drugos_pipeline`` logger above
+            # still handles the pipeline's own records. The P2-027 fix
+            # is best-effort here — the primary entry points
+            # (run_4phase.py, __main__.py) also call setup_logging()
+            # directly so the named logger is configured even if this
+            # site fails.
+            pass
+
         _logger_configured = True
 
 

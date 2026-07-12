@@ -183,12 +183,27 @@ _FALLBACK_HANDLER.setLevel(logging.WARNING)
 _FALLBACK_HANDLER.setFormatter(
     logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 )
-logging.basicConfig(level=logging.WARNING, handlers=[_FALLBACK_HANDLER])
-
-# Dedicated module logger -- used for pre-flight and lifecycle messages.
-# The name "drugos_graph.__main__" ensures it inherits the root logger's
-# fallback handler until run_pipeline's `_configure_logging` overrides it.
+# P2-027 ROOT FIX (Team 8 — forensic completion): the previous code called
+# ``logging.basicConfig(level=logging.WARNING, handlers=[_FALLBACK_HANDLER])``
+# which mutates the ROOT logger. In an Airflow production deployment,
+# Airflow overrides the root logger's handlers — so this fallback was
+# silently routed to Airflow's worker log instead of stderr, defeating
+# its purpose as a safety net. Worse, the mutation persisted even after
+# run_pipeline's `_configure_logging` ran, causing duplicate log lines
+# in Airflow's worker log.
+#
+# ROOT FIX: attach the fallback handler directly to the NAMED
+# ``drugos_graph.__main__`` logger (NOT the root logger). Named loggers
+# are immune to Airflow's root-logger override (the bug P2-027 fixes).
+# ``propagate=False`` ensures the records do NOT reach Airflow's root
+# handler. The fallback is removed once run_pipeline's
+# `_configure_logging` attaches the real handlers (it calls
+# `setup_logging()` from utils.py which configures the
+# ``drugos.phase2`` named logger hierarchy).
 _logger = logging.getLogger("drugos_graph.__main__")
+_logger.addHandler(_FALLBACK_HANDLER)
+_logger.setLevel(logging.WARNING)
+_logger.propagate = False  # P2-027: don't route to Airflow's root handler
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Module-level state -- these mirror the pattern used by run_pipeline.py

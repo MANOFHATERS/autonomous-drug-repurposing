@@ -416,10 +416,48 @@ def run_phase3_and_4(
 
 def main() -> int:
     # R-028: configure logging inside main(), not at module import time.
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
-    )
+    #
+    # P2-027 ROOT FIX (Team 8 — forensic completion): the previous code
+    # called ``logging.basicConfig`` here, which mutates the ROOT logger.
+    # In an Airflow production deployment, Airflow overrides the root
+    # logger's handlers — so this pipeline's logs were silently routed
+    # to Airflow's worker log file instead of the dedicated pipeline
+    # log file. Ops could not find the pipeline logs, could not debug
+    # production issues, and the audit trail was corrupted. This is
+    # exactly the "fake fix" pattern: utils.py defined ``setup_logging``
+    # but no entry point called it, so the named-logger fix was INERT.
+    #
+    # ROOT FIX: call ``drugos_graph.utils.setup_logging()`` which
+    # configures the NAMED ``drugos.phase2`` logger (immune to
+    # Airflow's root-logger override) with a FileHandler
+    # (``${DRUGOS_LOG_DIR:-/var/log/drugos}/phase2.log``) AND a
+    # StreamHandler (stderr). ``propagate=False`` ensures Airflow's
+    # root handler cannot duplicate or swallow our records.
+    try:
+        from drugos_graph.utils import setup_logging as _setup_phase2_logging
+        _setup_phase2_logging()
+        logger.info(
+            "P2-027: phase2 named logger 'drugos.phase2' configured via "
+            "setup_logging() — immune to Airflow root-logger override."
+        )
+    except Exception as _p2_027_exc:
+        # Fallback ONLY if drugos_graph.utils is unavailable (e.g. phase2
+        # not installed in a stripped-down environment). This preserves
+        # the legacy behaviour for environments that cannot import the
+        # named-logger setup, but logs a WARNING so ops know the
+        # Airflow-override bug (P2-027) is NOT fixed in this run.
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
+        )
+        logger.warning(
+            "P2-027 REGRESSION: setup_logging unavailable (%s) — "
+            "falling back to logging.basicConfig. In an Airflow "
+            "deployment this pipeline's logs will be routed to "
+            "Airflow's worker log, NOT the dedicated pipeline log. "
+            "Install drugos_graph.utils to fix.",
+            _p2_027_exc,
+        )
 
     parser = argparse.ArgumentParser(
         description="Run the full 4-phase drug repurposing pipeline."
