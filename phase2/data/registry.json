@@ -1,7 +1,7 @@
 {
   "string_edges": {
     "version": "1.0.0",
-    "schema_version": "1.0.0",
+    "schema_version": "2.0.0",
     "owner": "string_loader",
     "produced_by": "drugos_graph.string_loader",
     "produced_at": "2026-07-01T07:09:36Z",
@@ -9,7 +9,11 @@
     "loaded": false,
     "loaded_reason": "v38 ROOT FIX (Issue #52): edge_count=0 means STRING PPI was registered as 'processed' but produced ZERO edges. Previous code trusted the registry's existence as 'loaded' \u2014 downstream code that trusts the registry believed STRING was loaded. The 'loaded' flag is now explicit: false when edge_count=0. The protein subgraph is disconnected from itself when STRING has 0 edges. To fix: run the STRING loader with real data (DRUGOS_STRING_SCORE_THRESHOLD defaults to 700; lower it to 400 for more edges at lower precision).",
     "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
-    "load_id": "84984ce64cf34dfaa92a0d1da5038f0f"
+    "load_id": "84984ce64cf34dfaa92a0d1da5038f0f",
+    "node_type_counts": {},
+    "edge_type_counts": {
+      "(Protein, interacts_with, Protein)": 0
+    }
   },
   "sider": {
     "version": "2023-10-25",
@@ -18,7 +22,14 @@
     "loaded": true,
     "parsed_at": "2026-07-03T07:18:43.455118Z",
     "load_id": "sider_20260703T071835_2048afd1",
-    "schema_version": "1.0.0",
-    "parser_version": "1.0.0"
+    "schema_version": "2.0.0",
+    "parser_version": "1.0.0",
+    "node_type_counts": {
+      "AdverseEvent": 91926
+    },
+    "edge_type_counts": {
+      "(Compound, causes, AdverseEvent)": 91926
+    },
+    "node_type_note": "FE-020 ROOT FIX: SIDER rows are AdverseEvent records (side-effect mentions), NOT canonical KG nodes. The 5 canonical node types per the project docx are: Compound, Protein, Pathway, Disease, ClinicalOutcomes. AdverseEvent is intentionally kept as a SEPARATE non-canonical type so the dashboard does NOT misreport 91,926 'nodes' as canonical KG nodes. The dashboard's canonical node count excludes AdverseEvent."
   }
 }
