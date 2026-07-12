@@ -1,4 +1,4 @@
-"""DrugOS Graph Module — Training Data Construction (Institutional-Grade v2.1.0)
+"""DrugOS Graph Module -- Training Data Construction (Institutional-Grade v2.1.0)
 ===============================================================================
 Constructs training data for drug-disease link prediction in the DrugOS
 Autonomous Drug Repurposing Platform.
@@ -9,11 +9,11 @@ training data = wrong predictions = patient harm. Every function in this
 module is life-safety-critical.
 
 Four public functions:
-  (a) extract_positive_pairs       — Known drug-disease 'treats' pairs
-  (b) extract_auxiliary_positive_pairs — Multi-relational pairs (Compound-Gene,
+  (a) extract_positive_pairs       -- Known drug-disease 'treats' pairs
+  (b) extract_auxiliary_positive_pairs -- Multi-relational pairs (Compound-Gene,
       Gene-Disease, Gene-Gene) for multi-hop training signal
-  (c) build_training_data         — Complete dataset (positives + negatives)
-  (d) temporal_split_pairs         — Temporal train/val/test split
+  (c) build_training_data         -- Complete dataset (positives + negatives)
+  (d) temporal_split_pairs         -- Temporal train/val/test split
 
 Target: 15,000+ positive and 75,000+ negative pairs.
   RATIONALE: Targets derived from DRKG data availability: ~15K known
@@ -28,7 +28,7 @@ Multi-Relational Training (ARCH-001 fix):
     Drug A -> targets -> Protein B -> involved in -> Pathway C -> disrupted in -> Disease D
   Auxiliary pairs (compound-gene, gene-disease, gene-gene) are extracted
   and passed to build_training_data() for downstream PyG heterogeneous
-  graph construction. These are NOT used for negative sampling — only for
+  graph construction. These are NOT used for negative sampling -- only for
   multi-hop positive training signal.
 
 Patient Safety Note:
@@ -38,22 +38,22 @@ Patient Safety Note:
   predictions mean wasted millions in R&D AND potential patient harm.
 
 Fixes applied: All 79 issues from TrainingData_FixPrompt_79Issues_16Domains.docx
-  Domain 3  (Scientific Correctness)   — Issues SCI-001 to SCI-007
-  Domain 5  (Data Quality)            — Issues DQI-001 to DQI-008
-  Domain 7  (Idempotency)             — Issues IDE-001 to IDE-005
-  Domain 1  (Architecture)           — Issues ARCH-001 to ARCH-005
-  Domain 9  (Security & Privacy)      — Issues SEC-001 to SEC-003
-  Domain 2  (Design)                  — Issues DSN-001 to DSN-004
-  Domain 14 (Compliance)              — Issues CMP-001 to CMP-004
-  Domain 6  (Reliability)             — Issues REL-001 to REL-005
-  Domain 10 (Testing)                 — Issues TST-001 to TST-005
-  Domain 4  (Coding)                 — Issues COD-001 to COD-006
-  Domain 8  (Performance)             — Issues PRF-001 to PRF-005
-  Domain 11 (Logging)                 — Issues LOG-001 to LOG-005
-  Domain 12 (Configuration)           — Issues CFG-001 to CFG-005
-  Domain 15 (Interoperability)        — Issues IOP-001 to IOP-004
-  Domain 16 (Lineage)                 — Issues LIN-001 to LIN-004
-  Domain 13 (Documentation)           — Issues DOC-001 to DOC-005
+  Domain 3  (Scientific Correctness)   -- Issues SCI-001 to SCI-007
+  Domain 5  (Data Quality)            -- Issues DQI-001 to DQI-008
+  Domain 7  (Idempotency)             -- Issues IDE-001 to IDE-005
+  Domain 1  (Architecture)           -- Issues ARCH-001 to ARCH-005
+  Domain 9  (Security & Privacy)      -- Issues SEC-001 to SEC-003
+  Domain 2  (Design)                  -- Issues DSN-001 to DSN-004
+  Domain 14 (Compliance)              -- Issues CMP-001 to CMP-004
+  Domain 6  (Reliability)             -- Issues REL-001 to REL-005
+  Domain 10 (Testing)                 -- Issues TST-001 to TST-005
+  Domain 4  (Coding)                 -- Issues COD-001 to COD-006
+  Domain 8  (Performance)             -- Issues PRF-001 to PRF-005
+  Domain 11 (Logging)                 -- Issues LOG-001 to LOG-005
+  Domain 12 (Configuration)           -- Issues CFG-001 to CFG-005
+  Domain 15 (Interoperability)        -- Issues IOP-001 to IOP-004
+  Domain 16 (Lineage)                 -- Issues LIN-001 to LIN-004
+  Domain 13 (Documentation)           -- Issues DOC-001 to DOC-005
 """
 
 from __future__ import annotations
@@ -69,7 +69,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 import numpy as np
 
-# import torch  # Not used directly — uncomment if future methods need GPU tensors (ARCH-004)
+# import torch  # Not used directly -- uncomment if future methods need GPU tensors (ARCH-004)
 # from torch_geometric.data import HeteroData  # Not used directly in this module
 
 from .config import (
@@ -109,7 +109,7 @@ TRAINING_DATA_SCHEMA_VERSION: str = "2.1.0"
 # FIX-P1-D-10 (root): the previous code did
 # ``float(os.environ.get("DRUGOS_NEG_RATIO", "5.0"))`` at module import
 # time. If the operator set ``DRUGOS_NEG_RATIO=abc`` (typo, missing
-# unit, etc.), ``float("abc")`` raised ValueError AT IMPORT TIME —
+# unit, etc.), ``float("abc")`` raised ValueError AT IMPORT TIME --
 # taking down the entire ``drugos_graph`` package (every consumer
 # that imports anything from drugos_graph fails to start). The same
 # issue applied to DEFAULT_CUTOFF_YEAR, TRAIN_SPLIT_RATIO, and
@@ -118,7 +118,7 @@ TRAINING_DATA_SCHEMA_VERSION: str = "2.1.0"
 # default on ValueError, so a malformed env var no longer breaks
 # the import. This is critical for production: a misconfigured env
 # var on a deploy host should NEVER prevent the service from
-# booting — it should be visible as a warning in the logs and
+# booting -- it should be visible as a warning in the logs and
 # the operator can fix the env var without a restart-cycle.
 def _safe_float_env(var_name: str, default: float) -> float:
     """Parse a float env var with a safe fallback (FIX-P1-D-10)."""
@@ -163,7 +163,7 @@ def _safe_int_env(var_name: str, default: int) -> int:
 
 DEFAULT_NEG_RATIO: float = _safe_float_env("DRUGOS_NEG_RATIO", 5.0)
 
-# Fix CFG-003: Temporal cutoff year — aligned with PyGConfig.temporal_cutoff_year
+# Fix CFG-003: Temporal cutoff year -- aligned with PyGConfig.temporal_cutoff_year
 # RATIONALE: 2020 was chosen because the DRKG snapshot used for V1 was
 # curated pre-COVID. For post-2020 data, update to the most recent full
 # calendar year minus 2. Override via DRUGOS_TEMPORAL_CUTOFF_YEAR env var.
@@ -205,7 +205,7 @@ class PositivePairSet:
         return len(self.pairs)
 
 # ======================================================================
-# Internal helpers — regex patterns, validation, sanitization
+# Internal helpers -- regex patterns, validation, sanitization
 # ======================================================================
 
 # Fix SEC-002: ANSI escape code pattern for string sanitization
@@ -219,12 +219,12 @@ _ANSI_ESCAPE_PATTERN: re.Pattern = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
 #   Palliative: palliative, palliates (symptom management)
 #   DRKG composite: CtD::Compound:Disease (Hetionet)
 #
-# EXCLUDED (SCI-002): 'indication' alone — in pharmacology, 'indication'
+# EXCLUDED (SCI-002): 'indication' alone -- in pharmacology, 'indication'
 #   includes off-label uses, experimental uses, AND failed clinical trial
 #   indications. We only use FDA-approved indications as positive examples.
 #   Failed trial indications are handled by NegativeSampler.failed_phase3.
 #
-# EXCLUDED (SCI-001): Substring matches like 'entreat', 'mistreat' — these
+# EXCLUDED (SCI-001): Substring matches like 'entreat', 'mistreat' -- these
 #   are NOT treatment relations and must never be treated as positives.
 _TREAT_RELATION_PATTERN: re.Pattern = re.compile(
     r"^(?:CtD(?:::Compound:Disease)?|"
@@ -272,27 +272,27 @@ _COMPOUND_GENE_RELATION_PATTERN: re.Pattern = re.compile(
 # captured ALL Gene-Disease edges regardless of relation type, including
 # GNBR "possible" / speculative edges. Training on these would teach the
 # model to predict therapeutic / pathogenesis relationships from
-# literature CO-MENTION hypothesis, not from evidence — a patient-safety
+# literature CO-MENTION hypothesis, not from evidence -- a patient-safety
 # risk flagged in the forensic audit (P1) and a 21 CFR Part 11
 # reproducibility concern (the Te / Y relations are not stable across
 # GNBR releases).
 #
 # EXCLUDED (speculative, document in audit trail):
-#   - GNBR::Te   ("POSSIBLE therapeutic effect" — speculative)
-#   - GNBR::Y    ("POSSIBLE pathogenesis"       — speculative)
+#   - GNBR::Te   ("POSSIBLE therapeutic effect" -- speculative)
+#   - GNBR::Y    ("POSSIBLE pathogenesis"       -- speculative)
 #
 # INCLUDED: every other Gene-Disease relation in DRKG, including:
 #   - Hetionet::DaG::Disease:Gene   (curated disease-associates-gene)
 #   - GNBR::A+  (activation)
 #   - GNBR::A-  (inhibition)
-#   - GNBR::B   (binding — kept for backward compat with prior behaviour)
+#   - GNBR::B   (binding -- kept for backward compat with prior behaviour)
 #   - GNBR::D   (downregulation)
-#   - GNBR::E   (expression — kept for backward compat)
-#   - GNBR::J   (role in pathogenesis — CONFIRMED, not "possible")
+#   - GNBR::E   (expression -- kept for backward compat)
+#   - GNBR::J   (role in pathogenesis -- CONFIRMED, not "possible")
 #   - GNBR::L   (causal mutation)
 #   - GNBR::M   (production by organism)
 #   - GNBR::N   (regulatory)
-#   - GNBR::T   (therapeutic effect — CONFIRMED, distinct from Te)
+#   - GNBR::T   (therapeutic effect -- CONFIRMED, distinct from Te)
 #   - GNBR::U   (upregulation)
 #   - GNBR::V   (restores)
 #   - GNBR::W   (affects risk)
@@ -339,7 +339,7 @@ def _validate_drkg_df(drkg_df: Any, context: str = "function") -> None:
     """
     if drkg_df is None:
         raise DrugOSDataError(
-            f"drkg_df is None in {context} — cannot extract training data",
+            f"drkg_df is None in {context} -- cannot extract training data",
             context={"function": context, "error": "null_dataframe"},
         )
     missing = _REQUIRED_DRKG_COLUMNS - set(drkg_df.columns)
@@ -356,7 +356,7 @@ def _validate_drkg_df(drkg_df: Any, context: str = "function") -> None:
 try:
     import pandas as _pd_module
     _PD_NOTNA = _pd_module.notna  # type: ignore[assignment]
-except ImportError:  # pragma: no cover — pandas is required
+except ImportError:  # pragma: no cover -- pandas is required
     _pd_module = None
     _PD_NOTNA = None
 
@@ -391,7 +391,7 @@ def _compute_drkg_checksum(drkg_df: Any) -> str:
     produced the SAME checksum, defeating the lineage-tracking
     purpose entirely. The fix hashes a deterministic SAMPLE of the
     actual row contents (first/middle/last 100 rows per required
-    column) plus the row count and column list — fast enough for
+    column) plus the row count and column list -- fast enough for
     pipeline use (only ~300 row serialisations per call) but
     sensitive to content changes.
 
@@ -475,7 +475,7 @@ def _build_disease_atc_map(
     v35 ROOT FIX (L-34): vectorise the Compound-x-atc-Atc edge scan
     using pandas boolean masks instead of the per-row
     ``itertuples`` loop. The previous code iterated every row of the
-    ATC-masked DataFrame in Python — for a 5M-row DRKG that was
+    ATC-masked DataFrame in Python -- for a 5M-row DRKG that was
     ~300K itertuples calls (the ATC sub-graph is ~6% of total). The
     fix uses ``drkg_df.loc[atc_mask, ['head_id', 'tail_id']].values``
     to pull the relevant columns as a numpy array, then iterates the
@@ -642,8 +642,8 @@ def extract_positive_pairs(
       - Palliative: palliative, palliates
 
     EXCLUDED: 'indication' alone (includes non-treatment pharmacological
-    indications — see SCI-002). 'entreat', 'mistreat' (substring false
-    positives — see SCI-001).
+    indications -- see SCI-002). 'entreat', 'mistreat' (substring false
+    positives -- see SCI-001).
 
     Args:
         drkg_df: Parsed DRKG DataFrame with head_type, tail_type,
@@ -678,7 +678,7 @@ def extract_positive_pairs(
     # v35 ROOT FIX (L-11): replace ``apply(lambda)`` with a vectorised
     # pandas ``.str.match`` call. The lambda was called once per row
     # (~5M calls on the full DRKG), each invoking Python-level regex
-    # compilation caching — about 12x slower than the vectorised
+    # compilation caching -- about 12x slower than the vectorised
     # ``str.match`` path on the same hardware. NaN ``relation_name``
     # values get ``na=False`` so they return False (no match).
     rel_series = drkg_df.loc[cd_mask, "relation_name"].astype(str)
@@ -696,7 +696,7 @@ def extract_positive_pairs(
         tail_id = _sanitize_string(str(row.tail_id))
         relation_name = str(row.relation_name) if pd_notna(row.relation_name) else ""
 
-        # v88 ROOT FIX (BUG #49 — defensive assert on DRKG edge direction):
+        # v88 ROOT FIX (BUG #49 -- defensive assert on DRKG edge direction):
         # assert head_type=='Compound' and tail_type=='Disease' so a future
         # regex broadening to include DtC FAILS FAST instead of silently
         # inverting edges.
@@ -705,7 +705,7 @@ def extract_positive_pairs(
         assert _head_type == "Compound" and _tail_type == "Disease", (
             f"DRKG treats row has unexpected edge direction: "
             f"head_type={_head_type!r}, tail_type={_tail_type!r}. "
-            f"Expected Compound→Disease (CtD). (v88 BUG #49 root fix)"
+            f"Expected Compound->Disease (CtD). (v88 BUG #49 root fix)"
         )
 
         # DQI-002, DQI-003: Filter NaN/None/empty entity IDs
@@ -729,7 +729,7 @@ def extract_positive_pairs(
         if not ppset.add(pair_dict, pair_key):
             n_deduped += 1
 
-    # From DrugBank indications (if available) — store as metadata only
+    # From DrugBank indications (if available) -- store as metadata only
     # Free text indications cannot be used as disease IDs for link prediction
     # because they lack standardized disease identifiers (e.g., UMLS CUI,
     # MONDO ID). Future work: NLP-based disease extraction from indication
@@ -749,7 +749,7 @@ def extract_positive_pairs(
             logger.info(
                 "DrugBank: %d drugs with indication text "
                 "(%d validated IDs; not usable as training pairs "
-                "— requires NLP disease extraction for standardized disease IDs)",
+                "-- requires NLP disease extraction for standardized disease IDs)",
                 indication_count,
                 validated_count,
             )
@@ -806,7 +806,7 @@ def extract_auxiliary_positive_pairs(drkg_df: Any) -> Dict[str, List[Dict]]:
       1. Compound-Gene: Drug-target edges (target, enzyme, carrier, transporter,
          CbG, B, E, N, GNBR sub-relations, binding interactions)
       2. Gene-Disease: Gene-disease associations (DaG, DdG, J, U, L, Te, Md,
-         X, Y — all Gene-Disease edges regardless of relation type)
+         X, Y -- all Gene-Disease edges regardless of relation type)
       3. Gene-Gene: Protein-protein interactions (BINDING, CATALYSIS, REACTION,
          PHYSICAL ASSOCIATION, ASSOCIATION, GiG, GcG, Gr>G, HumGenHumGen,
          and all other Gene-Gene edges)
@@ -896,8 +896,8 @@ def extract_auxiliary_positive_pairs(drkg_df: Any) -> Dict[str, List[Dict]]:
     # above for the full include / exclude table.
     # In DRKG, Gene->Disease edges include: DaG (Hetionet disease-associates-gene),
     # GNBR::L (causal), GNBR::U (upregulated), GNBR::J (biomarker),
-    # GNBR::T (therapeutic effect — confirmed), GNBR::Te (POSSIBLE
-    # therapeutic effect — EXCLUDED), GNBR::Y (POSSIBLE pathogenesis —
+    # GNBR::T (therapeutic effect -- confirmed), GNBR::Te (POSSIBLE
+    # therapeutic effect -- EXCLUDED), GNBR::Y (POSSIBLE pathogenesis --
     # EXCLUDED), etc.
     gd_type_mask = (
         (drkg_df["head_type"] == "Gene") &
@@ -986,7 +986,7 @@ def extract_auxiliary_positive_pairs(drkg_df: Any) -> Dict[str, List[Dict]]:
             n_gg_bidir_deduped,
         )
 
-    # LOG-005: Quality metrics — unique gene coverage
+    # LOG-005: Quality metrics -- unique gene coverage
     cg_genes = {p["tail_id"] for p in auxiliary["compound_gene"]}
     gd_genes = {p["head_id"] for p in auxiliary["gene_disease"]}
     unique_genes = len(cg_genes | gd_genes)
@@ -1031,7 +1031,7 @@ def build_training_data(
 
     SCIENTIFIC CORRECTNESS FIX:
     The original code accepted drug_disease_map and disease_atc_map as
-    optional arguments but never auto-built them — so combined_sampling
+    optional arguments but never auto-built them -- so combined_sampling
     silently fell back to random-only negatives (verified: 100% of
     negatives had strategy='random' in the prior pipeline run).
 
@@ -1084,7 +1084,7 @@ def build_training_data(
             ``temporal_split_pairs``). When provided, ``num_negatives`` is
             computed against ``len(train_positive_pairs)`` and the
             auto-built ``drug_disease_map`` is built from
-            ``train_positive_pairs`` only — preventing val/test leakage
+            ``train_positive_pairs`` only -- preventing val/test leakage
             into the negative sampling distribution (FIX-P1-D-6). When
             ``None`` (default, backward compat), the previous behaviour
             is preserved but a warning is logged.
@@ -1118,19 +1118,19 @@ def build_training_data(
     # DQI-004: Validate all_drug_ids and all_disease_ids
     if not all_drug_ids:
         raise DrugOSDataError(
-            "all_drug_ids is empty — no drug entities available for negative sampling",
+            "all_drug_ids is empty -- no drug entities available for negative sampling",
             context={"function": "build_training_data"},
         )
     if not all_disease_ids:
         raise DrugOSDataError(
-            "all_disease_ids is empty — no disease entities available for negative sampling",
+            "all_disease_ids is empty -- no disease entities available for negative sampling",
             context={"function": "build_training_data"},
         )
 
     # REL-002: Check for empty positive pairs
     if not positive_pairs:
         raise DrugOSDataError(
-            "positive_pairs is empty — cannot build training data with no positive examples",
+            "positive_pairs is empty -- cannot build training data with no positive examples",
             context={"function": "build_training_data"},
         )
 
@@ -1142,13 +1142,13 @@ def build_training_data(
     # True whenever a column named ``_schema_version`` exists (pandas
     # exposes columns as attributes). Then ``df._schema_version``
     # returns the COLUMN (a Series), and ``Series != "2.0.0"`` produces
-    # a boolean Series — which raises ``ValueError: The truth value of
+    # a boolean Series -- which raises ``ValueError: The truth value of
     # a Series is ambiguous`` when used in ``if``. This crashed
     # Step 10 (training_data) on the default Phase 1 path because the
     # bridge attaches ``_schema_version`` as a per-edge property, which
     # the run_pipeline DRKG-shim flattens into a column.
     #
-    # Root fix: distinguish the three legitimate cases —
+    # Root fix: distinguish the three legitimate cases --
     #   (a) real Python attribute on a non-DataFrame object
     #       (``drkg_df.attrs["_schema_version"]`` or a dataclass),
     #   (b) a column named ``_schema_version`` on a DataFrame, where
@@ -1159,8 +1159,8 @@ def build_training_data(
 
     # v100 ROOT FIX (BUG P2-057): the 30-line schema-version-check block
     # below (from `expected = SCHEMA_VERSION` through the trailing `else`
-    # branch) is currently DEAD CODE. No upstream caller — neither the
-    # Phase 1 bridge nor the DRKG loader — ever sets `_schema_version` on
+    # branch) is currently DEAD CODE. No upstream caller -- neither the
+    # Phase 1 bridge nor the DRKG loader -- ever sets `_schema_version` on
     # the drkg_df (neither as `df.attrs["_schema_version"]` nor as a
     # column named `_schema_version`); this was confirmed by audit
     # finding P2-012. The block therefore always falls through: for a
@@ -1174,7 +1174,7 @@ def build_training_data(
     # emits a `_schema_version` column on the DRKG DataFrame), this
     # block will AUTOMATICALLY start enforcing the version match and
     # log a warning on mismatch. Until then, the block is a no-op. The
-    # block's logic is intentionally UNCHANGED — only this explanatory
+    # block's logic is intentionally UNCHANGED -- only this explanatory
     # comment is added.
     expected = SCHEMA_VERSION
     if isinstance(drkg_df, _pd.DataFrame):
@@ -1193,14 +1193,14 @@ def build_training_data(
                 logger.warning(
                     "DRKG schema version column has multiple values: %s "
                     "(expected %s). This indicates mixed-schema rows in the "
-                    "DRKG DataFrame — investigate the bridge/loader.",
+                    "DRKG DataFrame -- investigate the bridge/loader.",
                     unique_versions, expected,
                 )
         # Case (c): proper pandas metadata API.
         # v100 ROOT FIX (P2-012): the previous code checked ONLY the
         # ``_schema_version`` key (with leading underscore). But the
         # DRKG loader at ``drkg_loader.py:1791`` sets the key as
-        # ``schema_version`` (NO underscore) — so the check was silently
+        # ``schema_version`` (NO underscore) -- so the check was silently
         # inert: ``"_schema_version" in drkg_df.attrs`` was always False,
         # the warning never fired, and a schema-version mismatch between
         # the loader and the trainer would go undetected.
@@ -1242,7 +1242,7 @@ def build_training_data(
     # diseases. The full ``positive_pair_set`` (covering train+val+test)
     # is still passed to the NegativeSampler constructor below so the
     # sampler refuses to emit a (drug, disease) pair that is a TRUE
-    # positive in any split as a negative — preventing false-negative
+    # positive in any split as a negative -- preventing false-negative
     # leakage in the other direction.
     _positive_pairs_for_sampling = (
         train_positive_pairs if train_positive_pairs is not None
@@ -1250,7 +1250,7 @@ def build_training_data(
     )
     if train_positive_pairs is None:
         logger.warning(
-            "build_training_data: train_positive_pairs is None — "
+            "build_training_data: train_positive_pairs is None -- "
             "negative sampling will use the FULL positive_pairs set "
             "(including val/test pairs) for num_negatives computation "
             "and drug_disease_map construction. This is val/test "
@@ -1271,7 +1271,7 @@ def build_training_data(
             # which threw away the per-class vote counts. The sampler
             # then could not distinguish "disease D has 9 votes for A
             # and 1 vote for C" from "disease D has 1 vote for A and
-            # 9 votes for C" — both looked like just ``A``. This made
+            # 9 votes for C" -- both looked like just ``A``. This made
             # wrong-class sampling almost identical to random sampling
             # for diseases whose drugs span multiple ATC classes
             # (M-4 also addresses this from the sampler side).
@@ -1388,10 +1388,10 @@ def temporal_split_pairs(
     that were discovered AFTER the training cutoff. This simulates real-world
     deployment where the model must predict genuinely novel repurposing
     candidates, not memorize known pairs. Drugs approved before the cutoff
-    constitute the training set; drugs approved after are the test set —
+    constitute the training set; drugs approved after are the test set --
     exactly as they would be in a prospective clinical application.
 
-    Split boundaries (SCI-003 fix — docstring now matches code):
+    Split boundaries (SCI-003 fix -- docstring now matches code):
       - train: approved <= cutoff_year - 2 (e.g., <= 2018 for cutoff=2020)
       - val:   approved > cutoff_year - 2 AND <= cutoff_year (e.g., 2019-2020)
       - test:  approved > cutoff_year (e.g., 2021+)
@@ -1405,7 +1405,7 @@ def temporal_split_pairs(
     across ALL diseases. This guarantees no drug appears in both train and
     test (no drug-level leakage in that direction). HOWEVER, it also means
     the test set NEVER contains a drug the model has already seen in
-    training — the model's drug embeddings for test drugs are randomly
+    training -- the model's drug embeddings for test drugs are randomly
     initialized, so the test AUC reflects ZERO extrapolation to new drugs.
     Concrete example: a drug approved in 2018 for Disease X (train) and in
     2022 for Disease Y is placed in TRAIN for BOTH pairs (because
@@ -1423,7 +1423,7 @@ def temporal_split_pairs(
       - "pair_level": split by the (drug, disease) pair's OWN approval
         year. The same drug may appear in train (for disease X) and test
         (for disease Y). Test AUC measures extrapolation to NEW
-        INDICATIONS for known drugs — the drug-repurposing use case.
+        INDICATIONS for known drugs -- the drug-repurposing use case.
 
     Args:
         positive_pairs: Positive example dicts with 'drug_id' and 'disease_id'.
@@ -1431,8 +1431,8 @@ def temporal_split_pairs(
         approval_years: Optional {(drug_id, disease_id): year} mapping.
         split_mode: (v100 ROOT FIX BUG P2-042) "drug_first_approval"
             (default) splits by the drug's first approval year across all
-            diseases — backward compatible with v88 BUG #34. "pair_level"
-            splits by the (drug, disease) pair's own approval year —
+            diseases -- backward compatible with v88 BUG #34. "pair_level"
+            splits by the (drug, disease) pair's own approval year --
             stricter; allows the same drug in train and test for different
             diseases (tests new-indication extrapolation).
 
@@ -1474,7 +1474,7 @@ def temporal_split_pairs(
         # A random split DESTROYS the temporal evaluation guarantee
         # (future drug approvals leak into the train set), which is
         # exactly what the docstring promises this function prevents.
-        # The silent fallback made the leakage invisible — operators
+        # The silent fallback made the leakage invisible -- operators
         # calling ``temporal_split_pairs`` had no way to know the
         # returned split was NOT actually temporal.
         #
@@ -1495,11 +1495,11 @@ def temporal_split_pairs(
         # and downstream code that trusts the function name gets a non-
         # temporal split. In dev mode (where the env var may be set
         # globally for smoke tests), ALL temporal splits silently become
-        # random — future drug approvals can appear in training, inflating
+        # random -- future drug approvals can appear in training, inflating
         # AUC. The DOCX V1 launch criterion ">0.85 AUC on held-out drug-
         # disease pairs" would be evaluated on a random split, making the
         # demo to the team lead a lie. ROOT FIX: mirror the
-        # DRUGOS_ALLOW_NO_SAMPLER production-refusal pattern — in
+        # DRUGOS_ALLOW_NO_SAMPLER production-refusal pattern -- in
         # production, the escape hatch is IGNORED and we raise regardless.
         _env_mode_ts = os.environ.get("DRUGOS_ENVIRONMENT", "dev").lower()
         _is_production_ts = _env_mode_ts in ("prod", "production")
@@ -1508,7 +1508,7 @@ def temporal_split_pairs(
                 "PRODUCTION_TEMPORAL_FALLBACK_REFUSED: "
                 "DRUGOS_ALLOW_TEMPORAL_RANDOM_FALLBACK=1 is set but "
                 "DRUGOS_ENVIRONMENT=%s. Refusing to honor the escape "
-                "hatch — a random split would let future drug approvals "
+                "hatch -- a random split would let future drug approvals "
                 "leak into training, inflating the V1 launch AUC. This "
                 "is the exact patient-safety failure mode P2C-015 "
                 "identifies. (P2C-015 root fix)",
@@ -1517,7 +1517,7 @@ def temporal_split_pairs(
             _allow_random_fallback = False
         if not _allow_random_fallback:
             raise DrugOSDataError(
-                "temporal_split_pairs: approval_years is None or empty — "
+                "temporal_split_pairs: approval_years is None or empty -- "
                 "cannot perform a temporal split. A random fallback would "
                 "violate the temporal evaluation guarantee (future drug "
                 "approvals could leak into the train set). Either: "
@@ -1525,7 +1525,7 @@ def temporal_split_pairs(
                 "for every positive pair, OR "
                 "(b) set DRUGOS_ALLOW_TEMPORAL_RANDOM_FALLBACK=1 in the "
                 "environment to acknowledge you are accepting a random "
-                "split (development / unit tests only — IGNORED in "
+                "split (development / unit tests only -- IGNORED in "
                 "production per P2C-015 root fix). (H-5 / P2C-015 root fix)",
                 context={
                     "function": "temporal_split_pairs",
@@ -1537,9 +1537,9 @@ def temporal_split_pairs(
             )
         # IDE-001: Use set_global_seed() for reproducibility instead of bare random
         logger.warning(
-            "No approval year data — DRUGOS_ALLOW_TEMPORAL_RANDOM_FALLBACK=1 "
+            "No approval year data -- DRUGOS_ALLOW_TEMPORAL_RANDOM_FALLBACK=1 "
             "is set, falling back to deterministic random split (seed=%d). "
-            "WARNING: this violates the temporal evaluation guarantee — "
+            "WARNING: this violates the temporal evaluation guarantee -- "
             "the returned split is NOT a temporal split. (H-5)",
             SEED,
         )
@@ -1555,7 +1555,7 @@ def temporal_split_pairs(
         n_val = int(n * VAL_SPLIT_RATIO)
 
         # v35 ROOT FIX (M-5): set ``no_year_count`` to 0 in random mode
-        # (every pair IS assigned to a split — none are dropped for
+        # (every pair IS assigned to a split -- none are dropped for
         # missing years). Also add an explicit ``all_pairs_random_split``
         # field so downstream consumers can distinguish "random split
         # because no years" from "temporal split that happened to drop
@@ -1594,7 +1594,7 @@ def temporal_split_pairs(
     val: List[Dict] = []
     test: List[Dict] = []
 
-    # v88 ROOT FIX (BUG #34 — drug-level leakage in temporal split):
+    # v88 ROOT FIX (BUG #34 -- drug-level leakage in temporal split):
     # split by DRUG approval year (the drug's FIRST approval across all
     # diseases), not by (drug, disease) approval year. A drug is in train
     # iff its first approval year <= cutoff-2. This ensures no drug
@@ -1623,11 +1623,11 @@ def temporal_split_pairs(
         #   drug's FIRST approval year across all diseases. Guarantees
         #   no drug appears in both train and test, but the test set
         #   then never contains a drug the model has already learned
-        #   (zero extrapolation to new drugs — see KNOWN LIMITATION in
+        #   (zero extrapolation to new drugs -- see KNOWN LIMITATION in
         #   the docstring).
         # - "pair_level": split by the (drug, disease) pair's OWN
         #   approval year. The same drug may appear in train (disease X)
-        #   and test (disease Y) — tests temporal extrapolation to NEW
+        #   and test (disease Y) -- tests temporal extrapolation to NEW
         #   INDICATIONS for known drugs (the drug-repurposing use case).
         if split_mode == "pair_level":
             split_year = year
@@ -1647,7 +1647,7 @@ def temporal_split_pairs(
     # year previously went to train (conservative). The previous code
     # acknowledged this "may cause temporal data leakage" but did it
     # anyway. For a publishable temporal evaluation, no-year pairs MUST
-    # NOT pollute the train set — the model could be trained on what are
+    # NOT pollute the train set -- the model could be trained on what are
     # effectively future approvals, then "evaluated" on a temporal test
     # set that excludes those same drugs.
     #
@@ -1660,13 +1660,13 @@ def temporal_split_pairs(
         if allow_no_year:
             train.extend(no_year)
             logger.warning(
-                "%d pairs have no approval year — DRUGOS_ALLOW_NO_YEAR_IN_TRAIN=1, "
+                "%d pairs have no approval year -- DRUGOS_ALLOW_NO_YEAR_IN_TRAIN=1, "
                 "assigned to train. This may cause temporal data leakage.",
                 len(no_year),
             )
         else:
             logger.warning(
-                "%d pairs have no approval year — DROPPED from all splits to "
+                "%d pairs have no approval year -- DROPPED from all splits to "
                 "prevent temporal leakage. Set DRUGOS_ALLOW_NO_YEAR_IN_TRAIN=1 "
                 "to restore the previous (leaky) behavior.",
                 len(no_year),
@@ -1681,17 +1681,17 @@ def temporal_split_pairs(
     elapsed = time.time() - t0
     logger.info("temporal_split_pairs completed in %.1fs", elapsed)
 
-    # v43 ROOT FIX (P1 — no-year pairs silently dropped): log loudly
+    # v43 ROOT FIX (P1 -- no-year pairs silently dropped): log loudly
     # when pairs are dropped so operators notice the data loss. The
     # previous code returned the dropped pairs in result["dropped"] but
-    # only logged at INFO level — invisible at the default WARNING log
+    # only logged at INFO level -- invisible at the default WARNING log
     # level. If 50% of pairs were dropped (common when approval_years
     # is sparse), the trainer trained on half the data with no warning.
     if no_year:
         _total_input = len(train) + len(val) + len(test) + len(no_year)
         _drop_pct = (len(no_year) / max(_total_input, 1)) * 100
         logger.warning(
-            "temporal_split_pairs: DROPPED %d of %d pairs (%.1f%%) — "
+            "temporal_split_pairs: DROPPED %d of %d pairs (%.1f%%) -- "
             "these pairs had NO approval_year and were excluded from "
             "all splits to prevent temporal leakage. Training data is "
             "smaller than expected. Check that drug_records includes "
@@ -1707,7 +1707,7 @@ def temporal_split_pairs(
         # v28 ROOT FIX (P2-B-10): expose the dropped no-year pairs
         # directly on the returned dict so callers can audit the data
         # loss. Previously the dropped pairs were only counted inside
-        # ``_split_metadata["no_year_count"]`` — the actual pair dicts
+        # ``_split_metadata["no_year_count"]`` -- the actual pair dicts
         # were silently discarded, with no way for downstream code to
         # inspect WHICH pairs were lost or to re-emit them to a separate
         # data-loss audit log. The pairs are now available at
@@ -1724,7 +1724,7 @@ def temporal_split_pairs(
         # ACTUAL ratios computed from the split sizes (rather than
         # the configured TRAIN_SPLIT_RATIO / VAL_SPLIT_RATIO) so they
         # accurately reflect the temporal split's per-arm proportion
-        # — temporal splits rarely land on exactly the configured
+        # -- temporal splits rarely land on exactly the configured
         # 80/10/10 because the year cutoffs are coarse.
         "_split_metadata": {
             "method": "temporal",
@@ -1765,8 +1765,8 @@ def pd_notna(val: Any) -> bool:
     previous code re-imported pandas inside the function body, which
     (per cProfile on a 15M-row DRKG) added ~3.2s of pure import
     overhead per ``extract_positive_pairs`` call. Importing once at
-    module level is safe — pandas is a hard dependency in
-    ``requirements.txt`` — and the ``_PD_NOTNA`` reference is set to
+    module level is safe -- pandas is a hard dependency in
+    ``requirements.txt`` -- and the ``_PD_NOTNA`` reference is set to
     ``None`` if the import fails so the function falls back to the
     numpy NaN check. (COD-006)
     """

@@ -63,7 +63,7 @@ from entity_resolution.resolver_utils import (
 
 
 # =====================================================================
-# Domain 3 — Knowledge (Scientific Correctness)
+# Domain 3 -- Knowledge (Scientific Correctness)
 # =====================================================================
 
 
@@ -152,7 +152,7 @@ class TestScientificCorrectness:
         resolver.add_uniprot_records([
             {"uniprot_id": "P04637", "gene_symbol": "TP53", "organism": "Mus musculus"},
         ])
-        # P04637 is human TP53 — claiming it's mouse should be rejected.
+        # P04637 is human TP53 -- claiming it's mouse should be rejected.
         assert "P04637" not in resolver.mapping
         assert len(resolver._dead_letter) > 0
 
@@ -211,7 +211,7 @@ class TestScientificCorrectness:
         resolver.add_uniprot_records([
             {"uniprot_id": "P04637", "gene_symbol": "TP53", "organism": "Homo sapiens"},
         ])
-        # TP53 is in _WELL_KNOWN_HGNC_SYMBOLS — just verify it's accepted.
+        # TP53 is in _WELL_KNOWN_HGNC_SYMBOLS -- just verify it's accepted.
         assert "P04637" in resolver.mapping
         assert "TP53" in _WELL_KNOWN_HGNC_SYMBOLS
 
@@ -254,7 +254,7 @@ class TestScientificCorrectness:
 
 
 # =====================================================================
-# Domain 1 — Architecture
+# Domain 1 -- Architecture
 # =====================================================================
 
 
@@ -340,7 +340,7 @@ class TestArchitecture:
 
 
 # =====================================================================
-# Domain 2 — Design
+# Domain 2 -- Design
 # =====================================================================
 
 
@@ -367,8 +367,8 @@ class TestDesign:
         """DESIGN-02: MatchConfidence enum values should be consistent."""
         assert MatchConfidence.UNIPROT_EXACT.value == 1.0
         # v90 STALE-TEST FIX: the v29 SCI-02 inversion fix lowered both
-        # GENE_NAME_ORGANISM (was 0.85 → 0.75) and PROTEIN_NAME_FUZZY
-        # (was 0.90 → 0.60) because a fuzzy / gene-name match is by
+        # GENE_NAME_ORGANISM (was 0.85 -> 0.75) and PROTEIN_NAME_FUZZY
+        # (was 0.90 -> 0.60) because a fuzzy / gene-name match is by
         # definition LESS reliable than an exact UniProt match (1.0)
         # and should NOT exceed name_normalized (0.80). The previous
         # assertions reflected the PRE-v29 values. ROOT FIX: assert
@@ -412,7 +412,7 @@ class TestDesign:
 
 
 # =====================================================================
-# Domain 5 — Data Quality & Integrity
+# Domain 5 -- Data Quality & Integrity
 # =====================================================================
 
 
@@ -462,7 +462,7 @@ class TestDataQuality:
 
 
 # =====================================================================
-# Domain 6 — Reliability & Resilience
+# Domain 6 -- Reliability & Resilience
 # =====================================================================
 
 
@@ -499,7 +499,7 @@ class TestReliability:
 
 
 # =====================================================================
-# Domain 7 — Idempotency & Reproducibility
+# Domain 7 -- Idempotency & Reproducibility
 # =====================================================================
 
 
@@ -542,7 +542,7 @@ class TestIdempotency:
 
 
 # =====================================================================
-# Domain 8 — Performance & Scalability
+# Domain 8 -- Performance & Scalability
 # =====================================================================
 
 
@@ -577,7 +577,7 @@ class TestPerformance:
 
 
 # =====================================================================
-# Domain 9 — Security & Privacy
+# Domain 9 -- Security & Privacy
 # =====================================================================
 
 
@@ -626,12 +626,12 @@ class TestSecurity:
     def test_sec15_tamper_detection(self):
         """SEC-15: Tampered state dict is rejected."""
         # v90 STALE-TEST FIX: same key-config fix as
-        # test_sec15_tamper_evident_signature — without a key, no
+        # test_sec15_tamper_evident_signature -- without a key, no
         # signature is produced, so ``state.pop('_signature')`` raised
         # KeyError. ROOT FIX: construct with a test-only key.
         # NOTE: ``from_state_dict`` reads the key from env var
         # ``ENTITY_RESOLUTION_TAMPER_EVIDENT_KEY`` (because it's a
-        # classmethod with no ``self._config`` yet — the config is part
+        # classmethod with no ``self._config`` yet -- the config is part
         # of the signed payload, so it can't be used to source the key).
         # So we must ALSO set the env var for the verification side.
         import os
@@ -667,7 +667,7 @@ class TestSecurity:
 
 
 # =====================================================================
-# Domain 11 — Logging & Observability
+# Domain 11 -- Logging & Observability
 # =====================================================================
 
 
@@ -695,7 +695,7 @@ class TestLoggingObservability:
 
 
 # =====================================================================
-# Domain 12 — Configuration & Environment Management
+# Domain 12 -- Configuration & Environment Management
 # =====================================================================
 
 
@@ -727,7 +727,7 @@ class TestConfiguration:
 
 
 # =====================================================================
-# Domain 14 — Compliance & Standards
+# Domain 14 -- Compliance & Standards
 # =====================================================================
 
 
@@ -758,7 +758,7 @@ class TestCompliance:
 
 
 # =====================================================================
-# Domain 15 — Interoperability & Integration
+# Domain 15 -- Interoperability & Integration
 # =====================================================================
 
 
@@ -779,7 +779,7 @@ class TestInteroperability:
 
 
 # =====================================================================
-# Domain 16 — Data Lineage & Traceability
+# Domain 16 -- Data Lineage & Traceability
 # =====================================================================
 
 
@@ -821,7 +821,7 @@ class TestLineage:
 
 
 # =====================================================================
-# Domain 4 — Coding
+# Domain 4 -- Coding
 # =====================================================================
 
 
@@ -881,7 +881,7 @@ class TestCoding:
 
 
 # =====================================================================
-# Domain 10 — Testing & Validation (meta-test)
+# Domain 10 -- Testing & Validation (meta-test)
 # =====================================================================
 
 

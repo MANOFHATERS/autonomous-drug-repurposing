@@ -1,11 +1,11 @@
 """
-v26 ML Honesty Chain — Regression Tests for Issues C-1 / C-2 / C-3.
+v26 ML Honesty Chain -- Regression Tests for Issues C-1 / C-2 / C-3.
 
 These tests verify the v26 ROOT FIXES for the user's #1 complaint:
 the pipeline reported ``V1 LAUNCH CRITERIA: PASSED`` for a model with
 ``best_val_auc=0.6722`` (target 0.85) and ``held_out_auc=0.5389``
 (statistically random), and a log line said
-``AUC enforcement PASSED: 0.6722 >= 0.8500`` — a mathematical falsehood.
+``AUC enforcement PASSED: 0.6722 >= 0.8500`` -- a mathematical falsehood.
 
 Root causes fixed:
 
@@ -156,7 +156,7 @@ def _extract_except_body(source: str, exception_name: str):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Helpers — build a mock `results` dict that mirrors the toy fixture
+# Helpers -- build a mock `results` dict that mirrors the toy fixture
 # the audit found (best_val_auc=0.6722, held_out_auc=0.5389).
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -177,13 +177,13 @@ def _toy_fixture_results() -> dict:
     The original toy fixture's held_out_auc=0.5389 is below 0.6, so
     dev_smoke_test_pass would be False. To preserve this test's purpose
     (verify dev_smoke_test_pass can be True while passed is False), we
-    bump the fixture's held_out_auc to 0.65 — passes 0.6 smoke, fails
+    bump the fixture's held_out_auc to 0.65 -- passes 0.6 smoke, fails
     0.85 launch. This represents an honest baseline that just barely
     passes the dev smoke threshold.
 
     v61 ROOT FIX (test was broken): bumped num_positives from 9 to 10
     to satisfy MIN_POSITIVE_PAIRS=10. The previous value of 9 was
-    below the threshold, causing dev_smoke_test_pass to be False —
+    below the threshold, causing dev_smoke_test_pass to be False --
     which broke the test that verifies "dev_smoke_test_pass can be
     True while passed is False". The toy fixture must satisfy ALL
     dev-mode conditions (positive_pairs >= 10, negative_pairs >= 10,
@@ -230,13 +230,13 @@ def _force_dev_smoke_test_env(monkeypatch):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Test 1 — assert_auc_meets_threshold returns False when AUC < threshold
+# Test 1 -- assert_auc_meets_threshold returns False when AUC < threshold
 # Issue C-2: callers must check the return value; the function returns
 # False silently in RELAXED mode.
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TestAssertAucMeetsThresholdReturnsFalseWhenBelow:
-    """Issue C-2 — RELAXED mode returns False WITHOUT raising.
+    """Issue C-2 -- RELAXED mode returns False WITHOUT raising.
 
     The previous v25 callers assumed "no exception == AUC met threshold",
     which produced the mathematical falsehood
@@ -258,7 +258,7 @@ class TestAssertAucMeetsThresholdReturnsFalseWhenBelow:
             "assert_auc_meets_threshold must return False when AUC < "
             "threshold in RELAXED mode. Got: True. This is the bug that "
             "caused transe_model.py to log 'AUC enforcement PASSED: "
-            "0.6722 >= 0.8500' — a mathematical falsehood."
+            "0.6722 >= 0.8500' -- a mathematical falsehood."
         )
 
     def test_does_not_raise_in_relaxed_mode_when_below(self):
@@ -267,7 +267,7 @@ class TestAssertAucMeetsThresholdReturnsFalseWhenBelow:
             AUCEnforcementLevel,
             AUCBelowThresholdError,
         )
-        # In RELAXED mode, the function MUST NOT raise — it logs a
+        # In RELAXED mode, the function MUST NOT raise -- it logs a
         # WARNING and returns False. Callers must read the return value.
         try:
             result = assert_auc_meets_threshold(
@@ -287,7 +287,7 @@ class TestAssertAucMeetsThresholdReturnsFalseWhenBelow:
             assert_auc_meets_threshold,
             AUCEnforcementLevel,
         )
-        # Sanity check — the function still returns True when AUC meets
+        # Sanity check -- the function still returns True when AUC meets
         # the threshold in RELAXED mode. We don't want a regression
         # where the function always returns False.
         result = assert_auc_meets_threshold(
@@ -298,7 +298,7 @@ class TestAssertAucMeetsThresholdReturnsFalseWhenBelow:
         assert result is True
 
     def test_check_auc_meets_threshold_returns_meets_and_reason(self):
-        """v26 companion function — non-enforcing mirror of assert_*.
+        """v26 companion function -- non-enforcing mirror of assert_*.
 
         Returns (meets, reason) so callers cannot accidentally treat
         "no exception" as "meets threshold".
@@ -329,12 +329,12 @@ class TestAssertAucMeetsThresholdReturnsFalseWhenBelow:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Test 2 — _check_v1_launch_criteria: passed=False when AUC < 0.85
+# Test 2 -- _check_v1_launch_criteria: passed=False when AUC < 0.85
 # Issue C-1: the v25 override flipped passed=True in dev mode.
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TestV1CriteriaPassedIsFalseWhenAucBelowThreshold:
-    """Issue C-1 — strict `passed` must be False when AUC < 0.85.
+    """Issue C-1 -- strict `passed` must be False when AUC < 0.85.
 
     The v25 "DEV_SMOKE_TEST override" used to flip
     ``criteria["passed"] = True`` even when ``auc_meets_threshold=False``,
@@ -346,7 +346,7 @@ class TestV1CriteriaPassedIsFalseWhenAucBelowThreshold:
         from drugos_graph.run_pipeline import _check_v1_launch_criteria
         results = _toy_fixture_results()
         criteria = _check_v1_launch_criteria(results)
-        # The strict production check must FAIL — both val and held-out
+        # The strict production check must FAIL -- both val and held-out
         # AUC are below the 0.85 DOCX threshold.
         assert criteria["auc_meets_threshold"] is False, (
             f"auc_meets_threshold must be False when best_val_auc=0.6722 "
@@ -354,13 +354,13 @@ class TestV1CriteriaPassedIsFalseWhenAucBelowThreshold:
         )
         assert criteria["passed"] is False, (
             "criteria['passed'] must be False when AUC < 0.85, EVEN IN "
-            "DEV MODE. The v25 override flipped it to True — that was "
+            "DEV MODE. The v25 override flipped it to True -- that was "
             f"the bug. Got: passed={criteria['passed']}, "
             f"dev_smoke_test_pass={criteria.get('dev_smoke_test_pass')}"
         )
 
     def test_passed_is_false_even_when_dev_smoke_test_enabled(self):
-        """Explicitly verify the override is gone — DRUGOS_DEV_SMOKE_TEST=1
+        """Explicitly verify the override is gone -- DRUGOS_DEV_SMOKE_TEST=1
         must NOT cause passed=True when AUC < 0.85."""
         # The autouse fixture sets DRUGOS_DEV_SMOKE_TEST=1.
         assert os.environ.get("DRUGOS_DEV_SMOKE_TEST") == "1"
@@ -387,7 +387,7 @@ class TestV1CriteriaPassedIsFalseWhenAucBelowThreshold:
         their failing values (9 positive pairs < MIN_POSITIVE_PAIRS=10,
         and no step12 graph-size data). The function correctly requires
         ALL conditions to be met for `passed=True`, so the test always
-        failed — even though the function was working correctly. Fix:
+        failed -- even though the function was working correctly. Fix:
         also bump positive_pairs to >= MIN_POSITIVE_PAIRS and add
         step12 graph-size data so ALL conditions for `passed=True` are
         satisfied when AUC meets threshold.
@@ -398,7 +398,7 @@ class TestV1CriteriaPassedIsFalseWhenAucBelowThreshold:
         results["step11"]["best_val_auc"] = 0.90
         results["step11"]["held_out_auc"] = 0.88
         # v61: also satisfy the OTHER conditions for passed=True.
-        # MIN_POSITIVE_PAIRS=10, MIN_NEGATIVE_PAIRS=10 — bump both.
+        # MIN_POSITIVE_PAIRS=10, MIN_NEGATIVE_PAIRS=10 -- bump both.
         results["step10"]["training_data"]["num_positives"] = 50
         results["step10"]["training_data"]["num_negatives"] = 100
         # v61: add step12 graph-size data (min 50 nodes, 50 edges).
@@ -431,15 +431,15 @@ class TestV1CriteriaPassedIsFalseWhenAucBelowThreshold:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Test 3 — dev_smoke_test_pass / passed_dev_smoke SEPARATE from passed
+# Test 3 -- dev_smoke_test_pass / passed_dev_smoke SEPARATE from passed
 # Issue C-1: the dev smoke-test verdict must not affect `passed`.
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TestDevSmokeTestPassIsSeparateFromPassed:
-    """Issue C-1 — dev_smoke_test_pass is INFORMATIONAL only.
+    """Issue C-1 -- dev_smoke_test_pass is INFORMATIONAL only.
 
     The toy fixture (best_val_auc=0.6722, held_out_auc=0.5389) ran
-    end-to-end in dev mode, so the smoke-test verdict is "pass" — the
+    end-to-end in dev mode, so the smoke-test verdict is "pass" -- the
     pipeline didn't crash. But the LAUNCH verdict must be "NOT PASSED"
     because AUC < 0.85. These two fields must be independent.
     """
@@ -456,7 +456,7 @@ class TestDevSmokeTestPassIsSeparateFromPassed:
             "smoke-test conditions (AUC >= 0.5, model saved, etc.). "
             f"Got: {criteria.get('dev_smoke_test_pass')}"
         )
-        # BUT the strict `passed` must be False — AUC < 0.85.
+        # BUT the strict `passed` must be False -- AUC < 0.85.
         assert criteria["passed"] is False, (
             "The dev_smoke_test_pass flag must NOT flip `passed` to True. "
             "These two fields are independent: dev_smoke_test_pass means "
@@ -478,7 +478,7 @@ class TestDevSmokeTestPassIsSeparateFromPassed:
 
     def test_dev_smoke_test_pass_is_false_in_production(self, monkeypatch):
         """In production (DEV_SMOKE_TEST=False), dev_smoke_test_pass
-        must be False — there's no dev mode to smoke-test in."""
+        must be False -- there's no dev mode to smoke-test in."""
         monkeypatch.setenv("DRUGOS_ENVIRONMENT", "production")
         monkeypatch.setenv("DRUGOS_DEV_SMOKE_TEST", "0")
         # Reload config to pick up env changes
@@ -503,16 +503,16 @@ class TestDevSmokeTestPassIsSeparateFromPassed:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Test 4 — AUC enforcement log does not lie (transe_model.py)
+# Test 4 -- AUC enforcement log does not lie (transe_model.py)
 # Issue C-3: "AUC enforcement PASSED" must only fire when AUC >= threshold.
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TestAucEnforcementLogDoesNotLie:
-    """Issue C-3 — the log message must NOT lie.
+    """Issue C-3 -- the log message must NOT lie.
 
     The previous v25 code logged
     "AUC enforcement PASSED: 0.6722 >= 0.8500"
-    whenever assert_auc_meets_threshold returned without raising —
+    whenever assert_auc_meets_threshold returned without raising --
     a mathematical falsehood, because in RELAXED mode the function
     returns meets=False WITHOUT raising.
 
@@ -576,7 +576,7 @@ class TestAucEnforcementLogDoesNotLie:
     def test_source_does_not_log_passed_unconditionally(self):
         """The previous bug was a `try/except` block that logged PASSED
         inside the try (when no exception was raised). Verify the
-        source no longer has that structure — the PASSED log must be
+        source no longer has that structure -- the PASSED log must be
         gated by `if _auc_meets:`."""
         import drugos_graph.transe_model as tm
         source = inspect.getsource(tm.train_transe)
@@ -596,7 +596,7 @@ class TestAucEnforcementLogDoesNotLie:
             if "AUC enforcement PASSED" not in line:
                 continue
             if "logger." not in line and "log." not in line:
-                # Not a logging call — probably a comment or docstring
+                # Not a logging call -- probably a comment or docstring
                 # mention. Skip.
                 continue
             # Look back up to 8 lines for the most recent block opener.
@@ -657,12 +657,12 @@ class TestAucEnforcementLogDoesNotLie:
             )
             if _auc_meets:
                 test_logger.info(
-                    "AUC enforcement PASSED: %.4f >= %.4f — model will be saved",
+                    "AUC enforcement PASSED: %.4f >= %.4f -- model will be saved",
                     best_val_auc, target_auc,
                 )
             else:
                 test_logger.error(
-                    "AUC enforcement FAILED: %.4f < %.4f — model will NOT be "
+                    "AUC enforcement FAILED: %.4f < %.4f -- model will NOT be "
                     "saved (relaxed mode logged warning but did not raise).",
                     best_val_auc, target_auc,
                 )
@@ -681,7 +681,7 @@ class TestAucEnforcementLogDoesNotLie:
         # The PASSED log MUST NOT be present.
         assert "AUC enforcement PASSED" not in log_text, (
             "When AUC < threshold, the log MUST NOT contain "
-            "'AUC enforcement PASSED' — that was the bug. Captured: "
+            "'AUC enforcement PASSED' -- that was the bug. Captured: "
             + log_text
         )
 
@@ -709,12 +709,12 @@ class TestAucEnforcementLogDoesNotLie:
             )
             if _auc_meets:
                 test_logger.info(
-                    "AUC enforcement PASSED: %.4f >= %.4f — model will be saved",
+                    "AUC enforcement PASSED: %.4f >= %.4f -- model will be saved",
                     best_val_auc, target_auc,
                 )
             else:
                 test_logger.error(
-                    "AUC enforcement FAILED: %.4f < %.4f — model will NOT be saved.",
+                    "AUC enforcement FAILED: %.4f < %.4f -- model will NOT be saved.",
                     best_val_auc, target_auc,
                 )
 
@@ -729,7 +729,7 @@ class TestAucEnforcementLogDoesNotLie:
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TestExitCodeContractFollowsStrictPassed:
-    """Fix 4 — exit code must follow `passed` (strict), NOT
+    """Fix 4 -- exit code must follow `passed` (strict), NOT
     `dev_smoke_test_pass`.
 
     The previous v25 code returned exit 0 in dev mode even when AUC <
@@ -780,13 +780,13 @@ class TestExitCodeContractFollowsStrictPassed:
 
     def test_cli_main_exits_4_on_v1_launch_criteria_failed(self, monkeypatch):
         """The `python -m drugos_graph` CLI must exit 4 (not 1) when
-        V1LaunchCriteriaFailed is raised — matching the documented
+        V1LaunchCriteriaFailed is raised -- matching the documented
         contract for run_unified.py."""
         from drugos_graph.run_pipeline import V1LaunchCriteriaFailed
 
         # Simulate the main() except clause from run_pipeline.py.
         # We verify by importing the module and inspecting the source
-        # — the contract is `sys.exit(4)`, NOT `sys.exit(1)`.
+        # -- the contract is `sys.exit(4)`, NOT `sys.exit(1)`.
         import drugos_graph.run_pipeline as rp
         source = inspect.getsource(rp.main)
         # Find the `except V1LaunchCriteriaFailed as exc:` block and

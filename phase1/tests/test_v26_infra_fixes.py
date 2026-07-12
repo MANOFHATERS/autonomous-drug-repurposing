@@ -1,20 +1,20 @@
 """
-FIX-C (Phase 1 Infrastructure) — verification tests.
+FIX-C (Phase 1 Infrastructure) -- verification tests.
 
 Covers three fixes:
-  * C-5 — migration runner must NOT pick up ``*_rollback.sql`` sidecars.
-  * C-6 — ``apache-airflow`` must be declared in ``requirements.txt`` so
+  * C-5 -- migration runner must NOT pick up ``*_rollback.sql`` sidecars.
+  * C-6 -- ``apache-airflow`` must be declared in ``requirements.txt`` so
     DAG files are importable outside Docker and ``test_dag_structure.py``
     no longer needs ``pytest.importorskip("airflow")``.
-  * C-9 — ``_validate_security()`` must HONESTLY report that DisGeNET and
+  * C-9 -- ``_validate_security()`` must HONESTLY report that DisGeNET and
     DrugBank will crash on run when their prerequisites are missing, and
     ``health_check()`` must return ``{"healthy": False, "issues": [...]}``
     in that case.
 
-These tests are designed to run WITHOUT airflow installed — they only
+These tests are designed to run WITHOUT airflow installed -- they only
 verify that the fix is in place (file content + health_check behavior).
 The DAG-import smoke test lives in ``test_dag_structure.py`` (which, post
-FIX-C6, no longer skips when airflow is absent — it will simply fail if
+FIX-C6, no longer skips when airflow is absent -- it will simply fail if
 airflow is not installed, which is the desired behaviour).
 """
 
@@ -49,7 +49,7 @@ MIGRATIONS_DIR = PROJECT_ROOT / "database" / "migrations"
 
 class TestMigrationGlobExcludesRollback:
     """FIX-C5: ``MIGRATIONS_DIR.glob("*.sql")`` sites must filter out
-    ``*_rollback.sql`` sidecars — otherwise on PostgreSQL the rollback
+    ``*_rollback.sql`` sidecars -- otherwise on PostgreSQL the rollback
     files would ``DROP TABLE IF EXISTS drugs CASCADE; ...`` and destroy
     the staging schema on every fresh install, and on SQLite they abort
     with "You can only execute one statement at a time".
@@ -133,7 +133,7 @@ class TestMigrationGlobExcludesRollback:
 # ============================================================================
 
 class TestAirflowInRequirements:
-    """FIX-C6: ``apache-airflow`` must be a real dependency — the 8 DAG
+    """FIX-C6: ``apache-airflow`` must be a real dependency -- the 8 DAG
     files in ``phase1/dags/`` do ``from airflow.decorators import dag,
     task`` at module top level. Previously the comment in
     ``phase1/requirements.txt`` said "provided by Docker base image" and
@@ -161,13 +161,13 @@ class TestAirflowInRequirements:
 
     def test_airflow_in_phase1_requirements(self) -> None:
         """``phase1/requirements.txt`` must NOT still have the
-        "provided by Docker base image" comment — it must declare
+        "provided by Docker base image" comment -- it must declare
         ``apache-airflow`` explicitly.
         """
         text = PHASE1_REQ_FILE.read_text(encoding="utf-8")
         assert "provided by Docker base image" not in text, (
             "phase1/requirements.txt still says Airflow is 'provided by "
-            "Docker base image' — DAGs are un-importable outside Docker."
+            "Docker base image' -- DAGs are un-importable outside Docker."
         )
         assert "apache-airflow" in text.lower(), (
             f"apache-airflow not declared in {PHASE1_REQ_FILE}"

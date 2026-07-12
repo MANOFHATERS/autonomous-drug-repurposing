@@ -20,7 +20,7 @@ def check(name, condition, detail=""):
         print(f"  PASS: {name}")
     else:
         FAIL += 1
-        print(f"  FAIL: {name} — {detail}")
+        print(f"  FAIL: {name} -- {detail}")
 
 
 def test_bug1_reverse_edges():
@@ -224,7 +224,7 @@ def test_bug20_inchikey_validators():
             count = stripped.count('"""')
             if count == 1:
                 in_docstring = not in_docstring
-            # if count == 2, it's a single-line docstring — skip the line
+            # if count == 2, it's a single-line docstring -- skip the line
             continue
         if in_docstring:
             continue

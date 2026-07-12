@@ -1,4 +1,4 @@
-"""Phase 2 test suite conftest — pre-imports torch_geometric to avoid
+"""Phase 2 test suite conftest -- pre-imports torch_geometric to avoid
 circular import issues during test collection.
 
 v61 ROOT FIX (torch_geometric 2.8.0 circular import):
@@ -19,7 +19,7 @@ once, setting all attributes on the ``torch_geometric`` module, so
 subsequent test-module imports of submodules don't hit the partial-
 initialization window.
 """
-import torch_geometric  # noqa: F401 — pre-import to avoid circular import
+import torch_geometric  # noqa: F401 -- pre-import to avoid circular import
 import torch_geometric.typing  # noqa: F401
 import torch_geometric.data  # noqa: F401
 import torch_geometric.transforms  # noqa: F401

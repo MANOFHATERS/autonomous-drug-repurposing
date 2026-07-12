@@ -279,7 +279,7 @@ class TestR031PackageReexport(unittest.TestCase):
                 if (node.module == "drugos_graph.phase1_bridge" and
                         any(a.name == "RecordingGraphBuilder" for a in node.names)):
                     # The only allowed deep import is for Phase1StagedData or
-                    # run_phase1_to_phase2 — NOT RecordingGraphBuilder.
+                    # run_phase1_to_phase2 -- NOT RecordingGraphBuilder.
                     self.fail(
                         "R-031: run_unified.py imports RecordingGraphBuilder "
                         "from drugos_graph.phase1_bridge (should use the "
@@ -306,7 +306,7 @@ class TestR035PhaseRequirements(unittest.TestCase):
     requirements.txt only) but the per-phase files still exist for
     backwards compatibility and for operators who want to install only
     a subset (e.g. a GPU-only training container). R-035 says "EITHER
-    (a) create per-phase files OR (b) consolidate" — having both is
+    (a) create per-phase files OR (b) consolidate" -- having both is
     also valid.
     """
 

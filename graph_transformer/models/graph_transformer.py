@@ -9,27 +9,27 @@ ROOT FIX (E11 + FORENSIC-AUDIT-I36): DOCSTRING REALITY CHECK.
 Previous versions claimed many "ROOT FIX" achievements that didn't
 hold at runtime. This docstring now accurately reflects the runtime
 behavior verified by actual pipeline execution after ALL forensic
-audit fixes (V6–V9):
+audit fixes (V6-V9):
 
-  - Temperature IS applied at inference time (B-F5) — TRUE
+  - Temperature IS applied at inference time (B-F5) -- TRUE
   - Temperature calibration uses Adam + log-parameterization with a
-    TIGHT clamp [0.5, 2.0] (FORENSIC-AUDIT-C01) — TRUE, producing
+    TIGHT clamp [0.5, 2.0] (FORENSIC-AUDIT-C01) -- TRUE, producing
     meaningful intermediate values (e.g., T=1.34, not boundary 0.05/10.0)
-  - RL agent ranks by policy_prob (B-F2) — TRUE, and policy_prob has
+  - RL agent ranks by policy_prob (B-F2) -- TRUE, and policy_prob has
     wide variance (A5 fixed, std > 0.15)
-  - Phase 6 routes through RL agent (C-F8) — TRUE, and RL AUC > 0.5
+  - Phase 6 routes through RL agent (C-F8) -- TRUE, and RL AUC > 0.5
     (D4 fixed)
-  - gnn_score is the dominant signal (B-F3) — TRUE in weights (0.35),
+  - gnn_score is the dominant signal (B-F3) -- TRUE in weights (0.35),
     and adaptive weight amplification (D3 fix) ensures it dominates
     even with low variance
-  - Phase 3 ↔ Phase 4 connected — TRUE at API level AND functional
+  - Phase 3 ↔ Phase 4 connected -- TRUE at API level AND functional
     level. The scientific validation gate now uses V1-CONTRACT-GRADE
     thresholds (FORENSIC-AUDIT-C07): GT AUC > 0.85 (V1_AUC_THRESHOLD),
     RL AUC > 0.5, KP recovery >= 20%.
   - HeterogeneousMultiHeadAttention uses per-head Q/K/V projections
-    (FORENSIC-AUDIT-I04) — TRUE, standard MHA per Vaswani et al. 2017
+    (FORENSIC-AUDIT-I04) -- TRUE, standard MHA per Vaswani et al. 2017
   - Self-loops use a separate self_loop_proj with a learnable weight
-    (FORENSIC-AUDIT-I05) — TRUE, out_proj applied once (not twice)
+    (FORENSIC-AUDIT-I05) -- TRUE, out_proj applied once (not twice)
 
 Architecture:
     1. NodeTypeProjection - projects raw features to unified embedding space
@@ -92,13 +92,13 @@ logger = logging.getLogger(__name__)
 # Re-export the canonical constants so legacy callers (``from
 # models.graph_transformer import DEFAULT_FEATURE_DIMS``) still work.
 # The re-export happens via the ``from ..data import (...)`` statement
-# at lines 80-85 above — those names are already in this module's
+# at lines 80-85 above -- those names are already in this module's
 # namespace. (B7 fix.)
 #
 # ROOT FIX (B-08): the V26 code had three no-op self-assignments here
 # (``DEFAULT_EDGE_TYPES = DEFAULT_EDGE_TYPES`` etc.), suppressed with
 # ``# noqa: F811`` comments claiming they were "explicit re-exports."
-# But ``X = X`` is a no-op — the assignment does NOTHING, and the
+# But ``X = X`` is a no-op -- the assignment does NOTHING, and the
 # re-export already happened via the import. The three lines were pure
 # noise that misled reviewers into thinking the re-export required
 # explicit code. They have been deleted.
@@ -154,7 +154,7 @@ class DrugRepurposingGraphTransformer(nn.Module):
         # V90 ROOT FIX (BUG #48): use frozenset consistently for exclude_edges.
         # The previous code converted the input to a mutable set, while
         # LABEL_LEAKING_EDGES (the default source) is an immutable frozenset.
-        # The type mismatch was confusing — a reviewer couldn't tell if the
+        # The type mismatch was confusing -- a reviewer couldn't tell if the
         # model's exclude_edges was mutable or not. The fix uses frozenset
         # consistently: the default is frozenset(LABEL_LEAKING_EDGES), and
         # any caller-provided iterable is converted to frozenset. This
@@ -338,7 +338,7 @@ class DrugRepurposingGraphTransformer(nn.Module):
         ROOT FIX (B5): this method exposes the ``NodeTypeEmbedding``
         module for external consumers (dashboard, visualization, model
         inspection). Previously, ``NodeTypeEmbedding`` was exported in
-        ``models/__init__.py`` but never used externally — it was only
+        ``models/__init__.py`` but never used externally -- it was only
         used internally by ``NodeTypeProjection``. This method wires it
         into the public API of the main model class, making the export
         truthful and the embedding accessible for downstream analysis
@@ -350,7 +350,7 @@ class DrugRepurposingGraphTransformer(nn.Module):
                 None, returns all node types in the model's vocabulary.
 
         Returns:
-            Dict mapping node type name → embedding tensor of shape
+            Dict mapping node type name -> embedding tensor of shape
             (embedding_dim,).
         """
         if node_types is None:
@@ -375,16 +375,16 @@ class DrugRepurposingGraphTransformer(nn.Module):
 
         return result
 
-    # v84 FORENSIC ROOT FIX (BUG #12 — declare score_direction on the
+    # v84 FORENSIC ROOT FIX (BUG #12 -- declare score_direction on the
     # GraphTransformer so the eval path can read it directly instead of
     # substring-matching the class name). The GraphTransformer uses a
-    # link predictor that outputs logits → sigmoid probabilities; higher
+    # link predictor that outputs logits -> sigmoid probabilities; higher
     # score = more plausible drug-disease pair. Direction is "higher_better".
     @property
     def score_direction(self) -> str:
         """Scoring convention: 'higher_better' for GraphTransformer.
 
-        The link predictor outputs logits → sigmoid probabilities.
+        The link predictor outputs logits -> sigmoid probabilities.
         Higher score = more plausible drug-disease pair. The eval path
         uses this to set `higher_is_better=True` for AUC computation.
         """
@@ -448,7 +448,7 @@ class DrugRepurposingGraphTransformer(nn.Module):
         # instead of mutating self.exclude_edges. The original save/restore
         # pattern (original_exclude = self.exclude_edges; self.exclude_edges
         # = ...; try: ...; finally: self.exclude_edges = original_exclude)
-        # was NOT thread-safe — concurrent calls would race on
+        # was NOT thread-safe -- concurrent calls would race on
         # self.exclude_edges. The fix passes the effective exclude_edges
         # directly to encode(), which uses it for THIS call only without
         # touching the model's stored config.
@@ -579,7 +579,7 @@ class DrugRepurposingGraphTransformer(nn.Module):
                 LABEL_LEAKING_EDGES -- C2 fix).
             apply_temperature: If True (default), apply the calibrated
                 temperature (``sigmoid(logits / T)``). If False, use raw
-                sigmoid (``sigmoid(logits)``) — use this for RL input
+                sigmoid (``sigmoid(logits)``) -- use this for RL input
                 where full variance is needed (FORENSIC-AUDIT-I03 fix).
 
         Returns:
@@ -595,7 +595,7 @@ class DrugRepurposingGraphTransformer(nn.Module):
         # ``predict_all_pairs`` was called mid-training (e.g., for
         # intermediate evaluation, or by a concurrent thread in the
         # Phase 5 API), the model was silently switched to eval mode
-        # and STAYED there — subsequent ``train_epoch()`` calls did
+        # and STAYED there -- subsequent ``train_epoch()`` calls did
         # call ``self.model.train()``, but ANY external caller (the
         # bridge's ``generate_rl_input``, the Phase 5 API server)
         # that called ``predict_all_pairs`` mid-training silently
@@ -689,7 +689,7 @@ class DrugRepurposingGraphTransformer(nn.Module):
         this check is "NOT dead defensive code" because "from_config
         must handle arbitrary config objects per its signature
         (``config: Any``)." But the audit found there is NO caller in
-        the codebase that passes a non-GTConfig object — GTConfig's
+        the codebase that passes a non-GTConfig object -- GTConfig's
         ``feature_dims`` has ``field(default_factory=...)`` so it's
         NEVER None. The check is dead in practice.
 
@@ -713,7 +713,7 @@ class DrugRepurposingGraphTransformer(nn.Module):
                 "from_config requires `feature_dims` to be set on the config. "
                 "If using GTConfig, feature_dims has a default. If using a "
                 "custom config object, pass feature_dims explicitly. "
-                "Refusing to fall back to a default — the original codebase's "
+                "Refusing to fall back to a default -- the original codebase's "
                 "silent fallback to a divergent DEFAULT_FEATURE_DIMS caused "
                 "shape-mismatch crashes (B6/B7)."
             )
@@ -743,7 +743,7 @@ class DrugRepurposingGraphTransformer(nn.Module):
         ROOT FIX (E13): save ALL config fields, not just a subset.
         The original save() omitted ffn_hidden_dim, dropout,
         attention_dropout, link_predictor_hidden_dims, and
-        link_predictor_dropout. This caused round-trip save→load to
+        link_predictor_dropout. This caused round-trip save->load to
         lose config and produce state_dict mismatches. The E13 fix
         saves ALL fields so load() can reconstruct the model exactly.
         """
@@ -778,7 +778,7 @@ class DrugRepurposingGraphTransformer(nn.Module):
         ROOT FIX (E12): restore ALL config fields, not just a subset.
         The original load() omitted ffn_hidden_dim, dropout,
         attention_dropout, link_predictor_hidden_dims, and
-        link_predictor_dropout — these reverted to defaults, causing
+        link_predictor_dropout -- these reverted to defaults, causing
         state_dict mismatches. The E12 fix restores ALL fields from
         the checkpoint config (with backward-compatible defaults for
         checkpoints saved before E13).
@@ -819,7 +819,7 @@ class DrugRepurposingGraphTransformer(nn.Module):
         return model
 
 
-# v89 ROOT FIX (CI V31-5 — GraphTransformerModel import error):
+# v89 ROOT FIX (CI V31-5 -- GraphTransformerModel import error):
 # The CI workflow's V31 verification step does:
 #   from graph_transformer.models.graph_transformer import GraphTransformerModel
 # but the actual class is named ``DrugRepurposingGraphTransformer``. This

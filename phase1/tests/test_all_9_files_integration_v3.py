@@ -21,7 +21,7 @@ Tests cover:
   - Models define correct schema with all constraints
   - Migrations run successfully
   - Loaders upsert data correctly using real database session
-  - Full ETL pipeline: config → connection → models → migrations → loaders
+  - Full ETL pipeline: config -> connection -> models -> migrations -> loaders
   - Cross-module integration: settings read by loaders, models used by loaders
 """
 
@@ -204,8 +204,8 @@ class TestDatabaseIntegration:
 
 
 class TestFullETLPipeline:
-    """End-to-end test: create DB → run migrations → upsert all entity
-    types → verify data integrity."""
+    """End-to-end test: create DB -> run migrations -> upsert all entity
+    types -> verify data integrity."""
 
     @pytest.fixture(scope="class")
     def etl_engine(self):
@@ -402,7 +402,7 @@ class TestFullETLPipeline:
         assert result.inserted >= 1
 
     def test_gene_to_uniprot_resolution(self, etl_session):
-        """Step 9: Test gene symbol → UniProt resolution."""
+        """Step 9: Test gene symbol -> UniProt resolution."""
         from database.loaders import (
             build_gene_to_uniprot_maps,
             resolve_gene_symbol_to_uniprot,

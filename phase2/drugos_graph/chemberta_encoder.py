@@ -1,10 +1,10 @@
-"""DrugOS Graph Module — ChemBERTa SMILES Encoder
+"""DrugOS Graph Module -- ChemBERTa SMILES Encoder
 ============================================================
 
 Generates molecular embeddings from SMILES strings using a
 HuggingFace transformer model (default: ChemBERTa-zinc-base-v1).
 
-The embedding dimension depends on the model — see
+The embedding dimension depends on the model -- see
 ``config.CHEMBERTA_DIM_BY_MODEL`` for the lookup table. The default
 model produces 768-dim embeddings.
 
@@ -54,7 +54,7 @@ Decision Log
   sentence-level molecular embeddings without fine-tuning.
 - max_length=512 because ChemBERTa-zinc-base-v1's maximum
   position embedding is 512 tokens. Truncating beyond this
-  destroys chemical meaning — see ``on_truncate`` parameter.
+  destroys chemical meaning -- see ``on_truncate`` parameter.
 - batch_size=64 default because this is conservative for 16GB
   GPU memory with 768-dim hidden states.
 - L2 normalization is on by default because downstream
@@ -73,7 +73,7 @@ Decision Log
 from __future__ import annotations
 
 # ─── Standard-library imports ─────────────────────────────────────────
-# Fixes audit issue 1.3 — stdlib imports at module level
+# Fixes audit issue 1.3 -- stdlib imports at module level
 import asyncio
 import hashlib
 import io
@@ -104,8 +104,8 @@ from typing import (
     Union,
 )
 
-# ─── Third-party imports (eager — hard dependencies) ─────────────────
-# Fixes audit issue 1.3 — torch is a hard dependency in requirements.txt
+# ─── Third-party imports (eager -- hard dependencies) ─────────────────
+# Fixes audit issue 1.3 -- torch is a hard dependency in requirements.txt
 try:
     import torch
     _HAS_TORCH = True
@@ -115,7 +115,7 @@ except ImportError:
 
 import numpy as np
 
-# ─── Third-party imports (guarded — optional dependencies) ───────────
+# ─── Third-party imports (guarded -- optional dependencies) ───────────
 try:
     from transformers import AutoModel, AutoTokenizer
     _HAS_TRANSFORMERS = True
@@ -190,7 +190,7 @@ from .drugbank_parser import _validate_smiles, _validate_inchikey
 # than at the first ``encode_smiles`` call. The previous code did
 # this check inside ``_validate_inputs`` which meant a bad config was
 # not detected until the operator had already started the (potentially
-# multi-hour) encode run — wasting GPU time. The check is wrapped in
+# multi-hour) encode run -- wasting GPU time. The check is wrapped in
 # try/except so a missing ``EMBEDDINGS_DIR`` (e.g. in test
 # environments) does not break import. ChembertaEncoderError is
 # defined later in this module, so we use a generic RuntimeError
@@ -199,7 +199,7 @@ try:
     if not isinstance(EMBEDDINGS_DIR, Path):
         import warnings as _warnings
         _warnings.warn(
-            f"EMBEDDINGS_DIR is not a Path object — got "
+            f"EMBEDDINGS_DIR is not a Path object -- got "
             f"{type(EMBEDDINGS_DIR).__name__}. encode_smiles will "
             f"fail with ChembertaEncoderError. Check config.py. (L-22)",
             RuntimeWarning,
@@ -210,7 +210,7 @@ except Exception:
     pass
 
 # ─── Module-level constants ──────────────────────────────────────────
-# Fixes audit issue 12.1 — CHEMBERTA_MODEL env override
+# Fixes audit issue 12.1 -- CHEMBERTA_MODEL env override
 CHEMBERTA_MODEL: str = os.environ.get(
     "DRUGOS_CHEMBERTA_MODEL",
     "seyonec/ChemBERTa-zinc-base-v1",
@@ -264,58 +264,58 @@ if _env_fallbacks:
 # Fixes audit issue 14.6 — cache format version
 CHEMBERTA_CACHE_FORMAT_VERSION: str = "1.0.0"
 
-# Fixes audit issue 15.10 — API versioning
+# Fixes audit issue 15.10 -- API versioning
 CHEMBERTA_ENCODER_API_VERSION: str = "2.0.0"
 
-# Fixes audit issue 12.2 — batch_size env override
+# Fixes audit issue 12.2 -- batch_size env override
 CHEMBERTA_DEFAULT_BATCH_SIZE: int = int(
     os.environ.get("DRUGOS_CHEMBERTA_BATCH_SIZE", "64")
 )
 
-# Fixes audit issue 12.3 — max_length env override
+# Fixes audit issue 12.3 -- max_length env override
 CHEMBERTA_DEFAULT_MAX_LENGTH: int = int(
     os.environ.get("DRUGOS_CHEMBERTA_MAX_LENGTH", "512")
 )
 
-# Fixes audit issue 12.11 — dtype env override
+# Fixes audit issue 12.11 -- dtype env override
 CHEMBERTA_DEFAULT_DTYPE: str = os.environ.get(
     "DRUGOS_CHEMBERTA_DTYPE", "float32"
 )
 
-# Fixes audit issue 12.14 — revision env override
+# Fixes audit issue 12.14 -- revision env override
 CHEMBERTA_DEFAULT_REVISION: str = os.environ.get(
     "DRUGOS_CHEMBERTA_REVISION", "main"
 )
 
-# Fixes audit issue 12.12 — sample_size env override
+# Fixes audit issue 12.12 -- sample_size env override
 CHEMBERTA_DEFAULT_SAMPLE_SIZE: int = int(
     os.environ.get("DRUGOS_CHEMBERTA_SAMPLE_SIZE", "10")
 )
 
-# Fixes audit issue 12.4 — cache dir env override
+# Fixes audit issue 12.4 -- cache dir env override
 CHEMBERTA_DEFAULT_CACHE_DIR: Path = Path(
     os.environ.get("DRUGOS_CHEMBERTA_CACHE_DIR", str(EMBEDDINGS_DIR))
 )
 
-# Fixes audit issue 12.13 — HF cache dir
+# Fixes audit issue 12.13 -- HF cache dir
 CHEMBERTA_HF_CACHE_DIR: Optional[str] = os.environ.get(
     "DRUGOS_CHEMBERTA_HF_CACHE_DIR"
 ) or os.environ.get("HF_HOME")
 
-# Fixes audit issue 9.7 — cache contains proprietary data
+# Fixes audit issue 9.7 -- cache contains proprietary data
 CACHE_CONTAINS_PROPRIETARY_DATA: bool = True
 
-# Fixes audit issue 9.10 — public model name allowlist
+# Fixes audit issue 9.10 -- public model name allowlist
 _PUBLIC_MODEL_ORGS: frozenset[str] = frozenset({
     "seyonec", "navidved", "microsoft", "google", "facebook",
 })
 
-# Fixes audit issue 6.14 — circuit breaker threshold
+# Fixes audit issue 6.14 -- circuit breaker threshold
 CIRCUIT_BREAKER_THRESHOLD: int = int(
     os.environ.get("DRUGOS_CHEMBERTA_CIRCUIT_BREAKER", "100")
 )
 
-# Fixes audit issue 8.2 — model cache (process-local)
+# Fixes audit issue 8.2 -- model cache (process-local)
 _MODEL_CACHE: Dict[Tuple[str, str, str], Tuple[Any, Any, str]] = {}
 _MODEL_CACHE_LOCK: threading.Lock = threading.Lock()
 
@@ -345,7 +345,7 @@ if _HAS_PROMETHEUS:
         "Encoding duration", ["model"],
     )
 else:
-    # No-op stubs — fixes audit issue 1.3 (no new hard deps)
+    # No-op stubs -- fixes audit issue 1.3 (no new hard deps)
     class _NoOpCounter:
         def labels(self, **kw): return self
         def inc(self, n=1): pass
@@ -589,9 +589,9 @@ def _resolve_device(device: str) -> str:
     ``_MODEL_CACHE`` still points at the GPU device. Subsequent calls
     that hit the cache return the model on the WRONG device, causing
     device-mismatch errors during forward pass. The fix is invoked by
-    ``encode_smiles`` after a CPU fallback — it re-resolves the
+    ``encode_smiles`` after a CPU fallback -- it re-resolves the
     device string for the cached model refs so they get moved on the
-    next cache hit. This function itself does NOT move the model —
+    next cache hit. This function itself does NOT move the model --
     it just returns the resolved device string so the caller can
     decide whether to move.
     """
@@ -657,7 +657,7 @@ def _canonicalize_smiles(
         # M-10: log WARNING so operators know canonicalization is
         # being skipped. Silent skip broke cache reproducibility.
         logger.warning(
-            "RDKit not available — SMILES canonicalization SKIPPED "
+            "RDKit not available -- SMILES canonicalization SKIPPED "
             "for input of length %d. Cache hashes will be "
             "non-deterministic across environments with/without "
             "RDKit. Install rdkit-pypi for reproducible canonical "
@@ -705,20 +705,20 @@ def _validate_inputs(
     Fixes audit issues 4.1, 4.2, 4.14, 4.15, 4.16, 5.5, 5.6,
     5.7, 5.9, 5.14, 12.8, 15.8.
     """
-    # 12.8 — config validation
+    # 12.8 -- config validation
     if not isinstance(EMBEDDINGS_DIR, Path):
         raise ChembertaEncoderError(
             "EMBEDDINGS_DIR is not a Path object."
         )
 
-    # 4.1 — length mismatch
+    # 4.1 -- length mismatch
     if len(smiles_list) != len(compound_ids):
         raise ValueError(
             f"smiles_list length ({len(smiles_list)}) != "
             f"compound_ids length ({len(compound_ids)})."
         )
 
-    # 5.6 — uniqueness check
+    # 5.6 -- uniqueness check
     seen: Dict[str, int] = {}
     duplicates: List[str] = []
     for cid in compound_ids:
@@ -733,7 +733,7 @@ def _validate_inputs(
             f"{duplicates}. All compound_ids must be unique."
         )
 
-    # 5.9 — compound_id format validation
+    # 5.9 -- compound_id format validation
     if compound_id_format == "inchikey":
         for cid in compound_ids:
             if _validate_inchikey(cid) is None:
@@ -742,14 +742,14 @@ def _validate_inputs(
                     cid,
                 )
 
-    # 15.8 — UTF-8 encoding check
+    # 15.8 -- UTF-8 encoding check
     for s in smiles_list:
         s.encode("utf-8")
 
-    # Resolve expected dimension — 12.6, 12.7
+    # Resolve expected dimension -- 12.6, 12.7
     # v35 ROOT FIX (L-24): fail fast for unknown models. The previous
     # code silently fell back to the ``default`` dim when the model
-    # name was not in ``CHEMBERTA_DIM_BY_MODEL`` — meaning a typo in
+    # name was not in ``CHEMBERTA_DIM_BY_MODEL`` -- meaning a typo in
     # the model name (e.g. ``seyonec/ChemBERTa-zinc-base-v2`` instead
     # of ``v1``) silently used the WRONG dim, producing embeddings
     # that fit the cache key but mismatched the model's actual hidden
@@ -761,7 +761,7 @@ def _validate_inputs(
         expected_dim = CHEMBERTA_DIM_BY_MODEL[model_name]
     elif "default" in CHEMBERTA_DIM_BY_MODEL:
         logger.critical(
-            "Model %s not in CHEMBERTA_DIM_BY_MODEL — using "
+            "Model %s not in CHEMBERTA_DIM_BY_MODEL -- using "
             "'default' dim=%d as fallback. If this is a typo or an "
             "unknown model, the produced embeddings may have the "
             "WRONG dim and downstream consumers will fail or "
@@ -781,13 +781,13 @@ def _validate_inputs(
     # Resolve device
     resolved_device = _resolve_device(device)
 
-    # 4.14 — batch_size validation
+    # 4.14 -- batch_size validation
     if batch_size is not None and batch_size < 1:
         raise ValueError(
             f"batch_size must be >= 1, got {batch_size}"
         )
 
-    # 5.13 — referential integrity check
+    # 5.13 -- referential integrity check
     if entity_map_compound is not None:
         missing = [
             cid for cid in compound_ids
@@ -899,12 +899,12 @@ def _load_model(
 
     Fixes audit issues 1.8, 6.1, 6.2, 8.2, 9.2, 9.3, 9.5, 15.5.
     """
-    # 8.2 — model cache check
-    # v43 ROOT FIX (P1 — cache key missing attn_implementation): the
+    # 8.2 -- model cache check
+    # v43 ROOT FIX (P1 -- cache key missing attn_implementation): the
     # previous key was (model_name, revision, dtype) which ignored
     # attn_implementation. Two calls with different attn_implementation
     # ("eager" vs "sdpa" vs "flash_attention_2") would share the same
-    # cached model — using whichever was requested FIRST. This caused
+    # cached model -- using whichever was requested FIRST. This caused
     # silent performance regression: operator sets flash_attention_2
     # but gets sdpa (the first request's value). Adding attn_implementation
     # to the key ensures each variant gets its own cache entry.
@@ -923,22 +923,22 @@ def _load_model(
             "Install with: pip install 'transformers>=4.30,<5.0'"
         )
 
-    # 9.2 — HF token
+    # 9.2 -- HF token
     hf_token = token or os.environ.get(
         "HF_TOKEN"
     ) or os.environ.get("HUGGING_FACE_HUB_TOKEN")
 
-    # 6.2 — download timeout
+    # 6.2 -- download timeout
     os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "60")
 
-    # 9.4 — TLS bundle
+    # 9.4 -- TLS bundle
     ca_backup = None
     ca_bundle = os.environ.get("DRUGOS_CHEMBERTA_CA_BUNDLE")
     if ca_bundle:
         ca_backup = os.environ.get("REQUESTS_CA_BUNDLE")
         os.environ["REQUESTS_CA_BUNDLE"] = ca_bundle
 
-    # Retry with exponential backoff — fixes 6.1, 6.12
+    # Retry with exponential backoff -- fixes 6.1, 6.12
     max_retries = 5
     tokenizer = None
     model = None
@@ -947,11 +947,11 @@ def _load_model(
     # ``local_files_only=(local_files_only and attempt > 0)`` which is
     # False on attempt 0 (when ``local_files_only`` is True AND attempt
     # is 0, ``True and False == False``). The first attempt therefore
-    # ALWAYS contacted HF Hub — even in ``regulatory_mode`` (where the
+    # ALWAYS contacted HF Hub -- even in ``regulatory_mode`` (where the
     # caller explicitly passes local_files_only=True to avoid network
     # calls). In an air-gapped production deployment, attempt 0 timed
     # out (HF_HUB_DOWNLOAD_TIMEOUT=60s), then attempt 1+ correctly used
-    # local-only — but the operator paid a 60-second penalty per model
+    # local-only -- but the operator paid a 60-second penalty per model
     # load AND polluted the audit log with spurious "connection refused"
     # errors that looked like real failures.
     #
@@ -962,12 +962,12 @@ def _load_model(
     # forcing local_files_only=True on attempt 0 when the operator has
     # explicitly opted into offline mode via env var. This matches the
     # behavior of ``transformers.AutoTokenizer.from_pretrained`` when
-    # HF_HUB_OFFLINE is set — except our version surfaces the choice
+    # HF_HUB_OFFLINE is set -- except our version surfaces the choice
     # explicitly in the log so the operator can audit it.
     _hf_offline_pre = os.environ.get("HF_HUB_OFFLINE", "0") == "1"
     if _hf_offline_pre and not local_files_only:
         logger.info(
-            "HF_HUB_OFFLINE=1 — forcing local_files_only=True on "
+            "HF_HUB_OFFLINE=1 -- forcing local_files_only=True on "
             "attempt 0 (regulatory/offline mode)."
         )
         local_files_only = True
@@ -1034,12 +1034,12 @@ def _load_model(
         elif ca_bundle:
             os.environ.pop("REQUESTS_CA_BUNDLE", None)
 
-    # Get commit hash — fixes 7.7
+    # Get commit hash -- fixes 7.7
     commit_hash = getattr(
         model.config, "_commit_hash", "unknown"
     )
 
-    # 9.5 — model hash verification (informational)
+    # 9.5 -- model hash verification (informational)
     if expected_model_hash is not None:
         logger.info(
             "Model hash verification requested; "
@@ -1047,7 +1047,7 @@ def _load_model(
             commit_hash,
         )
 
-    # 8.2 — cache the model
+    # 8.2 -- cache the model
     with _MODEL_CACHE_LOCK:
         _MODEL_CACHE[cache_key] = (tokenizer, model, commit_hash)
 
@@ -1077,7 +1077,7 @@ def _check_embedding_health(
 
     v35 ROOT FIX (L-23): the previous early-return ``if
     embeddings.shape[0] == 0: return`` skipped ALL validation for
-    empty embedding tensors — including the dim check. An empty
+    empty embedding tensors -- including the dim check. An empty
     tensor with the WRONG dim (e.g. shape ``(0, 999)`` when
     ``expected_dim=768``) would pass validation silently and then
     crash a downstream consumer that assumed the dim was correct.
@@ -1086,7 +1086,7 @@ def _check_embedding_health(
     BEFORE the NaN/Inf check. The dim check is now also done for
     1-D tensors that may have been created by accident.
     """
-    # L-23: truly empty (zero elements) — skip validation entirely.
+    # L-23: truly empty (zero elements) -- skip validation entirely.
     if embeddings.numel() == 0:
         return
     if embeddings.dim() == 0:
@@ -1111,10 +1111,10 @@ def _check_embedding_health(
             f"Embeddings contain {nan_count} NaN and "
             f"{inf_count} Inf values. Refusing to cache."
         )
-    # v43 ROOT FIX (P2 — _check_embedding_health doesn't check all-zero rows):
+    # v43 ROOT FIX (P2 -- _check_embedding_health doesn't check all-zero rows):
     # The previous code checked NaN/Inf but NOT all-zero rows. A broken
     # embedding (e.g. from a truncated SMILES that produced all-pad tokens)
-    # would pass NaN/Inf checks but be a zero vector — meaningless for ML.
+    # would pass NaN/Inf checks but be a zero vector -- meaningless for ML.
     # Fix: check for all-zero rows and raise if found.
     _zero_rows = (embeddings.abs().sum(dim=1) == 0).sum().item()
     if _zero_rows > 0:
@@ -1134,7 +1134,7 @@ def _encode_batch(
     """Run forward pass and pool embeddings.
 
     Fixes audit issues 3.3, 3.5, 8.4.
-    v53 ROOT FIX (P2-012 — GPU/CPU device mismatch): add explicit
+    v53 ROOT FIX (P2-012 -- GPU/CPU device mismatch): add explicit
     assertion that the model's parameters are on the same device as
     the input tensors BEFORE the forward pass. If they mismatch,
     raise a clear error instead of a cryptic RuntimeError.
@@ -1143,26 +1143,26 @@ def _encode_batch(
         k: v.to(device) for k, v in tokenized_batch.items()
     }
     # v53 ROOT FIX (P2-012): verify model device matches input device.
-    # v100 ROOT FIX (BUG P2-052 — dead code + swallowing except): the
+    # v100 ROOT FIX (BUG P2-052 -- dead code + swallowing except): the
     # previous code had three defects:
     #   1. The bare `except Exception: pass` SWALLOWED the RuntimeError
-    #      raised above — so the device-mismatch check was completely
+    #      raised above -- so the device-mismatch check was completely
     #      silent in production. The "raise" was dead because the
     #      except caught it on the very next line.
     #   2. The line below the raise (`# This line is unreachable due
     #      to the raise above, but kept for documentation`) admitted
-    #      the trailing code was dead — yet the dead-code comment was
+    #      the trailing code was dead -- yet the dead-code comment was
     #      itself misleading because the raise WAS reachable (it just
     #      got swallowed by the except).
     #   3. The "Attempting to move model to {_input_device}..." message
     #      in the RuntimeError implied the function would attempt a
-    #      move — but no move was ever attempted (and the comment
+    #      move -- but no move was ever attempted (and the comment
     #      below confirmed it).
     # ROOT FIX: catch ONLY StopIteration (model has no parameters,
     # which is the legitimate skip case) and re-raise RuntimeError
     # instances explicitly. All other exceptions propagate. The dead
     # trailing comment is removed. The error message no longer claims
-    # a move will be attempted — the caller is responsible for moving
+    # a move will be attempted -- the caller is responsible for moving
     # the model to the correct device before invoking this function.
     try:
         _model_device = next(model.parameters()).device
@@ -1176,14 +1176,14 @@ def _encode_batch(
                 f"Use model.to('{device}') on the caller side."
             )
     except StopIteration:
-        pass  # model has no parameters (empty) — skip check
+        pass  # model has no parameters (empty) -- skip check
 
     with torch.inference_mode():
         model_outputs = model(**tokenized_batch)
 
     hidden = model_outputs.last_hidden_state
 
-    # 3.3 — pooling strategies
+    # 3.3 -- pooling strategies
     if pooling == "cls":
         # Use <s> (BOS) token. NOTE: ChemBERTa is RoBERTa-based
         # and uses <s>, not [CLS]. The ChemBERTa paper recommends
@@ -1216,7 +1216,7 @@ def _encode_batch(
             # the returned metrics. The previous code silently fell
             # back to ``hidden.mean(dim=1)`` when ``pooler_output``
             # was unavailable, with only a log WARNING. Callers had
-            # no programmatic way to detect the fallback — meaning a
+            # no programmatic way to detect the fallback -- meaning a
             # production run that silently used mean pooling instead
             # of pooler pooling would produce different embeddings
             # than the operator expected, with no audit trail. The
@@ -1229,7 +1229,7 @@ def _encode_batch(
             # L-36: attach fallback marker for downstream metrics.
             try:
                 # ``setattr`` on a tensor is allowed but the attribute
-                # is lost across most operations — callers must check
+                # is lost across most operations -- callers must check
                 # immediately after _encode_batch returns.
                 setattr(pooled, "_pooling_fallback", "mean")
             except Exception:
@@ -1327,7 +1327,7 @@ def _cache_save_atomic(
     ``payload["cache_sha256"] = sha256_digest`` to the dict, then
     wrote ``payload_bytes`` (which did NOT contain the digest) to
     disk. On read-back, ``_cache_load`` re-saved the loaded payload
-    via ``torch.save`` to recompute the digest — but that
+    via ``torch.save`` to recompute the digest -- but that
     re-serialisation produced DIFFERENT bytes than the original
     (different pickle memo state), so the SHA-256 verification
     ALWAYS failed for legitimate caches. The fix:
@@ -1356,7 +1356,7 @@ def _cache_save_atomic(
     # (digest of the PLACEHOLDER bytes) while the sidecar correctly held
     # ``digest_B`` (digest of the actual file bytes). On load, only the
     # sidecar was verified, but the in-payload field gave a FALSE
-    # impression of self-verification — a snapshot of the payload could
+    # impression of self-verification -- a snapshot of the payload could
     # not be used to confirm its own integrity.
     #
     # The fix follows the second option from the audit: do NOT embed a
@@ -1364,7 +1364,7 @@ def _cache_save_atomic(
     # for backward compatibility with existing cache readers (the
     # ``ChembertaCachePayload`` dataclass still defines it) but is
     # written as the empty string sentinel. The SIDECAR file is the
-    # single source of truth — it holds the SHA-256 of the EXACT bytes
+    # single source of truth -- it holds the SHA-256 of the EXACT bytes
     # written to disk, and only the sidecar is verified on load.
     payload["cache_sha256"] = ""  # sentinel: see sidecar ``<path>.sha256``
 
@@ -1381,12 +1381,12 @@ def _cache_save_atomic(
         # Sidecar is the single source of truth for the file digest.
         f.write(file_sha256)
 
-    # 9.6 — file permissions
+    # 9.6 -- file permissions
     perm = 0o600 if CACHE_CONTAINS_PROPRIETARY_DATA else 0o644
     os.chmod(temp_path, perm)
     os.chmod(sha_path, perm)
 
-    # 7.10 — keep previous as .previous.pt
+    # 7.10 -- keep previous as .previous.pt
     if cache_path.exists():
         prev_path = Path(str(cache_path) + ".previous.pt")
         try:
@@ -1420,11 +1420,11 @@ def _cache_load(
 
     v35 ROOT FIX (L-26): ``cache_max_age_days`` uses the cache
     FILE'S mtime (``cache_path.stat().st_mtime``) as the freshness
-    indicator. This is the file-system modification time — which is
+    indicator. This is the file-system modification time -- which is
     updated whenever ANY process writes to the file (including a
     ``touch`` or a metadata-only save). On network filesystems
     (NFS, CIFS), mtime may be SKEWED by clock drift between the
-    writer and reader host — so a freshly-written cache may appear
+    writer and reader host -- so a freshly-written cache may appear
     stale to a reader on a host with a slow clock. Operators on NFS
     should either disable ``cache_max_age_days`` or use a
     clock-sync protocol (NTP) on all reader/writer hosts. The
@@ -1434,7 +1434,7 @@ def _cache_load(
     if not cache_path.exists():
         return None
 
-    # 5.12 — freshness check
+    # 5.12 -- freshness check
     if cache_max_age_days is not None:
         age_days = (time.time() - cache_path.stat().st_mtime) / 86400
         if age_days > cache_max_age_days:
@@ -1448,7 +1448,7 @@ def _cache_load(
                 # EXECUTION via malicious cache files. A malicious actor
                 # who can write to EMBEDDINGS_DIR could execute any
                 # Python code. The module docstring claims "FDA 21 CFR
-                # Part 11 compliance" and "FAIL LOUDLY" — silent RCE
+                # Part 11 compliance" and "FAIL LOUDLY" -- silent RCE
                 # directly contradicts both. The fix: use
                 # `weights_only=True` (PyTorch 2.0+ default) which
                 # restricts unpickling to tensors, dicts, lists, and
@@ -1477,7 +1477,7 @@ def _cache_load(
         except Exception:
             return None
 
-    # 9.1 — SHA-256 sidecar verification
+    # 9.1 -- SHA-256 sidecar verification
     # v35 ROOT FIX (M-2): compute the digest from the FILE BYTES on
     # disk, not from a re-serialised version of the loaded payload.
     # The previous code did:
@@ -1507,23 +1507,23 @@ def _cache_load(
         except Exception:
             return None
 
-    # 14.6 — format version check
+    # 14.6 -- format version check
     if cached_payload.get("cache_format_version") != CHEMBERTA_CACHE_FORMAT_VERSION:
         return None
 
-    # 5.1 — compound_ids exact match
+    # 5.1 -- compound_ids exact match
     cached_ids = cached_payload.get("compound_ids", [])
     if cached_ids != expected_compound_ids:
         return None
 
-    # 5.2 — compound_ids hash
+    # 5.2 -- compound_ids hash
     expected_ids_hash = hashlib.sha256(
         json.dumps(sorted(expected_compound_ids)).encode()
     ).hexdigest()
     if cached_payload.get("compound_ids_hash") != expected_ids_hash:
         raise ChembertaCacheIntegrityError("Compound IDs hash mismatch.")
 
-    # 7.6, 7.7, 7.8, 7.9 — parameter match checks
+    # 7.6, 7.7, 7.8, 7.9 -- parameter match checks
     mismatches = []
     for field_name, expected_val in {
         "model_name": expected_model_name,
@@ -1547,7 +1547,7 @@ def _cache_load(
     if mismatches:
         return None
 
-    # 16.2 — smiles hash
+    # 16.2 -- smiles hash
     if cached_payload.get("smiles_hash") != expected_smiles_hash:
         return None
 
@@ -1888,11 +1888,11 @@ def encode_smiles(
     log, dead-letter records. Modifies global RNG state.
     FIX-P3-14: loads model into GPU memory via the module-level
     ``_MODEL_CACHE`` (line ~865). The cache survives the function
-    return — subsequent ``encode_smiles`` calls with the same
+    return -- subsequent ``encode_smiles`` calls with the same
     ``model_name`` reuse the cached model/tokenizer instead of
     re-loading from disk. To actually release the GPU memory between
     unrelated runs, call ``clear_model_cache()`` (defined below).
-    The previous docstring claim "released on return" was FALSE —
+    The previous docstring claim "released on return" was FALSE --
     ``del model, tokenizer`` only removed the local references.
 
     See Also
@@ -1991,7 +1991,7 @@ def encode_smiles(
 
     # ── GPU warning ────────────────────────────────────────
     if resolved_device == "cpu" and device == "auto":
-        logger.warning("Encoding on CPU — ~50-100x slower than GPU.")
+        logger.warning("Encoding on CPU -- ~50-100x slower than GPU.")
 
     # ── Load model ─────────────────────────────────────────
     t_load_start = time.monotonic()
@@ -2106,7 +2106,7 @@ def encode_smiles(
     try:
         # v35 ROOT FIX (H-12): use a WHILE loop that only advances ``i``
         # on success. The previous ``for i in range(0, len, batch_size)``
-        # could not actually retry the same batch — ``i -= batch_size``
+        # could not actually retry the same batch -- ``i -= batch_size``
         # inside a for-loop is a no-op because the for-loop's internal
         # index is restored on the next iteration. The while loop lets
         # us retry the same batch with a smaller batch_size or after a
@@ -2119,20 +2119,20 @@ def encode_smiles(
             batch_ids = sorted_ids[i:i + current_batch_size]
 
             try:
-                # Tokenize — return_tensors="pt" gives tensors; .to(device)
+                # Tokenize -- return_tensors="pt" gives tensors; .to(device)
                 # is applied inside _encode_batch for both dict and BatchEncoding
                 tokenized = tokenizer(batch_smiles, padding=True, truncation=True, max_length=max_length, return_tensors="pt")
 
-                # 3.4 — truncation detection
+                # 3.4 -- truncation detection
                 # v35 ROOT FIX (H-11): for on_truncate="skip", build a
                 # keep_mask, filter the batch BEFORE encoding, and
                 # re-tokenize the filtered batch. The previous code did
                 # ``all_failed_ids.append(batch_ids[j]); continue`` inside
-                # the truncation-detection loop — but this only skipped
+                # the truncation-detection loop -- but this only skipped
                 # the truncation WARNING, not the actual encoding. The
                 # truncated SMILES was still encoded (with padding) and
                 # its embedding was added to ``accumulated_embeddings``
-                # alongside the non-truncated ones — corrupting the
+                # alongside the non-truncated ones -- corrupting the
                 # downstream graph features. The fix:
                 #   1. Build a ``keep_mask`` of non-truncated SMILES.
                 #   2. If on_truncate == "skip" AND some SMILES were
@@ -2146,7 +2146,7 @@ def encode_smiles(
                         # Quick pre-check: tokenise this SMILES alone to
                         # see if it would be truncated. We use the
                         # already-tokenised batch's attention_mask for
-                        # efficiency — but we need to re-tokenise per-SMILES
+                        # efficiency -- but we need to re-tokenise per-SMILES
                         # because the batch tokenisation padded to the
                         # longest in the batch (not to max_length).
                         non_pad = tokenized["attention_mask"][j].sum().item()
@@ -2171,17 +2171,17 @@ def encode_smiles(
                         else:
                             keep_mask.append(True)
                     if not any(keep_mask):
-                        # All SMILES in this batch were truncated — skip
+                        # All SMILES in this batch were truncated -- skip
                         # the entire batch and advance i.
                         i += current_batch_size
                         continue
                     if not all(keep_mask):
-                        # Some SMILES were truncated — filter and re-tokenise.
+                        # Some SMILES were truncated -- filter and re-tokenise.
                         batch_smiles = [s for s, k in zip(batch_smiles, keep_mask) if k]
                         batch_ids = [b for b, k in zip(batch_ids, keep_mask) if k]
                         tokenized = tokenizer(batch_smiles, padding=True, truncation=True, max_length=max_length, return_tensors="pt")
                 else:
-                    # on_truncate == "warn" or "error" — original behavior.
+                    # on_truncate == "warn" or "error" -- original behavior.
                     for j, smi in enumerate(batch_smiles):
                         non_pad = tokenized["attention_mask"][j].sum().item()
                         if non_pad >= max_length:
@@ -2202,13 +2202,13 @@ def encode_smiles(
                     # swallowed them (``except Exception: pass``).
                     # A buggy callback (e.g. one that crashed while
                     # writing to MLflow or a downstream dashboard)
-                    # was invisible to operators — the encode loop
+                    # was invisible to operators -- the encode loop
                     # continued as if nothing happened, but the
                     # callback's intended side effect (logging,
                     # checkpointing, etc.) silently stopped. The fix
                     # logs a WARNING with the exception info so
                     # operators can detect and debug callback
-                    # failures. The encode loop still continues —
+                    # failures. The encode loop still continues --
                     # the callback's failure should NOT abort the
                     # multi-hour encode run.
                     try:
@@ -2229,34 +2229,34 @@ def encode_smiles(
 
             except torch.cuda.OutOfMemoryError:
                 # v35 ROOT FIX (H-12): with the while loop, ``i`` is
-                # NOT advanced on OOM — the next iteration retries the
+                # NOT advanced on OOM -- the next iteration retries the
                 # SAME batch with a smaller batch_size (or after CPU
                 # fallback). This is the actual fix; the comment-only
                 # version in the for-loop was a no-op.
                 if current_batch_size > 4:
                     current_batch_size = max(current_batch_size // 2, 1)
-                    logger.warning("CUDA OOM — halved batch_size to %d", current_batch_size)
-                    # Do NOT advance i — retry the same batch.
+                    logger.warning("CUDA OOM -- halved batch_size to %d", current_batch_size)
+                    # Do NOT advance i -- retry the same batch.
                     continue
                 else:
-                    logger.error("CUDA OOM at batch_size=1 — falling back to CPU")
+                    logger.error("CUDA OOM at batch_size=1 -- falling back to CPU")
                     resolved_device = "cpu"
                     model = model.to("cpu")
-                    # v43 ROOT FIX (P1 — OOM device drift in cached model):
+                    # v43 ROOT FIX (P1 -- OOM device drift in cached model):
                     # After moving the model to CPU, the _MODEL_CACHE still
                     # holds a reference to the SAME model object (now on
                     # CPU). The next call requesting GPU gets the CPU model
-                    # via cache hit → device mismatch error on forward pass.
+                    # via cache hit -> device mismatch error on forward pass.
                     # Fix: clear the cache so the next call re-loads the
                     # model on the correct device.
                     with _MODEL_CACHE_LOCK:
                         _MODEL_CACHE.clear()
                         logger.info(
                             "Cleared chemberta model cache after OOM CPU "
-                            "fallback — next call will re-load on the "
+                            "fallback -- next call will re-load on the "
                             "requested device."
                         )
-                    # Do NOT advance i — retry the same batch on CPU.
+                    # Do NOT advance i -- retry the same batch on CPU.
                     continue
 
             except ChembertaSMILESValidationError:
@@ -2400,7 +2400,7 @@ def compute_avg_pairwise_similarity(
 
     v35 ROOT FIX (L-40): document memory usage. The function builds
     a full ``sample_size x sample_size`` similarity matrix via
-    ``sample_norm @ sample_norm.T`` — for the default
+    ``sample_norm @ sample_norm.T`` -- for the default
     ``sample_size=1000`` this is 1000*1000*4 bytes = 4 MB of GPU /
     CPU memory. The matrix is then indexed via ``triu_indices`` to
     extract the upper-triangular (off-diagonal) similarities, which
@@ -2425,7 +2425,7 @@ def compute_avg_pairwise_similarity(
     indices = torch.randperm(n, generator=gen)[:sample_size]
     sample = embeddings[indices].cpu()
 
-    # 8.5 — vectorized
+    # 8.5 -- vectorized
     sample_norm = torch.nn.functional.normalize(sample, p=2, dim=1)
     sim_matrix = sample_norm @ sample_norm.T
     triu_i, triu_j = torch.triu_indices(sample_size, sample_size, offset=1)
@@ -2457,7 +2457,7 @@ def clear_model_cache() -> None:
     """Clear in-memory model cache. Fixes audit issue 8.2.
 
     v35 ROOT FIX (L-25): the function name ``clear_model_cache`` was
-    ambiguous — it cleared the IN-MEMORY process-local cache
+    ambiguous -- it cleared the IN-MEMORY process-local cache
     (``_MODEL_CACHE``) but did NOT clear the on-disk embedding
     cache (``EMBEDDINGS_DIR``). Callers expecting a full reset
     were surprised when a re-encode still hit the disk cache. The
@@ -2479,7 +2479,7 @@ def clear_model_memory_cache() -> None:
 
     Alias for ``clear_model_cache``. Use this name in new code to
     make it explicit that the ON-DISK embedding cache is NOT
-    cleared — call ``Path(EMBEDDINGS_DIR).glob('*.pt').unlink()``
+    cleared -- call ``Path(EMBEDDINGS_DIR).glob('*.pt').unlink()``
     (or similar) to clear the disk cache.
     """
     clear_model_cache()
@@ -2528,7 +2528,7 @@ def check_dependency_cves() -> List[Dict[str, str]]:
     DICT's KEYS (strings) and called ``f.get("name", "")`` on each
     string, raising ``AttributeError``. The except branch then silently
     swallowed the error and returned ``[]``, making it look as if no
-    dependency had any known CVE — a false-negative on a security gate.
+    dependency had any known CVE -- a false-negative on a security gate.
     The fix unwraps ``dependencies`` from the response envelope and
     filters that list of dicts.
     """

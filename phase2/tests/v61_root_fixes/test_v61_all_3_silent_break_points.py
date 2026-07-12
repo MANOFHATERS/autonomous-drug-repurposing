@@ -1,7 +1,7 @@
-"""v61 ROOT FIX verification tests — 3 silent break points in the bridge.
+"""v61 ROOT FIX verification tests -- 3 silent break points in the bridge.
 
 Each test verifies ONE root-cause fix. Tests FAIL on regression.
-NO network, NO real databases — pure Python assertions on actual code.
+NO network, NO real databases -- pure Python assertions on actual code.
 """
 
 import os
@@ -20,7 +20,7 @@ if str(_WORKSPACE / "phase1") not in sys.path:
 
 
 # ===========================================================================
-# ISSUE #1 — _phase1_db_available() must classify failure modes
+# ISSUE #1 -- _phase1_db_available() must classify failure modes
 # ===========================================================================
 
 def test_issue_1_classify_db_failure_distinguishes_modes():
@@ -89,7 +89,7 @@ def test_issue_1_classify_db_failure_distinguishes_modes():
         f"FAIL: unrecognized errors must classify as unknown"
     )
 
-    print("PASS: Issue #1 — _classify_db_failure distinguishes all 4 failure modes")
+    print("PASS: Issue #1 -- _classify_db_failure distinguishes all 4 failure modes")
 
 
 def test_issue_1_phase1_db_available_does_not_crash_on_schema_missing():
@@ -130,13 +130,13 @@ def test_issue_1_phase1_db_available_does_not_crash_on_schema_missing():
         db_conn.get_engine = lambda: FakeEngine()
 
         try:
-            # Must NOT raise — schema_missing is non-fatal even in prod
+            # Must NOT raise -- schema_missing is non-fatal even in prod
             result = bridge._phase1_db_available()
             assert result is False, (
                 f"FAIL: _phase1_db_available() must return False on "
                 f"schema_missing (not raise, not True). Got {result!r}."
             )
-            print("PASS: Issue #1 — _phase1_db_available returns False on schema_missing (no crash)")
+            print("PASS: Issue #1 -- _phase1_db_available returns False on schema_missing (no crash)")
         finally:
             db_conn.get_engine = orig_get_engine
     finally:
@@ -144,7 +144,7 @@ def test_issue_1_phase1_db_available_does_not_crash_on_schema_missing():
 
 
 # ===========================================================================
-# ISSUE #2 — read_phase1_outputs() second silent fallback layer
+# ISSUE #2 -- read_phase1_outputs() second silent fallback layer
 # ===========================================================================
 
 def test_issue_2_read_phase1_outputs_falls_back_to_csv_on_schema_missing():
@@ -191,7 +191,7 @@ def test_issue_2_read_phase1_outputs_falls_back_to_csv_on_schema_missing():
         bridge._read_phase1_from_postgres = raise_schema
 
         try:
-            # Must NOT raise — must fall back to CSV
+            # Must NOT raise -- must fall back to CSV
             result = bridge.read_phase1_outputs(samples_dir, prefer_postgres=True)
             assert isinstance(result, dict), (
                 f"FAIL: read_phase1_outputs must return a dict, got {type(result)!r}"
@@ -202,7 +202,7 @@ def test_issue_2_read_phase1_outputs_falls_back_to_csv_on_schema_missing():
                 f"FAIL: backend must be 'csv' after schema_missing fallback, "
                 f"got {backend!r}"
             )
-            print("PASS: Issue #2 — read_phase1_outputs falls back to CSV on schema_missing (no crash)")
+            print("PASS: Issue #2 -- read_phase1_outputs falls back to CSV on schema_missing (no crash)")
         finally:
             bridge._phase1_db_available = orig_db_avail
             bridge._read_phase1_from_postgres = orig_read_pg
@@ -211,7 +211,7 @@ def test_issue_2_read_phase1_outputs_falls_back_to_csv_on_schema_missing():
 
 
 # ===========================================================================
-# ISSUE #3 — run_unified.py Phase 1 fallback to embedded samples
+# ISSUE #3 -- run_unified.py Phase 1 fallback to embedded samples
 # ===========================================================================
 
 def test_issue_3_run_unified_has_tiered_fallback():
@@ -231,11 +231,11 @@ def test_issue_3_run_unified_has_tiered_fallback():
     assert "pipelines all" in content or "pipelines\", \"all" in content or "pipelines', 'all'" in content, (
         "FAIL: run_unified.py must invoke `pipelines all` as Tier 1"
     )
-    print("PASS: Issue #3 — run_unified.py has tiered fallback (Tier 1/2/3)")
+    print("PASS: Issue #3 -- run_unified.py has tiered fallback (Tier 1/2/3)")
 
 
 # ===========================================================================
-# ISSUE #4 — Phase1StagedData.total_nodes includes pathway_nodes
+# ISSUE #4 -- Phase1StagedData.total_nodes includes pathway_nodes
 # ===========================================================================
 
 def test_issue_4_total_nodes_includes_pathway_nodes():
@@ -265,11 +265,11 @@ def test_issue_4_total_nodes_includes_pathway_nodes():
         f"FAIL: after clearing pathway_nodes, total_nodes must be 6, "
         f"got {staged.total_nodes}"
     )
-    print("PASS: Issue #4 — total_nodes includes pathway_nodes (v57 fix verified)")
+    print("PASS: Issue #4 -- total_nodes includes pathway_nodes (v57 fix verified)")
 
 
 # ===========================================================================
-# ISSUE #5 — Phase 1 ↔ Phase 2 connection produces all 5 node types
+# ISSUE #5 -- Phase 1 ↔ Phase 2 connection produces all 5 node types
 # ===========================================================================
 
 def test_issue_5_bridge_produces_all_5_node_types():
@@ -323,11 +323,11 @@ def test_issue_5_bridge_produces_all_5_node_types():
     print(f"  Disease nodes: {len(staged.disease_nodes)}")
     print(f"  ClinicalOutcome nodes: {len(staged.clinical_outcome_nodes)}")
     print(f"  Pathway nodes: {len(staged.pathway_nodes)}")
-    print("PASS: Issue #5 — Bridge stages all 5 (Compound/Protein/Gene/Disease/ClinicalOutcome/Pathway) node types")
+    print("PASS: Issue #5 -- Bridge stages all 5 (Compound/Protein/Gene/Disease/ClinicalOutcome/Pathway) node types")
 
 
 # ===========================================================================
-# ISSUE #6 — nodes_staged == nodes_loaded (no under-reporting)
+# ISSUE #6 -- nodes_staged == nodes_loaded (no under-reporting)
 # ===========================================================================
 
 def test_issue_6_nodes_staged_equals_nodes_loaded():
@@ -371,11 +371,11 @@ def test_issue_6_nodes_staged_equals_nodes_loaded():
         f"(a) pathway_nodes is being dropped from total_nodes (v57 regression), "
         f"or (b) the builder is silently dead-lettering nodes."
     )
-    print(f"PASS: Issue #6 — nodes_staged ({nodes_staged}) == nodes_loaded ({nodes_loaded}) — no under-reporting")
+    print(f"PASS: Issue #6 -- nodes_staged ({nodes_staged}) == nodes_loaded ({nodes_loaded}) -- no under-reporting")
 
 
 # ===========================================================================
-# ISSUE #7 — Bridge audit log records fallbacks with failure_mode
+# ISSUE #7 -- Bridge audit log records fallbacks with failure_mode
 # ===========================================================================
 
 def test_issue_7_audit_log_records_failure_mode():
@@ -405,7 +405,7 @@ def test_issue_7_audit_log_records_failure_mode():
                 prefer_postgres=True,
             )
         except Exception:
-            pass  # any error is fine — we just want the audit log entry
+            pass  # any error is fine -- we just want the audit log entry
 
     assert audit_path.exists(), (
         f"FAIL: audit log not created at {audit_path}. The bridge must "
@@ -432,7 +432,7 @@ def test_issue_7_audit_log_records_failure_mode():
         f"FAIL: audit log entries must include failure_mode or reason. "
         f"Sample entry: {entries[-1]}"
     )
-    print(f"PASS: Issue #7 — audit log has {len(entries)} entries with failure mode info")
+    print(f"PASS: Issue #7 -- audit log has {len(entries)} entries with failure mode info")
 
 
 # ===========================================================================
@@ -469,7 +469,7 @@ def run_all():
           f"(of {len(tests)})")
     print("=" * 70)
     if failed == 0:
-        print("ALL TESTS PASSED — all 7 v61 root fixes verified.")
+        print("ALL TESTS PASSED -- all 7 v61 root fixes verified.")
     else:
         print(f"FAILURES:")
         for name, msg in failures:

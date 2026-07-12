@@ -1,12 +1,12 @@
 """v89 ROOT FIX: Curated biomedical data tables for production-grade feature computation.
 
 ROOT CAUSE of fake feature columns (v88 and earlier):
-  - safety_score was derived from drug→causes→clinical_outcome edge count.
-    On the demo graph, most drugs had 0 AE edges → safety=0.95 for ALL drugs.
+  - safety_score was derived from drug->causes->clinical_outcome edge count.
+    On the demo graph, most drugs had 0 AE edges -> safety=0.95 for ALL drugs.
     Scientifically meaningless: ibuprofen (GI bleed risk) got the same safety
     as dexamethasone (immunosuppression risk).
-  - market_score was derived from pathway→disrupted_in→disease edge count.
-    On the demo graph, sparse connectivity → market=0.65 for ALL diseases.
+  - market_score was derived from pathway->disrupted_in->disease edge count.
+    On the demo graph, sparse connectivity -> market=0.65 for ALL diseases.
   - rare_disease_flag used pathway_count <= 2 as rarity proxy. Scientifically
     wrong: disease rarity is defined by PREVALENCE (patients per 10K), not
     graph topology. COPD (16M patients) was flagged "rare".
@@ -51,17 +51,17 @@ from typing import Dict, Optional, Tuple
 # Drugs not in this table get a neutral 0.5 + deterministic hash jitter
 # (stable per drug name, NOT per pair).
 DRUG_SAFETY_PROFILES: Dict[str, float] = {
-    # Corticosteroids — immunosuppression, osteoporosis, GI bleed
+    # Corticosteroids -- immunosuppression, osteoporosis, GI bleed
     "dexamethasone": 0.35,
     "prednisone": 0.38,
     "hydrocortisone": 0.42,
-    # NSAIDs — GI bleed, cardiovascular risk
+    # NSAIDs -- GI bleed, cardiovascular risk
     "ibuprofen": 0.55,
     "aspirin": 0.60,  # low-dose cardioprotective; higher dose GI risk
     "naproxen": 0.52,
     "celecoxib": 0.48,
     "diclofenac": 0.40,
-    # Diabetes — generally safe, lactic acidosis (metformin), hypoglycemia
+    # Diabetes -- generally safe, lactic acidosis (metformin), hypoglycemia
     "metformin": 0.78,
     "glipizide": 0.62,
     "glyburide": 0.58,
@@ -69,7 +69,7 @@ DRUG_SAFETY_PROFILES: Dict[str, float] = {
     "sitagliptin": 0.75,
     "empagliflozin": 0.68,
     "insulin": 0.65,
-    # Cardiovascular — generally well-tolerated, bleeding risk (warfarin)
+    # Cardiovascular -- generally well-tolerated, bleeding risk (warfarin)
     "lisinopril": 0.82,
     "losartan": 0.84,
     "amlodipine": 0.83,
@@ -77,7 +77,7 @@ DRUG_SAFETY_PROFILES: Dict[str, float] = {
     "simvastatin": 0.78,
     "metoprolol": 0.76,
     "warfarin": 0.35,  # narrow therapeutic index, bleeding
-    # Psychiatric — varied safety profiles
+    # Psychiatric -- varied safety profiles
     "sertraline": 0.72,
     "fluoxetine": 0.70,
     "citalopram": 0.65,  # QT prolongation
@@ -89,7 +89,7 @@ DRUG_SAFETY_PROFILES: Dict[str, float] = {
     "gabapentin": 0.78,
     "levetiracetam": 0.76,
     "topiramate": 0.65,
-    # Autoimmune/biologic — immunosuppression
+    # Autoimmune/biologic -- immunosuppression
     "methotrexate": 0.38,  # hepatotoxicity, myelosuppression
     "hydroxychloroquine": 0.68,
     "sulfasalazine": 0.65,
@@ -102,7 +102,7 @@ DRUG_SAFETY_PROFILES: Dict[str, float] = {
     "alendronate": 0.70,  # esophagitis, ONJ
     "zoledronic": 0.65,  # ONJ, renal
     "denosumab": 0.62,
-    # Oncology — high toxicity by design
+    # Oncology -- high toxicity by design
     "tamoxifen": 0.50,  # VTE, endometrial cancer
     "letrozole": 0.58,
     "imatinib": 0.52,
@@ -142,9 +142,9 @@ DRUG_SAFETY_PROFILES: Dict[str, float] = {
 #   - unmet_need_score: diseases with few treatments get high unmet need.
 #
 # Prevalence is per 10,000 population. Example:
-#   - hypertension: ~3000 per 10K (30% of population) — very common
-#   - cystic fibrosis: ~0.4 per 10K — rare
-#   - Huntington's: ~0.5 per 10K — rare
+#   - hypertension: ~3000 per 10K (30% of population) -- very common
+#   - cystic fibrosis: ~0.4 per 10K -- rare
+#   - Huntington's: ~0.5 per 10K -- rare
 DISEASE_PREVALENCE_PER_10K: Dict[str, float] = {
     # KP diseases
     "inflammation": 500.0,  # broad category, very common
@@ -182,7 +182,7 @@ DISEASE_PREVALENCE_PER_10K: Dict[str, float] = {
     # Other
     "endometriosis": 100.0,
     "osteoporosis": 300.0,
-    # Oncology (prevalence per 10K — cancer is categorized by type)
+    # Oncology (prevalence per 10K -- cancer is categorized by type)
     "breast cancer": 50.0,
     "lung cancer": 30.0,
     "prostate cancer": 80.0,
@@ -226,7 +226,7 @@ def get_drug_safety_score(drug_name: str, fallback_seed: int = 42) -> float:
     key = drug_name.lower().strip()
     if key in DRUG_SAFETY_PROFILES:
         return DRUG_SAFETY_PROFILES[key]
-    # Fallback: deterministic hash → [0.4, 0.6] range (neutral with jitter)
+    # Fallback: deterministic hash -> [0.4, 0.6] range (neutral with jitter)
     h = int(hashlib.md5(f"{fallback_seed}:{key}".encode()).hexdigest()[:8], 16)
     return 0.4 + 0.2 * (h % 1000) / 1000.0
 
@@ -273,20 +273,20 @@ def compute_market_score(disease_name: str) -> float:
     """
     prev = get_disease_prevalence(disease_name)
     if prev is None:
-        # Unknown disease — neutral score
+        # Unknown disease -- neutral score
         return 0.50
 
     if prev < RARE_DISEASE_PREVALENCE_THRESHOLD:
-        # Rare disease — orphan drug opportunity (HIGH value)
-        # Scale: prevalence 0 → 0.95, prevalence 5 → 0.80
+        # Rare disease -- orphan drug opportunity (HIGH value)
+        # Scale: prevalence 0 -> 0.95, prevalence 5 -> 0.80
         score = 0.95 - 0.03 * prev  # 0.95 at prev=0, 0.80 at prev=5
     elif prev < 100.0:
-        # Mid-prevalence — underserved market (MODERATE)
-        # Scale: prevalence 5 → 0.65, prevalence 100 → 0.45
+        # Mid-prevalence -- underserved market (MODERATE)
+        # Scale: prevalence 5 -> 0.65, prevalence 100 -> 0.45
         score = 0.65 - 0.20 * ((prev - 5) / 95.0)
     else:
-        # Common disease — competitive market (LOWER but still viable)
-        # Scale: prevalence 100 → 0.40, prevalence 3000 → 0.25
+        # Common disease -- competitive market (LOWER but still viable)
+        # Scale: prevalence 100 -> 0.40, prevalence 3000 -> 0.25
         score = max(0.25, 0.40 - 0.15 * min(1.0, (prev - 100) / 2900.0))
 
     return max(0.0, min(1.0, score))
@@ -318,7 +318,7 @@ def compute_unmet_need_score(disease_name: str, n_treatments: int = 0) -> float:
     """
     rarity = is_rare_disease(disease_name)
     rarity_component = 1.0 if rarity else 0.3
-    # Treatment gap: 0 treatments → 1.0, 5+ treatments → ~0.1
+    # Treatment gap: 0 treatments -> 1.0, 5+ treatments -> ~0.1
     scale = max(2.0, float(n_treatments) * 0.5 + 2.0)
     treatment_gap = math.exp(-n_treatments / scale)
     score = 0.6 * rarity_component + 0.4 * treatment_gap
@@ -328,10 +328,10 @@ def compute_unmet_need_score(disease_name: str, n_treatments: int = 0) -> float:
 # ============================================================================
 # DRUG PATENT STATUS (sourced from FDA Orange Book)
 # ============================================================================
-# 1.0 = off-patent (generic available, BETTER for repurposing — no IP barrier)
+# 1.0 = off-patent (generic available, BETTER for repurposing -- no IP barrier)
 # 0.0 = on-patent (IP exclusivity, harder to repurpose commercially)
 DRUG_PATENT_STATUS: Dict[str, float] = {
-    # Off-patent generics (high repurposing value — no IP barrier)
+    # Off-patent generics (high repurposing value -- no IP barrier)
     "aspirin": 0.95,
     "ibuprofen": 0.95,
     "metformin": 0.95,
@@ -373,7 +373,7 @@ DRUG_PATENT_STATUS: Dict[str, float] = {
     "doxycycline": 0.95,
     "fluconazole": 0.92,
     "acyclovir": 0.93,
-    # On-patent / newer drugs (lower repurposing value — IP barrier)
+    # On-patent / newer drugs (lower repurposing value -- IP barrier)
     "adalimumab": 0.20,
     "infliximab": 0.25,
     "bevacizumab": 0.15,
@@ -407,6 +407,6 @@ def get_drug_patent_score(drug_name: str, fallback_seed: int = 42) -> float:
     key = drug_name.lower().strip()
     if key in DRUG_PATENT_STATUS:
         return DRUG_PATENT_STATUS[key]
-    # Fallback: deterministic hash → [0.3, 0.8] range
+    # Fallback: deterministic hash -> [0.3, 0.8] range
     h = int(hashlib.md5(f"patent:{fallback_seed}:{key}".encode()).hexdigest()[:8], 16)
     return 0.3 + 0.5 * (h % 1000) / 1000.0

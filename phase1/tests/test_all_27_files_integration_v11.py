@@ -39,20 +39,20 @@ The newly-fixed file (file #27):
 
 This test suite verifies:
 
-1. **Importability** — every file imports cleanly (no syntax errors, no
+1. **Importability** -- every file imports cleanly (no syntax errors, no
    circular imports, no missing dependencies).
-2. **Structural integrity** — each module exposes the expected public API.
-3. **Schema consistency** — the schema (``pipelines/schema/v1.json``) is
+2. **Structural integrity** -- each module exposes the expected public API.
+3. **Schema consistency** -- the schema (``pipelines/schema/v1.json``) is
    consistent across all pipelines (each pipeline's output columns are
    declared in the schema).
-4. **Database model integrity** — all SQLAlchemy models create cleanly
+4. **Database model integrity** -- all SQLAlchemy models create cleanly
    against an in-memory SQLite engine.
-5. **Migration integrity** — all SQL migration files are syntactically
+5. **Migration integrity** -- all SQL migration files are syntactically
    valid (parseable by the migration runner).
-6. **Cross-pipeline contract** — the PubChemPipeline consumes the
+6. **Cross-pipeline contract** -- the PubChemPipeline consumes the
    ``drugs`` table populated by ChEMBL/DrugBank, and the new
    ``pubchem_compound_properties`` table is JOINable with ``drugs``.
-7. **End-to-end smoke** — a tiny end-to-end run through PubChemPipeline
+7. **End-to-end smoke** -- a tiny end-to-end run through PubChemPipeline
    (with mocked HTTP) succeeds.
 
 Run::
@@ -119,7 +119,7 @@ EXPECTED_FILES: list[str] = [
     "entity_resolution/resolver_utils.py",
     "entity_resolution/drug_resolver.py",
     "entity_resolution/protein_resolver.py",
-    # Pipelines (8 files — including the newly-fixed pubchem_pipeline.py)
+    # Pipelines (8 files -- including the newly-fixed pubchem_pipeline.py)
     "pipelines/__init__.py",
     "pipelines/base_pipeline.py",
     "pipelines/chembl_pipeline.py",
@@ -199,8 +199,8 @@ class TestAllPythonFilesImport:
     @pytest.mark.parametrize("file_path", PYTHON_FILES)
     def test_module_imports_cleanly(self, file_path):
         """Each Python file must import without raising."""
-        # Convert path to module name: "config/__init__.py" → "config"
-        # "config/settings.py" → "config.settings"
+        # Convert path to module name: "config/__init__.py" -> "config"
+        # "config/settings.py" -> "config.settings"
         if file_path.endswith("/__init__.py"):
             module_name = file_path[: -len("/__init__.py")].replace("/", ".")
         else:
@@ -231,7 +231,7 @@ class TestAllSqlMigrations:
         """Each SQL migration must be parseable (at least the statements SQLite understands).
 
         SQLite's parser is stricter than PostgreSQL's, but it accepts
-        most DDL.  We don't expect every statement to succeed — only that
+        most DDL.  We don't expect every statement to succeed -- only that
         the file is syntactically valid SQL (no unterminated strings,
         no missing semicolons, etc.).
         """
@@ -252,7 +252,7 @@ class TestAllSqlMigrations:
             conn.executescript(cleaned)
         except sqlite3.OperationalError as exc:
             # OperationalError = the SQL ran but failed (e.g., duplicate
-            # index).  That's OK — we're checking syntax, not semantics.
+            # index).  That's OK -- we're checking syntax, not semantics.
             pass
         except sqlite3.ProgrammingError as exc:
             pytest.fail(f"SQL syntax error in {file_path}: {exc}")
@@ -269,13 +269,13 @@ class TestSqlAlchemyModels:
     """Verify that all ORM models create cleanly."""
 
     def test_base_metadata_create_all_succeeds(self, db_engine):
-        """``Base.metadata.create_all`` succeeds — all models are valid."""
+        """``Base.metadata.create_all`` succeeds -- all models are valid."""
         # The fixture already calls create_all; just verify the engine
         # has the expected tables.
         inspector = inspect(db_engine)
         tables = set(inspector.get_table_names())
         # Core tables that MUST exist (note: table name is "entity_mapping"
-        # singular, and "schema_version" singular — these are the actual
+        # singular, and "schema_version" singular -- these are the actual
         # __tablename__ values in database/models.py).
         for required in [
             "drugs",
@@ -424,7 +424,7 @@ class TestSchemaConsistency:
 
 
 # ===========================================================================
-# Test 7: Cross-pipeline contract — PubChemPipeline can JOIN with drugs.
+# Test 7: Cross-pipeline contract -- PubChemPipeline can JOIN with drugs.
 # ===========================================================================
 
 
@@ -499,9 +499,9 @@ class TestCrossPipelineContract:
     def test_pubchem_compound_properties_fk_to_drugs(self, db_engine, db_session):
         """pubchem_compound_properties.inchikey is FK to drugs.inchikey.
 
-        Verified by inspecting migration 005's SQL — the ``REFERENCES
+        Verified by inspecting migration 005's SQL -- the ``REFERENCES
         drugs(inchikey)`` clause declares the FK.  (The lazy-constructed
-        Table object in loaders.py omits the FK for simplicity — the
+        Table object in loaders.py omits the FK for simplicity -- the
         migration is the source of truth for schema constraints.)
         """
         migration_path = (
@@ -548,7 +548,7 @@ class TestPubChemEndToEndSmoke:
         p = PubChemPipeline()
         p.raw_dir = tmp_path / "raw"
         p.raw_dir.mkdir(parents=True, exist_ok=True)
-        # Empty DataFrame — should return 0 without error.
+        # Empty DataFrame -- should return 0 without error.
         df = pd.DataFrame(columns=list(COLUMN_ORDER))
         result = p.load(df, session=db_session)
         assert result == 0
@@ -607,7 +607,7 @@ class TestPubChemEndToEndSmoke:
         # df has the parsed record.
         assert len(df) == 1
         assert df.iloc[0]["inchikey"] == "BSYNRYMUTXBXSQ-UHFFFAOYSA-N"
-        # Stereochemistry columns are present (even when equal — no stereo for aspirin).
+        # Stereochemistry columns are present (even when equal -- no stereo for aspirin).
         assert "canonical_smiles" in df.columns
         assert "isomeric_smiles" in df.columns
         # Decimal precision preserved.
@@ -888,7 +888,7 @@ class TestMigration005Registered:
         3. Executing it against the SQLite engine.
         4. Asserting the table exists.
         """
-        # Use the loader's lazy-constructed Table object — it has the
+        # Use the loader's lazy-constructed Table object -- it has the
         # same schema as migration 005 (both are derived from the
         # COLUMN_ORDER in pubchem_pipeline.py and the migration's CREATE
         # TABLE statement).  Creating the Table object via SQLAlchemy

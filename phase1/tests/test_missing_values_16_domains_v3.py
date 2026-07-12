@@ -3,32 +3,32 @@ Test 1: REAL functional tests for the upgraded cleaning/missing_values.py
 ========================================================================
 
 This test file verifies that the upgraded ``cleaning/missing_values.py``
-(v3.0.0) actually works — not just that symbols are present, but that
+(v3.0.0) actually works -- not just that symbols are present, but that
 the BEHAVIOR is correct across all 16 verification domains.
 
 The tests are organized by domain and exercise:
 
-  - is_nullish / NullStrategy     — null detection (ARCH-7, DESIGN-1..3)
-  - recover_inchikeys_from_smiles — recovery without data loss (ARCH-3)
-  - drop_unidentifiable_drugs      — BugBank ID / ChEMBL ID preservation
+  - is_nullish / NullStrategy     -- null detection (ARCH-7, DESIGN-1..3)
+  - recover_inchikeys_from_smiles -- recovery without data loss (ARCH-3)
+  - drop_unidentifiable_drugs      -- BugBank ID / ChEMBL ID preservation
                                      (BUG-SCI-2)
-  - handle_missing_inchikey        — full pipeline + backward compat
-  - fill_missing_drug_fields       — conservative vs legacy defaults
+  - handle_missing_inchikey        -- full pipeline + backward compat
+  - fill_missing_drug_fields       -- conservative vs legacy defaults
                                      (BUG-SCI-3, BUG-SCI-7, BUG-SCI-10)
-  - handle_missing_protein_fields  — non-human organism safety (BUG-SCI-4)
+  - handle_missing_protein_fields  -- non-human organism safety (BUG-SCI-4)
                                      + sequence truncation lineage
                                      (BUG-SCI-8)
-  - validate_gda_scores            — score clipping lineage (BUG-DESIGN-5)
+  - validate_gda_scores            -- score clipping lineage (BUG-DESIGN-5)
                                      + preserve_direction (BUG-SCI-5)
                                      + disease_name fill (BUG-SCI-6)
-  - DataCleaningResult             — structured result (DESIGN-9)
-  - Idempotency                    — IDEM-1..4
-  - Observability                  — metrics, dead letters, correlation ID
-  - Data lineage                   — LINEAGE-1..8 (underscore-prefixed cols
+  - DataCleaningResult             -- structured result (DESIGN-9)
+  - Idempotency                    -- IDEM-1..4
+  - Observability                  -- metrics, dead letters, correlation ID
+  - Data lineage                   -- LINEAGE-1..8 (underscore-prefixed cols
                                      + DataFrame.attrs["_cleaning_metadata"])
-  - Security                       — SMILES sanitization, PII scan,
+  - Security                       -- SMILES sanitization, PII scan,
                                      input size validation (SEC-1..5)
-  - Orchestration                  — clean_drugs, clean_proteins, clean_gda
+  - Orchestration                  -- clean_drugs, clean_proteins, clean_gda
 
 Run:  pytest tests/test_missing_values_16_domains_v3.py -v
 """
@@ -142,7 +142,7 @@ class TestModuleSmoke:
 
 
 # ===========================================================================
-# Section 1: is_nullish / NullStrategy — null detection (ARCH-7, DESIGN-1..3)
+# Section 1: is_nullish / NullStrategy -- null detection (ARCH-7, DESIGN-1..3)
 # ===========================================================================
 
 
@@ -163,8 +163,8 @@ class TestIsNullishGeneral:
         ("-", True),                 # dash treated as null in general context
         ("--", True),
         ("valid", False),            # real data
-        ("NA", False),               # gene symbol — NOT null (BUG-SCI-1)
-        ("none", False),             # biomedical value — NOT null (AUDIT-30)
+        ("NA", False),               # gene symbol -- NOT null (BUG-SCI-1)
+        ("none", False),             # biomedical value -- NOT null (AUDIT-30)
         ("None", False),
         ("CCO", False),              # SMILES
         ("Homo sapiens", False),     # organism
@@ -237,7 +237,7 @@ class TestIsNullishGeneral:
             def dtype(self):
                 raise RuntimeError("simulated internal error")
 
-        # The fallback should kick in.  This test is defensive — if
+        # The fallback should kick in.  This test is defensive -- if
         # the implementation changes such that this no longer raises,
         # that's fine.
         try:
@@ -350,7 +350,7 @@ class TestRecoverInchikeysFromSmiles:
 
         def fake_converter(smiles: str):
             calls.append(smiles)
-            # Return a SYNTH-prefixed key — always valid per the platform contract.
+            # Return a SYNTH-prefixed key -- always valid per the platform contract.
             return f"SYNTH-FAKE-{smiles[:3].upper()}"
 
         df = pd.DataFrame({
@@ -359,8 +359,8 @@ class TestRecoverInchikeysFromSmiles:
         })
         result = recover_inchikeys_from_smiles(df, converter=fake_converter)
 
-        # First row already has an InChIKey — converter NOT called.
-        # Second row needs recovery — converter IS called.
+        # First row already has an InChIKey -- converter NOT called.
+        # Second row needs recovery -- converter IS called.
         assert len(calls) == 1
         assert calls[0] == "CC(=O)O"
         # InChIKey recovered (SYNTH-prefixed keys are always valid).
@@ -467,8 +467,8 @@ class TestDropUnidentifiableDrugs:
             "name": ["Drug1", "Drug2", None],
         })
         # Row 0: has inchikey. Keep.
-        # Row 1: no inchikey, but has smiles — recoverable, keep.
-        # Row 2: no inchikey, no smiles, no name — DROP.
+        # Row 1: no inchikey, but has smiles -- recoverable, keep.
+        # Row 2: no inchikey, no smiles, no name -- DROP.
         result = drop_unidentifiable_drugs(df)
         assert len(result) == 2
         assert "Drug2" in result["name"].tolist()
@@ -482,8 +482,8 @@ class TestDropUnidentifiableDrugs:
             "name": ["Drug1", None],
         })
         result = drop_unidentifiable_drugs(df)
-        # Row 0 has drugbank_id — kept.
-        # Row 1 has nothing — dropped.
+        # Row 0 has drugbank_id -- kept.
+        # Row 1 has nothing -- dropped.
         assert len(result) == 1
         assert result["drugbank_id"].iloc[0] == "DB00001"
 
@@ -577,7 +577,7 @@ class TestHandleMissingInchikeyBackwardCompat:
             "inchikey": ["AAA", None, "BBB"],
         })
         result = handle_missing_inchikey(df)
-        # Row 1 has null inchikey and no smiles col → dropped (legacy behavior).
+        # Row 1 has null inchikey and no smiles col -> dropped (legacy behavior).
         assert len(result) == 2
 
     def test_recovery_via_injected_converter(self):
@@ -626,7 +626,7 @@ class TestFillMissingDrugFieldsBackwardCompat:
     """Verify v2.0.0 legacy defaults are preserved."""
 
     def test_is_fda_approved_fills_with_none(self):
-        """v90: is_fda_approved NaN → None (unknown, not confirmed-negative)."""
+        """v90: is_fda_approved NaN -> None (unknown, not confirmed-negative)."""
         # v90 UPDATE: conservative_defaults now defaults to True, so
         # is_fda_approved NaN stays None (scientifically correct: unknown
         # is not the same as "confirmed not approved"). To get the old
@@ -638,7 +638,7 @@ class TestFillMissingDrugFieldsBackwardCompat:
         assert bool(result["is_fda_approved"].iloc[1]) == True  # noqa: E712
 
     def test_drug_type_fills_with_unknown(self):
-        """Legacy: drug_type NaN → 'Unknown'."""
+        """Legacy: drug_type NaN -> 'Unknown'."""
         df = pd.DataFrame({"drug_type": [None, "Small molecule"]})
         result = fill_missing_drug_fields(df)
         assert result["drug_type"].iloc[0] == "Unknown"
@@ -652,7 +652,7 @@ class TestFillMissingDrugFieldsBackwardCompat:
         assert result["max_phase"].iloc[1] == 4
 
     def test_smiles_fills_with_none(self):
-        """v90: smiles NaN → None (prevents RDKit crashes on empty string)."""
+        """v90: smiles NaN -> None (prevents RDKit crashes on empty string)."""
         # v90 UPDATE: conservative_defaults=True fills smiles with None
         # (keeps NaN), not empty string. An empty string causes RDKit
         # to crash when it tries to parse it as SMILES.
@@ -661,7 +661,7 @@ class TestFillMissingDrugFieldsBackwardCompat:
         assert pd.isna(result["smiles"].iloc[0])
 
     def test_mechanism_of_action_fills_with_unknown(self):
-        """v90: mechanism_of_action NaN → 'Unknown'."""
+        """v90: mechanism_of_action NaN -> 'Unknown'."""
         # v90 UPDATE: conservative_defaults=True fills with "Unknown"
         # instead of empty string, distinguishing "we don't know" from
         # "has no mechanism".
@@ -674,7 +674,7 @@ class TestFillMissingDrugFieldsConservative:
     """Verify conservative_defaults=True uses scientifically safer values."""
 
     def test_is_fda_approved_fills_with_none(self):
-        """conservative_defaults=True: is_fda_approved NaN → None (nullable Boolean)."""
+        """conservative_defaults=True: is_fda_approved NaN -> None (nullable Boolean)."""
         df = pd.DataFrame({"is_fda_approved": [None, True]})
         result = fill_missing_drug_fields(df, conservative_defaults=True)
         # Should be NA / None for the NaN row (not False).
@@ -683,14 +683,14 @@ class TestFillMissingDrugFieldsConservative:
         assert str(result["is_fda_approved"].dtype) == "boolean"
 
     def test_smiles_fills_with_none(self):
-        """conservative_defaults=True: smiles NaN → None (prevents RDKit crash)."""
+        """conservative_defaults=True: smiles NaN -> None (prevents RDKit crash)."""
         df = pd.DataFrame({"smiles": [None, "CCO"]})
         result = fill_missing_drug_fields(df, conservative_defaults=True)
         # NaN preserved (not empty string).
         assert pd.isna(result["smiles"].iloc[0])
 
     def test_mechanism_of_action_fills_with_unknown(self):
-        """conservative_defaults=True: mechanism_of_action NaN → 'Unknown'."""
+        """conservative_defaults=True: mechanism_of_action NaN -> 'Unknown'."""
         df = pd.DataFrame({"mechanism_of_action": [None]})
         result = fill_missing_drug_fields(df, conservative_defaults=True)
         assert result["mechanism_of_action"].iloc[0] == "Unknown"
@@ -748,7 +748,7 @@ class TestHandleMissingProteinFieldsBackwardCompat:
         assert "Q99999" in result["uniprot_id"].tolist()
 
     def test_fills_gene_name_with_empty(self):
-        """gene_name NaN → '' (legacy)."""
+        """gene_name NaN -> '' (legacy)."""
         df = pd.DataFrame({
             "uniprot_id": ["P1", "P2"],
             "gene_name": ["BRCA1", None],
@@ -757,7 +757,7 @@ class TestHandleMissingProteinFieldsBackwardCompat:
         assert result["gene_name"].iloc[1] == ""
 
     def test_fills_organism_with_homo_sapiens(self):
-        """organism NaN → 'Homo sapiens' (legacy default)."""
+        """organism NaN -> 'Homo sapiens' (legacy default)."""
         df = pd.DataFrame({
             "uniprot_id": ["P1"],
             "organism": [None],
@@ -766,7 +766,7 @@ class TestHandleMissingProteinFieldsBackwardCompat:
         assert result["organism"].iloc[0] == "Homo sapiens"
 
     def test_fills_function_desc_with_empty(self):
-        """function_desc NaN → '' (legacy)."""
+        """function_desc NaN -> '' (legacy)."""
         df = pd.DataFrame({
             "uniprot_id": ["P1"],
             "function_desc": [None],
@@ -810,17 +810,17 @@ class TestHandleMissingProteinFieldsNonHuman:
             "organism": ["Homo sapiens", "Mus musculus", None],
         })
         result = handle_missing_protein_fields(df, organism_fill_mode="strict")
-        # Row 3 has NaN organism AND there's a non-human (mouse) — fill with "Unknown organism".
+        # Row 3 has NaN organism AND there's a non-human (mouse) -- fill with "Unknown organism".
         assert result["organism"].iloc[2] == "Unknown organism"
 
     def test_default_mode_fills_with_homo_sapiens_even_with_non_human(self):
-        """Legacy: even with non-human proteins, NaN → 'Homo sapiens' (with warning)."""
+        """Legacy: even with non-human proteins, NaN -> 'Homo sapiens' (with warning)."""
         df = pd.DataFrame({
             "uniprot_id": ["P1", "P2", "P3"],
             "organism": ["Homo sapiens", "Mus musculus", None],
         })
         result = handle_missing_protein_fields(df, organism_fill_mode="default")
-        # Row 3 still gets "Homo sapiens" (legacy behavior — preserved).
+        # Row 3 still gets "Homo sapiens" (legacy behavior -- preserved).
         assert result["organism"].iloc[2] == "Homo sapiens"
 
     def test_skip_mode_leaves_nan(self):
@@ -897,7 +897,7 @@ class TestValidateGdaScoresBackwardCompat:
         assert result["score"].iloc[2] == 0.5
 
     def test_fills_disease_name_with_disease_id(self):
-        """Legacy: disease_name NaN → disease_id value (e.g. 'D1')."""
+        """Legacy: disease_name NaN -> disease_id value (e.g. 'D1')."""
         df = pd.DataFrame({
             "disease_id": ["D1", "D2"],
             "disease_name": [None, "Alzheimer's"],
@@ -907,7 +907,7 @@ class TestValidateGdaScoresBackwardCompat:
         assert result["disease_name"].iloc[1] == "Alzheimer's"
 
     def test_fills_association_type_with_unknown(self):
-        """association_type NaN → 'unknown'."""
+        """association_type NaN -> 'unknown'."""
         df = pd.DataFrame({
             "association_type": [None, "somatic"],
         })
@@ -1386,7 +1386,7 @@ class TestNormalizerIntegration:
 
         We scan for actual import statements (lines starting with `from` or
         `import`), not comments.  A COMMENT that says "DO NOT import from
-        cleaning.missing_values" is fine — it's documentation, not code.
+        cleaning.missing_values" is fine -- it's documentation, not code.
         """
         import cleaning.normalizer as norm
         import inspect
@@ -1407,14 +1407,14 @@ class TestNormalizerIntegration:
     def test_handle_missing_inchikey_uses_normalizer(self):
         """handle_missing_inchikey uses normalizer.convert_to_inchikey when no converter injected."""
         # This test verifies that the lazy import path works.  Without RDKit,
-        # convert_to_inchikey returns None — recovery "fails" gracefully.
+        # convert_to_inchikey returns None -- recovery "fails" gracefully.
         df = pd.DataFrame({
             "inchikey": [None],
             "smiles": ["CCO"],
             "name": ["Ethanol"],
         })
         result = handle_missing_inchikey(df)
-        # Without RDKit, recovery returns None — row kept because it has a name.
+        # Without RDKit, recovery returns None -- row kept because it has a name.
         assert len(result) == 1
 
 

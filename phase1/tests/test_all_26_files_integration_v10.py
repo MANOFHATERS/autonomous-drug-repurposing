@@ -1,10 +1,10 @@
 """
-tests/test_all_26_files_integration_v10.py — Combined integration test for
+tests/test_all_26_files_integration_v10.py -- Combined integration test for
 all 26 files (25 previously-fixed + the new OMIM pipeline).
 
 This is test #2 of 3 required by the master prompt:
-  1. tests/test_omim_pipeline.py — real tests for the OMIM file.
-  2. tests/test_all_26_files_integration_v10.py (THIS FILE) — all 26 files
+  1. tests/test_omim_pipeline.py -- real tests for the OMIM file.
+  2. tests/test_all_26_files_integration_v10.py (THIS FILE) -- all 26 files
      combined integration.
   3. All existing tests must still pass.
 
@@ -113,7 +113,7 @@ TWENTY_SIX_FILES = [
     "pipelines/chembl_pipeline.py",
     "pipelines/drugbank_pipeline.py",
     "pipelines/pubchem_pipeline.py",
-    # The 26th file — the one we just fixed
+    # The 26th file -- the one we just fixed
     "pipelines/omim_pipeline.py",
 ]
 
@@ -304,7 +304,7 @@ def test_omim_pipeline_imports_cleanly():
 
 
 # ===========================================================================
-# Test 4: Config integration — OMIM config keys are available
+# Test 4: Config integration -- OMIM config keys are available
 # ===========================================================================
 class TestConfigIntegration:
     """Verify OMIM config is registered and available."""
@@ -353,7 +353,7 @@ class TestConfigIntegration:
 
 
 # ===========================================================================
-# Test 5: Database integration — GDA model has all required columns
+# Test 5: Database integration -- GDA model has all required columns
 # ===========================================================================
 class TestDatabaseIntegration:
     """Verify the GDA model and loaders support OMIM's output schema."""
@@ -415,7 +415,7 @@ class TestDatabaseIntegration:
 
 
 # ===========================================================================
-# Test 6: Cleaning integration — validate_gda_scores + classify_confidence
+# Test 6: Cleaning integration -- validate_gda_scores + classify_confidence
 # ===========================================================================
 class TestCleaningIntegration:
     """Verify the cleaning utilities work with OMIM's output."""
@@ -424,7 +424,7 @@ class TestCleaningIntegration:
         """validate_gda_scores must accept OMIM's cleaned DataFrame."""
         from cleaning.missing_values import validate_gda_scores
         df = omim_pipeline.clean(morbidmap_fixture)
-        # Run validate_gda_scores again — should be idempotent.
+        # Run validate_gda_scores again -- should be idempotent.
         result = validate_gda_scores(
             df,
             score_range=(0.0, 1.0),
@@ -446,13 +446,13 @@ class TestCleaningIntegration:
 
 
 # ===========================================================================
-# Test 7: End-to-end integration — clean → load → DB
+# Test 7: End-to-end integration -- clean -> load -> DB
 # ===========================================================================
 class TestEndToEndIntegration:
-    """Full clean → load flow with a real (in-memory) DB."""
+    """Full clean -> load flow with a real (in-memory) DB."""
 
     def test_full_omim_pipeline_clean_and_load(self, omim_pipeline, morbidmap_fixture, populated_db_session):
-        """Full clean → load flow: verify DB rows have correct values."""
+        """Full clean -> load flow: verify DB rows have correct values."""
         df = omim_pipeline.clean(morbidmap_fixture)
         assert not df.empty
         with patch.object(omim_pipeline, "_post_load_disgenet_dedup"):
@@ -571,7 +571,7 @@ class TestSchemaCompliance:
 
 
 # ===========================================================================
-# Test 9: Lineage integration — manifest file written
+# Test 9: Lineage integration -- manifest file written
 # ===========================================================================
 class TestLineageIntegration:
     """Verify the manifest is written with full provenance."""
@@ -613,7 +613,7 @@ class TestLineageIntegration:
 
 
 # ===========================================================================
-# Test 10: Cross-pipeline integration — OMIM + DisGeNET patterns match
+# Test 10: Cross-pipeline integration -- OMIM + DisGeNET patterns match
 # ===========================================================================
 class TestCrossPipelineIntegration:
     """Verify OMIM and DisGeNET share the same institutional patterns."""
@@ -744,7 +744,7 @@ class TestDocumentationIntegration:
 
 
 # ===========================================================================
-# Test 13: Backward compatibility — DAG still works
+# Test 13: Backward compatibility -- DAG still works
 # ===========================================================================
 class TestBackwardCompatibility:
     """Verify the DAG and existing API contracts are preserved."""

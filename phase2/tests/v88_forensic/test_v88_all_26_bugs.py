@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""v88 Forensic Root-Fix Verification — BUG #27 through BUG #52.
+"""v88 Forensic Root-Fix Verification -- BUG #27 through BUG #52.
 
 This module verifies the root-cause fixes for all 26 bugs identified in
 the forensic audit. Each test exercises the ACTUAL patched code path
@@ -36,7 +36,7 @@ def test_bug_27_gene_mim_aliasing_postgres_path():
     assert hasattr(phase1_bridge, "_read_indications_from_postgres")
     assert hasattr(phase1_bridge, "_read_phase1_from_postgres")
     # The fix is in the omim_susceptibility block of
-    # _read_phase1_from_postgres — verified by code inspection.
+    # _read_phase1_from_postgres -- verified by code inspection.
 
 
 def test_bug_28_silent_csv_fallback_blocked():

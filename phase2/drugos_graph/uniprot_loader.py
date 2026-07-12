@@ -1,4 +1,4 @@
-"""DrugOS Graph Module — UniProt Loader
+"""DrugOS Graph Module -- UniProt Loader
 ========================================
 Parses UniProtKB/Swiss-Prot flat-file (.dat) format into Protein node
 records for the DrugOS knowledge graph.
@@ -13,7 +13,7 @@ Supported line types (after this fix):
     ``and`` separator for multi-gene loci), OS, OX, OG, OH, PE, SQ,
     DR (all cross-references).
 
-Output schema (``UniProtRecord`` — see ``schemas.py``):
+Output schema (``UniProtRecord`` -- see ``schemas.py``):
     {accession, secondary_accessions, entry_name, protein_name,
      alternative_names, alternative_name, contains_names, includes_names,
      ec_numbers, gene_name, gene_names, gene_synonyms, gene_orf_names,
@@ -23,10 +23,10 @@ Output schema (``UniProtRecord`` — see ``schemas.py``):
 
 Memory: streaming via ``iter_uniprot_entries()`` (~10 MB peak).
         ``parse_uniprot_entries()`` materializes the full list (~1 GB for
-        570k records) — use the generator for production-scale runs where
+        570k records) -- use the generator for production-scale runs where
         you can consume records one at a time.
 
-Idempotency: YES — same input file + same parser version -> same output.
+Idempotency: YES -- same input file + same parser version -> same output.
              Records are sorted by accession before return (D7-001).
              The only non-deterministic field is
              ``_provenance['parsed_at']`` (ISO-8601 timestamp).
@@ -40,24 +40,24 @@ Scientific guardian (SCI-1):
     ``ID_CROSSWALK_REPAIR_CHANGELOG.md``.
 
 Errors raised:
-    FileNotFoundError — input file missing.
-    UniProtDownloadError — download failed after all retries (D6-006).
-    UniProtDataIntegrityError — SHA256 mismatch, record count > 50%
+    FileNotFoundError -- input file missing.
+    UniProtDownloadError -- download failed after all retries (D6-006).
+    UniProtDataIntegrityError -- SHA256 mismatch, record count > 50%
         below expected, missing required accession on a node (D1-003).
-    UniProtParseError — parse error rate exceeds 1% of kept records
+    UniProtParseError -- parse error rate exceeds 1% of kept records
         (D6-003).
-    ValueError — ``organism`` is an empty string (use ``None`` to
-        disable filtering — D4-008).
+    ValueError -- ``organism`` is an empty string (use ``None`` to
+        disable filtering -- D4-008).
 
 Dead-letter: ``data/dead_letter/uniprot_malformed.jsonl`` (one JSON line
              per dropped record).  Fixes D6-004.
 
 Transformation log: ``logs/transformations/uniprot.jsonl`` (one JSON line
-                     per significant transformation — SCI-1 override,
+                     per significant transformation -- SCI-1 override,
                      DE Contains split, GN ``and`` split, multi-line AC,
                      etc.).  Fixes D16-002.
 
-License: CC BY 4.0 — attribution propagated in every record's
+License: CC BY 4.0 -- attribution propagated in every record's
          ``_attribution`` field (D14-001).
 
 URL: https://www.uniprot.org/
@@ -66,7 +66,7 @@ Format spec: https://www.uniprot.org/docs/userman.htm
 
 from __future__ import annotations
 
-# ─── Standard library imports (D1-005 — no new third-party deps) ─────────────
+# ─── Standard library imports (D1-005 -- no new third-party deps) ─────────────
 import gzip
 import hashlib
 import io
@@ -124,7 +124,7 @@ from .exceptions import (
 from .schemas import PROVENANCE_KEYS, UniProtEdge, UniProtRecord, ProteinNode
 
 # Re-use the validated scientific-correctness layer from id_crosswalk.
-# These helpers are the AUTHORITATIVE validators — do not duplicate the
+# These helpers are the AUTHORITATIVE validators -- do not duplicate the
 # regex (D5-001, D5-002, D3-001).  Fixes D5-001 / D5-002 / D3-001.
 from .id_crosswalk import (
     VERIFIED_UNIPROT_GENE_CROSSWALK,
@@ -134,7 +134,7 @@ from .id_crosswalk import (
 
 # ─── D1-004: module public surface ───────────────────────────────────────────
 __all__: list[str] = [
-    # Public functions (preserved from v1 — D1-003 / D15-002)
+    # Public functions (preserved from v1 -- D1-003 / D15-002)
     "download_uniprot",
     "parse_uniprot_entries",
     "uniprot_to_node_records",
@@ -161,7 +161,7 @@ logger = logging.getLogger(__name__)
 
 # v69 ROOT FIX (P2L-019): coerce ``ncbi_taxid`` to int at the boundary.
 #
-# The previous code did ``rec.get("ncbi_taxid", 0)`` — the default is 0
+# The previous code did ``rec.get("ncbi_taxid", 0)`` -- the default is 0
 # (int), but when records come from ``parse_uniprot_entries_from_phase1_csv``
 # (line ~1877), ``ncbi_taxid`` may be a string from the CSV (e.g. "9606").
 # The ProteinNode schema (line ~172) says ``ncbi_taxid: int``. Mixed
@@ -192,10 +192,10 @@ def _coerce_ncbi_taxid(value: Any) -> int:
 
 # ─── D13-003: authoritative Protein node schema (for docs + validation) ──────
 PROTEIN_NODE_SCHEMA: Final[Dict[str, type]] = {
-    "uniprot_id": str,        # canonical PK (config.CANONICAL_IDS['Protein'])  — D2-004
-    "id": str,                # backward-compat alias (deprecated, removed v3)  — D15-003
-    "uniprot_uri": str,       # identifiers.org URI (FAIR)                       — D14-002
-    "name": str,              # protein_name | entry_name | accession (never empty)  — D4-002
+    "uniprot_id": str,        # canonical PK (config.CANONICAL_IDS['Protein'])  -- D2-004
+    "id": str,                # backward-compat alias (deprecated, removed v3)  -- D15-003
+    "uniprot_uri": str,       # identifiers.org URI (FAIR)                       -- D14-002
+    "name": str,              # protein_name | entry_name | accession (never empty)  -- D4-002
     "entry_name": str,
     "gene_name": str,         # primary gene symbol
     "gene_names": list,       # all gene symbols (D3-003)
@@ -247,7 +247,7 @@ _GENE_ID_MAX: Final[int] = 100_000_000
 _CHECKPOINT_EVERY: Final[int] = 50_000
 
 # ─── D2-005: DR database -> (edge relation, target entity type) mapping ─────
-# Fixes D2-005 — emit edges from UniProt DR cross-references.
+# Fixes D2-005 -- emit edges from UniProt DR cross-references.
 _DB_TO_EDGE_TYPE: Final[Dict[str, str]] = {
     "ChEMBL": "interacts_with",
     "DrugBank": "interacts_with",
@@ -292,7 +292,7 @@ _DB_TO_ENTITY_TYPE: Final[Dict[str, str]] = {
 # ─── D3-001: verified crosswalk as a fast lookup dict ────────────────────────
 # Built ONCE at import time from id_crosswalk.VERIFIED_UNIPROT_GENE_CROSSWALK.
 # Key: uppercase UniProt AC.  Value: (verified_ncbi_gene_id, gene_symbol).
-# Fixes D3-001 — loader cross-checks every parsed gene_id against this table.
+# Fixes D3-001 -- loader cross-checks every parsed gene_id against this table.
 _VERIFIED_LOOKUP: Final[Dict[str, Tuple[str, str]]] = {
     entry.uniprot_ac.upper(): (entry.ncbi_gene_id, entry.gene_symbol)
     for entry in VERIFIED_UNIPROT_GENE_CROSSWALK
@@ -300,17 +300,17 @@ _VERIFIED_LOOKUP: Final[Dict[str, Tuple[str, str]]] = {
 
 
 # =============================================================================
-# Section 1 — Private helpers
+# Section 1 -- Private helpers
 # =============================================================================
 
 
 def _open_uniprot(filepath: Path) -> io.TextIOBase:
     """Open a UniProt flat file for text reading, auto-detecting gzip.
 
-    Fixes D4-005 — detect by magic bytes (``\\x1f\\x8b``), NOT by file
+    Fixes D4-005 -- detect by magic bytes (``\\x1f\\x8b``), NOT by file
     extension, so a mislabeled file (e.g. a gzipped file without ``.gz``
     suffix, or a plain file with ``.gz`` suffix) is handled correctly.
-    Fixes D4-006 — always use ``encoding='utf-8', errors='strict'`` so
+    Fixes D4-006 -- always use ``encoding='utf-8', errors='strict'`` so
     behaviour is identical on Linux, macOS, and Windows (the default
     locale encoding would otherwise be cp1252 on Windows).
 
@@ -322,8 +322,8 @@ def _open_uniprot(filepath: Path) -> io.TextIOBase:
     """
     with open(filepath, "rb") as probe:
         magic = probe.read(2)
-    if magic == b"\x1f\x8b":  # gzip magic — D4-005
-        # D8-004 — wrap in a buffered reader for faster decompression.
+    if magic == b"\x1f\x8b":  # gzip magic -- D4-005
+        # D8-004 -- wrap in a buffered reader for faster decompression.
         raw = gzip.open(filepath, "rb")
         buffered = io.BufferedReader(raw, buffer_size=65536)
         return io.TextIOWrapper(buffered, encoding="utf-8", errors="strict")
@@ -333,7 +333,7 @@ def _open_uniprot(filepath: Path) -> io.TextIOBase:
 def _compute_sha256(filepath: Path) -> str:
     """Compute the SHA-256 of a file (streaming, ~1 MB chunks).
 
-    Fixes D7-002 — provenance records the source file's checksum so two
+    Fixes D7-002 -- provenance records the source file's checksum so two
     parses of the same file can be confirmed identical.  Used by D5-007
     (download verification) and D16-001 (per-record provenance).
     """
@@ -347,7 +347,7 @@ def _compute_sha256(filepath: Path) -> str:
 def _get_ssl_context() -> ssl.SSLContext:
     """Return a TLS context for verifying UniProt's certificate.
 
-    Fixes D9-001 — ``urllib.request.urlretrieve`` does not verify TLS.
+    Fixes D9-001 -- ``urllib.request.urlretrieve`` does not verify TLS.
     We use ``ssl.create_default_context`` with ``certifi``'s CA bundle if
     available, falling back to the system CA store.  An optional TOFU
     certificate fingerprint can be pinned via ``DRUGOS_UNIPROT_CERT_PIN``.
@@ -367,7 +367,7 @@ _SSL_CONTEXT: Final[ssl.SSLContext] = _get_ssl_context()
 def _validate_uniprot_url(url: str) -> None:
     """Refuse to download from a URL not in the allowlist.
 
-    Fixes D9-002 — guards against config injection / SSRF.  The allowlist
+    Fixes D9-002 -- guards against config injection / SSRF.  The allowlist
     is ``config.ALLOWED_UNIPROT_URLS`` and can be extended without code
     changes.
     """
@@ -382,7 +382,7 @@ def _validate_uniprot_url(url: str) -> None:
 def _sanitize_freetext(value: Any) -> Any:
     """Defence-in-depth sanitiser for free-text fields heading to Neo4j.
 
-    Fixes D9-004 — strips control characters (NUL, newline, tab inside
+    Fixes D9-004 -- strips control characters (NUL, newline, tab inside
     identifiers) and escapes backslashes / single quotes so that a
     maliciously crafted protein name cannot break out of a Cypher string
     literal.  The canonical guard is parameterised queries in
@@ -415,7 +415,7 @@ _DEAD_LETTER_PATH: Final[Path] = DEAD_LETTER_DIR / "uniprot_malformed.jsonl"
 def _write_dead_letter(entry: Dict[str, Any]) -> None:
     """Append a malformed/dropped record to the UniProt dead-letter queue.
 
-    Fixes D6-004 — every ``continue`` in a validation/skip path MUST call
+    Fixes D6-004 -- every ``continue`` in a validation/skip path MUST call
     this first, so no record is silently dropped.  The file is
     ``data/dead_letter/uniprot_malformed.jsonl`` (one JSON object per
     line, append-only).
@@ -447,7 +447,7 @@ def _log_transform(
 ) -> None:
     """Record a significant data transformation for audit traceability.
 
-    Fixes D16-002 — every non-trivial transformation (SCI-1 override, DE
+    Fixes D16-002 -- every non-trivial transformation (SCI-1 override, DE
     Contains split, GN ``and`` split, multi-line AC accumulation,
     taxid/organism mismatch skip, invalid-accession skip, invalid-gene-id
     skip) is logged as one JSON line.  This is the data-lineage audit
@@ -474,7 +474,7 @@ def _log_transform(
 class _ProteinNodeDict(dict):
     """A dict that emits a DeprecationWarning on first ``['id']`` access.
 
-    Fixes D15-003 — the legacy ``id`` key is kept as a shim during the
+    Fixes D15-003 -- the legacy ``id`` key is kept as a shim during the
     transition to the canonical ``uniprot_id`` key, but callers are
     nudged toward the new key.  Only ``__getitem__`` is overridden to
     keep the shim lightweight.
@@ -501,7 +501,7 @@ _LOADER_STATE_PATH: Final[Path] = PROCESSED_DIR / "loader_state.json"
 def _persist_loader_state(source_name: str, state: Dict[str, Any]) -> None:
     """Persist loader state (last_downloaded_at, sha256) for idempotency.
 
-    Fixes D7-005 / D16-003 — after a successful download, the SHA-256 and
+    Fixes D7-005 / D16-003 -- after a successful download, the SHA-256 and
     timestamp are written to ``data/processed/loader_state.json`` so the
     next run can detect staleness and so downstream consumers can verify
     which source version produced the current graph.
@@ -529,11 +529,11 @@ def _write_checkpoint(records_count: int, byte_offset: int,
                       source_sha256: str) -> None:
     """Write a parse checkpoint for resume-after-failure.
 
-    Fixes D6-005 — every ``_CHECKPOINT_EVERY`` records, the current byte
+    Fixes D6-005 -- every ``_CHECKPOINT_EVERY`` records, the current byte
     offset and record count are persisted.  On a subsequent run, if the
     source SHA-256 matches, the parse can resume from the checkpoint
     instead of restarting from byte 0.  (Full resume requires re-reading
-    the entry in progress at the checkpoint offset — best-effort here.)
+    the entry in progress at the checkpoint offset -- best-effort here.)
     """
     try:
         _CHECKPOINT_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -559,17 +559,17 @@ def _organism_matches(
 ) -> bool:
     """Return True iff ``record_organism`` matches ``target``.
 
-    Fixes D3-006 — three match modes:
+    Fixes D3-006 -- three match modes:
       * ``exact`` (default): case-insensitive equality on the scientific
         name component (e.g. ``"Homo sapiens"``).  This prevents the
         Neanderthal / Mouse-ear-bat false positives of the old substring
         match.
       * ``substring``: case-insensitive ``in`` (the old behaviour, opt-in).
-      * ``regex``: ``re.search`` — power-user mode.
+      * ``regex``: ``re.search`` -- power-user mode.
     """
     if target is None:
-        return True  # no filter — D4-008 / D2-002
-    # D4-008 — empty organism is a programming error, not "match all".
+        return True  # no filter -- D4-008 / D2-002
+    # D4-008 -- empty organism is a programming error, not "match all".
     if not target.strip():
         raise ValueError(
             "organism must be non-empty; use organism=None to disable filtering"
@@ -595,7 +595,7 @@ def filter_by_organism(
 ) -> Iterator[Dict[str, Any]]:
     """Yield only records whose ``organism`` field matches.
 
-    Fixes D2-002 — pure filter, no I/O.  Composes with
+    Fixes D2-002 -- pure filter, no I/O.  Composes with
     ``iter_uniprot_entries`` so the full parse-and-filter pipeline is
     memory-streaming.
 
@@ -632,16 +632,16 @@ _DE_TOKEN_RE: Final[re.Pattern[str]] = re.compile(
 #
 # ROOT FIX: change the regex to accept ``;``, ``.``, or end-of-string as
 # the terminator: ``Full=([^;.]*)(?:;|\.|$)``. This matches:
-#   - ``Full=Aspirin;``            → "Aspirin" (mid-block, ``;`` terminator)
-#   - ``Full=Aspirin.``            → "Aspirin" (end-of-block, ``.`` terminator)
-#   - ``Full=Aspirin``             → "Aspirin" (end-of-string, no terminator)
+#   - ``Full=Aspirin;``            -> "Aspirin" (mid-block, ``;`` terminator)
+#   - ``Full=Aspirin.``            -> "Aspirin" (end-of-block, ``.`` terminator)
+#   - ``Full=Aspirin``             -> "Aspirin" (end-of-string, no terminator)
 # The character class ``[^;.]*`` is tightened from ``[^;]*`` to also
 # exclude ``.`` so we don't greedily consume the terminator.
 _DE_FULL_RE: Final[re.Pattern[str]] = re.compile(r"Full=([^;.]*)(?:;|\.|$)")
 # v69 ROOT FIX (P2L-016): same fix for EC numbers. The previous regex
 # ``EC=([\d.\-]+);`` required a trailing ``;``. When EC= is the LAST
 # field in a DE block (common for well-characterized enzymes), the line
-# ends with ``.`` not ``;`` — the EC number was silently dropped,
+# ends with ``.`` not ``;`` -- the EC number was silently dropped,
 # under-counting EC numbers for proteins whose DE block ends with EC=.
 #
 # ROOT FIX: use a more precise pattern for EC numbers. EC numbers have
@@ -662,10 +662,10 @@ _DE_EC_RE: Final[re.Pattern[str]] = re.compile(
 def _parse_DE_block(de_text: str, current: Dict[str, Any]) -> None:
     """Parse an accumulated DE block into structured fields.
 
-    Fixes D3-002 — a ``de_stack`` state machine distinguishes root-level
+    Fixes D3-002 -- a ``de_stack`` state machine distinguishes root-level
     RecName from sub-record (Contains/Includes) RecName, so the primary
     protein name is NEVER overwritten by a sub-record name.  Fixes
-    D4-003 — by accumulating the whole DE block first, the off-by-one
+    D4-003 -- by accumulating the whole DE block first, the off-by-one
     risk when ``;`` is on a continuation line disappears.
 
     Routing:
@@ -694,7 +694,7 @@ def _parse_DE_block(de_text: str, current: Dict[str, Any]) -> None:
     # ``alternative_names``. But UniProt format allows multiple
     # ``RecName: Full=`` entries in the root section (e.g. for enzymes
     # with multiple accepted names). The previous code treated the SECOND
-    # ``RecName: Full=`` as an ``AltName`` — polluting the alternative
+    # ``RecName: Full=`` as an ``AltName`` -- polluting the alternative
     # names list with secondary recommended names. Downstream name
     # disambiguation may use the wrong primary.
     #
@@ -702,9 +702,9 @@ def _parse_DE_block(de_text: str, current: Dict[str, Any]) -> None:
     # match instead of relying on positional ordering. Walk the root
     # section line-by-line, tracking the current ``RecName``/``AltName``
     # context, and route each ``Full=`` to the correct list:
-    #   - RecName: Full=  → ``protein_name`` (first wins) OR
+    #   - RecName: Full=  -> ``protein_name`` (first wins) OR
     #                      ``recommended_names`` (subsequent RecName Full=)
-    #   - AltName: Full=  → ``alternative_names`` (list)
+    #   - AltName: Full=  -> ``alternative_names`` (list)
     # The new ``recommended_names`` list preserves secondary recommended
     # names (previously lost). Backward compat: ``alternative_names`` no
     # longer contains misclassified RecName entries.
@@ -732,7 +732,7 @@ def _parse_DE_block(de_text: str, current: Dict[str, Any]) -> None:
             elif _current_context == "AltName":
                 _alternative_names.append(name)
             else:
-                # No context seen yet — this is a malformed DE block.
+                # No context seen yet -- this is a malformed DE block.
                 # Defensive: treat as a recommended name (first wins) so
                 # we don't lose the data. Log a debug warning.
                 logger.debug(
@@ -741,26 +741,26 @@ def _parse_DE_block(de_text: str, current: Dict[str, Any]) -> None:
                     name,
                 )
                 _recommended_names.append(name)
-    # First recommended name → protein_name (only if not already set).
+    # First recommended name -> protein_name (only if not already set).
     if _recommended_names and not current.get("protein_name"):
         current["protein_name"] = _recommended_names[0].strip()
-    # All recommended names (including the first) → recommended_names list.
+    # All recommended names (including the first) -> recommended_names list.
     if _recommended_names:
         current.setdefault("recommended_names", []).extend(_recommended_names)
-    # Alternative names → alternative_names list.
+    # Alternative names -> alternative_names list.
     if _alternative_names:
         current.setdefault("alternative_names", []).extend(_alternative_names)
     # EC numbers appear in root and sub-sections
     for ec in _DE_EC_RE.findall(de_text):
         current.setdefault("ec_numbers", []).append(ec.strip())
 
-    # Contains / Includes sub-records — D3-002
+    # Contains / Includes sub-records -- D3-002
     for sec_key, field_name in (("contains", "contains_names"),
                                 ("includes", "includes_names")):
         for full in _DE_FULL_RE.findall(sections.get(sec_key, "")):
             current.setdefault(field_name, []).append(full.strip())
 
-    # D2-001 — alternative_name (singular) backward-compat shim.
+    # D2-001 -- alternative_name (singular) backward-compat shim.
     alts = current.get("alternative_names", [])
     current["alternative_name"] = alts[0] if alts else ""
 
@@ -777,16 +777,16 @@ _GN_FIELD_RES: Final[Dict[str, re.Pattern[str]]] = {
 def _parse_GN_block(gn_text: str, current: Dict[str, Any]) -> None:
     """Parse an accumulated GN block into structured gene-name fields.
 
-    Fixes D3-003 — handles the ``and`` separator for multi-gene loci
+    Fixes D3-003 -- handles the ``and`` separator for multi-gene loci
     (clinically critical for fusion proteins like BCR-ABL), plus
     ``Synonyms=``, ``ORFNames=``, ``LocusNames=``.
 
     Output fields:
-      * ``gene_names`` (list[str]) — primary Name= values
+      * ``gene_names`` (list[str]) -- primary Name= values
       * ``gene_synonyms`` (list[str])
       * ``gene_orf_names`` (list[str])
       * ``gene_locus_names`` (list[str])
-      * ``gene_name`` (str) — first primary name (backward-compat)
+      * ``gene_name`` (str) -- first primary name (backward-compat)
     """
     # Split on 'and' separator (may be surrounded by whitespace/newlines).
     segments = re.split(r"\band\b", gn_text)
@@ -794,7 +794,7 @@ def _parse_GN_block(gn_text: str, current: Dict[str, Any]) -> None:
         for field, pattern in _GN_FIELD_RES.items():
             for m in pattern.finditer(seg):
                 val = m.group(1).strip()
-                # D4-011 — strip ISOform braces {isoform info} safely.
+                # D4-011 -- strip ISOform braces {isoform info} safely.
                 brace = val.find("{")
                 if brace != -1:
                     val = val[:brace].strip()
@@ -819,7 +819,7 @@ def _apply_verified_crosswalk(
 ) -> None:
     """Cross-check parsed gene_id against the verified crosswalk.
 
-    Fixes D3-001 — if the accession is in
+    Fixes D3-001 -- if the accession is in
     ``VERIFIED_UNIPROT_GENE_CROSSWALK`` and the parsed ``gene_id``
     disagrees with the verified value, the verified value WINS.  This is
     the loader-side enforcement of the SCI-1 fix (P35568/IRS1: 2645 ->
@@ -828,13 +828,13 @@ def _apply_verified_crosswalk(
     """
     verified = _VERIFIED_LOOKUP.get(accession.upper())
     if verified is None:
-        return  # not a verified entry — trust the file
+        return  # not a verified entry -- trust the file
     verified_gid, verified_symbol = verified
     parsed_gid = current.get("gene_id")
     if parsed_gid != verified_gid:
         logger.critical(
             "SCI-1 mismatch accession=%s parsed_gene_id=%s verified_gene_id=%s "
-            "— overriding with verified value (see D3-001). gene_symbol=%s",
+            "-- overriding with verified value (see D3-001). gene_symbol=%s",
             accession, parsed_gid, verified_gid, verified_symbol,
         )
         _write_dead_letter({
@@ -871,7 +871,7 @@ def _validate_record(
 ) -> List[str]:
     """Return a list of missing required fields (empty list = valid).
 
-    Fixes D5-009 — every record must have non-empty ``accession``,
+    Fixes D5-009 -- every record must have non-empty ``accession``,
     ``entry_name``, ``ncbi_taxid``.  Missing fields are tracked in
     ``stats['missing_field_counts']`` and the record is dead-lettered.
     """
@@ -886,7 +886,7 @@ def _validate_record(
 
 
 # =============================================================================
-# Section 2 — Download (P0: D1-001, D6-001..007, D9-001..003, D12-002..004)
+# Section 2 -- Download (P0: D1-001, D6-001..007, D9-001..003, D12-002..004)
 # =============================================================================
 
 
@@ -937,18 +937,18 @@ def _download_from_network(
             last_error = e
             backoff = backoff_base * (2 ** (attempt - 1))
             logger.warning(
-                "Download attempt %d/%d failed for %s: %s — retrying in %.0fs",
+                "Download attempt %d/%d failed for %s: %s -- retrying in %.0fs",
                 attempt, max_retries, source_name, e, backoff,
             )
             tmp_path.unlink(missing_ok=True)
             if attempt < max_retries:
                 time.sleep(backoff)
     else:
-        # All retries exhausted — D6-007 graceful degradation.
+        # All retries exhausted -- D6-007 graceful degradation.
         if allow_stale and gz_path.exists():
             age_days = _staleness_days(cfg)
             logger.critical(
-                "uniprot_stale_data_used age_days=%d — download failed, "
+                "uniprot_stale_data_used age_days=%d -- download failed, "
                 "falling back to cached copy per allow_stale=True.", age_days,
             )
             return gz_path
@@ -974,7 +974,7 @@ def _download_from_network(
             context={"actual": actual_size, "expected": expected_size},
         )
 
-    # D6-002 — atomic move on POSIX.
+    # D6-002 -- atomic move on POSIX.
     os.replace(tmp_path, gz_path)
 
     # ── D12-002: content-sniff assertion (first line must start with 'ID ') ─
@@ -1003,7 +1003,7 @@ def _download_from_network(
         gz_path.unlink(missing_ok=True)
         raise UniProtDataIntegrityError(
             f"SHA-256 mismatch: expected {expected_sha}, got {actual_sha}. "
-            f"File may have been tampered with — verify against UniProt's "
+            f"File may have been tampered with -- verify against UniProt's "
             f"official .sha256 sidecar.",
             context={"expected": expected_sha, "actual": actual_sha},
         )
@@ -1078,7 +1078,7 @@ def download_uniprot(force: bool = False, *, allow_stale: bool = False) -> Path:
     # ── D5-008: cache validity check on the primary path ──────────────────
     if gz_path.exists():
         if force:
-            logger.info("Force re-download requested — removing cached %s", gz_path.name)
+            logger.info("Force re-download requested -- removing cached %s", gz_path.name)
             gz_path.unlink(missing_ok=True)
         else:
             size = gz_path.stat().st_size
@@ -1087,7 +1087,7 @@ def download_uniprot(force: bool = False, *, allow_stale: bool = False) -> Path:
             if (expected > UNIPROT_MIN_VALID_SIZE_BYTES
                     and size <= UNIPROT_MIN_VALID_SIZE_BYTES):
                 logger.warning(
-                    "Cached file %s is %d bytes (likely truncated) — re-downloading",
+                    "Cached file %s is %d bytes (likely truncated) -- re-downloading",
                     gz_path.name, size,
                 )
                 gz_path.unlink(missing_ok=True)
@@ -1108,7 +1108,7 @@ def download_uniprot(force: bool = False, *, allow_stale: bool = False) -> Path:
 
 
 # =============================================================================
-# Section 3 — Parser (P1: D3-001..009, D4-001..014, D5-001..009, D6-003..005,
+# Section 3 -- Parser (P1: D3-001..009, D4-001..014, D5-001..009, D6-003..005,
 #              D7-001..004, D8-001..006, D11-001..005, D14-001..002, D16-001..005)
 # =============================================================================
 
@@ -1120,7 +1120,7 @@ def iter_uniprot_entries(
 ) -> Iterator[Dict[str, Any]]:
     """Yield parsed UniProt records as a streaming generator.
 
-    Pure parser — NO organism filter (D2-002).  Use ``filter_by_organism``
+    Pure parser -- NO organism filter (D2-002).  Use ``filter_by_organism``
     or the convenience wrapper ``parse_uniprot_entries`` to filter.
 
     Memory: ~10 MB peak regardless of file size (one record at a time).
@@ -1137,7 +1137,7 @@ def iter_uniprot_entries(
         parser_version: Override the parser version stamp (testing).
 
     Yields:
-        UniProtRecord dicts (one per entry, sorted is NOT guaranteed —
+        UniProtRecord dicts (one per entry, sorted is NOT guaranteed --
         use ``parse_uniprot_entries`` for sorted output, D7-001).
     """
     # ── Resolve filepath (D12-003 env override + local-sample fallback) ────
@@ -1200,7 +1200,7 @@ def iter_uniprot_entries(
     current: Dict[str, Any] = {}
     entry_start_offset: int = 0
     entry_start_line: int = 0
-    # D16-005 — track byte offset manually. We CANNOT call fh.tell()
+    # D16-005 -- track byte offset manually. We CANNOT call fh.tell()
     # inside a `for line in fh:` loop because TextIOWrapper disables
     # telling during iteration (raises OSError). So we sum line byte
     # lengths ourselves. At the top of each iteration, `byte_offset`
@@ -1217,15 +1217,15 @@ def iter_uniprot_entries(
     try:
         for line_no, raw_line in enumerate(fh, 1):  # D11-001
             stats["lines_total"] += 1
-            line_start_offset = byte_offset  # D16-005 — start of this line
+            line_start_offset = byte_offset  # D16-005 -- start of this line
             byte_offset += len(raw_line.encode("utf-8"))
             line = raw_line.rstrip("\n").rstrip("\r")
             try:
                 # ── SQ sequence accumulation (D3-009) ──────────────────────
                 if in_sequence:
                     if line.startswith("//"):
-                        # End of entry — finalize sequence first.
-                        # v71 P2L-020: preserve case — UniProt sequence
+                        # End of entry -- finalize sequence first.
+                        # v71 P2L-020: preserve case -- UniProt sequence
                         # lines occasionally contain lowercase letters
                         # for sequence variants / uncertain residues. The
                         # previous ``.upper()`` silently converted them,
@@ -1273,14 +1273,14 @@ def iter_uniprot_entries(
                         gn_buffer = []
 
                     # Final entry without // is handled after the loop (D4-009).
-                    # Here the entry IS terminated — process it.
+                    # Here the entry IS terminated -- process it.
                     stats["records_read"] += 1
                     accession = current.get("accession", "")
 
-                    # D5-001 — accession format validation.
+                    # D5-001 -- accession format validation.
                     if accession and not _validate_uniprot_ac(accession):
                         logger.warning(
-                            "Invalid UniProt accession %r at line %d — skipping",
+                            "Invalid UniProt accession %r at line %d -- skipping",
                             accession, entry_start_line,
                         )
                         _write_dead_letter({
@@ -1294,12 +1294,12 @@ def iter_uniprot_entries(
                         current = {}
                         continue
 
-                    # D5-009 — required-fields check.
+                    # D5-009 -- required-fields check.
                     missing = _validate_record(current, entry_start_line, stats)
                     if missing:
                         logger.warning(
                             "Entry accession=%s missing required fields %s "
-                            "(line %d) — dead-lettering",
+                            "(line %d) -- dead-lettering",
                             accession, missing, entry_start_line,
                         )
                         _write_dead_letter({
@@ -1311,15 +1311,15 @@ def iter_uniprot_entries(
                         current = {}
                         continue
 
-                    # D3-001 — SCI-1 verified crosswalk override.
+                    # D3-001 -- SCI-1 verified crosswalk override.
                     _apply_verified_crosswalk(current, accession, entry_start_line)
                     if current.pop("_sci1_corrected", False):
                         stats["sci_corrections"] += 1
 
-                    # D5-004 — deduplicate by accession.
+                    # D5-004 -- deduplicate by accession.
                     if accession in seen_accessions:
                         logger.warning(
-                            "Duplicate accession %s at line %d — keeping first, "
+                            "Duplicate accession %s at line %d -- keeping first, "
                             "second to dead-letter", accession, entry_start_line,
                         )
                         _write_dead_letter({
@@ -1334,7 +1334,7 @@ def iter_uniprot_entries(
                         continue
                     seen_accessions.add(accession)
 
-                    # D3-005 — OS / OX cross-check.
+                    # D3-005 -- OS / OX cross-check.
                     organism = current.get("organism", "")
                     taxid = current.get("ncbi_taxid")
                     if organism and taxid is not None:
@@ -1343,12 +1343,12 @@ def iter_uniprot_entries(
                         )
                         # v71 P2L-018: taxid is already an int (set at
                         # line ~1452 as ``int(taxid_str)``). The previous
-                        # ``int(taxid)`` wrapper was redundant — harmless
+                        # ``int(taxid)`` wrapper was redundant -- harmless
                         # but signalled unclear type assumptions.
                         if expected_tax is not None and taxid != expected_tax:
                             logger.critical(
                                 "OS/OX mismatch accession=%s organism=%s "
-                                "ncbi_taxid=%s expected=%d — skipping (D3-005)",
+                                "ncbi_taxid=%s expected=%d -- skipping (D3-005)",
                                 accession, organism, taxid, expected_tax,
                             )
                             _write_dead_letter({
@@ -1363,7 +1363,7 @@ def iter_uniprot_entries(
                             current = {}
                             continue
 
-                    # D16-001 — attach provenance + compliance fields.
+                    # D16-001 -- attach provenance + compliance fields.
                     prov = dict(prov_template)
                     prov["entry_line_no"] = entry_start_line
                     prov["byte_range"] = [entry_start_offset, byte_offset]  # D16-005
@@ -1372,7 +1372,7 @@ def iter_uniprot_entries(
                     current["_source"] = "uniprot_loader"
                     current["_license"] = UNIPROT_LICENSE  # D14-001
                     current["_attribution"] = UNIPROT_ATTRIBUTION  # D14-001
-                    # D14-002 — FAIR identifiers.org URI.
+                    # D14-002 -- FAIR identifiers.org URI.
                     current.setdefault(
                         "uniprot_uri", f"https://identifiers.org/uniprot:{accession}"
                     )
@@ -1380,7 +1380,7 @@ def iter_uniprot_entries(
                     stats["records_kept"] += 1
                     yield current
 
-                    # D4-001 / D8-002 — milestone logging (one comparison).
+                    # D4-001 / D8-002 -- milestone logging (one comparison).
                     if stats["records_kept"] >= next_milestone:
                         logger.info(
                             "Parsed %d UniProt records ...",
@@ -1388,7 +1388,7 @@ def iter_uniprot_entries(
                         )
                         next_milestone += 10000
 
-                    # D6-005 — checkpoint.
+                    # D6-005 -- checkpoint.
                     if stats["records_kept"] % _CHECKPOINT_EVERY == 0:
                         _write_checkpoint(
                             stats["records_kept"], byte_offset, source_sha256,
@@ -1401,7 +1401,7 @@ def iter_uniprot_entries(
                 if line.startswith("ID"):
                     entry_start_offset = line_start_offset  # D16-005
                     entry_start_line = line_no
-                    # D4-010 — safe split.
+                    # D4-010 -- safe split.
                     parts = line[5:].split()
                     if parts:
                         current["entry_name"] = parts[0]
@@ -1411,7 +1411,7 @@ def iter_uniprot_entries(
                         stats["parse_errors"] += 1
                     continue
 
-                # ── AC line (D3-004 — accumulate across multiple lines) ───
+                # ── AC line (D3-004 -- accumulate across multiple lines) ───
                 if line.startswith("AC"):
                     line_accessions = _AC_REGEX.findall(line[5:])  # D4-007
                     if line_accessions:
@@ -1423,7 +1423,7 @@ def iter_uniprot_entries(
                         else:
                             # Subsequent AC lines: ALL accessions are secondary
                             # (only the very first accession of the first AC
-                            # line is primary).  Fixes D3-004 — previously
+                            # line is primary).  Fixes D3-004 -- previously
                             # line_accessions[0] of the 2nd line was dropped.
                             current.setdefault("secondary_accessions", []).extend(
                                 line_accessions
@@ -1434,17 +1434,17 @@ def iter_uniprot_entries(
                         )
                     continue
 
-                # ── DE line — accumulate into buffer (D3-002, D4-003) ─────
+                # ── DE line -- accumulate into buffer (D3-002, D4-003) ─────
                 if line.startswith("DE"):
                     de_buffer.append(line[5:])
                     continue
 
-                # ── GN line — accumulate into buffer (D3-003) ─────────────
+                # ── GN line -- accumulate into buffer (D3-003) ─────────────
                 if line.startswith("GN"):
                     gn_buffer.append(line[5:])
                     continue
 
-                # ── OS line — parse organism (D3-005, D3-006) ─────────────
+                # ── OS line -- parse organism (D3-005, D3-006) ─────────────
                 if line.startswith("OS"):
                     m = re.match(r"^OS\s+(.+?)\s*\.\s*$", line)
                     if m:
@@ -1453,23 +1453,23 @@ def iter_uniprot_entries(
                         current["organism"] = line[5:].strip().rstrip(".")
                     continue
 
-                # ── OX line — parse NCBI TaxID (D5-003) ───────────────────
+                # ── OX line -- parse NCBI TaxID (D5-003) ───────────────────
                 if line.startswith("OX") and "NCBI_TaxID=" in line:
                     ox = line[5:]
                     m = re.search(r"NCBI_TaxID=(\d+)", ox)
                     if m:
                         taxid_str = m.group(1)
-                        # D5-003 — validate + store as int.
+                        # D5-003 -- validate + store as int.
                         if taxid_str.isdigit():
                             current["ncbi_taxid"] = int(taxid_str)
                         else:
                             logger.warning(
-                                "Invalid NCBI_TaxID %r at line %d — skipping field",
+                                "Invalid NCBI_TaxID %r at line %d -- skipping field",
                                 taxid_str, line_no,
                             )
                     continue
 
-                # ── PE line — protein existence (D3-008) ──────────────────
+                # ── PE line -- protein existence (D3-008) ──────────────────
                 if line.startswith("PE"):
                     m = re.search(r"(\d+)", line[5:])
                     if m:
@@ -1483,7 +1483,7 @@ def iter_uniprot_entries(
                             )
                     continue
 
-                # ── SQ line — start sequence block (D3-009) ───────────────
+                # ── SQ line -- start sequence block (D3-009) ───────────────
                 if line.startswith("SQ"):
                     m = re.search(r"SEQUENCE\s+(\d+)\s+AA", line[5:])
                     if m:
@@ -1492,7 +1492,7 @@ def iter_uniprot_entries(
                     seq_lines = []
                     continue
 
-                # ── DR line — all cross-references (D2-005, D4-004) ───────
+                # ── DR line -- all cross-references (D2-005, D4-004) ───────
                 if line.startswith("DR"):
                     dr_text = line[5:].strip()
                     # Split "DB; id; description." into parts.
@@ -1504,13 +1504,13 @@ def iter_uniprot_entries(
                             "cross_references", {}
                         ).setdefault(db_name, []).append(db_id)
 
-                        # D4-004 — DR GeneID: accumulate, never overwrite.
+                        # D4-004 -- DR GeneID: accumulate, never overwrite.
                         if db_name == "GeneID":
                             normalized = _normalize_ncbi_gene_id(db_id)  # D5-002
                             if normalized is None:
                                 logger.warning(
                                     "Invalid gene_id %r at line %d accession=%s "
-                                    "— skipping gene_id assignment",
+                                    "-- skipping gene_id assignment",
                                     db_id, line_no, current.get("accession", "?"),
                                 )
                                 stats["invalid_gene_ids"] += 1
@@ -1530,18 +1530,18 @@ def iter_uniprot_entries(
                                     current.setdefault("gene_ids", []).append(
                                         normalized
                                     )
-                                    # D4-004 — primary gene_id = first (backward-compat).
+                                    # D4-004 -- primary gene_id = first (backward-compat).
                                     if "gene_id" not in current:
                                         current["gene_id"] = normalized
                     continue
 
-                # ── OG / OH — organelle / host (parsed but not deeply used) ─
+                # ── OG / OH -- organelle / host (parsed but not deeply used) ─
                 if line.startswith("OG") or line.startswith("OH"):
                     # Record presence for completeness; not propagated to node.
                     current.setdefault("organelle", line[5:].strip())
                     continue
 
-            except Exception as e:  # D6-003 — per-line error isolation
+            except Exception as e:  # D6-003 -- per-line error isolation
                 stats["parse_errors"] += 1
                 logger.warning(
                     "parse_error line_no=%d accession=%s error=%s line=%r",
@@ -1557,7 +1557,7 @@ def iter_uniprot_entries(
         # ── D4-009: final entry without trailing // ────────────────────────
         if current and current.get("accession"):
             logger.warning(
-                "Final entry had no // terminator — added from in-progress state "
+                "Final entry had no // terminator -- added from in-progress state "
                 "(line_no=%d)", entry_start_line,
             )
             stats["entries_without_terminator"] += 1
@@ -1590,7 +1590,7 @@ def iter_uniprot_entries(
                     stats["records_kept"] += 1
                     yield current
 
-    except UnicodeDecodeError as e:  # D4-006 — degraded mode
+    except UnicodeDecodeError as e:  # D4-006 -- degraded mode
         logger.error(
             "UnicodeDecodeError parsing %s: %s. Retrying with errors='replace' "
             "is recommended for production; for the local sample this indicates "
@@ -1610,7 +1610,7 @@ def iter_uniprot_entries(
     if stats["parse_errors"] > max(kept * 0.01, 1) and kept > 0:
         raise UniProtParseError(
             f"Parse error rate {stats['parse_errors']} exceeds 1% of "
-            f"{kept} kept records — aborting (D6-003).",
+            f"{kept} kept records -- aborting (D6-003).",
             context={"stats": stats},
         )
 
@@ -1632,7 +1632,7 @@ def iter_uniprot_entries(
 
 
 # =============================================================================
-# Section 4 — Convenience wrapper (D2-002, D7-001, D5-005)
+# Section 4 -- Convenience wrapper (D2-002, D7-001, D5-005)
 # =============================================================================
 
 
@@ -1669,7 +1669,7 @@ def parse_uniprot_entries(
         parser_version: Override the parser version stamp (testing).
 
     Returns:
-        List of UniProtRecord dicts, sorted by accession (D7-001 —
+        List of UniProtRecord dicts, sorted by accession (D7-001 --
         deterministic ordering for idempotency).
 
     Raises:
@@ -1685,7 +1685,7 @@ def parse_uniprot_entries(
         30
         >>> records = parse_uniprot_entries(organism=None)  # all organisms
     """
-    # D4-008 — empty organism is a programming error.
+    # D4-008 -- empty organism is a programming error.
     if organism is not None and not organism.strip():
         raise ValueError(
             "organism must be non-empty; use organism=None to disable filtering"
@@ -1713,7 +1713,7 @@ def parse_uniprot_entries(
     filtered = filter_by_organism(records_iter, organism, match_mode=organism_match_mode)
     records = list(filtered)
 
-    # D7-001 — deterministic ordering for idempotency.
+    # D7-001 -- deterministic ordering for idempotency.
     records.sort(key=lambda r: r.get("accession", ""))
 
     # ── D5-005: record-count verification ────────────────────────────────
@@ -1734,7 +1734,7 @@ def parse_uniprot_entries(
         if len(records) < int(expected) * 0.5:
             logger.critical(
                 "uniprot_record_count_mismatch expected=~%d actual=%d "
-                "source_sha256=%s — possible file corruption, organism filter "
+                "source_sha256=%s -- possible file corruption, organism filter "
                 "mismatch, or URL/format mismatch (see D12-002)",
                 expected, len(records),
                 records[0].get("_provenance", {}).get("source_sha256", "")[:12]
@@ -1760,7 +1760,7 @@ def parse_uniprot_entries(
 
 
 # =============================================================================
-# Section 5 — Node + edge construction (D1-003, D2-004, D2-005, D4-002,
+# Section 5 -- Node + edge construction (D1-003, D2-004, D2-005, D4-002,
 #             D4-004, D14-001, D15-003, D16-001)
 # =============================================================================
 
@@ -1782,7 +1782,7 @@ def uniprot_to_node_records(
         _provenance <- computed (D16-001)
         _license, _attribution <- CC BY 4.0 (D14-001)
 
-    Dropped (remain on the UniProtRecord for edge construction — see
+    Dropped (remain on the UniProtRecord for edge construction -- see
     ``uniprot_to_edge_records``):
         secondary_accessions, alternative_names, contains_names,
         includes_names, gene_synonyms, gene_orf_names, cross_references.
@@ -1807,16 +1807,16 @@ def uniprot_to_node_records(
     missing_accession_count = 0
     for rec in records:
         accession = rec.get("accession")
-        # D1-003 — runtime assertion: accession must be non-empty.
+        # D1-003 -- runtime assertion: accession must be non-empty.
         if not accession:
             missing_accession_count += 1
             logger.error(
-                "uniprot_to_node_records: record missing accession — skipping. "
+                "uniprot_to_node_records: record missing accession -- skipping. "
                 "entry_name=%s", rec.get("entry_name", "?"),
             )
             continue
 
-        # D4-002 — name fallback chain (never empty for a valid record).
+        # D4-002 -- name fallback chain (never empty for a valid record).
         name = (
             rec.get("protein_name")
             or rec.get("entry_name")
@@ -1824,16 +1824,16 @@ def uniprot_to_node_records(
             or ""
         )
 
-        # D4-004 — gene_id / gene_ids (always list for gene_ids).
+        # D4-004 -- gene_id / gene_ids (always list for gene_ids).
         gene_ids = list(rec.get("gene_ids", []))
         gene_id = rec.get("gene_id", "") or (gene_ids[0] if gene_ids else "")
 
-        # D3-003 — gene_name / gene_names.
+        # D3-003 -- gene_name / gene_names.
         gene_names = list(rec.get("gene_names", []))
         gene_name = rec.get("gene_name", "") or (gene_names[0] if gene_names else "")
 
-        # D9-004 — sanitize free-text fields (defence-in-depth for Neo4j).
-        node = _ProteinNodeDict({  # D15-003 — warns on ['id'] access
+        # D9-004 -- sanitize free-text fields (defence-in-depth for Neo4j).
+        node = _ProteinNodeDict({  # D15-003 -- warns on ['id'] access
             "uniprot_id": accession,           # D2-004 canonical
             "id": accession,                   # D15-003 backward-compat shim
             "uniprot_uri": rec.get(
@@ -1874,9 +1874,9 @@ def uniprot_to_edge_records(
 ) -> List[Dict[str, Any]]:
     """Convert UniProt DR cross-references into KG edge records.
 
-    Fixes D2-005 — the v1 loader extracted only ``DR GeneID`` and
+    Fixes D2-005 -- the v1 loader extracted only ``DR GeneID`` and
     discarded every other cross-reference (ChEMBL, DrugBank, HGNC, Pfam,
-    InterPro, Reactome, STRING, …).  Those are edges in the KG.  This
+    InterPro, Reactome, STRING, ...).  Those are edges in the KG.  This
     function emits them.
 
     Edge shape:
@@ -1907,7 +1907,7 @@ def uniprot_to_edge_records(
             relation = _DB_TO_EDGE_TYPE.get(db_name)
             target_type = _DB_TO_ENTITY_TYPE.get(db_name)
             if relation is None or target_type is None:
-                # Unknown DB — record as a generic 'xref' edge so no data is lost.
+                # Unknown DB -- record as a generic 'xref' edge so no data is lost.
                 relation = "xref"
                 target_type = "ExternalRef"
             for db_id in db_ids:
@@ -1920,7 +1920,7 @@ def uniprot_to_edge_records(
                 #   - STRING loader emits Protein IDs as bare UniProt ACs
                 # The prefixed UniProt-emitted dst_ids NEVER MATCHED the
                 # other loaders' src_ids. Every UniProt DR-edge became an
-                # ORPHAN edge — no Compound/Protein node matched at the
+                # ORPHAN edge -- no Compound/Protein node matched at the
                 # Cypher MERGE step. ~50-90% of UniProt cross-reference
                 # edges (ChEMBL, DrugBank, STRING, BindingDB, PharmGKB,
                 # etc.) were dead-lettered or orphaned. The KG lost
@@ -1931,7 +1931,7 @@ def uniprot_to_edge_records(
                 # used by all other loaders (ChEMBL bare "CHEMBL218",
                 # DrugBank bare "DB00001", STRING bare "9606.ENSP...").
                 # The ``db_name`` is preserved in the edge's ``source_db``
-                # field and in ``props["xref_db"]`` for traceability —
+                # field and in ``props["xref_db"]`` for traceability --
                 # no information is lost, the ID just matches the
                 # canonical form that kg_builder.ID_PATTERNS expects.
                 #
@@ -1942,7 +1942,7 @@ def uniprot_to_edge_records(
                 if ":" in bare_dst_id:
                     bare_dst_id = bare_dst_id.split(":", 1)[1]
                 edges.append({
-                    # BUG-B-003 root fix — kg_builder._load_edges requires
+                    # BUG-B-003 root fix -- kg_builder._load_edges requires
                     # ``src_id`` and ``dst_id`` keys. The previous dict
                     # used ``source``/``target`` which caused every UniProt
                     # cross-reference edge to be dead-lettered at the Cypher
@@ -1980,14 +1980,14 @@ def uniprot_to_edge_records(
 
 
 # =============================================================================
-# Section 6 — Loader Protocol adapter (D1-002)
+# Section 6 -- Loader Protocol adapter (D1-002)
 # =============================================================================
 
 
 class UniProtLoader:
     """Adapter implementing the ``Loader`` Protocol for UniProt.
 
-    Fixes D1-002 — provides a uniform ``download / parse / to_graph``
+    Fixes D1-002 -- provides a uniform ``download / parse / to_graph``
     interface so ``run_pipeline`` can treat all loaders polymorphically.
     The module-level functions remain the public API; this class is a
     thin adapter that delegates to them.
@@ -2005,7 +2005,7 @@ class UniProtLoader:
         return download_uniprot(force=force)
 
     def parse(self, path: Optional[Path] = None) -> Iterator[Dict[str, Any]]:
-        """Yield parsed records (no organism filter — pure parser)."""
+        """Yield parsed records (no organism filter -- pure parser)."""
         return iter_uniprot_entries(path)
 
     def to_graph(
@@ -2019,10 +2019,10 @@ class UniProtLoader:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# v26 ROOT FIX (Audit section 10 — Phase 2 Loaders Bypass Matrix / P0 BLOCKER):
+# v26 ROOT FIX (Audit section 10 -- Phase 2 Loaders Bypass Matrix / P0 BLOCKER):
 # "Make the 4 raw re-fetch loaders consume Phase 1 CSVs by default."
 # The audit's recommendation: refactor uniprot_loader to follow the same
-# bridge pattern as disgenet_loader / omim_loader / pubchem_loader — read
+# bridge pattern as disgenet_loader / omim_loader / pubchem_loader -- read
 # Phase 1 CSVs by default; only fall back to raw fetch when explicitly
 # requested.
 #
@@ -2030,7 +2030,7 @@ class UniProtLoader:
 # when data_source="phase1" (because the bridge in step1 already loaded
 # uniprot_proteins.csv). This v26 fix adds Phase-1-aware functions so that
 # STANDALONE use (calling download_uniprot() or parse_uniprot_entries()
-# directly) ALSO consumes Phase 1 CSVs by default — defense in depth.
+# directly) ALSO consumes Phase 1 CSVs by default -- defense in depth.
 # ═══════════════════════════════════════════════════════════════════════════════
 
 # Phase 1 emits this CSV; resolve relative to the unified package layout.
@@ -2052,9 +2052,9 @@ def parse_uniprot_entries_from_phase1_csv(
     list-of-dicts schema mirrors what ``uniprot_to_node_records`` and
     ``uniprot_to_edge_records`` expect.
 
-    v26 ROOT FIX (Audit section 10 — bypass matrix): previously, calling
+    v26 ROOT FIX (Audit section 10 -- bypass matrix): previously, calling
     ``parse_uniprot_entries()`` standalone would re-download the ~800 MB
-    UniProt .dat file and re-parse it — bypassing Phase 1's cleaning
+    UniProt .dat file and re-parse it -- bypassing Phase 1's cleaning
     (organism verification, gene-symbol normalization, sequence
     validation). Now standalone callers can consume Phase 1's
     already-cleaned output.
@@ -2165,22 +2165,22 @@ def uniprot_to_edge_records_from_phase1(
     by their NCBI Gene ID (the project spec: "Canonical Gene ID =
     NCBI Gene ID"; see ``entity_resolver.resolve_genes_from_drkg`` which
     now also prefers ncbi_gene_id). A ``SYM:TP53`` dst_id would never
-    MATCH a Gene node keyed ``7157`` — orphan edge. Fix:
+    MATCH a Gene node keyed ``7157`` -- orphan edge. Fix:
 
       1. If the record already carries ``ncbi_gene_id``, use it directly.
-      2. Else use the verified UniProt→Gene crosswalk
+      2. Else use the verified UniProt->Gene crosswalk
          (``VERIFIED_UNIPROT_GENE_CROSSWALK``) to resolve the UniProt AC
          to ncbi_gene_id.
       3. Else use ``IDCrosswalk.canonicalize("Gene", "gene_symbol",
          gene_symbol)`` to resolve the symbol to ncbi_gene_id.
       4. Only fall back to ``SYM:{symbol}`` when no ncbi_gene_id is
          resolvable (preserving prior behavior so the edge is still
-         emitted — better an orphan edge than a silently dropped edge).
+         emitted -- better an orphan edge than a silently dropped edge).
     """
     # Lazy import to avoid a circular import at module load time.
     try:
         from .id_crosswalk import get_default_crosswalk as _get_xwalk
-    except Exception:  # pragma: no cover — defensive
+    except Exception:  # pragma: no cover -- defensive
         _get_xwalk = None  # type: ignore[assignment]
 
     edges: List[Dict[str, Any]] = []
@@ -2236,7 +2236,7 @@ def uniprot_to_edge_records_from_phase1(
                     # Fall back to SYM: below.
                     pass
 
-            # Step 4: last-resort fallback — preserve the prior
+            # Step 4: last-resort fallback -- preserve the prior
             # SYM:{symbol} form so the edge is still emitted (downstream
             # entity resolution may still recover the link).
             if gene_id is None:

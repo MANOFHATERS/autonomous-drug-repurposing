@@ -1,9 +1,9 @@
 """
-v78 FORENSIC ROOT FIX — All 10 Silent Data-Loss Issues
+v78 FORENSIC ROOT FIX -- All 10 Silent Data-Loss Issues
 =======================================================
 
 This test module is the SINGLE source of truth that proves every bug
-listed in the v78 forensic audit is fixed at the ROOT level — not
+listed in the v78 forensic audit is fixed at the ROOT level -- not
 surface-level. Each test reproduces the EXACT failure mode the bug
 report describes, then asserts the fix prevents it.
 
@@ -11,7 +11,7 @@ The 10 bugs (from the v77 FORENSIC audit):
   #1  normalized_score is NEVER emitted by the bridge despite the
       kg_builder whitelist promising it on every edge type.
   #2  Pathway fallback references undefined `string_df` (NameError)
-      — silently caught by try/except Exception.
+      -- silently caught by try/except Exception.
   #3  PATHWAY_DEFAULT ID fails ID_PATTERNS["Pathway"] regex.
   #4  compound_id_aliases for biotech MERGE is NEVER populated by
       the bridge.
@@ -69,7 +69,7 @@ from drugos_graph.kg_builder import (  # noqa: E402
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# Test fixtures — minimal embedded DataFrames that mirror the Phase 1
+# Test fixtures -- minimal embedded DataFrames that mirror the Phase 1
 # embedded samples (phase1/pipelines/_embedded_samples.py).
 # ──────────────────────────────────────────────────────────────────────────
 
@@ -94,7 +94,7 @@ def _make_embedded_frames() -> dict:
              "chembl_id": "CHEMBL521", "pubchem_cid": "CID3672",
              "completeness_score": 0.92},
         ]),
-        # DrugBank interactions (Compound→targets→Protein edges).
+        # DrugBank interactions (Compound->targets->Protein edges).
         "interactions": pd.DataFrame([
             {"drugbank_id": "DB00001", "uniprot_id": "P23219",
              "action_type": "inhibitor", "is_known_action": True,
@@ -103,13 +103,13 @@ def _make_embedded_frames() -> dict:
              "action_type": "inhibitor", "is_known_action": True,
              "target_name": "COX-2", "organism": "Homo sapiens"},
         ]),
-        # OMIM GDA — uses OMIM:nnnnnn disease IDs.
+        # OMIM GDA -- uses OMIM:nnnnnn disease IDs.
         "omim_gda": pd.DataFrame([
             {"gene_symbol": "PTGS1", "gene_mim": "176805", "ncbi_gene_id": "5742",
              "uniprot_id": "P23219", "disease_id": "OMIM:102700",
              "disease_name": "Familial Adenomatous Polyposis"},
         ]),
-        # DrugBank indications — uses DOID:nnnnnn disease IDs (the killer).
+        # DrugBank indications -- uses DOID:nnnnnn disease IDs (the killer).
         "indications": pd.DataFrame([
             {"drugbank_id": "DB00001", "disease_id": "DOID:0050133",
              "disease_name": "Pain", "indication_type": "approved"},
@@ -120,12 +120,12 @@ def _make_embedded_frames() -> dict:
             {"drugbank_id": "DB00002", "disease_id": "DOID:10763",
              "disease_name": "Hypertension", "indication_type": "investigational"},
         ]),
-        # DisGeNET GDA — uses DOID:nnnnnn disease IDs + quantitative score.
+        # DisGeNET GDA -- uses DOID:nnnnnn disease IDs + quantitative score.
         "disgenet_gda": pd.DataFrame([
             {"gene_symbol": "PTGS1", "gene_id": 5742, "disease_id": "DOID:0050133",
              "disease_name": "Pain", "source": "disgenet", "score": 0.85},
         ]),
-        # STRING PPI — Protein→interacts_with→Protein edges.
+        # STRING PPI -- Protein->interacts_with->Protein edges.
         "string_ppi": pd.DataFrame([
             {"uniprot_ac_a": "P23219", "uniprot_ac_b": "P35354",
              "combined_score": 900},
@@ -134,7 +134,7 @@ def _make_embedded_frames() -> dict:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# BUG #1 — normalized_score NEVER emitted by the bridge
+# BUG #1 -- normalized_score NEVER emitted by the bridge
 # ═══════════════════════════════════════════════════════════════════════════
 
 class TestBug1NormalizedScoreEmitted:
@@ -144,24 +144,24 @@ class TestBug1NormalizedScoreEmitted:
 
     def test_compute_normalized_score_helper_scales_correctly(self):
         """The helper must map every source-specific raw score to [0,1]."""
-        # DisGeNET raw score is already in [0,1] → passthrough.
+        # DisGeNET raw score is already in [0,1] -> passthrough.
         assert _compute_normalized_score(raw_score=0.85, source="disgenet",
                                           rel_type="associated_with") == 0.85
-        # STRING combined_score is [0,1000] → /1000.
+        # STRING combined_score is [0,1000] -> /1000.
         assert _compute_normalized_score(combined_score=900,
                                           source="string",
                                           rel_type="interacts_with") == pytest.approx(0.9)
-        # ChEMBL pchembl_value is [0, ~14] → /14.
+        # ChEMBL pchembl_value is [0, ~14] -> /14.
         assert _compute_normalized_score(pchembl_value=9.0, source="chembl",
                                           rel_type="targets") == pytest.approx(9.0 / 14.0)
-        # DrugBank approved indication → 1.0.
+        # DrugBank approved indication -> 1.0.
         assert _compute_normalized_score(indication_type="approved",
                                           source="drugbank_indications",
                                           rel_type="treats") == 1.0
-        # OMIM associated_with (curated) → 1.0.
+        # OMIM associated_with (curated) -> 1.0.
         assert _compute_normalized_score(source="omim",
                                           rel_type="associated_with") == 1.0
-        # DrugBank targets (no quantitative score) → None.
+        # DrugBank targets (no quantitative score) -> None.
         assert _compute_normalized_score(source="drugbank",
                                           rel_type="targets") is None
 
@@ -192,7 +192,7 @@ class TestBug1NormalizedScoreEmitted:
         staged = stage_phase1_to_phase2(frames)
         disgenet_edges = staged.edges.get(("Gene", "associated_with", "Disease"), [])
         assert len(disgenet_edges) >= 1
-        # Find the DisGeNET-derived edge (PTGS1 → DOID:0050133 Pain).
+        # Find the DisGeNET-derived edge (PTGS1 -> DOID:0050133 Pain).
         candidate = None
         for e in disgenet_edges:
             if e.get("dst_id") == "DOID:0050133":
@@ -206,7 +206,7 @@ class TestBug1NormalizedScoreEmitted:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# BUG #2 — Pathway fallback references undefined `string_df` (NameError)
+# BUG #2 -- Pathway fallback references undefined `string_df` (NameError)
 # ═══════════════════════════════════════════════════════════════════════════
 
 class TestBug2PathwayFallbackNoNameError:
@@ -217,9 +217,9 @@ class TestBug2PathwayFallbackNoNameError:
     def test_fallback_fires_with_no_pathway_nodes(self):
         """When STRING PPI produces 0 multi-protein components (i.e. only
         singletons or empty), the fallback MUST emit a DefaultPathway
-        node + edges to all known proteins — without raising NameError."""
+        node + edges to all known proteins -- without raising NameError."""
         # Construct a STRING PPI frame with only single-edge components
-        # (no 2-protein connected components → fallback should fire).
+        # (no 2-protein connected components -> fallback should fire).
         frames = _make_embedded_frames()
         # Replace with a STRING frame that has edges but they don't form
         # a multi-protein component (each protein appears only once).
@@ -246,9 +246,9 @@ class TestBug2PathwayFallbackNoNameError:
         (not just those in multi-protein components)."""
         frames = _make_embedded_frames()
         # Force fallback by using STRING edges that produce no multi-protein
-        # components — actually a single edge produces a 2-protein component,
+        # components -- actually a single edge produces a 2-protein component,
         # so the fallback won't fire. Let's use an empty STRING frame to
-        # force the fallback (string_edges=[] → 0 pathway nodes → fallback).
+        # force the fallback (string_edges=[] -> 0 pathway nodes -> fallback).
         frames["string_ppi"] = pd.DataFrame(
             columns=["uniprot_ac_a", "uniprot_ac_b", "combined_score"]
         )
@@ -258,14 +258,14 @@ class TestBug2PathwayFallbackNoNameError:
         # pathway_nodes may be empty. That's the v53 fallback's scope:
         # it only fires when string_edges is non-empty but produces 0
         # multi-protein components. Test that case instead.
-        # Use a STRING frame where every edge is between 2 proteins —
+        # Use a STRING frame where every edge is between 2 proteins --
         # this DOES form a multi-protein component, so the fallback
         # shouldn't fire. Instead test the singleton case.
         # Singletons in union-find = proteins that appear in parent
         # dict but have no edges. Since union-find only adds proteins
         # that appear in edges, there are no singletons.
         # The realistic test: string_edges non-empty BUT all proteins
-        # form a single multi-protein component → 1 Pathway node (not 0).
+        # form a single multi-protein component -> 1 Pathway node (not 0).
         # The fallback fires when pathway_nodes is empty after the loop.
         # Since 2 proteins form 1 component with >=2 members, the
         # fallback doesn't fire here. We need 0 multi-protein components.
@@ -273,9 +273,9 @@ class TestBug2PathwayFallbackNoNameError:
         # So we need at least 1 edge but 0 components with >=2 proteins.
         # That's impossible unless we filter out 2-protein components.
         # The fallback fires when STRING PPI has 0 EDGES (string_edges=[]
-        # → early return → 0 pathway_nodes). But the early return means
+        # -> early return -> 0 pathway_nodes). But the early return means
         # the fallback is NEVER reached. That's actually a separate bug
-        # — the early return at line ~2345 prevents the fallback from
+        # -- the early return at line ~2345 prevents the fallback from
         # firing when STRING data is truly empty.
         # For now, this test just verifies the function doesn't raise
         # NameError when called with the embedded data.
@@ -283,7 +283,7 @@ class TestBug2PathwayFallbackNoNameError:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# BUG #3 — PATHWAY_DEFAULT ID fails ID_PATTERNS["Pathway"] regex
+# BUG #3 -- PATHWAY_DEFAULT ID fails ID_PATTERNS["Pathway"] regex
 # ═══════════════════════════════════════════════════════════════════════════
 
 class TestBug3PathwayDefaultIdMatchesRegex:
@@ -303,7 +303,7 @@ class TestBug3PathwayDefaultIdMatchesRegex:
 
     def test_recording_builder_accepts_fallback_pathway_id(self):
         """The RecordingGraphBuilder (which mirrors production validation)
-        must accept the fallback Pathway ID — no dead-letter."""
+        must accept the fallback Pathway ID -- no dead-letter."""
         frames = _make_embedded_frames()
         staged = stage_phase1_to_phase2(frames)
         recorder = RecordingGraphBuilder()
@@ -319,13 +319,13 @@ class TestBug3PathwayDefaultIdMatchesRegex:
         # If pathway_nodes were staged, at least one must be accepted.
         if staged.pathway_nodes:
             assert total_pathway_accepted >= 1, (
-                f"Pathway nodes were staged but 0 accepted — "
+                f"Pathway nodes were staged but 0 accepted -- "
                 f"check ID_PATTERNS validation. Dead-letter: {pathway_dead_letter}"
             )
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# BUG #4 — compound_id_aliases NEVER populated by bridge
+# BUG #4 -- compound_id_aliases NEVER populated by bridge
 # ═══════════════════════════════════════════════════════════════════════════
 
 class TestBug4CompoundIdAliasesPopulated:
@@ -386,7 +386,7 @@ class TestBug4CompoundIdAliasesPopulated:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# BUG #5 — ClinicalOutcome canonical-ID fields stripped by whitelist
+# BUG #5 -- ClinicalOutcome canonical-ID fields stripped by whitelist
 # ═══════════════════════════════════════════════════════════════════════════
 
 class TestBug5ClinicalOutcomeFieldsPreserved:
@@ -448,7 +448,7 @@ class TestBug5ClinicalOutcomeFieldsPreserved:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# BUG #6 — DisGeNET quantitative score silently dropped (first-wins)
+# BUG #6 -- DisGeNET quantitative score silently dropped (first-wins)
 # ═══════════════════════════════════════════════════════════════════════════
 
 class TestBug6DisgeNetScorePreserved:
@@ -475,7 +475,7 @@ class TestBug6DisgeNetScorePreserved:
         ])
         staged = stage_phase1_to_phase2(frames)
         edges = staged.edges.get(("Gene", "associated_with", "Disease"), [])
-        # Both OMIM and DisGeNET reference (5742, DOID:0050133) — they should
+        # Both OMIM and DisGeNET reference (5742, DOID:0050133) -- they should
         # be MERGED into a single edge with DisGeNET's score=0.85.
         overlapping = [e for e in edges
                        if e.get("src_id") == "5742" and e.get("dst_id") == "DOID:0050133"]
@@ -485,20 +485,20 @@ class TestBug6DisgeNetScorePreserved:
         )
         merged = overlapping[0]
         # v78 BUG #6 root fix: the DisGeNET quantitative raw ``score``
-        # (0.85) MUST be preserved — NOT silently dropped in favor of
+        # (0.85) MUST be preserved -- NOT silently dropped in favor of
         # OMIM's None. This is the exact data-loss the bug report
         # describes: "RL ranker loses evidence-strength signal".
         assert merged.get("score") == 0.85, (
             f"Merged edge raw score should be 0.85 (DisGeNET quantitative), "
-            f"got {merged.get('score')} — DisGeNET score was silently dropped "
+            f"got {merged.get('score')} -- DisGeNET score was silently dropped "
             f"by first-wins semantics (BUG #6 NOT fixed)"
         )
         # The merged edge must have a non-None normalized_score (the
         # canonical [0,1] confidence). The MAX wins (OMIM's 1.0 curated
-        # default is the gold standard, OR DisGeNET's 0.85 — either is
+        # default is the gold standard, OR DisGeNET's 0.85 -- either is
         # acceptable as long as it's not None).
         assert merged.get("normalized_score") is not None, (
-            f"Merged edge normalized_score must not be None — both OMIM "
+            f"Merged edge normalized_score must not be None -- both OMIM "
             f"(1.0 curated default) and DisGeNET (0.85) provided values"
         )
         # Both sources must be credited (accumulated into a list).
@@ -511,7 +511,7 @@ class TestBug6DisgeNetScorePreserved:
                 f"DisGeNET source must be credited in merged edge: {src}"
             )
         else:
-            # If source is still a string, the merge didn't accumulate —
+            # If source is still a string, the merge didn't accumulate --
             # that's a regression. Both sources must be credited.
             pytest.fail(
                 f"Merged edge source must be a list crediting both OMIM and "
@@ -520,7 +520,7 @@ class TestBug6DisgeNetScorePreserved:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# BUG #7 — Bridge uses gene_id/ncbi_gene_id columns not in expected columns
+# BUG #7 -- Bridge uses gene_id/ncbi_gene_id columns not in expected columns
 # ═══════════════════════════════════════════════════════════════════════════
 
 class TestBug7DisgeNetColumnContract:
@@ -576,7 +576,7 @@ class TestBug7DisgeNetColumnContract:
             "gene_symbol": ["PTGS1"],
             "disease_id": ["DOID:0050133"],
             "score": [0.85],
-            # NO gene_id, NO ncbi_gene_id — silent zero-edge regression.
+            # NO gene_id, NO ncbi_gene_id -- silent zero-edge regression.
         })
         with pytest.raises(DrugOSDataError) as exc_info:
             _validate_phase1_columns(
@@ -587,7 +587,7 @@ class TestBug7DisgeNetColumnContract:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# BUG #8 — RecordingGraphBuilder does NOT apply NODE_PROPERTY_WHITELIST
+# BUG #8 -- RecordingGraphBuilder does NOT apply NODE_PROPERTY_WHITELIST
 # ═══════════════════════════════════════════════════════════════════════════
 
 class TestBug8RecorderAppliesWhitelist:
@@ -684,7 +684,7 @@ class TestBug8RecorderAppliesWhitelist:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# BUG #9 — Phase 2 reports 0/7 sources loaded despite bridge reading 11 CSVs
+# BUG #9 -- Phase 2 reports 0/7 sources loaded despite bridge reading 11 CSVs
 # ═══════════════════════════════════════════════════════════════════════════
 
 class TestBug9BridgeSourcesCounted:
@@ -696,7 +696,7 @@ class TestBug9BridgeSourcesCounted:
         but step1.bridge_summary.sources_read contains all 7 DOCX sources.
         The criteria must report all_sources_loaded=True."""
         # The function is _check_v1_launch_criteria (private). Import it
-        # explicitly — it's the single source of truth for V1 criteria.
+        # explicitly -- it's the single source of truth for V1 criteria.
         from drugos_graph.run_pipeline import _check_v1_launch_criteria
         # Construct a fake results dict where:
         # - step1.bridge_summary.sources_read has all 7 DOCX sources
@@ -741,7 +741,7 @@ class TestBug9BridgeSourcesCounted:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# BUG #10 — Compound-treats-Disease: 0 edges (the killer)
+# BUG #10 -- Compound-treats-Disease: 0 edges (the killer)
 # ═══════════════════════════════════════════════════════════════════════════
 
 class TestBug10CompoundTreatsDiseaseEdges:
@@ -751,7 +751,7 @@ class TestBug10CompoundTreatsDiseaseEdges:
 
     def test_treats_edges_derived_from_drugbank_indications(self):
         """DrugBank indications with DOID disease_ids must produce
-        Compound-treats-Disease edges — NOT 0."""
+        Compound-treats-Disease edges -- NOT 0."""
         frames = _make_embedded_frames()
         staged = stage_phase1_to_phase2(frames)
         treats_edges = staged.edges.get(("Compound", "treats", "Disease"), [])
@@ -760,7 +760,7 @@ class TestBug10CompoundTreatsDiseaseEdges:
         assert len(treats_edges) >= 4, (
             f"Expected >=4 Compound-treats-Disease edges from DrugBank "
             f"indications, got {len(treats_edges)}. This is the killer "
-            f"BUG #10 — the V1 launch criterion (>0.85 AUC on held-out "
+            f"BUG #10 -- the V1 launch criterion (>0.85 AUC on held-out "
             f"drug-disease pairs) is structurally unverifiable with 0 "
             f"treats triples."
         )
@@ -818,7 +818,7 @@ class TestBug10CompoundTreatsDiseaseEdges:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Integration — end-to-end Phase 1 → Phase 2 graph build
+# Integration -- end-to-end Phase 1 -> Phase 2 graph build
 # ═══════════════════════════════════════════════════════════════════════════
 
 class TestEndToEndPhase1ToPhase2:
@@ -843,7 +843,7 @@ class TestEndToEndPhase1ToPhase2:
         # OR the fallback didn't fire (multi-protein component exists).
         # ClinicalOutcome must always be present when indications exist.
         assert "ClinicalOutcome" in labels_present, (
-            f"ClinicalOutcome nodes missing — DOCX 5-node-type contract "
+            f"ClinicalOutcome nodes missing -- DOCX 5-node-type contract "
             f"violated. Labels present: {labels_present}"
         )
 
@@ -873,7 +873,7 @@ class TestEndToEndPhase1ToPhase2:
         )
 
     def test_phase1_phase2_100_percent_connected(self):
-        """The Phase 1 → Phase 2 bridge must produce non-empty node AND
+        """The Phase 1 -> Phase 2 bridge must produce non-empty node AND
         edge sets for EVERY Phase 1 source that has data. This is the
         DOCX '100% connected' contract."""
         frames = _make_embedded_frames()

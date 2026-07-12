@@ -253,7 +253,7 @@ class TestEntityResolutionModule:
 
 
 # ===========================================================================
-# 19. pipelines/__init__.py    (File 19 — NEWLY FIXED)
+# 19. pipelines/__init__.py    (File 19 -- NEWLY FIXED)
 # ===========================================================================
 class TestPipelinesModule:
     """File 19: pipelines package (the newly-fixed file in this iteration).
@@ -493,7 +493,7 @@ print('OK')
         assert "Team Cosmic" in lines[1]
 
     def test_pipelines_docstring_mentions_scientific_facts(self):
-        """File 19 (Domain 3 — P0): docstring mentions InChIKey, thalidomide, etc."""
+        """File 19 (Domain 3 -- P0): docstring mentions InChIKey, thalidomide, etc."""
         import pipelines
         doc = pipelines.__doc__
         assert "InChIKey" in doc
@@ -532,7 +532,7 @@ print('OK')
         assert "Protein->Protein" in kg["string"]["edge_types"]
         assert "Gene->Disease" in kg["disgenet"]["edge_types"]
         assert "Gene->Disease" in kg["omim"]["edge_types"]
-        # PubChem enriches existing Drug nodes — no new nodes
+        # PubChem enriches existing Drug nodes -- no new nodes
         assert kg["pubchem"]["node_types"] == []
 
     def test_pipelines_constants_match_source_files(self):
@@ -592,7 +592,7 @@ class TestPipelineIntegration:
     """Cross-module integration tests exercising the full 19-file pipeline."""
 
     def test_normalizer_to_drug_resolver_pipeline(self):
-        """cleaning.normalizer → entity_resolution.drug_resolver pipeline."""
+        """cleaning.normalizer -> entity_resolution.drug_resolver pipeline."""
         from cleaning.normalizer import normalize_inchikey
         from entity_resolution.drug_resolver import DrugResolver
 
@@ -605,13 +605,13 @@ class TestPipelineIntegration:
         assert resolver is not None
 
     def test_normalizer_to_protein_resolver_pipeline(self):
-        """cleaning.normalizer → entity_resolution.protein_resolver pipeline."""
+        """cleaning.normalizer -> entity_resolution.protein_resolver pipeline."""
         from entity_resolution.protein_resolver import ProteinResolver
         resolver = ProteinResolver()
         assert resolver is not None
 
     def test_string_merge_pipeline(self):
-        """STRING → protein_resolver pipeline."""
+        """STRING -> protein_resolver pipeline."""
         from entity_resolution.protein_resolver import ProteinResolver
         resolver = ProteinResolver()
         # STRING source adds records to the resolver
@@ -619,7 +619,7 @@ class TestPipelineIntegration:
         assert hasattr(resolver, "add_string_records") or hasattr(resolver, "add_source_records")
 
     def test_chembl_merge_pipeline(self):
-        """ChEMBL → drug_resolver pipeline."""
+        """ChEMBL -> drug_resolver pipeline."""
         from entity_resolution.drug_resolver import DrugResolver
         resolver = DrugResolver()
         # ChEMBL source adds records to the resolver
@@ -639,7 +639,7 @@ class TestPipelineIntegration:
         assert hasattr(resolver, "build_mapping")
 
     def test_config_to_resolver_pipeline(self):
-        """config → resolver pipeline (config provides paths)."""
+        """config -> resolver pipeline (config provides paths)."""
         from config import settings
         from entity_resolution.drug_resolver import DrugResolver
         # Resolver uses config paths
@@ -681,10 +681,10 @@ class TestPipelineIntegration:
         assert hasattr(resolver_utils, "normalize_name")
 
     def test_pipelines_to_cleaning_to_entity_resolution_chain(self):
-        """Cross-module chain: pipelines → cleaning → entity_resolution.
+        """Cross-module chain: pipelines -> cleaning -> entity_resolution.
 
         This test verifies the data flow described in the master prompt:
-        7 sources → pipelines → cleaning → entity_resolution → database.
+        7 sources -> pipelines -> cleaning -> entity_resolution -> database.
         """
         # 1. Pipelines package is importable (lazy)
         import pipelines
@@ -707,7 +707,7 @@ class TestPipelineIntegration:
         assert hasattr(database, "__version__")
 
     def test_pipelines_to_database_loaders_chain(self):
-        """Cross-module chain: pipelines → database.loaders.
+        """Cross-module chain: pipelines -> database.loaders.
 
         Verifies that the pipelines output (CSV files) can be loaded by
         database.loaders (bulk_upsert_drugs, etc.).

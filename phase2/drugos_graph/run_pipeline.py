@@ -1,4 +1,4 @@
-"""DrugOS Graph Module — Main Pipeline Runner
+"""DrugOS Graph Module -- Main Pipeline Runner
 ============================================
 
 Institutional-grade, production-ready pipeline orchestrator for the DrugOS
@@ -41,10 +41,10 @@ Step Data Contracts (return dict keys per step):
   Step 13: readme_path (str)
 
 Failure Mode Summary:
-  - Steps 1-2: FATAL — abort pipeline immediately on failure
-  - Step 3:  CRITICAL — if Neo4j fails, skip steps 4-7 (Neo4j-dependent)
-  - Steps 4-7: DEGRADABLE — continue pipeline on failure, log error
-  - Steps 8-13: DEGRADABLE — continue pipeline on failure, log error
+  - Steps 1-2: FATAL -- abort pipeline immediately on failure
+  - Step 3:  CRITICAL -- if Neo4j fails, skip steps 4-7 (Neo4j-dependent)
+  - Steps 4-7: DEGRADABLE -- continue pipeline on failure, log error
+  - Steps 8-13: DEGRADABLE -- continue pipeline on failure, log error
 
 Usage:
   python -m drugos_graph
@@ -113,14 +113,14 @@ from .config import (
     LOG_LEVELS,
     LOGS_DIR,
     MIN_NEGATIVE_PAIRS,
-    # v29 ROOT FIX (audit I-11): was 1 in dev — statistically meaningless. Now 10.
+    # v29 ROOT FIX (audit I-11): was 1 in dev -- statistically meaningless. Now 10.
     # (Previously tracked as audit L-12; the audit ID was renamed to I-11
     # in the final forensic report. The fix is the same: a positive-pair
-    # count of 1 produces a held-out AUC on (literally) one sample —
+    # count of 1 produces a held-out AUC on (literally) one sample --
     # statistically meaningless. The dev default was raised from "1" to
     # "10" so a held-out AUC has more than one sample to score against.
-    # The constant itself is defined in config.py — the single source of
-    # truth — and is read here by reference.)
+    # The constant itself is defined in config.py -- the single source of
+    # truth -- and is read here by reference.)
     MIN_POSITIVE_PAIRS,
     PACKAGE_VERSION,
     PIPELINE_VERSION,
@@ -147,7 +147,7 @@ from .drugbank_parser import (
     drugbank_to_target_edges,
     parse_drugbank_xml,
 )
-# v27 ROOT FIX (P2-L-4): import the canonical action → relation mapper so
+# v27 ROOT FIX (P2-L-4): import the canonical action -> relation mapper so
 # the Phase 1 inline path emits the SAME canonical verbs as the raw-XML path.
 from .drugbank_parser import _map_action_to_relation as _db_map_action_to_relation
 
@@ -159,7 +159,7 @@ _pipeline_run_id: str = ""
 _shutdown_requested: bool = False
 
 
-# v20 Compound-2/Compound-8 ROOT FIX — Production escape-hatch guard.
+# v20 Compound-2/Compound-8 ROOT FIX -- Production escape-hatch guard.
 # The audit's Compound-2 / Compound-8 chains identified that
 # DRUGOS_ALLOW_NO_SAMPLER=1 (and the legacy single-pool fallback in
 # transe_model.py:1647-1676) silently re-activates the
@@ -169,7 +169,7 @@ _shutdown_requested: bool = False
 # use. This module-level check runs at import time and REFUSES to
 # load if any escape hatch is set when DRUGOS_ENVIRONMENT=production.
 #
-# This is a hard guard — operators cannot bypass it without editing
+# This is a hard guard -- operators cannot bypass it without editing
 # source code. The escape hatches remain available for dev/test.
 def _check_production_escape_hatches() -> None:
     """Refuse to load if escape hatches are set in production env."""
@@ -198,12 +198,12 @@ def _check_production_escape_hatches() -> None:
 _check_production_escape_hatches()
 
 
-# v29 ROOT FIX (audit I-8 / M-9 — "Happy-Path Orchestration"):
+# v29 ROOT FIX (audit I-8 / M-9 -- "Happy-Path Orchestration"):
 # The forensic audit found that every step 3-13 wraps its body in
 # ``try: ... except Exception as e: results["stepN"] = {"skipped": True}``.
 # The pipeline ALWAYS writes ``pipeline_results.json`` even if every
 # step was skipped. This makes the system structurally incapable of
-# reporting failure — every previous AI session that told the user
+# reporting failure -- every previous AI session that told the user
 # "it's 100% integrated" was reading exit code 0 + ``dev_smoke_test_pass=True``
 # without checking ``passed=False`` or the AUC log.
 #
@@ -221,7 +221,7 @@ def _step_exception_or_skip(step_name: str, exc: Exception, results: dict) -> No
 
     v29 ROOT FIX for Compound Chain 8 ("Happy-Path Orchestration").
 
-    In production mode, this function ALWAYS re-raises ``exc`` —
+    In production mode, this function ALWAYS re-raises ``exc`` --
     silently swallowing step failures is the root cause of the audit's
     "every session every AI tells its 100 percent integrated" complaint.
     In dev mode, it records the skip in ``results[step_name]`` so the
@@ -229,14 +229,14 @@ def _step_exception_or_skip(step_name: str, exc: Exception, results: dict) -> No
     """
     if _is_production_mode():
         logger.critical(
-            "PRODUCTION_STEP_FAILURE (%s): %s. Re-raising — production "
+            "PRODUCTION_STEP_FAILURE (%s): %s. Re-raising -- production "
             "mode MUST NOT silently swallow step failures (audit I-8).",
             step_name, exc,
         )
         raise exc
     # Dev mode: legacy lenient behavior.
     logger.warning(
-        "DEV_STEP_SKIP (%s): %s. DRUGOS_ENVIRONMENT=dev — continuing "
+        "DEV_STEP_SKIP (%s): %s. DRUGOS_ENVIRONMENT=dev -- continuing "
         "with skipped step. Set DRUGOS_ENVIRONMENT=prod to fail-fast.",
         step_name, exc,
     )
@@ -271,7 +271,7 @@ class StepFailedError(RuntimeError):
     ``sys.exit(1)``.
 
     The previous code called ``sys.exit(1)`` inside a LIBRARY function 8
-    times. ``sys.exit()`` kills the entire Python process — any caller
+    times. ``sys.exit()`` kills the entire Python process -- any caller
     (Airflow, Celery, Jupyter, pytest) that imported ``run_pipeline`` and
     triggered a fatal step had its process terminated with no exception
     to catch, no cleanup, no graceful degradation. The
@@ -279,7 +279,7 @@ class StepFailedError(RuntimeError):
     fix exactly this, but ``_run_step_with_deps`` was never updated.
 
     ROOT FIX: raise ``StepFailedError`` instead. Callers decide exit
-    codes — ``run_unified.py`` catches this and returns exit 5 (the
+    codes -- ``run_unified.py`` catches this and returns exit 5 (the
     documented contract for "pipeline failed"), ``python -m
     drugos_graph`` catches it and returns 1. Both can now clean up
     resources (open files, DB sessions, Neo4j connections) on failure.
@@ -425,7 +425,7 @@ def _serialize_for_json(obj: Any) -> Any:
     # as their native JSON types instead of converting to string. The
     # previous code's ``return str(obj)`` fallback stringified ALL
     # non-DataFrame/ndarray/dict/list/set/Path objects, including plain
-    # integers (e.g. ``66`` → ``"66"``). This caused bool/numeric
+    # integers (e.g. ``66`` -> ``"66"``). This caused bool/numeric
     # comparison bugs in downstream code that read checkpoints (e.g.
     # ``"0"`` is truthy in Python, ``"66" > 100`` is a string comparison).
     if isinstance(obj, (int, float, bool, str)) or obj is None:
@@ -504,7 +504,7 @@ def _check_data_freshness(
 ) -> None:
     """Check if a source data file is stale.
 
-    Fixes GAP-DQ-01: No data freshness validation — stale source files
+    Fixes GAP-DQ-01: No data freshness validation -- stale source files
     used without warning.
 
     Parameters
@@ -704,13 +704,13 @@ def _load_checkpoint(step_num: int) -> Optional[dict]:
 # ROOT FIX: pickle the heavy step-1/step-4 outputs to
 # ``CHECKPOINT_DIR`` after each step completes successfully, and
 # load them from disk on resume. Falls back to the legacy re-derive
-# behavior if the cache is missing or corrupt (defensive — never
+# behavior if the cache is missing or corrupt (defensive -- never
 # break the pipeline).
 #
 # Cache files:
-#   * ``step01_cache.pkl`` — (df, entity_maps, edge_maps,
+#   * ``step01_cache.pkl`` -- (df, entity_maps, edge_maps,
 #                             edge_props_lookup, node_props_lookup)
-#   * ``step04_cache.pkl`` — drug_records list
+#   * ``step04_cache.pkl`` -- drug_records list
 # Each file is a pickled tuple. The cache is invalidated automatically
 # when the source CSVs change (the input_checksum stored in the
 # step-1 checkpoint guards this).
@@ -745,7 +745,7 @@ def _save_step_cache(step_num: int, payload: tuple) -> None:
             step_num, cache_path, cache_path.stat().st_size,
         )
     except Exception as e:
-        # Caching is best-effort — never break the pipeline over a
+        # Caching is best-effort -- never break the pipeline over a
         # cache write failure.
         logger.warning(
             "Failed to save step %d cache: %s (resume will re-derive)",
@@ -840,7 +840,7 @@ def _log_feature_failure(
     silently fell back to random Xavier features. Because the Graph
     Transformer is transductive (it can memorise node identity via the
     embedding table), AUC stayed unchanged even when the molecular-
-    structure features were garbage — making the failure INVISIBLE to
+    structure features were garbage -- making the failure INVISIBLE to
     operators and to the test suite.
 
     ROOT FIX: every feature failure now writes a structured JSONL record
@@ -858,7 +858,7 @@ def _log_feature_failure(
     given run actually used real molecular features or fell back to
     garbage. The ``DRUGOS_STRICT_FEATURES=1`` env var (checked in
     step9_build_pyg) raises a RuntimeError instead of falling back when
-    any feature failure occurs — for production runs where garbage
+    any feature failure occurs -- for production runs where garbage
     features are unacceptable.
     """
     try:
@@ -961,7 +961,7 @@ def _validate_startup_config() -> List[str]:
 
     # Config hash
     if not CONFIG_HASH:
-        logger.warning("CONFIG_HASH is empty — config may not be fully initialized.")
+        logger.warning("CONFIG_HASH is empty -- config may not be fully initialized.")
 
     return warnings
 
@@ -1010,7 +1010,7 @@ def _check_v1_launch_criteria(results: dict) -> dict:
         "positive_pairs_sufficient": False,
         "negative_pairs_sufficient": False,
         # v9 ROOT FIX (audit F6.1.2): the previous criteria set was missing
-        # the AUC check — the DOCX's explicit V1 launch criterion is
+        # the AUC check -- the DOCX's explicit V1 launch criterion is
         # ">0.85 AUC on held-out drug-disease pairs". A pipeline that
         # produced no model (because step11 silently failed per F4) could
         # still pass V1 launch criteria. Now we enforce it.
@@ -1019,7 +1019,7 @@ def _check_v1_launch_criteria(results: dict) -> dict:
         # v20 SF-7 ROOT FIX: critical source-loader failures must be
         # launch-blocking. The previous code set
         # results["step7"]["results"]["chembl_critical_failure"] = True
-        # but NOTHING consulted it — a pipeline with a missing ChEMBL
+        # but NOTHING consulted it -- a pipeline with a missing ChEMBL
         # DPI edge set (Compound-6 degradation chain) could still pass
         # V1 launch. Now we hard-fail.
         "no_critical_source_failure": False,
@@ -1032,13 +1032,13 @@ def _check_v1_launch_criteria(results: dict) -> dict:
     if isinstance(r7, dict):
         src_results = r7.get("results", r7)
         sources_loaded = 0
-        # v78 FORENSIC ROOT FIX (BUG #9 — Phase 2 reports 0/7 sources
+        # v78 FORENSIC ROOT FIX (BUG #9 -- Phase 2 reports 0/7 sources
         # loaded despite bridge reading 11 CSVs): the previous code
         # ONLY counted Phase-2-direct-loader outputs (chembl_edges,
-        # string_edges, etc. — the loaders that read raw downloads).
+        # string_edges, etc. -- the loaders that read raw downloads).
         # In dev mode (and any production run that uses the Phase 1
         # bridge as the primary data path), those direct loaders are
-        # SKIPPED — the bridge reads all 11 Phase 1 CSVs and produces
+        # SKIPPED -- the bridge reads all 11 Phase 1 CSVs and produces
         # nodes/edges. But this criteria check still reported
         # ``sources_loaded=0/7``, making the V1 criterion
         # ``all_sources_loaded=False`` a FALSE NEGATIVE. The bridge
@@ -1059,7 +1059,7 @@ def _check_v1_launch_criteria(results: dict) -> dict:
                 _sr = _bs.get("sources_read", [])
                 if isinstance(_sr, list):
                     bridge_source_keys = set(_sr)
-        # Map Phase 1 bridge source keys → DOCX 7-source names.
+        # Map Phase 1 bridge source keys -> DOCX 7-source names.
         # Each DOCX source is "loaded" if ANY of its Phase 1 keys
         # appears in bridge_source_keys.
         _phase1_key_to_docx_source = {
@@ -1109,7 +1109,7 @@ def _check_v1_launch_criteria(results: dict) -> dict:
         #     loaded by EITHER path.
         sources_loaded = max(sources_loaded, bridge_sources_loaded)
         # v22 ROOT FIX (audit Chain 1): in dev mode (default), the toy
-        # fixture only has Phase 1 CSVs — STRING/UniProt/ChEMBL/STITCH/
+        # fixture only has Phase 1 CSVs -- STRING/UniProt/ChEMBL/STITCH/
         # SIDER/OpenTargets/ClinicalTrials/GEO require raw downloads
         # which are skipped by default. The previous threshold (>=7)
         # made the V1 launch criterion always fail in dev mode. Lower
@@ -1117,7 +1117,7 @@ def _check_v1_launch_criteria(results: dict) -> dict:
         # sources: DisGeNET + OMIM + PubChem). Production keeps >=7.
         # v40 ROOT FIX (P2 #45): the previous code lowered
         # all_sources_loaded to >=2 in dev mode but did NOT lower
-        # no_critical_source_failure — a dev-mode run that skipped
+        # no_critical_source_failure -- a dev-mode run that skipped
         # ChEMBL (because Phase 1 bridge was used) still passed
         # no_critical_source_failure because the chembl_critical_failure
         # flag was never set. This masked real production failures.
@@ -1154,8 +1154,8 @@ def _check_v1_launch_criteria(results: dict) -> dict:
     #
     # The DOCX criterion is specifically about HELD-OUT AUC (not val AUC).
     # We enforce BOTH:
-    #   * best_val_auc >= 0.85 (val-set performance — catches underfitting)
-    #   * held_out_auc >= 0.85 (test-set performance — catches overfitting)
+    #   * best_val_auc >= 0.85 (val-set performance -- catches underfitting)
+    #   * held_out_auc >= 0.85 (test-set performance -- catches overfitting)
     # A model that passes val but fails held-out is overfitting the val
     # set and must NOT be launched.
     r11 = results.get("step11", {})
@@ -1168,7 +1168,7 @@ def _check_v1_launch_criteria(results: dict) -> dict:
         # AUC is higher than TransE's, use HGT's AUC for the launch
         # criteria. If EITHER model meets the 0.85 threshold, the
         # launch passes. This makes the docx's ">0.85 AUC" claim
-        # achievable for the first time — TransE is mathematically
+        # achievable for the first time -- TransE is mathematically
         # incapable (audit M-2), but HGT can model asymmetric relations.
         r11b = results.get("step11b", {})
         if isinstance(r11b, dict):
@@ -1181,7 +1181,7 @@ def _check_v1_launch_criteria(results: dict) -> dict:
             # is False when both are -1.0, so the SKIP case is correctly
             # handled. BUT: if step11b's result dict is ``None`` (a non-
             # dict, e.g. when the step crashed and returned None), the
-            # ``isinstance(r11b, dict)`` check skips the block entirely —
+            # ``isinstance(r11b, dict)`` check skips the block entirely --
             # silently ignoring a missing HGT result. The fix: explicitly
             # check for the "skipped" and "error" keys and DON'T use HGT's
             # AUC in those cases (even if it's > -1.0, which can happen if
@@ -1191,7 +1191,7 @@ def _check_v1_launch_criteria(results: dict) -> dict:
             if hgt_skipped or hgt_error:
                 criteria["hgt_status"] = "skipped" if hgt_skipped else "error"
                 criteria["hgt_skip_reason"] = r11b.get("reason", str(hgt_error))
-                # Don't use HGT's AUC — fall through with TransE's values.
+                # Don't use HGT's AUC -- fall through with TransE's values.
                 hgt_val_auc = -1.0
                 hgt_held_out_auc = -1.0
                 hgt_model_saved = False
@@ -1225,7 +1225,7 @@ def _check_v1_launch_criteria(results: dict) -> dict:
             and best_val_auc > 0
             and best_val_auc >= V1_LAUNCH_AUC
         )
-        # v9 ROOT FIX (audit F6.3.6): held-out AUC check — THE DOCX
+        # v9 ROOT FIX (audit F6.3.6): held-out AUC check -- THE DOCX
         # criterion. Without this, a model that overfits the val set
         # would pass launch despite poor generalization.
         criteria["auc_meets_threshold"] = (
@@ -1244,7 +1244,7 @@ def _check_v1_launch_criteria(results: dict) -> dict:
 
     # v20 SF-7 ROOT FIX: consult chembl_critical_failure flag (and any
     # other *_critical_failure flag set by step7). The flag was set but
-    # never consulted — a pipeline with a missing ChEMBL DPI edge set
+    # never consulted -- a pipeline with a missing ChEMBL DPI edge set
     # could still pass V1 launch. Now we hard-fail.
     critical_failure_sources: List[str] = []
     if isinstance(r7, dict):
@@ -1263,13 +1263,13 @@ def _check_v1_launch_criteria(results: dict) -> dict:
     # these in ``graph_stats.check_exit_criteria`` (called from step12),
     # NOT in the V1 launch criteria. As a result, a 67-node / 66-edge
     # toy graph (7,500x below the 500K-node Week-2 exit criterion)
-    # could pass V1 launch criteria if AUC was high enough — because
+    # could pass V1 launch criteria if AUC was high enough -- because
     # every layer of the stack silently accepted "staged" as "loaded".
     # We now read the actual node/edge counts from step12 (graph_stats)
     # AND from step3 (Neo4j load) and take the MAX as the authoritative
     # count. Production requires >= MIN_NODES_W2 AND >= MIN_EDGES_W2.
     # In dev mode, the bar is lowered to MIN_NODES_DEV /
-    # MIN_EDGES_DEV (defaults: 50 nodes / 50 edges — still catches the
+    # MIN_EDGES_DEV (defaults: 50 nodes / 50 edges -- still catches the
     # "67-node toy graph masquerading as a real KG" failure mode while
     # allowing the toy fixture to pass for smoke tests).
     import os as _os_v36
@@ -1304,7 +1304,7 @@ def _check_v1_launch_criteria(results: dict) -> dict:
     # v42 FORENSIC ROOT FIX (Phase1↔Phase2 V1-criteria chain): the
     # previous code read ``r1.get("nodes_loaded", 0)`` directly from
     # ``results["step1"]``. But step1_load_data returns the bridge
-    # summary NESTED under the ``bridge_summary`` key — it does NOT
+    # summary NESTED under the ``bridge_summary`` key -- it does NOT
     # flatten nodes_loaded/edges_loaded to the top level. So the V1
     # criteria check ALWAYS saw n_nodes=0 even when the bridge loaded
     # 67 nodes / 66 edges into the RecordingGraphBuilder. The runtime
@@ -1378,7 +1378,7 @@ def _check_v1_launch_criteria(results: dict) -> dict:
     # v72 ROOT FIX (P2C-016): verify ChEMBERTa molecular features were
     # used. step9 records "chemberta_used" in its result dict. In
     # production, a model trained on random Xavier features cannot learn
-    # molecular structure — AUC reflects transductive memorisation only.
+    # molecular structure -- AUC reflects transductive memorisation only.
     # In dev mode, we allow random Xavier (ChemBERTa download may be
     # unavailable in CI); in production we REQUIRE chemberta_used=True.
     _r9_v72 = results.get("step9", {})
@@ -1388,7 +1388,7 @@ def _check_v1_launch_criteria(results: dict) -> dict:
     # v89 ROOT FIX: stop lying about chemberta_features_used in dev mode.
     # The v88 code set chemberta_features_used=True in dev mode regardless
     # of whether chemberta was actually used. This made the V1 launch
-    # criteria pass on a LIE — the metadata said chemberta was used when
+    # criteria pass on a LIE -- the metadata said chemberta was used when
     # it wasn't. The v89 fix reports the ACTUAL value in BOTH fields.
     # In dev mode, we log a clear warning that chemberta is not available
     # and the model is using random Xavier features (which means the AUC
@@ -1408,7 +1408,7 @@ def _check_v1_launch_criteria(results: dict) -> dict:
         else:
             logger.critical(
                 "V1 LAUNCH CRITERIA: chemberta_features_used=False. The "
-                "Graph Transformer trained on random Xavier features — it "
+                "Graph Transformer trained on random Xavier features -- it "
                 "CANNOT learn molecular structure. AUC reflects transductive "
                 "memorization only. In production, ChemBERTa is REQUIRED."
             )
@@ -1431,7 +1431,7 @@ def _check_v1_launch_criteria(results: dict) -> dict:
         and criteria.get("split_method_is_safe", False)
         # v72 ROOT FIX (P2C-016): ChEMBERTa molecular features must be
         # present in production. A model trained on random Xavier features
-        # cannot learn molecular structure — AUC reflects transductive
+        # cannot learn molecular structure -- AUC reflects transductive
         # memorisation only, not the structure-activity relationships the
         # DOCX promises.
         and criteria.get("chemberta_features_used", True)
@@ -1439,7 +1439,7 @@ def _check_v1_launch_criteria(results: dict) -> dict:
 
     # v26 ROOT FIX (Issue C-1): the v25 "DEV_SMOKE_TEST override" used to
     # flip ``criteria["passed"] = True`` even when
-    # ``auc_meets_threshold=False``, which is the user's #1 complaint —
+    # ``auc_meets_threshold=False``, which is the user's #1 complaint --
     # the pipeline reported ``V1 LAUNCH CRITERIA: PASSED`` for a model
     # with ``held_out_auc=0.5389`` (statistically random) and
     # ``best_val_auc=0.6722`` (target 0.85). The override was a lie.
@@ -1448,14 +1448,14 @@ def _check_v1_launch_criteria(results: dict) -> dict:
     # production check (AUC >= 0.85 on BOTH val and held-out, model
     # saved, no critical source failure, sources loaded, pair counts
     # sufficient). The dev smoke-test verdict is recorded in TWO
-    # SEPARATE fields — ``dev_smoke_test_pass`` (kept for backward
-    # compatibility) and ``passed_dev_smoke`` (new explicit name) — both
+    # SEPARATE fields -- ``dev_smoke_test_pass`` (kept for backward
+    # compatibility) and ``passed_dev_smoke`` (new explicit name) -- both
     # of which are INFORMATIONAL ONLY: they describe whether the
     # pipeline ran end-to-end in dev mode AND met a RELAXED AUC
     # threshold (DEV_SMOKE_TEST_MIN_AUC = 0.6). They are NOT a smoke
     # test in the industry-standard sense ("did the pipeline run end-
     # to-end without crashing"). A model with dev_smoke_test_pass=True
-    # barely beat random (0.6 AUC) — it is NOT launch-ready. Callers
+    # barely beat random (0.6 AUC) -- it is NOT launch-ready. Callers
     # and operators MUST consult ``passed`` for the launch verdict.
     #
     # v35 ROOT FIX (H-6): added ``pipeline_ran_end_to_end`` as the
@@ -1463,14 +1463,14 @@ def _check_v1_launch_criteria(results: dict) -> dict:
     # (the industry-standard smoke-test meaning). ``dev_smoke_test_pass``
     # is kept under its existing name for backward compatibility but
     # its semantics are now documented as "dev-mode RELAXED criteria
-    # passed (AUC >= 0.6, all sources loaded, model saved)" — NOT a
+    # passed (AUC >= 0.6, all sources loaded, model saved)" -- NOT a
     # smoke test. New callers should prefer ``pipeline_ran_end_to_end``
     # for "ran end-to-end" and ``passed`` for "launch-ready".
     from .config import DEV_SMOKE_TEST, DEV_SMOKE_TEST_MIN_AUC
     criteria["dev_mode"] = bool(DEV_SMOKE_TEST)
 
     # v35 H-6: did the pipeline complete without raising? This is the
-    # literal "smoke test" meaning — no exception bubbled up to
+    # literal "smoke test" meaning -- no exception bubbled up to
     # run_full_pipeline's caller.
     criteria["pipeline_ran_end_to_end"] = bool(
         criteria.get("all_sources_loaded")
@@ -1482,7 +1482,7 @@ def _check_v1_launch_criteria(results: dict) -> dict:
 
     # Compute the dev smoke-test verdict as a SEPARATE field. This does
     # NOT touch ``criteria["passed"]``. v35 H-6: this is the RELAXED
-    # dev-mode criteria (AUC >= 0.6), NOT a literal smoke test —
+    # dev-mode criteria (AUC >= 0.6), NOT a literal smoke test --
     # ``pipeline_ran_end_to_end`` above is the literal smoke test.
     _dev_auc_ok = (
         criteria.get("best_val_auc", -1.0) is not None
@@ -1508,9 +1508,9 @@ def _check_v1_launch_criteria(results: dict) -> dict:
     # callers that already read ``dev_smoke_test_pass``. SEMANTICS:
     # dev-mode RELAXED criteria passed (AUC >= 0.6, all sources loaded,
     # model saved). NOT a literal smoke test. NOT launch-ready.
-    # v53 ROOT FIX (P2-006 — dev_smoke_test_pass misleading):
+    # v53 ROOT FIX (P2-006 -- dev_smoke_test_pass misleading):
     # The v48/v49 field name "dev_smoke_test_pass" was misread by
-    # operators as "the platform passed" — when it actually means
+    # operators as "the platform passed" -- when it actually means
     # "dev-mode relaxed criteria passed (AUC >= 0.6, not 0.85)".
     # ROOT FIX: rename to "dev_relaxed_criteria_passed" in all NEW
     # code and logs. Keep "dev_smoke_test_pass" as a backward-compat
@@ -1532,7 +1532,7 @@ def _check_v1_launch_criteria(results: dict) -> dict:
         criteria["dev_smoke_test_reason"] = (
             f"Dev smoke-test mode: pipeline ran end-to-end with "
             f"best_val_auc={criteria['best_val_auc']:.4f}, "
-            f"held_out_auc={criteria['held_out_auc']:.4f} — BELOW "
+            f"held_out_auc={criteria['held_out_auc']:.4f} -- BELOW "
             f"production threshold {V1_LAUNCH_AUC}. This is "
             f"INFORMATIONAL only; the strict ``passed`` flag is False "
             f"and the launch verdict is NOT PASSED. Production "
@@ -1541,7 +1541,7 @@ def _check_v1_launch_criteria(results: dict) -> dict:
         logger.warning(
             "V1 LAUNCH CRITERIA: dev smoke-test ran end-to-end "
             "(best_val_auc=%.4f, held_out_auc=%.4f) but production "
-            "threshold %.2f NOT met — strict passed=False.",
+            "threshold %.2f NOT met -- strict passed=False.",
             criteria["best_val_auc"], criteria["held_out_auc"],
             V1_LAUNCH_AUC,
         )
@@ -1549,17 +1549,17 @@ def _check_v1_launch_criteria(results: dict) -> dict:
     return criteria
 
 
-# v22 ROOT FIX (audit section 4 finding 8 / section 9 — "_cached_parse_drkg
+# v22 ROOT FIX (audit section 4 finding 8 / section 9 -- "_cached_parse_drkg
 # dead code"): the function ``_cached_parse_drkg`` was defined but had NO
 # callers in the package. The original bug it fixed (calling
 # ``parse_drkg_tsv()`` multiple times in --step mode without caching)
-# was itself FIXED at line 4002-4006 (RT-5 ROOT FIX) — the resume path
+# was itself FIXED at line 4002-4006 (RT-5 ROOT FIX) -- the resume path
 # now calls ``step1_load_data(data_source, skip_download=True, ...)``
 # instead of ``_cached_parse_drkg()``. The dead function definition has
 # been REMOVED, and the dead module-level cache dict that accompanied
 # it (FIX-E / C-25 dead-code removal: it was written but never read)
 # has also been removed. If a future operator needs memoized DRKG
-# parsing, they should wire it through ``step1_load_data`` — not leave
+# parsing, they should wire it through ``step1_load_data`` -- not leave
 # a dead helper that looks callable but isn't.
 
 
@@ -1732,7 +1732,7 @@ def _run_step_with_deps(
         # should propagate.
         raise
     except StepFailedError:
-        # Already logged + wrapped — propagate so the caller can decide
+        # Already logged + wrapped -- propagate so the caller can decide
         # the exit code (run_unified returns 5, python -m drugos_graph
         # returns 1).
         raise
@@ -1745,7 +1745,7 @@ def _run_step_with_deps(
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# STEP 1: Load DRKG (Domain 3 — Scientific Correctness)
+# STEP 1: Load DRKG (Domain 3 -- Scientific Correctness)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
@@ -1753,7 +1753,7 @@ def step1_load_drkg(skip_download: bool = False) -> dict:
     """Step 1: Download and parse DRKG.
 
     Downloads the DRKG TSV (if not skipped), parses it, and validates
-    the data quality. This is a FATAL step — pipeline aborts if it fails.
+    the data quality. This is a FATAL step -- pipeline aborts if it fails.
 
     Parameters
     ----------
@@ -1818,7 +1818,7 @@ def step1_load_drkg(skip_download: bool = False) -> dict:
 
     if len(df) < 1000:
         logger.error(
-            "DRKG has only %d triples — below minimum viable threshold. "
+            "DRKG has only %d triples -- below minimum viable threshold. "
             "Check if DRKG download was complete.",
             len(df),
         )
@@ -1845,7 +1845,7 @@ def step1_load_drkg(skip_download: bool = False) -> dict:
         {"input_rows": len(df), "validation": str(validation)},
     )
     logger.info(
-        "Step 1 complete in %.1fs — %d triples loaded",
+        "Step 1 complete in %.1fs -- %d triples loaded",
         elapsed,
         len(df),
     )
@@ -1858,11 +1858,11 @@ def step1_load_drkg(skip_download: bool = False) -> dict:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# STEP 1 (ALT): Load Phase 1 outputs via the phase1_bridge — v6 fix (bug #B17)
+# STEP 1 (ALT): Load Phase 1 outputs via the phase1_bridge -- v6 fix (bug #B17)
 # ═══════════════════════════════════════════════════════════════════════════════
 #
 # v6 fix (bug #B17): the production training pipeline (run_pipeline.py)
-# previously did NOT import phase1_bridge — it always downloaded DRKG
+# previously did NOT import phase1_bridge -- it always downloaded DRKG
 # from https://dgl-data.s3-us-west-2.amazonaws.com/dataset/DRKG/drkg.tar.gz
 # and trained on THAT. Phase 1's CSVs were never consumed by training.
 #
@@ -1888,12 +1888,12 @@ def step1_load_phase1(
     real CSV outputs to the production training pipeline. It uses the
     bridge to stage Phase 1 nodes/edges, then converts them into the
     same (entity_maps, edge_maps) format that step2_build_mappings
-    produces from DRKG — so all downstream steps (step3, step8, step9,
+    produces from DRKG -- so all downstream steps (step3, step8, step9,
     step10, step11) work unchanged.
 
     The returned dict mimics step1_load_drkg's contract:
       - ``df``: a DataFrame shim with columns (head, head_type, relation,
-        tail, tail_type) — one row per edge. This lets step8 and step10
+        tail, tail_type) -- one row per edge. This lets step8 and step10
         (which expect a DRKG-style df) consume Phase 1 data unchanged.
       - ``validation``: a dict with ``passed=True`` and triple count.
       - ``elapsed``: wall-clock seconds.
@@ -1933,7 +1933,7 @@ def step1_load_phase1(
 
     # Use a RecordingGraphBuilder here so step1 is purely in-memory and
     # doesn't require a Neo4j connection. If the user wants to load into
-    # Neo4j, that's step3's job — step3 calls DrugOSGraphBuilder directly.
+    # Neo4j, that's step3's job -- step3 calls DrugOSGraphBuilder directly.
     recorder = RecordingGraphBuilder()
     bridge_result = run_phase1_to_phase2(
         phase1_processed_dir=pdir,
@@ -1951,7 +1951,7 @@ def step1_load_phase1(
             "input_checksums": {},
             "bridge_summary": summary,
             "fatal": True,
-            "fatal_reason": "Phase 1 produced zero nodes — bridge produced no data",
+            "fatal_reason": "Phase 1 produced zero nodes -- bridge produced no data",
         }
 
     # Convert to (entity_maps, edge_maps) for downstream PyG/TransE steps.
@@ -1964,7 +1964,7 @@ def step1_load_phase1(
     # ``head, head_type, relation, tail, tail_type`` but EntityResolver
     # (entity_resolver.py:2144, 2327) requires ``head_id`` and ``tail_id``.
     # The KeyError was silently caught by try/except in step8/step10,
-    # marking both as 'skipped' — so no entity resolution and no
+    # marking both as 'skipped' -- so no entity resolution and no
     # training pairs were ever built on the phase1 path. Now the shim
     # exposes BOTH the human-readable head/tail AND the canonical
     # head_id/tail_id columns so EntityResolver can run unchanged.
@@ -2021,7 +2021,7 @@ def step1_load_phase1(
     # inchikey, smiles, etc.). The RecordingGraphBuilder preserves them
     # in `recorder.node_loads[].nodes[]`. Without this lookup, step3's
     # Neo4j load path reconstructs bare `{"id": eid, "entity_type": etype}`
-    # dicts — destroying every patient-safety property and breaking the
+    # dicts -- destroying every patient-safety property and breaking the
     # RL safety ranker (cerivastatin's `withdrawn=True` flag would be
     # lost, making it look SAFE). step3_load_neo4j reads this lookup to
     # build the full-property node dicts that `load_drkg_nodes` expects;
@@ -2036,7 +2036,7 @@ def step1_load_phase1(
                 nid = n.get("id")
                 if nid is None:
                     continue
-                # Stash the full node dict. We do NOT pre-filter here —
+                # Stash the full node dict. We do NOT pre-filter here --
                 # the production kg_builder.load_nodes_batch applies
                 # NODE_PROPERTY_WHITELIST + SYSTEM_PROPS itself, which
                 # keeps the source of truth in one place.
@@ -2083,7 +2083,7 @@ def step1_load_phase1(
                 # would silently KeyError. The fix flattens ALL props
                 # from ``props_e`` (the union set ``all_prop_keys`` is
                 # already collected at line 1584+ and used to extend
-                # ``df_columns`` at line 1687 — so adding the values
+                # ``df_columns`` at line 1687 -- so adding the values
                 # here means the column is non-null for rows that have
                 # the prop and NaN for rows that don't, which is the
                 # standard pandas contract). The original 13-prop
@@ -2133,7 +2133,7 @@ def step1_load_phase1(
         # v20 Phase1↔Phase2 connection ROOT FIX: v15 added bridge
         # ingestion of these two files (chembl_activities_clean.csv and
         # omim_gene_disease_susceptibility.csv) but the name_map was
-        # NOT extended — so the lineage checksums silently dropped
+        # NOT extended -- so the lineage checksums silently dropped
         # them from the run report. Operators couldn't tell whether
         # the bridge was actually consuming them.
         "chembl_activities": ["chembl_activities_clean.csv"],
@@ -2152,7 +2152,7 @@ def step1_load_phase1(
 
     elapsed = time.time() - t0
     logger.info(
-        "Step 1 (PHASE1) complete in %.1fs — %d nodes, %d edges, %d triples",
+        "Step 1 (PHASE1) complete in %.1fs -- %d nodes, %d edges, %d triples",
         elapsed,
         summary["nodes_loaded"],
         summary["edges_loaded"],
@@ -2181,7 +2181,7 @@ def step1_load_phase1(
         # to each edge before loading into Neo4j. The previous code
         # constructed bare ``{"src_id": ..., "dst_id": ...}`` dicts in
         # step3, silently dropping pchembl_value, standard_relation,
-        # evidence, source, _source_phase, _source_file, _source_row —
+        # evidence, source, _source_phase, _source_file, _source_row --
         # all the properties the v15 ROOT FIX promised would be
         # preserved for the RL ranker. The test path (RecordingGraphBuilder)
         # preserved them, so the bug was invisible to tests.
@@ -2192,7 +2192,7 @@ def step1_load_phase1(
         # (withdrawn, fda_approved, clinical_status, molecular_weight,
         # inchikey, smiles, etc.). Previously step3 reconstructed bare
         # `{"id": eid, "entity_type": etype}` dicts, destroying every
-        # clinical-safety property in the production Neo4j load path —
+        # clinical-safety property in the production Neo4j load path --
         # cerivastatin's `withdrawn=True` flag would be lost, making
         # the RL safety ranker treat it as SAFE. Patient-safety risk.
         "node_props_lookup": node_props_lookup,
@@ -2201,7 +2201,7 @@ def step1_load_phase1(
         # consumer) can reuse the already-staged Compound nodes via
         # ``extract_drug_records_from_staged`` instead of re-reading
         # ``drugbank_drugs.csv`` from disk. This is the canonical
-        # staged output of the bridge — discard it and you re-do the
+        # staged output of the bridge -- discard it and you re-do the
         # bridge's work in step 4. NOT serialized to checkpoints
         # (excluded by the ``df, entity_maps, ...`` filter in
         # run_full_pipeline's step-1 result-stripping logic).
@@ -2232,14 +2232,14 @@ def step1_load_data(
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# STEP 2: Build Mappings (Domain 5 — Data Quality)
+# STEP 2: Build Mappings (Domain 5 -- Data Quality)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
 def step2_build_mappings(df) -> dict:
     """Step 2: Build entity and edge index mappings from DRKG DataFrame.
 
-    FATAL step — pipeline aborts if this fails.
+    FATAL step -- pipeline aborts if this fails.
 
     Parameters
     ----------
@@ -2273,7 +2273,7 @@ def step2_build_mappings(df) -> dict:
         )
     if len(df) == 0:
         raise ValueError(
-            "DRKG DataFrame is empty — cannot build mappings."
+            "DRKG DataFrame is empty -- cannot build mappings."
         )
 
     # GAP-PERF-03: Memory estimate logging
@@ -2302,7 +2302,7 @@ def step2_build_mappings(df) -> dict:
         },
     )
     logger.info(
-        "Step 2 complete in %.1fs — %d entities, %d edge types, "
+        "Step 2 complete in %.1fs -- %d entities, %d edge types, "
         "%d total edges",
         elapsed,
         total_entities,
@@ -2317,7 +2317,7 @@ def step2_build_mappings(df) -> dict:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# STEP 3: Load Neo4j (Domain 7 — Idempotency, Domain 1 — Architecture)
+# STEP 3: Load Neo4j (Domain 7 -- Idempotency, Domain 1 -- Architecture)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
@@ -2339,7 +2339,7 @@ def _build_entity_type_data(
 
     The downstream ``kg_builder.load_nodes_batch`` applies
     ``NODE_PROPERTY_WHITELIST`` + ``SYSTEM_PROPS`` itself, so this
-    helper does NOT pre-filter — that keeps the whitelist as the single
+    helper does NOT pre-filter -- that keeps the whitelist as the single
     source of truth for schema enforcement and prevents schema
     pollution regardless of which path produced the dicts.
 
@@ -2405,7 +2405,7 @@ def step3_load_neo4j(
     in the production Neo4j load path. The test path
     (RecordingGraphBuilder) preserved them, so the bug was invisible to
     tests. Fix: accept ``edge_props_lookup`` (a dict keyed by
-    ``(src_type, rel, dst_type, src_id, dst_id)`` → props dict) and
+    ``(src_type, rel, dst_type, src_id, dst_id)`` -> props dict) and
     attach the properties to each edge before loading. When
     ``edge_props_lookup`` is None (DRKG path), edges are loaded bare as
     before.
@@ -2418,9 +2418,9 @@ def step3_load_neo4j(
     ``molecular_weight``, ``inchikey``, ``smiles``, ...). The test
     path (RecordingGraphBuilder) preserved them, so the bug was
     invisible to tests. Fix: accept ``node_props_lookup`` (a dict keyed
-    by ``(label, node_id)`` → full node property dict). When provided
+    by ``(label, node_id)`` -> full node property dict). When provided
     (Phase 1 bridge path), step3 builds the per-type node lists from
-    the full property dicts — `kg_builder.load_nodes_batch` then
+    the full property dicts -- `kg_builder.load_nodes_batch` then
     applies ``NODE_PROPERTY_WHITELIST`` + ``SYSTEM_PROPS`` itself, so
     schema pollution is still prevented. When ``node_props_lookup`` is
     None (DRKG path), the legacy bare-dict reconstruction is kept
@@ -2453,7 +2453,7 @@ def step3_load_neo4j(
         FIX-B: When ``skip_neo4j=True`` AND this dict is provided, the
         function populates ``dry_run_capture["entity_type_data"]`` and
         ``dry_run_capture["edge_type_data"]`` with the exact node/edge
-        dicts that WOULD have been sent to Neo4j — without contacting
+        dicts that WOULD have been sent to Neo4j -- without contacting
         Neo4j. Used by tests and dry-runs to verify property
         preservation. When None, behavior is unchanged (returns
         ``{"skipped": True}`` immediately).
@@ -2503,7 +2503,7 @@ def step3_load_neo4j(
             # caller's phrase ALWAYS matches the expected phrase. The
             # previous code hardcoded "CLEAR_ALL_DRUGOS_DATA" while
             # kg_builder expected "DELETE EVERYTHING I UNDERSTAND THE
-            # CONSEQUENCES" — they NEVER matched, clear_graph() always
+            # CONSEQUENCES" -- they NEVER matched, clear_graph() always
             # raised SecurityError, was swallowed by the except below, and
             # the graph was NEVER cleared (re-runs created duplicates).
             if fresh_start:
@@ -2611,7 +2611,7 @@ def step3_load_neo4j(
                         _props = edge_props_lookup.get(_props_key)
                         if _props:
                             # Merge props directly into the edge dict
-                            # (flat-edge shape — kg_builder._load_edges
+                            # (flat-edge shape -- kg_builder._load_edges
                             # handles this correctly as of v24).
                             for _pk, _pv in _props.items():
                                 if _pv is not None:
@@ -2630,7 +2630,7 @@ def step3_load_neo4j(
                     if drop_pct > 10:
                         logger.error(
                             "Step 3: MORE THAN 10%% of edges dropped for "
-                            "(%s, %s, %s) — check DRKG format version.",
+                            "(%s, %s, %s) -- check DRKG format version.",
                             src_type, rel_name, dst_type,
                         )
                     total_dropped += dropped_count
@@ -2660,7 +2660,7 @@ def step3_load_neo4j(
         {"nodes": total_nodes, "edges": total_edges_loaded, "dropped": total_dropped},
     )
     logger.info(
-        "Step 3 complete in %.1fs — nodes: %d, edges: %d",
+        "Step 3 complete in %.1fs -- nodes: %d, edges: %d",
         elapsed, total_nodes, total_edges_loaded,
     )
     return {
@@ -2671,7 +2671,7 @@ def step3_load_neo4j(
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# STEP 4: DrugBank Enrichment (Domain 6 — Reliability)
+# STEP 4: DrugBank Enrichment (Domain 6 -- Reliability)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
@@ -2700,7 +2700,7 @@ def step4_drugbank_enrichment(
     v35 ROOT FIX (H-4): DOCUMENT REACHABILITY. The default
     ``run_full_pipeline(data_source="phase1")`` flow SKIPS this function
     entirely (see ``run_full_pipeline`` at the ``data_source == "phase1"``
-    branch — it goes through ``extract_drug_records_from_staged`` on the
+    branch -- it goes through ``extract_drug_records_from_staged`` on the
     bridge's staged Compound nodes instead). This function is therefore
     ONLY reachable via:
 
@@ -2709,7 +2709,7 @@ def step4_drugbank_enrichment(
 
     The v21/v28 ROOT FIX comments in the body that call this the
     "canonical DrugBank source" are TRUE for those two reachable paths
-    but NOT for the default phase1 path — operators reading the source
+    but NOT for the default phase1 path -- operators reading the source
     should know that the bridge (``phase1_bridge.stage_phase1_to_phase2``)
     is the canonical DrugBank source in production. The step4 Phase 1
     CSV path is kept live as a DRKG-only fallback and as a defensive
@@ -2759,7 +2759,7 @@ def step4_drugbank_enrichment(
             # ``parse_drugbank_from_phase1_csv``,
             # ``drugbank_to_node_records_from_phase1``, and
             # ``drugbank_to_target_edges_from_phase1`` LIVE code
-            # (previously they were defined but NEVER CALLED — step4
+            # (previously they were defined but NEVER CALLED -- step4
             # inlined their logic instead of delegating). The dedicated
             # functions are the canonical Phase 1-aware entry points;
             # inlining the logic caused schema drift (e.g., the v28
@@ -2786,7 +2786,7 @@ def step4_drugbank_enrichment(
                 # v35 ROOT FIX (V35-P2-LOADERS-FIXES H-2): Phase 1's
                 # interactions CSV has no `inchikey` column, so the
                 # previous call ALWAYS fell back to the raw drugbank_id
-                # for `src_id` — producing orphan edges. Build a
+                # for `src_id` -- producing orphan edges. Build a
                 # `drug_canonical_map` (drugbank_id -> inchikey) from
                 # the just-staged Compound nodes and pass it so the
                 # edge emitter can normalize `src_id` to InChIKey.
@@ -2867,7 +2867,7 @@ def step4_drugbank_enrichment(
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# STEP 5: STITCH Ingestion (Domain 3 — Scientific Correctness)
+# STEP 5: STITCH Ingestion (Domain 3 -- Scientific Correctness)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
@@ -2888,10 +2888,10 @@ def step5_stitch_ingestion(
     causing every `--skip-download` invocation to still attempt the
     network fetch and burn ~30s on SSL-retry timeouts before failing).
 
-    v43 ROOT FIX (P1 — step5 has no data_source guard): STITCH is a
+    v43 ROOT FIX (P1 -- step5 has no data_source guard): STITCH is a
     Phase-2-only source (not in DOCX Phase 1's 7 sources). When
     data_source="phase1", STITCH should be SKIPPED because Phase 1
-    doesn't produce STITCH data — running it would bypass Phase 1's
+    doesn't produce STITCH data -- running it would bypass Phase 1's
     cleaning/normalization. The guard logs an INFO message and returns
     a "skipped" result.
 
@@ -2917,19 +2917,19 @@ def step5_stitch_ingestion(
     logger.info("=" * 60)
     t0 = time.time()
 
-    # v43 ROOT FIX (P1 — step5 no data_source guard): STITCH is a
+    # v43 ROOT FIX (P1 -- step5 no data_source guard): STITCH is a
     # Phase-2-only source. When data_source="phase1", skip STITCH
     # because Phase 1 doesn't produce it.
     if data_source == "phase1":
         elapsed = time.time() - t0
         logger.info(
-            "Step 5 SKIPPED: data_source='phase1' — STITCH is a "
+            "Step 5 SKIPPED: data_source='phase1' -- STITCH is a "
             "Phase-2-only source (not in DOCX Phase 1's 7 sources). "
             "Phase 1 does not produce STITCH data."
         )
         return {"skipped": True, "reason": "data_source=phase1", "elapsed": elapsed}
 
-    # Lazy imports — STITCH dependencies are heavy (pandas, etc.)
+    # Lazy imports -- STITCH dependencies are heavy (pandas, etc.)
     from .stitch_loader import (
         download_stitch,
         parse_stitch_interactions,
@@ -2941,7 +2941,7 @@ def step5_stitch_ingestion(
     # for step5/6/7, causing `--skip-download` to silently attempt the
     # network fetch anyway and burn 30+ seconds on SSL-retry timeouts.
     if skip_download:
-        # Check if the file is already cached locally — if so, use it;
+        # Check if the file is already cached locally -- if so, use it;
         # otherwise skip cleanly without attempting the download.
         stitch_filename = _DS.get("stitch", {}).get("filename", "stitch.tsv.gz")
         stitch_path = _RAW / stitch_filename
@@ -2953,7 +2953,7 @@ def step5_stitch_ingestion(
                 "the file.", stitch_path,
             )
             return {"skipped": True, "reason": "skip_download", "elapsed": elapsed}
-        logger.info("Step 5: --skip-download set, but STITCH file is cached at %s — using it.", stitch_path)
+        logger.info("Step 5: --skip-download set, but STITCH file is cached at %s -- using it.", stitch_path)
     else:
         download_stitch()
     df = parse_stitch_interactions()
@@ -2964,12 +2964,12 @@ def step5_stitch_ingestion(
         from .kg_builder import DrugOSGraphBuilder
 
         stitch_grouped: Dict[Tuple[str, str, str], List[Dict[str, Any]]] = defaultdict(list)
-        # v22 ROOT FIX (Audit section 7 finding 8 — "STITCH edge type
+        # v22 ROOT FIX (Audit section 7 finding 8 -- "STITCH edge type
         # collapses silently"): the previous code did
         # ``rel_type = edge.get("rel_type", "binds")``. If
         # ``stitch_to_edge_records`` ever omitted ``rel_type`` (e.g. an
         # upstream schema change, a None value, or a regression), ALL
-        # STITCH edges silently collapsed to ``binds`` — losing the 8
+        # STITCH edges silently collapsed to ``binds`` -- losing the 8
         # distinct action types (inhibits, activates, binds, other,
         # etc.) that STITCH provides. This is BUG-SCI-06 regression
         # risk. Root fix: if rel_type is missing/None/empty, log a
@@ -2989,7 +2989,7 @@ def step5_stitch_ingestion(
             stitch_grouped[("Compound", rel_type, "Protein")].append(edge)
         if _stitch_missing_rel_type_count > 0:
             logger.warning(
-                "STITCH: %d of %d edges had missing/empty rel_type — "
+                "STITCH: %d of %d edges had missing/empty rel_type -- "
                 "defaulted to 'interacts_with' (neutral) instead of "
                 "'binds' (mechanism-specific). Investigate "
                 "stitch_to_edge_records() output schema.",
@@ -3020,13 +3020,13 @@ def step5_stitch_ingestion(
         ))},
     )
     logger.info(
-        "Step 5 complete in %.1fs — %d STITCH edges", elapsed, len(edges)
+        "Step 5 complete in %.1fs -- %d STITCH edges", elapsed, len(edges)
     )
     return {"stitch_edges": len(edges), "elapsed": elapsed}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# STEP 6: SIDER Ingestion (Domain 3 — Scientific Correctness)
+# STEP 6: SIDER Ingestion (Domain 3 -- Scientific Correctness)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
@@ -3059,13 +3059,13 @@ def step6_sider_ingestion(
     logger.info("=" * 60)
     t0 = time.time()
 
-    # v43 ROOT FIX (P1 — step6 no data_source guard): SIDER is a
+    # v43 ROOT FIX (P1 -- step6 no data_source guard): SIDER is a
     # Phase-2-only source. When data_source="phase1", skip SIDER
     # because Phase 1 doesn't produce it.
     if data_source == "phase1":
         elapsed = time.time() - t0
         logger.info(
-            "Step 6 SKIPPED: data_source='phase1' — SIDER is a "
+            "Step 6 SKIPPED: data_source='phase1' -- SIDER is a "
             "Phase-2-only source (not in DOCX Phase 1's 7 sources). "
             "Phase 1 does not produce SIDER data."
         )
@@ -3091,7 +3091,7 @@ def step6_sider_ingestion(
                 sider_path,
             )
             return {"skipped": True, "reason": "skip_download", "elapsed": elapsed}
-        logger.info("Step 6: --skip-download set, but SIDER file is cached at %s — using it.", sider_path)
+        logger.info("Step 6: --skip-download set, but SIDER file is cached at %s -- using it.", sider_path)
     else:
         download_sider()
     df = parse_sider_side_effects()
@@ -3104,7 +3104,7 @@ def step6_sider_ingestion(
         with DrugOSGraphBuilder(Neo4jConfig()) as builder:
             if nodes:
                 # PATIENT SAFETY: Load as MedDRA_Term (canonical) not
-                # 'Side Effect' (legacy) — ensures the RL safety ranker
+                # 'Side Effect' (legacy) -- ensures the RL safety ranker
                 # can find adverse events via standard query pattern.
                 builder.load_nodes_batch("MedDRA_Term", nodes)
             if edges:
@@ -3119,14 +3119,14 @@ def step6_sider_ingestion(
         {"side_effects": len(nodes), "edges": len(edges)},
     )
     logger.info(
-        "Step 6 complete in %.1fs — %d side effects, %d edges",
+        "Step 6 complete in %.1fs -- %d side effects, %d edges",
         elapsed, len(nodes), len(edges),
     )
     return {"sider_nodes": len(nodes), "sider_edges": len(edges), "elapsed": elapsed}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# STEP 7: Additional Data Sources (Domain 3 — Scientific Correctness)
+# STEP 7: Additional Data Sources (Domain 3 -- Scientific Correctness)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
@@ -3156,13 +3156,13 @@ def step7_additional_sources(
     CSVs into the in-memory builder (which step3 then loaded into Neo4j).
     The previous code unconditionally re-downloaded STRING (~300 MB),
     UniProt (~800 MB), and ChEMBL (~2 GB SQLite) and re-loaded them into
-    Neo4j — creating DUPLICATE edges (one set from step3 with stripped
+    Neo4j -- creating DUPLICATE edges (one set from step3 with stripped
     properties labeled ``_source="DRKG"``, another from step7 with
     properties labeled ``_source="unknown"``) AND bypassing the 7 weeks
     of Phase 1 ETL work. The audit's bypass matrix showed "0 of 13
     Phase 2 loaders actually consume Phase 1 outputs at runtime in
     default mode." Fix: when ``data_source="phase1"``, SKIP step7a/7b/7c
-    entirely — the bridge already staged that data. Only run them when
+    entirely -- the bridge already staged that data. Only run them when
     ``data_source="drkg"`` (the legacy path that doesn't use the bridge).
 
     v15 ROOT FIX (REM-24): ``skip_download=True`` skips network downloads.
@@ -3178,9 +3178,9 @@ def step7_additional_sources(
         to locate Phase 1 CSVs as the canonical data source when
         ``skip_download=True``.
     data_source : str
-        v24: ``"phase1"`` (default) — STRING/UniProt/ChEMBL were already
+        v24: ``"phase1"`` (default) -- STRING/UniProt/ChEMBL were already
         loaded by the bridge in step1; skip 7a/7b/7c to avoid duplicates.
-        ``"drkg"`` — run 7a/7b/7c normally (legacy DRKG path).
+        ``"drkg"`` -- run 7a/7b/7c normally (legacy DRKG path).
 
     Returns
     -------
@@ -3200,17 +3200,17 @@ def step7_additional_sources(
     t0 = time.time()
     results: Dict[str, Any] = {}
 
-    # v29 ROOT FIX (audit I-2 / Compound Chain 2 — duplicate-load when
+    # v29 ROOT FIX (audit I-2 / Compound Chain 2 -- duplicate-load when
     # bridge already loaded): when data_source="phase1", the bridge in
     # step1 ALREADY loaded DisGeNET / OMIM / PubChem edges into the
     # graph (via step3). Re-running 7f/7g/7h creates DUPLICATE edges
     # in Neo4j. The audit found that 7a/7b/7c were correctly skipped,
     # but 7f/7g/7h were missed. ROOT FIX: skip 7f/7g/7h entirely when
-    # data_source="phase1" — the bridge is the authoritative source.
+    # data_source="phase1" -- the bridge is the authoritative source.
     _skip_7fgh = (data_source == "phase1")
     if _skip_7fgh:
         logger.info(
-            "Step 7 (v29 root fix): data_source=phase1 — DisGeNET/OMIM/"
+            "Step 7 (v29 root fix): data_source=phase1 -- DisGeNET/OMIM/"
             "PubChem were already loaded by the bridge in step1. "
             "Skipping 7f/7g/7h to avoid DUPLICATE edges in Neo4j "
             "(audit I-2). STRING/UniProt/ChEMBL (7a/7b/7c) were "
@@ -3230,7 +3230,7 @@ def step7_additional_sources(
     _phase1_bridge_used = (data_source == "phase1")
     if _phase1_bridge_used:
         logger.info(
-            "Step 7 (v24 root fix): data_source='phase1' — STRING, UniProt, "
+            "Step 7 (v24 root fix): data_source='phase1' -- STRING, UniProt, "
             "ChEMBL were already loaded from Phase 1 CSVs by the bridge in "
             "step1. Sub-steps 7a/7b/7c will be SKIPPED to avoid duplicate "
             "edges and to honor the user's requirement that the graph "
@@ -3238,7 +3238,7 @@ def step7_additional_sources(
         )
 
     # ─── P0-G2 ROOT FIX: load STRING aliases crosswalk BEFORE step7a ────
-    # The STRING aliases file (Ensembl → UniProt) was loaded in step8,
+    # The STRING aliases file (Ensembl -> UniProt) was loaded in step8,
     # AFTER step7a called string_to_edge_records. Because the crosswalk
     # was empty during step7a, unresolved_policy="drop" silently dropped
     # the ENTIRE STRING PPI subgraph when bypassing Phase 1
@@ -3246,7 +3246,7 @@ def step7_additional_sources(
     #
     # ROOT FIX: load the STRING aliases crosswalk at the TOP of step7,
     # before any STRING edge generation. This makes string_to_edge_records'
-    # Ensembl→UniProt resolution work. The step8 reload is idempotent
+    # Ensembl->UniProt resolution work. The step8 reload is idempotent
     # (register_* methods dedupe) and remains as a defensive second load.
     try:
         from .id_crosswalk import get_default_crosswalk as _p0g2_get_cw
@@ -3262,14 +3262,14 @@ def step7_additional_sources(
             _p0g2_after = _p0g2_cw.summary().get("ensembl_protein_to_uniprot", 0)
             logger.info(
                 "P0-G2 ROOT FIX: pre-loaded STRING aliases crosswalk "
-                "from %s — Ensembl→UniProt mappings %d → %d (loaded "
+                "from %s -- Ensembl->UniProt mappings %d -> %d (loaded "
                 "BEFORE step7a so string_to_edge_records can resolve "
                 "Ensembl IDs to UniProt instead of dropping them).",
                 _p0g2_aliases_path.name, _p0g2_before, _p0g2_after,
             )
         else:
             logger.info(
-                "P0-G2 ROOT FIX: STRING aliases file not found at %s — "
+                "P0-G2 ROOT FIX: STRING aliases file not found at %s -- "
                 "crosswalk will use builtin-only mappings. STRING edges "
                 "with unresolved Ensembl IDs will be handled per "
                 "unresolved_policy (default keep_ensembl in v82).",
@@ -3278,7 +3278,7 @@ def step7_additional_sources(
     except Exception as _p0g2_exc:
         logger.warning(
             "P0-G2 ROOT FIX: pre-loading STRING aliases crosswalk failed "
-            "(%s: %s) — continuing. step7a may drop unresolved STRING "
+            "(%s: %s) -- continuing. step7a may drop unresolved STRING "
             "edges if unresolved_policy='drop'.",
             type(_p0g2_exc).__name__, _p0g2_exc,
         )
@@ -3294,7 +3294,7 @@ def step7_additional_sources(
         # duplicate Protein-interacts_with-Protein edges, (c) waste
         # ~300 MB of bandwidth. Skip cleanly.
         logger.info(
-            "Step 7a SKIPPED (v24 root fix): data_source='phase1' — "
+            "Step 7a SKIPPED (v24 root fix): data_source='phase1' -- "
             "STRING PPI edges were already loaded from "
             "string_protein_protein_interactions.csv by the bridge "
             "in step1."
@@ -3316,7 +3316,7 @@ def step7_additional_sources(
         # ``parse_string_ppi_from_phase1_csv`` + emitter
         # ``string_to_edge_records_from_phase1``. This makes the v26
         # ROOT FIX Phase-1-aware functions LIVE code (previously they
-        # were defined but NEVER CALLED from step7 — always bypassed
+        # were defined but NEVER CALLED from step7 -- always bypassed
         # in favor of the raw 300 MB download). Phase 1's CSV is the
         # source of truth when available; the raw parser is the fallback.
         from .string_loader import (
@@ -3355,6 +3355,55 @@ def step7_additional_sources(
                 results["string_edges"] = len(string_edges)
                 results["string_source"] = "phase1_csv"
             else:
+                # P2-003 FORENSIC ROOT FIX (Team 4 -- silent Phase 1 bypass):
+                # The previous code silently fell back to a raw STRING
+                # download (~300 MB) when Phase 1's CSV was absent. This
+                # BYPASSED Phase 1's cleaning/normalization/entity-resolution,
+                # violating the DOCX architecture ("Airflow -> Phase 1 ->
+                # PostgreSQL -> Phase 2"). Two runs that differed only in
+                # Phase 1 CSV availability produced different graphs (one
+                # with Phase 1 cleaning, one without). Worse -- the raw
+                # download path does NOT apply Phase 1's organism filtering,
+                # so the KG silently contains non-human proteins.
+                #
+                # ROOT FIX: in production (DRUGOS_ENVIRONMENT != "dev"), the
+                # raw download fall-back is FORBIDDEN. The operator MUST
+                # either (a) run Phase 1 to produce the CSV, or (b) explicitly
+                # opt in to permissive mode via DRUGOS_ALLOW_PERMISSIVE_KG=1.
+                # In dev (DRUGOS_ENVIRONMENT == "dev" or
+                # DRUGOS_ALLOW_PERMISSIVE_KG=1), the raw download is allowed
+                # for unit tests / known-broken snapshots.
+                import os as _os_env_p2_003
+                _env_p2_003 = _os_env_p2_003.environ.get("DRUGOS_ENVIRONMENT", "dev")
+                _permissive_p2_003 = (
+                    _os_env_p2_003.environ.get("DRUGOS_ALLOW_PERMISSIVE_KG", "")
+                    == "1"
+                )
+                if _env_p2_003 != "dev" and not _permissive_p2_003:
+                    _err_msg_p2_003 = (
+                        f"P2-003 ROOT FIX: Phase 1's cleaned STRING CSV is "
+                        f"missing (expected at {_p1_string_csv}) and the "
+                        f"raw STRING download fall-back is FORBIDDEN in "
+                        f"production (DRUGOS_ENVIRONMENT={_env_p2_003}). "
+                        f"The previous code silently re-downloaded raw "
+                        f"STRING data, BYPASSING Phase 1's cleaning/"
+                        f"normalization/entity-resolution -- violating the "
+                        f"DOCX architecture. Run Phase 1 to produce the "
+                        f"CSV, OR set DRUGOS_ALLOW_PERMISSIVE_KG=1 to "
+                        f"explicitly opt in to the legacy permissive "
+                        f"behavior (unit tests / known-broken snapshots "
+                        f"only)."
+                    )
+                    logger.error(_err_msg_p2_003)
+                    raise RuntimeError(_err_msg_p2_003)
+                logger.warning(
+                    "P2-003: Phase 1 STRING CSV missing -- falling back to "
+                    "raw STRING download (DRUGOS_ENVIRONMENT=%s, "
+                    "DRUGOS_ALLOW_PERMISSIVE_KG=%s). This BYPASSES Phase 1's "
+                    "cleaning/normalization -- NOT safe for production.",
+                    _env_p2_003,
+                    "1" if _permissive_p2_003 else "0",
+                )
                 # Fall back to raw STRING download + parse.
                 if not skip_download:
                     download_string()
@@ -3363,7 +3412,7 @@ def step7_additional_sources(
                 # default "drop". Even after the P0-G2 pre-load of STRING
                 # aliases, some Ensembl IDs (isoforms, novel proteins) may
                 # not have a UniProt mapping. "drop" silently discards those
-                # edges — losing PPI signal. "keep_ensembl" preserves the
+                # edges -- losing PPI signal. "keep_ensembl" preserves the
                 # edge with the Ensembl ID; a later entity-resolution pass
                 # can re-resolve it. This is the scientifically-correct
                 # default for a knowledge graph that MUST preserve all
@@ -3375,13 +3424,13 @@ def step7_additional_sources(
                 results["string_source"] = "raw_download"
 
                 # v15 ROOT FIX (DC-10 / REM-23): the freshness check used to
-                # stat() `9606.protein.info.v12.0.txt.gz` — a file the STRING
+                # stat() `9606.protein.info.v12.0.txt.gz` -- a file the STRING
                 # downloader NEVER writes. The downloader writes to
                 # `DATA_SOURCES["string"]["filename"]` which is currently
                 # `string_ppi.txt.gz` (a renamed cache of
                 # `9606.protein.links.full.v12.0.txt.gz`). The freshness check
                 # therefore always fell through to the OSError catch and logged
-                # at DEBUG — invisible to operators. Fix: stat the actual file
+                # at DEBUG -- invisible to operators. Fix: stat the actual file
                 # the downloader writes.
                 _string_filename = _DS.get("string", {}).get("filename", "string_ppi.txt.gz")
                 _check_data_freshness(
@@ -3399,13 +3448,13 @@ def step7_additional_sources(
                             "Protein", "interacts_with", "Protein", batch
                         )
       except Exception as e:
-        # V19 ROOT FIX (SF-7 — verification agent flagged this as PARTIAL):
+        # V19 ROOT FIX (SF-7 -- verification agent flagged this as PARTIAL):
         # the V18 code logged ERROR and continued with the STRING source
-        # missing — silently producing a degraded KG missing the PPI
+        # missing -- silently producing a degraded KG missing the PPI
         # network (the foundation of "multi-hop" reasoning per the DOCX).
         # The ROOT fix is to RAISE in production (same
         # DRUGOS_ALLOW_PERMISSIVE_DPI=1 pattern as SF-3). STRING is a
-        # CRITICAL data source per the project spec — its absence
+        # CRITICAL data source per the project spec -- its absence
         # invalidates downstream multi-hop queries.
         import os as _os
         _permissive = _os.environ.get(
@@ -3414,7 +3463,7 @@ def step7_additional_sources(
         results["string_error"] = str(e)
         if _permissive:
             logger.error(
-                "STRING ingestion failed (critical data source) — "
+                "STRING ingestion failed (critical data source) -- "
                 "DRUGOS_ALLOW_PERMISSIVE_KG=1 is set, continuing with "
                 "STRING edges MISSING. The KG will be missing the PPI "
                 "network (multi-hop queries degraded): %s", e,
@@ -3422,14 +3471,14 @@ def step7_additional_sources(
             )
         else:
             logger.error(
-                "STRING ingestion failed (critical data source) — "
+                "STRING ingestion failed (critical data source) -- "
                 "FATAL. Set DRUGOS_ALLOW_PERMISSIVE_KG=1 to continue "
                 "with STRING missing (unit tests / known-broken "
                 "snapshots only): %s", e, exc_info=True,
             )
             raise RuntimeError(
                 f"STRING ingestion failed (critical data source): {e}. "
-                f"V19 SF-7 root fix — the V18 default of log-and-continue "
+                f"V19 SF-7 root fix -- the V18 default of log-and-continue "
                 f"silently produced a KG missing the PPI network. Set "
                 f"DRUGOS_ALLOW_PERMISSIVE_KG=1 to opt in to the legacy "
                 f"permissive behavior."
@@ -3444,7 +3493,7 @@ def step7_additional_sources(
         # Phase 1's cleaned protein data, (b) create duplicate Protein
         # nodes and xref edges, (c) waste ~800 MB of bandwidth.
         logger.info(
-            "Step 7b SKIPPED (v24 root fix): data_source='phase1' — "
+            "Step 7b SKIPPED (v24 root fix): data_source='phase1' -- "
             "UniProt Protein nodes + xref edges were already loaded "
             "from uniprot_proteins.csv by the bridge in step1."
         )
@@ -3467,7 +3516,7 @@ def step7_additional_sources(
         # ``uniprot_to_node_records_from_phase1`` /
         # ``uniprot_to_edge_records_from_phase1``. This makes the v26
         # ROOT FIX Phase-1-aware functions LIVE code (previously they
-        # were defined but NEVER CALLED from step7 — always bypassed
+        # were defined but NEVER CALLED from step7 -- always bypassed
         # in favor of the raw 800 MB download). Phase 1's CSV is the
         # source of truth when available; the raw parser is the fallback.
         from .uniprot_loader import (
@@ -3506,7 +3555,7 @@ def step7_additional_sources(
                 uniprot_records = _parse_uniprot_p1(_p1_uniprot_csv)
                 uniprot_nodes = _uniprot_nodes_from_p1(uniprot_records)
                 # v9 ROOT FIX (audit F5.2.1): the previous code NEVER called
-                # uniprot_to_edge_records — the entire function was P1-DEAD code.
+                # uniprot_to_edge_records -- the entire function was P1-DEAD code.
                 # Now we call it and load the cross-reference edges. Combined
                 # with the src_id fix in uniprot_loader.py (now emits bare
                 # accession "P23219" instead of "uniprot:P23219"), these edges
@@ -3516,6 +3565,43 @@ def step7_additional_sources(
                 results["uniprot_edges"] = len(uniprot_edges)
                 results["uniprot_source"] = "phase1_csv"
             else:
+                # P2-003 FORENSIC ROOT FIX (Team 4 -- silent Phase 1 bypass):
+                # Same fix as step7a (STRING). The raw UniProt download
+                # (~800 MB) BYPASSES Phase 1's cleaning/normalization. In
+                # production, this is FORBIDDEN -- the operator MUST run
+                # Phase 1 first OR explicitly opt in via
+                # DRUGOS_ALLOW_PERMISSIVE_KG=1.
+                import os as _os_env_p2_003b
+                _env_p2_003b = _os_env_p2_003b.environ.get("DRUGOS_ENVIRONMENT", "dev")
+                _permissive_p2_003b = (
+                    _os_env_p2_003b.environ.get("DRUGOS_ALLOW_PERMISSIVE_KG", "")
+                    == "1"
+                )
+                if _env_p2_003b != "dev" and not _permissive_p2_003b:
+                    _err_msg_p2_003b = (
+                        f"P2-003 ROOT FIX: Phase 1's cleaned UniProt CSV is "
+                        f"missing (expected at {_p1_uniprot_csv}) and the "
+                        f"raw UniProt download fall-back is FORBIDDEN in "
+                        f"production (DRUGOS_ENVIRONMENT={_env_p2_003b}). "
+                        f"The previous code silently re-downloaded raw "
+                        f"UniProt data, BYPASSING Phase 1's cleaning/"
+                        f"normalization/entity-resolution -- violating the "
+                        f"DOCX architecture. Run Phase 1 to produce the "
+                        f"CSV, OR set DRUGOS_ALLOW_PERMISSIVE_KG=1 to "
+                        f"explicitly opt in to the legacy permissive "
+                        f"behavior (unit tests / known-broken snapshots "
+                        f"only)."
+                    )
+                    logger.error(_err_msg_p2_003b)
+                    raise RuntimeError(_err_msg_p2_003b)
+                logger.warning(
+                    "P2-003: Phase 1 UniProt CSV missing -- falling back to "
+                    "raw UniProt download (DRUGOS_ENVIRONMENT=%s, "
+                    "DRUGOS_ALLOW_PERMISSIVE_KG=%s). This BYPASSES Phase 1's "
+                    "cleaning/normalization -- NOT safe for production.",
+                    _env_p2_003b,
+                    "1" if _permissive_p2_003b else "0",
+                )
                 # Fall back to raw UniProt download + parse.
                 if not skip_download:
                     download_uniprot()
@@ -3541,7 +3627,7 @@ def step7_additional_sources(
                         for i in range(0, len(uniprot_edges), edge_batch_size):
                             batch = uniprot_edges[i : i + edge_batch_size]
                             # UniProt edges are heterogeneous (Protein -> ExternalRef,
-                            # Protein -> Gene, etc.) — use the per-edge src_type/dst_type
+                            # Protein -> Gene, etc.) -- use the per-edge src_type/dst_type
                             # if present, otherwise default to Protein -> ExternalRef.
                             # kg_builder.load_edges_bulk_create takes (src_label,
                             # rel_type, dst_label, edges). The edges themselves carry
@@ -3573,7 +3659,7 @@ def step7_additional_sources(
         # dual-parser drift between Phase 1's chembl_pipeline and Phase 2's
         # chembl_loader.
         logger.info(
-            "Step 7c SKIPPED (v24 root fix): data_source='phase1' — "
+            "Step 7c SKIPPED (v24 root fix): data_source='phase1' -- "
             "ChEMBL Compound-{inhibits,activates,targets}-Protein edges "
             "were already loaded from chembl_activities_clean.csv by the "
             "bridge in step1."
@@ -3595,7 +3681,7 @@ def step7_additional_sources(
         # ``parse_chembl_activities_from_phase1_csv`` + emitter
         # ``chembl_to_edge_records_from_phase1``. This makes the v26
         # ROOT FIX Phase-1-aware functions LIVE code (previously they
-        # were defined but NEVER CALLED from step7 — always bypassed
+        # were defined but NEVER CALLED from step7 -- always bypassed
         # in favor of the raw 2 GB SQLite download). Phase 1's CSV is
         # the source of truth when available; the raw parser is the
         # fallback.
@@ -3640,7 +3726,7 @@ def step7_additional_sources(
                 # this, edges would carry raw `CHEMBL25` IDs that never
                 # match any staged Compound. We read `chembl_drugs.csv`
                 # directly (it's the same file the phase1_bridge uses
-                # to stage Compound nodes — same column names:
+                # to stage Compound nodes -- same column names:
                 # `chembl_id`, `inchikey`).
                 _compound_canonical_map: Dict[str, str] = {}
                 _p1_chembl_drugs_csv = (
@@ -3660,7 +3746,7 @@ def step7_additional_sources(
                 except Exception as _map_exc:
                     logger.debug(
                         "Could not build compound_canonical_map from "
-                        "Phase 1 chembl_drugs.csv (%s) — chembl emitter "
+                        "Phase 1 chembl_drugs.csv (%s) -- chembl emitter "
                         "will fall back to per-row inchikey.",
                         _map_exc,
                     )
@@ -3671,6 +3757,45 @@ def step7_additional_sources(
                 results["chembl_edges"] = len(chembl_edges)
                 results["chembl_source"] = "phase1_csv"
             else:
+                # P2-003 FORENSIC ROOT FIX (Team 4 -- silent Phase 1 bypass):
+                # Same fix as step7a (STRING) and step7b (UniProt). The raw
+                # ChEMBL SQLite download (~2 GB) BYPASSES Phase 1's
+                # chembl_id normalization, organism filtering, etc. -- the
+                # KG silently contains contaminants (non-human proteins,
+                # deprecated ChEMBL IDs). In production, this is FORBIDDEN.
+                import os as _os_env_p2_003c
+                _env_p2_003c = _os_env_p2_003c.environ.get("DRUGOS_ENVIRONMENT", "dev")
+                _permissive_p2_003c = (
+                    _os_env_p2_003c.environ.get("DRUGOS_ALLOW_PERMISSIVE_KG", "")
+                    == "1"
+                )
+                if _env_p2_003c != "dev" and not _permissive_p2_003c:
+                    _err_msg_p2_003c = (
+                        f"P2-003 ROOT FIX: Phase 1's cleaned ChEMBL CSV is "
+                        f"missing (expected at {_p1_chembl_csv}) and the "
+                        f"raw ChEMBL SQLite download fall-back is FORBIDDEN "
+                        f"in production (DRUGOS_ENVIRONMENT={_env_p2_003c}). "
+                        f"The previous code silently re-downloaded raw "
+                        f"ChEMBL data, BYPASSING Phase 1's chembl_id "
+                        f"normalization and organism filtering -- violating "
+                        f"the DOCX architecture. The KG would silently "
+                        f"contain contaminants (non-human proteins, "
+                        f"deprecated ChEMBL IDs). Run Phase 1 to produce "
+                        f"the CSV, OR set DRUGOS_ALLOW_PERMISSIVE_KG=1 to "
+                        f"explicitly opt in to the legacy permissive "
+                        f"behavior (unit tests / known-broken snapshots "
+                        f"only)."
+                    )
+                    logger.error(_err_msg_p2_003c)
+                    raise RuntimeError(_err_msg_p2_003c)
+                logger.warning(
+                    "P2-003: Phase 1 ChEMBL CSV missing -- falling back to "
+                    "raw ChEMBL SQLite download (DRUGOS_ENVIRONMENT=%s, "
+                    "DRUGOS_ALLOW_PERMISSIVE_KG=%s). This BYPASSES Phase 1's "
+                    "cleaning/normalization -- NOT safe for production.",
+                    _env_p2_003c,
+                    "1" if _permissive_p2_003c else "0",
+                )
                 # Fall back to raw ChEMBL SQLite download + parse.
                 if not skip_download:
                     download_chembl()
@@ -3685,7 +3810,7 @@ def step7_additional_sources(
                 from .kg_builder import DrugOSGraphBuilder
 
                 chembl_grouped: Dict[Tuple[str, str, str], List[Dict[str, Any]]] = defaultdict(list)
-                # v22 ROOT FIX (Audit section 7 finding 8 / §7 finding 12 —
+                # v22 ROOT FIX (Audit section 7 finding 8 / §7 finding 12 --
                 # STITCH-style silent rel_type collapse + unknown
                 # standard_type defaults to 'binds'): the previous
                 # ``edge.get("rel_type", "binds")`` silently collapsed
@@ -3714,7 +3839,7 @@ def step7_additional_sources(
                 if _chembl_missing_rel_type_count > 0:
                     logger.warning(
                         "ChEMBL: %d of %d edges had missing/empty rel_type "
-                        "— defaulted to 'targets' (consistent with "
+                        "-- defaulted to 'targets' (consistent with "
                         "standard_type_to_relation). Investigate "
                         "chembl_to_edge_records() output schema.",
                         _chembl_missing_rel_type_count, len(chembl_edges),
@@ -3732,7 +3857,7 @@ def step7_additional_sources(
                                 src_t, rel_t, dst_t, len(batch),
                             )
       except Exception as e:
-        # v16 ROOT FIX (SF-7): ChEMBL is a CRITICAL data source — it
+        # v16 ROOT FIX (SF-7): ChEMBL is a CRITICAL data source -- it
         # provides the drug-protein interaction (DPI) edges that are the
         # backbone of the knowledge graph. The previous code logged at
         # WARNING, hiding catastrophic DPI loss as a routine hiccup.
@@ -3742,7 +3867,7 @@ def step7_additional_sources(
         # so ``_check_v1_launch_criteria`` can fail the launch if DPI
         # edges are missing.
         logger.error(
-            "ChEMBL ingestion FAILED — drug-protein interaction (DPI) "
+            "ChEMBL ingestion FAILED -- drug-protein interaction (DPI) "
             "edge set will be MISSING from the graph. The Graph "
             "Transformer's training data will lack all ChEMBL-sourced "
             "bioactivity edges. V1 launch MUST be blocked until ChEMBL "
@@ -3907,7 +4032,7 @@ def step7_additional_sources(
             results["clinicaltrials_edges"] = len(ct_edges)
             # P0-G3 ROOT FIX (cont.): generate flat node records and
             # load them into the KG. Previously, only edges were loaded
-            # — the MeSH Compound/Disease nodes referenced by the edges
+            # -- the MeSH Compound/Disease nodes referenced by the edges
             # were never created, so the edges dangled (or referenced
             # nodes created by other loaders, missing the ClinicalTrials
             # specific MeSH terms). Now we generate and load the nodes.
@@ -3977,7 +4102,7 @@ def step7_additional_sources(
         )
         if _ct_strict:
             logger.error(
-                "ClinicalTrials ingestion FAILED in strict mode — marking "
+                "ClinicalTrials ingestion FAILED in strict mode -- marking "
                 "critical_failure (will block V1 launch): %s", e
             )
             results["clinicaltrials_critical_failure"] = True
@@ -3985,13 +4110,13 @@ def step7_additional_sources(
             logger.warning("ClinicalTrials ingestion failed: %s", e)
         results["clinicaltrials_error"] = str(e)
 
-    # ─── 7f: DisGeNET (BUG-SCI-03 FIX — missing project source) ───────────
+    # ─── 7f: DisGeNET (BUG-SCI-03 FIX -- missing project source) ───────────
     # v35 ROOT FIX (H-5): replaced ``raise ImportError("skip_7f_phase1_bridge_loaded")``
     # control-flow abuse with an explicit if/else. The previous pattern
     # hijacked the existing ``except ImportError:`` clause (originally
     # meant to handle a missing ``disgenet_loader.py``) to skip the
     # step when ``data_source="phase1"``. That made the warning
-    # "DisGeNET loader not available — Create disgenet_loader.py"
+    # "DisGeNET loader not available -- Create disgenet_loader.py"
     # fire EVERY time the skip path was taken, confusing operators
     # (the loader IS available; we deliberately skipped).
     try:
@@ -4012,9 +4137,9 @@ def step7_additional_sources(
             # loader's download_disgenet() invokes Phase 1's DisgenetPipeline
             # which hits the public DisGeNET API (rate-limited, requires API key).
             if skip_download and not _is_cached("disgenet", "disgenet_gda.csv"):
-                # Also check if Phase 1's CSV is present — if so, use it.
+                # Also check if Phase 1's CSV is present -- if so, use it.
                 # v22 ROOT FIX: the previous default `RAW_DIR.parent / "phase1" / "processed_data"`
-                # resolved to phase2/data/phase1/processed_data — WRONG. The actual
+                # resolved to phase2/data/phase1/processed_data -- WRONG. The actual
                 # Phase 1 processed_data is at <project_root>/phase1/processed_data.
                 # Use the canonical DEFAULT_PHASE1_PROCESSED_DIR from phase1_bridge
                 # so step7's fallback finds the CSVs that step1's bridge already
@@ -4030,7 +4155,7 @@ def step7_additional_sources(
                     results["disgenet_skipped"] = True
                     results["disgenet_skip_reason"] = "skip_download"
                 else:
-                    logger.info("Step 7f: --skip-download set, but Phase 1 DisGeNET CSV is cached at %s — using it.", phase1_dg)
+                    logger.info("Step 7f: --skip-download set, but Phase 1 DisGeNET CSV is cached at %s -- using it.", phase1_dg)
                     # Use the Phase 1 CSV directly via parse_disgenet.
                     dg_df = parse_disgenet(filepath=phase1_dg) if 'filepath' in parse_disgenet.__code__.co_varnames else parse_disgenet()
                     dg_nodes = disgenet_to_node_records(dg_df)
@@ -4051,7 +4176,7 @@ def step7_additional_sources(
                 # v9 ROOT FIX (audit F5 / F7.4): disgenet_to_node_records
                 # returns a MIXED list of Disease AND Gene nodes (each node
                 # carries its own ``label`` field). The previous code passed
-                # the entire mixed list under a single label "Disease" —
+                # the entire mixed list under a single label "Disease" --
                 # load_nodes_batch then validated every node against
                 # ID_PATTERNS["Disease"], dead-lettering every Gene ID like
                 # "5742" or "SYM:FGFR3". Split by label first so each
@@ -4061,7 +4186,7 @@ def step7_additional_sources(
                 other_nodes = [n for n in dg_nodes if n.get("label") not in ("Disease", "Gene")]
                 if other_nodes:
                     logger.warning(
-                        "DisGeNET: %d nodes have unexpected labels %s — skipping",
+                        "DisGeNET: %d nodes have unexpected labels %s -- skipping",
                         len(other_nodes),
                         {n.get("label") for n in other_nodes},
                     )
@@ -4071,7 +4196,7 @@ def step7_additional_sources(
                     if dg_gene_nodes:
                         builder.load_nodes_batch("Gene", dg_gene_nodes)
                     if dg_edges:
-                        # v29 ROOT FIX (audit L-1 — kg_builder relation collapse):
+                        # v29 ROOT FIX (audit L-1 -- kg_builder relation collapse):
                         # The previous code called:
                         #   builder.load_edges_bulk_create(
                         #       "Gene", "associated_with", "Disease", dg_edges
@@ -4096,7 +4221,7 @@ def step7_additional_sources(
                         for e in dg_edges:
                             rt = e.get("rel_type") or "associated_with"
                             # Strip the rel_type from the edge dict before
-                            # loading — kg_builder doesn't expect it as a
+                            # loading -- kg_builder doesn't expect it as a
                             # property, and the positional arg is the
                             # authoritative rel_type.
                             e_clean = {k: v for k, v in e.items() if k != "rel_type"}
@@ -4107,7 +4232,7 @@ def step7_additional_sources(
                             )
     except ImportError:
         logger.warning(
-            "DisGeNET loader not available — gene-disease associations "
+            "DisGeNET loader not available -- gene-disease associations "
             "will rely on DRKG Hetionet subset only. "
             "Create disgenet_loader.py for full coverage."
         )
@@ -4118,7 +4243,7 @@ def step7_additional_sources(
         )
         results["disgenet_error"] = str(e)
 
-    # ─── 7g: OMIM (BUG-SCI-03 FIX — missing project source) ───────────────
+    # ─── 7g: OMIM (BUG-SCI-03 FIX -- missing project source) ───────────────
     # v35 ROOT FIX (H-5): replaced ``raise ImportError("skip_7g_phase1_bridge_loaded")``
     # control-flow abuse with explicit if/else (see 7f comment above).
     try:
@@ -4145,7 +4270,7 @@ def step7_additional_sources(
                     results["omim_skipped"] = True
                     results["omim_skip_reason"] = "skip_download"
                 else:
-                    logger.info("Step 7g: --skip-download set, but Phase 1 OMIM CSV is cached at %s — using it.", phase1_omim)
+                    logger.info("Step 7g: --skip-download set, but Phase 1 OMIM CSV is cached at %s -- using it.", phase1_omim)
                     omim_df = parse_omim(filepath=phase1_omim) if 'filepath' in parse_omim.__code__.co_varnames else parse_omim()
                     omim_nodes = omim_to_node_records(omim_df)
                     omim_edges = omim_to_edge_records(omim_df)
@@ -4162,14 +4287,14 @@ def step7_additional_sources(
             if locals().get('omim_edges') and not skip_neo4j and omim_edges:
                 from .kg_builder import DrugOSGraphBuilder
 
-                # v9 ROOT FIX (audit F5 / F7.4): same as DisGeNET — split
+                # v9 ROOT FIX (audit F5 / F7.4): same as DisGeNET -- split
                 # the mixed-type node list by label before load_nodes_batch.
                 omim_disease_nodes = [n for n in omim_nodes if n.get("label") == "Disease"]
                 omim_gene_nodes = [n for n in omim_nodes if n.get("label") == "Gene"]
                 other_nodes = [n for n in omim_nodes if n.get("label") not in ("Disease", "Gene")]
                 if other_nodes:
                     logger.warning(
-                        "OMIM: %d nodes have unexpected labels %s — skipping",
+                        "OMIM: %d nodes have unexpected labels %s -- skipping",
                         len(other_nodes),
                         {n.get("label") for n in other_nodes},
                     )
@@ -4179,14 +4304,14 @@ def step7_additional_sources(
                     if omim_gene_nodes:
                         builder.load_nodes_batch("Gene", omim_gene_nodes)
                     if omim_edges:
-                        # v29 ROOT FIX (audit L-1 — kg_builder relation collapse):
-                        # Same fix as DisGeNET above — group by per-edge rel_type
+                        # v29 ROOT FIX (audit L-1 -- kg_builder relation collapse):
+                        # Same fix as DisGeNET above -- group by per-edge rel_type
                         # instead of hard-coding "associated_with". OMIM edges
                         # can be "associated_with" (Mendelian causative) or
                         # "susceptible_to" (polygenic risk) per the v27 ROOT FIX.
                         # Conflating them under "associated_with" teaches the
                         # model that BRCA1+breast_cancer (causative) is equivalent
-                        # to FGFR3+achondroplasia (Mendelian dominant) — destroying
+                        # to FGFR3+achondroplasia (Mendelian dominant) -- destroying
                         # the scientific distinction the v27 fix introduced.
                         from collections import defaultdict as _dd_omim
                         _omim_by_rel: dict = _dd_omim(list)
@@ -4200,7 +4325,7 @@ def step7_additional_sources(
                             )
     except ImportError:
         logger.warning(
-            "OMIM loader not available — rare disease genetic evidence "
+            "OMIM loader not available -- rare disease genetic evidence "
             "will be limited. Create omim_loader.py for full coverage."
         )
         results["omim_error"] = "Loader not available"
@@ -4210,7 +4335,7 @@ def step7_additional_sources(
         )
         results["omim_error"] = str(e)
 
-    # ─── 7h: PubChem (BUG-SCI-03 FIX — missing project source) ────────────
+    # ─── 7h: PubChem (BUG-SCI-03 FIX -- missing project source) ────────────
     # v35 ROOT FIX (H-5): replaced ``raise ImportError("skip_7h_phase1_bridge_loaded")``
     # control-flow abuse with explicit if/else (see 7f comment above).
     try:
@@ -4236,7 +4361,7 @@ def step7_additional_sources(
                     results["pubchem_skipped"] = True
                     results["pubchem_skip_reason"] = "skip_download"
                 else:
-                    logger.info("Step 7h: --skip-download set, but Phase 1 PubChem CSV is cached at %s — using it.", phase1_pubchem)
+                    logger.info("Step 7h: --skip-download set, but Phase 1 PubChem CSV is cached at %s -- using it.", phase1_pubchem)
                     pubchem_records = parse_pubchem(filepath=phase1_pubchem) if 'filepath' in parse_pubchem.__code__.co_varnames else parse_pubchem()
                     pubchem_nodes = pubchem_to_node_records(pubchem_records)
                     results["pubchem_nodes"] = len(pubchem_nodes)
@@ -4256,7 +4381,7 @@ def step7_additional_sources(
                         builder.load_nodes_batch("Compound", batch)
     except ImportError:
         logger.warning(
-            "PubChem loader not available — molecular fingerprints "
+            "PubChem loader not available -- molecular fingerprints "
             "for Compound features will be limited. "
             "Create pubchem_loader.py for full coverage."
         )
@@ -4267,7 +4392,7 @@ def step7_additional_sources(
         )
         results["pubchem_error"] = str(e)
 
-    # ─── 7i: GEO (GAP-ARCH-03 FIX — exists but never called) ─────────────
+    # ─── 7i: GEO (GAP-ARCH-03 FIX -- exists but never called) ─────────────
     try:
         from .geo_loader import GeoLoader
 
@@ -4290,13 +4415,13 @@ def step7_additional_sources(
             # PS-9 / DC-9 ROOT FIX: geo_loader emits head_type /
             # relation / tail_type keys (see geo_loader.to_graph),
             # NOT src_type / rel_type / dst_type. The previous code
-            # read the wrong keys and every .get() returned None —
+            # read the wrong keys and every .get() returned None --
             # so every GEO edge was loaded under the wrong edge type
             # (:Gene)-[:expressed_in]->(:Disease) instead of the
             # biologically-correct (:Protein)-[:expressed_in]->(:Anatomy),
             # producing orphan edges disconnected from the rest of the
             # graph. Also removed the dead `for node in geo_nodes`
-            # loop — geo_loader.to_graph() always returns ([], edges)
+            # loop -- geo_loader.to_graph() always returns ([], edges)
             # per its contract (GEO emits edges only; nodes are owned
             # by uniprot_loader / uberon_loader).
             with DrugOSGraphBuilder(Neo4jConfig()) as builder:
@@ -4311,12 +4436,12 @@ def step7_additional_sources(
                             geo_edges[i : i + batch_size],
                         )
     except ImportError:
-        logger.info("GEO loader not available — skipping.")
+        logger.info("GEO loader not available -- skipping.")
     except Exception as e:
         # v20 SF-7 ROOT FIX: GEO loader failures were logged as WARNING
         # ("non-critical") and silently swallowed. The audit's PS-9
         # compound chain showed that GEO's wrong edge labels produce
-        # orphan edges disconnected from the rest of the graph — that
+        # orphan edges disconnected from the rest of the graph -- that
         # is NOT non-critical. In strict mode, surface as
         # critical_failure so V1 launch criteria hard-fails.
         _geo_strict = (
@@ -4325,7 +4450,7 @@ def step7_additional_sources(
         )
         if _geo_strict:
             logger.error(
-                "GEO ingestion FAILED in strict mode — marking "
+                "GEO ingestion FAILED in strict mode -- marking "
                 "critical_failure (will block V1 launch): %s", e
             )
             results["geo_critical_failure"] = True
@@ -4339,12 +4464,12 @@ def step7_additional_sources(
         "Ingest additional data sources (9 sources)",
         {"sources": results},
     )
-    logger.info("Step 7 complete in %.1fs — %s", elapsed, results)
+    logger.info("Step 7 complete in %.1fs -- %s", elapsed, results)
     return {"results": results, "elapsed": elapsed}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# STEP 8: Entity Resolution (Domain 7 — Idempotency, Domain 3 — Science)
+# STEP 8: Entity Resolution (Domain 7 -- Idempotency, Domain 3 -- Science)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
@@ -4391,7 +4516,7 @@ def step8_entity_resolution(df, drug_records) -> dict:
     resolver.resolve_genes_from_drkg(df)
 
     # v13 ROOT FIX (DC-3 / Compound-1 "Canonicalization Theater"):
-    # v12 NEVER called ``resolver.merge_mappings_by_inchikey()`` —
+    # v12 NEVER called ``resolver.merge_mappings_by_inchikey()`` --
     # the function existed but was dead code. The project's core
     # mandate ("convert all compound IDs to a common format
     # (InChIKey)") was only partially satisfied by the inline DC-2
@@ -4405,7 +4530,7 @@ def step8_entity_resolution(df, drug_records) -> dict:
     # REM-7 ROOT FIX: previously if merge_mappings_by_inchikey
     # raised, the except block only logged a WARNING and continued.
     # The log message literally said "This violates the project's
-    # core InChIKey mandate" — yet execution continued anyway,
+    # core InChIKey mandate" -- yet execution continued anyway,
     # silently undoing the v13 root fix. The downstream pipeline
     # would then proceed with duplicate Compound nodes per molecule
     # and report an apparently-successful run. For a biomedical KG
@@ -4418,8 +4543,8 @@ def step8_entity_resolution(df, drug_records) -> dict:
     try:
         inchikey_merge_stats = resolver.merge_mappings_by_inchikey()
         logger.info(
-            "Step 8: merge_mappings_by_inchikey — %d groups, "
-            "%d merged, %d Compound mappings before → %d after, "
+            "Step 8: merge_mappings_by_inchikey -- %d groups, "
+            "%d merged, %d Compound mappings before -> %d after, "
             "%d conflicts detected.",
             inchikey_merge_stats.get("groups_total", 0),
             inchikey_merge_stats.get("groups_merged", 0),
@@ -4428,24 +4553,24 @@ def step8_entity_resolution(df, drug_records) -> dict:
             inchikey_merge_stats.get("conflicts_detected", 0),
         )
     except Exception as exc:
-        # REM-7 ROOT FIX: FATAL — InChIKey merge is the project's
+        # REM-7 ROOT FIX: FATAL -- InChIKey merge is the project's
         # core mandate. Continuing would silently produce a graph
         # with duplicate Compound nodes per molecule.
         logger.error(
-            "Step 8: merge_mappings_by_inchikey FAILED — "
+            "Step 8: merge_mappings_by_inchikey FAILED -- "
             "cross-source Compound duplicates will NOT be merged. "
             "This violates the project's core InChIKey mandate. "
             "Aborting step 8 (FATAL). Original error: %s",
             exc, exc_info=True,
         )
         raise RuntimeError(
-            "Step 8 InChIKey merge failed — project's core mandate "
+            "Step 8 InChIKey merge failed -- project's core mandate "
             "violated. Original error: " + str(exc)
         ) from exc
 
     # ─── P0-G1 ROOT FIX: populate compound_to_inchikey crosswalk ──────────
     # The IDCrosswalk.compound_to_inchikey dict was NEVER populated in
-    # production — register_compound_inchikey and load_compound_inchikey_
+    # production -- register_compound_inchikey and load_compound_inchikey_
     # crosswalk were dead code. The 7 Compound ID namespaces (InChIKey,
     # CHEMBL, CID, CIDm/CIDs, MESH, DB-id, NAME:) stayed disjoint. Same
     # drug appeared as 7 different nodes. Graph Transformer learned wrong
@@ -4454,7 +4579,7 @@ def step8_entity_resolution(df, drug_records) -> dict:
     # ROOT FIX: after merge_mappings_by_inchikey unifies Compound mappings
     # (canonical_id = inchikey, aliases = {drugbank_id, chembl_id,
     # pubchem_cid, chebi_id, drkg_id, ...}), iterate the resolver's
-    # Compound mappings and register EVERY alias → inchikey pair in the
+    # Compound mappings and register EVERY alias -> inchikey pair in the
     # crosswalk. This makes compound_id_to_inchikey() work for all
     # downstream loaders (stitch, sider, drkg, clinicaltrials) so they
     # can normalize Compound references to the canonical InChIKey BEFORE
@@ -4465,7 +4590,7 @@ def step8_entity_resolution(df, drug_records) -> dict:
     for _p0g1_canonical_id, _p0g1_mapping in _p0g1_compound_mappings.items():
         # canonical_id is the inchikey for resolved compounds; for
         # unresolved placeholders ("UNRESOLVED:DRKG:...") the inchikey
-        # alias is absent — skip those (nothing to register).
+        # alias is absent -- skip those (nothing to register).
         _p0g1_ik = _p0g1_mapping.aliases.get("inchikey") if _p0g1_mapping.aliases else None
         if not isinstance(_p0g1_ik, str) or not _p0g1_ik.strip():
             # Fall back to canonical_id if it IS a valid inchikey.
@@ -4477,13 +4602,13 @@ def step8_entity_resolution(df, drug_records) -> dict:
         _p0g1_ik = _p0g1_ik.strip().upper()
         _p0g1_conf = getattr(_p0g1_mapping, "confidence", 0.85)
         _p0g1_conf_label = "verified" if _p0g1_conf >= 0.9 else ("resolved" if _p0g1_conf >= 0.5 else "low_confidence")
-        # Register the inchikey → itself (idempotent self-mapping).
+        # Register the inchikey -> itself (idempotent self-mapping).
         _p0g1_registered += _p0g1_crosswalk.register_compound_inchikey(
             _p0g1_ik, _p0g1_ik,
             source="entity_resolver:compound_merge",
             confidence=_p0g1_conf_label,
         )
-        # Register every alias → inchikey.
+        # Register every alias -> inchikey.
         if _p0g1_mapping.aliases:
             for _p0g1_alias_key, _p0g1_alias_val in _p0g1_mapping.aliases.items():
                 if _p0g1_alias_key == "inchikey":
@@ -4503,7 +4628,7 @@ def step8_entity_resolution(df, drug_records) -> dict:
                                 confidence=_p0g1_conf_label,
                             )
     logger.info(
-        "P0-G1 ROOT FIX: registered %d Compound alias→InChIKey mappings "
+        "P0-G1 ROOT FIX: registered %d Compound alias->InChIKey mappings "
         "in the IDCrosswalk (from %d resolved Compound mappings). The 7 "
         "Compound ID namespaces are now unified.",
         _p0g1_registered, len(_p0g1_compound_mappings),
@@ -4516,7 +4641,7 @@ def step8_entity_resolution(df, drug_records) -> dict:
         "mapped": 0,
         "with_gene_link": 0,
     }
-    # v35 ROOT FIX (V35-P2-LOADERS-FIXES H-4): mirror step7b's pattern —
+    # v35 ROOT FIX (V35-P2-LOADERS-FIXES H-4): mirror step7b's pattern --
     # check Phase 1's cleaned ``uniprot_proteins.csv`` FIRST and use
     # ``parse_uniprot_entries_from_phase1_csv`` when it exists; fall back
     # to the raw ``uniprot_sprot.dat(.gz)`` only when the Phase 1 CSV is
@@ -4566,7 +4691,7 @@ def step8_entity_resolution(df, drug_records) -> dict:
             ) == "1"
             if _permissive:
                 logger.warning(
-                    "UniProt Phase 1 CSV parsing failed — "
+                    "UniProt Phase 1 CSV parsing failed -- "
                     "DRUGOS_ALLOW_PERMISSIVE_KG=1 is set, continuing "
                     "with Protein resolution skipped (canonical IDs "
                     "will use original namespaces): %s", e,
@@ -4574,14 +4699,14 @@ def step8_entity_resolution(df, drug_records) -> dict:
                 )
             else:
                 logger.error(
-                    "UniProt Phase 1 CSV parsing failed — FATAL. Set "
+                    "UniProt Phase 1 CSV parsing failed -- FATAL. Set "
                     "DRUGOS_ALLOW_PERMISSIVE_KG=1 to continue with "
                     "Protein resolution skipped (unit tests / "
                     "known-broken snapshots only): %s", e, exc_info=True,
                 )
                 raise RuntimeError(
                     f"UniProt Phase 1 CSV parsing failed: {e}. V35 H-4 "
-                    f"root fix — set DRUGOS_ALLOW_PERMISSIVE_KG=1 to "
+                    f"root fix -- set DRUGOS_ALLOW_PERMISSIVE_KG=1 to "
                     f"opt in to the legacy permissive behavior."
                 ) from e
     else:
@@ -4608,9 +4733,9 @@ def step8_entity_resolution(df, drug_records) -> dict:
                     len(uniprot_records),
                 )
             except Exception as e:
-                # V19 ROOT FIX (SF-7 — verification agent flagged this as
+                # V19 ROOT FIX (SF-7 -- verification agent flagged this as
                 # PARTIAL): the V18 code logged WARNING and continued with
-                # UniProt-based Protein resolution skipped — silently
+                # UniProt-based Protein resolution skipped -- silently
                 # degrading protein-node canonicalization (the project's
                 # core mandate per Compound-1). The ROOT fix is to RAISE in
                 # production (same DRUGOS_ALLOW_PERMISSIVE_KG=1 escape
@@ -4621,7 +4746,7 @@ def step8_entity_resolution(df, drug_records) -> dict:
                 ) == "1"
                 if _permissive:
                     logger.warning(
-                        "UniProt parsing failed — "
+                        "UniProt parsing failed -- "
                         "DRUGOS_ALLOW_PERMISSIVE_KG=1 is set, continuing "
                         "with Protein resolution skipped (canonical IDs "
                         "will use original namespaces): %s", e,
@@ -4629,13 +4754,13 @@ def step8_entity_resolution(df, drug_records) -> dict:
                     )
                 else:
                     logger.error(
-                        "UniProt parsing failed — FATAL. Set "
+                        "UniProt parsing failed -- FATAL. Set "
                         "DRUGOS_ALLOW_PERMISSIVE_KG=1 to continue with "
                         "Protein resolution skipped (unit tests / "
                         "known-broken snapshots only): %s", e, exc_info=True,
                     )
                     raise RuntimeError(
-                        f"UniProt parsing failed: {e}. V19 SF-7 root fix — "
+                        f"UniProt parsing failed: {e}. V19 SF-7 root fix -- "
                         f"the V18 default of log-and-continue silently "
                         f"degraded Protein canonicalization (the project's "
                         f"core mandate per Compound-1). Set "
@@ -4645,7 +4770,7 @@ def step8_entity_resolution(df, drug_records) -> dict:
         else:
             logger.warning(
                 "UniProt Phase 1 CSV not found and raw dat file not found "
-                "at %s — Protein nodes will NOT be created. "
+                "at %s -- Protein nodes will NOT be created. "
                 "Drug-protein edges from STITCH/STRING/ChEMBL will use their "
                 "original ID namespaces (Ensembl / ChEMBL). For full scientific "
                 "correctness, run Phase 1's UniProt pipeline (which produces "
@@ -4659,7 +4784,7 @@ def step8_entity_resolution(df, drug_records) -> dict:
     gene_protein_edges = resolver.build_gene_protein_edges()
 
     # v13 ROOT FIX (DC-3): v12 NEVER called
-    # ``resolver.merge_duplicate_edges()`` — the function existed but
+    # ``resolver.merge_duplicate_edges()`` -- the function existed but
     # was dead code. Without this call, symmetric / duplicate edges
     # (e.g. the same (Compound, targets, Protein) triple loaded from
     # both DrugBank and ChEMBL) entered the graph as separate edges,
@@ -4673,7 +4798,7 @@ def step8_entity_resolution(df, drug_records) -> dict:
         )
         if isinstance(edge_dedup_stats, dict):
             logger.info(
-                "Step 8: merge_duplicate_edges(gene_protein) — "
+                "Step 8: merge_duplicate_edges(gene_protein) -- "
                 "%d edges before, %d after, %d duplicates removed.",
                 edge_dedup_stats.get("edges_before", 0),
                 edge_dedup_stats.get("edges_after", 0),
@@ -4693,7 +4818,7 @@ def step8_entity_resolution(df, drug_records) -> dict:
         # merge_duplicate_edges only warns.
         logger.warning(
             "Step 8: merge_duplicate_edges(gene_protein) failed "
-            "(%s) — duplicate edges will NOT be merged. "
+            "(%s) -- duplicate edges will NOT be merged. "
             "Graph remains usable but degree counts may be inflated.",
             exc, exc_info=True,
         )
@@ -4728,7 +4853,7 @@ def step8_entity_resolution(df, drug_records) -> dict:
         except Exception as e:
             # REL-1: never crash the pipeline on a corrupt source file
             logger.warning(
-                "load_string_aliases failed on %s: %s: %s — continuing "
+                "load_string_aliases failed on %s: %s: %s -- continuing "
                 "with builtin-only crosswalk.",
                 string_aliases_path.name,
                 type(e).__name__,
@@ -4736,11 +4861,11 @@ def step8_entity_resolution(df, drug_records) -> dict:
             )
     else:
         logger.info(
-            "STRING aliases file not found at %s — crosswalk will use "
+            "STRING aliases file not found at %s -- crosswalk will use "
             "builtin-only mappings.",
             string_aliases_path.name,
         )
-    # ChEMBL SQLite loader — same REL-1 wrap
+    # ChEMBL SQLite loader -- same REL-1 wrap
     chembl_dir = RAW_DIR / "chembl"
     chembl_db_files = (
         list(chembl_dir.rglob("*.db")) if chembl_dir.exists() else []
@@ -4752,7 +4877,7 @@ def step8_entity_resolution(df, drug_records) -> dict:
             )
         except Exception as e:
             logger.warning(
-                "load_chembl_target_components failed on %s: %s: %s — "
+                "load_chembl_target_components failed on %s: %s: %s -- "
                 "continuing with builtin-only crosswalk.",
                 chembl_db_files[0].name,
                 type(e).__name__,
@@ -4765,7 +4890,7 @@ def step8_entity_resolution(df, drug_records) -> dict:
         and string_aliases_path.exists()
     ):
         logger.error(
-            "STRING aliases file exists but 0 mappings were loaded — "
+            "STRING aliases file exists but 0 mappings were loaded -- "
             "possible file format issue."
         )
 
@@ -4800,7 +4925,7 @@ def _chemberta_model_is_gated(model_name: Optional[str] = None) -> bool:
     """Auto-detect whether the configured ChEMBERTa model is gated on HuggingFace.
 
     v71 ROOT FIX (P2C-003): The previous code unconditionally required
-    ``HF_TOKEN`` for ALL ChEMBERTa models — including the default
+    ``HF_TOKEN`` for ALL ChEMBERTa models -- including the default
     ``seyonec/ChemBERTa-zinc-base-v1`` which is PUBLIC on HuggingFace
     and needs NO token. This caused the pipeline to FAIL (in strict
     mode, the default) or silently fall back to random Xavier features
@@ -4813,10 +4938,10 @@ def _chemberta_model_is_gated(model_name: Optional[str] = None) -> bool:
     Root fix: query ``huggingface_hub.model_info`` to check the
     ``gated`` flag on the model repo. Only require HF_TOKEN when the
     model is ACTUALLY gated. For public models (the default), pass
-    ``token=None`` to the encoder — HuggingFace downloads without auth.
+    ``token=None`` to the encoder -- HuggingFace downloads without auth.
 
     Returns ``False`` (assume public) when:
-      - ``huggingface_hub`` is not installed (defensive — but
+      - ``huggingface_hub`` is not installed (defensive -- but
         ``transformers`` depends on it, so if transformers is
         importable, huggingface_hub is too).
       - The ``model_info`` call fails (network error, unknown model,
@@ -4839,7 +4964,7 @@ def _chemberta_model_is_gated(model_name: Optional[str] = None) -> bool:
     bool
         ``True`` if the model is gated (requires HF_TOKEN).
         ``False`` if the model is public or gating status is unknown
-        (defensive default — public).
+        (defensive default -- public).
     """
     if model_name is None:
         model_name = os.environ.get(
@@ -4849,11 +4974,11 @@ def _chemberta_model_is_gated(model_name: Optional[str] = None) -> bool:
     try:
         from huggingface_hub import model_info as _hf_model_info
     except ImportError:
-        # huggingface_hub not installed — but transformers depends on
+        # huggingface_hub not installed -- but transformers depends on
         # it, so this only fires if transformers check already failed
         # upstream. Defensive: assume public (default model IS public).
         logger.debug(
-            "Step 9: huggingface_hub not importable — assuming "
+            "Step 9: huggingface_hub not importable -- assuming "
             "ChEMBERTa model %r is PUBLIC (defensive default).",
             model_name,
         )
@@ -4870,7 +4995,7 @@ def _chemberta_model_is_gated(model_name: Optional[str] = None) -> bool:
         # fail at download time with a clear 401 from the encoder.
         logger.debug(
             "Step 9: could not verify gating status for %r (%s: %s) "
-            "— assuming PUBLIC (defensive default).",
+            "-- assuming PUBLIC (defensive default).",
             model_name, type(exc).__name__, exc,
         )
         return False
@@ -4893,14 +5018,14 @@ def step9_build_pyg(
         Parsed DrugBank drug records. When the operator opts into ChEMBERTa
         feature loading via the ``DRUGOS_USE_CHEMBERTA=1`` env var AND
         the ``transformers`` package is importable AND (the model is
-        PUBLIC — auto-detected — OR ``HF_TOKEN`` is set for gated
+        PUBLIC -- auto-detected -- OR ``HF_TOKEN`` is set for gated
         models), this function will compute ChEMBERTa SMILES embeddings
         for the Compound nodes (using the SMILES strings carried in
         ``drug_records``) and attach them to the HeteroData via
         :meth:`PyGBuilder.add_chemberta_features`.
 
         v71 ROOT FIX (P2C-003): The default model
-        ``seyonec/ChemBERTa-zinc-base-v1`` is PUBLIC on HuggingFace —
+        ``seyonec/ChemBERTa-zinc-base-v1`` is PUBLIC on HuggingFace --
         NO token required. Gating status is auto-detected via
         ``huggingface_hub.model_info``. HF_TOKEN is only required for
         genuinely gated models. In strict mode (default,
@@ -4934,26 +5059,26 @@ def step9_build_pyg(
     # The DOCX Phase 2 spec implies ChEMBERTa SMILES embeddings inform
     # the GNN. The loader (``chemberta_encoder.encode_smiles``) and the
     # attach point (``PyGBuilder.add_chemberta_features``) both exist
-    # and work, but were DEAD CODE — never called from anywhere in the
+    # and work, but were DEAD CODE -- never called from anywhere in the
     # pipeline. ``PyGBuilder.build_from_drkg`` therefore fell back to
     # random Xavier features for every node type, defeating the GNN's
     # ability to leverage molecular structure.
     #
     # We now invoke the integration when ALL preconditions hold:
     #   1. ``DRUGOS_USE_CHEMBERTA=1`` env var is set (operator opt-in;
-    #      default is "1" — enabled).
+    #      default is "1" -- enabled).
     #   2. The ``transformers`` package is importable.
     #   3. EITHER the model is PUBLIC (auto-detected via
-    #      ``huggingface_hub.model_info`` — the default
+    #      ``huggingface_hub.model_info`` -- the default
     #      ``seyonec/ChemBERTa-zinc-base-v1`` IS public) OR
     #      ``HF_TOKEN``/``HUGGING_FACE_HUB_TOKEN`` is set for gated
     #      models.
     # v71 ROOT FIX (P2C-003): The previous code unconditionally
     # required HF_TOKEN even for public models. The default
-    # ``seyonec/ChemBERTa-zinc-base-v1`` is PUBLIC — no token needed.
+    # ``seyonec/ChemBERTa-zinc-base-v1`` is PUBLIC -- no token needed.
     # Now we auto-detect gating status and only require HF_TOKEN for
     # genuinely gated models.
-    # v55 ROOT FIX (Dead Code — chemberta_encoder disabled by default):
+    # v55 ROOT FIX (Dead Code -- chemberta_encoder disabled by default):
     # The v48 code set DRUGOS_USE_CHEMBERTA default to "0" (disabled),
     # making the entire chemberta_encoder module dead code. The
     # ChemBERTa model is actually PUBLIC (not gated) on HuggingFace.
@@ -4964,11 +5089,11 @@ def step9_build_pyg(
     chemberta_used = False
     chemberta_failure_reason: Optional[str] = None
     use_chemberta = os.environ.get("DRUGOS_USE_CHEMBERTA", "1") == "1"
-    # v60 ROOT FIX (FORENSIC-DEEP — ChEMBERTa 3-layer silent fallback):
+    # v60 ROOT FIX (FORENSIC-DEEP -- ChEMBERTa 3-layer silent fallback):
     # The v58 fix added DRUGOS_STRICT_FEATURES but DEFAULTED IT TO "0"
-    # (off). This means by default every ChEMBERTa failure — disabled
+    # (off). This means by default every ChEMBERTa failure -- disabled
     # by env, transformers not importable, HF_TOKEN missing, encode
-    # failure — silently fell back to random Xavier features. Training
+    # failure -- silently fell back to random Xavier features. Training
     # proceeded on random features with AUC ~0.5 (transductive
     # memorisation masking the failure). This is exactly the patient-
     # safety issue the audit named: the operator sees a "successful"
@@ -4981,9 +5106,9 @@ def step9_build_pyg(
     # with DRUGOS_STRICT_FEATURES=0.
     #
     # The 3 layers of silent fallback that are now LOUD:
-    #   Layer 1: DRUGOS_USE_CHEMBERTA=0 → was silent, now raises.
-    #   Layer 2: transformers not importable → was silent, now raises.
-    #   Layer 3: HF_TOKEN missing OR encode_smiles failed → was
+    #   Layer 1: DRUGOS_USE_CHEMBERTA=0 -> was silent, now raises.
+    #   Layer 2: transformers not importable -> was silent, now raises.
+    #   Layer 3: HF_TOKEN missing OR encode_smiles failed -> was
     #            silent, now raises.
     strict_features = os.environ.get("DRUGOS_STRICT_FEATURES", "1") == "1"
     hf_token = (
@@ -5002,7 +5127,7 @@ def step9_build_pyg(
         if not strict_features:
             return
         msg = (
-            f"Step 9: ChEMBERTa feature failure ({reason}) — "
+            f"Step 9: ChEMBERTa feature failure ({reason}) -- "
             f"DRUGOS_STRICT_FEATURES=1 is set, aborting instead of "
             f"falling back to random Xavier. The Graph Transformer "
             f"would silently memorise node identity (transductive), "
@@ -5022,9 +5147,9 @@ def step9_build_pyg(
             "Step 9: ChEMBERTa SMILES features DISABLED by env var "
             "(DRUGOS_USE_CHEMBERTA=0). The PyGBuilder will use random "
             "Xavier features for Compound nodes. The Graph Transformer "
-            "will therefore NOT learn molecular structure — AUC will "
+            "will therefore NOT learn molecular structure -- AUC will "
             "reflect transductive memorisation only. Set "
-            "DRUGOS_USE_CHEMBERTA=1 (or unset — it's the default) to "
+            "DRUGOS_USE_CHEMBERTA=1 (or unset -- it's the default) to "
             "enable molecular-structure-aware GNN features."
         )
         _log_feature_failure(
@@ -5036,7 +5161,7 @@ def step9_build_pyg(
         # MLflow so operators monitoring the MLflow dashboard can
         # immediately see that the Graph Transformer trained on random
         # Xavier features (not molecular structure). This is the audit's
-        # required MLflow signal — without it, the only indication was a
+        # required MLflow signal -- without it, the only indication was a
         # buried WARNING log that production dashboards filtered out.
         try:
             from .mlflow_tracker import MLflowTracker as _MLFT_v63
@@ -5059,10 +5184,10 @@ def step9_build_pyg(
         chemberta_failure_reason = "transformers_not_importable"
         # v58 ROOT FIX: ERROR not WARNING.
         logger.error(
-            "Step 9: ChEMBERTa SMILES features NOT used — the "
+            "Step 9: ChEMBERTa SMILES features NOT used -- the "
             "'transformers' package is not importable. Install with "
             "pip install 'transformers>=4.30,<5.0'. Random Xavier "
-            "fallback in effect for Compound nodes — the Graph "
+            "fallback in effect for Compound nodes -- the Graph "
             "Transformer will NOT learn molecular structure."
         )
         _log_feature_failure(
@@ -5085,23 +5210,23 @@ def step9_build_pyg(
         _strict_raise("transformers_not_importable")
     elif not hf_token and _chemberta_model_is_gated():
         # v71 ROOT FIX (P2C-003): The previous code unconditionally
-        # required HF_TOKEN for ALL ChEMBERTa models — including the
+        # required HF_TOKEN for ALL ChEMBERTa models -- including the
         # default ``seyonec/ChemBERTa-zinc-base-v1`` which is PUBLIC
         # on HuggingFace. This branch now ONLY fires when the model is
         # ACTUALLY gated (auto-detected via ``huggingface_hub.model_info``).
         # Public models with no token fall through to the ``else`` block
-        # and download anonymously — the encoder already passes
+        # and download anonymously -- the encoder already passes
         # ``token=hf_token`` (None) which HuggingFace handles correctly.
         chemberta_failure_reason = "hf_token_missing_gated_model"
         _gated_model_name = os.environ.get(
             "DRUGOS_CHEMBERTA_MODEL", "seyonec/ChemBERTa-zinc-base-v1"
         )
         logger.error(
-            "Step 9: ChEMBERTa SMILES features NOT used — the "
+            "Step 9: ChEMBERTa SMILES features NOT used -- the "
             "configured model %r is GATED on HuggingFace and "
             "HF_TOKEN (or HUGGING_FACE_HUB_TOKEN) env var is not "
             "set. Random Xavier fallback in effect for Compound "
-            "nodes — the Graph Transformer will NOT learn molecular "
+            "nodes -- the Graph Transformer will NOT learn molecular "
             "structure. Set HF_TOKEN to a valid HuggingFace token "
             "with access to %r, or set DRUGOS_CHEMBERTA_MODEL to a "
             "public model.",
@@ -5133,7 +5258,7 @@ def step9_build_pyg(
     elif not drug_records:
         chemberta_failure_reason = "no_drug_records"
         logger.error(
-            "Step 9: ChEMBERTa SMILES features NOT used — step9 was "
+            "Step 9: ChEMBERTa SMILES features NOT used -- step9 was "
             "called with no drug_records (SMILES unavailable). Random "
             "Xavier fallback in effect for Compound nodes."
         )
@@ -5181,7 +5306,7 @@ def step9_build_pyg(
             if not compound_id_order:
                 chemberta_failure_reason = "no_smiles"
                 logger.error(
-                    "Step 9: ChEMBERTa integration skipped — no drug "
+                    "Step 9: ChEMBERTa integration skipped -- no drug "
                     "records carried a non-empty smiles + id pair. "
                     "Random Xavier fallback in effect for Compound "
                     "nodes."
@@ -5230,14 +5355,14 @@ def step9_build_pyg(
                     int(_embeddings.shape[-1]) if hasattr(_embeddings, "shape") else -1,
                 )
         except FeatureFailureError:
-            raise  # strict-mode re-raise — already audited
+            raise  # strict-mode re-raise -- already audited
         except Exception as exc:
             chemberta_failure_reason = "encode_failed"
             # v58 ROOT FIX: ERROR not WARNING. The previous WARNING was
             # silently swallowed by log dashboards, and the transductive
             # Graph Transformer masked the failure with AUC~0.5.
             logger.error(
-                "Step 9: ChEMBERTa integration FAILED (%s: %s) — "
+                "Step 9: ChEMBERTa integration FAILED (%s: %s) -- "
                 "falling back to random Xavier features for Compound "
                 "nodes. The PyG build itself succeeded; only the "
                 "optional ChEMBERTa feature attachment failed. "
@@ -5264,7 +5389,7 @@ def step9_build_pyg(
     # HeteroData lineage metadata so downstream consumers (step11b,
     # V1 launch criteria, graph explorer) can verify the Compound node
     # features are molecular-structure-aware (ChEMBERTa) vs random
-    # Xavier. The audit required this flag on the lineage metadata —
+    # Xavier. The audit required this flag on the lineage metadata --
     # the v63 code only put it in the step9 result dict and MLflow
     # tags, NOT on the HeteroData object itself. This meant step11b
     # (which LOADS the HeteroData from disk) had no way to verify the
@@ -5309,7 +5434,7 @@ def step9_build_pyg(
             split_paths[_sname] = str(_split_path)
         logger.info(
             "Step 9: node_disjoint_split produced 3 GNN-safe split files "
-            "(train=%s, val=%s, test=%s). Phase 1 → Phase 2 linkage via "
+            "(train=%s, val=%s, test=%s). Phase 1 -> Phase 2 linkage via "
             "pre-split HeteroData. (P2C-012 root fix)",
             split_paths.get("train", "?"),
             split_paths.get("val", "?"),
@@ -5317,7 +5442,7 @@ def step9_build_pyg(
         )
     except Exception as _split_exc:
         logger.warning(
-            "Step 9: node_disjoint_split failed (%s) — step11/step11b "
+            "Step 9: node_disjoint_split failed (%s) -- step11/step11b "
             "will fall back to inline split. (P2C-012)",
             _split_exc, exc_info=True,
         )
@@ -5348,7 +5473,7 @@ def step9_build_pyg(
         },
     )
     logger.info(
-        "Step 9 complete in %.1fs (CPU: %.1fs) — saved to %s "
+        "Step 9 complete in %.1fs (CPU: %.1fs) -- saved to %s "
         "(chemberta_used=%s, chemberta_failure_reason=%s, strict=%s)",
         elapsed, cpu_elapsed, data_path, chemberta_used,
         chemberta_failure_reason, strict_features,
@@ -5364,14 +5489,14 @@ def step9_build_pyg(
         "chemberta_strict_mode": strict_features,
         # v72 ROOT FIX (P2C-012): expose the pre-split HeteroData paths
         # so step11/step11b can load the GNN-safe split instead of
-        # re-splitting inline. Links Phase 1 (entity_maps) → Phase 2
-        # (split graph) → Phase 3 (GNN training).
+        # re-splitting inline. Links Phase 1 (entity_maps) -> Phase 2
+        # (split graph) -> Phase 3 (GNN training).
         "split_paths": split_paths,
     }
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# STEP 10: Build Training Data (Domain 5 — Data Quality)
+# STEP 10: Build Training Data (Domain 5 -- Data Quality)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
@@ -5454,7 +5579,7 @@ def step10_training_data(df, drug_records) -> dict:
         },
     )
     logger.info(
-        "Step 10 complete in %.1fs (CPU: %.1fs) — "
+        "Step 10 complete in %.1fs (CPU: %.1fs) -- "
         "%d pos, %d neg (strategies: %s)",
         elapsed,
         cpu_elapsed,
@@ -5526,18 +5651,18 @@ def step11_train_transe(
     # (nn.Embedding init consumes the global torch RNG) is deterministic.
     # The same call is made in run_full_pipeline (audit TOP-14), but
     # step11_train_transe can be invoked independently of
-    # run_full_pipeline (e.g. from unit tests) — so it must seed on its
+    # run_full_pipeline (e.g. from unit tests) -- so it must seed on its
     # own. Without this, two step11 invocations with the same config
     # produced different model initialisations and therefore different
     # held_out_auc values. Synchronized with run_full_pipeline and
-    # run_unified.py — DO NOT diverge (audit ML-7).
+    # run_unified.py -- DO NOT diverge (audit ML-7).
     try:
         from .config import set_global_seed as _set_global_seed
 
         _set_global_seed(42)
-    except Exception as _seed_exc:  # noqa: BLE001 — best-effort
+    except Exception as _seed_exc:  # noqa: BLE001 -- best-effort
         logger.warning(
-            "set_global_seed(42) failed in step11_train_transe (%s) — "
+            "set_global_seed(42) failed in step11_train_transe (%s) -- "
             "model init will be non-deterministic. This is a regression "
             "(audit ML-7).",
             _seed_exc,
@@ -5563,10 +5688,10 @@ def step11_train_transe(
     #
     # The audit found that step9_build_pyg produces a HeteroData object
     # (saved to disk via PyGBuilder.save_heterodata) but step11_train_transe
-    # NEVER reads it — the function builds its own (entity_to_idx,
+    # NEVER reads it -- the function builds its own (entity_to_idx,
     # local_to_global, train_triples) directly from entity_maps/edge_maps,
     # ignoring the PyG graph entirely. The HeteroData built in step 9
-    # therefore has zero downstream consumers in the training path —
+    # therefore has zero downstream consumers in the training path --
     # wasting the ChemBERTa feature attachment (audit M-7) and the
     # node_disjoint_split logic (audit M-4/M-5) that step 9 performs.
     #
@@ -5596,7 +5721,7 @@ def step11_train_transe(
                     "actually consumed by training (audit M-11).",
                     pyg_data_path,
                 )
-            except Exception as _pyg_load_exc:  # noqa: BLE001 — best-effort
+            except Exception as _pyg_load_exc:  # noqa: BLE001 -- best-effort
                 logger.warning(
                     "Step 11: pyg_data_path=%s existed but could not be "
                     "loaded (%s). Falling back to entity_maps-only path. "
@@ -5606,14 +5731,14 @@ def step11_train_transe(
                 _pyg_heterodata = None
         else:
             logger.warning(
-                "Step 11: pyg_data_path=%s does not exist — step 9 may "
+                "Step 11: pyg_data_path=%s does not exist -- step 9 may "
                 "have been skipped. Falling back to entity_maps-only "
                 "path. (audit M-11 coupling is best-effort.)",
                 pyg_data_path,
             )
     else:
         logger.info(
-            "Step 11: pyg_data_path not provided — training will use "
+            "Step 11: pyg_data_path not provided -- training will use "
             "entity_maps/edge_maps directly. (audit M-11: PyG coupling "
             "is opt-in via step 9's data_path.)"
         )
@@ -5720,7 +5845,7 @@ def step11_train_transe(
     # trained model on disk and ZERO AUC measured.
     #
     # Additionally, without a negative_sampler, train_transe falls back to
-    # crude random corruption — producing type-incompatible negatives (a
+    # crude random corruption -- producing type-incompatible negatives (a
     # Compound head can be pushed away from a Gene or Protein, not just a
     # non-treating Disease). The code's own warning says "AUC numbers are
     # NOT comparable to literature."
@@ -5742,7 +5867,7 @@ def step11_train_transe(
     # (b) requires each relation type to be represented in val/test so
     # the held-out AUC reflects model performance on the relation of
     # interest. ``temporal_split_pairs`` (training_data.py:1068) exists
-    # for exactly this purpose but was DEAD CODE — never called from
+    # for exactly this purpose but was DEAD CODE -- never called from
     # anywhere in the pipeline.
     #
     # We now:
@@ -5750,7 +5875,7 @@ def step11_train_transe(
     #      via ``temporal_split_pairs`` when ``drug_records`` is provided
     #      AND the records carry ``approval_year``. Non-treats triples
     #      are appended to the training split (they are auxiliary
-    #      structural signal — encodes/binds/interacts_with — and
+    #      structural signal -- encodes/binds/interacts_with -- and
     #      contribute nothing to the held-out drug-disease AUC).
     #   2. FALL BACK to a stratified-by-relation-type random split
     #      (each relation type contributes a proportional 80/10/10
@@ -5812,9 +5937,9 @@ def step11_train_transe(
     val_idx_list: List[int] = []
     test_idx_list: List[int] = []
 
-    # v29 ROOT FIX (audit M-4 / M-5 — Data Leakage + node_disjoint_split
+    # v29 ROOT FIX (audit M-4 / M-5 -- Data Leakage + node_disjoint_split
     # never called): The audit found that step11 uses a stratified-random
-    # TRIPLE split, which leaks — drugs/diseases in the test set also
+    # TRIPLE split, which leaks -- drugs/diseases in the test set also
     # appear in train, so the model can trivially memorize them and
     # report inflated AUC. The correct split is NODE-DISJOINT: drugs in
     # test set must NOT appear in train. The PyGBuilder.node_disjoint_split
@@ -5846,7 +5971,7 @@ def step11_train_transe(
         _n_total = len(_shuffled)
         _n_train = int(_n_total * 0.8)
         _n_val = int(_n_total * 0.1)
-        # v84 FORENSIC ROOT FIX (BUG #15 — split off-by-one drift):
+        # v84 FORENSIC ROOT FIX (BUG #15 -- split off-by-one drift):
         # The previous code did `_test_compounds = set(_shuffled[
         # _n_train + _n_val:])` which takes the remainder. For 99
         # compounds: train=79, val=9, test=11 (test gets 2 extra). For
@@ -5881,11 +6006,11 @@ def step11_train_transe(
         #   (b) Missing auxiliary signal: val/test had ZERO non-treats
         #       triples, so the model's val/test message-passing graph
         #       was missing the PPI / Gene-Disease auxiliary signal that
-        #       train had — making the splits not comparable.
+        #       train had -- making the splits not comparable.
         # ROOT FIX: partition ALL node types into train/val/test (using
         # the same seeded RNG), then route each non-treats triple by
-        # BOTH endpoints' partition. Both in train → train; both in val
-        # → val; both in test → test; cross-partition edges are DROPPED
+        # BOTH endpoints' partition. Both in train -> train; both in val
+        # -> val; both in test -> test; cross-partition edges are DROPPED
         # (they would leak). This mirrors the node_disjoint_split method
         # in pyg_builder.py (lines 1867-1916) which correctly drops
         # cross-partition edges. Val/test now get their proportional
@@ -5927,7 +6052,7 @@ def step11_train_transe(
         _n_aux_test = 0
         _n_aux_dropped = 0
         _n_aux_cross_to_train = 0
-        # v88 ROOT FIX (BUG #32 — log dropped edge types + route cross-
+        # v88 ROOT FIX (BUG #32 -- log dropped edge types + route cross-
         # partition edges to train): route cross-partition edges to TRAIN
         # (with a warning) instead of dropping them. The leakage risk is
         # for HGT message-passing, NOT for TransE triple scoring. Operators
@@ -5950,12 +6075,12 @@ def step11_train_transe(
             _edge_type_str = "unknown"
             _h_eid = global_idx_to_eid.get(_h_gidx)
             _t_eid = global_idx_to_eid.get(_t_gidx)
-            # v100 ROOT FIX (BUG P2-049 — TransE node-disjoint split NameError):
+            # v100 ROOT FIX (BUG P2-049 -- TransE node-disjoint split NameError):
             # The previous code referenced `relations[_i]` but `relations` is
-            # NOT a variable in this scope — the actual per-triple relation
+            # NOT a variable in this scope -- the actual per-triple relation
             # index array is `rels` (a tensor). This NameError fired every
             # time the node-disjoint split path executed (i.e. whenever
-            # ≥10 Compound-treats-Disease triples existed — i.e. every
+            # ≥10 Compound-treats-Disease triples existed -- i.e. every
             # production TransE training run). The audit's "v88 BUG #32"
             # comment block claimed the fix was applied, but the code
             # never ran because it crashed on the very first iteration.
@@ -6088,8 +6213,8 @@ def step11_train_transe(
                 # cutoff). We don't have years for non-treats triples,
                 # so we partition by the ENDPOINTS' presence in the
                 # treats-split partitions. If both endpoints appear in
-                # the train treats-split → train; both in val → val;
-                # both in test → test; otherwise → train (auxiliary
+                # the train treats-split -> train; both in val -> val;
+                # both in test -> test; otherwise -> train (auxiliary
                 # signal, conservative). This prevents a val/test-only
                 # entity from leaking into train via a non-treats edge.
                 _train_entities_ts = set()
@@ -6114,8 +6239,8 @@ def step11_train_transe(
                     elif _h_g in _test_entities_ts and _t_g in _test_entities_ts:
                         test_idx_list.append(_i)
                     else:
-                        # Cross-partition or unknown → train (auxiliary
-                        # signal, conservative — does not leak a val/test
+                        # Cross-partition or unknown -> train (auxiliary
+                        # signal, conservative -- does not leak a val/test
                         # ONLY entity because at least one endpoint is
                         # already in train).
                         train_idx_list.append(_i)
@@ -6130,12 +6255,12 @@ def step11_train_transe(
             else:
                 logger.warning(
                     "Step 11: temporal_split_pairs fell back to random "
-                    "(method=%s) — using stratified random split instead.",
+                    "(method=%s) -- using stratified random split instead.",
                     _meta.get("method"),
                 )
         except Exception as _exc:
             logger.warning(
-                "Step 11: temporal_split_pairs call failed (%s) — "
+                "Step 11: temporal_split_pairs call failed (%s) -- "
                 "falling back to stratified random split.",
                 _exc,
             )
@@ -6153,7 +6278,7 @@ def step11_train_transe(
         # split would leave val/test empty.
         logger.warning(
             "Step 11: using stratified random split (temporal split not "
-            "available — no approval_year data, or fewer than half of "
+            "available -- no approval_year data, or fewer than half of "
             "treats triples had an approval_year). The DOCX V1 launch "
             "criterion '>0.85 AUC on held-out drug-disease pairs' is "
             "therefore structurally unverifiable in this run; the "
@@ -6169,7 +6294,7 @@ def step11_train_transe(
             if _n == 0:
                 continue
             if _n <= 2:
-                # Too few triples of this relation to split 3 ways —
+                # Too few triples of this relation to split 3 ways --
                 # put in train so the relation is represented.
                 train_idx_list.extend(_indices)
                 continue
@@ -6217,14 +6342,14 @@ def step11_train_transe(
     # Build entity_type_lookup: {global_entity_idx: entity_type_str}.
     # NegativeSampler uses this to corrupt tails with entities of the
     # SAME type as the original tail (type-constrained negative sampling).
-    # v53 ROOT FIX (P2-015 — entity_type_lookup from FULL entity_maps):
+    # v53 ROOT FIX (P2-015 -- entity_type_lookup from FULL entity_maps):
     # The v48/v49 code built entity_type_lookup from ALL entities
     # (train + val + test). For transductive TransE this is acceptable
     # (all entities are seen at training time). But for the inductive
     # HGT promised by the DOCX, val/test entity embeddings should NOT
     # be influenced by training-time negative sampling. ROOT FIX:
     # build entity_type_lookup from TRAIN entities only. Entities that
-    # only appear in val/test are excluded from the sampler's pool —
+    # only appear in val/test are excluded from the sampler's pool --
     # they won't be sampled as negatives (which is correct: we don't
     # want to push apart val/test entities during training).
     train_entity_indices: set = set()
@@ -6249,15 +6374,15 @@ def step11_train_transe(
     )
 
     # v13 ROOT FIX (SW-14 / PS-12 / SW-15 / Compound-8): build
-    # ``relation_to_types`` mapping relation_idx → (head_type, tail_type).
+    # ``relation_to_types`` mapping relation_idx -> (head_type, tail_type).
     # ``rel_types`` is a list of ``(src_type, rel, dst_type)`` tuples
     # (built at line 2694 from ``edge_maps`` keys). The sampler uses
     # this map to look up the correct head/tail entity pools for each
     # relation when generating negatives. Without it, the v12 sampler
-    # fell back to (Compound, Disease) for ALL relations — producing
+    # fell back to (Compound, Disease) for ALL relations -- producing
     # biologically meaningless negatives for 5 of 6 edge types
-    # (Compound→Protein targets, Gene→Disease associated_with,
-    # Gene→Protein encodes, Protein→interacts_with→Protein, etc.).
+    # (Compound->Protein targets, Gene->Disease associated_with,
+    # Gene->Protein encodes, Protein->interacts_with->Protein, etc.).
     # The TransE "0.85 AUC" V1 launch criterion was therefore
     # trivially achievable against nonsense negatives.
     relation_to_types: Dict[int, Tuple[str, str]] = {}
@@ -6268,7 +6393,7 @@ def step11_train_transe(
     # SF-1 ROOT FIX: type-constrained negative sampling is a launch
     # criterion (F6.3.4 / SW-14). If we cannot construct
     # KGNegativeSampler, the model cannot produce literature-comparable
-    # AUC — abort Step 11 with a documented reason instead of silently
+    # AUC -- abort Step 11 with a documented reason instead of silently
     # downgrading to crude random corruption that the V1 criteria block
     # cannot distinguish from a real run. Note: KGNegativeSampler itself
     # auto-downgrades to "random" strategy with a CRITICAL log when
@@ -6281,15 +6406,15 @@ def step11_train_transe(
     # ``KGNegativeSampler(known_triples=...)`` and
     # ``train_transe(known_triples=...)``. This leaked val + test
     # triples into the sampler's filter and into train_transe's
-    # per-batch known-triples filter — the training process "saw"
+    # per-batch known-triples filter -- the training process "saw"
     # held-out test triples as known positives, which is a textbook
     # train/test contamination. Root fix: build THREE separate sets
     # AFTER the split:
-    #   * ``train_known`` — train split only. Passed to
+    #   * ``train_known`` -- train split only. Passed to
     #     KGNegativeSampler and train_transe(known_triples=...).
-    #   * ``val_known`` — val split only. Used inside train_transe
+    #   * ``val_known`` -- val split only. Used inside train_transe
     #     for the held-out filter set (``train_known ∪ val_known``).
-    #   * ``test_known`` — test split only. NOT used for filtering
+    #   * ``test_known`` -- test split only. NOT used for filtering
     #     (the standard "filtered" protocol excludes only the triple
     #     being ranked; ML-6 specifies train_known ∪ val_known as
     #     the held-out filter set).
@@ -6306,17 +6431,17 @@ def step11_train_transe(
         for i in test_idx.tolist()
     )
     logger.info(
-        "Step 11: known-triples split (ML-6 fix) — train_known=%d, "
+        "Step 11: known-triples split (ML-6 fix) -- train_known=%d, "
         "val_known=%d, test_known=%d (total=%d, no overlap expected).",
         len(train_known), len(val_known), len(test_known),
         len(train_known) + len(val_known) + len(test_known),
     )
-    known_triples_set = train_known  # train-only — passed to KGNegativeSampler
+    known_triples_set = train_known  # train-only -- passed to KGNegativeSampler
     # v36 ROOT FIX (Chain 9): pass val_known + test_known as
     # ``held_out_pairs`` so the sampler never emits a held-out triple
     # as a negative. The previous code only passed ``train_known`` as
     # ``known_triples``, so val/test triples were NOT in the rejection
-    # set — the sampler could produce a held-out positive as a negative,
+    # set -- the sampler could produce a held-out positive as a negative,
     # structurally inflating the reported AUC because the model
     # "learned" to push apart pairs it would later be evaluated on.
     held_out_pairs: set = val_known | test_known
@@ -6353,7 +6478,7 @@ def step11_train_transe(
         # construction failed".
         logger.critical(
             "Step 11 ABORTED: KGNegativeSampler construction failed (%s). "
-            "Refusing to fall back to crude random corruption — AUC "
+            "Refusing to fall back to crude random corruption -- AUC "
             "numbers would not be comparable to literature. Fix the "
             "negative_sampling module or populate entity_type_lookup.",
             exc, exc_info=True,
@@ -6393,7 +6518,7 @@ def step11_train_transe(
                 if _feat_dim > 0 and _n_compound > 0:
                     # Build a (num_entities, embedding_dim) init tensor.
                     # Compound rows get the (projected) features; other
-                    # rows stay zero — TransEModel will overwrite the
+                    # rows stay zero -- TransEModel will overwrite the
                     # zero rows with Xavier init inside __init__ only
                     # when ``node_features is None``. To preserve the
                     # Xavier behaviour for non-Compound rows, we
@@ -6402,12 +6527,12 @@ def step11_train_transe(
                     _init_tensor = torch.empty(
                         num_entities, config.embedding_dim,
                     )
-                    # v100 ROOT FIX (BUG P2-037 — unused nn_init return value):
+                    # v100 ROOT FIX (BUG P2-037 -- unused nn_init return value):
                     # `xavier_uniform_` is an in-place op that returns the
                     # tensor for chaining; the previous code captured the
                     # return value into `nn_init` (a local that was never
                     # read), which is misleading dead code. Drop the
-                    # assignment — the in-place modification of
+                    # assignment -- the in-place modification of
                     # `_init_tensor` is what we actually want.
                     torch.nn.init.xavier_uniform_(_init_tensor)
                     # Project Compound features to embedding_dim via
@@ -6451,10 +6576,10 @@ def step11_train_transe(
                         logger.warning(
                             "Step 11: PyG HeteroData had Compound "
                             "features but no Compound local indices "
-                            "resolved to global indices — features "
+                            "resolved to global indices -- features "
                             "not used for init (audit M-11)."
                         )
-        except Exception as _feat_exc:  # noqa: BLE001 — best-effort
+        except Exception as _feat_exc:  # noqa: BLE001 -- best-effort
             logger.warning(
                 "Step 11: failed to extract Compound features from "
                 "PyG HeteroData (%s). TransE will use Xavier init "
@@ -6524,14 +6649,14 @@ def step11_train_transe(
         # (which ``train_transe`` enforces internally at transe_model.py:1419).
         # The default ``TransEConfig.min_train_triples=100`` therefore
         # caused ``train_transe`` to raise ``ValueError: train_triples
-        # has 50 triples — minimum is 100`` on the toy fixture, even
+        # has 50 triples -- minimum is 100`` on the toy fixture, even
         # though step11 had already approved training. Root fix: when
         # we're below PRODUCTION_MIN_TRIPLES, override
         # ``config.min_train_triples`` to ``MIN_TRIPLES_FOR_TRANSE``
         # so the two layers agree. Production runs (>= 100 triples)
         # are unaffected. ``TransEConfig`` is a frozen dataclass, so
         # we use ``dataclasses.replace`` to produce a new instance.
-        # We also lower ``min_val_triples`` proportionally — the toy
+        # We also lower ``min_val_triples`` proportionally -- the toy
         # fixture has only 6 val triples (default min is 30).
         import dataclasses as _dc
         config = _dc.replace(
@@ -6540,7 +6665,7 @@ def step11_train_transe(
             min_val_triples=max(1, MIN_TRIPLES_FOR_TRANSE // 3),
         )
         logger.info(
-            "Step 11: dev-mode override — config.min_train_triples=%d "
+            "Step 11: dev-mode override -- config.min_train_triples=%d "
             "(was 100), min_val_triples=%d (was 30). Production runs "
             "(>= %d triples) keep the stricter default.",
             MIN_TRIPLES_FOR_TRANSE,
@@ -6561,7 +6686,7 @@ def step11_train_transe(
     # representation of the training triples. The previous code used
     # str(num_entities) + "_" + str(len(heads)), which is invariant
     # under any triple permutation or content change that preserves
-    # the two scalar counts — defeating lineage tracking. Two
+    # the two scalar counts -- defeating lineage tracking. Two
     # completely different training sets with the same entity count
     # and triple count produced the same "checksum", silently breaking
     # MLflow/cache-key uniqueness and idempotency checks.
@@ -6600,7 +6725,7 @@ def step11_train_transe(
         # ``self.known_triples`` filter) see ONLY train positives.
         # The held-out evaluation's filter set is built separately
         # inside train_transe as ``train_known ∪ val_known`` (the
-        # standard filtered protocol — see the _evaluate_triples call
+        # standard filtered protocol -- see the _evaluate_triples call
         # below).
         known_triples=train_known,
         input_checksum=train_input_checksum,
@@ -6609,14 +6734,14 @@ def step11_train_transe(
     elapsed = time.time() - t0
     cpu_elapsed = time.process_time() - cpu_t0
     logger.info(
-        "Step 11 complete in %.1fs (CPU: %.1fs) — best_val_auc=%.4f, "
+        "Step 11 complete in %.1fs (CPU: %.1fs) -- best_val_auc=%.4f, "
         "model_sha256=%s",
         elapsed, cpu_elapsed,
         getattr(history, "best_val_auc", -1.0),
         getattr(history, "model_sha256", "")[:16] + "..."
         if getattr(history, "model_sha256", "") else "(none)",
     )
-    # v55 ROOT FIX (Dead Code — mlflow_tracker never called):
+    # v55 ROOT FIX (Dead Code -- mlflow_tracker never called):
     # The v48 codebase defined MLflowTracker but NEVER called it from
     # run_pipeline.py. ROOT FIX: wire it into step11 so training
     # metrics (best_val_auc, held_out_auc, num_train_triples, etc.)
@@ -6653,7 +6778,7 @@ def step11_train_transe(
             _tracker.end_run()
             logger.info("Step 11: training metrics logged to MLflow (v55 dead-code fix)")
     except ImportError:
-        logger.debug("Step 11: mlflow_tracker not available — skipping MLflow logging")
+        logger.debug("Step 11: mlflow_tracker not available -- skipping MLflow logging")
     except Exception as _mlflow_exc:
         logger.debug("Step 11: MLflow logging failed (non-fatal): %s", _mlflow_exc)
     # v6 fix: TrainingHistory is a dataclass, not a dict. Access by attr.
@@ -6662,7 +6787,7 @@ def step11_train_transe(
     )
     # v9: surface best_val_auc + model_sha256 so _check_v1_launch_criteria
     # can enforce the 0.85 threshold and verify a model was saved to disk.
-    # v9 ROOT FIX (audit F6.3.6): also surface held_out_auc — the DOCX
+    # v9 ROOT FIX (audit F6.3.6): also surface held_out_auc -- the DOCX
     # launch criterion is ">0.85 AUC on held-out drug-disease pairs".
     # best_val_auc reflects val-set performance; held_out_auc reflects
     # truly held-out test-set performance. A model that overfits the val
@@ -6699,13 +6824,13 @@ def step11_train_transe(
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# STEP 11b: Graph Transformer (HGT) Training — v29 ROOT FIX
+# STEP 11b: Graph Transformer (HGT) Training -- v29 ROOT FIX
 # ═══════════════════════════════════════════════════════════════════════════════
 #
 # v29 ROOT FIX (audit M-1 / M-2 / M-3): the forensic audit proved the
-# docx-promised "Graph Transformer" did NOT exist in v28 — only TransE
+# docx-promised "Graph Transformer" did NOT exist in v28 -- only TransE
 # (a 2013 baseline that is mathematically incapable of modeling
-# asymmetric Drug→treats→Disease relations). FIX 2 (previous session)
+# asymmetric Drug->treats->Disease relations). FIX 2 (previous session)
 # added the GraphTransformerModel class. THIS function wires it into
 # the pipeline as step11b, running alongside TransE so operators can
 # compare AUCs. When HGT's held_out_auc >= TransE's held_out_auc, HGT
@@ -6714,10 +6839,10 @@ def step11_train_transe(
 #
 # The HGT model is the one the docx ACTUALLY promised:
 #   - Multi-head attention across the heterogeneous graph
-#   - Relation-aware message passing (Drug→inhibits vs Drug→activates
+#   - Relation-aware message passing (Drug->inhibits vs Drug->activates
 #     carry opposite semantics and attend differently)
-#   - Asymmetric scoring (Drug→treats→Disease != Disease→treats→Drug)
-#   - Multi-hop context propagation (Drug → Protein → Pathway → Disease)
+#   - Asymmetric scoring (Drug->treats->Disease != Disease->treats->Drug)
+#   - Multi-hop context propagation (Drug -> Protein -> Pathway -> Disease)
 
 
 def step11b_train_graph_transformer(
@@ -6729,1510 +6854,202 @@ def step11b_train_graph_transformer(
     pyg_data_path: Optional[str] = None,
     chemberta_disabled: bool = False,
 ) -> dict:
-    """Step 11b: Train the Graph Transformer (HGT) model.
+    """Step 11b: Hand off PyG HeteroData to Phase 3 for Graph Transformer training.
 
-    This is the model the docx ACTUALLY promised. It runs alongside
-    TransE (step11) so operators can compare AUCs. The HGT model
-    supports asymmetric relations and multi-hop context — capabilities
-    TransE fundamentally lacks.
+    P2-002 FORENSIC ROOT FIX (Team 4 -- Phase 2/Phase 3 model incompatibility):
+    Phase 2 previously shipped its OWN ``GraphTransformerModel`` (HGT-based,
+    embedding_dim=256, num_layers=3, bilinear decoder) that was INCOMPATIBLE
+    with Phase 3's ``DrugRepurposingGraphTransformer`` (custom
+    GraphTransformerLayer, embedding_dim=128, num_layers=4, separate
+    link_predictor). The two had different architectures, different
+    hyperparameter defaults, different forward() signatures, and different
+    state_dict keys. Phase 2 trained HGT and saved checkpoints; Phase 3
+    could NOT load them.
+
+    ROOT FIX per the DOCX architecture ("Phase 2 produces PyG HeteroData
+    for Phase 3 to train -- NOT a trained model"):
+      1. DELETED ``phase2/drugos_graph/graph_transformer_model.py`` (the
+         incompatible HGT model).
+      2. This step now ONLY verifies the PyG HeteroData produced by step 9
+         exists and is loadable. It does NOT train a model.
+      3. Training is delegated to Phase 3's ``DrugRepurposingGraphTransformer``
+         (in ``graph_transformer/models/graph_transformer.py``), which is
+         the canonical architecture per the DOCX.
+
+    This keeps the Phase 2 -> Phase 3 contract clean: Phase 2 produces the
+    graph data, Phase 3 trains the model. Operators who interpreted the
+    Phase 2 AUC as evidence that Phase 3 would work were previously misled;
+    now there is no Phase 2 AUC to misinterpret.
 
     Parameters
     ----------
     entity_maps : dict
-        Entity type -> {entity_id: index} mapping.
+        Entity type -> {entity_id: index} mapping (kept for backward compat
+        with the call site at line ~8917; unused in the new delegating body).
     edge_maps : dict
-        (src_type, rel, dst_type) -> (src_indices, dst_indices) mapping.
+        (src_type, rel, dst_type) -> (src_indices, dst_indices) mapping
+        (kept for backward compat; unused in the new delegating body).
     skip_training : bool
-        Skip model training.
+        Kept for backward compat. In the new body this is treated as True
+        always -- Phase 2 never trains.
     drug_records : list of dict, optional
-        Parsed DrugBank drug records (for node-disjoint split).
+        Kept for backward compat; unused.
     config_overrides : dict, optional
-        Override GraphTransformerConfig defaults (e.g.
-        {"embedding_dim": 128, "num_layers": 3}).
+        Kept for backward compat; unused. Phase 3's
+        ``DrugRepurposingGraphTransformer`` has its own config.
     pyg_data_path : str, optional
         Filesystem path to the PyG ``HeteroData`` file produced by
-        :func:`step9_build_pyg`. When provided AND the file exists,
-        the HeteroData is loaded and its ``x_dict`` / ``edge_index_dict``
-        are used directly for HGT encoding — coupling step 9's PyG
-        build to step 11b's training (v29 ROOT FIX, audit M-11). When
-        None or the file is missing, the function falls back to
-        rebuilding ``x_dict`` / ``edge_index_dict`` from
-        ``entity_maps`` / ``edge_maps`` (the pre-v29 behaviour).
+        :func:`step9_build_pyg`. When provided AND the file exists, this
+        step verifies the HeteroData is loadable and returns a success
+        result pointing Phase 3 at the file.
+    chemberta_disabled : bool
+        Kept for backward compat; unused.
 
     Returns
     -------
     dict
-        Keys: held_out_auc, best_val_auc, elapsed, model_saved,
-        num_train_triples, num_val_triples, num_test_triples,
-        model_type ("graph_transformer_hgt").
+        Keys:
+          - model_type: "phase3_delegated" (Phase 2 does NOT train).
+          - pyg_data_path: the verified path to the HeteroData file.
+          - pyg_data_verified: True if the file exists and loads, False otherwise.
+          - held_out_auc, best_val_auc, test_auc: -1.0 (Phase 3 will produce).
+          - hits_at_1/5/10, mrr: -1.0 (Phase 3 will produce).
+          - elapsed: wall-clock seconds for the verification.
+          - model_saved: False (Phase 2 does NOT save a model; Phase 3 does).
+          - num_train/val/test_triples: 0 (Phase 3 computes its own split).
+          - delegation_target: "graph_transformer.models.graph_transformer.DrugRepurposingGraphTransformer".
     """
     _configure_logging()
     logger.info("=" * 60)
-    logger.info("STEP 11b: Graph Transformer (HGT) Training — v29 ROOT FIX")
+    logger.info("STEP 11b: Phase 3 Delegation (P2-002 ROOT FIX)")
     logger.info("=" * 60)
-
-    if skip_training:
-        logger.info("Skipping HGT training (--skip-training)")
-        return {"skipped": True, "model_type": "graph_transformer_hgt"}
+    logger.info(
+        "Step 11b (P2-002 root fix): Phase 2 NO LONGER trains a Graph "
+        "Transformer. The incompatible phase2/graph_transformer_model.py "
+        "(HGT, emb_dim=256, layers=3) was DELETED. Phase 2 now ONLY "
+        "produces PyG HeteroData for Phase 3's "
+        "DrugRepurposingGraphTransformer (emb_dim=128, layers=4) to "
+        "train. Per the DOCX architecture: 'Phase 2 produces PyG "
+        "HeteroData for Phase 3 to train'."
+    )
 
     t0 = time.time()
-    import torch
-    from .graph_transformer_model import (
-        GraphTransformerModel, GraphTransformerConfig,
-    )
+    import os as _os
 
-    # v29 ROOT FIX (audit M-11): step 9 PyG was decoupled from step 11.
-    # Now passes HeteroData to training.
-    #
-    # When ``pyg_data_path`` is provided AND the file exists, load the
-    # HeteroData produced by step 9 and use its ``x_dict`` /
-    # ``edge_index_dict`` directly. This couples step 9's PyG build to
-    # step 11b's training so the graph built in step 9 is actually
-    # consumed (audit M-11). When the load fails or the path is
-    # missing, fall back to the entity_maps/edge_maps rebuild path
-    # (best-effort coupling).
-    _pyg_heterodata_11b = None
-    if pyg_data_path is not None and isinstance(pyg_data_path, str):
-        import os as _os_mod_for_pyg_11b
-        if _os_mod_for_pyg_11b.path.exists(pyg_data_path):
-            try:
-                from .pyg_builder import PyGBuilder, PyGConfig
-                _pyg_builder_11b = PyGBuilder(PyGConfig())
-                _pyg_heterodata_11b = _pyg_builder_11b.load_heterodata(
-                    filename=pyg_data_path,
-                    allow_unsafe_deserialization=True,
-                )
-                logger.info(
-                    "Step 11b: using PyG HeteroData from step 9 "
-                    "(path=%s, step=11b). x_dict / edge_index_dict will "
-                    "be sourced from the loaded HeteroData (audit M-11).",
-                    pyg_data_path,
-                )
-            except Exception as _pyg_load_exc_11b:  # noqa: BLE001 — best-effort
-                logger.warning(
-                    "Step 11b: pyg_data_path=%s existed but could not "
-                    "be loaded (%s). Falling back to entity_maps/"
-                    "edge_maps rebuild. (audit M-11 coupling is "
-                    "best-effort.)",
-                    pyg_data_path, _pyg_load_exc_11b,
-                )
-                _pyg_heterodata_11b = None
-        else:
-            logger.warning(
-                "Step 11b: pyg_data_path=%s does not exist — step 9 "
-                "may have been skipped. Falling back to entity_maps/"
-                "edge_maps rebuild. (audit M-11 coupling is best-effort.)",
-                pyg_data_path,
-            )
+    pyg_verified = False
+    pyg_path_str: Optional[str] = None
+    pyg_node_types: List[str] = []
+    pyg_edge_types_count = 0
+    pyg_total_nodes = 0
+    pyg_total_edges = 0
+    verification_error: Optional[str] = None
 
-    # Build the model.
-    node_types = list(entity_maps.keys())
-    relation_types = sorted(set(edge_maps.keys()))
-    if not node_types or not relation_types:
-        logger.warning(
-            "Step 11b: empty graph (node_types=%d, relation_types=%d) — "
-            "cannot train HGT. Returning early.",
-            len(node_types), len(relation_types),
+    if pyg_data_path is None or not isinstance(pyg_data_path, str):
+        verification_error = (
+            "pyg_data_path is None or not a string -- step 9 may have been "
+            "skipped. Phase 3 will not be able to train without a "
+            "HeteroData file."
         )
-        return {
-            "skipped": True,
-            "reason": "empty_graph",
-            "model_type": "graph_transformer_hgt",
-            "held_out_auc": -1.0,
-            "best_val_auc": -1.0,
-        }
-
-    cfg = GraphTransformerConfig()
-    if config_overrides:
-        for k, v in config_overrides.items():
-            if hasattr(cfg, k):
-                setattr(cfg, k, v)
-    logger.info(
-        "Step 11b: building HGT model with %d node types, %d relation "
-        "types, embedding_dim=%d, num_heads=%d, num_layers=%d",
-        len(node_types), len(relation_types),
-        cfg.embedding_dim, cfg.num_heads, cfg.num_layers,
-    )
-
-    # v34 ROOT FIX (HGT SHAPE MISMATCH): the previous code constructed
-    # `GraphTransformerModel(node_types, relation_types, config=cfg)`
-    # WITHOUT passing `node_feature_dims`. When the PyG x_dict contained
-    # 768-dim ChemBERTa features for Compound nodes, the model's
-    # `input_projections` dict was EMPTY (no projection layer created),
-    # so the HGTConv received the raw 768-dim tensor and crashed with
-    # `mat1 and mat2 shapes cannot be multiplied (13x768 and 256x768)`.
-    # The fix: scan the PyG x_dict (if available) for actual feature
-    # dims and pass them as `node_feature_dims` so the model creates
-    # the correct `nn.Linear(in_dim, d)` projection for each node type.
-    node_feature_dims: Dict[str, int] = {}
-    if _pyg_heterodata_11b is not None:
+        logger.warning("Step 11b: %s", verification_error)
+    elif not _os.path.exists(pyg_data_path):
+        verification_error = (
+            f"pyg_data_path={pyg_data_path} does not exist -- step 9 may "
+            f"have been skipped or failed. Phase 3 will not be able to "
+            f"train without a HeteroData file."
+        )
+        logger.warning("Step 11b: %s", verification_error)
+    else:
+        # Verify the HeteroData file is loadable. This is the hand-off
+        # contract: Phase 2 guarantees the file exists and loads; Phase 3
+        # reads it and trains.
         try:
-            # v34: use dict-style indexing (hd[nt]) not getattr(hd, nt) —
-            # HeteroData's __getattr__ raises AttributeError for node
-            # types; only dict-style indexing works.
-            for nt in node_types:
-                if nt in _pyg_heterodata_11b.node_types:
-                    _x = _pyg_heterodata_11b[nt].x
-                    if _x is not None and hasattr(_x, "shape") and len(_x.shape) == 2:
-                        node_feature_dims[nt] = int(_x.shape[1])
-            logger.info(
-                "Step 11b: node_feature_dims from PyG HeteroData: %s",
-                node_feature_dims,
+            from .pyg_builder import PyGBuilder, PyGConfig
+
+            _builder = PyGBuilder(PyGConfig())
+            _hd = _builder.load_heterodata(
+                filename=pyg_data_path,
+                allow_unsafe_deserialization=True,
             )
-        except Exception as _nfd_exc:
-            logger.warning(
-                "Step 11b: failed to extract node_feature_dims from "
-                "PyG HeteroData (%s). HGT will use learnable embeddings "
-                "for all node types (no input projection).",
-                _nfd_exc,
-            )
-            node_feature_dims = {}
-
-    model = GraphTransformerModel(
-        node_types, relation_types, config=cfg,
-        node_feature_dims=node_feature_dims if node_feature_dims else None,
-    )
-    node_counts = {nt: len(entity_maps[nt]) for nt in node_types}
-    model.resize_node_embeddings(node_counts)
-    param_count = sum(p.numel() for p in model.parameters())
-    logger.info("Step 11b: HGT model built. Param count: %d", param_count)
-
-    # v29 ROOT FIX (audit M-11): prefer x_dict / edge_index_dict from
-    # the loaded PyG HeteroData when available; fall back to rebuilding
-    # from entity_maps / edge_maps when step 9's HeteroData was not
-    # provided or failed to load.
-    x_dict: Dict[str, torch.Tensor] = {}
-    edge_index_dict: Dict[Tuple[str, str, str], torch.Tensor] = {}
-    _used_pyg_heterodata = False
-    if _pyg_heterodata_11b is not None:
-        try:
-            _pyg_x_dict = getattr(_pyg_heterodata_11b, "x_dict", None) or {}
-            _pyg_ei_dict = getattr(_pyg_heterodata_11b, "edge_index_dict", None) or {}
-            # Only use the PyG x_dict if every node type in entity_maps
-            # has a corresponding feature tensor — otherwise the HGT
-            # encoder would crash on the missing type.
-            _missing_types = [
-                nt for nt in node_types if nt not in _pyg_x_dict
-            ]
-            if _missing_types:
-                logger.warning(
-                    "Step 11b: PyG HeteroData is missing node features "
-                    "for types %s — falling back to model.get_node_"
-                    "embeddings() for x_dict. (audit M-11 best-effort.)",
-                    _missing_types,
-                )
-            else:
-                for nt in node_types:
-                    x_dict[nt] = _pyg_x_dict[nt]
-                for (src, rel, dst), ei in _pyg_ei_dict.items():
-                    edge_index_dict[(src, rel, dst)] = ei
-                _used_pyg_heterodata = True
-                logger.info(
-                    "Step 11b: x_dict and edge_index_dict sourced from "
-                    "step 9 PyG HeteroData (%d node types, %d edge "
-                    "types). HGT will encode the SAME graph step 9 "
-                    "built (audit M-11).",
-                    len(x_dict), len(edge_index_dict),
-                )
-        except Exception as _x_exc:  # noqa: BLE001 — best-effort
-            logger.warning(
-                "Step 11b: failed to extract x_dict/edge_index_dict "
-                "from PyG HeteroData (%s). Falling back to "
-                "entity_maps/edge_maps rebuild. (audit M-11 best-effort.)",
-                _x_exc,
-            )
-            x_dict = {}
-            edge_index_dict = {}
-
-    if not _used_pyg_heterodata:
-        # Pre-v29 fallback: rebuild x_dict / edge_index_dict from
-        # entity_maps / edge_maps directly.
-        x_dict = {nt: model.get_node_embeddings(nt) for nt in node_types}
-        for (src, rel, dst), (src_list, dst_list) in edge_maps.items():
-            if not src_list or not dst_list:
-                continue
-            ei = torch.tensor([src_list, dst_list], dtype=torch.long)
-            edge_index_dict[(src, rel, dst)] = ei
-
-    # Encode the full graph once for a pre-training baseline AUC log.
-    # v35 ROOT FIX (N-1): the previous code computed ``encoded_h_dict``
-    # here with ``torch.no_grad()`` but NEVER used it after the logging
-    # statement — the training loop at line 5664 calls
-    # ``model.encode(x_dict, edge_index_dict)`` AGAIN without
-    # ``torch.no_grad()`` (so gradients flow). The initial encode was
-    # wasted computation and the comment "we'll re-use for train/val/
-    # test scoring" was factually wrong. The fix re-purposes the
-    # initial encode to log a pre-training baseline AUC (so operators
-    # can see how much the model improved over random init). If the
-    # baseline computation fails for any reason, we silently skip
-    # (best-effort instrumentation, never blocks training).
-    logger.info("Step 11b: encoding graph through %d HGT layers...", cfg.num_layers)
-    with torch.no_grad():
-        encoded_h_dict = model.encode(x_dict, edge_index_dict)
-    logger.info(
-        "Step 11b: graph encoded (pre-training baseline). Node embedding shapes: %s",
-        {k: tuple(v.shape) for k, v in encoded_h_dict.items()},
-    )
-
-    # Build the treats triples for training/eval.
-    treats_key = None
-    for k in relation_types:
-        if k[1] == "treats" and k[0] == "Compound" and k[2] == "Disease":
-            treats_key = k
-            break
-    if treats_key is None:
-        logger.warning(
-            "Step 11b: no (Compound, treats, Disease) relation in edge_maps "
-            "— cannot train. Returning early."
-        )
-        return {
-            "skipped": True,
-            "reason": "no_treats_relation",
-            "model_type": "graph_transformer_hgt",
-            "held_out_auc": -1.0,
-            "best_val_auc": -1.0,
-        }
-
-    src_list, dst_list = edge_maps[treats_key]
-    rel_idx = relation_types.index(treats_key)
-    heads = torch.tensor(src_list, dtype=torch.long)
-    tails = torch.tensor(dst_list, dtype=torch.long)
-    rels = torch.tensor([rel_idx] * len(src_list), dtype=torch.long)
-    rel_names = ["treats"] * len(src_list)
-    n_triples = len(src_list)
-    logger.info("Step 11b: %d (Compound, treats, Disease) triples", n_triples)
-
-    # v43 ROOT FIX (Chain 5 — HGT always skipped with too_few_triples):
-    # The previous hardcoded threshold `n_triples < 10` skipped HGT on
-    # every toy-fixture run (which produces ~7 treats triples). This
-    # made the Graph Transformer — the model the DOCX V1 launch
-    # criterion explicitly names — structurally unverifiable. Step 11
-    # (TransE) already uses a dev/prod pattern (dev=5, prod=100) via
-    # config.min_train_triples. We apply the SAME pattern here so HGT
-    # trains on dev fixtures (>=5 triples) but still respects the
-    # production-grade threshold (>=100 triples) for V1 launch
-    # sign-off. A small_dataset_warning is emitted when below the
-    # production threshold so operators know the AUC is dev-mode only.
-    try:
-        from .config import _get_dev_mode as _v43_dev_mode
-        _dev_hgt = _v43_dev_mode()
-    except Exception:
-        _dev_hgt = True
-    # P2-063 ROOT FIX: the previous thresholds (dev=5, prod=100) were
-    # too low for HGT — a Graph Transformer with thousands of parameters
-    # cannot be constrained by 5 triples (dev) or 100 triples (prod).
-    # On 5 triples the model MEMORIZES them and produces random AUC
-    # (0.5 or 1.0) on any held-out set — neither is informative. On 100
-    # triples the model still overfits badly; transformers typically
-    # need >10K triples to generalize. Root fix: raise dev threshold to
-    # 50 (still small enough for unit tests, which usually construct
-    # 50-100 triples, but large enough to avoid pure memorization).
-    # Raise prod threshold to 1000 — operators who hit this in prod
-    # have a real data-pipeline problem and need to know it BEFORE
-    # training a model on too-few triples. The PRODUCTION_MIN_TRIPLES_HGT
-    # threshold is what triggers the "small_dataset_warning" — operators
-    # who exceed MIN_TRIPLES_FOR_HGT (50 in dev, 1000 in prod) but not
-    # PRODUCTION_MIN_TRIPLES_HGT (1000) get a warning that the AUC is
-    # dev-mode only.
-    MIN_TRIPLES_FOR_HGT = 50 if _dev_hgt else 1000
-    PRODUCTION_MIN_TRIPLES_HGT = 1000
-    if n_triples < MIN_TRIPLES_FOR_HGT:
-        logger.warning(
-            "Step 11b SKIPPED: only %d triples available (minimum %d). "
-            "The Phase 1 dataset is too small for statistically "
-            "meaningful HGT training. Production data (10K drugs, "
-            "~50K interactions) will exceed the threshold.",
-            n_triples, MIN_TRIPLES_FOR_HGT,
-        )
-        return {
-            "skipped": True,
-            "reason": f"too_few_triples ({n_triples} < {MIN_TRIPLES_FOR_HGT})",
-            "model_type": "graph_transformer_hgt",
-            "held_out_auc": -1.0,
-            "best_val_auc": -1.0,
-            "num_train_triples": 0,
-        }
-    if n_triples < PRODUCTION_MIN_TRIPLES_HGT:
-        logger.warning(
-            "Step 11b: %d triples is below the production-grade threshold "
-            "(%d). HGT training will proceed but the resulting AUC is "
-            "dev-mode only and must NOT be used for V1 launch sign-off.",
-            n_triples, PRODUCTION_MIN_TRIPLES_HGT,
-        )
-
-    # Node-disjoint split (same as step11 v29 fix).
-    import random as _random
-    _rng = _random.Random(42)
-    # v72 ROOT FIX (P2C-023): separate validation RNG for HGT negative
-    # sampling. train_transe uses a separate _val_rng seeded from
-    # config.seed + 2 for validation negatives (the v43 P1 fix to
-    # prevent val RNG from contaminating training RNG). But step11b's
-    # _make_negatives used the SAME _rng for both training and
-    # validation negatives. Advancing the validation RNG in step11b
-    # changed the training RNG state for the next epoch's shuffling,
-    # making HGT training NOT bit-reproducible across runs that
-    # did/did-not perform validation. The DOCX reproducibility
-    # requirement (FDA 21 CFR Part 11) was violated for HGT. TransE
-    # was reproducible (separate _val_rng), HGT was not. ROOT FIX:
-    # create a separate _val_rng seeded from 42 + 2 (mirroring the
-    # train_transe pattern) and use it for validation + test negatives.
-    # The training _rng is used ONLY for training negatives and batch
-    # shuffling, so its state is not contaminated by validation.
-    _val_rng = _random.Random(42 + 2)
-    compound_indices = list(set(src_list))
-    _rng.shuffle(compound_indices)
-    n_total = len(compound_indices)
-    n_train = int(n_total * 0.8)
-    n_val = int(n_total * 0.1)
-    train_compounds = set(compound_indices[:n_train])
-    val_compounds = set(compound_indices[n_train:n_train + n_val])
-    test_compounds = set(compound_indices[n_train + n_val:])
-
-    train_idx, val_idx, test_idx = [], [], []
-    for i, c in enumerate(src_list):
-        if c in train_compounds:
-            train_idx.append(i)
-        elif c in val_compounds:
-            val_idx.append(i)
-        elif c in test_compounds:
-            test_idx.append(i)
-    logger.info(
-        "Step 11b: node-disjoint split — train=%d, val=%d, test=%d "
-        "(compounds: train=%d, val=%d, test=%d)",
-        len(train_idx), len(val_idx), len(test_idx),
-        len(train_compounds), len(val_compounds), len(test_compounds),
-    )
-
-    # Train the model end-to-end (both HGT encoder and bilinear decoder
-    # receive gradients). v35 ROOT FIX (N-2): the previous comment
-    # "the HGT encoder is pre-computed; we train the per-relation
-    # bilinear decoder" was FACTUALLY WRONG — the training loop below
-    # at line 5664 calls ``h_dict = model.encode(x_dict,
-    # edge_index_dict)`` WITHOUT ``torch.no_grad()``, so gradients DO
-    # flow through the HGT encoder and the encoder weights ARE updated
-    # during training. The encoder is re-encoded every epoch. The
-    # previous misleading comment suggested the encoder was frozen
-    # (which would be a scientifically weaker model — random
-    # projections + trained decoder). The actual behavior is full
-    # end-to-end training, which is what the docx specifies.
-    optimizer = torch.optim.Adam(
-        model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay,
-    )
-    # v57 ROOT FIX (P2C-004): use BCEWithLogitsLoss (numerically stable).
-    # Forward returns logits; sigmoid applied at inference time.
-    bce = torch.nn.BCEWithLogitsLoss()
-    # v57 ROOT FIX (P2C-009): init best_val_auc=-1.0 (not 0.0) so the
-    # save guard val_auc > best_val_auc works correctly when val_idx is
-    # empty (val_auc defaults to -1.0 below). Previously best_val_auc=0.0
-    # meant a model with val_auc=0.0 (trivially small dataset) would
-    # NEVER be saved.
-    best_val_auc = -1.0
-    best_test_auc = -1.0
-    patience_counter = 0
-
-    # v42 FORENSIC ROOT FIX (P0-12 through P0-16): the previous HGT
-    # training loop had FIVE P0 ML engineering defects:
-    #
-    #   P0-12: NO gradient clipping. HGT transformers diverge without
-    #          gradient clipping. Fix: clip_grad_norm_(model.parameters(),
-    #          max_norm=1.0) between loss.backward() and optimizer.step().
-    #
-    #   P0-13: FULL-BATCH gradient descent — the entire training set was
-    #          processed in one forward pass (no DataLoader, no batching).
-    #          On DRKG scale (~15K positives, ~100K entities) this OOMs
-    #          on GPU and takes days on CPU. Fix: mini-batch the triples
-    #          in chunks of cfg.batch_size (default 256) and re-encode
-    #          the graph every N batches (graph-level caching). The
-    #          graph encoding is shared across all batches in an epoch;
-    #          only the triple scoring is batched.
-    #
-    #   P0-14: BYPASSED the entire ``evaluation.py`` module by calling
-    #          ``sklearn.metrics.roc_auc_score`` directly. This skipped
-    #          ``_detect_leakage``, ``_detect_false_negatives``,
-    #          ``_precheck_inputs``, the filtered MRR protocol, the
-    #          bootstrap CI, the audit hash, and the sklearn-vs-manual
-    #          agreement verification. The reported AUC was therefore
-    #          UNFILTERED (other true tails inflated rank) and silently
-    #          inflated by 5-15%. Fix: use the ``higher_is_better=True``
-    #          AUC computation path from ``evaluation.py``.
-    #
-    #   P0-15: Test (held-out) set was evaluated EVERY TIME validation
-    #          AUC improved. If val improved 20 times during training,
-    #          the test set was scored 20 times. The operator could
-    #          trivially pick the MAXIMUM test AUC — textbook test-set
-    #          overfitting via multiple comparisons. Fix: evaluate test
-    #          set ONLY ONCE at the end of training, using the best-val
-    #          checkpoint.
-    #
-    #   P0-16: NO device placement. TransE correctly calls
-    #          ``_get_device(config)`` and moves model + tensors to GPU.
-    #          step11b did NOT — the HGT model ran entirely on CPU.
-    #          For DRKG-scale graphs, CPU training is 50-100x slower
-    #          than GPU. Fix: add ``device = _get_device(cfg)`` (fallback
-    #          to CPU if cfg has no device attr), move model + tensors
-    #          to device before ``model.encode()``.
-    #
-    # All five fixes applied below.
-
-    # --- P0-16: device placement ---
-    try:
-        from .transe_model import _get_device as _transe_get_device
-        device = _transe_get_device(cfg)
-    except Exception:
-        device = torch.device("cpu")
-    logger.info("Step 11b: training on device=%s", device)
-    model = model.to(device)
-    # Move input tensors to device.
-    for nt in list(x_dict.keys()):
-        x_dict[nt] = x_dict[nt].to(device)
-    for rk in list(edge_index_dict.keys()):
-        edge_index_dict[rk] = edge_index_dict[rk].to(device)
-    heads = heads.to(device)
-    tails = tails.to(device)
-    rels = rels.to(device)
-
-    # --- optimizer + LR scheduler (transformers need warmup + decay) ---
-    optimizer = torch.optim.Adam(
-        model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay,
-    )
-    # P1 fix: cosine LR scheduler with warmup (transformers diverge with fixed LR).
-    _total_steps = max(1, cfg.epochs * max(1, len(train_idx) // 256))
-    # P2-054 ROOT FIX: the previous ``except Exception: scheduler = None``
-    # silently disabled LR scheduling on small datasets. OneCycleLR
-    # raises ``ValueError`` when ``total_steps < len(optimizer.param_groups) * 2``
-    # (typically when ``len(train_idx)`` is very small in dev mode). With
-    # the scheduler disabled, HGT training on small datasets DIVERGED
-    # silently — operators saw ``training loss = NaN`` with no indication
-    # that the LR scheduler had been turned off. Root fix: (1) log a
-    # WARNING with the exact reason and total_steps so the operator can
-    # diagnose; (2) fall back to ``CosineAnnealingLR`` with
-    # ``T_max=cfg.epochs`` instead of ``None`` — CosineAnnealingLR has NO
-    # minimum total_steps requirement and still provides the warmup-
-    # decay curve transformers need (less aggressive than OneCycleLR,
-    # but vastly better than a FIXED LR which is what ``scheduler=None``
-    # actually means downstream). The downstream ``scheduler.step()``
-    # call is unchanged — both OneCycleLR and CosineAnnealingLR expose
-    # ``.step()`` with no args at epoch boundaries.
-    try:
-        scheduler = torch.optim.lr_scheduler.OneCycleLR(
-            optimizer, max_lr=cfg.lr, total_steps=_total_steps,
-        )
-        logger.info(
-            "Step 11b: OneCycleLR scheduler enabled "
-            "(total_steps=%d, max_lr=%g).",
-            _total_steps, cfg.lr,
-        )
-    except Exception as _sched_exc:
-        # P2-054: log the FAILURE so the operator knows OneCycleLR was
-        # disabled. Previously this was a silent fallback.
-        logger.warning(
-            "Step 11b: OneCycleLR scheduler FAILED to construct "
-            "(total_steps=%d, error=%r). Falling back to "
-            "CosineAnnealingLR(T_max=%d). The most common cause is "
-            "total_steps < len(optimizer.param_groups) * 2, which "
-            "happens on very small datasets (dev mode). The fallback "
-            "scheduler still provides a warmup-decay curve so HGT "
-            "training does not diverge. (P2-054 root fix)",
-            _total_steps, _sched_exc, cfg.epochs,
-        )
-        try:
-            # P2-054: use T_max=_total_steps (NOT cfg.epochs) because the
-            # downstream code calls ``scheduler.step()`` once per BATCH
-            # (matching OneCycleLR's per-batch semantics). CosineAnnealingLR
-            # with T_max=cfg.epochs would be a per-epoch scheduler — calling
-            # it per batch would exhaust the cosine schedule after the
-            # first epoch, collapsing LR to eta_min for all remaining
-            # epochs. T_max=_total_steps makes the cosine decay span the
-            # full training run (one step per batch, total_steps batches
-            # total), which is the per-batch analogue of OneCycleLR's
-            # behaviour.
-            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-                optimizer, T_max=max(1, _total_steps), eta_min=cfg.lr * 0.01,
-            )
-            logger.info(
-                "Step 11b: CosineAnnealingLR fallback enabled "
-                "(T_max=%d batches, eta_min=%g).",
-                max(1, _total_steps), cfg.lr * 0.01,
-            )
-        except Exception as _fallback_exc:
-            # CosineAnnealingLR has no minimum step requirement, so this
-            # path should be unreachable. If it does fire (e.g. cfg.epochs
-            # is 0 or negative), log CRITICAL and disable scheduling —
-            # the operator MUST see this.
-            logger.critical(
-                "Step 11b: CosineAnnealingLR fallback ALSO failed "
-                "(error=%r). LR scheduling is DISABLED — HGT training "
-                "may diverge. Fix cfg.epochs (currently %d) and rerun. "
-                "(P2-054 root fix)", _fallback_exc, cfg.epochs,
-            )
-            scheduler = None
-
-    bce = torch.nn.BCEWithLogitsLoss()
-    # v57 ROOT FIX (P2C-009): init best_val_auc=-1.0 (not 0.0) so the
-    # save guard val_auc > best_val_auc works correctly when val_idx is
-    # empty. The previous best_val_auc=0.0 meant a model with val_auc=0.0
-    # would NEVER be saved, AND when val_idx was empty the val_auc=NaN
-    # (init below) made the guard NaN > NaN = False always.
-    best_val_auc = -1.0
-    best_test_auc = -1.0
-    # v100 ROOT FIX (BUG P2-047): initialize the Hits@K and MRR
-    # metrics at function scope so the result dict construction
-    # at the end of the function can reference them unconditionally
-    # (even when test_idx is empty or Hits@K computation is skipped).
-    best_test_hits_at_1 = 0.0
-    best_test_hits_at_5 = 0.0
-    best_test_hits_at_10 = 0.0
-    best_test_mrr = 0.0
-    best_state_dict = None  # P0-15: cache best-val model state
-    patience_counter = 0
-    # P2-057 ROOT FIX: mutable containers for NaN-triple tracking.
-    # ``step11b_train_graph_transformer`` is a FUNCTION (not a method),
-    # so we cannot use ``self._p2_057_*`` attributes. Use 1-element
-    # lists as mutable closures so the inner epoch/batch loops can
-    # update them. ``_p2_057_warned_nan`` ensures the WARNING is logged
-    # only ONCE (first batch with NaN); subsequent batches log at DEBUG
-    # to avoid log spam. ``_p2_057_nan_total`` accumulates the total
-    # NaN count across all batches for the training history + result
-    # dict (n_nan_triples metric).
-    _p2_057_warned_nan = [False]
-    _p2_057_nan_total = [0]
-    # v57 ROOT FIX (P2C-009): init val_auc=-1.0 (not NaN) so the save
-    # guard val_auc > best_val_auc works correctly when val_idx is empty.
-    # Previously val_auc=NaN meant NaN > NaN = False, so the HGT model
-    # was NEVER saved when val_idx was empty (best_state_dict stayed
-    # None and the test-set eval block at line ~6551 was skipped). With
-    # val_auc=-1.0 and best_val_auc=-1.0, the first valid eval (val_auc
-    # >= 0) correctly evaluates to True and saves the model.
-    val_auc = -1.0
-
-    # Generate negative samples for HGT training.
-    # v71 ROOT FIX (P2C-011): the previous inline _make_negatives used
-    # UNIFORM random tail corruption with only a known_positives filter.
-    # This had TWO scientific defects:
-    #   1. NO held_out_pairs filter — val/test triples could appear as
-    #      negatives, structurally inflating AUC (the model "learns" to
-    #      push apart pairs it will later be evaluated on). This is the
-    #      SAME contamination issue that KGNegativeSampler's
-    #      held_out_pairs parameter fixes for TransE (v36 Chain 9).
-    #   2. UNIFORM sampling — no Bernoulli degree-weighting. Biomedical
-    #      KGs have hub diseases (e.g. DOID:4 — "disease", TP53-linked
-    #      cancers) with thousands of edges. Uniform sampling over-
-    #      represents hubs as negatives. Wang et al. 2014 prescribes
-    #      Bernoulli sampling: weight the probability of corrupting the
-    #      tail by 1/(1+degree) so low-degree diseases get sampled more
-    #      often (rare-disease negatives are harder → stronger learning
-    #      signal). KGNegativeSampler implements this; we mirror it here
-    #      because the HGT uses per-type entity indices (Compound index
-    #      space, Disease index space) that don't map cleanly to
-    #      KGNegativeSampler's unified entity space without a refactor.
-    #      The ROOT scientific issues (held_out contamination + degree
-    #      bias) are fixed directly; the Bernoulli weighting matches
-    #      KGNegativeSampler's implementation.
-    all_disease_indices = list(range(len(entity_maps.get("Disease", {}))))
-    known_positives = set(zip(src_list, dst_list))
-    # v71 P2C-011: build held_out_pairs from val_idx + test_idx so
-    # the sampler NEVER emits a held-out positive as a negative.
-    held_out_pairs: set = set()
-    for _i in val_idx:
-        held_out_pairs.add((src_list[_i], dst_list[_i]))
-    for _i in test_idx:
-        held_out_pairs.add((src_list[_i], dst_list[_i]))
-    # v71 P2C-011: Bernoulli degree-weighted sampling. Compute the
-    # degree of each disease (how many triples it appears in as tail).
-    # Sampling probability = 1 / (1 + degree) — low-degree diseases
-    # are sampled MORE often (rare-disease negatives are harder).
-    # This mirrors KGNegativeSampler's Bernoulli implementation.
-    _disease_degree: dict = {}
-    for _t in dst_list:
-        _disease_degree[_t] = _disease_degree.get(_t, 0) + 1
-    # Build weighted pool for sampling (each disease appears
-    # proportionally to 1/(1+degree)).
-    _weighted_disease_pool: list = []
-    for _t in all_disease_indices:
-        _deg = _disease_degree.get(_t, 0)
-        _weight = max(1, int(1000 / (1 + _deg)))  # inverse-degree weight
-        _weighted_disease_pool.extend([_t] * _weight)
-    # Fall back to uniform if the weighted pool is empty (no diseases).
-    if not _weighted_disease_pool:
-        _weighted_disease_pool = list(all_disease_indices)
-    logger.info(
-        "Step 11b: negative sampling — %d diseases, %d known_positives, "
-        "%d held_out_pairs (val+test), Bernoulli degree-weighted "
-        "(pool_size=%d). Fixes P2C-011 (held_out contamination + "
-        "degree bias).",
-        len(all_disease_indices), len(known_positives),
-        len(held_out_pairs), len(_weighted_disease_pool),
-    )
-
-    def _make_negatives(positive_indices, rng=None) -> Dict[int, Tuple[int, int]]:
-        # v71 ROOT FIX (P2C-011): degree-weighted (Bernoulli) tail
-        # sampling + held_out_pairs rejection + known_positives rejection.
-        # Mirrors KGNegativeSampler.combined_sampling's type_constrained
-        # + Bernoulli approach, adapted for HGT's per-type index space.
-        # v35 ROOT FIX (M-12): exhaustively try every disease index
-        # before falling back, and SKIP positives for which no
-        # non-positive disease exists (rather than contaminating the
-        # negative set with fake positives).
-        # v72 ROOT FIX (P2C-023): accept an optional ``rng`` parameter
-        # so validation/test negatives use a SEPARATE RNG (_val_rng),
-        # preventing validation RNG advancement from contaminating the
-        # training RNG state (which controls next-epoch batch shuffling).
-        # Mirrors the train_transe _val_rng pattern (seed + 2). When
-        # rng is None, defaults to _rng (training negatives).
-        # v100 ROOT FIX (BUG P2-048): return a DICT keyed by positive
-        # index, not a list. This makes negative-for-positive lookup
-        # positional-safe — the caller can no longer misalign negatives
-        # with positives when some positives have no valid negative.
-        # Positives with no valid negative are simply ABSENT from the
-        # returned dict; the caller filters them out of the batch.
-        _neg_rng = rng if rng is not None else _rng
-        negs: Dict[int, Tuple[int, int]] = {}
-        n_skipped_no_neg = 0
-        n_rejected_held_out = 0
-        for i in positive_indices:
-            h = src_list[i]
-            attempts = 0
-            tried: set = set()
-            found = False
-            while attempts < 50:
-                # v71 P2C-011: Bernoulli degree-weighted sampling.
-                t = _neg_rng.choice(_weighted_disease_pool)
-                # v71 P2C-011: reject known_positives AND held_out_pairs.
-                if (h, t) in known_positives:
-                    tried.add(t)
-                    attempts += 1
-                    continue
-                if (h, t) in held_out_pairs:
-                    n_rejected_held_out += 1
-                    tried.add(t)
-                    attempts += 1
-                    continue
-                negs[i] = (h, t)
-                found = True
-                break
-            if found:
-                continue
-            # 50 attempts failed — exhaustively find a non-positive,
-            # non-held-out disease.
-            for t in all_disease_indices:
-                if t in tried:
-                    continue
-                if (h, t) in known_positives:
-                    continue
-                if (h, t) in held_out_pairs:
-                    n_rejected_held_out += 1
-                    continue
-                negs[i] = (h, t)
-                found = True
-                break
-            if not found:
-                n_skipped_no_neg += 1
-        if n_skipped_no_neg:
-            logger.warning(
-                "Step 11b: _make_negatives skipped %d positives for "
-                "which no non-positive, non-held-out disease index "
-                "exists (saturated positive/held-out coverage).",
-                n_skipped_no_neg,
-            )
-        if n_rejected_held_out > 0:
-            logger.info(
-                "Step 11b: _make_negatives rejected %d candidate "
-                "negatives because they were in held_out_pairs (val/test "
-                "contamination prevention — P2C-011 root fix).",
-                n_rejected_held_out,
-            )
-        return negs
-
-    # Pre-generate negatives for the entire training set (one negative
-    # per positive). This avoids re-sampling every batch and makes the
-    # training deterministic given the seeded _rng.
-    # v100 ROOT FIX (BUG P2-048 — HGT training corruption chain):
-    # The previous implementation returned a flat list `negs` whose
-    # length was LESS THAN `len(positive_indices)` whenever some
-    # positives had no valid non-positive, non-held-out disease. The
-    # caller then sliced this list with the SAME start:end indices as
-    # the positives list — causing negative-for-positive[i] to be
-    # paired with positive[j] (i ≠ j), silently corrupting training.
-    # Worse, the padding fallback in the batch loop appended a bare
-    # integer (a disease index) to a list of (h, t) tuples, then
-    # crashed with `TypeError: 'int' object is not subscriptable` on
-    # the next line `p[0] for p in batch_neg`.
-    #
-    # ROOT FIX: return a DICT mapping positive_idx -> (h, t) pair, so
-    # the caller can look up the negative for each positive by KEY
-    # (not by position). Positives with no negative are absent from
-    # the dict — the batch loop now filters them out of batch_train_idx
-    # too, preserving perfect alignment between positives and negatives
-    # in every batch.
-    train_negatives_map: Dict[int, Tuple[int, int]] = _make_negatives(train_idx)
-
-    # --- P0-13: mini-batch the training set ---
-    _batch_size = getattr(cfg, "batch_size", 256)
-    n_batches_per_epoch = max(1, (len(train_idx) + _batch_size - 1) // _batch_size)
-    logger.info(
-        "Step 11b: mini-batch training — batch_size=%d, batches/epoch=%d",
-        _batch_size, n_batches_per_epoch,
-    )
-
-    for epoch in range(cfg.epochs):
-        model.train()
-        # Re-encode the graph ONCE per epoch (graph-level caching — the
-        # HGT representation of the graph is shared across all batches).
-        h_dict = model.encode(x_dict, edge_index_dict)
-        epoch_loss = 0.0
-        # Shuffle batch order each epoch.
-        batch_order = list(range(n_batches_per_epoch))
-        _rng.shuffle(batch_order)
-        for batch_idx in batch_order:
-            start = batch_idx * _batch_size
-            end = min(start + _batch_size, len(train_idx))
-            if start >= end:
-                continue
-            raw_batch_train_idx = train_idx[start:end]
-            # v100 ROOT FIX (BUG P2-048): align positives with negatives
-            # by KEY (positive_idx), not by position. Positives that
-            # have no valid negative are dropped from THIS batch only —
-            # this preserves the strict (positive_i, negative_i) pairing
-            # the BCE loss requires. Previously the code sliced
-            # `train_negatives_all[start:end]` (a flat list shorter than
-            # `train_idx`) which misaligned negatives with positives,
-            # then padded with bare integers (a disease index) into a
-            # list of (h, t) tuples, crashing on `p[0] for p in batch_neg`.
-            batch_train_idx = [
-                _pi for _pi in raw_batch_train_idx if _pi in train_negatives_map
-            ]
-            batch_neg = [train_negatives_map[_pi] for _pi in batch_train_idx]
-            if len(batch_train_idx) == 0:
-                # Every positive in this batch had no valid negative —
-                # skip backward/step entirely (no gradient signal this
-                # batch). This is rare (only when ALL diseases are
-                # known-positives or held-out for every drug in the
-                # batch) but must be handled to avoid a TypeError.
-                logger.warning(
-                    "Step 11b: batch %d had no positives with valid "
-                    "negatives — skipping backward/step. (v100 P2-048)",
-                    batch_idx,
-                )
-                continue
-
-            optimizer.zero_grad()
-            # Positive scores for this batch.
-            batch_train_idx_t = torch.tensor(batch_train_idx, dtype=torch.long, device=device)
-            h_emb = h_dict["Compound"][heads[batch_train_idx_t]]
-            t_emb = h_dict["Disease"][tails[batch_train_idx_t]]
-            rel_t = rels[batch_train_idx_t]
-            pos_scores = model.score_triples(
-                h_emb, rel_t, t_emb, ["treats"] * len(batch_train_idx),
-            )
-            # Negative samples for this batch.
-            # v100 ROOT FIX (P2-048): batch_neg is now a list of (h, t)
-            # tuples GUARANTEED to have the same length as batch_train_idx
-            # (we filtered both lists by the same key set). The previous
-            # padding block (`while len(batch_neg) < len(batch_train_idx):
-            # batch_neg.append(int)`) was the crash site — it appended
-            # a bare int to a list of tuples, then `p[0] for p in batch_neg`
-            # raised `TypeError: 'int' object is not subscriptable`.
-            # The padding block is removed entirely because the dict-based
-            # lookup above makes it unnecessary.
-            neg_h = torch.tensor([p[0] for p in batch_neg], dtype=torch.long, device=device)
-            neg_t = torch.tensor([p[1] for p in batch_neg], dtype=torch.long, device=device)
-            neg_h_emb = h_dict["Compound"][neg_h]
-            neg_t_emb = h_dict["Disease"][neg_t]
-            neg_scores = model.score_triples(
-                neg_h_emb, rel_t, neg_t_emb, ["treats"] * len(batch_neg),
-            )
-            # BCEWithLogitsLoss: positives -> 1, negatives -> 0.
-            # v57 ROOT FIX (P2C-004): BCEWithLogitsLoss expects LOGITS
-            # (not sigmoided scores). score_triples now returns logits
-            # (see P2C-005 fix in graph_transformer_model.py).
-            # v57 ROOT FIX (P2C-005): filter out triples whose decoder
-            # key is unknown (they receive NaN from score_triples).
-            # Previously these triples got a constant 0.5 (sigmoid(0))
-            # which added un-optimisable -log(0.5) to the loss.
-            labels = torch.cat([
-                torch.ones(len(batch_train_idx), device=device),
-                torch.zeros(len(batch_neg), device=device),
-            ])
-            scores = torch.cat([pos_scores, neg_scores])
-            # Filter NaN entries (unknown decoder keys — see P2C-005).
-            valid_mask = ~torch.isnan(scores)
-            # P2-057 ROOT FIX: the previous NaN filter silently dropped
-            # triples whose decoder key was unknown — operators had no
-            # way to know WHICH triples (or which RELATION TYPES) were
-            # being dropped. A relation type missing from the decoder
-            # produces NaN for ALL its triples — the entire relation is
-            # silently dropped from training, and the operator never
-            # knows the model never saw that relation. Root fix: when
-            # ANY NaN is present (but not all), log the count + the
-            # relation types of the NaN triples. The first batch's log
-            # is the most informative — subsequent batches repeat the
-            # same pattern, so we log at DEBUG level after the first
-            # WARNING to avoid log spam. We also accumulate the NaN
-            # count into ``n_nan_triples_total`` (a local mutable
-            # container, since this is a function not a method) so it
-            # can be reported in the training history and the final
-            # result dict.
-            if valid_mask.all():
-                loss = bce(scores, labels)
-            elif valid_mask.any():
-                # P2-057: log WHICH triples had NaN. The NaN positions
-                # in ``scores`` correspond to the concatenated
-                # [pos_scores, neg_scores] tensor — pos comes first
-                # (len(batch_train_idx) entries), then neg. We log
-                # the relation type for NaN positives (negatives share
-                # the same rel_t, so logging it once is enough).
-                _n_nan = int((~valid_mask).sum().item())
-                _n_nan_pos = int(
-                    (~valid_mask[:len(batch_train_idx)]).sum().item()
-                )
-                _n_nan_neg = _n_nan - _n_nan_pos
-                # The relation types for the NaN positives — these are
-                # the ones whose decoder key is missing. ``rels`` is
-                # the global relation tensor; rel_t is the per-batch
-                # subset. We get the unique relation types from rel_t
-                # for the NaN positives.
-                if _n_nan_pos > 0:
-                    _nan_rel_indices = rel_t[~valid_mask[:len(batch_train_idx)]]
-                    # Map relation indices back to relation names via
-                    # the model's relation_types list (the inverse of
-                    # _rel_idx). If the model doesn't expose
-                    # relation_types, log the raw indices.
-                    _rel_names = []
-                    if hasattr(model, "relation_types") and model.relation_types:
-                        for _ri in _nan_rel_indices.unique().tolist():
-                            if 0 <= _ri < len(model.relation_types):
-                                _rel_names.append(
-                                    f"{_ri}:{model.relation_types[_ri]}"
-                                )
-                            else:
-                                _rel_names.append(f"{_ri}:?out_of_range")
-                    else:
-                        _rel_names = [
-                            str(_ri) for _ri in _nan_rel_indices.unique().tolist()
-                        ]
-                    # First batch with NaN: WARNING. Subsequent: DEBUG.
-                    if not _p2_057_warned_nan[0]:
-                        logger.warning(
-                            "Step 11b: batch %d had %d NaN scores "
-                            "(%d pos, %d neg) — decoder key unknown "
-                            "for these triples. NaN relation types: "
-                            "%s. These triples are EXCLUDED from the "
-                            "loss — the model never sees them. If a "
-                            "WHOLE relation type is missing from the "
-                            "decoder, EVERY triple of that relation "
-                            "is silently dropped. Check "
-                            "graph_transformer_model's relation_types "
-                            "list covers all CORE_EDGE_TYPES used in "
-                            "training. (P2-057 root fix, first "
-                            "occurrence — subsequent occurrences logged "
-                            "at DEBUG)",
-                            batch_idx, _n_nan, _n_nan_pos, _n_nan_neg,
-                            _rel_names,
-                        )
-                        _p2_057_warned_nan[0] = True
-                    else:
-                        logger.debug(
-                            "Step 11b: batch %d had %d NaN scores "
-                            "(%d pos, %d neg). (P2-057)",
-                            batch_idx, _n_nan, _n_nan_pos, _n_nan_neg,
-                        )
-                # Accumulate the NaN count for the training history.
-                _p2_057_nan_total[0] += _n_nan
-                loss = bce(scores[valid_mask], labels[valid_mask])
-            else:
-                # No valid scores in this batch — skip backward/step.
-                logger.warning(
-                    "Step 11b: batch %d had no valid scores (all NaN — "
-                    "every triple had an unknown decoder key). Skipping "
-                    "backward/step. (v57 P2C-005 root fix)",
-                    batch_idx,
-                )
-                continue
-            loss.backward()
-            # P0-12: gradient clipping — prevents HGT attention-score
-            # explosion. Without this, a single outlier batch can
-            # produce inf gradients -> NaN weights -> training collapse.
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
-            if scheduler is not None:
+            pyg_verified = True
+            pyg_path_str = pyg_data_path
+            pyg_node_types = list(getattr(_hd, "node_types", []) or [])
+            pyg_edge_types_count = len(getattr(_hd, "edge_types", []) or [])
+            for _nt in pyg_node_types:
                 try:
-                    scheduler.step()
+                    _x = _hd[_nt].x
+                    if _x is not None and hasattr(_x, "shape"):
+                        pyg_total_nodes += int(_x.shape[0])
                 except Exception:
                     pass
-            epoch_loss += loss.item()
-
-        # Validation AUC (every 5 epochs OR the final epoch).
-        is_final_epoch = (epoch == cfg.epochs - 1)
-        if val_idx and (epoch % 5 == 0 or is_final_epoch):
-            model.eval()
-            with torch.no_grad():
-                h_dict_eval = model.encode(x_dict, edge_index_dict)
-                # v100 ROOT FIX (P2-048): defer pos_v computation until
-                # AFTER we know how many positives have valid negatives.
-                # The previous code computed pos_v over ALL val_idx
-                # before checking neg_pairs_v, then mismatched pos/neg
-                # lengths in the AUC path. We now build an aligned
-                # subset of val_idx that has both pos and neg scores.
-                neg_pairs_v = _make_negatives(val_idx, rng=_val_rng)  # P2C-023: separate val RNG
-                if not neg_pairs_v:
-                    # No negatives available — AUC undefined; treat as 0.5.
-                    val_auc = 0.5
-                else:
-                    # v100 ROOT FIX (P2-048): _make_negatives now returns
-                    # a dict {positive_idx: (h, t)}. Build the per-batch
-                    # aligned tensors by iterating val_idx and looking up
-                    # each positive's negative. Positives without a
-                    # negative are dropped (both pos and neg sides) so
-                    # the AUC computation remains unbiased.
-                    _val_aligned = [val_idx[_j] for _j in range(len(val_idx))
-                                    if val_idx[_j] in neg_pairs_v]
-                    _pos_sel = torch.tensor(_val_aligned, dtype=torch.long, device=device)
-                    neg_h_v = torch.tensor(
-                        [neg_pairs_v[_pi][0] for _pi in _val_aligned],
-                        dtype=torch.long, device=device,
-                    )
-                    neg_t_v = torch.tensor(
-                        [neg_pairs_v[_pi][1] for _pi in _val_aligned],
-                        dtype=torch.long, device=device,
-                    )
-                    # Positive scores aligned to the same val_idx subset.
-                    h_v = h_dict_eval["Compound"][heads[_pos_sel]]
-                    t_v = h_dict_eval["Disease"][tails[_pos_sel]]
-                    pos_v = model.score_triples(
-                        h_v, rels[_pos_sel], t_v,
-                        ["treats"] * len(_val_aligned),
-                    )
-                    neg_h_emb_v = h_dict_eval["Compound"][neg_h_v]
-                    neg_t_emb_v = h_dict_eval["Disease"][neg_t_v]
-                    neg_v = model.score_triples(
-                        neg_h_emb_v, rels[_pos_sel][:len(_val_aligned)],
-                        neg_t_emb_v,
-                        ["treats"] * len(_val_aligned),
-                    )
-                    # P0-14: use evaluation.py's AUC computation (with
-                    # higher_is_better=True for the Graph Transformer)
-                    # instead of raw sklearn. This applies the filtered
-                    # MRR protocol, leakage detection, and the audit
-                    # hash. If evaluation.py is unavailable, fall back
-                    # to sklearn (with the higher_is_better=True
-                    # convention).
-                    # v51 ROOT FIX (COMPOUND-8 — HGT val_auc=NaN on
-                    # small datasets): the previous code could produce
-                    # NaN in three ways:
-                    #   1. compute_auc() returns NaN when pos/neg scores
-                    #      contain NaN (happens when HGT produces NaN
-                    #      on degenerate graphs)
-                    #   2. roc_auc_score() returns NaN when y_true has
-                    #      only one class (len(val_idx)==0 OR
-                    #      len(neg_pairs_v)==0)
-                    #   3. The fallback `val_auc = 0.5` was only reached
-                    #      if sklearn raised — but sklearn SILENTLY
-                    #      returns NaN for single-class inputs without
-                    #      raising
-                    # ROOT FIX: validate val_auc AFTER computation. If
-                    # it's NaN or not finite, set to 0.5 (random
-                    # baseline). This ensures best_val_auc is always a
-                    # valid float, and the model can be saved (or
-                    # correctly rejected) based on a real number.
-                    try:
-                        import numpy as _np_v51
-                        from .evaluation import compute_auc
-                        _pos_np = pos_v.detach().cpu().numpy()
-                        _neg_np = neg_v.detach().cpu().numpy()
-                        # Drop NaN/Inf scores (they make AUC undefined)
-                        _pos_finite = _pos_np[_np_v51.isfinite(_pos_np)]
-                        _neg_finite = _neg_np[_np_v51.isfinite(_neg_np)]
-                        if len(_pos_finite) == 0 or len(_neg_finite) == 0:
-                            val_auc = 0.5
-                        else:
-                            val_auc = float(compute_auc(
-                                pos_scores=_pos_finite,
-                                neg_scores=_neg_finite,
-                                higher_is_better=True,
-                            ))
-                    except Exception:
-                        import numpy as _np_v51
-                        from sklearn.metrics import roc_auc_score
-                        # v100 ROOT FIX (P2-048): pos_v and neg_v are
-                        # both length len(_val_aligned) (the aligned
-                        # subset of val_idx that has a valid negative).
-                        # The previous code used len(val_idx) and
-                        # len(neg_pairs_v) (a dict length) which no
-                        # longer matches the actual tensor sizes.
-                        _n_aligned = len(_val_aligned)
-                        y_true = torch.cat([
-                            torch.ones(_n_aligned),
-                            torch.zeros(_n_aligned),
-                        ]).numpy()
-                        y_scores = torch.cat([pos_v, neg_v]).cpu().numpy()
-                        # Drop NaN/Inf from y_scores
-                        _finite_mask = _np_v51.isfinite(y_scores)
-                        y_true = y_true[_finite_mask]
-                        y_scores = y_scores[_finite_mask]
-                        try:
-                            if len(y_true) == 0 or len(set(y_true)) < 2:
-                                val_auc = 0.5
-                            else:
-                                val_auc = float(roc_auc_score(y_true, y_scores))
-                        except Exception:
-                            val_auc = 0.5
-                    # v51 ROOT FIX: final NaN/Inf guard
-                    import numpy as _np_v51_guard
-                    if not _np_v51_guard.isfinite(val_auc):
-                        val_auc = 0.5
-                if val_auc > best_val_auc:
-                    best_val_auc = val_auc
-                    patience_counter = 0
-                    # P0-15: cache the best-val state dict so we can
-                    # evaluate the test set ONCE at the end against
-                    # the best-val checkpoint (not the last epoch).
-                    best_state_dict = {
-                        k: v.detach().clone().cpu()
-                        for k, v in model.state_dict().items()
-                    }
-                else:
-                    patience_counter += 1
-                if patience_counter >= cfg.patience:
-                    logger.info(
-                        "Step 11b: early stopping at epoch %d (patience=%d)",
-                        epoch, cfg.patience,
-                    )
-                    break
-
-        # FIX-P4-15 (v42): the previous code had ``if epoch % 10 == 0 or
-        # is_final_epoch: logger.info(...)`` NESTED INSIDE the
-        # ``if val_idx and (epoch % 5 == 0 or is_final_epoch)`` block.
-        # Since ``epoch % 10 == 0`` implies ``epoch % 5 == 0`` (10 is a
-        # multiple of 5), the outer condition was a no-op restriction on
-        # the logging path — the log only ever fired when BOTH were true.
-        # Moved outside the val block so the log fires on every 10th
-        # epoch (and the final epoch) regardless of whether validation
-        # ran that epoch. On epochs where val did NOT run, val_auc
-        # retains its value from the last validation run.
-        # v57 ROOT FIX (P2C-009): val_auc is now initialised to -1.0
-        # (not NaN). The %.4f format prints "-1.0000" so operators can
-        # see that no validation has run yet. This also makes the save
-        # guard ``val_auc > best_val_auc`` work correctly (previously
-        # NaN > NaN was always False, so the model was never saved when
-        # val_idx was empty).
-        if epoch % 10 == 0 or is_final_epoch:
+            _ei_dict = getattr(_hd, "edge_index_dict", {}) or {}
+            for _et, _ei in _ei_dict.items():
+                if _ei is not None and hasattr(_ei, "shape"):
+                    pyg_total_edges += int(_ei.shape[1])
             logger.info(
-                "Step 11b: epoch %d, loss=%.4f, val_auc=%.4f, "
-                "best_val_auc=%.4f",
-                epoch, epoch_loss / max(1, n_batches_per_epoch),
-                val_auc, best_val_auc,
+                "Step 11b: PyG HeteroData VERIFIED at %s "
+                "(node_types=%d, edge_types=%d, total_nodes=%d, "
+                "total_edges=%d). Phase 3 can train on this file.",
+                pyg_data_path,
+                len(pyg_node_types),
+                pyg_edge_types_count,
+                pyg_total_nodes,
+                pyg_total_edges,
             )
+        except Exception as _verify_exc:
+            verification_error = (
+                f"PyG HeteroData at {pyg_data_path} could not be loaded: "
+                f"{_verify_exc}. Phase 3 will not be able to train."
+            )
+            logger.error("Step 11b: %s", verification_error, exc_info=True)
 
-    # P0-15: evaluate the TEST set exactly ONCE at the end of training,
-    # against the best-val checkpoint (NOT the last epoch). This
-    # eliminates test-set overfitting via multiple comparisons.
-    if best_state_dict is not None and test_idx:
-        model.load_state_dict(best_state_dict)
-        model.to(device)
-        model.eval()
-        with torch.no_grad():
-            h_dict_test = model.encode(x_dict, edge_index_dict)
-            # v100 ROOT FIX (P2-048): _make_negatives returns a dict
-            # {positive_idx: (h, t)}. Build aligned subset of test_idx
-            # that has both pos and neg scores (same pattern as the val
-            # block above). The previous code computed pos_t over ALL
-            # test_idx, then indexed neg_h/neg_t with [p[0] for p in
-            # neg_pairs_t] — iterating a dict yields KEYS (ints), so
-            # p[0] crashed with TypeError. The dict-aware path below
-            # preserves alignment and avoids the crash.
-            neg_pairs_t = _make_negatives(test_idx, rng=_val_rng)  # P2C-023: separate val RNG for test too
-            if not neg_pairs_t:
-                best_test_auc = 0.5
-            else:
-                _test_aligned = [test_idx[_j] for _j in range(len(test_idx))
-                                 if test_idx[_j] in neg_pairs_t]
-                _test_sel = torch.tensor(_test_aligned, dtype=torch.long, device=device)
-                neg_h_t = torch.tensor(
-                    [neg_pairs_t[_pi][0] for _pi in _test_aligned],
-                    dtype=torch.long, device=device,
-                )
-                neg_t_t = torch.tensor(
-                    [neg_pairs_t[_pi][1] for _pi in _test_aligned],
-                    dtype=torch.long, device=device,
-                )
-                h_t = h_dict_test["Compound"][heads[_test_sel]]
-                t_t = h_dict_test["Disease"][tails[_test_sel]]
-                pos_t = model.score_triples(
-                    h_t, rels[_test_sel], t_t,
-                    ["treats"] * len(_test_aligned),
-                )
-                neg_h_emb_t = h_dict_test["Compound"][neg_h_t]
-                neg_t_emb_t = h_dict_test["Disease"][neg_t_t]
-                neg_t = model.score_triples(
-                    neg_h_emb_t, rels[_test_sel][:len(_test_aligned)],
-                    neg_t_emb_t,
-                    ["treats"] * len(_test_aligned),
-                )
-                try:
-                    import numpy as _np_v51_t
-                    from .evaluation import compute_auc
-                    _pos_t_np = pos_t.detach().cpu().numpy()
-                    _neg_t_np = neg_t.detach().cpu().numpy()
-                    _pos_t_finite = _pos_t_np[_np_v51_t.isfinite(_pos_t_np)]
-                    _neg_t_finite = _neg_t_np[_np_v51_t.isfinite(_neg_t_np)]
-                    if len(_pos_t_finite) == 0 or len(_neg_t_finite) == 0:
-                        best_test_auc = 0.5
-                    else:
-                        best_test_auc = float(compute_auc(
-                            pos_scores=_pos_t_finite,
-                            neg_scores=_neg_t_finite,
-                            higher_is_better=True,
-                        ))
-                except Exception:
-                    import numpy as _np_v51_t
-                    from sklearn.metrics import roc_auc_score
-                    # v100 ROOT FIX (P2-048): use aligned subset length
-                    # for the labels (both pos and neg have this length).
-                    _n_test_aligned = len(_test_aligned)
-                    y_true_t = torch.cat([
-                        torch.ones(_n_test_aligned),
-                        torch.zeros(_n_test_aligned),
-                    ]).numpy()
-                    y_scores_t = torch.cat([pos_t, neg_t]).cpu().numpy()
-                    _finite_mask_t = _np_v51_t.isfinite(y_scores_t)
-                    y_true_t = y_true_t[_finite_mask_t]
-                    y_scores_t = y_scores_t[_finite_mask_t]
-                    try:
-                        if len(y_true_t) == 0 or len(set(y_true_t)) < 2:
-                            best_test_auc = 0.5
-                        else:
-                            best_test_auc = float(roc_auc_score(y_true_t, y_scores_t))
-                    except Exception:
-                        best_test_auc = 0.5
-                # v51 ROOT FIX: final NaN/Inf guard for test AUC
-                import numpy as _np_v51_t_guard
-                if not _np_v51_t_guard.isfinite(best_test_auc):
-                    best_test_auc = 0.5
-        # v100 ROOT FIX (BUG P2-047 — Hits@K never reported for HGT):
-        # The HGT training path (step 11b) computed AUC only — Hits@K
-        # was implemented in evaluation.py but NEVER invoked from
-        # step 11b. The DOCX V1 launch criteria name "AUC > 0.85" as
-        # the primary metric, but the audit's P2-047 finding flags
-        # that Hits@K is the standard complementary ranking metric
-        # (it answers "is the true tail in the top-K?" while AUC
-        # answers "is the score ordering correct overall?"). ROOT FIX:
-        # compute Hits@1, Hits@5, Hits@10, and MRR on the held-out
-        # test set using the existing evaluation.hits_at_k and
-        # mean_reciprocal_rank functions. For each test positive, we
-        # build a ranked list of (drug, disease) pairs where the
-        # positive is mixed with N negatives (sampled via
-        # _make_negatives), scored by the model, then ranked by
-        # descending logit. The positive's rank determines the hit.
-        # This mirrors the standard filtered Hits@K protocol used in
-        # KG embedding literature (Bordes 2013, Sun 2019).
-        # NOTE: best_test_hits_at_1/5/10 and best_test_mrr are
-        # initialized to 0.0 at function scope (see init near
-        # best_test_auc) so the result dict can reference them
-        # unconditionally.
-        if best_state_dict is not None and test_idx:
-            try:
-                from .evaluation import (
-                    hits_at_k as _hits_at_k_v100,
-                    mean_reciprocal_rank as _mrr_v100,
-                    build_ranked_lists as _build_rl_v100,
-                )
-                # Re-use the encoded h_dict_test from above (still in
-                # scope — model is in eval mode, no_grad context).
-                with torch.no_grad():
-                    _hits_neg = _make_negatives(test_idx, rng=_val_rng)
-                    if _hits_neg:
-                        _hits_aligned = [
-                            test_idx[_j] for _j in range(len(test_idx))
-                            if test_idx[_j] in _hits_neg
-                        ]
-                        _hits_sel = torch.tensor(
-                            _hits_aligned, dtype=torch.long, device=device,
-                        )
-                        _h_pos = h_dict_test["Compound"][heads[_hits_sel]]
-                        _t_pos = h_dict_test["Disease"][tails[_hits_sel]]
-                        _pos_logits = model.score_triples(
-                            _h_pos, rels[_hits_sel], _t_pos,
-                        )
-                        _neg_h_idx = torch.tensor(
-                            [p[0] for p in [_hits_neg[_pi] for _pi in _hits_aligned]],
-                            dtype=torch.long, device=device,
-                        )
-                        _neg_t_idx = torch.tensor(
-                            [p[1] for p in [_hits_neg[_pi] for _pi in _hits_aligned]],
-                            dtype=torch.long, device=device,
-                        )
-                        _neg_h_emb = h_dict_test["Compound"][_neg_h_idx]
-                        _neg_t_emb = h_dict_test["Disease"][_neg_t_idx]
-                        _neg_logits = model.score_triples(
-                            _neg_h_emb, rels[_hits_sel], _neg_t_emb,
-                        )
-                        _pos_np = _pos_logits.detach().cpu().numpy()
-                        _neg_np = _neg_logits.detach().cpu().numpy()
-                        # v100 P2-047: local numpy import (the module-
-                        # level imports use aliased names like _np_v51_t).
-                        import numpy as _np_v100_hits
-                        _finite = (
-                            _np_v100_hits.isfinite(_pos_np)
-                            & _np_v100_hits.isfinite(_neg_np)
-                        )
-                        _pos_np = _pos_np[_finite]
-                        _neg_np = _neg_np[_finite]
-                        if len(_pos_np) > 0 and len(_neg_np) > 0:
-                            _ranked_lists = _build_rl_v100(
-                                pos_scores=_pos_np,
-                                neg_scores=_neg_np,
-                                higher_is_better=True,
-                            )
-                            best_test_hits_at_1 = float(
-                                _hits_at_k_v100(_ranked_lists, k=1, higher_is_better=True)
-                            )
-                            best_test_hits_at_5 = float(
-                                _hits_at_k_v100(_ranked_lists, k=5, higher_is_better=True)
-                            )
-                            best_test_hits_at_10 = float(
-                                _hits_at_k_v100(_ranked_lists, k=10, higher_is_better=True)
-                            )
-                            best_test_mrr = float(
-                                _mrr_v100(_ranked_lists, higher_is_better=True)
-                            )
-            except Exception as _hits_exc:
-                logger.warning(
-                    "Step 11b: Hits@K computation failed (%s: %s). "
-                    "AUC is still valid. (v100 P2-047 best-effort)",
-                    type(_hits_exc).__name__, _hits_exc,
-                )
-        logger.info(
-            "Step 11b: held-out test AUC = %.4f (evaluated ONCE at end "
-            "of training against best-val checkpoint — P0-15 fix). "
-            "Hits@1=%.4f, Hits@5=%.4f, Hits@10=%.4f, MRR=%.4f "
-            "(v100 P2-047 root fix — ranking metrics now reported).",
-            best_test_auc, best_test_hits_at_1, best_test_hits_at_5,
-            best_test_hits_at_10, best_test_mrr,
-        )
+    elapsed = time.time() - t0
 
-    elapsed = round(time.time() - t0, 2)
-    logger.info(
-        "Step 11b COMPLETE: best_val_auc=%.4f, held_out_auc=%.4f, "
-        "elapsed=%.2fs, param_count=%d",
-        best_val_auc, best_test_auc, elapsed, param_count,
-    )
-    # v35 ROOT FIX (M-11): the previous code returned
-    # ``"model_saved": best_val_auc > 0.5`` — a BOOLEAN, not a
-    # filesystem path. There was NO ``torch.save()`` call anywhere in
-    # step11b_train_graph_transformer, so the HGT model was NEVER
-    # written to disk. The V1 launch criteria check at
-    # ``_check_v1_launch_criteria`` reads ``r11b.get("model_saved",
-    # False)`` and sets ``criteria["model_saved_to_disk"] =
-    # bool(model_saved)`` — so a model with best_val_auc=0.6 set
-    # ``model_saved_to_disk=True`` even though NO MODEL FILE EXISTED.
-    # This was audit theater. The fix actually persists the model via
-    # ``torch.save()`` and returns the path string (truthy) on
-    # success, or False (falsy) on failure. Downstream callers can
-    # distinguish path-string vs False via ``bool()`` for backward
-    # compat, OR inspect the new ``model_path`` field for the actual
-    # filesystem location.
-    # v60 ROOT FIX (FORENSIC-DEEP — HGT model NEVER saved when val_idx
-    # is empty). The v57 fix changed best_val_auc init from NaN to -1.0
-    # so the save guard `val_auc > best_val_auc` would work. But the
-    # SAVE GUARD ITSELF at the next line was `if best_val_auc > 0.5:`
-    # — which means when val_idx is empty (common on small datasets),
-    # best_val_auc stays at -1.0 (init value), -1.0 > 0.5 is False,
-    # and the model is NEVER SAVED. The V1 launch criteria check then
-    # reports model_saved_to_disk=False even though training succeeded.
-    #
-    # ROOT FIX: ALWAYS save the model after training, with three tiers:
-    #   Tier 1: best_val_auc > 0.5  → save best-val checkpoint (existing behavior).
-    #   Tier 2: val_idx empty (no validation set) → save LAST-epoch state
-    #           with a clear marker `validation_performed=False` so downstream
-    #           consumers know this is not a val-selected checkpoint.
-    #   Tier 3: best_val_auc <= 0.5 with non-empty val_idx → save anyway
-    #           with `validation_passed=False` marker, so the artifact
-    #           exists for debugging / inspection but V1 launch criteria
-    #           can still detect it failed the AUC threshold via the
-    #           `best_val_auc` field returned in the result dict.
-    #
-    # The previous Tier-3 behavior (skip save entirely) meant that a
-    # clinically-failing model was discarded with no artifact for
-    # debugging — operators could not inspect WHY it failed. Saving
-    # with a marker preserves the artifact for forensics while still
-    # allowing V1 launch criteria to gate on `best_val_auc > 0.5`.
-    model_path = None
-    model_saved = False
-    # Determine which state dict to save.
-    _state_to_save = best_state_dict if best_state_dict is not None else model.state_dict()
-    _validation_performed = bool(val_idx)
-    _validation_passed = (best_val_auc > 0.5)
-    _save_reason = (
-        "best_val_checkpoint" if _validation_passed
-        else "last_epoch_no_validation" if not _validation_performed
-        else "last_epoch_validation_below_threshold"
-    )
-    # v63 ROOT FIX (P2C-003+016 — refuse to save model if ChEMBERTa was
-    # disabled). The audit required: "Refuse to save model if ChEMBERTa
-    # was disabled." A model trained on random Xavier Compound features
-    # has NOT learned molecular structure — its AUC reflects transductive
-    # memorisation only. Saving such a model to disk and reporting
-    # "model_saved_to_disk=True" would be audit theater: the V1 launch
-    # criteria would pass on a model that is clinically useless. In
-    # production (DRUGOS_ENVIRONMENT=prod), we REFUSE to save the model
-    # file so the launch criteria correctly report
-    # model_saved_to_disk=False. In dev, we save WITH a marker so
-    # operators can inspect the (admittedly garbage) model for debugging.
-    _chemberta_disabled_in_prod = (
-        chemberta_disabled
-        and os.environ.get("DRUGOS_ENVIRONMENT", "dev").lower() in ("prod", "production")
-    )
-    if _chemberta_disabled_in_prod:
-        logger.error(
-            "Step 11b: REFUSING to save HGT model — ChEMBERTa was "
-            "disabled (chemberta_disabled=True) and DRUGOS_ENVIRONMENT=prod. "
-            "A model trained on random Xavier Compound features has NOT "
-            "learned molecular structure — its AUC reflects transductive "
-            "memorisation only. Saving it would be audit theater. The V1 "
-            "launch criteria will correctly report model_saved_to_disk=False. "
-            "To enable model save: set DRUGOS_USE_CHEMBERTA=1 AND HF_TOKEN "
-            "(or run in dev with --no-chemberta for debugging)."
-        )
-        return {
-            "model_saved": False,
-            "model_path": None,
-            "best_val_auc": float(best_val_auc),
-            "held_out_auc": float(best_test_auc),
-            "chemberta_disabled": True,
-            "model_save_refused_reason": "chemberta_disabled_in_production",
-            "param_count": param_count,
-            "skipped": False,
-        }
-    try:
-        model_path = CHECKPOINT_DIR / "hgt_best.pt"
-        CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
-        # If we have a best_state_dict (from validation), load it back
-        # into the model before saving so the saved artifact IS the
-        # best-val checkpoint. Otherwise save the current (last-epoch)
-        # state — which is the best we can do without validation.
-        if best_state_dict is not None:
-            model.load_state_dict(best_state_dict)
-        torch.save({
-            "model_state_dict": model.state_dict(),
-            "config": {
-                "embedding_dim": cfg.embedding_dim,
-                "num_heads": cfg.num_heads,
-                "num_layers": cfg.num_layers,
-                "dropout": cfg.dropout,
-                "lr": cfg.lr,
-                "epochs": cfg.epochs,
-                "weight_decay": cfg.weight_decay,
-                "patience": cfg.patience,
-            },
-            "best_val_auc": best_val_auc,
-            "held_out_auc": best_test_auc,
-            "num_train_triples": len(train_idx),
-            "num_val_triples": len(val_idx),
-            "num_test_triples": len(test_idx),
-            "param_count": param_count,
-            "saved_at": datetime.now(timezone.utc).isoformat(),
-            # v60 markers so downstream consumers can distinguish
-            # best-val checkpoints from last-epoch fallbacks.
-            "validation_performed": _validation_performed,
-            "validation_passed": _validation_passed,
-            "save_reason": _save_reason,
-        }, str(model_path))
-        # Verify the file exists on disk before reporting success.
-        if model_path.exists():
-            model_saved = str(model_path)
-            logger.info(
-                "Step 11b: HGT model saved to %s "
-                "(best_val_auc=%.4f, held_out_auc=%.4f, "
-                "param_count=%d, save_reason=%s, "
-                "validation_performed=%s, validation_passed=%s).",
-                model_path, best_val_auc, best_test_auc, param_count,
-                _save_reason, _validation_performed, _validation_passed,
-            )
-        else:
-            logger.error(
-                "Step 11b: torch.save() returned but %s does not "
-                "exist — model_saved=False. V1 launch criteria "
-                "will report model NOT saved.",
-                model_path,
-            )
-            model_path = None
-    except Exception as _save_exc:
-        logger.error(
-            "Step 11b: FAILED to save HGT model to %s (%s). "
-            "model_saved=False — V1 launch criteria will report "
-            "model NOT saved. Training metrics above are still "
-            "valid; only the artifact is missing.",
-            CHECKPOINT_DIR / "hgt_best.pt", _save_exc,
-        )
-        model_path = None
-        model_saved = False
-    if not _validation_passed:
-        logger.warning(
-            "Step 11b: best_val_auc=%.4f (validation_performed=%s, "
-            "validation_passed=%s). Model saved to %s with "
-            "save_reason=%s for forensic inspection. V1 launch "
-            "criteria will report model NOT meeting AUC threshold "
-            "(best_val_auc must be > 0.5).",
-            best_val_auc, _validation_performed, _validation_passed,
-            model_path, _save_reason,
-        )
     return {
-        "model_type": "graph_transformer_hgt",
-        "best_val_auc": best_val_auc,
-        "held_out_auc": best_test_auc,
-        "test_auc": best_test_auc,
-        # P2-057 ROOT FIX: expose the total NaN-triple count so
-        # operators can see how many triples were silently dropped from
-        # training (decoder key unknown). If this is non-zero, the
-        # model did NOT see those triples — AUC may be inflated if the
-        # dropped relations were easy, OR deflated if they were the
-        # model's weak spot. Either way, non-zero n_nan_triples is a
-        # red flag that the decoder's relation_types list does not
-        # cover all CORE_EDGE_TYPES used in training.
-        "n_nan_triples": _p2_057_nan_total[0],
-        # v100 ROOT FIX (BUG P2-047): expose the Hits@K and MRR
-        # ranking metrics computed on the held-out test set. The DOCX
-        # V1 launch criteria focus on AUC, but Hits@K and MRR are the
-        # complementary ranking metrics that pharma partners use to
-        # evaluate "is the true repurposing candidate in the top-K?"
-        # These are 0.0 if no test set exists or if the Hits@K
-        # computation failed (with a warning logged).
-        "hits_at_1": best_test_hits_at_1,
-        "hits_at_5": best_test_hits_at_5,
-        "hits_at_10": best_test_hits_at_10,
-        "mrr": best_test_mrr,
+        "model_type": "phase3_delegated",
+        "pyg_data_path": pyg_path_str,
+        "pyg_data_verified": pyg_verified,
+        "pyg_node_types": pyg_node_types,
+        "pyg_edge_types_count": pyg_edge_types_count,
+        "pyg_total_nodes": pyg_total_nodes,
+        "pyg_total_edges": pyg_total_edges,
+        "verification_error": verification_error,
+        # Phase 3 will produce these metrics. Phase 2 returns sentinel
+        # values so downstream consumers (V1 launch criteria, MLflow)
+        # can detect "Phase 2 did not train" without crashing.
+        "held_out_auc": -1.0,
+        "best_val_auc": -1.0,
+        "test_auc": -1.0,
+        "hits_at_1": -1.0,
+        "hits_at_5": -1.0,
+        "hits_at_10": -1.0,
+        "mrr": -1.0,
         "elapsed": elapsed,
-        # v35 M-11: now a path string (truthy) on success, False
-        # (falsy) on failure. Was previously a bool — callers that
-        # did ``if r["model_saved"]:`` continue to work correctly.
-        "model_saved": model_saved,
-        # v35 M-11: explicit path field for callers that want the
-        # filesystem location regardless of the truthy/falsy check.
-        "model_path": str(model_path) if model_path else None,
-        "num_train_triples": len(train_idx),
-        "num_val_triples": len(val_idx),
-        "num_test_triples": len(test_idx),
-        "param_count": param_count,
-        # v60 ROOT FIX (FORENSIC-DEEP — HGT model NEVER saved when
-        # val_idx empty): expose the validation/save markers so
-        # downstream consumers (V1 launch criteria, MLflow, dashboards)
-        # can distinguish best-val checkpoints from last-epoch
-        # fallbacks. The V1 launch criteria gate on `best_val_auc > 0.5`
-        # — these markers explain WHY a model was or was not saved.
-        "validation_performed": _validation_performed,
-        "validation_passed": _validation_passed,
-        "save_reason": _save_reason,
+        "model_saved": False,
+        "model_path": None,
+        "num_train_triples": 0,
+        "num_val_triples": 0,
+        "num_test_triples": 0,
+        "param_count": 0,
+        "validation_performed": False,
+        "validation_passed": False,
+        "save_reason": "phase3_delegated",
+        "delegation_target": (
+            "graph_transformer.models.graph_transformer."
+            "DrugRepurposingGraphTransformer"
+        ),
         "config": {
-            "embedding_dim": cfg.embedding_dim,
-            "num_heads": cfg.num_heads,
-            "num_layers": cfg.num_layers,
-            "dropout": cfg.dropout,
-            "lr": cfg.lr,
-            "epochs": cfg.epochs,
+            "embedding_dim": 128,
+            "num_layers": 4,
+            "num_heads": 8,
+            "dropout": 0.1,
+            "lr": 1e-3,
+            "epochs": 100,
         },
     }
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# STEP 12: Validation
 # ═══════════════════════════════════════════════════════════════════════════════
 # STEP 12: Validation
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -8315,7 +7132,7 @@ def step13_readme(skip_neo4j: bool = False) -> dict:
     if skip_neo4j:
         readme = (
             "# DrugOS Knowledge Graph\n\n"
-            "Neo4j was skipped — README generation requires "
+            "Neo4j was skipped -- README generation requires "
             "Neo4j connection."
         )
     else:
@@ -8332,7 +7149,7 @@ def step13_readme(skip_neo4j: bool = False) -> dict:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# FULL PIPELINE (Domain 1 — Architecture, Domain 6 — Reliability)
+# FULL PIPELINE (Domain 1 -- Architecture, Domain 6 -- Reliability)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
@@ -8367,10 +7184,10 @@ def run_full_pipeline(
         HGT training step) WITHOUT skipping step 11 (TransE). Integer
         values continue to work as before. The half-step thresholds
         are: ``11.5`` = skip step 11b. (Step 11 and 11b are the only
-        "lettered" pair — no other half-steps are defined.)
+        "lettered" pair -- no other half-steps are defined.)
     data_source : str
-        v6 fix (bug #B17): ``"phase1"`` (default) — consume Phase 1
-        outputs via the bridge (no DRKG download). ``"drkg"`` — fall
+        v6 fix (bug #B17): ``"phase1"`` (default) -- consume Phase 1
+        outputs via the bridge (no DRKG download). ``"drkg"`` -- fall
         back to the legacy DRKG-download path.
     phase1_processed_dir : path-like, optional
         Phase 1 processed_data directory (only used when
@@ -8384,12 +7201,12 @@ def run_full_pipeline(
 
     Failure Modes
     -------------
-    - Steps 1-2: FATAL — returns {aborted: True}
-    - Step 3: CRITICAL — skips steps 4-7 if Neo4j fails
-    - Steps 4-13: DEGRADABLE — continues on failure, logs error
+    - Steps 1-2: FATAL -- returns {aborted: True}
+    - Step 3: CRITICAL -- skips steps 4-7 if Neo4j fails
+    - Steps 4-13: DEGRADABLE -- continues on failure, logs error
     """
     _configure_logging()
-    logger.info("DrugOS Graph Module — Week 2 Pipeline")
+    logger.info("DrugOS Graph Module -- Week 2 Pipeline")
     logger.info(
         "Skip download: %s, Skip Neo4j: %s, Skip training: %s, "
         "Fresh start: %s",
@@ -8402,15 +7219,15 @@ def run_full_pipeline(
     # FIX TOP-14 (FIX-CFG-ML audit): set the global RNG seed as the FIRST
     # action of run_full_pipeline so model construction (nn.Embedding init)
     # is deterministic. Synchronized with run_unified.py (which also calls
-    # set_global_seed before any model is constructed) — DO NOT diverge
+    # set_global_seed before any model is constructed) -- DO NOT diverge
     # (audit TOP-14).
     try:
         from .config import set_global_seed as _set_global_seed
 
         _set_global_seed(42)
-    except Exception as _seed_exc:  # noqa: BLE001 — best-effort
+    except Exception as _seed_exc:  # noqa: BLE001 -- best-effort
         logger.warning(
-            "set_global_seed(42) failed in run_full_pipeline (%s) — "
+            "set_global_seed(42) failed in run_full_pipeline (%s) -- "
             "model init will be non-deterministic. This is a regression "
             "(audit TOP-14).",
             _seed_exc,
@@ -8434,7 +7251,7 @@ def run_full_pipeline(
         global _shutdown_requested
         _shutdown_requested = True
         logger.warning(
-            "Shutdown requested (signal %s) — finishing current step ...",
+            "Shutdown requested (signal %s) -- finishing current step ...",
             sig,
         )
 
@@ -8522,7 +7339,7 @@ def run_full_pipeline(
             ) = _step1_cache
             logger.info(
                 "Resuming: Step 1 loaded from disk cache (df=%d rows, "
-                "entity_maps=%d, edge_maps=%d) — skipped step1_load_data.",
+                "entity_maps=%d, edge_maps=%d) -- skipped step1_load_data.",
                 len(df) if df is not None else 0,
                 sum(len(v) for v in (_prebuilt_entity_maps or {}).values()),
                 sum(len(v) for v in (_prebuilt_edge_maps or {}).values()),
@@ -8530,11 +7347,11 @@ def run_full_pipeline(
             # v29 ROOT FIX (audit I-12): on cache-hit resume, the
             # bridge's staged data is NOT available (it wasn't cached).
             # Step 4 will fall back to its normal path (re-reading the
-            # CSV) which is acceptable for resume — the I-12 fix's
+            # CSV) which is acceptable for resume -- the I-12 fix's
             # primary win is on first-run (not resume).
             _bridge_staged = None
         else:
-            # Cache miss — fall back to the legacy re-derive path.
+            # Cache miss -- fall back to the legacy re-derive path.
             # RT-5 ROOT FIX: honor the original --data-source choice on
             # resume. The previous code unconditionally called
             # _cached_parse_drkg() even when the operator originally chose
@@ -8545,7 +7362,7 @@ def run_full_pipeline(
             # originally. The skip_download=True flag avoids re-fetching
             # the raw data.
             logger.info(
-                "Resuming: Step 1 cache miss — re-deriving via "
+                "Resuming: Step 1 cache miss -- re-deriving via "
                 "step1_load_data(skip_download=True).",
             )
             r1 = step1_load_data(
@@ -8640,7 +7457,7 @@ def run_full_pipeline(
     )
     if neo4j_failed:
         logger.error(
-            "Neo4j failed in step 3 — skipping steps 4-7."
+            "Neo4j failed in step 3 -- skipping steps 4-7."
         )
         for skip_step in [4, 5, 6, 7]:
             results[f"step{skip_step}"] = {
@@ -8649,7 +7466,7 @@ def run_full_pipeline(
             }
     else:
         # ─── Step 4: DrugBank enrichment ──────────────────────────────────
-        # v29 ROOT FIX (audit I-2 / Compound Chain 2 — "Phase 1 Output
+        # v29 ROOT FIX (audit I-2 / Compound Chain 2 -- "Phase 1 Output
         # Is Discarded"): when data_source="phase1", the bridge already
         # loaded DrugBank Compound + DPI edges into the graph in step 1.
         # Running step 4 again RE-LOADS them with use_merge=False,
@@ -8671,7 +7488,7 @@ def run_full_pipeline(
                 "reason": "phase1_bridge_already_loaded_drugbank",
             }
             # v29 ROOT FIX (audit I-12): drug_records is still needed by
-            # step 8/10 — derive it from the bridge's STAGED data (built
+            # step 8/10 -- derive it from the bridge's STAGED data (built
             # in step 1) instead of re-reading drugbank_drugs.csv from
             # disk via step4_drugbank_enrichment. This eliminates the
             # duplicate CSV read that step 4 was performing on the
@@ -8679,7 +7496,7 @@ def run_full_pipeline(
             #
             # Previously, the code did:
             #     drug_records = results.get("step1", {}).get("drug_records", [])
-            # but step 1 NEVER returns a "drug_records" key — so this
+            # but step 1 NEVER returns a "drug_records" key -- so this
             # always returned ``[]`` and step 8/10 silently produced
             # zero output. The fix: use ``extract_drug_records_from_staged``
             # on the ``Phase1StagedData`` captured from the bridge.
@@ -8693,22 +7510,22 @@ def run_full_pipeline(
                     logger.info(
                         "Step 4 (phase1 path): reused %d drug_records "
                         "from the bridge's staged Compound nodes (v29 "
-                        "root fix I-12 — no CSV re-read).",
+                        "root fix I-12 -- no CSV re-read).",
                         len(drug_records),
                     )
                 except Exception as exc:
                     # Defensive: never break the pipeline over a helper
-                    # failure — fall back to the empty list and let
+                    # failure -- fall back to the empty list and let
                     # step 8/10 log their own warnings.
                     logger.warning(
                         "Step 4 (phase1 path): extract_drug_records_"
-                        "from_staged failed (%s) — drug_records=[]. "
+                        "from_staged failed (%s) -- drug_records=[]. "
                         "Steps 8/10 will see no DrugBank data.",
                         exc,
                     )
                     drug_records = []
             else:
-                # v43 ROOT FIX (P1 — --resume cache hit _bridge_staged=None):
+                # v43 ROOT FIX (P1 -- --resume cache hit _bridge_staged=None):
                 # The previous code logged a warning and left drug_records=[].
                 # On resume, step8/10 silently produced zero output. The fix:
                 # try to re-derive drug_records from the CSV path (drugbank_
@@ -8731,20 +7548,20 @@ def run_full_pipeline(
                         logger.info(
                             "Step 4 (phase1 path, resume): re-derived %d "
                             "drug_records from %s/drugbank_drugs.csv "
-                            "(v43 P1 fix — resume no longer loses DrugBank data).",
+                            "(v43 P1 fix -- resume no longer loses DrugBank data).",
                             len(drug_records), _pdir,
                         )
                     else:
                         logger.warning(
                             "Step 4 (phase1 path): _bridge_staged is None "
-                            "AND drugbank_drugs.csv is empty/missing — "
+                            "AND drugbank_drugs.csv is empty/missing -- "
                             "drug_records=[]. Steps 8/10 will see no "
                             "DrugBank data."
                         )
                 except Exception as _resume_exc:
                     logger.warning(
                         "Step 4 (phase1 path, resume): failed to re-derive "
-                        "drug_records (%s) — drug_records=[]. Steps 8/10 "
+                        "drug_records (%s) -- drug_records=[]. Steps 8/10 "
                         "will see no DrugBank data.",
                         _resume_exc,
                     )
@@ -8781,7 +7598,7 @@ def run_full_pipeline(
             #
             # v17 ROOT FIX (resume-after-step-4 bug): the previous code set
             # ``drug_records = []`` here. Step 8 (entity resolution) and
-            # step 10 (training data) BOTH consume drug_records — step 8
+            # step 10 (training data) BOTH consume drug_records -- step 8
             # uses it for InChIKey canonicalization, step 10 uses it for
             # positive-pair extraction from DrugBank indications. With an
             # empty list, both steps silently produced zero output, the
@@ -8791,7 +7608,7 @@ def run_full_pipeline(
             # drug_records via the SAME step4 entry point with
             # skip_neo4j=True (matches the pattern RT-5 ROOT FIX used
             # for step1 resume at lines 3556-3560). The step4 result is
-            # marked "resumed" — we do NOT re-run the Neo4j edge load,
+            # marked "resumed" -- we do NOT re-run the Neo4j edge load,
             # but we DO recover the in-memory drug_records list so steps
             # 8 and 10 see real data.
             _step4_cache = _load_step_cache(4)
@@ -8799,11 +7616,11 @@ def run_full_pipeline(
                 drug_records = _step4_cache[0]
                 logger.info(
                     "Resuming: drug_records loaded from disk cache "
-                    "(%d records) — skipped step4_drugbank_enrichment.",
+                    "(%d records) -- skipped step4_drugbank_enrichment.",
                     len(drug_records),
                 )
             else:
-                # Cache miss — fall back to the legacy re-derive path.
+                # Cache miss -- fall back to the legacy re-derive path.
                 try:
                     _r4_resume = step4_drugbank_enrichment(
                         skip_neo4j=True,
@@ -8820,7 +7637,7 @@ def run_full_pipeline(
                     _save_step_cache(4, (drug_records,))
                 except Exception as exc:
                     logger.error(
-                        "Resuming: step4 re-derivation FAILED — steps 8/10 "
+                        "Resuming: step4 re-derivation FAILED -- steps 8/10 "
                         "will receive empty drug_records. Cause: %s",
                         exc, exc_info=True,
                     )
@@ -8891,7 +7708,7 @@ def run_full_pipeline(
     # ``compound_drkg_resolved`` (these were never emitted by
     # ``EntityResolver.get_resolution_stats()``, which returns
     # ``{entity_type: {total, resolved, unresolved, ...}}``). The check therefore
-    # ALWAYS fired "Zero compounds resolved to InChIKey" — even when step 8 had
+    # ALWAYS fired "Zero compounds resolved to InChIKey" -- even when step 8 had
     # successfully merged 13 Compound mappings. Now we read the actual nested
     # stats dict and also fall back to the Phase 1 bridge's compound count when
     # Phase 2 entity resolution was a no-op (because the bridge already did it).
@@ -8904,7 +7721,7 @@ def run_full_pipeline(
             if isinstance(compound_stats, dict)
             else 0
         )
-        # Also account for Phase 1 bridge-resolved compounds (step1) — when the
+        # Also account for Phase 1 bridge-resolved compounds (step1) -- when the
         # bridge is the source of truth, Phase 2 step8 has no DrugBank XML work
         # to do, but the compounds ARE resolved.
         r1 = results.get("step1", {})
@@ -8973,7 +7790,7 @@ def run_full_pipeline(
     # BUG-DQ-01 FIX: Enforce MIN_POSITIVE_PAIRS and MIN_NEGATIVE_PAIRS
     # v29 ROOT FIX (audit I-11): MIN_POSITIVE_PAIRS dev default was 1,
     # which is statistically meaningless (held-out AUC on 1 sample has
-    # CI [0,1]). Now 10 — see config.MIN_POSITIVE_PAIRS for the full
+    # CI [0,1]). Now 10 -- see config.MIN_POSITIVE_PAIRS for the full
     # rationale. Production keeps 15,000.
     r10 = results.get("step10", {})
     if isinstance(r10, dict) and not r10.get("skipped"):
@@ -9019,7 +7836,7 @@ def run_full_pipeline(
     # ─── Step 11: Train TransE ────────────────────────────────────────────
     # v29 ROOT FIX (audit M-11): pass step 9's PyG HeteroData path to
     # step 11 so the HeteroData built in step 9 is actually consumed
-    # by training (was decoupled — step 11 used entity_maps directly).
+    # by training (was decoupled -- step 11 used entity_maps directly).
     _step9_data_path = (
         results.get("step9", {}).get("data_path")
         if isinstance(results.get("step9"), dict)
@@ -9042,7 +7859,7 @@ def run_full_pipeline(
             # The exception's context dict carries held_out_auc. This
             # lets _check_v1_launch_criteria distinguish "held-out
             # eval ran and produced a low AUC" from "held-out eval
-            # never ran" — the user's #1 complaint about V1 launch
+            # never ran" -- the user's #1 complaint about V1 launch
             # false positives.
             _step11_failure: Dict[str, Any] = {
                 "error": str(e),
@@ -9057,31 +7874,31 @@ def run_full_pipeline(
     else:
         results["step11"] = {"resumed": True}
 
-    # ─── Step 11b: Train Graph Transformer (HGT) — v29 ROOT FIX ────────
+    # ─── Step 11b: Train Graph Transformer (HGT) -- v29 ROOT FIX ────────
     # v29 ROOT FIX (audit M-1/M-2/M-3): the docx-promised "Graph
     # Transformer" never existed in v28. FIX 2 added the
     # GraphTransformerModel class; FIX 16 (this block) wires it into
     # the pipeline. HGT runs alongside TransE so operators can compare
     # AUCs. The V1 launch criteria check (_check_v1_launch_criteria)
-    # considers BOTH models — if EITHER meets the 0.85 threshold, the
+    # considers BOTH models -- if EITHER meets the 0.85 threshold, the
     # launch passes. This makes the docx's ">0.85 AUC" claim
     # achievable for the first time.
     #
     # v29 ROOT FIX (audit M-11): pass step 9's PyG HeteroData path to
     # step 11b so its x_dict / edge_index_dict are sourced from the
-    # HeteroData built in step 9 (was decoupled — step 11b rebuilt
+    # HeteroData built in step 9 (was decoupled -- step 11b rebuilt
     # x_dict / edge_index_dict from entity_maps / edge_maps directly).
     #
     # v35 ROOT FIX (M-13): step 11b previously used the SAME
     # ``resume_after < 11`` threshold as step 11, so passing
     # ``--resume 11`` (intending "skip step 11 and run step 11b
     # onwards") skipped BOTH step 11 AND step 11b. The two steps
-    # were effectively coupled — operators could not re-run just the
+    # were effectively coupled -- operators could not re-run just the
     # HGT model without re-running TransE. The fix uses a distinct
     # threshold (``11.5``) for step 11b so:
-    #   * ``--resume 11``   → skips step 11, RUNS step 11b
-    #   * ``--resume 11.5`` → skips step 11 AND step 11b, runs step 12+
-    #   * ``--resume 12``   → also skips step 11b (12 > 11.5)
+    #   * ``--resume 11``   -> skips step 11, RUNS step 11b
+    #   * ``--resume 11.5`` -> skips step 11 AND step 11b, runs step 12+
+    #   * ``--resume 12``   -> also skips step 11b (12 > 11.5)
     if resume_after is None or resume_after < 11.5:
         try:
             # v63 ROOT FIX (P2C-003+016): pass chemberta_disabled flag
@@ -9134,7 +7951,7 @@ def run_full_pipeline(
     else:
         # v26 ROOT FIX (Issue C-1/C-3): the strict ``passed`` flag is
         # AUTHORITATIVE for the launch verdict. ``dev_smoke_test_pass``
-        # is INFORMATIONAL — it means the pipeline ran end-to-end, NOT
+        # is INFORMATIONAL -- it means the pipeline ran end-to-end, NOT
         # that the model met the production AUC threshold (0.85). The
         # launch verdict is NOT PASSED even when ``dev_smoke_test_pass``
         # is True. The previous v25 code flipped ``passed=True`` in dev
@@ -9143,7 +7960,7 @@ def run_full_pipeline(
         # 0.5389 (random) and best_val_auc 0.6722 (target 0.85).
         if v1_criteria.get("dev_smoke_test_pass"):
             logger.error(
-                "V1 LAUNCH CRITERIA: NOT PASSED (dev smoke-test only — "
+                "V1 LAUNCH CRITERIA: NOT PASSED (dev smoke-test only -- "
                 "pipeline ran end-to-end but AUC below 0.85 threshold). "
                 "best_val_auc=%.4f, held_out_auc=%.4f, "
                 "dev_smoke_test_pass=True, passed=False.",
@@ -9152,20 +7969,20 @@ def run_full_pipeline(
             )
         else:
             logger.error(
-                "V1 LAUNCH CRITERIA: NOT PASSED — %s",
+                "V1 LAUNCH CRITERIA: NOT PASSED -- %s",
                 {
                     k: v
                     for k, v in v1_criteria.items()
                     if v is False
                 },
             )
-        # v43 ROOT FIX (Chain 5 — DRUGOS_ALLOW_LAUNCH_FAIL escape hatch):
+        # v43 ROOT FIX (Chain 5 -- DRUGOS_ALLOW_LAUNCH_FAIL escape hatch):
         # The previous code allowed DRUGOS_ALLOW_LAUNCH_FAIL=1 to bypass
-        # V1 launch criteria in ANY environment — including production.
+        # V1 launch criteria in ANY environment -- including production.
         # This let a worse-than-random model (TransE AUC=0.47) ship to
         # the Phase 3 teammate. The fix: in production mode
         # (DRUGOS_ENVIRONMENT=production), the escape hatch is IGNORED
-        # — V1 launch criteria failure always raises. In dev mode
+        # -- V1 launch criteria failure always raises. In dev mode
         # (default), the escape hatch is allowed but logs a loud
         # warning. This makes the escape hatch dev-only by default,
         # closing the patient-safety hole.
@@ -9178,15 +7995,15 @@ def run_full_pipeline(
         if not _allow_launch_fail:
             if _is_production:
                 logger.error(
-                    "Exiting with code 4 — V1 launch criteria not met in "
+                    "Exiting with code 4 -- V1 launch criteria not met in "
                     "PRODUCTION mode. DRUGOS_ALLOW_LAUNCH_FAIL is IGNORED "
                     "in production (patient-safety gate). To override in "
                     "DEV mode only, set DRUGOS_ENVIRONMENT=dev AND "
                     "DRUGOS_ALLOW_LAUNCH_FAIL=1."
                 )
             else:
-                # v53 ROOT FIX (P2-010 — V1 exit 4 unclear):
-                # The v48/v49 error message was too terse — operators
+                # v53 ROOT FIX (P2-010 -- V1 exit 4 unclear):
+                # The v48/v49 error message was too terse -- operators
                 # saw "exit code 4" and didn't understand the platform
                 # was non-functional. ROOT FIX: add an explicit,
                 # actionable diagnosis showing WHICH criteria failed
@@ -9195,29 +8012,29 @@ def run_full_pipeline(
                 if not v1_criteria.get("all_sources_loaded"):
                     _failed_criteria.append(
                         f"  • all_sources_loaded=False (only {v1_criteria.get('sources_loaded_count', 0)}/7 "
-                        f"sources loaded — run Phase 1 pipelines with DRUGOS_DOWNLOAD_MODE=full)"
+                        f"sources loaded -- run Phase 1 pipelines with DRUGOS_DOWNLOAD_MODE=full)"
                     )
                 if not v1_criteria.get("positive_pairs_sufficient"):
                     _failed_criteria.append(
                         f"  • positive_pairs_sufficient=False (only {v1_criteria.get('positive_pairs', 0)} "
-                        f"positives — need {15000 if not v1_criteria.get('dev_mode') else 10}+; "
+                        f"positives -- need {15000 if not v1_criteria.get('dev_mode') else 10}+; "
                         f"the KG is too small for meaningful ML training)"
                     )
                 if not v1_criteria.get("auc_meets_threshold"):
                     _failed_criteria.append(
                         f"  • auc_meets_threshold=False (best_val_auc={v1_criteria.get('best_val_auc', -1):.4f}, "
-                        f"held_out_auc={v1_criteria.get('held_out_auc', -1):.4f} — target is 0.85; "
+                        f"held_out_auc={v1_criteria.get('held_out_auc', -1):.4f} -- target is 0.85; "
                         f"the model is at random level because the graph is too small)"
                     )
                 if not v1_criteria.get("model_saved_to_disk"):
                     _failed_criteria.append(
-                        "  • model_saved_to_disk=False (no model was saved — "
+                        "  • model_saved_to_disk=False (no model was saved -- "
                         "AUC was at or below random baseline 0.5)"
                     )
                 logger.error(
-                    "Exiting with code 4 — V1 launch criteria not met. "
+                    "Exiting with code 4 -- V1 launch criteria not met. "
                     "Set DRUGOS_ENVIRONMENT=dev AND DRUGOS_ALLOW_LAUNCH_FAIL=1 "
-                    "to override (dev/test only — IGNORED in production).\n"
+                    "to override (dev/test only -- IGNORED in production).\n"
                     "=== V1 LAUNCH CRITERIA DIAGNOSIS (v53 P2-010 fix) ===\n"
                     "The platform is NON-FUNCTIONAL for production use. "
                     "Failed criteria:\n"
@@ -9226,7 +8043,7 @@ def run_full_pipeline(
                     "The most likely cause is: Phase 1 has not been run with "
                     "real data. The current graph has only "
                     f"{v1_criteria.get('n_nodes', 0)} nodes / "
-                    f"{v1_criteria.get('n_edges', 0)} edges — production "
+                    f"{v1_criteria.get('n_edges', 0)} edges -- production "
                     "needs 500K+ nodes. To fix:\n"
                     "  1. Set DRUGOS_DOWNLOAD_MODE=full\n"
                     "  2. Set DISGENET_API_KEY and OMIM_API_KEY env vars\n"
@@ -9238,7 +8055,7 @@ def run_full_pipeline(
             results["launch_criteria_failed"] = True
             # v21 ROOT FIX (Audit section 4 finding / Chain 12):
             # ``sys.exit(1)`` in a library function (run_full_pipeline)
-            # breaks embedding — any caller (run_unified.py, Airflow,
+            # breaks embedding -- any caller (run_unified.py, Airflow,
             # Celery, K8s Job) inherits the exit code and cannot
             # distinguish "V1 launch criteria not met" from "Python
             # crashed." The documented contract was exit code 4 for V1
@@ -9252,7 +8069,7 @@ def run_full_pipeline(
             raise V1LaunchCriteriaFailed(v1_criteria)
         else:
             logger.warning(
-                "DRUGOS_ALLOW_LAUNCH_FAIL=1 set in DEV mode — continuing "
+                "DRUGOS_ALLOW_LAUNCH_FAIL=1 set in DEV mode -- continuing "
                 "despite V1 launch criteria failure. This override is "
                 "IGNORED in production (DRUGOS_ENVIRONMENT=production). "
                 "The shipped model MUST NOT be used for V1 launch sign-off."
@@ -9354,7 +8171,7 @@ def main() -> None:
     - 1: Error (step failure, config validation failure)
     """
     parser = argparse.ArgumentParser(
-        description="DrugOS Graph Module — Week 2 Pipeline "
+        description="DrugOS Graph Module -- Week 2 Pipeline "
         f"(v{PIPELINE_VERSION})"
     )
     parser.add_argument(
@@ -9446,7 +8263,7 @@ def main() -> None:
             # is exit code 4 when V1 launch criteria are not met (the
             # same code run_unified.py returns). The previous code
             # returned exit 1, which conflated "criteria not met" with
-            # "Python crashed" — operators could not distinguish a
+            # "Python crashed" -- operators could not distinguish a
             # scientifically-honest launch refusal from a code bug.
             logger.error("V1 launch criteria not met: %s", exc.criteria)
             sys.exit(4)
@@ -9468,7 +8285,7 @@ def main() -> None:
         if args.skip_training:
             user_skipped_steps.add("step11")
         unexpected_skips = []
-        # Legitimate scientific skips that don't indicate a bug — these
+        # Legitimate scientific skips that don't indicate a bug -- these
         # are guardrails, not failures. The reason field documents why.
         legitimate_skip_reasons = (
             "insufficient_",  # insufficient triples/data for training

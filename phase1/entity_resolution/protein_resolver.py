@@ -1,26 +1,26 @@
 # SPDX-License-Identifier: MIT
-# © 2024-2026 Autonomous Drug Repurposing Platform — Team Cosmic / VentureLab
+# © 2024-2026 Autonomous Drug Repurposing Platform -- Team Cosmic / VentureLab
 """
 Cross-database protein entity resolution for the Drug Repurposing ETL platform.
 
 Proteins are identified differently across UniProt (accession IDs),
 STRING (taxon-prefixed ENSP identifiers like "9606.ENSP00000269305"),
 and ChEMBL (target IDs in CHEMBL\\d+ format, with UniProt accessions
-provided as a SEPARATE cross-reference field — NOT embedded in the
+provided as a SEPARATE cross-reference field -- NOT embedded in the
 target ID itself).  :class:`ProteinResolver` reconciles
 these into a single canonical record keyed by UniProt accession.
 
 Resolution strategy (priority order)
 ------------------------------------
-1. **UniProt ID exact match** (confidence 1.0 — MatchConfidence.UNIPROT_EXACT).
-2. **STRING → UniProt cross-reference** (confidence 1.0 when the
+1. **UniProt ID exact match** (confidence 1.0 -- MatchConfidence.UNIPROT_EXACT).
+2. **STRING -> UniProt cross-reference** (confidence 1.0 when the
    cross-reference was established from a UniProt-supplied STRING ID;
    lower confidence when the mapping is reverse-engineered from a
    STRING-derived provisional entry).
-3. **Gene name + organism match** (confidence 0.75 — MatchConfidence.GENE_NAME_ORGANISM;
+3. **Gene name + organism match** (confidence 0.75 -- MatchConfidence.GENE_NAME_ORGANISM;
    v29 inversion fix: was 0.85, lowered to sit between NAME_NORMALIZED
    (0.80) and FUZZY (0.65)).
-4. **Protein-name fuzzy match** (confidence 0.60 — MatchConfidence.PROTEIN_NAME_FUZZY,
+4. **Protein-name fuzzy match** (confidence 0.60 -- MatchConfidence.PROTEIN_NAME_FUZZY,
    v29 inversion fix: was 0.90; threshold controlled by
    ResolverConfig.fuzzy_threshold (default 0.60) floored by
    ``_PROTEIN_FUZZY_THRESHOLD=0.60``).
@@ -102,37 +102,37 @@ def _get_pd() -> Any:
 # ---------------------------------------------------------------------------
 
 #: Semantic version of this module. P1-ER-4 ROOT FIX: bumped from the
-#: implicit 1.0.0 baseline to 1.0.1 to mark the SHA-1 → SHA-256 upgrade
+#: implicit 1.0.0 baseline to 1.0.1 to mark the SHA-1 -> SHA-256 upgrade
 #: of every checksum in this module (audit P1-ER-4). SHA-1 is
 #: cryptographically broken (collision attacks since 2017) and was
 #: inconsistently used here while ``drug_resolver.py`` has always used
 #: SHA-256. All six ``hashlib.sha1(...)`` call sites were replaced with
 #: ``hashlib.sha256(...)``; the ``[:16]`` truncation length is preserved
 #: so existing ``canonical_checksum`` columns continue to fit in
-#: ``String(16)`` — only the hash algorithm changes, not the column
+#: ``String(16)`` -- only the hash algorithm changes, not the column
 #: width. Downstream consumers that compare checksums for change
 #: detection will see a one-time re-computation on the next ingest.
 __version__: str = "1.0.1"
 
-#: DEPRECATED — use :attr:`ResolverConfig.fuzzy_threshold` instead.
+#: DEPRECATED -- use :attr:`ResolverConfig.fuzzy_threshold` instead.
 #: Kept for backward compat with external code that imports this constant.
 #: Emits DeprecationWarning on first use (FIX DOC-17 / COMP-06).
 #:
-#: v29 ROOT FIX (audit C-2 — Confidence Score Inversion): was 0.90.
+#: v29 ROOT FIX (audit C-2 -- Confidence Score Inversion): was 0.90.
 #: Combined with the inverted MatchConfidence.PROTEIN_NAME_FUZZY=0.90,
 #: this threshold meant protein fuzzy matches were accepted at the same
-#: rank as exact name matches — making them indistinguishable to
+#: rank as exact name matches -- making them indistinguishable to
 #: downstream rankers. With PROTEIN_NAME_FUZZY now fixed to 0.60, the
 #: threshold must also be lowered so fuzzy matches can be accepted at
 #: their true confidence level (below exact matches).
 #:
-#: FIX-P4-4 (v42): was 0.55 — decorative, because ResolverConfig.fuzzy_threshold
+#: FIX-P4-4 (v42): was 0.55 -- decorative, because ResolverConfig.fuzzy_threshold
 #: was lowered to 0.60 by v42 P0-1, so max(0.60, 0.55) = 0.60 made this
 #: floor a no-op. Bumped to 0.60 so the floor is no longer decorative
 #: and matches the new protein-confidence gate (MatchConfidence.PROTEIN_NAME_FUZZY
 #: = 0.60). SYNC CONTRACT: any future change to
 #: ResolverConfig.fuzzy_threshold's default MUST also revisit this constant
-#: — the floor should be >= the default fuzzy_threshold (otherwise it's
+#: -- the floor should be >= the default fuzzy_threshold (otherwise it's
 #: a no-op) and <= MatchConfidence.PROTEIN_NAME_FUZZY (otherwise accepted
 #: matches could be scored BELOW the gate, breaking the D3-3 invariant).
 _PROTEIN_FUZZY_THRESHOLD: float = 0.60
@@ -145,7 +145,7 @@ _DEFAULT_ORGANISM: str = "Homo sapiens"
 # ``compute_match_confidence("string_provisional" | "chembl_provisional"
 # | "string_derived")`` resolves to a registered value (0.5) instead of
 # silently falling back to the unknown-method default (also 0.5). The
-# numeric value is unchanged — the fix is about REGISTRATION, not the
+# numeric value is unchanged -- the fix is about REGISTRATION, not the
 # score. Without registration:
 #   - ``compute_match_confidence`` logs an UnknownMethodWarning on every
 #     call,
@@ -166,14 +166,14 @@ register_match_method("string_derived", 0.5)
 # STRING entries (confidence 0.5) STUCK at 0.5 even when a later STRING
 # cross-reference CONFIRMED their identity. Downstream filters requiring
 # confidence >= 0.7 (the standard pharmacology-grade threshold) excluded
-# these confirmed entries — silent data loss in the knowledge graph.
+# these confirmed entries -- silent data loss in the knowledge graph.
 #
 # The root fix: STRING cross-reference IS confirming evidence. When a
 # provisional STRING entry (confidence 0.5) later receives a STRING
 # cross-reference that confirms its identity, the confidence is UPGRADED
 # to 0.7 (the ``string_cross_reference`` method score). This is BELOW
 # exact-name (0.8) and InChIKey (0.95) matches, preserving the
-# confidence hierarchy, but ABOVE the provisional 0.5 floor — confirmed
+# confidence hierarchy, but ABOVE the provisional 0.5 floor -- confirmed
 # entries now pass the standard >= 0.7 filter.
 #
 # Registration is REQUIRED (not just a hardcoded 0.7 in the merge
@@ -217,7 +217,7 @@ _ORGANISM_ALIASES: Dict[str, str] = {
 # FIX SCI-06: well-known UniProt-to-organism overrides for cross-validation.
 # ---------------------------------------------------------------------------
 # v16 ROOT FIX (SW-13): the previous map was a small hardcoded dict
-# (~20 entries) — only a tiny fraction of the ~560,000 Swiss-Prot
+# (~20 entries) -- only a tiny fraction of the ~560,000 Swiss-Prot
 # entries have organism cross-checks. The vast majority of UniProt
 # records had NO organism cross-validation, so a Mouse protein
 # labeled "Homo sapiens" by a buggy upstream source would pass
@@ -237,7 +237,7 @@ _UNIPROT_ORGANISM_OVERRIDES: Dict[str, str] = {
     "P04637": "Homo sapiens",   # TP53
     "P68871": "Homo sapiens",   # HBB
     "P00533": "Homo sapiens",   # EGFR
-    "P04626": "Homo sapiens",   # ERBB2 (HER2)  — FIX-P4-5: was mislabeled 'BRCA1'; BRCA1 is P38398.
+    "P04626": "Homo sapiens",   # ERBB2 (HER2)  -- FIX-P4-5: was mislabeled 'BRCA1'; BRCA1 is P38398.
     "P51587": "Homo sapiens",   # BRCA2
     "P01112": "Homo sapiens",   # KRAS
     "P01116": "Homo sapiens",   # NRAS
@@ -257,7 +257,7 @@ _UNIPROT_ORGANISM_OVERRIDES: Dict[str, str] = {
     # Rat
     "P04631": "Rattus norvegicus",  # Rt1a1
     "P01194": "Rattus norvegicus",  # Hras1
-    # v16 SW-13 additions — common drug targets not in original list:
+    # v16 SW-13 additions -- common drug targets not in original list:
     # === Drug-metabolizing enzymes (pharmacogenomics) ===
     "P10635": "Homo sapiens",   # CYP2D6
     "P10632": "Homo sapiens",   # CYP2C9
@@ -375,7 +375,7 @@ def load_uniprot_organism_crosswalk(path: "Path | str") -> int:
                 import yaml as _yaml
             except ImportError:
                 logger.warning(
-                    "load_uniprot_organism_crosswalk: PyYAML not installed — "
+                    "load_uniprot_organism_crosswalk: PyYAML not installed -- "
                     "cannot load YAML crosswalk"
                 )
                 return 0
@@ -435,7 +435,7 @@ def load_uniprot_deprecation_crosswalk(path: "Path | str") -> int:
       - YAML: ``{"Q9NUZ8": "P04637", ...}``
 
     Returns the number of new entries added to ``_DEPRECATED_UNIPROT_MAP``.
-    Existing entries are NOT overwritten (first-write-wins) — operators
+    Existing entries are NOT overwritten (first-write-wins) -- operators
     who need to override should call
     :meth:`ProteinResolver.add_deprecated_uniprot_mapping` directly.
     """
@@ -455,7 +455,7 @@ def load_uniprot_deprecation_crosswalk(path: "Path | str") -> int:
             except ImportError:
                 logger.warning(
                     "load_uniprot_deprecation_crosswalk: PyYAML not installed "
-                    "— cannot load YAML crosswalk"
+                    "-- cannot load YAML crosswalk"
                 )
                 return 0
             with open(p, "r", encoding="utf-8") as fh:
@@ -507,7 +507,7 @@ def load_uniprot_deprecation_crosswalk(path: "Path | str") -> int:
 
 # v16 SW-13: auto-load from env var if set (best-effort).
 # v20 SW-13 ROOT FIX: the v16 mechanism existed but no default file was
-# shipped — the audit's complaint ("vast majority of UniProt records have
+# shipped -- the audit's complaint ("vast majority of UniProt records have
 # NO organism cross-check") persisted. We now ship a default crosswalk
 # YAML at phase1/data/uniprot_organism_crosswalk.yaml covering ~250 of
 # the most-cited drug-target accessions. If the env var is NOT set, we
@@ -534,25 +534,25 @@ else:
             )
     else:
         logger.debug(
-            "v20 SW-13: default crosswalk file %s not found — skipping auto-load",
+            "v20 SW-13: default crosswalk file %s not found -- skipping auto-load",
             _DEFAULT_CROSSWALK_PATH,
         )
 
 # ---------------------------------------------------------------------------
 # FIX SCI-10: deprecated/merged UniProt accession map.
 # ---------------------------------------------------------------------------
-# v16 ROOT FIX (SW-12): the previous map was EMPTY — the comment said
+# v16 ROOT FIX (SW-12): the previous map was EMPTY -- the comment said
 # "Populated as known deprecations are discovered" but no deprecations
 # were ever added. UniProt deprecates/merges accessions regularly
 # (when entries are merged after redundancy removal or when sequences
 # are found to be fragments). Without this map, the resolver cannot
-# follow accession chains — a record that references a deprecated AC
+# follow accession chains -- a record that references a deprecated AC
 # (e.g. in an old STRING alias file or a ChEMBL target_component row)
 # would either be dropped or create a duplicate Protein node.
 # We now seed the map with well-known deprecations that have been
-# publicly documented by UniProt. This is NOT exhaustive — the full
+# publicly documented by UniProt. This is NOT exhaustive -- the full
 # UniProt deprecation list is published at
-# https://www.uniprot.org/docs/deleter?ac=* — but these entries cover
+# https://www.uniprot.org/docs/deleter?ac=* -- but these entries cover
 # the most common cases seen in biomedical literature and in our 7
 # source databases. The map can be extended at runtime via
 # :meth:`ProteinResolver.add_deprecated_uniprot_mapping`.
@@ -731,19 +731,19 @@ class ProteinResolver(Resolver):
 
     Internally the resolver maintains:
 
-    * ``mapping`` — ``uniprot_id → canonical record dict``. May also contain
+    * ``mapping`` -- ``uniprot_id -> canonical record dict``. May also contain
       SYNTHETIC keys like ``"STRING:..."`` and ``"CHEMBL_T:..."`` for
       provisional entries (FIX DOC-16 / ARCH-01). Use
       :meth:`iter_canonical_entries` and :meth:`iter_provisional_entries`
       to filter by type, or check ``entry.get("provisional")``.
-    * ``_gene_index`` — ``(gene_name, organism) → uniprot_id``
-    * ``_string_to_uniprot`` — ``string_id → uniprot_id``  (cross-reference
+    * ``_gene_index`` -- ``(gene_name, organism) -> uniprot_id``
+    * ``_string_to_uniprot`` -- ``string_id -> uniprot_id``  (cross-reference
       built from STRING alias files or direct mapping)
-    * ``_name_index`` — normalized_name → uniprot_id
+    * ``_name_index`` -- normalized_name -> uniprot_id
       (with multi-valued counterpart ``_name_index_multi``)
-    * ``_dead_letter`` — list of records that failed validation
+    * ``_dead_letter`` -- list of records that failed validation
       (audit D6-3).
-    * ``_audit_trail`` — ``uniprot_id → list[merge-event-dict]``
+    * ``_audit_trail`` -- ``uniprot_id -> list[merge-event-dict]``
       (audit D16-6).
 
     UniProt records are loaded first and serve as the *canonical* source.
@@ -784,7 +784,7 @@ class ProteinResolver(Resolver):
         self._name_index: Dict[str, str] = {}
         # D8-5: multi-valued name index.
         self._name_index_multi: Dict[str, List[str]] = {}
-        # v89 ROOT FIX (BUG #35 — case-folding gene symbols defeats
+        # v89 ROOT FIX (BUG #35 -- case-folding gene symbols defeats
         # species distinction for fuzzy matching):
         #   ``normalize_name`` lowercases its input. Gene symbols like
         #   ``TP53`` (human) and ``Tp53`` (mouse) both normalize to
@@ -795,13 +795,13 @@ class ProteinResolver(Resolver):
         #   primary lookup in ``_fuzzy_match`` uses the single-valued
         #   index. The organism filter is the only protection against
         #   cross-species fuzzy matches, and it's unreliable (BUG #6
-        #   in the original audit — organism override table covers
+        #   in the original audit -- organism override table covers
         #   only ~250 of ~560,000 UniProt accessions).
         #
         #   ROOT FIX: add a SEPARATE ``_gene_symbol_index`` that
         #   preserves gene-symbol case. This index is keyed by the
-        #   EXACT gene symbol (e.g. ``TP53``, ``Tp53``) — case-
-        #   sensitive — so human and mouse symbols are DISTINCT keys.
+        #   EXACT gene symbol (e.g. ``TP53``, ``Tp53``) -- case-
+        #   sensitive -- so human and mouse symbols are DISTINCT keys.
         #   Fuzzy matching on gene symbols can use this index instead
         #   of the case-folded ``_name_index``, preserving species
         #   distinction even when the organism filter fails. The
@@ -811,7 +811,7 @@ class ProteinResolver(Resolver):
         #   and is already case-sensitive).
         self._gene_symbol_index: Dict[str, str] = {}
         self._gene_symbol_index_multi: Dict[str, List[str]] = {}
-        # v89 FORENSIC ROOT FIX (BUG #15 P1 — single-valued gene_index and
+        # v89 FORENSIC ROOT FIX (BUG #15 P1 -- single-valued gene_index and
         #   string_to_uniprot silently picked FIRST match):
         #   Both ``_gene_index`` and ``_string_to_uniprot`` are single-
         #   valued dicts. When multiple UniProt accessions map to the
@@ -844,13 +844,13 @@ class ProteinResolver(Resolver):
         self._organism_name_cache_valid: bool = False
         # FIX IDEM-05: batch fingerprint for duplicate-batch detection.
         self._last_batch_fingerprints: Dict[str, str] = {}
-        # v80 FORENSIC ROOT FIX (P0-D3 — O(N×M) provisional-promotion
+        # v80 FORENSIC ROOT FIX (P0-D3 -- O(N×M) provisional-promotion
         # loop): maintain a separate index of provisional entries keyed
         # by (gene_symbol, organism) so that
         # ``_ingest_uniprot_record`` can find promotion candidates in
         # O(1) instead of iterating over ALL entries (O(N×M)). The
         # previous code's loop at line ~1539 was
-        # ``for prov_uid in list(self.mapping.keys()):`` — for a 100K-
+        # ``for prov_uid in list(self.mapping.keys()):`` -- for a 100K-
         # scale UniProt ingestion, this is 10 billion+ iterations and
         # causes Airflow task timeout (default 4h). This index is
         # updated whenever a provisional entry is added or promoted.
@@ -860,16 +860,16 @@ class ProteinResolver(Resolver):
         # but with different STRING IDs).
         self._provisional_by_gene_organism: Dict[Tuple[str, str], List[str]] = {}
 
-        # v82 FORENSIC ROOT FIX (P0-D3b — O(N) fallback triggers for
+        # v82 FORENSIC ROOT FIX (P0-D3b -- O(N) fallback triggers for
         # STRING-derived provisionals that lack gene_symbol):
         #   The v80 _provisional_by_gene_organism index only helps when
         #   a provisional entry has a gene_symbol. But STRING alias
         #   records (the dominant source of provisionals) carry ONLY
-        #   ``string_id`` + ``uniprot_id`` — they have NO gene_symbol.
+        #   ``string_id`` + ``uniprot_id`` -- they have NO gene_symbol.
         #   So the gene-organism index NEVER contains them, and every
         #   UniProt record that arrives falls through to the O(N)
         #   defensive scan. On a 100K-scale ingestion this is 10
-        #   billion iterations → Airflow timeout (the exact failure
+        #   billion iterations -> Airflow timeout (the exact failure
         #   mode the v80 fix was supposed to prevent).
         #
         #   ROOT FIX: maintain a SECOND index keyed by the alias's
@@ -894,14 +894,14 @@ class ProteinResolver(Resolver):
         HGNC uses ALL-CAPS for human; MGI uses Title-Case for mouse.
 
         v9 ROOT FIX (audit F4.10): the previous implementation only
-        stripped whitespace and surrounding quotes — it accepted ANY
+        stripped whitespace and surrounding quotes -- it accepted ANY
         string as a gene_symbol (including "12345", "---", "<script>").
         With bulk_strict_validation=False (the default), this let
         garbage data into the canonical mapping. Now we validate
         against the HGNC convention: an uppercase letter followed by
         uppercase letters + digits + optional hyphens, length 1-40.
         Mouse Title-Case symbols (e.g. "Tp53", "Brca1") are also
-        accepted — first letter uppercase, rest mixed-case
+        accepted -- first letter uppercase, rest mixed-case
         alphanumerics + hyphens. Returns None for invalid input.
         """
         if gene_symbol is None:
@@ -921,13 +921,13 @@ class ProteinResolver(Resolver):
         # (HTML tags, punctuation-only, digits-only) at the source.
         # Pattern: starts with a letter; remaining chars are letters,
         # digits, or hyphens; max 50 chars total.
-        # v22 ROOT FIX (audit P1-8 / section 5 finding 1 — "Three divergent
+        # v22 ROOT FIX (audit P1-8 / section 5 finding 1 -- "Three divergent
         # gene-symbol regexes"): the previous pattern used {0,39} (max 40
         # chars) while models._GENE_SYMBOL_RE uses {0,49} (max 50 chars).
         # A 41-50 char gene symbol accepted by models was rejected by
-        # protein_resolver → silent data loss. Unify on {0,49} (50 chars)
+        # protein_resolver -> silent data loss. Unify on {0,49} (50 chars)
         # to match models._GENE_SYMBOL_RE.
-        # v43 ROOT FIX (P2 — inline regex duplicates models._GENE_SYMBOL_RE):
+        # v43 ROOT FIX (P2 -- inline regex duplicates models._GENE_SYMBOL_RE):
         # The previous code used an inline regex that duplicates models.py's
         # _GENE_SYMBOL_RE. If the canonical pattern changes, this inline
         # copy silently diverges. Fix: import and use the canonical pattern.
@@ -950,13 +950,13 @@ class ProteinResolver(Resolver):
         v16 ROOT FIX (SW-11): the previous code did NOT strip the
         common-name parenthetical that UniProt and other sources append.
         ``"Homo sapiens (Human)"`` normalized to
-        ``"Homo sapiens (human)"`` — DIFFERENT from ``"Homo sapiens"``
+        ``"Homo sapiens (human)"`` -- DIFFERENT from ``"Homo sapiens"``
         produced by STRING, DisGeNET, etc. This fragmented the
         ``(gene_name, organism)`` index so the same gene from UniProt
         and STRING got TWO index entries, and cross-source protein
         resolution silently failed. The fix strips trailing
         parentheticals BEFORE alias lookup and title-casing.
-        ``"Homo sapiens (Human)"`` → ``"Homo sapiens"``.
+        ``"Homo sapiens (Human)"`` -> ``"Homo sapiens"``.
 
         Returns "" for empty/None input (caller decides on default).
         """
@@ -992,7 +992,7 @@ class ProteinResolver(Resolver):
             # First word capitalized, second+ words lowercase.
             result = parts[0].capitalize() + " " + " ".join(p.lower() for p in parts[1:])
             return result
-        # Single word — capitalize.
+        # Single word -- capitalize.
         return s.capitalize()
 
     @staticmethod
@@ -1020,7 +1020,7 @@ class ProteinResolver(Resolver):
         return s.upper()
 
     # ------------------------------------------------------------------
-    # Resolver ABC — read-only views on config / stats.
+    # Resolver ABC -- read-only views on config / stats.
     # ------------------------------------------------------------------
 
     @property
@@ -1256,7 +1256,7 @@ class ProteinResolver(Resolver):
                 _bucket = self._provisional_by_gene_organism.setdefault(_key, [])
                 if uid not in _bucket:
                     _bucket.append(uid)
-        # Alias-uniprot index (v82 P0-D3b) — the fast path for STRING
+        # Alias-uniprot index (v82 P0-D3b) -- the fast path for STRING
         # alias records that carry a real UniProt accession.
         if alias_uniprot_id:
             _au = str(alias_uniprot_id).strip().upper()
@@ -1330,7 +1330,7 @@ class ProteinResolver(Resolver):
           * collision detection against ``self.mapping``
           * WARNING log on collision
           * ``synthetic_uid_collisions`` stat increment
-          * 4-char (→8→12→16) hash suffix for collision resistance
+          * 4-char (->8->12->16) hash suffix for collision resistance
         """
         sanitized = re.sub(r"[^A-Za-z0-9._\-]", "_", raw_id)
         if source == "string":
@@ -1363,19 +1363,19 @@ class ProteinResolver(Resolver):
                unlikely event that even a 16-char hash collides.
 
         The hash suffix is DETERMINISTIC for a given ``raw_id`` (same
-        input → same suffix), so retries within the same session do
+        input -> same suffix), so retries within the same session do
         not keep generating new suffixes for the same collision.
         """
         base_uid = self.make_synthetic_uid(source, raw_id)
         if base_uid not in self.mapping:
             return base_uid
 
-        # Collision detected — log, stat, and disambiguate.
+        # Collision detected -- log, stat, and disambiguate.
         self._stats.inc("synthetic_uid_collisions")
         logger.warning(
             "_make_synthetic_uid_checked: synthetic UID collision "
             "detected for source=%r raw_id=%r (base UID %s already in "
-            "mapping) — appending hash suffix to disambiguate.",
+            "mapping) -- appending hash suffix to disambiguate.",
             source, raw_id, base_uid,
         )
 
@@ -1410,7 +1410,7 @@ class ProteinResolver(Resolver):
     def check_dependencies(cls) -> Dict[str, bool]:
         """Check which optional dependencies are available.
 
-        Returns a dict mapping dependency name → availability.
+        Returns a dict mapping dependency name -> availability.
         """
         deps = {}
         try:
@@ -1464,14 +1464,14 @@ class ProteinResolver(Resolver):
                 yield uid, entry
 
     # ------------------------------------------------------------------
-    # Public API — bulk ingestion
+    # Public API -- bulk ingestion
     # ------------------------------------------------------------------
 
     def add_source_records(self, records: List[dict], source: str, *,
                            operator_id: Optional[str] = None) -> None:
         """Dispatch ``records`` to the appropriate source-specific ingestor.
 
-        This is the unified entry point for ProteinResolver (FIX DOC-11 —
+        This is the unified entry point for ProteinResolver (FIX DOC-11 --
         removed confusing DrugResolver reference). It dispatches based on
         the ``source`` argument via the class-level ``_SOURCE_INGESTORS``
         registry (ARCH-06). New sources can be registered via
@@ -1555,7 +1555,7 @@ class ProteinResolver(Resolver):
         if self._last_batch_fingerprints.get("uniprot") == batch_fp:
             logger.info(
                 "add_uniprot_records: identical batch fingerprint detected "
-                "— skipping duplicate batch (%d records)", len(records)
+                "-- skipping duplicate batch (%d records)", len(records)
             )
             return
         self._last_batch_fingerprints["uniprot"] = batch_fp
@@ -1570,7 +1570,7 @@ class ProteinResolver(Resolver):
             dup_count = len(dup_result.get("uniprot_id", []))
             logger.warning(
                 "add_uniprot_records: %d duplicate uniprot_ids detected "
-                "within batch — last occurrence wins",
+                "within batch -- last occurrence wins",
                 dup_count,
             )
 
@@ -1612,7 +1612,7 @@ class ProteinResolver(Resolver):
                 )
 
         logger.info(
-            "add_uniprot_records: done — %d canonical proteins loaded",
+            "add_uniprot_records: done -- %d canonical proteins loaded",
             len(self.mapping),
         )
 
@@ -1634,7 +1634,7 @@ class ProteinResolver(Resolver):
             self._stats.inc("records_rejected")
             self._stats.inc("dead_lettered")
             logger.warning(
-                "add_uniprot_records: record %d rejected — %s",
+                "add_uniprot_records: record %d rejected -- %s",
                 idx, errors,
             )
             return
@@ -1655,13 +1655,13 @@ class ProteinResolver(Resolver):
                 self._stats.inc("records_rejected")
                 self._stats.inc("dead_lettered")
                 logger.warning(
-                    "add_uniprot_records: record %d rejected — invalid "
+                    "add_uniprot_records: record %d rejected -- invalid "
                     "amino acid characters in sequence", idx,
                 )
                 return
 
         self._stats.inc("records_ingested")
-        # v89 FORENSIC ROOT FIX (BUG #4 P0 — UniProt accessions NOT uppercased):
+        # v89 FORENSIC ROOT FIX (BUG #4 P0 -- UniProt accessions NOT uppercased):
         #   UniProt accessions are CASE-SENSITIVE per the UniProt spec
         #   (must be UPPERCASE, e.g. "P04637" not "p04637"). The
         #   validation regex ``_UNIPROT_ACCESSION_RE`` requires uppercase,
@@ -1676,14 +1676,14 @@ class ProteinResolver(Resolver):
         #   DOES uppercase for lookup, but the actual storage key
         #   ``base_uid`` (line 1882: ``self.mapping[base_uid] = entry``)
         #   does NOT. This produced DUPLICATE canonical entries for the
-        #   same protein — corrupting TransE embeddings and drug-target
+        #   same protein -- corrupting TransE embeddings and drug-target
         #   edge connectivity.
         #   ROOT FIX: normalize ``uniprot_id`` to uppercase + strip
         #   IMMEDIATELY after retrieval. ``base_uid`` (derived from
         #   ``uniprot_id`` at line 1668) inherits the uppercase
         #   normalization, so ALL ``self.mapping[base_uid]`` operations
         #   use the uppercase key. This is the SAME normalization the
-        #   alias-uniprot index already uses — now consistent end-to-end.
+        #   alias-uniprot index already uses -- now consistent end-to-end.
         uniprot_id = record.get("uniprot_id", "")
         if isinstance(uniprot_id, str):
             uniprot_id = uniprot_id.strip().upper()
@@ -1692,10 +1692,10 @@ class ProteinResolver(Resolver):
         else:
             uniprot_id = ""
         if not uniprot_id:
-            # v89 FORENSIC ROOT FIX (BUG #11 P1 — empty uniprot_id silently
+            # v89 FORENSIC ROOT FIX (BUG #11 P1 -- empty uniprot_id silently
             #   dropped without dead-letter):
             #   The previous code incremented ``records_rejected`` and
-            #   ``return``ed — the record vanished silently. The operator
+            #   ``return``ed -- the record vanished silently. The operator
             #   saw ``records_rejected=1`` but could NOT diagnose WHICH
             #   protein was lost or WHY. For a patient-safety pharma
             #   platform, silent data loss is unacceptable.
@@ -1711,7 +1711,7 @@ class ProteinResolver(Resolver):
             self._stats.inc("records_rejected")
             self._stats.inc("dead_lettered")
             logger.warning(
-                "add_uniprot_records: record %d rejected — empty uniprot_id "
+                "add_uniprot_records: record %d rejected -- empty uniprot_id "
                 "(added to dead-letter queue for diagnosis)", idx,
             )
             return
@@ -1725,7 +1725,7 @@ class ProteinResolver(Resolver):
             expected_org = _effective_overrides[uniprot_id]
             if organism and organism != expected_org:
                 logger.warning(
-                    "add_uniprot_records: organism mismatch for %s — "
+                    "add_uniprot_records: organism mismatch for %s -- "
                     "expected %s, got %s; dead-lettering",
                     uniprot_id, expected_org, organism,
                 )
@@ -1742,19 +1742,19 @@ class ProteinResolver(Resolver):
                 self._stats.inc("organism_mismatches")
                 return
         else:
-            # v89 FORENSIC ROOT FIX (BUG #6 P0 — organism filter was
+            # v89 FORENSIC ROOT FIX (BUG #6 P0 -- organism filter was
             #   "decorative" for >99.9% of records):
             #   The override table has ~80 baseline + ~250 auto-loaded
             #   entries. UniProt Swiss-Prot has ~560,000 entries. So for
-            #   >99.9% of records, the organism was NEVER validated —
+            #   >99.9% of records, the organism was NEVER validated --
             #   the code logged a DEBUG message and accepted whatever
             #   organism the record claimed. Combined with BUG #2 (STRING
-            #   →UniProt mispairing) and BUG #3 (no organism filter on
+            #   ->UniProt mispairing) and BUG #3 (no organism filter on
             #   alias file selection), this produced systemic cross-
             #   species protein mixing. Mouse/rat/fly proteins were
             #   silently labeled "Homo sapiens" and merged into human
             #   PPI subgraphs. Drug-target edges connected human drugs
-            #   to non-human protein targets — a patient-safety hazard.
+            #   to non-human protein targets -- a patient-safety hazard.
             #   ROOT FIX: when ``require_organism_override=True`` (a
             #   config flag that already exists at base.py:455 but
             #   defaulted to False and was never consulted), REFUSE to
@@ -1817,13 +1817,13 @@ class ProteinResolver(Resolver):
 
         # FIX ARCH-02: check if a provisional entry should be promoted.
         #
-        # v80 FORENSIC ROOT FIX (P0-D3 — O(N×M) provisional-promotion
+        # v80 FORENSIC ROOT FIX (P0-D3 -- O(N×M) provisional-promotion
         # loop): the previous code iterated over ALL entries in
         # ``self.mapping`` (``for prov_uid in list(self.mapping.keys())``)
         # for EVERY new UniProt record, checking each one to see if it
         # was a synthetic (provisional) entry that matched the new
         # record's (gene, organism). On a 100K-scale UniProt ingestion,
-        # this is 10 billion+ iterations → Airflow task timeout
+        # this is 10 billion+ iterations -> Airflow task timeout
         # (default 4h). The pipeline hung forever on real data.
         #
         # ROOT FIX: use the new ``_provisional_by_gene_organism`` index
@@ -1833,19 +1833,19 @@ class ProteinResolver(Resolver):
         # ``_unregister_provisional_entry`` (called by
         # ``_promote_provisional_entry`` and ``remove_source``). Falls
         # back to the O(N) scan ONLY if the index is somehow empty
-        # (defensive — should never happen if the index is maintained
+        # (defensive -- should never happen if the index is maintained
         # correctly).
         #
-        # v82 FORENSIC ROOT FIX (P0-D3b — O(N) fallback still triggered
+        # v82 FORENSIC ROOT FIX (P0-D3b -- O(N) fallback still triggered
         #   for STRING-alias-derived provisionals):
         #   The v80 gene-organism index only helps when the provisional
         #   entry has a ``gene_symbol``. But STRING alias records (the
         #   DOMINANT source of provisionals on a real ingestion) carry
-        #   ONLY ``string_id`` + ``uniprot_id`` — they have NO
+        #   ONLY ``string_id`` + ``uniprot_id`` -- they have NO
         #   ``gene_symbol``. So the gene-organism index NEVER contains
         #   them, and EVERY UniProt record fell through to the O(N)
         #   defensive scan. On 100K UniProt records × 100K STRING
-        #   provisionals, that's 10 BILLION iterations — the exact
+        #   provisionals, that's 10 BILLION iterations -- the exact
         #   Airflow-timeout failure the v80 fix was supposed to prevent.
         #
         #   ROOT FIX: check the new ``_provisional_by_alias_uniprot``
@@ -1854,7 +1854,7 @@ class ProteinResolver(Resolver):
         #   UniProt accession registered their synthetic uid under that
         #   accession. When the real UniProt record arrives with the
         #   same accession, we find the provisional in O(1) and promote
-        #   it — no O(N) scan. The gene-organism index is checked
+        #   it -- no O(N) scan. The gene-organism index is checked
         #   SECOND (for provisionals that had a gene but no alias
         #   uniprot). The O(N) fallback is the LAST resort (defensive,
         #   should now genuinely never fire).
@@ -1879,7 +1879,7 @@ class ProteinResolver(Resolver):
                 if not self.is_synthetic_uid(prov_uid):
                     continue
                 # Found a promotion candidate via the alias-uniprot
-                # index — promote + merge + return.
+                # index -- promote + merge + return.
                 self._promote_provisional_entry(prov_uid, base_uid)
                 self._merge_uniprot_record(base_uid, record)
                 self._stats.inc("records_matched")
@@ -1902,7 +1902,7 @@ class ProteinResolver(Resolver):
             # promoted uid from the list).
             for prov_uid in list(_candidates):
                 if prov_uid not in self.mapping:
-                    # Stale index entry — clean it up.
+                    # Stale index entry -- clean it up.
                     try:
                         _candidates.remove(prov_uid)
                     except ValueError:
@@ -1910,9 +1910,9 @@ class ProteinResolver(Resolver):
                     continue
                 if not self.is_synthetic_uid(prov_uid):
                     # Entry was promoted previously but the index wasn't
-                    # cleaned up — skip (defensive).
+                    # cleaned up -- skip (defensive).
                     continue
-                # Found a promotion candidate — promote + merge + return.
+                # Found a promotion candidate -- promote + merge + return.
                 self._promote_provisional_entry(prov_uid, base_uid)
                 # Merge the UniProt data into the promoted entry.
                 self._merge_uniprot_record(base_uid, record)
@@ -1934,11 +1934,11 @@ class ProteinResolver(Resolver):
                 prov_gene = self._normalize_gene_symbol(prov_entry.get("gene_symbol"))
                 prov_org = self._normalize_organism(prov_entry.get("organism"))
                 if prov_gene == rec_gene and prov_org == rec_org:
-                    # Found a candidate the index missed — log a WARNING
+                    # Found a candidate the index missed -- log a WARNING
                     # so operators know the index is stale, then promote.
                     logger.warning(
                         "add_uniprot_records: provisional index MISS for "
-                        "(gene=%s, organism=%s) — found candidate %s via "
+                        "(gene=%s, organism=%s) -- found candidate %s via "
                         "O(N) fallback. The _provisional_by_gene_organism "
                         "index may be stale.",
                         rec_gene, rec_org, prov_uid,
@@ -1976,7 +1976,7 @@ class ProteinResolver(Resolver):
             else:
                 logger.debug(
                     "add_uniprot_records: gene symbol %s not in well-known "
-                    "HGNC set (not a rejection — just informational)",
+                    "HGNC set (not a rejection -- just informational)",
                     gene_symbol,
                 )
         # TODO SCI-11-future: load full HGNC download for production-grade
@@ -2040,11 +2040,11 @@ class ProteinResolver(Resolver):
 
         # v89 ROOT FIX (BUG #35): populate the case-preserving gene
         # symbol index. ``_gene_index`` above is keyed by
-        # (gene_symbol, organism) — case-sensitive on gene_symbol, but
+        # (gene_symbol, organism) -- case-sensitive on gene_symbol, but
         # requires the organism to be known. ``_name_index`` below is
         # case-folded (``normalize_name`` lowercases), so ``TP53`` and
         # ``Tp53`` collide. The new ``_gene_symbol_index`` is keyed by
-        # the EXACT gene symbol (case-sensitive, organism-agnostic) —
+        # the EXACT gene symbol (case-sensitive, organism-agnostic) --
         # human ``TP53`` and mouse ``Tp53`` are DISTINCT keys. This
         # preserves species distinction even when the organism filter
         # fails (BUG #6). Fuzzy matching on gene symbols can consult
@@ -2080,7 +2080,7 @@ class ProteinResolver(Resolver):
 
         Matching strategy (FIX DOC-10):
 
-        1. Direct STRING → UniProt mapping via ``_string_to_uniprot``. This
+        1. Direct STRING -> UniProt mapping via ``_string_to_uniprot``. This
            may return a REAL uniprot_id (from a UniProt record's string_id
            field) OR a SYNTHETIC uid (``STRING:...`` from a previously-created
            provisional entry). Both are valid merge targets.
@@ -2156,7 +2156,7 @@ class ProteinResolver(Resolver):
                 self._stats.inc("records_rejected")
                 self._stats.inc("dead_lettered")
                 logger.warning(
-                    "add_string_records: record %d rejected — %s",
+                    "add_string_records: record %d rejected -- %s",
                     idx, errors,
                 )
                 continue
@@ -2167,7 +2167,7 @@ class ProteinResolver(Resolver):
             organism = self._normalize_organism(organism_raw)
             gene_symbol = self._normalize_gene_symbol(gene_symbol_raw)
 
-            # v89 FORENSIC ROOT FIX (BUG #15 P1 — ambiguous lookups silently
+            # v89 FORENSIC ROOT FIX (BUG #15 P1 -- ambiguous lookups silently
             #   picked FIRST match):
             #   The previous lookups used single-valued dicts
             #   ``_string_to_uniprot`` and ``_gene_index``. When multiple
@@ -2176,7 +2176,7 @@ class ProteinResolver(Resolver):
             #   resolver silently picked the first match without alerting
             #   on ambiguity. For genes with multiple UniProt entries
             #   (e.g. TP53 has P04637 + isoforms), STRING records were
-            #   always merged into the FIRST registered entry — the KG's
+            #   always merged into the FIRST registered entry -- the KG's
             #   PPI subgraph was incomplete.
             #   ROOT FIX: consult the multi-valued indices
             #   ``_string_to_uniprot_multi`` and ``_gene_index_multi``
@@ -2185,7 +2185,7 @@ class ProteinResolver(Resolver):
             #   falls through to other matching strategies or creates a
             #   new provisional entry. Only use the single-valued index
             #   when the multi-valued index has exactly ONE candidate.
-            # 1. Direct STRING → UniProt mapping.
+            # 1. Direct STRING -> UniProt mapping.
             uniprot_id = None
             _multi_candidates = self._string_to_uniprot_multi.get(string_id) or []
             # Deduplicate while preserving order.
@@ -2194,7 +2194,7 @@ class ProteinResolver(Resolver):
             if len(_multi_candidates) > 1:
                 logger.warning(
                     "add_string_records: STRING ID %s maps to MULTIPLE "
-                    "UniProt accessions (%s) — ambiguous, refusing to "
+                    "UniProt accessions (%s) -- ambiguous, refusing to "
                     "match by STRING ID alone. Creating provisional entry.",
                     string_id, _multi_candidates,
                 )
@@ -2215,7 +2215,7 @@ class ProteinResolver(Resolver):
                 if len(_multi_gene_candidates) > 1:
                     logger.warning(
                         "add_string_records: (gene=%s, organism=%s) maps "
-                        "to MULTIPLE UniProt accessions (%s) — ambiguous, "
+                        "to MULTIPLE UniProt accessions (%s) -- ambiguous, "
                         "refusing to match by gene+organism alone. "
                         "Creating provisional entry.",
                         gene_symbol, organism, _multi_gene_candidates,
@@ -2243,7 +2243,7 @@ class ProteinResolver(Resolver):
                 )
 
         logger.info(
-            "add_string_records: done — %d matched, %d provisional created",
+            "add_string_records: done -- %d matched, %d provisional created",
             matched, created,
         )
         self._organism_name_cache_valid = False
@@ -2326,7 +2326,7 @@ class ProteinResolver(Resolver):
                 self._stats.inc("records_rejected")
                 self._stats.inc("dead_lettered")
                 logger.warning(
-                    "add_chembl_target_records: record %d rejected — %s",
+                    "add_chembl_target_records: record %d rejected -- %s",
                     idx, errors,
                 )
                 continue
@@ -2380,13 +2380,13 @@ class ProteinResolver(Resolver):
                 )
 
         logger.info(
-            "add_chembl_target_records: done — %d matched, %d provisional created",
+            "add_chembl_target_records: done -- %d matched, %d provisional created",
             matched, created,
         )
         self._organism_name_cache_valid = False
 
     # ------------------------------------------------------------------
-    # Public API — single-record resolution
+    # Public API -- single-record resolution
     # ------------------------------------------------------------------
 
     def resolve_single(
@@ -2406,7 +2406,7 @@ class ProteinResolver(Resolver):
             UniProt accession (e.g. ``"P04637"``).
         gene_name:
             Gene symbol or name. Used for BOTH gene+organism matching (path 3)
-            AND fuzzy matching (path 4) (FIX DOC-12 — was undocumented).
+            AND fuzzy matching (path 4) (FIX DOC-12 -- was undocumented).
             Gene symbols are normalized via ``_normalize_gene_symbol_for_fuzzy``
             before fuzzy comparison (SCI-12).
         string_id:
@@ -2423,7 +2423,7 @@ class ProteinResolver(Resolver):
         -------
         dict or None
             A DEEP COPY of the canonical record if a match is found, else ``None``
-            (FIX DOC-13 / ARCH-04 — was live entry, mutations corrupted resolver).
+            (FIX DOC-13 / ARCH-04 -- was live entry, mutations corrupted resolver).
             Mutations to the returned dict do NOT affect the resolver's internal state.
         """
         # FIX DESIGN-07: optional query dataclass support.
@@ -2460,12 +2460,12 @@ class ProteinResolver(Resolver):
             self._stats.inc("uniprot_exact_matches")
             return self._copy_entry_for_read(self.mapping[uniprot_id])
 
-        # 2. STRING → UniProt mapping.
+        # 2. STRING -> UniProt mapping.
         if string_id and string_id in self._string_to_uniprot:
             mapped_uid = self._string_to_uniprot[string_id]
             if mapped_uid in self.mapping:
                 logger.debug(
-                    "resolve_single: STRING mapping '%s' → '%s'",
+                    "resolve_single: STRING mapping '%s' -> '%s'",
                     string_id, mapped_uid,
                 )
                 return self._copy_entry_for_read(self.mapping[mapped_uid])
@@ -2478,7 +2478,7 @@ class ProteinResolver(Resolver):
             mapped_uid = self._gene_index.get(key)
             if mapped_uid and mapped_uid in self.mapping:
                 logger.debug(
-                    "resolve_single: gene match '%s' → '%s'",
+                    "resolve_single: gene match '%s' -> '%s'",
                     gene_name, mapped_uid,
                 )
                 self._stats.inc("name_matches")
@@ -2489,7 +2489,7 @@ class ProteinResolver(Resolver):
             # FIX SCI-12: use gene-symbol-specific normalizer for fuzzy path.
             norm = self._normalize_gene_symbol_for_fuzzy(gene_name)
             if norm:
-                # FIX SCI-04: minimum length guard — short gene symbols
+                # FIX SCI-04: minimum length guard -- short gene symbols
                 # are too risky for fuzzy matching.
                 if len(norm) < 4:
                     logger.debug(
@@ -2542,7 +2542,7 @@ class ProteinResolver(Resolver):
         # FIX P1-ER-10 (MEDIUM): the previous ``min(base_threshold * 1.05,
         # 0.99)`` produced 0.8925 for the default ``base_threshold=0.85``,
         # which was BELOW the documented protein-specific minimum of 0.90
-        # (``_PROTEIN_FUZZY_THRESHOLD``) — so the constant was decorative
+        # (``_PROTEIN_FUZZY_THRESHOLD``) -- so the constant was decorative
         # and the actual cutoff was looser than advertised. Use ``max()``
         # so the protein-specific floor is always honored, and only then
         # apply the 1.05 safety multiplier capped at 0.99.
@@ -2575,7 +2575,7 @@ class ProteinResolver(Resolver):
                     # precisely for the hardest-to-resolve proteins
                     # (fuzzy match is the LAST-resort path). The
                     # sibling module ``drug_resolver.py`` already
-                    # handles both shapes (audit 4.3) — mirror that
+                    # handles both shapes (audit 4.3) -- mirror that
                     # defensive unpack here.
                     if len(result) == 3:
                         best_norm, best_score_100, _ = result
@@ -2584,7 +2584,7 @@ class ProteinResolver(Resolver):
                     else:
                         logger.warning(
                             "resolve_single: fuzzy_match returned "
-                            "unexpected result shape (len=%d, type=%s) — "
+                            "unexpected result shape (len=%d, type=%s) -- "
                             "skipping fuzzy match for '%s'",
                             len(result), type(result).__name__, norm,
                         )
@@ -2595,14 +2595,14 @@ class ProteinResolver(Resolver):
                         if self._is_gene_family_false_positive(norm, best_norm):
                             logger.debug(
                                 "resolve_single: fuzzy match '%s' ≈ '%s' "
-                                "rejected — gene-family false positive "
+                                "rejected -- gene-family false positive "
                                 "(score=%.3f)", norm, best_norm,
                                 best_score_100 / 100.0,
                             )
                             return None
                         logger.debug(
                             "resolve_single: fuzzy match '%s' ≈ '%s' "
-                            "(score=%.3f) → '%s'",
+                            "(score=%.3f) -> '%s'",
                             norm, best_uid,
                             best_score_100 / 100.0, best_uid,
                         )
@@ -2625,13 +2625,13 @@ class ProteinResolver(Resolver):
                 if best_norm_name and self._is_gene_family_false_positive(norm, best_norm_name):
                     logger.debug(
                         "resolve_single: fuzzy match '%s' ≈ '%s' rejected "
-                        "— gene-family false positive (score=%.3f)",
+                        "-- gene-family false positive (score=%.3f)",
                         norm, best_norm_name, best_score,
                     )
                     return None
                 logger.debug(
                     "resolve_single: fuzzy match '%s' ≈ '%s' "
-                    "(score=%.3f) → '%s'",
+                    "(score=%.3f) -> '%s'",
                     norm, best_uid, best_score, best_uid,
                 )
                 self._stats.inc("fuzzy_matches")
@@ -2661,7 +2661,7 @@ class ProteinResolver(Resolver):
         self._organism_name_cache_valid = True
 
     # ------------------------------------------------------------------
-    # Public API — bulk resolution from DataFrames
+    # Public API -- bulk resolution from DataFrames
     # ------------------------------------------------------------------
 
     def build_mapping(
@@ -2679,25 +2679,25 @@ class ProteinResolver(Resolver):
         """Build cross-database protein entity mapping.
 
         Four sources are processed in order (FIX DOC-09 + v89 BUG #33):
-        1. **uniprot_df** — loaded first as the canonical source. Each record
+        1. **uniprot_df** -- loaded first as the canonical source. Each record
            creates a new canonical entry keyed by uniprot_id, or merges into
            an existing entry, or promotes a provisional entry (ARCH-02).
-        2. **string_aliases_df** — STRING alias data, matched against existing
+        2. **string_aliases_df** -- STRING alias data, matched against existing
            canonical entries via string_id cross-reference or gene+organism
            match. Unmatched records create provisional entries.
-        3. **string_df** — STRING protein data with uniprot_id column. Each
+        3. **string_df** -- STRING protein data with uniprot_id column. Each
            row's uniprot_id is checked against the mapping; if missing, a
            ``string_derived`` entry is created (match_method="string_derived",
            confidence=0.5). If present, the row's other fields are merged
            into the existing entry (CODE-20).
-        4. **chembl_target_df** — ChEMBL target records (v89 BUG #33 ROOT
+        4. **chembl_target_df** -- ChEMBL target records (v89 BUG #33 ROOT
            FIX). Each record has a ``chembl_target_id`` and optionally a
            ``uniprot_id`` cross-reference. Matched via UniProt ID exact
            match or gene+organism match; unmatched records create
            ``chembl_provisional`` entries. Previously this source was
            registered in ``_SOURCE_INGESTORS`` but NEVER passed by
            ``run.py``, leaving ChEMBL target IDs orphaned from the
-           canonical Protein nodes — drug-target edges from ChEMBL used
+           canonical Protein nodes -- drug-target edges from ChEMBL used
            ChEMBL target IDs that were not linked to UniProt accessions.
 
         Returns
@@ -2713,7 +2713,7 @@ class ProteinResolver(Resolver):
         if reset:
             if self.mapping:
                 logger.info(
-                    "build_mapping: reset=True — clearing %d existing "
+                    "build_mapping: reset=True -- clearing %d existing "
                     "canonical entries (idempotent re-run)",
                     len(self.mapping),
                 )
@@ -2728,7 +2728,7 @@ class ProteinResolver(Resolver):
         if string_aliases_df is not None:
             try:
                 if hasattr(string_aliases_df, "empty") and not string_aliases_df.empty:
-                    # v89 ROOT FIX (BUG #23 — silent schema mismatch in
+                    # v89 ROOT FIX (BUG #23 -- silent schema mismatch in
                     # STRING aliases DataFrame):
                     #   The previous code called ``add_string_records`` on
                     #   ``string_aliases_df`` WITHOUT validating the schema.
@@ -2738,7 +2738,7 @@ class ProteinResolver(Resolver):
                     #   record was rejected at the validation step (line
                     #   ~1945: ``if not string_id``) and dead-lettered.
                     #   The operator saw only "ingesting N STRING records"
-                    #   followed by "0 matched, 0 provisional created" —
+                    #   followed by "0 matched, 0 provisional created" --
                     #   no error, no warning about the schema mismatch.
                     #   The KG's PPI subgraph was silently incomplete.
                     #
@@ -2747,7 +2747,7 @@ class ProteinResolver(Resolver):
                     #   column is ``string_id`` (minimum). If missing,
                     #   log an ERROR with the actual columns present, and
                     #   SKIP ingestion (do NOT call add_string_records
-                    #   with malformed records — that just fills the
+                    #   with malformed records -- that just fills the
                     #   dead-letter queue with confusing entries). This
                     #   surfaces the root cause (wrong schema) to the
                     #   operator immediately.
@@ -2770,7 +2770,7 @@ class ProteinResolver(Resolver):
                                 "build_mapping: string_aliases_df is "
                                 "missing required column(s) %s. Available "
                                 "columns: %s. Skipping STRING aliases "
-                                "ingestion — every record would be "
+                                "ingestion -- every record would be "
                                 "rejected at the string_id validation "
                                 "step and dead-lettered, producing a "
                                 "silently-empty PPI subgraph. Fix the "
@@ -2798,7 +2798,7 @@ class ProteinResolver(Resolver):
             try:
                 if hasattr(string_df, "empty") and hasattr(string_df, "columns"):
                     if not string_df.empty and "uniprot_id" in string_df.columns:
-                        # v89 FORENSIC ROOT FIX (BUG #18 P1 — string_derived
+                        # v89 FORENSIC ROOT FIX (BUG #18 P1 -- string_derived
                         #   organism default "Homo sapiens" for unknowns):
                         #   The previous code created a string_derived entry
                         #   for EVERY UniProt ID in string_df that was not
@@ -2817,7 +2817,7 @@ class ProteinResolver(Resolver):
                         #   that prefix is in ``_ORGANISM_ALIASES``. For any
                         #   STRING-derived UniProt ID not in the override
                         #   table and without a valid string_id pairing, the
-                        #   organism defaulted to "Homo sapiens" — non-human
+                        #   organism defaulted to "Homo sapiens" -- non-human
                         #   proteins were mislabeled as human.
                         #   ROOT FIX: REFUSE to create a string_derived
                         #   entry when the organism cannot be determined
@@ -2883,7 +2883,7 @@ class ProteinResolver(Resolver):
                             if _resolved_organism is None:
                                 logger.warning(
                                     "build_mapping: cannot determine organism "
-                                    "for STRING-derived UniProt ID %s — refusing "
+                                    "for STRING-derived UniProt ID %s -- refusing "
                                     "to create string_derived entry (would "
                                     "default to 'Homo sapiens' and risk cross-"
                                     "species contamination). Dead-lettering. "
@@ -2898,7 +2898,7 @@ class ProteinResolver(Resolver):
                                     "errors": [
                                         "organism could not be determined from "
                                         "override table, string_df organism "
-                                        "column, or STRING ID taxonomy prefix — "
+                                        "column, or STRING ID taxonomy prefix -- "
                                         "refusing to default to 'Homo sapiens'"
                                     ],
                                     "stage": "build_mapping_string_derived",
@@ -2953,7 +2953,7 @@ class ProteinResolver(Resolver):
                     "build_mapping: string_df has no .empty/.columns attributes"
                 )
 
-        # v89 ROOT FIX (BUG #33 — ChEMBL target data never passed to
+        # v89 ROOT FIX (BUG #33 -- ChEMBL target data never passed to
         # build_mapping):
         #   The ``add_chembl_target_records`` method (line ~2030) was
         #   registered in ``_SOURCE_INGESTORS`` but NEVER called from
@@ -2963,16 +2963,16 @@ class ProteinResolver(Resolver):
         #   target data. ChEMBL target IDs (e.g. CHEMBL2366519 for
         #   EGFR) were NOT cross-referenced with UniProt accessions.
         #   The KG's drug-target edges from ChEMBL used ChEMBL target
-        #   IDs that were not linked to the canonical Protein nodes —
+        #   IDs that were not linked to the canonical Protein nodes --
         #   orphaned drug-target edges, incomplete KG.
         #
         #   ROOT FIX: add a ``chembl_target_df`` keyword parameter and
         #   ingest it via ``add_chembl_target_records`` (same pattern as
-        #   string_aliases_df → add_string_records). ``run.py`` is
+        #   string_aliases_df -> add_string_records). ``run.py`` is
         #   updated to load the ChEMBL activities/targets CSV and pass
         #   it here. This connects ChEMBL target IDs to UniProt
-        #   accessions, completing the drug → target → pathway → disease
-        #   chain (Phase 1 → Phase 2 → Phase 3 → Phase 4 connectivity).
+        #   accessions, completing the drug -> target -> pathway -> disease
+        #   chain (Phase 1 -> Phase 2 -> Phase 3 -> Phase 4 connectivity).
         if chembl_target_df is not None:
             try:
                 if hasattr(chembl_target_df, "empty") and not chembl_target_df.empty:
@@ -2980,7 +2980,7 @@ class ProteinResolver(Resolver):
                     # validate the schema BEFORE ingesting. Required
                     # column is ``chembl_target_id`` (minimum). If
                     # missing, log an ERROR with the actual columns and
-                    # SKIP ingestion — do NOT fill the dead-letter queue
+                    # SKIP ingestion -- do NOT fill the dead-letter queue
                     # with confusing malformed records.
                     if not hasattr(chembl_target_df, "columns"):
                         logger.error(
@@ -3002,7 +3002,7 @@ class ProteinResolver(Resolver):
                                 "build_mapping: chembl_target_df is "
                                 "missing required column(s) %s. Available "
                                 "columns: %s. Skipping ChEMBL target "
-                                "ingestion — every record would be "
+                                "ingestion -- every record would be "
                                 "rejected at the chembl_target_id "
                                 "validation step. Fix the upstream caller "
                                 "to pass a DataFrame with at least a "
@@ -3016,7 +3016,7 @@ class ProteinResolver(Resolver):
                 else:
                     logger.info(
                         "build_mapping: chembl_target_df is None or empty "
-                        "— skipping ChEMBL target ingestion (no ChEMBL "
+                        "-- skipping ChEMBL target ingestion (no ChEMBL "
                         "target data available this run). (v89 BUG #33)"
                     )
             except AttributeError:
@@ -3037,7 +3037,7 @@ class ProteinResolver(Resolver):
     ) -> Any:
         """Convert the internal ``mapping`` dict to an entity-mapping DataFrame.
 
-        Always returns a DataFrame (FIX DESIGN-09 — was data-dependent
+        Always returns a DataFrame (FIX DESIGN-09 -- was data-dependent
         return type when chunksize was given).  Use
         ``to_dataframe_streaming`` for chunked output.
 
@@ -3049,7 +3049,7 @@ class ProteinResolver(Resolver):
         """
         if chunksize is not None and chunksize > 0:
             warnings.warn(
-                "to_dataframe(chunksize=...) is deprecated — use "
+                "to_dataframe(chunksize=...) is deprecated -- use "
                 "to_dataframe_streaming() instead. Returning full DataFrame.",
                 DeprecationWarning,
                 stacklevel=2,
@@ -3087,7 +3087,7 @@ class ProteinResolver(Resolver):
                 "provisional": entry.get("provisional", False),
             })
 
-        # Backward-compatible column order — must match original 13 columns exactly.
+        # Backward-compatible column order -- must match original 13 columns exactly.
         # New columns are available but not included by default to preserve
         # backward compatibility with existing tests and downstream consumers.
         columns = [
@@ -3158,7 +3158,7 @@ class ProteinResolver(Resolver):
     def to_dict(self) -> Dict[str, dict]:
         """Export the mapping as a dict-of-dicts (JSON-serialisable).
 
-        FIX CODE-24: uses deep copy (was shallow — sources list shared).
+        FIX CODE-24: uses deep copy (was shallow -- sources list shared).
         """
         return {uid: self._copy_entry_for_read(e) for uid, e in self.mapping.items()}
 
@@ -3223,7 +3223,7 @@ class ProteinResolver(Resolver):
                 pq.write_to_dataset(table, root_path=path)
 
     # ------------------------------------------------------------------
-    # Public API — state serialisation (D7-4, D16-3)
+    # Public API -- state serialisation (D7-4, D16-3)
     # ------------------------------------------------------------------
 
     def to_state_dict(self) -> dict:
@@ -3239,7 +3239,7 @@ class ProteinResolver(Resolver):
         # implementation returned LIVE references to ``self.mapping``,
         # ``self._gene_index``, ``self._string_to_uniprot``,
         # ``self._name_index``, ``self._name_index_multi``,
-        # ``self._dead_letter`` and ``self._audit_trail`` — a caller that
+        # ``self._dead_letter`` and ``self._audit_trail`` -- a caller that
         # did ``state["mapping"].pop(...)`` would corrupt the live
         # resolver.
         state: dict = {
@@ -3262,12 +3262,12 @@ class ProteinResolver(Resolver):
 
         # FIX SEC-15: HMAC signature for tamper-evidence.
         # FIX P1-ER-18 (LOW): the previous implementation hard-coded the
-        # HMAC key as ``b"protein-resolver-tamper-evident-key"`` — anyone
+        # HMAC key as ``b"protein-resolver-tamper-evident-key"`` -- anyone
         # with source access could forge valid signatures. The key is
         # now sourced from ``ResolverConfig.tamper_evident_key`` (env
         # var: ``ENTITY_RESOLUTION_TAMPER_EVIDENT_KEY``, hex-encoded).
         # If ``tamper_evident=True`` but no key is configured, we log a
-        # CRITICAL warning and skip signing — tamper-evidence is
+        # CRITICAL warning and skip signing -- tamper-evidence is
         # effectively disabled until the operator configures a key.
         # This is safer than silently using a known-to-attacker key.
         if self._config.tamper_evident:
@@ -3275,7 +3275,7 @@ class ProteinResolver(Resolver):
             if tek is None:
                 logger.critical(
                     "to_state_dict: tamper_evident=True but "
-                    "tamper_evident_key is None — SKIPPING signature. "
+                    "tamper_evident_key is None -- SKIPPING signature. "
                     "State will be saved WITHOUT tamper-evidence. "
                     "Configure ENTITY_RESOLUTION_TAMPER_EVIDENT_KEY "
                     "(hex-encoded, e.g. `openssl rand -hex 32`) to "
@@ -3356,7 +3356,7 @@ class ProteinResolver(Resolver):
         # ``tamper_evident_key`` (not the legacy hard-coded key). The
         # key is read from env var ``ENTITY_RESOLUTION_TAMPER_EVIDENT_KEY``
         # (hex-encoded) because ``from_state_dict`` is a classmethod
-        # and has no ``self._config`` yet — the config is itself part
+        # and has no ``self._config`` yet -- the config is itself part
         # of the signed payload, so it CANNOT be used to source the
         # key (chicken-and-egg). If the state carries a signature but
         # no key is configured, log CRITICAL and skip verification.
@@ -3372,7 +3372,7 @@ class ProteinResolver(Resolver):
                 except ValueError:
                     logger.warning(
                         "from_state_dict: ENTITY_RESOLUTION_"
-                        "TAMPER_EVIDENT_KEY is not valid hex — "
+                        "TAMPER_EVIDENT_KEY is not valid hex -- "
                         "skipping signature verification."
                     )
             if tek is None:
@@ -3380,7 +3380,7 @@ class ProteinResolver(Resolver):
                     "from_state_dict: state carries an HMAC signature "
                     "but no tamper_evident_key is configured (env var "
                     "ENTITY_RESOLUTION_TAMPER_EVIDENT_KEY is unset or "
-                    "invalid) — SKIPPING verification. Tamper-evidence "
+                    "invalid) -- SKIPPING verification. Tamper-evidence "
                     "is DISABLED. This is a CRITICAL security gap in "
                     "production deployments."
                 )
@@ -3394,7 +3394,7 @@ class ProteinResolver(Resolver):
                     ).hexdigest()
                     if not hmac.compare_digest(sig, expected_sig):
                         raise ValueError(
-                            "State dict HMAC signature mismatch — data may have "
+                            "State dict HMAC signature mismatch -- data may have "
                             "been tampered with (SEC-15)"
                         )
                 except (TypeError, ValueError) as exc:
@@ -3451,13 +3451,13 @@ class ProteinResolver(Resolver):
         return resolver
 
     # ------------------------------------------------------------------
-    # Public API — lifecycle / maintenance
+    # Public API -- lifecycle / maintenance
     # ------------------------------------------------------------------
 
     def reset(self) -> None:
-        """Clear all internal state — equivalent to a fresh instance.
+        """Clear all internal state -- equivalent to a fresh instance.
 
-        FIX LOG-10: reset logs at INFO (was DEBUG — invisible in production).
+        FIX LOG-10: reset logs at INFO (was DEBUG -- invisible in production).
         """
         old_count = len(self.mapping)
         self.mapping = {}
@@ -3512,7 +3512,7 @@ class ProteinResolver(Resolver):
                 "source": source,
             })
 
-        # Full deletions — batch rebuild indexes once.
+        # Full deletions -- batch rebuild indexes once.
         if to_delete:
             delete_set = set(to_delete)
             for uid in to_delete:
@@ -3591,14 +3591,14 @@ class ProteinResolver(Resolver):
         ingestion is skipped (idempotent).
 
         P2-3 ROOT FIX (v82): the previous implementation hashed only
-        ``records[:100]`` — for batches >100 records where only records
+        ``records[:100]`` -- for batches >100 records where only records
         101+ differed from a prior batch, the fingerprint was IDENTICAL
         and the second batch was silently skipped (idempotency collision
-        → silent data loss). For a 200K-record batch, this means 199,900
+        -> silent data loss). For a 200K-record batch, this means 199,900
         records could be silently dropped on re-ingestion.
 
         The root fix uses STREAMING SHA-256 over ALL records:
-          * O(n) time, O(1) memory — for 200K records with ~10-char IDs,
+          * O(n) time, O(1) memory -- for 200K records with ~10-char IDs,
             that's ~2MB of data hashed, negligible vs. network/parse cost.
           * Includes the record COUNT as a prefix so adding/removing a
             duplicate record produces a different fingerprint.
@@ -3634,13 +3634,13 @@ class ProteinResolver(Resolver):
             return h.hexdigest()[:16]
         except (TypeError, ValueError):
             # If a record contains an unhashable/unserialisable ID,
-            # fall back to "" (which forces a non-idempotent re-ingest —
+            # fall back to "" (which forces a non-idempotent re-ingest --
             # safe failure mode: the batch is re-processed rather than
             # silently skipped).
             return ""
 
     # ------------------------------------------------------------------
-    # Internal — merge helpers
+    # Internal -- merge helpers
     # ------------------------------------------------------------------
 
     def _append_audit(self, uid: str, event: dict) -> None:
@@ -3649,13 +3649,13 @@ class ProteinResolver(Resolver):
         Audit event schema (FIX DOC-14 / COMP-08):
         ------------------------------------------
         Required keys:
-          - action: str — one of {"create", "merge", "promote_provisional",
+          - action: str -- one of {"create", "merge", "promote_provisional",
                     "promote_provisional_merge", "remove_source_partial",
                     "merge_conflict", "string_xref_conflict", "delete",
                     "confidence_upgrade"}
-          - source: str — one of {"uniprot", "string", "chembl", "string_derived"}
-          - method: str — one of the MatchConfidence method names
-          - timestamp: str — ISO-8601 UTC
+          - source: str -- one of {"uniprot", "string", "chembl", "string_derived"}
+          - method: str -- one of the MatchConfidence method names
+          - timestamp: str -- ISO-8601 UTC
 
         Optional keys (depending on action):
           - field, existing, incoming, policy_applied (for merge_conflict)
@@ -3707,7 +3707,7 @@ class ProteinResolver(Resolver):
         """Apply the configured ``conflict_policy`` to a single field conflict.
 
         FIX-P1-C-11: previously the protein_resolver only recognised the
-        undocumented ``"overwrite"`` policy — every other documented policy
+        undocumented ``"overwrite"`` policy -- every other documented policy
         (``keep_existing`` (default), ``keep_incoming``, ``keep_newer``,
         ``dead_letter``) silently fell through to ``keep_existing``. This
         helper mirrors the drug_resolver's policy application so the
@@ -3719,7 +3719,7 @@ class ProteinResolver(Resolver):
         if policy == "keep_incoming":
             entry[field] = incoming_val
         elif policy == "keep_newer":
-            # Compare timestamps — incoming record's ``fetched_at`` /
+            # Compare timestamps -- incoming record's ``fetched_at`` /
             # ``timestamp`` vs the existing entry's ``resolved_at``. If
             # either side is missing, fall back to keep_existing.
             incoming_ts = (
@@ -3746,9 +3746,9 @@ class ProteinResolver(Resolver):
                 "existing": existing_val,
                 "incoming": incoming_val,
             })
-        # ``keep_existing`` (default) — no-op.
+        # ``keep_existing`` (default) -- no-op.
         # Audit the conflict (with the EFFECTIVE policy, not the configured
-        # one — ``keep_newer`` may fall back to ``keep_existing`` above).
+        # one -- ``keep_newer`` may fall back to ``keep_existing`` above).
         self._append_audit(uniprot_id, {
             "action": "merge_conflict",
             "source": source,
@@ -3767,7 +3767,7 @@ class ProteinResolver(Resolver):
 
         Merge semantics:
         - **Fill-missing**: all fields in ``_MERGE_FILLABLE_FIELDS`` are
-          fill-merged — incoming values fill None/empty slots in the
+          fill-merged -- incoming values fill None/empty slots in the
           existing entry. If both are non-empty and differ, a conflict
           is logged and the existing value is kept (FIX CODE-12 /
           DESIGN-04 conflict_policy).
@@ -3787,7 +3787,7 @@ class ProteinResolver(Resolver):
                 elif existing_val != incoming_val:
                     # FIX-P1-C-11: use the policy helper so all documented
                     # policies (keep_existing / keep_incoming / keep_newer /
-                    # dead_letter) are honoured — was previously "overwrite"
+                    # dead_letter) are honoured -- was previously "overwrite"
                     # only (not in the documented set).
                     self._apply_conflict_policy(
                         entry, f, existing_val, incoming_val,
@@ -3839,7 +3839,7 @@ class ProteinResolver(Resolver):
         """Merge a matched STRING record into the canonical entry.
 
         Merge semantics (FIX DOC-06):
-        - **Fill-missing**: same as _merge_uniprot_record — all fields in
+        - **Fill-missing**: same as _merge_uniprot_record -- all fields in
           ``_MERGE_FILLABLE_FIELDS`` are fill-merged with conflict detection.
         - **_string_to_uniprot update**: if the STRING record's ``string_id``
           is not already mapped, it's added. If it IS already mapped to a
@@ -3851,11 +3851,11 @@ class ProteinResolver(Resolver):
           This left provisional STRING entries (confidence 0.5) STUCK at
           0.5 even when STRING cross-reference CONFIRMED their identity,
           causing downstream filters requiring confidence >= 0.7 to
-          exclude confirmed entries — silent data loss in the knowledge
+          exclude confirmed entries -- silent data loss in the knowledge
           graph. The root fix: STRING cross-reference IS confirming
           evidence; confidence is upgraded from 0.5 to 0.7 (the
           ``string_cross_reference`` method score, registered at module
-          import). The upgrade is MONOTONIC — entries with confidence
+          import). The upgrade is MONOTONIC -- entries with confidence
           already >= 0.7 are NOT downgraded.
         - **Sources**: "string" added to entry's sources list (deduplicated).
         - **Audit trail**: appends a "merge" event with method="string_cross_reference",
@@ -3912,10 +3912,10 @@ class ProteinResolver(Resolver):
                     )
 
         # P2-9 ROOT FIX (v82): upgrade confidence when STRING cross-
-        # reference confirms identity. Monotonic — never downgrades.
+        # reference confirms identity. Monotonic -- never downgrades.
         # The ``string_cross_reference`` method was registered at module
         # import with confidence 0.7 (above the 0.5 provisional floor,
-        # below the 0.8 exact-name match — preserves the hierarchy).
+        # below the 0.8 exact-name match -- preserves the hierarchy).
         try:
             current_conf = float(entry.get("match_confidence", 0.5) or 0.5)
         except (TypeError, ValueError):
@@ -3971,12 +3971,12 @@ class ProteinResolver(Resolver):
         """Merge a matched ChEMBL target record into the canonical entry.
 
         Merge semantics (FIX DOC-07):
-        - **Fill-missing**: same as _merge_uniprot_record — all fields in
+        - **Fill-missing**: same as _merge_uniprot_record -- all fields in
           ``_MERGE_FILLABLE_FIELDS`` are fill-merged with conflict detection.
         - **Confidence upgrade (FIX DESIGN-01)**: if the ChEMBL record's
           ``match_method`` has HIGHER confidence than the entry's current
           ``match_confidence``, the entry's confidence is UPGRADED.
-          Downgrades are NOT applied (was a bug — DESIGN-01).
+          Downgrades are NOT applied (was a bug -- DESIGN-01).
         - **Sources**: "chembl" added to entry's sources list (deduplicated).
         - **Audit trail**: appends a "merge" event with the ChEMBL match method.
         """
@@ -4048,7 +4048,7 @@ class ProteinResolver(Resolver):
         )
 
     # ------------------------------------------------------------------
-    # Internal — provisional entry creation
+    # Internal -- provisional entry creation
     # ------------------------------------------------------------------
 
     def _create_provisional_from_string(self, record: dict) -> None:
@@ -4061,7 +4061,7 @@ class ProteinResolver(Resolver):
         exists, the duplicate is skipped (DEBUG log + stat increment
         per REL-08 / DESIGN-06).
 
-        match_method is "string_provisional" (FIX SCI-17 — was
+        match_method is "string_provisional" (FIX SCI-17 -- was
         misleading "gene_name_organism").
 
         Entries are promoted when a real uniprot_id arrives (ARCH-02).
@@ -4102,7 +4102,7 @@ class ProteinResolver(Resolver):
             # this one. Keep it as a fail-safe.
             #
             # FIX-P4-6 (v42): the previous code incremented
-            # `synthetic_keys_generated` here — on the SKIP path — making
+            # `synthetic_keys_generated` here -- on the SKIP path -- making
             # the stat meaningless (it counted attempts, not creations).
             # The skip path now records nothing (the
             # `synthetic_uid_collisions` stat from _make_synthetic_uid_checked
@@ -4115,14 +4115,14 @@ class ProteinResolver(Resolver):
             return
 
         now_iso = self._now_iso()
-        # v89 ROOT FIX (BUG #42 — silent fallback to default_organism
+        # v89 ROOT FIX (BUG #42 -- silent fallback to default_organism
         # masks invalid organism input):
         #   The previous code did ``"organism": organism or
         #   self._config.default_organism``. If ``organism`` was an
         #   empty string (from ``_normalize_organism`` returning "" for
         #   invalid input), the ``or`` fell through to
         #   ``default_organism`` ("Homo sapiens"). This masked invalid
-        #   organism input — the operator didn't see that the original
+        #   organism input -- the operator didn't see that the original
         #   organism was unparseable. Cross-species contamination could
         #   result if the original organism was non-human but unparseable.
         #
@@ -4136,7 +4136,7 @@ class ProteinResolver(Resolver):
         if not organism and organism_raw and str(organism_raw).strip():
             logger.warning(
                 "_create_provisional_from_string: STRING record "
-                "string_id=%r had unparseable organism %r — falling "
+                "string_id=%r had unparseable organism %r -- falling "
                 "back to default_organism %r. This may cause "
                 "cross-species contamination if the original organism "
                 "was non-human. Fix the upstream organism string or "
@@ -4264,7 +4264,7 @@ class ProteinResolver(Resolver):
             # this one. Keep it as a fail-safe.
             #
             # FIX-P4-6 (v42): the previous code incremented
-            # `synthetic_keys_generated` here — on the SKIP path — making
+            # `synthetic_keys_generated` here -- on the SKIP path -- making
             # the stat meaningless (it counted attempts, not creations).
             # The skip path now records nothing (the
             # `synthetic_uid_collisions` stat from _make_synthetic_uid_checked
@@ -4308,7 +4308,7 @@ class ProteinResolver(Resolver):
         # arrives with the same (gene, organism).
         # v82 P0-D3b: also register under the ChEMBL target's
         # ``uniprot_id`` cross-reference if present (same fix as the
-        # STRING path — enables O(1) promotion by UniProt accession).
+        # STRING path -- enables O(1) promotion by UniProt accession).
         _chembl_alias_uniprot = record.get("uniprot_id") or None
         self._register_provisional_entry(
             synthetic_uid, gene_symbol,

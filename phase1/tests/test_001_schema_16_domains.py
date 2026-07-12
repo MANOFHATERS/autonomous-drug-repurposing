@@ -13,7 +13,7 @@ This test suite verifies that ALL 7 core database files work together correctly:
 AND that the upgraded 001_initial_schema.sql produces a schema that is
 consistent with the ORM models and satisfies all 16 verification domains.
 
-Tests are REAL — they verify actual behavior, not just "it doesn't crash".
+Tests are REAL -- they verify actual behavior, not just "it doesn't crash".
 They create a real SQLite in-memory database, create all tables from ORM
 models, insert valid and invalid data, and verify constraints work.
 
@@ -49,7 +49,7 @@ os.environ.setdefault("LOG_LEVEL", "WARNING")
 
 
 # ===========================================================================
-# DOMAIN 1: ARCHITECTURE — Module structure, dependency flow, boundaries
+# DOMAIN 1: ARCHITECTURE -- Module structure, dependency flow, boundaries
 # ===========================================================================
 
 class TestArchitecture:
@@ -144,7 +144,7 @@ class TestArchitecture:
 
 
 # ===========================================================================
-# DOMAIN 2: DESIGN — Patterns, API design, data model, interface contracts
+# DOMAIN 2: DESIGN -- Patterns, API design, data model, interface contracts
 # ===========================================================================
 
 class TestDesign:
@@ -204,7 +204,7 @@ class TestDesign:
         """GeneDiseaseAssociation must link to proteins via uniprot_id (DES-01).
 
         K fix: per task description #10, the GDA model no longer has an
-        integer ``protein_id`` FK — instead it uses a string ``uniprot_id``
+        integer ``protein_id`` FK -- instead it uses a string ``uniprot_id``
         FK to ``proteins.uniprot_id`` (the canonical cross-source key).
         """
         from database.models import GeneDiseaseAssociation
@@ -227,7 +227,7 @@ class TestDesign:
 
 
 # ===========================================================================
-# DOMAIN 3: SCIENTIFIC CORRECTNESS — Formula, range, type accuracy
+# DOMAIN 3: SCIENTIFIC CORRECTNESS -- Formula, range, type accuracy
 # ===========================================================================
 
 class TestScientificCorrectness:
@@ -299,7 +299,7 @@ class TestScientificCorrectness:
         assert "chk_gda_disease_id_type" in constraint_names
 
     def test_drug_smiles_capped(self):
-        """smiles must be capped (SCI-08) — not unbounded TEXT."""
+        """smiles must be capped (SCI-08) -- not unbounded TEXT."""
         schema_path = PROJECT_ROOT / "database" / "migrations" / "001_initial_schema.sql"
         if schema_path.exists():
             content = schema_path.read_text()
@@ -309,7 +309,7 @@ class TestScientificCorrectness:
 
 
 # ===========================================================================
-# DOMAIN 4: CODING — Syntax, logic, naming conventions
+# DOMAIN 4: CODING -- Syntax, logic, naming conventions
 # ===========================================================================
 
 class TestCoding:
@@ -374,7 +374,7 @@ class TestCoding:
         content = schema_path.read_text()
         # Must NOT use CREATE OR REPLACE FUNCTION (silently overwrites)
         assert "CREATE OR REPLACE FUNCTION" not in content, \
-            "Found CREATE OR REPLACE FUNCTION — must use DO $$ IF NOT EXISTS pattern"
+            "Found CREATE OR REPLACE FUNCTION -- must use DO $$ IF NOT EXISTS pattern"
         # Must use IF NOT EXISTS check in DO $$ block
         assert "IF NOT EXISTS" in content
         assert "pg_proc" in content
@@ -387,7 +387,7 @@ class TestCoding:
         content = schema_path.read_text()
         # Must NOT use DROP TRIGGER IF EXISTS + CREATE TRIGGER (destructive pattern)
         assert "DROP TRIGGER" not in content or "-- DROP TRIGGER" in content, \
-            "Found DROP TRIGGER — must use DO $$ IF NOT EXISTS pattern for triggers"
+            "Found DROP TRIGGER -- must use DO $$ IF NOT EXISTS pattern for triggers"
 
     def test_source_columns_have_check_constraints(self):
         """source columns must have CHECK constraints for valid values (COD-05)."""
@@ -809,7 +809,7 @@ class TestLogging:
             try:
                 repr(instance)
             except Exception:
-                pass  # __repr__ on uninitialized objects may fail — acceptable
+                pass  # __repr__ on uninitialized objects may fail -- acceptable
 
 
 # ===========================================================================
@@ -827,7 +827,7 @@ class TestConfiguration:
         content = schema_path.read_text()
         # Check that 1000 in PPI score constraint has a comment explaining STRING scoring
         assert "STRING" in content.upper()
-        assert "0-1000" in content or "0 – 1000" in content
+        assert "0-1000" in content or "0 - 1000" in content
 
     def test_settings_externalized(self):
         """Configuration must be externalized, not hardcoded (CFG-02)."""
@@ -1176,7 +1176,7 @@ class TestAllSevenFilesIntegration:
         assert protein.id is not None
         assert dpi.drug_id == drug.id
         assert dpi.protein_id == protein.id
-        # K fix: GDA links via uniprot_id (string FK) — no integer protein_id
+        # K fix: GDA links via uniprot_id (string FK) -- no integer protein_id
         assert gda.uniprot_id == protein.uniprot_id
         assert em.canonical_inchikey == drug.inchikey
         assert pipeline_run.status == "success"

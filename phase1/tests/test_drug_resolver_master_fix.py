@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MIT
-# © 2024-2026 Autonomous Drug Repurposing Platform — Team Cosmic / VentureLab
+# © 2024-2026 Autonomous Drug Repurposing Platform -- Team Cosmic / VentureLab
 """
-TEST 1 — Comprehensive real-world test for the upgraded
+TEST 1 -- Comprehensive real-world test for the upgraded
 ``entity_resolution/drug_resolver.py`` addressing all 345 audit
 findings across 16 engineering domains.
 
@@ -13,22 +13,22 @@ exercises the actual behaviour mandated by the master fix prompt and
 asserts that the behaviour is correct.
 
 Test coverage by domain:
-  - Domain 1 (Architecture)           — _MutationContext, _DependencyInjector, _MatchPipeline, schema-validated state I/O
-  - Domain 2 (Design)                 — ResolveResult, _MatchHit, conflict detection, no retroactive mutation
-  - Domain 3 (Knowledge / Sci)        — case-insensitive InChIKey, salt-form detection, stereoisomer gate, no_match confidence
-  - Domain 4 (Coding)                 — read-only matchers, cached fuzzy choices, version-tolerant unpack, exc.response null-deref
-  - Domain 5 (Data Quality)           — soft validation, conflict detection, DQ score
-  - Domain 6 (Reliability)            — circuit breaker, dead-letter cap, crash recovery
-  - Domain 7 (Idempotency)            — _ingested_record_keys, deterministic timestamps, created_at vs resolved_at
-  - Domain 8 (Performance)            — streaming to_dataframe, single-pass remove_source, cached fuzzy choices
-  - Domain 9 (Security / Privacy)     — _safe_name, _SecretStr, no raw PII in logs, X-PubChem-API-Key header
-  - Domain 10 (Testing)               — runtime_asserts, _verify_audit_chain
-  - Domain 11 (Logging / Observability) — _event_log, correlation_id, health(), to_prometheus()
-  - Domain 12 (Configuration)         — env-var overrides, masked config, validate()
-  - Domain 13 (Documentation)         — __all__ in sync, docstrings present
-  - Domain 14 (Compliance)            — ISO 8601 Z suffix, hash-chained audit trail, __version__
-  - Domain 15 (Interoperability)      — to_csv, to_jsonl, OpenAPI schema, JSON-encoded sources
-  - Domain 16 (Lineage)               — LineageEvent, trace_value, as_of, to_openlineage, field_provenance
+  - Domain 1 (Architecture)           -- _MutationContext, _DependencyInjector, _MatchPipeline, schema-validated state I/O
+  - Domain 2 (Design)                 -- ResolveResult, _MatchHit, conflict detection, no retroactive mutation
+  - Domain 3 (Knowledge / Sci)        -- case-insensitive InChIKey, salt-form detection, stereoisomer gate, no_match confidence
+  - Domain 4 (Coding)                 -- read-only matchers, cached fuzzy choices, version-tolerant unpack, exc.response null-deref
+  - Domain 5 (Data Quality)           -- soft validation, conflict detection, DQ score
+  - Domain 6 (Reliability)            -- circuit breaker, dead-letter cap, crash recovery
+  - Domain 7 (Idempotency)            -- _ingested_record_keys, deterministic timestamps, created_at vs resolved_at
+  - Domain 8 (Performance)            -- streaming to_dataframe, single-pass remove_source, cached fuzzy choices
+  - Domain 9 (Security / Privacy)     -- _safe_name, _SecretStr, no raw PII in logs, X-PubChem-API-Key header
+  - Domain 10 (Testing)               -- runtime_asserts, _verify_audit_chain
+  - Domain 11 (Logging / Observability) -- _event_log, correlation_id, health(), to_prometheus()
+  - Domain 12 (Configuration)         -- env-var overrides, masked config, validate()
+  - Domain 13 (Documentation)         -- __all__ in sync, docstrings present
+  - Domain 14 (Compliance)            -- ISO 8601 Z suffix, hash-chained audit trail, __version__
+  - Domain 15 (Interoperability)      -- to_csv, to_jsonl, OpenAPI schema, JSON-encoded sources
+  - Domain 16 (Lineage)               -- LineageEvent, trace_value, as_of, to_openlineage, field_provenance
 """
 from __future__ import annotations
 
@@ -102,7 +102,7 @@ def deterministic_resolver():
 
 
 ASPIRIN_IK = "BSYNRYMUTXBXSQ-UHFFFAOYSA-N"
-# Correct lowercase (just .lower() of ASPIRIN_IK — tests case-insensitive matching).
+# Correct lowercase (just .lower() of ASPIRIN_IK -- tests case-insensitive matching).
 ASPIRIN_IK_LOWER = ASPIRIN_IK.lower()
 IBUPROFEN_IK = "HEFNNWSXXWATIW-UHFFFAOYSA-N"
 WARFARIN_IK = "PJVWKTKQMONHTF-UHFFFAOYSA-N"  # S-warfarin
@@ -110,19 +110,19 @@ WARFARIN_R_IK = "PJVWKTKQMONHTF-ZZOUCSAGSA-N"  # different stereo
 
 
 # =============================================================================
-# Domain 1 — Architecture
+# Domain 1 -- Architecture
 # =============================================================================
 
 class TestDomain1Architecture:
     """Architecture-level invariants."""
 
     def test_mutation_context_rollback_on_exception(self, basic_resolver):
-        """1.3 — _MutationContext rolls back state on exception.
+        """1.3 -- _MutationContext rolls back state on exception.
 
         P2-8 v82 ROOT FIX: the previous test asserted that non-ResolverError
         exceptions raised inside _MutationContext were WRAPPED in
         ResolverStateCorruptionError. That wrapping MASKED the original
-        exception type — callers catching ``except ValueError:`` (or any
+        exception type -- callers catching ``except ValueError:`` (or any
         non-ResolverError/ValueError type) could not catch the wrapped
         exception. The root fix lets the ORIGINAL exception propagate
         unchanged; the rollback is still performed and logged via
@@ -154,7 +154,7 @@ class TestDomain1Architecture:
         assert len(basic_resolver.mapping) == original_count
 
     def test_dependencyInjector_thread_safe(self):
-        """1.2 / 4.28 — _DependencyInjector is thread-safe under concurrent access."""
+        """1.2 / 4.28 -- _DependencyInjector is thread-safe under concurrent access."""
         injector = _DependencyInjector()
         injector.reset()
         results: list = []
@@ -177,7 +177,7 @@ class TestDomain1Architecture:
         assert all(r is results[0] for r in results)
 
     def test_match_pipeline_priority_order(self, basic_resolver):
-        """1.8 — _MatchPipeline tries methods in priority order."""
+        """1.8 -- _MatchPipeline tries methods in priority order."""
         basic_resolver.add_source_records(
             [{"inchikey": ASPIRIN_IK, "name": "Aspirin", "chembl_id": "CHEMBL25"}],
             source="chembl",
@@ -190,7 +190,7 @@ class TestDomain1Architecture:
         assert hit.method == "inchikey_exact"
 
     def test_build_mapping_return_resolver(self):
-        """1.1 — build_mapping(return_resolver=True) retains observability."""
+        """1.1 -- build_mapping(return_resolver=True) retains observability."""
         import pandas as pd
         chembl_df = pd.DataFrame([
             {"inchikey": ASPIRIN_IK, "name": "Aspirin", "chembl_id": "CHEMBL25"},
@@ -211,20 +211,20 @@ class TestDomain1Architecture:
         assert resolver.get_stats()["records_ingested"] == 2
 
     def test_schema_validated_state_io(self, basic_resolver):
-        """1.9 — from_state_dict validates against schema/v1.json."""
+        """1.9 -- from_state_dict validates against schema/v1.json."""
         basic_resolver.add_source_records(
             [{"inchikey": ASPIRIN_IK, "name": "Aspirin", "chembl_id": "CHEMBL25"}],
             source="chembl",
         )
         state = basic_resolver.to_state_dict()
-        # Tamper with the state — remove a required key.
+        # Tamper with the state -- remove a required key.
         bad_state = dict(state)
         del bad_state["mapping"]
         with pytest.raises((ResolverStateCorruptionError, ValueError)):
             DrugResolver.from_state_dict(bad_state)
 
     def test_to_state_dict_no_live_refs(self, basic_resolver):
-        """1.10 / C.2 — to_state_dict returns deep copies, not live references."""
+        """1.10 / C.2 -- to_state_dict returns deep copies, not live references."""
         basic_resolver.add_source_records(
             [{"inchikey": ASPIRIN_IK, "name": "Aspirin", "chembl_id": "CHEMBL25"}],
             source="chembl",
@@ -239,14 +239,14 @@ class TestDomain1Architecture:
 
 
 # =============================================================================
-# Domain 2 — Design
+# Domain 2 -- Design
 # =============================================================================
 
 class TestDomain2Design:
     """Design-pattern invariants."""
 
     def test_resolve_result_is_mapping_compatible(self, basic_resolver):
-        """2.14 / C.10 — ResolveResult is Mapping-compatible."""
+        """2.14 / C.10 -- ResolveResult is Mapping-compatible."""
         basic_resolver.add_source_records(
             [{"inchikey": ASPIRIN_IK, "name": "Aspirin", "chembl_id": "CHEMBL25"}],
             source="chembl",
@@ -266,7 +266,7 @@ class TestDomain2Design:
         assert r2.canonical_inchikey == ASPIRIN_IK
 
     def test_matcher_does_not_mutate_mapping(self, basic_resolver):
-        """2.3 / 4.1 — _match_by_name returns _MatchHit, does NOT mutate mapping."""
+        """2.3 / 4.1 -- _match_by_name returns _MatchHit, does NOT mutate mapping."""
         basic_resolver.add_source_records(
             [{"inchikey": ASPIRIN_IK, "name": "aspirin", "chembl_id": "CHEMBL25"}],
             source="chembl",
@@ -282,7 +282,7 @@ class TestDomain2Design:
         assert hit.canonical_ik == ASPIRIN_IK
 
     def test_no_match_confidence_is_zero(self):
-        """2.5 / 3.12 — compute_match_confidence('no_match') returns 0.0.
+        """2.5 / 3.12 -- compute_match_confidence('no_match') returns 0.0.
 
         NOTE: this registration is done at drug_resolver.py module-load
         time, but other tests (e.g. test_resolver_utils_113_issues.py)
@@ -299,7 +299,7 @@ class TestDomain2Design:
         assert compute_match_confidence("no_match") == 0.0
 
     def test_conflict_detection_id_field(self, basic_resolver):
-        """2.8 / C.16 — conflicting source IDs are recorded, not silently dropped."""
+        """2.8 / C.16 -- conflicting source IDs are recorded, not silently dropped."""
         basic_resolver.add_source_records(
             [{"inchikey": ASPIRIN_IK, "name": "Aspirin", "chembl_id": "CHEMBL25"}],
             source="chembl",
@@ -311,17 +311,17 @@ class TestDomain2Design:
         )
         conflicts = basic_resolver.get_conflicts(ASPIRIN_IK)
         assert len(conflicts) >= 1
-        # Default policy is "keep_existing" — original chembl_id retained.
+        # Default policy is "keep_existing" -- original chembl_id retained.
         assert basic_resolver.mapping[ASPIRIN_IK]["chembl_id"] == "CHEMBL25"
 
     def test_conflict_detection_property_field_with_tolerance(self, basic_resolver):
-        """2.9 — molecular_weight conflict uses float tolerance (0.01 Da)."""
+        """2.9 -- molecular_weight conflict uses float tolerance (0.01 Da)."""
         basic_resolver.add_source_records(
             [{"inchikey": ASPIRIN_IK, "name": "Aspirin", "chembl_id": "CHEMBL25",
               "molecular_weight": 180.16}],
             source="chembl",
         )
-        # Within tolerance — no conflict.
+        # Within tolerance -- no conflict.
         basic_resolver.add_source_records(
             [{"inchikey": ASPIRIN_IK, "name": "Aspirin", "drugbank_id": "DB00945",
               "molecular_weight": 180.158}],
@@ -344,7 +344,7 @@ class TestDomain2Design:
         assert len(mw_conflicts) >= 1
 
     def test_create_canonical_entry_records_method(self, basic_resolver):
-        """2.1 — _create_canonical_entry records the actual method, not 'inchikey_exact'."""
+        """2.1 -- _create_canonical_entry records the actual method, not 'inchikey_exact'."""
         # A record with no InChIKey should be created with method='synthetic_key' or 'name_only'.
         basic_resolver.add_source_records(
             [{"name": "MysteryDrug", "chembl_id": "CHEMBL_MYST"}],
@@ -356,11 +356,11 @@ class TestDomain2Design:
         assert entry["match_confidence"] < 1.0
 
     def test_empty_name_fallback_uses_canonical_ik_prefix(self, basic_resolver):
-        """2.13 — empty-name fallback uses canonical_ik[:14], not record['canonical_inchikey'].
+        """2.13 -- empty-name fallback uses canonical_ik[:14], not record['canonical_inchikey'].
 
         We bypass validation (which requires a non-empty ``name``) by
         calling ``_create_canonical_entry`` directly with an empty name
-        — this tests the fallback logic in isolation.
+        -- this tests the fallback logic in isolation.
         """
         # Directly create 3 entries with empty names + different InChIKeys.
         basic_resolver._create_canonical_entry(
@@ -381,14 +381,14 @@ class TestDomain2Design:
 
 
 # =============================================================================
-# Domain 3 — Knowledge / Scientific Correctness
+# Domain 3 -- Knowledge / Scientific Correctness
 # =============================================================================
 
 class TestDomain3Knowledge:
     """Scientific-correctness invariants."""
 
     def test_case_mismatched_inchikeys_merge(self, basic_resolver):
-        """3.4 / 3.5 — case-mismatched InChIKeys merge into one canonical entry."""
+        """3.4 / 3.5 -- case-mismatched InChIKeys merge into one canonical entry."""
         basic_resolver.add_source_records(
             [
                 {"inchikey": ASPIRIN_IK_LOWER, "name": "Aspirin", "chembl_id": "CHEMBL25"},
@@ -402,7 +402,7 @@ class TestDomain3Knowledge:
         assert entry["inchikey"] == ASPIRIN_IK
 
     def test_stereoisomer_distinctness_preserved(self):
-        """3.4 / 3.10 — collapse_stereoisomers=False keeps stereoisomers distinct.
+        """3.4 / 3.10 -- collapse_stereoisomers=False keeps stereoisomers distinct.
 
         Uses ``fuzzy_threshold=1.0`` to disable fuzzy name matching
         (otherwise ``S-warfarin`` and ``R-warfarin`` would fuzzy-match).
@@ -420,45 +420,45 @@ class TestDomain3Knowledge:
         assert len(r.mapping) == 2
 
     def test_salt_form_detector_iupac_suffix(self):
-        """3.1 — _SaltFormDetector detects salt forms via IUPAC name suffix."""
+        """3.1 -- _SaltFormDetector detects salt forms via IUPAC name suffix."""
         is_salt, reason = _SaltFormDetector.is_salt_form(
             "acetylsalicylic acid sodium", "C9H7NaO4",
         )
         assert is_salt, f"expected salt, reason={reason}"
 
     def test_salt_form_detector_metal_cation(self):
-        """3.1 — _SaltFormDetector detects salt forms via metal cation in formula."""
+        """3.1 -- _SaltFormDetector detects salt forms via metal cation in formula."""
         is_salt, reason = _SaltFormDetector.is_salt_form(
             "sodium chloride", "NaCl",
         )
         assert is_salt, f"expected salt, reason={reason}"
 
     def test_salt_form_detector_not_salt(self):
-        """3.1 — _SaltFormDetector correctly rejects non-salts."""
+        """3.1 -- _SaltFormDetector correctly rejects non-salts."""
         is_salt, reason = _SaltFormDetector.is_salt_form(
             "acetylsalicylic acid", "C9H8O4",
         )
         assert not is_salt
 
     def test_normalize_inchikey_handles_none(self):
-        """3.4 — _normalize_inchikey returns '' for None / non-string input."""
+        """3.4 -- _normalize_inchikey returns '' for None / non-string input."""
         assert _normalize_inchikey(None) == ""
         assert _normalize_inchikey(123) == ""
         assert _normalize_inchikey("") == ""
 
     def test_normalize_inchikey_uppercases(self):
-        """3.4 — _normalize_inchikey strips and uppercases."""
+        """3.4 -- _normalize_inchikey strips and uppercases."""
         # Use ASPIRIN_IK_LOWER (the correct lowercase of ASPIRIN_IK).
         assert _normalize_inchikey(f"  {ASPIRIN_IK_LOWER}  ") == ASPIRIN_IK
 
     def test_synthetic_key_collision_disambiguation(self, basic_resolver):
-        """3.6 — synthetic key collisions are disambiguated via salt.
+        """3.6 -- synthetic key collisions are disambiguated via salt.
 
         We bypass the normal match pipeline (which would merge via name)
         and call ``_create_canonical_entry`` directly to exercise the
         collision-disambiguation path.
         """
-        # Create first entry with no InChIKey → synthetic key generated.
+        # Create first entry with no InChIKey -> synthetic key generated.
         basic_resolver._create_canonical_entry(
             {"name": "Mystery", "smiles": "CCO", "chembl_id": "CHEMBL_A"},
             source="chembl", method="name_only",
@@ -475,10 +475,10 @@ class TestDomain3Knowledge:
         assert keys[0] != keys[1]
 
     def test_smiles_form_detection(self):
-        """3.14 — _detect_smiles_form correctly identifies isomeric / canonical_non_isomeric / unknown.
+        """3.14 -- _detect_smiles_form correctly identifies isomeric / canonical_non_isomeric / unknown.
 
         v16 SW-8 ROOT FIX: ``"canonical"`` is no longer returned for
-        non-isomeric SMILES — the correct label is
+        non-isomeric SMILES -- the correct label is
         ``"canonical_non_isomeric"`` (see SW-8 root fix in source).
         """
         assert _detect_smiles_form(None) == "unknown"
@@ -489,16 +489,16 @@ class TestDomain3Knowledge:
         assert _detect_smiles_form("CC/C=C\\C") == "isomeric"
 
     def test_molecular_formula_hill_order(self):
-        """3.16 — _normalize_molecular_formula sorts in Hill order."""
+        """3.16 -- _normalize_molecular_formula sorts in Hill order."""
         # C first, then H, then alphabetical.
         assert _normalize_molecular_formula("H2O") == "H2O"
         assert _normalize_molecular_formula("C8 H9 N O2") == "C8H9NO2"
         assert _normalize_molecular_formula("O2N C8H9") == "C8H9NO2"
-        # No carbon → alphabetical.
+        # No carbon -> alphabetical.
         assert _normalize_molecular_formula("H2 O") == "H2O"
 
     def test_thalidomide_docstring_not_inaccurate(self):
-        """3.10 / 13.8 — thalidomide example scientifically accurate."""
+        """3.10 / 13.8 -- thalidomide example scientifically accurate."""
         # Read the module docstring directly from the file.
         src = (PROJECT_ROOT / "entity_resolution" / "drug_resolver.py").read_text()
         # The new framing mentions warfarin and citalopram.
@@ -509,19 +509,19 @@ class TestDomain3Knowledge:
 
 
 # =============================================================================
-# Domain 4 — Coding
+# Domain 4 -- Coding
 # =============================================================================
 
 class TestDomain4Coding:
     """Code-level invariants."""
 
     def test_rapidfuzz_public_name_imported(self):
-        """4.18 / 13.12 — RAPIDFUZZ_AVAILABLE imported at top-level via public name."""
+        """4.18 / 13.12 -- RAPIDFUZZ_AVAILABLE imported at top-level via public name."""
         src = (PROJECT_ROOT / "entity_resolution" / "drug_resolver.py").read_text()
         assert "from .resolver_utils import RAPIDFUZZ_AVAILABLE" in src
 
     def test_no_bare_except_pass(self):
-        """4.8 / A.2 #11 — no 'except Exception: pass' that swallows errors.
+        """4.8 / A.2 #11 -- no 'except Exception: pass' that swallows errors.
 
         ``except ImportError: pass`` and ``except Exception: pass`` inside
         ``__del__`` / cleanup methods are allowed (best-effort cleanup).
@@ -531,7 +531,7 @@ class TestDomain4Coding:
         src = (PROJECT_ROOT / "entity_resolution" / "drug_resolver.py").read_text()
         import re
         # Match "except Exception:" followed by ONLY a "pass" on the next line
-        # (no logging, no re-raise) — this is the forbidden pattern.
+        # (no logging, no re-raise) -- this is the forbidden pattern.
         forbidden = re.compile(
             r"except\s+Exception\s*: \s*\n\s*pass\s*\n",
             re.MULTILINE,
@@ -541,12 +541,12 @@ class TestDomain4Coding:
         # We allow up to a small number in __del__ / cleanup contexts.
         # The audit forbids ``except Exception: pass`` in normal logic.
         assert len(matches) <= 2, (
-            f"found {len(matches)} 'except Exception: pass' patterns — "
+            f"found {len(matches)} 'except Exception: pass' patterns -- "
             f"audit 4.8 forbids silent error swallowing"
         )
 
     def test_no_sha1_for_checksums(self):
-        """4.14 / C.8 — SHA-256 (not SHA-1) used for input_checksums."""
+        """4.14 / C.8 -- SHA-256 (not SHA-1) used for input_checksums."""
         src = (PROJECT_ROOT / "entity_resolution" / "drug_resolver.py").read_text()
         # The file should NOT use sha1 for new checksum computation.
         # Allow sha1 only in comments / deprecation notes.
@@ -555,19 +555,19 @@ class TestDomain4Coding:
         assert len(sha1_uses) == 0, f"found {len(sha1_uses)} hashlib.sha1() uses"
 
     def test_url_quote_via_stdlib(self):
-        """4.21 — urllib.parse.quote used directly (not requests.utils.quote)."""
+        """4.21 -- urllib.parse.quote used directly (not requests.utils.quote)."""
         src = (PROJECT_ROOT / "entity_resolution" / "drug_resolver.py").read_text()
         assert "requests.utils.quote" not in src
         assert "from urllib.parse import quote" in src or "urllib.parse.quote" in src
 
     def test_get_pd_does_not_crash(self):
-        """4.28 — _get_pd() works (backward-compat shim)."""
+        """4.28 -- _get_pd() works (backward-compat shim)."""
         from entity_resolution.drug_resolver import _get_pd
         pd = _get_pd()
         assert pd is not None
 
     def test_resolve_single_uses_actual_method(self, basic_resolver):
-        """2.4 / 4.1 — resolve_single reports actual method, not hardcoded 'name_normalized'."""
+        """2.4 / 4.1 -- resolve_single reports actual method, not hardcoded 'name_normalized'."""
         basic_resolver.add_source_records(
             [{"inchikey": ASPIRIN_IK, "name": "aspirin", "chembl_id": "CHEMBL25"}],
             source="chembl",
@@ -590,7 +590,7 @@ class TestDomain4Coding:
         )
 
     def test_exc_response_null_deref_protection(self):
-        """3.17 — HTTPError with response=None doesn't crash."""
+        """3.17 -- HTTPError with response=None doesn't crash."""
         # Construct a mock requests module where get raises an HTTPError
         # with response=None.
         r = DrugResolver(config=ResolverConfig(
@@ -614,13 +614,13 @@ class TestDomain4Coding:
         m_req.utils.quote.return_value = "aspirin"
         m_req.get.side_effect = FakeHTTPError("test", response=None)
         with mock.patch.object(drug_resolver, "_requests", m_req):
-            # Should NOT crash — should return None gracefully.
+            # Should NOT crash -- should return None gracefully.
             result = r._match_by_pubchem_xref("aspirin")
         assert result is None
         assert r.stats.pubchem_failures >= 1
 
     def test_version_tolerant_extractOne_unpack(self, basic_resolver):
-        """4.3 — extractOne result unpacking is version-tolerant."""
+        """4.3 -- extractOne result unpacking is version-tolerant."""
         # Add a record so the fuzzy index has entries.
         basic_resolver.add_source_records(
             [{"inchikey": ASPIRIN_IK, "name": "aspirin", "chembl_id": "CHEMBL25"}],
@@ -632,14 +632,14 @@ class TestDomain4Coding:
 
 
 # =============================================================================
-# Domain 5 — Data Quality & Integrity
+# Domain 5 -- Data Quality & Integrity
 # =============================================================================
 
 class TestDomain5DataQuality:
     """Data-quality invariants."""
 
     def test_soft_validation_flags_malformed_inchikey(self, basic_resolver):
-        """5.12 — soft validation flags malformed InChIKeys."""
+        """5.12 -- soft validation flags malformed InChIKeys."""
         # Use a name that won't fuzzy-match anything.
         basic_resolver.add_source_records(
             [{"inchikey": "BAD", "name": "UniqueTestDrug12345", "chembl_id": "CHEMBL1"}],
@@ -652,7 +652,7 @@ class TestDomain5DataQuality:
         assert stats.get("soft_validation_warnings", 0) >= 1 or stats.get("records_ingested", 0) >= 1
 
     def test_soft_validation_flags_molecular_weight_range(self, basic_resolver):
-        """5.11 — soft validation flags molecular_weight outside [1, 10000]."""
+        """5.11 -- soft validation flags molecular_weight outside [1, 10000]."""
         basic_resolver.add_source_records(
             [{"inchikey": ASPIRIN_IK, "name": "Aspirin", "molecular_weight": 99999}],
             source="chembl",
@@ -662,7 +662,7 @@ class TestDomain5DataQuality:
         assert stats.get("soft_validation_warnings", 0) >= 1 or stats.get("records_ingested", 0) >= 1
 
     def test_data_quality_score_in_dataframe(self, basic_resolver):
-        """5.23 — to_dataframe includes a data_quality_score column."""
+        """5.23 -- to_dataframe includes a data_quality_score column."""
         basic_resolver.add_source_records(
             [{"inchikey": ASPIRIN_IK, "name": "Aspirin", "chembl_id": "CHEMBL25"}],
             source="chembl",
@@ -673,7 +673,7 @@ class TestDomain5DataQuality:
         assert df.iloc[0]["data_quality_score"] <= 1.0
 
     def test_compute_data_quality_score_components(self, basic_resolver):
-        """5.23 — compute_data_quality_score returns the right components."""
+        """5.23 -- compute_data_quality_score returns the right components."""
         basic_resolver.add_source_records(
             [{"inchikey": ASPIRIN_IK, "name": "Aspirin", "chembl_id": "CHEMBL25",
               "smiles": "CC(=O)OC1=CC=CC=C1C(=O)O", "molecular_weight": 180.16}],
@@ -685,7 +685,7 @@ class TestDomain5DataQuality:
         assert score >= 0.6
 
     def test_dead_letter_for_empty_records(self, basic_resolver):
-        """5.4 / C.15 — empty records go to dead-letter, not silently merge."""
+        """5.4 / C.15 -- empty records go to dead-letter, not silently merge."""
         basic_resolver.add_source_records(
             [{}],  # empty dict
             source="chembl",
@@ -695,17 +695,17 @@ class TestDomain5DataQuality:
 
 
 # =============================================================================
-# Domain 6 — Reliability & Resilience
+# Domain 6 -- Reliability & Resilience
 # =============================================================================
 
 class TestDomain6Reliability:
     """Reliability / resilience invariants."""
 
     def test_circuit_breaker_states(self):
-        """6.3 / C.14 — _PubChemCircuitBreaker transitions CLOSED → OPEN → HALF_OPEN → CLOSED."""
+        """6.3 / C.14 -- _PubChemCircuitBreaker transitions CLOSED -> OPEN -> HALF_OPEN -> CLOSED."""
         cb = _PubChemCircuitBreaker(failure_threshold=3, cooldown=0.1)
         assert cb.state == "CLOSED"
-        # Fail 3 times → OPEN.
+        # Fail 3 times -> OPEN.
         for _ in range(3):
             cb.record_failure()
         assert cb.state == "OPEN"
@@ -713,12 +713,12 @@ class TestDomain6Reliability:
         time.sleep(0.15)
         # Next call should transition to HALF_OPEN.
         assert cb.state == "HALF_OPEN"
-        # Success → CLOSED.
+        # Success -> CLOSED.
         cb.record_success()
         assert cb.state == "CLOSED"
 
     def test_graceful_degradation_when_circuit_open(self):
-        """6.4 — resolve_single returns degraded result when circuit is OPEN."""
+        """6.4 -- resolve_single returns degraded result when circuit is OPEN."""
         r = DrugResolver(config=ResolverConfig(
             pubchem_enabled=True, pubchem_call_delay=0.0,
         ))
@@ -726,14 +726,14 @@ class TestDomain6Reliability:
         for _ in range(20):
             r._pubchem_circuit.record_failure()
         assert r._pubchem_circuit.state == "OPEN"
-        # resolve_single for an unknown name — should return degraded result.
+        # resolve_single for an unknown name -- should return degraded result.
         result = r.resolve_single("nonexistentdrug12345")
         assert result.degraded is True
         assert result.match_method == "no_match_pubchem_degraded"
         assert result.match_confidence == 0.0
 
     def test_dead_letter_size_cap(self):
-        """6.2 / 8.15 — dead-letter queue is capped."""
+        """6.2 / 8.15 -- dead-letter queue is capped."""
         from entity_resolution.base import ResolverConfig
         # Use a small cap for testing.
         r = DrugResolver()  # default cap is 100_000; we'll just verify the cap exists
@@ -746,7 +746,7 @@ class TestDomain6Reliability:
         assert len(r._dead_letter) == 200
 
     def test_remove_source_preserves_audit_trail(self, basic_resolver):
-        """4.12 / 14.3 / 16.29 — remove_source preserves audit trail in archived."""
+        """4.12 / 14.3 / 16.29 -- remove_source preserves audit trail in archived."""
         basic_resolver.add_source_records(
             [{"inchikey": ASPIRIN_IK, "name": "Aspirin", "chembl_id": "CHEMBL25"}],
             source="chembl",
@@ -761,7 +761,7 @@ class TestDomain6Reliability:
         assert "remove_source_full" in actions
 
     def test_forget_record_scrubs_audit_trail(self, basic_resolver):
-        """14.6 — forget_record removes entry AND scrubs audit trail (after auth)."""
+        """14.6 -- forget_record removes entry AND scrubs audit trail (after auth)."""
         basic_resolver.add_source_records(
             [{"inchikey": ASPIRIN_IK, "name": "Aspirin", "chembl_id": "CHEMBL25"}],
             source="chembl",
@@ -777,14 +777,14 @@ class TestDomain6Reliability:
 
 
 # =============================================================================
-# Domain 7 — Idempotency & Reproducibility
+# Domain 7 -- Idempotency & Reproducibility
 # =============================================================================
 
 class TestDomain7Idempotency:
     """Idempotency / reproducibility invariants."""
 
     def test_idempotent_ingestion(self, basic_resolver):
-        """7.1 / 7.2 / C.6 — ingesting the same record twice produces no change."""
+        """7.1 / 7.2 / C.6 -- ingesting the same record twice produces no change."""
         record = {"inchikey": ASPIRIN_IK, "name": "Aspirin", "chembl_id": "CHEMBL25"}
         basic_resolver.add_source_records([record], source="chembl")
         ingested_first = basic_resolver.get_stats()["records_ingested"]
@@ -797,7 +797,7 @@ class TestDomain7Idempotency:
         assert len(basic_resolver.mapping) == 1
 
     def test_deterministic_timestamps(self):
-        """7.3 / 7.4 / C.7 — deterministic_timestamps=True uses EPOCH."""
+        """7.3 / 7.4 / C.7 -- deterministic_timestamps=True uses EPOCH."""
         r = DrugResolver(config=ResolverConfig(deterministic_timestamps=True))
         r.add_source_records(
             [{"inchikey": ASPIRIN_IK, "name": "Aspirin", "chembl_id": "CHEMBL25"}],
@@ -808,7 +808,7 @@ class TestDomain7Idempotency:
         assert entry["resolved_at"] == "1970-01-01T00:00:00.000000Z"
 
     def test_created_at_never_changes_on_merge(self, basic_resolver):
-        """7.3 / 16.4 — created_at is set once and never updated."""
+        """7.3 / 16.4 -- created_at is set once and never updated."""
         basic_resolver.add_source_records(
             [{"inchikey": ASPIRIN_IK, "name": "Aspirin", "chembl_id": "CHEMBL25"}],
             source="chembl",
@@ -826,7 +826,7 @@ class TestDomain7Idempotency:
         assert basic_resolver.mapping[ASPIRIN_IK]["resolved_at"] >= created_at_first
 
     def test_random_seed_reproducibility(self):
-        """7.11 — random_seed config seeds the RNG for reproducibility."""
+        """7.11 -- random_seed config seeds the RNG for reproducibility."""
         r1 = DrugResolver(config=ResolverConfig(random_seed=42))
         r2 = DrugResolver(config=ResolverConfig(random_seed=42))
         # Both should produce the same fuzzy choices ordering (when populated).
@@ -836,11 +836,11 @@ class TestDomain7Idempotency:
         r2.add_source_records(
             [{"name": "aspirin", "inchikey": ASPIRIN_IK}], source="chembl",
         )
-        # Same input → same mapping.
+        # Same input -> same mapping.
         assert list(r1.mapping.keys()) == list(r2.mapping.keys())
 
     def test_build_mapping_idempotent_reset(self):
-        """7.1 — build_mapping(reset=True) called twice produces the same result."""
+        """7.1 -- build_mapping(reset=True) called twice produces the same result."""
         import pandas as pd
         chembl_df = pd.DataFrame([
             {"inchikey": ASPIRIN_IK, "name": "Aspirin", "chembl_id": "CHEMBL25"},
@@ -856,18 +856,18 @@ class TestDomain7Idempotency:
 
 
 # =============================================================================
-# Domain 8 — Performance & Scalability
+# Domain 8 -- Performance & Scalability
 # =============================================================================
 
 class TestDomain8Performance:
     """Performance / scalability invariants."""
 
     def test_to_dataframe_streaming(self, basic_resolver):
-        """8.4 / C.21 — to_dataframe(chunksize=N) streams chunks."""
+        """8.4 / C.21 -- to_dataframe(chunksize=N) streams chunks."""
         # Ingest 50 records with TRULY DISTINCT names that won't fuzzy-match.
         # Use random-looking names from a deterministic generator.
         # v90 STALE-FIXTURE FIX: the previous InChIKey pattern
-        # ``AAAAAAAAAAAAAA-{i:09d}-N`` was MALFORMED — the second block
+        # ``AAAAAAAAAAAAAA-{i:09d}-N`` was MALFORMED -- the second block
         # was 9 digits (not 10 letters), so it did NOT match the
         # ``[A-Z]{14}-[A-Z]{10}-[A-Z]`` pattern that
         # ``cleaning.normalizer.standardize_inchikey`` validates against.
@@ -875,13 +875,13 @@ class TestDomain8Performance:
         # producing 30 entries instead of 50 (only 30 of 50 records
         # landed in ``r.mapping``). ROOT FIX: generate VALID
         # InChIKey-shaped strings (14 hex-letters - 10 hex-letters -
-        # 1 hex-letter) using SHA256-derived hashes — all uppercase,
+        # 1 hex-letter) using SHA256-derived hashes -- all uppercase,
         # all in [A-F0-9], matching the InChIKey pattern.
         import hashlib
         def make_name(i: int) -> str:
             # v90: use the FULL 64-char SHA256 hex as part of the name.
             # The previous 12-char prefix caused fuzzy-match false
-            # positives — two names like "Compound627D420A2FF7" vs
+            # positives -- two names like "Compound627D420A2FF7" vs
             # "CompoundE3C7D1D257B6" share the "Compound" prefix and
             # have ~50% suffix similarity, which can exceed the default
             # fuzzy_threshold (0.80) under token_sort_ratio. With a
@@ -890,7 +890,7 @@ class TestDomain8Performance:
         def make_ik(i: int) -> str:
             # v90: convert SHA256 hex to LETTERS only (A-P), since the
             # InChIKey pattern ``[A-Z]{14}-[A-Z]{10}-[A-Z]`` requires
-            # uppercase letters — SHA256 hex contains 0-9 which fail.
+            # uppercase letters -- SHA256 hex contains 0-9 which fail.
             h = hashlib.sha256(f"ik-{i}".encode()).hexdigest().lower()[:25]
             letters = ''.join(chr(ord('A') + int(c, 16)) for c in h)
             return f"{letters[:14]}-{letters[14:24]}-{letters[24]}"
@@ -909,22 +909,22 @@ class TestDomain8Performance:
             assert len(chunk) <= 10
 
     def test_to_dataframe_chunksize_zero_raises(self, basic_resolver):
-        """2.11 — to_dataframe(chunksize=0) raises ValueError."""
+        """2.11 -- to_dataframe(chunksize=0) raises ValueError."""
         with pytest.raises(ValueError):
             basic_resolver.to_dataframe(chunksize=0)
 
     def test_remove_source_single_pass(self, basic_resolver):
-        """4.10 / 8.3 — remove_source rebuilds indices in a single pass."""
+        """4.10 / 8.3 -- remove_source rebuilds indices in a single pass."""
         # Add 100 records with TRULY DISTINCT names.
         # v90 STALE-FIXTURE FIX: same malformed-InChIKey fix as
-        # test_to_dataframe_streaming — see that test for full rationale.
+        # test_to_dataframe_streaming -- see that test for full rationale.
         import hashlib
         def make_name(i: int) -> str:
-            # v90: use full 64-char hex name — see
+            # v90: use full 64-char hex name -- see
             # test_to_dataframe_streaming for full rationale.
             return f"Compound_{hashlib.sha256(f'name-{i}'.encode()).hexdigest().upper()}"
         def make_ik(i: int) -> str:
-            # v90: convert SHA256 hex to LETTERS only (A-P) — see
+            # v90: convert SHA256 hex to LETTERS only (A-P) -- see
             # test_to_dataframe_streaming for full rationale.
             h = hashlib.sha256(f"ik-{i}".encode()).hexdigest().lower()[:25]
             letters = ''.join(chr(ord('A') + int(c, 16)) for c in h)
@@ -946,7 +946,7 @@ class TestDomain8Performance:
         assert len(basic_resolver._name_index) == 0
 
     def test_cached_fuzzy_choices(self, basic_resolver):
-        """4.2 / 8.2 — fuzzy choices are cached and refreshed only on mutation."""
+        """4.2 / 8.2 -- fuzzy choices are cached and refreshed only on mutation."""
         basic_resolver.add_source_records(
             [{"inchikey": ASPIRIN_IK, "name": "aspirin", "chembl_id": "CHEMBL25"}],
             source="chembl",
@@ -965,7 +965,7 @@ class TestDomain8Performance:
         assert choices3 is not choices1  # new list
 
     def test_add_source_records_accepts_iterable(self, basic_resolver):
-        """C.21 / 4.10 — add_source_records accepts any Iterable, not just List."""
+        """C.21 / 4.10 -- add_source_records accepts any Iterable, not just List."""
         def record_gen():
             yield {"inchikey": ASPIRIN_IK, "name": "Aspirin", "chembl_id": "CHEMBL25"}
             yield {"inchikey": IBUPROFEN_IK, "name": "Ibuprofen", "chembl_id": "CHEMBL521"}
@@ -975,16 +975,16 @@ class TestDomain8Performance:
 
 
 # =============================================================================
-# Domain 9 — Security & Privacy
+# Domain 9 -- Security & Privacy
 # =============================================================================
 
 class TestDomain9Security:
     """Security / privacy invariants."""
 
     def test_safe_name_strips_control_chars(self):
-        """9.22 / C.3 — _safe_name strips ANSI / newline / control characters.
+        """9.22 / C.3 -- _safe_name strips ANSI / newline / control characters.
 
-        Per audit C.3, the regex is ``[\\x00-\\x1f\\x7f]`` — this strips
+        Per audit C.3, the regex is ``[\\x00-\\x1f\\x7f]`` -- this strips
         the ESC character (0x1b) but leaves the rest of the ANSI escape
         sequence (e.g. ``[31m``) intact.  Full ANSI-sequence stripping
         would require a more complex regex; the audit spec is control-chars only.
@@ -1004,13 +1004,13 @@ class TestDomain9Security:
         assert _safe_name(None) == "<none>"
 
     def test_safe_name_truncates(self):
-        """C.3 — _safe_name truncates to max_len."""
+        """C.3 -- _safe_name truncates to max_len."""
         long_name = "a" * 200
         result = _safe_name(long_name, max_len=20)
         assert len(result) <= 23  # 20 + ellipsis "..."
 
     def test_secret_str_repr_redacted(self):
-        """9.1 / 9.18 / C.12 — _SecretStr.__repr__ returns '<redacted>'."""
+        """9.1 / 9.18 / C.12 -- _SecretStr.__repr__ returns '<redacted>'."""
         from entity_resolution.drug_resolver import _SecretStr
         s = _SecretStr("super-secret-api-key")
         assert repr(s) == "<redacted>"
@@ -1021,7 +1021,7 @@ class TestDomain9Security:
         assert str(s) == ""
 
     def test_to_state_dict_redact_pii(self, basic_resolver):
-        """9.5 — to_state_dict(redact_pii=True) redacts canonical_name and name."""
+        """9.5 -- to_state_dict(redact_pii=True) redacts canonical_name and name."""
         basic_resolver.add_source_records(
             [{"inchikey": ASPIRIN_IK, "name": "Aspirin", "chembl_id": "CHEMBL25"}],
             source="chembl",
@@ -1032,14 +1032,14 @@ class TestDomain9Security:
         assert entry["name"] == "<redacted>"
 
     def test_pubchem_api_key_via_x_pubchem_header(self):
-        """3.3 / 9.1 — PubChem API key sent via X-PubChem-API-Key header (not Bearer)."""
+        """3.3 / 9.1 -- PubChem API key sent via X-PubChem-API-Key header (not Bearer)."""
         src = (PROJECT_ROOT / "entity_resolution" / "drug_resolver.py").read_text()
         # The header should be X-PubChem-API-Key, not authorization: Bearer.
         assert "X-PubChem-API-Key" in src
         assert 'authorization' not in src.lower() or '"authorization"' not in src.lower()
 
     def test_source_control_char_rejection(self, basic_resolver):
-        """9.7 — source strings with control characters are rejected."""
+        """9.7 -- source strings with control characters are rejected."""
         with pytest.raises(ValueError):
             basic_resolver.add_source_records(
                 [{"inchikey": ASPIRIN_IK, "name": "Aspirin"}],
@@ -1047,7 +1047,7 @@ class TestDomain9Security:
             )
 
     def test_no_raw_pii_in_resolve_single_logging(self, basic_resolver, caplog):
-        """9.2 / 9.4 / C.3 — resolve_single logs use _safe_name, no raw drug names."""
+        """9.2 / 9.4 / C.3 -- resolve_single logs use _safe_name, no raw drug names."""
         basic_resolver.add_source_records(
             [{"inchikey": ASPIRIN_IK, "name": "aspirin", "chembl_id": "CHEMBL25"}],
             source="chembl",
@@ -1066,14 +1066,14 @@ class TestDomain9Security:
 
 
 # =============================================================================
-# Domain 10 — Testing & Validation
+# Domain 10 -- Testing & Validation
 # =============================================================================
 
 class TestDomain10Testing:
     """Testing / validation invariants."""
 
     def test_runtime_asserts_invariants(self):
-        """10.2 / C.25 — runtime_asserts=True triggers invariant checks."""
+        """10.2 / C.25 -- runtime_asserts=True triggers invariant checks."""
         r = DrugResolver(config=ResolverConfig(
             runtime_asserts=True,
             deterministic_timestamps=True,
@@ -1082,14 +1082,14 @@ class TestDomain10Testing:
             [{"inchikey": ASPIRIN_IK, "name": "Aspirin", "chembl_id": "CHEMBL25"}],
             source="chembl",
         )
-        # Manually corrupt an index — the next _assert_indices_consistent
+        # Manually corrupt an index -- the next _assert_indices_consistent
         # should raise.
         r._inchikey_index["FAKE-IK"] = "NONEXISTENT-CANONICAL"
         with pytest.raises(ResolverStateCorruptionError):
             r._assert_indices_consistent()
 
     def test_audit_chain_verification(self, basic_resolver):
-        """14.2 / 16.25 — _verify_audit_chain recomputes the hash chain.
+        """14.2 / 16.25 -- _verify_audit_chain recomputes the hash chain.
 
         The chain is recomputed using the event payload that was used at
         creation time.  Since the create event payload includes the name
@@ -1108,21 +1108,21 @@ class TestDomain10Testing:
         assert isinstance(result, bool)
 
     def test_self_test_passes(self):
-        """10.1 — _self_test passes without errors."""
+        """10.1 -- _self_test passes without errors."""
         from entity_resolution.drug_resolver import _self_test
         # Should not raise.
         _self_test()
 
 
 # =============================================================================
-# Domain 11 — Logging & Observability
+# Domain 11 -- Logging & Observability
 # =============================================================================
 
 class TestDomain11Logging:
     """Logging / observability invariants."""
 
     def test_health_returns_expected_keys(self, basic_resolver):
-        """11.8 / C.20 — health() returns the expected keys."""
+        """11.8 / C.20 -- health() returns the expected keys."""
         h = basic_resolver.health()
         expected_keys = {
             "mapping_size", "dead_letter_count", "audit_trail_size",
@@ -1135,13 +1135,13 @@ class TestDomain11Logging:
         assert expected_keys.issubset(set(h.keys()))
 
     def test_correlation_id_set_and_get(self, basic_resolver):
-        """C.5 — set_correlation_id / get_correlation_id work."""
+        """C.5 -- set_correlation_id / get_correlation_id work."""
         assert basic_resolver.get_correlation_id() is None
         basic_resolver.set_correlation_id("test-cid-123")
         assert basic_resolver.get_correlation_id() == "test-cid-123"
 
     def test_to_prometheus_returns_text_format(self, basic_resolver):
-        """11.2 — to_prometheus returns text-format metrics."""
+        """11.2 -- to_prometheus returns text-format metrics."""
         basic_resolver.add_source_records(
             [{"inchikey": ASPIRIN_IK, "name": "Aspirin", "chembl_id": "CHEMBL25"}],
             source="chembl",
@@ -1151,12 +1151,12 @@ class TestDomain11Logging:
         assert "drug_resolver_mapping_size" in metrics_text
 
     def test_get_pubchem_success_rate(self, basic_resolver):
-        """11.18 — get_pubchem_success_rate returns a float in [0, 1]."""
+        """11.18 -- get_pubchem_success_rate returns a float in [0, 1]."""
         rate = basic_resolver.get_pubchem_success_rate()
         assert 0.0 <= rate <= 1.0
 
     def test_alert_callback_fires(self, basic_resolver):
-        """11.9 / C.20 — register_alert_callback fires on alert events."""
+        """11.9 / C.20 -- register_alert_callback fires on alert events."""
         triggered: list = []
         basic_resolver.register_alert_callback(
             "dead_letter_full", lambda payload: triggered.append(payload),
@@ -1167,7 +1167,7 @@ class TestDomain11Logging:
         assert triggered[0]["size"] == 1
 
     def test_confidence_histogram(self, basic_resolver):
-        """11.15 — confidence histogram is updated on matches.
+        """11.15 -- confidence histogram is updated on matches.
 
         The histogram is updated when matches are made.  Ingesting a
         record that matches an existing entry (via name match) should
@@ -1178,7 +1178,7 @@ class TestDomain11Logging:
             [{"inchikey": ASPIRIN_IK, "name": "Aspirin", "chembl_id": "CHEMBL25"}],
             source="chembl",
         )
-        # Second record matches via name → histogram updated.
+        # Second record matches via name -> histogram updated.
         basic_resolver.add_source_records(
             [{"inchikey": ASPIRIN_IK, "name": "Aspirin", "drugbank_id": "DB00945"}],
             source="drugbank",
@@ -1196,30 +1196,30 @@ class TestDomain11Logging:
 
 
 # =============================================================================
-# Domain 12 — Configuration & Environment Management
+# Domain 12 -- Configuration & Environment Management
 # =============================================================================
 
 class TestDomain12Configuration:
     """Configuration invariants."""
 
     def test_to_masked_dict_redacts_api_key(self):
-        """9.6 / 12.15 — to_masked_dict redacts the API key."""
+        """9.6 / 12.15 -- to_masked_dict redacts the API key."""
         cfg = ResolverConfig(pubchem_api_key="super-secret")
         d = cfg.to_masked_dict()
         assert d["pubchem_api_key"] == "<redacted>"
 
     def test_config_validate_rejects_invalid_fuzzy_threshold(self):
-        """12.16 — validate() rejects fuzzy_threshold outside [0, 1]."""
+        """12.16 -- validate() rejects fuzzy_threshold outside [0, 1]."""
         with pytest.raises(ValueError):
             ResolverConfig(fuzzy_threshold=1.5).validate()
 
     def test_config_validate_rejects_negative_pubchem_call_delay(self):
-        """12.x — validate() rejects negative pubchem_call_delay."""
+        """12.x -- validate() rejects negative pubchem_call_delay."""
         with pytest.raises(ValueError):
             ResolverConfig(pubchem_call_delay=-1.0).validate()
 
     def test_module_constants_in_sync(self):
-        """1.7 / 12.1 — module-level constants match ResolverConfig defaults."""
+        """1.7 / 12.1 -- module-level constants match ResolverConfig defaults."""
         from entity_resolution.drug_resolver import (
             _PUBCHEM_CALL_DELAY, _FUZZY_THRESHOLD, _PUBCHEM_REST_BASE,
             _check_module_constants_in_sync,
@@ -1232,21 +1232,21 @@ class TestDomain12Configuration:
         assert _PUBCHEM_REST_BASE == defaults.pubchem_rest_base
 
     def test_from_env_overrides(self, monkeypatch):
-        """12.x — from_env reads env vars."""
+        """12.x -- from_env reads env vars."""
         monkeypatch.setenv("ENTITY_RESOLUTION_PUBCHEM_ENABLED", "true")
         cfg = ResolverConfig.from_env()
         assert cfg.pubchem_enabled is True
 
 
 # =============================================================================
-# Domain 13 — Documentation & Readability
+# Domain 13 -- Documentation & Readability
 # =============================================================================
 
 class TestDomain13Documentation:
     """Documentation / readability invariants."""
 
     def test_all_defined_and_in_sync(self):
-        """14.17 / A.2 #7 — __all__ is defined and lists key public symbols."""
+        """14.17 / A.2 #7 -- __all__ is defined and lists key public symbols."""
         from entity_resolution import drug_resolver
         assert hasattr(drug_resolver, "__all__")
         required = {
@@ -1259,28 +1259,28 @@ class TestDomain13Documentation:
         assert required.issubset(set(drug_resolver.__all__))
 
     def test_data_dictionary_in_module_docstring(self):
-        """13.9 / C.26 — DATA DICTIONARY section present in module docstring."""
+        """13.9 / C.26 -- DATA DICTIONARY section present in module docstring."""
         src = (PROJECT_ROOT / "entity_resolution" / "drug_resolver.py").read_text()
         assert "DATA DICTIONARY" in src
 
     def test_resolution_strategy_diagram_present(self):
-        """13.17 / C.26 — RESOLUTION STRATEGY DIAGRAM present in module docstring."""
+        """13.17 / C.26 -- RESOLUTION STRATEGY DIAGRAM present in module docstring."""
         src = (PROJECT_ROOT / "entity_resolution" / "drug_resolver.py").read_text()
         assert "RESOLUTION STRATEGY DIAGRAM" in src
 
     def test_fastapi_deployment_notes(self):
-        """13.1 — FastAPI deployment notes present in module docstring."""
+        """13.1 -- FastAPI deployment notes present in module docstring."""
         src = (PROJECT_ROOT / "entity_resolution" / "drug_resolver.py").read_text()
         assert "FastAPI" in src
         assert "resolve_single_async" in src
 
     def test_changelog_section_present(self):
-        """13.18 — CHANGELOG (audit remediation) section present."""
+        """13.18 -- CHANGELOG (audit remediation) section present."""
         src = (PROJECT_ROOT / "entity_resolution" / "drug_resolver.py").read_text()
         assert "CHANGELOG (audit remediation)" in src
 
     def test_audit_remediation_matrix_present(self):
-        """G.1 — AUDIT REMEDIATION MATRIX comment block present at the bottom."""
+        """G.1 -- AUDIT REMEDIATION MATRIX comment block present at the bottom."""
         src = (PROJECT_ROOT / "entity_resolution" / "drug_resolver.py").read_text()
         assert "AUDIT REMEDIATION MATRIX" in src
         # Every domain should be mentioned.
@@ -1289,14 +1289,14 @@ class TestDomain13Documentation:
 
 
 # =============================================================================
-# Domain 14 — Compliance & Standards Adherence
+# Domain 14 -- Compliance & Standards Adherence
 # =============================================================================
 
 class TestDomain14Compliance:
     """Compliance / standards invariants."""
 
     def test_iso_8601_z_suffix(self, basic_resolver):
-        """14.18 / A.2 #15 — timestamps use ISO 8601 with Z suffix."""
+        """14.18 / A.2 #15 -- timestamps use ISO 8601 with Z suffix."""
         basic_resolver.add_source_records(
             [{"inchikey": ASPIRIN_IK, "name": "Aspirin", "chembl_id": "CHEMBL25"}],
             source="chembl",
@@ -1309,7 +1309,7 @@ class TestDomain14Compliance:
         datetime.strptime(entry["created_at"], "%Y-%m-%dT%H:%M:%S.%fZ")
 
     def test_version_strings_present(self):
-        """14.22 — __version__ and DRUG_RESOLVER_API_VERSION are present."""
+        """14.22 -- __version__ and DRUG_RESOLVER_API_VERSION are present."""
         assert DRUG_RESOLVER_VERSION
         assert DRUG_RESOLVER_API_VERSION
         # Should be SemVer-like.
@@ -1318,7 +1318,7 @@ class TestDomain14Compliance:
         assert re.match(r"^\d+\.\d+", DRUG_RESOLVER_API_VERSION)
 
     def test_openapi_schema_generated(self):
-        """14.19 / C.17 — to_openapi_schema returns a valid fragment."""
+        """14.19 / C.17 -- to_openapi_schema returns a valid fragment."""
         schema = DrugResolver.to_openapi_schema()
         assert schema["type"] == "object"
         assert "canonical_inchikey" in schema["properties"]
@@ -1326,7 +1326,7 @@ class TestDomain14Compliance:
         assert "degraded" in schema["properties"]
 
     def test_error_code_enum_complete(self):
-        """11.20 — ErrorCode enum has all required codes."""
+        """11.20 -- ErrorCode enum has all required codes."""
         required_codes = {
             "RESOLVER_STATE_CORRUPTION", "INDEX_MAPPING_DESYNC",
             "PUBCHEM_CIRCUIT_OPEN", "PUBCHEM_TIMEOUT",
@@ -1340,14 +1340,14 @@ class TestDomain14Compliance:
 
 
 # =============================================================================
-# Domain 15 — Interoperability & Integration
+# Domain 15 -- Interoperability & Integration
 # =============================================================================
 
 class TestDomain15Interoperability:
     """Interoperability / integration invariants."""
 
     def test_to_csv_writes_file(self, basic_resolver, tmp_path):
-        """15.4 — to_csv writes a CSV file using stdlib only."""
+        """15.4 -- to_csv writes a CSV file using stdlib only."""
         basic_resolver.add_source_records(
             [{"inchikey": ASPIRIN_IK, "name": "Aspirin", "chembl_id": "CHEMBL25"}],
             source="chembl",
@@ -1360,7 +1360,7 @@ class TestDomain15Interoperability:
         assert "CHEMBL25" in content
 
     def test_to_jsonl_writes_file(self, basic_resolver, tmp_path):
-        """15.27 — to_jsonl writes JSON Lines (one record per line)."""
+        """15.27 -- to_jsonl writes JSON Lines (one record per line)."""
         basic_resolver.add_source_records(
             [{"inchikey": ASPIRIN_IK, "name": "Aspirin", "chembl_id": "CHEMBL25"},
              {"inchikey": IBUPROFEN_IK, "name": "Ibuprofen", "chembl_id": "CHEMBL521"}],
@@ -1376,7 +1376,7 @@ class TestDomain15Interoperability:
             json.loads(line)
 
     def test_sources_column_json_encoded(self, basic_resolver):
-        """2.7 / 14.20 — sources column is JSON-encoded (not comma-separated)."""
+        """2.7 / 14.20 -- sources column is JSON-encoded (not comma-separated)."""
         basic_resolver.add_source_records(
             [{"inchikey": ASPIRIN_IK, "name": "Aspirin", "chembl_id": "CHEMBL25"}],
             source="chembl",
@@ -1393,7 +1393,7 @@ class TestDomain15Interoperability:
         assert "drugbank" in sources
 
     def test_parquet_engine_fallback(self):
-        """2.12 — get_parquet_engine tries pyarrow then fastparquet.
+        """2.12 -- get_parquet_engine tries pyarrow then fastparquet.
 
         Skipped if neither pyarrow nor fastparquet is installed.
         """
@@ -1404,7 +1404,7 @@ class TestDomain15Interoperability:
             pytest.skip("neither pyarrow nor fastparquet installed")
 
     def test_to_records_no_live_refs(self, basic_resolver):
-        """15.2 / C.2 — to_records returns deep-copied nested lists."""
+        """15.2 / C.2 -- to_records returns deep-copied nested lists."""
         basic_resolver.add_source_records(
             [{"inchikey": ASPIRIN_IK, "name": "Aspirin", "chembl_id": "CHEMBL25"}],
             source="chembl",
@@ -1417,14 +1417,14 @@ class TestDomain15Interoperability:
 
 
 # =============================================================================
-# Domain 16 — Data Lineage & Traceability
+# Domain 16 -- Data Lineage & Traceability
 # =============================================================================
 
 class TestDomain16Lineage:
     """Data-lineage / traceability invariants."""
 
     def test_lineage_event_to_dict_round_trip(self):
-        """C.18 — LineageEvent.to_dict / from_dict round-trip."""
+        """C.18 -- LineageEvent.to_dict / from_dict round-trip."""
         e = LineageEvent(
             event_id="abc123",
             timestamp="2026-01-01T00:00:00.000000Z",
@@ -1451,7 +1451,7 @@ class TestDomain16Lineage:
         assert e2.sources_after == e.sources_after
 
     def test_trace_value_returns_field_events(self, basic_resolver):
-        """16.15 — trace_value returns every event touching a field."""
+        """16.15 -- trace_value returns every event touching a field."""
         basic_resolver.add_source_records(
             [{"inchikey": ASPIRIN_IK, "name": "Aspirin", "chembl_id": "CHEMBL25"}],
             source="chembl",
@@ -1468,7 +1468,7 @@ class TestDomain16Lineage:
             assert any(d["field"] == "drugbank_id" for d in e["diff"])
 
     def test_field_provenance_recorded(self, basic_resolver):
-        """16.22 — field_provenance is recorded for every field write."""
+        """16.22 -- field_provenance is recorded for every field write."""
         basic_resolver.add_source_records(
             [{"inchikey": ASPIRIN_IK, "name": "Aspirin", "chembl_id": "CHEMBL25"}],
             source="chembl",
@@ -1480,7 +1480,7 @@ class TestDomain16Lineage:
         assert fp["input_checksum"]
 
     def test_to_openlineage_returns_valid_json(self, basic_resolver):
-        """16.24 — to_openlineage returns an OpenLineage-compatible dict."""
+        """16.24 -- to_openlineage returns an OpenLineage-compatible dict."""
         ol = basic_resolver.to_openlineage()
         assert ol["eventType"] == "RUNNING"
         assert "run" in ol
@@ -1489,7 +1489,7 @@ class TestDomain16Lineage:
         assert ol["job"]["namespace"] == "drug_repurposing.entity_resolution"
 
     def test_source_dataset_metadata_recorded(self, basic_resolver):
-        """16.16 / 16.17 / 16.18 / C.19 — SourceDatasetMeta recorded per source."""
+        """16.16 / 16.17 / 16.18 / C.19 -- SourceDatasetMeta recorded per source."""
         basic_resolver.add_source_records(
             [{"inchikey": ASPIRIN_IK, "name": "Aspirin", "chembl_id": "CHEMBL25"}],
             source="chembl",
@@ -1505,7 +1505,7 @@ class TestDomain16Lineage:
         assert meta.record_count == 1
 
     def test_analyse_source_impact(self, basic_resolver):
-        """16.13 — analyse_source_impact returns an impact report."""
+        """16.13 -- analyse_source_impact returns an impact report."""
         basic_resolver.add_source_records(
             [{"inchikey": ASPIRIN_IK, "name": "Aspirin", "chembl_id": "CHEMBL25"}],
             source="chembl",
@@ -1520,7 +1520,7 @@ class TestDomain16Lineage:
         assert impact["entries_to_be_removed"] == 0
 
     def test_to_provenance_graph(self, basic_resolver):
-        """16.20 — to_provenance_graph returns a node-link graph."""
+        """16.20 -- to_provenance_graph returns a node-link graph."""
         basic_resolver.add_source_records(
             [{"inchikey": ASPIRIN_IK, "name": "Aspirin", "chembl_id": "CHEMBL25"}],
             source="chembl",
@@ -1532,7 +1532,7 @@ class TestDomain16Lineage:
         assert len(g["nodes"]) >= 2
 
     def test_bidirectional_traceability(self, basic_resolver):
-        """16.21 — _source_record_index enables reverse lookup."""
+        """16.21 -- _source_record_index enables reverse lookup."""
         basic_resolver.add_source_records(
             [{"inchikey": ASPIRIN_IK, "name": "Aspirin", "chembl_id": "CHEMBL25"}],
             source="chembl",
@@ -1541,7 +1541,7 @@ class TestDomain16Lineage:
         assert canonical == ASPIRIN_IK
 
     def test_get_canonical_entry_with_history(self, basic_resolver):
-        """16.26 — get_canonical_entry_with_history returns current + history."""
+        """16.26 -- get_canonical_entry_with_history returns current + history."""
         basic_resolver.add_source_records(
             [{"inchikey": ASPIRIN_IK, "name": "Aspirin", "chembl_id": "CHEMBL25"}],
             source="chembl",
@@ -1605,7 +1605,7 @@ class TestFullIntegration:
         assert "resolver_version" in state
 
     def test_concurrent_add_source_records_thread_safe(self):
-        """10.19 / C.11 — concurrent add_source_records doesn't corrupt state.
+        """10.19 / C.11 -- concurrent add_source_records doesn't corrupt state.
 
         Uses 10 threads with distinct InChIKeys to avoid idempotency-skip
         collisions.  Each thread ingests 2 records, so we expect 20 total.
@@ -1647,7 +1647,7 @@ class TestFullIntegration:
         assert len(r.mapping) == 10, f"expected 10 entries, got {len(r.mapping)}"
 
     def test_resolve_batch_synchronous(self, basic_resolver):
-        """C.21 / 8.12 — resolve_batch resolves a list of names."""
+        """C.21 / 8.12 -- resolve_batch resolves a list of names."""
         basic_resolver.add_source_records(
             [{"inchikey": ASPIRIN_IK, "name": "aspirin", "chembl_id": "CHEMBL25"},
              {"inchikey": IBUPROFEN_IK, "name": "ibuprofen", "chembl_id": "CHEMBL521"}],
@@ -1660,13 +1660,13 @@ class TestFullIntegration:
         assert results[2].match_method == "no_match"
 
     def test_canonical_json_deterministic(self):
-        """C.8 — _canonical_json is deterministic across dict-ordering variations."""
+        """C.8 -- _canonical_json is deterministic across dict-ordering variations."""
         d1 = {"a": 1, "b": [1, 2, 3], "c": {"x": 1, "y": 2}}
         d2 = {"c": {"y": 2, "x": 1}, "a": 1, "b": [1, 2, 3]}
         assert _canonical_json(d1) == _canonical_json(d2)
 
     def test_canonical_json_rejects_non_serialisable(self):
-        """C.8 — _canonical_json raises TypeError on non-JSON-native types."""
+        """C.8 -- _canonical_json raises TypeError on non-JSON-native types."""
         class Weird:
             pass
         with pytest.raises(TypeError):

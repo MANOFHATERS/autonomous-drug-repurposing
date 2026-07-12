@@ -10,24 +10,24 @@ This test file mirrors the structure of ``tests/test_database_init.py``
 which is the gold-standard test for the sibling ``database/__init__.py``.
 
 Test Categories:
-  1. Package API Surface — every symbol in __all__ is importable
-  2. Lazy Loading Behaviour — no side effects at import time
-  3. PEP 562 Compliance — __getattr__ and __dir__ are correct
-  4. Backward Compatibility — deep imports still work
-  5. Factory & Introspection — get_pipeline, get_expected_pipelines
-  6. Knowledge Graph Mapping — get_kg_mapping
-  7. Filtering Thresholds — get_filtering_thresholds (scientific correctness)
-  8. Data Dictionary — DATA_DICTIONARY structure
-  9. Source Attribution — SOURCE_ATTRIBUTION structure
-  10. Validation — validate_infrastructure, _validate_security
-  11. Configuration — validate_config, get_config_summary
-  12. Lineage & Provenance — get_provenance, get_audit_trail
-  13. State Serialisation — to_state_dict / from_state_dict
-  14. Reliability — dead letters, circuit breaker, recover_from_failure
-  15. Observability — correlation ID, log level, metrics
-  16. CLI — python -m pipelines version/list
-  17. PEP 8 / PEP 257 Compliance — line length, docstring
-  18. ARM64 Simulation — rdkit missing → ChEMBL fails, UniProt works
+  1. Package API Surface -- every symbol in __all__ is importable
+  2. Lazy Loading Behaviour -- no side effects at import time
+  3. PEP 562 Compliance -- __getattr__ and __dir__ are correct
+  4. Backward Compatibility -- deep imports still work
+  5. Factory & Introspection -- get_pipeline, get_expected_pipelines
+  6. Knowledge Graph Mapping -- get_kg_mapping
+  7. Filtering Thresholds -- get_filtering_thresholds (scientific correctness)
+  8. Data Dictionary -- DATA_DICTIONARY structure
+  9. Source Attribution -- SOURCE_ATTRIBUTION structure
+  10. Validation -- validate_infrastructure, _validate_security
+  11. Configuration -- validate_config, get_config_summary
+  12. Lineage & Provenance -- get_provenance, get_audit_trail
+  13. State Serialisation -- to_state_dict / from_state_dict
+  14. Reliability -- dead letters, circuit breaker, recover_from_failure
+  15. Observability -- correlation ID, log level, metrics
+  16. CLI -- python -m pipelines version/list
+  17. PEP 8 / PEP 257 Compliance -- line length, docstring
+  18. ARM64 Simulation -- rdkit missing -> ChEMBL fails, UniProt works
 """
 
 from __future__ import annotations
@@ -55,7 +55,7 @@ if str(PROJECT_ROOT) not in sys.path:
 # submodules transitively import config.settings which reads DATABASE_URL.
 os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
 
-# Now import the pipelines package — this MUST NOT trigger side effects
+# Now import the pipelines package -- this MUST NOT trigger side effects
 import pipelines  # noqa: E402
 
 
@@ -579,7 +579,7 @@ class TestFilteringThresholds:
         ``pipelines/_http_client.py`` (P4 fix).
         """
         thresholds = pipelines.get_filtering_thresholds()
-        # P1 fix: 0.5s (not 1.1s) — token-bucket allows bursts while
+        # P1 fix: 0.5s (not 1.1s) -- token-bucket allows bursts while
         # maintaining the 2 req/sec average.
         assert thresholds["CHEMBL_MIN_REQUEST_INTERVAL"]["value"] == 0.5
 
@@ -593,7 +593,7 @@ class TestFilteringThresholds:
 
         The legacy value was 100 (PubChem's hard limit). The institutional-grade
         rewrite per PUBCHEM_PIPELINE_MASTER_FIX_PROMPT.md (DESIGN-13, CONF-1)
-        uses 95 — a 5% safety margin in case PubChem lowers the limit. This
+        uses 95 -- a 5% safety margin in case PubChem lowers the limit. This
         test is updated to reflect the new safer default while preserving the
         spirit of the original assertion (the batch size is bounded by
         PubChem's 100-identifier limit).
@@ -1301,10 +1301,10 @@ print(f'OK ({elapsed_ms:.1f} ms)')
 
 
 # ---------------------------------------------------------------------------
-# 19. Scientific Correctness (Domain 3 — P0)
+# 19. Scientific Correctness (Domain 3 -- P0)
 # ---------------------------------------------------------------------------
 class TestScientificCorrectness:
-    """Verify scientific correctness (Domain 3 — 100% non-negotiable)."""
+    """Verify scientific correctness (Domain 3 -- 100% non-negotiable)."""
 
     def test_inchikey_pattern_in_docstring(self):
         """KNOW-1: docstring mentions the InChIKey regex."""
@@ -1387,7 +1387,7 @@ class TestScientificCorrectness:
     def test_base_pipeline_is_abstract(self):
         """DES-8: BasePipeline is abstract and cannot be instantiated."""
         from pipelines import BasePipeline
-        # Try to instantiate — should raise TypeError (ABC with abstract methods)
+        # Try to instantiate -- should raise TypeError (ABC with abstract methods)
         with pytest.raises(TypeError):
             BasePipeline()
 
@@ -1523,13 +1523,13 @@ class TestIdempotency:
         from pipelines import chembl_pipeline as chembl_module
         original = chembl_module.ChEMBLPipeline
         chembl_module.ChEMBLPipeline = MagicMock
-        # Access via facade — gets the mock
+        # Access via facade -- gets the mock
         mock_cls = pipelines.ChEMBLPipeline
         assert mock_cls is MagicMock
         # Restore and reset
         chembl_module.ChEMBLPipeline = original
         pipelines._reset()
-        # Re-access — should get the real class
+        # Re-access -- should get the real class
         real_cls = pipelines.ChEMBLPipeline
         assert real_cls is original
 

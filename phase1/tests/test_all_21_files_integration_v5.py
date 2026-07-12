@@ -1,10 +1,10 @@
-# MIT License — Copyright (c) 2026 Team Cosmic / VentureLab — see LICENSE
+# MIT License -- Copyright (c) 2026 Team Cosmic / VentureLab -- see LICENSE
 """Integration test for all 21 files of the drug-repurposing platform.
 
 This test verifies that all 21 files (the 20 previously-fixed files plus
 the newly-fixed ``pipelines/chembl_pipeline.py``) work together as a
 cohesive system. It exercises the full ChEMBL ingestion pipeline
-(download → clean → load) with a mocked ChEMBL REST API and an in-memory
+(download -> clean -> load) with a mocked ChEMBL REST API and an in-memory
 SQLite database, then verifies:
 
 1. All 21 files import cleanly.
@@ -14,7 +14,7 @@ SQLite database, then verifies:
    is a member of the corresponding enum in ``database.models``.
 5. The manifest JSON contains all required lineage fields.
 6. Dead-letter files are written when records are dropped.
-7. The pipeline is idempotent — running twice doesn't duplicate rows.
+7. The pipeline is idempotent -- running twice doesn't duplicate rows.
 8. Count validation raises ``PipelineError`` when below the minimum.
 9. The new ``get_chembl_to_drug_id_map`` loader helper works correctly.
 10. The new ``RateLimitedHttpClient`` initializes and handles errors.
@@ -56,7 +56,7 @@ import pandas as pd
 import pytest
 
 # ---------------------------------------------------------------------------
-# Project-root + DATABASE_URL setup — must happen before any config import.
+# Project-root + DATABASE_URL setup -- must happen before any config import.
 # ---------------------------------------------------------------------------
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
@@ -93,7 +93,7 @@ TWENTY_ONE_FILES = [
 
 
 # =====================================================================
-# Domain 1: Architecture — all 21 files import cleanly
+# Domain 1: Architecture -- all 21 files import cleanly
 # =====================================================================
 
 
@@ -152,12 +152,12 @@ class TestAll21FilesImport:
         http_client_path = PROJECT_ROOT / "pipelines" / "_http_client.py"
         assert http_client_path.exists(), (
             "pipelines/_http_client.py must exist (new module added for the "
-            "institutional-grade chembl_pipeline.py rewrite — A5)"
+            "institutional-grade chembl_pipeline.py rewrite -- A5)"
         )
 
 
 # =====================================================================
-# Domain 3: Scientific Correctness — enum contracts
+# Domain 3: Scientific Correctness -- enum contracts
 # =====================================================================
 
 
@@ -208,7 +208,7 @@ class TestEnumContractsAll21Files:
 
 
 # =====================================================================
-# Domain 5: Data Quality — K1-K8 fixes verified end-to-end
+# Domain 5: Data Quality -- K1-K8 fixes verified end-to-end
 # =====================================================================
 
 
@@ -316,7 +316,7 @@ class TestK1ToK8FixesEndToEnd:
 
 
 # =====================================================================
-# Domain 7: Idempotency — running twice doesn't duplicate
+# Domain 7: Idempotency -- running twice doesn't duplicate
 # =====================================================================
 
 
@@ -403,23 +403,23 @@ class TestIdempotencyAll21Files:
         db_session.flush()
         count_after_first = db_session.query(DrugProteinInteraction).count()
 
-        # Upsert the SAME DPI again — should update, not insert.
+        # Upsert the SAME DPI again -- should update, not insert.
         r2 = bulk_upsert_dpi(db_session, dpi_df, source_version="ChEMBL_35")
         db_session.flush()
         count_after_second = db_session.query(DrugProteinInteraction).count()
 
         assert count_after_first == count_after_second, (
-            "DPI upsert should be idempotent — count should not change on re-upsert"
+            "DPI upsert should be idempotent -- count should not change on re-upsert"
         )
 
 
 # =====================================================================
-# Domain 10: Testing — real end-to-end test
+# Domain 10: Testing -- real end-to-end test
 # =====================================================================
 
 
 class TestEndToEndAll21Files:
-    """Real end-to-end test: download → clean → load with mocked API."""
+    """Real end-to-end test: download -> clean -> load with mocked API."""
 
     def test_full_chembl_pipeline_with_mocked_api(
         self, tmp_path, monkeypatch, db_session
@@ -525,7 +525,7 @@ class TestEndToEndAll21Files:
             pipeline.raw_dir = tmp_path / "chembl"
             pipeline.raw_dir.mkdir(parents=True, exist_ok=True)
 
-            # Run download → clean → load.
+            # Run download -> clean -> load.
             drugs_path = pipeline.download()
             assert drugs_path.exists()
 
@@ -542,12 +542,12 @@ class TestEndToEndAll21Files:
         assert drug is not None, "Drug row should be inserted"
         assert drug.chembl_id == "CHEMBL25"
         assert int(drug.max_phase) == 4
-        # SW-1 ROOT FIX: is_fda_approved is None (unknown — pending FDA
+        # SW-1 ROOT FIX: is_fda_approved is None (unknown -- pending FDA
         # Orange Book join). ChEMBL max_phase==4 means GLOBALLY approved
         # (any regulator), NOT FDA-specific. The previous assertion
         # ``is_fda_approved is True`` silently marked EMA-only-approved
         # drugs as FDA-approved.
-        # The Drug ORM column is Boolean, which can't hold None — so the
+        # The Drug ORM column is Boolean, which can't hold None -- so the
         # value may be False after load. The important invariant is that
         # it's NOT True (which would mean FDA-approved).
         assert drug.is_fda_approved is not True, (
@@ -595,13 +595,13 @@ class TestEndToEndAll21Files:
 
         # A PipelineRun row should exist for source='chembl'.
         # (Written by either our _ensure_pipeline_run_row or the base's
-        # _write_run_log — both write to the same table.)
+        # _write_run_log -- both write to the same table.)
         runs = db_session.query(PipelineRun).filter_by(source="chembl").all()
-        assert len(runs) >= 0  # soft — may not have a session in this test
+        assert len(runs) >= 0  # soft -- may not have a session in this test
 
 
 # =====================================================================
-# Domain 6: Reliability — error handling
+# Domain 6: Reliability -- error handling
 # =====================================================================
 
 
@@ -655,7 +655,7 @@ class TestReliabilityAll21Files:
 
 
 # =====================================================================
-# Domain 16: Data Lineage — manifest + provenance
+# Domain 16: Data Lineage -- manifest + provenance
 # =====================================================================
 
 
@@ -753,7 +753,7 @@ class TestDataLineageAll21Files:
 
 
 # =====================================================================
-# Domain 9: Security — HTTP client hardening
+# Domain 9: Security -- HTTP client hardening
 # =====================================================================
 
 
@@ -788,7 +788,7 @@ class TestSecurityAll21Files:
 
 
 # =====================================================================
-# Domain 12: Configuration — new settings wired correctly
+# Domain 12: Configuration -- new settings wired correctly
 # =====================================================================
 
 
@@ -877,7 +877,7 @@ class TestConfigurationAll21Files:
         # Query with filter.
         result = get_chembl_to_drug_id_map(db_session, chembl_ids={"CHEMBL25"})
         assert isinstance(result, MappingResult), (
-            "Must return MappingResult (K2 — MappingResult is NOT a dict)"
+            "Must return MappingResult (K2 -- MappingResult is NOT a dict)"
         )
         assert isinstance(result.mapping, dict)
         assert "CHEMBL25" in result.mapping
@@ -885,7 +885,7 @@ class TestConfigurationAll21Files:
 
 
 # =====================================================================
-# Domain 11: Logging & Observability — metrics tracking
+# Domain 11: Logging & Observability -- metrics tracking
 # =====================================================================
 
 
@@ -932,7 +932,7 @@ class TestObservabilityAll21Files:
 
 
 # =====================================================================
-# Domain 13: Documentation — module docstrings
+# Domain 13: Documentation -- module docstrings
 # =====================================================================
 
 
@@ -945,7 +945,7 @@ class TestDocumentationAll21Files:
 
         assert chembl_pipeline.__doc__ is not None
         assert len(chembl_pipeline.__doc__) > 500, (
-            "Module docstring should be comprehensive (>500 chars) — DOC-1"
+            "Module docstring should be comprehensive (>500 chars) -- DOC-1"
         )
         # Should mention key scientific proxies (DOC-1, DOC-14).
         doc = chembl_pipeline.__doc__
@@ -970,7 +970,7 @@ class TestDocumentationAll21Files:
 
 
 # =====================================================================
-# Domain 14: Compliance — coding standards
+# Domain 14: Compliance -- coding standards
 # =====================================================================
 
 
@@ -986,7 +986,7 @@ class TestComplianceAll21Files:
         import re
         bare_excepts = re.findall(r"^\s*except\s*:", content, re.MULTILINE)
         assert len(bare_excepts) == 0, (
-            f"Found {len(bare_excepts)} bare 'except:' blocks — must use specific exceptions"
+            f"Found {len(bare_excepts)} bare 'except:' blocks -- must use specific exceptions"
         )
 
     def test_chembl_pipeline_no_type_ignore(self):
@@ -999,7 +999,7 @@ class TestComplianceAll21Files:
         import re
         bare_type_ignores = re.findall(r"#\s*type:\s*ignore\s*$", content, re.MULTILINE)
         assert len(bare_type_ignores) == 0, (
-            f"Found {len(bare_type_ignores)} bare '# type: ignore' comments — "
+            f"Found {len(bare_type_ignores)} bare '# type: ignore' comments -- "
             "use specific error codes or fix the type error"
         )
 
@@ -1011,13 +1011,13 @@ class TestComplianceAll21Files:
         import re
         bare_noqas = re.findall(r"#\s*noqa\s*$", content, re.MULTILINE)
         assert len(bare_noqas) == 0, (
-            f"Found {len(bare_noqas)} bare '# noqa' comments — "
+            f"Found {len(bare_noqas)} bare '# noqa' comments -- "
             "must specify the error code (e.g. '# noqa: E501')"
         )
 
 
 # =====================================================================
-# Domain 15: Interoperability — encoding / line endings
+# Domain 15: Interoperability -- encoding / line endings
 # =====================================================================
 
 
@@ -1034,16 +1034,16 @@ class TestInteroperabilityAll21Files:
         open_calls = re.findall(r"open\([^)]+\)", content)
         for call in open_calls:
             if "encoding" not in call:
-                # Allow open(..., "rb") or open(..., "wb") — binary mode
+                # Allow open(..., "rb") or open(..., "wb") -- binary mode
                 # doesn't need encoding.
                 if '"rb"' in call or '"wb"' in call or "'rb'" in call or "'wb'" in call:
                     continue
                 # Allow open() calls that don't involve file I/O (rare).
-                # We're being conservative — flag any text-mode open without encoding.
+                # We're being conservative -- flag any text-mode open without encoding.
                 # (In practice, all our open() calls pass encoding="utf-8".)
         # The test passes if no text-mode open() lacks encoding (we're lenient
         # because the regex can't perfectly distinguish text vs binary).
-        assert True  # soft — the real check is in the code review
+        assert True  # soft -- the real check is in the code review
 
     def test_chembl_pipeline_uses_lineterminator(self):
         """to_csv calls use lineterminator='\\n' for cross-platform compat (INT-6)."""
@@ -1051,7 +1051,7 @@ class TestInteroperabilityAll21Files:
         with open(src_path) as f:
             content = f.read()
         # Every to_csv call should pass lineterminator="\n".
-        # (We check that at least one to_csv has it — full enforcement
+        # (We check that at least one to_csv has it -- full enforcement
         # would require AST analysis.)
         assert 'lineterminator="\\n"' in content or "lineterminator='\\n'" in content, (
             "Expected at least one to_csv call with lineterminator='\\n'"
@@ -1059,7 +1059,7 @@ class TestInteroperabilityAll21Files:
 
 
 # =====================================================================
-# Summary — all 21 files work together
+# Summary -- all 21 files work together
 # =====================================================================
 
 
@@ -1095,7 +1095,7 @@ class TestAll21FilesTogether:
                 pytest.fail(f"Failed to import {mod}: {exc}")
 
     def test_data_flow_through_full_stack(self, tmp_path, monkeypatch, db_session):
-        """Data flows: API → download → clean → load → DB (full-stack integration).
+        """Data flows: API -> download -> clean -> load -> DB (full-stack integration).
 
         This test exercises the complete data flow:
         1. Mock ChEMBL API returns molecules + activities

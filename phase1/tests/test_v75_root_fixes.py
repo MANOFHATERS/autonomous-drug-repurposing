@@ -1,5 +1,5 @@
 """
-v75 ROOT FIX Verification — T-024 through T-036
+v75 ROOT FIX Verification -- T-024 through T-036
 =================================================
 
 This test file is the SINGLE proof that all 13 v75 root-level fixes
@@ -49,7 +49,7 @@ class TestT024_SlaTimeoutAlignment(unittest.TestCase):
         self.assertEqual(
             sla_hours, timeout_hours,
             f"T-024 ROOT FIX: TASK_SLA ({sla_hours}h) must equal TASK_TIMEOUT "
-            f"({timeout_hours}h) — Airflow SLA misses are advisory, so an "
+            f"({timeout_hours}h) -- Airflow SLA misses are advisory, so an "
             f"SLA shorter than the timeout generates false-positive warnings "
             f"that train operators to ignore them.",
         )
@@ -85,7 +85,7 @@ class TestT025_DownloadParallelEntityResolution(unittest.TestCase):
         # must be GONE from active code (the call site at run_pipeline()).
         # The docstring may quote it for audit-trail purposes.
         self.assertNotIn("cls(run_id=_run_id).run()", active,
-                         "T-025: download_parallel.py must NOT call cls(...).run() (the full run) — "
+                         "T-025: download_parallel.py must NOT call cls(...).run() (the full run) -- "
                          "this was the v74 bug that loaded before entity resolution ran.")
 
     def test_shared_module_exists(self):
@@ -107,7 +107,7 @@ class TestT025_DownloadParallelEntityResolution(unittest.TestCase):
                       "T-025: master_pipeline_dag.py must import the shared run_entity_resolution")
         # The inline ~250-line implementation must be GONE (extracted to run.py)
         self.assertNotIn("drug_resolver.build_mapping", text,
-                         "T-025: master_pipeline_dag.py must not have inline build_mapping calls — "
+                         "T-025: master_pipeline_dag.py must not have inline build_mapping calls -- "
                          "they were extracted to entity_resolution/run.py")
 
 
@@ -166,7 +166,7 @@ class TestT027_MlflowCustomDockerfile(unittest.TestCase):
         # trigger false positives.
         active = _strip_yaml_comments(text)
         # The mlflow service must use build: (not image: python:3.11-slim).
-        # Find the mlflow service block — match from "  mlflow:" until the
+        # Find the mlflow service block -- match from "  mlflow:" until the
         # next 2-space-indented key OR top-level key OR EOF.
         mlflow_match = re.search(
             r"^  mlflow:\s*\n((?:^(?:    .*)?\n)+?)(?=^  [a-z]|^[a-z]|\Z)",
@@ -206,7 +206,7 @@ class TestT028_AirflowSchedulerHealthcheck(unittest.TestCase):
         compose_path = PHASE1_ROOT / "docker-compose.yml"
         text = compose_path.read_text()
         active = _strip_yaml_comments(text)
-        # Find the airflow-scheduler service block — match from
+        # Find the airflow-scheduler service block -- match from
         # "  airflow-scheduler:" until the next 2-space-indented key OR
         # top-level key OR EOF.
         sched_match = re.search(
@@ -243,7 +243,7 @@ def _strip_py_comments(text: str) -> str:
         stripped = ln.lstrip()
         if stripped.startswith("#"):
             continue
-        # Truncate at inline # (naive — does not handle strings)
+        # Truncate at inline # (naive -- does not handle strings)
         if "#" in ln:
             # Only strip if # is not inside a string literal (approximate
             # by checking quote balance before #)
@@ -556,7 +556,7 @@ class TestPhase1Phase2Bridge100PercentLinked(unittest.TestCase):
         dag_path = PHASE1_ROOT / "dags" / "master_pipeline_dag.py"
         text = dag_path.read_text()
         self.assertIn("pubchem_load >> trigger_phase2", text,
-                      "Master DAG must wire pubchem_load >> trigger_phase2 (Phase 1 → Phase 2 link)")
+                      "Master DAG must wire pubchem_load >> trigger_phase2 (Phase 1 -> Phase 2 link)")
         self.assertIn("run_unified.py", text,
                       "trigger_phase2 task must invoke run_unified.py")
 

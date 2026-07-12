@@ -88,7 +88,7 @@ def db_session(db_engine):
 
 @pytest.fixture(scope="function")
 def clean_engine():
-    """Engine with no tables created — for testing migration from scratch."""
+    """Engine with no tables created -- for testing migration from scratch."""
     engine = create_engine("sqlite:///:memory:", echo=False)
 
     @event.listens_for(engine, "connect")
@@ -876,11 +876,11 @@ class TestConfiguration:
         warnings about questionable (but not invalid) values.
         """
         from database.migrations import validate_migration_config, MigrationConfig
-        # Bad batch_size — __post_init__ fails fast (BUG-CFG-03)
+        # Bad batch_size -- __post_init__ fails fast (BUG-CFG-03)
         with pytest.raises(ValueError, match="batch_size"):
             MigrationConfig(batch_size=-1)
 
-        # Bad timeout — __post_init__ fails fast (BUG-CFG-03)
+        # Bad timeout -- __post_init__ fails fast (BUG-CFG-03)
         with pytest.raises(ValueError, match="timeout_seconds"):
             MigrationConfig(timeout_seconds=0)
 

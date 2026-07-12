@@ -1,20 +1,20 @@
 # SPDX-License-Identifier: MIT
-# © 2024-2026 Autonomous Drug Repurposing Platform — Team Cosmic / VentureLab
+# © 2024-2026 Autonomous Drug Repurposing Platform -- Team Cosmic / VentureLab
 """
 Entity resolution package for the Drug Repurposing ETL platform.
 
 Provides cross-database entity resolution for drugs and proteins,
 reconciling identifiers across **five** biomedical databases:
 
-* **ChEMBL** — chemical compounds + bioactivity data (drug records)
-* **DrugBank** — FDA-approved drug profiles (drug records)
-* **PubChem** — structural / property data (drug records, opt-in
+* **ChEMBL** -- chemical compounds + bioactivity data (drug records)
+* **DrugBank** -- FDA-approved drug profiles (drug records)
+* **PubChem** -- structural / property data (drug records, opt-in
   network lookup)
-* **UniProt** — protein sequences / functions (protein records —
+* **UniProt** -- protein sequences / functions (protein records --
   canonical)
-* **STRING** — protein-protein interactions (protein records — merged)
+* **STRING** -- protein-protein interactions (protein records -- merged)
 
-DisGeNET and OMIM are **out of scope** for this package — they are
+DisGeNET and OMIM are **out of scope** for this package -- they are
 disease databases, not entity-identity databases, and are handled by
 the ``cleaning`` and ``database`` packages downstream.
 
@@ -45,45 +45,45 @@ Resolution Strategies
 **Drugs** are reconciled by InChIKey (the canonical chemical
 identifier) with this priority order:
 
-1. ``inchikey_exact`` — full 27-char InChIKey equality (confidence 1.0)
-2. ``inchikey_connectivity`` — first 14 chars equal (confidence 0.9).
-   **Off by default** — see *Stereoisomer Safety Warning* below.
-3a. ``name_normalized`` — exact match after :func:`normalize_name`
+1. ``inchikey_exact`` -- full 27-char InChIKey equality (confidence 1.0)
+2. ``inchikey_connectivity`` -- first 14 chars equal (confidence 0.9).
+   **Off by default** -- see *Stereoisomer Safety Warning* below.
+3a. ``name_normalized`` -- exact match after :func:`normalize_name`
    (confidence 0.8)
-3b. ``fuzzy`` — :func:`rapidfuzz.fuzz.token_sort_ratio` ≥
+3b. ``fuzzy`` -- :func:`rapidfuzz.fuzz.token_sort_ratio` ≥
    :attr:`ResolverConfig.fuzzy_threshold
    <entity_resolution.base.ResolverConfig.fuzzy_threshold>`
-   (confidence 0.65, ``MatchConfidence.FUZZY`` — v29 inversion fix).
+   (confidence 0.65, ``MatchConfidence.FUZZY`` -- v29 inversion fix).
    The reported confidence is always ≥ the
    threshold (audit D3-3).
-4. ``pubchem_xref`` — PubChem REST API name → InChIKey lookup
-   (confidence 0.7).  **Off by default** — see *Network Side
+4. ``pubchem_xref`` -- PubChem REST API name -> InChIKey lookup
+   (confidence 0.7).  **Off by default** -- see *Network Side
    Effects* below.
 
 **Proteins** are reconciled by UniProt accession with this priority
 order:
 
-1. ``uniprot_exact`` — UniProt accession equality (confidence 1.0)
-2. STRING → UniProt cross-reference (confidence 1.0 when the
+1. ``uniprot_exact`` -- UniProt accession equality (confidence 1.0)
+2. STRING -> UniProt cross-reference (confidence 1.0 when the
    cross-reference was established from a UniProt-supplied STRING ID)
-3. ``gene_name_organism`` — ``(gene_symbol.upper(), organism.lower())``
-   match (confidence 0.75, ``MatchConfidence.GENE_NAME_ORGANISM`` —
+3. ``gene_name_organism`` -- ``(gene_symbol.upper(), organism.lower())``
+   match (confidence 0.75, ``MatchConfidence.GENE_NAME_ORGANISM`` --
    v29 inversion fix: sits between NAME_NORMALIZED (0.80) and FUZZY
    (0.65)).
-4. ``protein_name_fuzzy`` — protein-name fuzzy match with a stricter
+4. ``protein_name_fuzzy`` -- protein-name fuzzy match with a stricter
    0.60 threshold (``ResolverConfig.fuzzy_threshold`` floored by
    ``_PROTEIN_FUZZY_THRESHOLD=0.55``) to suppress false positives
-   (confidence 0.60, ``MatchConfidence.PROTEIN_NAME_FUZZY`` — v29
+   (confidence 0.60, ``MatchConfidence.PROTEIN_NAME_FUZZY`` -- v29
    inversion fix).
 
 Bulk vs. Single-Record Mode
 ---------------------------
 The bulk path :meth:`DrugResolver.build_mapping` and
-:meth:`ProteinResolver.build_mapping` **never** make network calls —
+:meth:`ProteinResolver.build_mapping` **never** make network calls --
 they ingest pre-fetched DataFrames.  PubChem lookup is confined to
 :meth:`DrugResolver.resolve_single`, which is the single-record path
 used for ad-hoc lookups.  This asymmetry is intentional and
-documented (audit D3-1) — bulk ETL must be deterministic and
+documented (audit D3-1) -- bulk ETL must be deterministic and
 reproducible, so it cannot depend on a third-party HTTP service.
 
 Stereoisomer Safety Warning
@@ -92,7 +92,7 @@ Stereoisomer Safety Warning
    The default ``collapse_stereoisomers=False`` is a **patient-safety
    setting**.  Two InChIKeys sharing the same 14-char connectivity
    block represent the same molecular skeleton but may have
-   different stereochemistry — and stereochemistry can drastically
+   different stereochemistry -- and stereochemistry can drastically
    change pharmacology.  Thalidomide enantiomers are the canonical
    example: one is a sedative, the other is a teratogen.  Warfarin,
    citalopram, and many other drugs have similar enantiomer-specific
@@ -116,7 +116,7 @@ generates a **source-independent** synthetic key by hashing the
 normalized name with SHA-256 and embedding it in the InChIKey *shape*
 (``SYNTH{14 chars}-{10 chars}-{1 char}``).  This means the same
 InChIKey-less drug from ChEMBL vs DrugBank gets the **same** synthetic
-key and is correctly merged — fixing audit D3-5, where the previous
+key and is correctly merged -- fixing audit D3-5, where the previous
 ``sha256(name:source)`` scheme split the two records into different
 canonical entries.
 
@@ -130,7 +130,7 @@ False
 
 PubChem Cross-Reference Ambiguity
 ---------------------------------
-PubChem name lookups may resolve to a salt form (e.g. "aspirin" →
+PubChem name lookups may resolve to a salt form (e.g. "aspirin" ->
 "aspirin sodium") rather than the free acid.  Salt forms have
 different pharmacology from the free acid.  Set
 :attr:`ResolverConfig.pubchem_strict_salt_form
@@ -163,29 +163,29 @@ env-var override (prefix ``ENTITY_RESOLUTION_``) so deployments can
 re-tune the resolver without editing source.  The default values are
 chosen for **safe-by-default** operation:
 
-* ``collapse_stereoisomers=False`` — see Stereoisomer Safety Warning.
-* ``pubchem_enabled=False`` — see Network Side Effects.
-* ``fuzzy_threshold=0.60`` — empirically chosen to accept common
+* ``collapse_stereoisomers=False`` -- see Stereoisomer Safety Warning.
+* ``pubchem_enabled=False`` -- see Network Side Effects.
+* ``fuzzy_threshold=0.60`` -- empirically chosen to accept common
   typos and case variations while rejecting unrelated drugs that
   happen to share a substring.  (v42 P0-1: lowered from the legacy
-  0.85 to align with ``MatchConfidence.FUZZY=0.65`` — the gate must
+  0.85 to align with ``MatchConfidence.FUZZY=0.65`` -- the gate must
   sit below the reported confidence so accepted fuzzy matches are
   always scored at ≥ the gate.)
-* ``fuzzy_max_candidates=10_000`` — bounds the worst-case
+* ``fuzzy_max_candidates=10_000`` -- bounds the worst-case
   :math:`O(n^2)` fuzzy sweep so a 1M-record dataset doesn't make the
   resolver pathological (audit D8-2).
-* ``pubchem_call_delay=0.2`` (5 req/sec) — matches PubChem's
+* ``pubchem_call_delay=0.2`` (5 req/sec) -- matches PubChem's
   published rate limit.  When ``pubchem_api_key`` is set, the delay
   drops to 0.1 (10 req/sec) per PubChem's published limits for
   authenticated callers.
-* ``default_organism="Homo sapiens"`` — ⚠️ This default assumes
+* ``default_organism="Homo sapiens"`` -- ⚠️ This default assumes
   human-centric research.  Non-human protein studies MUST override
   this via ``ResolverConfig(default_organism=...)`` or the
   ``ENTITY_RESOLUTION_DEFAULT_ORGANISM`` env var.
 
 Confidence scores are **calibrated heuristics, not probabilities**.
 A confidence of 0.85 does NOT mean "85 % likely to be the same
-entity" — it means "this is the score we assign to a fuzzy match
+entity" -- it means "this is the score we assign to a fuzzy match
 that scored at least 0.85 on the rapidfuzz token-sort ratio".  The
 rationale table:
 
@@ -200,9 +200,9 @@ name_normalized      0.80    Same normalized name across sources.
                               vs "aspirin" the metabolite).
 fuzzy                0.65    Token-sort ratio ≥ threshold (0.60).
                               v29 inversion fix: confidence was lowered
-                              from the legacy 0.85 → 0.65 so it sits
+                              from the legacy 0.85 -> 0.65 so it sits
                               below NAME_NORMALIZED (0.80). The runtime
-                              threshold was also lowered 0.85 → 0.60 in
+                              threshold was also lowered 0.85 -> 0.60 in
                               v42 P0-1 so the gate stays below the
                               reported confidence (D3-3).
 pubchem_xref         0.70    Third-party network lookup.  Subject to
@@ -214,12 +214,12 @@ gene_name_organism   0.75    Gene symbols are stable within an
                               organism but cross-organism homologs
                               exist (e.g. TP53 in human vs Trp53 in
                               mouse). v29 inversion fix: lowered from
-                              0.85 → 0.75 so it sits between
+                              0.85 -> 0.75 so it sits between
                               NAME_NORMALIZED (0.80) and FUZZY (0.65).
 protein_name_fuzzy   0.60    Protein names are highly variable; fuzzy
                               matches here are lower confidence than
                               drug-name fuzzy matches. v29 inversion
-                              fix: lowered from 0.90 → 0.60.
+                              fix: lowered from 0.90 -> 0.60.
 ==============  ===========  =========================================
 
 Logging
@@ -244,7 +244,7 @@ Scaling Notes
   package does not trigger any side effects.
 * **Fuzzy sweep ceiling**: ``ResolverConfig.fuzzy_max_candidates``
   bounds the worst-case :math:`O(n^2)` fuzzy sweep.  For datasets
-  larger than the ceiling, some fuzzy matches may be missed —
+  larger than the ceiling, some fuzzy matches may be missed --
   increase the ceiling (and accept slower runtime) if false negatives
   are a concern.
 * **PubChem rate limit**: :meth:`resolve_single
@@ -292,21 +292,21 @@ Version
 
 See Also
 --------
-:mod:`entity_resolution.base` — :class:`Resolver` ABC,
+:mod:`entity_resolution.base` -- :class:`Resolver` ABC,
 :class:`ResolverConfig`, :class:`ResolverStats`,
 :class:`MatchConfidence` enum, :class:`_ProcessGlobalRateLimiter`.
-:mod:`entity_resolution.drug_resolver` — :class:`DrugResolver` and
+:mod:`entity_resolution.drug_resolver` -- :class:`DrugResolver` and
 :func:`is_synthetic_inchikey`.
-:mod:`entity_resolution.protein_resolver` — :class:`ProteinResolver`.
-:mod:`entity_resolution.resolver_utils` — :func:`normalize_name`,
+:mod:`entity_resolution.protein_resolver` -- :class:`ProteinResolver`.
+:mod:`entity_resolution.resolver_utils` -- :func:`normalize_name`,
 :func:`fuzzy_match_score`, :func:`extract_inchikey_first_block`,
 :func:`is_valid_inchikey`, :func:`validate_drug_record`,
 :func:`validate_protein_record`, :func:`build_canonical_name_index`,
 :func:`build_canonical_inchikey_index`, :func:`compute_match_confidence`,
 :func:`register_match_method`, :data:`METHOD_CONFIDENCE`,
 :class:`MatchConfidence`.
-:mod:`cleaning` — pre-resolution cleaning / normalization.
-:mod:`database.loaders` — post-resolution bulk loaders.
+:mod:`cleaning` -- pre-resolution cleaning / normalization.
+:mod:`database.loaders` -- post-resolution bulk loaders.
 """
 
 from __future__ import annotations
@@ -318,7 +318,7 @@ import sys
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 # ---------------------------------------------------------------------------
-# Package logger — attach NullHandler BEFORE any submodule import so that
+# Package logger -- attach NullHandler BEFORE any submodule import so that
 # "No handlers could be found" warnings are impossible (audit D11-1).
 # ---------------------------------------------------------------------------
 logger = logging.getLogger(__name__)
@@ -341,7 +341,7 @@ MAPPING_SCHEMA_VERSION: str = "1.0"
 # accessed (audit D1-2, D6-1, D8-1).
 # ---------------------------------------------------------------------------
 _SYMBOL_MAP: Dict[str, Tuple[str, str]] = {
-    # Classes (D1-3 — Resolver ABC lives in base)
+    # Classes (D1-3 -- Resolver ABC lives in base)
     "Resolver": ("entity_resolution.base", "Resolver"),
     "ResolverConfig": ("entity_resolution.base", "ResolverConfig"),
     "ResolverStats": ("entity_resolution.base", "ResolverStats"),
@@ -370,7 +370,7 @@ _SYMBOL_MAP: Dict[str, Tuple[str, str]] = {
     "DeadLetterQueueFullError": ("entity_resolution.drug_resolver", "DeadLetterQueueFullError"),
     "ResolverOutputSchemaError": ("entity_resolution.drug_resolver", "ResolverOutputSchemaError"),
 
-    # Functions — resolver_utils
+    # Functions -- resolver_utils
     "normalize_name": ("entity_resolution.resolver_utils", "normalize_name"),
     "fuzzy_match_score": ("entity_resolution.resolver_utils", "fuzzy_match_score"),
     "extract_inchikey_first_block": (
@@ -393,13 +393,13 @@ _SYMBOL_MAP: Dict[str, Tuple[str, str]] = {
     "find_duplicate_ids": (
         "entity_resolution.resolver_utils", "find_duplicate_ids"),
 
-    # Functions — base
+    # Functions -- base
     "is_valid_inchikey": ("entity_resolution.base", "is_valid_inchikey"),
     "is_synthetic_inchikey": ("entity_resolution.base", "is_synthetic_inchikey"),
     "make_synthetic_inchikey": (
         "entity_resolution.base", "make_synthetic_inchikey"),
 
-    # Functions — drug_resolver
+    # Functions -- drug_resolver
     "build_mapping": (
         "entity_resolution.drug_resolver", "build_mapping"),
 
@@ -546,7 +546,7 @@ def check_dependencies() -> Dict[str, bool]:
     Returns
     -------
     dict[str, bool]
-        Mapping of dependency name → importable.  Keys: ``pandas``,
+        Mapping of dependency name -> importable.  Keys: ``pandas``,
         ``requests``, ``rapidfuzz``, ``pyarrow``.
     """
     deps: Dict[str, bool] = {}
@@ -562,7 +562,7 @@ def check_dependencies() -> Dict[str, bool]:
 def is_available() -> bool:
     """Return ``True`` iff the resolver's **core** dependencies are present.
 
-    Core dependencies are ``pandas`` and ``rapidfuzz`` — without these
+    Core dependencies are ``pandas`` and ``rapidfuzz`` -- without these
     the resolver cannot construct its indices or normalize names.
     ``requests`` is only required for PubChem lookups (opt-in).
     """
