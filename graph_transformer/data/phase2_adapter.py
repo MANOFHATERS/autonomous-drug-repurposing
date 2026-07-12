@@ -163,8 +163,17 @@ PHASE2_TO_PHASE3_EDGE: Dict[Tuple[str, str, str], Tuple[str, str, str]] = {
         "part_of",
         "pathway",
     ),
-    # (Pathway, disrupted_in, Disease) edges are DERIVED (see Step 5 in
-    # adapt_phase2_to_phase3) — NOT directly mapped from Phase 2.
+    # P3-009 unification: also accept direct (Pathway, disrupted_in,
+    # Disease) edges if Phase 2 ever produces them (currently Phase 2
+    # does NOT — these edges are DERIVED in Step 5 from Gene->Disease +
+    # Gene->Protein + Protein->Pathway). Including this mapping makes
+    # the adapter IDENTICAL to graph_builder._PHASE2_TO_PHASE3_EDGE_TYPE
+    # so both paths produce the same graph for the same Phase 2 data.
+    ("Pathway", "disrupted_in", "Disease"): (
+        "pathway",
+        "disrupted_in",
+        "disease",
+    ),
 }
 
 # ─── Disease name canonicalization ──────────────────────────────────────
