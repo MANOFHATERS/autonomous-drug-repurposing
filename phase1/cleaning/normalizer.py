@@ -4258,6 +4258,47 @@ def normalize_activity_value(
             warnings=tuple(warnings_tuple),
         )
     if not isinstance(units, str):
+        # P1-033 ROOT FIX (NaN units coerced to "nan" string):
+        #   The previous code did ``units = str(units)`` for any non-str,
+        #   non-None value. For ``float('nan')``, ``np.nan``, or pandas
+        #   ``pd.NA`` / ``pd.NaT`` this produces the strings ``"nan"`` or
+        #   ``"<NA>"`` — which then fail the unit lookup at line ~4545
+        #   (``_UNIT_CONVERSIONS_CF.get("nan".casefold())`` returns None)
+        #   and the function returns ``value=numeric_value`` unchanged
+        #   with ``unit="nan"`` — silently passing the original value as
+        #   if it were already in nM. Same impact as P1-014 (wrong
+        #   magnitude). The ``unit="nan"`` string in the DB CHECK
+        #   constraint may or may not pass depending on the constraint.
+        #
+        #   ROOT FIX: explicitly check for NaN/NA values using
+        #   ``pd.isna()`` (which catches ``float('nan')``, ``np.nan``,
+        #   ``pd.NA``, ``pd.NaT``, and Python ``None``). For NaN/NA we
+        #   log a warning and return ``value=None`` with ``unit=""`` —
+        #   the same behavior as the ``units is None`` branch above.
+        #   This prevents the silent "nan"-string passthrough.
+        try:
+            _is_na = bool(pd.isna(units))
+        except (TypeError, ValueError):
+            # pd.isna on some non-scalar types (e.g. lists) raises; treat
+            # as "not NA" and fall through to the str() coercion below.
+            _is_na = False
+        if _is_na:
+            logger.warning(
+                "normalize_activity_value: units is NaN/NA (type=%s) — "
+                "treating as missing (returning value=None, unit='')",
+                type(units).__name__,
+            )
+            warnings_tuple.append("units_is_nan")
+            return ActivityValue(
+                value=None,
+                unit="",
+                original_value=original_value,
+                original_unit=original_unit,
+                censored=False,
+                activity_type=activity_type,
+                temperature_c=temperature_c,
+                warnings=tuple(warnings_tuple),
+            )
         logger.debug(
             "normalize_activity_value: units is %s, not str — coercing",
             type(units).__name__,
