@@ -174,8 +174,12 @@ export function validatePasswordPolicy(password: string): PasswordPolicyResult {
 }
 
 export function validateEmail(email: string): boolean {
-  // Pragmatic RFC-5322-ish check; we do not need to be perfect — we send a
-  // verification email for real accounts.
+  // FE-029 ROOT FIX: The previous comment said "we send a verification
+  // email for real accounts" — that was a lie. nodemailer was in
+  // package.json but NEVER imported, and emailVerified was set to false
+  // on register and never became true. Email verification is implemented
+  // separately in FE-035 (registration rate limit + verification flow).
+  // Until then, this validator just checks the format.
   return typeof email === "string" && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) && email.length <= 254;
 }
 
