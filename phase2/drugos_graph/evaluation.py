@@ -1232,11 +1232,36 @@ def compute_auc(
         # launch sign-off on eval sets too small for the AUC to be
         # statistically meaningful. Operators can override with
         # DRUGOS_ALLOW_SMALL_IMBALANCED_EVAL=1 for dev runs.
+        #
+        # v102 ROOT FIX (P2-044 — make thresholds CONFIGURABLE via env
+        # vars): the v100 fix used HARDCODED 30 (min positives) and
+        # 5.0 (max ratio). The issue spec requires these be
+        # configurable via DRUGOS_MIN_EVAL_POSITIVES (default 30) and
+        # DRUGOS_MAX_EVAL_RATIO (default 5.0) so operators can tune
+        # the integrity gate for their eval set size without code
+        # changes. This is critical for production: a pharma partner
+        # running a small focused eval (e.g. 50 positives × 200
+        # negatives = 1:4 ratio) should NOT be blocked, while a
+        # dev-mode eval (7 × 70 = 1:10) should be. The env vars let
+        # operators tune the gate per-run without editing code.
+        import os as _os_v102_044
+        try:
+            _min_eval_positives = int(_os_v102_044.environ.get(
+                "DRUGOS_MIN_EVAL_POSITIVES", "30"
+            ))
+        except (TypeError, ValueError):
+            _min_eval_positives = 30
+        try:
+            _max_eval_ratio = float(_os_v102_044.environ.get(
+                "DRUGOS_MAX_EVAL_RATIO", "5.0"
+            ))
+        except (TypeError, ValueError):
+            _max_eval_ratio = 5.0
         _n_pos = len(pos_scores)
         _n_neg = len(neg_scores)
         if _n_pos > 0 and _n_neg > 0:
             _ratio = max(_n_pos, _n_neg) / min(_n_pos, _n_neg)
-            if _ratio > 5.0:
+            if _ratio > _max_eval_ratio:
                 _log_structured(
                     logging.WARNING,
                     "imbalanced_eval_set",
@@ -1246,18 +1271,26 @@ def compute_auc(
                         f"(ratio 1:{_ratio:.1f}). The AUC confidence "
                         f"interval is wide — interpret with caution. "
                         f"For production V1 launch sign-off, use at "
-                        f"least 30 positives and 30 negatives."
+                        f"least {_min_eval_positives} positives and "
+                        f"{_min_eval_positives} negatives "
+                        f"(DRUGOS_MIN_EVAL_POSITIVES) and a ratio <= "
+                        f"{_max_eval_ratio:.1f}:1 "
+                        f"(DRUGOS_MAX_EVAL_RATIO)."
                     ),
                     n_positives=_n_pos,
                     n_negatives=_n_neg,
                     imbalance_ratio=_ratio,
+                    min_eval_positives=_min_eval_positives,
+                    max_eval_ratio=_max_eval_ratio,
                 )
                 # v100 P2-044: BLOCK when the eval set is too small
                 # for the AUC to be statistically meaningful. The 30-
                 # positive threshold is the standard minimum for the
                 # Mann-Whitney U 95% CI to be narrower than ±0.15.
-                import os as _os_v100_044
-                _allow_small_imbalanced = _os_v100_044.environ.get(
+                # v102 P2-044: thresholds are now configurable via
+                # DRUGOS_MIN_EVAL_POSITIVES (default 30) and
+                # DRUGOS_MAX_EVAL_RATIO (default 5.0).
+                _allow_small_imbalanced = _os_v102_044.environ.get(
                     "DRUGOS_ALLOW_SMALL_IMBALANCED_EVAL", ""
                 ) == "1"
                 # Dev mode bypasses the block so dev-fixture runs (which
@@ -1269,7 +1302,7 @@ def compute_auc(
                 except Exception:
                     _is_dev_v100 = False
                 if (
-                    min(_n_pos, _n_neg) < 30
+                    min(_n_pos, _n_neg) < _min_eval_positives
                     and not _allow_small_imbalanced
                     and not _is_dev_v100
                 ):
@@ -1279,17 +1312,22 @@ def compute_auc(
                             f"{_n_neg} negatives (ratio 1:{_ratio:.1f}) "
                             f"is statistically unreliable — the 95% CI "
                             f"spans more than ±0.15 AUC. V1 launch "
-                            f"sign-off requires ≥30 positives AND "
-                            f"≥30 negatives for the AUC to be "
-                            f"interpretable. Set "
-                            f"DRUGOS_ALLOW_SMALL_IMBALANCED_EVAL=1 to "
-                            f"override (dev mode only). (v100 P2-044)"
+                            f"sign-off requires ≥{_min_eval_positives} "
+                            f"positives AND ≥{_min_eval_positives} "
+                            f"negatives for the AUC to be "
+                            f"interpretable (DRUGOS_MIN_EVAL_POSITIVES="
+                            f"{_min_eval_positives}, "
+                            f"DRUGOS_MAX_EVAL_RATIO={_max_eval_ratio}). "
+                            f"Set DRUGOS_ALLOW_SMALL_IMBALANCED_EVAL=1 "
+                            f"to override (dev mode only). (v102 P2-044)"
                         ),
                         context={
                             "reason": "imbalanced_eval_set_too_small",
                             "n_positives": _n_pos,
                             "n_negatives": _n_neg,
                             "imbalance_ratio": _ratio,
+                            "min_eval_positives": _min_eval_positives,
+                            "max_eval_ratio": _max_eval_ratio,
                         },
                     )
 

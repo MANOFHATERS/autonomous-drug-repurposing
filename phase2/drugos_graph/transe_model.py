@@ -2845,20 +2845,41 @@ def train_transe(
                         continue
                     head_pool, tail_pool = pool
                     # Sample n_slots head negatives from head_pool.
+                    # v102 ROOT FIX (P2-043): the previous code used
+                    # ``perm_h = torch.randperm(...)[:n_slots]`` then
+                    # concatenated ``extra = torch.randint(...)`` when
+                    # n_slots > len(head_pool). The randint extra CAN
+                    # sample the SAME index multiple times, producing
+                    # DUPLICATE head negatives within the same batch.
+                    # TransE training then sees the same negative triple
+                    # multiple times, wasting gradient signal on
+                    # duplicates. Effective negative batch size is
+                    # smaller than nominal.
+                    #
+                    # ROOT FIX: use randperm when n_slots <= len(pool)
+                    # (guarantees unique indices — no duplicates), else
+                    # use randint directly (necessary for n_slots >
+                    # pool_size, where duplicates are unavoidable but
+                    # the perm_h+extra split was just adding complexity
+                    # without deduplication). The randint call already
+                    # handles n_slots > pool_size by sampling with
+                    # replacement.
                     if len(head_pool) > 0:
-                        perm_h = torch.randperm(
-                            len(head_pool), generator=rng, device=device
-                        )[:n_slots]
-                        # Wrap around if n_slots > len(head_pool).
-                        if len(perm_h) < n_slots:
-                            extra = torch.randint(
-                                0, len(head_pool), (n_slots - len(perm_h),),
-                                generator=rng, device=device,
-                            )
-                            perm_h = torch.cat([perm_h, extra])
                         h_pool_tensor = torch.tensor(
                             head_pool, dtype=torch.long, device=device
                         )
+                        if n_slots <= len(head_pool):
+                            # Unique indices (no duplicates).
+                            perm_h = torch.randperm(
+                                len(head_pool), generator=rng, device=device
+                            )[:n_slots]
+                        else:
+                            # n_slots > pool_size: duplicates unavoidable.
+                            # Use randint directly (no perm_h+extra split).
+                            perm_h = torch.randint(
+                                0, len(head_pool), (n_slots,),
+                                generator=rng, device=device,
+                            )
                         neg_h_list[slots] = h_pool_tensor[perm_h]
                     else:
                         neg_h_list[slots] = torch.randint(
@@ -2866,19 +2887,22 @@ def train_transe(
                             generator=rng, device=device,
                         )
                     # Sample n_slots tail negatives from tail_pool.
+                    # v102 P2-043: same fix as head_pool above — use
+                    # randperm when n_slots <= len(pool) (unique indices),
+                    # else randint directly (no perm_t+extra split).
                     if len(tail_pool) > 0:
-                        perm_t = torch.randperm(
-                            len(tail_pool), generator=rng, device=device
-                        )[:n_slots]
-                        if len(perm_t) < n_slots:
-                            extra = torch.randint(
-                                0, len(tail_pool), (n_slots - len(perm_t),),
-                                generator=rng, device=device,
-                            )
-                            perm_t = torch.cat([perm_t, extra])
                         t_pool_tensor = torch.tensor(
                             tail_pool, dtype=torch.long, device=device
                         )
+                        if n_slots <= len(tail_pool):
+                            perm_t = torch.randperm(
+                                len(tail_pool), generator=rng, device=device
+                            )[:n_slots]
+                        else:
+                            perm_t = torch.randint(
+                                0, len(tail_pool), (n_slots,),
+                                generator=rng, device=device,
+                            )
                         neg_t_list[slots] = t_pool_tensor[perm_t]
                     else:
                         neg_t_list[slots] = torch.randint(
