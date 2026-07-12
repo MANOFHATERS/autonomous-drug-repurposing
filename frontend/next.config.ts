@@ -16,7 +16,13 @@ const nextConfig: NextConfig = {
   typescript: {
     ignoreBuildErrors: false,
   },
-  reactStrictMode: false,
+  // FE-028 ROOT FIX: reactStrictMode was disabled — React 19's built-in
+  // bug detection was off. Strict mode in development double-renders
+  // components, double-invokes effects, and warns about deprecated APIs.
+  // This catches stale closures, missing effect cleanups, and deprecated
+  // patterns BEFORE they reach production. Disabling it in a production
+  // pharma app is a code smell.
+  reactStrictMode: true,
 };
 
 export default nextConfig;
