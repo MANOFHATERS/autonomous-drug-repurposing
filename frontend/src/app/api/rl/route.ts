@@ -104,6 +104,22 @@ export async function GET() {
 /**
  * FE-010 ROOT FIX: candidates are persisted with status="predicted" and
  * rlPredicted=true. They are NOT "validated".
+ *
+ * FE-037 ROOT FIX (re-applied after regression): persistRlCandidates
+ * previously found the user's FIRST org membership, then found the FIRST
+ * project in that org (ordered by createdAt asc), and upserted hypotheses
+ * into it. The user may not be the owner or even a member of that project
+ * (the Project model has no ProjectMember table — projects are org-scoped,
+ * not user-scoped). So user A's RL query could populate user B's project
+ * with hypotheses.
+ *
+ * Root fix: We now find or create a DEDICATED 'RL Predictions' project
+ * OWNED BY the calling user. This guarantees:
+ *   - The user is the owner of the project (createdById = userId).
+ *   - Other users' projects are NEVER touched.
+ *   - Re-running the RL agent upserts into the same dedicated project
+ *     (keyed on the project name + ownerId) so re-runs update scores
+ *     rather than creating duplicate projects.
  */
 async function persistRlCandidates(userId: string, candidates: RankedHypothesis[]): Promise<void> {
   if (candidates.length === 0) return;
@@ -113,11 +129,36 @@ async function persistRlCandidates(userId: string, candidates: RankedHypothesis[
       orderBy: { joinedAt: "asc" },
     });
     if (!membership) return;
-    const project = await db.project.findFirst({
-      where: { organizationId: membership.organizationId },
-      orderBy: { createdAt: "asc" },
+
+    // FE-037: Find or create a DEDICATED 'RL Predictions' project OWNED
+    // BY the calling user. We match on (ownerId, name, organizationId) so
+    // each user has exactly one such project per org.
+    const RL_PROJECT_NAME = "RL Predictions";
+    let project = await db.project.findFirst({
+      where: { ownerId: userId, name: RL_PROJECT_NAME, organizationId: membership.organizationId },
     });
-    if (!project) return;
+    if (!project) {
+      try {
+        project = await db.project.create({
+          data: {
+            name: RL_PROJECT_NAME,
+            description: "Auto-populated by the Phase 4 RL ranker. Hypotheses here are derived from RL predictions — verify before acting on them.",
+            status: "active",
+            visibility: "private", // FE-037: private — never org-visible by default.
+            ownerId: userId,
+            organizationId: membership.organizationId,
+            tags: "rl,predictions,auto-generated",
+          },
+        });
+      } catch {
+        // Race: another concurrent request created the project between
+        // our findFirst and create. Re-fetch.
+        project = await db.project.findFirst({
+          where: { ownerId: userId, name: RL_PROJECT_NAME, organizationId: membership.organizationId },
+        });
+        if (!project) return;
+      }
+    }
 
     for (const c of candidates.slice(0, 50)) {
       const existing = await db.hypothesis.findFirst({
