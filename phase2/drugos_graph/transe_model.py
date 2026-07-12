@@ -733,6 +733,33 @@ class TransEModel(nn.Module):
         """
         return "lower_better"
 
+    # v102 ROOT FIX (P2-039): expose ``num_total_entities`` so the
+    # KGEmbeddingModel Protocol contract is satisfied. The previous
+    # train_transe code at line 2219 used
+    # ``getattr(model, "num_total_entities", None)`` with a fallback to
+    # ``model.entity_embeddings.num_embeddings`` — but TransE did NOT
+    # expose num_total_entities, so the getattr was always dead code.
+    # Adding the property here makes the contract explicit:
+    #   - TransE (homogeneous): num_total_entities == entity_embeddings.num_embeddings
+    #   - HGT   (heterogeneous): num_total_entities == sum(self._node_counts.values())
+    # Future heterogeneous models MUST also expose this property.
+    @property
+    def num_total_entities(self) -> int:
+        """Total entity count for index-range validation + neg sampling.
+
+        For TransE (homogeneous entity table): equals
+        ``self.entity_embeddings.num_embeddings`` (the single entity
+        table's row count). For heterogeneous models (HGT) this is the
+        SUM of all node-type counts — see graph_transformer_model.py.
+
+        train_transe uses this to validate head/tail index ranges and
+        to size the negative-sampling space. The previous getattr-
+        fallback pattern was dead code for TransE; making it an
+        explicit Protocol contract (P2-039) eliminates the silent
+        fallback class of bugs.
+        """
+        return int(self.entity_embeddings.num_embeddings)
+
     @property
     def score_higher_is_better(self) -> bool:
         """Legacy boolean form of score_direction. False for TransE.

@@ -2080,12 +2080,29 @@ class PyGBuilder(GraphBuilderProtocol):
                     "val": perm[n_train:n_train + n_val],
                     "test": perm[n_train + n_val:n_train + n_val + n_test],
                 }
-                self.logger.info(
-                    f"node_disjoint_split partition[{ntype}]: "
-                    f"train={n_nodes and n_train} ({n_nodes and n_train/n_nodes:.1%}), "
-                    f"val={n_nodes and n_val} ({n_nodes and n_val/n_nodes:.1%}), "
-                    f"test={n_nodes and n_test} ({n_nodes and n_test/n_nodes:.1%})"
-                )
+                # v102 ROOT FIX (P2-040): replace the cryptic
+                # ``n_nodes and n_train`` short-circuit (which evaluates
+                # to ``n_train`` when ``n_nodes > 0`` else ``0``) with
+                # explicit guards. The previous form produced
+                # "train=0 (0.0%)" when n_nodes=0, which was technically
+                # correct but unreadable — operators couldn't tell
+                # whether the split was empty because there were no
+                # nodes OR because of a partition bug. Now the log
+                # clearly distinguishes the two cases AND shows the
+                # total node count for context.
+                if n_nodes > 0:
+                    self.logger.info(
+                        f"node_disjoint_split partition[{ntype}]: "
+                        f"train={n_train} ({n_train/n_nodes:.1%} of {n_nodes}), "
+                        f"val={n_val} ({n_val/n_nodes:.1%} of {n_nodes}), "
+                        f"test={n_test} ({n_test/n_nodes:.1%} of {n_nodes})"
+                    )
+                else:
+                    self.logger.info(
+                        f"node_disjoint_split partition[{ntype}]: "
+                        f"train=0 (no nodes), val=0 (no nodes), "
+                        f"test=0 (no nodes)"
+                    )
 
             # Step 2: build the three HeteroData outputs. For each
             # edge type, assign an edge to a split IFF both its

@@ -2088,8 +2088,9 @@ def store_label_map_metadata_in_graph(builder: Any) -> None:
     Args:
         builder: A DrugOSGraphBuilder (or compatible) instance.
     """
-    session = builder.driver.session()
-    try:
+    # v102 ROOT FIX (P2-038): use ``with`` context manager for style
+    # consistency with migrate_labels() and check_label_map_version_matches_graph.
+    with builder.driver.session() as session:
         session.run(
             "CALL dbms.setGraphProperty('label_map_version', $v)",
             v=LABEL_MAP_VERSION,
@@ -2114,8 +2115,6 @@ def store_label_map_metadata_in_graph(builder: Any) -> None:
             "label_map_metadata_stored_in_graph",
             extra={"version": LABEL_MAP_VERSION, "hash": LABEL_MAP_HASH},
         )
-    finally:
-        session.close()
 
 
 def check_label_map_version_matches_graph(builder: Any) -> None:
@@ -2131,8 +2130,13 @@ def check_label_map_version_matches_graph(builder: Any) -> None:
     Raises:
         RuntimeError: If the graph's stored version differs from the code version.
     """
-    session = builder.driver.session()
-    try:
+    # v102 ROOT FIX (P2-038): use ``with`` context manager for style
+    # consistency with migrate_labels() (line 1927). The previous
+    # try/finally + session.close() was SAFE (the finally DID close)
+    # but style-inconsistent — the codebase standard is the ``with``
+    # form which guarantees close on ANY control-flow path including
+    # early returns and unexpected exceptions inside the body.
+    with builder.driver.session() as session:
         result = session.run(
             "CALL dbms.graphproperty('label_map_version') YIELD value "
             "RETURN value"
@@ -2152,8 +2156,6 @@ def check_label_map_version_matches_graph(builder: Any) -> None:
                 f"code has {LABEL_MAP_VERSION!r}. Run migrate_labels() first "
                 f"(audit issue 12.6)."
             )
-    finally:
-        session.close()
 
 
 # Fixes audit issue 16.2 — commit_label_map_change audit trail
