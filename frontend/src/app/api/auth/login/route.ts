@@ -8,7 +8,7 @@ import {
   signMfaChallengeToken,
   clearAuthCookies,
 } from "@/lib/auth/server";
-import { badRequest, writeAuditLog, internalError } from "@/lib/api-helpers";
+import { badRequest, writeAuditLog, internalError, issueCsrfToken, setCsrfCookie } from "@/lib/api-helpers";
 import {
   checkIpRateLimit,
   recordIpAttempt,
@@ -179,11 +179,28 @@ export async function POST(req: NextRequest) {
   // could log in with just a password. The TOTP implementation in totp.ts
   // was dead code on the auth path.
   if (user.mfaEnabled) {
-    // Reset failed counter on successful password — but DO NOT issue tokens.
-    await recordSuccessfulLogin(user.id);
+    // FE-018 ROOT FIX: Do NOT call recordSuccessfulLogin() here. The previous
+    // code reset failedLoginCount to 0 and cleared lockedUntil BEFORE the MFA
+    // challenge was verified — so an attacker with the password but no TOTP
+    // secret could trigger unlimited MFA challenges without ever being locked
+    // out. recordSuccessfulLogin is now called in /api/auth/2fa/login-verify
+    // ONLY after the TOTP code verifies.
     const mfaToken = signMfaChallengeToken({
       userId: user.id,
       email: user.email,
+    });
+    // FE-016: set the challenge token as an HttpOnly cookie so XSS cannot
+    // read it from the response body. The client SHOULD send the cookie back
+    // to /api/auth/2fa/login-verify; the JSON mfaToken is kept for backward
+    // compat with non-browser API clients.
+    const { cookies: loginCookies } = await import("next/headers");
+    const loginStore = await loginCookies();
+    loginStore.set("drugos_mfa_challenge", mfaToken, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "strict",
+      path: "/api/auth/2fa/login-verify",
+      maxAge: 5 * 60, // 5 minutes — matches MFA_CHALLENGE_TTL_SECONDS
     });
     await writeAuditLog({
       user: { userId: user.id, email: user.email, role: user.role },
@@ -194,7 +211,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({
       mfaRequired: true,
       mfaToken,
-      message: "Multi-factor authentication required. POST this token and your 6-digit TOTP code to /api/auth/2fa/login-verify.",
+      message: "Multi-factor authentication required. POST this token (or rely on the drugos_mfa_challenge cookie) and your 6-digit TOTP code to /api/auth/2fa/login-verify.",
     });
   }
 
@@ -216,6 +233,11 @@ export async function POST(req: NextRequest) {
     orgId: membership?.organizationId,
   });
   await setAuthCookies(access, tokens.refresh);
+  // FE-011: issue the CSRF token cookie on successful login. The browser
+  // client reads this cookie and copies its value into the X-CSRF-Token
+  // header on every state-changing request.
+  const csrfToken = issueCsrfToken();
+  await setCsrfCookie(csrfToken);
   // FE-034: login success is security-critical — must be auditable.
   const loginAudit = await writeAuditLog({
     user: { userId: user.id, email: user.email, role: user.role, orgId: membership?.organizationId },
@@ -239,5 +261,8 @@ export async function POST(req: NextRequest) {
       role: user.role,
     },
     organizationId: membership?.organizationId,
+    // FE-011: echo the CSRF token in the response body so non-browser
+    // clients (which can't read cookies) can pick it up.
+    csrfToken,
   });
 }

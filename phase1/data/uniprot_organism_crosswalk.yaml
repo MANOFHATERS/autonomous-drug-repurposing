@@ -48,7 +48,18 @@
 "P04637": "Homo sapiens"   # TP53
 "P68871": "Homo sapiens"   # HBB
 "P00533": "Homo sapiens"   # EGFR
-"P04626": "Homo sapiens"   # BRCA1
+# P1-006 ROOT FIX (Team-1): P04626 is ERBB2/HER2 (NOT BRCA1).
+# The previous comment mislabeled P04626 as BRCA1. BRCA1 is P38398
+# (added below). P04626 = ERBB2/HER2 confirmed via UniProt:
+# https://www.uniprot.org/uniprot/P04626
+"P04626": "Homo sapiens"   # ERBB2 (HER2)  -- P1-006: was mislabeled 'BRCA1'
+# P1-006 ROOT FIX (Team-1): BRCA1 is P38398. Previously MISSING from
+# this crosswalk -- a UniProt record for P38398 with a corrupted
+# organism field would pass validation with no override check, silently
+# breaking PARP-inhibitor sensitivity predictions for BRCA1-mutant
+# cancers. BRCA1 confirmed via UniProt:
+# https://www.uniprot.org/uniprot/P38398
+"P38398": "Homo sapiens"   # BRCA1  -- P1-006: was MISSING
 "P51587": "Homo sapiens"   # BRCA2
 "P01112": "Homo sapiens"   # KRAS
 "P01116": "Homo sapiens"   # NRAS

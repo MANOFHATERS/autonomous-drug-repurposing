@@ -4129,6 +4129,7 @@ def normalize_activity_value(
     activity_type: str | None = None,
     temperature_c: float | None = None,
     raise_on_error: bool = False,
+    molecular_weight: float | None = None,
 ) -> ActivityValue:
     """Convert an activity measurement to nanomolar (nM) units.
 
@@ -4157,6 +4158,45 @@ def normalize_activity_value(
     resulting :class:`ActivityValue` has ``censored=True`` and
     ``censor_direction`` set (SCI-10).
 
+    P1-014 ROOT FIX (Team-1 -- unknown units no longer silently pass through):
+        The previous implementation handled pM, nM, uM, µM, mM, M, mol/L,
+        and "%". For any OTHER unit string (e.g. "ug/mL", "mg/mL",
+        "ng/mL" -- mass-based units common in ChEMBL), it returned
+        ``ActivityValue(value=numeric_value, unit=normalized_units, ...)``
+        -- the original value UNCHANGED, with a debug-level log
+        "unrecognised unit". The caller (chembl_pipeline
+        ``_step_normalize_activity_values``) took the returned ``.value``
+        and wrote it to the ``activity_value`` column (documented as
+        "Normalized to nM"). So a ChEMBL record with
+        ``standard_value=5.0, standard_units="ug/mL"`` was silently
+        stored as ``activity_value=5.0`` (nM) -- a 200x under-estimation
+        for a typical 250 Da drug (5 ug/mL ≈ 20000 nM). The DB CHECK
+        ``activity_value > 0`` passed. Downstream ML saw a fake 5 nM
+        IC50 (extremely potent) -- biasing the model toward predicting
+        high potency for this drug. Patient-safety risk: a toxic drug
+        may be ranked as a high-potency repurposing candidate.
+
+        ROOT FIX: the behavior for unknown units is now:
+          1. If the unit is a mass-based concentration ("ug/mL", "mg/mL",
+             "ng/mL", "ug/l", "mg/l", "ng/l" -- case-insensitive) AND
+             ``molecular_weight`` is provided (in g/mol), attempt the
+             conversion to nM:
+               nM = (mass_concentration_in_g/L * 1e9) / MW_g_per_mol
+             For "ug/mL": 1 ug/mL = 1e-6 g/mL = 1e-3 g/L, so
+               nM = (value * 1e-3 * 1e9) / MW = (value * 1e6) / MW
+             For "mg/mL": multiply by 1e3 more (1 mg = 1e-3 g, 1 mg/mL = 1 g/L).
+             For "ng/mL": divide by 1e3 more (1 ng = 1e-9 g, 1 ng/mL = 1e-6 g/L).
+          2. If ``molecular_weight`` is NOT provided (default), return
+             ``value=None`` (drop the activity_value) with a WARNING log
+             and a ``unknown_unit_dropped:{unit}`` warning tag. The
+             caller (chembl_pipeline) already handles None values by
+             setting ``activity_value=None`` in the DataFrame. The DB
+             CHECK ``activity_value IS NULL OR activity_value > 0``
+             accepts NULL. Downstream ML that filters on
+             ``activity_value IS NOT NULL`` automatically drops these
+             records. No silent corruption.
+          3. Log at WARNING level (not DEBUG) so operators see the drop.
+
     Parameters
     ----------
     value : int, float, str, or None
@@ -4174,6 +4214,13 @@ def normalize_activity_value(
     raise_on_error : bool
         If True, raise on invalid input.  If False (default), return an
         ActivityValue with ``value=None``.
+    molecular_weight : float, optional
+        Molecular weight in g/mol. If provided AND the unit is a
+        mass-based concentration (ug/mL, mg/mL, ng/mL, ug/L, mg/L,
+        ng/L), the value is converted to nM using the molecular weight.
+        If NOT provided (default), mass-based units are dropped
+        (value=None) with a WARNING -- preventing the silent corruption
+        documented in P1-014. P1-014 ROOT FIX.
 
     Returns
     -------
@@ -4194,6 +4241,14 @@ def normalize_activity_value(
     >>> r = normalize_activity_value(">100", "uM")
     >>> r.value, r.censored, r.censor_direction
     (100000.0, True, '>')
+    >>> # P1-014: unknown unit without MW -> value=None (drop)
+    >>> r = normalize_activity_value(5.0, "ug/mL")
+    >>> r.value is None, "unknown_unit_dropped:ug/mL" in r.warnings
+    (True, True)
+    >>> # P1-014: unknown unit with MW -> convert to nM
+    >>> r = normalize_activity_value(5.0, "ug/mL", molecular_weight=250.0)
+    >>> r.value, r.unit  # 5 ug/mL of 250 Da = 20000 nM
+    (20000.0, 'nM')
     """
     warnings_tuple: list[str] = []
     original_value = value
@@ -4755,15 +4810,101 @@ def normalize_activity_value(
                 temperature_c=temperature_c,
                 warnings=tuple(warnings_tuple),
             )
-        # Unknown unit — return as-is.
-        logger.debug(
-            "normalize_activity_value: unrecognised unit %r — returning "
-            "value unchanged",
-            normalized_units,
+        # P1-014 ROOT FIX (Team-1 -- unknown units no longer silently
+        # pass through with the original value):
+        #   The previous code returned ``value=numeric_value`` UNCHANGED
+        #   for any unrecognized unit. The caller wrote this value to the
+        #   ``activity_value`` column (documented as "Normalized to nM"),
+        #   silently corrupting the DB -- e.g. 5.0 ug/mL became 5.0 nM
+        #   (a 200x under-estimation for a 250 Da drug). Patient-safety
+        #   risk: a toxic drug could be ranked as a high-potency
+        #   repurposing candidate.
+        #
+        #   ROOT FIX: try mass-based unit conversion if molecular_weight
+        #   is provided. Otherwise, return value=None (drop the record's
+        #   activity_value) with a WARNING log. The caller already
+        #   handles None values (chembl_pipeline line 4016-4018).
+        #   The DB CHECK ``activity_value IS NULL OR activity_value > 0``
+        #   accepts NULL. Downstream ML filters on
+        #   ``activity_value IS NOT NULL`` to skip these records.
+        #
+        #   Mass-based unit conversion table (MW in g/mol):
+        #     "ug/mL" → nM = value * 1e6 / MW   (1 ug/mL = 1e-3 g/L; nM = (1e-3 * 1e9) / MW = 1e6 / MW)
+        #     "mg/mL" → nM = value * 1e9 / MW   (1 mg/mL = 1 g/L;     nM = (1    * 1e9) / MW = 1e9 / MW)
+        #     "ng/mL" → nM = value * 1e3 / MW   (1 ng/mL = 1e-6 g/L; nM = (1e-6 * 1e9) / MW = 1e3 / MW)
+        #     "ug/L"  → nM = value * 1e3 / MW   (1 ug/L  = 1e-6 g/L; same as ng/mL)
+        #     "mg/L"  → nM = value * 1e6 / MW   (1 mg/L  = 1e-3 g/L; same as ug/mL)
+        #     "ng/L"  → nM = value / MW         (1 ng/L  = 1e-9 g/L; nM = (1e-9 * 1e9) / MW = 1 / MW)
+        _MASS_UNIT_CONVERSIONS: dict[str, float] = {
+            "ug/ml": 1e6, "µg/ml": 1e6,
+            "mg/ml": 1e9,
+            "ng/ml": 1e3,
+            "ug/l": 1e3, "µg/l": 1e3,
+            "mg/l": 1e6,
+            "ng/l": 1.0,
+        }
+        _mass_factor = _MASS_UNIT_CONVERSIONS.get(normalized_units.casefold())
+        if _mass_factor is not None and molecular_weight is not None and molecular_weight > 0:
+            # Convert mass-based concentration to nM using MW.
+            try:
+                _converted_to_nM = (numeric_value * _mass_factor) / float(molecular_weight)
+                logger.info(
+                    "normalize_activity_value: P1-014 mass-based unit "
+                    "conversion (unit=%r, value=%s, MW=%s g/mol) → %.4g nM",
+                    normalized_units, numeric_value, molecular_weight,
+                    _converted_to_nM,
+                )
+                warnings_tuple.append(
+                    f"mass_unit_converted:{normalized_units}:MW={molecular_weight}"
+                )
+                return ActivityValue(
+                    value=_converted_to_nM,
+                    unit="nM",
+                    original_value=original_value,
+                    original_unit=original_unit,
+                    conversion_factor=None,  # not a simple multiplier
+                    censored=censored,
+                    censor_direction=censor_direction,
+                    activity_type=activity_type,
+                    temperature_c=temperature_c,
+                    warnings=tuple(warnings_tuple),
+                )
+            except (ValueError, TypeError, OverflowError, ZeroDivisionError) as exc:
+                logger.warning(
+                    "normalize_activity_value: P1-014 mass-based unit "
+                    "conversion FAILED for unit=%r value=%s MW=%s (%s) — "
+                    "dropping value (returning None)",
+                    normalized_units, numeric_value, molecular_weight, exc,
+                )
+                warnings_tuple.append(
+                    f"mass_unit_conversion_failed:{normalized_units}:{exc}"
+                )
+                return ActivityValue(
+                    value=None,
+                    unit=normalized_units,
+                    original_value=original_value,
+                    original_unit=original_unit,
+                    censored=censored,
+                    censor_direction=censor_direction,
+                    activity_type=activity_type,
+                    temperature_c=temperature_c,
+                    warnings=tuple(warnings_tuple),
+                )
+        # Unknown unit AND (no mass-based conversion OR no MW provided):
+        # drop the value (return None) with a WARNING. This is the
+        # patient-safety fix -- the previous behavior (return the
+        # original value) silently corrupted the DB.
+        logger.warning(
+            "normalize_activity_value: P1-014 unrecognised unit %r "
+            "(value=%s, MW=%s) — dropping value (returning None). The "
+            "caller should set activity_value=NULL. To convert "
+            "mass-based units (ug/mL, mg/mL, ng/mL), pass "
+            "molecular_weight=<g/mol> to normalize_activity_value().",
+            normalized_units, numeric_value, molecular_weight,
         )
-        warnings_tuple.append(f"unknown_unit:{normalized_units}")
+        warnings_tuple.append(f"unknown_unit_dropped:{normalized_units}")
         return ActivityValue(
-            value=numeric_value,
+            value=None,
             unit=normalized_units,
             original_value=original_value,
             original_unit=original_unit,

@@ -2,7 +2,7 @@
  * Shared API helpers for Next.js route handlers.
  */
 
-import { NextResponse } from "next/server";
+import { NextResponse, type NextRequest } from "next/server";
 import { getAuthenticatedUser, type AuthenticatedUser } from "@/lib/auth/server";
 import { db } from "@/lib/db";
 
@@ -280,15 +280,157 @@ export async function requireRoleOrSend(
   return requireAuthRole(...roles);
 }
 
+// ---------------------------------------------------------------------------
+// FE-011 ROOT FIX: REAL CSRF protection (double-submit cookie pattern).
+//
+// Previously `requireCsrfOrSend` was a NO-OP that returned `{ ok: true }`
+// unconditionally — every state-changing route that called it had a false
+// sense of security. Combined with SameSite=Lax cookies (which DO provide
+// partial CSRF protection for non-GET requests from cross-origin, but are
+// bypassable in older browsers and would be re-opened if SameSite=None
+// were ever set for SSO), this left POST/PUT/PATCH/DELETE routes exposed.
+//
+// The fix uses the double-submit cookie pattern (OWASP-recommended):
+//
+//   1. On successful login, setAuthCookies() also sets a `drugos_csrf`
+//      cookie containing a random 32-byte token. The cookie is NOT
+//      HttpOnly — the browser client MUST be able to read it and copy
+//      its value into the `X-CSRF-Token` request header on every
+//      state-changing request.
+//   2. requireCsrfOrSend(req) reads the `X-CSRF-Token` header and the
+//      `drugos_csrf` cookie. If they are equal (constant-time) AND
+//      non-empty, the request passes. If either is missing or they
+//      differ, the request is rejected with 403.
+//   3. The token is session-scoped (regenerated on each login) so a
+//      stolen token does not survive a re-login.
+//
+// Why double-submit and not synchronizer-token: double-submit is stateless
+// — we don't need a server-side table of issued tokens. The cookie's
+// SameSite=Lax attribute (set below) prevents cross-origin reads, so an
+// attacker on evil.com cannot read the victim's csrf cookie to forge the
+// matching header. The combination of (cookie SameSite=Lax) + (header must
+// match cookie) + (header is not auto-sent by browsers) is the defense.
+//
+// API-key auth (Authorization: Bearer drugos_…) is exempt — programmatic
+// clients do not have cookies and are not vulnerable to CSRF (an attacker
+// cannot make the victim's browser send an Authorization header with the
+// attacker's key, and even if they could, they'd be using their own key).
+// ---------------------------------------------------------------------------
+
+import { randomBytes, timingSafeEqual } from "crypto";
+
+export const CSRF_COOKIE_NAME = "drugos_csrf";
+export const CSRF_HEADER_NAME = "x-csrf-token";
+
 /**
- * FE-025 ROOT FIX: CSRF protection for state-changing POST/PUT/DELETE routes.
- * Checks the X-CSRF-Token header against the access token's CSRF claim.
- * For now this is a passthrough (returns OK) — full CSRF implementation
- * requires client-side token management. The function signature is stable
- * so routes can adopt it now and the implementation can be filled in.
+ * Issue a fresh CSRF token (32 random bytes, hex-encoded). Called by the
+ * login route on successful authentication and by the refresh route when
+ * access cookies are rotated. The token is stored in a cookie that the
+ * browser can read (httpOnly: false) so the SPA can copy it into the
+ * X-CSRF-Token header.
  */
-export async function requireCsrfOrSend(): Promise<{ ok: boolean; response: null } | { ok: false; response: Response }> {
-  // TODO: implement full CSRF token validation. For now, return OK.
-  // This is a known gap — the signature is here so routes can adopt it.
+export function issueCsrfToken(): string {
+  return randomBytes(32).toString("hex");
+}
+
+export async function setCsrfCookie(token: string): Promise<void> {
+  const { cookies } = await import("next/headers");
+  const store = await cookies();
+  const isProd = process.env.NODE_ENV === "production";
+  store.set(CSRF_COOKIE_NAME, token, {
+    httpOnly: false, // the client MUST read this to copy into the header
+    secure: isProd,
+    sameSite: "lax", // not strict — we want top-level navigations to keep the cookie
+    path: "/",
+    maxAge: 30 * 24 * 60 * 60, // 30 days — matches REFRESH_TOKEN_TTL_DAYS
+  });
+}
+
+export async function clearCsrfCookie(): Promise<void> {
+  const { cookies } = await import("next/headers");
+  const store = await cookies();
+  store.set(CSRF_COOKIE_NAME, "", {
+    httpOnly: false,
+    secure: process.env.NODE_ENV === "production",
+    sameSite: "lax",
+    path: "/",
+    maxAge: 0,
+  });
+}
+
+/**
+ * FE-011 ROOT FIX: Validate the CSRF token on every state-changing request.
+ * Returns { ok: true, response: null } if the request passes, or
+ * { ok: false, response: <403 Response> } if it fails.
+ *
+ * Exemptions:
+ *   - Requests with an `Authorization: Bearer drugos_…` header are EXEMPT.
+ *     API-key auth is not vulnerable to CSRF (the attacker cannot make the
+ *     victim's browser send the attacker's key, and even if they could,
+ *     they'd be using their own key). Exempting programmatic clients is
+ *     necessary for the developer platform to work.
+ */
+export async function requireCsrfOrSend(req: NextRequest): Promise<{
+  ok: boolean;
+  response: null;
+} | { ok: false; response: Response }> {
+  // Exemption 1: API-key auth (Bearer drugos_…). Programmatic clients are
+  // not vulnerable to CSRF.
+  const authHeader = req.headers.get("authorization") || req.headers.get("Authorization");
+  if (authHeader && authHeader.toLowerCase().startsWith("bearer ")) {
+    const rawKey = authHeader.slice(7).trim();
+    if (rawKey.startsWith("drugos_")) {
+      return { ok: true, response: null };
+    }
+  }
+
+  // Check for auth cookies (session cookies). If the request has NO auth
+  // cookies at all, CSRF protection is irrelevant — CSRF attacks exploit
+  // the browser's auto-sending of cookies on cross-site requests. If there
+  // are no cookies, there's nothing to exploit. This exemption lets
+  // unauthenticated endpoints like /api/auth/login and /api/auth/register
+  // work without a pre-issued CSRF token.
+  let hasAccessCookie = false;
+  let hasRefreshCookie = false;
+  let cookieToken = "";
+  try {
+    const { cookies } = await import("next/headers");
+    const store = await cookies();
+    hasAccessCookie = !!store.get("drugos_access")?.value;
+    hasRefreshCookie = !!store.get("drugos_refresh")?.value;
+    cookieToken = store.get(CSRF_COOKIE_NAME)?.value || "";
+  } catch {
+    // cookies() throws outside a request scope — treat as missing.
+  }
+
+  // Exemption 2: No session cookies → unauthenticated request → CSRF N/A.
+  // This covers login, register, and any other public POST endpoint.
+  if (!hasAccessCookie && !hasRefreshCookie && !cookieToken) {
+    return { ok: true, response: null };
+  }
+
+  const headerToken = req.headers.get(CSRF_HEADER_NAME) || req.headers.get(CSRF_HEADER_NAME.toUpperCase()) || "";
+
+  if (!cookieToken || !headerToken) {
+    return {
+      ok: false,
+      response: NextResponse.json(
+        { error: "csrf_missing", message: "CSRF token missing — both the drugos_csrf cookie and the X-CSRF-Token header are required for authenticated requests." },
+        { status: 403 }
+      ),
+    };
+  }
+  // Constant-time comparison to prevent timing attacks.
+  const a = Buffer.from(cookieToken);
+  const b = Buffer.from(headerToken);
+  if (a.length !== b.length || !timingSafeEqual(a, b)) {
+    return {
+      ok: false,
+      response: NextResponse.json(
+        { error: "csrf_mismatch", message: "CSRF token mismatch — the X-CSRF-Token header does not match the drugos_csrf cookie." },
+        { status: 403 }
+      ),
+    };
+  }
   return { ok: true, response: null };
 }

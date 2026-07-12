@@ -1602,7 +1602,21 @@ class GTRLBridge:
                 # _compute_supplementary_features (D-02 audit finding).
                 p = np.clip(scores_np, 1e-7, 1 - 1e-7)
                 entropy = -(p * np.log(p) + (1 - p) * np.log(1 - p))
-                confidence_np = 1.0 - entropy / np.log(2)
+                # P3-008 ROOT FIX (HIGH, fp32 precision): clip confidence to
+                # [0.0, 1.0]. With fp32 gnn_scores, the entropy can be slightly
+                # larger than np.log(2) (e.g. 0.6931472 vs log(2)=0.6931471),
+                # making 1.0 - entropy/log(2) slightly NEGATIVE (-1e-9). The
+                # RL pipeline's validate_input_schema then warns "Column
+                # 'confidence' has N values outside [0,1]" and clips to 0.0,
+                # which (a) floods the logs with spurious warnings on every
+                # run, and (b) masks any real numerical instability if a
+                # confidence value is significantly negative. The same fix is
+                # applied at line ~1356 (in-memory writer) and line ~3853
+                # (Phase 6 top-K). All three sites must agree — a prior
+                # partial fix only patched one site, leaving the batch writer
+                # producing out-of-range confidence values that triggered
+                # downstream RL warnings (the exact regression this fix closes).
+                confidence_np = np.clip(1.0 - entropy / np.log(2), 0.0, 1.0)
 
                 # Build per-batch DataFrame: (B_drugs * num_diseases) rows
                 batch_drugs_tiled = np.repeat(
@@ -3848,9 +3862,22 @@ class GTRLBridge:
                     [{"drug": d, "disease": v, "gnn_score": float(s)} for d, v, s in novel_pairs]
                 )
                 # Merge in confidence (binary prediction entropy)
+                # P3-008 ROOT FIX (HIGH, fp32 precision): clip confidence to
+                # [0.0, 1.0]. With fp32 gnn_scores, entropy can be slightly
+                # larger than np.log(2) (e.g. 0.6931472 vs log(2)=0.6931471),
+                # making 1.0 - entropy/log(2) slightly NEGATIVE (-1e-9). This
+                # triggered spurious "Column 'confidence' has N values outside
+                # [0,1]" warnings + silent clipping in the RL validation step,
+                # AND — critically — Phase 6's Top-K candidate pool was the
+                # UNFIXED path that produced the runtime "Min=-0.0000" the
+                # issue report cited. The same fix is applied at line ~1356
+                # (in-memory writer) and line ~1605 (batch writer). All three
+                # sites must agree; a prior partial fix left this site
+                # producing out-of-range confidence values that polluted the
+                # Phase 6 ranking feed.
                 p = np.clip(pool_df["gnn_score"].values, 1e-7, 1 - 1e-7)
                 entropy = -(p * np.log(p) + (1 - p) * np.log(1 - p))
-                pool_df["confidence"] = 1.0 - entropy / np.log(2)
+                pool_df["confidence"] = np.clip(1.0 - entropy / np.log(2), 0.0, 1.0)
 
                 # Compute supplementary features (safety, market, pathway, etc.)
                 drug_map = self.node_maps.get("drug", {})

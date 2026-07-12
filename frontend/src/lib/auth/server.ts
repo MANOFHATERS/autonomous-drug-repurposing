@@ -81,15 +81,23 @@ const JWT_ISSUER = "drugos";
 // obtain real access+refresh tokens. The challenge token CANNOT be used for
 // anything except the 2FA verify endpoint — its `type` is "mfa_challenge",
 // not "access".
+//
+// FE-016 ROOT FIX: The token now carries a `jti` (JWT ID, random 16 bytes).
+// /api/auth/2fa/login-verify records each jti as consumed in the MfaChallenge
+// table (unique on jti). A replayed token is rejected with 401. This closes
+// the "intercept-and-replay" hole where an attacker with XSS could read the
+// mfaToken from the JSON response and replay it within the 5-min window.
 const MFA_CHALLENGE_TTL_SECONDS = 5 * 60; // 5 minutes
 export function signMfaChallengeToken(payload: {
   userId: string;
   email: string;
 }): string {
+  const jti = randomBytes(16).toString("hex");
   const jwtPayload = {
     sub: payload.userId,
     email: payload.email,
     type: "mfa_challenge" as const,
+    jti,
   };
   // FE-041: resolve secret per-call to support hot-rotation.
   return jwt.sign(jwtPayload, resolveJwtSecret(), {
@@ -394,18 +402,68 @@ export async function clearAuthCookies(): Promise<void> {
 }
 
 export async function getAuthenticatedUser(): Promise<AuthenticatedUser | null> {
+  // FE-012 ROOT FIX: API-key authentication path. The developer platform
+  // issues "drugos_<32 hex>" keys via /api/api-keys, but authenticateApiKey()
+  // was DEAD CODE — no route ever called it. Enterprise customers paying for
+  // "API access (50,000 req/day)" could not actually use the API. Now every
+  // route that calls requireAuth() honors "Authorization: Bearer drugos_…"
+  // automatically. The cookie session path below still handles browser
+  // clients. Order matters: API-key auth is checked FIRST so a request
+  // carrying a valid Bearer key does not fall through to cookie inspection
+  // (which would 401 a programmatic client with no cookies).
+  try {
+    const { headers } = await import("next/headers");
+    const hdrs = await headers();
+    const authHeader = hdrs.get("authorization") || hdrs.get("Authorization");
+    if (authHeader && authHeader.toLowerCase().startsWith("bearer ")) {
+      const rawKey = authHeader.slice(7).trim();
+      // Only attempt API-key auth for keys with the documented "drugos_"
+      // prefix — a generic Bearer token is treated as malformed and ignored
+      // (it might be an OAuth token for a different provider, etc.).
+      if (rawKey.startsWith("drugos_")) {
+        const user = await authenticateApiKey(rawKey);
+        if (user) return user;
+        // Invalid API key → return null immediately. Do NOT fall through to
+        // cookie auth, because the caller explicitly tried API-key auth and
+        // returning a cookie-session user would be a confused-deputy risk.
+        return null;
+      }
+    }
+  } catch {
+    // headers() throws if called outside a request scope (e.g. in a script).
+    // Swallow and continue to the cookie path.
+  }
+
   const store = await cookies();
   const access = store.get(ACCESS_COOKIE)?.value;
-  if (!access) return null;
-  const user = verifyAccessToken(access);
-  if (user) return user;
+  if (access) {
+    const user = verifyAccessToken(access);
+    if (user) return user;
+  }
   // Try refresh
   const refresh = store.get(REFRESH_COOKIE)?.value;
-  if (!refresh) return null;
-  const refreshed = await consumeRefreshToken(refresh);
-  if (!refreshed) return null;
-  await setAuthCookies(refreshed.access, refreshed.refresh);
-  return verifyAccessToken(refreshed.access);
+  if (refresh) {
+    const refreshed = await consumeRefreshToken(refresh);
+    if (refreshed) {
+      await setAuthCookies(refreshed.access, refreshed.refresh);
+      return verifyAccessToken(refreshed.access);
+    }
+  }
+  // FE-021 ROOT FIX: Both access and refresh tokens failed verification.
+  // Previously we returned null WITHOUT clearing the bad cookies, so the
+  // browser kept sending them on every subsequent request → repeated 401s
+  // and a permanent lockout if an attacker planted a malformed cookie via
+  // XSS. Now we wipe them so the next request is a clean unauthenticated
+  // state (the client will redirect to /login).
+  if (access || refresh) {
+    try {
+      await clearAuthCookies();
+    } catch {
+      // clearAuthCookies can throw if cookies() is called outside a request
+      // scope; swallow so the null return is the only signal.
+    }
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -435,12 +493,23 @@ export async function authenticateApiKey(rawKey: string): Promise<AuthenticatedU
 // ---------------------------------------------------------------------------
 // Authorization helpers
 // ---------------------------------------------------------------------------
+// FE-022 ROOT FIX: The boolean `requireRole(user, ...roles)` that used to live
+// here was DEAD CODE — zero call sites repo-wide — and its signature
+// `(user, ...roles) => boolean` silently shadowed the route-friendly version
+// in @/lib/api-helpers.ts (`requireRole(user, ...roles) => Promise<{user,response}>`).
+// IDE auto-import would pick the wrong one and future maintainers would get
+// unexpected behavior. Deleted. Use `requireRole` / `requireAuthRole` from
+// @/lib/api-helpers.ts for every route-level authorization check.
+//
+// (Re-exported below so any external consumer that imported from this module
+// keeps compiling — but the re-exported symbol is the api-helpers version,
+// not a boolean-returning stub.)
 
-export function requireRole(user: AuthenticatedUser | null, ...roles: string[]): boolean {
-  if (!user) return false;
-  if (roles.length === 0) return true;
-  return roles.includes(user.role);
-}
+export {
+  requireRole,
+  requireAuthRole,
+  requireRoleOrSend,
+} from "@/lib/api-helpers";
 
 // FE-009: Re-export rate-limit functions with alternate names for backward
 // compat with tests written by other agents.

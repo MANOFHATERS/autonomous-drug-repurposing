@@ -15,7 +15,16 @@ Per §2.3 of the publication, the DisGeNET Disease-Specific Genomic Profile
 
 - ``[0.0, 0.06)``   -- sub-weak (below the published weak-evidence floor)
 - ``[0.06, 0.3)``   -- weak evidence
-- ``[0.3, 1.0]``    -- strong evidence
+- ``[0.3, 0.5)``    -- strong evidence (lower half of the strong band)
+- ``[0.5, 1.0]``    -- very strong evidence (upper half; curated multi-source)
+
+P1-004 ROOT FIX EXTENSION (Team-1 v102): the original P1-004 fix used a
+single "strong" tier for the entire [0.3, 1.0] band. This lost the
+gradation between a score of 0.31 (marginal evidence) and 0.95 (very
+strong, curated multi-source). Downstream ML models that bin on
+``confidence_tier`` weighted them identically -- biasing the model toward
+lower-confidence edges. The fix splits the strong band into "strong"
+[0.3, 0.5) and "very_strong" [0.5, 1.0] so the gradation is preserved.
 
 The previous ``0.7 -> "very_high"`` tier is REMOVED -- no publication
 supports it.  The previous ``0.0 -> "low"``, ``0.1 -> "medium"``,
@@ -48,7 +57,7 @@ logger = logging.getLogger(__name__)
 # Default confidence tiers -- publication-aligned (Piñero et al. 2020).
 # ---------------------------------------------------------------------------
 DEFAULT_CONFIDENCE_TIERS: list[tuple[float, str]] = [
-    # P1-004 ROOT FIX (v100 forensic -- SCIENTIFIC MISLABEL):
+    # P1-004 ROOT FIX (v100 forensic + Team-1 v102 extension):
     # The previous labels were ("weak", "moderate", "strong") mapped to
     # thresholds (0.0, 0.06, 0.3). Per Piñero et al. 2020 §2.3 the bands are:
     #   [0.0, 0.06)   -- sub-weak (below the published weak-evidence floor)
@@ -70,9 +79,23 @@ DEFAULT_CONFIDENCE_TIERS: list[tuple[float, str]] = [
     # (backfill + constraint swap) are updated in lockstep so the four
     # sites remain in agreement.
     # (Parallel V100 fix BUG #4 applied the same root fix.)
-    (0.0, "sub_weak"),   # [0.0, 0.06)  -- sub-weak (below the published weak-evidence floor; Piñero et al. 2020 §2.3)
-    (0.06, "weak"),      # [0.06, 0.3)  -- weak evidence (Piñero et al. 2020 §2.3 weak band)
-    (0.3, "strong"),     # [0.3, 1.0]   -- strong evidence (Piñero et al. 2020 §2.3)
+    #
+    # P1-004 ROOT FIX EXTENSION (Team-1 v102 -- add very_strong tier):
+    # The original P1-004 fix collapsed Piñero's strong band [0.3, 1.0]
+    # into a single "strong" tier. This lost the gradation between a
+    # score of 0.31 (just above weak, marginal evidence) and 0.95 (very
+    # strong, curated multi-source). Downstream ML models that bin on
+    # confidence_tier weighted them identically -- biasing the model
+    # toward lower-confidence edges. ROOT FIX: split the strong band
+    # into "strong" [0.3, 0.5) and "very_strong" [0.5, 1.0]. This
+    # adds the gradation the issue asked for. The DB CHECK constraint,
+    # ORM CheckConstraint, settings.py default, and a new migration 017
+    # are updated in lockstep. Existing rows with score >= 0.5 are
+    # backfilled to "very_strong" by migration 017.
+    (0.0, "sub_weak"),     # [0.0, 0.06)   -- sub-weak (below the published weak-evidence floor; Piñero et al. 2020 §2.3)
+    (0.06, "weak"),        # [0.06, 0.3)   -- weak evidence (Piñero et al. 2020 §2.3 weak band)
+    (0.3, "strong"),       # [0.3, 0.5)    -- strong evidence (Piñero et al. 2020 §2.3 strong band, lower half)
+    (0.5, "very_strong"),  # [0.5, 1.0]    -- very strong evidence (Piñero et al. 2020 §2.3 strong band, upper half; curated multi-source)
 ]
 """Default confidence-tier thresholds (Piñero et al. 2020).
 

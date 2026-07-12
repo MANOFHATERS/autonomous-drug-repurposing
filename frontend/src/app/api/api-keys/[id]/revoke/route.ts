@@ -8,9 +8,9 @@ import { revokeApiKey } from "@/lib/services/api-keys";
  * A non-admin caller can now revoke ONLY their own keys. Admin/owner can
  * revoke any key in the org.
  */
-export async function POST(_req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
-  // CSRF — FE-025.
-  const csrf = await requireCsrfOrSend();
+export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+  // FE-011: CSRF protection on every state-changing route.
+  const csrf = await requireCsrfOrSend(req);
   if (csrf.response) return csrf.response;
 
   const auth = await requireRoleOrSend("developer", "admin", "owner");

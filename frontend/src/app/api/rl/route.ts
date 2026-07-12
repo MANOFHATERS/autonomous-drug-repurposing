@@ -1,52 +1,61 @@
 import { NextRequest, NextResponse } from "next/server";
 import { checkRlAvailability } from "@/lib/services/ml-stubs";
 import { db } from "@/lib/db";
-import { writeAuditLog, requireAuth, badRequest, internalError } from "@/lib/api-helpers";
-import { parse } from "csv-parse/sync";
+import { writeAuditLog, requireAuth, internalError, requireCsrfOrSend } from "@/lib/api-helpers";
+import {
+  getRankedHypotheses,
+  type RankedHypothesis,
+} from "@/lib/services/rl-ranker";
+// FE-069 ROOT FIX: per-user rate limiting. The CSV cache lives inside
+// rl-ranker.ts (the single source of truth for parsing); the rate limiter
+// lives here at the route boundary so a flood of requests is rejected
+// BEFORE any disk I/O or upstream HTTP call.
+import { checkUserRateLimit } from "@/lib/auth/per-user-rate-limit";
 
 /**
  * POST /api/rl
  * Body: { drug?: string, disease?: string, limit?: number }
  *
- * FE-002 ROOT FIX: The previous code unconditionally returned 501 — even
- * when RL_SERVICE_URL was set. There was NO code anywhere in src/ that
- * read the Phase 4 RL ranker's output CSV. A grep for
- * validated_hypotheses, policy_prob, gnn_score, rl_drug_ranker,
- * candidates.csv returned ZERO matches. The candidate fields (drug,
- * disease, reward, rank, policy_prob, safety_score, literature_support)
- * appeared NOWHERE in the Next.js codebase.
+ * FE-019 ROOT FIX: This route previously had its OWN inline CSV parser
+ * (parseRlCsv, RlCandidate interface) separate from
+ * lib/services/rl-ranker.ts. Two divergent parsers, two env vars
+ * (RL_LOCAL_CSV vs RL_OUTPUT_CSV_PATH), two schemas. The lib was dead
+ * code. Root fix: deleted the inline parser, import getRankedHypotheses()
+ * from the lib. ONE parser, ONE schema, ONE env var.
  *
- * The Phase 4 → API handoff was non-existent. The RL ranker's predictions
- * never reached the dashboard.
+ * FE-010 ROOT FIX: persistRlCandidates() previously wrote each RL
+ * candidate to the Hypothesis table with `status: "validated"`. But
+ * these are RAW MODEL PREDICTIONS, not validated hypotheses. A
+ * "validated" hypothesis in pharma means wet-lab or clinical
+ * confirmation. Mislabeling a model output as "validated" corrupts the
+ * scientific record. Root fix: status="predicted", rlPredicted=true.
  *
- * ROOT FIX: This endpoint now implements TWO real integration paths:
+ * FE-011: CSRF protection applied to POST.
  *
- *   1. HTTP proxy (production): If RL_SERVICE_URL is set, we POST the
- *      query to the standalone RL service (a FastAPI app wrapping
- *      rl_drug_ranker.py) and stream back the ranked candidates as JSON.
- *      The RL service is the source of truth — we never fabricate.
- *
- *   2. Local CSV (dev/demo): If RL_LOCAL_CSV is set (path to a CSV file
- *      produced by `python rl/rl_drug_ranker.py`), we parse it in-process
- *      and return the ranked candidates. This lets the dashboard show
- *      REAL RL output during development without standing up the FastAPI
- *      service. The CSV columns are documented in rl/rl_drug_ranker.py
- *      (drug, disease, gnn_score, safety_score, market_score, reward,
- *      rank, policy_prob, literature_support, etc.).
- *
- * In BOTH cases, the response is mapped to the Hypothesis schema fields
- * (plausibilityScore, safetyScore, marketScore, overallScore) so the
- * dashboard can render real RL predictions instead of mock data.
- *
- * If NEITHER env var is set, we return 503 service_not_deployed — we NEVER
- * fabricate predictions. A pharma company might act on a fake "high
- * confidence" prediction — that's a patient-safety violation.
+ * FE-069 ROOT FIX: per-user rate limiting (60 req/min) added to BOTH GET
+ * and POST. The CSV cache lives inside rl-ranker.ts's readLocalCsv (TTL +
+ * mtime + fs.watch). The rate limiter is checked BEFORE any disk I/O so a
+ * flood of requests is rejected at the gate with 429 + Retry-After.
  */
 export async function POST(req: NextRequest) {
-  // FE-001 (related): the dashboard must call this endpoint, so we require
-  // auth. An unauthenticated caller could enumerate RL predictions.
+  // FE-011: CSRF protection on every state-changing route.
+  const csrf = await requireCsrfOrSend(req);
+  if (csrf.response) return csrf.response;
+
   const auth = await requireAuth();
   if (auth.user === null) return auth.response;
+
+  // FE-069 ROOT FIX: per-user rate limit (60 req/min). Checked BEFORE we
+  // parse the request body or touch disk — a flood of requests is rejected
+  // at the gate. The 429 response includes Retry-After so well-behaved
+  // clients back off correctly.
+  const rl = checkUserRateLimit(auth.user.userId, { max: 60, windowSeconds: 60 });
+  if (rl.blocked) {
+    return NextResponse.json(
+      { error: "rate_limited", message: "Too many RL requests. Please slow down." },
+      { status: 429, headers: { "Retry-After": String(rl.retryAfterSeconds) } }
+    );
+  }
 
   let body: { drug?: string; disease?: string; limit?: number };
   try {
@@ -59,236 +68,86 @@ export async function POST(req: NextRequest) {
   const limit = Math.min(body.limit ?? 50, 200);
 
   const availability = checkRlAvailability();
-  if (!availability.available) {
-    // Fall through to local CSV check below — maybe the dev set RL_LOCAL_CSV
-    // without setting RL_SERVICE_URL. That's a valid dev configuration.
-    if (!process.env.RL_LOCAL_CSV) {
-      return NextResponse.json(
-        {
-          error: "service_not_deployed",
-          service: availability.service,
-          description: availability.description,
-          reason: availability.reason,
-          documentation:
-            "See Phase 4 of the build plan (RL-Driven Hypothesis Ranking). " +
-            "Set RL_SERVICE_URL to proxy to the standalone RL service, or " +
-            "RL_LOCAL_CSV to read a local output CSV in dev mode.",
-        },
-        { status: 503 }
-      );
-    }
+  const hasLocalCsv = Boolean(process.env.RL_OUTPUT_CSV_PATH || process.env.RL_LOCAL_CSV);
+  if (!availability.available && !hasLocalCsv) {
+    return NextResponse.json(
+      {
+        error: "service_not_deployed",
+        service: availability.service,
+        description: availability.description,
+        reason: availability.reason,
+        documentation:
+          "See Phase 4 of the build plan (RL-Driven Hypothesis Ranking). " +
+          "Set RL_SERVICE_URL to proxy to the standalone RL service, or " +
+          "RL_OUTPUT_CSV_PATH to read a local output CSV in dev mode.",
+      },
+      { status: 503 }
+    );
   }
 
-  // Path 1: HTTP proxy to the standalone RL service.
-  const rlServiceUrl = process.env.RL_SERVICE_URL;
-  if (rlServiceUrl) {
-    try {
-      const upstream = await fetch(`${rlServiceUrl.replace(/\/$/, "")}/rank`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ drug, disease, limit }),
-      });
-      if (!upstream.ok) {
-        const text = await upstream.text();
-        return NextResponse.json(
-          {
-            error: "rl_service_error",
-            message: `RL service returned ${upstream.status}: ${text.slice(0, 500)}`,
-          },
-          { status: 502 }
-        );
-      }
-      const data = await upstream.json();
-      // Persist each candidate as a Hypothesis row so the user can
-      // reference them later. We upsert by (drugName, diseaseName) within
-      // the user's first project (or skip persistence if no project).
-      await persistRlCandidates(auth.user.userId, data.candidates || []);
-      await writeAuditLog({
-        user: auth.user,
-        action: "rl_query",
-        resource: `rl:${drug || "*"}:${disease || "*"}`,
-        metadata: { count: (data.candidates || []).length, source: "proxy" },
-      });
-      return NextResponse.json(data);
-    } catch (e: unknown) {
-      // FE-063 ROOT FIX: `e: any` disabled type safety; if a non-Error was
-      // thrown (e.g. a string), e.message was undefined and the response
-      // became "undefined". Narrow with instanceof, fallback to String(e).
-      const msg = e instanceof Error ? e.message : String(e);
-      return internalError(`RL service proxy failed: ${msg}`);
-    }
+  try {
+    const result = await getRankedHypotheses({ drug: drug || undefined, disease: disease || undefined, limit });
+    await persistRlCandidates(auth.user.userId, result.candidates);
+    await writeAuditLog({
+      user: auth.user,
+      action: "rl_query",
+      resource: `rl:${drug || "*"}:${disease || "*"}`,
+      metadata: { count: result.candidates.length, source: result.source },
+    });
+    return NextResponse.json({
+      candidates: result.candidates,
+      source: result.source,
+      csvPath: result.csvPath,
+      total: result.candidates.length,
+      note: result.note,
+    });
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return internalError(`RL query failed: ${msg}`);
   }
-
-  // Path 2: Local CSV (dev/demo mode).
-  const csvPath = process.env.RL_LOCAL_CSV;
-  if (csvPath) {
-    try {
-      const candidates = await parseRlCsv(csvPath, { drug, disease, limit });
-      await persistRlCandidates(auth.user.userId, candidates);
-      await writeAuditLog({
-        user: auth.user,
-        action: "rl_query",
-        resource: `rl:${drug || "*"}:${disease || "*"}`,
-        metadata: { count: candidates.length, source: "local_csv" },
-      });
-      return NextResponse.json({
-        candidates,
-        source: "local_csv",
-        csvPath,
-        total: candidates.length,
-      });
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : String(e);
-      return internalError(`RL CSV parse failed: ${msg}`);
-    }
-  }
-
-  // Should not reach here (availability check above handles this), but
-  // belt-and-suspenders.
-  return NextResponse.json(
-    { error: "service_not_deployed", message: "RL service is not configured." },
-    { status: 503 }
-  );
 }
 
 export async function GET() {
-  // FE-001: dashboard calls GET for a default top-N list.
   const auth = await requireAuth();
   if (auth.user === null) return auth.response;
-  const csvPath = process.env.RL_LOCAL_CSV;
-  if (csvPath) {
-    try {
-      const candidates = await parseRlCsv(csvPath, { limit: 50 });
-      return NextResponse.json({ candidates, source: "local_csv", total: candidates.length });
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : String(e);
-      return internalError(`RL CSV parse failed: ${msg}`);
-    }
-  }
-  return NextResponse.json(
-    { error: "service_not_deployed", message: "Set RL_SERVICE_URL or RL_LOCAL_CSV." },
-    { status: 503 }
-  );
-}
 
-// ---------------------------------------------------------------------------
-// CSV parser — reads the RL ranker's output CSV and maps it to the
-// Hypothesis schema fields that the dashboard expects.
-// ---------------------------------------------------------------------------
-
-interface RlCandidate {
-  drug: string;
-  disease: string;
-  reward: number;
-  rank: number;
-  policyProb: number;
-  plausibilityScore: number; // from gnn_score
-  safetyScore: number;
-  marketScore: number;
-  overallScore: number; // weighted composite
-  literatureSupport: boolean;
-  isKnownPositive: boolean;
-  confidence: number;
-  pathwayScore: number;
-  unmetNeedScore: number;
-  efficacyScore: number;
-  admeScore: number;
-}
-
-async function parseRlCsv(
-  path: string,
-  filter: { drug?: string; disease?: string; limit?: number }
-): Promise<RlCandidate[]> {
-  const fs = await import("fs/promises");
-  const content = await fs.readFile(path, "utf8");
-  const records = parse(content, {
-    columns: true,
-    skip_empty_lines: true,
-    trim: true,
-  }) as Record<string, string>[];
-
-  let candidates: RlCandidate[] = records.map((r, idx) => {
-    const gnn = num(r, "gnn_score", 0);
-    const safety = num(r, "safety_score", 0);
-    const market = num(r, "market_score", 0);
-    const reward = num(r, "reward", 0);
-    const rank = num(r, "rank", idx + 1);
-    const policyProb = num(r, "policy_prob", 0);
-    const confidence = num(r, "confidence", 0);
-    const pathwayScore = num(r, "pathway_score", 0);
-    const unmetNeedScore = num(r, "unmet_need_score", 0);
-    const efficacyScore = num(r, "efficacy_score", 0);
-    const admeScore = num(r, "adme_score", 0);
-    // Composite overall score — weighted sum of the three dimensions the
-    // project docx specifies (plausibility, safety, market). Weights match
-    // the RL reward function's default weights in rl_drug_ranker.py.
-    const overall = 0.4 * gnn + 0.3 * safety + 0.3 * market;
-    return {
-      drug: r.drug || "",
-      disease: r.disease || "",
-      reward,
-      rank,
-      policyProb,
-      plausibilityScore: gnn,
-      safetyScore: safety,
-      marketScore: market,
-      overallScore: overall,
-      literatureSupport: bool(r, "literature_support"),
-      isKnownPositive: bool(r, "is_known_positive"),
-      confidence,
-      pathwayScore,
-      unmetNeedScore,
-      efficacyScore,
-      admeScore,
-    };
-  });
-
-  // Filter by optional drug/disease query.
-  if (filter.drug) {
-    const q = filter.drug.toLowerCase();
-    candidates = candidates.filter((c) => c.drug.toLowerCase().includes(q));
-  }
-  if (filter.disease) {
-    const q = filter.disease.toLowerCase();
-    candidates = candidates.filter((c) => c.disease.toLowerCase().includes(q));
+  // FE-069 ROOT FIX: per-user rate limit (60 req/min) on GET too. The GET
+  // handler is the one most easily spammed (no body required), so it must
+  // be throttled identically to POST.
+  const rl = checkUserRateLimit(auth.user.userId, { max: 60, windowSeconds: 60 });
+  if (rl.blocked) {
+    return NextResponse.json(
+      { error: "rate_limited", message: "Too many RL requests. Please slow down." },
+      { status: 429, headers: { "Retry-After": String(rl.retryAfterSeconds) } }
+    );
   }
 
-  // Sort by overall score (desc) — the RL agent's ranking.
-  candidates.sort((a, b) => b.overallScore - a.overallScore);
-
-  // Reassign rank after sort.
-  candidates = candidates.map((c, i) => ({ ...c, rank: i + 1 }));
-
-  if (filter.limit) {
-    candidates = candidates.slice(0, filter.limit);
+  try {
+    const result = await getRankedHypotheses({ limit: 50 });
+    return NextResponse.json({
+      candidates: result.candidates,
+      source: result.source,
+      csvPath: result.csvPath,
+      total: result.candidates.length,
+      note: result.note,
+    });
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return internalError(`RL query failed: ${msg}`);
   }
-  return candidates;
 }
-
-function num(r: Record<string, string>, key: string, fallback: number): number {
-  const v = r[key];
-  if (v === undefined || v === null || v === "") return fallback;
-  const n = Number(v);
-  return Number.isFinite(n) ? n : fallback;
-}
-
-function bool(r: Record<string, string>, key: string): boolean {
-  const v = (r[key] || "").toLowerCase();
-  return v === "1" || v === "true" || v === "yes";
-}
-
-// ---------------------------------------------------------------------------
-// Persistence — store RL candidates as Hypothesis rows so the user can
-// reference them in projects. Best-effort; failures are logged not thrown.
-// ---------------------------------------------------------------------------
 
 /**
- * FE-037 ROOT FIX: persistRlCandidates previously found the user's FIRST
- * org membership, then found the FIRST project in that org (ordered by
- * createdAt asc), and upserted hypotheses into it. The user may not be
- * the owner or even a member of that project (the Project model has no
- * ProjectMember table — projects are org-scoped, not user-scoped). So
- * user A's RL query could populate user B's project with hypotheses.
+ * FE-010 ROOT FIX: candidates are persisted with status="predicted" and
+ * rlPredicted=true. They are NOT "validated".
+ *
+ * FE-037 ROOT FIX (re-applied after regression): persistRlCandidates
+ * previously found the user's FIRST org membership, then found the FIRST
+ * project in that org (ordered by createdAt asc), and upserted hypotheses
+ * into it. The user may not be the owner or even a member of that project
+ * (the Project model has no ProjectMember table — projects are org-scoped,
+ * not user-scoped). So user A's RL query could populate user B's project
+ * with hypotheses.
  *
  * Root fix: We now find or create a DEDICATED 'RL Predictions' project
  * OWNED BY the calling user. This guarantees:
@@ -297,25 +156,19 @@ function bool(r: Record<string, string>, key: string): boolean {
  *   - Re-running the RL agent upserts into the same dedicated project
  *     (keyed on the project name + ownerId) so re-runs update scores
  *     rather than creating duplicate projects.
- *
- * The project is created in the user's first org (by joinedAt asc). If
- * the user has no org membership, we skip persistence entirely (the
- * candidates are still returned in the response).
  */
-async function persistRlCandidates(userId: string, candidates: RlCandidate[]): Promise<void> {
+async function persistRlCandidates(userId: string, candidates: RankedHypothesis[]): Promise<void> {
   if (candidates.length === 0) return;
   try {
-    // Find the user's first org membership.
     const membership = await db.organizationMember.findFirst({
       where: { userId },
       orderBy: { joinedAt: "asc" },
     });
-    if (!membership) return; // No org — skip persistence.
+    if (!membership) return;
 
     // FE-037: Find or create a DEDICATED 'RL Predictions' project OWNED
-    // BY the calling user. We match on (ownerId, name) so each user has
-    // exactly one such project per org. Use upsert to handle the race
-    // where two concurrent RL queries both try to create the project.
+    // BY the calling user. We match on (ownerId, name, organizationId) so
+    // each user has exactly one such project per org.
     const RL_PROJECT_NAME = "RL Predictions";
     let project = await db.project.findFirst({
       where: { ownerId: userId, name: RL_PROJECT_NAME, organizationId: membership.organizationId },
@@ -333,19 +186,16 @@ async function persistRlCandidates(userId: string, candidates: RlCandidate[]): P
             tags: "rl,predictions,auto-generated",
           },
         });
-      } catch (e: any) {
+      } catch {
         // Race: another concurrent request created the project between
         // our findFirst and create. Re-fetch.
         project = await db.project.findFirst({
           where: { ownerId: userId, name: RL_PROJECT_NAME, organizationId: membership.organizationId },
         });
-        if (!project) throw e;
+        if (!project) return;
       }
     }
 
-    // Upsert each candidate as a Hypothesis. We use upsert keyed on
-    // (projectId, drugName, diseaseName) so re-running the RL agent
-    // updates scores rather than creating duplicates.
     for (const c of candidates.slice(0, 50)) {
       const existing = await db.hypothesis.findFirst({
         where: {
@@ -354,16 +204,30 @@ async function persistRlCandidates(userId: string, candidates: RlCandidate[]): P
           diseaseName: c.disease,
         },
       });
+      const rlData = {
+        plausibilityScore: c.plausibilityScore ?? c.gnnScore ?? null,
+        safetyScore: c.safetyScore ?? null,
+        marketScore: c.marketScore ?? null,
+        overallScore: c.overallScore ?? null,
+        rank: c.rank ?? null,
+        policyProb: c.policyProb ?? null,
+        reward: c.reward ?? null,
+        gnnScore: c.gnnScore ?? null,
+        literatureSupport: c.literatureSupportBool ?? (c.literatureSupport !== undefined ? c.literatureSupport > 0 : null),
+        rlModelVersion: "rl_drug_ranker.py-v101",
+        rlUpdatedAt: new Date(),
+        rlPredicted: true,
+      } as any;
       if (existing) {
+        // FE-010: do NOT downgrade a wet-lab "validated" or "rejected"
+        // hypothesis to "predicted".
+        const nextStatus =
+          existing.status === "validated" || existing.status === "rejected"
+            ? existing.status
+            : "predicted";
         await db.hypothesis.update({
           where: { id: existing.id },
-          data: {
-            plausibilityScore: c.plausibilityScore,
-            safetyScore: c.safetyScore,
-            marketScore: c.marketScore,
-            overallScore: c.overallScore,
-            status: "validated",
-          },
+          data: { ...rlData, status: nextStatus },
         });
       } else {
         await db.hypothesis.create({
@@ -372,19 +236,16 @@ async function persistRlCandidates(userId: string, candidates: RlCandidate[]): P
             title: `${c.drug} for ${c.disease}`,
             drugName: c.drug,
             diseaseName: c.disease,
-            status: "validated",
-            plausibilityScore: c.plausibilityScore,
-            safetyScore: c.safetyScore,
-            marketScore: c.marketScore,
-            overallScore: c.overallScore,
+            // FE-010: NEW RL-sourced hypotheses are "predicted", NOT "validated".
+            status: "predicted",
             createdById: userId,
-            notes: `RL rank ${c.rank}, reward ${c.reward.toFixed(4)}, policy_prob ${c.policyProb.toFixed(4)}, literature_support ${c.literatureSupport}`,
-          },
+            notes: `RL rank ${c.rank ?? "—"}, reward ${c.reward?.toFixed(4) ?? "—"}, policy_prob ${c.policyProb?.toFixed(4) ?? "—"}`,
+            ...rlData,
+          } as any,
         });
       }
     }
   } catch (e) {
-    // Persistence is best-effort — the response still returns the candidates.
     console.error("persistRlCandidates failed:", e);
   }
 }

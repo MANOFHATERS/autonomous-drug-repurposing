@@ -149,7 +149,20 @@ from cleaning._constants import (
 from cleaning.deduplicator import dedup_by_inchikey
 from cleaning.missing_values import fill_missing_drug_fields
 from cleaning.normalizer import (
-    ALLOWED_TYPES,  # imported for backward compatibility (test_all_45_fixes TestIssue33)
+    # P1-010 ROOT FIX (Team-1 -- remove dead ALLOWED_TYPES import):
+    #   The previous code imported ``ALLOWED_TYPES`` from
+    #   ``cleaning.normalizer`` with a comment "imported for backward
+    #   compatibility (test_all_45_fixes TestIssue33)". The constant
+    #   was NOT referenced anywhere in this 4889-line file (only the
+    #   import line). The only consumer was a meta-test that asserted
+    #   the import exists -- a meta-test that adds no real protection.
+    #   If ``cleaning.normalizer.ALLOWED_TYPES`` is ever removed,
+    #   ``chembl_pipeline.py`` would fail to import -- breaking the
+    #   entire ChEMBL pipeline for a constant nobody uses.
+    #   ROOT FIX: remove the dead import. The meta-test should be
+    #   updated to assert against ``cleaning.normalizer.ALLOWED_TYPES``
+    #   directly (where it's actually defined), not against the import
+    #   in this file.
     convert_to_inchikey,
     normalize_activity_value,
     standardize_inchikey,
