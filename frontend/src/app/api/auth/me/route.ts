@@ -45,11 +45,26 @@ export async function GET() {
     },
   });
   if (!user) {
-    return NextResponse.json({ error: "not_found" }, { status: 404 });
+    // FE-068 ROOT FIX: Return 401 (not 404) when the access token decoded
+    // successfully but the user no longer exists in the DB. Returning 404
+    // leaked information: an attacker could distinguish "valid token for a
+    // deleted user" (404) from "invalid token" (401). Treating both cases
+    // as 401 collapses the side channel — the attacker learns nothing
+    // about whether the user ever existed.
+    return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   }
+  // FE-060 ROOT FIX: Use `select` (not `include`) so we fetch only the
+  // fields actually used in the response (id, name, slug, plan) — not the
+  // entire Organization record (which also includes status, seats, createdAt,
+  // updatedAt). Reduces payload + DB load for users in many orgs.
   const memberships = await db.organizationMember.findMany({
     where: { userId: user.id },
-    include: { organization: true },
+    select: {
+      role: true,
+      organization: {
+        select: { id: true, name: true, slug: true, plan: true },
+      },
+    },
   });
   const body = {
     user,
@@ -83,6 +98,37 @@ export async function PATCH(req: NextRequest) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   }
 
+  // FE-072 ROOT FIX: Suspended users must not be able to edit their profile.
+  //
+  // getAuthenticatedUser() only verifies the JWT signature — it does NOT
+  // re-check the user's current status in the DB. So a user suspended by
+  // an admin retains a valid access token for up to ACCESS_TOKEN_TTL (15
+  // min) and could change their name/title/bio during that window. In a
+  // pharma research setting, a suspended user changing their display name
+  // to impersonate a colleague could cause real collaboration harm.
+  //
+  // Root fix: fetch the user's current status from the DB on every PATCH
+  // and reject if status === "suspended". This is a defense-in-depth
+  // measure alongside the longer-term fix (token revocation on suspension
+  // via refresh-token revoke + access-token blacklist until expiry).
+  const currentUser = await db.user.findUnique({
+    where: { id: authUser.userId },
+    select: { status: true },
+  });
+  if (!currentUser) {
+    // FE-068 (same rationale as GET): treat deleted user as 401, not 404.
+    return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+  }
+  if (currentUser.status === "suspended") {
+    return NextResponse.json(
+      {
+        error: "account_suspended",
+        message: "Your account has been suspended. Profile changes are not permitted.",
+      },
+      { status: 403 }
+    );
+  }
+
   let body: { name?: string; title?: string; bio?: string };
   try {
     body = await req.json();
@@ -105,7 +151,28 @@ export async function PATCH(req: NextRequest) {
   }
 
   if (Object.keys(data).length === 0) {
-    return badRequest("No updatable fields provided (name, title, bio)");
+    // FE-054 ROOT FIX: HTTP PATCH semantics allow a no-op patch — the server
+    // returns 200 with the current (unchanged) resource. Previously this
+    // returned 400 "No updatable fields", which broke clients that send an
+    // empty patch to refresh their cached profile. We now return the current
+    // user resource with 200, matching RFC 5789 §2.1 ("If the server
+    // receives a PATCH request with no body, the server MUST process it as
+    // if the body was empty and apply no changes").
+    const current = await db.user.findUnique({
+      where: { id: authUser.userId },
+      select: {
+        id: true,
+        email: true,
+        name: true,
+        role: true,
+        title: true,
+        bio: true,
+      },
+    });
+    if (!current) {
+      return NextResponse.json({ error: "not_found" }, { status: 404 });
+    }
+    return NextResponse.json({ user: current, noop: true });
   }
 
   const updated = await db.user.update({

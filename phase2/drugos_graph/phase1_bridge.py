@@ -188,9 +188,21 @@ import pandas as pd
 
 # v27 ROOT FIX (P2-B-5): import DrugOSDataError so the new
 # ``_validate_phase1_columns`` helper can raise on schema mismatch.
+# P2-052 ROOT FIX: the previous ``except Exception`` was too broad — it
+# silently swallowed SyntaxError, NameError, AttributeError, and any
+# other bug inside ``exceptions.py``. If a maintainer introduced a
+# typo in exceptions.py (e.g. ``class DrugOSDataError(Exception:`` with
+# a colon instead of paren), this module would silently fall back to
+# the local stub class — which LACKS the rich ``context`` attribute the
+# real DrugOSDataError provides. Operators would see schema-mismatch
+# errors lose their structured context and never know the exceptions
+# module was broken. Root fix: catch ONLY ``ImportError`` (the expected
+# case for direct-script execution where the package isn't on sys.path).
+# Any other exception (SyntaxError, NameError, etc.) now propagates so
+# the operator sees the real bug immediately.
 try:
     from .exceptions import DrugOSDataError
-except Exception:  # pragma: no cover — fallback for direct-script execution
+except ImportError:  # pragma: no cover — fallback for direct-script execution
     class DrugOSDataError(Exception):
         """Local fallback when the package cannot be imported."""
 
@@ -1259,15 +1271,42 @@ def _is_production_env() -> bool:
 
     Logic:
       * ``DRUGOS_ENVIRONMENT=prod`` → True (explicit prod override).
-      * ``DRUGOS_ENVIRONMENT=dev`` → False (explicit dev override, even
-        if DATABASE_URL is set — lets developers use CSV fallback).
-      * Otherwise: True iff ``DATABASE_URL`` is set and non-empty.
+      * ``DRUGOS_ENVIRONMENT=dev`` (or UNSET) → False (dev is the safe
+        default — production deployments MUST set DRUGOS_ENVIRONMENT=prod
+        explicitly so an accidental DATABASE_URL leak from a global env
+        file doesn't trigger production-mode hard failures on a dev
+        machine).
+      * Otherwise (any other value): True iff ``DATABASE_URL`` is set
+        and non-empty (backward compat for operators who set
+        DRUGOS_ENVIRONMENT to a non-standard value like "staging").
+
+    P2-062 ROOT FIX: the previous logic defaulted UNSET
+    ``DRUGOS_ENVIRONMENT`` to "" (empty string), which fell through to
+    the ``DATABASE_URL`` check. An operator who set ``DATABASE_URL``
+    for a dev run (e.g. to test the postgres path) WITHOUT setting
+    ``DRUGOS_ENVIRONMENT=dev`` got PRODUCTION-mode behavior — DB
+    failures were FATAL, crashing the dev run instead of falling back
+    to CSV. This was confusing because the operator expected dev-mode
+    CSV fallback. Root fix: default UNSET to "dev" (the safe choice).
+    Production deployments MUST set ``DRUGOS_ENVIRONMENT=prod``
+    explicitly — this is the fail-safe direction (an unset variable
+    produces dev-mode behavior, not prod-mode hard failures). The
+    DOCX V1 launch checklist should require
+    ``DRUGOS_ENVIRONMENT=prod`` as an explicit deployment step.
     """
-    env = os.environ.get("DRUGOS_ENVIRONMENT", "").lower().strip()
+    # P2-062: default to "dev" when UNSET. Previously defaulted to ""
+    # which fell through to the DATABASE_URL check and caused dev runs
+    # with an accidental DATABASE_URL to get prod-mode hard failures.
+    env = os.environ.get("DRUGOS_ENVIRONMENT", "dev").lower().strip()
     if env == "prod":
         return True
     if env == "dev":
         return False
+    # P2-062: backward compat — if the operator set a non-standard
+    # value (e.g. "staging", "qa"), fall back to the DATABASE_URL
+    # heuristic. This preserves the old behavior for operators who
+    # explicitly set a non-standard env, while making "dev" the safe
+    # default for the common case of an UNSET variable.
     # Default: production iff the operator has configured a database.
     return bool(os.environ.get("DATABASE_URL", "").strip())
 
@@ -4396,6 +4435,42 @@ def stage_phase1_to_phase2(
             key = (drug_canonical, did)
             if key in seen_treats:
                 continue  # upstream dedup (bug #B2)
+            # P2-058 ROOT FIX: explicit referential-integrity guard
+            # BEFORE creating the treats edge. The audit (P2-058) noted
+            # that if a future refactor moves the treats_edges.append
+            # OUTSIDE the if/else block at lines 4181-4212, an invalid
+            # did (one that doesn't match any biomedical ontology
+            # pattern AND wasn't already in disease_id_set) could
+            # produce an orphan edge — the treats edge would point at
+            # a Disease node that kg_builder would dead-letter (no
+            # MATCH for the dst), but the bridge's ``staged.edges``
+            # count would include it, inflating the operator's
+            # expectation of loaded edge count. The current code path
+            # uses ``continue`` at line 4212 to skip invalid dids, so
+            # this guard is technically redundant TODAY — but it makes
+            # the invariant EXPLICIT and protects against future
+            # refactors. If ``did`` is not in ``disease_id_set`` (i.e.
+            # no Disease node was staged for it, by ANY source), we
+            # skip the edge creation and log a WARNING so the operator
+            # sees the silent drop. This is the "belt and suspenders"
+            # approach: the upstream ``continue`` at line 4212 should
+            # already prevent reaching here with an invalid did, but
+            # if a future maintainer changes that control flow, this
+            # guard catches the orphan edge before it's created.
+            if did not in disease_id_set:
+                logger.warning(
+                    "Phase1 bridge: skipping treats edge for drug=%s "
+                    "disease_id=%s — did is NOT in disease_id_set "
+                    "(no Disease node staged by any source). This "
+                    "would produce an orphan edge (treats → "
+                    "non-existent Disease). The upstream validation "
+                    "should have already skipped this did, so "
+                    "reaching this warning indicates a control-flow "
+                    "regression in the if/else block above. "
+                    "(P2-058 root fix)",
+                    drug_canonical, did,
+                )
+                continue
             seen_treats.add(key)
             _treat_itype = _safe_str(row.get("indication_type", "")) or "structured"
             treats_edges.append({

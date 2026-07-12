@@ -51,6 +51,10 @@ import {
   useLiteratureSearch, useKnowledgeGraph, useBuildEvidencePackage, useRlCandidates,
   LoadingSpinner, ErrorDisplay,
 } from './use-api-data';
+// FE-053 ROOT FIX: Import ScoreBar + SafetyBadge from their dedicated files
+// instead of redefining them inline with different colors / scale thresholds.
+import { ScoreBar } from './score-bar';
+import { SafetyBadge } from './safety-badge';
 import {
   diseases, drugCandidates, clinicalTrials, graphNodes, graphEdges,
   trendingDiseases, recentQueries, savedQueries, usageMetrics,
@@ -77,33 +81,12 @@ function scoreColor(s: number) {
   return ACCENT_RED;
 }
 
-function ScoreBar({ score, size = 'md' }: { score: number; size?: 'sm' | 'md' | 'lg' }) {
-  const color = scoreColor(score);
-  const h = size === 'sm' ? 'h-1.5' : size === 'lg' ? 'h-3.5' : 'h-2.5';
-  return (
-    <div className="flex items-center gap-2">
-      <span className="text-xs font-bold" style={{ color }}>{score}</span>
-      <div className="flex-1 bg-slate-100 rounded-full overflow-hidden">
-        <div className={`${h} rounded-full transition-all duration-500`} style={{ width: `${score}%`, backgroundColor: color }} />
-      </div>
-    </div>
-  );
-}
-
-function SafetyBadge({ tier }: { tier: 'green' | 'yellow' | 'red' }) {
-  const cfg = {
-    green: { label: 'Safe', bg: 'bg-emerald-50', text: 'text-emerald-700', border: 'border-emerald-200', dot: 'bg-emerald-500' },
-    yellow: { label: 'Caution', bg: 'bg-amber-50', text: 'text-amber-700', border: 'border-amber-200', dot: 'bg-amber-500' },
-    red: { label: 'High Risk', bg: 'bg-red-50', text: 'text-red-700', border: 'border-red-200', dot: 'bg-red-500' },
-  };
-  const c = cfg[tier];
-  return (
-    <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-semibold border ${c.bg} ${c.text} ${c.border}`}>
-      <span className={`w-1.5 h-1.5 rounded-full ${c.dot}`} />
-      {c.label}
-    </span>
-  );
-}
+// FE-053 ROOT FIX: The inline ScoreBar and SafetyBadge definitions were
+// removed — they duplicated src/components/drugos/score-bar.tsx and
+// src/components/drugos/safety-badge.tsx with DIFFERENT color thresholds
+// (emerald/amber/red vs #1D9E75/#D4853A/#C0392B) and DIFFERENT size scales.
+// Bug fixes in one never propagated to the other. The shared imports above
+// are now the single source of truth.
 
 function StatCard({ icon: Icon, value, label, color = PRIMARY }: { icon: React.ElementType; value: string | number; label: string; color?: string }) {
   return (
@@ -444,7 +427,9 @@ function SearchResultsScreen() {
   // (passed via navigate({ name })) and use it to query the real RL ranker
   // via /api/rl. Falls back to mock candidates if RL service not deployed.
   const diseaseId = currentRoute.id || 'D001';
-  const diseaseName = (currentRoute as any).name ||
+  // FE-062 ROOT FIX: Route type already has `name?:` (see nav-context.tsx),
+  // so the previous `as any` cast was unnecessary and bypassed type safety.
+  const diseaseName = currentRoute.name ||
     (diseaseId.startsWith('search:') ? decodeURIComponent(diseaseId.slice(7)) : diseaseId);
   const disease = diseases.find(d => d.id === diseaseId) ||
     diseases.find(d => d.name === diseaseName) || {
@@ -1202,6 +1187,26 @@ function KnowledgeGraphScreen() {
     drug: searchQuery.length >= 2 ? searchQuery : undefined,
   });
 
+  // FE-067 ROOT FIX: "View candidate detail" button used to look up the
+  // clicked drug node in the MOCK `drugCandidates` array. For real RL
+  // candidates (sourced from /api/rl), the mock lookup returned undefined
+  // and the button silently did nothing. Now we fetch the real RL top-N
+  // candidates via the same /api/rl endpoint the dashboard uses, and look
+  // up the clicked drug by name in that real list. The candidate's `id`
+  // for navigation is synthesized as `${drug}|${disease}` when the API
+  // does not return one (the RL CSV doesn't have a stable row id), so the
+  // navigation is stable across re-renders.
+  const { data: rlData } = useRlCandidates({ limit: 200 });
+  const realRlCandidates = useMemo(() => {
+    const list = rlData?.candidates || [];
+    return list.map((c: any) => ({
+      id: c.id || `${c.drug}|${c.disease}`,
+      drugName: c.drug as string,
+      diseaseName: c.disease as string,
+      overallScore: c.overallScore as number,
+    }));
+  }, [rlData]);
+
   const realNodes = kgData?.nodes || [];
   const realEdges = kgData?.edges || [];
 
@@ -1355,7 +1360,16 @@ function KnowledgeGraphScreen() {
                   <p className="text-xs text-muted-foreground mt-1">{nodeEdges.length} connections</p>
                   {node.type === 'drug' && (
                     <Button variant="link" size="sm" className="h-6 p-0 text-xs mt-1" onClick={() => {
-                      const cand = drugCandidates.find(c => c.drugName === node.label);
+                      // FE-067 ROOT FIX: Look up the clicked drug in the
+                      // REAL RL candidate list (sourced from /api/rl).
+                      // Previously this searched the mock `drugCandidates`
+                      // array, which silently failed for any drug that
+                      // wasn't in the mock set. Now we prefer the real RL
+                      // data; if the RL service isn't deployed yet, we
+                      // fall back to the mock array so the button still
+                      // works for demo drugs.
+                      const cand = realRlCandidates.find(c => c.drugName === node.label)
+                        || drugCandidates.find(c => c.drugName === node.label);
                       if (cand) navigate({ page: 'app', section: 'candidate', id: cand.id });
                     }}>View candidate detail →</Button>
                   )}

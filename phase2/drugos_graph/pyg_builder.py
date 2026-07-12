@@ -95,10 +95,16 @@ Companion .meta.json:
     config (sanitized), input_checksums, node_type_counts,
     edge_type_counts, feature_provenance.
 
-# FIX(issue-56): comprehensive unit test suite for pyg_builder lives in tests/test_pyg_builder.py
-# FIX(issue-57): parametrized edge case tests live in tests/test_pyg_builder.py
-# FIX(issue-58): output schema validation tests live in tests/test_pyg_builder.py
-# FIX(issue-59): regression tests for safety-critical issues live in tests/test_pyg_builder.py
+# FIX(issue-56): comprehensive unit test suite for pyg_builder lives in
+# phase2/tests/test_pyg_builder.py (P2-049 ROOT FIX: the previous
+# docstring referenced "tests/test_pyg_builder.py" — a path that does
+# NOT exist in the repo. The misleading reference made maintainers
+# believe tests covered the code when they did not. Root fix: create
+# the actual test file at phase2/tests/test_pyg_builder.py and update
+# the docstring to point to the correct relative path.)
+# FIX(issue-57): parametrized edge case tests live in phase2/tests/test_pyg_builder.py
+# FIX(issue-58): output schema validation tests live in phase2/tests/test_pyg_builder.py
+# FIX(issue-59): regression tests for safety-critical issues live in phase2/tests/test_pyg_builder.py
 #
 # Optional dependencies
 # ---------------------
@@ -111,7 +117,8 @@ Audit status
 ------------
 All 89 findings from Forensic_Audit_pyg_builder.pdf are addressed.
 Each fix is marked ``# FIX(issue-<N>)`` in the code. Regression
-tests live in ``tests/test_pyg_builder.py``.
+tests live in ``phase2/tests/test_pyg_builder.py`` (P2-049 ROOT FIX:
+corrected path from "tests/test_pyg_builder.py" which did not exist).
 
 Security policy (FDA / HIPAA compliance):
     1. Default load uses weights_only=True.
@@ -123,10 +130,10 @@ Security policy (FDA / HIPAA compliance):
 # FIX(issue-76): documented security policy for FDA/HIPAA compliance.
 # FIX(issue-78): documented .pt file format spec.
 # FIX(issue-82): consolidated output format documentation.
-# FIX(issue-56): unit test suite lives in tests/test_pyg_builder.py
-# FIX(issue-57): edge case tests live in tests/test_pyg_builder.py
-# FIX(issue-58): output schema tests live in tests/test_pyg_builder.py
-# FIX(issue-59): regression tests live in tests/test_pyg_builder.py
+# FIX(issue-56): unit test suite lives in phase2/tests/test_pyg_builder.py
+# FIX(issue-57): edge case tests live in phase2/tests/test_pyg_builder.py
+# FIX(issue-58): output schema tests live in phase2/tests/test_pyg_builder.py
+# FIX(issue-59): regression tests live in phase2/tests/test_pyg_builder.py
 
 import copy
 import hashlib
@@ -2974,16 +2981,38 @@ class PyGBuilder(GraphBuilderProtocol):
 
             # FIX(issue-80): temporal_split output compatible with PyG
             # training -- post-split assertion.
+            # P2-066 ROOT FIX: replace ``assert`` with explicit
+            # ``if not ...: raise RuntimeError(...)``. Python's ``assert``
+            # is a NO-OP when the interpreter runs with ``-O`` (optimize)
+            # flag — production deployments often run with ``-O`` for
+            # performance. The post-split integrity check is too
+            # important to be skipped in production: a malformed split
+            # (missing edge_label) would pass the check silently and
+            # crash later during training with a cryptic PyG error.
+            # Root fix: use a real ``if`` + ``raise RuntimeError`` so
+            # the check fires regardless of the ``-O`` flag. The error
+            # message is preserved verbatim so existing log-grep
+            # patterns still match.
             for name, sd in [
                 ("train", train_data),
                 ("val", val_data),
                 ("test", test_data),
             ]:
                 tgt = sd[target_edge_type]
-                assert hasattr(tgt, "edge_label") and tgt.edge_label is not None, \
-                    f"{name} split missing edge_label on {target_edge_type}"
-                assert hasattr(tgt, "edge_label_index") and tgt.edge_label_index is not None, \
-                    f"{name} split missing edge_label_index on {target_edge_type}"
+                if not (hasattr(tgt, "edge_label") and tgt.edge_label is not None):
+                    raise RuntimeError(
+                        f"{name} split missing edge_label on "
+                        f"{target_edge_type} (P2-066 root fix: assert "
+                        f"replaced with RuntimeError so the check "
+                        f"survives python -O mode)"
+                    )
+                if not (hasattr(tgt, "edge_label_index") and tgt.edge_label_index is not None):
+                    raise RuntimeError(
+                        f"{name} split missing edge_label_index on "
+                        f"{target_edge_type} (P2-066 root fix: assert "
+                        f"replaced with RuntimeError so the check "
+                        f"survives python -O mode)"
+                    )
 
             return train_data, val_data, test_data
 

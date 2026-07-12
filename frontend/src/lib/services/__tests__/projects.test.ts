@@ -85,14 +85,23 @@ describe("Projects & collaboration", () => {
 
   test("addComment persists comment and emits a project_activity", async () => {
     const project = await createProject({ name: "Test", ownerId: testUserId, organizationId: testOrgId });
-    const comment = await addComment(project.id, "Dr. Smith", "Looks promising. Let's run a literature search.");
+    // FE-073 ROOT FIX: signature is now (projectId, userId, body). The
+    // service derives authorName from the User table (User.name || email).
+    const comment = await addComment(project.id, testUserId, "Looks promising. Let's run a literature search.");
     expect(comment.body).toMatch(/promising/);
-    expect(comment.authorName).toBe("Dr. Smith");
+    expect(comment.authorName).toBe("Projects Test"); // matches the user.name in beforeEach
+    expect(comment.userId).toBe(testUserId);
 
     const activities = await db.projectActivity.findMany({ where: { projectId: project.id } });
     expect(activities.length).toBe(1);
     expect(activities[0].type).toBe("comment_added");
+    expect(activities[0].actorName).toBe("Projects Test");
   });
+
+  // NOTE: The FE-073 impersonation-guard test (legacy 3-arg signature
+  // rejection) lives in fe-073-comment-impersonation.test.ts with a mocked
+  // DB so it can run despite the pre-existing test-DB infra issue
+  // (postgres schema vs sqlite URL).
 
   test("getProject includes hypotheses, comments, and activities", async () => {
     const project = await createProject({ name: "Test", ownerId: testUserId, organizationId: testOrgId });
@@ -103,7 +112,7 @@ describe("Projects & collaboration", () => {
       diseaseName: "migraine",
       createdById: testUserId,
     });
-    await addComment(project.id, "User", "Comment 1");
+    await addComment(project.id, testUserId, "Comment 1");
 
     const loaded = await getProject(project.id);
     expect(loaded).not.toBeNull();
@@ -122,7 +131,7 @@ describe("Projects & collaboration", () => {
       diseaseName: "migraine",
       createdById: testUserId,
     });
-    await addComment(projectId, "User", "Comment 1");
+    await addComment(projectId, testUserId, "Comment 1");
 
     await db.project.delete({ where: { id: projectId } });
 

@@ -2115,8 +2115,16 @@ def store_label_map_metadata_in_graph(builder: Any) -> None:
     Args:
         builder: A DrugOSGraphBuilder (or compatible) instance.
     """
-    # v102 ROOT FIX (P2-038): use ``with`` context manager for style
-    # consistency with migrate_labels() and check_label_map_version_matches_graph.
+    # v102 ROOT FIX (P2-038) / P2-060: use ``with`` context manager for
+    # style consistency with migrate_labels() and
+    # check_label_map_version_matches_graph(). The previous
+    # ``session = builder.driver.session()`` + try/finally + ``session.close()``
+    # pattern was functionally equivalent but stylistically inconsistent — a
+    # new developer copying the wrong pattern might forget the close(). The
+    # ``with`` form guarantees the session is closed even on exception, with
+    # no chance of forgetting the finally block. This matches the modern
+    # neo4j-python-driver idiom and the pattern already used by
+    # migrate_labels in this same file.
     with builder.driver.session() as session:
         session.run(
             "CALL dbms.setGraphProperty('label_map_version', $v)",
@@ -2157,8 +2165,9 @@ def check_label_map_version_matches_graph(builder: Any) -> None:
     Raises:
         RuntimeError: If the graph's stored version differs from the code version.
     """
-    # v102 ROOT FIX (P2-038): use ``with`` context manager for style
-    # consistency with migrate_labels() (line 1927). The previous
+    # v102 ROOT FIX (P2-038) / P2-060: use ``with`` context manager for
+    # style consistency with migrate_labels() (line 1927) and
+    # store_label_map_metadata_in_graph (above). The previous
     # try/finally + session.close() was SAFE (the finally DID close)
     # but style-inconsistent — the codebase standard is the ``with``
     # form which guarantees close on ANY control-flow path including
