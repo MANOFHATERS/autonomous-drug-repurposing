@@ -460,6 +460,13 @@ function SearchResultsScreen() {
   // populate, and have the UI render "N/A" for null values. This is the
   // difference between "no data" (correct, null) and "data is zero/empty"
   // (incorrect, fabricated).
+  //
+  // FE-024 ROOT FIX: mechanism field is NO LONGER populated with RL debug
+  // values. It is left empty here — the CandidateTable component fetches
+  // the real mechanism-of-action from ChEMBL via the useDrugMechanisms
+  // hook. The RL debug info (reward, policyProb, gnnScore, rank, source)
+  // is moved to the `rlDebugInfo` field, which the table renders ONLY in
+  // a tooltip clearly labeled "RL Model Debug (not for clinical use)".
   const realCandidates: DrugCandidate[] = (rlData?.candidates || []).map((rc: any, i: number) => ({
     id: `rl-${i}`,
     drugName: rc.drug,
@@ -474,7 +481,8 @@ function SearchResultsScreen() {
     // FE-049: RL ranker does not compute molecular similarity — null, not 0.
     molSimScore: null,
     safetyTier: (rc.safetyScore || 0) >= 0.7 ? 'green' : (rc.safetyScore || 0) >= 0.4 ? 'yellow' : 'red',
-    mechanism: `RL reward: ${rc.reward?.toFixed(3) || '—'}, policy_prob: ${rc.policyProb?.toFixed(3) || '—'}`,
+    // FE-024: mechanism is fetched from ChEMBL by CandidateTable; leave empty here.
+    mechanism: '',
     clinicalPhase: rc.literatureSupport ? 'Literature-supported' : 'Novel',
     // FE-049: patent status lookup is a separate pipeline step — null, not "Unknown".
     ipStatus: null,
@@ -482,6 +490,14 @@ function SearchResultsScreen() {
     targets: null,
     pathways: null,
     rank: rc.rank,
+    // FE-024: RL debug info is moved to a tooltip, NOT shown as mechanism.
+    rlDebugInfo: {
+      reward: typeof rc.reward === 'number' ? rc.reward : undefined,
+      policyProb: typeof rc.policyProb === 'number' ? rc.policyProb : undefined,
+      gnnScore: typeof rc.plausibilityScore === 'number' ? rc.plausibilityScore : undefined,
+      rank: typeof rc.rank === 'number' ? rc.rank : undefined,
+      source: rlData?.source,
+    },
   }));
 
   // FE-001 ROOT FIX: NEVER fall back to mock drug candidates in a production
