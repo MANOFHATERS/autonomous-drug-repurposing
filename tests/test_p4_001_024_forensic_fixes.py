@@ -263,10 +263,23 @@ class TestP4_006_ResumeCheckpointVecNormalize:
     """Verify resume_checkpoint path wraps env in VecNormalize before PPO.load."""
 
     def test_resume_uses_vec_normalize(self):
-        """P4-006: train_agent with resume_checkpoint wraps env in VecNormalize."""
+        """P4-006: train_agent with resume_checkpoint wraps env in VecNormalize.
+
+        P4-005 interaction: this test uses generate_fake_data (standalone
+        mode), which triggers the P4-005 checkpoint-save block. We override
+        env._standalone_mode=False after construction because this test is
+        verifying the RESUME CHECKPOINT logic (P4-006), NOT the standalone
+        block (P4-005). The standalone block is tested separately in
+        tests/p4_team11/test_p4_005_to_013_batch.py.
+        """
         data = generate_fake_data(n_pairs=30, seed=42)
         cfg = PipelineConfig(timesteps=64, top_n=3)
         env = DrugRankingEnv(data, config=cfg)
+        # P4-005 interaction: override the standalone flag so the
+        # checkpoint CAN be saved (this test verifies resume logic, not
+        # the standalone block).
+        env._standalone_mode = False
+        env._standalone_mode_reason = "P4-006 test override (testing resume, not standalone block)"
         # First train a model and save checkpoint
         model, ckpt_path, vec_norm = rld.train_agent(
             env, timesteps=64, seed=42, config=cfg
@@ -279,6 +292,9 @@ class TestP4_006_ResumeCheckpointVecNormalize:
             f"P4-006: vecnormalize stats file missing at {vecnorm_path}"
         # Resume from checkpoint — should NOT crash and should use VecNormalize
         env2 = DrugRankingEnv(data, config=cfg)
+        # P4-005 interaction: override the standalone flag for env2 too.
+        env2._standalone_mode = False
+        env2._standalone_mode_reason = "P4-006 test override (testing resume, not standalone block)"
         model2, _, vec_norm2 = rld.train_agent(
             env2, timesteps=cfg.timesteps + 32, seed=42, config=cfg,
             resume_checkpoint=ckpt_path,
@@ -586,17 +602,27 @@ class TestP4_018_PpoGammaConfigurable:
     """Verify ppo_gamma is configurable and the choice is logged."""
 
     def test_ppo_gamma_is_configurable(self):
-        """P4-018: ppo_gamma is a first-class config field (not hardcoded)."""
+        """P4-018: ppo_gamma is a first-class config field (not hardcoded).
+
+        P4-001 ROOT FIX (Team Cosmic / Phase 4): the default is now 0.0
+        (contextual bandit), NOT 0.95. The DrugRankingEnv is a contextual
+        bandit (each step is independent — action at step N does NOT
+        affect observation at step N+1). With gamma=0.95, PPO's value
+        head targets the discounted sum of ~20 future INDEPENDENT
+        rewards, which is NOISY → explained_variance ≈ 0 → PPO collapses.
+        gamma=0.0 makes the value head predict the IMMEDIATE reward,
+        which it CAN learn.
+
+        The previous P4-018 v2 reverted gamma to 0.95 with the comment
+        "aligned with parallel agent's choice (sequential MDP)" — but
+        this is NOT a sequential MDP. P4-001 re-fixes the default to 0.0.
+        """
         cfg = PipelineConfig(timesteps=64, top_n=3)
         assert hasattr(cfg, 'ppo_gamma'), \
             "P4-018: PipelineConfig missing ppo_gamma field"
-        # P4-018 v2: aligned with parallel agent's choice — gamma=0.95
-        # (sequential MDP with credit assignment). The original V30 code
-        # had gamma=0.0 (contextual bandit). Both are valid per the bug
-        # report, but the parallel agent's test expects 0.95, so we
-        # aligned to avoid a regression.
-        assert cfg.ppo_gamma == 0.95, \
-            f"P4-018: ppo_gamma default should be 0.95 (got {cfg.ppo_gamma})"
+        # P4-001 ROOT FIX: default is 0.0 (contextual bandit).
+        assert cfg.ppo_gamma == 0.0, \
+            f"P4-001: ppo_gamma default should be 0.0 (contextual bandit), got {cfg.ppo_gamma}"
 
     def test_ppo_gamma_can_be_overridden(self):
         """P4-018: ppo_gamma can be set to a different value."""

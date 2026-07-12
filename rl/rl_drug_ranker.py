@@ -2115,6 +2115,12 @@ class RewardFunction:
         # batch-distribution concern via the 20th-percentile gate (which
         # is a HARD GATE, not a transformation — it doesn't change the
         # reward value, only whether the pair is rejected).
+        #
+        # P4-033 ROOT FIX (alias): this is the SAME fix as P4-033
+        # (RewardFunction must NOT apply z-score+sigmoid to gnn_score
+        # only — the transformation created an inconsistency in the
+        # weighted sum). P4-007 and P4-033 are the same root cause
+        # from two different audits; this single fix addresses both.
         gnn_val_for_reward = float(gnn_val)
 
         # Weighted sum — monotonic in every feature.
