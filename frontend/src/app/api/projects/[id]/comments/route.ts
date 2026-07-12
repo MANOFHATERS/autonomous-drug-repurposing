@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requireAuth, notFound, badRequest } from "@/lib/api-helpers";
+import { requireAuth, notFound, badRequest, requireCsrfOrSend } from "@/lib/api-helpers";
 import { addComment } from "@/lib/services/projects";
 import { db } from "@/lib/db";
 
@@ -20,6 +20,10 @@ import { db } from "@/lib/db";
  * is always truthful and audit-traceable.
  */
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+  // FE-011: CSRF protection on every state-changing route.
+  const csrf = await requireCsrfOrSend(req);
+  if (csrf.response) return csrf.response;
+
   const auth = await requireAuth();
   if (auth.user === null) return auth.response;
   const { id } = await params;

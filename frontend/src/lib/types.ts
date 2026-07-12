@@ -34,7 +34,13 @@ export interface Disease {
   icd10?: string;
 }
 
-export type SafetyTier = 'green' | 'yellow' | 'red';
+// FE-023 ROOT FIX: 'unknown' tier added. RL model predictions do NOT get a
+// green/yellow/red badge — those thresholds (>=0.7 green, >=0.4 yellow)
+// were not clinically validated and gave a false sense of safety. Real
+// safety tiering must come from openFDA label data (black-box warning →
+// red, etc.) or FAERS adverse-event counts. Until that integration is in
+// place, RL candidates show 'unknown' with a disclaimer.
+export type SafetyTier = 'green' | 'yellow' | 'red' | 'unknown';
 
 export interface DrugCandidate {
   id: string;

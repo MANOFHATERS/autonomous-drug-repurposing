@@ -392,7 +392,7 @@ def _is_valid_drugbank_id(drugbank_id: str | None) -> bool:
     accepted synthesized IDs (``DB{8 hex}``, ``DBSYNTH{6 digits}``) as
     if they were real DrugBank IDs. This function is the SINGLE source
     of truth for drugbank_id validation — it accepts EITHER a real
-    DrugBank ID (``DB\d{5,7}``) OR a synthesized ID (``SYNTH-DB-...``).
+    DrugBank ID (``DB\\d{5,7}``) OR a synthesized ID (``SYNTH-DB-...``).
     Callers that need to distinguish real vs synthesized can check
     ``_DRUGBANK_ID_RE.match()`` (real only) vs
     ``_SYNTHESIZED_DRUG_ID_RE.match()`` (synthesized only).
