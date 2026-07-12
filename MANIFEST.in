@@ -1,0 +1,26 @@
+# MANIFEST.in — ensures non-Python files ship with the package.
+# P4-003 ROOT FIX (Team Cosmic / Phase 4): the canonical
+# validated_hypotheses.csv ships in the rl/ directory, but without a
+# MANIFEST.in entry, `pip install` did NOT include it in the wheel.
+# In production (Docker, Kubernetes, systemd), the module_dir path
+# (e.g., /usr/lib/python3/site-packages/rl/) had NO
+# validated_hypotheses.csv, so the data flywheel (DOCX §10) was
+# non-functional — validated pairs received NO reward bonus, the RL
+# agent had no incentive to rank them HIGH, and the data flywheel moat
+# was non-functional.
+#
+# This MANIFEST.in entry ensures the file is included in both sdist
+# (pip install from source) and wheel (pip install from wheel) builds.
+# The runtime check in _load_validated_hypotheses() logs CRITICAL if
+# the file is still missing (e.g., if a deployment uses a custom
+# install path that bypasses MANIFEST.in).
+
+include README.md
+include LICENSE
+include requirements.txt
+recursive-include rl *.csv
+recursive-include rl *.py
+recursive-include graph_transformer *.py
+recursive-include phase1 *.py
+recursive-include phase2 *.py
+recursive-include tests *.py

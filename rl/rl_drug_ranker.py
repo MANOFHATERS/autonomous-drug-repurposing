@@ -641,9 +641,18 @@ def _load_validated_hypotheses() -> List[Tuple[str, str]]:
     This is the standard "train/eval disjointness" rule — the model
     is evaluated on pairs it was NOT explicitly rewarded for.
 
+    P4-003 ROOT FIX (HIGH — Team Cosmic / Phase 4): added a runtime
+    CRITICAL log if the file is not found in ANY of the 3 candidate
+    paths. The previous code silently returned an empty list, which
+    broke the data flywheel (DOCX §10) — validated pairs received NO
+    reward bonus, the RL agent had no incentive to rank them HIGH, and
+    the data flywheel moat was non-functional. The runtime check makes
+    the missing-file case LOUD instead of silent.
+
     Returns:
         List of (drug, disease) tuples from validated_hypotheses.csv.
-        Empty list if the file doesn't exist or is empty.
+        Empty list if the file doesn't exist or is empty (with a
+        CRITICAL log warning so operators can fix the deployment).
     """
     validated_path = "validated_hypotheses.csv"
     # v90 ROOT FIX (BUG #65): the previous code iterated candidate_paths
@@ -664,11 +673,28 @@ def _load_validated_hypotheses() -> List[Tuple[str, str]]:
         validated_path,                            # CWD-relative
         os.path.join(os.getcwd(), validated_path), # CWD-absolute
     ]
+    # P4-003 ROOT FIX: also allow override via the RL_VALIDATED_HYPOTHESES_PATH
+    # env var. In production (Docker, Kubernetes, systemd), the CWD may be
+    # /app, /opt/drugos, or /, and the module_dir may be
+    # /app/rl/ or /usr/lib/python3/site-packages/rl/. The 3-path search
+    # handles most cases, but a deployment may want to point at a specific
+    # file (e.g., a ConfigMap mount in Kubernetes). The env var takes
+    # PRIORITY over the 3 default paths.
+    env_path = os.environ.get("RL_VALIDATED_HYPOTHESES_PATH", "")
+    if env_path:
+        candidate_paths = [env_path] + candidate_paths
+        logger.info(
+            f"P4-003 ROOT FIX: RL_VALIDATED_HYPOTHESES_PATH is set to "
+            f"'{env_path}'. This path takes PRIORITY over the default "
+            f"3-path search (module_dir, CWD-relative, CWD-absolute)."
+        )
     result: List[Tuple[str, str]] = []
     seen = set()
     files_loaded: List[str] = []
+    files_missing: List[str] = []
     for path in candidate_paths:
         if not os.path.exists(path):
+            files_missing.append(path)
             continue
         try:
             df_vh = pd.read_csv(path)
@@ -702,6 +728,27 @@ def _load_validated_hypotheses() -> List[Tuple[str, str]]:
             f"{files_loaded}. Merged from all candidate paths (no file "
             f"silently ignored). Used for REWARD BONUS ONLY (not in AUC "
             f"label set — prevents circular leakage)."
+        )
+    else:
+        # P4-003 ROOT FIX: CRITICAL log when NO validated_hypotheses.csv is
+        # found in ANY of the candidate paths. The previous code silently
+        # returned an empty list, which broke the data flywheel (DOCX §10):
+        # validated pairs received NO reward bonus, the RL agent had no
+        # incentive to rank them HIGH, and the data flywheel moat was
+        # non-functional. The CRITICAL log makes the missing-file case LOUD
+        # so operators can fix the deployment (install the package properly,
+        # set RL_VALIDATED_HYPOTHESES_PATH, or copy the file to CWD).
+        logger.critical(
+            f"P4-003 ROOT FIX: validated_hypotheses.csv NOT FOUND in ANY "
+            f"of the {len(candidate_paths)} candidate paths: {candidate_paths}. "
+            f"The data flywheel (DOCX §10) is NON-FUNCTIONAL — validated "
+            f"pairs will receive NO reward bonus, so the RL agent has no "
+            f"incentive to rank validated pairs HIGH. To fix: (1) ensure "
+            f"the file ships with the package (MANIFEST.in / package_data "
+            f"in setup.py / pyproject.toml), OR (2) set the "
+            f"RL_VALIDATED_HYPOTHESES_PATH env var to the file's absolute "
+            f"path, OR (3) copy validated_hypotheses.csv to the CWD. The "
+            f"canonical file is at rl/validated_hypotheses.csv in the repo."
         )
     return result
 
