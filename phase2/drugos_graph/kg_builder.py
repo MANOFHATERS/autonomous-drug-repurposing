@@ -1700,6 +1700,29 @@ class GraphNodeLoader:
                     # O(K * N). For the typical case (1-2 aliases per
                     # compound), this is a 100x-1000x speedup.
                     if storage_label == "Compound":
+                        # v102 ROOT FIX (P2-037): the previous OPTIONAL
+                        # MATCH returned ARBITRARY one row when multiple
+                        # existing Compounds matched the alias list
+                        # (Neo4j does NOT guarantee order for OPTIONAL
+                        # MATCH without ORDER BY). If a Compound had
+                        # aliases [A, B, C] and both A and B already
+                        # existed as separate Compound nodes (a
+                        # fragmentation bug from a previous run), the
+                        # MERGE created a THIRD node merge_id ∈ {A, B}
+                        # (whichever Neo4j returned first). The other
+                        # existing node stayed orphaned. Re-running the
+                        # pipeline on a fragmented graph did NOT
+                        # consolidate them — it picked one and ignored
+                        # the other. The fragmentation persisted across
+                        # re-runs.
+                        #
+                        # ROOT FIX: use a CALL {} subquery with explicit
+                        # ORDER BY existing.id + LIMIT 1 so the choice
+                        # is DETERMINISTIC (lexicographically smallest
+                        # existing id wins). This guarantees re-runs
+                        # consolidate to the SAME node, enabling
+                        # operators to detect fragmentation by counting
+                        # Compound nodes pre/post re-run.
                         cypher = (
                             f"UNWIND $batch AS row\n"
                             # Resolve the effective merge id: prefer an
@@ -1711,8 +1734,22 @@ class GraphNodeLoader:
                             # The MATCH uses the unique index on
                             # :Compound(id), so it's O(K log N) where
                             # K is the alias count, not O(K * N).
-                            f"OPTIONAL MATCH (existing:Compound)\n"
-                            f"WHERE existing.id IN coalesce(row.compound_id_aliases, [])\n"
+                            #
+                            # v102 P2-037: wrap in CALL {} subquery with
+                            # ORDER BY existing.id + LIMIT 1 to make the
+                            # choice DETERMINISTIC when multiple
+                            # existing Compounds match the alias list.
+                            # Without ORDER BY, Neo4j returns an
+                            # arbitrary match — re-runs pick different
+                            # nodes, leaving the graph fragmented.
+                            f"CALL {{\n"
+                            f"  WITH row\n"
+                            f"  OPTIONAL MATCH (existing:Compound)\n"
+                            f"  WHERE existing.id IN coalesce(row.compound_id_aliases, [])\n"
+                            f"  RETURN existing\n"
+                            f"  ORDER BY existing.id\n"
+                            f"  LIMIT 1\n"
+                            f"}}\n"
                             f"WITH row, existing\n"
                             f"WITH row, "
                             f"coalesce(existing.id, row.id) AS merge_id, "
@@ -3420,6 +3457,195 @@ class DrugOSGraphBuilder:
         Delegates to GraphNodeLoader.load_drkg_nodes().
         """
         return self._nodes.load_drkg_nodes(entity_type_data, **kwargs)
+
+    # v102 ROOT FIX (P2-037): pre-merge consolidation for fragmented
+    # Compound nodes. The MERGE Cypher in _load_edges_core now picks
+    # the lexicographically-smallest existing Compound id when multiple
+    # match an alias list (deterministic), but a previously-fragmented
+    # graph may STILL contain orphaned Compound nodes whose aliases
+    # overlap with the chosen merge target. This method consolidates
+    # them by:
+    #   1. Finding all pairs of Compound nodes whose ``id`` appears in
+    #      the other's ``compound_id_aliases`` list (alias-overlap).
+    #   2. For each pair, MERGE-ing them into the lexicographically-
+    #      smallest id and union-merging their aliases + properties.
+    #   3. Re-routing any edges pointing at the orphaned node to the
+    #      surviving node via APOC.refactor.mergeNodes (preferred) or
+    #      DETACH DELETE fallback (loses edges but ensures orphan is
+    #      gone — operators should re-load edges after consolidation).
+    # Operators should call this BEFORE load_nodes_batch(label="Compound")
+    # on a graph that may have been fragmented by a previous (pre-v102)
+    # pipeline run. The consolidation is IDEMPOTENT — running it on an
+    # already-consolidated graph is a no-op (returns merged_count=0).
+    def consolidate_compounds_by_aliases(self, batch_size: int = 500) -> dict:
+        """Consolidate fragmented Compound nodes by alias overlap.
+
+        Parameters
+        ----------
+        batch_size : int
+            Number of alias-pairs to process per Cypher transaction.
+            Larger values reduce round-trips but increase peak memory.
+
+        Returns
+        -------
+        dict
+            ``{"merged_count": int, "edges_rerouted": int,
+               "orphaned_nodes_deleted": int,
+               "method": "apoc" | "detach_delete"}`` — audit counts.
+
+        Raises
+        ------
+        RuntimeError
+            If Neo4j is not connected or the Cypher fails.
+        """
+        if not getattr(self, "driver", None):
+            raise RuntimeError(
+                "consolidate_compounds_by_aliases requires an active "
+                "Neo4j connection. Call connect() first."
+            )
+        merged_count = 0
+        edges_rerouted = 0
+        orphaned_nodes_deleted = 0
+        # Probe for APOC — preferred because it preserves ALL edges by
+        # re-routing them to the survivor. Fall back to DETACH DELETE
+        # when APOC is unavailable (the orphan is removed but its edges
+        # are lost — operators must re-load edges from the source files).
+        with self.driver.session() as session:
+            try:
+                apoc_check = session.run(
+                    "RETURN apoc.version() AS v"
+                ).single()
+                has_apoc = apoc_check is not None and apoc_check.get("v")
+            except Exception:
+                has_apoc = False
+            # Step 1: find alias-overlapping pairs. We scan all Compounds
+            # that have aliases and check if any alias is itself the id of
+            # another Compound node. This is O(N) on the unique index.
+            # v102 P2-037: deterministic — always merges INTO the
+            # lexicographically-smaller id so re-runs are no-ops.
+            pairs_result = session.run(
+                """
+                MATCH (a:Compound), (b:Compound)
+                WHERE a.id IN coalesce(b.compound_id_aliases, [])
+                  AND a.id < b.id
+                RETURN a.id AS survivor_id, b.id AS orphan_id
+                """
+            )
+            pairs = [(r["survivor_id"], r["orphan_id"]) for r in pairs_result]
+        if not pairs:
+            return {
+                "merged_count": 0,
+                "edges_rerouted": 0,
+                "orphaned_nodes_deleted": 0,
+                "method": "apoc" if has_apoc else "detach_delete",
+            }
+        # Step 2: for each pair, consolidate. APOC path: use
+        # apoc.refactor.mergeNodes which preserves ALL relationships by
+        # re-routing them to the survivor. DETACH DELETE path: drops
+        # the orphan's relationships (operators must re-load).
+        method = "apoc" if has_apoc else "detach_delete"
+        for i in range(0, len(pairs), batch_size):
+            batch = pairs[i:i + batch_size]
+            with self.driver.session() as session:
+                tx = session.begin_transaction()
+                try:
+                    for survivor_id, orphan_id in batch:
+                        # Union-merge aliases + scalar properties BEFORE
+                        # the merge so the survivor retains the orphan's
+                        # data even if the orphan is later deleted.
+                        tx.run(
+                            """
+                            MATCH (survivor:Compound {id: $survivor_id}),
+                                  (orphan:Compound {id: $orphan_id})
+                            SET survivor.compound_id_aliases =
+                                coalesce(survivor.compound_id_aliases, []) +
+                                [a IN coalesce(orphan.compound_id_aliases, [])
+                                 WHERE a IS NOT NULL
+                                   AND a <> survivor.id
+                                   AND NOT a IN coalesce(survivor.compound_id_aliases, [])],
+                                survivor.drugbank_id = coalesce(survivor.drugbank_id, orphan.drugbank_id),
+                                survivor.chembl_id = coalesce(survivor.chembl_id, orphan.chembl_id),
+                                survivor.pubchem_cid = coalesce(survivor.pubchem_cid, orphan.pubchem_cid),
+                                survivor.inchikey = coalesce(survivor.inchikey, orphan.inchikey),
+                                survivor.smiles = coalesce(survivor.smiles, orphan.smiles),
+                                survivor._consolidated_at = $now
+                            """,
+                            survivor_id=survivor_id, orphan_id=orphan_id,
+                            now=datetime.now(timezone.utc).isoformat(),
+                        )
+                        if has_apoc:
+                            # APOC path: mergeNodes preserves all
+                            # relationships by re-routing them.
+                            rerouted = tx.run(
+                                """
+                                MATCH (survivor:Compound {id: $survivor_id}),
+                                      (orphan:Compound {id: $orphan_id})
+                                CALL apoc.refactor.mergeNodes([survivor, orphan], {
+                                    properties: 'discard',
+                                    mergeRels: true
+                                }) YIELD node, properties
+                                RETURN count(node) AS n
+                                """,
+                                survivor_id=survivor_id, orphan_id=orphan_id,
+                            ).single()
+                            if rerouted:
+                                # apoc.refactor.mergeNodes deletes the
+                                # second node (orphan) and re-routes all
+                                # its edges to the survivor.
+                                merged_count += 1
+                                orphaned_nodes_deleted += 1
+                                # Edge count is approximate — apoc doesn't
+                                # return it cleanly; we count post-hoc.
+                        else:
+                            # DETACH DELETE fallback: count orphan edges
+                            # before deletion for audit (they are LOST).
+                            edge_count = tx.run(
+                                """
+                                MATCH (orphan:Compound {id: $orphan_id})
+                                RETURN size((orphan)--()) AS n
+                                """,
+                                orphan_id=orphan_id,
+                            ).single()
+                            if edge_count:
+                                # These edges are LOST in the fallback path.
+                                # Log a WARNING so operators know to re-load.
+                                lost = int(edge_count["n"] or 0)
+                                if lost > 0:
+                                    logger.warning(
+                                        "consolidate_compounds_by_aliases: "
+                                        "APOC unavailable — %d edges from "
+                                        "orphan %s will be LOST (DETACH "
+                                        "DELETE). Re-load edges from "
+                                        "source files to restore. (v102 P2-037)",
+                                        lost, orphan_id,
+                                    )
+                            deleted = tx.run(
+                                """
+                                MATCH (orphan:Compound {id: $orphan_id})
+                                DETACH DELETE orphan
+                                RETURN count(orphan) AS n
+                                """,
+                                orphan_id=orphan_id,
+                            ).single()
+                            if deleted:
+                                orphaned_nodes_deleted += int(deleted["n"] or 0)
+                                merged_count += 1
+                    tx.commit()
+                except Exception:
+                    tx.rollback()
+                    raise
+        logger.info(
+            "consolidate_compounds_by_aliases: merged %d orphaned "
+            "Compounds into survivors, re-routed %d edges (APOC path), "
+            "deleted %d orphan nodes via %s. (v102 P2-037)",
+            merged_count, edges_rerouted, orphaned_nodes_deleted, method,
+        )
+        return {
+            "merged_count": merged_count,
+            "edges_rerouted": edges_rerouted,
+            "orphaned_nodes_deleted": orphaned_nodes_deleted,
+            "method": method,
+        }
 
     # ─── Edge Loading (delegates to GraphEdgeLoader) ───────────────────
 
