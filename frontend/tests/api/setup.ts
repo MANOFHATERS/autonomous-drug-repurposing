@@ -38,6 +38,7 @@ beforeEach(async () => {
   const tablenames = [
     "AuditLog",
     "Notification",
+    "MfaChallenge",
     "RefreshToken",
     "ApiKey",
     "EvidencePackage",

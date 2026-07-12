@@ -3543,24 +3543,34 @@ def _load_clinical_outcomes(
             co_id = f"CO:{dbid}:{disease_key}:{itype}"
             seen_node_keys[dedup_key] = co_id
             node_name = f"{dname or did} ({itype})"
-            # v60 ROOT FIX (FORENSIC-DEEP — 3 CORE_NODE_TYPES have no
-            # canonical ID system). The v57 fix added
-            # CANONICAL_IDS["ClinicalOutcome"] = "meddra_id" to config.py
-            # — but this ClinicalOutcome node construction never
-            # populated `meddra_id` (or the ID_MAPPING_PRIORITY fallback
-            # fields `mesh_id`, `name`). So
-            # entity_resolver.resolve_canonical_id returned None silently
-            # for every ClinicalOutcome node. ROOT FIX: populate the
-            # canonical ID fields explicitly:
-            #   * `meddra_id`: None (ClinicalOutcomes from DrugBank
-            #     indications don't carry MedDRA codes; would require a
-            #     MeSH→MedDRA crosswalk not yet implemented). Storing
-            #     None makes the gap explicit.
-            #   * `mesh_id`: extracted from `did` if it's a MeSH ID
-            #     (e.g. "MESH:D006932" → "D006932"). DrugBank indications
-            #     reference diseases by MeSH descriptor IDs.
-            #   * `name`: already set above (used as last-resort
-            #     fallback per ID_MAPPING_PRIORITY).
+            # P2-001 FORENSIC ROOT FIX (Team 4 — namespace collision):
+            #   ``CANONICAL_IDS["ClinicalOutcome"]`` was changed from
+            #   ``"meddra_id"`` to ``"clinical_outcome_id"`` so
+            #   ClinicalOutcome and MedDRA_Term no longer share the
+            #   same canonical ID field. The ``clinical_outcome_id``
+            #   field holds the ``CO:<drugbank_id>:<disease_key>:<indication_type>``
+            #   value (same as ``id``) — this is the SAME format
+            #   already produced here and already registered in
+            #   ``kg_builder.ID_PATTERNS["ClinicalOutcome"]`` and
+            #   validated by ``utils.is_clinical_outcome_id``.
+            #
+            #   The v60 fix (lines 3547-3563 below this comment block)
+            #   populated ``meddra_id: None`` and ``mesh_id`` because
+            #   the old CANONICAL_IDS pointed at ``meddra_id``. With
+            #   P2-001, the canonical field is ``clinical_outcome_id``
+            #   — so we MUST populate it here, otherwise
+            #   ``entity_resolver.resolve_canonical_id`` would return
+            #   None for every ClinicalOutcome node (it looks up
+            #   ``clinical_outcome_id`` first per ID_MAPPING_PRIORITY,
+            #   then falls back to ``meddra_id`` which is None here,
+            #   then ``mesh_id`` which is only set for MeSH IDs).
+            #
+            #   We KEEP ``meddra_id: None`` and ``mesh_id`` for
+            #   backward compat with any code that still reads them
+            #   (e.g. legacy SIDER crosswalks that emitted MedDRA
+            #   codes on ClinicalOutcome nodes — now deprecated but
+            #   not yet removed). The ``clinical_outcome_id`` is the
+            #   NEW canonical field per P2-001.
             _mesh_id: Optional[str] = None
             if did and isinstance(did, str) and did.upper().startswith(("MESH:", "MESH_")):
                 _mesh_id = did.split(":", 1)[-1] if ":" in did else did.split("_", 1)[-1]
@@ -3570,13 +3580,20 @@ def _load_clinical_outcomes(
                 "disease_id": did,
                 "disease_name": dname,
                 "indication_type": itype,
-                # v60 ROOT FIX: canonical ID fields per
-                # CANONICAL_IDS["ClinicalOutcome"] = "meddra_id" and
-                # ID_MAPPING_PRIORITY["ClinicalOutcome"] =
-                # ["meddra_id", "mesh_id", "name"]. All three fields
-                # are populated so resolve_canonical_id can find them.
-                "meddra_id": None,  # requires MeSH→MedDRA crosswalk (future work)
-                "mesh_id": _mesh_id,
+                # P2-001 ROOT FIX: ``clinical_outcome_id`` is the NEW
+                # canonical ID field for ClinicalOutcome (replaces
+                # ``meddra_id`` which collided with MedDRA_Term). Holds
+                # the ``CO:<dbid>:<disease_key>:<indication_type>`` value.
+                "clinical_outcome_id": co_id,
+                # v60 ROOT FIX (legacy fields, kept for backward compat):
+                # ``meddra_id`` is None here because DrugBank indications
+                # don't carry MedDRA codes (would require a MeSH→MedDRA
+                # crosswalk not yet implemented). ``mesh_id`` is extracted
+                # from the disease ID when it's a MeSH descriptor. Both
+                # are LOWER priority in ID_MAPPING_PRIORITY than
+                # ``clinical_outcome_id`` — they're fallbacks only.
+                "meddra_id": None,  # legacy fallback (P2-001: no longer canonical)
+                "mesh_id": _mesh_id,  # legacy fallback for MeSH IDs
                 # v35 M-5 root fix: renamed misleading ``source_drug_id``
                 # to ``first_seen_drug_id`` (the actual semantics — the
                 # first drug that pointed to this node). The new
@@ -6153,6 +6170,18 @@ def bridge_to_pyg_maps(
     # Keyed by ANY id (canonical or alias) → canonical PyG index.
     compound_alias_to_idx: Dict[str, int] = {}
     n_compound_alias_merges = 0
+    # P2-005 FORENSIC ROOT FIX (Team 4): separate counter for UNIQUE
+    # Compound nodes. The previous code used ``len(entity_maps[label])``
+    # to allocate the next index — but ``entity_maps[label]`` now contains
+    # BOTH canonical ids AND merged aliases (both map to the same index,
+    # so callers can look up a Compound by ANY of its ids directly via
+    # ``entity_maps["Compound"][some_id]`` without a KeyError). Using
+    # ``len(entity_maps[label])`` would produce non-contiguous indices
+    # (skipping numbers whenever a merge added redundant keys). The
+    # separate ``_compound_next_idx`` counter increments ONLY when a NEW
+    # canonical Compound node is allocated — guaranteeing contiguous
+    # ``[0, N-1]`` indices per the ``bridge_to_pyg_maps`` contract.
+    _compound_next_idx: int = 0
 
     for load in builder.node_loads:
         label = load["label"]
@@ -6166,11 +6195,11 @@ def bridge_to_pyg_maps(
                 if nid in compound_alias_to_idx:
                     # Already known (either as a canonical id from a
                     # previous load, or as an alias of an earlier node).
-                    # DO NOT add to entity_maps — entity_maps must
-                    # contain only canonical ids so len(entity_maps
-                    # [label]) reflects the true node count. The alias
-                    # is already in compound_alias_to_idx for edge
-                    # lookup.
+                    # The alias is already in compound_alias_to_idx AND
+                    # entity_maps[label] (both registered when the
+                    # canonical node was first allocated, or during a
+                    # previous alias merge). Skip — do NOT allocate a
+                    # new index, do NOT add a duplicate key.
                     continue
                 aliases = n.get("compound_id_aliases") or []
                 if isinstance(aliases, str):
@@ -6182,20 +6211,50 @@ def bridge_to_pyg_maps(
                         existing_idx = compound_alias_to_idx[alias]
                         break
                 if existing_idx is not None:
-                    # Alias merge — DO NOT add this nid to entity_maps
-                    # (it would inflate the key count and confuse any
-                    # downstream code that uses len(entity_maps[label])
-                    # as the node count). Instead, register nid + all
-                    # its aliases ONLY in compound_alias_to_idx so edge
-                    # lookups can resolve them to the canonical index.
+                    # Alias merge — DO NOT allocate a new index. The
+                    # current node is the SAME Compound as an earlier
+                    # node (just referenced by a different ID — e.g.
+                    # a biologic drug's DrugBank ID vs its InChIKey from
+                    # ChEMBL). Register the current nid AND all its
+                    # aliases in BOTH:
+                    #   * ``compound_alias_to_idx`` — for edge lookup
+                    #     (edges that reference the Compound by ANY of
+                    #     its ids resolve to the canonical index).
+                    #   * ``entity_maps[label]`` — for callers that
+                    #     look up a Compound by id directly via
+                    #     ``entity_maps["Compound"][some_id]``. The test
+                    #     ``test_p2_005_bridge_consolidates_compound_aliases``
+                    #     expects BOTH ``DB00071`` AND
+                    #     ``RZVAJINKQORUOD-UHFFFAOYSA-N`` to be keys in
+                    #     ``entity_maps["Compound"]`` with the SAME
+                    #     value. Adding the merged aliases to
+                    #     ``entity_maps[label]`` with the existing_idx
+                    #     does NOT inflate the unique index count
+                    #     (``len(set(entity_maps[label].values()))``
+                    #     is unchanged) — it only adds redundant keys
+                    #     that map to the same index. This is the
+                    #     semantically correct behavior: the alias IS
+                    #     the same node, just referenced by a different
+                    #     ID. (P2-005 FORENSIC ROOT FIX — Team 4:
+                    #     previously the merged aliases were only added
+                    #     to ``compound_alias_to_idx``, NOT to
+                    #     ``entity_maps[label]``, causing KeyError when
+                    #     callers looked up the merged alias directly.)
                     compound_alias_to_idx[nid] = existing_idx
+                    entity_maps[label][nid] = existing_idx
                     for alias in aliases:
                         if isinstance(alias, str):
                             compound_alias_to_idx[alias] = existing_idx
+                            entity_maps[label][alias] = existing_idx
                     n_compound_alias_merges += 1
                     continue
                 # New canonical Compound node — allocate a new index.
-                new_idx = len(entity_maps[label])
+                # P2-005: use ``_compound_next_idx`` (NOT
+                # ``len(entity_maps[label])``) because entity_maps[label]
+                # may contain merged alias keys that would inflate the
+                # count and produce non-contiguous indices.
+                new_idx = _compound_next_idx
+                _compound_next_idx += 1
                 entity_maps[label][nid] = new_idx
                 compound_alias_to_idx[nid] = new_idx
                 for alias in aliases:

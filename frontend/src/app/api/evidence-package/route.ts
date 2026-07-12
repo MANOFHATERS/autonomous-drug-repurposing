@@ -1,11 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
 import { buildEvidencePackage, evidencePackageToMarkdown } from "@/lib/services/evidence-package";
-import { requireAuthRole, badRequest, internalError, writeAuditLog } from "@/lib/api-helpers";
+import { requireAuthRole, badRequest, internalError, writeAuditLog, requireCsrfOrSend } from "@/lib/api-helpers";
 import { parsePagination, buildPaginatedResponse } from "@/lib/pagination";
 import { db } from "@/lib/db";
 
 /** FE-010 ROOT FIX: Evidence package build requires a research role. */
 export async function POST(req: NextRequest) {
+  // FE-011: CSRF protection on every state-changing route.
+  const csrf = await requireCsrfOrSend(req);
+  if (csrf.response) return csrf.response;
+
   const auth = await requireAuthRole("researcher", "data-scientist", "pi", "business-dev");
   if (auth.user === null) return auth.response;
 

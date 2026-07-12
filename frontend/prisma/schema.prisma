@@ -126,6 +126,23 @@ model RefreshToken {
   @@index([expiresAt])
 }
 
+// FE-016 ROOT FIX: MFA challenge-token replay protection. Each MFA challenge
+// JWT now carries a random `jti` (JWT ID). /api/auth/2fa/login-verify
+// atomically inserts the jti here on first use; the unique constraint on
+// `jti` makes a second insert fail (Prisma P2002), which the verify route
+// treats as a replay attack and rejects with 401. Rows are garbage-collected
+// by a periodic job (or manually) once `expiresAt` has passed.
+model MfaChallenge {
+  id         String   @id @default(cuid())
+  jti        String   @unique // FE-016: single-use replay guard
+  userId     String
+  consumedAt DateTime @default(now())
+  expiresAt  DateTime // 1 min grace past the JWT's own expiry for clock skew
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
 // ---------------------------------------------------------------------------
 // PROJECTS & COLLABORATION
 // ---------------------------------------------------------------------------
@@ -162,7 +179,17 @@ model Hypothesis {
   title         String
   drugName      String
   diseaseName   String
-  status        String   @default("draft") // draft | reviewing | validated | rejected | archived
+  // FE-010 ROOT FIX: status enum tightened. RL model predictions are stored
+  // with status="predicted" (NOT "validated" — a "validated" hypothesis in
+  // pharma means wet-lab or clinical confirmation, which a model output is
+  // NOT). The rlPredicted boolean below distinguishes RL-sourced hypotheses
+  // from human-created ones at query time.
+  status        String   @default("draft") // draft | predicted | reviewing | validated | rejected | archived
+  // FE-010 ROOT FIX: true when this hypothesis was created or last updated
+  // by the RL ranker (via /api/rl persistRlCandidates). Lets researchers
+  // filter "RL predictions" vs "human-curated hypotheses" vs "validated by
+  // wet-lab" — three distinct categories that were previously conflated.
+  rlPredicted   Boolean  @default(false)
   // The three scores managed by the standalone RL agent — we store the
   // most recent values for display, but the RL agent is the source of truth.
   plausibilityScore  Float?
@@ -186,10 +213,13 @@ model Hypothesis {
   evidencePackages EvidencePackage[]
 
   // FE-018 ROOT FIX: Missing index on projectId.
+  // FE-010: index on rlPredicted so "show me RL predictions" queries don't
+  // full-scan the Hypothesis table.
   @@index([projectId])
   @@index([drugName])
   @@index([diseaseName])
   @@index([status])
+  @@index([rlPredicted])
 }
 
 model Comment {
