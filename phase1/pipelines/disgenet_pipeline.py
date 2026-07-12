@@ -1607,6 +1607,35 @@ class DisGeNETPipeline(BasePipeline):
                     offset += len(records)
 
             # IDEM-5: Do NOT write an empty file when no records returned.
+            # P1-014 ROOT FIX (Team-2): emit ``n_pagination_iterations``
+            # metric so operators can verify pagination actually happened
+            # (a value of 1 would indicate a single-page fetch -- suspicious
+            # for bulk GDA download). This metric is the regression-test
+            # assertion target for the 3-page mock test
+            # ``test_p1_014_disgenet_pagination_three_pages``.
+            self._emit_metric(
+                "n_pagination_iterations",
+                page_num,
+                tags={"source_format": "api", "source": "disgenet"},
+            )
+            self._emit_metric(
+                "records_fetched_via_pagination",
+                records_written,
+                tags={"source_format": "api", "source": "disgenet"},
+            )
+            if total_available is not None:
+                self._emit_metric(
+                    "total_available_per_pagination_run",
+                    total_available,
+                    tags={"source_format": "api", "source": "disgenet"},
+                )
+            logger.info(
+                "[disgenet] P1-014 pagination summary: %d iteration(s), "
+                "%d records fetched / %s total available",
+                page_num,
+                records_written,
+                str(total_available) if total_available is not None else "?",
+            )
             if records_written == 0:
                 try:
                     tmp_dest.unlink()

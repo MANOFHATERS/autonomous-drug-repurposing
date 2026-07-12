@@ -215,6 +215,7 @@ from config.settings import (
     OMIM_USER_AGENT,
     PROCESSED_DATA_DIR,
     RAW_DATA_DIR,
+    ENVIRONMENT,
 )
 
 # ============================================================================
@@ -893,6 +894,14 @@ class OMIMPipeline(BasePipeline):
 
         Raises:
             ValueError: on invalid configuration.
+            RuntimeError: P1-015 ROOT FIX (Team-2) -- if OMIM_API_KEY is
+                not set AND the pipeline is configured for production /
+                full-mode download. The previous code only raised inside
+                ``download()`` -- which meant a misconfigured production
+                deploy would start up cleanly, pass pre-flight checks, and
+                fail MID-PIPELINE (after wasting Airflow worker time). The
+                fix raises at STARTUP so the operator sees the error
+                immediately in the task's init log, before any work begins.
         """
         errors: list[str] = []
         if OMIM_REQUEST_INTERVAL <= 0:
@@ -919,6 +928,37 @@ class OMIMPipeline(BasePipeline):
             raise ValueError(
                 "OMIM config validation failed:\n  - " + "\n  - ".join(errors)
             )
+        # P1-015 ROOT FIX (Team-2): raise at STARTUP if OMIM_API_KEY is
+        # missing in production or full-download mode. The previous code
+        # only raised inside download() -- too late for the operator to
+        # catch a misconfigured production deploy. Now the pipeline fails
+        # fast at construction time, before any Airflow worker is wasted.
+        _download_mode = os.environ.get("DRUGOS_DOWNLOAD_MODE", "sample").lower().strip()
+        _is_full_mode = _download_mode == "full"
+        if not OMIM_API_KEY:
+            if ENVIRONMENT == "production" or _is_full_mode:
+                raise RuntimeError(
+                    "OMIM_API_KEY is not set -- cannot construct OMIM "
+                    "pipeline in " + ("production" if ENVIRONMENT == "production" else "full-download")
+                    + " mode. The KG would have ZERO OMIM-sourced disease "
+                    "nodes, breaking rare-disease coverage (the platform's "
+                    "core value proposition). Set the OMIM_API_KEY env var "
+                    "(free for academic use -- register at "
+                    "https://www.omim.org/api) OR explicitly set "
+                    "DRUGOS_DOWNLOAD_MODE=sample AND "
+                    "DRUGOS_ENVIRONMENT=development for local laptop runs. "
+                    "(P1-015 ROOT FIX: fail fast at startup, never silently "
+                    "continue with an empty key.)"
+                )
+            else:
+                logger.warning(
+                    "[omim] OMIM_API_KEY is not set AND DRUGOS_DOWNLOAD_MODE=%s "
+                    "AND ENVIRONMENT=%s -- pipeline will fall back to embedded "
+                    "sample data in download(). This is acceptable for local "
+                    "development ONLY. Set OMIM_API_KEY for any non-dev use.",
+                    _download_mode,
+                    ENVIRONMENT,
+                )
 
     # ------------------------------------------------------------------
     # Authentication headers (BUG-2.2 / BUG-9.1)

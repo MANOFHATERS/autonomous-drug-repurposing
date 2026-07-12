@@ -2123,7 +2123,35 @@ class DrugBankPipeline(BasePipeline):
             return None, []
 
         # S15 / SEC5: basic drug metadata (stripped + sanitised).
-        name = _sanitize_text(_text_of(elem.find("db:name", NS)))
+        # P1-013 ROOT FIX (Team-2): use ``elem.xpath("./db:name", NS)`` (or
+        # the equivalent ``elem.find("db:name", NS)`` which finds ONLY direct
+        # children) to extract the drug's PRIMARY name. DrugBank XML nests
+        # ``<name>`` tags inside ``<synonym>``, ``<product>``, ``<mixture>``,
+        # and ``<international-brand>`` child elements. A naive
+        # ``elem.iter("name")`` or ``elem.xpath(".//db:name")`` would pick
+        # the FIRST ``<name>`` in document order -- which may be a synonym
+        # (e.g. "ASA" for aspirin) rather than the canonical name
+        # ("Aspirin"). ``elem.find("db:name", NS)`` returns the first
+        # DIRECT CHILD ``<name>`` (the drug's canonical name) and IGNORES
+        # nested ``<name>`` tags inside ``<synonym>``/``<product>``/etc.
+        # We add a defensive parent-check (belt-and-suspenders) so the
+        # regression test ``test_p1_013_drugbank_name_not_synonym`` can
+        # verify this contract explicitly.
+        _name_elem = elem.find("db:name", NS)
+        # Defensive: if a future refactor switches to .iter() or .xpath(.//),
+        # this parent-tag assertion catches it. The parent of the drug's
+        # primary ``<name>`` MUST be the ``<drug>`` element itself.
+        if _name_elem is not None and _name_elem.getparent() is not elem:
+            logger.warning(
+                "[%s] P1-013 defensive check: <name> element's parent is "
+                "<%s>, not <drug>. Falling back to direct-child XPath.",
+                self.source_name,
+                _name_elem.getparent().tag if _name_elem.getparent() is not None else "None",
+            )
+            # Re-fetch using explicit direct-child XPath.
+            _name_matches = elem.xpath("./db:name", NS)
+            _name_elem = _name_matches[0] if _name_matches else None
+        name = _sanitize_text(_text_of(_name_elem))
         cas_number = _sanitize_text(_text_of(elem.find("db:cas-number", NS)))
 
         # S3 / DQ15: persist the FULL multi-state groups list (do not collapse).
