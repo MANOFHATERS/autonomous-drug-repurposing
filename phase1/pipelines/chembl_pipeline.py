@@ -623,6 +623,14 @@ class ChEMBLPipeline(BasePipeline):
 
         # Per-instance metrics (L6). Written to the manifest at end of
         # each phase.
+        # P1-012 ROOT FIX (Team-2): add ``n_rate_limited_drugs`` metric so
+        # operators can monitor how many drugs lost their bioactivity data
+        # to HTTP 429 rate-limit responses. The ChEMBL HTTP client raises
+        # ``HttpClientError`` after retries are exhausted on 429 -- it does
+        # NOT silently return an empty list (the previous audit finding).
+        # This metric is incremented whenever a 429-driven ``HttpClientError``
+        # propagates through ``_download_activities`` / ``_download_molecules``,
+        # so the run audit trail records the count of rate-limited drugs.
         self._metrics: dict[str, int | float] = {
             "api_calls": 0,
             "api_calls_429": 0,
@@ -636,6 +644,10 @@ class ChEMBLPipeline(BasePipeline):
             "drugs_quarantined": 0,
             "dpi_upserted": 0,
             "dpi_quarantined": 0,
+            # P1-012: number of drugs whose bioactivity fetch was aborted by
+            # HTTP 429 after all retries. Non-zero => operator must back off
+            # and re-run the affected drugs.
+            "n_rate_limited_drugs": 0,
             "duration_download_sec": 0.0,
             "duration_clean_sec": 0.0,
             "duration_load_sec": 0.0,
@@ -2238,7 +2250,7 @@ class ChEMBLPipeline(BasePipeline):
                 "offset": offset,
             }
             url = f"{CHEMBL_API_URL}/molecule.json"
-            data = self._api_get(url, params)
+            data = self._api_get_with_rate_limit_tracking(url, params)
             molecules = data.get("molecules", [])
             page_meta = data.get("page_meta", {})
             # P1-1 ROOT FIX (silent truncation): The previous code did
@@ -2429,7 +2441,7 @@ class ChEMBLPipeline(BasePipeline):
                     "offset": offset,
                 }
                 url = f"{CHEMBL_API_URL}/activity.json"
-                data = self._api_get(url, params)
+                data = self._api_get_with_rate_limit_tracking(url, params)
                 activities = data.get("activities", [])
                 page_meta = data.get("page_meta", {})
                 # P1-1 ROOT FIX (silent truncation): see _download_molecules
@@ -3416,6 +3428,57 @@ class ChEMBLPipeline(BasePipeline):
         self._metrics["api_calls_5xx"] = client_metrics["api_calls_5xx"]
         self._metrics["api_calls_4xx"] = client_metrics["api_calls_4xx"]
         self._metrics["retries"] = client_metrics["retries"]
+        # P1-012 ROOT FIX (Team-2): expose ``n_rate_limited_drugs`` so the
+        # audit trail records how many page-fetches were aborted by HTTP 429
+        # after all retries. ``api_calls_429`` counts INDIVIDUAL 429 responses
+        # (including those that succeeded after retry); ``n_rate_limited_drugs``
+        # counts page-fetches that ULTIMATELY FAILED because of 429 (i.e.
+        # retries exhausted). The two metrics are complementary -- one
+        # measures transient rate-limit pressure, the other measures data
+        # loss. See ``_api_get_with_rate_limit_tracking`` for the increment
+        # site.
+
+    # P1-012 ROOT FIX (Team-2): wrapper around ``_api_get`` that detects
+    # 429-driven ``HttpClientError`` (retries exhausted) and increments the
+    # ``n_rate_limited_drugs`` metric BEFORE re-raising. The exception is NOT
+    # swallowed -- it propagates to the Airflow task so the operator is
+    # notified and the whole task is retried with a longer backoff. This is
+    # the explicit non-silent contract: NEVER return an empty list on
+    # rate-limit; ALWAYS raise so downstream phases know the data is missing.
+    def _api_get_with_rate_limit_tracking(
+        self, url: str, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Issue an API GET, tracking 429-driven failures in ``n_rate_limited_drugs``.
+
+        Raises:
+            HttpClientError: if the underlying client exhausted retries on
+                429/5xx (propagates -- NOT swallowed).
+            CircuitBreakerOpenError: if the circuit breaker is OPEN.
+            requests.exceptions.RequestException: on network-level failures.
+        """
+        _before_429 = self._http_client.metrics.get("api_calls_429", 0)
+        try:
+            return self._api_get(url, params)
+        except HttpClientError as exc:
+            _after_429 = self._http_client.metrics.get("api_calls_429", 0)
+            if _after_429 > _before_429:
+                # The failure involved at least one 429 response. Increment
+                # the per-run rate-limited-drugs counter so the audit trail
+                # records the data-loss event. The exception still
+                # propagates -- this metric is for observability, not for
+                # suppressing the error.
+                self._metrics["n_rate_limited_drugs"] = (
+                    int(self._metrics.get("n_rate_limited_drugs", 0)) + 1
+                )
+                logger.error(
+                    "[chembl] HTTP 429 after retries on %s -- "
+                    "n_rate_limited_drugs=%d. Exception will propagate to "
+                    "the Airflow task (P1-012 ROOT FIX: never silently "
+                    "return empty list on rate-limit).",
+                    url,
+                    self._metrics["n_rate_limited_drugs"],
+                )
+            raise
 
     # ==================================================================
     # PRIVATE HELPERS — Clean (per-step)

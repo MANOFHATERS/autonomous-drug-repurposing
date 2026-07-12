@@ -1117,15 +1117,38 @@ PIPELINE_RESUME: bool = _getenv_bool("PIPELINE_RESUME", False)
 # UniProt -- SCI-5, IDMP-1
 # ---------------------------------------------------------------------------
 
-# UniProt release for reproducibility. Defaults to 'current_release'
-# which is non-reproducible; warn in production.
-UNIPROT_RELEASE: str = _getenv("UNIPROT_RELEASE", "current_release")
+# UniProt release for reproducibility.
+# P1-016 ROOT FIX (Team-2): default is now a PINNED release
+# (``releases/2024_03``) instead of ``current_release``. UniProt releases
+# weekly, so two runs on different days would use different protein sets
+# -- making KG embeddings non-reproducible and breaking FDA audit
+# requirements. The pinned default guarantees reproducibility; operators
+# who want the latest release can explicitly set
+# ``UNIPROT_RELEASE=current_release`` in development (it raises in
+# production via the check below). The pinned release is updated
+# deliberately as part of a quarterly KG re-build, NOT silently.
+DEFAULT_UNIPROT_RELEASE: str = "releases/2024_03"
+UNIPROT_RELEASE: str = _getenv("UNIPROT_RELEASE", DEFAULT_UNIPROT_RELEASE)
 
+# P1-016 ROOT FIX (Team-2): in production, RAISE if UNIPROT_RELEASE is
+# ``current_release`` -- a non-reproducible KG is a regulatory
+# non-compliance. The previous code only warned, which operators routinely
+# ignored. Raise to force the operator to pin a release.
 if UNIPROT_RELEASE == "current_release" and ENVIRONMENT == "production":
-    warnings.warn(
+    raise RuntimeError(
         "UNIPROT_RELEASE is set to 'current_release' in production. "
-        "This makes pipeline runs non-reproducible. Pin a specific release "
-        "(e.g., 'releases/2024_03') for reproducibility.",
+        "This makes pipeline runs non-reproducible (UniProt releases "
+        "weekly) and violates FDA audit requirements. Pin a specific "
+        "release (e.g., UNIPROT_RELEASE=releases/2024_03) for "
+        "reproducibility. (P1-016 ROOT FIX: raise, don't warn.)"
+    )
+if UNIPROT_RELEASE == "current_release" and ENVIRONMENT != "production":
+    warnings.warn(
+        "UNIPROT_RELEASE is set to 'current_release' (ENVIRONMENT=%s). "
+        "This is non-reproducible and acceptable ONLY for local dev. "
+        "Pin a specific release (e.g., 'releases/2024_03') for any "
+        "shared/staging/production deploy. (P1-016)"
+        % ENVIRONMENT,
         UserWarning,
     )
 
