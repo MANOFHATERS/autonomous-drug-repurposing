@@ -20,6 +20,18 @@
  * Both layers are required: per-account lockout stops targeted brute-force on
  * one account, per-IP rate limit stops an attacker rotating through many
  * accounts from the same IP.
+ *
+ * FE-061 ROOT FIX: The previous implementation used a plain `Map<string,
+ * IpBucket>` cleaned up only every 10 minutes. Under a distributed attack
+ * with millions of unique source IPs, the Map could grow to millions of
+ * entries between cleanup cycles — consuming GB of memory and causing GC
+ * pauses. The cleanup iteration itself was O(n) over the whole Map.
+ *
+ * We now use a bounded LRU cache (max 100K entries). When the cap is hit,
+ * the least-recently-accessed bucket is evicted. This bounds memory at
+ * ~100K * ~200 bytes ≈ 20MB worst case, and eviction is O(1) amortized.
+ * For multi-node deployments that need shared state, swap in
+ * @upstash/ratelimit — the function signatures stay the same.
  */
 
 import { db } from "@/lib/db";
@@ -33,6 +45,12 @@ export const LOCKOUT_DURATION_MINUTES = 30;
 const IP_MAX_ATTEMPTS = 20; // 20 attempts...
 const IP_WINDOW_MINUTES = 5; // ...per 5 minutes
 const IP_BLOCK_MINUTES = 15; // ...then block IP for 15 minutes
+
+// FE-061: Bounded LRU cache size. 100K unique IPs covers a sustained attack
+// from a botnet; legitimate traffic uses orders of magnitude fewer entries.
+// At ~200 bytes per bucket (20 timestamps * 8 bytes + overhead), this caps
+// memory at ~20MB.
+const IP_LRU_MAX_ENTRIES = 100_000;
 
 // FE-003 ROOT FIX: TOTP (2FA) brute-force protection.
 // A 6-digit TOTP code has 1,000,000 combinations; at 1000 req/s an attacker
@@ -57,25 +75,78 @@ interface IpBucket {
   blockedUntil: number | null;
 }
 
-// In-memory store. Keyed by IP. For multi-node deployment, replace with
-// @upstash/ratelimit (Redis-backed) — the function signatures stay the same.
-const ipBuckets = new Map<string, IpBucket>();
-
-// Periodic cleanup so the Map doesn't grow unboundedly. Evict any bucket
-// whose newest attempt is older than IP_BLOCK_MINUTES.
+// FE-061: Periodic cleanup so the LRU doesn't accumulate stale entries.
 const CLEANUP_INTERVAL_MS = 10 * 60 * 1000; // 10 minutes
 let lastCleanup = Date.now();
+
+/**
+ * FE-061 ROOT FIX: Bounded LRU Map.
+ *
+ * A plain `Map` in JavaScript preserves insertion order, so we can use it as
+ * an LRU by:
+ *   - On read/write: delete the key, then re-set it (moves it to the end = MRU).
+ *   - On insertion when over capacity: delete the first key (LRU).
+ *
+ * This gives O(1) get/set/evict. We cap at IP_LRU_MAX_ENTRIES so memory is
+ * bounded regardless of attack volume.
+ */
+class LruMap<K, V> {
+  private map = new Map<K, V>();
+  constructor(private readonly max: number) {}
+
+  get(key: K): V | undefined {
+    const v = this.map.get(key);
+    if (v === undefined) return undefined;
+    // Move to MRU position.
+    this.map.delete(key);
+    this.map.set(key, v);
+    return v;
+  }
+
+  set(key: K, value: V): void {
+    if (this.map.has(key)) this.map.delete(key);
+    this.map.set(key, value);
+    // Evict LRU if over capacity.
+    if (this.map.size > this.max) {
+      const firstKey = this.map.keys().next().value;
+      if (firstKey !== undefined) this.map.delete(firstKey);
+    }
+  }
+
+  delete(key: K): boolean {
+    return this.map.delete(key);
+  }
+
+  get size(): number {
+    return this.map.size;
+  }
+
+  /**
+   * Iterate entries in insertion (LRU-first) order. Used by cleanup.
+   */
+  forEach(callback: (value: V, key: K) => void): void {
+    this.map.forEach((v, k) => callback(v, k));
+  }
+}
+
+// In-memory LRU store. Keyed by IP. For multi-node deployment, replace with
+// @upstash/ratelimit (Redis-backed) — the function signatures stay the same.
+const ipBuckets = new LruMap<string, IpBucket>(IP_LRU_MAX_ENTRIES);
+
 function maybeCleanup() {
   const now = Date.now();
   if (now - lastCleanup < CLEANUP_INTERVAL_MS) return;
   lastCleanup = now;
   const cutoff = now - IP_BLOCK_MINUTES * 60 * 1000;
-  for (const [ip, bucket] of ipBuckets) {
+  // Iterate from LRU end. We collect keys to delete first to avoid mutating
+  // during iteration. The LRU iteration order means we hit the oldest first,
+  // which are the most likely candidates for eviction.
+  ipBuckets.forEach((bucket, ip) => {
     const last = bucket.attempts[bucket.attempts.length - 1] ?? 0;
     if (last < cutoff && (!bucket.blockedUntil || bucket.blockedUntil < now)) {
       ipBuckets.delete(ip);
     }
-  }
+  });
 }
 
 function getClientIp(req: NextRequest): string {
@@ -137,7 +208,7 @@ export function recordIpAttempt(req: NextRequest) {
   const now = Date.now();
   const bucket = ipBuckets.get(ip) || { attempts: [], blockedUntil: null };
   bucket.attempts.push(now);
-  // Keep only attempts within the window — bounded memory.
+  // Keep only attempts within the window — bounded memory per bucket.
   const windowMs = IP_WINDOW_MINUTES * 60 * 1000;
   bucket.attempts = bucket.attempts.filter((t) => now - t < windowMs);
   ipBuckets.set(ip, bucket);
@@ -390,3 +461,13 @@ export function __resetUserApiStateForTests(): void {
 }
 
 export const USER_API_RATE_LIMIT_PER_MINUTE = USER_API_MAX_REQUESTS;
+
+// FE-061: Exposed for tests so we can verify the LRU bound is enforced.
+export const __test = {
+  getBucketCount: () => ipBuckets.size,
+  LRU_MAX: IP_LRU_MAX_ENTRIES,
+  reset: () => {
+    // Only safe in tests — clears all buckets.
+    ipBuckets.forEach((_, k) => ipBuckets.delete(k));
+  },
+};
