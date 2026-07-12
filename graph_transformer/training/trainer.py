@@ -97,7 +97,32 @@ class GraphTransformerTrainer:
         # On CPU, ``torch.Generator(device="cpu")`` works. On CUDA,
         # ``torch.Generator(device="cuda")`` works. The randperm call now
         # uses self.device so the generator and tensor always match.
-        self._gen = torch.Generator(device=device)
+        #
+        # P3-028 ROOT FIX: torch.Generator(device=...) is NOT supported on
+        # MPS (Apple Silicon) or XLA (TPU) — it raises
+        # ``RuntimeError: Generator for X device is not supported``.
+        # The V30 8.3 fix only handled CPU and CUDA. On Apple Silicon
+        # (device="mps") or TPU (device="xla"), the trainer crashed at
+        # construction time, blocking all training on those devices.
+        # The fix: try the requested device first, fall back to a CPU
+        # generator on RuntimeError. randperm results are then moved to
+        # the target device by the caller (train_epoch already does
+        # ``.to(self.device)`` on the perm tensor). A CPU generator
+        # produces identical sequences to a device generator for the same
+        # seed, so reproducibility is preserved.
+        try:
+            self._gen = torch.Generator(device=device)
+            self._gen_device: str = device
+        except (RuntimeError, TypeError):
+            logger.warning(
+                f"ROOT FIX (P3-028): torch.Generator(device='{device}') is "
+                f"not supported on this device (common for MPS / XLA). "
+                f"Falling back to a CPU generator. randperm results will "
+                f"be moved to the target device by callers. Reproducibility "
+                f"is preserved (same seed -> same sequence)."
+            )
+            self._gen = torch.Generator(device="cpu")
+            self._gen_device = "cpu"
         self._gen.manual_seed(seed)
 
         self.optimizer = torch.optim.Adam(
@@ -237,7 +262,19 @@ class GraphTransformerTrainer:
         # generator. Calling torch.randperm(device="cuda", generator=cpu_gen)
         # crashed at runtime. The fix creates the generator on self.device
         # (in __init__), and the randperm call uses self.device so they match.
-        indices = torch.randperm(n_samples, device=self.device, generator=self._gen)
+        # P3-028 ROOT FIX: when the generator fell back to CPU (MPS/XLA
+        # case, see __init__), we must generate randperm on the GENERATOR's
+        # device (CPU) and then move the result to self.device. Generating
+        # directly on self.device with a CPU generator raises
+        # ``RuntimeError: expected device cpu but got mps``.
+        if getattr(self, "_gen_device", self.device) != self.device:
+            indices = torch.randperm(
+                n_samples, device=self._gen_device, generator=self._gen
+            ).to(self.device)
+        else:
+            indices = torch.randperm(
+                n_samples, device=self.device, generator=self._gen
+            )
         total_loss = 0.0
         n_batches = 0
 
@@ -457,21 +494,57 @@ class GraphTransformerTrainer:
 
         # V30 ROOT FIX (8.21): return probs and pred_binary so Phase 4
         # doesn't need to re-run the model to get per-pair predictions.
-        # P3-033 ROOT FIX: convert numpy arrays to Python lists so the
-        # metrics dict is JSON-serializable. The previous code returned
-        # raw numpy arrays, which crash with
-        # ``TypeError: Object of type ndarray is not JSON serializable``
-        # if the caller (e.g. the bridge, the dashboard, a CI test)
-        # tries to JSON-serialize the dict. The arrays are reconstructed
-        # via ``np.array(metrics["probs"])`` on the consumer side when
-        # needed. The conversion is cheap (O(n) memcpy) and prevents
-        # an entire class of integration bugs.
+        # P3-019 ROOT FIX: return NUMPY ARRAYS (not Python lists) for
+        # probs / pred_binary / labels. The P3-033 fix converted these
+        # to lists for JSON serializability, but that prioritized
+        # serialization over computational efficiency. Downstream
+        # consumers that want to do vectorized ops (precision@K, ROC
+        # curves, np.argsort for ranking) had to convert BACK to numpy
+        # via ``np.array(metrics["probs"])`` — a wasteful round-trip.
+        # The fix returns the native numpy arrays (the natural output of
+        # sklearn / torch.cpu().numpy()). Callers that need JSON
+        # serialization use the new ``to_json_metrics()`` helper which
+        # performs the .tolist() conversion in ONE place. The scalar
+        # fields (loss, auc, accuracy) remain floats (already JSON-safe).
         return {
             "loss": avg_loss, "auc": auc, "accuracy": accuracy,
-            "probs": all_probs.tolist(),
-            "pred_binary": pred_binary.tolist(),
-            "labels": all_labels.tolist(),
+            "probs": all_probs,
+            "pred_binary": pred_binary,
+            "labels": all_labels,
         }
+
+    @staticmethod
+    def to_json_metrics(metrics: Dict[str, Any]) -> Dict[str, Any]:
+        """Convert an evaluate() metrics dict to a JSON-serializable dict.
+
+        P3-019 ROOT FIX: ``evaluate()`` now returns numpy arrays for the
+        ``probs`` / ``pred_binary`` / ``labels`` fields (for vectorized
+        downstream ops). numpy arrays are NOT JSON-serializable, so any
+        caller that needs to JSON-dump the metrics dict (the bridge's
+        results export, the dashboard API, CI test artifacts) must first
+        convert the arrays to Python lists. This helper performs that
+        conversion in ONE canonical place, so the conversion logic is
+        not duplicated across callers.
+
+        The scalar fields (loss, auc, accuracy) are passed through
+        unchanged (they are already JSON-safe floats). Unknown keys are
+        also passed through (forward-compatibility).
+
+        Args:
+            metrics: A metrics dict as returned by ``evaluate()``.
+
+        Returns:
+            A new dict with the same keys, where ``probs`` /
+            ``pred_binary`` / ``labels`` are converted to Python lists
+            (via ``np.asarray(...).tolist()``). The input dict is NOT
+            mutated.
+        """
+        import numpy as _np
+        out: Dict[str, Any] = dict(metrics)  # shallow copy
+        for k in ("probs", "pred_binary", "labels"):
+            if k in out and out[k] is not None:
+                out[k] = _np.asarray(out[k]).tolist()
+        return out
 
     def fit(
         self,
@@ -975,11 +1048,21 @@ class GraphTransformerTrainer:
                     n_attn_layers += 1
                     try:
                         slw = float(module.self_loop_weight.item())
+                        # P3-015 ROOT FIX: the self_loop_weight is initialized
+                        # to 1.0 (P3-S01 fix, layers.py:170), NOT 0.1. The
+                        # previous D-10 logging used initial=0.100000 which was
+                        # a STALE baseline from the pre-P3-S01 code (V27 used
+                        # 0.1). With the wrong baseline, delta was always
+                        # ~+0.900000 even if the weight never moved, making
+                        # the "LEARNING" vs "NOT LEARNING" determination
+                        # meaningless (it always reported LEARNING). The fix
+                        # uses the ACTUAL initial value (1.0) so delta
+                        # correctly reflects training-time movement.
                         logger.info(
                             f"ROOT FIX (D-10): {name}.self_loop_weight = "
-                            f"{slw:.6f} (initial=0.100000, "
-                            f"delta={slw - 0.1:+.6f}). The self_loop_weight "
-                            f"is {'LEARNING' if abs(slw - 0.1) > 1e-4 else 'NOT LEARNING (effectively constant)'} "
+                            f"{slw:.6f} (initial=1.000000, "
+                            f"delta={slw - 1.0:+.6f}). The self_loop_weight "
+                            f"is {'LEARNING' if abs(slw - 1.0) > 1e-4 else 'NOT LEARNING (effectively constant)'} "
                             f"during training."
                         )
                     except (AttributeError, RuntimeError) as e:

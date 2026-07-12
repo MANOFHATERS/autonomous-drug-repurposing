@@ -630,32 +630,56 @@ class GTRLBridge:
             for i in range(n_pos)
         )
 
-        # ROOT FIX (W-07): KP drugs are KNOWN POSITIVES — exclude from
-        # negative sampling so KP drugs appear ONLY in positive pairs.
-        # This prevents the conflicting-signal bug where the model sees
-        # aspirin in BOTH positive and negative pairs.
+        # P3-021 ROOT FIX (SCIENTIFIC — INCLUDE KP DRUGS IN NEGATIVE
+        # SAMPLING): the W-07 fix excluded KP drugs from negative sampling
+        # so they appeared ONLY in positive pairs. The stated rationale
+        # was "prevent the conflicting-signal bug where the model sees
+        # aspirin in BOTH positive and negative pairs." But the C-3 fix
+        # (below, line ~794) ALREADY holds out ALL KP drugs from the GT
+        # TRAINING SET via drug_aware_split(held_out_drugs=kp_drugs).
+        # This means KP drugs NEVER appear in the TRAINING split —
+        # neither as positives NOR as negatives — regardless of whether
+        # they're in the negative-sampling pool. So W-07's concern is
+        # MOOT given C-3: there is no "conflicting signal" because KP
+        # drugs don't reach the training set at all.
+        #
+        # The HARM of W-07: by excluding KP drugs from the negative
+        # pool, the val/test set (which DOES contain KP-drug pairs via
+        # the C-3 hold-out) had KP-drug-POSITIVE pairs but NO
+        # KP-drug-NEGATIVE pairs. The model's scores for KP drugs were
+        # UNCALIBRATED — it never saw "aspirin + unrelated_disease =
+        # negative" during training or evaluation. A model that scores
+        # ALL aspirin pairs high (because aspirin has good topology)
+        # would still "recover" KPs by chance, making the KP recovery
+        # test unreliable.
+        #
+        # The fix: INCLUDE KP drugs in the negative-sampling pool (use
+        # ALL drugs, not just non-KP). The C-3 split then distributes
+        # KP-drug-negative pairs to val/test (not train), giving the
+        # evaluation a REAL negative baseline for KP drugs: "can the
+        # model rank aspirin+cardiovascular (positive) above
+        # aspirin+unrelated_disease (negative)?" This does NOT leak the
+        # treats label — the negative pair uses a DIFFERENT disease.
         # P3-032 ROOT FIX: use the lazy helper instead of the (removed)
         # top-level KNOWN_POSITIVES constant.
         kp_drug_indices: set = set()
         for drug_name, _ in _get_known_positives():
             if drug_name in drug_map:
                 kp_drug_indices.add(drug_map[drug_name])
-        non_kp_drug_indices = [
-            d for d in range(num_drugs) if d not in kp_drug_indices
-        ]
-        if len(non_kp_drug_indices) == 0:
-            logger.warning(
-                f"ROOT FIX (W-07): graph has ONLY KP drugs ({len(kp_drug_indices)}). "
-                f"Cannot exclude KP drugs from negative sampling. "
-                f"Falling back to all drugs for negative candidates."
-            )
-            non_kp_drug_indices = list(range(num_drugs))
-        else:
-            logger.info(
-                f"ROOT FIX (W-07): excluding {len(kp_drug_indices)} KP drugs "
-                f"from negative sampling. {len(non_kp_drug_indices)} non-KP "
-                f"drugs available as negative candidates."
-            )
+        # P3-021: use ALL drugs (including KP) for negative candidates.
+        # The C-3 split (held_out_drugs=kp_drug_indices) ensures KP
+        # drugs still don't appear in TRAINING — they only appear in
+        # val/test, where the KP-drug-negative pairs provide calibration.
+        all_drug_indices_for_neg = list(range(num_drugs))
+        logger.info(
+            f"ROOT FIX (P3-021): INCLUDING all {num_drugs} drugs (incl. "
+            f"{len(kp_drug_indices)} KP drugs) in negative sampling. The "
+            f"C-3 split (held_out_drugs=kp_drugs) ensures KP drugs still "
+            f"do NOT appear in training — they appear in val/test only, "
+            f"where KP-drug-negative pairs provide calibration for the "
+            f"KP recovery test. (W-07 exclusion removed: it was redundant "
+            f"given C-3 and starved val/test of KP-drug negatives.)"
+        )
 
         # V90 ROOT FIX (BUG #16, P1): REMOVED the alignment_median filter.
         # The audit found that node features are rng.standard_normal
@@ -724,29 +748,61 @@ class GTRLBridge:
         # the disease), making it a HARDER negative — the model must
         # learn the specific drug-disease association, not just "this
         # drug is rare" or "this disease is rare."
-        # We implement corrupt-one-side here. A full multi-hop
+        #
+        # P3-020 ROOT FIX (SCIENTIFIC — MIX CORRUPT-ONE-SIDE + CORRUPT-BOTH):
+        # the P3-S04 fix used ONLY corrupt-one-side (50% drug / 50%
+        # disease). This produces ONLY hard negatives (each shares one
+        # endpoint with a positive). The model NEVER sees a completely
+        # unrelated (random drug + random disease) pair as a negative.
+        # At inference, novel drug-disease pairs where NEITHER endpoint
+        # was in training are scored by the model with no baseline
+        # calibration for "completely unrelated = negative." This can
+        # inflate false-positive rates for novel pairs.
+        #
+        # Standard KG-embedding practice (TransE, Bordes et al. 2013;
+        # also RotatE, Sun et al. 2019) uses BOTH corrupt-one-side AND
+        # corrupt-both negatives. The corrupt-both negatives teach the
+        # model that completely unrelated pairs are negative (a trivial
+        # baseline), while corrupt-one-side negatives teach the model
+        # the specific association. The mix is typically 80% one-side
+        # (hard) + 20% both (easy), matching the TransE convention.
+        #
+        # We implement the 80/20 mix here: 40% corrupt-drug + 40%
+        # corrupt-disease + 20% corrupt-both. A full multi-hop
         # reachability check (build a (num_drugs, num_diseases)
         # reachability matrix and exclude reachable pairs from negatives)
         # is the gold standard but is O(n_drugs * n_diseases) memory and
-        # O(n_paths) time — deferred to a future optimization. The
-        # corrupt-one-side approach is a strict improvement over uniform
-        # random and matches the KG-embedding literature.
+        # O(n_paths) time — deferred to a future optimization.
         pos_drug_idx_list = pos_drug_idx.tolist()
         pos_disease_idx_list = pos_disease_idx.tolist()
+        # P3-020: 80% corrupt-one-side (split 40/40 drug/disease) + 20% corrupt-both.
+        CORRUPT_BOTH_PROB = 0.20
         while len(neg_drug_indices) < n_pos * neg_ratio and attempts < max_attempts:
             attempts += 1
             # Pick a random positive pair to corrupt.
             pos_i = int(neg_rng.integers(0, n_pos))
-            # Corrupt the drug 50% of the time, the disease 50% of the time.
-            if neg_rng.random() < 0.5:
-                # Corrupt the drug: keep the disease, pick a new drug
-                # from non-KP drugs (W-07 fix preserved).
-                d_idx = int(non_kp_drug_indices[
-                    neg_rng.integers(0, len(non_kp_drug_indices))
+            r = neg_rng.random()
+            if r < CORRUPT_BOTH_PROB:
+                # P3-020: corrupt BOTH endpoints — random drug + random
+                # disease. This produces an EASY negative (no shared
+                # endpoint with any positive) that teaches the model
+                # "completely unrelated = negative." The model needs
+                # this baseline so it doesn't over-score novel pairs at
+                # inference. We use all_drug_indices_for_neg (includes
+                # KP drugs per P3-021).
+                d_idx = int(all_drug_indices_for_neg[
+                    neg_rng.integers(0, len(all_drug_indices_for_neg))
+                ])
+                ds_idx = int(neg_rng.integers(0, num_diseases))
+            elif r < 0.5 * (1 + CORRUPT_BOTH_PROB):
+                # Corrupt the drug (keep the disease): hard negative.
+                # P3-021: use ALL drugs (incl. KP) — C-3 split handles hold-out.
+                d_idx = int(all_drug_indices_for_neg[
+                    neg_rng.integers(0, len(all_drug_indices_for_neg))
                 ])
                 ds_idx = int(pos_disease_idx_list[pos_i])
             else:
-                # Corrupt the disease: keep the drug, pick a new disease.
+                # Corrupt the disease (keep the drug): hard negative.
                 d_idx = int(pos_drug_idx_list[pos_i])
                 ds_idx = int(neg_rng.integers(0, num_diseases))
             if (d_idx, ds_idx) in pos_set:
@@ -1104,14 +1160,31 @@ class GTRLBridge:
         results["test_loss"] = self._test_metrics["loss"]
         results["test_accuracy"] = self._test_metrics["accuracy"]
 
-        # ROOT FIX (B2): use evaluate_link_prediction as an INDEPENDENT
-        # verification of the trainer's evaluate() method. This wires
-        # the previously-dead evaluate_link_prediction function into the
-        # active code path. The trainer's evaluate() and
-        # evaluate_link_prediction() compute the same metrics (AUC,
-        # loss, accuracy) but via different code paths — if they
-        # disagree, it indicates a bug in one of them. We log both
-        # for cross-validation.
+        # P3-022 ROOT FIX (HONEST DOCUMENTATION — CODE-PATH-IDENTICAL
+        # SANITY CHECK): the previous comment claimed
+        # evaluate_link_prediction is an "INDEPENDENT verification" of
+        # trainer.evaluate(). That was OVERSTATED. After the P3-017 fix,
+        # BOTH paths call model.encode() (same method) then
+        # model.link_predictor.forward_logits() and
+        # model.link_predictor.forward() (same methods) on the
+        # pre-computed embeddings. The ONLY differences are:
+        #   1. evaluate_link_prediction uses a FRESH nn.BCEWithLogitsLoss()
+        #      (no pos_weight) — but trainer.evaluate uses
+        #      self._eval_criterion which is ALSO a fresh
+        #      nn.BCEWithLogitsLoss() (BUG #26 fix). So the loss
+        #      computation is IDENTICAL.
+        #   2. The two paths have different code STRUCTURE (one is a
+        #      standalone function, one is a method), but they execute
+        #      the SAME model methods on the SAME data.
+        # So "test_auc_verified" is NOT an independent cross-check of
+        # the MODEL — it's a CODE-PATH-IDENTICAL sanity check that
+        # catches INTEGRATION BUGS (e.g., if one caller forgets to
+        # exclude label-leaking edges, or passes the wrong batch_size,
+        # the two metrics diverge). Discrepancies indicate a CODE BUG,
+        # not a model issue. This is still valuable (it catches wiring
+        # mistakes), but it is NOT the "independent verification" the
+        # old comment claimed. We keep the cross-check for its
+        # integration-bug-detection value and document its TRUE scope.
         try:
             from .evaluation import evaluate_link_prediction
             eval_metrics = evaluate_link_prediction(
@@ -1128,12 +1201,15 @@ class GTRLBridge:
             results["test_loss_verified"] = eval_metrics["loss"]
             results["test_accuracy_verified"] = eval_metrics["accuracy"]
             logger.info(
-                f"ROOT FIX (B2): evaluate_link_prediction verification: "
-                f"AUC={eval_metrics['auc']:.4f} (trainer: {results['test_auc']:.4f}), "
-                f"loss={eval_metrics['loss']:.4f} (trainer: {results['test_loss']:.4f})"
+                f"P3-022 sanity check (code-path-identical): "
+                f"evaluate_link_prediction AUC={eval_metrics['auc']:.4f} "
+                f"(trainer: {results['test_auc']:.4f}), "
+                f"loss={eval_metrics['loss']:.4f} (trainer: {results['test_loss']:.4f}). "
+                f"Discrepancies indicate an INTEGRATION BUG (not a model issue) "
+                f"— both paths call the same model.encode + link_predictor methods."
             )
         except Exception as e:
-            logger.warning(f"ROOT FIX (B2): evaluate_link_prediction failed: {e}")
+            logger.warning(f"P3-022 sanity check (evaluate_link_prediction) failed: {e}")
 
         logger.info(
             f"Training complete. Best val AUC: {results['best_val_auc']:.4f}, "
@@ -1258,7 +1334,18 @@ class GTRLBridge:
         gnn_scores_np = score_matrix.cpu().numpy()  # (num_drugs, num_diseases)
         p = np.clip(gnn_scores_np, 1e-7, 1 - 1e-7)
         entropy = -(p * np.log(p) + (1 - p) * np.log(1 - p))
-        confidence_np = 1.0 - entropy / np.log(2)
+        # P3-027 ROOT FIX: clip confidence to [0, 1]. The formula
+        # ``1.0 - entropy / np.log(2)`` CAN produce values like -1e-9 or
+        # 1.0000001 due to fp32 precision: when p is very close to 0 or 1
+        # (after the 1e-7 clip), the entropy is ~0 but the division by
+        # log(2) can round to slightly more than 1.0, making confidence
+        # slightly negative. Conversely, when p is exactly 0.5, entropy
+        # = log(2) exactly in real arithmetic but ~log(2)*(1±1e-7) in
+        # fp32, so confidence can be slightly > 1. These out-of-range
+        # values trigger spurious validation warnings downstream
+        # (P3-008 documented the symptom). The fix clips to [0, 1] so
+        # the confidence column is always a valid probability-complement.
+        confidence_np = np.clip(1.0 - entropy / np.log(2), 0.0, 1.0)
 
         # V4 C-F1 fix: build the DataFrame WITHOUT materializing a list
         # of dicts (which would be ~50GB at 100M pairs). Use a direct

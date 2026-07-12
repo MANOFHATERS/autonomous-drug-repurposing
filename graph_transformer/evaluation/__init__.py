@@ -62,6 +62,23 @@ def evaluate_link_prediction(
       3. The independent code path (this function vs trainer's
          evaluate) catches integration bugs in either caller.
 
+    P3-022 ROOT FIX (HONEST SCOPE): the above point 3 was previously
+    described as "INDEPENDENT verification." That was OVERSTATED. After
+    the P3-017 fix, BOTH this function AND ``trainer.evaluate()`` call
+    ``model.encode()`` (same method) then ``link_predictor.forward_logits``
+    and ``link_predictor.forward`` (same methods) on the pre-computed
+    embeddings. The loss is computed via a fresh ``nn.BCEWithLogitsLoss()``
+    in BOTH paths (trainer uses ``self._eval_criterion`` per BUG #26).
+    So the two paths execute the SAME model methods on the SAME data —
+    they are CODE-PATH-IDENTICAL in computation, differing only in code
+    STRUCTURE (standalone function vs method). The "verified AUC" is
+    therefore a CODE-PATH-IDENTICAL SANITY CHECK that catches
+    INTEGRATION BUGS (e.g., one caller forgets to exclude label-leaking
+    edges, or passes the wrong batch_size). Discrepancies indicate a
+    CODE BUG, not a model issue. This is still valuable (it catches
+    wiring mistakes) but is NOT the "independent verification" the old
+    docstring claimed.
+
     ROOT FIX (E18): the original code applied ``torch.sigmoid(logits)``
     to get probabilities, but did NOT apply temperature scaling. This
     was inconsistent with ``predict_probability`` in link_predictor.py
@@ -152,6 +169,11 @@ def evaluate_link_prediction(
         #      will diverge from the trainer's accuracy.
         #   3. The independent code path (this function vs trainer's
         #      evaluate) catches integration bugs in either caller.
+        # P3-022: point 3 is a CODE-PATH-IDENTICAL sanity check (NOT
+        # "independent verification") — see the module-level docstring
+        # for the honest scope. Both paths call the same model.encode +
+        # link_predictor methods; discrepancies indicate a CODE BUG
+        # (wiring mistake), not a model issue.
         embeddings = model.encode(
             nf, ei,
             exclude_edges_override=set(exclude_edges),

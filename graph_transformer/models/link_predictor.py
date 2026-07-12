@@ -69,16 +69,19 @@ class DrugDiseaseLinkPredictor(nn.Module):
     returns raw logits (used by the trainer for ``BCEWithLogitsLoss`` --
     training loss needs raw logits, not calibrated probabilities).
 
-    ROOT FIX (B-06): input features per pair are now
-    [drug_emb, disease_emb, elementwise_product, signed_difference]
-    (4*D dimensions). The V26 code also included ``abs_diff`` (5*D),
-    but ``abs_diff = |signed_diff|`` is a deterministic function of
-    ``signed_diff`` — the MLP can learn the ``|·|`` operator from
-    ``signed_diff`` alone. The extra D dimensions doubled the input
-    layer's parameter count for zero information gain (33% of input
-    weights were redundant). With ``embedding_dim=32`` the input layer
-    shrank from ``5*32=160 -> 64`` (10240 params) to ``4*32=128 -> 64``
-    (8192 params), a 20% reduction in the dominant layer.
+    P3-016 ROOT FIX (REVERT B-06): input features per pair are now
+    [drug_emb, disease_emb, elementwise_product, signed_difference,
+    abs_difference] (5*D dimensions). The B-06 fix had removed
+    ``abs_diff`` (reducing to 4*D) claiming the MLP can learn |·| from
+    signed_diff alone. While technically true, this forced the first
+    MLP layer to spend representational capacity learning the
+    absolute-value operator — capacity that should learn the actual
+    drug-disease interaction pattern. abs_diff is a DISTINCT
+    magnitude-of-difference signal that the MLP no longer needs to
+    reconstruct. The parameter savings (20% of one layer) is negligible
+    compared to the information loss and slower convergence. With
+    ``embedding_dim=32`` the input layer is ``5*32=160 -> 64`` (10240
+    params).
 
     Args:
         embedding_dim: Dimension of input node embeddings.
@@ -98,10 +101,25 @@ class DrugDiseaseLinkPredictor(nn.Module):
         self.embedding_dim = embedding_dim
         hidden_dims = hidden_dims or [256, 128]
 
-        # ROOT FIX (B-06): Input is 4*D, not 5*D. The redundant
-        # ``abs_diff`` feature has been removed (it's a deterministic
-        # function of ``signed_diff`` and added zero information).
-        input_dim = embedding_dim * 4
+        # P3-016 ROOT FIX (REVERT B-06): Input is 5*D, not 4*D. The B-06
+        # fix removed ``abs_diff = |signed_diff|`` claiming the MLP can
+        # learn the |·| operator from signed_diff alone via ReLU. While
+        # technically true (ReLU is piecewise-linear and can approximate
+        # |x|), this FORCES the first MLP layer to spend representational
+        # capacity learning the absolute-value operator — capacity that
+        # should be used for learning the actual drug-disease interaction
+        # pattern. abs_diff is a DISTINCT signal (magnitude of difference)
+        # that is NOT trivially reconstructible: a 2-layer ReLU MLP needs
+        # ~2*D extra hidden units to learn |x| across all D dimensions,
+        # and the approximation is imperfect near x=0 (the kink).
+        #
+        # The original 5*D input was more informative. The parameter
+        # savings from 4*D (20% of one layer = ~2K params on a 32-dim
+        # embedding) is negligible compared to the information loss. On
+        # small demo graphs the capacity loss is noticeable; on large
+        # production graphs it slows convergence. Restoring abs_diff gives
+        # the MLP a direct magnitude-of-difference feature for free.
+        input_dim = embedding_dim * 5
 
         # Build MLP layers
         layers: List[nn.Module] = []
@@ -157,26 +175,30 @@ class DrugDiseaseLinkPredictor(nn.Module):
     ) -> torch.Tensor:
         """Construct pair features from drug and disease embeddings.
 
-        ROOT FIX (B-06): the redundant ``abs_diff`` feature has been
-        removed. ``abs_diff = |signed_diff|`` is a deterministic function
-        of ``signed_diff`` — the MLP can learn the absolute-value operator
-        from ``signed_diff`` alone (a piecewise-linear ReLU suffices).
-        The extra D dimensions doubled the input layer's parameter count
-        for zero information gain.
+        P3-016 ROOT FIX (REVERT B-06): ``abs_diff = |signed_diff|`` has
+        been RESTORED as a distinct input feature. The B-06 fix removed
+        it claiming the MLP can learn |·| from signed_diff via ReLU.
+        While technically true, this forced the first MLP layer to spend
+        representational capacity learning the absolute-value operator
+        — capacity that should learn the drug-disease interaction pattern.
+        abs_diff is a DIRECT magnitude-of-difference signal that the MLP
+        no longer needs to reconstruct. See the __init__ comment for the
+        full rationale.
 
         Args:
             drug_emb: (N, D) drug embeddings.
             disease_emb: (N, D) disease embeddings.
 
         Returns:
-            (N, 4*D) concatenated features:
-            [drug_emb, disease_emb, product, signed_diff].
+            (N, 5*D) concatenated features:
+            [drug_emb, disease_emb, product, signed_diff, abs_diff].
         """
         product = drug_emb * disease_emb
         signed_diff = drug_emb - disease_emb
+        abs_diff = torch.abs(signed_diff)
 
         return torch.cat(
-            [drug_emb, disease_emb, product, signed_diff], dim=-1
+            [drug_emb, disease_emb, product, signed_diff, abs_diff], dim=-1
         )
 
     def forward_logits(

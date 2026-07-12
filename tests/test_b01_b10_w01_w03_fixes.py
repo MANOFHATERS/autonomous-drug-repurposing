@@ -344,8 +344,14 @@ def test_b05_drug_level_features_stable_across_pairs():
 # ---------------------------------------------------------------------------
 
 def test_b06_no_redundant_abs_diff():
-    """B-06: _construct_pair_features must NOT include abs_diff (it's a
-    deterministic function of signed_diff — pure parameter waste)."""
+    """P3-016 REVERTED B-06: _construct_pair_features MUST include abs_diff.
+
+    The B-06 fix removed abs_diff claiming the MLP can learn |·| from
+    signed_diff alone. P3-016 reverts this: abs_diff is a DISTINCT
+    magnitude-of-difference signal that the MLP should NOT have to
+    reconstruct (it wastes representational capacity). The input is
+    now 5*D (drug, disease, product, signed_diff, abs_diff).
+    """
     from graph_transformer.models.link_predictor import DrugDiseaseLinkPredictor
 
     predictor = DrugDiseaseLinkPredictor(embedding_dim=16, hidden_dims=[8])
@@ -353,21 +359,26 @@ def test_b06_no_redundant_abs_diff():
     disease_emb = torch.randn(4, 16)
 
     features = predictor._construct_pair_features(drug_emb, disease_emb)
-    # 4 components: drug_emb, disease_emb, product, signed_diff = 4 * 16 = 64
-    assert features.shape == (4, 64), \
-        f"B-06: expected (4, 64) for 4*D features, got {features.shape}"
+    # P3-016: 5 components: drug_emb, disease_emb, product, signed_diff, abs_diff = 5*16 = 80
+    assert features.shape == (4, 80), \
+        f"P3-016: expected (4, 80) for 5*D features, got {features.shape}"
 
-    # Verify the MLP input dimension matches
-    # First layer of the MLP should accept 4*D = 64 inputs
+    # Verify the MLP input dimension matches (5*D = 80)
     first_linear = None
     for module in predictor.mlp:
         if isinstance(module, nn.Linear):
             first_linear = module
             break
     assert first_linear is not None
-    assert first_linear.in_features == 64, \
-        f"B-06: first linear layer in_features should be 64 (4*16), got {first_linear.in_features}"
-    _ok("B-06: link_predictor uses 4*D features (abs_diff removed), input layer is 4*D not 5*D")
+    assert first_linear.in_features == 80, \
+        f"P3-016: first linear layer in_features should be 80 (5*16), got {first_linear.in_features}"
+
+    # P3-016: verify the last D columns ARE abs_diff = |signed_diff|
+    signed_diff = drug_emb - disease_emb
+    abs_diff = torch.abs(signed_diff)
+    assert torch.allclose(features[:, -16:], abs_diff, atol=1e-6), \
+        "P3-016: last D columns must be abs_diff = |signed_diff|"
+    _ok("P3-016: link_predictor uses 5*D features (abs_diff RESTORED), input layer is 5*D")
 
 
 # ---------------------------------------------------------------------------
