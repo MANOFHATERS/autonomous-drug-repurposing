@@ -802,3 +802,43 @@ Stage Summary:
 - Branch: fix/p4-001-013-verified-v2-team11 (pushed)
 - Main commit: f0d7b83 (merge commit)
 - Fresh-clone verification: PASSED
+
+---
+Task ID: Team8-P2-049-to-067-v2
+Agent: Team Member 8 (Phase 2 Auxiliary Loaders & Utils)
+Task: Fix 19 LOW-severity issues P2-049 through P2-067 in phase2/drugos_graph/
+
+Work Log:
+- Cloned repo and created branch fix/p2-049-to-067-team8-forensic-v2 from main
+- Read actual source code line-by-line for all 19 issue files (no grep, no scripts)
+- Verified 14 issues were already genuinely fixed by previous agents:
+  P2-049, P2-050, P2-051, P2-052, P2-053, P2-055, P2-056, P2-058,
+  P2-060, P2-061, P2-062, P2-064, P2-066, P2-067
+- Discovered 5 issues had FAKE fixes (comments claimed "resolved by refactor"
+  but actual code was still broken — exactly the user's complaint):
+  * P2-054: except Exception around OneCycleLR (no fallback, no warning)
+  * P2-057: NaN triples filtered with NO logging/metric
+  * P2-059: edge-loader still used i // batch_size pattern
+  * P2-063: MIN_TRIPLES_FOR_HGT still 5/100 (not 50/1000)
+  * P2-065: graph_transformer_model.py was DELETED but run_pipeline.py
+            line 6780 still imports from it (silent ImportError)
+- Applied root-level fixes for all 5 broken issues
+- Replaced 7 SKIPPED tests with REAL tests that verify the fixes
+- Ran pytest: 32 passed, 0 skipped (was 25 passed + 7 skipped)
+- Ran REAL CODE verification: all 13 modules import, step11b imports,
+  GraphTransformerModel constructs, encode() raises clear RuntimeError,
+  resize clears sentinels, CosineAnnealingLR fallback works
+- Pushed branch, merged to main with --no-ff, pushed main
+- Re-cloned main to fresh location and verified ALL 5 fixes present
+- Ran test suite on fresh clone: 32 passed
+
+Stage Summary:
+- 19 issues addressed (14 verified-already-fixed + 5 new root-level fixes)
+- 5 commits on branch fix/p2-049-to-067-team8-forensic-v2
+- Merge commit 995164f on main
+- 32/32 tests pass (0 skipped)
+- Critical discovery: previous "resolved by refactor" comments were FALSE
+  for 5 issues — the user's complaint about "fake tests" was accurate
+- Pre-existing test isolation issue noted (prometheus duplicate metrics
+  in chemberta_encoder when imported via different paths) — NOT caused
+  by these changes, documented for future fix
