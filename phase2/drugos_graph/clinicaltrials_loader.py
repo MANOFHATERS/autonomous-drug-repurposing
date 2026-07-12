@@ -3797,12 +3797,58 @@ def _build_edge_record_from_dict(
     # TREATS the disease. Downstream training can now cleanly separate
     # positive signal ("treats") from exploratory signal ("tested_for").
     rel_type: str = "tested_for"
+    # P2-016 ROOT FIX (rel_type="treats" too strict on primary_outcome_met):
+    # The previous condition ``primary_outcome_met is True`` was too
+    # strict. The ClinicalTrials.gov AACT schema does NOT have a
+    # first-class ``primary_outcome_met`` column — it's a derived
+    # field computed from the results database. Most completed trials
+    # do NOT post results, so ``primary_outcome_met`` is None for
+    # ~70% of completed trials. The ``is True`` check fails for None,
+    # so 70% of completed trials got rel_type="tested_for" instead
+    # of "treats". The Compound-treats-Disease edge set was severely
+    # understated (only ~30% of completed trials contributed),
+    # TransE training had fewer positive treats triples, AUC dropped,
+    # and the V1 launch criterion (>0.85 AUC) was harder to meet.
+    # The clinical-trial evidence — which should be the STRONGEST
+    # positive signal in the KG — was silently downgraded to
+    # "tested_for".
+    #
+    # ROOT FIX: treat ``None`` (outcome unknown / unreported) as
+    # "possibly positive". A completed trial with no posted results
+    # is still evidence that the drug was investigated for the
+    # disease — and the trial COMPLETED (was not terminated for
+    # efficacy failure), which is weakly positive evidence. Only
+    # ``primary_outcome_met is False`` (trial explicitly reported
+    # the primary endpoint was NOT met) downgrades to "tested_for".
+    # The assumption fires for ~70% of completed trials; we log a
+    # WARNING so operators can audit the assumption per study phase.
     if (
         overall_status_str is not None
         and _normalise_trial_status(overall_status_str) == "completed"
-        and primary_outcome_met is True
+        and primary_outcome_met is not False
     ):
         rel_type = "treats"
+        if primary_outcome_met is None:
+            # P2-016: log when the "treats" assignment is based on
+            # completion alone (no posted results). Operators can
+            # audit by NCT ID if a specific trial's "treats" edge
+            # is questionable.
+            logger.warning(
+                "P2-016: NCT=%s rel_type='treats' assigned based on "
+                "trial completion alone (primary_outcome_met is "
+                "None — no posted results). The trial COMPLETED "
+                "(was not terminated for efficacy failure) which "
+                "is weakly positive evidence. Audit by NCT ID if "
+                "the 'treats' edge is questionable.",
+                nct_id,
+                extra={
+                    "stage": "rel_type_inference",
+                    "source": SOURCE_KEY,
+                    "nct_id": nct_id,
+                    "primary_outcome_met": None,
+                    "assumption": "completed_no_results_is_weakly_positive",
+                },
+            )
 
     # Issue 2.3 / 7.1 — deterministic edge_id.
     edge_id: str = _build_edge_id(

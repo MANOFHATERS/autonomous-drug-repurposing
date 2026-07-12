@@ -1028,8 +1028,10 @@ def compute_score_distribution(
 def compute_auc(
     pos_scores: np.ndarray,
     neg_scores: np.ndarray,
-    higher_is_better: bool = False,
+    higher_is_better: Optional[bool] = None,
     *,
+    model: Optional[Any] = None,
+    model_score_direction: Optional[str] = None,
     allow_nan: bool = False,
 ) -> float:
     """Compute AUC (Area Under ROC Curve) for link prediction.
@@ -1048,15 +1050,47 @@ def compute_auc(
         correct; the docstring was wrong. Lower distance => more
         plausible triple. Therefore, for TransE-derived scores,
         ``higher_is_better=False`` is the SCIENTIFICALLY CORRECT
-        default. Scores are negated before AUC so that "positive
+        value. Scores are negated before AUC so that "positive
         scores are higher" in the transformed space, matching the
         convention ``roc_auc_score``
         expects.
 
         For the Phase 3 Graph Transformer (dot-product attention),
         higher score => more plausible, so ``higher_is_better=True``
-        MUST be passed explicitly or set via
-        ``EvaluationConfig.default_higher_is_better``.
+        MUST be passed explicitly OR inferred from
+        ``model.score_direction == "higher_better"``.
+
+    P2-007 ROOT FIX (CRITICAL — AUC direction inference):
+        The previous signature defaulted ``higher_is_better=False``
+        (the TransE-correct value). For HGT / GraphTransformer
+        (where higher score = more plausible via sigmoid), the caller
+        HAD to pass ``higher_is_better=True`` explicitly. Any caller
+        that forgot got an INVERTED AUC (a 0.90 model reported as
+        0.10), and the training loop's ``best_val_auc`` check picked
+        the WORST epoch as the best — patient-safety blocker.
+
+        ROOT FIX: ``higher_is_better`` is now OPTIONAL (default
+        ``None``) and is RESOLVED from (in priority order):
+
+          1. Explicit ``higher_is_better`` argument (backward compat).
+          2. ``model_score_direction`` keyword (string
+             ``"lower_better"`` or ``"higher_better"``).
+          3. ``model.score_direction`` attribute (per
+             ``KGEmbeddingModel`` Protocol).
+
+        If NONE of the three is provided, the function RAISES
+        ``EvaluationInputError``. An operator who wants the legacy
+        silent-default behaviour can set
+        ``DRUGOS_ALLOW_DEFAULT_AUC_DIRECTION=1`` (NOT recommended
+        for production — it is the exact foot-gun this fix removes).
+
+        Backward compatibility: every existing in-repo caller
+        (``run_pipeline.py:7579``, ``run_pipeline.py:7712``,
+        ``evaluation.py:2420``) already passes ``higher_is_better``
+        explicitly, so this change is non-breaking for production
+        code. Test files that relied on the implicit ``False``
+        default must be updated to pass it explicitly (or pass the
+        model) — the raise-on-first-call contract is intentional.
 
     Examples
     --------
@@ -1068,14 +1102,36 @@ def compute_auc(
     1.0
     >>> compute_auc(pos, neg, higher_is_better=True)
     0.0
+    >>> # P2-007: infer from model.score_direction
+    >>> class FakeTransE:
+    ...     score_direction = "lower_better"
+    >>> compute_auc(pos, neg, model=FakeTransE())
+    1.0
 
     Args:
         pos_scores: Scores for positive (true) edges.
         neg_scores: Scores for negative (false) edges.
         higher_is_better: If True, higher scores indicate more likely
-            positives (e.g. cosine similarity). If False (default
-            for TransE), lower scores indicate more likely positives
-            and scores are negated before computing AUC.
+            positives (e.g. cosine similarity). If False, lower scores
+            indicate more likely positives and scores are negated
+            before computing AUC. If ``None`` (default), the value is
+            resolved from ``model_score_direction`` or
+            ``model.score_direction``; if neither is provided the
+            function raises ``EvaluationInputError`` (P2-007 root
+            fix — prevents silent AUC inversion for HGT callers).
+        model: Optional KG embedding model implementing the
+            ``KGEmbeddingModel`` Protocol (see ``model_protocol.py``).
+            When provided AND ``higher_is_better`` is None, the
+            function reads ``model.score_direction`` (one of
+            ``"lower_better"`` / ``"higher_better"``) to infer the
+            direction. This is the PREFERRED call shape for any
+            model-aware evaluation path — it makes the AUC
+            direction impossible to forget.
+        model_score_direction: Optional string override (one of
+            ``"lower_better"`` / ``"higher_better"``) for callers
+            that have the direction as a string but not a model
+            instance. Lower priority than ``higher_is_better``;
+            higher priority than ``model.score_direction``.
         allow_nan: If True, NaN scores are dropped with a warning.
             Default False (raises EvaluationInputError).
 
@@ -1084,7 +1140,8 @@ def compute_auc(
 
     Raises:
         EvaluationInputError: If inputs are empty, contain NaN/Inf,
-            or have other validation failures.
+            have other validation failures, OR if no AUC direction
+            can be resolved (P2-007 root fix).
         EvaluationIntegrityError: If computed AUC is out of [0, 1]
             or sklearn/manual paths disagree.
         EvaluationError: For unexpected errors (wraps raw exceptions).
@@ -1095,6 +1152,138 @@ def compute_auc(
     """
     # Fixes E9-004 — authorization check
     _check_authorization("compute_auc")
+
+    # ── P2-007 ROOT FIX: resolve AUC direction ─────────────────────────
+    # ``higher_is_better`` MUST be determinable. The previous code
+    # silently defaulted to ``False`` (TransE-correct), which INVERTS
+    # the AUC for HGT / GraphTransformer callers that forget to pass
+    # ``higher_is_better=True``. A 0.90 HGT AUC silently reports as
+    # 0.10, the training loop picks the WORST epoch as the best, and
+    # the deployed model ranks drugs BACKWARDS — patient-safety
+    # blocker. The fix refuses to guess; callers MUST declare the
+    # direction explicitly OR pass the model (which declares it via
+    # the ``KGEmbeddingModel`` Protocol).
+    if higher_is_better is None:
+        if model_score_direction is not None:
+            _sd = str(model_score_direction).strip().lower()
+            if _sd not in ("lower_better", "higher_better"):
+                raise EvaluationInputError(
+                    f"compute_auc: model_score_direction="
+                    f"{model_score_direction!r} is not one of "
+                    f"'lower_better' / 'higher_better'. "
+                    f"(P2-007 root fix — prevents silent AUC inversion)",
+                    context={
+                        "reason": "invalid_score_direction",
+                        "model_score_direction": model_score_direction,
+                    },
+                )
+            higher_is_better = (_sd == "higher_better")
+        elif model is not None:
+            # Read score_direction from the model per the
+            # KGEmbeddingModel Protocol (see model_protocol.py).
+            _sd_attr = getattr(model, "score_direction", None)
+            if _sd_attr is None:
+                # Backward compat: legacy models used the boolean
+                # ``score_higher_is_better`` attribute before the
+                # Protocol standardised on the string form. Accept
+                # it with a deprecation warning so legacy model
+                # classes still work.
+                _legacy_attr = getattr(model, "score_higher_is_better", None)
+                if isinstance(_legacy_attr, bool):
+                    _log_structured(
+                        logging.WARNING,
+                        "compute_auc_legacy_score_attr",
+                        message=(
+                            "Model passed to compute_auc uses the "
+                            "deprecated 'score_higher_is_better' "
+                            "boolean attribute. Migrate to the "
+                            "'score_direction' string Protocol "
+                            "attribute ('lower_better' / "
+                            "'higher_better'). (P2-007 root fix)"
+                        ),
+                        model_class=type(model).__name__,
+                    )
+                    higher_is_better = bool(_legacy_attr)
+                else:
+                    raise EvaluationInputError(
+                        f"compute_auc: model {type(model).__name__} does "
+                        f"NOT declare 'score_direction' (Protocol "
+                        f"attribute) NOR the legacy "
+                        f"'score_higher_is_better' boolean. Cannot "
+                        f"infer AUC direction. Either pass "
+                        f"higher_is_better explicitly, OR add a "
+                        f"score_direction property to the model "
+                        f"returning 'lower_better' (TransE) or "
+                        f"'higher_better' (HGT/GraphTransformer). "
+                        f"(P2-007 root fix — prevents silent AUC "
+                        f"inversion for HGT callers)",
+                        context={
+                            "reason": "model_missing_score_direction",
+                            "model_class": type(model).__name__,
+                        },
+                    )
+            else:
+                _sd = str(_sd_attr).strip().lower()
+                if _sd not in ("lower_better", "higher_better"):
+                    raise EvaluationInputError(
+                        f"compute_auc: model {type(model).__name__}."
+                        f"score_direction={_sd_attr!r} is not one of "
+                        f"'lower_better' / 'higher_better'. "
+                        f"(P2-007 root fix)",
+                        context={
+                            "reason": "invalid_model_score_direction",
+                            "model_class": type(model).__name__,
+                            "score_direction": _sd_attr,
+                        },
+                    )
+                higher_is_better = (_sd == "higher_better")
+        else:
+            # No direction source — refuse to guess. Allow an
+            # environment-variable escape hatch for legacy callers
+            # that have not yet been migrated (NOT recommended for
+            # production; the entire point of this fix is to make
+            # the silent default impossible).
+            import os as _os_p2_007
+            _allow_default = _os_p2_007.environ.get(
+                "DRUGOS_ALLOW_DEFAULT_AUC_DIRECTION", ""
+            ) == "1"
+            if _allow_default:
+                _log_structured(
+                    logging.WARNING,
+                    "compute_auc_default_direction_used",
+                    message=(
+                        "compute_auc called with no "
+                        "higher_is_better / model / "
+                        "model_score_direction. "
+                        "DRUGOS_ALLOW_DEFAULT_AUC_DIRECTION=1 is "
+                        "set — falling back to the legacy TransE "
+                        "default (higher_is_better=False). THIS "
+                        "IS THE EXACT FOOT-GUN THE P2-007 ROOT "
+                        "FIX REMOVES — passing the model (or the "
+                        "explicit bool) is the production-grade "
+                        "call shape."
+                    ),
+                )
+                higher_is_better = False
+            else:
+                raise EvaluationInputError(
+                    "compute_auc: cannot resolve AUC direction. "
+                    "Pass higher_is_better explicitly (bool), OR "
+                    "pass model=<KGEmbeddingModel> (the function "
+                    "will read model.score_direction), OR pass "
+                    "model_score_direction='lower_better' / "
+                    "'higher_better'. The silent default was "
+                    "removed because it INVERTED the AUC for HGT "
+                    "callers (a 0.90 HGT model reported as 0.10) "
+                    "— patient-safety blocker. To restore the "
+                    "legacy TransE-correct default for an "
+                    "unmigrated caller, set "
+                    "DRUGOS_ALLOW_DEFAULT_AUC_DIRECTION=1 in the "
+                    "environment. (P2-007 root fix)",
+                    context={
+                        "reason": "auc_direction_not_resolvable",
+                    },
+                )
 
     try:
         pos_scores = _validate_score_array(

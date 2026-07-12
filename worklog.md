@@ -351,3 +351,45 @@ Stage Summary:
 - Makefile now exposes run-4phase and run-full-platform targets.
 - No fake / stub / synthetic-pipeline bugs remain.
 - Next: install deps, run real code end-to-end, write tests, push branch, verify, merge to main, re-clone to verify.
+
+---
+Task ID: team-cosmic-p2-loaders-14-issues
+Agent: Team Member 5 (Phase 2 Loaders)
+Task: Fix 14 issues (P2-007 through P2-020) — 2 CRITICAL, 12 HIGH — in phase2/drugos_graph/ loader modules. Each fix is a root-cause level fix (not surface-level). For each issue: read the actual code at the cited file/lines, implement the fix manually with the Edit tool, write a unit test that would have caught the bug, run the test.
+
+Work Log:
+- Cloned repo `MANOFHATERS/autonomous-drug-repurposing` to /home/z/my-project/repo/
+- Read project DOCX (Team_Cosmic_Build_Process_Updated.docx) to understand 4-phase architecture (Phase 1 data ingestion → Phase 2 KG in Neo4j → Phase 3 Graph Transformer → Phase 4 RL ranker)
+- Read ACTUAL code (not comments) at each issue's cited file/lines
+- Created branch `fix/team-cosmic-p2-loaders-14-issues`
+- Fixed P2-007 (CRITICAL): compute_auc now accepts `model` parameter, infers higher_is_better from model.score_direction, RAISES if no direction resolvable (with DRUGOS_ALLOW_DEFAULT_AUC_DIRECTION=1 escape hatch for legacy callers)
+- Fixed P2-008 (CRITICAL): HGT step11b now partitions BOTH Compound AND Disease endpoints; edges spanning partitions are DROPPED (mirrors PyGBuilder.node_disjoint_split); fallback to legacy compound-only split if disjoint split produces empty train/val/test
+- Fixed P2-009 (HIGH): phase1_bridge.py docstring updated to reflect inchikey as canonical Compound ID (was drugbank_id pre-v3.12)
+- Fixed P2-010 (HIGH): kg_builder.ID_PATTERNS["Compound"] CIDm/CIDs prefix now case-insensitive via [Cc][Ii][Dd][Mm] character class (was case-sensitive, dead-lettering uppercased STITCH IDs)
+- Fixed P2-011 (HIGH): Added SYMMETRIC_RELATIONS frozenset to config.py; graph_stats.py uses n*(n-1)/2 denominator for symmetric relations (was n*(n-1), halving PPI density)
+- Fixed P2-012 (HIGH): graph_stats.py density now uses TOTAL node counts (MATCH (n:Type) RETURN count(n)) as denominator, not per-edge DISTINCT counts; legacy participating-node density exposed as density_per_edge_type_participating for backward compat
+- Fixed P2-013 (HIGH): train_transe val pool fallback now uses entity_type_lookup to filter to correct tail type (was raising RuntimeError on first missing pool unless 3 env vars set); >50% missing-pool raise added for systematic mis-configuration
+- Fixed P2-014 (HIGH): MLflowTracker.__init__ registers close() with atexit (deterministic shutdown before network torn down); __exit__ calls close() (not end_run directly); close() is idempotent (_closed flag); __del__ delegates to close()
+- Fixed P2-015 (HIGH): train_transe vectorized corruption fallback now uses entity_type_lookup to filter neg_entities to correct type per triple (was sampling from ALL entities — type-wrong negatives); raises in production if neither entity_type_lookup nor sampler provided
+- Fixed P2-016 (HIGH): clinicaltrials_loader rel_type="treats" now fires for completed AND primary_outcome_met is not False (was `is True`, downgrading 70% of completed trials to tested_for); logs WARNING when assumption fires
+- Fixed P2-017 (HIGH): pyg_builder.py adds runtime assertion before each torch.flip call site that edge_attr is None (was latent bug — silent corruption if edge_attr ever added); assertion message directs developer to ToUndirected()
+- Fixed P2-018 (HIGH): pyg_builder.py temporal_split now RAISES on small split (< 2 unique src/dst entities) instead of silently falling back to transductive full-graph negatives; DRUGOS_ALLOW_SMALL_SPLIT_NEGATIVES=1 env var override for dev runs
+- Fixed P2-019 (HIGH): pyg_builder.py temporal_split now RAISES when n_neg < 0.5 * n_pos (was only WARNING); DRUGOS_ALLOW_INSUFFICIENT_NEGATIVES=1 env var override for dev runs
+- Fixed P2-020 (HIGH): NegativeSampler.random_sampling now accepts degree_weighted: bool = True parameter; when True, samples tail entities with probability proportional to 1/(1+degree) per Wang et al. 2014 (was uniform — over-represented hubs as easy negatives); REPLACES the P2-007 fix which used degree-PROPORTIONAL weighting (the OPPOSITE of what Wang et al. prescribes)
+- Wrote comprehensive test file: phase2/tests/team_cosmic_p2_loaders/test_p2_007_to_p2_020_root_fixes.py (40 tests covering all 14 fixes)
+- Installed dependencies: torch 2.13.0+cpu, numpy 2.1.3, scikit-learn 1.5.2, torch_geometric 2.8.0
+- Ran tests: 40/40 PASS
+- Ran REAL function calls (not smoke tests) on every fixed module: compute_auc with HGT/TransE models, _validate_id with 5 STITCH CID variants, config.SYMMETRIC_RELATIONS, MLflowTracker.close() idempotency, NegativeSampler.random_sampling with degree_weighted=True/False, clinicaltrials._normalise_trial_status — ALL SUCCEEDED
+- Verified pre-existing tests still pass: test_graph_stats.py 71/71 PASS, test_phase1_phase2_bridge.py 26/26 PASS (in isolation)
+- Verified 17 audit_v7 test failures are PRE-EXISTING (present without my changes — they require Phase 1 data files not in this checkout). My changes introduce ZERO new failures.
+
+Stage Summary:
+- 14 issues fixed with root-cause level edits (no surface-level patches)
+- 40/40 new tests PASS
+- 71/71 existing graph_stats tests PASS
+- 26/26 existing bridge tests PASS (in isolation)
+- 0 new test failures introduced
+- All 30+ drugos_graph modules import cleanly
+- All 6 REAL function calls succeed (compute_auc, _validate_id, SYMMETRIC_RELATIONS, MLflowTracker.close, NegativeSampler.random_sampling, _normalise_trial_status)
+- Files modified: evaluation.py, run_pipeline.py, phase1_bridge.py, kg_builder.py, graph_stats.py, transe_model.py, mlflow_tracker.py, clinicaltrials_loader.py, pyg_builder.py, negative_sampling.py, config.py
+- Files added: phase2/tests/team_cosmic_p2_loaders/__init__.py, phase2/tests/team_cosmic_p2_loaders/test_p2_007_to_p2_020_root_fixes.py
