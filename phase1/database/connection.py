@@ -262,6 +262,8 @@ __all__: list[str] = [
     "init_db",
     "reinitialize_engine",
     "reset_global_state",
+    "retry_transaction",  # v104 P1-001: public retry API (uses session_scope)
+    "session_scope",  # v104 P1-001 ROOT FIX: alias for get_db_session, used by retry_transaction
     "verify_schema",
 ]
 
@@ -1288,6 +1290,50 @@ def get_db_session(
                 current_count, session_id,
                 extra=context_extra,
             )
+
+
+# v104 FORENSIC ROOT FIX (P1-001 -- session_scope undefined):
+#   ``retry_transaction()`` (line ~1589) calls ``with session_scope(...)``
+#   as a context manager, but ``session_scope`` was NEVER defined anywhere
+#   in the codebase (not in connection.py, base.py, or any other module).
+#   Every call to ``retry_transaction()`` raised ``NameError`` at runtime,
+#   silently disabling the entire P1-A2 silent-data-loss retry fix. Any
+#   transient DB error (network blip, deadlock) that should have been
+#   retried instead propagated as an unhandled NameError, and the
+#   original DB operation was lost.
+#
+#   ROOT FIX: define ``session_scope`` as a thin alias for the existing
+#   ``get_db_session`` context manager. ``get_db_session`` ALREADY
+#   implements the full session lifecycle (factory acquire -> yield ->
+#   commit with retry -> rollback on exception -> callback hooks ->
+#   factory.remove() in finally) and accepts the SAME kwargs that
+#   ``retry_transaction`` forwards (``pipeline_name``, ``run_id``,
+#   ``correlation_id``, ``warn_nested``, ``verify_commit``,
+#   ``on_commit``, ``on_rollback``). Aliasing (rather than wrapping)
+#   preserves the exact semantics and avoids a double-yield generator
+#   chain that would silently drop the outermost commit logic.
+#
+#   ``get_db_session`` is a generator function (it contains ``yield``),
+#   so it is automatically usable as a context manager WITHOUT the
+#   ``@contextmanager`` decorator. ``with session_scope(...) as
+#   session:`` therefore behaves identically to ``with
+#   get_db_session(...) as session:``. The alias is exported in
+#   ``__all__`` so it is part of the module's public API and
+#   discoverable via grep.
+#
+#   Regression test: phase1/tests/test_p1_001_session_scope.py asserts
+#   that ``session_scope`` is callable, that ``with session_scope()``
+#   yields a usable Session, that the Session commits on clean exit and
+#   rolls back on exception, and that ``retry_transaction`` no longer
+#   raises NameError when handed a transient-failing work callable.
+session_scope = get_db_session
+"""``session_scope`` -- public alias for :func:`get_db_session`.
+
+P1-001 ROOT FIX: this alias is the symbol that ``retry_transaction``
+and other call sites reference. Removing it (or forgetting to define
+it) breaks every retry path. Treat this alias as part of the module's
+public API.
+"""
 
 
 def _set_session_variables(

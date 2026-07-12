@@ -409,21 +409,49 @@ _RE_HPO = re.compile(r"^HP:[0-9]+$", re.IGNORECASE)
 # the [100100, 999999] range at load time. The mismatch caused silent
 # join failures. The v64 fix makes DisGeNET reject out-of-range IDs
 # BEFORE they reach the KG, so the join is clean.
-_RE_OMIM = re.compile(r"^(?:OMIM:)?[0-9]{6,7}$", re.IGNORECASE)
-# OMIM MIM number valid range -- matches omim_pipeline.py:553.
-# Lower bound 100100 is the first official OMIM phenotype MIM number.
-# Upper bound 9999999 allows for 7-digit future expansion (current max
-# is 6 digits ~ 6xxxxx).
-_OMIM_MIM_MIN = 100100
-_OMIM_MIM_MAX = 9999999
+_RE_OMIM = re.compile(r"^(?:OMIM:)?[1-9][0-9]{5}$", re.IGNORECASE)
+# v104 FORENSIC ROOT FIX (P1-005 -- OMIM MIM-number range diverges across
+#   3 modules):
+#   The previous code used ``_OMIM_MIM_MAX = 9999999`` (7-digit) and a
+#   6-7 digit regex ``^[0-9]{6,7}$``. This diverged from the OMIM
+#   pipeline's strict 6-digit range [100100, 999999] (omim_pipeline.py:701)
+#   and from the canonical regex in cleaning/_constants.py (which
+#   previously accepted 4-7 digits). When DisGeNET loaded a 7-digit MIM
+#   (which does not exist in current OMIM data -- OMIM has never expanded
+#   past 6 digits), the OMIM pipeline rejected it during cross-source
+#   validation, silently dropping the disease. The KG then had the
+#   disease from DisGeNET but not from OMIM, and the entity resolver
+#   could not merge them because the MIM formats did not match.
+#
+#   ROOT FIX: import the canonical constants from cleaning/_constants.py
+#   (single source of truth). The regex is now ``^[1-9][0-9]{5}$``
+#   (strict 6-digit starting with 1-9, covering all OMIM ranges 100100
+#   through 999999) and the numeric range is [100100, 999999]. This
+#   matches omim_pipeline.py:701 EXACTLY. A 7-digit MIM is now REJECTED
+#   with a warning (previously silently accepted and then dropped by
+#   the OMIM pipeline, causing KG duplication).
+#
+#   The issue brief suggested rejecting OR truncating 7-digit MIMs.
+#   Truncation would silently corrupt the disease ID (the truncated
+#   value might collide with a different disease). REJECTION with a
+#   logged warning is the only safe choice -- the operator can then
+#   investigate the upstream DisGeNET data quality issue.
+from cleaning._constants import OMIM_MIM_MIN as _OMIM_MIM_MIN
+from cleaning._constants import OMIM_MIM_MAX as _OMIM_MIM_MAX
 
 
 def _validate_omim_mim_range(omim_id_str: str) -> bool:
     """Validate that an OMIM ID's numeric portion is in the official range.
 
-    Returns True if the ID matches `_RE_OMIM` AND its numeric value is in
-    `[100100, 9999999]`. Returns False otherwise. Used after regex match
-    to enforce the same range constraint as the OMIM pipeline.
+    Returns True if the ID matches ``_RE_OMIM`` AND its numeric value is
+    in ``[OMIM_MIM_MIN, OMIM_MIM_MAX]`` (i.e. ``[100100, 999999]``).
+    Returns False otherwise. Used after regex match to enforce the same
+    range constraint as the OMIM pipeline (omim_pipeline.py:701).
+
+    v104 P1-005 ROOT FIX: the previous range was ``[100100, 9999999]``
+    (7-digit). It is now ``[100100, 999999]`` (6-digit, matching OMIM).
+    A 7-digit MIM is rejected; the caller should log a warning so the
+    operator can investigate the upstream data quality issue.
     """
     if not omim_id_str or not isinstance(omim_id_str, str):
         return False
