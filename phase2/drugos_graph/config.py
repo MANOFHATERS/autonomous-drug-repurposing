@@ -3117,6 +3117,39 @@ class TransEConfig:
     # KGs (per DRKG paper, Huang et al., 2020). Smaller dims lose
     # expressiveness; larger dims increase GPU memory and overfitting risk.
     # FIX C12.2: embedding_dim — was hardcoded in TransEModel.__init__.
+    #
+    # P2-067 ROOT FIX (Phase 2 ↔ Phase 3 embedding_dim MISMATCH):
+    # This TransEConfig.embedding_dim defaults to 256, but Phase 3's
+    # DrugRepurposingGraphTransformer defaults to embedding_dim=128
+    # (see graph_transformer/models/graph_transformer.py and the Phase 3
+    # config). A TransE checkpoint trained with embedding_dim=256 CANNOT
+    # be loaded into a Phase 3 model expecting 128-dim embeddings — the
+    # shape mismatch raises ``RuntimeError: Error(s) in loading
+    # state_dict for GraphTransformerModel: size mismatch for
+    # entity_embeddings.weight``.
+    #
+    # The DOCX architecture (§5 Phase 3) suggests Phase 2 TransE
+    # embeddings COULD warm-start Phase 3 — but this is IMPOSSIBLE with
+    # mismatched dims. We have two options:
+    #   (a) Align the defaults (both 256 OR both 128).
+    #   (b) Document that Phase 2 TransE and Phase 3 GraphTransformer
+    #       are SEPARATE models with NO warm-start path.
+    #
+    # We choose (b) because it is more HONEST about the architectural
+    # differences: TransE is a BASELINE KGE model (Bordes et al. 2013,
+    # shared entity+relation embedding space), while the GraphTransformer
+    # is the PRODUCTION model (HGT attention with per-node-type
+    # projections). Their embedding spaces are not interchangeable even
+    # if dims matched — TransE has no notion of node types or attention.
+    # Pretending they could warm-start each other would be misleading.
+    #
+    # Operators who want to USE Phase 2 TransE embeddings in Phase 3
+    # must EXPLICITLY project them: train TransE with embedding_dim=128
+    # (override the default via DRUGOS_TRANSE_EMBEDDING_DIM=128), then
+    # pass the embeddings as ``node_features`` to the GraphTransformer's
+    # Compound node type (which projects them through
+    # ``input_projections["Compound"]`` to the GraphTransformer's
+    # embedding_dim). This is the ONLY supported warm-start path.
     embedding_dim: int = field(
         default_factory=lambda: int(os.environ.get("DRUGOS_TRANSE_EMBEDDING_DIM", "256"))
     )

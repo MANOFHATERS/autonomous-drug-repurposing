@@ -56,6 +56,21 @@ def test_batch_memory(
     num_edges: int = 6000000,
     feat_dim: int = 256,
     batch_size: int = 512,
+    # P2-051 ROOT FIX: the previous signature hard-coded
+    # ``device="cuda"`` inside the function body, which on a multi-GPU
+    # host always allocates the test batch on cuda:0. If cuda:0 was
+    # occupied (e.g. by another process) the function reported
+    # "FAIL — OOM" even when cuda:2 had 70 GB free — a FALSE failure
+    # that misled operators into thinking the GPU was unusable. Root
+    # fix: accept an explicit ``device`` parameter (string or
+    # ``torch.device``) so the caller can target a specific GPU.
+    # Default to "cuda" (== cuda:0) for backward compat, but operators
+    # on multi-GPU hosts can now pass device="cuda:2" to validate the
+    # specific GPU they intend to train on. We also surface the chosen
+    # device in the result dict so the audit log records WHICH GPU was
+    # tested — without this, the result was ambiguous on multi-GPU
+    # hosts.
+    device: str = "cuda",
 ) -> Dict[str, Any]:
     """Test if GPU memory can fit a mini-batch.
 
@@ -64,6 +79,10 @@ def test_batch_memory(
         num_edges: Approximate total edge count.
         feat_dim: Node feature dimension.
         batch_size: Mini-batch size to test.
+        device: Target CUDA device specifier ("cuda", "cuda:0",
+            "cuda:2", ...). Defaults to "cuda" (cuda:0). On multi-GPU
+            hosts, pass the specific device you intend to train on so
+            the test measures the correct GPU's free memory (P2-051).
 
     Returns:
         Dict with memory estimates and pass/fail.
@@ -80,22 +99,55 @@ def test_batch_memory(
         "node_feat_gb": round(node_feat_bytes / 1e9, 2),
         "edge_index_gb": round(edge_index_bytes / 1e9, 2),
         "batch_size": batch_size,
+        # P2-051: record the device under test so the audit log is
+        # unambiguous on multi-GPU hosts.
+        "device_requested": str(device),
     }
 
     if torch.cuda.is_available():
-        free_gb = (torch.cuda.get_device_properties(0).total_mem -
-                   torch.cuda.memory_allocated(0)) / 1e9
+        # P2-051 ROOT FIX: resolve the requested device explicitly so
+        # we measure the FREE memory of the GPU the caller intends to
+        # use, not always cuda:0. ``torch.device(device).index`` is
+        # None for "cuda" (defaults to 0) — coerce to int so the
+        # ``torch.cuda`` APIs accept it.
+        _dev = torch.device(device)
+        _dev_idx = _dev.index if _dev.index is not None else 0
+        # Validate the index is in range — a typo like "cuda:9" on a
+        # 4-GPU host should produce a clear error, not a cryptic
+        # CUDA error inside ``torch.randn``.
+        if _dev_idx >= torch.cuda.device_count():
+            result["fits_gpu"] = False
+            result["batch_test"] = (
+                f"FAIL — invalid device {device!r} "
+                f"(host has {torch.cuda.device_count()} GPU(s))"
+            )
+            logger.error(
+                "test_batch_memory: requested device %s but host has "
+                "only %d GPU(s). (P2-051)",
+                device, torch.cuda.device_count(),
+            )
+            return result
+        free_gb = (
+            torch.cuda.get_device_properties(_dev_idx).total_mem
+            - torch.cuda.memory_allocated(_dev_idx)
+        ) / 1e9
         result["gpu_free_gb"] = round(free_gb, 2)
+        result["device_tested"] = f"cuda:{_dev_idx}"
         result["fits_gpu"] = total_estimated_gb < free_gb
 
-        # Test actual mini-batch allocation
+        # Test actual mini-batch allocation ON THE REQUESTED DEVICE.
+        # P2-051: previously this used ``device="cuda"`` which is
+        # always cuda:0; multi-GPU operators testing cuda:2 got a false
+        # OOM from cuda:0. Now we allocate on the resolved device.
         try:
-            test_batch = torch.randn(batch_size, feat_dim, device="cuda")
+            test_batch = torch.randn(batch_size, feat_dim, device=_dev)
             result["batch_test"] = "PASS"
             del test_batch
+            # P2-051: empty the cache on the tested device, not the
+            # default device.
             torch.cuda.empty_cache()
         except torch.cuda.OutOfMemoryError:
-            result["batch_test"] = "FAIL -- OOM"
+            result["batch_test"] = f"FAIL — OOM on cuda:{_dev_idx}"
     else:
         result["fits_gpu"] = False
         result["batch_test"] = "SKIP -- no GPU"
