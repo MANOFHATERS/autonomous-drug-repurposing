@@ -109,5 +109,47 @@ class KGEmbeddingModel(Protocol):
         """
         ...
 
+    # v102 ROOT FIX (P2-039): num_total_entities not in Protocol.
+    #
+    # The previous train_transe code at line 2219 used
+    # ``getattr(model, "num_total_entities", None)`` with a fallback to
+    # ``model.entity_embeddings.num_embeddings``. The comment claimed
+    # this was "for HGT" — but neither TransE NOR HGT was REQUIRED to
+    # expose num_total_entities. HGT did (added in v43), TransE did
+    # not. The getattr was therefore dead code for TransE: it always
+    # fell through to the fallback. This is misleading for maintainers:
+    # a future developer adding a new heterogeneous model would see
+    # ``getattr(model, "num_total_entities", None)`` and assume the
+    # existing code path uses it — but the contract was undocumented.
+    #
+    # ROOT FIX: add ``num_total_entities`` to the KGEmbeddingModel
+    # Protocol as a REQUIRED property. Document that:
+    #   - Homogeneous models (TransE): returns entity_embeddings.num_embeddings
+    #     (the single entity table's row count).
+    #   - Heterogeneous models (HGT): returns the SUM of all node-type
+    #     entity counts (the cross-type index space used for negative
+    #     sampling).
+    # This makes the contract explicit and forward-compatible: any new
+    # model that implements KGEmbeddingModel MUST expose
+    # num_total_entities, and the train_transe code path will use it.
+    @property
+    def num_total_entities(self) -> int:
+        """Total entity count across ALL node/entity tables.
+
+        - Homogeneous models (TransE): equals
+          ``entity_embeddings.num_embeddings`` (single entity table).
+        - Heterogeneous models (HGT): equals
+          ``sum(self._node_counts.values())`` — the SUM of all node-
+          type counts. Used for index-range validation in train_transe
+          and for negative sampling space sizing.
+
+        Callers that need the TOTAL entity count MUST use this property
+        instead of ``entity_embeddings.num_embeddings`` (which returns
+        only the FIRST node type's count on heterogeneous models, leading
+        to out-of-range negative samples and index-range validation
+        failures — see P2-039 root cause).
+        """
+        ...
+
 
 __all__: list[str] = ["KGEmbeddingModel"]

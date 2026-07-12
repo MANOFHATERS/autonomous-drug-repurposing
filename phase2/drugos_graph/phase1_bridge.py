@@ -206,6 +206,23 @@ except ImportError:  # pragma: no cover — fallback for direct-script execution
     class DrugOSDataError(Exception):
         """Local fallback when the package cannot be imported."""
 
+# v102 ROOT FIX (P2-036): centralize InChIKey normalization so every
+# loader produces the SAME canonical form. Falls back to a local
+# implementation if utils cannot be imported (direct-script execution).
+try:
+    from .utils import normalize_inchikey as _normalize_inchikey
+except Exception:  # pragma: no cover — fallback for direct-script execution
+    def _normalize_inchikey(inchikey):  # type: ignore[no-redef]
+        if inchikey is None:
+            return ""
+        try:
+            ik = str(inchikey).strip()
+        except Exception:
+            return ""
+        if not ik or ik.lower() in ("nan", "none", "null", "na"):
+            return ""
+        return ik.upper()
+
 logger = logging.getLogger(__name__)
 
 
@@ -3691,7 +3708,18 @@ def stage_phase1_to_phase2(
             # but if any source emits a lowercase InChIKey it would be
             # dead-lettered. Uppercase explicitly here so the canonical
             # ID always matches the ID_PATTERNS regex.
-            inchikey_canonical = inchikey.upper() if inchikey else ""
+            #
+            # v102 ROOT FIX (P2-036): route through the centralized
+            # ``normalize_inchikey`` helper so this loader produces the
+            # SAME canonical form as chembl_loader and pubchem_loader
+            # (uppercase + strip + placeholder-collapsed). Previously
+            # ``inchikey.upper() if inchikey else ""`` did NOT strip
+            # whitespace, so a " RZBJ...AN " input would dead-letter
+            # while chembl_loader's ``.strip().upper()`` would succeed —
+            # the SAME compound landed as TWO canonical IDs depending
+            # on which loader ran. Centralizing eliminates this class
+            # of bug.
+            inchikey_canonical = _normalize_inchikey(inchikey)
             if inchikey_canonical and not inchikey_canonical.startswith("SYNTH"):
                 canonical_id = inchikey_canonical
             else:
@@ -4297,7 +4325,47 @@ def stage_phase1_to_phase2(
                 ).strip("_")
                 if not _slug:
                     continue
-                did = f"SYNDROME:{_slug}"
+                # v102 ROOT FIX (P2-046): before slugifying to a
+                # synthetic SYNDROME: ID, try to upgrade the disease
+                # name to a real biomedical ontology ID (DOID/MeSH) via
+                # the existing _DISEASE_KEYWORD_MAP. The previous code
+                # ALWAYS slugified — emitting "SYNDROME:Pain",
+                # "SYNDROME:Hepatitis-B", etc. — which do NOT match any
+                # biomedical ontology (DOID, OMIM, MeSH, EFO). ~half of
+                # Compound-treats-Disease edges pointed at SYNDROME:
+                # nodes that were disconnected from the rest of the
+                # Disease subgraph. Multi-hop queries like
+                # "Compound → treats → Disease → associated_with → Gene"
+                # returned empty for these diseases (they had no Gene
+                # edges). The KG was fragmented.
+                #
+                # ROOT FIX: scan the disease_name (lowercased) against
+                # _DISEASE_KEYWORD_MAP. If a keyword matches, upgrade
+                # the did to the corresponding DOID ID and mark the
+                # node with ontology_status="mapped". If NO keyword
+                # matches, keep the SYNDROME: slugified ID but mark
+                # the node with ontology_status="unmapped" so operators
+                # can audit (e.g. run a richer NLP disease-name matcher
+                # like NCBImeta API or a local MeSH lookup to upgrade
+                # later). This preserves the clinical signal (Aspirin
+                # treats Pain → now points at DOID:0050133 instead of
+                # SYNDROME:Pain) while keeping the audit trail.
+                _dname_lower = dname.strip().lower()
+                _matched_doid = None
+                for _kw, (_doid_id, _doid_name) in _DISEASE_KEYWORD_MAP.items():
+                    if _kw in _dname_lower:
+                        _matched_doid = _doid_id
+                        break
+                if _matched_doid is not None:
+                    # Upgrade to a real DOID ID — connects to the
+                    # broader Disease subgraph (DisGeNET, OMIM, etc.).
+                    did = _matched_doid
+                    _ontology_status = "mapped"
+                else:
+                    # No keyword match — keep the slugified SYNDROME: ID
+                    # but mark it unmapped so operators can audit.
+                    did = f"SYNDROME:{_slug}"
+                    _ontology_status = "unmapped"
                 # Emit a Disease node if not already staged.
                 if did not in disease_id_set and did not in _slug_seen:
                     _slug_seen.add(did)
@@ -4312,6 +4380,13 @@ def stage_phase1_to_phase2(
                         "_loaded_at": loaded_at,
                         "_schema_version": schema_version,
                         "_synthetic_disease": True,  # audit flag
+                        # v102 P2-046: track whether this Disease ID was
+                        # mapped to a real ontology (DOID/MeSH) or is a
+                        # synthetic SYNDROME: slug awaiting NLP upgrade.
+                        # Operators can query
+                        # ``MATCH (d:Disease {ontology_status: 'unmapped'})``
+                        # to audit the unmapped population.
+                        "ontology_status": _ontology_status,
                     }
                     staged.disease_nodes.append(dnode)
                     disease_id_set.add(did)
