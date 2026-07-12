@@ -98,6 +98,33 @@ from sqlalchemy.exc import (
 from sqlalchemy.orm import Session, scoped_session, sessionmaker
 from urllib.parse import urlparse, urlunparse
 
+# P1-002 / P1-011 ROOT FIX (Team-1 -- consolidate duplicate circuit breaker):
+#   This module previously defined its OWN local ``_CircuitBreaker`` dataclass
+#   (lines 268-389 in the previous revision), duplicating the canonical
+#   implementation in ``phase1/_circuit_breaker.py``. The duplicate had a
+#   CRITICAL concurrency bug (P1-002): ``record_failure()`` checked
+#   ``if self._state == "HALF_OPEN"`` AFTER the threshold-check that sets
+#   state to "OPEN" -- so when a half-open probe failed AND the failure
+#   count was already >= threshold, the half-open branch was skipped and
+#   ``_half_open_probe_in_flight`` stayed True forever. The breaker was
+#   then stuck open (combined with the ``allow_request()`` semantics,
+#   all DB writes were silently dropped until manual restart).
+#
+#   The canonical implementation fixes this by checking half_open FIRST
+#   in ``record_failure()`` (see ``_circuit_breaker.py`` v89 BUG #13
+#   ROOT FIX). The duplicate in this file never received that fix --
+#   the "consolidation" claim in the canonical file's docstring was
+#   aspirational, not actual.
+#
+#   ROOT FIX: import the canonical ``_CircuitBreaker`` here and DELETE
+#   the local duplicate. The canonical class now exposes a ``reset()``
+#   method (added P1-002/P1-011) so ``reset_global_state()`` continues
+#   to work unchanged. The state strings are lowercase ("closed" /
+#   "open" / "half_open") on the canonical class -- callers that
+#   previously compared to UPPERCASE should use ``.upper()`` or migrate
+#   to lowercase.
+from _circuit_breaker import _CircuitBreaker  # noqa: E402 -- canonical impl
+
 # [ARCH-02] Import Base from database.base to eliminate circular-import risk.
 # Previously, models.py imported Base from connection.py while connection.py
 # lazily imported from models.py — creating a fragile circular dependency.
@@ -265,128 +292,27 @@ class HealthCheckResult:
         return self.is_healthy
 
 
-@dataclass
-class _CircuitBreaker:
-    """Simple circuit breaker for database connection attempts (REL-005).
-
-    States: CLOSED (normal) -> OPEN (failing) -> HALF_OPEN (probing).
-    """
-
-    failure_threshold: int = 5
-    recovery_timeout: float = 30.0
-    _failure_count: int = 0
-    _state: str = "CLOSED"  # CLOSED, OPEN, HALF_OPEN
-    _last_failure_time: float = 0.0
-    _lock: threading.Lock = field(default_factory=threading.Lock)
-    # P1-A8 ROOT FIX: track whether a HALF_OPEN probe is in flight.
-    _half_open_probe_in_flight: bool = False
-
-    @property
-    def state(self) -> str:
-        """Current breaker state (PURE OBSERVATION — does NOT mutate).
-
-        P1-006 ROOT FIX (v100 forensic): the previous implementation
-        transitioned OPEN → HALF_OPEN inside this property when the
-        recovery_timeout had elapsed. That made the property a MUTATOR
-        disguised as an accessor — any monitoring/observability code
-        that read ``breaker.state`` inadvertently triggered the
-        transition, racing with ``allow_request()`` and potentially
-        leaving the breaker in a half-reserved state. The canonical
-        ``_circuit_breaker.py`` (BUG #12 P1) claimed to fix this exact
-        bug but the duplicate in ``database/connection.py`` was never
-        removed — the "consolidation" claim was false.
-
-        ROOT FIX: this property is now PURE OBSERVATION. It returns the
-        current ``_state`` without transitioning. The OPEN → HALF_OPEN
-        transition happens ONLY inside ``allow_request()``, which is
-        the single authorized mutator for the state machine. Monitoring
-        code can now safely read ``breaker.state`` for observability
-        without breaking the circuit breaker.
-
-        Note: callers that previously relied on the side effect of
-        ``state`` transitioning OPEN → HALF_OPEN will now see "OPEN"
-        until the next ``allow_request()`` call. This is the CORRECT
-        behavior — observability must never mutate state.
-        """
-        with self._lock:
-            return self._state
-
-    def record_success(self) -> None:
-        """Record a successful operation."""
-        with self._lock:
-            self._failure_count = 0
-            self._state = "CLOSED"
-            self._half_open_probe_in_flight = False
-
-    def record_failure(self) -> None:
-        """Record a failed operation."""
-        with self._lock:
-            self._failure_count += 1
-            self._last_failure_time = time.monotonic()
-            if self._failure_count >= self.failure_threshold:
-                self._state = "OPEN"
-                logger.warning(
-                    "Database circuit breaker OPENED after %d consecutive failures",
-                    self._failure_count,
-                )
-            # P1-A8 ROOT FIX: a failed probe in HALF_OPEN trips the
-            # breaker back to OPEN and clears the probe-in-flight flag.
-            if self._state == "HALF_OPEN":
-                self._state = "OPEN"
-                self._half_open_probe_in_flight = False
-
-    def allow_request(self) -> bool:
-        """Check if a request should be allowed.
-
-        P1-A8 ROOT FIX (v82): the previous implementation returned True for
-        EVERY call in HALF_OPEN — defeating single-probe semantics. Under
-        concurrent pipelines (7 Phase 1 sources running in parallel), all
-        7 would simultaneously get "allowed" and hammer a still-recovering
-        DB, re-tripping the breaker. ROOT FIX: track whether a probe is
-        already in flight; allow exactly ONE probe in HALF_OPEN, reject
-        all others until the probe completes (success → CLOSED, failure
-        → OPEN). This is the textbook circuit-breaker HALF_OPEN semantic.
-        """
-        with self._lock:
-            current_state = self._state
-            if current_state == "OPEN":
-                # Check if recovery timeout has elapsed.
-                if time.monotonic() - self._last_failure_time > self.recovery_timeout:
-                    self._state = "HALF_OPEN"
-                    self._half_open_probe_in_flight = False
-                    current_state = "HALF_OPEN"
-                else:
-                    return False
-            if current_state == "CLOSED":
-                return True
-            # HALF_OPEN: allow exactly ONE probe.
-            if self._half_open_probe_in_flight:
-                return False
-            self._half_open_probe_in_flight = True
-            return True
-
-    def reset(self) -> None:
-        """Reset the circuit breaker to CLOSED state (thread-safe).
-
-        v90 ROOT FIX (BUG #11 — P1 circuit breaker reset without lock):
-          The previous ``reset_global_state()`` directly mutated
-          ``_circuit_breaker._failure_count`` and ``_circuit_breaker._state``
-          WITHOUT acquiring ``_circuit_breaker._lock``. If another thread
-          was concurrently checking ``allow_request()`` (which acquires the
-          lock), it read a torn state: ``_failure_count=0`` but ``_state``
-          still momentarily "OPEN" (or vice-versa). The breaker's invariant
-          (``_state == OPEN`` iff ``_failure_count >= threshold``) was
-          violated. Under concurrent test teardown + live pipeline, the
-          breaker could get stuck OPEN (rejecting all DB calls) or stuck
-          CLOSED (never tripping on real failures). Non-deterministic,
-          hard to reproduce. ROOT FIX: this method acquires ``_lock``
-          before mutating state, preserving the invariant.
-        """
-        with self._lock:
-            self._failure_count = 0
-            self._state = "CLOSED"
-            self._last_failure_time = 0.0
-            self._half_open_probe_in_flight = False
+# ---------------------------------------------------------------------------
+# P1-002 / P1-011 ROOT FIX (Team-1 -- consolidate duplicate circuit breaker):
+#   The local ``_CircuitBreaker`` dataclass that previously lived here has
+#   been DELETED. The canonical implementation from ``phase1/_circuit_breaker``
+#   is imported at the top of this module. The duplicate had a CRITICAL
+#   concurrency bug (P1-002: ``record_failure()`` checked half_open AFTER
+#   the threshold-check, so a failed half-open probe with failure_count
+#   already >= threshold left ``_half_open_probe_in_flight`` stuck True
+#   forever -- the breaker was then stuck open and silently dropped all
+#   DB writes). The canonical implementation fixes this by checking
+#   half_open FIRST in ``record_failure()`` (see v89 BUG #13 ROOT FIX in
+#   ``_circuit_breaker.py``). The canonical class also exposes a ``reset()``
+#   method (added P1-002/P1-011) so ``reset_global_state()`` below
+#   continues to work unchanged.
+#
+#   DO NOT re-introduce a local ``_CircuitBreaker`` here. If you need
+#   breaker behavior, import from ``_circuit_breaker``. The single
+#   canonical implementation ensures bug fixes propagate to ALL callers
+#   (database layer, HTTP clients, normalizer, etc.) instead of being
+#   silently lost in a divergent copy.
+# ---------------------------------------------------------------------------
 
 
 # ===========================================================================

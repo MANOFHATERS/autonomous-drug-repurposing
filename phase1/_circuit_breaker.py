@@ -476,3 +476,61 @@ class _CircuitBreaker:
                 return self._half_open_probe_in_flight
             # closed
             return False
+
+    # -- Hard reset (P1-002 / P1-011 ROOT FIX) ----------------------------
+    def reset(self) -> None:
+        """Hard-reset the breaker to the closed state (thread-safe).
+
+        P1-002 / P1-011 ROOT FIX (Team-1 -- consolidate duplicate breaker):
+          ``database/connection.py`` previously defined its OWN local
+          ``_CircuitBreaker`` dataclass with a ``reset()`` method called
+          by ``reset_global_state()`` during test teardown / process
+          shutdown. The canonical implementation here had no ``reset()``
+          method, so deleting the duplicate would have broken
+          ``connection.py``. ROOT FIX: add ``reset()`` to the canonical
+          breaker so ``connection.py`` can import the canonical class
+          and call ``reset()`` unchanged.
+
+        Semantically ``reset()`` is similar to ``record_success()``
+        (both close the breaker), but ``reset()`` ALSO clears
+        ``_last_failure_time`` (so the next ``allow_request()`` does not
+        see a stale timestamp) and is intended for OUT-OF-BAND state
+        cleanup (test teardown, operator override, process restart)
+        rather than as a normal state-transition. Use
+        ``record_success()`` for normal "the probe succeeded" transitions;
+        use ``reset()`` only when you genuinely want to wipe all state.
+        """
+        with self._lock:
+            self._failure_count = 0
+            self._state = "closed"
+            self._last_failure_time = 0.0
+            self._half_open_probe_in_flight = False
+            self._half_open_probe_reserved_at = 0.0
+
+    # -- Backward-compat UPPERCASE state aliases (P1-002 / P1-011) ---------
+    # ``database/connection.py``'s local ``_CircuitBreaker`` used
+    # UPPERCASE state strings ("CLOSED", "OPEN", "HALF_OPEN"). The
+    # canonical implementation uses lowercase ("closed", "open",
+    # "half_open"). Tests and observability code that read
+    # ``breaker.state`` and compared to UPPERCASE strings would break
+    # after the consolidation. To preserve backward compatibility, we
+    # keep the canonical lowercase internally but ALSO accept UPPERCASE
+    # in the ``state`` setter (so legacy tests that set state directly
+    # still work). The ``state`` getter continues to return lowercase
+    # (canonical form) -- callers that need UPPERCASE should use
+    # ``breaker.state.upper()``.
+    #
+    # This is a deliberate bridge, not a permanent API. New code should
+    # use lowercase state strings exclusively.
+    def reset_to_open(self) -> None:
+        """Force the breaker to OPEN (thread-safe, for testing/admin).
+
+        P1-002 / P1-011 ROOT FIX: legacy ``connection.py`` tests directly
+        set ``breaker._state = "OPEN"`` to simulate a tripped breaker.
+        Direct attribute mutation bypasses the lock and is unsafe. This
+        helper provides a thread-safe equivalent.
+        """
+        with self._lock:
+            self._state = "open"
+            if self._last_failure_time == 0.0:
+                self._last_failure_time = time.monotonic()

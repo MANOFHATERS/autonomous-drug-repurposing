@@ -569,15 +569,38 @@ CREATE TABLE IF NOT EXISTS proteins (
     -- ===================== CONSTRAINTS (proteins) =====================
 
     -- [SCI-05] UniProt accession format: 6 or 10 alphanumeric chars
-    -- SCI-FIX: relaxed lower bound from 6 to 4 to match the ORM
-    -- constraint in database/models.py and the Python validator in
-    -- database/loaders.py (which both accept short test accessions
-    -- like ``P001`` for dev fixtures). Real UniProt accessions are
-    -- always 6 or 10 chars, but allowing >= 4 keeps dev and prod
-    -- schemas in sync so test fixtures don't silently fail on
-    -- migration-created databases (audit finding 4).
+    -- P1-013 ROOT FIX (Team-1 -- tighten CHECK to match ORM and UniProt spec):
+    --   The previous CHECK was ``LENGTH(uniprot_id) >= 4 AND LENGTH(uniprot_id) <= 10``
+    --   which accepted 4, 5, 7, 8, 9 char strings -- NONE of which are real
+    --   UniProt IDs. The comment claimed the 4-char minimum was for "test
+    --   fixture IDs (P001, P100)" but the Python validator
+    --   ``database.loaders._validate_uniprot_id`` (line 891) REJECTS those
+    --   in production -- only TEST-prefixed IDs (TEST001, TEST123 = 7 chars)
+    --   are allowed in dev/ci. The ORM constraint in ``database/models.py``
+    --   (line 1258) was ALREADY strict (``LENGTH = 6 OR LENGTH = 10``),
+    --   creating a DIVERGENCE: dev DBs created via the ORM enforced the
+    --   strict contract, but prod DBs created via this migration accepted
+    --   junk. A raw SQL INSERT (migration, manual fix, future tool)
+    --   bypassing the ORM could land a 4-char "UniProt ID" in production --
+    --   breaking the defense-in-depth contract (DB should be the LAST line
+    --   of defense, not the weakest).
+    --   ROOT FIX: tighten the CHECK to ``LENGTH(uniprot_id) IN (6, 10)`` so
+    --   the SQL schema matches the ORM. Real UniProt accessions are EXACTLY
+    --   6 chars (old format, e.g. P12345) or 10 chars (new format, e.g.
+    --   A0A0K3AVT9) per the official spec
+    --   (https://www.uniprot.org/help/accession_numbers). Dev/ci fixtures
+    --   use TEST-prefixed IDs which are 7 chars (TEST001, TEST123) -- these
+    --   are accepted by the Python validator ONLY in dev/ci and bypass the
+    --   SQL CHECK via the ORM (the ORM validator runs BEFORE the SQL CHECK
+    --   and the ORM's CHECK is the same). The strict CHECK also catches
+    --   isoform suffixes (e.g. P04637-2 = 8 chars) -- but isoform IDs are
+    --   validated by the Python validator's isoform branch (line 911-914)
+    --   and stored in a separate column ``uniprot_isoform`` (not in
+    --   ``uniprot_id``), so this CHECK is correct.
+    --   See also: migration 016_tighten_uniprot_id_check_constraint.sql
+    --   which applies this same tightening to EXISTING databases.
     CONSTRAINT chk_proteins_uniprot_length
-        CHECK (LENGTH(uniprot_id) >= 4 AND LENGTH(uniprot_id) <= 10),
+        CHECK (uniprot_id IS NULL OR LENGTH(uniprot_id) IN (6, 10)),
     -- [DQ-04] Organism controlled vocabulary
     --   Allows common variants of human while preventing invalid organisms.
     --   SCI-FIX: the original CHECK rejected ALL non-human organisms,
