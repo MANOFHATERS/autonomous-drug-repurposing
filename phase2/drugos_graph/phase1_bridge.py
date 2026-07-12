@@ -5844,6 +5844,49 @@ def load_into_graph(
     real_paths = [base / name_map[k] for k in _sources_for_checksum if k in name_map]
     input_checksum = compute_input_checksum(real_paths)
 
+    # v103 ROOT FIX (P2-037 deep): call consolidate_compounds_by_aliases
+    # BEFORE loading new Compound nodes. The v102 fix defined this method
+    # on DrugOSGraphBuilder but NEVER CALLED it — making the "better: run
+    # a pre-merge consolidation query" half of the P2-037 fix dead code.
+    # The deterministic ORDER BY LIMIT 1 in the MERGE prevents NEW
+    # fragmentation, but a previously-fragmented graph (pre-v102 runs,
+    # manual edits, partial restores) still contains orphaned Compound
+    # nodes whose aliases overlap with the chosen merge target. Without
+    # this consolidation call, those orphans persist forever and the
+    # graph stays fragmented across re-runs.
+    #
+    # Guard with hasattr() so the test-only RecordingGraphBuilder (which
+    # does NOT implement this Neo4j-specific method) still works. Only
+    # the real DrugOSGraphBuilder with an active Neo4j connection will
+    # actually consolidate.
+    _consolidation_method = getattr(builder, "consolidate_compounds_by_aliases", None)
+    if callable(_consolidation_method):
+        try:
+            _consolidation_report = _consolidation_method()
+            if isinstance(_consolidation_report, dict):
+                _merged = int(_consolidation_report.get("merged_count", 0) or 0)
+                if _merged > 0:
+                    logger.info(
+                        "load_into_graph: pre-merge consolidation merged "
+                        "%d fragmented Compound nodes (method=%s). v103 "
+                        "P2-037 root fix — v102 left this method uncalled.",
+                        _merged,
+                        _consolidation_report.get("method", "unknown"),
+                    )
+                    report.setdefault("consolidation", _consolidation_report)
+        except Exception as exc:
+            # Consolidation is best-effort: a failure MUST NOT block the
+            # main node load. Log loudly so operators can investigate,
+            # then proceed with the (still-deterministic) MERGE below.
+            logger.warning(
+                "load_into_graph: consolidate_compounds_by_aliases "
+                "raised %s: %s. Proceeding with node load (deterministic "
+                "MERGE will still prevent NEW fragmentation, but "
+                "pre-existing orphans may remain. v103 P2-037.",
+                type(exc).__name__, exc,
+            )
+            report.setdefault("consolidation_error", str(exc))
+
     # Nodes ────────────────────────────────────────────────────────────────
     for label, nodes in (
         ("Compound", staged.compound_nodes),
