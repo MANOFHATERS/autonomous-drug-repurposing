@@ -571,6 +571,9 @@ __all__: list[str] = [
     "filter_to_core_edges", "DRKG_RELATION_TO_CORE_EDGE",
     "STRICT_EDGE_FILTERING", "split_drkg_relation", "join_drkg_relation",
     "DRKG_RELATION_SEPARATOR",
+    # P2-014 ROOT FIX: new helpers for robust DRKG relation parsing.
+    "parse_drkg_relation_head_tail",
+    "canonical_drkg_relation_name",
     # ── DRKG v2.0 audit-fix constants (drkg_loader_repair_prompt.md) ──
     # Fixes BUG 1.3 / 1.4 / 3.1 / 3.2 / 3.4 / 3.6 / 3.7 / 5.5 / 5.8 / 9.2 /
     #       9.6 / 12.4 / 14.2 / GUARD 3.10.
@@ -4059,20 +4062,50 @@ DRKG_RELATION_SEPARATOR: str = "::"
 def split_drkg_relation(relation: str) -> Tuple[str, str, str]:
     """Split a DRKG relation string into (src_type, relation_name, dst_type).
 
+    P2-014 ROOT FIX: handles BOTH DRKG relation formats robustly:
+
+    1. **Hetionet / DRUGBANK format** (3 tokens after split on ``::``):
+       ``"Hetionet::CtD::Compound:Disease"`` -> ("Hetionet", "CtD", "Compound:Disease")
+       Here the third token is ``HeadType:TailType`` -- the caller must
+       split on ``:`` to get head/tail types separately.
+
+    2. **GNBR short-code format** (3 tokens after split on ``::``):
+       ``"GNBR::A::Gene:Compound"`` -> ("GNBR", "A", "Gene:Compound")
+       The middle token is the GNBR abbreviation (A, B, E, N, ...). The
+       previous code returned this tuple verbatim, which is correct --
+       but downstream code that looked up ``DRKG_RELATION_ABBREV_TO_NAME``
+       would miss the entry for plain "A" (only "A+" / "A-" were in the
+       codebook), producing ``relation_human_name="unknown"``. The P2-014
+       fix adds "A" to the codebook so the semantic context ("affects")
+       is preserved.
+
+    The function returns ``(source, relation_abbrev, head_tail_types)``.
+    Callers that need head_type and tail_type separately should split
+    ``head_tail_types`` on ``":"`` (first colon only -- entity IDs may
+    contain colons, e.g. ``"Disease::DOID:1438"``).
+
     Parameters
     ----------
     relation : str
-        DRKG relation string like "Compound::treats::Disease"
+        DRKG relation string like ``"Hetionet::CtD::Compound:Disease"``
+        or ``"GNBR::A::Gene:Compound"``.
 
     Returns
     -------
     tuple of (src_type, relation_name, dst_type)
+        Where ``dst_type`` is the ``HeadType:TailType`` substring (NOT
+        split on ``:`` -- callers must do that themselves).
 
     Raises
     ------
     ValueError
         If relation doesn't have the expected format.
     """
+    if not isinstance(relation, str) or not relation:
+        raise ValueError(
+            f"Invalid DRKG relation format: {relation!r}. "
+            f"Expected 'SrcType::relation::DstType'"
+        )
     parts = relation.split(DRKG_RELATION_SEPARATOR)
     if len(parts) < 3:
         raise ValueError(
@@ -4080,6 +4113,63 @@ def split_drkg_relation(relation: str) -> Tuple[str, str, str]:
             f"Expected 'SrcType::relation::DstType'"
         )
     return parts[0], parts[1], parts[-1]
+
+
+def parse_drkg_relation_head_tail(head_tail_str: str) -> Tuple[str, str]:
+    """Split a DRKG ``HeadType:TailType`` substring into (head_type, tail_type).
+
+    P2-014 ROOT FIX: splits on the FIRST colon only -- entity IDs in
+    DRKG may contain colons (e.g. ``"Disease:DOID:1438"`` where the tail
+    type is ``"Disease"`` and the tail ID is ``"DOID:1438"``). The
+    previous split-on-``:`` approach in some downstream callers would
+    produce 3 tokens and silently drop the ID prefix.
+
+    Parameters
+    ----------
+    head_tail_str : str
+        The ``HeadType:TailType`` substring from a DRKG relation (the
+        third token returned by ``split_drkg_relation``).
+
+    Returns
+    -------
+    tuple of (head_type, tail_type)
+        Both lowercased for case-insensitive comparison with
+        ``DRKG_VALID_TRIPLE_SCHEMAS``.
+
+    Raises
+    ------
+    ValueError
+        If the input doesn't contain a colon.
+    """
+    if not isinstance(head_tail_str, str) or ":" not in head_tail_str:
+        raise ValueError(
+            f"Invalid DRKG head:tail format: {head_tail_str!r}. "
+            f"Expected 'HeadType:TailType'"
+        )
+    head, tail = head_tail_str.split(":", 1)
+    return head.strip(), tail.strip()
+
+
+def canonical_drkg_relation_name(relation_abbrev: str) -> str:
+    """Look up the human-readable name for a DRKG relation abbreviation.
+
+    P2-014 ROOT FIX: case-insensitive lookup so that ``"A"``, ``"a"``,
+    ``"CtD"``, ``"ctd"`` all resolve correctly. Returns the abbreviation
+    itself if no mapping exists (so the caller can detect unknown codes
+    via ``DRKG_RELATION_ABBREV_TO_NAME.get(code) is None``).
+    """
+    if not isinstance(relation_abbrev, str) or not relation_abbrev:
+        return relation_abbrev if isinstance(relation_abbrev, str) else ""
+    # Try exact match first (preserves case-sensitive codes like "E+"/"E-").
+    if relation_abbrev in DRKG_RELATION_ABBREV_TO_NAME:
+        return DRKG_RELATION_ABBREV_TO_NAME[relation_abbrev]
+    # Fall back to case-insensitive match for codes that are case-agnostic
+    # (e.g. "ctd" -> "CtD", "target" -> "target").
+    lower = relation_abbrev.lower()
+    for k, v in DRKG_RELATION_ABBREV_TO_NAME.items():
+        if k.lower() == lower:
+            return v
+    return relation_abbrev
 
 
 def join_drkg_relation(src_type: str, relation: str, dst_type: str) -> str:
@@ -4938,6 +5028,13 @@ DRKG_RELATION_ABBREV_TO_NAME: dict[str, str] = {
     "O": "Compound-transports-Gene",
     "Z": "Compound-affects-Gene",
     "J": "Compound-role-in-pathogenesis-of-Gene",
+    # P2-014 ROOT FIX: GNBR "A" = general "affects" relation. The GNBR
+    # codebook (https://pubmed.ncbi.nlm.nih.gov/30321895/) defines "A" as
+    # the broadest affect relation -- distinct from "A+" (activates) and
+    # "A-" (inhibits). Without this entry, DRKG rows with relation
+    # "GNBR::A::Gene:Compound" would have relation_human_name = "unknown",
+    # losing semantic context for the GNN's edge-type embedding.
+    "A": "Compound-affects-Gene",
     "A+": "Compound-activates-Disease",
     "A-": "Compound-inhibits-Disease",
     # GNBR text-mined Gene-Disease
@@ -4992,6 +5089,14 @@ DRKG_VALID_TRIPLE_SCHEMAS: frozenset[tuple[str, str, str]] = frozenset({
     ("O", "Compound", "Gene"),
     ("Z", "Compound", "Gene"),
     ("J", "Compound", "Gene"),
+    # P2-014 ROOT FIX: GNBR "A" = general "affects" relation. The GNBR
+    # codebook documents "A" as a Compound-affects-Gene edge (distinct
+    # from "A+" activates and "A-" inhibits). Without this entry, DRKG
+    # rows with relation "GNBR::A::Gene:Compound" would fail the
+    # valid-triple-schema check and be dead-lettered -- losing semantic
+    # context for the GNN's edge-type embedding.
+    ("A", "Compound", "Gene"),
+    ("A", "Compound", "Disease"),
     # bioarx preprint drug-gene
     ("DrugHumGen", "Compound", "Gene"),
     ("DrugVirGen", "Compound", "Gene"),
