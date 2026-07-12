@@ -7046,7 +7046,25 @@ def step11b_train_graph_transformer(
 
     # Node-disjoint split (same as step11 v29 fix).
     import random as _random
-    _rng = _random.Random(42)
+    # v102 ROOT FIX (P2-047): the previous code hardcoded the seed to
+    # 42 (and 42 + 2 for the validation RNG), ignoring config.seed.
+    # HGT training was reproducible across runs with the SAME code but
+    # NOT correlated with the global seed. An operator running a
+    # multi-seed ensemble (config.seed = 42, 43, 44) for HGT variance
+    # estimation got the SAME result for all three runs — defeating
+    # the purpose of multi-seed ensembling. TransE respected
+    # config.seed (via train_transe); HGT did not. The DOCX
+    # reproducibility requirement (FDA 21 CFR Part 11) was partially
+    # violated: multi-seed runs that should have produced variance
+    # produced identical results, masking model instability.
+    #
+    # ROOT FIX: replace ``42`` with ``getattr(cfg, "seed", 42)`` and
+    # ``42 + 2`` with ``getattr(cfg, "seed", 42) + 2``. The default of
+    # 42 preserves backward compat for callers that don't set cfg.seed.
+    # The GraphTransformerConfig.seed field (graph_transformer_model.py:158)
+    # defaults to 42, so existing single-seed runs are bit-identical.
+    _hgt_seed = getattr(cfg, "seed", 42)
+    _rng = _random.Random(_hgt_seed)
     # v72 ROOT FIX (P2C-023): separate validation RNG for HGT negative
     # sampling. train_transe uses a separate _val_rng seeded from
     # config.seed + 2 for validation negatives (the v43 P1 fix to
@@ -7058,11 +7076,14 @@ def step11b_train_graph_transformer(
     # did/did-not perform validation. The DOCX reproducibility
     # requirement (FDA 21 CFR Part 11) was violated for HGT. TransE
     # was reproducible (separate _val_rng), HGT was not. ROOT FIX:
-    # create a separate _val_rng seeded from 42 + 2 (mirroring the
-    # train_transe pattern) and use it for validation + test negatives.
-    # The training _rng is used ONLY for training negatives and batch
-    # shuffling, so its state is not contaminated by validation.
-    _val_rng = _random.Random(42 + 2)
+    # create a separate _val_rng seeded from _hgt_seed + 2 (mirroring
+    # the train_transe pattern) and use it for validation + test
+    # negatives. The training _rng is used ONLY for training negatives
+    # and batch shuffling, so its state is not contaminated by
+    # validation.
+    # v102 P2-047: derived from _hgt_seed (which respects cfg.seed),
+    # not the hardcoded 42.
+    _val_rng = _random.Random(_hgt_seed + 2)
     compound_indices = list(set(src_list))
     _rng.shuffle(compound_indices)
     n_total = len(compound_indices)

@@ -821,6 +821,88 @@ def _storage_label(label: str) -> str:
     return label
 
 
+# v102 ROOT FIX (P2-048): canonical Neo4j relationship type transform.
+#
+# The previous safe_rel construction only handled spaces and hyphens:
+#   rel_type.lower().replace(" ", "_").replace("-", "_")
+# DRKG relation codes contain "::" and ":" (e.g.
+# "DRUGBANK::treats::Compound:Disease"). After lowercasing, the
+# rel_type still has "::" and ":" — sanitize_rel_type (via
+# _sanitize_identifier_core) replaces every char NOT in [A-Za-z0-9_]
+# with underscore, producing "drugbank__treats__compound_disease" —
+# losing the source prefix structure. Graph queries that filter by
+# relation source (e.g. "DRUGBANK::") return empty.
+#
+# ROOT FIX: apply a CANONICAL transformation BEFORE calling
+# sanitize_rel_type. The canonical form is "source_relation"
+# (lowercase, underscore-joined, no double-colons). This preserves
+# the source prefix structure that operators query on, while remaining
+# Neo4j-safe (no ":" characters). Examples:
+#   "DRUGBANK::treats::Compound:Disease" → "drugbank_treats"
+#   "DRUGBANK::treats"                    → "drugbank_treats"
+#   "treats"                              → "treats"
+#   "DRUGBANK::causes_side_effect"        → "drugbank_causes_side_effect"
+#   "drugbank::treats::compound:disease"  → "drugbank_treats" (lowercase input)
+#
+# This helper is called from EVERY safe_rel construction site (3 call
+# sites in kg_builder.py: _load_edges_core, dedup_edges,
+# select_primary_edge) so the canonical form is consistent across
+# writes, dedup, and primary-edge selection.
+def _canonical_rel_type(rel_type: str) -> str:
+    """Transform a DRKG-style relation code into its canonical Neo4j form.
+
+    The canonical form is ``"source_relation"`` (lowercase,
+    underscore-joined, no double-colons). For DRKG codes with the
+    full ``"source::name::dst_type"`` form, only the FIRST TWO tokens
+    (source + name) are retained — the dst_type token is redundant
+    with the edge triple's dst_label.
+
+    Args:
+        rel_type: Raw relation type string (e.g. "DRUGBANK::treats::
+            Compound:Disease", "treats", "DRUGBANK::causes_side_effect").
+
+    Returns:
+        Canonical lowercase form ready for sanitize_rel_type (e.g.
+        "drugbank_treats", "treats", "drugbank_causes_side_effect").
+
+    The output is NOT yet Neo4j-safe (may still contain chars
+    sanitize_rel_type would reject) — callers MUST pass the result
+    through sanitize_rel_type for final validation.
+    """
+    if not rel_type or not isinstance(rel_type, str):
+        return rel_type if rel_type else ""
+    _rel_lower = rel_type.lower()
+    if "::" in _rel_lower:
+        # DRKG-style "source::name::dst_type" form.
+        _rel_tokens = [t for t in _rel_lower.split("::") if t]
+        if len(_rel_tokens) >= 2:
+            _canonical = "_".join(_rel_tokens[:2])
+        elif len(_rel_tokens) == 1:
+            _canonical = _rel_tokens[0]
+        else:
+            _canonical = _rel_lower
+    else:
+        _canonical = _rel_lower
+    # Strip any remaining ":" (e.g. "drugbank:treats" form) and
+    # replace spaces/hyphens with underscores.
+    _canonical = (
+        _canonical
+        .replace(":", "_")
+        .replace(" ", "_")
+        .replace("-", "_")
+    )
+    # Collapse any double-underscores produced by the replacements.
+    while "__" in _canonical:
+        _canonical = _canonical.replace("__", "_")
+    _canonical = _canonical.strip("_")
+    if not _canonical:
+        # Defensive: if the transformation produced an empty string,
+        # fall back to the original behavior so sanitize_rel_type
+        # raises the appropriate ValueError.
+        _canonical = rel_type.lower().replace(" ", "_").replace("-", "_")
+    return _canonical
+
+
 def _sanitize_value(v: Any) -> Any:
     """Sanitize a property value before writing to Neo4j.
 
@@ -2062,9 +2144,10 @@ class GraphEdgeLoader:
         # ``sanitize_label`` which enforces PascalCase (Neo4j convention).
         safe_src = sanitize_label(_storage_label(src_label))
         safe_dst = sanitize_label(_storage_label(dst_label))
-        safe_rel = sanitize_rel_type(
-            rel_type.lower().replace(" ", "_").replace("-", "_")
-        )
+        # v102 P2-048: use _canonical_rel_type to handle DRKG "::" and
+        # ":" separators BEFORE sanitize_rel_type. See the helper's
+        # docstring for the full transformation spec.
+        safe_rel = sanitize_rel_type(_canonical_rel_type(rel_type))
 
         # Fixes IVR §3.6: Validate edge triple
         if not allow_non_core and not _ALLOW_NON_CORE_EDGES:
@@ -2615,9 +2698,10 @@ class GraphEdgeLoader:
         # ``_load_edges`` writes (see the comment there).
         safe_src = sanitize_label(_storage_label(src_label))
         safe_dst = sanitize_label(_storage_label(dst_label))
-        safe_rel = sanitize_rel_type(
-            rel_type.lower().replace(" ", "_").replace("-", "_")
-        )
+        # v102 P2-048: use _canonical_rel_type to handle DRKG "::" and
+        # ":" separators BEFORE sanitize_rel_type, so dedup matches the
+        # same canonical relationship type that _load_edges writes.
+        safe_rel = sanitize_rel_type(_canonical_rel_type(rel_type))
 
         with self._conn.session() as session:
             result = session.run(
@@ -2665,9 +2749,10 @@ class GraphEdgeLoader:
         # ``_load_edges`` writes (see the comment there).
         safe_src = sanitize_label(_storage_label(src_label))
         safe_dst = sanitize_label(_storage_label(dst_label))
-        safe_rel = sanitize_rel_type(
-            rel_type.lower().replace(" ", "_").replace("-", "_")
-        )
+        # v102 P2-048: use _canonical_rel_type to handle DRKG "::" and
+        # ":" separators BEFORE sanitize_rel_type, so dedup matches the
+        # same canonical relationship type that _load_edges writes.
+        safe_rel = sanitize_rel_type(_canonical_rel_type(rel_type))
 
         with self._conn.session() as session:
             # Fixes I-5: Deterministic ordering by source priority and load time.
