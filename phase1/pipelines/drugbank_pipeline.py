@@ -2149,7 +2149,17 @@ class DrugBankPipeline(BasePipeline):
                 _name_elem.getparent().tag if _name_elem.getparent() is not None else "None",
             )
             # Re-fetch using explicit direct-child XPath.
-            _name_matches = elem.xpath("./db:name", NS)
+            # P1-013 v106 FORENSIC ROOT FIX: lxml's ``xpath()`` does NOT
+            # accept namespaces as a positional argument -- the previous
+            # call ``elem.xpath("./db:name", NS)`` raised
+            # ``TypeError: xpath() takes exactly 1 positional argument (2 given)``
+            # at runtime. The defensive fall-back was therefore DEAD CODE --
+            # if the primary ``elem.find("db:name", NS)`` ever returned a
+            # misparented element, the fall-back would crash with TypeError
+            # instead of recovering. The fix: pass namespaces as a keyword
+            # argument (``namespaces=NS``) per the lxml API contract
+            # (https://lxml.de/api/lxml.etree._Element-class.html#xpath).
+            _name_matches = elem.xpath("./db:name", namespaces=NS)
             _name_elem = _name_matches[0] if _name_matches else None
         name = _sanitize_text(_text_of(_name_elem))
         cas_number = _sanitize_text(_text_of(elem.find("db:cas-number", NS)))
