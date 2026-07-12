@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAdmin, badRequest, writeAuditLog } from "@/lib/api-helpers";
+import { revokeAllRefreshTokensForUser } from "@/lib/auth/server";
 import { db } from "@/lib/db";
 import {
   ALLOWED_ROLES_ADMIN,
@@ -132,6 +133,22 @@ export async function PATCH(req: NextRequest) {
     data,
     select: { id: true, email: true, name: true, role: true, status: true },
   });
+
+  // FE-032 ROOT FIX: If the user was just suspended, revoke ALL their
+  // refresh tokens so existing sessions stop working immediately. Without
+  // this, a suspended user's existing refresh token would continue to
+  // work for up to 30 days (REFRESH_TOKEN_TTL_DAYS) — defeating the
+  // purpose of suspension.
+  if (data.status === "suspended") {
+    const revokedCount = await revokeAllRefreshTokensForUser(updated.id);
+    await writeAuditLog({
+      user: auth.user,
+      action: "admin_user_suspended_tokens_revoked",
+      resource: `user:${updated.id}`,
+      metadata: { revokedRefreshTokenCount: revokedCount },
+    });
+  }
+
   await writeAuditLog({
     user: auth.user,
     action: "admin_user_update",

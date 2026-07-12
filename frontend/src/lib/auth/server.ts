@@ -259,10 +259,37 @@ export function issueRefreshToken(): { token: string; expiresAt: Date } {
 }
 
 export async function rotateRefreshToken(userId: string): Promise<{ refresh: string; access: string }> {
-  const { token, expiresAt } = issueRefreshToken();
-  await db.refreshToken.create({ data: { userId, token, expiresAt } });
+  // FE-032 ROOT FIX: The previous code called db.user.findUnique and only
+  // checked that the user exists — it did NOT check user.status or
+  // user.lockedUntil. So a SUSPENDED user's existing refresh token
+  // continued to work for up to 30 days (REFRESH_TOKEN_TTL_DAYS). An
+  // attacker who compromised a session before the user was suspended
+  // retained access throughout the suspension. A LOCKED user (failed
+  // login brute-force lockout) could also bypass the lock by using an
+  // existing refresh token.
+  //
+  // Now we check both conditions explicitly. If the user is suspended or
+  // locked, we revoke ALL their refresh tokens and throw — the caller
+  // (consumeRefreshToken) returns null, and /api/auth/refresh returns 401
+  // + clears cookies.
   const user = await db.user.findUnique({ where: { id: userId } });
   if (!user) throw new Error("User not found while rotating refresh token");
+  if (user.status === "suspended") {
+    // Revoke ALL refresh tokens for this user — they should not be able
+    // to keep using any previously-issued token after suspension.
+    await revokeAllRefreshTokensForUser(userId);
+    throw new Error("account_suspended");
+  }
+  if (user.lockedUntil && user.lockedUntil.getTime() > Date.now()) {
+    // Account is temporarily locked (brute-force protection). Do NOT
+    // revoke all tokens — the lock is temporary and the user should be
+    // able to use existing sessions after the lock expires. But we DO
+    // refuse to issue new tokens during the lock.
+    throw new Error("account_locked");
+  }
+
+  const { token, expiresAt } = issueRefreshToken();
+  await db.refreshToken.create({ data: { userId, token, expiresAt } });
   const access = signAccessToken({ userId: user.id, email: user.email, role: user.role });
   return { refresh: token, access };
 }
@@ -273,7 +300,19 @@ export async function consumeRefreshToken(token: string): Promise<{ refresh: str
   if (record.revokedAt) return null;
   if (record.expiresAt.getTime() < Date.now()) return null;
   await db.refreshToken.update({ where: { id: record.id }, data: { revokedAt: new Date() } });
-  return rotateRefreshToken(record.userId);
+  try {
+    return await rotateRefreshToken(record.userId);
+  } catch (e) {
+    // FE-032: rotateRefreshToken throws if the user is suspended or
+    // locked. We swallow the error and return null so the caller returns
+    // 401 (and clears cookies via FE-031).
+    const msg = e instanceof Error ? e.message : String(e);
+    if (msg === "account_suspended" || msg === "account_locked") {
+      return null;
+    }
+    // Unexpected error — rethrow.
+    throw e;
+  }
 }
 
 export async function revokeAllRefreshTokensForUser(userId: string): Promise<number> {
