@@ -2232,12 +2232,95 @@ def _drop_self_loops(df: pd.DataFrame) -> pd.DataFrame:
     return df[mask].reset_index(drop=True)
 
 
+def _looks_like_canonical_string_id(s: str) -> bool:
+    """Return True iff ``s`` is a taxid-prefixed canonical STRING identifier.
+
+    P2-008 ROOT FIX: the canonical-pair dedup in ``_canonicalize_pair_order``
+    uses ``protein1 < protein2`` string comparison. This is correct ONLY when
+    identifiers carry the species taxid prefix (e.g. ``"9606.ENSP00000000233"``
+    for human, ``"10090.ENSMUSP000000001"`` for mouse). When the loader is
+    configured to use gene symbols instead (via aliases / crosswalk flag),
+    the same gene symbol from two different species (e.g. human ``"9606.TP53"``
+    vs mouse ``"10090.Tp53"``) would compare equal after lowercasing in some
+    downstream consumers, and the dedup ``p1 <= p2`` would not distinguish
+    species -- silently merging cross-species PPIs into a single edge.
+
+    This helper inspects the identifier shape so the loader can emit a
+    WARNING when gene-symbol mode is detected, and so callers can guard
+    against the cross-species collapse documented in P2-008.
+    """
+    if not isinstance(s, str) or not s:
+        return False
+    # Canonical STRING IDs are ``<taxid>.<ENSP|ENSMUSP|...>`` with the taxid
+    # being 1-7 digits and the protein segment starting with a letter.
+    head, sep, tail = s.partition(".")
+    if not sep:
+        return False
+    if not head.isdigit():
+        return False
+    if not tail or not tail[0].isalpha():
+        return False
+    return True
+
+
+def _warn_if_gene_symbol_mode(df: pd.DataFrame) -> None:
+    """Emit a WARNING if ``df['protein1']`` looks like bare gene symbols.
+
+    P2-008 ROOT FIX: when the loader is configured to use gene symbols
+    (via the STRING aliases file or a crosswalk flag), the canonical-pair
+    dedup in ``_canonicalize_pair_order`` may merge cross-species PPIs
+    that share the same gene symbol (e.g. human TP53 vs mouse Tp53).
+    The fix is detection + warning, not a silent behaviour change --
+    operators who explicitly enable gene-symbol mode MUST be told that
+    cross-species dedup is a known risk.
+    """
+    if "protein1" not in df.columns or len(df) == 0:
+        return
+    # Sample up to 1000 IDs to detect the mode cheaply.
+    sample = df["protein1"].astype(str).head(min(1000, len(df)))
+    if len(sample) == 0:
+        return
+    canonical_count = sum(1 for s in sample if _looks_like_canonical_string_id(s))
+    ratio = canonical_count / len(sample)
+    # If fewer than 80% of sampled IDs look like canonical taxid-prefixed
+    # STRING identifiers, the loader is probably in gene-symbol mode.
+    if ratio < 0.8:
+        logger.warning(
+            "string_gene_symbol_mode_detected",
+            extra={
+                "canonical_ratio": round(ratio, 4),
+                "sample_size": int(len(sample)),
+                "warning": (
+                    "STRING protein1 column does not look like canonical "
+                    "taxid-prefixed STRING IDs (e.g. '9606.ENSP...'). "
+                    "Gene-symbol mode detected: the canonical-pair dedup "
+                    "may incorrectly merge cross-species PPIs that share "
+                    "the same gene symbol (e.g. human TP53 vs mouse Tp53). "
+                    "Pass canonical STRING identifiers, or set "
+                    "emit_both_directions=False explicitly and verify "
+                    "no cross-species collapse occurs. (P2-008)"
+                ),
+            },
+        )
+
+
 def _canonicalize_pair_order(df: pd.DataFrame) -> pd.DataFrame:
     """Canonicalize (protein1, protein2) so protein1 <= protein2 (S3-06).
 
     This makes (A, B) and (B, A) equivalent, so subsequent dedup catches
     both. Logs the number of swaps.
+
+    P2-008 ROOT FIX: the dedup uses ``protein1 < protein2`` string
+    comparison, which is correct ONLY when identifiers carry the species
+    taxid prefix (e.g. ``"9606.ENSP00000000233"``). When the loader is
+    configured to use gene symbols instead, the same gene symbol from
+    two different species (e.g. human ``"9606.TP53"`` vs mouse
+    ``"10090.Tp53"``) may compare incorrectly, silently merging
+    cross-species PPIs. ``_warn_if_gene_symbol_mode`` is called here
+    to emit a WARNING so operators are aware of the risk.
     """
+    # Fixes P2-008: detect gene-symbol mode and warn before dedup.
+    _warn_if_gene_symbol_mode(df)
     # Fixes S3-06: canonicalize pair order.
     p1 = df["protein1"].astype(str)
     p2 = df["protein2"].astype(str)
@@ -3180,6 +3263,16 @@ def string_to_edge_records(
     emit_both_directions : bool, default False
         If True, emit both (A,B) and (B,A) edges (default False since
         STRING PPIs are undirected -- S3-06).
+
+        P2-008: the canonical-pair dedup upstream
+        (``_canonicalize_pair_order``) assumes taxid-prefixed STRING
+        identifiers (e.g. ``"9606.ENSP00000000233"``). When the loader
+        is configured to use bare gene symbols, the dedup may merge
+        cross-species PPIs that share the same gene symbol -- a
+        WARNING is emitted in that case. ``emit_both_directions=False``
+        is the safe default for both modes; setting it to ``True`` in
+        gene-symbol mode does NOT recover lost cross-species edges
+        because the dedup has already collapsed them.
     keep_self_loops : bool, default False
         If True, keep self-interaction edges (S3-04).
     crosswalk_copy : bool, default False

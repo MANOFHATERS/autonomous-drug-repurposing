@@ -755,20 +755,72 @@ def _stitch_stereo_code(cid: Any) -> str:
 def _stitch_stereo_label(stereo_code: str) -> str:
     """Map a STITCH stereo code to a human-readable label (v57 ROOT FIX P2L-038).
 
-    Mapping:
-      * ``"sm"`` -> ``"stereo_specific_merged"``  (stereo + merged record)
-      * ``"s"``  -> ``"stereo_specific"``         (per STITCH docs -- kept separate)
-      * ``"f"``  -> ``"different_connectivity"``  (different connectivity / salt)
-      * ``"m"``  -> ``"non_stereo_merged"``       (flat / merged -- stereoisomers folded)
-      * ``""``   -> ``"unknown"``                  (no stereo annotation)
+    P2-009 ROOT FIX -- consolidated documentation of all 6+1 STITCH
+    stereo codes. The STITCH paper (Kuhn et al., 2008, Nucleic Acids
+    Res. 36:D684-D688, doi:10.1093/nar/gkm858) and the STITCH docs at
+    https://stitch.embl.de/docs/ define the following CID prefix codes:
+
+    Legacy codes (STITCH <= 5.0):
+      * ``"sm"`` -> ``"stereo_specific_merged"``  -- stereospecific + merged
+        record. Enantiomers are kept SEPARATE (each enantiomer has its
+        own CIDsm entry) AND the entry is a merged record (stereo
+        annotation is preserved). Used in STITCH's
+        ``chemical.actions.v5.0.tsv`` for high-confidence stereo edges.
+      * ``"s"``  -> ``"stereo_specific"``         -- stereo is preserved
+        (per STITCH docs: enantiomers kept separate). S-warfarin and
+        R-warfarin have different CIDs entries. Critical for
+        dose-response modelling where S-warfarin is 5x more potent than
+        R-warfarin.
+      * ``"f"``  -> ``"different_connectivity"``  -- different
+        connectivity / salt form. Used when the molecule has the same
+        atoms but a different bond graph (e.g. an isomer), or when the
+        entry is a salt form (e.g. hydrochloride vs free base).
+      * ``"m"``  -> ``"non_stereo_merged"``       -- FLAT / merged form.
+        Stereoisomers are folded together into a single entry. Used
+        when stereo annotation is absent or when the source database
+        (e.g. PubChem's auto-merged entries) does not distinguish
+        enantiomers. The 'm' stands for 'merged', NOT 'racemic mixture'
+        (a racemic mixture is a 50:50 physical mix; CIDm is just the
+        absence of stereo annotation).
+      * ``""``   -> ``"unknown"``                  -- bare ``CID`` prefix
+        with no stereo code. Treated as "non_stereo_merged" by some
+        downstream consumers but is technically a distinct annotation
+        state -- the source file did not specify any stereo information.
+
+    Newer codes (STITCH 5.1+, also used by SIDER's meddra.tsv):
+      * ``"0"`` -> ``"non_stereo_merged"``    -- semantically equivalent
+        to ``CIDm`` (flat form). The 4th character of the CID string
+        is ``0``. SIDER's production files use this format.
+      * ``"1"`` -> ``"stereo_specific"``      -- semantically equivalent
+        to ``CIDs`` (stereo-specific). The 4th character of the CID
+        string is ``1``.
+
+    All 6 codes (sm, s, f, m, 0, 1) collapse to the SAME canonical
+    PubChem CID via ``_normalize_stitch_cid``. The original code is
+    preserved on the edge as the ``stitch_stereo`` property so
+    downstream consumers can filter by stereo-specificity without
+    digging into the nested ``_stitch`` dict.
+
+    Compound effect (P2-009): the previous code collapsed CIDf and CIDm
+    to the same canonical CID but the rationale was undocumented. A
+    future engineer might "fix" the collapse by keeping CIDf separate,
+    which would split Compound nodes for salt forms and break entity
+    resolution. This docstring documents that the collapse is
+    intentional and cites the STITCH paper as the canonical reference.
+
+    References
+    ----------
+    * Kuhn M, von Mering C, Campillos M, Jensen LJ, Bork P. **STITCH:
+      interaction networks of chemicals and proteins.** Nucleic Acids
+      Res. 2008;36(Database issue):D684-D688. doi:10.1093/nar/gkm858
+    * STITCH documentation: https://stitch.embl.de/docs/
+    * PubChem stereochemistry: https://pubchem.ncbi.nlm.nih.gov/docs/stereochemistry
 
     v70 ROOT FIX (P2L-040): added mappings for the newer STITCH CID
-    format's prefix codes:
-      * ``"0"`` -> ``"non_stereo_merged"``    (newer flat format = CIDm)
-      * ``"1"`` -> ``"stereo_specific"``      (newer stereo format = CIDs)
-    The newer codes map to the SAME semantic labels as their legacy
-    equivalents so downstream consumers see consistent labels regardless
-    of which format the source file uses.
+    format's prefix codes (``"0"`` and ``"1"``). The newer codes map to
+    the SAME semantic labels as their legacy equivalents so downstream
+    consumers see consistent labels regardless of which format the
+    source file uses.
     """
     return {
         "sm": "stereo_specific_merged",

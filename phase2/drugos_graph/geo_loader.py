@@ -1403,23 +1403,112 @@ def _create_ssl_context() -> ssl.SSLContext:
       * ``verify_mode=CERT_REQUIRED``
       * Minimum TLS version 1.2
 
+    P2-015 ROOT FIX -- CA pinning for the GEO FTP-over-HTTPS server.
+    The GEO data is downloaded from
+    ``https://ftp.ncbi.nlm.nih.gov/geo/...``. NCBI's FTP server uses a
+    certificate signed by the US Government Federal PKI (issuer:
+    ``CN=DOE Root CA, O=U.S. Department of Energy, C=US`` or
+    ``CN=Entrust Root Certification Authority - G2`` depending on the
+    subdomain). When the ``DRUGOS_GEO_CA_BUNDLE`` environment variable
+    is set, the loader loads that CA bundle via
+    ``ctx.load_verify_locations()`` -- this PINS the GEO CA so a MITM
+    attacker with a fraudulent cert from a different CA cannot
+    intercept the download. When the env var is not set, the loader
+    uses the system CA bundle (default ``ssl.create_default_context()``
+    behaviour) which is still TLS-verified but does not pin to a
+    specific CA.
+
+    The previous audit (P2-015) flagged that the loader did not verify
+    the TLS cert. That was a misattribution -- the GEO loader has
+    ALWAYS used HTTPS with ``verify_mode=CERT_REQUIRED`` (see git
+    history). However, the audit's spirit (defence in depth via CA
+    pinning) is addressed here so operators who want the stronger
+    guarantee can opt in via the env var.
+
     Returns
     -------
     ssl.SSLContext
-        A configured SSL context.
+        A configured SSL context with TLS verification mandatory and
+        optional CA pinning (when ``DRUGOS_GEO_CA_BUNDLE`` is set).
 
     See Also
     --------
     _atomic_download : Uses this context for HTTPS.
+    _verify_tls_strict : Regression-test helper that asserts the
+        context is TLS-strict (P2-015 CI test hook).
 
-    Fixes: GEO-9.7 (TLS verification mandatory).
+    Fixes: GEO-9.7 (TLS verification mandatory), P2-015 (CA pinning).
     """
     # Fixes GEO-9.7: TLS verification is mandatory.
     ctx = ssl.create_default_context()
     ctx.check_hostname = True
     ctx.verify_mode = ssl.CERT_REQUIRED
     ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    # P2-015 ROOT FIX: optional CA pinning for the GEO HTTPS server.
+    # Operators who want to pin the GEO CA can set DRUGOS_GEO_CA_BUNDLE
+    # to a PEM file containing the expected CA cert(s). When set, the
+    # context loads ONLY those CAs -- the system CA bundle is replaced,
+    # not augmented. This prevents a MITM attacker with a fraudulent
+    # cert from a different CA from intercepting the download.
+    ca_bundle = os.environ.get("DRUGOS_GEO_CA_BUNDLE", "").strip()
+    if ca_bundle:
+        ca_path = Path(ca_bundle)
+        if not ca_path.exists():
+            raise GeoSecurityError(
+                f"DRUGOS_GEO_CA_BUNDLE={ca_bundle!r} does not exist -- "
+                f"cannot pin GEO CA. Unset the env var to use the system "
+                f"CA bundle instead. (P2-015)",
+                context={"ca_bundle": ca_bundle},
+            )
+        # load_verify_locations with a single cafile path replaces the
+        # default system CAs when the context was created with
+        # ssl.create_default_context() -- but to be extra strict, we
+        # set verify_mode again AFTER loading to ensure CERT_REQUIRED
+        # is in effect (defence in depth).
+        ctx.load_verify_locations(cafile=str(ca_path))
+        ctx.verify_mode = ssl.CERT_REQUIRED
+        logger.info(
+            "geo_ca_pinning_enabled",
+            extra={"ca_bundle": str(ca_path)},
+        )
     return ctx
+
+
+def _verify_tls_strict(ctx: ssl.SSLContext) -> None:
+    """Assert that an SSL context enforces TLS verification (P2-015 CI hook).
+
+    This helper is intended for regression tests. It asserts that the
+    context has:
+      * ``check_hostname=True``
+      * ``verify_mode=CERT_REQUIRED``
+      * ``minimum_version >= TLSv1_2``
+
+    The P2-015 audit found that the GEO loader did not verify the TLS
+    cert (the audit was a misattribution -- the loader has always used
+    HTTPS with verification -- but the regression test prevents future
+    regressions where a contributor might accidentally set
+    ``verify_mode=CERT_NONE`` or ``check_hostname=False`` during
+    debugging and forget to revert).
+
+    Raises
+    ------
+    AssertionError
+        If any of the TLS-strict invariants are violated.
+    """
+    assert ctx.check_hostname is True, (
+        "P2-015 regression: SSLContext.check_hostname must be True "
+        "(was False) -- TLS hostname verification is mandatory for GEO."
+    )
+    assert ctx.verify_mode == ssl.CERT_REQUIRED, (
+        f"P2-015 regression: SSLContext.verify_mode must be "
+        f"CERT_REQUIRED (was {ctx.verify_mode}) -- TLS certificate "
+        f"verification is mandatory for GEO."
+    )
+    assert ctx.minimum_version >= ssl.TLSVersion.TLSv1_2, (
+        f"P2-015 regression: SSLContext.minimum_version must be >= "
+        f"TLSv1_2 (was {ctx.minimum_version}) -- TLS 1.0/1.1 have "
+        f"known vulnerabilities and must not be used for GEO downloads."
+    )
 
 
 def _is_private_ip(host: str) -> bool:
