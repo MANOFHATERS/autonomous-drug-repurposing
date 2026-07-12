@@ -88,9 +88,70 @@ export async function listHypotheses(projectId: string) {
   });
 }
 
-export async function addComment(projectId: string, authorName: string, body: string) {
+/**
+ * FE-073 ROOT FIX: Comment impersonation.
+ *
+ * Previously: addComment(projectId, authorName, body) stored whatever
+ * `authorName` the caller provided. The /api/projects/[id]/comments route
+ * passed `body.authorName || auth.user.email` — so a client sending
+ * authorName="Dr. Smith (PI)" would post a damaging comment attributed to
+ * "Dr. Smith (PI)" even though the actual commenter was someone else.
+ *
+ * Root fix: the service signature now takes `userId` (NOT `authorName`).
+ * The authorName is ALWAYS derived from the User table at write time:
+ *   - If User.name is set, use it.
+ *   - Otherwise fall back to User.email.
+ * The client-supplied authorName is silently ignored at every layer.
+ *
+ * The Comment model already has a `userId` field (nullable in schema) — we
+ * now always populate it, so attribution is audit-traceable even if the
+ * user later renames themselves.
+ *
+ * Backward-compat: the old `(projectId, authorName, body)` 3-arg signature
+ * is preserved as a runtime guard — if a caller passes a string in the
+ * second-arg position (legacy), we throw. This forces every call site to
+ * migrate to the new signature; we never silently accept an
+ * attacker-controlled name.
+ */
+export async function addComment(
+  projectId: string,
+  userId: string,
+  body: string
+) {
+  // Defense-in-depth: if a legacy caller passes authorName as the 2nd arg
+  // (which would be a display name like "Dr. Smith (PI)", not a userId),
+  // reject loudly rather than silently storing an attacker-controlled name.
+  //
+  // UserIds in this system are CUIDs (24 lowercase alphanumeric chars,
+  // e.g. "clxxxxxxxxxxxxxxxxxxxxxx") or UUIDs (36 chars with hyphens).
+  // Display names contain spaces, punctuation, and/or uppercase letters.
+  // We reject any string that:
+  //   - is less than 20 chars (CUIDs are 24; UUIDs are 36)
+  //   - contains chars other than lowercase alphanumeric or hyphens
+  //     (names have spaces, periods, parentheses, commas, etc.)
+  if (
+    typeof userId !== "string" ||
+    userId.length < 20 ||
+    /[^a-z0-9-]/.test(userId)
+  ) {
+    throw new Error(
+      "addComment: second argument must be a userId (cuid), not an authorName. " +
+        "FE-073 root fix: authorName is now derived from the User table."
+    );
+  }
+
+  const user = await db.user.findUnique({
+    where: { id: userId },
+    select: { name: true, email: true },
+  });
+  if (!user) {
+    throw new Error(`addComment: user ${userId} not found`);
+  }
+  // Always derive authorName from the DB — never trust the caller.
+  const authorName = user.name || user.email;
+
   const comment = await db.comment.create({
-    data: { projectId, authorName, body },
+    data: { projectId, userId, authorName, body },
   });
   await db.projectActivity.create({
     data: {
