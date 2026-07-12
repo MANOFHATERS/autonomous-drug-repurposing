@@ -219,6 +219,58 @@ def main(argv: Optional[list] = None) -> int:
             "Useful for quick smoke-tests in dev."
         ),
     )
+    # ORCH-002 ROOT FIX: --full-pipeline was misleadingly named — it runs
+    # only the Phase 2 INTERNAL full pipeline (TransE training, PyG
+    # HeteroData, V1 launch criteria), NOT Phase 3 (Graph Transformer)
+    # or Phase 4 (RL ranker). An operator running `python run_unified.py`
+    # expected 4-phase output but got ONLY Phase 1+2. The new --run-gt-rl
+    # flag (default False for backward-compat; --run-gt-rl to enable)
+    # chains Phase 3+4 via GTRLBridge.run_full_pipeline AFTER Phase 2
+    # completes. This makes the meaning of each flag explicit:
+    #   --full-pipeline : Phase 2 full internal pipeline (TransE etc.)
+    #   --run-gt-rl     : Phase 3 (GT) + Phase 4 (RL) on top of Phase 2
+    # Use BOTH for a true 4-phase run from this entry point. For the
+    # canonical 4-phase runner, see run_4phase.py (which is the source
+    # of truth for the Phase 1→2→3→4 chain).
+    parser.add_argument(
+        "--run-gt-rl",
+        action="store_true",
+        default=False,
+        help=(
+            "ORCH-002 ROOT FIX: after Phase 2, also run Phase 3 (Graph "
+            "Transformer training) + Phase 4 (RL ranker) via "
+            "GTRLBridge.run_full_pipeline. Without this flag, "
+            "run_unified.py stops after Phase 2 (or after the Phase 2 "
+            "internal full pipeline if --full-pipeline is set). For the "
+            "canonical 4-phase runner, use run_4phase.py."
+        ),
+    )
+    parser.add_argument(
+        "--gt-epochs", type=int, default=80,
+        help=(
+            "ORCH-002: Graph Transformer training epochs (only used "
+            "when --run-gt-rl is set). Default 80 (demo); 500 for "
+            "production-scale training."
+        ),
+    )
+    parser.add_argument(
+        "--rl-timesteps", type=int, default=5000,
+        help=(
+            "ORCH-002: RL training timesteps (only used when --run-gt-rl "
+            "is set). Default 5000; 50000 for production-scale RL."
+        ),
+    )
+    parser.add_argument(
+        "--rl-top-n", type=int, default=10,
+        help="ORCH-002: Number of top RL candidates to return (default 10).",
+    )
+    parser.add_argument(
+        "--gt-rl-output-dir", type=str, default=None,
+        help=(
+            "ORCH-002: Output directory for GT/RL artifacts. Defaults to "
+            "<cwd>/output_unified_gt_rl."
+        ),
+    )
     # v21 ROOT FIX (Audit Chain 1 / Chain 12): the previous declaration
     # used ``action='store_true', default=True`` with NO inverse flag.
     # That made ``--skip-download`` a no-op (it was already True) AND
@@ -908,6 +960,107 @@ def main(argv: Optional[list] = None) -> int:
                 return 4
             log.exception("Full pipeline failed: %s", exc)
             return 5
+
+    # ─── 7. ORCH-002 ROOT FIX: optional Phase 3 (GT) + Phase 4 (RL) ───────
+    # The previous run_unified.py stopped after Phase 2 (or after the
+    # Phase 2 internal full pipeline if --full-pipeline). Phase 3 (Graph
+    # Transformer) and Phase 4 (RL ranker) were NEVER invoked from this
+    # entry point, even though the docstring implied a "unified" run.
+    # The new --run-gt-rl flag chains Phase 3+4 via the same
+    # GTRLBridge.run_full_pipeline that run_4phase.py uses, so an
+    # operator can run the full 4-phase chain from a single command.
+    if getattr(args, "run_gt_rl", False):
+        log.info("=" * 70)
+        log.info(
+            "PHASE 3 + 4 (ORCH-002): Graph Transformer training + "
+            "RL ranking via GTRLBridge.run_full_pipeline"
+        )
+        log.info("=" * 70)
+        try:
+            # Phase 2 → Phase 3 schema adapter: convert the in-memory
+            # RecordingGraphBuilder (or Neo4j-backed builder) into the
+            # (node_features, edge_indices, node_maps, known_pairs) tuple
+            # that GTRLBridge expects. This is the SAME adapter that
+            # run_4phase.py uses — we deliberately reuse it so the two
+            # entry points cannot drift.
+            from graph_transformer.data.phase2_adapter import (
+                adapt_phase2_to_phase3,
+            )
+
+            # ``builder`` is set earlier in main() by the Phase 2 bridge.
+            # If the bridge was skipped (e.g. dev smoke-test), we cannot
+            # run Phase 3+4 — fail loud, not silent.
+            if "builder" not in locals() or builder is None:
+                log.error(
+                    "ORCH-002: --run-gt-rl was set but the Phase 2 "
+                    "builder is not available. Phase 3+4 requires the "
+                    "Phase 2 graph. Run without --no-full-pipeline."
+                )
+                return 5
+
+            graph_data = adapt_phase2_to_phase3(builder, seed=42)
+            node_features, edge_indices, node_maps, known_pairs = graph_data
+            n_drugs = len(node_maps.get("drug", {}))
+            n_diseases = len(node_maps.get("disease", {}))
+            log.info(
+                "Phase 2→3 adapter: %d drugs, %d diseases, %d known pairs.",
+                n_drugs, n_diseases, len(known_pairs),
+            )
+            if n_drugs == 0 or n_diseases == 0:
+                log.error(
+                    "ORCH-002: schema adapter produced 0 drug or 0 disease "
+                    "nodes. Cannot train Graph Transformer on an empty "
+                    "graph. Aborting Phase 3+4."
+                )
+                return 5
+
+            from graph_transformer.gt_rl_bridge import GTRLBridge
+
+            gt_rl_output_dir = args.gt_rl_output_dir or str(
+                Path.cwd() / "output_unified_gt_rl"
+            )
+            Path(gt_rl_output_dir).mkdir(parents=True, exist_ok=True)
+
+            bridge = GTRLBridge(
+                output_dir=gt_rl_output_dir,
+                device="cpu",
+                seed=42,
+            )
+            candidates_df, results = bridge.run_full_pipeline(
+                gt_epochs=args.gt_epochs,
+                rl_timesteps=args.rl_timesteps,
+                rl_top_n=args.rl_top_n,
+                allow_invalid_output=False,
+                graph_data=graph_data,
+            )
+
+            log.info("=" * 70)
+            log.info("PHASE 3 + 4 COMPLETE — GT/RL RESULTS")
+            log.info("=" * 70)
+            log.info("  GT Best Val AUC:        %s", results.get("gt_best_val_auc", "N/A"))
+            log.info("  GT Test AUC (verified): %s", results.get("gt_test_auc_verified", "N/A"))
+            log.info("  GT Epochs Trained:      %s", results.get("gt_epochs_trained", 0))
+            log.info("  RL Candidates Ranked:   %s", results.get("rl_ranked_high", 0))
+            log.info("  Candidates Returned:    %s", results.get("n_candidates_returned", 0))
+            log.info("  Output Directory:       %s", gt_rl_output_dir)
+            sv = results.get("scientific_validation", {})
+            if sv:
+                log.info(
+                    "  Scientific validation:  overall_pass=%s",
+                    sv.get("overall_pass", False),
+                )
+            if len(candidates_df) > 0:
+                log.info("Top RL-ranked candidates:")
+                cols = [c for c in ["drug", "disease", "reward", "rank"]
+                        if c in candidates_df.columns]
+                log.info("\n%s", candidates_df[cols].to_string(index=False))
+        except RuntimeError as exc:
+            log.exception("ORCH-002: Phase 3+4 failed: %s", exc)
+            return 4
+        except Exception as exc:
+            # Programming bugs must propagate — do NOT swallow.
+            log.exception("ORCH-002: unexpected Phase 3+4 error: %s", exc)
+            raise
 
     return 0
 
