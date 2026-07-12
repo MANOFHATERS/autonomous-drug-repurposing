@@ -6,8 +6,9 @@ import {
   rotateRefreshToken,
   setAuthCookies,
   signMfaChallengeToken,
+  clearAuthCookies,
 } from "@/lib/auth/server";
-import { badRequest, writeAuditLog } from "@/lib/api-helpers";
+import { badRequest, writeAuditLog, internalError } from "@/lib/api-helpers";
 import {
   checkIpRateLimit,
   recordIpAttempt,
@@ -123,11 +124,16 @@ export async function POST(req: NextRequest) {
     // FE-056: recordIpAttempt was already called up-front at line 49.
     // FE-009: Increment failedLoginCount; auto-lock if threshold hit.
     const lockResult = await recordFailedLogin(user.id);
-    await writeAuditLog({
+    // FE-034: login_failed is security-critical — must be auditable.
+    const auditResult = await writeAuditLog({
       user: { userId: user.id, email: user.email, role: user.role },
       action: "login_failed",
       resource: `user:${user.id}`,
+      critical: true,
     });
+    if (!auditResult.ok) {
+      return internalError("Failed to record login failure in audit log.");
+    }
     if (lockResult.locked) {
       return NextResponse.json(
         {
@@ -163,6 +169,7 @@ export async function POST(req: NextRequest) {
       user: { userId: user.id, email: user.email, role: user.role },
       action: "login_mfa_challenge_issued",
       resource: `user:${user.id}`,
+      critical: true,
     });
     return NextResponse.json({
       mfaRequired: true,
@@ -189,11 +196,20 @@ export async function POST(req: NextRequest) {
     orgId: membership?.organizationId,
   });
   await setAuthCookies(access, tokens.refresh);
-  await writeAuditLog({
+  // FE-034: login success is security-critical — must be auditable.
+  const loginAudit = await writeAuditLog({
     user: { userId: user.id, email: user.email, role: user.role, orgId: membership?.organizationId },
     action: "login",
     resource: `user:${user.id}`,
+    critical: true,
   });
+  if (!loginAudit.ok) {
+    // We've already set the auth cookies, but we MUST tell the client
+    // the login is not considered complete because the audit log failed.
+    // Clear the cookies and return 500.
+    await clearAuthCookies();
+    return internalError("Failed to record login in audit log.");
+  }
 
   return NextResponse.json({
     user: {
