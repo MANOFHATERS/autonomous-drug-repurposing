@@ -1,6 +1,22 @@
 # AGENTS FILE OWNERSHIP MAP
 # ====================================================================
 #
+# ⚠️  DEPRECATED — use ISSUE_OWNERSHIP.md instead  ⚠️
+# ====================================================================
+# This file-based ownership map has been SUPERSEDED by issue-based
+# ownership in ISSUE_OWNERSHIP.md. The new system:
+#   - Claims ISSUES (bugs), not files — one issue can own many files
+#   - Uses scripts/pre_commit_issue_guard.py (not pre_commit_ownership_guard.py)
+#   - Is more accurate because agents fight over bugs, not files
+#
+# DO NOT use this file for coordination. Read ISSUE_OWNERSHIP.md instead.
+# This file is kept only for historical reference and will be deleted
+# after one release cycle.
+# ====================================================================
+#
+# (Original content below — kept for reference, DO NOT USE)
+# ====================================================================
+#
 # PURPOSE: Let parallel agents work WITHOUT breaking each other.
 # NO CI required. NO sequential ordering required. Just ONE rule:
 #
