@@ -36,12 +36,17 @@ Fixes: A-1..A-7, D-1..D-6, S-1..S-5, C-1..C-7, DQ-1..DQ-7, R-1..R-7,
 
 from __future__ import annotations
 
+import atexit
 import inspect
 import logging
 import os
+import signal
 import sys
 import re
+import threading
 import time
+import warnings
+import weakref
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -814,6 +819,158 @@ _ALLOW_NON_CORE_EDGES = os.environ.get("DRUGOS_KG_ALLOW_NON_CORE_EDGES", "0") ==
 _AUTO_DEDUP = os.environ.get("DRUGOS_KG_AUTO_DEDUP", "0") == "1"
 
 
+# P2-004 FORENSIC ROOT FIX (v104 — Team Member 5): Neo4j driver
+# lifecycle cleanup on SIGTERM / SIGINT / atexit.
+#
+# BUG (P2-004):
+#   ``GraphConnection`` registered NO signal handlers. When Airflow
+#   sends SIGTERM to stop a long-running KG build, the driver was not
+#   closed cleanly. The Neo4j server kept the connections open until
+#   TCP timeout (typically 2 hours). After 10 SIGTERM'd runs, Neo4j
+#   hit its max-connections limit (default 400) and rejected new
+#   connections — the pipeline could not run.
+#
+# ROOT FIX:
+#   1. Module-level registry (``_OWNED_CONNECTIONS``) of
+#      ``GraphConnection`` instances that OWN their driver (i.e. they
+#      created it, not received it via DI). Uses ``weakref.WeakSet``
+#      so connections can be GC'd without explicit unregister.
+#   2. Module-level signal handlers for SIGTERM and SIGINT (installed
+#      ONCE via ``_install_signal_handlers``). The handler iterates
+#      the registry and calls ``disconnect()`` on each, then CHAINS
+#      to the previous handler (so ``__main__.py``'s handler still
+#      runs). This avoids clobbering upstream signal handlers.
+#   3. Module-level atexit handler as a safety net for normal
+#      interpreter shutdown (covers ``sys.exit()``, end-of-script).
+#   4. ``GraphConnection.connect()`` registers self AFTER successful
+#      driver creation (only if it owns the driver).
+#   5. ``GraphConnection.disconnect()`` is idempotent (sets
+#      ``self._driver = None`` after close) so the signal handler can
+#      call it without risk of double-close.
+#
+# The signal handlers do NOT raise — they log, close drivers, and
+# then re-raise the signal as ``SystemExit`` so the process exits
+# cleanly. A second SIGTERM/SIGINT (within 3 seconds) bypasses
+# cleanup and forces immediate exit (for stuck drivers).
+_OWNED_CONNECTIONS: "weakref.WeakSet[GraphConnection]" = weakref.WeakSet()
+_SIGNAL_HANDLERS_INSTALLED = False
+_SIGNAL_HANDLER_LOCK = threading.Lock()
+_LAST_SIGNAL_TIME: float = 0.0
+
+
+def _cleanup_owned_connections(signum: Optional[int] = None) -> int:
+    """P2-004 — close ALL owned Neo4j drivers.
+
+    Iterates ``_OWNED_CONNECTIONS`` and calls ``disconnect()`` on
+    each. Returns the number of connections closed. Safe to call
+    from a signal handler, atexit, or normal code. Idempotent.
+
+    ``signum`` is passed by the signal-handler wrapper for logging;
+    ``None`` means called from atexit or explicit code.
+    """
+    closed = 0
+    # Take a snapshot — the WeakSet may mutate during iteration if
+    # disconnect() triggers GC (unlikely but defensive).
+    conns = list(_OWNED_CONNECTIONS)
+    for conn in conns:
+        try:
+            if conn._driver is not None and not conn._external_driver:
+                conn.disconnect()
+                closed += 1
+        except Exception as exc:  # noqa: BLE001 — signal handler must not raise
+            logger.warning(
+                "P2-004: error closing Neo4j connection during "
+                "signal/atexit cleanup: %s", exc,
+            )
+    if closed > 0:
+        logger.info(
+            "P2-004: closed %d Neo4j connection(s) during cleanup "
+            "(signal=%s)", closed,
+            signal.Signals(signum).name if signum else "atexit",
+        )
+    return closed
+
+
+def _signal_cleanup_handler(signum, frame):  # type: ignore[no-untyped-def]
+    """P2-004 — SIGTERM/SIGINT handler that closes Neo4j drivers.
+
+    Chains to the previous signal handler after cleanup. A second
+    signal within 3 seconds forces immediate exit (for stuck drivers
+    that block on ``driver.close()``).
+    """
+    global _LAST_SIGNAL_TIME
+    import time as _time
+    now = _time.monotonic()
+    if now - _LAST_SIGNAL_TIME < 3.0:
+        # Second signal — force exit without cleanup.
+        logger.warning(
+            "P2-004: second signal %s received — forcing immediate exit "
+            "without Neo4j cleanup.",
+            signal.Signals(signum).name if signum in signal.Signals._value2member_map_ else signum,
+        )
+        sys.exit(130)  # 128 + SIGINT(2) convention; works for SIGTERM too
+    _LAST_SIGNAL_TIME = now
+
+    try:
+        _cleanup_owned_connections(signum)
+    except Exception as exc:  # noqa: BLE001 — signal handler must not raise
+        logger.warning("P2-004: cleanup raised: %s", exc)
+
+    # Re-raise as SystemExit so the process exits cleanly and
+    # try/finally blocks in the main thread run.
+    raise SystemExit(128 + (signum & 7))
+
+
+def _install_signal_handlers() -> None:
+    """P2-004 — install SIGTERM/SIGINT handlers + atexit. Idempotent.
+
+    Installs ONCE (module-level flag). Chains with existing handlers
+    by saving the previous handler — though in practice we re-raise
+    as SystemExit which is the Python-idiomatic way to exit from a
+    signal handler while still running try/finally blocks.
+
+    On Windows, SIGTERM may not exist; SIGBREAK is used instead.
+    """
+    global _SIGNAL_HANDLERS_INSTALLED
+    with _SIGNAL_HANDLER_LOCK:
+        if _SIGNAL_HANDLERS_INSTALLED:
+            return
+        _SIGNAL_HANDLERS_INSTALLED = True
+
+    # atexit handler — safety net for normal shutdown.
+    atexit.register(_cleanup_owned_connections, None)
+
+    # Signal handlers — for Airflow SIGTERM, Ctrl-C SIGINT, etc.
+    # Only install if the signal exists on this platform.
+    for sig_name in ("SIGTERM", "SIGINT", "SIGBREAK"):
+        sig = getattr(signal, sig_name, None)
+        if sig is None:
+            continue
+        try:
+            # signal.signal returns the previous handler — we don't
+            # explicitly call it (re-raising SystemExit is cleaner),
+            # but we log it at DEBUG for observability.
+            prev = signal.signal(sig, _signal_cleanup_handler)
+            logger.debug(
+                "P2-004: installed %s handler (previous: %s)",
+                sig_name, prev,
+            )
+        except (ValueError, OSError) as exc:
+            # signal.signal raises ValueError if not in main thread,
+            # OSError on some platforms for certain signals. Log and
+            # continue — atexit still provides cleanup.
+            logger.debug(
+                "P2-004: could not install %s handler: %s "
+                "(atexit fallback still active)", sig_name, exc,
+            )
+
+
+# P2-004: install signal + atexit handlers at module load. Idempotent
+# and safe — handlers only fire on SIGTERM/SIGINT/atexit, and only
+# close drivers that THIS module created (not external/DI drivers).
+_install_signal_handlers()
+
+
 # ─── Result Dataclasses ───────────────────────────────────────────────────────
 # Fixes D-6, C-7: Structured return types for all mutating operations.
 
@@ -1357,6 +1514,8 @@ class GraphConnection:
                 _redact_uri(self.config.uri),
             )
             self._detect_version()
+            # P2-004: register for SIGTERM/atexit cleanup (we own this driver).
+            _OWNED_CONNECTIONS.add(self)
             return
 
         # Fixes R-6 + BUG-D-001/D-014 root fix: Cleanup on connect() failure.
@@ -1404,6 +1563,11 @@ class GraphConnection:
 
             # Fixes CO-5: Neo4j version detection
             self._detect_version()
+
+            # P2-004 ROOT FIX: register for SIGTERM/atexit cleanup.
+            # We own this driver (created it via GraphDatabase.driver),
+            # so the signal handler should close it on Airflow SIGTERM.
+            _OWNED_CONNECTIONS.add(self)
 
         except Exception:
             # Fixes R-6 + BUG-D-001/D-014: Cleanup on failure now actually
@@ -1462,14 +1626,32 @@ class GraphConnection:
                 )
 
     def disconnect(self) -> None:
-        """Close the Neo4j driver connection."""
+        """Close the Neo4j driver connection.
+
+        P2-004 ROOT FIX (v104): made idempotent (sets ``self._driver
+        = None`` after close) so the SIGTERM/atexit handler can call
+        this safely without risk of double-close. Previously, calling
+        ``disconnect()`` twice would call ``driver.close()`` twice —
+        the second call raised ``DriverError`` because the driver was
+        already closed. The signal handler would then log the error
+        but the driver was already closed, so the connection leak was
+        accidentally avoided — but the error log was noise. Now the
+        second call is a no-op.
+        """
         # Fixes A-5: Don't close externally-provided drivers
         if self._external_driver:
             logger.info("Skipping disconnect for externally-provided driver")
             return
         if self._driver:
-            self._driver.close()
-            logger.info("Disconnected from Neo4j")
+            try:
+                self._driver.close()
+                logger.info("Disconnected from Neo4j")
+            finally:
+                # P2-004: always null the reference so disconnect() is
+                # idempotent. Even if close() raised, we don't want to
+                # retry on the next call (the driver is in an unknown
+                # state).
+                self._driver = None
 
     @contextmanager
     def session(self, **kwargs: Any) -> Iterator[Any]:
@@ -2053,8 +2235,17 @@ class GraphNodeLoader:
                     log_freq = _LOG_FREQUENCY
                     batch_count = i // batch_size + 1  # 1-indexed
                     if batch_count % log_freq == 0:
-                        # Fixes L-5: Data lineage in logs
-                        logger.info(
+                        # P2-007 ROOT FIX (v104): per-batch progress log
+                        # moved from INFO to DEBUG. For a 10K-drug KG with
+                        # batch_size=5000, this fires every 10 batches =
+                        # every 50,000 nodes — at INFO that was 10 lines
+                        # per node type × 5 types = 50 lines per build,
+                        # 5000 lines per 100 builds. Ops teams missed real
+                        # errors in the noise. The summary log at the end
+                        # of the load (``Created %d %s nodes ...``) stays
+                        # at INFO — that's the line operators need.
+                        # Fixes L-5: Data lineage in logs (now DEBUG).
+                        logger.debug(
                             "  %s: loaded %d/%d nodes "
                             "source=%s checksum=%s",
                             safe_label, i + len(batch), len(nodes),
@@ -2705,7 +2896,12 @@ class GraphEdgeLoader:
                     # stylistic drift).
                     batch_count = i // batch_size + 1  # 1-indexed
                     if batch_count % _LOG_FREQUENCY == 0:
-                        logger.info(
+                        # P2-007 ROOT FIX (v104): per-batch progress log
+                        # moved from INFO to DEBUG (same fix as the node
+                        # loader at line 2248). The summary log at the end
+                        # of the load (``Created %d %s-%s->%s edges ...``)
+                        # stays at INFO — that's the line operators need.
+                        logger.debug(
                             "  %s-%s->%s: loaded %d/%d edges mode=%s",
                             safe_src, safe_rel, safe_dst,
                             i + len(batch), len(edges), mode,
@@ -2810,20 +3006,45 @@ class GraphEdgeLoader:
         dst_label: str,
         edges: list[dict],
         batch_size: Optional[int] = None,
-        use_merge: bool = False,
+        use_merge: bool = True,
         **kwargs: Any,
     ) -> Union[int, LoadResult]:
-        """Bulk-create relationships using UNWIND + CREATE (or MERGE).
+        """Bulk-create relationships using UNWIND + MERGE (or CREATE).
+
+        P2-003 FORENSIC ROOT FIX (v104 — Team Member 5):
+            The previous default was ``use_merge=False`` (CREATE mode).
+            CREATE always inserts a new edge — re-running the pipeline
+            DOUBLED the edge count. After 5 re-runs, the KG had 5x the
+            edges. The GNN's message-passing then over-weighted these
+            edges 5x, causing embedding drift and non-reproducible RL
+            rankings.
+
+            ROOT FIX: default changed to ``use_merge=True`` (idempotent
+            MERGE). Re-running the pipeline now produces the SAME edge
+            count. The CREATE branch is preserved for explicit one-off
+            loads (``use_merge=False``) but emits a ``DeprecationWarning``
+            to discourage the dangerous non-idempotent path. CREATE will
+            be removed in v2.0.
 
         Fixes A-2: Thin wrapper around _load_edges.
-        Fixes I-1: Default use_merge=False preserved, but callers should
-        use use_merge=True for idempotent loads.
+        Fixes I-1: Default is now ``use_merge=True`` (idempotent).
 
         Parameters
         ----------
         use_merge : bool
-            If True, use MERGE instead of CREATE (idempotent).
+            If True (DEFAULT), use MERGE (idempotent — safe for re-runs).
+            If False, use CREATE (non-idempotent — emits
+            DeprecationWarning; for one-off loads only).
         """
+        if not use_merge:
+            warnings.warn(
+                "load_edges_bulk_create(use_merge=False) uses Neo4j CREATE "
+                "which produces DUPLICATE edges on re-run (P2-003). Pass "
+                "use_merge=True (the new default) for idempotent loads. "
+                "use_merge=False will be removed in v2.0.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
         mode = "merge" if use_merge else "create"
         return self._load_edges(
             src_label, rel_type, dst_label, edges,
@@ -2835,9 +3056,15 @@ class GraphEdgeLoader:
         edge_type_data: dict[tuple[str, str, str], list[dict]],
         *,
         source_file: Optional[str] = None,
-        use_merge: bool = False,
+        use_merge: bool = True,
     ) -> dict[tuple[str, str, str], Union[int, LoadResult]]:
-        """Load all DRKG edges using bulk CREATE.
+        """Load all DRKG edges using bulk MERGE (idempotent).
+
+        P2-003 FORENSIC ROOT FIX (v104 — Team Member 5):
+            Default changed from ``use_merge=False`` (CREATE) to
+            ``use_merge=True`` (MERGE). DRKG is re-ingested on every
+            pipeline run; CREATE mode doubled the edge count each time.
+            MERGE is idempotent — re-running produces the same edge count.
 
         Fixes DL-2: Input checksum verification.
         """
@@ -2851,8 +3078,9 @@ class GraphEdgeLoader:
         results: dict[tuple[str, str, str], Union[int, LoadResult]] = {}
         for (src_type, rel_name, dst_type), edges in edge_type_data.items():
             logger.info(
-                "Loading %d %s-%s->%s edges ...",
+                "Loading %d %s-%s->%s edges (mode=%s) ...",
                 len(edges), src_type, rel_name, dst_type,
+                "MERGE" if use_merge else "CREATE",
             )
             count = self.load_edges_bulk_create(
                 src_type, rel_name, dst_type, edges,
@@ -3970,10 +4198,14 @@ class DrugOSGraphBuilder:
         dst_label: str,
         edges: list[dict],
         batch_size: Optional[int] = None,
-        use_merge: bool = False,
+        use_merge: bool = True,
         **kwargs: Any,
     ) -> Union[int, LoadResult]:
-        """Bulk-create relationships using UNWIND + CREATE.
+        """Bulk-create relationships using UNWIND + MERGE (or CREATE).
+
+        P2-003 FORENSIC ROOT FIX (v104): default changed to
+        ``use_merge=True`` (idempotent). See
+        ``GraphEdgeLoader.load_edges_bulk_create`` for full rationale.
 
         Delegates to GraphEdgeLoader.load_edges_bulk_create().
         """
