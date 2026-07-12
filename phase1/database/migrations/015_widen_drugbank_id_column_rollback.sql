@@ -34,7 +34,7 @@ ALTER TABLE drugs
 ALTER TABLE entity_mapping
     ALTER COLUMN drugbank_id TYPE VARCHAR(10);
 
-DELETE FROM schema_version WHERE version = 13;
+DELETE FROM schema_version WHERE version = 15;
 
 DO $$
 BEGIN

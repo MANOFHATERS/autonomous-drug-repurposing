@@ -221,15 +221,19 @@ class TestP1_017_SynthesizedDrugIdPrefix:
             f"got {DRUGBANK_ID_LENGTH}"
         )
 
-    def test_migration_013_exists(self):
-        """Migration 013 must exist to widen the column for existing DBs."""
+    def test_migration_015_exists(self):
+        """Migration 015 must exist to widen the column for existing DBs.
+
+        Originally created as 013, renamed to 015 to avoid collision with
+        Team-3's migration 013 (013_is_fda_approved_nullable.sql).
+        """
         migration_path = (
             Path(__file__).parent.parent
             / "database"
             / "migrations"
-            / "013_widen_drugbank_id_column.sql"
+            / "015_widen_drugbank_id_column.sql"
         )
-        assert migration_path.exists(), "migration 013 must exist (P1-017)"
+        assert migration_path.exists(), "migration 015 must exist (P1-017)"
 
 
 # ============================================================================

@@ -1,6 +1,6 @@
 -- ============================================================================
 -- Drug Repurposing ETL Platform — Widen drugbank_id column to VARCHAR(64)
--- Migration: 013_widen_drugbank_id_column.sql
+-- Migration: 015_widen_drugbank_id_column.sql
 -- Description: Widen the ``drugs.drugbank_id`` column from VARCHAR(10) to
 --              VARCHAR(64) to accommodate synthesized IDs (``SYNTH-DB-...``).
 --
@@ -71,7 +71,7 @@ END $$;
 -- ===========================================================================
 INSERT INTO schema_version (version, description)
 VALUES (
-    13,
+    15,
     'Widen drugbank_id columns (drugs + entity_mapping) from VARCHAR(10) to ' ||
     'VARCHAR(64) to accommodate SYNTH-DB- prefixed synthesized IDs (P1-017)'
 )
