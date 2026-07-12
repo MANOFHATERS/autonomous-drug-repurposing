@@ -110,8 +110,12 @@ export async function POST(req: NextRequest) {
         metadata: { count: (data.candidates || []).length, source: "proxy" },
       });
       return NextResponse.json(data);
-    } catch (e: any) {
-      return internalError(`RL service proxy failed: ${e.message}`);
+    } catch (e: unknown) {
+      // FE-063 ROOT FIX: `e: any` disabled type safety; if a non-Error was
+      // thrown (e.g. a string), e.message was undefined and the response
+      // became "undefined". Narrow with instanceof, fallback to String(e).
+      const msg = e instanceof Error ? e.message : String(e);
+      return internalError(`RL service proxy failed: ${msg}`);
     }
   }
 
@@ -133,8 +137,9 @@ export async function POST(req: NextRequest) {
         csvPath,
         total: candidates.length,
       });
-    } catch (e: any) {
-      return internalError(`RL CSV parse failed: ${e.message}`);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      return internalError(`RL CSV parse failed: ${msg}`);
     }
   }
 
@@ -155,8 +160,9 @@ export async function GET() {
     try {
       const candidates = await parseRlCsv(csvPath, { limit: 50 });
       return NextResponse.json({ candidates, source: "local_csv", total: candidates.length });
-    } catch (e: any) {
-      return internalError(`RL CSV parse failed: ${e.message}`);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      return internalError(`RL CSV parse failed: ${msg}`);
     }
   }
   return NextResponse.json(
