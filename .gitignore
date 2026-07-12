@@ -18,3 +18,4 @@ frontend/server.log
 # Pipeline-trained model checkpoints (regenerable, do not commit)
 checkpoints/
 output_v100/
+rl/output/

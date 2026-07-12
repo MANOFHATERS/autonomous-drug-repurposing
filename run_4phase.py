@@ -326,12 +326,21 @@ def run_phase3_and_4(
     rl_top_n: int,
     output_dir: str,
     seed: int,
-    allow_invalid_output: bool,
+    # P4-016 ROOT FIX (Team Member 12): cap the number of drug-disease
+    # pairs written to gt_predictions.csv. Default 1000 (the RL ranker's
+    # env only needs the top-K pairs).
+    gt_top_k: int = 1000,
 ) -> Tuple[Any, Dict[str, Any]]:
     """Phase 3 + 4: GT training + RL ranking via ``GTRLBridge``.
 
     Uses the REAL Phase 2 HeteroData (passed as ``graph_data``) instead
     of ``build_demo_graph``.
+
+    P4-014 ROOT FIX: the ``allow_invalid_output`` parameter has been
+    REMOVED. The pipeline FAILS if scientific_validation fails — no
+    bypass. The Python API on ``GTRLBridge.run_full_pipeline`` retains
+    the parameter as a test-only escape hatch, but it is NOT reachable
+    from the CLI or from this function.
     """
     logger.info("=" * 70)
     logger.info("PHASE 3 + 4: Graph Transformer Training + RL Ranking")
@@ -348,7 +357,10 @@ def run_phase3_and_4(
         gt_epochs=gt_epochs,
         rl_timesteps=rl_timesteps,
         rl_top_n=rl_top_n,
-        allow_invalid_output=allow_invalid_output,
+        # P4-016: pass the top-K limit to the bridge.
+        gt_top_k=gt_top_k,
+        # P4-014: allow_invalid_output defaults to False (strict mode).
+        # The pipeline FAILS if scientific_validation fails.
         graph_data=graph_data,
     )
     return candidates_df, results
@@ -392,9 +404,37 @@ def main() -> int:
         help="Random seed for RNG initialization (default 42)",
     )
     parser.add_argument(
-        "--allow-invalid-output", action="store_true",
-        help="Bypass scientific-validation safety net (DEBUGGING ONLY)",
+        # P4-016 ROOT FIX (Team Member 12): cap the number of drug-disease
+        # pairs written to gt_predictions.csv. The previous code wrote ALL
+        # pairs (e.g., 115 in the live test, 1M+ for the production graph).
+        # The RL ranker's env only needs the top-K pairs (it ranks them,
+        # not discovers them). Writing all pairs wastes disk and confuses
+        # the ranker (which may rank low-quality pairs). Default 1000.
+        "--gt-top-k", type=int, default=1000,
+        help="Maximum number of drug-disease pairs to write to "
+             "gt_predictions.csv (default 1000). The RL ranker only "
+             "needs the top-K pairs by GT score. Set to 0 to write ALL "
+             "pairs (not recommended — produces 100+ MB CSVs at "
+             "production scale).",
     )
+    # P4-014 ROOT FIX (Team Member 12): the --allow-invalid-output CLI
+    # flag has been REMOVED. The previous code allowed a stressed team
+    # member facing a pharma partner demo to bypass the
+    # scientific_validation gate by passing --allow-invalid-output (or
+    # setting RL_ALLOW_SCIENCE_FAILURE=1). The bypass then wrote a CSV
+    # with scientifically invalid predictions (AUC=0.403,
+    # metformin→epilepsy as the #3 candidate in the live test). The
+    # audit's compound-effect analysis: bypass → invalid CSV ships →
+    # pharma partner acts on invalid predictions → patient harm.
+    #
+    # The fix: if the scientific_validation gate fails, the pipeline
+    # FAILS — no exceptions, no bypass. The Python API parameter
+    # ``allow_invalid_output`` on ``GTRLBridge.run_full_pipeline`` is
+    # retained ONLY as a test-only escape hatch (the CI test suite
+    # needs a way to inspect invalid output for verification). It is
+    # NOT reachable from the CLI. A CI test
+    # (tests/test_team12_p4_012_to_018.py::test_p4_014_*) verifies
+    # the CLI flag does not exist.
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir)
@@ -410,7 +450,10 @@ def main() -> int:
         "rl_timesteps": args.rl_timesteps,
         "rl_top_n": args.rl_top_n,
         "seed": args.seed,
-        "allow_invalid_output": args.allow_invalid_output,
+        # P4-016: record the gt_top_k limit in the manifest for auditability.
+        "gt_top_k": args.gt_top_k,
+        # P4-014: the allow_invalid_output field is INTENTIONALLY ABSENT.
+        # The CLI flag was removed; there is no longer a bypass to record.
     }
     _write_manifest(output_dir, phase1_dir, config_snapshot)
 
@@ -485,7 +528,13 @@ def main() -> int:
             rl_top_n=args.rl_top_n,
             output_dir=str(output_dir),
             seed=args.seed,
-            allow_invalid_output=args.allow_invalid_output,
+            # P4-016: pass the top-K limit to the bridge so it writes
+            # only the top-K GT predictions to gt_predictions.csv.
+            gt_top_k=args.gt_top_k,
+            # P4-014: allow_invalid_output is INTENTIONALLY NOT passed.
+            # The CLI flag was removed; the bridge defaults to
+            # allow_invalid_output=False (strict mode). The pipeline
+            # FAILS if scientific_validation fails — no CLI bypass.
         )
 
         # ─── Summary (R-022: removed duplicate 9-line block) ───────────
@@ -528,7 +577,11 @@ def main() -> int:
         if not overall_pass:
             print("\n" + "=" * 70)
             print("SCIENTIFIC VALIDATION FAILED. Exiting non-zero.")
-            print("Use --allow-invalid-output for debugging.")
+            # P4-014 ROOT FIX: the --allow-invalid-output bypass has been
+            # REMOVED. The pipeline FAILS when scientific_validation fails
+            # — no exceptions. Fix the underlying issues (GT AUC, RL AUC,
+            # KP recovery, literature support) and re-run.
+            print("Fix the failed checks above and re-run. There is NO bypass.")
             print("=" * 70)
             return 4
         return 0

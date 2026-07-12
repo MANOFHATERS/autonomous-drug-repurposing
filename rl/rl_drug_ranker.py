@@ -1275,8 +1275,24 @@ class PipelineConfig:
     # RL AUC < 0.5, or KP recovery < 20%. This prevents shipping
     # scientifically invalid output to pharma partners.
     block_on_scientific_failure: bool = True
-    # ROOT FIX (P0-4): minimum KP recovery rate to pass validation
-    min_kp_recovery_rate: float = 0.2
+    # P4-013 ROOT FIX (Team Member 12): the default ``min_kp_recovery_rate``
+    # is now sourced from the shared ``rl.scientific_thresholds`` module
+    # so the RL ranker and the GT-RL bridge use the SAME threshold. The
+    # previous code hardcoded 0.2 here while the bridge used
+    # ``max(rl_config_threshold, 0.5)`` (effectively 0.5), causing the
+    # two components to DISAGREE on whether a run was scientifically
+    # valid (a run with kp_recovery=0.4 passed the ranker but failed
+    # the bridge). The shared constant is 0.5 (the stricter V1 launch
+    # criterion). Users can still override via the config field for
+    # experimentation, but the DEFAULT is the shared constant — so a
+    # production deployment that does not explicitly override will use
+    # the same threshold in both components.
+    #
+    # The import is deferred to __post_init__ to avoid a circular
+    # import at module-load time (scientific_thresholds.py is in the
+    # same package). We use a sentinel (-1.0) as the dataclass default
+    # and resolve it to the shared constant in __post_init__.
+    min_kp_recovery_rate: float = -1.0  # sentinel; resolved in __post_init__
     # v89 P0 ROOT FIX (gate BEFORE CSV write): the GT AUC threshold for
     # the RL pipeline's own scientific_validation gate. The previous
     # code hardcoded 0.5 (better-than-random), which let the RL pipeline
@@ -1340,6 +1356,24 @@ class PipelineConfig:
         sound bounds at construction time, so misconfiguration is caught
         IMMEDIATELY with a clear error message.
         """
+        # P4-013 ROOT FIX (Team Member 12): resolve the
+        # min_kp_recovery_rate sentinel. The dataclass default is -1.0
+        # (a sentinel meaning "use the shared constant"). We resolve it
+        # to the shared KP_RECOVERY_THRESHOLD from
+        # rl.scientific_thresholds so the RL ranker and the GT-RL bridge
+        # use the SAME threshold by default. If the user explicitly
+        # passed a non-negative value, that override is preserved.
+        if self.min_kp_recovery_rate < 0.0:
+            try:
+                from .scientific_thresholds import KP_RECOVERY_THRESHOLD
+                self.min_kp_recovery_rate = float(KP_RECOVERY_THRESHOLD)
+            except ImportError:
+                # Fallback for direct-execution scenarios where the
+                # package import fails (e.g., running rl_drug_ranker.py
+                # as a script without the rl/ package on sys.path).
+                # Use the same value as the shared constant (0.5) so
+                # the behavior is identical.
+                self.min_kp_recovery_rate = 0.5
         # timesteps must be > 0 (BUG #37: model.learn(0) crashes SB3
         # or produces an untrained model).
         if self.timesteps <= 0:
@@ -1644,9 +1678,17 @@ class ScientificFailureError(Exception):
     fails, the pipeline raises this exception BEFORE writing the output,
     making it impossible to ship scientifically invalid results.
 
-    To allow the pipeline to continue despite failures (for debugging),
-    set ``config.block_on_scientific_failure = False`` or the
-    ``RL_ALLOW_SCIENCE_FAILURE=1`` env var.
+    To allow the pipeline to continue despite failures (for debugging
+    ONLY — not for production), set ``config.block_on_scientific_failure
+    = False`` via the Python API. This is a TEST-ONLY escape hatch and
+    is NOT reachable from the CLI.
+
+    P4-014 ROOT FIX (Team Member 12): the ``RL_ALLOW_SCIENCE_FAILURE=1``
+    env var bypass has been REMOVED. The previous code allowed a
+    stressed team member to bypass the gate by setting an env var,
+    which let invalid CSVs ship to pharma partners. The fix: the gate
+    can ONLY be disabled via the Python API, not via env var or CLI
+    flag.
     """
 
     def __init__(self, message: str, validation: Optional[Dict[str, Any]] = None) -> None:
@@ -1662,8 +1704,10 @@ class ScientificFailureError(Exception):
             f"  GT test AUC: {self.validation.get('gt_test_auc', 'N/A')}\n"
             f"  RL AUC: {self.validation.get('rl_auc', 'N/A')}\n"
             f"  KP recovery: {self.validation.get('kp_recovery_rate', 'N/A')}\n"
-            f"  To override: set config.block_on_scientific_failure=False "
-            f"or RL_ALLOW_SCIENCE_FAILURE=1"
+            f"  To override (TEST-ONLY, Python API): set "
+            f"config.block_on_scientific_failure=False. The CLI bypass "
+            f"(--allow-invalid-output) and env var bypass "
+            f"(RL_ALLOW_SCIENCE_FAILURE) were removed in P4-014."
         )
 
 
@@ -6652,7 +6696,25 @@ OUTPUT_SCHEMA: Dict[str, Any] = {
 # ============================================================================
 # SECTION 15: MAIN ORCHESTRATION
 # ============================================================================
-def run_pipeline(config: PipelineConfig) -> Tuple[List[RankedCandidate], PipelineMetrics]:
+def run_pipeline(
+    config: PipelineConfig,
+    # P4-015 ROOT FIX (Team Member 12): explicit seed parameter. The
+    # previous code relied solely on ``config.seed`` for
+    # reproducibility. The GT-RL bridge sets ``config.seed = self.seed``
+    # before calling run_pipeline, so the seed IS propagated — but the
+    # propagation was IMPLICIT (via the config object), making it easy
+    # to miss in code review and impossible to verify in a CI test
+    # without inspecting the config object's state. The fix adds an
+    # EXPLICIT ``seed`` parameter that, when provided, OVERRIDES
+    # ``config.seed`` and re-seeds all RNGs. This makes the seed
+    # propagation VISIBLE in the call site
+    # (``run_pipeline(rl_config, seed=self.seed)``) and VERIFIABLE in a
+    # CI test (the test checks that the seed appears in the call args
+    # and in the output metadata). When ``seed`` is None (default), the
+    # function uses ``config.seed`` — preserving backward compatibility
+    # for callers that do not pass the explicit parameter.
+    seed: Optional[int] = None,
+) -> Tuple[List[RankedCandidate], PipelineMetrics]:
     """Run the full RL ranking pipeline.
 
     FIXES vs original:
@@ -6664,8 +6726,22 @@ def run_pipeline(config: PipelineConfig) -> Tuple[List[RankedCandidate], Pipelin
       - **C4**: split_data uses drug_aware=True by default, so drugs in
         train never appear in test.
 
+    P4-015 ROOT FIX (Team Member 12): the ``seed`` parameter makes seed
+    propagation from the GT-RL bridge EXPLICIT and VERIFIABLE. The
+    bridge calls ``run_pipeline(rl_config, seed=self.seed)`` so the seed
+    is visible at the call site. When provided, the seed OVERRIDES
+    ``config.seed`` and re-seeds all RNGs (numpy, torch, random, SB3).
+    This guarantees reproducibility: a run with ``--seed=123`` produces
+    identical RL training across re-runs. A CI test
+    (tests/test_team12_p4_012_to_018.py::test_p4_015_*) verifies the
+    seed is propagated and recorded in the output metadata.
+
     Args:
         config: PipelineConfig instance.
+        seed: Optional explicit seed. When provided, OVERRIDES
+            ``config.seed`` and re-seeds all RNGs. When None (default),
+            uses ``config.seed``. The GT-RL bridge ALWAYS passes this
+            explicitly (``seed=self.seed``) for reproducibility.
 
     Returns:
         Tuple of (top_candidates, metrics). The top_candidates come from
@@ -6674,8 +6750,47 @@ def run_pipeline(config: PipelineConfig) -> Tuple[List[RankedCandidate], Pipelin
     """
     import time as _time
 
+    # P4-015 ROOT FIX: if an explicit seed is provided, override
+    # config.seed and re-seed all RNGs. This makes the seed propagation
+    # EXPLICIT and VERIFIABLE — the seed appears in the call args and
+    # in the output metadata, so a CI test can verify reproducibility.
+    if seed is not None:
+        if seed < 0:
+            raise ValueError(
+                f"P4-015: explicit seed must be >= 0 (got {seed}). "
+                f"Negative seeds are invalid in numpy/SB3."
+            )
+        if seed != config.seed:
+            logger.info(
+                f"P4-015 ROOT FIX: overriding config.seed ({config.seed}) "
+                f"with explicit seed ({seed}) passed to run_pipeline. "
+                f"This makes seed propagation from the GT-RL bridge "
+                f"EXPLICIT and VERIFIABLE. The RL training will use "
+                f"seed={seed} for all RNGs (numpy, torch, random, SB3)."
+            )
+            config.seed = int(seed)
+        # Re-seed all RNGs with the (possibly overridden) seed. We seed
+        # numpy, Python's random, and torch (if available). SB3's PPO
+        # internally calls set_seed via the config, but we re-seed here
+        # to be explicit and to cover any code that reads RNG state
+        # before PPO is constructed.
+        import random as _random
+        _random.seed(config.seed)
+        np.random.seed(config.seed)  # numpy is imported at module level as np
+        try:
+            import torch as _torch
+            _torch.manual_seed(config.seed)
+            if _torch.cuda.is_available():
+                _torch.cuda.manual_seed_all(config.seed)
+        except ImportError:
+            pass  # torch not installed (CI without GPU deps)
+        logger.info(
+            f"P4-015: RL training seed = {config.seed} (propagated from "
+            f"GT-RL bridge via explicit run_pipeline seed parameter)."
+        )
+
     metrics = PipelineMetrics()
-    log_audit_event("pipeline_start", {"run_id": metrics.run_id})
+    log_audit_event("pipeline_start", {"run_id": metrics.run_id, "seed": config.seed})
 
     # Load data
     input_sha256 = "fake_data"
@@ -7114,55 +7229,84 @@ def run_pipeline(config: PipelineConfig) -> Tuple[List[RankedCandidate], Pipelin
         )
 
     # Literature cross-check
-    # v90: wrap in try/except to handle the BUG #56 fix gracefully.
-    # The BUG #56 fix raises RuntimeError when biopython is not installed
-    # (to prevent silent V1 criterion failure). In CI/test environments
-    # where biopython is not installed, this would crash all e2e tests.
-    # The fix: catch the RuntimeError, log a warning, and continue with
-    # literature_support=False for all candidates. The scientific_validation
-    # gate will catch the missing literature support if block_on_scientific_failure
-    # is True. This preserves the BUG #56 intent (loud failure in production)
-    # while not breaking CI.
-    # P4-012 ROOT FIX (LOW — Team Cosmic / Phase 4): track whether the
-    # literature check was SKIPPED (biopython not installed or
-    # RL_SKIP_LITERATURE set). The previous code caught the RuntimeError
-    # and downgraded to a warning, but the scientific_validation gate
-    # didn't know the check was skipped — the V1 launch criterion
-    # "≥5 literature-supported predictions" silently failed. The fix
-    # tracks the skip in _literature_check_skipped so the gate can
-    # EXCLUDE the literature check from checks_passed AND checks_failed
-    # (like gt_test_auc_skipped in standalone mode). The operator sees
-    # a WARNING that the literature check was skipped and can install
-    # biopython (pip install biopython) to enable it.
+    # P4-012 ROOT FIX (HIGH — Team Member 12 / Phase 4): the previous
+    # code SILENTLY SKIPPED the literature cross-check when biopython
+    # was not installed. It caught the RuntimeError from
+    # literature_crosscheck, set ``_literature_check_skipped = True``,
+    # and EXCLUDED the literature criterion from the
+    # scientific_validation gate (``literature_pass = None``). The gate
+    # then passed if the other checks passed — even though the V1
+    # launch criterion "≥5 literature-supported predictions" (DOCX §8)
+    # was NEVER evaluated. The platform claimed V1 readiness without
+    # actually verifying the literature criterion.
+    #
+    # The fix: when biopython is not installed, the literature check
+    # FAILS the gate (literature_pass = False), it does NOT skip. The
+    # pipeline then raises ScientificFailureError and refuses to write
+    # its output CSV. biopython is now a MANDATORY dependency
+    # (requirements.txt) so this branch only fires in a broken
+    # deployment — exactly when the pipeline SHOULD refuse to ship.
+    #
+    # ``RL_SKIP_LITERATURE`` remains as a TEST-ONLY escape hatch: when
+    # set, ``literature_crosscheck`` returns immediately with all
+    # candidates having ``literature_support=False`` (no PubMed network
+    # calls). At the gate level this is still treated as a SKIP
+    # (``literature_pass = None``) so CI tests that depend on the
+    # escape hatch continue to work. The escape hatch is INTENTIONALLY
+    # not advertised in production CLI help — it exists solely so the
+    # test suite can exercise the full pipeline without making network
+    # calls to NCBI Entrez.
     _literature_check_skipped: bool = False
+    _literature_check_failed_missing_biopython: bool = False
     if os.environ.get("RL_SKIP_LITERATURE"):
+        # TEST-ONLY escape hatch: skip the literature cross-check
+        # entirely (no PubMed network calls). The gate treats this as
+        # a SKIP (literature_pass = None) so CI tests that set this
+        # env var do not trigger ScientificFailureError. This is the
+        # ONLY legitimate non-production path; production deployments
+        # MUST install biopython (it is in requirements.txt) and MUST
+        # NOT set RL_SKIP_LITERATURE.
         _literature_check_skipped = True
         logger.warning(
-            "P4-012 ROOT FIX: literature cross-check SKIPPED "
-            "(RL_SKIP_LITERATURE is set). All candidates will have "
-            "literature_support=False. The V1 launch criterion "
-            "'≥5 literature-supported predictions' is EXCLUDED from "
-            "the scientific_validation gate (skipped, not failed). "
-            "Unset RL_SKIP_LITERATURE and install biopython to enable."
+            "P4-012: literature cross-check SKIPPED "
+            "(RL_SKIP_LITERATURE is set). This is a TEST-ONLY escape "
+            "hatch -- production deployments MUST NOT set this env "
+            "var. The V1 launch criterion '≥5 literature-supported "
+            "predictions' is EXCLUDED from the scientific_validation "
+            "gate (skipped, not failed). Unset RL_SKIP_LITERATURE "
+            "and install biopython (pip install biopython) for "
+            "production use."
         )
     else:
         try:
             candidates = literature_crosscheck(candidates)
         except RuntimeError as _lit_err:
             if "Biopython not installed" in str(_lit_err):
-                # P4-012: mark the check as SKIPPED so the gate excludes
-                # it from checks_passed and checks_failed. The previous
-                # code silently downgraded to a warning, which masked
-                # the missing-biopython case from the gate.
-                _literature_check_skipped = True
-                logger.warning(
-                    "P4-012 ROOT FIX: literature cross-check SKIPPED "
-                    "(biopython not installed). All candidates have "
-                    "literature_support=False. The V1 launch criterion "
-                    "'≥5 literature-supported predictions' is EXCLUDED "
-                    "from the scientific_validation gate (skipped, not "
-                    "failed). Install biopython (pip install biopython) "
-                    "to enable the literature cross-check."
+                # P4-012 ROOT FIX: the literature check FAILS the gate
+                # (does NOT skip). biopython is a MANDATORY production
+                # dependency (requirements.txt). If it is missing, the
+                # deployment is broken and the pipeline MUST refuse to
+                # ship scientifically invalid output. The previous code
+                # set ``_literature_check_skipped = True`` which
+                # EXCLUDED the criterion from the gate — that was the
+                # silent-bypass bug. The fix sets
+                # ``_literature_check_failed_missing_biopython = True``
+                # so the gate sets ``literature_pass = False`` and
+                # ``literature`` is added to ``checks_failed``.
+                _literature_check_failed_missing_biopython = True
+                logger.error(
+                    "P4-012 ROOT FIX: literature cross-check FAILED "
+                    "(biopython not installed). biopython is a "
+                    "MANDATORY production dependency (requirements.txt). "
+                    "The V1 launch criterion '≥5 literature-supported "
+                    "predictions' CANNOT be evaluated without biopython. "
+                    "The scientific_validation gate will FAIL and the "
+                    "pipeline will refuse to write its output CSV. "
+                    "Install biopython (pip install biopython) and "
+                    "re-run. This is a ROOT-LEVEL fix: the previous "
+                    "code SKIPPED the check, allowing the platform to "
+                    "claim V1 readiness without ever verifying the "
+                    "literature criterion."
                 )
             else:
                 raise
@@ -7374,10 +7518,29 @@ def run_pipeline(config: PipelineConfig) -> Tuple[List[RankedCandidate], Pipelin
         ),
         "min_literature_supported": 5,  # DOCX §8 V1 launch criterion
         "literature_check_skipped": _literature_check_skipped,
+        # P4-012 ROOT FIX: track the FAIL case explicitly so downstream
+        # consumers and the CI test can verify the gate FAILS (not
+        # skips) when biopython is missing.
+        "literature_check_failed_missing_biopython": _literature_check_failed_missing_biopython,
     }
-    # P4-012: set literature_pass based on whether the check was skipped.
+    # P4-012 ROOT FIX: set literature_pass based on the check outcome.
+    #   - RL_SKIP_LITERATURE set (TEST-ONLY): SKIP (literature_pass = None).
+    #     The criterion is EXCLUDED from checks_passed AND checks_failed.
+    #     This is the ONLY non-failing path, and it exists solely so
+    #     the test suite can exercise the full pipeline without PubMed
+    #     network calls.
+    #   - biopython missing (PRODUCTION BROKEN): FAIL (literature_pass = False).
+    #     The criterion is ADDED to checks_failed. The pipeline raises
+    #     ScientificFailureError and refuses to write its output CSV.
+    #     This is the ROOT FIX: the previous code SKIPPED in this case,
+    #     allowing the platform to claim V1 readiness without ever
+    #     verifying the literature criterion.
+    #   - biopython installed and check ran: PASS/FAIL based on
+    #     n_literature_supported >= 5 (the V1 launch criterion).
     if _literature_check_skipped:
-        scientific_validation["literature_pass"] = None  # skipped
+        scientific_validation["literature_pass"] = None  # TEST-ONLY skip
+    elif _literature_check_failed_missing_biopython:
+        scientific_validation["literature_pass"] = False  # PRODUCTION FAIL
     else:
         scientific_validation["literature_pass"] = (
             scientific_validation["n_literature_supported"]
@@ -7440,10 +7603,23 @@ def run_pipeline(config: PipelineConfig) -> Tuple[List[RankedCandidate], Pipelin
     # ROOT FIX (P0-3/P0-4): BLOCK pipeline completion if scientific
     # validation fails and blocking is enabled. This prevents shipping
     # scientifically invalid output to pharma partners.
-    allow_failure = (
-        not config.block_on_scientific_failure
-        or os.environ.get("RL_ALLOW_SCIENCE_FAILURE", "0") == "1"
-    )
+    #
+    # P4-014 ROOT FIX (Team Member 12): the ``RL_ALLOW_SCIENCE_FAILURE``
+    # env var bypass has been REMOVED. The previous code allowed a
+    # stressed team member to set ``RL_ALLOW_SCIENCE_FAILURE=1`` and
+    # bypass the scientific_validation gate, writing a CSV with
+    # scientifically invalid predictions (the live test confirmed this:
+    # ``metformin→epilepsy`` as the #3 candidate with AUC=0.403). The
+    # audit's compound-effect analysis: bypass → invalid CSV ships →
+    # pharma partner acts on invalid predictions → patient harm.
+    #
+    # The fix: the gate CANNOT be bypassed via env var. The ONLY way to
+    # disable the gate is via the Python API
+    # (``config.block_on_scientific_failure=False``), which is intended
+    # for test-only use and is NOT reachable from the CLI. A CI test
+    # (tests/test_team12_p4_012_to_018.py::test_p4_014_*) verifies the
+    # env var is no longer checked.
+    allow_failure = not config.block_on_scientific_failure
     if not scientific_validation["overall_pass"] and not allow_failure:
         error = ScientificFailureError(
             "ROOT FIX (P0-3/P0-4): Scientific validation FAILED. "
@@ -7463,8 +7639,11 @@ def run_pipeline(config: PipelineConfig) -> Tuple[List[RankedCandidate], Pipelin
     elif not scientific_validation["overall_pass"] and allow_failure:
         logger.warning(
             f"ROOT FIX (P0-3/P0-4): Scientific validation FAILED but "
-            f"blocking is DISABLED (block_on_scientific_failure=False or "
-            f"RL_ALLOW_SCIENCE_FAILURE=1). Output will be written but "
+            f"blocking is DISABLED (block_on_scientific_failure=False). "
+            f"This is a TEST-ONLY Python API escape hatch — it is NOT "
+            f"reachable from the CLI (the --allow-invalid-output flag "
+            f"was removed in P4-014, and the RL_ALLOW_SCIENCE_FAILURE "
+            f"env var is no longer checked). Output will be written but "
             f"marked as SCIENTIFICALLY INVALID in metadata."
         )
 
@@ -7490,22 +7669,28 @@ def run_pipeline(config: PipelineConfig) -> Tuple[List[RankedCandidate], Pipelin
     # the output should NOT be written to disk.
     #
     # P4-005 v2 FIX: these critical alerts now respect the SAME escape
-    # hatch as the scientific validation gate (block_on_scientific_failure
-    # / RL_ALLOW_SCIENCE_FAILURE). The original v90 BUG #48 fix made
-    # these alerts UNCONDITIONAL — they raised RuntimeError even when
-    # the user set allow_invalid_output=True (via the bridge) or
-    # RL_ALLOW_SCIENCE_FAILURE=1. This broke tests that intentionally
-    # run with degenerate data (e.g., test_v3_e2e_pipeline_propagates_gt_auc
-    # uses a small demo graph with a high safety rejection rate). The
-    # fix makes the alerts CONSISTENT with the scientific validation
-    # gate: they raise ONLY when block_on_scientific_failure=True AND
-    # RL_ALLOW_SCIENCE_FAILURE is not "1". When the user opts out of
-    # blocking (for testing/debugging), the alerts log CRITICAL but
-    # don't raise.
-    _allow_alert_failure = (
-        not config.block_on_scientific_failure
-        or os.environ.get("RL_ALLOW_SCIENCE_FAILURE", "0") == "1"
-    )
+    # hatch as the scientific validation gate (block_on_scientific_failure).
+    # The original v90 BUG #48 fix made these alerts UNCONDITIONAL — they
+    # raised RuntimeError even when the user set
+    # block_on_scientific_failure=False (via the Python API). This broke
+    # tests that intentionally run with degenerate data (e.g.,
+    # test_v3_e2e_pipeline_propagates_gt_auc uses a small demo graph with
+    # a high safety rejection rate). The fix makes the alerts CONSISTENT
+    # with the scientific validation gate: they raise ONLY when
+    # block_on_scientific_failure=True. When the user opts out of
+    # blocking via the Python API (for testing/debugging), the alerts
+    # log CRITICAL but don't raise.
+    #
+    # P4-014 ROOT FIX (Team Member 12): the RL_ALLOW_SCIENCE_FAILURE
+    # env var bypass has been REMOVED. The previous code allowed
+    # ``_allow_alert_failure = ... or RL_ALLOW_SCIENCE_FAILURE=1``,
+    # which let a stressed team member bypass the critical alerts by
+    # setting an env var — the same bypass that allowed invalid CSVs
+    # to ship. The fix removes the env var check entirely; the ONLY
+    # way to disable the alerts is via the Python API
+    # (``config.block_on_scientific_failure=False``), which is
+    # test-only and NOT reachable from the CLI.
+    _allow_alert_failure = not config.block_on_scientific_failure
     if metrics.n_pairs_processed > 0 and metrics.n_ranked_high == 0:
         _alert_msg_no_high = (
             "v90 ROOT FIX (BUG #48): CRITICAL ALERT — no candidates ranked "
@@ -7518,7 +7703,7 @@ def run_pipeline(config: PipelineConfig) -> Tuple[List[RankedCandidate], Pipelin
         if not _allow_alert_failure:
             raise RuntimeError(_alert_msg_no_high)
         else:
-            logger.critical(_alert_msg_no_high + " (RL_ALLOW_SCIENCE_FAILURE=1: alert non-blocking)")
+            logger.critical(_alert_msg_no_high + " (block_on_scientific_failure=False: alert non-blocking)")
     safety_reject_rate_check = (
         metrics.n_safety_rejected / max(
             getattr(metrics, '_n_test_pairs_for_alert', metrics.n_pairs_processed), 1
@@ -7535,7 +7720,7 @@ def run_pipeline(config: PipelineConfig) -> Tuple[List[RankedCandidate], Pipelin
         if not _allow_alert_failure:
             raise RuntimeError(_alert_msg_safety)
         else:
-            logger.critical(_alert_msg_safety + " (RL_ALLOW_SCIENCE_FAILURE=1: alert non-blocking)")
+            logger.critical(_alert_msg_safety + " (block_on_scientific_failure=False: alert non-blocking)")
 
     output_path = save_results(candidates, metadata=metadata, config=config)
 
@@ -7657,7 +7842,17 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "(default: warn and proceed)\n"
         "  RL_USER               Override the audit log actor username\n"
         "  NCBI_EMAIL            Email for PubMed literature cross-check\n"
-        "  RL_SKIP_LITERATURE    Set to '1' to skip literature cross-check\n"
+        "\n"
+        "P4-014 ROOT FIX: the RL_ALLOW_SCIENCE_FAILURE env var has been "
+        "REMOVED. The scientific_validation gate CANNOT be bypassed via "
+        "env var or CLI flag. The ONLY way to disable the gate is via "
+        "the Python API (config.block_on_scientific_failure=False), "
+        "which is TEST-ONLY.\n"
+        "\n"
+        "P4-012 ROOT FIX: biopython is a MANDATORY production dependency. "
+        "If it is not installed, the scientific_validation gate FAILS "
+        "(not skips) and the pipeline refuses to write its output CSV. "
+        "Install with: pip install biopython.\n"
         "\n"
         "ROOT FIX (F6): Without RL_HMAC_KEY, the output HMAC is marked "
         "as 'unverified' — it provides forensic fingerprinting only, NOT "
