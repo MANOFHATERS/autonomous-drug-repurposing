@@ -2004,6 +2004,32 @@ class GraphEdgeLoader:
         start_time = time.monotonic()
         batch_size = _validate_batch_size(batch_size, "batch_size")
 
+        # P2-031 ROOT FIX: lowercase ``rel_type`` ONCE at the entry
+        # point and use the lowercased version EVERYWHERE downstream.
+        #
+        # The previous code lowercased rel_type only for ``safe_rel``
+        # construction (line ~2028) but used the ORIGINAL-CASE
+        # ``rel_type`` for BOTH the ``is_core_edge`` check (line ~2034)
+        # AND the ``EDGE_PROPERTY_WHITELIST`` lookup (line ~2059). Since
+        # ``CORE_EDGE_TYPES`` and ``EDGE_PROPERTY_WHITELIST`` both use
+        # lowercase rel names, a caller passing ``rel_type="TREATS"``
+        # got:
+        #   (1) a spurious "not in CORE_EDGE_TYPES" WARNING (false
+        #       alarm — the actual Neo4j write uses lowercased "treats"
+        #       which IS a core edge);
+        #   (2) WORSE: the EDGE_PROPERTY_WHITELIST lookup MISSED,
+        #       silently falling back to the default
+        #       ``{"source", "evidence", "score"}`` and STRIPPING
+        #       pchembl_value / standard_relation / activity_type from
+        #       Compound-inhibits-Protein edges.
+        #
+        # ROOT FIX: compute ``rel_type_lower`` ONCE here and use it
+        # for ALL three downstream lookups (is_core_edge, safe_rel,
+        # edge_key). Document that callers may pass any case but the
+        # canonical form is lowercase (matches CORE_EDGE_TYPES and
+        # EDGE_PROPERTY_WHITELIST).
+        rel_type_lower = str(rel_type).lower()
+
         # Fixes S(9)-1 / C-1: Cypher injection via f-strings
         # Fixes NFR §3.9: Sanitize labels and rel types
         # v43 ROOT FIX (Chain 1): translate semantic type names (e.g.
@@ -2026,17 +2052,22 @@ class GraphEdgeLoader:
         safe_src = sanitize_label(_storage_label(src_label))
         safe_dst = sanitize_label(_storage_label(dst_label))
         safe_rel = sanitize_rel_type(
-            rel_type.lower().replace(" ", "_").replace("-", "_")
+            rel_type_lower.replace(" ", "_").replace("-", "_")
         )
 
         # Fixes IVR §3.6: Validate edge triple
+        # P2-031 ROOT FIX: use ``rel_type_lower`` (not the original
+        # ``rel_type``) so callers passing mixed-case rel names do not
+        # trigger false-alarm warnings. The actual Neo4j write uses
+        # ``safe_rel`` (lowercased), so the core-edge check MUST also
+        # use the lowercased form for consistency.
         if not allow_non_core and not _ALLOW_NON_CORE_EDGES:
-            if not is_core_edge(src_label, rel_type, dst_label):
+            if not is_core_edge(src_label, rel_type_lower, dst_label):
                 logger.warning(
                     "Edge triple (%s, %s, %s) is not in CORE_EDGE_TYPES. "
                     "Set allow_non_core=True or DRUGOS_KG_ALLOW_NON_CORE_EDGES=1 "
                     "to allow.",
-                    src_label, rel_type, dst_label,
+                    src_label, rel_type_lower, dst_label,
                 )
 
         # Fixes P-1: Warn on single-edge batch
@@ -2056,7 +2087,13 @@ class GraphEdgeLoader:
         all_errors: list[str] = []
 
         # Edge property whitelist
-        edge_key = (src_label, rel_type, dst_label)
+        # P2-031 ROOT FIX: use ``rel_type_lower`` for the whitelist key
+        # so the lookup HITS when callers pass mixed-case rel names.
+        # The previous code used the original-case ``rel_type``, which
+        # missed the whitelist for any caller passing "TREATS" /
+        # "Inhibits" / etc. — silently stripping pchembl_value and
+        # other ChEMBL activity properties from Compound-Drug edges.
+        edge_key = (src_label, rel_type_lower, dst_label)
         allowed_edge_props = (
             EDGE_PROPERTY_WHITELIST.get(edge_key, frozenset({"source", "evidence", "score"}))
             | SYSTEM_PROPS
@@ -2253,7 +2290,7 @@ class GraphEdgeLoader:
                         logger.debug(
                             "Dropped non-whitelisted edge props for "
                             "%s-%s->%s: %s",
-                            src_label, rel_type, dst_label, dropped,
+                            src_label, rel_type_lower, dst_label, dropped,
                         )
                     row["props"] = cleaned_props
                     clean_batch.append(row)
@@ -2270,10 +2307,20 @@ class GraphEdgeLoader:
                 # caller already invokes this once per (src, rel, dst)
                 # triple, so the addition is a defensive measure against
                 # future refactors that batch across rel_types.
+                #
+                # P2-031 ROOT FIX: use ``rel_type_lower`` (not the
+                # original-case ``rel_type``) for the dedup key. The
+                # Neo4j write uses ``safe_rel`` (lowercased), so two
+                # calls with ``rel_type="TREATS"`` and ``rel_type="treats"``
+                # would otherwise produce DIFFERENT dedup keys and BOTH
+                # edges would be written — defeating the dedup and
+                # creating duplicate Neo4j relationships (the exact
+                # case-sensitivity corruption P2L-021 was designed to
+                # prevent).
                 seen_pairs: set[tuple[str, str, str]] = set()
                 deduped_batch: list[dict[str, Any]] = []
                 for row in clean_batch:
-                    pair = (row["src_id"], row["dst_id"], str(rel_type))
+                    pair = (row["src_id"], row["dst_id"], rel_type_lower)
                     if pair in seen_pairs:
                         dead_letter_record(
                             source=source,
