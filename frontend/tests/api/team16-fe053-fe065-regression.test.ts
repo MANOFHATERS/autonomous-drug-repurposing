@@ -79,9 +79,12 @@ describe("FE-063: rl/route.ts — all catch blocks use `e: unknown`", () => {
   });
 
   test("all catch blocks use 'catch (e: unknown)' with proper narrowing", () => {
-    // Count catch blocks — there should be at least 4 (3 in route handlers + 1+ in helpers)
+    // Count catch blocks — there should be at least 3 (2 in route handlers
+    // + 1 in persistRlCandidates outer catch). The main branch's version of
+    // persistRlCandidates is simpler (no project-creation inner catch), so
+    // the total is 3, not 4.
     const catchUnknownCount = (rlRoute.match(/catch\s*\(\s*e:\s*unknown\s*\)/g) || []).length;
-    expect(catchUnknownCount).toBeGreaterThanOrEqual(4);
+    expect(catchUnknownCount).toBeGreaterThanOrEqual(3);
 
     // Verify narrowing pattern is used: e instanceof Error ? e.message : String(e)
     expect(rlRoute).toContain("e instanceof Error ? e.message : String(e)");
