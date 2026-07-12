@@ -247,10 +247,36 @@ export const REFRESH_COOKIE = "drugos_refresh";
 export async function setAuthCookies(access: string, refresh: string): Promise<void> {
   const store = await cookies();
   const isProd = process.env.NODE_ENV === "production";
+
+  // FE-070 ROOT FIX: SameSite policy hardening.
+  //
+  // Previously BOTH cookies used SameSite=Lax. Lax blocks POST/PUT/DELETE
+  // from cross-origin (good) but ALLOWS top-level GET navigations to carry
+  // cookies — so if any state-changing operation can be triggered via a
+  // GET (bad practice but happens), it's CSRF-vulnerable. Worse, if SSO/
+  // OIDC redirect flows are added later (next-auth is in package.json),
+  // Lax will break them and a future developer may "fix" it by setting
+  // SameSite=None — re-opening CSRF.
+  //
+  // Root fix:
+  //   - ACCESS cookie: SameSite=Strict. The access token authorizes every
+  //     API call AND every state-changing GET (rare but possible). Strict
+  //     means the cookie is NEVER sent on cross-site requests — not even
+  //     top-level GET navigations. The DruGOS dashboard is a same-origin
+  //     SPA; no external site needs to deep-link in with auth. Trade-off:
+  //     a user clicking an external link TO drugos.example.com will land
+  //     unauthenticated on the first hop — acceptable for a pharma
+  //     research platform (defense-in-depth > friction).
+  //   - REFRESH cookie: SameSite=Lax. Refresh is scoped to
+  //     /api/auth/refresh (path restriction) and is opaque (not a JWT).
+  //     Lax is required because the SPA's silent-refresh flow may be
+  //     triggered by a top-level navigation from a password-reset email
+  //     link or SSO callback. Combined with CSRF tokens (FE-011) for
+  //     defense-in-depth.
   store.set(ACCESS_COOKIE, access, {
     httpOnly: true,
     secure: isProd,
-    sameSite: "lax",
+    sameSite: "strict",
     path: "/",
     maxAge: ACCESS_TOKEN_TTL_SECONDS,
   });
