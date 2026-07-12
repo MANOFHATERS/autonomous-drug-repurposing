@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requireAuth, requireRole, badRequest, notFound, requireCsrfOrSend } from "@/lib/api-helpers";
+import { requireAuth, badRequest, requireCsrfOrSend } from "@/lib/api-helpers";
 import { createProject, listProjects } from "@/lib/services/projects";
 import { db } from "@/lib/db";
 

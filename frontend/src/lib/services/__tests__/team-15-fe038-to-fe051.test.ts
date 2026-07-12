@@ -510,15 +510,18 @@ describe("FE-049: RL candidate mapping", () => {
   });
 
   it("DrugCandidate.molSimScore is typed as number | null", async () => {
-    const src = require("fs").readFileSync(
-      require("path").join(process.cwd(), "src/lib/mock-data.ts"),
+    // FE-026 moved the DrugCandidate interface from mock-data.ts to types.ts.
+    // Read types.ts (the canonical home) and also mock-data.ts (in case any
+    // re-export or inline type remains there).
+    const typesSrc = require("fs").readFileSync(
+      require("path").join(process.cwd(), "src/lib/types.ts"),
       "utf8"
     );
     // The interface must declare molSimScore as `number | null`.
-    expect(src).toMatch(/molSimScore:\s*number\s*\|\s*null/);
-    expect(src).toMatch(/ipStatus:\s*string\s*\|\s*null/);
-    expect(src).toMatch(/targets:\s*string\[\]\s*\|\s*null/);
-    expect(src).toMatch(/pathways:\s*string\[\]\s*\|\s*null/);
+    expect(typesSrc).toMatch(/molSimScore:\s*number\s*\|\s*null/);
+    expect(typesSrc).toMatch(/ipStatus:\s*string\s*\|\s*null/);
+    expect(typesSrc).toMatch(/targets:\s*string\[\]\s*\|\s*null/);
+    expect(typesSrc).toMatch(/pathways:\s*string\[\]\s*\|\s*null/);
   });
 
   it("the RL candidate mapping in core-screens.tsx assigns null (not 0/'Unknown'/[])", async () => {
@@ -804,6 +807,8 @@ describe("FE-044: project creation checks OrgMember.role", () => {
     const { POST } = await import("@/app/api/projects/route");
     const req = {
       json: async () => ({ name: "p" }),
+      // FE-011 CSRF check reads req.headers.get('authorization').
+      headers: { get: () => null },
     } as any;
     const res = await POST(req);
     expect(res.status).toBe(403);
@@ -841,6 +846,8 @@ describe("FE-044: project creation checks OrgMember.role", () => {
     const { POST } = await import("@/app/api/projects/route");
     const req = {
       json: async () => ({ name: "My Project" }),
+      // FE-011 CSRF check reads req.headers.get('authorization').
+      headers: { get: () => null },
     } as any;
     const res = await POST(req);
     expect(res.status).toBe(201);
