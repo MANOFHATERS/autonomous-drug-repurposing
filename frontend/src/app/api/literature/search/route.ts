@@ -11,7 +11,7 @@ import {
 // quota (10 req/sec, 1M req/day). Once exhausted, ALL researchers' PubMed
 // queries would fail. Now it requires auth + a per-user rate limit.
 export async function GET(req: NextRequest) {
-  const guard = await requireAuthAndRateLimit();
+  const guard = await requireAuthAndRateLimit(req);
   if (guard.response !== null) return guard.response;
 
   const query = req.nextUrl.searchParams.get("q") || "";

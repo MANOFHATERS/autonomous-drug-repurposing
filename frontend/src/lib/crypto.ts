@@ -12,7 +12,7 @@
  * The "v1" prefix lets us evolve the format later without breaking old rows.
  */
 
-import { createCipheriv, createDecipheriv, randomBytes, createHash } from "crypto";
+import { createCipheriv, createDecipheriv, randomBytes, createHash, createHmac, timingSafeEqual } from "crypto";
 
 const KEY_ENV_VAR = "WEBHOOK_SECRET_KEY";
 const PREFIX = "v1";
@@ -105,4 +105,108 @@ export function decryptSecret(stored: string): string {
  */
 export function isEncryptedSecret(stored: string): boolean {
   return typeof stored === "string" && stored.startsWith(`${PREFIX}:`);
+}
+
+// ---------------------------------------------------------------------------
+// FE-015 ROOT FIX (Team Member 14): Constant-time HMAC computation/verification.
+//
+// Previously this file had NO `verifyHmac()` helper at all — webhook routes
+// that needed HMAC verification would have reached for `===` (string equality),
+// which short-circuits on the first differing byte. An attacker who can
+// measure response time can determine the expected HMAC byte-by-byte: for a
+// 32-byte HMAC this is ~256 * 32 = 8192 requests — feasible in a few hours
+// on a quiet endpoint. Once forged, the attacker can inject fake webhook
+// payloads (e.g. fake Stripe events, fake GitHub push events) and trigger
+// arbitrary state changes in the platform.
+//
+// This module provides:
+//   - `computeHmac(key, message, algorithm?)` — returns a hex digest.
+//   - `verifyHmac(key, message, expectedHex, algorithm?)` — CONSTANT-TIME
+//     comparison via `crypto.timingSafeEqual`. Returns true iff the computed
+//     HMAC equals `expectedHex` AND both buffers are the same length.
+//
+// The comparison is constant-time because:
+//   1. We compute the HMAC fresh on every call (the expected value is the
+//      attacker-controlled input; the computed value is the secret-derived
+//      ground truth). The attacker cannot short-circuit the computation.
+//   2. We compare the two buffers with `timingSafeEqual`, which iterates
+//      ALL bytes before returning — there is no early exit.
+//   3. We guard the length check explicitly because `timingSafeEqual`
+//      throws on mismatched lengths (which itself is a timing side-channel
+//      if not handled — but the length of the expected HMAC is fixed by
+//      the algorithm, so a length mismatch already means the attacker
+//      sent malformed input).
+//
+// Usage (webhook signature verification):
+//   const expected = req.headers.get("x-hub-signature-256")?.replace("sha256=", "");
+//   const body = await req.text();
+//   const ok = verifyHmac(webhookSecret, body, expected ?? "", "sha256");
+//   if (!ok) return NextResponse.json({ error: "invalid_signature" }, { status: 401 });
+// ---------------------------------------------------------------------------
+
+/**
+ * Compute the HMAC of `message` using `key`. Returns a lowercase hex digest.
+ *
+ * Defaults to SHA-256 (the algorithm used by GitHub's x-hub-signature-256
+ * and Stripe's Stripe-Signature headers). Supports any algorithm supported
+ * by Node's `crypto.createHmac` (sha1, sha256, sha512, etc.).
+ *
+ * The key may be passed as a string (UTF-8 encoded) or a Buffer. The
+ * message may also be a string or Buffer.
+ */
+export function computeHmac(
+  key: string | Buffer,
+  message: string | Buffer,
+  algorithm: string = "sha256"
+): string {
+  const keyBuf = typeof key === "string" ? Buffer.from(key, "utf8") : key;
+  const msgBuf = typeof message === "string" ? Buffer.from(message, "utf8") : message;
+  return createHmac(algorithm, keyBuf).update(msgBuf).digest("hex");
+}
+
+/**
+ * Verify that `expectedHex` matches the HMAC of `message` under `key`, using
+ * a CONSTANT-TIME comparison to prevent timing attacks.
+ *
+ * Returns `true` if and only if:
+ *   - `expectedHex` is a non-empty string,
+ *   - the computed HMAC has the same byte length as `expectedHex` (i.e. the
+ *     caller is using the correct algorithm — sha256 → 64 hex chars / 32
+ *     bytes, sha1 → 40 hex chars / 20 bytes, etc.),
+ *   - and the two buffers are byte-for-byte equal under `timingSafeEqual`.
+ *
+ * Returns `false` for any malformed input (empty, wrong length, non-hex).
+ * This fail-closed behavior ensures a forged or truncated signature cannot
+ * bypass verification by exploiting edge cases in the comparison.
+ *
+ * IMPORTANT: this function does NOT protect against length-extension
+ * attacks on sha1/sha256 — but HMAC itself is immune to length-extension
+ * by construction (the key is inner-and-outer-padded), so this is not a
+ * concern. The constant-time comparison is the only timing side-channel
+ * that matters here.
+ */
+export function verifyHmac(
+  key: string | Buffer,
+  message: string | Buffer,
+  expectedHex: string,
+  algorithm: string = "sha256"
+): boolean {
+  // Fail closed on malformed input — never throw, never leak whether the
+  // expected value was empty vs. wrong-length vs. wrong-content.
+  if (typeof expectedHex !== "string" || expectedHex.length === 0) {
+    return false;
+  }
+  const computed = computeHmac(key, message, algorithm);
+  const a = Buffer.from(computed, "utf8");
+  const b = Buffer.from(expectedHex, "utf8");
+  // Length mismatch: return false WITHOUT calling timingSafeEqual (it
+  // throws on length mismatch). We do not early-return on the CONTENT —
+  // only on the length, which is fixed by the algorithm and thus not a
+  // secret. The attacker already knows which algorithm we use (it's in
+  // the header name: x-hub-signature-256 → sha256).
+  if (a.length !== b.length) {
+    return false;
+  }
+  // Constant-time comparison — iterates all bytes before returning.
+  return timingSafeEqual(a, b);
 }

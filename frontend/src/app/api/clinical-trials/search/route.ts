@@ -11,7 +11,7 @@ import {
 // API quota and to scrape trial data at scale. Now it requires auth + a
 // per-user rate limit.
 export async function GET(req: NextRequest) {
-  const guard = await requireAuthAndRateLimit();
+  const guard = await requireAuthAndRateLimit(req);
   if (guard.response !== null) return guard.response;
 
   const condition = req.nextUrl.searchParams.get("condition") || "";
