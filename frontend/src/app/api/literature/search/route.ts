@@ -10,6 +10,17 @@ import {
 // the internet could use it as an open proxy to deplete our NCBI_API_KEY
 // quota (10 req/sec, 1M req/day). Once exhausted, ALL researchers' PubMed
 // queries would fail. Now it requires auth + a per-user rate limit.
+//
+// FE-006 ROOT FIX (response shape): Previously this route returned the raw
+// service response `{ total, articles }`. The api-client.ts's
+// searchLiterature() expected `{ items: PubMedArticle[] }` and accessed
+// response.items.map(...). Since `items` was undefined, the .map() call
+// threw "Cannot read properties of undefined (reading 'map')" and the
+// literature search UI crashed on every search.
+//
+// ROOT FIX: Standardize on `{ items: [...], total: number, ... }`. We map
+// the service's `articles` field to `items` and pass through `total`,
+// `limit`, and `offset` for paginated follow-up requests.
 export async function GET(req: NextRequest) {
   const guard = await requireAuthAndRateLimit();
   if (guard.response !== null) return guard.response;
@@ -31,8 +42,16 @@ export async function GET(req: NextRequest) {
   try {
     const result = await searchPubMed({ query, limit, offset, sort, yearFrom, yearTo });
     recordApiRequestForUser(guard.user);
-    return NextResponse.json(result);
-  } catch (e: any) {
-    return internalError(`PubMed search failed: ${e.message}`);
+    // FE-006: map `articles` → `items`. Keep `total`, `limit`, `offset`.
+    return NextResponse.json({
+      items: result.articles,
+      total: result.total,
+      limit,
+      offset,
+    });
+  } catch (e: unknown) {
+    // FE-063: never use `e: any` — narrow with instanceof.
+    const msg = e instanceof Error ? e.message : String(e);
+    return internalError(`PubMed search failed: ${msg}`);
   }
 }

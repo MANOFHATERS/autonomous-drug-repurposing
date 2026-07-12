@@ -306,11 +306,30 @@ export interface GraphSourceStat {
   loadId?: string;
 }
 
+export interface BridgeNodeEdgeStats {
+  nodesStaged: number;
+  nodesLoaded: number;
+  edgesStaged: number;
+  edgesLoaded: number;
+  edgeTypesPresent: string[];
+  bridgeVersion?: string;
+  backend?: string;
+}
+
 export interface KnowledgeGraphStatsResponse {
   sources: GraphSourceStat[];
   nodeCount: number;
   edgeCount: number;
+  edgeTypesPresent: string[];
+  bridge: BridgeNodeEdgeStats | null;
   source: "kg_service" | "local_registry" | "none";
+  /**
+   * "bridge_summary" = real Phase 2 node/edge counts by type.
+   * "registry_rows_sum" = fallback sum of per-source rows (over-counts
+   * because SIDER rows are side-effects, not graph nodes).
+   * "none" = no data.
+   */
+  nodeCountSource: "bridge_summary" | "registry_rows_sum" | "none";
   generatedAt: string;
   note?: string;
 }
