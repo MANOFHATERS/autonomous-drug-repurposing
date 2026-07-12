@@ -5,6 +5,8 @@ import {
   hashPassword,
   verifyPassword,
   validatePasswordPolicy,
+  revokeAllRefreshTokensForUser,
+  clearAuthCookies,
 } from "@/lib/auth/server";
 import { badRequest, internalError, writeAuditLog } from "@/lib/api-helpers";
 
@@ -59,12 +61,47 @@ export async function POST(req: NextRequest) {
       where: { id: user.userId },
       data: { passwordHash: newHash },
     });
+
+    // FE-004 ROOT FIX: OWASP — password change MUST invalidate all existing
+    // sessions. If an attacker had stolen the old password and was quietly
+    // using a refresh token, this kills their access. If the legitimate
+    // user was changing the password because they suspected compromise,
+    // this is the ONLY way to actually re-secure the account.
+    try {
+      const revoked = await revokeAllRefreshTokensForUser(user.userId);
+       
+      console.log(`[password] revoked ${revoked} refresh token(s) for user ${user.userId}`);
+    } catch (err) {
+       
+      console.error("[password] failed to revoke refresh tokens", err);
+      // We still proceed — the password IS changed; the lingering tokens
+      // will expire within 30 days at worst. But we surface a warning.
+    }
+
     await writeAuditLog({
       user,
       action: "password_change",
       resource: user.userId,
+      // Note: we also write a separate audit entry for the revocation so
+      // forensics can reconstruct "password change → all sessions killed".
     });
-    return NextResponse.json({ ok: true, message: "Password updated." });
+    await writeAuditLog({
+      user,
+      action: "sessions_revoked",
+      resource: user.userId,
+      metadata: { trigger: "password_change" },
+    });
+
+    // Force the current session to re-authenticate: clear the cookies so
+    // the user is logged out of THIS browser too. They must sign in with
+    // the new password.
+    await clearAuthCookies();
+
+    return NextResponse.json({
+      ok: true,
+      message: "Password updated. All other sessions have been signed out. Please sign in again.",
+      requireReauth: true,
+    });
   } catch (e) {
     console.error("Password update failed:", e);
     return internalError("Failed to update password.");

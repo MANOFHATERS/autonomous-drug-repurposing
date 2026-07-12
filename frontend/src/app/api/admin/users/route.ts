@@ -57,6 +57,10 @@ export async function GET(req: NextRequest) {
         role: true,
         status: true,
         emailVerified: true,
+        // FE-009 ROOT FIX: surface mfaEnabled so the admin user-management
+        // screen can show the real 2FA state per user instead of a fabricated
+        // boolean.
+        mfaEnabled: true,
         createdAt: true,
         lastLoginAt: true,
       },

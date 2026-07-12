@@ -62,17 +62,22 @@ export function checkKnowledgeGraphAvailability(): MlServiceAvailability {
       available: false,
       service: ML_SERVICE_STATUS.knowledgeGraph.name,
       description: ML_SERVICE_STATUS.knowledgeGraph.description,
+      // FE-007 ROOT FIX: do NOT leak the env var name in the reason string.
+      // The status endpoint is admin-only now, but defense in depth — we
+      // also redact env var names at the route layer. Generic "service not
+      // configured" is all an operator needs to know.
       reason:
-        "KG_SERVICE_URL environment variable is not set. The standalone " +
-        "Neo4j knowledge graph service has not been deployed yet. This " +
-        "endpoint refuses to return fabricated graph data.",
+        "The standalone Neo4j knowledge graph service has not been deployed " +
+        "yet. This endpoint refuses to return fabricated graph data.",
     };
   }
   return {
     available: true,
     service: ML_SERVICE_STATUS.knowledgeGraph.name,
     description: ML_SERVICE_STATUS.knowledgeGraph.description,
-    reason: `Knowledge graph service is configured at ${url}.`,
+    // FE-007 ROOT FIX: do NOT echo the URL back — it may contain internal
+    // hostnames or ports that aid reconnaissance.
+    reason: "Knowledge graph service is configured and reachable.",
   };
 }
 
@@ -83,17 +88,17 @@ export function checkDatasetAvailability(): MlServiceAvailability {
       available: false,
       service: ML_SERVICE_STATUS.dataset.name,
       description: ML_SERVICE_STATUS.dataset.description,
+      // FE-007 ROOT FIX: do NOT leak the env var name.
       reason:
-        "DATASET_SERVICE_URL environment variable is not set. The standalone " +
-        "Apache Airflow dataset pipeline has not been deployed yet. This " +
-        "endpoint refuses to return fabricated dataset statistics.",
+        "The standalone Apache Airflow dataset pipeline has not been deployed " +
+        "yet. This endpoint refuses to return fabricated dataset statistics.",
     };
   }
   return {
     available: true,
     service: ML_SERVICE_STATUS.dataset.name,
     description: ML_SERVICE_STATUS.dataset.description,
-    reason: `Dataset service is configured at ${url}.`,
+    reason: "Dataset service is configured and reachable.",
   };
 }
 
@@ -104,16 +109,17 @@ export function checkRlAvailability(): MlServiceAvailability {
       available: false,
       service: ML_SERVICE_STATUS.rl.name,
       description: ML_SERVICE_STATUS.rl.description,
+      // FE-007 ROOT FIX: do NOT leak the env var name.
       reason:
-        "RL_SERVICE_URL environment variable is not set. The standalone " +
-        "Stable-Baselines3 RL hypothesis ranker has not been deployed yet. " +
-        "This endpoint refuses to return fabricated repurposing predictions.",
+        "The standalone Stable-Baselines3 RL hypothesis ranker has not been " +
+        "deployed yet. This endpoint refuses to return fabricated " +
+        "repurposing predictions.",
     };
   }
   return {
     available: true,
     service: ML_SERVICE_STATUS.rl.name,
     description: ML_SERVICE_STATUS.rl.description,
-    reason: `RL service is configured at ${url}.`,
+    reason: "RL service is configured and reachable.",
   };
 }

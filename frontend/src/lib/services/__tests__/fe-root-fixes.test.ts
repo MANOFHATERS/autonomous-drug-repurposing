@@ -253,13 +253,14 @@ describe("FE-018: Prisma indexes added", () => {
     // (the actual model terminator).
     const auditStart = schema.indexOf("model AuditLog");
     expect(auditStart).toBeGreaterThanOrEqual(0);
-    // Find the closing `}` at column 0 after auditStart.
+    // FE-005 + FE-040 ROOT FIX: find the closing `}` at column 0 after
+    // auditStart. This is more robust than a fixed char window.
     const afterStart = schema.slice(auditStart);
     const closeMatch = afterStart.match(/\n\}\n/);
     expect(closeMatch).toBeTruthy();
     const auditBlock = afterStart.slice(0, closeMatch!.index! + 2);
     expect(auditBlock).toMatch(/@@index\(\[createdAt\]\)/);
-    // FE-040: also confirm the new organizationId field + index.
+    // FE-005 + FE-040: also confirm the new organizationId field + index.
     expect(auditBlock).toMatch(/organizationId\s+String\?/);
     expect(auditBlock).toMatch(/@@index\(\[organizationId\]\)/);
   });

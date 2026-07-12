@@ -55,7 +55,12 @@ describe("ML service stubs — scientific integrity contract", () => {
     process.env.KG_SERVICE_URL = "http://kg-service.internal:7474";
     const avail = checkKnowledgeGraphAvailability();
     expect(avail.available).toBe(true);
-    expect(avail.reason).toMatch(/kg-service\.internal/);
+    // FE-007 ROOT FIX: the reason must NOT echo the URL back — it may
+    // contain internal hostnames or ports that aid reconnaissance.
+    // Just assert that some positive reason is given.
+    expect(avail.reason).toBeTruthy();
+    expect(avail.reason).not.toMatch(/kg-service\.internal/);
+    expect(avail.reason).not.toMatch(/http:\/\//);
   });
 
   test("dataset stub reports available when env var is set", () => {

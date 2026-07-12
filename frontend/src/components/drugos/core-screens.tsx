@@ -499,10 +499,14 @@ function SearchResultsScreen() {
     rank: rc.rank,
   }));
 
-  // Fall back to mock candidates if the RL service is not deployed.
-  const mockCandidates = drugCandidates.filter(c => c.diseaseId === diseaseId);
-  const candidates = realCandidates.length > 0 ? realCandidates : mockCandidates;
-  const usingMock = realCandidates.length === 0;
+  // FE-001 ROOT FIX: NEVER fall back to mock drug candidates in a production
+  // pharma app. If the RL service is not deployed, we render an explicit empty
+  // state instead of fabricating predictions that a researcher could mistake
+  // for real RL output. Mock fallback is a patient-safety hazard.
+  const candidates: DrugCandidate[] = realCandidates;
+  const rlServiceUnavailable =
+    realCandidates.length === 0 &&
+    (Boolean(rlError) || (rlData === null && !rlLoading));
 
   const [filterTier, setFilterTier] = useState<string>('all');
   const [filterPhase, setFilterPhase] = useState<string>('all');
@@ -572,13 +576,40 @@ function SearchResultsScreen() {
           (source: {rlData.source}).
         </div>
       )}
-      {usingMock && (
-        <div className="mb-4 text-xs text-amber-700 p-2 border border-amber-200 rounded bg-amber-50">
-          <strong>Showing demo data.</strong> The Phase 4 RL ranker is not deployed.
-          Set <code>RL_SERVICE_URL</code> or <code>RL_LOCAL_CSV</code> to see real RL predictions.
-        </div>
+
+      {/* FE-001 ROOT FIX: Empty state — never render mock data.
+          If the RL service is unavailable, we surface a hard-blocking empty
+          state so a researcher cannot mistake fabricated rows for real
+          predictions. The table below is only rendered when at least one
+          real candidate exists. */}
+      {rlServiceUnavailable && (
+        <Card className="mb-4 border-amber-300 bg-amber-50">
+          <CardContent className="py-10 text-center">
+            <AlertCircle className="h-10 w-10 mx-auto mb-3 text-amber-600" />
+            <p className="text-sm font-semibold text-amber-900">
+              No RL predictions available for {disease.name}.
+            </p>
+            <p className="text-xs text-amber-800 mt-2 max-w-md mx-auto">
+              The Phase 4 RL ranker service is not deployed. Deploy the RL service
+              (set <code className="bg-amber-100 px-1 rounded">RL_SERVICE_URL</code> or
+              <code className="bg-amber-100 px-1 rounded ml-1">RL_LOCAL_CSV</code>) to
+              see real, scientifically-valid repurposing candidates.
+            </p>
+            <p className="text-[11px] text-amber-700 mt-3 italic">
+              For patient-safety reasons, this platform never displays fabricated
+              candidate data.
+            </p>
+          </CardContent>
+        </Card>
       )}
 
+      {/* FE-001 ROOT FIX: Filter bar + results table only render when there
+          is at least one real candidate. If the RL service is unavailable,
+          we render the empty state above and skip the filter bar entirely
+          so the researcher cannot accidentally interact with a fabricated
+          result set. */}
+      {!rlServiceUnavailable && (
+        <>
       {/* Filter Bar */}
       <div className="flex flex-wrap items-center gap-2 mb-4">
         <span className="text-xs font-medium text-muted-foreground mr-1">Safety:</span>
@@ -686,6 +717,8 @@ function SearchResultsScreen() {
           )}
         </CardContent>
       </Card>
+        </>
+      )}
     </FadeIn>
   );
 }

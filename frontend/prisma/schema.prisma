@@ -81,6 +81,8 @@ model Organization {
   apiKeys           ApiKey[]
   billingInvoices   BillingInvoice[]
   subscription      Subscription?
+  // FE-005 ROOT FIX: back-relation for AuditLog.organizationId.
+  auditLogs         AuditLog[]
 
   @@index([plan])
   @@index([status])
@@ -327,15 +329,15 @@ model Notification {
 model AuditLog {
   id              String   @id @default(cuid())
   userId          String?
-  // FE-040 ROOT FIX: organizationId is required for multi-tenant audit-trail
-  // isolation. The previous schema had only userId + actorName — meaning
-  // audit logs could not be scoped to an org for query purposes, a user
-  // who was a member of multiple orgs had their actions conflated across
-  // orgs, and GDPR/CCPA data-subject-access-requests could not be scoped
-  // to a specific org. The field is nullable ONLY for system-level events
-  // (e.g. failed-login on a non-existent email) that are not tied to any
-  // org. All user-initiated writes populate it from the authenticated
-  // user's orgId via writeAuditLog.
+  // FE-005 + FE-040 ROOT FIX: organizationId is REQUIRED for multi-tenant
+  // isolation. The previous schema had only userId + actorName — meaning an
+  // admin of Org A could read audit logs of Org B via GET /api/audit-logs
+  // (no filter), and a user who was a member of multiple orgs had their
+  // actions conflated across orgs. GDPR/CCPA data-subject-access-requests
+  // could not be scoped to a specific org. The column is nullable ONLY for
+  // system-level events (failed-login on a non-existent email, etc.) that
+  // are not tied to any org. All user-initiated writes populate it from
+  // the authenticated user's orgId via writeAuditLog.
   organizationId  String?
   actorName       String
   action          String   // login | logout | hypothesis_create | billing_change | admin_action
@@ -345,15 +347,17 @@ model AuditLog {
   metadata        String   @default("{}") // JSON string
   createdAt       DateTime @default(now())
 
-  user User? @relation(fields: [userId], references: [id])
+  user         User?         @relation(fields: [userId], references: [id])
+  organization Organization? @relation(fields: [organizationId], references: [id])
 
   @@index([userId])
   @@index([action])
   // FE-018 ROOT FIX: Missing index on createdAt — audit log queries by
   // time range were full table scans.
   @@index([createdAt])
-  // FE-040 ROOT FIX: index on organizationId for per-org audit-log queries
-  // (compliance reporting, DSARs, multi-tenant scoping).
+  // FE-005 + FE-040 ROOT FIX: index on organizationId for per-org audit-log
+  // queries (compliance reporting, DSARs, multi-tenant scoping). This is
+  // the index the /api/audit-logs GET relies on for tenant isolation.
   @@index([organizationId])
 }
 

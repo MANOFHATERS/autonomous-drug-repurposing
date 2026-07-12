@@ -34,6 +34,24 @@ const IP_MAX_ATTEMPTS = 20; // 20 attempts...
 const IP_WINDOW_MINUTES = 5; // ...per 5 minutes
 const IP_BLOCK_MINUTES = 15; // ...then block IP for 15 minutes
 
+// FE-003 ROOT FIX: TOTP (2FA) brute-force protection.
+// A 6-digit TOTP code has 1,000,000 combinations; at 1000 req/s an attacker
+// can sweep the keyspace in ~17 minutes, and the ±30s drift window expands
+// it to ~3M codes. We implement a per-user sliding-window counter that is
+// SEPARATE from the password failedLoginCount, because password failures
+// and 2FA failures have different blast radii and reset semantics.
+export const TOTP_MAX_ATTEMPTS = 5; // 5 wrong TOTP codes...
+const TOTP_WINDOW_MINUTES = 5; // ...within 5 minutes...
+const TOTP_LOCK_MINUTES = 15; // ...locks 2FA for 15 minutes
+
+interface TotpBucket {
+  attempts: number[]; // timestamps (ms) of recent WRONG codes
+  lockedUntil: number | null;
+}
+
+// In-memory store keyed by userId. For multi-node deployment swap in Redis.
+const totpBuckets = new Map<string, TotpBucket>();
+
 interface IpBucket {
   attempts: number[]; // timestamps (ms) of recent attempts
   blockedUntil: number | null;
@@ -198,3 +216,177 @@ export async function recordSuccessfulLogin(userId: string): Promise<void> {
     },
   });
 }
+
+// ---------------------------------------------------------------------------
+// FE-003 ROOT FIX: TOTP (2FA) brute-force protection
+// ---------------------------------------------------------------------------
+
+/**
+ * Check whether a user is currently TOTP-locked (too many wrong 2FA codes
+ * in the sliding window). Returns { locked, retryAfterSeconds }.
+ *
+ * This is keyed on userId, not IP, because the mfaChallengeToken already
+ * binds the attempt to a specific user — an attacker cannot rotate
+ * usernames to bypass this. The IP-level rate limit (checkIpRateLimit)
+ * still applies as a separate layer for the overall request volume.
+ */
+export function checkTotpRateLimit(userId: string): {
+  locked: boolean;
+  retryAfterSeconds: number;
+} {
+  maybeCleanup();
+  const now = Date.now();
+  const bucket = totpBuckets.get(userId) || { attempts: [], lockedUntil: null };
+
+  if (bucket.lockedUntil && bucket.lockedUntil > now) {
+    return {
+      locked: true,
+      retryAfterSeconds: Math.ceil((bucket.lockedUntil - now) / 1000),
+    };
+  }
+
+  // Drop attempts older than the window.
+  const windowMs = TOTP_WINDOW_MINUTES * 60 * 1000;
+  bucket.attempts = bucket.attempts.filter((t) => now - t < windowMs);
+
+  if (bucket.attempts.length >= TOTP_MAX_ATTEMPTS) {
+    bucket.lockedUntil = now + TOTP_LOCK_MINUTES * 60 * 1000;
+    totpBuckets.set(userId, bucket);
+    return {
+      locked: true,
+      retryAfterSeconds: TOTP_LOCK_MINUTES * 60,
+    };
+  }
+
+  return { locked: false, retryAfterSeconds: 0 };
+}
+
+/**
+ * Record a failed TOTP attempt for a user. If the count exceeds
+ * TOTP_MAX_ATTEMPTS within TOTP_WINDOW_MINUTES, lock 2FA for
+ * TOTP_LOCK_MINUTES.
+ *
+ * Returns the lock state AFTER recording this failure.
+ */
+export function recordFailedTotp(userId: string): {
+  locked: boolean;
+  retryAfterSeconds: number;
+  attemptsRemaining: number;
+} {
+  maybeCleanup();
+  const now = Date.now();
+  const windowMs = TOTP_WINDOW_MINUTES * 60 * 1000;
+  const bucket = totpBuckets.get(userId) || { attempts: [], lockedUntil: null };
+
+  // Drop old attempts.
+  bucket.attempts = bucket.attempts.filter((t) => now - t < windowMs);
+  bucket.attempts.push(now);
+
+  if (bucket.attempts.length >= TOTP_MAX_ATTEMPTS) {
+    bucket.lockedUntil = now + TOTP_LOCK_MINUTES * 60 * 1000;
+    totpBuckets.set(userId, bucket);
+    return {
+      locked: true,
+      retryAfterSeconds: TOTP_LOCK_MINUTES * 60,
+      attemptsRemaining: 0,
+    };
+  }
+
+  totpBuckets.set(userId, bucket);
+  return {
+    locked: false,
+    retryAfterSeconds: 0,
+    attemptsRemaining: TOTP_MAX_ATTEMPTS - bucket.attempts.length,
+  };
+}
+
+/**
+ * Reset the TOTP attempt counter on a successful 2FA verification.
+ * Call this immediately after verifyTotp() returns true, BEFORE issuing
+ * access/refresh tokens.
+ */
+export function clearTotpAttempts(userId: string): void {
+  totpBuckets.delete(userId);
+}
+
+/**
+ * Test-only helper: reset all TOTP state. Exported for unit tests so they
+ * can run deterministically without state leaking between cases. NOT for
+ * use in production code paths.
+ */
+export function __resetTotpStateForTests(): void {
+  totpBuckets.clear();
+}
+
+// ---------------------------------------------------------------------------
+// FE-006 ROOT FIX: Per-user rate limit for expensive upstream API proxies.
+// ---------------------------------------------------------------------------
+
+// Per-user limits for the 6 public-API-proxy routes (drugs, diseases,
+// clinical-trials, literature, patents, safety). Without this, any
+// unauthenticated user could deplete the platform's NCBI / PatentsView /
+// openFDA API quotas via our backend as an open proxy.
+const USER_API_MAX_REQUESTS = 60; // 60 requests...
+const USER_API_WINDOW_MINUTES = 1; // ...per minute
+
+interface UserApiBucket {
+  requests: number[]; // timestamps (ms)
+}
+
+const userApiBuckets = new Map<string, UserApiBucket>();
+
+/**
+ * Check whether a user has exceeded the per-user API rate limit. Returns
+ * { blocked, retryAfterSeconds }. Does NOT record the request — call
+ * recordUserApiRequest(user) AFTER this returns blocked:false and the
+ * upstream call has actually been dispatched.
+ */
+export function checkUserApiRateLimit(userId: string): {
+  blocked: boolean;
+  retryAfterSeconds: number;
+  remaining: number;
+} {
+  maybeCleanup();
+  const now = Date.now();
+  const windowMs = USER_API_WINDOW_MINUTES * 60 * 1000;
+  const bucket = userApiBuckets.get(userId) || { requests: [] };
+  bucket.requests = bucket.requests.filter((t) => now - t < windowMs);
+
+  if (bucket.requests.length >= USER_API_MAX_REQUESTS) {
+    const oldest = bucket.requests[0];
+    const retryAfterSeconds = Math.ceil((oldest + windowMs - now) / 1000);
+    return {
+      blocked: true,
+      retryAfterSeconds: Math.max(1, retryAfterSeconds),
+      remaining: 0,
+    };
+  }
+  return {
+    blocked: false,
+    retryAfterSeconds: 0,
+    remaining: USER_API_MAX_REQUESTS - bucket.requests.length,
+  };
+}
+
+/**
+ * Record a successful (non-blocked) upstream API request for a user.
+ * Must be called AFTER checkUserApiRateLimit returns blocked:false.
+ */
+export function recordUserApiRequest(userId: string): void {
+  maybeCleanup();
+  const now = Date.now();
+  const windowMs = USER_API_WINDOW_MINUTES * 60 * 1000;
+  const bucket = userApiBuckets.get(userId) || { requests: [] };
+  bucket.requests = bucket.requests.filter((t) => now - t < windowMs);
+  bucket.requests.push(now);
+  userApiBuckets.set(userId, bucket);
+}
+
+/**
+ * Test-only helper: reset all per-user API rate-limit state.
+ */
+export function __resetUserApiStateForTests(): void {
+  userApiBuckets.clear();
+}
+
+export const USER_API_RATE_LIMIT_PER_MINUTE = USER_API_MAX_REQUESTS;

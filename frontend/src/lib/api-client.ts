@@ -184,6 +184,9 @@ export interface AdminUser {
   role: string;
   status: string;
   emailVerified: boolean;
+  // FE-009 ROOT FIX: surfaced from /api/admin/users so the admin screen
+  // can show the real 2FA state per user instead of a fabricated boolean.
+  mfaEnabled?: boolean;
   createdAt: string;
   lastLoginAt: string | null;
 }
