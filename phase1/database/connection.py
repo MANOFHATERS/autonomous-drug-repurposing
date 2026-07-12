@@ -765,6 +765,72 @@ def _configure_engine_events(engine: Engine) -> None:
             finally:
                 cursor.close()
 
+        # P1-015 ROOT FIX (Team-2 — register SQLite REGEXP function so
+        # CHECK constraints can use real regex matching instead of the
+        # weak LENGTH+SUBSTR backstop):
+        #   The migration 001 + 009 SQL uses PostgreSQL's POSIX regex
+        #   operator ``~`` for InChIKey / disease_id / pmid_list format
+        #   validation. SQLite does NOT support ``~`` natively. The
+        #   previous fix (v76 T-038) translated the InChIKey regex to
+        #   ``LENGTH(inchikey) = 27 AND SUBSTR(inchikey, 15, 1) = '-' AND
+        #   SUBSTR(inchikey, 26, 1) = '-'`` — a weak check that accepts
+        #   any 27-char string with hyphens at positions 15 and 26
+        #   (e.g. ``11111111111111-2222222222-3``, ``aaaa...``, ``!!!!...``).
+        #   Dev DBs (SQLite) accepted gibberish InChIKeys that prod
+        #   PostgreSQL rejected — a dev/prod asymmetry footgun.
+        #   ROOT FIX: register a SQLite REGEXP function via
+        #   ``create_function``. SQLite's SQL parser recognizes the
+        #   ``REGEXP`` operator (e.g. ``inchikey REGEXP '^[A-Z]{14}-...'``)
+        #   and routes it to the registered Python function. This gives
+        #   SQLite the SAME regex matching power as PostgreSQL's ``~``,
+        #   so the migration runner can translate ``~`` to ``REGEXP``
+        #   (instead of the weak LENGTH backstop) and dev/prod behavior
+        #   is identical. The function uses Python's ``re`` module with
+        #   ``re.search`` (SQLite REGEXP convention: returns 1 if the
+        #   pattern matches ANYWHERE in the string, 0 otherwise — so
+        #   patterns must use ``^...$`` anchors for full-string match,
+        #   which all our regexes already do).
+        import re as _re_for_sqlite_regexp
+
+        def _sqlite_regexp(pattern: str, value: Any) -> int:
+            """SQLite REGEXP function — returns 1 if pattern matches, 0 else.
+
+            SQLite calls this with (pattern, value) when a SQL statement
+            uses the ``REGEXP`` operator: ``value REGEXP pattern``.
+            ``value`` may be NULL (returns 0 — NULL does not match any
+            pattern). ``pattern`` is a Python regex string. Uses
+            ``re.search`` so patterns MUST anchor with ``^...$`` for
+            full-string match (all our CHECK-constraint regexes do).
+            """
+            if value is None:
+                return 0
+            if not isinstance(pattern, str):
+                return 0
+            try:
+                return 1 if _re_for_sqlite_regexp.search(pattern, str(value)) else 0
+            except _re_for_sqlite_regexp.error:
+                # Invalid regex pattern — do not match (safer than raising
+                # inside a CHECK constraint, which would reject every row).
+                return 0
+
+        @event.listens_for(engine, "connect")
+        def _register_sqlite_regexp_function(
+            dbapi_connection: Any, connection_record: Any
+        ) -> None:
+            # create_function signature: (name, num_args, func, deterministic?)
+            # ``deterministic=True`` (SQLite 3.8.3+) lets the query planner
+            # cache results — important for CHECK constraints evaluated
+            # on every INSERT. Older SQLite versions ignore the 4th arg.
+            try:
+                dbapi_connection.create_function(
+                    "REGEXP", 2, _sqlite_regexp, deterministic=True
+                )
+            except TypeError:
+                # Older SQLite / pysqlite versions don't accept
+                # ``deterministic`` — fall back to the 3-arg form.
+                dbapi_connection.create_function("REGEXP", 2, _sqlite_regexp)
+            logger.debug("SQLite REGEXP function registered (P1-015)")
+
     # --- Connection lifecycle logging ---
     if _DEBUG_EVENTS or not is_sqlite:
 

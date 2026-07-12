@@ -237,16 +237,16 @@ ID_PATTERNS: dict[str, str] = {
     # (_DRUGBANK_ID_RE) and Phase 2 drugbank_parser
     # (DRUGBANK_DRUG_IDENTIFIER_REGEX), all = ^DB\d{5,7}$. Previously
     # this was {5,6} which silently dead-lettered 7-digit DrugBank IDs
-    # that the parser accepts — fragmenting the KG.
+    # that the parser accepts -- fragmenting the KG.
     # P2-010 ROOT FIX (STITCH CIDm/CIDs case-sensitivity):
-    # The previous pattern ``CIDm\d+|CIDs\d+`` was case-SENSITIVE —
+    # The previous pattern ``CIDm\d+|CIDs\d+`` was case-SENSITIVE --
     # it accepted ``CIDm00002244`` and ``CIDs00002244`` (lowercase
     # m/s) but NOT ``CIDM00002244`` / ``CIDS00002244`` (uppercase
     # M/S). Any caller that uppercased the ID upstream (e.g.
     # phase1_bridge.py:3547 uppercases inchikey, and the entity
     # resolver applies .upper() to canonical IDs in some paths)
-    # converted ``CIDm00002244`` → ``CIDM00002244`` which FAILED
-    # the pattern — dead-lettering the entire STITCH drug-target
+    # converted ``CIDm00002244`` -> ``CIDM00002244`` which FAILED
+    # the pattern -- dead-lettering the entire STITCH drug-target
     # edge set (STITCH has ~500K drug-protein edges, the largest
     # single source). Drug-protein connectivity of the KG was
     # silently halved.
@@ -257,10 +257,25 @@ ID_PATTERNS: dict[str, str] = {
     # the four-letter prefix while keeping the digit run strict
     # (avoiding accidental match of unrelated identifiers). The
     # canonical form emitted by the STITCH loader remains
-    # ``CIDm<digits>`` / ``CIDs<digits>`` (lowercase m/s) — the
+    # ``CIDm<digits>`` / ``CIDs<digits>`` (lowercase m/s) -- the
     # case-insensitive pattern is defensive against upstream
     # normalisation, NOT a licence to emit arbitrary case.
-    "Compound": r"^(DB\d{5,7}|CHEMBL\d+|CID\d+|[A-Z]{14}-[A-Z]{10}-[A-Z]|[Cc][Ii][Dd][Mm]\d+|[Cc][Ii][Dd][Ss]\d+|MESH:[A-Z]\d+)$",
+    #
+    # P1-017 ROOT FIX (Team-2 -- accept synthesized IDs at the Phase 1 ->
+    #   Phase 2 bridge):
+    #   The v50 open-data fallback (``_v50_downloaders.py::_synthesize_drugbank_id``)
+    #   generates synthesized IDs with the ``SYNTH-DB-`` prefix (clearly
+    #   non-DrugBank -- see P1-017 root fix in drugbank_pipeline.py). The
+    #   previous Compound pattern accepted ONLY ``DB\d{5,7}`` (real
+    #   DrugBank IDs) -- synthesized IDs were REJECTED at the Phase 1 ->
+    #   Phase 2 bridge, breaking the v50 fallback end-to-end. ROOT FIX:
+    #   add ``SYNTH-DB-[0-9A-F]{8}`` and ``SYNTH-DB-M\d{6}`` to the
+    #   Compound pattern alternation. These match the patterns in
+    #   ``drugbank_pipeline._SYNTHESIZED_DRUG_ID_RE`` and
+    #   ``resolver_utils._SYNTHESIZED_DRUG_ID_RE`` -- all three must
+    #   stay in sync (a future refactor should consolidate into a
+    #   single shared ``_constants`` module).
+    "Compound": r"^(DB\d{5,7}|SYNTH-DB-[0-9A-F]{8}|SYNTH-DB-M\d{6}|CHEMBL\d+|CID\d+|[A-Z]{14}-[A-Z]{10}-[A-Z]|[Cc][Ii][Dd][Mm]\d+|[Cc][Ii][Dd][Ss]\d+|MESH:[A-Z]\d+)$",
     # v21 ROOT FIX (Audit section 4 finding 8 / Chain 9 - "Bridge emits
     # IDs that production rejects"): the previous Protein pattern
     # accepted ONLY UniProt accessions. But phase1_bridge.py:1642 emits

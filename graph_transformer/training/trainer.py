@@ -227,6 +227,70 @@ class GraphTransformerTrainer:
         # the same data again. This is the standard sklearn-style API.
         self._last_val_data: Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = None
 
+    def create_scheduler(self, total_steps: int) -> None:
+        """Create the OneCycleLR scheduler for custom training loops.
+
+        P3-012 ROOT FIX (HIGH, wrong): the OneCycleLR scheduler was
+        created ONLY inside ``fit()`` (line ~666). If a user called
+        ``train_epoch()`` directly (e.g. for a custom training loop with
+        early stopping, gradient accumulation, or per-epoch learning-rate
+        inspection), ``self.scheduler`` stayed ``None`` (set in
+        ``__init__``), and the per-batch ``self.scheduler.step()`` call
+        in ``train_epoch()`` was a no-op. The learning rate stayed
+        constant at ``5e-4`` for the entire run — no warmup, no cosine
+        decay. The model could converge to a suboptimal solution compared
+        to the same model trained via ``fit()``.
+
+        This method exposes the SAME OneCycleLR creation logic that
+        ``fit()`` uses, so custom training loops can opt in:
+
+            trainer = GraphTransformerTrainer(model, ...)
+            trainer.create_scheduler(total_steps=epochs * n_batches)
+            for epoch in range(epochs):
+                trainer.train_epoch(...)   # now steps the scheduler
+                trainer.evaluate(...)
+
+        Args:
+            total_steps: Total number of optimizer steps across the full
+                training run. OneCycleLR requires this upfront so it can
+                schedule the warmup (first 10%) and cosine decay (remaining
+                90%). Must be >= 15 (``MIN_STEPS_FOR_SCHEDULER``); below
+                that the scheduler is skipped (tiny debug runs only).
+
+        Note:
+            Calling this method REPLACES any existing scheduler on
+            ``self.scheduler``. If you call ``fit()`` after
+            ``create_scheduler()``, ``fit()`` will overwrite the scheduler
+            with its own (computed from its ``epochs`` and ``batch_size``
+            args).
+        """
+        MIN_STEPS_FOR_SCHEDULER = 15
+        if total_steps < MIN_STEPS_FOR_SCHEDULER:
+            self.scheduler = None
+            logger.warning(
+                f"P3-012: create_scheduler(total_steps={total_steps}) < "
+                f"{MIN_STEPS_FOR_SCHEDULER} — skipping scheduler creation "
+                f"(OneCycleLR requires enough steps for both warmup and "
+                f"anneal phases). LR will remain constant at "
+                f"{self.learning_rate}. This is expected for tiny "
+                f"debugging runs."
+            )
+            return
+        self.scheduler = torch.optim.lr_scheduler.OneCycleLR(
+            self.optimizer,
+            max_lr=self.learning_rate,
+            total_steps=total_steps,
+            pct_start=0.1,
+            anneal_strategy="cos",
+        )
+        logger.info(
+            f"P3-012 ROOT FIX: OneCycleLR scheduler created via "
+            f"create_scheduler() (max_lr={self.learning_rate}, "
+            f"total_steps={total_steps}, pct_start=0.1, anneal=cos). "
+            f"train_epoch() will now step the scheduler per batch. "
+            f"Custom training loops get the same warmup+decay as fit()."
+        )
+
     def train_epoch(
         self,
         drug_indices: torch.Tensor,
@@ -236,6 +300,17 @@ class GraphTransformerTrainer:
         exclude_edges: Optional[set] = None,
     ) -> float:
         """Train for one epoch.
+
+        P3-012 ROOT FIX (HIGH, wrong): this method steps the LR scheduler
+        (``self.scheduler``) per batch IF one exists. The scheduler is
+        created by ``fit()`` (with ``total_steps = epochs *
+        n_batches_per_epoch``) OR by the new ``create_scheduler()``
+        method (for custom training loops). If neither is called,
+        ``self.scheduler`` is ``None`` and the LR stays constant at
+        ``self.learning_rate`` — no warmup, no decay. This is acceptable
+        for debugging but suboptimal for production training. Call
+        ``create_scheduler(total_steps)`` before the loop to get the
+        OneCycleLR warmup+decay in a custom training loop.
 
         Args:
             drug_indices: (N,) drug node indices.
@@ -735,21 +810,13 @@ class GraphTransformerTrainer:
         n_train = len(train_labels)
         n_batches_per_epoch = max(1, (n_train + batch_size - 1) // batch_size)
         total_steps = epochs * n_batches_per_epoch
+        # P3-012 ROOT FIX: delegate to create_scheduler() so the scheduler
+        # creation logic has a SINGLE source of truth. Custom training loops
+        # that call train_epoch() directly can now opt in via
+        # create_scheduler(total_steps) and get the IDENTICAL warmup+decay
+        # schedule that fit() uses.
         if total_steps >= MIN_STEPS_FOR_SCHEDULER:
-            self.scheduler = torch.optim.lr_scheduler.OneCycleLR(
-                self.optimizer,
-                max_lr=self.learning_rate,
-                total_steps=total_steps,
-                pct_start=0.1,
-                anneal_strategy="cos",
-            )
-            logger.info(
-                f"P3-S06 ROOT FIX: OneCycleLR scheduler created "
-                f"(max_lr={self.learning_rate}, total_steps={total_steps}, "
-                f"pct_start=0.1, anneal=cos). Warmup for first 10% of "
-                f"steps, then cosine decay to ~0. The previous code used "
-                f"plain Adam with constant lr -- no warmup, no decay."
-            )
+            self.create_scheduler(total_steps=total_steps)
         else:
             self.scheduler = None
             logger.warning(

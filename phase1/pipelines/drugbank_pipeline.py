@@ -345,25 +345,67 @@ NS: dict[str, str] = {"db": DRUGBANK_XML_NAMESPACE}
 #   InChIKeys. The previous regex ``^DB\d{5,7}$`` REJECTED both forms
 #   (8-hex contains letters; DBSYNTH000000 is 14 chars). DQ4 (line ~1961)
 #   then SKIPPED every synthesized drug -> the pipeline produced ZERO
-#   drugs in v50 open-data fallback mode. The ``load()`` path's VARCHAR(64)
-#   column accepted the IDs, but DQ4 in the clean/parse path rejected
-#   them BEFORE they ever reached load(). The v50 fallback was effectively
-#   dead code.
-# ROOT FIX: extend the regex to ALSO accept:
-#   1. ``DB[\dA-F]{8}`` -- the 8-hex synthesized form (uppercase hex only,
-#      matching what ``hashlib.sha256(...).hexdigest()[:8].upper()`` emits).
-#   2. ``DBSYNTH\d{6}`` -- the missing-InChIKey sentinel.
-# The regex is still ANCHORED (``^...$``) so partial matches cannot slip
-# through. Real DrugBank IDs (DB\d{5,7}) continue to match the first
-# alternative. The Drug model's drugbank_id column is VARCHAR(64), so all
-# three forms fit. The v50 fallback is now scientifically usable: when
-# DrugBank XML is unavailable, the pipeline can still load ChEMBL-derived
-# drugs with synthesized IDs and the KG is non-empty.
+#   drugs in v50 open-data fallback mode.
+#
+# P1-017 ROOT FIX (Team-2 -- use clearly non-DrugBank prefix for
+#   synthesized IDs):
+#   The v82 fix extended the regex to accept ``DB{8 hex}`` and
+#   ``DBSYNTH{6 digits}`` -- both using the ``DB`` prefix. This created
+#   a COLLISION RISK: if DrugBank ever emits an 8-hex ID, it would
+#   collide with the synthesized sentinel. Real DrugBank has never
+#   emitted this form, but the collision risk is structural.
+#   ADDITIONAL BUG: the ``DBSYNTH{6 digits}`` form is 13 chars, but
+#   the ``drugbank_id`` column was VARCHAR(10) -- the DBSYNTH form was
+#   SILENTLY TRUNCATED or REJECTED at the DB level.
+#   ROOT FIX:
+#     1. ``_synthesize_drugbank_id`` now emits ``SYNTH-DB-{8 hex}`` and
+#        ``SYNTH-DB-M{6 digits}`` (clearly non-DrugBank prefix -- no
+#        collision risk).
+#     2. ``_DRUGBANK_ID_RE`` ONLY accepts REAL DrugBank IDs
+#        (``^DB\d{5,7}$``) -- synthesized IDs are REJECTED by this regex.
+#     3. A SEPARATE ``_SYNTHESIZED_DRUG_ID_RE`` accepts the synthesized
+#        form (``^SYNTH-DB-[0-9A-F]{8}$|^SYNTH-DB-M\d{6}$``).
+#     4. The validation logic (DQ4) accepts EITHER a real DrugBank ID
+#        OR a synthesized ID -- see ``_is_valid_drugbank_id`` below.
+#     5. ``DRUGBANK_ID_LENGTH`` widened from 10 to 64 (see models.py
+#        and migration 013) so the longer synthesized IDs fit.
+#     6. Downstream consumers can distinguish real vs synthesized by
+#        the prefix (``DB`` = real DrugBank, ``SYNTH-DB-`` = synthesized).
 _DRUGBANK_ID_RE: re.Pattern[str] = re.compile(
-    r"^DB\d{5,7}$"            # real DrugBank IDs: DB00945, DB00722, etc.
-    r"|^DB[\dA-F]{8}$"        # v50 synthesized: DBA1B2C3D4 (8 uppercase hex)
-    r"|^DBSYNTH\d{6}$"        # v50 sentinel for missing InChIKey
+    r"^DB\d{5,7}$"            # real DrugBank IDs ONLY: DB00945, DB00722, etc.
 )
+# P1-017 ROOT FIX (Team-2): separate regex for synthesized drug IDs.
+# The ``SYNTH-DB-`` prefix clearly distinguishes these from real DrugBank
+# IDs (``DB`` prefix). Downstream consumers can check the prefix to
+# decide whether to query DrugBank's API (real IDs only) or skip the
+# API call (synthesized IDs have no DrugBank backing).
+_SYNTHESIZED_DRUG_ID_RE: re.Pattern[str] = re.compile(
+    r"^SYNTH-DB-[0-9A-F]{8}$"  # synthesized from InChIKey hash: SYNTH-DB-A1B2C3D4
+    r"|^SYNTH-DB-M\d{6}$"      # synthesized for missing InChIKey: SYNTH-DB-M000001
+)
+
+
+def _is_valid_drugbank_id(drugbank_id: str | None) -> bool:
+    """Validate a drugbank_id — accepts EITHER real OR synthesized IDs.
+
+    P1-017 ROOT FIX (Team-2): the previous ``_DRUGBANK_ID_RE.match()``
+    accepted synthesized IDs (``DB{8 hex}``, ``DBSYNTH{6 digits}``) as
+    if they were real DrugBank IDs. This function is the SINGLE source
+    of truth for drugbank_id validation — it accepts EITHER a real
+    DrugBank ID (``DB\d{5,7}``) OR a synthesized ID (``SYNTH-DB-...``).
+    Callers that need to distinguish real vs synthesized can check
+    ``_DRUGBANK_ID_RE.match()`` (real only) vs
+    ``_SYNTHESIZED_DRUG_ID_RE.match()`` (synthesized only).
+
+    Returns True for a valid real OR synthesized ID, False otherwise.
+    ``None`` and empty strings return False.
+    """
+    if not drugbank_id or not isinstance(drugbank_id, str):
+        return False
+    return bool(
+        _DRUGBANK_ID_RE.match(drugbank_id)
+        or _SYNTHESIZED_DRUG_ID_RE.match(drugbank_id)
+    )
 
 # S19: standard InChIKey is 27 chars (14-10-1). Source: InChI Trust.
 # v84 FORENSIC ROOT FIX (BUG #52): removed the local ``_INCHIKEY_RE``
@@ -1386,6 +1428,16 @@ class DrugBankPipeline(BasePipeline):
         # Wrap the extract + transform + persist in try/finally so the
         # file handle opened inside _extract_all is always closed even
         # on exception (TestIssue16FileHandleClose).
+        # P1-016 ROOT FIX (Team-2 — replace locals().get() anti-pattern):
+        #   The previous code used ``locals().get("_file_handle")`` in the
+        #   finally block below to detect whether a future refactor had
+        #   moved file-handle management into clean() directly. This is
+        #   the same anti-pattern as the ``locals().get("drug_rec")``
+        #   case fixed above. ROOT FIX: initialise ``_file_handle = None``
+        #   BEFORE the try block. If a future refactor assigns
+        #   ``_file_handle`` inside the try, the finally block can read
+        #   it directly — no ``locals()`` call needed.
+        _file_handle = None  # P1-016 sentinel
         try:
             # Extract drugs and interactions (A6: split for single-responsibility).
             drugs_df, interactions_df = self._extract_all(raw_path)
@@ -1475,8 +1527,10 @@ class DrugBankPipeline(BasePipeline):
             # finally block; this outer finally is a defense-in-depth
             # guard for any future refactors that move file-handle
             # management into clean() directly (TestIssue16FileHandleClose).
-            # If a _file_handle local is present, close it.
-            _file_handle = locals().get("_file_handle")
+            # P1-016 ROOT FIX: read the sentinel directly (initialised
+            # before the try block above). If a future refactor assigns
+            # ``_file_handle`` inside the try, the finally block reads
+            # it directly — no ``locals()`` call needed.
             if _file_handle is not None:
                 try:
                     _file_handle.close()
@@ -1701,6 +1755,30 @@ class DrugBankPipeline(BasePipeline):
             context = etree.iterparse(_file_handle, **_build_iterparse_kwargs(recover=False))
             try:
                 for _event, elem in context:
+                    # P1-016 ROOT FIX (Team-2 — replace ``locals().get()``
+                    # anti-pattern with explicit sentinel):
+                    #   The previous code used ``failed_drug_id =
+                    #   locals().get("drug_rec")`` inside the except block
+                    #   to detect whether ``_parse_drug_element`` had
+                    #   assigned ``drug_rec`` before raising. ``locals()``
+                    #   is implementation-dependent (CPython returns a
+                    #   snapshot; other Python implementations may behave
+                    #   differently), slower than a sentinel variable,
+                    #   and fragile to refactoring (a future code change
+                    #   that adds ``drug_rec = None`` BEFORE the try block
+                    #   would silently break the detection — the sentinel
+                    #   would always be None, masking real parse failures).
+                    #   ROOT FIX: initialise ``drug_rec = None`` BEFORE
+                    #   the try block. If ``_parse_drug_element`` raises
+                    #   before assignment, ``drug_rec`` stays None (the
+                    #   sentinel). If it raises AFTER assignment (e.g.
+                    #   during the interactions parsing), ``drug_rec``
+                    #   holds the partial record. The except block reads
+                    #   ``drug_rec`` directly — no ``locals()`` call, no
+                    #   fragility, no performance overhead. This is the
+                    #   idiomatic Python pattern for "partially-assigned
+                    #   variable in a try block".
+                    drug_rec = None  # P1-016 sentinel
                     try:
                         drug_rec, interactions = self._parse_drug_element(elem)
                         if drug_rec:
@@ -1739,13 +1817,17 @@ class DrugBankPipeline(BasePipeline):
                             exc,
                             self._parse_failures,
                         )
-                        # drug_rec may not be assigned yet if the error
-                        # happened during _parse_drug_element; use a safe
-                        # local variable that we initialise before the try.
-                        failed_drug_id = locals().get("drug_rec")
+                        # P1-016 ROOT FIX: read the sentinel directly.
+                        # If ``_parse_drug_element`` raised before
+                        # assigning ``drug_rec``, the sentinel (None)
+                        # is still in scope — no ``locals()`` call
+                        # needed. If it raised AFTER assignment (partial
+                        # record), ``drug_rec`` holds the partial dict
+                        # and we extract the drugbank_id for the
+                        # dead-letter entry.
                         failed_drug_id = (
-                            failed_drug_id.get("drugbank_id")
-                            if isinstance(failed_drug_id, dict)
+                            drug_rec.get("drugbank_id")
+                            if isinstance(drug_rec, dict)
                             else None
                         )
                         self._dead_letter.append(
@@ -2020,10 +2102,21 @@ class DrugBankPipeline(BasePipeline):
             )
             return None, []
 
-        # DQ4: validate drugbank_id format (DB\d{5}).
-        if not _DRUGBANK_ID_RE.match(drugbank_id):
+        # DQ4: validate drugbank_id format.
+        # P1-017 ROOT FIX (Team-2): accept EITHER a real DrugBank ID
+        # (``DB\d{5,7}``) OR a synthesized ID (``SYNTH-DB-...``). The
+        # previous code only accepted ``_DRUGBANK_ID_RE.match()`` which,
+        # before P1-017, also matched synthesized forms (``DB{8 hex}``,
+        # ``DBSYNTH{6 digits}``). After P1-017, ``_DRUGBANK_ID_RE`` only
+        # matches REAL DrugBank IDs, so we use ``_is_valid_drugbank_id()``
+        # which accepts EITHER form. This preserves the v50 fallback's
+        # ability to load synthesized drugs while clearly distinguishing
+        # them from real DrugBank IDs by the ``SYNTH-DB-`` prefix.
+        if not _is_valid_drugbank_id(drugbank_id):
             logger.warning(
-                "[%s] Invalid DrugBank ID format: %r - drug skipped (DQ4)",
+                "[%s] Invalid DrugBank ID format: %r - drug skipped (DQ4). "
+                "Accepted formats: real DrugBank ID (DB\\d{5,7}) OR "
+                "synthesized ID (SYNTH-DB-[0-9A-F]{8} | SYNTH-DB-M\\d{6}).",
                 self.source_name,
                 drugbank_id,
             )

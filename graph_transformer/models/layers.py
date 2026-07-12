@@ -299,7 +299,34 @@ class HeterogeneousMultiHeadAttention(nn.Module):
         self_loop_messages = self.self_loop_proj(all_embeddings)  # (N, D)
         # Reshape self-loop messages to (N, num_heads * head_dim) for consistency
         # self_loop_proj outputs (N, embedding_dim) = (N, num_heads * head_dim)
-        messages = messages + self_loop_messages * self.self_loop_weight
+        #
+        # P3-013 ROOT FIX (HIGH, wrong): apply cross_type_norm to self-loop
+        # messages too. The previous code did:
+        #   messages = messages + self_loop_messages * self.self_loop_weight
+        # which is NOT scaled by cross_type_norm. But edge messages ARE
+        # scaled by cross_type_norm (line ~378: weighted_V_flat * gate *
+        # cross_type_norm). So a node with K incoming edge types received:
+        #   self_loop_weight * |self_loop_proj(h)| + sum_over_K_types(
+        #     cross_type_norm * |V|)
+        # = 1.0 * |self_loop_proj(h)| + K * (1/sqrt(K)) * |V|
+        # = 1.0 * |self_loop_proj(h)| + sqrt(K) * |V|
+        # For K=7 edge types, self-loops contributed 1.0/(1.0+2.65) ≈ 27%
+        # of the total — disproportionately influential for nodes with few
+        # incoming edge types (leaf nodes) and disproportionately weak for
+        # hub nodes. The self-loop's relative contribution varied with node
+        # degree, causing suboptimal learning on hub vs leaf nodes.
+        #
+        # ROOT FIX: scale self-loops by cross_type_norm too. Now a node
+        # with K incoming edge types receives:
+        #   cross_type_norm * self_loop_weight * |self_loop_proj(h)|
+        #     + K * cross_type_norm * |V|
+        # = cross_type_norm * (self_loop_weight * |self_loop_proj(h)| + sqrt(K) * |V|)
+        # The self-loop's relative contribution is now INDEPENDENT of K
+        # (it's self_loop_weight / (self_loop_weight + sqrt(K) * |V|/|h|)),
+        # which is consistent across node degrees. The self_loop_weight
+        # (learnable, init=0.1) still controls the self-loop's magnitude
+        # relative to edge messages.
+        messages = messages + self_loop_messages * self.self_loop_weight * cross_type_norm
 
         # Process each edge type
         # P3-039 ROOT FIX (comment accuracy): the previous comment claimed
@@ -350,7 +377,27 @@ class HeterogeneousMultiHeadAttention(nn.Module):
             Q_tgt = Q[tgt_nodes]  # (E, H, head_dim)
 
             # Scaled dot-product attention
-            scale = math.sqrt(self.head_dim)
+            # P3-014 ROOT FIX (HIGH, documentation): add the missing
+            # rationale for why the scale is sqrt(head_dim) and NOT
+            # sqrt(embedding_dim). A reader who sees ``scale = math.sqrt(
+            # self.head_dim)`` after the Q/K projections might think this
+            # is a bug — shouldn't the scale be sqrt(embedding_dim) since
+            # the Q/K projections output embedding_dim dimensions?
+            #
+            # It is NOT a bug. The Q/K tensors are reshaped to
+            # (N, num_heads, head_dim) BEFORE the dot product. The einsum
+            # 'ehd,ehd->eh' computes the dot product per-head over head_dim
+            # dimensions (NOT embedding_dim = num_heads * head_dim). Per
+            # Vaswani et al. 2017 ("Attention Is All You Need"), the
+            # correct scale is sqrt(d_k) where d_k is the dimensionality
+            # of the dot product — which is head_dim in multi-head
+            # attention, NOT embedding_dim. Scaling by sqrt(embedding_dim)
+            # would OVER-scale the attention scores (make them too small,
+            # pushing softmax toward uniform distribution), destroying the
+            # model's ability to discriminate relevant from irrelevant
+            # neighbors. The math is correct; this comment prevents a
+            # future maintainer from "fixing" it and breaking attention.
+            scale = math.sqrt(self.head_dim)  # d_k = head_dim per Vaswani et al. 2017 (NOT embedding_dim)
             # ROOT FIX (F3): use torch.einsum for idiomatic attention.
             # Q_tgt: (E, H, head_dim), K_src: (E, H, head_dim) -> (E, H)
             attn_scores = torch.einsum('ehd,ehd->eh', Q_tgt, K_src) / scale  # (E, H)

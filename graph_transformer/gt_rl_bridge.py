@@ -1334,17 +1334,25 @@ class GTRLBridge:
         gnn_scores_np = score_matrix.cpu().numpy()  # (num_drugs, num_diseases)
         p = np.clip(gnn_scores_np, 1e-7, 1 - 1e-7)
         entropy = -(p * np.log(p) + (1 - p) * np.log(1 - p))
-        # P3-027 ROOT FIX: clip confidence to [0, 1]. The formula
-        # ``1.0 - entropy / np.log(2)`` CAN produce values like -1e-9 or
-        # 1.0000001 due to fp32 precision: when p is very close to 0 or 1
-        # (after the 1e-7 clip), the entropy is ~0 but the division by
-        # log(2) can round to slightly more than 1.0, making confidence
-        # slightly negative. Conversely, when p is exactly 0.5, entropy
-        # = log(2) exactly in real arithmetic but ~log(2)*(1±1e-7) in
-        # fp32, so confidence can be slightly > 1. These out-of-range
-        # values trigger spurious validation warnings downstream
-        # (P3-008 documented the symptom). The fix clips to [0, 1] so
-        # the confidence column is always a valid probability-complement.
+        # P3-008 + P3-027 ROOT FIX (combined — two agents fixed the same
+        # bug in parallel): with fp32 gnn_scores (from torch.sigmoid on
+        # fp32 logits), the binary entropy computation can produce values
+        # slightly outside the expected [0, log(2)] range due to fp32
+        # precision. Two failure modes:
+        #   1. When p is very close to 0 or 1 (after the 1e-7 clip), the
+        #      entropy is ~0 but the division by log(2) can round to
+        #      slightly more than 1.0, making confidence slightly negative
+        #      (e.g., -1e-9).
+        #   2. When p is exactly 0.5, entropy = log(2) exactly in real
+        #      arithmetic but ~log(2)*(1±1e-7) in fp32, so confidence can
+        #      be slightly > 1 (e.g., 1.0000001) or slightly < 0.
+        # These out-of-range values triggered spurious validation warnings
+        # downstream ("Column 'confidence' has N values outside [0,1]")
+        # and silent clipping that masked real numerical instability.
+        # ROOT FIX: clip confidence to [0.0, 1.0] immediately after the
+        # computation. This eliminates the spurious warnings AND preserves
+        # the true value (the clipping only affects values that are
+        # already at the boundary due to fp32 rounding, not real signal).
         confidence_np = np.clip(1.0 - entropy / np.log(2), 0.0, 1.0)
 
         # V4 C-F1 fix: build the DataFrame WITHOUT materializing a list
@@ -3904,20 +3912,76 @@ class GTRLBridge:
                 # passing to predict() and extract_policy_prob_high().
                 _vn = self.rl_vec_normalize
                 while not done:
-                    # v90 BUG #7: normalize obs before predict/extract
+                    # v90 BUG #7 + P3-005 ROOT FIX: normalize obs ONCE in
+                    # the bridge, then pass vec_normalize=None to
+                    # extract_policy_prob_high. The previous code normalized
+                    # here AND passed _vn to extract_policy_prob_high, which
+                    # normalized AGAIN inside the helper (see
+                    # rl_drug_ranker.py:4308). DOUBLE normalization converts
+                    # raw obs to z-scores, then z-scores to z-scores-of-z-
+                    # scores — NOT the same as single normalization. The
+                    # policy network received double-normalized obs, a silent
+                    # distribution shift that made Phase 6 Top-K rankings
+                    # essentially random. Fix: normalize once here (needed
+                    # for rl_model.predict which has no vec_normalize param),
+                    # pass vec_normalize=None to extract_policy_prob_high
+                    # so it does NOT re-normalize.
                     _obs_for_policy = obs
                     if _vn is not None:
                         try:
                             _obs_for_policy = _vn.normalize_obs(obs)
-                        except Exception:
-                            pass  # fall back to raw obs (logged below)
+                        except Exception as vn_err:
+                            # P3-010 ROOT FIX (CRITICAL, silent fallback):
+                            # the previous code had `except Exception: pass`
+                            # — NO logging, NO error, NO raise. If VecNormalize
+                            # stats were corrupted/incompatible/obs-shape-
+                            # mismatched, the policy SILENTLY received raw
+                            # obs and produced random rankings. Pharma
+                            # partners received garbage with no indication
+                            # of failure. This was the EXACT silent
+                            # distribution shift bug the v89 P0 fix was
+                            # supposed to prevent.
+                            #
+                            # ROOT FIX: log ERROR with full context AND raise
+                            # RuntimeError. Shipping random predictions to
+                            # pharma partners is WORSE than crashing — at
+                            # least a crash is visible. The error message
+                            # includes the obs shape, the VecNormalize class,
+                            # and the original exception so the operator can
+                            # diagnose the root cause (corrupted stats file,
+                            # obs schema drift, SB3 version mismatch, etc.).
+                            logger.error(
+                                "P3-010 ROOT FIX: VecNormalize.normalize_obs "
+                                "FAILED in get_top_k_novel_predictions. The "
+                                "policy would receive RAW obs and produce "
+                                "RANDOM rankings (silent distribution shift "
+                                "= the v89 P0 bug). Refusing to ship garbage "
+                                "predictions. obs shape=%s, obs dtype=%s, "
+                                "VecNormalize class=%s, error=%s: %s. "
+                                "Fix: re-load the VecNormalize stats from the "
+                                "training checkpoint, OR retrain the RL agent "
+                                "with a matching obs schema.",
+                                getattr(obs, "shape", "unknown"),
+                                getattr(obs, "dtype", "unknown"),
+                                type(_vn).__name__,
+                                type(vn_err).__name__,
+                                vn_err,
+                            )
+                            raise RuntimeError(
+                                f"P3-010: VecNormalize.normalize_obs failed — "
+                                f"refusing to ship random predictions "
+                                f"({type(vn_err).__name__}: {vn_err})."
+                            ) from vn_err
                     action, _ = rl_model.predict(_obs_for_policy, deterministic=True)
                     action_int = int(_np.asarray(action).item())
                     # V5 B-F1/B-F2 hardening: extract policy PROBABILITY
-                    # via the shared helper. v90 BUG #7: pass vec_normalize
-                    # so the obs is normalized before the policy network.
+                    # via the shared helper. P3-005 ROOT FIX: pass
+                    # vec_normalize=None because _obs_for_policy is ALREADY
+                    # normalized above. Passing _vn here would cause
+                    # DOUBLE normalization (the helper normalizes again
+                    # at rl_drug_ranker.py:4308).
                     prob_high = extract_policy_prob_high(
-                        rl_model, _obs_for_policy, vec_normalize=_vn
+                        rl_model, _obs_for_policy, vec_normalize=None
                     )
                     policy_probs.append(prob_high)
                     actions.append(action_int)
@@ -3972,11 +4036,52 @@ class GTRLBridge:
                         _drug_indices = [di for di, v in zip(_drug_indices, _valid_mask) if v]
                         _disease_indices = [dii for dii, v in zip(_disease_indices, _valid_mask) if v]
                     if len(_drug_indices) == 0:
-                        logger.warning("V100 BUG P3-015: all pairs had missing drug/disease names -- skipping calibration.")
+                        logger.warning("V100 BUG P3-015: all pairs had missing drug/disease names — skipping calibration.")
+                        raw_scores = None
                         calibrated_scores = None
                     else:
                         top_drug_idx = torch.tensor(_drug_indices, dtype=torch.long)
                         top_disease_idx = torch.tensor(_disease_indices, dtype=torch.long)
+                        # P3-007 ROOT FIX (HIGH, wrong): the previous code
+                        # called predict_drug_disease_scores with
+                        # apply_temperature=False (RAW sigmoid, NO temperature
+                        # scaling) and stored the result in a column named
+                        # "gnn_score_calibrated". The column name was a LIE
+                        # — the values were uncalibrated raw sigmoid scores.
+                        # Downstream consumers (dashboard, literature cross-
+                        # check, pharma partner reports) interpreted the
+                        # column as calibrated probabilities, leading to
+                        # wrong threshold-based decisions (e.g. "score > 0.7
+                        # = high confidence" was applied to raw sigmoid
+                        # which may be over/underconfident). The trainer's
+                        # fit_temperature() method calibrates the temperature
+                        # parameter, but the bridge NEVER used
+                        # apply_temperature=True — the temperature calibration
+                        # was dead weight for the Phase 6 deliverable.
+                        #
+                        # ROOT FIX: call predict_drug_disease_scores TWICE
+                        # and store BOTH columns with honest names:
+                        #   - gnn_score_raw: apply_temperature=False (raw
+                        #     sigmoid, matches the candidate pool's
+                        #     selection distribution per V90 BUG #47).
+                        #   - gnn_score_calibrated: apply_temperature=True
+                        #     (temperature-scaled, ACTUALLY calibrated).
+                        # The temperature calibration is now USED (not dead
+                        # weight), and downstream consumers can choose
+                        # which to use: raw for ranking-consistent scores,
+                        # calibrated for threshold-based decisions.
+                        raw_scores = predict_drug_disease_scores(
+                            model=self.model,
+                            node_features=self.node_features,
+                            edge_indices=self.edge_indices,
+                            drug_indices=top_drug_idx,
+                            disease_indices=top_disease_idx,
+                            exclude_edges=set(LABEL_LEAKING_EDGES),
+                            device=self.device,
+                            # V90 ROOT FIX (BUG #47): raw sigmoid to MATCH
+                            # the candidate pool's selection distribution.
+                            apply_temperature=False,
+                        )
                         calibrated_scores = predict_drug_disease_scores(
                             model=self.model,
                             node_features=self.node_features,
@@ -3985,22 +4090,41 @@ class GTRLBridge:
                             disease_indices=top_disease_idx,
                             exclude_edges=set(LABEL_LEAKING_EDGES),
                             device=self.device,
-                            # V90 ROOT FIX (BUG #47): use apply_temperature=False
-                            # to MATCH the candidate pool's selection distribution.
-                            apply_temperature=False,
+                            # P3-007 ROOT FIX: temperature-scaled calibrated
+                            # probabilities — uses the trainer's
+                            # fit_temperature() result (was dead weight).
+                            apply_temperature=True,
                         )
-                    # Update gnn_score with calibrated values
+                    # P3-007 ROOT FIX: store BOTH columns with honest names.
+                    if raw_scores is not None:
+                        pool_df["gnn_score_raw"] = raw_scores
+                        logger.info(
+                            f"P3-007: predict_drug_disease_scores re-scored "
+                            f"{len(raw_scores)} top-K pairs with RAW sigmoid "
+                            f"(apply_temperature=False, matches selection "
+                            f"distribution). Stored as 'gnn_score_raw'."
+                        )
+                    else:
+                        pool_df["gnn_score_raw"] = pool_df["gnn_score"]
                     if calibrated_scores is not None:
                         pool_df["gnn_score_calibrated"] = calibrated_scores
                         logger.info(
-                            f"ROOT FIX (B3): predict_drug_disease_scores re-scored "
-                            f"{len(calibrated_scores)} top-K pairs with calibrated "
-                            f"probabilities."
+                            f"P3-007 ROOT FIX: predict_drug_disease_scores "
+                            f"re-scored {len(calibrated_scores)} top-K pairs "
+                            f"with TEMPERATURE-CALIBRATED probabilities "
+                            f"(apply_temperature=True, uses trainer's "
+                            f"fit_temperature result). Stored as "
+                            f"'gnn_score_calibrated' (now ACTUALLY calibrated, "
+                            f"was raw sigmoid before). Downstream consumers "
+                            f"(dashboard, literature cross-check, pharma "
+                            f"reports) should use this column for threshold-"
+                            f"based decisions."
                         )
                     else:
                         pool_df["gnn_score_calibrated"] = pool_df["gnn_score"]
                 except Exception as e:
-                    logger.warning(f"ROOT FIX (B3): predict_drug_disease_scores failed: {e}")
+                    logger.warning(f"P3-007: predict_drug_disease_scores failed: {e}")
+                    pool_df["gnn_score_raw"] = pool_df["gnn_score"]
                     pool_df["gnn_score_calibrated"] = pool_df["gnn_score"]
 
                 logger.info(

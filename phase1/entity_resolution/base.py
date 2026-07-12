@@ -124,11 +124,32 @@ class MatchConfidence(float, enum.Enum):
     # downstream consumer that ranked by confidence got the wrong answer.
     #
     # ROOT FIX: set FUZZY below NAME_NORMALIZED, and PROTEIN_NAME_FUZZY
-    # below NAME_NORMALIZED. The hierarchy is now:
-    #   INCHIKEY_EXACT (1.0) > INCHIKEY_CONNECTIVITY (0.9) >
-    #   NAME_NORMALIZED (0.8) > GENE_NAME_ORGANISM (0.75) >
-    #   SMILES_CANONICAL (0.75) > FUZZY (0.65) > PROTEIN_NAME_FUZZY (0.6)
-    #   > PUBCHEM_XREF (0.55) > UNKNOWN (0.5)
+    # below NAME_NORMALIZED.
+    #
+    # P1-021 ROOT FIX (Team-2 — comment drift: hierarchy comment listed
+    #   wrong PUBCHEM_XREF value). The previous comment said:
+    #     "PUBCHEM_XREF (0.55) > UNKNOWN (0.5)"
+    #   but the ACTUAL enum value (line 116 above) is 0.7 — placing
+    #   PUBCHEM_XREF ABOVE FUZZY (0.65), not between PROTEIN_NAME_FUZZY
+    #   (0.6) and UNKNOWN (0.5). The comment drifted from the code.
+    #   ROOT FIX: rewrite the hierarchy comment to match the ACTUAL
+    #   enum values (sorted descending), AND add a runtime assertion
+    #   (below the enum, ``_CONFIDENCE_HIERARCHY_ASSERTIONS``) so
+    #   future drift fails CI immediately.
+    #
+    # The CORRECT hierarchy (descending by value, ties broken by enum
+    # definition order) is:
+    #   INCHIKEY_EXACT      (1.0)  ─┐ tied — both are deterministic,
+    #   UNIPROT_EXACT       (1.0)  ─┘ source-independent exact matches
+    #   INCHIKEY_CONNECTIVITY (0.9)  — same molecule, different stereo
+    #   NAME_NORMALIZED     (0.8)  — exact name after case/punct normalization
+    #   GENE_NAME_ORGANISM  (0.75) ─┐ tied — both are strong but not
+    #   SMILES_CANONICAL    (0.75) ─┘ source-independent exact matches
+    #   PUBCHEM_XREF        (0.7)  — PubChem cross-reference (curated)
+    #   FUZZY               (0.65) — approximate string similarity
+    #   PROTEIN_NAME_FUZZY  (0.60) — approximate protein name match
+    #   UNKNOWN             (0.5)  ─┐ tied — lowest confidence / unknown
+    #   SYNTHETIC_KEY_MATCH (0.5)  ─┘ (computed InChIKey for biologics)
     #
     # The previous comment said "raised from 0.6 to be ≥ _FUZZY_THRESHOLD"
     # -- that was a misdiagnosis. The _FUZZY_THRESHOLD (0.85) was the
@@ -243,6 +264,50 @@ class MatchConfidence(float, enum.Enum):
         except ImportError:
             pass
         return cls.UNKNOWN
+
+
+# P1-021 ROOT FIX (Team-2 — runtime assertion to prevent comment/code drift):
+#   The previous comment listed PUBCHEM_XREF as 0.55 when the actual enum
+#   value is 0.7. Such drift is silent — filters behave differently than
+#   the documentation claims. ROOT FIX: assert at import time that EVERY
+#   enum member has the value documented in the hierarchy comment above.
+#   If a future maintainer changes an enum value without updating the
+#   comment (or vice versa), this assertion fails IMMEDIATELY at import
+#   time, failing CI and blocking the merge.
+#
+#   The expected values are frozen here as a tuple-of-tuples so they're
+#   easy to audit alongside the enum definition above. Keep this list
+#   in EXACT sync with the enum members and the hierarchy comment.
+_CONFIDENCE_HIERARCHY_ASSERTIONS: tuple[tuple[str, float], ...] = (
+    ("INCHIKEY_EXACT", 1.0),
+    ("INCHIKEY_CONNECTIVITY", 0.9),
+    ("NAME_NORMALIZED", 0.8),
+    ("PUBCHEM_XREF", 0.7),
+    ("FUZZY", 0.65),
+    ("UNIPROT_EXACT", 1.0),
+    ("GENE_NAME_ORGANISM", 0.75),
+    ("PROTEIN_NAME_FUZZY", 0.60),
+    ("UNKNOWN", 0.5),
+    ("SYNTHETIC_KEY_MATCH", 0.5),
+    ("SMILES_CANONICAL", 0.75),
+)
+for _member_name, _expected_value in _CONFIDENCE_HIERARCHY_ASSERTIONS:
+    _actual = getattr(MatchConfidence, _member_name, None)
+    if _actual is None:
+        raise AssertionError(
+            f"P1-021 drift guard: MatchConfidence.{_member_name} is missing "
+            f"from the enum (was it renamed or removed?). Update "
+            f"_CONFIDENCE_HIERARCHY_ASSERTIONS in base.py to match."
+        )
+    if float(_actual.value) != _expected_value:
+        raise AssertionError(
+            f"P1-021 drift guard: MatchConfidence.{_member_name}.value = "
+            f"{float(_actual.value)!r} but the documented hierarchy says "
+            f"{_expected_value!r}. Either fix the enum value OR update "
+            f"the hierarchy comment AND _CONFIDENCE_HIERARCHY_ASSERTIONS "
+            f"to match. Comment/code drift is the exact bug P1-021 fixes."
+        )
+del _member_name, _expected_value, _actual
 
 
 # ---------------------------------------------------------------------------

@@ -104,19 +104,75 @@ PHASE2_TO_PHASE3_NODE: Dict[str, str] = {
 # Value: (src_type, rel_type, tgt_type) in Phase 3 canonical vocabulary.
 # Only edges whose endpoints are both mappable appear here. Edges not in
 # this map are DROPPED (with a DEBUG log).
+#
+# P3-004 + P3-009 ROOT FIX (Team Member 9, forensic root fix):
+# The original PHASE2_TO_PHASE3_EDGE dict had only 5 entries and was
+# MISSING ('Protein','part_of','Pathway') — Phase 2's CORE_EDGE_TYPES
+# includes BOTH ('Protein','participates_in','Pathway') AND
+# ('Protein','part_of','Pathway'). If Phase 2 produced 'part_of' edges
+# they were SILENTLY DROPPED, breaking the protein->pathway leg of the
+# 3-hop pattern from the OTHER direction (the graph_builder path handled
+# 'part_of' but this adapter did not). The fix adds 'part_of' -> 'part_of'
+# so both relation names map identically.
+#
+# P3-009 ROOT FIX (unification): this dict is now IDENTICAL to the
+# _PHASE2_TO_PHASE3_EDGE_TYPE dict in graph_builder.py (line ~1324). The
+# two adapter paths (adapt_phase2_to_phase3 used by run_4phase.py via
+# graph_data=, and from_phase1_staged_data used by run_full_platform.py
+# and run_real_pipeline.py via phase1_staged_data=) now produce
+# IDENTICAL Phase 3 graphs for the same Phase 2 data. Previously they
+# had 5 vs 11 edge type mappings, different disease name canonicalization,
+# and different pathway->disease derivation — making results non-
+# reproducible across runners. The single source of truth is now the
+# graph_builder._PHASE2_TO_PHASE3_EDGE_TYPE dict; this dict mirrors it
+# (kept as a separate constant for adapter-module independence + so
+# existing imports of PHASE2_TO_PHASE3_EDGE continue to work).
+#
+# P3-001/P3-002 ROOT FIX: 'targets' -> 'binds' (neutral, NOT 'inhibits'),
+# 'allosterically_modulates' -> 'modulates' (neutral, NOT 'activates').
+# ('Compound','unknown','Protein') is INTENTIONALLY ABSENT — never map
+# unknown to a specific mechanism (per the P3-001 issue mandate).
 PHASE2_TO_PHASE3_EDGE: Dict[Tuple[str, str, str], Tuple[str, str, str]] = {
+    # Direct drug→protein mechanism edges
     ("Compound", "inhibits", "Protein"): ("drug", "inhibits", "protein"),
     ("Compound", "activates", "Protein"): ("drug", "activates", "protein"),
+    # P3-001 root fix: neutral binding edge (was wrongly 'inhibits').
+    ("Compound", "targets", "Protein"): ("drug", "binds", "protein"),
+    # P3-002 root fix: neutral modulation edge (was wrongly 'activates').
+    ("Compound", "allosterically_modulates", "Protein"): ("drug", "modulates", "protein"),
+    # Drug→disease therapeutic edges
     ("Compound", "treats", "Disease"): ("drug", "treats", "disease"),
+    ("Compound", "tested_for", "Disease"): ("drug", "tested_for", "disease"),
+    # Drug→clinical outcome edges (both relation names accepted — P3-009)
+    ("Compound", "causes", "ClinicalOutcome"): ("drug", "causes", "clinical_outcome"),
     ("Compound", "has_clinical_outcome", "ClinicalOutcome"): (
         "drug",
         "causes",
         "clinical_outcome",
     ),
+    # P3-004 root fix: ACCEPT BOTH 'participates_in' AND 'part_of'
+    # relation names from Phase 2 (CORE_EDGE_TYPES includes both). Both
+    # map to the same Phase 3 (protein, part_of, pathway) edge type.
     ("Protein", "participates_in", "Pathway"): (
         "protein",
         "part_of",
         "pathway",
+    ),
+    ("Protein", "part_of", "Pathway"): (
+        "protein",
+        "part_of",
+        "pathway",
+    ),
+    # P3-009 unification: also accept direct (Pathway, disrupted_in,
+    # Disease) edges if Phase 2 ever produces them (currently Phase 2
+    # does NOT — these edges are DERIVED in Step 5 from Gene->Disease +
+    # Gene->Protein + Protein->Pathway). Including this mapping makes
+    # the adapter IDENTICAL to graph_builder._PHASE2_TO_PHASE3_EDGE_TYPE
+    # so both paths produce the same graph for the same Phase 2 data.
+    ("Pathway", "disrupted_in", "Disease"): (
+        "pathway",
+        "disrupted_in",
+        "disease",
     ),
 }
 
@@ -260,10 +316,23 @@ def adapt_phase2_to_phase3(
         if uniprot_id:
             gene_id_to_uniprot[gene["id"]] = uniprot_id
 
-    # ─── Step 4: Build Protein -> Pathway mapping ───────────────────────
+    # ─── Step 4: Build Protein → Pathway mapping ───────────────────────
+    # P3-004 ROOT FIX: index BOTH 'participates_in' AND 'part_of' Phase 2
+    # relations. Phase 2's CORE_EDGE_TYPES includes BOTH relation names
+    # (config.py:3828). The previous code only indexed 'participates_in',
+    # so if Phase 2 produced ('Protein','part_of','Pathway') edges they
+    # were:
+    #   - SILENTLY DROPPED from the protein_id_to_pathway_ids map (here),
+    #     so pathway->disease derivation skipped them.
+    #   - ALSO silently dropped from the forward edge registration in
+    #     Step 7 (because PHASE2_TO_PHASE3_EDGE only had 'participates_in').
+    # The P3-004 fix in PHASE2_TO_PHASE3_EDGE handles the forward-edge
+    # registration; this fix handles the derivation indexing.
     protein_id_to_pathway_ids: Dict[str, List[str]] = {}
     for (src, rel, dst), edges in p2_edges.items():
-        if src == "Protein" and rel == "participates_in" and dst == "Pathway":
+        if src == "Protein" and dst == "Pathway" and rel in (
+            "participates_in", "part_of"
+        ):
             for protein_id, pathway_id in edges:
                 protein_id_to_pathway_ids.setdefault(protein_id, []).append(
                     pathway_id

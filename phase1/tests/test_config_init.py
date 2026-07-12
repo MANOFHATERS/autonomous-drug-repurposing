@@ -133,7 +133,11 @@ class TestDomain1Architecture:
         config._load_error = None
         config._resolved_settings = {}
 
-        with mock.patch("config.settings.load_dotenv") as mock_dotenv, \
+        # P1-019 ROOT FIX (Team-2): the module-level ``load_dotenv`` wrapper
+        # was removed. Tests now mock ``_load_dotenv_func`` (the module-level
+        # binding that is either the real ``dotenv.load_dotenv`` function or
+        # ``None`` if python-dotenv is not installed).
+        with mock.patch("config.settings._load_dotenv_func") as mock_dotenv, \
              mock.patch("logging.basicConfig") as mock_basicconfig:
             # Re-import should NOT trigger load_dotenv or basicConfig
             # because we haven't accessed any settings yet.
