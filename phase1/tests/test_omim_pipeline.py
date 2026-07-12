@@ -712,8 +712,9 @@ class TestDomain2Design:
 
     def test_bug_2_3_score_branches_reachable(self):
         """BUG-2.3: All 4 mapping_key score branches must be reachable."""
-        # mk=1 -> 0.5, mk=2 -> 0.6, mk=3 -> 0.9, mk=4 -> 0.8
-        for mk, expected in [(1, 0.5), (2, 0.6), (3, 0.9), (4, 0.8)]:
+        # v106 P1-006 ROOT FIX: mk=1 -> 0.2, mk=2 -> 0.25, mk=3 -> 0.9, mk=4 -> 0.8
+        # (Piñero 2020 §2.3 canonical values — NOT the old wrong 0.5/0.6)
+        for mk, expected in [(1, 0.2), (2, 0.25), (3, 0.9), (4, 0.8)]:
             score, _ = OMIMPipeline._compute_omim_score(mk, 0, 0.0)
             assert score == pytest.approx(expected, abs=0.001), \
                 f"mk={mk} -> score {score}, expected {expected}"
@@ -1205,10 +1206,17 @@ class TestDomain12Configuration:
         assert OMIM_CONFIRMED_SCORE == 0.9
 
     def test_bug_12_13_other_score_constants(self):
-        """BUG-12.13: Other score constants must be named (not magic numbers)."""
+        """BUG-12.13: Other score constants must be named (not magic numbers).
+
+        v106 P1-006 ROOT FIX: the canonical Piñero 2020 §2.3 values are
+        OMIM_PHENOTYPE_MAPPED_SCORE=0.25 and OMIM_GENE_MAPPED_SCORE=0.2.
+        The old wrong values (0.6 and 0.5) were 2.4x-2.5x too high and
+        caused the GNN to over-weight weakly-supported disease-gene
+        associations.
+        """
         assert OMIM_CONTIGUOUS_SCORE == 0.8
-        assert OMIM_PHENOTYPE_MAPPED_SCORE == 0.6
-        assert OMIM_GENE_MAPPED_SCORE == 0.5
+        assert OMIM_PHENOTYPE_MAPPED_SCORE == 0.25
+        assert OMIM_GENE_MAPPED_SCORE == 0.2
 
 
 # ===========================================================================
@@ -1555,8 +1563,12 @@ class TestRegressionBugs:
         )
 
     def test_bug_2_3_score_branches_reachable_regression(self):
-        """Regression: BUG-2.3 -- all 4 mapping-key score branches reachable."""
-        for mk, expected in [(1, 0.5), (2, 0.6), (3, 0.9), (4, 0.8)]:
+        """Regression: BUG-2.3 -- all 4 mapping-key score branches reachable.
+
+        v106 P1-006 ROOT FIX: the canonical Piñero 2020 §2.3 values are
+        mk=1 -> 0.2, mk=2 -> 0.25, mk=3 -> 0.9, mk=4 -> 0.8. The old
+        wrong values (0.5/0.6 for mk=1/mk=2) were 2.4x-2.5x too high."""
+        for mk, expected in [(1, 0.2), (2, 0.25), (3, 0.9), (4, 0.8)]:
             score, _ = OMIMPipeline._compute_omim_score(mk, 0, 0.0)
             assert score == pytest.approx(expected, abs=0.001)
 

@@ -3110,7 +3110,7 @@ def validate_gda_scores(
     #     1. Numeric coercion -- ALWAYS runs (idempotent: to_numeric on
     #        already-numeric data is a no-op).
     #     2. OMIM categorical mapping -- ALWAYS runs when source="omim"
-    #        (naturally idempotent: mapped values 0.5/0.6/0.8/0.9 are
+    #        (naturally idempotent: mapped values 0.2/0.25/0.9/0.8 are
     #        NOT integers 1/2/3/4, so re-running won't re-map them).
     #     3. Clipping -- uses PER-ROW idempotency: rows already marked
     #        ``_score_was_clipped=True`` are not re-clipped, preserving
@@ -3143,13 +3143,13 @@ def validate_gda_scores(
         # Coerce to numeric (always -- idempotent).
         out["score"] = pd.to_numeric(out["score"], errors="coerce")
         # FIX P1-ER-22 (LOW): cast to float64 unconditionally so the
-        # OMIM categorical->continuous mapping below (1->0.5 etc.)
+        # OMIM categorical->continuous mapping below (1->0.2 etc.)
         # doesn't trigger a pandas FutureWarning about assigning
         # floats to an int64 column.
         out["score"] = out["score"].astype("float64")
 
         # OMIM categorical mapping -- ALWAYS runs when source="omim".
-        # Naturally idempotent: mapped values 0.5/0.6/0.9/0.8 are NOT
+        # Naturally idempotent: mapped values 0.2/0.25/0.9/0.8 are NOT
         # integers 1/2/3/4, so re-running won't re-map them.
         #
         # v89 P0 ROOT FIX (Compound #2 -- OMIM score inversion): the
@@ -3176,12 +3176,13 @@ def validate_gda_scores(
         # AUC = 0.0 (Compound #2 in the v89 audit).
         #
         # The fix: align the validator's map with the pipeline's
-        # SCORE_BY_MAPPING_KEY. The map is now {1: 0.5, 2: 0.6, 3: 0.9,
-        # 4: 0.8} -- matching omim_pipeline.py exactly.
+        # SCORE_BY_MAPPING_KEY. The canonical map is now {1: 0.2,
+        # 2: 0.25, 3: 0.9, 4: 0.8} (Piñero 2020 §2.3) -- matching
+        # omim_pipeline.py exactly.
         #
         # v93 ROOT FIX (P1-029 -- single source of truth): the previous
-        # code hardcoded ``_OMIM_CATEGORICAL_MAP = {1: 0.5, 2: 0.6,
-        # 3: 0.9, 4: 0.8}`` as a local constant. If someone changed
+        # code hardcoded a local ``_OMIM_CATEGORICAL_MAP`` constant
+        # (with the old wrong values 0.5/0.6 for mk=1/mk=2). If someone changed
         # ``SCORE_BY_MAPPING_KEY`` in ``pipelines/omim_pipeline.py``
         # without updating this local copy, the two would SILENTLY
         # DIVERGE -- the pipeline would emit one set of scores and the
@@ -3200,8 +3201,9 @@ def validate_gda_scores(
             # v104 FORENSIC ROOT FIX (P1-006 -- WRONG hardcoded fallback OMIM
             #   score map):
             #   The previous code had a ``try/except ImportError`` that fell
-            #   back to a HARDCODED score map ``{1: 0.5, 2: 0.6, 3: 0.9,
-            #   4: 0.8}`` when the canonical ``SCORE_BY_MAPPING_KEY`` import
+            #   back to a HARDCODED score map with the old wrong values
+            #   (0.5 and 0.6 for mk=1 and mk=2) when the canonical
+            #   ``SCORE_BY_MAPPING_KEY`` import
             #   from ``pipelines.omim_pipeline`` failed. The CANONICAL map
             #   (Piñero 2020 §2.3, implemented in omim_pipeline.py:434) is
             #   ``{1: 0.2, 2: 0.25, 3: 0.9, 4: 0.8}``. The fallback gave
