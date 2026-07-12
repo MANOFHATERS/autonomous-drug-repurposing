@@ -6,6 +6,7 @@ import {
   checkRlAvailability,
   type MlServiceAvailability,
 } from "@/lib/services/ml-stubs";
+import { isOpenfdaApiKeyConfigured } from "@/lib/services/openfda";
 
 /**
  * GET /api/system/status
@@ -49,6 +50,11 @@ export async function GET() {
   if (auth.user === null) return auth.response;
 
   const patentsviewAvailable = !!process.env.PATENTSVIEW_API_KEY;
+  // FE-024: openFDA is technically reachable without a key, but the
+  // shared public rate limit (240 req/min) is too slow for a pharma
+  // partner demo. Report `degraded` when the key is missing so the
+  // admin dashboard surfaces the misconfiguration.
+  const openfdaKeyPresent = isOpenfdaApiKeyConfigured();
 
   return NextResponse.json({
     services: {
@@ -57,7 +63,17 @@ export async function GET() {
       mesh: { available: true, service: "MeSH Disease Search" },
       clinicalTrials: { available: true, service: "ClinicalTrials.gov Search" },
       pubmed: { available: true, service: "PubMed Literature Search" },
-      openfda: { available: true, service: "openFDA Adverse Events" },
+      openfda: {
+        // FE-024 ROOT FIX: report `degraded` (not `available: true`)
+        // when the API key is missing. The endpoint still works, but
+        // at 240 req/min shared — too slow for demos.
+        available: openfdaKeyPresent,
+        degraded: !openfdaKeyPresent,
+        service: "openFDA Adverse Events",
+        reason: openfdaKeyPresent
+          ? undefined
+          : "API key not configured. Service is reachable but rate-limited to 240 req/min shared across all unauthenticated callers. Set OPENFDA_API_KEY to raise to 120,000 req/min.",
+      },
       patentsview: {
         available: patentsviewAvailable,
         service: "USPTO Patent Search",

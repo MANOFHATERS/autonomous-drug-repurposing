@@ -13,6 +13,62 @@ import { z } from "zod";
 
 const RXNORM_BASE = "https://rxnav.nlm.nih.gov/REST";
 
+/**
+ * FE-025 ROOT FIX (Team Member 15):
+ *
+ * ROOT CAUSE: RxNorm REST calls had NO timeout. A slow RxNorm response
+ * (or a hung TCP connection) would hang the drug detail page
+ * indefinitely — the researcher sees a spinning loader with no
+ * recovery. The issue description mentions "ECHO endpoint" but the
+ * actual code already uses the REST endpoint; the real defect is the
+ * missing timeout.
+ *
+ * ROOT FIX: wrap every fetch in an `AbortController`-based 3-second
+ * timeout. On timeout, we throw a typed `RxNormTimeoutError` so the
+ * caller can render a clear "RxNorm lookup timed out — please retry"
+ * message instead of a generic 500.
+ *
+ * The 24h cache (`next: { revalidate: 86400 }`) is already in place
+ * and unchanged.
+ */
+
+const RXNORM_TIMEOUT_MS = 3000;
+
+export class RxNormTimeoutError extends Error {
+  constructor(public readonly endpoint: string) {
+    super(
+      `RxNorm ${endpoint} did not respond within ${RXNORM_TIMEOUT_MS}ms. ` +
+        "The NLM RxNorm service may be slow or unreachable. Please retry."
+    );
+    this.name = "RxNormTimeoutError";
+  }
+}
+
+/**
+ * Fetch with a 3-second AbortController timeout. Resolves with the
+ * Response on any HTTP status (caller checks res.ok). Rejects with
+ * `RxNormTimeoutError` on timeout.
+ */
+async function fetchWithTimeout(
+  url: string,
+  init: RequestInit = {}
+): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), RXNORM_TIMEOUT_MS);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } catch (e: unknown) {
+    // AbortError is thrown when the controller aborts the fetch.
+    if (e instanceof Error && e.name === "AbortError") {
+      throw new RxNormTimeoutError(url);
+    }
+    // Re-throw network errors as-is — they are not timeouts.
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 const RxNormConceptSchema = z.object({
   rxcui: z.string().optional(),
   name: z.string().optional(),
@@ -60,9 +116,9 @@ export async function searchDrugsByName(query: string, limit = 10): Promise<Norm
   const q = (query || "").trim();
   if (q.length < 2) return [];
   const url = `${RXNORM_BASE}/approximateTerm.json?term=${encodeURIComponent(q)}&maxEntries=${limit}`;
-  const res = await fetch(url, {
+  // FE-025: 3-second timeout via AbortController. Cache for 24h.
+  const res = await fetchWithTimeout(url, {
     headers: { Accept: "application/json" },
-    // Cache for 24h — drug nomenclature does not change frequently
     next: { revalidate: 86400 },
   });
   if (!res.ok) {
@@ -119,7 +175,8 @@ export async function getDrugProperties(rxcui: string): Promise<{
   tty?: string;
 }> {
   const url = `${RXNORM_BASE}/rxcui/${encodeURIComponent(rxcui)}/allProperties.json?prop=names+codes+attributes`;
-  const res = await fetch(url, {
+  // FE-025: 3-second timeout via AbortController. Cache for 24h.
+  const res = await fetchWithTimeout(url, {
     headers: { Accept: "application/json" },
     next: { revalidate: 86400 },
   });

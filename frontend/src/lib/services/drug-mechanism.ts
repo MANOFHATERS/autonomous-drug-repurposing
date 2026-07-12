@@ -24,6 +24,31 @@
 
 const CHEMBL_BASE = "https://www.ebi.ac.uk/chembl/api/data";
 
+/**
+ * FE-028 ROOT FIX (Team Member 15):
+ *
+ * ROOT CAUSE: the in-memory cache had NO TTL — entries lived forever
+ * (until evicted by LRU). If the KG was updated (e.g. a new mechanism
+ * was added to ChEMBL), the cache served the OLD mechanism
+ * indefinitely. For a pharma partner demo, this means showing
+ * outdated mechanisms with no recovery short of a server restart.
+ *
+ * ROOT FIX:
+ *   1. Cache entries now carry a `cachedAt` timestamp. On lookup,
+ *      entries older than `CACHE_TTL_MS` (5 minutes) are treated as
+ *         misses and re-fetched. 5 minutes is short enough that a
+ *         ChEMBL update is reflected quickly, but long enough to
+ *         avoid hammering ChEMBL on a busy dashboard.
+ *   2. Exported `clearDrugMechanismCache()` allows a manual refresh
+ *      via POST /api/drugs/mechanism/refresh.
+ *   3. The Next.js `next: { revalidate: 86400 }` on the underlying
+ *      fetch is preserved — it dedupes the HTTP request at the
+ *      framework level. The 5-min in-memory TTL is a SEPARATE
+ *      concern: it controls how often we re-check ChEMBL within a
+ *      single server process.
+ */
+const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes (FE-028: was infinite)
+
 export interface DrugMechanismResult {
   drugName: string;
   chemblId: string | null;
@@ -35,7 +60,13 @@ export interface DrugMechanismResult {
 
 // In-memory cache. Bounded to 256 entries; oldest evicted first.
 const CACHE_MAX = 256;
-const cache = new Map<string, DrugMechanismResult>();
+
+interface CacheEntry {
+  result: DrugMechanismResult;
+  cachedAt: number; // ms epoch — FE-028
+}
+
+const cache = new Map<string, CacheEntry>();
 
 function cacheKey(drugName: string): string {
   return drugName.trim().toLowerCase();
@@ -47,7 +78,42 @@ function cacheSet(key: string, value: DrugMechanismResult): void {
     const firstKey = cache.keys().next().value;
     if (firstKey !== undefined) cache.delete(firstKey);
   }
-  cache.set(key, value);
+  cache.set(key, { result: value, cachedAt: Date.now() });
+}
+
+/**
+ * FE-028: manually clear the drug-mechanism cache. Called by the
+ * POST /api/drugs/mechanism/refresh route when the operator clicks
+ * "Refresh" on the dashboard, or after a KG update is known to have
+ * landed.
+ *
+ * @param drugName Optional. If provided, clears only the entry for
+ *   that drug. If omitted, clears ALL entries.
+ */
+export function clearDrugMechanismCache(drugName?: string): void {
+  if (drugName) {
+    cache.delete(cacheKey(drugName));
+  } else {
+    cache.clear();
+  }
+}
+
+/** FE-028: inspect the cache for observability / debugging. */
+export function getDrugMechanismCacheState(): Array<{
+  drugName: string;
+  cachedAt: number;
+  ageMs: number;
+  ttlRemainingMs: number;
+  mechanism: string | null;
+}> {
+  const now = Date.now();
+  return Array.from(cache.entries()).map(([k, entry]) => ({
+    drugName: k,
+    cachedAt: entry.cachedAt,
+    ageMs: now - entry.cachedAt,
+    ttlRemainingMs: Math.max(0, CACHE_TTL_MS - (now - entry.cachedAt)),
+    mechanism: entry.result.mechanism,
+  }));
 }
 
 interface ChEMBLMoleculeResponse {
@@ -164,8 +230,14 @@ export async function lookupDrugMechanism(
   drugName: string
 ): Promise<DrugMechanismResult> {
   const key = cacheKey(drugName);
+  const now = Date.now();
+
+  // FE-028: TTL check. Treat entries older than CACHE_TTL_MS as misses.
   const cached = cache.get(key);
-  if (cached) return cached;
+  if (cached && now - cached.cachedAt < CACHE_TTL_MS) {
+    return cached.result;
+  }
+  // (else: cache miss or stale — fall through to re-fetch)
 
   const result: DrugMechanismResult = {
     drugName: drugName.trim(),

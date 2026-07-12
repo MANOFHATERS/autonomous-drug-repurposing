@@ -50,6 +50,15 @@ export interface DatasetStatsResponse {
   backend?: string;
   warnings: string[];
   errors: string[];
+  /**
+   * FE-021: explicit status field so the dashboard can render a clear
+   * "no data ingested yet — run Phase 1 to populate" message instead of
+   * a generic 500 error on fresh deploys.
+   *   - "ok"           : data is available (local or proxied).
+   *   - "no_data"      : checkpoint file does not exist — Phase 1 has not run.
+   *   - "service_down" : proxy attempted but upstream failed.
+   */
+  status: "ok" | "no_data" | "service_down";
   source: "dataset_service" | "local_checkpoint" | "none";
   generatedAt: string;
   note?: string;
@@ -98,6 +107,7 @@ async function readLocalCheckpoint(checkpointPath: string): Promise<DatasetStats
     backend: bridge.backend,
     warnings: bridge.warnings || [],
     errors: bridge.errors || [],
+    status: "ok",
     source: "local_checkpoint",
     generatedAt: new Date().toISOString(),
     note:
@@ -127,6 +137,7 @@ async function proxyToDatasetService(url: string): Promise<DatasetStatsResponse>
     backend: body?.backend,
     warnings: body?.warnings || [],
     errors: body?.errors || [],
+    status: "ok",
     source: "dataset_service",
     generatedAt: body?.generatedAt || new Date().toISOString(),
   };
@@ -139,16 +150,26 @@ export async function getDatasetStats(): Promise<DatasetStatsResponse> {
     try {
       return await proxyToDatasetService(serviceUrl);
     } catch (e) {
-      console.warn("Dataset service proxy failed, falling back to local checkpoint:", e);
+      console.warn(
+        "Dataset service proxy failed, falling back to local checkpoint:",
+        e
+      );
+      // Fall through to local checkpoint — do NOT return service_down here
+      // if the local checkpoint exists. Only mark service_down if BOTH
+      // paths fail.
     }
   }
 
   // 2. Local checkpoint path.
-  const checkpointPath = process.env.DATASET_CHECKPOINT_PATH || DEFAULT_CHECKPOINT_PATH;
+  const checkpointPath =
+    process.env.DATASET_CHECKPOINT_PATH || DEFAULT_CHECKPOINT_PATH;
   const stats = await readLocalCheckpoint(checkpointPath);
   if (stats) return stats;
 
   // 3. No data available.
+  // FE-021: return a clear `no_data` status with a helpful message so the
+  // dashboard can render "No data ingested yet — run Phase 1 to populate"
+  // instead of a generic 500 error on fresh deploys.
   return {
     sources: [],
     nodesLoaded: 0,
@@ -156,11 +177,17 @@ export async function getDatasetStats(): Promise<DatasetStatsResponse> {
     edgeTypesPresent: [],
     warnings: [],
     errors: [],
+    status: serviceUrl ? "service_down" : "no_data",
     source: "none",
     generatedAt: new Date().toISOString(),
-    note:
-      "No dataset statistics available. Set DATASET_SERVICE_URL to proxy " +
-      `to the Airflow service, or ensure the Phase 1 pipeline has written ` +
-      `its checkpoint to ${checkpointPath}.`,
+    note: serviceUrl
+      ? "Dataset service is configured but did not respond, and no local " +
+        "Phase 1 checkpoint was found. Verify DATASET_SERVICE_URL is " +
+        "reachable, or run the Phase 1 pipeline to produce a local " +
+        `checkpoint at ${checkpointPath}.`
+      : "No dataset statistics available. The Phase 1 Airflow pipeline has " +
+        "not been run yet. Run Phase 1 to populate the dataset checkpoint " +
+        `at ${checkpointPath}, or set DATASET_SERVICE_URL to proxy to a ` +
+        "deployed Airflow service.",
   };
 }

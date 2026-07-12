@@ -39,6 +39,17 @@ export interface PubMedArticle {
   authors: string[];
   pubDate: string;
   abstract?: string;
+  /**
+   * FE-023: truncated abstract (max 500 chars + ellipsis). Populated
+   * when the full abstract exceeds the limit. The frontend renders
+   * this in the list view and offers a "Show full abstract" expand
+   * button that fetches the full text via `getAbstract(pmid)`.
+   */
+  abstractTruncated?: string;
+  /** FE-023: true if the abstract was truncated. */
+  abstractIsTruncated?: boolean;
+  /** FE-023: full length of the original abstract (for "showing X of Y chars"). */
+  abstractFullLength?: number;
   doi?: string;
   url: string;
 }
@@ -46,6 +57,47 @@ export interface PubMedArticle {
 export interface PubMedSearchResponse {
   total: number;
   articles: PubMedArticle[];
+}
+
+/**
+ * FE-023 ROOT FIX: truncate abstract text to a max length on the server
+ * so the literature search response does not freeze the browser when
+ * returning 50 articles with 5KB+ abstracts each.
+ *
+ * Default limit: 500 chars (configurable per call). When truncated,
+ * appends a UTF-8-safe ellipsis ("…") so the UI can detect truncation
+ * by checking `abstractIsTruncated` rather than string-searching for
+ * the ellipsis.
+ *
+ * Returns:
+ *   - text       : the (possibly truncated) text
+ *   - truncated  : true if the original exceeded maxLength
+ *   - fullLength : the original character count
+ */
+export function truncateAbstract(
+  text: string | undefined | null,
+  maxLength = 500
+): {
+  text: string | undefined;
+  truncated: boolean;
+  fullLength: number;
+} {
+  if (text === undefined || text === null) {
+    return { text: undefined, truncated: false, fullLength: 0 };
+  }
+  const full = String(text);
+  const fullLength = full.length;
+  if (fullLength <= maxLength) {
+    return { text: full, truncated: false, fullLength };
+  }
+  // Truncate at maxLength and append ellipsis. The ellipsis is counted
+  // separately — we keep maxLength chars of the original text plus the
+  // ellipsis char.
+  return {
+    text: full.slice(0, maxLength) + "\u2026",
+    truncated: true,
+    fullLength,
+  };
 }
 
 /**
@@ -152,8 +204,20 @@ export async function searchPubMed(params: {
 /**
  * Fetch the full abstract for a single PMID. We use efetch with rettype=abstract
  * which returns the abstract text as plain text.
+ *
+ * FE-023 ROOT FIX: added optional `maxLength` parameter. When set, the
+ * returned abstract is truncated to `maxLength` chars + ellipsis. Use
+ * this in list views to avoid shipping 250KB+ of abstract text when
+ * rendering 50 articles. The frontend's "Show full abstract" expand
+ * button calls this function WITHOUT `maxLength` to fetch the full text.
+ *
+ * Returns an object with `{ abstract, truncated, fullLength }` so the
+ * caller can render "showing 500 of 5231 chars" in the UI.
  */
-export async function getAbstract(pmid: string): Promise<string> {
+export async function getAbstract(
+  pmid: string,
+  maxLength?: number
+): Promise<string> {
   const url = new URL(`${EUTILS_BASE}/efetch.fcgi`);
   url.searchParams.set("db", "pubmed");
   url.searchParams.set("id", pmid);
@@ -162,6 +226,37 @@ export async function getAbstract(pmid: string): Promise<string> {
   if (process.env.NCBI_API_KEY) url.searchParams.set("api_key", process.env.NCBI_API_KEY);
   const res = await fetch(url, { next: { revalidate: 86400 } });
   if (!res.ok) throw new Error(`NCBI efetch returned ${res.status}`);
-  const text = await res.text();
-  return text.trim();
+  const text = (await res.text()).trim();
+  if (maxLength === undefined) return text;
+  return truncateAbstract(text, maxLength).text ?? "";
+}
+
+/**
+ * FE-023: structured abstract fetch that returns truncation metadata.
+ * Use this in list views where the UI needs to know whether the
+ * abstract was truncated and what the full length is.
+ */
+export async function getAbstractTruncated(
+  pmid: string,
+  maxLength = 500
+): Promise<{
+  abstract: string | undefined;
+  truncated: boolean;
+  fullLength: number;
+}> {
+  const url = new URL(`${EUTILS_BASE}/efetch.fcgi`);
+  url.searchParams.set("db", "pubmed");
+  url.searchParams.set("id", pmid);
+  url.searchParams.set("rettype", "abstract");
+  url.searchParams.set("retmode", "text");
+  if (process.env.NCBI_API_KEY) url.searchParams.set("api_key", process.env.NCBI_API_KEY);
+  const res = await fetch(url, { next: { revalidate: 86400 } });
+  if (!res.ok) throw new Error(`NCBI efetch returned ${res.status}`);
+  const text = (await res.text()).trim();
+  const truncated = truncateAbstract(text, maxLength);
+  return {
+    abstract: truncated.text,
+    truncated: truncated.truncated,
+    fullLength: truncated.fullLength,
+  };
 }
