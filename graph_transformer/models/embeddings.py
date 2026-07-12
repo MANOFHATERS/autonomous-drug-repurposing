@@ -11,7 +11,7 @@ FIX vs original codebase (B8):
 from __future__ import annotations
 
 import logging
-from typing import Dict
+from typing import Dict, Optional
 
 import torch
 import torch.nn as nn
@@ -152,26 +152,108 @@ class NodeTypeEmbedding(nn.Module):
     export "API surface pollution". The V11 fix wires it into the
     public API of the main model class.
 
+    P3-004 ROOT FIX (Team Member 9, v104 — UNKNOWN NODE-TYPE FALLBACK):
+        At inference time, if the model receives a graph with a NEW
+        node type (e.g., 'variant' for pharmacogenomics added after
+        the model is trained), the lookup
+        ``self.embeddings(node_type_indices)`` raises IndexError because
+        ``node_type_indices`` contains a value >= ``num_node_types``.
+        This blocks KG growth — the model cannot be deployed without
+        retraining.
+
+        ROOT FIX: add a fallback 'unknown' embedding (slot index
+        ``num_node_types``, accessible via the ``UNKNOWN_TYPE_IDX``
+        class attribute). In ``forward()``, CLAMP out-of-range indices
+        to the unknown slot and log a WARNING (once per instance, to
+        avoid log spam). The unknown embedding is initialized to ZERO
+        with a small learnable bias, so it does not perturb trained
+        representations but can be learned if the model is later
+        fine-tuned on a graph that includes the new type.
+
+        This graceful degradation allows Phase 2 to grow (add new node
+        types) without blocking Phase 3 inference — the new type's
+        nodes will pass through with neutral embeddings until the model
+        is retrained.
+
     Args:
         num_node_types: Number of distinct node types.
         embedding_dim: Dimension of the type embedding.
     """
 
+    # P3-004 ROOT FIX v104: the unknown-type slot is at index num_node_types
+    # (i.e., one slot past the last trained type). UNKNOWN_TYPE_IDX is a
+    # CLASS-level constant so callers can introspect the fallback index
+    # without instantiating the class.
+    UNKNOWN_TYPE_IDX: int = -1  # resolved per-instance in __init__
+
     def __init__(self, num_node_types: int = 5, embedding_dim: int = 128) -> None:
         super().__init__()
         self.embedding_dim = embedding_dim
         self.num_node_types = num_node_types
-        self.embeddings = nn.Embedding(num_node_types, embedding_dim)
+        # P3-004 ROOT FIX v104: allocate one EXTRA slot for the 'unknown'
+        # type fallback. Total embedding table size = num_node_types + 1.
+        # The unknown slot is initialized to ZERO (no perturbation to
+        # trained representations) and is learnable so it CAN be trained
+        # if the model is later fine-tuned on a graph that includes new
+        # node types.
+        self.UNKNOWN_TYPE_IDX = num_node_types  # instance-level resolution
+        self.embeddings = nn.Embedding(num_node_types + 1, embedding_dim)
+        # Initialize the unknown slot to ZERO so untrained types do not
+        # perturb the projected features. Use zero_() with no_grad so the
+        # initialization is not tracked as a gradient.
+        with torch.no_grad():
+            self.embeddings.weight[self.UNKNOWN_TYPE_IDX].zero_()
+        # Track whether we've warned about unknown-type fallback (per instance).
+        self._unknown_warned: bool = False
 
     def forward(self, node_type_indices: torch.Tensor) -> torch.Tensor:
         """Look up type embeddings.
 
+        P3-004 ROOT FIX v104: out-of-range indices (>= num_node_types)
+        are CLAMPED to the unknown-type slot (index num_node_types) and
+        a WARNING is logged (once per instance). This prevents the
+        IndexError that would otherwise crash inference when Phase 2
+        adds a new node type after the model is trained.
+
         Args:
             node_type_indices: Long tensor of shape (num_nodes,).
+                Values in [0, num_node_types-1] are looked up normally.
+                Values >= num_node_types are clamped to the unknown
+                slot (index num_node_types).
 
         Returns:
             Tensor of shape (num_nodes, embedding_dim).
         """
+        # P3-004 ROOT FIX v104: detect out-of-range indices and clamp
+        # them to the unknown-type slot. This is the ROOT FIX for the
+        # IndexError crash that blocked KG growth.
+        out_of_range_mask = node_type_indices >= self.num_node_types
+        if out_of_range_mask.any():
+            num_oob = int(out_of_range_mask.sum().item())
+            if not self._unknown_warned:
+                logger.warning(
+                    f"NodeTypeEmbedding.forward() received {num_oob} "
+                    f"node-type indices >= num_node_types "
+                    f"({self.num_node_types}). These will be CLAMPED to "
+                    f"the 'unknown' type slot (index "
+                    f"{self.UNKNOWN_TYPE_IDX}), which is initialized to "
+                    f"ZERO. The model will produce neutral embeddings "
+                    f"for these nodes until retrained. This is graceful "
+                    f"degradation (P3-004 ROOT FIX v104) — Phase 2 can "
+                    f"add new node types without crashing Phase 3 "
+                    f"inference. To get full fidelity, RETRAIN the "
+                    f"model on a graph that includes the new types. "
+                    f"(This warning is emitted ONCE per "
+                    f"NodeTypeEmbedding instance.)"
+                )
+                self._unknown_warned = True
+            # Clamp to the unknown slot. torch.clamp preserves dtype
+            # and device, and is differentiable (no gradient through
+            # the index selection — Embedding lookup itself is the
+            # differentiable op).
+            node_type_indices = node_type_indices.clamp(
+                max=self.UNKNOWN_TYPE_IDX
+            )
         return self.embeddings(node_type_indices)
 
 
@@ -182,10 +264,36 @@ class NodeTypeProjection(nn.Module):
     (e.g., drugs may have 1024-dim Morgan fingerprints while proteins
     have 768-dim ESM-2 embeddings).
 
+    P3-009 ROOT FIX (Team Member 9, v104 — FREEZE PRETRAINED EMBEDDINGS):
+        When Phase 2's pre-trained TransE (Bordes et al. 2013) embeddings
+        are loaded into the per-type projection layers via
+        ``load_pretrained_embeddings()``, the GNN's optimizer would
+        normally update them during training. For small graphs (demo,
+        pilot), the GNN's gradient signal is noisy and OVERWRITES the
+        TransE signal — wasting the TransE pre-training (which took
+        hours).
+
+        ROOT FIX: add a ``freeze_pretrained`` flag (default True). When
+        frozen, ``load_pretrained_embeddings()`` sets
+        ``requires_grad=False`` on the loaded projection's weight and
+        bias, so the optimizer skips them entirely. The frozen
+        projection acts as a fixed feature extractor that maps raw
+        node features into the TransE-learned embedding space, and the
+        GNN learns only the attention/FFN weights on top.
+
+        The frozen types are tracked in ``self._frozen_types`` so a
+        future caller can introspect which types are frozen. A CI test
+        verifies that ``requires_grad=False`` is set on frozen types.
+
     Args:
         feature_dims: Dict mapping node type name to raw feature dimension.
         embedding_dim: Target embedding dimension for all types.
         feature_norm: Type of normalization ('none', 'layer', 'batch').
+        freeze_pretrained: Default freeze policy for
+            ``load_pretrained_embeddings()``. If True (default), loaded
+            embeddings are frozen. If False, they are trainable. Can
+            be overridden per-call via the ``freeze`` parameter of
+            ``load_pretrained_embeddings()``.
     """
 
     def __init__(
@@ -193,11 +301,19 @@ class NodeTypeProjection(nn.Module):
         feature_dims: Dict[str, int],
         embedding_dim: int = 128,
         feature_norm: str = "none",
+        freeze_pretrained: bool = True,
     ) -> None:
         super().__init__()
         self.feature_dims = dict(feature_dims)
         self.embedding_dim = embedding_dim
         self.feature_norm = feature_norm
+        # P3-009 ROOT FIX v104: default freeze policy for loaded pretrained
+        # embeddings. Can be overridden per-call.
+        self._default_freeze_pretrained: bool = bool(freeze_pretrained)
+        # P3-009 ROOT FIX v104: track which node types have frozen
+        # pretrained embeddings. Public for introspection (CI test checks
+        # this set).
+        self._frozen_types: set = set()
 
         # Per-type linear projections
         self.projections: Dict[str, nn.Module] = {}
@@ -250,6 +366,147 @@ class NodeTypeProjection(nn.Module):
         self._type_to_idx: Dict[str, int] = {
             name: idx for idx, name in enumerate(feature_dims.keys())
         }
+
+    # ------------------------------------------------------------------
+    # P3-009 ROOT FIX v104: load + freeze pretrained embeddings
+    # ------------------------------------------------------------------
+    def load_pretrained_embeddings(
+        self,
+        node_type: str,
+        weight: torch.Tensor,
+        bias: Optional[torch.Tensor] = None,
+        freeze: Optional[bool] = None,
+    ) -> None:
+        """Load pre-trained TransE (or other) embeddings into a projection.
+
+        P3-009 ROOT FIX v104: replaces the per-type linear projection's
+        randomly-initialized weight with a pre-trained tensor (e.g., from
+        Phase 2's TransE training). Optionally freezes the projection
+        so the GNN's optimizer does NOT update it during training.
+
+        Why freeze: TransE pre-training (Bordes et al. 2013) takes hours
+        on a biomedical KG. If the GNN's optimizer is allowed to update
+        the projection weights, the noisy GNN gradient signal on small
+        graphs OVERWRITES the TransE signal — wasting the pre-training.
+        Freezing preserves the TransE signal; the GNN learns only the
+        attention/FFN weights on top.
+
+        When NOT to freeze: on large production graphs (1M+ pairs), the
+        GNN gradient signal is strong enough that fine-tuning the
+        projection is beneficial. Pass ``freeze=False`` in that case.
+
+        Args:
+            node_type: Node type name (must be in ``feature_dims``).
+            weight: Tensor of shape ``(embedding_dim, feature_dim)`` —
+                the pre-trained projection weight. The shape must match
+                ``nn.Linear.weight`` convention (out_features, in_features).
+            bias: Optional tensor of shape ``(embedding_dim,)`` — the
+                pre-trained projection bias. If None, the bias is left
+                at its random initialization.
+            freeze: If True, set ``requires_grad=False`` on the
+                projection's weight (and bias if provided). If False,
+                leave them trainable. If None, use the constructor's
+                ``freeze_pretrained`` default.
+
+        Raises:
+            ValueError: If ``node_type`` is not in ``feature_dims``, or
+                if ``weight`` shape does not match the projection's
+                expected shape.
+        """
+        if node_type not in self.projections:
+            raise ValueError(
+                f"Unknown node type '{node_type}'. Known types: "
+                f"{list(self.projections.keys())}. Add '{node_type}' to "
+                f"feature_dims at construction time before loading "
+                f"pretrained embeddings."
+            )
+        proj = self.projections[node_type]
+        expected_w_shape = proj.weight.shape  # (out_features, in_features)
+        if tuple(weight.shape) != tuple(expected_w_shape):
+            raise ValueError(
+                f"Pretrained weight shape {tuple(weight.shape)} does not "
+                f"match projection '{node_type}' expected shape "
+                f"{tuple(expected_w_shape)} (out_features, in_features) = "
+                f"(embedding_dim, feature_dim). TransE embeddings must "
+                f"be projected to match the linear layer's weight "
+                f"geometry before loading."
+            )
+        # Copy the pretrained weight into the projection (no_grad to
+        # avoid polluting the optimizer state).
+        with torch.no_grad():
+            proj.weight.copy_(weight.to(proj.weight.device).to(proj.weight.dtype))
+            if bias is not None:
+                if tuple(bias.shape) != tuple(proj.bias.shape):
+                    raise ValueError(
+                        f"Pretrained bias shape {tuple(bias.shape)} does "
+                        f"not match projection '{node_type}' expected "
+                        f"shape {tuple(proj.bias.shape)}."
+                    )
+                proj.bias.copy_(bias.to(proj.bias.device).to(proj.bias.dtype))
+
+        # P3-009 ROOT FIX v104: apply the freeze policy.
+        if freeze is None:
+            freeze = self._default_freeze_pretrained
+        if freeze:
+            proj.weight.requires_grad_(False)
+            if proj.bias is not None:
+                proj.bias.requires_grad_(False)
+            self._frozen_types.add(node_type)
+            logger.info(
+                f"P3-009 ROOT FIX v104: loaded pretrained embeddings for "
+                f"'{node_type}' and FROZEN the projection (requires_grad="
+                f"False). The GNN optimizer will NOT update these "
+                f"weights. To unfreeze, call "
+                f"`unfreeze_pretrained_embeddings('{node_type}')`."
+            )
+        else:
+            # Make sure requires_grad is True (in case the projection was
+            # previously frozen and we are re-loading with freeze=False).
+            proj.weight.requires_grad_(True)
+            if proj.bias is not None:
+                proj.bias.requires_grad_(True)
+            self._frozen_types.discard(node_type)
+            logger.info(
+                f"P3-009 ROOT FIX v104: loaded pretrained embeddings for "
+                f"'{node_type}' and left them TRAINABLE (requires_grad="
+                f"True). The GNN optimizer WILL update these weights."
+            )
+
+    def unfreeze_pretrained_embeddings(self, node_type: str) -> None:
+        """Unfreeze a previously-frozen pretrained projection.
+
+        P3-009 ROOT FIX v104: companion to ``load_pretrained_embeddings``.
+        Allows a caller to load frozen TransE embeddings, train the GNN
+        for a few warmup epochs, then unfreeze for joint fine-tuning
+        (a common transfer-learning recipe).
+
+        Args:
+            node_type: Node type name (must be in ``feature_dims``).
+        """
+        if node_type not in self.projections:
+            raise ValueError(
+                f"Unknown node type '{node_type}'. Known types: "
+                f"{list(self.projections.keys())}."
+            )
+        proj = self.projections[node_type]
+        proj.weight.requires_grad_(True)
+        if proj.bias is not None:
+            proj.bias.requires_grad_(True)
+        self._frozen_types.discard(node_type)
+        logger.info(
+            f"P3-009 ROOT FIX v104: unfroze pretrained embeddings for "
+            f"'{node_type}'. The GNN optimizer will now update these weights."
+        )
+
+    def frozen_types(self) -> set:
+        """Return the set of node types whose projections are frozen.
+
+        P3-009 ROOT FIX v104: public introspection method. The CI test
+        ``test_p3_009_freeze_pretrained_embeddings`` uses this to verify
+        that ``load_pretrained_embeddings(freeze=True)`` actually froze
+        the projection.
+        """
+        return set(self._frozen_types)
 
     def forward(self, node_features: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         """Project all node type features to the unified embedding space.
