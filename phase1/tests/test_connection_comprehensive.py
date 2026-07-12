@@ -1,27 +1,27 @@
 """
-Comprehensive tests for database/connection.py — 16-domain verification.
+Comprehensive tests for database/connection.py -- 16-domain verification.
 
 This test suite validates that the upgraded connection.py correctly addresses
-all 109 issues across 16 domains.  Tests are REAL — they exercise actual
+all 109 issues across 16 domains.  Tests are REAL -- they exercise actual
 behaviour, not just check for attribute existence.
 
 Test categories:
-  1. Architecture (ARCH-*) — thread safety, singleton guarantees
-  2. Design (DES-*) — driver registry, HealthCheckResult, session hooks
-  3. Scientific Correctness (KNOW-*) — driver rejection, timeouts, SQLite warnings
-  4. Coding (CODE-*) — threading.local ref count, __all__, import placement
-  5. Data Quality (DATA-*) — SQLite PRAGMAs, init_db atomicity
-  6. Reliability (REL-*) — retry logic, circuit breaker, dispose safety
-  7. Idempotency (IDEM-*) — singleton under concurrency, ref count cleanup
-  8. Performance (PERF-*) — pool status, read-only sessions
-  9. Security (SEC-*) — credential masking, URL validation, delayed import
-  10. Testing (TEST-*) — testability hooks (configure_engine, reset)
-  11. Logging (LOG-*) — structured extra fields, slow query detection
-  12. Configuration (CONF-*) — env-var overrides, defaults
-  13. Documentation (DOC-*) — __all__ completeness
-  14. Compliance (COMP-*) — PEP 8 naming conventions
-  15. Interoperability (INTEROP-*) — SQLite PRAGMAs, connect_args registry
-  16. Data Lineage (LINE-*) — session context, provenance metadata
+  1. Architecture (ARCH-*) -- thread safety, singleton guarantees
+  2. Design (DES-*) -- driver registry, HealthCheckResult, session hooks
+  3. Scientific Correctness (KNOW-*) -- driver rejection, timeouts, SQLite warnings
+  4. Coding (CODE-*) -- threading.local ref count, __all__, import placement
+  5. Data Quality (DATA-*) -- SQLite PRAGMAs, init_db atomicity
+  6. Reliability (REL-*) -- retry logic, circuit breaker, dispose safety
+  7. Idempotency (IDEM-*) -- singleton under concurrency, ref count cleanup
+  8. Performance (PERF-*) -- pool status, read-only sessions
+  9. Security (SEC-*) -- credential masking, URL validation, delayed import
+  10. Testing (TEST-*) -- testability hooks (configure_engine, reset)
+  11. Logging (LOG-*) -- structured extra fields, slow query detection
+  12. Configuration (CONF-*) -- env-var overrides, defaults
+  13. Documentation (DOC-*) -- __all__ completeness
+  14. Compliance (COMP-*) -- PEP 8 naming conventions
+  15. Interoperability (INTEROP-*) -- SQLite PRAGMAs, connect_args registry
+  16. Data Lineage (LINE-*) -- session context, provenance metadata
 
 All tests use SQLite in-memory databases for isolation.  No external services
 are required.
@@ -93,7 +93,7 @@ def sqlite_file_url(tmp_path):
 
 
 # ===========================================================================
-# DOMAIN 1: ARCHITECTURE — Thread Safety & Singletons
+# DOMAIN 1: ARCHITECTURE -- Thread Safety & Singletons
 # ===========================================================================
 
 
@@ -170,7 +170,7 @@ class TestArchitecture:
 
 
 # ===========================================================================
-# DOMAIN 2: DESIGN — Driver Registry, HealthCheckResult, Session Hooks
+# DOMAIN 2: DESIGN -- Driver Registry, HealthCheckResult, Session Hooks
 # ===========================================================================
 
 
@@ -236,7 +236,7 @@ class TestDesign:
 
 
 # ===========================================================================
-# DOMAIN 3: KNOWLEDGE — Scientific Correctness
+# DOMAIN 3: KNOWLEDGE -- Scientific Correctness
 # ===========================================================================
 
 
@@ -297,7 +297,7 @@ class TestScientificCorrectness:
 
 
 # ===========================================================================
-# DOMAIN 4: CODING — Variable Naming, Imports, __all__
+# DOMAIN 4: CODING -- Variable Naming, Imports, __all__
 # ===========================================================================
 
 
@@ -614,7 +614,7 @@ class TestSecurity:
         """SEC-004: DATABASE_URL is not a direct module-level attribute.
 
         K fix: per task description #9, DATABASE_URL is now exposed via
-        ``__getattr__`` (PEP 562) for testability — so ``hasattr`` returns
+        ``__getattr__`` (PEP 562) for testability -- so ``hasattr`` returns
         True. The security guarantee (SEC-004) is that DATABASE_URL is NOT
         eagerly imported as a static module-level attribute (i.e. it does
         not appear in ``connection_module.__dict__``). Use ``getattr`` and

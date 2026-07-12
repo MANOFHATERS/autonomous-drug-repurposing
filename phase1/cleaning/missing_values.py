@@ -1,8 +1,8 @@
-# MIT License — Copyright (c) 2026 Team Cosmic / VentureLab — see LICENSE
+# MIT License -- Copyright (c) 2026 Team Cosmic / VentureLab -- see LICENSE
 # SPDX-License-Identifier: MIT
 """
 Missing-value handling utilities for the Autonomous Drug Repurposing ETL
-platform — INSTITUTIONAL-GRADE v3.0.0 (16-domain fix, 133 issues resolved).
+platform -- INSTITUTIONAL-GRADE v3.0.0 (16-domain fix, 133 issues resolved).
 
 ================================================================================
 PROJECT CONTEXT
@@ -39,41 +39,41 @@ PROCESSING ORDER (ARCH-4)
 ================================================================================
 The functions in this module are designed to be called in this order:
 
-  1. ``handle_missing_inchikey``   — recover InChIKeys from SMILES, drop
+  1. ``handle_missing_inchikey``   -- recover InChIKeys from SMILES, drop
                                      unidentifiable rows.
-  2. ``fill_missing_drug_fields``  — fill default values for missing
+  2. ``fill_missing_drug_fields``  -- fill default values for missing
                                      drug fields.  MUST run AFTER
                                      ``handle_missing_inchikey`` because
                                      the legacy default for ``smiles``
                                      is ``""`` (empty string), which
                                      suppresses InChIKey recovery.
-  3. ``handle_missing_protein_fields`` — drop null uniprot_ids, fill
+  3. ``handle_missing_protein_fields`` -- drop null uniprot_ids, fill
                                      defaults, truncate sequences.
-  4. ``validate_gda_scores``       — clip scores, fill disease names,
+  4. ``validate_gda_scores``       -- clip scores, fill disease names,
                                      fill association types.
 
 For convenience, three orchestration helpers (``clean_drugs``,
 ``clean_proteins``, ``clean_gda``) enforce this order.  Note that
 ``cleaning/__init__.py`` also exposes a ``clean_drugs`` function with a
-richer step-based pipeline — these two coexist (the one here is the
+richer step-based pipeline -- these two coexist (the one here is the
 simpler in-module orchestrator).
 
 ================================================================================
 SCIENTIFIC DECISIONS (DOMAIN 3)
 ================================================================================
-ADR-001 — Null Detection Strategy
+ADR-001 -- Null Detection Strategy
     Null detection is column-context-aware.  The ``is_nullish`` function
     accepts a ``NullStrategy`` (or a string ``column_context`` shortcut)
     so that chemical columns (SMILES, InChIKey) do NOT treat ``-`` as
-    null — ``-`` is a single bond in SMILES notation.  Clinical columns
+    null -- ``-`` is a single bond in SMILES notation.  Clinical columns
     may treat ``NA`` as null ("Not Available") while genomic columns
-    MUST NOT — ``NA`` is the gene symbol for Nucleosome Assembly
+    MUST NOT -- ``NA`` is the gene symbol for Nucleosome Assembly
     Protein 1.
 
-ADR-002 — Conservative Defaults (opt-in)
+ADR-002 -- Conservative Defaults (opt-in)
     The legacy default values (``is_fda_approved=False``, ``smiles=""``,
     ``mechanism_of_action=""``) conflate "unknown" with "confirmed
-    negative/empty" — scientifically dangerous.  v3.0.0 introduces a
+    negative/empty" -- scientifically dangerous.  v3.0.0 introduces a
     ``conservative_defaults: bool`` parameter on
     ``fill_missing_drug_fields``.  When True, ``is_fda_approved`` is
     filled with ``None`` (nullable Boolean), ``smiles`` is filled with
@@ -82,7 +82,7 @@ ADR-002 — Conservative Defaults (opt-in)
     backward compatibility with the v2.0.0 behavior expected by the
     other 12 already-fixed files and the existing test suite.
 
-ADR-003 — Score Direction Preservation (opt-in)
+ADR-003 -- Score Direction Preservation (opt-in)
     The legacy ``validate_gda_scores`` clips negative GDA scores to 0,
     destroying protective-association information.  v3.0.0 introduces
     ``score_range`` and ``preserve_direction`` parameters.  When
@@ -90,9 +90,9 @@ ADR-003 — Score Direction Preservation (opt-in)
     associations) are preserved.  Default ``(0.0, 1.0)`` preserves
     legacy behavior.
 
-ADR-004 — Non-Human Organism Safety (opt-in)
+ADR-004 -- Non-Human Organism Safety (opt-in)
     The legacy ``handle_missing_protein_fields`` fills NaN organism
-    with ``"Homo sapiens"`` even when non-human proteins are present —
+    with ``"Homo sapiens"`` even when non-human proteins are present --
     a data corruption event.  v3.0.0 keeps the legacy default but
     adds an ``organism_fill_mode`` parameter: ``"default"`` (legacy),
     ``"strict"`` (use ``"Unknown organism"`` when non-human proteins
@@ -104,7 +104,7 @@ THREAD SAFETY (REL-7, PERF-7)
 ================================================================================
 Module-level mutable state (``_metrics``, ``_dead_letters``,
 ``_current_correlation_id``) is guarded by ``threading.RLock`` instances.
-The four public functions are stateless with respect to user input — they
+The four public functions are stateless with respect to user input -- they
 always copy the input DataFrame before mutating.  However, the
 module-level state IS shared across threads. Locks are acquired
 before any mutation, so concurrent calls are safe but serialized on
@@ -118,22 +118,22 @@ DATA LINEAGE (DOMAIN 16)
 Every transformation attaches underscore-prefixed lineage columns to the
 output DataFrame:
 
-  ``_inchikey_source``             — "recovered_from_smiles" / "original" / None
-  ``_smiles_used_for_recovery``    — the SMILES string used (for audit)
-  ``_inchikey_recovery_failed``    — True if recovery was attempted and failed
-  ``_inchikey_recovery_error``     — error category from ConversionResult
-  ``_organism_was_defaulted``      — True if organism was filled with default
-  ``_gene_name_was_filled``        — True if gene_name was filled
-  ``_function_desc_was_filled``    — True if function_desc was filled
-  ``_sequence_was_truncated``      — True if sequence was truncated
-  ``_original_sequence_length``    — int or None (original length before truncation)
-  ``_score_was_clipped``           — True if score was clipped to range
-  ``_score_was_coerced_nan``       — True if score was non-numeric and coerced to NaN
-  ``_original_score``              — the original score value (if clipped)
-  ``_score_direction``             — "positive", "negative", or None
-  ``_disease_name_was_filled``     — True if disease_name was filled
-  ``_association_type_was_filled`` — True if association_type was filled
-  ``_{col}_was_filled``            — per-column flag in fill_missing_drug_fields
+  ``_inchikey_source``             -- "recovered_from_smiles" / "original" / None
+  ``_smiles_used_for_recovery``    -- the SMILES string used (for audit)
+  ``_inchikey_recovery_failed``    -- True if recovery was attempted and failed
+  ``_inchikey_recovery_error``     -- error category from ConversionResult
+  ``_organism_was_defaulted``      -- True if organism was filled with default
+  ``_gene_name_was_filled``        -- True if gene_name was filled
+  ``_function_desc_was_filled``    -- True if function_desc was filled
+  ``_sequence_was_truncated``      -- True if sequence was truncated
+  ``_original_sequence_length``    -- int or None (original length before truncation)
+  ``_score_was_clipped``           -- True if score was clipped to range
+  ``_score_was_coerced_nan``       -- True if score was non-numeric and coerced to NaN
+  ``_original_score``              -- the original score value (if clipped)
+  ``_score_direction``             -- "positive", "negative", or None
+  ``_disease_name_was_filled``     -- True if disease_name was filled
+  ``_association_type_was_filled`` -- True if association_type was filled
+  ``_{col}_was_filled``            -- per-column flag in fill_missing_drug_fields
 
 In addition, ``DataFrame.attrs["_cleaning_metadata"]`` is set with
 provenance information: timestamp, module version, input/output
@@ -143,10 +143,10 @@ output.
 ================================================================================
 CHANGELOG
 ================================================================================
-v1.0.0 — Initial implementation (4 functions, simple null handling).
-v2.0.0 — Added ``MAX_SEQUENCE_LENGTH`` public alias, ``_is_nullish``
+v1.0.0 -- Initial implementation (4 functions, simple null handling).
+v2.0.0 -- Added ``MAX_SEQUENCE_LENGTH`` public alias, ``_is_nullish``
          hardening to exclude ``"na"`` and ``"none"`` from null patterns.
-v3.0.0 — Comprehensive 16-domain institutional-grade upgrade (133 issues
+v3.0.0 -- Comprehensive 16-domain institutional-grade upgrade (133 issues
          resolved across Architecture, Design, Scientific Correctness,
          Coding, Data Quality, Reliability, Idempotency, Performance,
          Security, Testing, Logging, Configuration, Documentation,
@@ -175,7 +175,7 @@ from typing import Any, Callable, Iterable, Optional, Union
 import numpy as np
 import pandas as pd
 
-# Lazy imports (circular dependency guard — ARCH-1, GUARD-A7):
+# Lazy imports (circular dependency guard -- ARCH-1, GUARD-A7):
 #   cleaning/normalizer.py MUST NOT import from cleaning/missing_values.py.
 #   We import normalizer symbols lazily inside helper functions so that
 #   import order does not matter.
@@ -200,7 +200,7 @@ logger = logging.getLogger(__name__)
 # ===========================================================================
 # v3.0.0 introduces optional configuration via config.settings.  We use a
 # defensive import so that this module works standalone (without the config
-# package) — useful for unit tests and for the v2.x codebase that has not
+# package) -- useful for unit tests and for the v2.x codebase that has not
 # yet added MAX_SEQUENCE_LENGTH / DEFAULT_ORGANISM / CLEANING_NULL_PATTERNS_JSON
 # to config.settings.
 
@@ -223,7 +223,7 @@ def _load_config_value(name: str, default: Any) -> Any:
     try:
         from config import settings as _settings  # type: ignore[import]
         return getattr(_settings, name, default)
-    except Exception:  # noqa: BLE001 — defensive by design
+    except Exception:  # noqa: BLE001 -- defensive by design
         return default
 
 
@@ -248,7 +248,7 @@ def _load_environment() -> str:
 # ===========================================================================
 # MAX_SEQUENCE_LENGTH is configurable via config.settings.MAX_SEQUENCE_LENGTH
 # or the CLEANING_MAX_SEQUENCE_LENGTH env var.  The v2.0.0 default was 10,000
-# amino acids — preserved here for backward compatibility with the 12 already-
+# amino acids -- preserved here for backward compatibility with the 12 already-
 # fixed files in the v2.1.0 codebase.  The scientifically-correct value is
 # 35,000 (titin, the largest known human protein, is ~34,350 aa); set the env
 # var ``CLEANING_MAX_SEQUENCE_LENGTH=35000`` or call
@@ -276,7 +276,7 @@ _ENVIRONMENT: str = _load_environment()
 _STRICT_VALIDATION: bool = _ENVIRONMENT in {"staging", "production", "prod"}
 
 # Public alias for re-export through cleaning/__init__.py (GAP-DQ3).
-# This is a SNAPSHOT taken at module load — it does NOT track later
+# This is a SNAPSHOT taken at module load -- it does NOT track later
 # mutations to _MAX_SEQUENCE_LENGTH via cleaning.configure().  This
 # matches the documented v2.0.0 behavior (test_settings_max_sequence_length_configurable
 # in test_all_12_files_integration_v2.py).
@@ -299,29 +299,29 @@ _OUTPUT_SCHEMA_VERSION: str = "3.0.0"         # COMP-3: schema version attached 
 _MODULE_VERSION: str = "3.0.0"                # COMP-3: module version
 
 # Numeric sentinel values that may indicate missing data (CODE-1).
-# These are NOT silently treated as null — we only WARN when we see them.
+# These are NOT silently treated as null -- we only WARN when we see them.
 _NUMERIC_SENTINELS: list = [-999, -9999, -1, 9999]
 
-# Valid GDA association types (DQ-7) — allowlist for warning-only validation.
+# Valid GDA association types (DQ-7) -- allowlist for warning-only validation.
 _VALID_ASSOCIATION_TYPES: frozenset = frozenset({
     "somatic", "germline", "mixed", "unknown", "predictive",
     "therapeutic", "diagnostic", "prognostic", "predisposing",
     "protective", "contraindicated",
 })
 
-# Null pattern sets — column-context-aware (DESIGN-1, DESIGN-3).
+# Null pattern sets -- column-context-aware (DESIGN-1, DESIGN-3).
 _NULL_PATTERNS_UNIVERSAL: frozenset = frozenset({"null", "n/a", ""})
 _NULL_PATTERNS_GENERAL: frozenset = frozenset({"null", "n/a", "-", "--", ""})
 _NULL_PATTERNS_CHEMICAL: frozenset = frozenset({"null", "n/a", ""})
 _NULL_PATTERNS_STRICT: frozenset = frozenset({""})
 
-# Suspicious SMILES patterns (SEC-1) — defense-in-depth, normalizer already validates.
+# Suspicious SMILES patterns (SEC-1) -- defense-in-depth, normalizer already validates.
 _SMILES_SUSPICIOUS_PATTERNS: list = [
     re.compile(r"(.)\1{100,}"),                                  # run-length abuse
     re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]"),                 # control chars
 ]
 
-# PII scan patterns (SEC-2) — for warn-only PII detection in string columns.
+# PII scan patterns (SEC-2) -- for warn-only PII detection in string columns.
 _PII_PATTERNS: list = [
     ("email", re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")),
     ("ssn", re.compile(r"\b\d{3}-\d{2}-\d{4}\b")),
@@ -329,15 +329,15 @@ _PII_PATTERNS: list = [
     ("mrn", re.compile(r"\bMRN[:\s]?\d+\b", re.IGNORECASE)),
 ]
 
-# Pre-compiled regex (PERF-4) — whitespace-only string detector.
+# Pre-compiled regex (PERF-4) -- whitespace-only string detector.
 _WHITESPACE_REGEX: re.Pattern = re.compile(r"^\s*$")
 
-# Pre-compiled regex — numeric score validator (CODE-14).
+# Pre-compiled regex -- numeric score validator (CODE-14).
 # SCI-FIX: the original pattern ``^-?\d+\.?\d*$`` rejected scientific
 # notation (``1e-5``, ``1.5E10``), leading-dot decimals (``.5``,
 # ``-.5``), and explicit plus signs (``+5``). DisGeNET/OMIM GDA scores
 # can legitimately be very small (e.g., GWAS-derived protective scores
-# like 1e-7) — rejecting them silently destroyed real biological
+# like 1e-7) -- rejecting them silently destroyed real biological
 # signal AND polluted the DQ report's ``non_numeric_count`` field
 # because ``pd.to_numeric("1e-5")`` actually SUCCEEDS (returns 1e-5)
 # while the regex pre-check had already flagged the row as non-numeric.
@@ -360,7 +360,7 @@ _METRICS_LOCK = threading.RLock()
 _dead_letters: list = []
 _DEAD_LETTERS_LOCK = threading.RLock()
 # FIX-F / C-18: alias kept for backward-compat with operators/tests that
-# import ``_dead_letter_queue`` from this module. Same list object —
+# import ``_dead_letter_queue`` from this module. Same list object --
 # in-place mutations (.append/.clear/.pop) are visible through either name.
 _dead_letter_queue: list = _dead_letters
 
@@ -385,7 +385,7 @@ def _parse_pandas_version() -> tuple:
     -------
     tuple[int, int]
         Major and minor version of pandas (e.g. ``(2, 2)`` for 2.2.3).
-        Returns ``(99, 0)`` if parsing fails — assumes a future version
+        Returns ``(99, 0)`` if parsing fails -- assumes a future version
         with the modern API.
     """
     try:
@@ -485,7 +485,7 @@ class NullStrategy:
 
     A ``NullStrategy`` bundles together the parameters that ``is_nullish``
     needs to decide whether a value should be treated as missing.
-    Different column contexts require different strategies — for example,
+    Different column contexts require different strategies -- for example,
     a chemical SMILES column should NOT treat ``-`` as null (single bond)
     while a clinical "disease_name" column SHOULD treat ``NA`` as null
     ("Not Available"), but a genomic "gene_symbol" column MUST NOT treat
@@ -501,10 +501,10 @@ class NullStrategy:
         default.  Example: ``frozenset({"-", "--"})`` for chemical columns.
     treat_na_as_null : bool
         If True, the literal string ``"na"`` (case-insensitive) is treated
-        as null.  Default False — preserves biomedical gene symbols.
+        as null.  Default False -- preserves biomedical gene symbols.
     treat_none_as_null : bool
         If True, the literal string ``"none"`` (case-insensitive) is
-        treated as null.  Default False — "none" is a legitimate biomedical
+        treated as null.  Default False -- "none" is a legitimate biomedical
         value (e.g., "None identified" in protein function descriptions).
     detect_sentinels : bool
         If True, warn (do not flag) about numeric sentinel values like
@@ -606,18 +606,18 @@ def is_nullish(
        ``np.nan``, ``None``, ``pd.NA``, and ``pd.NaT``.
     2. **Empty / whitespace-only strings** are null in every context.
     3. **Literal "null" and "n/a"** (case-insensitive) are null in every
-       context — they are explicit null markers.
+       context -- they are explicit null markers.
     4. **"-" and "--"** are null in *general* context but NOT in
        *chemical* context (single bond in SMILES, en-dash in IUPAC names).
-    5. **"na"** is NOT null by default — it is the gene symbol for
+    5. **"na"** is NOT null by default -- it is the gene symbol for
        Nucleosome Assembly Protein 1.  Use ``NULL_STRATEGY_CLINICAL``
        or ``strategy.treat_na_as_null=True`` to treat it as null in
        clinical columns (e.g. disease_name).
-    6. **"none"** is NOT null by default — it is a legitimate biomedical
+    6. **"none"** is NOT null by default -- it is a legitimate biomedical
        value (e.g., "None identified" in protein function descriptions).
        Use ``strategy.treat_none_as_null=True`` to treat it as null.
     7. **Numeric sentinel values** (``-999``, ``-9999``, etc.) are NOT
-       silently treated as null — they are logged as warnings to
+       silently treated as null -- they are logged as warnings to
        surface upstream data quality issues.
 
     Parameters
@@ -637,7 +637,7 @@ def is_nullish(
     -------
     pd.Series[bool]
         Boolean mask aligned to ``series.index``.  True where the value
-        is null-like.  Never raises — falls back to ``series.isna()``
+        is null-like.  Never raises -- falls back to ``series.isna()``
         on internal errors (REL-3).
 
     Examples
@@ -651,7 +651,7 @@ def is_nullish(
     >>> is_nullish(pd.Series(["-", "CCO", ""]), column_context="chemical").tolist()
     [False, False, True]
     """
-    # Defensive: REL-3 — never raise from is_nullish.
+    # Defensive: REL-3 -- never raise from is_nullish.
     try:
         resolved = _resolve_strategy(strategy, column_context)
         patterns = _build_pattern_set(resolved)
@@ -674,7 +674,7 @@ def is_nullish(
             # Work on a copy of just the non-null values to avoid the
             # astype(str) -> "nan" issue (CODE-3, BUG-CODE-3).
             non_null_values = series[non_null_mask]
-            # astype(str) here is safe — non_null_values has no NaN.
+            # astype(str) here is safe -- non_null_values has no NaN.
             string_values = non_null_values.astype(str)
             stripped_lower = string_values.str.strip().str.lower()
             empty_mask = string_values.str.strip() == ""
@@ -703,7 +703,7 @@ def is_nullish(
             if non_scalar_count > 0:
                 logger.warning(
                     "is_nullish: %d non-scalar value(s) detected in "
-                    "object column — these may indicate upstream schema "
+                    "object column -- these may indicate upstream schema "
                     "corruption",
                     non_scalar_count,
                 )
@@ -722,7 +722,7 @@ def is_nullish(
                 if sentinel_count > 0:
                     logger.warning(
                         "is_nullish: %d sentinel value(s) %r detected "
-                        "in numeric column — these are NOT treated as "
+                        "in numeric column -- these are NOT treated as "
                         "null but may indicate missing data upstream",
                         sentinel_count,
                         sentinel,
@@ -737,10 +737,10 @@ def is_nullish(
         if null_mask.dtype != bool:
             null_mask = null_mask.astype(bool)
         if len(null_mask) != len(series):
-            # Length mismatch — this should never happen, but if it does
+            # Length mismatch -- this should never happen, but if it does
             # (e.g. due to a pandas bug), fall back to isna().
             logger.error(
-                "is_nullish: internal error — mask length %d != series "
+                "is_nullish: internal error -- mask length %d != series "
                 "length %d; falling back to isna()",
                 len(null_mask),
                 len(series),
@@ -748,7 +748,7 @@ def is_nullish(
             null_mask = series.isna()
         return null_mask
 
-    except Exception as exc:  # noqa: BLE001 — REL-3 defensive fallback
+    except Exception as exc:  # noqa: BLE001 -- REL-3 defensive fallback
         logger.error(
             "is_nullish: internal error (%s); falling back to isna()",
             exc,
@@ -781,7 +781,7 @@ def _is_nullish(series: pd.Series) -> pd.Series:
 
     Preserves the v2.0.0 contract: ``_is_nullish(series)`` returns a
     boolean mask using the *general* null strategy (which is the v2.0.0
-    behavior — "na" and "none" are NOT null, "-" and "--" ARE null).
+    behavior -- "na" and "none" are NOT null, "-" and "--" ARE null).
 
     Existing tests in ``test_all_45_fixes.py::TestIssue23`` and
     ``test_all_45_fixes.py::test_nullish_na_gene_symbol`` verify this
@@ -861,7 +861,7 @@ def _sanitize_smiles(smiles: Any) -> Optional[str]:
         return None
     if len(smiles) > _SMILES_MAX_LENGTH:
         logger.warning(
-            "_sanitize_smiles: SMILES length %d exceeds cap %d — rejecting",
+            "_sanitize_smiles: SMILES length %d exceeds cap %d -- rejecting",
             len(smiles),
             _SMILES_MAX_LENGTH,
         )
@@ -869,7 +869,7 @@ def _sanitize_smiles(smiles: Any) -> Optional[str]:
     for pattern in _SMILES_SUSPICIOUS_PATTERNS:
         if pattern.search(smiles):
             logger.warning(
-                "_sanitize_smiles: SMILES contains suspicious pattern — rejecting"
+                "_sanitize_smiles: SMILES contains suspicious pattern -- rejecting"
             )
             return None
     return smiles.strip() or None
@@ -938,7 +938,7 @@ def _scan_for_pii(df: pd.DataFrame) -> dict:
                 counts[pii_type] += count
                 logger.warning(
                     "_scan_for_pii: %d %s-like value(s) detected in "
-                    "column %r — review for PII leakage",
+                    "column %r -- review for PII leakage",
                     count,
                     pii_type,
                     col,
@@ -994,7 +994,7 @@ def _validate_column_types(df: pd.DataFrame) -> None:
             if has_callable:
                 logger.warning(
                     "_validate_column_types: column %r contains callable "
-                    "objects — possible code injection risk",
+                    "objects -- possible code injection risk",
                     col,
                 )
         except Exception:  # noqa: BLE001
@@ -1167,7 +1167,7 @@ def _append_dead_letter(
     reason: str,
     row: Optional[dict],
 ) -> None:
-    """Append a record to the dead-letter queue (bounded — REL-9)."""
+    """Append a record to the dead-letter queue (bounded -- REL-9)."""
     with _DEAD_LETTERS_LOCK:
         if len(_dead_letters) >= _MAX_DEAD_LETTERS:
             # Drop the oldest entry to bound memory.
@@ -1245,7 +1245,7 @@ def _convert_with_retry(
     for attempt in range(max_retries + 1):
         try:
             return convert_fn(smiles)
-        except Exception as exc:  # noqa: BLE001 — REL-6
+        except Exception as exc:  # noqa: BLE001 -- REL-6
             last_exc = exc
             if attempt < max_retries:
                 # Exponential backoff: 0.1, 0.2, 0.4, ...
@@ -1278,7 +1278,7 @@ class DataCleaningResult:
     When a public cleaning function is called with ``return_result=True``,
     it returns a ``DataCleaningResult`` instead of a bare DataFrame.
     This gives the caller programmatic access to what changed during
-    cleaning — essential for data quality monitoring and audit trails.
+    cleaning -- essential for data quality monitoring and audit trails.
 
     Attributes
     ----------
@@ -1360,7 +1360,7 @@ def recover_inchikeys_from_smiles(
     column_context: str = "chemical",
     reset_index: bool = False,
 ) -> pd.DataFrame:
-    """Recover missing InChIKeys from SMILES — NO rows are dropped (ARCH-3).
+    """Recover missing InChIKeys from SMILES -- NO rows are dropped (ARCH-3).
 
     This is the PURE recovery function.  Use it when you want InChIKey
     recovery without data loss.  To also drop unidentifiable rows, use
@@ -1373,7 +1373,7 @@ def recover_inchikeys_from_smiles(
         Drug records with at least an ``inchikey`` column.  A ``smiles``
         column is used for recovery if present.
     converter : Callable[[str], str | None] | None
-        Dependency-injection point for the SMILES→InChIKey converter
+        Dependency-injection point for the SMILES->InChIKey converter
         (ARCH-6).  When None, uses ``cleaning.normalizer.convert_to_inchikey``
         (lazy import).
     use_batch : bool | None
@@ -1383,11 +1383,11 @@ def recover_inchikeys_from_smiles(
         is >= ``_BATCH_THRESHOLD`` (10).
     column_context : str
         Column context for null detection on the ``smiles`` column.
-        Default ``"chemical"`` — does NOT treat ``-`` as null (single
+        Default ``"chemical"`` -- does NOT treat ``-`` as null (single
         bond in SMILES).
     reset_index : bool
         If True, reset the DataFrame index after recovery (drops the
-        original index).  Default False — preserves index for merge/join
+        original index).  Default False -- preserves index for merge/join
         compatibility (INT-1).
 
     Returns
@@ -1396,10 +1396,10 @@ def recover_inchikeys_from_smiles(
         A new DataFrame with recovered InChIKeys.  The following lineage
         columns are added:
 
-        - ``_inchikey_source`` — "recovered_from_smiles" / "original" / None
-        - ``_smiles_used_for_recovery`` — the SMILES used (for audit)
-        - ``_inchikey_recovery_failed`` — True if recovery was attempted and failed
-        - ``_inchikey_recovery_error`` — error category from ConversionResult
+        - ``_inchikey_source`` -- "recovered_from_smiles" / "original" / None
+        - ``_smiles_used_for_recovery`` -- the SMILES used (for audit)
+        - ``_inchikey_recovery_failed`` -- True if recovery was attempted and failed
+        - ``_inchikey_recovery_error`` -- error category from ConversionResult
 
     Notes
     -----
@@ -1440,7 +1440,7 @@ def recover_inchikeys_from_smiles(
         if already_done.all():
             logger.debug(
                 "recover_inchikeys_from_smiles: all rows already processed "
-                "(_inchikey_source present) — skipping"
+                "(_inchikey_source present) -- skipping"
             )
             _increment_metric("recover_skipped_already_processed")
             return out
@@ -1467,7 +1467,7 @@ def recover_inchikeys_from_smiles(
         smiles_present = ~is_nullish(out["smiles"], column_context=column_context)
     else:
         logger.warning(
-            "recover_inchikeys_from_smiles: 'smiles' column not found — "
+            "recover_inchikeys_from_smiles: 'smiles' column not found -- "
             "cannot recover InChIKeys"
         )
         smiles_present = pd.Series(False, index=out.index)
@@ -1498,7 +1498,7 @@ def recover_inchikeys_from_smiles(
     )
     _increment_metric("recover_attempts", recoverable_count)
 
-    # Resolve the converter (ARCH-6 — dependency injection).
+    # Resolve the converter (ARCH-6 -- dependency injection).
     if converter is None:
         try:
             convert_single = _get_convert_to_inchikey()
@@ -1532,7 +1532,7 @@ def recover_inchikeys_from_smiles(
     consecutive_failures = 0  # REL-7 circuit breaker
 
     if should_batch and converter is None:
-        # Batch path — uses ThreadPoolExecutor internally (ARCH-2).
+        # Batch path -- uses ThreadPoolExecutor internally (ARCH-2).
         try:
             convert_batch = _get_convert_to_inchikeys()
             # Sort recoverable indices for deterministic ordering (IDEM-5).
@@ -1541,7 +1541,7 @@ def recover_inchikeys_from_smiles(
                 _sanitize_smiles(out.at[idx, "smiles"])
                 for idx in recoverable_indices
             ]
-            # None entries will fail conversion — that's expected.
+            # None entries will fail conversion -- that's expected.
             smiles_to_convert = [s if s is not None else "" for s in recoverable_smiles]
             batch_results = convert_batch(smiles_to_convert)
 
@@ -1603,7 +1603,7 @@ def recover_inchikeys_from_smiles(
                     if consecutive_failures >= _CIRCUIT_BREAKER_THRESHOLD:
                         logger.error(
                             "recover_inchikeys_from_smiles: circuit breaker "
-                            "opened after %d consecutive failures — "
+                            "opened after %d consecutive failures -- "
                             "skipping remaining batch",
                             consecutive_failures,
                         )
@@ -1633,17 +1633,17 @@ def recover_inchikeys_from_smiles(
                 out.at[idx, "_inchikey_recovery_error"] = None
                 recovered += 1
                 consecutive_failures = 0  # reset on success
-        except Exception as exc:  # noqa: BLE001 — REL-2 preserve partial results
+        except Exception as exc:  # noqa: BLE001 -- REL-2 preserve partial results
             logger.error(
                 "recover_inchikeys_from_smiles: batch conversion raised "
-                "%s — falling back to row-by-row",
+                "%s -- falling back to row-by-row",
                 exc,
             )
             # Fall through to row-by-row path.
             should_batch = False
 
     if not should_batch or converter is not None:
-        # Row-by-row path (ARCH-1 — hoisted lazy import, ARCH-6 — DI).
+        # Row-by-row path (ARCH-1 -- hoisted lazy import, ARCH-6 -- DI).
         # Sort recoverable indices for deterministic ordering (IDEM-5).
         recoverable_indices = sorted(out.index[recoverable_mask].tolist())
         for idx in recoverable_indices:
@@ -1675,22 +1675,22 @@ def recover_inchikeys_from_smiles(
                 if consecutive_failures >= _CIRCUIT_BREAKER_THRESHOLD:
                     logger.error(
                         "recover_inchikeys_from_smiles: circuit breaker "
-                        "opened after %d consecutive failures — aborting "
+                        "opened after %d consecutive failures -- aborting "
                         "recovery",
                         consecutive_failures,
                     )
                     _increment_metric("circuit_open_count")
-                    # P1-016 ROOT FIX (v100 forensic — mark remaining rows
+                    # P1-016 ROOT FIX (v100 forensic -- mark remaining rows
                     # on circuit-open in the row-by-row path):
                     # The batch path (lines 1609-1618) marks remaining rows
                     # as ``_inchikey_recovery_failed=True`` with
                     # ``_inchikey_recovery_error="CIRCUIT_OPEN"`` before
-                    # breaking. The row-by-row path (this block) did NOT —
+                    # breaking. The row-by-row path (this block) did NOT --
                     # it just ``break``ed, leaving remaining rows with
                     # ``_inchikey_recovery_failed=False`` and
                     # ``_inchikey_source=None``. Downstream code that
                     # filters on ``_inchikey_recovery_failed`` treated
-                    # them as valid (but with null inchikey) — silent
+                    # them as valid (but with null inchikey) -- silent
                     # data corruption. ROOT FIX: mirror the batch path's
                     # marking before breaking, so remaining rows are
                     # explicitly flagged as failed due to circuit-open.
@@ -1713,11 +1713,11 @@ def recover_inchikeys_from_smiles(
             except Exception as _std_exc:  # noqa: BLE001
                 # v24 ROOT FIX (FORENSIC-P1-PIPE B / Audit Chain):
                 # the previous code did ``standardized = inchikey``
-                # (silent passthrough) — recovered InChIKeys bypassed
+                # (silent passthrough) -- recovered InChIKeys bypassed
                 # validation/normalization entirely, allowing lowercase
                 # or malformed keys into the DB. This is
-                # production-reachable via drugbank_pipeline.py:1397 →
-                # handle_missing_inchikey → recover_inchikeys_from_smiles
+                # production-reachable via drugbank_pipeline.py:1397 ->
+                # handle_missing_inchikey -> recover_inchikeys_from_smiles
                 # (non-batch path). Fix: mark the row as failed (not
                 # passthrough) so the caller can dead-letter it. The
                 # canonical validator (normalizer.is_valid_inchikey)
@@ -1725,7 +1725,7 @@ def recover_inchikeys_from_smiles(
                 logger.warning(
                     "recover_inchikeys_from_smiles: standardization "
                     "failed for inchikey=%r: %s. Marking row as "
-                    "failed (v24 root fix — no silent passthrough).",
+                    "failed (v24 root fix -- no silent passthrough).",
                     inchikey, _std_exc,
                 )
                 standardized = None
@@ -1752,7 +1752,7 @@ def recover_inchikeys_from_smiles(
             # Checkpoint callback (REL-10).
             if (recovered + failed) % _CHECKPOINT_INTERVAL == 0:
                 logger.debug(
-                    "recover_inchikeys_from_smiles: checkpoint — "
+                    "recover_inchikeys_from_smiles: checkpoint -- "
                     "%d recovered, %d failed so far",
                     recovered,
                     failed,
@@ -1799,7 +1799,7 @@ def drop_unidentifiable_drugs(
       ``"chembl_id"``, ``"name"``]) have a non-null value.
 
     Rows with a valid DrugBank ID, ChEMBL ID, or name are NOT dropped
-    even if both ``inchikey`` and ``smiles`` are missing — they can be
+    even if both ``inchikey`` and ``smiles`` are missing -- they can be
     re-identified later via entity resolution (BUG-SCI-2).
 
     Parameters
@@ -1844,7 +1844,7 @@ def drop_unidentifiable_drugs(
     else:
         # BUG-CODE-8: legacy behavior treated "no smiles col" as "all rows
         # missing smiles" which dropped everything missing inchikey.  We
-        # preserve this for backward compat — but use alternative_id_columns
+        # preserve this for backward compat -- but use alternative_id_columns
         # to avoid dropping rows with valid IDs.
         also_missing_smiles = pd.Series(True, index=out.index)
 
@@ -1906,9 +1906,9 @@ def handle_missing_inchikey(
         column is used for recovery if present.
     drop_unidentifiable : bool
         If True (default), drop rows where the drug cannot be identified.
-        If False, only recovery is attempted — no rows are dropped.
+        If False, only recovery is attempted -- no rows are dropped.
     converter : Callable[[str], str | None] | None
-        Dependency injection for the SMILES→InChIKey converter (ARCH-6).
+        Dependency injection for the SMILES->InChIKey converter (ARCH-6).
     alternative_id_columns : list[str] | None
         Columns to check before dropping.  Default
         ``["drugbank_id", "chembl_id", "name"]``.  Pass ``[]`` to disable.
@@ -1943,7 +1943,7 @@ def handle_missing_inchikey(
     ...     "name": ["Ethanol", "Acetic acid", "Unknown"],
     ... })
     >>> # Acetic acid may recover; Unknown has no InChIKey, no SMILES,
-    >>> # but DOES have a name — so it is NOT dropped by default.
+    >>> # but DOES have a name -- so it is NOT dropped by default.
     """
     if not isinstance(df, pd.DataFrame):
         raise TypeError(
@@ -1960,7 +1960,7 @@ def handle_missing_inchikey(
     columns_affected: dict = {}
     warnings_list: list = []
 
-    # Empty input — return immediately.
+    # Empty input -- return immediately.
     if df.empty:
         logger.debug("handle_missing_inchikey: empty DataFrame, nothing to do")
         empty = df.copy()
@@ -2110,13 +2110,13 @@ def fill_missing_drug_fields(
         Drug records.
     conservative_defaults : bool
         See the table above.  Default True (scientifically safer
-        behavior — v93 ROOT FIX P1-046: the previous docstring said
+        behavior -- v93 ROOT FIX P1-046: the previous docstring said
         "Default False (v2.0.0 behavior)" but the actual default was
         True. The docstring contradicted the code, misleading operators
         into thinking they were getting the legacy v2.0.0 behavior when
         they were actually getting the safer v3.0.0 behavior. Root fix:
         update the docstring to match the code. The default remains True
-        because the safer behavior is the correct production default —
+        because the safer behavior is the correct production default --
         operators who need the legacy behavior must explicitly opt in
         with ``conservative_defaults=False``).
     fill_map_override : dict | None
@@ -2134,7 +2134,7 @@ def fill_missing_drug_fields(
         A new DataFrame with missing values filled.  The following
         lineage columns are added (LINEAGE-4):
 
-        - ``_{col}_was_filled`` — True if the value in column ``{col}``
+        - ``_{col}_was_filled`` -- True if the value in column ``{col}``
           was filled with a default.
 
     Notes
@@ -2185,7 +2185,7 @@ def fill_missing_drug_fields(
 
     out = df.copy()
 
-    # DQ-3: ordering guard — warn if handle_missing_inchikey hasn't run yet.
+    # DQ-3: ordering guard -- warn if handle_missing_inchikey hasn't run yet.
     if (
         "smiles" in out.columns
         and "inchikey" in out.columns
@@ -2209,16 +2209,16 @@ def fill_missing_drug_fields(
         fill_map: dict = {
             "is_fda_approved": None,  # nullable Boolean
             "drug_type": "Unknown",
-            "max_phase": None,  # always None — distinguishes "unknown" from 0
+            "max_phase": None,  # always None -- distinguishes "unknown" from 0
             "mechanism_of_action": "Unknown",
             "molecular_formula": "",
             "smiles": None,  # None prevents RDKit crashes (BUG-SCI-7)
         }
     else:
-        # v2.0.0 legacy defaults — preserved for backward compatibility.
+        # v2.0.0 legacy defaults -- preserved for backward compatibility.
         # v91 ROOT FIX (BUG #6): is_fda_approved default changed from
         # False to None. False means "definitely NOT FDA approved" which
-        # is scientifically wrong for unknown drugs — the correct value
+        # is scientifically wrong for unknown drugs -- the correct value
         # for a missing FDA approval field is None (unknown). Marking
         # unknown drugs as unapproved silently excluded real repurposing
         # candidates from the RL ranker's safety filter.
@@ -2238,13 +2238,13 @@ def fill_missing_drug_fields(
     for col, default in fill_map.items():
         if col not in out.columns:
             logger.debug(
-                "fill_missing_drug_fields: column '%s' not present — skipping",
+                "fill_missing_drug_fields: column '%s' not present -- skipping",
                 col,
             )
             continue
 
-        # v82 FORENSIC ROOT FIX (P1-9 — per-COLUMN idempotency bug):
-        #   The previous code used ``out[lineage_col].any()`` — if ANY
+        # v82 FORENSIC ROOT FIX (P1-9 -- per-COLUMN idempotency bug):
+        #   The previous code used ``out[lineage_col].any()`` -- if ANY
         #   row had ``_{col}_was_filled=True``, the ENTIRE column was
         #   skipped on subsequent calls. Scenario: first call fills 50
         #   rows (out of 100) in drug_type. Second call (e.g., after
@@ -2260,16 +2260,16 @@ def fill_missing_drug_fields(
         #   already True.
         lineage_col = f"_{col}_was_filled"
         # If the lineage column exists and ALL rows are already marked,
-        # skip (truly idempotent — nothing to do).
+        # skip (truly idempotent -- nothing to do).
         # v82 FORENSIC ROOT FIX (P1-9 bug 2): pandas ``Series.all()``
         # SKIPS NaN by default, so ``[True, True, NaN].all()`` returns
-        # True — causing the entire column to be skipped even when new
+        # True -- causing the entire column to be skipped even when new
         # rows (with NaN lineage marker) still need filling. ROOT FIX:
         # use ``fillna(False).all()`` so NaN is treated as "not filled".
         if lineage_col in out.columns and bool(out[lineage_col].fillna(False).all()):
             logger.debug(
                 "fill_missing_drug_fields: column '%s' fully filled "
-                "(all rows have lineage marker) — skipping (idempotent)",
+                "(all rows have lineage marker) -- skipping (idempotent)",
                 col,
             )
             continue
@@ -2286,7 +2286,7 @@ def fill_missing_drug_fields(
         # Record dtype before (INT-3).
         dtype_before = str(out[col].dtype)
 
-        # Detect string-like columns (REL-4 — StringDtype handling).
+        # Detect string-like columns (REL-4 -- StringDtype handling).
         is_string_col = (
             out[col].dtype == object
             or pd.api.types.is_string_dtype(out[col])
@@ -2309,14 +2309,14 @@ def fill_missing_drug_fields(
             if whitespace_count > 0:
                 logger.info(
                     "fill_missing_drug_fields: found %d whitespace-only "
-                    "value(s) in '%s' — converting to NaN before fill",
+                    "value(s) in '%s' -- converting to NaN before fill",
                     whitespace_count,
                     col,
                 )
                 _increment_metric("whitespace_only_converted", whitespace_count)
                 try:
                     out[col] = out[col].replace(_WHITESPACE_REGEX, np.nan, regex=True)
-                except Exception:  # noqa: BLE001 — REL-4 StringDtype fallback
+                except Exception:  # noqa: BLE001 -- REL-4 StringDtype fallback
                     try:
                         out[col] = out[col].apply(
                             lambda x: np.nan
@@ -2337,18 +2337,18 @@ def fill_missing_drug_fields(
         # FIX #41: for None defaults, leave as NaN/NA to distinguish
         # "unknown" (None/NaN) from "confirmed no clinical data" (0).
         if default is None:
-            # Initialize lineage marker — these rows ARE "unknown".
+            # Initialize lineage marker -- these rows ARE "unknown".
             if lineage_col not in out.columns:
                 out[lineage_col] = False
             # Mark rows where the value WAS NaN as "filled with unknown".
             # P1-9: exclude rows already filled in a prior call.
             null_mask = is_nullish(out[col], column_context="general") & ~_already_filled
             out.loc[null_mask, lineage_col] = True
-            # Don't actually fill — keep NaN to represent "unknown".
+            # Don't actually fill -- keep NaN to represent "unknown".
             # But for is_fda_approved with conservative_defaults=True,
             # we DO want to coerce to nullable Boolean.
             if col == "is_fda_approved" and conservative_defaults:
-                # Use nullable Boolean type — preserves NaN/NA distinction.
+                # Use nullable Boolean type -- preserves NaN/NA distinction.
                 try:
                     out[col] = out[col].astype("boolean")
                 except Exception:  # noqa: BLE001
@@ -2365,16 +2365,16 @@ def fill_missing_drug_fields(
             continue
 
         # For non-None defaults, use fillna with version-aware downcasting (CODE-4).
-        # v66 ROOT FIX (P1C-023 — filled_mask over-marks rows):
+        # v66 ROOT FIX (P1C-023 -- filled_mask over-marks rows):
         #   The previous code computed the lineage marker AFTER fillna
         #   using ``filled_mask = out[col] == default``. This marked ANY
-        #   row whose value EQUALLED the default as "filled" — even rows
+        #   row whose value EQUALLED the default as "filled" -- even rows
         #   that ORIGINALLY had that value. Example: if default="Unknown"
         #   and a drug originally had drug_type="Unknown", it was falsely
         #   marked as filled, corrupting the audit trail.
         #   ROOT FIX: capture the EXACT null mask BEFORE fillna (right
         #   here, before the fillna call below) and use THAT mask for the
-        #   lineage marker. This is 100% accurate — only rows that were
+        #   lineage marker. This is 100% accurate -- only rows that were
         #   ACTUALLY null get marked as filled. The post-fillna heuristic
         #   is eliminated entirely.
         _null_mask_before_fillna = is_nullish(out[col], column_context="general") & ~_already_filled
@@ -2388,7 +2388,7 @@ def fill_missing_drug_fields(
         # Coerce to the expected dtype after fillna (ARCH-5, CODE-5, CODE-9).
         if col == "is_fda_approved":
             if conservative_defaults:
-                # Use nullable Boolean — preserves NaN/NA (ARCH-5).
+                # Use nullable Boolean -- preserves NaN/NA (ARCH-5).
                 try:
                     out[col] = out[col].astype("boolean")
                 except Exception:  # noqa: BLE001
@@ -2403,7 +2403,7 @@ def fill_missing_drug_fields(
                     if remaining_nan > 0:
                         logger.error(
                             "fill_missing_drug_fields: %d NaN value(s) "
-                            "remain in 'is_fda_approved' after fillna — "
+                            "remain in 'is_fda_approved' after fillna -- "
                             "filling with False before astype(bool)",
                             remaining_nan,
                         )
@@ -2411,7 +2411,7 @@ def fill_missing_drug_fields(
                     # CRITICAL FIX (patient safety): astype(bool) on string
                     # values converts ANY non-empty string to True, including
                     # the literal "False" or "0". For a drug-repurposing
-                    # platform this is life-critical — an UNAPPROVED drug
+                    # platform this is life-critical -- an UNAPPROVED drug
                     # marked FDA-approved could be administered to a patient.
                     # Use a safe truthy-set mapping instead.
                     # PS-2 ROOT FIX: include float 1.0 (numerical booleans
@@ -2441,7 +2441,7 @@ def fill_missing_drug_fields(
         elif col == "max_phase":
             # FIX #41: max_phase can be None (unknown) or int 0-4.
             # We've already handled the None-default case above (continue).
-            # If we get here, default is not None — coerce to Int64.
+            # If we get here, default is not None -- coerce to Int64.
             try:
                 out[col] = out[col].astype("Int64")
             except (ValueError, TypeError):
@@ -2450,13 +2450,13 @@ def fill_missing_drug_fields(
         # Initialize lineage column (LINEAGE-4).
         if lineage_col not in out.columns:
             out[lineage_col] = False
-        # v66 ROOT FIX (P1C-023 — replace post-fillna heuristic with
+        # v66 ROOT FIX (P1C-023 -- replace post-fillna heuristic with
         #   pre-fillna null mask):
         #   The previous code used ``filled_mask = out[col] == default``
         #   (computed AFTER fillna) which OVER-MARKED rows that originally
         #   had the default value. The new code uses the EXACT null mask
         #   captured BEFORE fillna (``_null_mask_before_fillna``, line
-        #   ~2308). This is 100% accurate — only rows that were ACTUALLY
+        #   ~2308). This is 100% accurate -- only rows that were ACTUALLY
         #   null/NaN before fillna are marked as "filled". The try/except
         #   is kept for defensive dtype-mismatch safety, but the logic is
         #   now deterministic (no heuristic).
@@ -2555,7 +2555,7 @@ def handle_missing_protein_fields(
 
     1. **Drop** rows where ``uniprot_id`` is null/empty (cannot identify).
     2. **Fill** ``gene_name`` NaN with ``gene_name_fill`` (default ``""``).
-    3. **Fill** ``organism`` NaN — behavior depends on ``organism_fill_mode``.
+    3. **Fill** ``organism`` NaN -- behavior depends on ``organism_fill_mode``.
     4. **Fill** ``function_desc`` NaN with ``function_desc_fill`` (default ``""``).
     5. **Truncate** ``sequence`` to ``_MAX_SEQUENCE_LENGTH`` characters.
 
@@ -2583,11 +2583,11 @@ def handle_missing_protein_fields(
         Fill value for null ``function_desc``.  Default ``""``.
     add_truncation_marker : bool
         If True, append ``"...[TRUNCATED]"`` to truncated sequences
-        (BUG-SCI-8 lineage).  Default False — preserves v2.0.0 behavior
+        (BUG-SCI-8 lineage).  Default False -- preserves v2.0.0 behavior
         of truncating to exactly ``_MAX_SEQUENCE_LENGTH`` chars without
         a marker.
     reset_index : bool
-        If True (default — preserves v2.0.0 behavior), reset the index
+        If True (default -- preserves v2.0.0 behavior), reset the index
         after dropping null ``uniprot_id`` rows.  Set to False to preserve
         the original index for merge/join compatibility (INT-2).
     return_result : bool
@@ -2599,17 +2599,17 @@ def handle_missing_protein_fields(
         A new DataFrame with cleaned protein fields.  Lineage columns
         added (LINEAGE-7):
 
-        - ``_organism_was_defaulted`` — True if organism was filled
-        - ``_gene_name_was_filled`` — True if gene_name was filled
-        - ``_function_desc_was_filled`` — True if function_desc was filled
-        - ``_sequence_was_truncated`` — True if sequence was truncated
-        - ``_original_sequence_length`` — int or None
+        - ``_organism_was_defaulted`` -- True if organism was filled
+        - ``_gene_name_was_filled`` -- True if gene_name was filled
+        - ``_function_desc_was_filled`` -- True if function_desc was filled
+        - ``_sequence_was_truncated`` -- True if sequence was truncated
+        - ``_original_sequence_length`` -- int or None
 
     Notes
     -----
     **Backward compatibility**: when called as
     ``handle_missing_protein_fields(df)``, this function preserves the
-    v2.0.0 behavior — ``reset_index=True`` is the default, and
+    v2.0.0 behavior -- ``reset_index=True`` is the default, and
     ``add_truncation_marker=False`` means truncated sequences are
     exactly ``_MAX_SEQUENCE_LENGTH`` chars long (no marker appended).
 
@@ -2654,7 +2654,7 @@ def handle_missing_protein_fields(
 
     out = df.copy()
 
-    # 1. Drop rows where uniprot_id is null or empty (DQ-5 — also warn on
+    # 1. Drop rows where uniprot_id is null or empty (DQ-5 -- also warn on
     #    duplicate uniprot_ids among the survivors).
     if "uniprot_id" in out.columns:
         before_count = len(out)
@@ -2701,7 +2701,7 @@ def handle_missing_protein_fields(
             if len(dups) > 0:
                 logger.warning(
                     "handle_missing_protein_fields: %d duplicate uniprot_id "
-                    "value(s) detected after dropping nulls — consider "
+                    "value(s) detected after dropping nulls -- consider "
                     "deduplication. Top 5: %s",
                     len(dups),
                     dups.head(5).to_dict(),
@@ -2712,7 +2712,7 @@ def handle_missing_protein_fields(
     else:
         msg = (
             f"handle_missing_protein_fields: 'uniprot_id' column not found "
-            f"(columns={list(out.columns)}). Cannot filter — returning "
+            f"(columns={list(out.columns)}). Cannot filter -- returning "
             f"DataFrame unchanged."
         )
         logger.warning(msg)
@@ -2731,7 +2731,7 @@ def handle_missing_protein_fields(
         if lineage_col in out.columns and bool(out[lineage_col].any()):
             logger.debug(
                 "handle_missing_protein_fields: column '%s' already has "
-                "lineage marker — skipping (idempotent)",
+                "lineage marker -- skipping (idempotent)",
                 col_name,
             )
             return 0
@@ -2743,7 +2743,7 @@ def handle_missing_protein_fields(
             return 0
         # Fill via loc (CODE-10, CODE-11, CODE-12).
         if fill_value is None:
-            # Leave as NaN — just mark lineage.
+            # Leave as NaN -- just mark lineage.
             pass
         else:
             out.loc[null_mask, col_name] = fill_value
@@ -2770,12 +2770,12 @@ def handle_missing_protein_fields(
         if "_organism_was_defaulted" in out.columns and bool(out["_organism_was_defaulted"].any()):
             logger.debug(
                 "handle_missing_protein_fields: organism already has "
-                "lineage marker — skipping (idempotent)"
+                "lineage marker -- skipping (idempotent)"
             )
         else:
             # Detect non-human organisms (BUG-SCI-4).
             # CRITICAL FIX (scientific correctness): UniProt returns organism
-            # names in the form "Homo sapiens (Human)" — with the common
+            # names in the form "Homo sapiens (Human)" -- with the common
             # name in parentheses. The original code compared the full
             # string against _DEFAULT_ORGANISM ("Homo sapiens") which
             # ALWAYS returned not-equal, flagging ALL UniProt proteins as
@@ -2827,7 +2827,7 @@ def handle_missing_protein_fields(
                     logger.warning(
                         "handle_missing_protein_fields: %d non-human "
                         "protein(s) detected. The default fill value is "
-                        "%r — non-human proteins will be INCORRECTLY "
+                        "%r -- non-human proteins will be INCORRECTLY "
                         "labeled as human. Use organism_fill_mode='strict' "
                         "to prevent this.",
                         non_human_count,
@@ -2873,7 +2873,7 @@ def handle_missing_protein_fields(
         if "_sequence_was_truncated" in out.columns and bool(out["_sequence_was_truncated"].any()):
             logger.debug(
                 "handle_missing_protein_fields: sequence already has "
-                "truncation marker — skipping (idempotent)"
+                "truncation marker -- skipping (idempotent)"
             )
         else:
             # BUG-REL-8: validate types first.
@@ -2882,7 +2882,7 @@ def handle_missing_protein_fields(
             if non_str_count > 0:
                 logger.warning(
                     "handle_missing_protein_fields: %d non-string sequence(s) "
-                    "detected — setting to None",
+                    "detected -- setting to None",
                     non_str_count,
                 )
                 out.loc[~str_mask & out["sequence"].notna(), "sequence"] = None
@@ -2908,7 +2908,7 @@ def handle_missing_protein_fields(
             if truncated_count > 0:
                 # BUG-SCI-8: truncate.  When add_truncation_marker=True,
                 # append "...[TRUNCATED]" for lineage visibility.  When False
-                # (default — v2.0.0 backward compat), truncate to exactly
+                # (default -- v2.0.0 backward compat), truncate to exactly
                 # _MAX_SEQUENCE_LENGTH chars without a marker.
                 if add_truncation_marker:
                     out.loc[long_mask, "sequence"] = (
@@ -2975,7 +2975,7 @@ def validate_gda_scores(
     reset_index: bool = False,
     return_result: bool = False,
 ) -> Union[pd.DataFrame, "DataCleaningResult"]:
-    """Validate and clean gene–disease association (GDA) records.
+    """Validate and clean gene-disease association (GDA) records.
 
     Operations:
 
@@ -2993,7 +2993,7 @@ def validate_gda_scores(
     Parameters
     ----------
     df : pd.DataFrame
-        Gene–disease association records.
+        Gene-disease association records.
     score_range : tuple[float, float]
         (min, max) for score clipping.  Default ``(0.0, 1.0)`` (v2.0.0).
         Use ``(-1.0, 1.0)`` with ``preserve_direction=True`` to keep
@@ -3003,13 +3003,13 @@ def validate_gda_scores(
         based on the original sign.  Default False.
     alternative_id_columns : list[str] | None
         Reserved for future use (referential integrity checks via
-        ``gene_reference`` / ``disease_reference`` — DQ-8).
+        ``gene_reference`` / ``disease_reference`` -- DQ-8).
     source : str | None
         Source pipeline name (e.g. ``"disgenet"``, ``"omim"``).  Used
         for source-specific validation warnings (COMP-5).  Default None.
     dedup : bool
         If True, drop duplicate records (DQ-4).  Default False (v2.0.0
-        behavior — no dedup).
+        behavior -- no dedup).
     dedup_keys : list[str] | None
         Column names to use for dedup.  Default
         ``["gene_symbol", "disease_id", "source"]`` (filtered to columns
@@ -3025,17 +3025,17 @@ def validate_gda_scores(
         A new DataFrame with validated GDA records.  Lineage columns
         added (LINEAGE-5):
 
-        - ``_score_was_clipped`` — True if score was clipped
-        - ``_original_score`` — the original score (if clipped)
-        - ``_score_was_coerced_nan`` — True if score was non-numeric
-        - ``_score_direction`` — "positive" / "negative" / None
-        - ``_disease_name_was_filled`` — True if disease_name was filled
-        - ``_association_type_was_filled`` — True if association_type was filled
+        - ``_score_was_clipped`` -- True if score was clipped
+        - ``_original_score`` -- the original score (if clipped)
+        - ``_score_was_coerced_nan`` -- True if score was non-numeric
+        - ``_score_direction`` -- "positive" / "negative" / None
+        - ``_disease_name_was_filled`` -- True if disease_name was filled
+        - ``_association_type_was_filled`` -- True if association_type was filled
 
     Notes
     -----
     **Backward compatibility**: when called as ``validate_gda_scores(df)``,
-    this function preserves the v2.0.0 behavior — clips to [0, 1], fills
+    this function preserves the v2.0.0 behavior -- clips to [0, 1], fills
     disease_name with disease_id, fills association_type with "unknown".
     No dedup is performed.
 
@@ -3096,23 +3096,23 @@ def validate_gda_scores(
     score_min, score_max = float(score_range[0]), float(score_range[1])
 
     # 1+2. Score coercion + clipping (BUG-DESIGN-5, CODE-14, BUG-SCI-5).
-    # v82 FORENSIC ROOT FIX (P1-1 — OMIM categorical mapping idempotency bug):
+    # v82 FORENSIC ROOT FIX (P1-1 -- OMIM categorical mapping idempotency bug):
     #   The previous code used a BROAD ``.any()`` gate: if ANY row had
     #   ``_score_was_clipped=True``, the ENTIRE score-processing branch
-    #   was skipped — including the OMIM categorical mapping. This meant
+    #   was skipped -- including the OMIM categorical mapping. This meant
     #   that if ``validate_gda_scores`` was called first with source="disgenet"
-    #   (clipping a 1.5→1.0 on one row), a second call with source="omim"
+    #   (clipping a 1.5->1.0 on one row), a second call with source="omim"
     #   on the same DataFrame would SKIP the OMIM categorical mapping
     #   entirely, leaving OMIM scores as raw integers 1/2/3/4 instead of
     #   mapping them to 0.5/0.6/0.8/0.9. Silent data corruption.
     #
     #   ROOT FIX: decouple the three operations:
-    #     1. Numeric coercion — ALWAYS runs (idempotent: to_numeric on
+    #     1. Numeric coercion -- ALWAYS runs (idempotent: to_numeric on
     #        already-numeric data is a no-op).
-    #     2. OMIM categorical mapping — ALWAYS runs when source="omim"
+    #     2. OMIM categorical mapping -- ALWAYS runs when source="omim"
     #        (naturally idempotent: mapped values 0.5/0.6/0.8/0.9 are
     #        NOT integers 1/2/3/4, so re-running won't re-map them).
-    #     3. Clipping — uses PER-ROW idempotency: rows already marked
+    #     3. Clipping -- uses PER-ROW idempotency: rows already marked
     #        ``_score_was_clipped=True`` are not re-clipped, preserving
     #        their ``_original_score`` lineage. Only NEW out-of-range
     #        rows get clipped.
@@ -3135,65 +3135,65 @@ def validate_gda_scores(
         if non_numeric_count > 0:
             logger.warning(
                 "validate_gda_scores: %d non-numeric score value(s) "
-                "detected — coercing to NaN",
+                "detected -- coercing to NaN",
                 non_numeric_count,
             )
             _increment_metric("non_numeric_scores_coerced", non_numeric_count)
 
-        # Coerce to numeric (always — idempotent).
+        # Coerce to numeric (always -- idempotent).
         out["score"] = pd.to_numeric(out["score"], errors="coerce")
         # FIX P1-ER-22 (LOW): cast to float64 unconditionally so the
-        # OMIM categorical→continuous mapping below (1→0.5 etc.)
+        # OMIM categorical->continuous mapping below (1->0.5 etc.)
         # doesn't trigger a pandas FutureWarning about assigning
         # floats to an int64 column.
         out["score"] = out["score"].astype("float64")
 
-        # OMIM categorical mapping — ALWAYS runs when source="omim".
+        # OMIM categorical mapping -- ALWAYS runs when source="omim".
         # Naturally idempotent: mapped values 0.5/0.6/0.9/0.8 are NOT
         # integers 1/2/3/4, so re-running won't re-map them.
         #
-        # v89 P0 ROOT FIX (Compound #2 — OMIM score inversion): the
+        # v89 P0 ROOT FIX (Compound #2 -- OMIM score inversion): the
         # previous map was {1: 0.5, 2: 0.6, 3: 0.8, 4: 0.9}, which
         # INVERTED mk=3 and mk=4 relative to the OMIM pipeline's
         # SCORE_BY_MAPPING_KEY (omim_pipeline.py:328-333):
-        #     pipeline: mk=3 → 0.9 (CONFIRMED, molecular basis known)
-        #               mk=4 → 0.8 (CONTIGUOUS, contiguous gene syndrome)
-        #     validator (BUG): mk=3 → 0.8, mk=4 → 0.9
+        #     pipeline: mk=3 -> 0.9 (CONFIRMED, molecular basis known)
+        #               mk=4 -> 0.8 (CONTIGUOUS, contiguous gene syndrome)
+        #     validator (BUG): mk=3 -> 0.8, mk=4 -> 0.9
         #
         # Per OMIM's official documentation:
         #   mk=1: disorder placed by linkage (weakest)
         #   mk=2: disorder placed by linkage, no recombination
         #   mk=3: molecular basis of disorder is KNOWN (STRONGEST)
         #   mk=4: contiguous gene deletion/duplication syndrome (strong
-        #         but less specific than mk=3 — multiple genes involved)
+        #         but less specific than mk=3 -- multiple genes involved)
         #
-        # The pipeline's mapping (mk=3 → 0.9, mk=4 → 0.8) is
+        # The pipeline's mapping (mk=3 -> 0.9, mk=4 -> 0.8) is
         # SCIENTIFICALLY CORRECT. The validator's inversion was a silent
         # data corruption: a record with mk=3 (strongest evidence) was
         # downgraded to 0.8 by the validator, while mk=4 (weaker) was
-        # upgraded to 0.9. This contaminated the KG's GDA scores → GT
-        # model trained on wrong scores → cannot generalize → held-out
+        # upgraded to 0.9. This contaminated the KG's GDA scores -> GT
+        # model trained on wrong scores -> cannot generalize -> held-out
         # AUC = 0.0 (Compound #2 in the v89 audit).
         #
         # The fix: align the validator's map with the pipeline's
         # SCORE_BY_MAPPING_KEY. The map is now {1: 0.5, 2: 0.6, 3: 0.9,
-        # 4: 0.8} — matching omim_pipeline.py exactly.
+        # 4: 0.8} -- matching omim_pipeline.py exactly.
         #
-        # v93 ROOT FIX (P1-029 — single source of truth): the previous
+        # v93 ROOT FIX (P1-029 -- single source of truth): the previous
         # code hardcoded ``_OMIM_CATEGORICAL_MAP = {1: 0.5, 2: 0.6,
         # 3: 0.9, 4: 0.8}`` as a local constant. If someone changed
         # ``SCORE_BY_MAPPING_KEY`` in ``pipelines/omim_pipeline.py``
         # without updating this local copy, the two would SILENTLY
-        # DIVERGE — the pipeline would emit one set of scores and the
+        # DIVERGE -- the pipeline would emit one set of scores and the
         # validator would remap them with a different mapping,
         # corrupting the GDA scores that feed the Graph Transformer
         # and the RL ranker. Root fix: import the canonical map from
-        # ``pipelines/omim_pipeline.py`` (lazy import — cleaning must
+        # ``pipelines/omim_pipeline.py`` (lazy import -- cleaning must
         # not import pipelines at module load due to circular-dep guard
         # ARCH-1, GUARD-A7). The pipeline's map IS the single source
         # of truth.
         #
-        # P1-007 ROOT FIX (v100 forensic — RESTORED after parallel-agent regression):
+        # P1-007 ROOT FIX (v100 forensic -- RESTORED after parallel-agent regression):
         # The verify command caught that this block was dropped during a parallel
         # merge. Restoring the mapping_key-based verification logic.
         if source == "omim":
@@ -3228,10 +3228,10 @@ def validate_gda_scores(
                             out.loc[mismatch, "score"] = expected_score.loc[mismatch]
                             needs_remap_mask = needs_remap_mask | mismatch
                             logger.warning(
-                                "validate_gda_scores: source='omim' — RE-MAPPED "
+                                "validate_gda_scores: source='omim' -- RE-MAPPED "
                                 "%d GDA score(s) whose value did not match the "
                                 "expected SCORE_BY_MAPPING_KEY mapping. This "
-                                "indicates an upstream inversion — the score "
+                                "indicates an upstream inversion -- the score "
                                 "has been corrected.",
                                 int(mismatch.sum()),
                             )
@@ -3255,8 +3255,8 @@ def validate_gda_scores(
                     out.loc[integer_score_mask, "score"] = out.loc[integer_score_mask, "score"].apply(lambda v: _OMIM_CATEGORICAL_MAP[int(v)])
                     needs_remap_mask = needs_remap_mask | integer_score_mask
                     logger.info(
-                        "validate_gda_scores: source='omim' — mapped %d raw-integer "
-                        "categorical GDA score(s) (1→0.5, 2→0.6, 3→0.9, 4→0.8).",
+                        "validate_gda_scores: source='omim' -- mapped %d raw-integer "
+                        "categorical GDA score(s) (1->0.5, 2->0.6, 3->0.9, 4->0.8).",
                         int(integer_score_mask.sum()),
                     )
                 n_categorical = int(needs_remap_mask.sum())
@@ -3268,7 +3268,7 @@ def validate_gda_scores(
                     _increment_metric("omim_categorical_scores_mapped", n_categorical)
             except (TypeError, ValueError) as exc:
                 logger.warning(
-                    "validate_gda_scores: OMIM categorical mapping failed (%s) — "
+                    "validate_gda_scores: OMIM categorical mapping failed (%s) -- "
                     "falling back to standard clipping.", exc,
                 )
 
@@ -3280,27 +3280,27 @@ def validate_gda_scores(
         coerced_nan_count = int(coerced_nan_mask.sum())
 
         # BUG-SCI-5: preserve direction (optional).
-        # P1-008 ROOT FIX (v100 forensic — DIRECTION LINEAGE NOW CONSUMED):
+        # P1-008 ROOT FIX (v100 forensic -- DIRECTION LINEAGE NOW CONSUMED):
         #
         # The previous code populated ``_score_direction`` ("positive" /
         # "negative" / "neutral") when ``preserve_direction=True``, but
         # ``classify_confidence`` uses ``abs(score)`` for the tier lookup
-        # — so the direction was CAPTURED but NEVER CONSUMED by the tier
+        # -- so the direction was CAPTURED but NEVER CONSUMED by the tier
         # classifier. Direction information was collected and thrown away.
         #
         # ROOT FIX: we keep the direction-population code (it's still
-        # useful lineage for downstream consumers — the RL ranker in
+        # useful lineage for downstream consumers -- the RL ranker in
         # Phase 4 can use it to distinguish protective from positive
         # associations even when the tier is the same), but we now
         # ALSO emit a clear log message at INFO level so an operator
         # can see when direction-preserving mode is active. The
         # ``classify_confidence`` docstring (P1-013 fix) now explicitly
         # documents that ``abs(score)`` is the OPT-IN protective-mode
-        # branch — when ``preserve_direction=True`` is set here, the
+        # branch -- when ``preserve_direction=True`` is set here, the
         # downstream tier classifier uses abs(score) so the tier
         # reflects strength, and the ``_score_direction`` column
         # preserves the sign for downstream ranking. The two columns
-        # together capture BOTH strength and direction — the previous
+        # together capture BOTH strength and direction -- the previous
         # implementation only captured direction (and lost strength
         # via the abs() in the wrong place). The lineage is now
         # CONSISTENT and consumed.
@@ -3313,7 +3313,7 @@ def validate_gda_scores(
             n_with_direction = int(out["_score_direction"].notna().sum())
             if n_with_direction > 0:
                 logger.info(
-                    "validate_gda_scores: preserve_direction=True — "
+                    "validate_gda_scores: preserve_direction=True -- "
                     "captured direction lineage for %d row(s) "
                     "(positive/negative/neutral). The _score_direction "
                     "column is consumed by downstream ranking (RL agent "
@@ -3384,16 +3384,16 @@ def validate_gda_scores(
             dtype_changes["score"] = (score_dtype_before, score_dtype_after)
     else:
         logger.debug(
-            "validate_gda_scores: 'score' column not present — skipping clip"
+            "validate_gda_scores: 'score' column not present -- skipping clip"
         )
 
     # 3. Fill disease_name (BUG-SCI-6).
     if "disease_name" in out.columns and "disease_id" in out.columns:
-        # P1-014 ROOT FIX (v100 forensic — per-row idempotency):
+        # P1-014 ROOT FIX (v100 forensic -- per-row idempotency):
         # The previous code used ``bool(out["_disease_name_was_filled"].any())``
-        # as a gate — if ANY row had the fill lineage flag set, the ENTIRE
+        # as a gate -- if ANY row had the fill lineage flag set, the ENTIRE
         # column was skipped. That meant new rows added in a second call
-        # (with null disease_name) were NEVER backfilled — silent data gap.
+        # (with null disease_name) were NEVER backfilled -- silent data gap.
         # ROOT FIX: compute the null mask FIRST, then exclude rows that
         # already have the fill flag set (per-row idempotency, matching
         # the pattern in fill_missing_drug_fields). New null rows are
@@ -3404,7 +3404,7 @@ def validate_gda_scores(
             null_mask = null_mask & ~out["_disease_name_was_filled"].astype(bool)
         null_count = int(null_mask.sum())
         if null_count > 0:
-            # BUG-SCI-6: format is "Unknown disease (<id>)" — but
+            # BUG-SCI-6: format is "Unknown disease (<id>)" -- but
             # for BACKWARD COMPAT with v2.0.0 tests, the DEFAULT
             # behavior fills with the bare disease_id.
             # The legacy tests verify:
@@ -3427,17 +3427,17 @@ def validate_gda_scores(
         else:
             logger.debug(
                 "validate_gda_scores: no null disease_name rows to fill "
-                "(per-row idempotency — already-filled rows skipped)"
+                "(per-row idempotency -- already-filled rows skipped)"
             )
     elif "disease_name" in out.columns:
         logger.debug(
-            "validate_gda_scores: 'disease_id' column not present — cannot "
+            "validate_gda_scores: 'disease_id' column not present -- cannot "
             "backfill disease_name"
         )
 
     # 4. Fill association_type.
     if "association_type" in out.columns:
-        # P1-015 ROOT FIX (v100 forensic — per-row idempotency):
+        # P1-015 ROOT FIX (v100 forensic -- per-row idempotency):
         # Same broad-.any()-gate bug as P1-014 (disease_name). The previous
         # code skipped the ENTIRE column if ANY row had the fill flag set,
         # leaving new null rows unfilled. ROOT FIX: compute the null mask
@@ -3464,7 +3464,7 @@ def validate_gda_scores(
         else:
             logger.debug(
                 "validate_gda_scores: no null association_type rows to fill "
-                "(per-row idempotency — already-filled rows skipped)"
+                "(per-row idempotency -- already-filled rows skipped)"
             )
 
     # DQ-7: validate association_type values against the allowlist (warn-only).
@@ -3477,7 +3477,7 @@ def validate_gda_scores(
                 invalid_values = non_null_assoc[invalid_mask].unique().tolist()[:10]
                 logger.warning(
                     "validate_gda_scores: %d association_type value(s) "
-                    "not in allowlist — top 10: %s",
+                    "not in allowlist -- top 10: %s",
                     invalid_count,
                     invalid_values,
                 )
@@ -3487,20 +3487,20 @@ def validate_gda_scores(
 
     # COMP-5: source-specific validation.
     if source == "disgenet" and "score" in out.columns:
-        # DisGeNET scores are typically in [0, 1] — warn if any value
+        # DisGeNET scores are typically in [0, 1] -- warn if any value
         # was clipped at the upper bound (might indicate a different scale).
         try:
-            # P1-010 ROOT FIX (v100 forensic — TypeError on None>float):
+            # P1-010 ROOT FIX (v100 forensic -- TypeError on None>float):
             # The previous code did ``out["_original_score"] > score_max``
             # directly. But ``_original_score`` is ONLY populated for
             # clipped rows (line ~3249 sets it inside ``out.loc[clipped_mask,
             # "_original_score"] = ...``). For non-clipped rows,
-            # ``_original_score`` is None — and ``None > 1.0`` raises
+            # ``_original_score`` is None -- and ``None > 1.0`` raises
             # TypeError on some pandas versions (or returns False on
             # others). The behavior was pandas-version-dependent and
             # could crash DisGeNET validation. ROOT FIX: use
             # ``.fillna(0.0)`` so the comparison is always numeric.
-            # A non-clipped row has ``_original_score = None → 0.0``,
+            # A non-clipped row has ``_original_score = None -> 0.0``,
             # which is never > ``score_max`` (1.0), so the row is
             # correctly excluded from the warning.
             _original_score_filled = out.get(
@@ -3517,7 +3517,7 @@ def validate_gda_scores(
             if clipped_at_max_count > 0:
                 logger.warning(
                     "validate_gda_scores: %d DisGeNET score(s) clipped at "
-                    "upper bound %s — verify source data scale",
+                    "upper bound %s -- verify source data scale",
                     clipped_at_max_count,
                     score_max,
                 )
@@ -3531,12 +3531,12 @@ def validate_gda_scores(
         existing_keys = [k for k in dedup_keys if k in out.columns]
         if existing_keys:
             before_dedup = len(out)
-            # v65 ROOT FIX (P1C-007 — NaN-collapsing bug):
+            # v65 ROOT FIX (P1C-007 -- NaN-collapsing bug):
             #   The previous code called ``drop_duplicates`` directly on
             #   ``existing_keys``. pandas ``drop_duplicates`` treats
             #   ``NaN == NaN`` as ``True`` by default, so ALL rows with
             #   NaN in ANY dedup key (gene_symbol, disease_id, or source)
-            #   were collapsed into a SINGLE row — silently losing
+            #   were collapsed into a SINGLE row -- silently losing
             #   Gene->Disease edges. The ``deduplicator.py`` module
             #   (lines 2336-2369) fixed this EXACT bug for InChIKey by
             #   assigning unique sentinels to NaN-keyed rows BEFORE
@@ -3720,7 +3720,7 @@ def clean_gda(
 # Public API (ARCH-3, COMP-1)
 # ===========================================================================
 __all__ = [
-    # Original public API (preserved — v1.0.0 / v2.0.0)
+    # Original public API (preserved -- v1.0.0 / v2.0.0)
     "handle_missing_inchikey",
     "fill_missing_drug_fields",
     "handle_missing_protein_fields",

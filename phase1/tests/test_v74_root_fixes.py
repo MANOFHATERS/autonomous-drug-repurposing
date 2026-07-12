@@ -19,13 +19,13 @@ Or standalone:
         PYTHONPATH=. python tests/test_v74_root_fixes.py
 
 The tests use a FRESH SQLite database per run (no Postgres dependency).
-SQLite is the dev/test dialect — verifying fixes on SQLite proves they
+SQLite is the dev/test dialect -- verifying fixes on SQLite proves they
 work on the dev path (the path that was broken in v73). PostgreSQL
 deploys get the same fixes via the migration runner.
 
 FIXES COVERED
 -------------
-T-013: activity_value FLOAT → NUMERIC(10,4) schema drift (migration 001 + new migration 011)
+T-013: activity_value FLOAT -> NUMERIC(10,4) schema drift (migration 001 + new migration 011)
 T-014: chk_drugs_is_globally_approved CheckConstraint missing from ORM
 T-015: DAG docstrings contradict actual schedules
 T-016: Contradictory BEGIN/COMMIT comments in migration 002
@@ -52,7 +52,7 @@ if str(PHASE1_ROOT) not in sys.path:
 
 
 # ===========================================================================
-# T-013: activity_value FLOAT → NUMERIC(10,4) schema drift
+# T-013: activity_value FLOAT -> NUMERIC(10,4) schema drift
 # ===========================================================================
 
 def test_t013_activity_value_is_numeric_in_migration_001():
@@ -78,7 +78,7 @@ def test_t013_orm_activity_value_is_numeric():
 
 
 def test_t013_migration_011_exists_and_aligns_float_to_numeric():
-    """Migration 011 must exist and ALTER FLOAT → NUMERIC(10, 4) for deployed DBs."""
+    """Migration 011 must exist and ALTER FLOAT -> NUMERIC(10, 4) for deployed DBs."""
     mig = PHASE1_ROOT / "database" / "migrations" / "011_align_activity_value_to_orm.sql"
     assert mig.exists(), "migration 011 file should exist"
     sql = mig.read_text()
@@ -108,13 +108,13 @@ def test_t013_activity_value_stores_decimal_exact():
 
     On PostgreSQL, NUMERIC(10,4) stores exact decimals (no ULP drift).
     On SQLite, the column type is advisory (dynamic typing) so the value
-    is stored as REAL — but the SCHEMA declaration still matches the ORM,
+    is stored as REAL -- but the SCHEMA declaration still matches the ORM,
     which is what T-013 fixes. This test verifies the schema declaration
     is consistent (the actual rounding behavior is dialect-specific).
     """
     from sqlalchemy import create_engine, text, inspect
     from database.base import Base
-    import database.models  # noqa: F401 — register models
+    import database.models  # noqa: F401 -- register models
 
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
@@ -375,7 +375,7 @@ def test_t022_resolver_utils_has_rdkit_warning_flag():
     assert "v74 T-022" in content, \
         "v74 T-022 warning log message must be present"
     # Must NOT silently pass on ImportError
-    assert "except ImportError:\n                # RDKit not available — skip cross-field check.\n                pass" not in content, \
+    assert "except ImportError:\n                # RDKit not available -- skip cross-field check.\n                pass" not in content, \
         "resolver_utils.py must not silently pass on ImportError"
 
 
@@ -443,10 +443,10 @@ def test_t023_is_http_4xx_error_classifies_correctly():
     assert mod.is_http_4xx_error(FakeHTTPError(403)) is True
     assert mod.is_http_4xx_error(FakeHTTPError(404)) is True
     assert mod.is_http_4xx_error(FakeHTTPError(410)) is True
-    # 429 (rate limit — RETRYABLE, must be False)
+    # 429 (rate limit -- RETRYABLE, must be False)
     assert mod.is_http_4xx_error(FakeHTTPError(429)) is False, \
         "429 (Too Many Requests) must NOT be classified as non-retryable 4xx"
-    # 5xx (transient — RETRYABLE, must be False)
+    # 5xx (transient -- RETRYABLE, must be False)
     assert mod.is_http_4xx_error(FakeHTTPError(500)) is False
     assert mod.is_http_4xx_error(FakeHTTPError(502)) is False
     assert mod.is_http_4xx_error(FakeHTTPError(503)) is False
@@ -478,7 +478,7 @@ def test_t023_all_dags_use_retry_policy():
 # ===========================================================================
 
 def test_phase1_phase2_bridge_connected():
-    """The Phase 1 → Phase 2 bridge must be wired and functional."""
+    """The Phase 1 -> Phase 2 bridge must be wired and functional."""
     # Add phase2 to sys.path
     phase2_root = PHASE1_ROOT.parent / "phase2"
     if str(phase2_root) not in sys.path:

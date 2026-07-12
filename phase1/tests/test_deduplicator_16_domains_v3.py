@@ -1,5 +1,5 @@
 """
-Test suite for cleaning/deduplicator.py v3.0.0 — 16-domain institutional-grade coverage.
+Test suite for cleaning/deduplicator.py v3.0.0 -- 16-domain institutional-grade coverage.
 
 This is Test #1 of 3 required by the upgrade prompt. It exercises the new
 deduplicator.py file in depth across all 16 domains:
@@ -133,7 +133,7 @@ def _make_dpi_df() -> pd.DataFrame:
 
 
 # ============================================================================
-# Section 1 — Architecture (Domain 1)
+# Section 1 -- Architecture (Domain 1)
 # ============================================================================
 
 class TestArchitecture:
@@ -200,7 +200,7 @@ class TestArchitecture:
 
 
 # ============================================================================
-# Section 2 — Design (Domain 2)
+# Section 2 -- Design (Domain 2)
 # ============================================================================
 
 class TestDesign:
@@ -241,7 +241,7 @@ class TestDesign:
 
     def test_des_4_keys_default_inferred(self):
         df = _make_dpi_df()
-        # Don't pass keys — should infer ["drug_id", "protein_id", "source", "source_id"]
+        # Don't pass keys -- should infer ["drug_id", "protein_id", "source", "source_id"]
         result = dedup_interactions(df)
         assert len(result) == 2  # 1 of the 2 chembl rows dropped, drugbank kept
 
@@ -283,14 +283,14 @@ class TestDesign:
 
 
 # ============================================================================
-# Section 3 — Scientific Correctness (Domain 3)
+# Section 3 -- Scientific Correctness (Domain 3)
 # ============================================================================
 
 class TestScientificCorrectness:
     """[SCI-1..12] Activity-type direction, segmentation, censoring, units."""
 
     def test_sci_1_pic50_keeps_higher(self):
-        """pIC50 — higher = more potent. v1.0.0 was wrong (sorted ascending)."""
+        """pIC50 -- higher = more potent. v1.0.0 was wrong (sorted ascending)."""
         df = pd.DataFrame([
             {"drug_id": 1, "protein_id": 10, "source": "chembl", "source_id": "a",
              "activity_value": 6.5, "activity_type": "pIC50"},
@@ -324,7 +324,7 @@ class TestScientificCorrectness:
         assert result.iloc[0]["activity_value"] == 50.0  # lower wins
 
     def test_sci_1_auto_direction(self):
-        # Mixed activity types — both should be retained (SCI-2)
+        # Mixed activity types -- both should be retained (SCI-2)
         df = pd.DataFrame([
             {"drug_id": 1, "protein_id": 10, "source": "chembl", "source_id": "a",
              "activity_value": 50.0, "activity_type": "IC50"},
@@ -332,7 +332,7 @@ class TestScientificCorrectness:
              "activity_value": 7.0, "activity_type": "pIC50"},
         ])
         result = dedup_interactions(df, keys=["drug_id", "protein_id", "source", "source_id"])
-        # SCI-2: different activity_type → NOT duplicates → both kept
+        # SCI-2: different activity_type -> NOT duplicates -> both kept
         assert len(result) == 2
 
     def test_sci_2_segments_by_activity_type(self):
@@ -344,7 +344,7 @@ class TestScientificCorrectness:
              "activity_value": 100.0, "activity_type": "Ki"},
         ])
         result = dedup_interactions(df, keys=["drug_id", "protein_id", "source", "source_id"])
-        assert len(result) == 2  # both retained — different activity_type
+        assert len(result) == 2  # both retained -- different activity_type
 
     def test_sci_3_censored_gt_does_not_win(self):
         """>100 should not silently win over an actual 50.0 value."""
@@ -380,7 +380,7 @@ class TestScientificCorrectness:
             {"drug_id": 1, "protein_id": 10, "source": "chembl", "source_id": "a",
              "activity_value": 0.1,    "activity_type": "IC50", "activity_units": "uM"},
         ])
-        # 100 nM = 0.1 uM — they're equal in nM, so first-occurrence wins
+        # 100 nM = 0.1 uM -- they're equal in nM, so first-occurrence wins
         result = dedup_interactions(df, keys=["drug_id", "protein_id", "source", "source_id"])
         assert len(result) == 1
 
@@ -442,7 +442,7 @@ class TestScientificCorrectness:
 
 
 # ============================================================================
-# Section 4 — Coding (Domain 4)
+# Section 4 -- Coding (Domain 4)
 # ============================================================================
 
 class TestCoding:
@@ -476,7 +476,7 @@ class TestCoding:
                 count = stripped.count('"""')
                 if count == 1:
                     in_docstring = not in_docstring
-                # If count == 2, the docstring opens and closes on same line — no toggle
+                # If count == 2, the docstring opens and closes on same line -- no toggle
                 continue
             if in_docstring:
                 continue
@@ -551,7 +551,7 @@ class TestCoding:
 
 
 # ============================================================================
-# Section 5 — Data Quality & Integrity (Domain 5)
+# Section 5 -- Data Quality & Integrity (Domain 5)
 # ============================================================================
 
 class TestDataQuality:
@@ -620,7 +620,7 @@ class TestDataQuality:
         df = pd.DataFrame([
             {"inchikey": "AAA", "name": f"Drug {i}"} for i in range(20)
         ])
-        # 20 rows, 1 unique inchikey → ratio = 19/20 = 0.95
+        # 20 rows, 1 unique inchikey -> ratio = 19/20 = 0.95
         with pytest.raises(ValueError):
             dedup_by_inchikey(df, max_duplicate_ratio=0.5)
 
@@ -706,7 +706,7 @@ class TestDataQuality:
 
 
 # ============================================================================
-# Section 6 — Reliability & Resilience (Domain 6)
+# Section 6 -- Reliability & Resilience (Domain 6)
 # ============================================================================
 
 class TestReliability:
@@ -716,7 +716,7 @@ class TestReliability:
         df = _make_aspirin_df()
         clear_dead_letters()
         dedup_by_inchikey(df)
-        # 1 duplicate dropped → at least 1 dead-letter entry
+        # 1 duplicate dropped -> at least 1 dead-letter entry
         letters = get_dead_letters()
         assert len(letters) >= 1
         assert letters[0]["function"] == "dedup_by_inchikey"
@@ -792,7 +792,7 @@ class TestReliability:
 
 
 # ============================================================================
-# Section 7 — Idempotency & Reproducibility (Domain 7)
+# Section 7 -- Idempotency & Reproducibility (Domain 7)
 # ============================================================================
 
 class TestIdempotency:
@@ -817,7 +817,7 @@ class TestIdempotency:
         assert r2.shape == r1.shape
 
     def test_idem_2_deterministic_tie_breaking(self):
-        """Same input → same output, even with ties."""
+        """Same input -> same output, even with ties."""
         df = pd.DataFrame([
             {"inchikey": "AAA", "name": "A"},  # both equally complete
             {"inchikey": "AAA", "name": "B"},
@@ -836,7 +836,7 @@ class TestIdempotency:
         assert fp_in != fp_out  # data changed
 
     def test_idem_4_fingerprint_stable(self):
-        """Same input twice → same output fingerprint."""
+        """Same input twice -> same output fingerprint."""
         df = _make_aspirin_df()
         r1 = dedup_by_inchikey(df, skip_if_already_deduped=False)
         r2 = dedup_by_inchikey(df, skip_if_already_deduped=False)
@@ -876,7 +876,7 @@ class TestIdempotency:
 
 
 # ============================================================================
-# Section 8 — Performance & Scalability (Domain 8)
+# Section 8 -- Performance & Scalability (Domain 8)
 # ============================================================================
 
 class TestPerformance:
@@ -932,7 +932,7 @@ class TestPerformance:
 
 
 # ============================================================================
-# Section 9 — Security & Privacy (Domain 9)
+# Section 9 -- Security & Privacy (Domain 9)
 # ============================================================================
 
 class TestSecurity:
@@ -986,7 +986,7 @@ class TestSecurity:
 
 
 # ============================================================================
-# Section 10 — Testing & Validation (Domain 10)
+# Section 10 -- Testing & Validation (Domain 10)
 # ============================================================================
 
 class TestTestingValidation:
@@ -994,7 +994,7 @@ class TestTestingValidation:
 
     def test_test_1_module_has_200_plus_assertions(self):
         """Verify the test file itself has substantial assertions."""
-        # This is a meta-test — just verify we have many test methods
+        # This is a meta-test -- just verify we have many test methods
         test_methods = [
             name for name in dir(TestScientificCorrectness)
             if name.startswith("test_")
@@ -1031,7 +1031,7 @@ class TestTestingValidation:
 
 
 # ============================================================================
-# Section 11 — Logging & Observability (Domain 11)
+# Section 11 -- Logging & Observability (Domain 11)
 # ============================================================================
 
 class TestLogging:
@@ -1086,7 +1086,7 @@ class TestLogging:
 
 
 # ============================================================================
-# Section 12 — Configuration & Environment (Domain 12)
+# Section 12 -- Configuration & Environment (Domain 12)
 # ============================================================================
 
 class TestConfiguration:
@@ -1136,7 +1136,7 @@ class TestConfiguration:
 
 
 # ============================================================================
-# Section 13 — Documentation & Readability (Domain 13)
+# Section 13 -- Documentation & Readability (Domain 13)
 # ============================================================================
 
 class TestDocumentation:
@@ -1177,7 +1177,7 @@ class TestDocumentation:
 
 
 # ============================================================================
-# Section 14 — Compliance & Standards (Domain 14)
+# Section 14 -- Compliance & Standards (Domain 14)
 # ============================================================================
 
 class TestCompliance:
@@ -1245,7 +1245,7 @@ class TestCompliance:
 
 
 # ============================================================================
-# Section 15 — Interoperability & Integration (Domain 15)
+# Section 15 -- Interoperability & Integration (Domain 15)
 # ============================================================================
 
 class TestInteroperability:
@@ -1319,7 +1319,7 @@ class TestInteroperability:
         """Production requirements.txt should not need new deps for dedup."""
         req_path = _PROJECT_ROOT / "requirements.txt"
         content = req_path.read_text(encoding="utf-8")
-        # Dedup only needs pandas + stdlib — no new deps required
+        # Dedup only needs pandas + stdlib -- no new deps required
         assert "pandas" in content
 
     def test_interop_8_api_stability_documented(self):
@@ -1329,7 +1329,7 @@ class TestInteroperability:
 
 
 # ============================================================================
-# Section 16 — Data Lineage & Traceability (Domain 16)
+# Section 16 -- Data Lineage & Traceability (Domain 16)
 # ============================================================================
 
 class TestDataLineage:
@@ -1430,7 +1430,7 @@ class TestDataLineage:
 
 
 # ============================================================================
-# Section 17 — Edge Cases (cross-domain)
+# Section 17 -- Edge Cases (cross-domain)
 # ============================================================================
 
 class TestEdgeCases:
@@ -1498,7 +1498,7 @@ class TestEdgeCases:
 
 
 # ============================================================================
-# Section 18 — Source-literal invariants (TestIssue21 / TestIssue36)
+# Section 18 -- Source-literal invariants (TestIssue21 / TestIssue36)
 # ============================================================================
 
 class TestSourceLiterals:
@@ -1521,7 +1521,7 @@ class TestSourceLiterals:
 
 
 # ============================================================================
-# Section 19 — Cross-Domain Integration
+# Section 19 -- Cross-Domain Integration
 # ============================================================================
 
 class TestCrossDomainIntegration:

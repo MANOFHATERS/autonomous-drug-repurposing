@@ -1,11 +1,11 @@
-"""Test 2 of 3 — Real integration test for all 23 files working together.
+"""Test 2 of 3 -- Real integration test for all 23 files working together.
 
 This is the second of the three test suites the user mandated.  It
 verifies that the newly-upgraded ``pipelines/uniprot_pipeline.py`` works
-correctly with ALL other files in the codebase — the 22 already-fixed
-files plus the one we just upgraded — for a total of 23 files.
+correctly with ALL other files in the codebase -- the 22 already-fixed
+files plus the one we just upgraded -- for a total of 23 files.
 
-The 23 files covered (no files removed — all originals preserved):
+The 23 files covered (no files removed -- all originals preserved):
 
   1.  config/__init__.py
   2.  config/settings.py
@@ -44,7 +44,7 @@ Test coverage
    ``protein_resolver``) can resolve the pipeline's output.
 6. ``BasePipeline`` audit-trail infrastructure (``PipelineRun`` rows)
    works with the upgraded ``UniProtPipeline``.
-7. End-to-end: download (mocked) → clean → load into SQLite, verify
+7. End-to-end: download (mocked) -> clean -> load into SQLite, verify
    DB contains expected ``Protein`` rows with full lineage.
 8. Idempotency: running ``clean()`` + ``load()`` twice produces
    identical DB state (no duplicate rows).
@@ -123,7 +123,7 @@ TWENTY_THREE_FILES: list[str] = [
 
 
 # ============================================================================
-# Section 1 — Import sanity (all 23 files import cleanly)
+# Section 1 -- Import sanity (all 23 files import cleanly)
 # ============================================================================
 
 class TestAllFilesImport:
@@ -172,7 +172,7 @@ class TestAllFilesImport:
 
 
 # ============================================================================
-# Section 2 — Config integration
+# Section 2 -- Config integration
 # ============================================================================
 
 class TestConfigIntegration:
@@ -205,7 +205,7 @@ class TestConfigIntegration:
 
 
 # ============================================================================
-# Section 3 — Database model integration
+# Section 3 -- Database model integration
 # ============================================================================
 
 class TestDatabaseIntegration:
@@ -299,7 +299,7 @@ class TestDatabaseIntegration:
 
 
 # ============================================================================
-# Section 4 — Cleaning module integration
+# Section 4 -- Cleaning module integration
 # ============================================================================
 
 class TestCleaningIntegration:
@@ -341,13 +341,13 @@ class TestCleaningIntegration:
     def test_normalizer_module_compatible(self):
         """cleaning.normalizer imports OK and exposes expected functions."""
         from cleaning import normalizer
-        # The normalizer is for SMILES → InChIKey conversion (drugs), but
+        # The normalizer is for SMILES -> InChIKey conversion (drugs), but
         # it must be importable in the same process as uniprot_pipeline.
         assert hasattr(normalizer, "__name__")
 
 
 # ============================================================================
-# Section 5 — Entity resolution integration
+# Section 5 -- Entity resolution integration
 # ============================================================================
 
 class TestEntityResolutionIntegration:
@@ -360,7 +360,7 @@ class TestEntityResolutionIntegration:
 
     def test_protein_resolver_can_use_pipeline_output(self, db_session):
         """ProteinResolver can resolve a UniProt ID produced by the pipeline."""
-        # This is a smoke test — we just verify the resolver can be
+        # This is a smoke test -- we just verify the resolver can be
         # instantiated and has the expected interface.
         try:
             from entity_resolution.protein_resolver import ProteinResolver
@@ -368,12 +368,12 @@ class TestEntityResolutionIntegration:
             assert resolver is not None
         except Exception as exc:
             # If ProteinResolver needs a DB session, that's OK for this
-            # integration test — we just want to verify the module loads.
+            # integration test -- we just want to verify the module loads.
             pytest.skip(f"ProteinResolver requires DB: {exc}")
 
 
 # ============================================================================
-# Section 6 — BasePipeline audit-trail integration
+# Section 6 -- BasePipeline audit-trail integration
 # ============================================================================
 
 class TestAuditTrailIntegration:
@@ -430,11 +430,11 @@ class TestAuditTrailIntegration:
 
 
 # ============================================================================
-# Section 7 — End-to-end integration
+# Section 7 -- End-to-end integration
 # ============================================================================
 
 class TestEndToEndIntegration:
-    """End-to-end: download (mocked) → clean → load into SQLite."""
+    """End-to-end: download (mocked) -> clean -> load into SQLite."""
 
     @pytest.fixture
     def e2e_engine(self):
@@ -460,7 +460,7 @@ class TestEndToEndIntegration:
         engine.dispose()
 
     def test_full_lifecycle(self, e2e_engine, tmp_path, monkeypatch):
-        """Full download → clean → load lifecycle with mocked download.
+        """Full download -> clean -> load lifecycle with mocked download.
 
         Verifies that:
         - The pipeline can be instantiated with default config.
@@ -529,7 +529,7 @@ class TestEndToEndIntegration:
 
 
 # ============================================================================
-# Section 8 — Idempotency
+# Section 8 -- Idempotency
 # ============================================================================
 
 class TestIdempotencyIntegration:
@@ -588,11 +588,11 @@ class TestIdempotencyIntegration:
             count1 = session.query(Protein).count()
             assert count1 == 1
 
-            # Load again — should be idempotent.
+            # Load again -- should be idempotent.
             p.load(cleaned, session=session)
             session.commit()
             count2 = session.query(Protein).count()
-            assert count2 == 1, f"Idempotency broken: {count1} → {count2}"
+            assert count2 == 1, f"Idempotency broken: {count1} -> {count2}"
         finally:
             session.rollback()
             session.close()
@@ -632,7 +632,7 @@ class TestIdempotencyIntegration:
 
 
 # ============================================================================
-# Section 9 — Schema compliance
+# Section 9 -- Schema compliance
 # ============================================================================
 
 class TestSchemaCompliance:
@@ -725,7 +725,7 @@ class TestSchemaCompliance:
 
 
 # ============================================================================
-# Section 10 — Lineage and provenance
+# Section 10 -- Lineage and provenance
 # ============================================================================
 
 class TestLineageIntegration:
@@ -757,10 +757,10 @@ class TestLineageIntegration:
         assert sidecar.exists()
         data = json.loads(sidecar.read_text())
 
-        # Required fields per LIN9–LIN20.
+        # Required fields per LIN9-LIN20.
         required = [
             "pipeline", "pipeline_version", "schema_version",
-            "run_id", "correlation_id", "triggered_by",  # LIN13–LIN15, SEC20, COMP1
+            "run_id", "correlation_id", "triggered_by",  # LIN13-LIN15, SEC20, COMP1
             "uniprot_release", "query", "fields",
             "raw_file", "raw_sha256",
             "cleaned_file", "cleaned_sha256",
@@ -798,24 +798,24 @@ class TestLineageIntegration:
         raw_path.write_text(tsv, encoding="utf-8")
 
         cleaned = p.clean(raw_path)
-        # LIN2 — source attribution.
+        # LIN2 -- source attribution.
         assert "_source" in cleaned.columns
         assert (cleaned["_source"] == "uniprot").all()
-        # LIN7 — record-level lineage.
+        # LIN7 -- record-level lineage.
         assert "_source_row_index" in cleaned.columns
-        # LIN8 — field-level lineage flags.
+        # LIN8 -- field-level lineage flags.
         assert "_protein_name_was_canonicalized" in cleaned.columns
         assert "_function_desc_was_cleaned" in cleaned.columns
 
 
 # ============================================================================
-# Section 11 — Cross-module scientific correctness
+# Section 11 -- Cross-module scientific correctness
 # ============================================================================
 
 class TestScientificCorrectnessAcrossModules:
     """Verify that scientific correctness is preserved across module boundaries.
 
-    This is the LIFE-SAFETY test — if the cleaned DataFrame that
+    This is the LIFE-SAFETY test -- if the cleaned DataFrame that
     UniProtPipeline produces is consumed by another module (e.g., the
     DB loader), the scientific correctness must NOT be lost.
     """
@@ -909,7 +909,7 @@ class TestScientificCorrectnessAcrossModules:
         p.raw_dir = tmp_path / "raw"
         p.raw_dir.mkdir(parents=True, exist_ok=True)
 
-        # 20 000 aa — larger than the old 10 000 truncation cap.
+        # 20 000 aa -- larger than the old 10 000 truncation cap.
         long_seq = "M" * 20000
         tsv = (
             "Entry\tGene Names (primary)\tGene Names\tProtein names\t"
@@ -941,7 +941,7 @@ class TestScientificCorrectnessAcrossModules:
 
 
 # ============================================================================
-# Section 12 — Backward compatibility
+# Section 12 -- Backward compatibility
 # ============================================================================
 
 class TestBackwardCompatibility:

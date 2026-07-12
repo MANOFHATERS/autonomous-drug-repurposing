@@ -87,10 +87,10 @@ class KGEmbeddingModel(Protocol):
         """
         ...
 
-    # v43 ROOT FIX (P1 — score_direction not in Protocol): the Protocol
+    # v43 ROOT FIX (P1 -- score_direction not in Protocol): the Protocol
     # did not declare score_direction, so a model that doesn't declare
     # it silently defaults to "lower_better" via getattr in train_transe.
-    # HGT (higher_better) would fail the assertion at training time —
+    # HGT (higher_better) would fail the assertion at training time --
     # but only at training time, not at Protocol compliance time. Adding
     # score_direction to the Protocol makes the contract explicit.
     @property

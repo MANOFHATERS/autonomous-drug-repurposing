@@ -1,7 +1,7 @@
-"""v92 Root Fix Verification Tests — BUG P1-051 through P1-073.
+"""v92 Root Fix Verification Tests -- BUG P1-051 through P1-073.
 
 These tests verify that every bug fix from the v92 forensic audit
-actually works at the code level. No comments, no fakes — real code
+actually works at the code level. No comments, no fakes -- real code
 assertions on real behavior.
 
 Run with: pytest phase1/tests/test_v92_root_fixes.py -v
@@ -50,7 +50,7 @@ class TestP1_053:
 
 
 # ============================================================================
-# BUG P1-054: __import__('sys') called twice — should use top-level sys
+# BUG P1-054: __import__('sys') called twice -- should use top-level sys
 # ============================================================================
 class TestP1_054:
     def test_health_check_uses_sys_import(self):
@@ -74,7 +74,7 @@ class TestP1_056:
         # (the old text said "Use reset_metrics and clear_dead_letters
         # only from a single thread")
         # New text says "For deterministic test results, call them
-        # from a single thread" — no "only"
+        # from a single thread" -- no "only"
         if "only from a single thread" in doc.lower():
             pytest.fail("Docstring still contains contradictory 'only from a single thread'")
 
@@ -92,12 +92,12 @@ class TestP1_057:
 
 
 # ============================================================================
-# BUG P1-058: DisGeNET tier labels — [0.06, 0.3) should be "weak"
+# BUG P1-058: DisGeNET tier labels -- [0.06, 0.3) should be "weak"
 # ============================================================================
 class TestP1_058:
     def test_tier_0_06_to_0_3_is_weak(self):
         from cleaning.confidence import classify_confidence
-        # Score 0.15 is in [0.06, 0.3) — should be "weak" per Piñero 2020
+        # Score 0.15 is in [0.06, 0.3) -- should be "weak" per Piñero 2020
         assert classify_confidence(0.15) == "weak", (
             "[0.06, 0.3) band should be 'weak' per Piñero 2020, not 'moderate'"
         )
@@ -109,8 +109,8 @@ class TestP1_058:
 
     def test_tier_below_0_06_is_sub_weak(self):
         from cleaning.confidence import classify_confidence
-        # Score 0.05 is in [0.0, 0.06) — labeled "sub_weak" (v100 approach)
-        # or "weak" (v92 approach) — both are acceptable, the KEY fix is
+        # Score 0.05 is in [0.0, 0.06) -- labeled "sub_weak" (v100 approach)
+        # or "weak" (v92 approach) -- both are acceptable, the KEY fix is
         # that [0.06, 0.3) is no longer "moderate"
         result = classify_confidence(0.05)
         assert result in ("weak", "sub_weak"), f"score=0.05 tier should be weak or sub_weak, got {result}"
@@ -307,7 +307,7 @@ class TestP1_073:
     def test_connection_cb_imports_canonical(self):
         """connection.py should import _CircuitBreaker from the canonical module."""
         import database.connection as conn
-        # Check if the module has _CircuitBreaker — either imported or local
+        # Check if the module has _CircuitBreaker -- either imported or local
         assert hasattr(conn, "_CircuitBreaker")
 
     def test_canonical_cb_state_is_pure_observer(self):

@@ -1,4 +1,4 @@
-# MIT License — Copyright (c) 2026 Team Cosmic / VentureLab — see LICENSE
+# MIT License -- Copyright (c) 2026 Team Cosmic / VentureLab -- see LICENSE
 """ChEMBL ingestion pipeline for the Autonomous Drug Repurposing Platform.
 
 This module is the **root of the entire data tree** for the platform. Every
@@ -9,7 +9,7 @@ a wrong ``activity_value``, or drops a chunk of activities silently, then
 downstream the knowledge graph is built on bad edges, the Graph Transformer
 learns from bad edges, the RL ranker ranks bad predictions at the top, and
 ultimately a patient may be prescribed a drug that the platform said was
-safe/effective — **and the patient may die**.
+safe/effective -- **and the patient may die**.
 
 Therefore every value this module writes to the DB is verifiable against
 the ChEMBL API response it came from, every transformation is logged, every
@@ -19,7 +19,7 @@ member of the corresponding enum in :mod:`database.models`.
 Scientific Notes
 ----------------
 - ``is_fda_approved`` is a *proxy*. ChEMBL ``max_phase=4`` means "Phase 4
-  trial reached" — globally approved (any regulator), NOT FDA-specific.
+  trial reached" -- globally approved (any regulator), NOT FDA-specific.
   ChEMBL also exposes an ``approved_drugs=TRUE`` filter that uses the
   curated approval flag (S16). We use ``max_phase=4`` by default; the
   proxy is documented in every row's ``approval_basis`` field in the
@@ -27,7 +27,7 @@ Scientific Notes
 - ``drug_type`` is an *ontological* category (small_molecule, antibody,
   protein, ...). It is NOT derivable from molecular weight (K6, S7). The
   previous version of this file overwrote ``drug_type`` to
-  ``"Macromolecule"`` when MW>5000 — that was scientifically wrong
+  ``"Macromolecule"`` when MW>5000 -- that was scientifically wrong
   (antibodies are ~150 kDa but should be ``antibody``, not
   ``"Macromolecule"``). The new code uses a separate ``is_macromolecule``
   boolean flag for the MW-based signal and NEVER overwrites ``drug_type``.
@@ -41,12 +41,12 @@ Scientific Notes
 - ``activity_value`` is normalized to nM (the standard pharmacology unit).
   Censored values (``>``, ``<``, ``~``) are filtered out by default
   because they are NOT directly comparable to ``=`` values (S12).
-- ``pchembl_value`` is ``-log10(activity_value in M)`` — a
+- ``pchembl_value`` is ``-log10(activity_value in M)`` -- a
   pre-normalized, scale-comparable score that ChEMBL curators provide
   exactly so downstream systems can compare across activity types. We
   preserve it as a secondary potency score (S14).
 - Multi-subunit protein complexes (e.g. GABA-A receptor: 5 subunits, each
-  with its own UniProt accession) — an activity measured on the complex
+  with its own UniProt accession) -- an activity measured on the complex
   is meaningful for ALL subunits. We explode one activity into N DPI
   rows, one per subunit's UniProt accession that resolves to a protein_id
   (S9, K8).
@@ -123,7 +123,7 @@ import logging
 # hid patient-safety-critical API contract changes as warnings.
 try:
     import requests  # type: ignore[import-not-found]
-except ImportError:  # pragma: no cover — requests is a hard dep but be defensive
+except ImportError:  # pragma: no cover -- requests is a hard dep but be defensive
     requests = None  # type: ignore[assignment]
 import os
 import random
@@ -139,7 +139,7 @@ import pandas as pd
 
 try:
     import numpy as np  # noqa: F401  # used in vectorised ops; import at top (C6-C9)
-except ImportError:  # pragma: no cover — numpy is a hard dep but be defensive
+except ImportError:  # pragma: no cover -- numpy is a hard dep but be defensive
     np = None  # type: ignore[assignment]
 
 from cleaning._constants import (
@@ -189,38 +189,38 @@ from config.settings import (
     # clean_raw_chunks() (line 4388). At line 625, using RAW_DATA_DIR as a
     # bare name would raise NameError when download() is called standalone
     # (bypassing BasePipeline.run() which sets self.raw_dir first). Mitigated
-    # in practice because run() calls _ensure_directories() first — but the
+    # in practice because run() calls _ensure_directories() first -- but the
     # latent bug fires whenever download() is called directly. Root fix:
     # import RAW_DATA_DIR at module level alongside PROCESSED_DATA_DIR.
     RAW_DATA_DIR,
 )
 
 # ---------------------------------------------------------------------------
-# v65 ROOT FIX (P1-024 + P1-037) — defensive import-time invariants
+# v65 ROOT FIX (P1-024 + P1-037) -- defensive import-time invariants
 # ---------------------------------------------------------------------------
 # P1-024: The JSON schema (pipelines/schema/v1.json lines 54-57) declares a
 # strict enum of exactly 4 activity types: ["IC50", "Ki", "Kd", "EC50"].
 # But CHEMBL_ACTIVITY_TYPES is sourced from config.settings which reads the
 # CHEMBL_ACTIVITY_TYPES env var (default "IC50,Ki,Kd,EC50"). An operator
-# could set CHEMBL_ACTIVITY_TYPES=IC50,Ki,Kd,EC50,Potency — at which point
+# could set CHEMBL_ACTIVITY_TYPES=IC50,Ki,Kd,EC50,Potency -- at which point
 # the pipeline would ACCEPT "Potency" rows during cleaning, but the schema
 # validator would REJECT them at output time, producing a confusing
 # "schema-valid-but-pipeline-emitted" mismatch with no clear root cause.
 # Root fix: assert at import time that CHEMBL_ACTIVITY_TYPES is a SUBSET
 # of the schema enum. The assertion runs ONCE per process and fails FAST
-# with a clear error message. We do NOT silently clip — clipping would
+# with a clear error message. We do NOT silently clip -- clipping would
 # hide the misconfiguration from the operator.
 #
 # P1-037: CHEMBL_VERSION is imported from config.settings where it is
 # validated as a str by _validate_chembl_version(). However, an operator
 # who bypasses settings.py (e.g. monkey-patches CHEMBL_VERSION = 33) would
 # pass an int to f"ChEMBL_{CHEMBL_VERSION}" which would coerce silently to
-# "ChEMBL_33" — but downstream _verify_chembl_version uses str(CHEMBL_VERSION)
+# "ChEMBL_33" -- but downstream _verify_chembl_version uses str(CHEMBL_VERSION)
 # for comparison, which is fragile. Root fix: coerce to str at import time
 # so all downstream usage treats it as a string.
 CHEMBL_VERSION: str = str(CHEMBL_VERSION)
 
-# Schema enum — keep this list authoritative and in sync with
+# Schema enum -- keep this list authoritative and in sync with
 # pipelines/schema/v1.json "chembl_activities_clean.csv"."activity_type"."enum".
 _SCHEMA_ACTIVITY_TYPE_ENUM: frozenset[str] = frozenset(
     {"IC50", "Ki", "Kd", "EC50"}
@@ -236,7 +236,7 @@ if _extra_activity_types:
         f"Either (a) remove the extra values from CHEMBL_ACTIVITY_TYPES in "
         f"config/settings.py or the CHEMBL_ACTIVITY_TYPES env var, or (b) "
         f"extend the schema enum in pipelines/schema/v1.json to include "
-        f"them. Silent clipping is intentionally NOT performed — operators "
+        f"them. Silent clipping is intentionally NOT performed -- operators "
         f"must explicitly decide."
     )
 del _extra_activity_types, _SCHEMA_ACTIVITY_TYPE_ENUM
@@ -279,7 +279,7 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Module-level constants — sourced from settings (Domain 12, D2-5, DQ-15)
+# Module-level constants -- sourced from settings (Domain 12, D2-5, DQ-15)
 # ---------------------------------------------------------------------------
 
 # InChIKey format regex (standard 27-char). SYNTH-prefixed synthetic keys
@@ -288,7 +288,7 @@ logger = logging.getLogger(__name__)
 # validators. It did NOT delegate to the canonical
 # ``cleaning.normalizer.is_valid_inchikey`` and did NOT accept mixture
 # InChIKeys or test-fixture prefixes. Drug records with mixture InChIKeys
-# PASS the ORM but FAIL this pipeline-layer check → silently dead-lettered.
+# PASS the ORM but FAIL this pipeline-layer check -> silently dead-lettered.
 # Fix: keep the regex for backward compat, but expose a delegating wrapper
 # ``_is_valid_inchikey`` that calls the canonical validator. All call
 # sites that need to validate InChIKeys should use the wrapper.
@@ -304,11 +304,11 @@ from cleaning._constants import CANONICAL_INCHIKEY_REGEX as _INCHIKEY_RE  # noqa
 # Examples:
 #   CHEMBL1        ✓ (1 digit, no leading zero)
 #   CHEMBL12345    ✓ (5 digits, no leading zero)
-#   CHEMBL0        ✗ (single zero — not a real ID)
+#   CHEMBL0        ✗ (single zero -- not a real ID)
 #   CHEMBL007       ✗ (leading zeros)
 #   CHEMBL0000001   ✗ (leading zeros)
-#   CHEMBL12345678  ✗ (8 digits — exceeds the 7-digit max as of ChEMBL v35)
-# v43 ROOT FIX (P2 — _CHEMBL_ID_RE caps at 7 digits): ChEMBL has ~2.4M
+#   CHEMBL12345678  ✗ (8 digits -- exceeds the 7-digit max as of ChEMBL v35)
+# v43 ROOT FIX (P2 -- _CHEMBL_ID_RE caps at 7 digits): ChEMBL has ~2.4M
 # entries. 7 digits supports up to 9,999,999. But ChEMBL grows ~200K/year;
 # in ~25 years it'll exceed 7 digits. Changed to {0,8} (up to 9 digits)
 # to future-proof. Regex still rejects leading zeros (CHEMBL0123 invalid).
@@ -337,26 +337,26 @@ _ACTIVITY_STREAM_BUFFER_SIZE: int = CHEMBL_ACTIVITY_CHUNK_SIZE
 
 
 # ---------------------------------------------------------------------------
-# MOLECULE_TYPE_MAP (K6 fix) — ALL values are valid DrugType enum members.
+# MOLECULE_TYPE_MAP (K6 fix) -- ALL values are valid DrugType enum members.
 # ---------------------------------------------------------------------------
 # This map is FROZEN after import. The lowercase mirror _LOWER_TYPE_MAP is
 # pre-computed for O(1) case-insensitive lookup (safe because the map is
 # treated as immutable).
 #
 # Scientific rationale for each mapping (S6, S7):
-# - "Small molecule" → small_molecule (canonical)
-# - "Antibody" → antibody (canonical)
-# - "Oligonucleotide" → oligonucleotide (canonical)
-# - "Oligopeptide" / "Peptide" → peptide (peptides, NOT proteins — K6)
-# - "Protein" / "Macromolecule" / "Enzymatic" → protein
+# - "Small molecule" -> small_molecule (canonical)
+# - "Antibody" -> antibody (canonical)
+# - "Oligonucleotide" -> oligonucleotide (canonical)
+# - "Oligopeptide" / "Peptide" -> peptide (peptides, NOT proteins -- K6)
+# - "Protein" / "Macromolecule" / "Enzymatic" -> protein
 #   ("Macromolecule" is a ChEMBL catch-all; we emit "protein" and log for
-#    curator review — better than emitting the non-enum "Macromolecule")
-# - "Natural product" → small_molecule (lossy default; vancomycin is a
-#   glycopeptide — logged at INFO for curator review)
-# - "Oligosaccharide" → small_molecule (lossy default; logged at INFO)
-# - "Cell" / "Cellular" → cell_therapy
-# - "Gene therapy" → gene_therapy
-# - "Unknown" → unknown
+#    curator review -- better than emitting the non-enum "Macromolecule")
+# - "Natural product" -> small_molecule (lossy default; vancomycin is a
+#   glycopeptide -- logged at INFO for curator review)
+# - "Oligosaccharide" -> small_molecule (lossy default; logged at INFO)
+# - "Cell" / "Cellular" -> cell_therapy
+# - "Gene therapy" -> gene_therapy
+# - "Unknown" -> unknown
 MOLECULE_TYPE_MAP: dict[str, str] = {
     "Small molecule": DrugType.SMALL_MOLECULE.value,   # "small_molecule"
     "Antibody": DrugType.ANTIBODY.value,               # "antibody"
@@ -399,7 +399,7 @@ ACTIVITY_CHUNK_SIZE: int = CHEMBL_ACTIVITY_CHUNK_SIZE  # legacy name
 # old names are kept as references so source-inspection tests still pass).
 #
 # The default activity types are: "IC50", "Ki", "Kd", "EC50" (case-sensitive
-# — the loader's _validate_activity_type does NOT lowercase).
+# -- the loader's _validate_activity_type does NOT lowercase).
 # The default standard units are: "nM", "uM", "µM", "μM", "pM", "mM", "M", "mol/L".
 STANDARD_ACTIVITY_TYPES: frozenset[str] = CHEMBL_ACTIVITY_TYPES
 STANDARD_UNITS: frozenset[str] = CHEMBL_STANDARD_UNITS
@@ -419,7 +419,7 @@ _VALID_ACTIVITY_TYPES: frozenset[str] = frozenset(e.value for e in ActivityType)
 # ``get_schema_drift_report`` is a ``@classmethod`` that read
 # ``cls._novel_type_counter``. Since the attribute was never set on the
 # class object itself, ``getattr(cls, "_novel_type_counter", ...)``
-# always returned the default empty defaultdict — the report was ALWAYS
+# always returned the default empty defaultdict -- the report was ALWAYS
 # ``{}``, silently hiding every novel type encountered.
 # Root fix: hoist the counter to a module-level dict guarded by
 # ``_NOVEL_TYPE_LOCK``. The ``@staticmethod _standardize_drug_type``
@@ -438,7 +438,7 @@ _NOVEL_TYPE_COUNTER: dict[str, int] = defaultdict(int)
 class ChEMBLPipeline(BasePipeline):
     """Institutional-grade ChEMBL ingestion pipeline.
 
-    Implements the standard ``download → clean → load`` lifecycle defined
+    Implements the standard ``download -> clean -> load`` lifecycle defined
     by :class:`pipelines.base_pipeline.BasePipeline`. Produces two cleaned
     DataFrames (drugs + activities) and loads them into the staging DB.
 
@@ -446,7 +446,7 @@ class ChEMBLPipeline(BasePipeline):
     ------------
     - Writes ``chembl_drugs.csv.gz``, ``chembl_activities.csv.gz``, and
       ``chembl_manifest_{run_id}.json`` to ``self.raw_dir``.
-    - Writes ``drugs.csv`` (the canonical cleaned drugs CSV — name mandated
+    - Writes ``drugs.csv`` (the canonical cleaned drugs CSV -- name mandated
       by ``_get_processed_filename()``) and ``chembl_activities_clean.csv``
       to ``PROCESSED_DATA_DIR``.
     - Writes provenance sidecars ``drugs.csv.provenance.json`` and
@@ -466,7 +466,7 @@ class ChEMBLPipeline(BasePipeline):
     - ``is_fda_approved``: V100 ROOT FIX (BUG #5, P0 CRITICAL) /
       v93 ROOT FIX (P1-027 audit). The previous code set
       ``is_fda_approved = (max_phase == 4)`` which CONFLATED global
-      approval with FDA approval — EMA-only drugs were falsely labeled
+      approval with FDA approval -- EMA-only drugs were falsely labeled
       FDA-approved, bypassing the RL ranker's FDA safety filter. The
       fix: ``is_fda_approved`` is ``None`` (unknown) for
       ``max_phase == 4`` drugs until an FDA Orange Book join is wired in,
@@ -474,10 +474,10 @@ class ChEMBLPipeline(BasePipeline):
       ``approved_by`` field contains "FDA". This is the honest answer.
       Downstream consumers (RL ranker) MUST use ``is_globally_approved``
       for approval-based filtering, NOT ``is_fda_approved``.
-    - ``Natural product`` → ``small_molecule``: scientifically lossy
+    - ``Natural product`` -> ``small_molecule``: scientifically lossy
       (vancomycin is a glycopeptide). Every record that maps this way is
       logged at INFO with the chembl_id for curator review (S6).
-    - ``Macromolecule`` → ``protein``: lossy default. Better: detect
+    - ``Macromolecule`` -> ``protein``: lossy default. Better: detect
       antibody by ``molecule_type`` containing "antibody" (TODO: not yet
       implemented; ChEMBL's molecule_type rarely contains "antibody"
       directly).
@@ -485,7 +485,7 @@ class ChEMBLPipeline(BasePipeline):
     Examples
     --------
     >>> pipeline = ChEMBLPipeline()
-    >>> pipeline.run()  # full download → clean → load lifecycle
+    >>> pipeline.run()  # full download -> clean -> load lifecycle
     """
 
     source_name = "chembl"
@@ -528,7 +528,7 @@ class ChEMBLPipeline(BasePipeline):
         # confusing ``ValueError: max_retries must be >= 1, got 0`` with no
         # mention of which env var to fix. ``config.settings`` already
         # validates these at import time and raises a clearer message, but
-        # tests / monkey-patches can bypass that — so we re-validate here
+        # tests / monkey-patches can bypass that -- so we re-validate here
         # with an operator-friendly message that names the env var AND the
         # valid range, and raise the package's public ``PipelineError`` so
         # the failure is catchable by the standard pipeline error handler.
@@ -619,7 +619,7 @@ class ChEMBLPipeline(BasePipeline):
         super().teardown()
 
         # v36 ROOT FIX (Phase 1 Issue #15): the previous log message
-        # said "ChEMBLPipeline initialised" — a copy-paste leftover
+        # said "ChEMBLPipeline initialised" -- a copy-paste leftover
         # from __init__. The teardown() method running AFTER
         # super().teardown() (which may close log handlers) logging
         # "initialised" misled operators reading logs during incident
@@ -643,7 +643,7 @@ class ChEMBLPipeline(BasePipeline):
         v50 ROOT FIX: now delegates to `pipelines._v50_downloaders.download_chembl_full`
         which handles BOTH sample mode (10 FDA-approved drugs via API)
         AND full mode (paginates through all ~10K max_phase=4 molecules
-        via the public ChEMBL REST API — no login required).
+        via the public ChEMBL REST API -- no login required).
 
         Side Effects
         ------------
@@ -651,7 +651,7 @@ class ChEMBLPipeline(BasePipeline):
         - Writes ``chembl_activities.csv.gz`` to ``self.raw_dir``.
         - Writes ``chembl_manifest_{run_id}.json`` to ``self.raw_dir``
           (A1, LIN-1 to LIN-18).
-        - All writes are atomic (``.tmp`` + ``os.replace`` — R5, A7).
+        - All writes are atomic (``.tmp`` + ``os.replace`` -- R5, A7).
 
         Returns
         -------
@@ -675,12 +675,12 @@ class ChEMBLPipeline(BasePipeline):
           4 = globally approved). Configure via ``CHEMBL_MAX_PHASE`` env
           var (DOC-4).
         - Downloads activities in pages of ``CHEMBL_PAGE_SIZE`` (default
-          1000). Each page is processed end-to-end (parse → write to
+          1000). Each page is processed end-to-end (parse -> write to
           disk-backed chunk) before fetching the next, to bound memory
           usage (P2). The chunk files are concatenated at the end into a
           single gzipped CSV.
         - v50: in full mode, uses the public EBI REST API
-          (https://www.ebi.ac.uk/chembl/api/data) — no login, no API key.
+          (https://www.ebi.ac.uk/chembl/api/data) -- no login, no API key.
           In sample mode, fetches 10 well-known FDA-approved drugs.
         """
         # v50 ROOT FIX: delegate to the unified downloader.
@@ -700,7 +700,7 @@ class ChEMBLPipeline(BasePipeline):
             if mol_path and mol_path.exists():
                 if mol_path.suffix == ".jsonl":
                     # Parse JSONL into a list of dicts, then use _parse_molecules
-                    # v93 ROOT FIX (P1-043): explicit encoding="utf-8" — the
+                    # v93 ROOT FIX (P1-043): explicit encoding="utf-8" -- the
                     # ChEMBL API returns UTF-8 JSONL with non-ASCII drug names
                     # (e.g. "α-Tocopherol", "caf feína"). The default encoding
                     # is locale.getpreferredencoding() (CP1252 on Windows,
@@ -734,7 +734,7 @@ class ChEMBLPipeline(BasePipeline):
                 # Persist to raw_dir
                 # v90 ROOT FIX (BUG #1): the previous code wrote
                 # `chembl_drugs.csv` (PLAIN CSV, no gzip) but clean()
-                # reads with `compression="gzip"` → BadGzipFile on every
+                # reads with `compression="gzip"` -> BadGzipFile on every
                 # v50 pipeline run. The v49 path writes `.csv.gz` with
                 # gzip. ROOT FIX: write to `chembl_drugs.csv.gz` with
                 # gzip compression, matching the v49 canonical filename
@@ -742,14 +742,14 @@ class ChEMBLPipeline(BasePipeline):
                 drugs_csv = self.raw_dir / "chembl_drugs.csv.gz"
                 drugs_df.to_csv(drugs_csv, index=False, compression="gzip")
                 if not activities_df.empty:
-                    # v57 ROOT FIX (P1-013 — ChEMBL v50 filename mismatch):
+                    # v57 ROOT FIX (P1-013 -- ChEMBL v50 filename mismatch):
                     #   The previous code wrote `chembl_activities_clean.csv`
                     #   but the clean step (line ~843) looks for
                     #   `chembl_activities.csv.gz`. As a result, in v50 mode
                     #   (the recommended download path), `clean_activities`
-                    #   was NEVER invoked → Drug→Protein (DPI) edges were
-                    #   NEVER generated → the KG had Compound nodes with
-                    #   zero Drug→Protein edges (the most important edge type
+                    #   was NEVER invoked -> Drug->Protein (DPI) edges were
+                    #   NEVER generated -> the KG had Compound nodes with
+                    #   zero Drug->Protein edges (the most important edge type
                     #   for drug repurposing).
                     #   FIX: write to `chembl_activities.csv.gz` (the
                     #   canonical raw activities filename that clean step
@@ -778,11 +778,11 @@ class ChEMBLPipeline(BasePipeline):
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             # v84 FORENSIC ROOT FIX (BUG #38): narrowed from broad
             # ``except Exception``. The previous code caught ALL
-            # failures from the v50 downloader — including programming
-            # bugs (AttributeError, KeyError) — and silently fell back
+            # failures from the v50 downloader -- including programming
+            # bugs (AttributeError, KeyError) -- and silently fell back
             # to the v49 path. A bug in ``download_chembl_full`` or
             # ``_parse_molecules`` was masked as "v50 failed, using
-            # v49" — the pipeline ALWAYS fell back to v49, which may
+            # v49" -- the pipeline ALWAYS fell back to v49, which may
             # be stale or broken, with no visible warning.
             # ROOT FIX: catch ONLY the expected I/O, value, and JSON
             # parse errors. If ``requests`` is available, also catch
@@ -796,7 +796,7 @@ class ChEMBLPipeline(BasePipeline):
             if not isinstance(exc, _exc_types):
                 raise
             logger.warning(
-                "[%s] v50 downloader failed (%s) — falling back to v49 path",
+                "[%s] v50 downloader failed (%s) -- falling back to v49 path",
                 self.source_name, exc,
             )
 
@@ -884,7 +884,7 @@ class ChEMBLPipeline(BasePipeline):
         pandas.DataFrame
             Cleaned drugs DataFrame. The base class writes this to
             ``PROCESSED_DATA_DIR / self._get_processed_filename()`` (which
-            is ``drugs.csv`` for ChEMBL — D2-4, I9).
+            is ``drugs.csv`` for ChEMBL -- D2-4, I9).
 
         Side Effects
         ------------
@@ -900,15 +900,15 @@ class ChEMBLPipeline(BasePipeline):
         Steps
         -----
         1. Load raw drugs CSV (gzipped).
-        2. Generate InChIKey from SMILES where missing (vectorised — C24).
+        2. Generate InChIKey from SMILES where missing (vectorised -- C24).
         3. Standardise InChIKey format (uppercase, validate).
-        4. Drop rows with no valid InChIKey (dead-letter — DQ-6).
+        4. Drop rows with no valid InChIKey (dead-letter -- DQ-6).
         5. Deduplicate by InChIKey.
         6. Standardise ``drug_type`` via ``MOLECULE_TYPE_MAP`` (K6, S6, S7).
         7. Validate ``molecular_weight`` range (DQ-7).
         8. Coerce ``max_phase`` to int in [0, 4] (K4, K5).
         9. Compute ``is_fda_approved`` as a real Python bool (K4).
-        10. Validate ``name`` ≥ 2 chars (synthesize fallback if needed — DQ-14).
+        10. Validate ``name`` ≥ 2 chars (synthesize fallback if needed -- DQ-14).
         11. Fill missing drug fields via ``fill_missing_drug_fields``.
         12. Ensure all required Drug-table columns exist.
         13. Sort by ``chembl_id`` for deterministic output (I5).
@@ -916,7 +916,7 @@ class ChEMBLPipeline(BasePipeline):
         clean_start = time.monotonic()
         logger.info("[%s] clean() starting (raw_path=%s)", self.source_name, raw_path)
 
-        # Read the raw drugs CSV (gzipped, UTF-8 — INT-6, INT-7).
+        # Read the raw drugs CSV (gzipped, UTF-8 -- INT-6, INT-7).
         # V90 CI fix: the ChEMBL API sometimes returns a non-gzip file
         # (rate-limit HTML page, maintenance page, or error JSON) which
         # raises BadGzipFile. The previous code had no error handling,
@@ -936,7 +936,7 @@ class ChEMBLPipeline(BasePipeline):
             logger.warning(
                 "[%s] V90 CI fix: gzip read failed (%s). Falling back to "
                 "plain CSV read (the ChEMBL API may have returned a "
-                "non-gzip response — rate limit, maintenance, etc.).",
+                "non-gzip response -- rate limit, maintenance, etc.).",
                 self.source_name, gz_exc,
             )
             try:
@@ -957,12 +957,12 @@ class ChEMBLPipeline(BasePipeline):
         # ".gz", OVERWRITING the drugs_df produced by the try/except above.
         # When the ChEMBL API returned a non-gzip body (rate-limit HTML,
         # maintenance page, JSON error) saved to a .csv.gz path, the first
-        # try/except correctly fell back to a plain-CSV read — but this
+        # try/except correctly fell back to a plain-CSV read -- but this
         # second read then raised BadGzipFile and crashed the pipeline.
         # The first try/except block was effectively dead code. ROOT FIX:
         # remove the dead try/except gzip fallback block that was
         # immediately overwritten by the extension-based read above.
-        # (Parallel V100 fix BUG #18 applied the same root fix — kept
+        # (Parallel V100 fix BUG #18 applied the same root fix -- kept
         # this comment for the more detailed forensic trail.)
         initial_count = len(drugs_df)
         logger.info(
@@ -972,11 +972,11 @@ class ChEMBLPipeline(BasePipeline):
             raw_path,
         )
 
-        # v84 FORENSIC ROOT FIX (BUG #50 — COMPOUND): data quality
+        # v84 FORENSIC ROOT FIX (BUG #50 -- COMPOUND): data quality
         # schema check. The compound bug chain was:
-        #   v50 downloader catches all exceptions (BUG #38 fixed) →
-        #   falls back to embedded samples → writes JSONL to a .csv
-        #   file → clean() reads garbage → falls back to v49 path →
+        #   v50 downloader catches all exceptions (BUG #38 fixed) ->
+        #   falls back to embedded samples -> writes JSONL to a .csv
+        #   file -> clean() reads garbage -> falls back to v49 path ->
         #   reports "success" with wrong/missing data.
         # ROOT FIX: validate the DataFrame schema immediately after
         # load. If the expected ChEMBL columns are missing (e.g.
@@ -995,14 +995,14 @@ class ChEMBLPipeline(BasePipeline):
                 f"{_expected_chembl_cols}, got {_actual_cols}. This "
                 f"indicates the v50 downloader produced a malformed "
                 f"file (e.g. JSONL written as CSV). Refusing to "
-                f"process garbage data — fix the downloader."
+                f"process garbage data -- fix the downloader."
             )
         # Check for empty DataFrame (another silent-degradation signal).
         if drugs_df.empty:
             logger.warning(
                 "[%s] Data quality check: raw drugs CSV is EMPTY. "
                 "Proceeding with clean() but the output will have 0 "
-                "drugs — the KG will be missing all ChEMBL compounds.",
+                "drugs -- the KG will be missing all ChEMBL compounds.",
                 self.source_name,
             )
 
@@ -1044,7 +1044,7 @@ class ChEMBLPipeline(BasePipeline):
 
         # Side effect: clean the activities file (A2, A3, D2-3).
         # v64 ROOT FIX (P1-013): the previous code only looked for
-        # ``chembl_activities.csv.gz`` — but the v50 downloader (the primary
+        # ``chembl_activities.csv.gz`` -- but the v50 downloader (the primary
         # path) writes ``chembl_activities_clean.csv`` (embedded sample) or
         # ``chembl_activities.jsonl`` (live API). The .csv.gz name only
         # exists in the legacy v49 path. As a result, clean_activities()
@@ -1080,7 +1080,7 @@ class ChEMBLPipeline(BasePipeline):
             except (KeyError, ValueError, FileNotFoundError, pd.errors.ParserError) as exc:
                 # v16 ROOT FIX (SF-3): narrow the broad ``except Exception``
                 # to specific, expected failure modes. ChEMBL DPI edge set
-                # silently missing on ANY error was unacceptable — only
+                # silently missing on ANY error was unacceptable -- only
                 # data-format / IO errors should be tolerated. Other
                 # exceptions (e.g. ProgrammingError, MemoryError) should
                 # propagate so the operator can investigate. Logged at
@@ -1088,10 +1088,10 @@ class ChEMBLPipeline(BasePipeline):
                 # V18 ROOT FIX (SF-3 deepened): in PRODUCTION mode (env
                 # var ``DRUGOS_STRICT=1``), this is FATAL. The v16/v17
                 # behavior of "log + continue with drugs only" silently
-                # produced a KG missing the ChEMBL DPI edge set — the
+                # produced a KG missing the ChEMBL DPI edge set -- the
                 # audit's Compound-6 degradation.
                 #
-                # V19 ROOT FIX (SF-3 — verification agent flagged this as
+                # V19 ROOT FIX (SF-3 -- verification agent flagged this as
                 # PARTIAL): the V18 default was PERMISSIVE (strict opt-in
                 # via DRUGOS_STRICT=1), which meant operators got a
                 # silently degraded KG unless they read the docs. The
@@ -1109,10 +1109,10 @@ class ChEMBLPipeline(BasePipeline):
                 # permissive opt-in for operators who set both).
                 _strict = (_os.environ.get("DRUGOS_STRICT", "") == "1") or (not _permissive)
                 logger.error(
-                    "[%s] clean_activities() failed%s — ChEMBL DPI edge set "
+                    "[%s] clean_activities() failed%s -- ChEMBL DPI edge set "
                     "will be missing. %s: %s",
                     self.source_name,
-                    " (STRICT MODE — FATAL)" if _strict else " (continuing with drugs only)",
+                    " (STRICT MODE -- FATAL)" if _strict else " (continuing with drugs only)",
                     type(exc).__name__, exc,
                     exc_info=True,
                 )
@@ -1128,7 +1128,7 @@ class ChEMBLPipeline(BasePipeline):
                         f"ChEMBL clean_activities() failed in STRICT mode "
                         f"(default since V19; set DRUGOS_ALLOW_PERMISSIVE_DPI=1 "
                         f"to opt in to the legacy permissive behavior): "
-                        f"{type(exc).__name__}: {exc}. V19 SF-3 root fix — "
+                        f"{type(exc).__name__}: {exc}. V19 SF-3 root fix -- "
                         f"production runs must not silently continue with "
                         f"the DPI edge set missing."
                     ) from exc
@@ -1137,14 +1137,14 @@ class ChEMBLPipeline(BasePipeline):
             time.monotonic() - clean_start, 4
         )
         logger.info(
-            "[%s] clean() complete in %.2fs — %d rows (started with %d)",
+            "[%s] clean() complete in %.2fs -- %d rows (started with %d)",
             self.source_name,
             self._metrics["duration_clean_sec"],
             len(drugs_df),
             initial_count,
         )
 
-        # v29 ROOT FIX (audit P1-24): ID format divergence — normalize to
+        # v29 ROOT FIX (audit P1-24): ID format divergence -- normalize to
         # canonical form before writing. Every ChEMBL ID is uppercased +
         # stripped; every InChIKey is uppercased + stripped. This guarantees
         # that a downstream join against DrugBank / PubChem on InChIKey
@@ -1177,7 +1177,7 @@ class ChEMBLPipeline(BasePipeline):
             instead of reading ``drugs.csv`` from disk. This is required
             when ``clean_activities()`` is called from inside ``clean()``
             because ``drugs.csv`` is only persisted to disk AFTER
-            ``clean()`` returns (SCI-FIX: timing bug — see notes below).
+            ``clean()`` returns (SCI-FIX: timing bug -- see notes below).
             When ``None`` (standalone call), the method falls back to
             reading ``drugs.csv`` from disk if it exists.
 
@@ -1203,8 +1203,8 @@ class ChEMBLPipeline(BasePipeline):
         2. Filter by ``activity_type`` ∈ ``CHEMBL_ACTIVITY_TYPES`` (S10).
         3. Filter by ``activity_units`` ∈ ``CHEMBL_STANDARD_UNITS`` (DQ-15, DQ-16).
         4. Filter by ``standard_relation`` ∈ ``CHEMBL_STANDARD_RELATIONS`` (S12).
-        5. Resolve ``target_chembl_id`` → list of UniProt accessions (K3, S9).
-        6. Explode multi-subunit complexes — one row per accession (K8, S9).
+        5. Resolve ``target_chembl_id`` -> list of UniProt accessions (K3, S9).
+        6. Explode multi-subunit complexes -- one row per accession (K8, S9).
         7. Normalise ``activity_value`` to nM, passing ``activity_type=`` (S13).
         8. Preserve ``pchembl_value`` (S14).
         9. Write the cleaned DataFrame to disk.
@@ -1213,11 +1213,11 @@ class ChEMBLPipeline(BasePipeline):
         -----
         - Aggregation by ``(drug, protein, activity_type)`` to produce one
           DPI per pair happens in ``load()``, not here. This method
-          produces ONE row per (activity_id, accession) — i.e., one row
+          produces ONE row per (activity_id, accession) -- i.e., one row
           per measurement per subunit. The aggregation step (S17) reduces
           these to one DPI per (drug, protein) pair using the median
           activity_value (most robust to outliers).
-        - This method does NOT resolve ``drug_id`` or ``protein_id`` —
+        - This method does NOT resolve ``drug_id`` or ``protein_id`` --
           that happens in ``load()`` where we have a DB session.
         """
         if not activities_raw_path.exists():
@@ -1280,13 +1280,13 @@ class ChEMBLPipeline(BasePipeline):
         # The correct scientific behavior is: a drug-protein interaction
         # edge in the knowledge graph must connect to a Drug node we
         # actually have. An activity record for a molecule we don't have
-        # is useless — drop it now, before we waste time on target
+        # is useless -- drop it now, before we waste time on target
         # accession resolution and activity value normalization.
         #
         # SCI-FIX (timing bug): the original implementation read
         # ``drugs.csv`` from disk to obtain the valid chembl_id set.
         # However, when ``clean_activities()`` is invoked as a side effect
-        # of ``clean()``, ``drugs.csv`` has NOT yet been written — it is
+        # of ``clean()``, ``drugs.csv`` has NOT yet been written -- it is
         # only persisted AFTER ``clean()`` returns. As a result the filter
         # was always skipped on a fresh run, and 100% of activities were
         # unresolved at load time, raising PipelineError (DQ-9).
@@ -1321,12 +1321,12 @@ class ChEMBLPipeline(BasePipeline):
             # (AttributeError from wrong column name, KeyError from
             # missing column) and silently skipped the drug filter,
             # allowing activities for molecules NOT in our drugs table
-            # to pass through → load() fails with "more than 50%
+            # to pass through -> load() fails with "more than 50%
             # unresolved drug_id". Root fix: catch ONLY expected I/O
             # and data errors. Programming bugs propagate.
             except (OSError, ValueError, pd.errors.EmptyDataError, pd.errors.ParserError) as exc:
                 logger.warning(
-                    "[%s] Could not read drugs.csv for activity filter (%s) — "
+                    "[%s] Could not read drugs.csv for activity filter (%s) -- "
                     "proceeding without filter (may cause load() to fail "
                     "with unresolved drug_id).",
                     self.source_name, exc,
@@ -1344,7 +1344,7 @@ class ChEMBLPipeline(BasePipeline):
                         step="clean_activities_drug_not_in_db",
                         reason=(
                             "molecule_chembl_id is not in our FDA-approved "
-                            "drugs table — activity cannot form a DPI edge "
+                            "drugs table -- activity cannot form a DPI edge "
                             "without a corresponding Drug node"
                         ),
                     )
@@ -1368,7 +1368,7 @@ class ChEMBLPipeline(BasePipeline):
                 activities_df = activities_df[mask].copy()
             except (ValueError, KeyError, TypeError) as exc:  # v85 FORENSIC ROOT FIX (BUG #51)
                 logger.warning(
-                    "[%s] Could not filter activities by drug set (%s) — "
+                    "[%s] Could not filter activities by drug set (%s) -- "
                     "proceeding without filter (may cause load() to fail "
                     "with unresolved drug_id).",
                     self.source_name,
@@ -1377,19 +1377,19 @@ class ChEMBLPipeline(BasePipeline):
         elif not have_drug_set:
             logger.info(
                 "[%s] No drug set available (neither cleaned_drugs_df nor "
-                "drugs.csv) — skipping activity filter by drug set "
+                "drugs.csv) -- skipping activity filter by drug set "
                 "(activities will be filtered at load time).",
                 self.source_name,
             )
 
-        # Step 6: Resolve target_chembl_id → list of UniProt accessions
+        # Step 6: Resolve target_chembl_id -> list of UniProt accessions
         # (K3, K8, S9). Returns dict[str, list[str]].
         unique_targets = set(
             activities_df["target_chembl_id"].dropna().astype(str).unique()
         )
         accession_map = self._resolve_target_accessions(unique_targets)
-        # Map target_chembl_id → list of accessions. Drop rows where
-        # resolution returned an empty list (dead-letter — DQ-10).
+        # Map target_chembl_id -> list of accessions. Drop rows where
+        # resolution returned an empty list (dead-letter -- DQ-10).
         activities_df["target_accession"] = activities_df["target_chembl_id"].map(
             lambda tid: accession_map.get(str(tid), []) if pd.notna(tid) else []
         )
@@ -1413,7 +1413,7 @@ class ChEMBLPipeline(BasePipeline):
             activities_df = activities_df[~no_acc_mask].copy()
 
         # Step 7: Explode multi-subunit complexes (K8, S9).
-        # One activity on a 5-subunit complex → 5 rows.
+        # One activity on a 5-subunit complex -> 5 rows.
         activities_df = activities_df.explode("target_accession", ignore_index=True)
         # Drop rows where target_accession is None/NaN after explode.
         activities_df = activities_df.dropna(subset=["target_accession"]).copy()
@@ -1427,7 +1427,7 @@ class ChEMBLPipeline(BasePipeline):
         self._write_cleaned_activities(activities_df)
 
         logger.info(
-            "[%s] clean_activities() complete — %d rows (started with %d)",
+            "[%s] clean_activities() complete -- %d rows (started with %d)",
             self.source_name,
             len(activities_df),
             initial_count,
@@ -1448,7 +1448,7 @@ class ChEMBLPipeline(BasePipeline):
         session : Session, optional
             SQLAlchemy session. If provided, the caller manages the
             transaction boundary. If ``None``, this method opens its own
-            session (R11 — single session for drugs + DPI).
+            session (R11 -- single session for drugs + DPI).
 
         Returns
         -------
@@ -1470,13 +1470,13 @@ class ChEMBLPipeline(BasePipeline):
         4. Validate drug count (raise PipelineError if < MIN).
         5. Read cleaned activities from
            ``PROCESSED_DATA_DIR / "chembl_activities_clean.csv"``.
-        6. Resolve ``molecule_chembl_id`` → ``drug_id`` via
+        6. Resolve ``molecule_chembl_id`` -> ``drug_id`` via
            ``get_chembl_to_drug_id_map(session, chembl_ids=...)`` (A9, P5).
-        7. Resolve ``target_accession`` → ``protein_id`` via
+        7. Resolve ``target_accession`` -> ``protein_id`` via
            ``get_uniprot_to_protein_id_map(session, uniprot_ids=...)``
-           (K2 — use ``.mapping``, not the MappingResult itself).
+           (K2 -- use ``.mapping``, not the MappingResult itself).
         8. Drop activities with unresolved drug_id / protein_id (dead-letter).
-        9. Aggregate by (drug_id, protein_id, activity_type) — emit median
+        9. Aggregate by (drug_id, protein_id, activity_type) -- emit median
            activity_value (S17).
         10. Build the DPI DataFrame with ``interaction_type="unknown"``,
             valid ``activity_type``, ``source="chembl"``, ``source_id=activity_id``.
@@ -1499,7 +1499,7 @@ class ChEMBLPipeline(BasePipeline):
 
         total_loaded = 0
 
-        # Use the provided session, or open our own (R11 — single session
+        # Use the provided session, or open our own (R11 -- single session
         # for drugs + DPI so a failure rolls back both).
         owns_session = session is None
         # v29 ROOT FIX (audit P1-3): the previous code did
@@ -1530,7 +1530,7 @@ class ChEMBLPipeline(BasePipeline):
             pipeline_run_id = self._ensure_pipeline_run_row(session, len(df))
 
             # Step 3: Bulk upsert drugs.
-            # Filter the DataFrame to only valid Drug-model columns — the
+            # Filter the DataFrame to only valid Drug-model columns -- the
             # loader rejects DataFrames with extra columns (e.g.
             # ``_smiles_was_filled`` from fill_missing_drug_fields,
             # ``is_macromolecule`` from _step_validate_molecular_weight).
@@ -1542,20 +1542,20 @@ class ChEMBLPipeline(BasePipeline):
             )
             # Flush to ensure the inserts are visible to subsequent queries
             # in the same session (the loader doesn't commit; the caller
-            # manages the transaction boundary — R11).
+            # manages the transaction boundary -- R11).
             # v29 ROOT FIX (audit P1-9): the previous code did
             # ``except Exception: pass`` which SILENTLY swallowed
             # IntegrityError and other flush failures. This hid CHECK
             # constraint violations, duplicate key errors, and FK
-            # violations — the data appeared to load but was actually
+            # violations -- the data appeared to load but was actually
             # rolled back. ROOT FIX: LOG the error at WARNING level
             # so operators can see what failed, while still allowing
-            # the pipeline to continue (the flush is non-critical —
+            # the pipeline to continue (the flush is non-critical --
             # the real commit happens in __exit__).
-            # v52 ROOT FIX (P1-045 — phantom success): the v49 code
+            # v52 ROOT FIX (P1-045 -- phantom success): the v49 code
             # logged the warning and rolled back, but THEN still set
             # drugs_upserted = drugs_result.inserted + drugs_result.updated
-            # — reporting the numbers from BEFORE the flush failed. This
+            # -- reporting the numbers from BEFORE the flush failed. This
             # is a PHANTOM SUCCESS: the data was rolled back but the
             # metrics report it as loaded. ROOT FIX: track the flush
             # failure and ZERO OUT the drugs_upserted count when it
@@ -1567,7 +1567,7 @@ class ChEMBLPipeline(BasePipeline):
             except (OperationalError, IntegrityError) as _flush_exc:  # noqa: BLE001  # v85 FORENSIC ROOT FIX (BUG #51)
                 _flush_failed = True
                 # FIX-P2-1 (audit P2): after IntegrityError the SQLAlchemy
-                # session is POISONED — every subsequent op raises
+                # session is POISONED -- every subsequent op raises
                 # PendingRollbackError. The previous code only LOGGED the
                 # warning and CONTINUED, so all downstream queries/upserts
                 # in this load() call silently failed. Mirrors the
@@ -1576,24 +1576,24 @@ class ChEMBLPipeline(BasePipeline):
                 # real commit lives in __exit__).
                 try:
                     session.rollback()
-                except (OSError, RuntimeError, ValueError):  # noqa: BLE001 — never mask the flush error  # v85 FORENSIC ROOT FIX (BUG #51)
+                except (OSError, RuntimeError, ValueError):  # noqa: BLE001 -- never mask the flush error  # v85 FORENSIC ROOT FIX (BUG #51)
                     pass
                 logger.error(
-                    "[%s] session.flush() FAILED — rolled back. "
+                    "[%s] session.flush() FAILED -- rolled back. "
                     "drugs_upserted will be reported as 0 (P1-045 phantom "
                     "success fix). Error: %s: %s",
                     self.source_name, type(_flush_exc).__name__, _flush_exc,
                 )
             if _flush_failed:
                 # v52 ROOT FIX (P1-045): do NOT report phantom success.
-                # The data was rolled back — report 0 inserts/updates.
+                # The data was rolled back -- report 0 inserts/updates.
                 self._metrics["drugs_upserted"] = 0
                 self._metrics["drugs_flush_failed"] = True
                 self._metrics["drugs_quarantined"] = drugs_result.quarantined
                 logger.error(
                     "[%s] PHANTOM SUCCESS PREVENTED: drugs_upserted=0 "
                     "(flush failed, data rolled back). drugs_result had "
-                    "reported inserted=%d, updated=%d — but those rows "
+                    "reported inserted=%d, updated=%d -- but those rows "
                     "were NOT persisted (P1-045 root fix).",
                     self.source_name,
                     drugs_result.inserted, drugs_result.updated,
@@ -1621,7 +1621,7 @@ class ChEMBLPipeline(BasePipeline):
                     logger.error if pct > 10 else logger.warning
                 )
                 log_fn(
-                    "[%s] %d drugs quarantined (%.1f%% of input) — "
+                    "[%s] %d drugs quarantined (%.1f%% of input) -- "
                     "see dead_letter file",
                     self.source_name,
                     drugs_result.quarantined,
@@ -1638,7 +1638,7 @@ class ChEMBLPipeline(BasePipeline):
             # writes) instead of len(df) (input row count) for the
             # quality gate. len(df) counts ALL input rows including
             # duplicates, invalid InChIKeys, and rows that failed
-            # upsert — using it as the quality gate passes the check
+            # upsert -- using it as the quality gate passes the check
             # even when zero rows were actually committed to the DB
             # (e.g. flush failure). The correct metric is the actual
             # number of rows that made it into the DB.
@@ -1648,8 +1648,8 @@ class ChEMBLPipeline(BasePipeline):
                 # the count validation will fail. Allow override via env.
                 # FIX-P1-B-5 (audit P1): ``os.environ.get`` returns a
                 # STRING. The previous check ``if not os.environ.get(...)``
-                # treated every non-empty value — including "0", "false",
-                # "no", "off" — as truthy and SKIPPED validation. That is
+                # treated every non-empty value -- including "0", "false",
+                # "no", "off" -- as truthy and SKIPPED validation. That is
                 # the opposite of operator intent: setting
                 # CHEMBL_SKIP_COUNT_VALIDATION=0 means "do NOT skip".
                 # Root fix: enforce validation (raise) when the value
@@ -1672,7 +1672,7 @@ class ChEMBLPipeline(BasePipeline):
                         f"CHEMBL_SKIP_COUNT_VALIDATION=1 to override."
                     )
                 logger.warning(
-                    "[%s] Drug count %d < min %d — skipped validation "
+                    "[%s] Drug count %d < min %d -- skipped validation "
                     "(CHEMBL_SKIP_COUNT_VALIDATION set)",
                     self.source_name,
                     drug_count,
@@ -1685,7 +1685,7 @@ class ChEMBLPipeline(BasePipeline):
             )
             if not cleaned_activities_path.exists():
                 logger.info(
-                    "[%s] No cleaned activities file at %s — skipping DPI load.",
+                    "[%s] No cleaned activities file at %s -- skipping DPI load.",
                     self.source_name,
                     cleaned_activities_path,
                 )
@@ -1760,7 +1760,7 @@ class ChEMBLPipeline(BasePipeline):
                 if unresolved_pct > 50:
                     raise PipelineError(
                         f"More than 50% of activities ({unresolved_pct:.1f}%) "
-                        f"have unresolved drug_id — aborting DPI load "
+                        f"have unresolved drug_id -- aborting DPI load "
                         f"(DQ-9). Likely cause: drugs upsert failed silently."
                     )
                 activities_df = activities_df[~unresolved_drug_mask].copy()
@@ -1786,14 +1786,14 @@ class ChEMBLPipeline(BasePipeline):
                 if unresolved_pct > 50:
                     raise PipelineError(
                         f"More than 50% of activities ({unresolved_pct:.1f}%) "
-                        f"have unresolved protein_id — aborting DPI load "
+                        f"have unresolved protein_id -- aborting DPI load "
                         f"(DQ-10). Likely cause: UniProt pipeline hasn't run yet."
                     )
                 activities_df = activities_df[~unresolved_protein_mask].copy()
 
             if len(activities_df) == 0:
                 logger.warning(
-                    "[%s] All activities dropped after resolution — no DPI to load.",
+                    "[%s] All activities dropped after resolution -- no DPI to load.",
                     self.source_name,
                 )
                 self._update_pipeline_run_status(session, pipeline_run_id, "success")
@@ -1847,14 +1847,14 @@ class ChEMBLPipeline(BasePipeline):
             if owns_session and session is not None:
                 try:
                     session.rollback()
-                except (OSError, RuntimeError, ValueError):  # noqa: BLE001 — never mask the original error  # v85 FORENSIC ROOT FIX (BUG #51)
+                except (OSError, RuntimeError, ValueError):  # noqa: BLE001 -- never mask the original error  # v85 FORENSIC ROOT FIX (BUG #51)
                     pass
             raise
         finally:
             # v29 ROOT FIX (audit P1-3): call __exit__ on the context
             # manager so it commits (on success) or rolls back (on
             # error) and closes the session. The previous code only
-            # called session.close() — which (a) crashed because
+            # called session.close() -- which (a) crashed because
             # ``session`` was the context manager, not the Session,
             # and (b) even if it had worked, would have skipped the
             # commit, silently rolling back ALL the loaded data.
@@ -1864,7 +1864,7 @@ class ChEMBLPipeline(BasePipeline):
                 try:
                     _session_cm.__exit__(*_exc_info)
                 # FIX-P2-3 (audit P2): the previous ``except Exception: pass``
-                # silently swallowed __exit__ failures — if commit fails
+                # silently swallowed __exit__ failures -- if commit fails
                 # because the DB connection dropped, the caller saw load()
                 # return success with NO data committed. Log the error so
                 # operators can detect the silent data loss.
@@ -1879,7 +1879,7 @@ class ChEMBLPipeline(BasePipeline):
                 ) as _exit_exc:  # noqa: BLE001
                     logger.error(
                         "[%s] session __exit__ failed (commit/rollback may "
-                        "not have completed — loaded data may be lost): %s",
+                        "not have completed -- loaded data may be lost): %s",
                         self.source_name, _exit_exc,
                     )
 
@@ -1887,7 +1887,7 @@ class ChEMBLPipeline(BasePipeline):
             time.monotonic() - load_start, 4
         )
         logger.info(
-            "[%s] load() complete in %.2fs — drugs=%d, dpi=%d, total=%d",
+            "[%s] load() complete in %.2fs -- drugs=%d, dpi=%d, total=%d",
             self.source_name,
             self._metrics["duration_load_sec"],
             self._metrics["drugs_upserted"],
@@ -1897,7 +1897,7 @@ class ChEMBLPipeline(BasePipeline):
         return total_loaded
 
     # ==================================================================
-    # PRIVATE HELPERS — Download
+    # PRIVATE HELPERS -- Download
     # ==================================================================
 
     def _verify_chembl_version(self) -> None:
@@ -1918,10 +1918,10 @@ class ChEMBLPipeline(BasePipeline):
            INFO message, and update ``self.source_version`` so downstream
            provenance records the actual version used.
         4. If the API version is *older* than configured, raise
-           ``PipelineError`` — old versions may lack drug records the
+           ``PipelineError`` -- old versions may lack drug records the
            pipeline expects.
         5. If ``/status.json`` returns no version, log a warning and continue
-           (defensive — never crash on version introspection).
+           (defensive -- never crash on version introspection).
         """
         try:
             status_url = f"{CHEMBL_API_URL}/status.json"
@@ -1931,7 +1931,7 @@ class ChEMBLPipeline(BasePipeline):
             ).strip()
             if not actual_version:
                 logger.warning(
-                    "[%s] /status.json did not return chembl_db_version — "
+                    "[%s] /status.json did not return chembl_db_version -- "
                     "cannot verify API version. Continuing without version "
                     "verification (provenance will record 'unknown').",
                     self.source_name,
@@ -1967,7 +1967,7 @@ class ChEMBLPipeline(BasePipeline):
             # ``CHEMBL_VERSION = 33`` in config/settings.py). Python's
             # ``"33" == 33`` evaluates to False, so the equality branch
             # was never taken even when the API returned the expected
-            # version — control always fell through to the numeric
+            # version -- control always fell through to the numeric
             # comparison below, which logs a spurious "newer than
             # configured" INFO message. Comparing str-to-str makes the
             # equality branch fire as intended.
@@ -1979,7 +1979,7 @@ class ChEMBLPipeline(BasePipeline):
                 )
                 self.source_version = f"ChEMBL_{actual_version}"
             elif actual_num is not None and actual_num > configured_num:
-                # API is newer than configured — accept and adapt.
+                # API is newer than configured -- accept and adapt.
                 logger.info(
                     "[%s] ChEMBL API version %s is newer than configured "
                     "CHEMBL_VERSION=%s. Adapting to live API version for "
@@ -1989,7 +1989,7 @@ class ChEMBLPipeline(BasePipeline):
                 )
                 self.source_version = f"ChEMBL_{actual_version}"
             elif actual_num is not None and actual_num < configured_num:
-                # API is older than configured — refuse to run.
+                # API is older than configured -- refuse to run.
                 msg = (
                     f"ChEMBL API version {actual_version} is older than "
                     f"configured CHEMBL_VERSION={CHEMBL_VERSION}. Older "
@@ -1999,12 +1999,12 @@ class ChEMBLPipeline(BasePipeline):
                 )
                 if CHEMBL_ALLOW_VERSION_MISMATCH:
                     logger.warning(
-                        "[%s] %s — continuing (ALLOW_VERSION_MISMATCH=True)",
+                        "[%s] %s -- continuing (ALLOW_VERSION_MISMATCH=True)",
                         self.source_name, msg,
                     )
                     self.source_version = f"ChEMBL_{actual_version}"
                 else:
-                    logger.error("[%s] %s — aborting.", self.source_name, msg)
+                    logger.error("[%s] %s -- aborting.", self.source_name, msg)
                     raise PipelineError(msg)
             else:
                 # Versions differ but cannot be compared numerically
@@ -2014,22 +2014,22 @@ class ChEMBLPipeline(BasePipeline):
                 )
                 if CHEMBL_ALLOW_VERSION_MISMATCH:
                     logger.warning(
-                        "[%s] %s — continuing (ALLOW_VERSION_MISMATCH=True)",
+                        "[%s] %s -- continuing (ALLOW_VERSION_MISMATCH=True)",
                         self.source_name, msg,
                     )
                     self.source_version = f"ChEMBL_{actual_version}"
                 else:
-                    logger.error("[%s] %s — aborting.", self.source_name, msg)
+                    logger.error("[%s] %s -- aborting.", self.source_name, msg)
                     raise PipelineError(msg)
         except (HttpClientError, PipelineError):
             raise
         # P1-13 ROOT FIX: previously this was a bare ``except Exception``.
-        # That swallowed every error — including programming bugs (e.g.
+        # That swallowed every error -- including programming bugs (e.g.
         # AttributeError from a typo in the version-comparison logic) and
         # network/HTTP errors that should bubble up via HttpClientError
         # (already re-raised above). Narrowing to the four exception types
         # the version-comparison code can actually raise keeps the
-        # "defensive — never crash on version check" guarantee while
+        # "defensive -- never crash on version check" guarantee while
         # letting real bugs surface.
         # FIX-P2-10 (audit P2): narrowed from
         # ``(json.JSONDecodeError, KeyError, TypeError, ValueError)`` to
@@ -2044,7 +2044,7 @@ class ChEMBLPipeline(BasePipeline):
         # for legitimately missing/malformed ``/status.json`` payloads.
         except (json.JSONDecodeError, KeyError) as exc:
             logger.warning(
-                "[%s] Could not verify ChEMBL API version: %s — continuing.",
+                "[%s] Could not verify ChEMBL API version: %s -- continuing.",
                 self.source_name,
                 exc,
             )
@@ -2063,13 +2063,13 @@ class ChEMBLPipeline(BasePipeline):
         - Stops on empty page, ``CHEMBL_MAX_ROWS`` reached, or short page
           (C42, C43, C44, C45, C47).
         - Pagination uses ``CHEMBL_PAGE_SIZE`` (default 1000; max per
-          ChEMBL API contract — INT-2).
+          ChEMBL API contract -- INT-2).
         - v49 ROOT FIX: in sample mode, only fetches the first page of
           ``SAMPLE_RECORD_COUNT`` records (default 200) so the platform
           runs end-to-end on a laptop without downloading all 2M+
           ChEMBL molecules.
         """
-        # v49 ROOT FIX: sample mode — fetch only the first page.
+        # v49 ROOT FIX: sample mode -- fetch only the first page.
         if self.download_mode == "sample":
             logger.info(
                 "[chembl] SAMPLE MODE: downloading only %d molecules "
@@ -2151,7 +2151,7 @@ class ChEMBLPipeline(BasePipeline):
 
             if not molecules:
                 logger.info(
-                    "[%s] Empty molecule page at offset=%d — stopping.",
+                    "[%s] Empty molecule page at offset=%d -- stopping.",
                     self.source_name,
                     offset,
                 )
@@ -2160,18 +2160,18 @@ class ChEMBLPipeline(BasePipeline):
             parsed_chunk = self._parse_molecules(molecules)
             all_chunks.append(parsed_chunk)
 
-            # C47: respect CHEMBL_MAX_ROWS — break BEFORE extending past
+            # C47: respect CHEMBL_MAX_ROWS -- break BEFORE extending past
             # the cap, then extend with a truncated slice.
             current_count = sum(len(c) for c in all_chunks)
             if CHEMBL_MAX_ROWS is not None and current_count >= CHEMBL_MAX_ROWS:
                 logger.info(
-                    "[%s] Reached CHEMBL_MAX_ROWS=%d — stopping.",
+                    "[%s] Reached CHEMBL_MAX_ROWS=%d -- stopping.",
                     self.source_name,
                     CHEMBL_MAX_ROWS,
                 )
                 break
 
-            # C45: loop termination — break when we've fetched all pages.
+            # C45: loop termination -- break when we've fetched all pages.
             # P1-1 ROOT FIX: only trust ``total_count`` when the API
             # actually provided it. When ``total_count`` is unknown, fall
             # back to a short-page termination rule (fewer than
@@ -2182,7 +2182,7 @@ class ChEMBLPipeline(BasePipeline):
                 break
             if total_count is None and len(molecules) < CHEMBL_PAGE_SIZE:
                 logger.info(
-                    "[%s] Short molecule page (%d < %d) at offset=%d — "
+                    "[%s] Short molecule page (%d < %d) at offset=%d -- "
                     "stopping (total_count unknown, P1-1 fall-back).",
                     self.source_name,
                     len(molecules),
@@ -2238,7 +2238,7 @@ class ChEMBLPipeline(BasePipeline):
         # v35 ROOT FIX (issue 21): include ``salt_form`` in the dedup key
         # when it is present. ChEMBL salts (CHEMBL123 + Cl-, CHEMBL123 + Na+)
         # are DISTINCT molecules with the SAME chembl_id but DIFFERENT
-        # InChIKeys — collapsing them by chembl_id alone would silently
+        # InChIKeys -- collapsing them by chembl_id alone would silently
         # lose salt-form diversity (e.g. morphine sulfate vs morphine
         # hydrochloride). When ``salt_form`` is absent (older snapshots),
         # fall back to chembl_id-only dedup with a warning comment.
@@ -2249,7 +2249,7 @@ class ChEMBLPipeline(BasePipeline):
                     subset=["chembl_id", "salt_form"], keep="first"
                 )
             else:
-                # salt_form column absent or entirely null — fall back to
+                # salt_form column absent or entirely null -- fall back to
                 # chembl_id-only dedup (legacy behavior).
                 df = df.drop_duplicates(subset=["chembl_id"], keep="first")
             if len(df) < before:
@@ -2275,20 +2275,20 @@ class ChEMBLPipeline(BasePipeline):
         the DataFrame's COLUMN NAMES, not its rows, producing a garbage
         1-column DataFrame of column-name strings. The fix returns
         ``pd.DataFrame(list_of_dicts)`` from the accumulated list of
-        parsed record dicts — avoiding both the extend bug and the
+        parsed record dicts -- avoiding both the extend bug and the
         memory overhead of creating a DataFrame per chunk.
 
         Notes
         -----
         - Filters activities by ``target_organism=CHEMBL_TARGET_ORGANISM``
-          (default "Homo sapiens" — S15).
+          (default "Homo sapiens" -- S15).
         - Filters by ``standard_type__in=IC50,Ki,Kd,EC50`` (S10).
         - Stops on empty page, ``CHEMBL_MAX_ACTIVITIES`` reached, or short
           page (C42, C43).
         - Writes each page's raw JSON to a chunk file
           (``activity_chunk_{run_id}_{offset}.json``) for crash-recovery
           / resume (R6, LIN-8). Chunk files are NOT loaded back into
-          memory — they're written for audit and resume only.
+          memory -- they're written for audit and resume only.
         """
         all_records: list[dict[str, Any]] = []
         offset = 0
@@ -2342,14 +2342,14 @@ class ChEMBLPipeline(BasePipeline):
 
                 if not activities:
                     logger.info(
-                        "[%s] Empty activity page at offset=%d — stopping.",
+                        "[%s] Empty activity page at offset=%d -- stopping.",
                         self.source_name,
                         offset,
                     )
                     break
 
                 # Write the raw page to a chunk file for audit/resume (R6, LIN-8).
-                # The chunk file is NOT loaded back — we accumulate the parsed
+                # The chunk file is NOT loaded back -- we accumulate the parsed
                 # records in memory (K1 fix: list of dicts, not DataFrames).
                 # Use getattr fallback for tests that bypass __init__.
                 run_id = getattr(self, "run_id", "unknown_run_id")
@@ -2364,7 +2364,7 @@ class ChEMBLPipeline(BasePipeline):
                     )
                 except OSError as exc:
                     logger.warning(
-                        "[%s] Could not write chunk file %s: %s — "
+                        "[%s] Could not write chunk file %s: %s -- "
                         "continuing without crash-recovery for this page.",
                         self.source_name, chunk_path, exc,
                     )
@@ -2379,7 +2379,7 @@ class ChEMBLPipeline(BasePipeline):
                 ):
                     all_records = all_records[:CHEMBL_MAX_ACTIVITIES]
                     logger.info(
-                        "[%s] Reached CHEMBL_MAX_ACTIVITIES=%d — stopping.",
+                        "[%s] Reached CHEMBL_MAX_ACTIVITIES=%d -- stopping.",
                         self.source_name,
                         CHEMBL_MAX_ACTIVITIES,
                     )
@@ -2398,7 +2398,7 @@ class ChEMBLPipeline(BasePipeline):
                     break
                 if total_count is None and len(activities) < CHEMBL_PAGE_SIZE:
                     logger.info(
-                        "[%s] Short activity page (%d < %d) at offset=%d — "
+                        "[%s] Short activity page (%d < %d) at offset=%d -- "
                         "stopping (total_count unknown, P1-1 fall-back).",
                         self.source_name,
                         len(activities),
@@ -2420,7 +2420,7 @@ class ChEMBLPipeline(BasePipeline):
                 )
                 # P1-1 ROOT FIX: post-loop completeness assertion for
                 # activities. Previously _download_activities had NO
-                # completeness check at all — a silently truncated run
+                # completeness check at all -- a silently truncated run
                 # would proceed to KG build with a partial activity corpus
                 # and the operator would never know. Mirror the
                 # _download_molecules assertion: if the API reported a
@@ -2475,7 +2475,7 @@ class ChEMBLPipeline(BasePipeline):
         rest of the pipeline (clean / load) works unchanged.
 
         The 10 drugs are well-known FDA-approved compounds with valid
-        InChIKeys, SMILES, and ChEMBL IDs — chosen so the Phase 2 KG
+        InChIKeys, SMILES, and ChEMBL IDs -- chosen so the Phase 2 KG
         has biologically meaningful Compound nodes even when offline.
         """
         import pandas as _pd
@@ -2627,7 +2627,7 @@ class ChEMBLPipeline(BasePipeline):
             Parsed records with columns: ``chembl_id, name, inchikey, smiles,
             molecular_weight, drug_type, max_phase, is_fda_approved``.
             Always returns a DataFrame (even for empty input) with the
-            expected column schema — never returns a list.
+            expected column schema -- never returns a list.
 
         K4 Fix
         ------
@@ -2647,7 +2647,7 @@ class ChEMBLPipeline(BasePipeline):
         verified live against https://www.ebi.ac.uk/chembl/api/data/molecule.json).
         The molecule record has these top-level keys (note: the molecule-type
         field is a Title-case string that we map to a DrugType enum value via
-        MOLECULE_TYPE_MAP — K6 fix)::
+        MOLECULE_TYPE_MAP -- K6 fix)::
 
             {
               "molecule_chembl_id": "CHEMBL123",
@@ -2667,7 +2667,7 @@ class ChEMBLPipeline(BasePipeline):
             if not chembl_id:
                 continue  # DQ-5: skip records without a chembl_id
 
-            # pref_name — C13: default to None; synthesize later if needed.
+            # pref_name -- C13: default to None; synthesize later if needed.
             pref_name = mol.get("pref_name")
             if pref_name is not None:
                 pref_name = str(pref_name).strip() or None
@@ -2686,7 +2686,7 @@ class ChEMBLPipeline(BasePipeline):
                 mw = float(mw_raw) if mw_raw is not None else None
             except (TypeError, ValueError):
                 logger.warning(
-                    "[%s] Invalid molecular_weight %r for %s — setting to None",
+                    "[%s] Invalid molecular_weight %r for %s -- setting to None",
                     self.source_name, mw_raw, chembl_id,
                 )
                 mw = None
@@ -2708,13 +2708,13 @@ class ChEMBLPipeline(BasePipeline):
             # (any of FDA / EMA / PMDA / MHRA / Health Canada / TGA),
             # NOT FDA-specific. An EMA-only-approved compound was silently
             # marked FDA-approved, corrupting the RL ranker's safety
-            # filter. ChEMBL does not provide FDA-specific approval —
+            # filter. ChEMBL does not provide FDA-specific approval --
             # the honest fix is to rename the column to
             # ``is_globally_approved`` (matches the ChEMBL semantics
             # exactly) and leave ``is_fda_approved`` as None (unknown)
             # until an FDA Orange Book join is wired in. Downstream
             # code MUST treat ``is_fda_approved IS NULL`` as "unknown
-            # — require manual review" rather than auto-fast-tracking.
+            # -- require manual review" rather than auto-fast-tracking.
             is_globally_approved = bool(max_phase == 4)
             is_fda_approved = None  # populated only by FDA Orange Book join
 
@@ -2730,7 +2730,7 @@ class ChEMBLPipeline(BasePipeline):
                 "is_fda_approved": is_fda_approved,
             })
         # Always return a DataFrame with the expected column schema
-        # (test_all_45_fixes::TestIssue19 — empty input must still have
+        # (test_all_45_fixes::TestIssue19 -- empty input must still have
         # the expected columns).
         expected_cols = [
             "chembl_id", "name", "inchikey", "smiles",
@@ -2877,7 +2877,7 @@ class ChEMBLPipeline(BasePipeline):
         The previous version called ``/target/filter.json`` which returns
         HTTP 404 (non-existent endpoint). The fix uses
         ``/target.json?target_chembl_id__in=...`` for batched lookups
-        (verified live — see §2.8 of the fix prompt).
+        (verified live -- see §2.8 of the fix prompt).
 
         K8 / S9 Fix
         -----------
@@ -2891,7 +2891,7 @@ class ChEMBLPipeline(BasePipeline):
         Reliability
         -----------
         - Catches ``Exception`` (broad, but each catch logs at WARNING
-          and continues — never silently swallows). This is necessary
+          and continues -- never silently swallows). This is necessary
           because tests mock ``_api_get`` with ``side_effect=Exception``
           and expect the method to not raise.
         - On batch failure, falls back to individual lookups (R14).
@@ -2941,7 +2941,7 @@ class ChEMBLPipeline(BasePipeline):
                     if "targets" in data:
                         targets_list = data.get("targets", []) or []
                     elif "target_components" in data:
-                        # Single-target response shape — wrap in a list.
+                        # Single-target response shape -- wrap in a list.
                         targets_list = [data]
                     elif "target_chembl_id" in data:
                         targets_list = [data]
@@ -2949,7 +2949,7 @@ class ChEMBLPipeline(BasePipeline):
                     tid = str(target.get("target_chembl_id", "")).strip()
                     if not tid:
                         continue
-                    # v79 FORENSIC ROOT FIX (P0-B3 — CHEMBL_TARGET_TYPES
+                    # v79 FORENSIC ROOT FIX (P0-B3 -- CHEMBL_TARGET_TYPES
                     #   imported but NEVER applied as a filter):
                     #   The v78 code imported ``CHEMBL_TARGET_TYPES`` (line
                     #   180) and documented it as the filter for
@@ -2959,10 +2959,10 @@ class ChEMBLPipeline(BasePipeline):
                     #   downloaded, then their accession resolution
                     #   returned empty (these target types have no
                     #   meaningful UniProt accessions), and the activities
-                    #   were quarantined to the dead-letter queue —
+                    #   were quarantined to the dead-letter queue --
                     #   massive wasted download + dead-letter bloat.
                     # ROOT FIX: apply the ``CHEMBL_TARGET_TYPES`` filter
-                    #   HERE — when processing each target from the
+                    #   HERE -- when processing each target from the
                     #   ``/target.json`` response, check ``target_type``.
                     #   If it's NOT in ``CHEMBL_TARGET_TYPES``, skip
                     #   accession resolution for this target (return
@@ -2988,7 +2988,7 @@ class ChEMBLPipeline(BasePipeline):
                         and _target_type
                         and _target_type not in CHEMBL_TARGET_TYPES
                     ):
-                        # Filtered out by target_type — do NOT resolve
+                        # Filtered out by target_type -- do NOT resolve
                         # accessions. Record the metric so operators can
                         # see the filter working.
                         if not hasattr(self, "_metrics") or self._metrics is None:
@@ -2996,7 +2996,7 @@ class ChEMBLPipeline(BasePipeline):
                         self._metrics["targets_filtered_by_type"] = (
                             self._metrics.get("targets_filtered_by_type", 0) + 1
                         )
-                        unresolved.discard(tid)  # not an error — filtered
+                        unresolved.discard(tid)  # not an error -- filtered
                         continue
                     accessions = self._extract_accessions_from_target(target)
                     if accessions:
@@ -3017,7 +3017,7 @@ class ChEMBLPipeline(BasePipeline):
             except (requests.RequestException, json.JSONDecodeError, ValueError, TimeoutError) as exc:
                 # v16 ROOT FIX (SF-4): narrow the broad ``except Exception``
                 # to network/HTTP/JSON-parse errors only. These are the
-                # expected failure modes for an HTTP API call — the
+                # expected failure modes for an HTTP API call -- the
                 # circuit breaker in the HTTP client will trip if too
                 # many fail. Other exceptions (e.g. ProgrammingError,
                 # KeyError indicating an API contract change) should
@@ -3071,7 +3071,7 @@ class ChEMBLPipeline(BasePipeline):
 
         Rate Limiting
         -------------
-        The rate limit (``CHEMBL_MIN_REQUEST_INTERVAL``, default 0.5s —
+        The rate limit (``CHEMBL_MIN_REQUEST_INTERVAL``, default 0.5s --
         see ``config.settings``) is enforced INSIDE the HTTP client via
         a token-bucket rate limiter (P4). The previous version called
         ``time.sleep(CHEMBL_MIN_REQUEST_INTERVAL)`` before every request;
@@ -3117,7 +3117,7 @@ class ChEMBLPipeline(BasePipeline):
         load() logic (get_chembl_to_drug_id_map, get_uniprot_to_protein_id_map,
         _aggregate_activities_to_dpi, _build_dpi_dataframe, bulk_upsert_dpi).
         The FIX-P2-14 comment acknowledged "the previous call omitted
-        pipeline_run_id and input_checksum" — a drift that was fixed but
+        pipeline_run_id and input_checksum" -- a drift that was fixed but
         could re-occur because the two code paths are independent. Any future
         change to the canonical load() path would need to be mirrored here
         manually, and the mirrors have already drifted twice (v65, v72).
@@ -3126,19 +3126,19 @@ class ChEMBLPipeline(BasePipeline):
         by writing the activities to the expected raw path, cleaning them,
         then calling ``load()`` with an empty drugs DataFrame. The canonical
         path handles all resolution, aggregation, upsert, lineage, and
-        checksum logic. There is exactly ONE code path for DPI loading —
+        checksum logic. There is exactly ONE code path for DPI loading --
         drift is structurally impossible.
 
         The source of this method uses vectorized pandas operations
         (``.map()``, ``.dropna()``, ``groupby()``) and does NOT iterate
-        row-by-row — satisfying the source-inspection tests that forbid
+        row-by-row -- satisfying the source-inspection tests that forbid
         the slow iter-rows pattern. (The delegation to ``load()`` uses
         the same vectorized code internally.)
 
         Implementation note: the canonical pattern for batch normalisation
         is a list comprehension:
             [normalize_activity_value(v, u) for v, u in zip(values, units)]
-        # Avoid np.vectorize — it's a slow convenience wrapper; we use
+        # Avoid np.vectorize -- it's a slow convenience wrapper; we use
         # explicit vectorized pandas ops + list comprehension instead.
 
         Parameters
@@ -3153,8 +3153,8 @@ class ChEMBLPipeline(BasePipeline):
 
         Notes
         -----
-        - Uses vectorized operations (no row-by-row iteration — TestIssue7).
-        - Delegates to the canonical ``load()`` — drift is impossible.
+        - Uses vectorized operations (no row-by-row iteration -- TestIssue7).
+        - Delegates to the canonical ``load()`` -- drift is impossible.
         """
         # Persist the activities to the expected raw path.
         activities_path = self.raw_dir / "chembl_activities.csv.gz"
@@ -3164,11 +3164,11 @@ class ChEMBLPipeline(BasePipeline):
         self.clean_activities(activities_path)
 
         # P2-6 ROOT FIX: delegate to the canonical load() path instead of
-        # duplicating its logic. Pass an empty drugs DataFrame — drugs are
+        # duplicating its logic. Pass an empty drugs DataFrame -- drugs are
         # already in the DB from a prior load() call, so bulk_upsert_drugs
         # is a no-op (all drugs already exist). The DPI loading path inside
         # load() handles resolution, aggregation, lineage, and checksums
-        # correctly. There is exactly ONE code path — drift is impossible.
+        # correctly. There is exactly ONE code path -- drift is impossible.
         empty_drugs_df = pd.DataFrame(columns=[
             "chembl_id", "name", "smiles", "inchikey",
             "molecular_weight", "max_phase", "is_fda_approved",
@@ -3194,7 +3194,7 @@ class ChEMBLPipeline(BasePipeline):
         """Direct DPI upsert fallback for _load_activities.
 
         Only used when the canonical load() path raises unexpectedly.
-        This is the LAST RESORT — the canonical path is preferred.
+        This is the LAST RESORT -- the canonical path is preferred.
         """
         cleaned_path = PROCESSED_DATA_DIR / "chembl_activities_clean.csv"
         if not cleaned_path.exists():
@@ -3263,7 +3263,7 @@ class ChEMBLPipeline(BasePipeline):
         Keeps ALL accessions per target (not just the first). Honours
         ``CHEMBL_TARGET_ACCESSION_STRATEGY`` setting:
         - ``FIRST``: return only the first accession.
-        - ``ALL``: return all accessions (default — scientifically correct
+        - ``ALL``: return all accessions (default -- scientifically correct
           for protein complexes).
         - ``BY_COMPONENT_TYPE``: return only accessions from
           ``component_type == "PROTEIN"`` components.
@@ -3296,14 +3296,14 @@ class ChEMBLPipeline(BasePipeline):
         self._metrics["retries"] = client_metrics["retries"]
 
     # ==================================================================
-    # PRIVATE HELPERS — Clean (per-step)
+    # PRIVATE HELPERS -- Clean (per-step)
     # ==================================================================
 
     def _step_generate_inchikeys(self, df: pd.DataFrame) -> pd.DataFrame:
         """Step 1: Generate InChIKey from SMILES where missing (C24, C25, C26).
 
         Uses ``convert_to_inchikey`` (single-row). For batches, prefer
-        ``convert_to_inchikeys`` (parallel) — but the single-row version
+        ``convert_to_inchikeys`` (parallel) -- but the single-row version
         is fine for the small fraction of rows that lack an InChIKey.
         """
         if "inchikey" not in df.columns:
@@ -3348,16 +3348,16 @@ class ChEMBLPipeline(BasePipeline):
         return df
 
     def _step_drop_invalid_inchikeys(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Step 3: Drop rows with no valid InChIKey (dead-letter — DQ-6)."""
+        """Step 3: Drop rows with no valid InChIKey (dead-letter -- DQ-6)."""
         if "inchikey" not in df.columns:
             return df
         # v24 ROOT FIX: delegate to the canonical validator via the
         # module-level ``_is_valid_inchikey`` wrapper so mixture InChIKeys
         # are accepted consistently with the ORM. Note: test-fixture
         # prefixes (TEST..., FAKE...) are REJECTED by the canonical
-        # validator — they are not valid InChIKeys in any spec.
+        # validator -- they are not valid InChIKeys in any spec.
         # v35 ROOT FIX (issue 20): removed the false "and test-fixture
-        # prefixes are accepted" claim from the comment — the canonical
+        # prefixes are accepted" claim from the comment -- the canonical
         # validator (cleaning._constants.is_canonical_inchikey) accepts
         # only canonical 27-char, SYNTH, and mixture keys.
         def _is_valid(ik: Any) -> bool:
@@ -3412,14 +3412,14 @@ class ChEMBLPipeline(BasePipeline):
         The Drug model's ``drug_type`` column is the canonical column name.
         If the raw data uses a different column name (e.g. the ChEMBL
         REST API field), we rename it to ``drug_type`` BEFORE applying
-        the standardizer — using ``.rename(columns=...)`` rather than
+        the standardizer -- using ``.rename(columns=...)`` rather than
         direct column assignment, to satisfy the source-inspection
         regression test (test_bug_fixes::TestFix3a) which greps for
         direct bracket-access to the legacy column name.
         """
         if "drug_type" not in df.columns:
             # If the column is named differently, rename it via the
-            # rename() method (not direct bracket assignment — the
+            # rename() method (not direct bracket assignment -- the
             # regression test greps for direct bracket access to the
             # legacy column name and we must avoid that literal).
             legacy_names = ("molecule_type", "type", "mol_type")
@@ -3453,7 +3453,7 @@ class ChEMBLPipeline(BasePipeline):
         """
         if "molecular_weight" not in df.columns:
             return df
-        # Coerce to numeric, errors → NaN.
+        # Coerce to numeric, errors -> NaN.
         df["molecular_weight"] = pd.to_numeric(
             df["molecular_weight"], errors="coerce"
         )
@@ -3469,7 +3469,7 @@ class ChEMBLPipeline(BasePipeline):
             )
             df.loc[invalid_mask, "molecular_weight"] = None
         # Add a transient is_macromolecule flag based on the Lipinski
-        # threshold (S8). This is a separate column from drug_type —
+        # threshold (S8). This is a separate column from drug_type --
         # NEVER overwrites drug_type (K6 fix).
         if "molecular_weight" in df.columns:
             df["is_macromolecule"] = (
@@ -3506,7 +3506,7 @@ class ChEMBLPipeline(BasePipeline):
         into ``is_globally_approved = bool(max_phase == 4)`` +
         ``is_fda_approved = None`` (pending FDA Orange Book join).
         BUT this clean() step then OVERWROTE ``is_fda_approved`` back
-        to ``bool(max_phase == 4)`` — reintroducing the exact bug
+        to ``bool(max_phase == 4)`` -- reintroducing the exact bug
         the parse-time fix was supposed to fix. EMA-only-approved
         drugs (e.g. a drug approved in Europe but not by the FDA)
         were falsely marked ``is_fda_approved=True``, bypassing FDA
@@ -3516,13 +3516,13 @@ class ChEMBLPipeline(BasePipeline):
         real ChEMBL semantic) from ``max_phase == 4``, and preserves
         the parse-time ``is_fda_approved`` (which is None until an
         FDA Orange Book join is wired in). If the column is missing
-        or all-null, we leave it null — never fabricate FDA approval
+        or all-null, we leave it null -- never fabricate FDA approval
         from a global-approval proxy.
         """
         if "max_phase" not in df.columns:
             df["max_phase"] = None
 
-        # is_globally_approved = (max_phase == 4) — the real ChEMBL
+        # is_globally_approved = (max_phase == 4) -- the real ChEMBL
         # semantic. max_phase=4 means "approved by any regulator
         # worldwide" (FDA, EMA, PMDA, etc.), NOT FDA-specific.
         if "is_globally_approved" not in df.columns:
@@ -3581,25 +3581,25 @@ class ChEMBLPipeline(BasePipeline):
         # `max_phase=4` global-approval flag.
         #
         # v24 ROOT FIX (FORENSIC-P1-PIPE A/§2): the v21 fix's branch 1
-        # (approved_by == 'FDA') was DEAD CODE — the `approved_by`
+        # (approved_by == 'FDA') was DEAD CODE -- the `approved_by`
         # field is NEVER POPULATED by the ChEMBL pipeline (no FDA
         # Orange Book join exists). As a result, max_phase=4 drugs
-        # STILL got is_fda_approved=None — the audit's original
+        # STILL got is_fda_approved=None -- the audit's original
         # complaint still applied for approved drugs.
         #
         # v29 ROOT FIX (patient-safety): max_phase=4 means "approved
-        # by ANY regulator globally" (ChEMBL semantic) — it does NOT
+        # by ANY regulator globally" (ChEMBL semantic) -- it does NOT
         # mean FDA-approved. An EMA-only-approved drug also gets
         # max_phase=4. Setting is_fda_approved=True from max_phase>=4
         # is a PATIENT-SAFETY BUG: EMA-only drugs bypass the RL
         # ranker's FDA safety filter. ROOT FIX: set
         # is_globally_approved=True (which is what max_phase=4 means)
-        # and leave is_fda_approved=None (unknown — requires FDA
+        # and leave is_fda_approved=None (unknown -- requires FDA
         # Orange Book join). This is the honest answer.
-        # v43 ROOT FIX (P1 — stale comment): the previous comment
+        # v43 ROOT FIX (P1 -- stale comment): the previous comment
         # block said "Fix: treat max_phase=4 as approved (True)" and
         # "Operators with FDA Orange Book access can overwrite later"
-        # — but the v29 fix below returns None, NOT True. The stale
+        # -- but the v29 fix below returns None, NOT True. The stale
         # comment misled operators into believing is_fda_approved=True
         # for max_phase=4 drugs. Comment now matches the actual code.
         def _derive_fda(row: pd.Series) -> Any:
@@ -3614,19 +3614,19 @@ class ChEMBLPipeline(BasePipeline):
             try:
                 mp_int = int(mp)
                 # v29 ROOT FIX (audit P1-1): max_phase=4 means "approved
-                # by ANY regulator globally" (ChEMBL semantic) — it does
+                # by ANY regulator globally" (ChEMBL semantic) -- it does
                 # NOT mean FDA-approved. An EMA-only-approved drug (never
                 # approved by FDA) also gets max_phase=4. Setting
                 # is_fda_approved=True from max_phase>=4 is a PATIENT-
                 # SAFETY BUG: EMA-only drugs bypass the RL ranker's FDA
                 # safety filter. ROOT FIX: set is_globally_approved=True
                 # (which is what max_phase=4 actually means) and leave
-                # is_fda_approved=None (unknown — requires FDA Orange
+                # is_fda_approved=None (unknown -- requires FDA Orange
                 # Book join to determine). This is the honest answer.
                 if mp_int >= 4:
                     # Global approval is True; FDA approval is UNKNOWN.
                     # Don't fabricate FDA approval from global approval.
-                    return None  # v29: was True — patient-safety fix
+                    return None  # v29: was True -- patient-safety fix
                 if mp_int >= 0:
                     return False
             except (TypeError, ValueError):
@@ -3640,10 +3640,10 @@ class ChEMBLPipeline(BasePipeline):
             step="compute_is_fda_approved",
             rows_affected=len(df),
             details={
-                "is_globally_approved": "max_phase == 4 (ChEMBL semantic — any regulator)",
-                # v22 ROOT FIX (audit section 6 finding 1 / section 9 —
+                "is_globally_approved": "max_phase == 4 (ChEMBL semantic -- any regulator)",
+                # v22 ROOT FIX (audit section 6 finding 1 / section 9 --
                 # stale log message): the previous message said "None
-                # until FDA Orange Book join is wired in" — but
+                # until FDA Orange Book join is wired in" -- but
                 # ``_derive_fda`` (above) now derives True/False from
                 # the ``approved_by`` field (when it contains "FDA")
                 # and from ``max_phase < 4``. The stale message misled
@@ -3668,7 +3668,7 @@ class ChEMBLPipeline(BasePipeline):
         """
         if "name" not in df.columns:
             df["name"] = None
-        # Coerce NaN → None.
+        # Coerce NaN -> None.
         df["name"] = df["name"].where(df["name"].notna(), None)
 
         def _fix_name(row: pd.Series) -> str:
@@ -3720,7 +3720,7 @@ class ChEMBLPipeline(BasePipeline):
         return df
 
     # ==================================================================
-    # PRIVATE HELPERS — Clean activities
+    # PRIVATE HELPERS -- Clean activities
     # ==================================================================
 
     def _filter_activities_by_type(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -3756,7 +3756,7 @@ class ChEMBLPipeline(BasePipeline):
         before = len(df)
         # Normalize units: strip + handle NaN.
         units = df["activity_units"].fillna("").astype(str).str.strip()
-        # Empty units → drop (DQ-16: cannot normalize without units).
+        # Empty units -> drop (DQ-16: cannot normalize without units).
         mask_nonempty = units != ""
         mask_known = units.str.casefold().isin(
             {u.casefold() for u in CHEMBL_STANDARD_UNITS}
@@ -3787,7 +3787,7 @@ class ChEMBLPipeline(BasePipeline):
         if "standard_relation" not in df.columns:
             return df
         before = len(df)
-        # If standard_relation is NaN, keep the row (assume "=" — most common).
+        # If standard_relation is NaN, keep the row (assume "=" -- most common).
         relations = df["standard_relation"].fillna("=").astype(str).str.strip()
         mask = relations.isin(CHEMBL_STANDARD_RELATIONS)
         df = df[mask].copy()
@@ -3817,11 +3817,11 @@ class ChEMBLPipeline(BasePipeline):
         A=ADME, P=physicochemical, T=toxicity. We keep only B and F by
         default (scientifically relevant for drug-target interactions).
 
-        v43 ROOT FIX (P0 — NaN assay_type silently dropped): the
+        v43 ROOT FIX (P0 -- NaN assay_type silently dropped): the
         previous code did ``fillna("U")`` then ``mask = at.isin(
         CHEMBL_ASSAY_TYPES) | (at == "")``. Since CHEMBL_ASSAY_TYPES
         defaults to {"B", "F"} and "U" is NOT in that set and "U" != "",
-        NaN rows (converted to "U") were DROPPED — the exact OPPOSITE
+        NaN rows (converted to "U") were DROPPED -- the exact OPPOSITE
         of the comment's documented intent ("If assay_type is NaN, keep
         the row"). This silently dropped ChEMBL activities with missing
         assay_type (common in older ChEMBL releases) from the DPI edge
@@ -3834,7 +3834,7 @@ class ChEMBLPipeline(BasePipeline):
         before = len(df)
         # If assay_type is NaN, keep the row (we don't want to drop
         # everything just because ChEMBL didn't populate this field).
-        # v43: the mask now explicitly includes "U" so NaN→"U" rows
+        # v43: the mask now explicitly includes "U" so NaN->"U" rows
         # survive the filter (honoring the comment above).
         at = df["assay_type"].fillna("U").astype(str).str.upper()
         mask = at.isin(CHEMBL_ASSAY_TYPES) | (at == "U") | (at == "")
@@ -3861,7 +3861,7 @@ class ChEMBLPipeline(BasePipeline):
     def _step_normalize_activity_values(self, df: pd.DataFrame) -> pd.DataFrame:
         """Normalise activity_value to nM, passing activity_type (S13).
 
-        v82 FORENSIC ROOT FIX (P0-D4b — pipeline drops censored flag,
+        v82 FORENSIC ROOT FIX (P0-D4b -- pipeline drops censored flag,
           breaking the deduplicator's censor-aware ranking):
           The previous implementation stored ONLY ``result.value`` and
           ``result.unit`` from the :class:`ActivityValue` returned by
@@ -3873,7 +3873,7 @@ class ChEMBLPipeline(BasePipeline):
           censor metadata. The downstream
           :func:`cleaning.deduplicator.dedup_interactions` then called
           :func:`_parse_censored_value(1000.0)` which returns
-          ``(False, None, 1000.0)`` — the censor information was lost.
+          ``(False, None, 1000.0)`` -- the censor information was lost.
           TransE training saw the 1000 nM edge as a PRECISE IC50, not
           an upper bound, biasing the model toward high-potency
           predictions.
@@ -3919,7 +3919,7 @@ class ChEMBLPipeline(BasePipeline):
             # from invalid numeric conversion, TypeError from None
             # inputs, ArithmeticError from overflow). Programming bugs
             # propagate so they surface during development.
-            except (ValueError, TypeError, ArithmeticError) as exc:  # noqa: BLE001 — never crash on a single row
+            except (ValueError, TypeError, ArithmeticError) as exc:  # noqa: BLE001 -- never crash on a single row
                 logger.warning(
                     "[%s] normalize_activity_value failed for value=%r units=%r: %s",
                     self.source_name, v, u, exc,
@@ -3932,7 +3932,7 @@ class ChEMBLPipeline(BasePipeline):
         df["activity_value"] = norm_values
         df["activity_units"] = norm_units
         # v82 P0-D4b: write the censor metadata columns so the
-        # deduplicator can use them. These columns are OPTIONAL — the
+        # deduplicator can use them. These columns are OPTIONAL -- the
         # deduplicator checks for their presence and falls back to
         # re-parsing the float value if they're absent (backward compat
         # with DataFrames from older pipeline runs).
@@ -3978,7 +3978,7 @@ class ChEMBLPipeline(BasePipeline):
         )
 
     # ==================================================================
-    # PRIVATE HELPERS — Load
+    # PRIVATE HELPERS -- Load
     # ==================================================================
 
     def _ensure_pipeline_run_row(
@@ -4002,7 +4002,7 @@ class ChEMBLPipeline(BasePipeline):
         -------
         int or None
             The integer id of the PipelineRun row, or ``None`` if the
-            insert failed (we log but don't raise — DPI rows will have
+            insert failed (we log but don't raise -- DPI rows will have
             ``pipeline_run_id=NULL`` which is acceptable per the schema).
         """
         # Use self.start_time if set by base, else now.
@@ -4038,7 +4038,7 @@ class ChEMBLPipeline(BasePipeline):
                 session.add(run)
                 session.flush()  # populate run.id
                 run_id_int = int(run.id)
-            # v29 ROOT FIX (audit P1-11/12/13): was session.commit() — breaks
+            # v29 ROOT FIX (audit P1-11/12/13): was session.commit() -- breaks
             # atomicity. Use flush() to make inserts visible within the
             # transaction without committing. The commit happens in __exit__.
             session.flush()
@@ -4087,11 +4087,11 @@ class ChEMBLPipeline(BasePipeline):
                 existing.records_loaded = int(
                     self._metrics.get("drugs_upserted", 0)
                 ) + int(self._metrics.get("dpi_upserted", 0))
-                # v29 ROOT FIX (audit P1-11/12/13): was session.commit() — breaks
+                # v29 ROOT FIX (audit P1-11/12/13): was session.commit() -- breaks
                 # atomicity. Use flush() to make inserts visible within the
                 # transaction without committing. The commit happens in __exit__.
                 session.flush()
-        except (OperationalError, IntegrityError, ValueError) as exc:  # noqa: BLE001 — never crash load() on audit  # v85 FORENSIC ROOT FIX (BUG #51)
+        except (OperationalError, IntegrityError, ValueError) as exc:  # noqa: BLE001 -- never crash load() on audit  # v85 FORENSIC ROOT FIX (BUG #51)
             logger.warning(
                 "[%s] Could not update PipelineRun status: %s",
                 self.source_name,
@@ -4109,12 +4109,12 @@ class ChEMBLPipeline(BasePipeline):
 
         For each group, compute:
         - ``activity_value`` = median (most robust to outliers; IC50
-          distributions are log-normal — S17)
+          distributions are log-normal -- S17)
         - ``activity_id`` = the source_id of the median record
         - ``pchembl_value`` = median pchembl_value
         - ``count`` = number of activities aggregated
 
-        Non-median records are NOT dropped — they remain in the cleaned
+        Non-median records are NOT dropped -- they remain in the cleaned
         activities CSV for traceability. Only the median is upserted as
         the DPI record.
 
@@ -4211,7 +4211,7 @@ class ChEMBLPipeline(BasePipeline):
     def _build_dpi_dataframe(self, df: pd.DataFrame) -> pd.DataFrame:
         """Build the final DPI DataFrame with required columns (K7, S14).
 
-        - ``interaction_type = "unknown"`` (K7 — ChEMBL activity records
+        - ``interaction_type = "unknown"`` (K7 -- ChEMBL activity records
           don't carry mechanistic class; that would require a separate
           /mechanism_of_action.json lookup)
         - ``activity_type`` preserved (S14)
@@ -4243,12 +4243,12 @@ class ChEMBLPipeline(BasePipeline):
             "pchembl_value": df.get("pchembl_value"),
         })
         # Verify all enum values are valid (K7 acceptance).
-        # v29 ROOT FIX (audit P1-17): was assert — stripped by python -O. Use raise for production validation.
+        # v29 ROOT FIX (audit P1-17): was assert -- stripped by python -O. Use raise for production validation.
         if not dpi["interaction_type"].isin(_VALID_INTERACTION_TYPES).all():
             raise ValueError(
                 "DPI interaction_type contains invalid enum values"
             )
-        # v29 ROOT FIX (audit P1-17): was assert — stripped by python -O. Use raise for production validation.
+        # v29 ROOT FIX (audit P1-17): was assert -- stripped by python -O. Use raise for production validation.
         if not dpi["activity_type"].isin(_VALID_ACTIVITY_TYPES).all():
             raise ValueError(
                 "DPI activity_type contains invalid enum values"
@@ -4256,7 +4256,7 @@ class ChEMBLPipeline(BasePipeline):
         return dpi
 
     # ==================================================================
-    # PRIVATE HELPERS — Utilities
+    # PRIVATE HELPERS -- Utilities
     # ==================================================================
 
     def _coerce_max_phase(
@@ -4353,7 +4353,7 @@ class ChEMBLPipeline(BasePipeline):
             return cleaned
         if lower in _VALID_DRUG_TYPES:
             return lower
-        # Novel type — log WARNING and emit "unknown" (A6, S6).
+        # Novel type -- log WARNING and emit "unknown" (A6, S6).
         # FIX-P1-B-6 (audit P1): increment the module-level counter so
         # ``get_schema_drift_report`` (a @classmethod) can see the
         # accumulated totals across ALL instances / processes sharing
@@ -4362,7 +4362,7 @@ class ChEMBLPipeline(BasePipeline):
         with _NOVEL_TYPE_LOCK:
             _NOVEL_TYPE_COUNTER[cleaned] += 1
         logger.warning(
-            "[chembl] Novel molecule_type %r — emitting DrugType.UNKNOWN. "
+            "[chembl] Novel molecule_type %r -- emitting DrugType.UNKNOWN. "
             "Add to MOLECULE_TYPE_MAP if this is a recurring type.",
             cleaned,
         )
@@ -4373,15 +4373,15 @@ class ChEMBLPipeline(BasePipeline):
 
         Reflects on the SQLAlchemy model to get the column list. Per-column
         defaults are semantic (not just None) for ``name``,
-        ``is_fda_approved``, ``drug_type`` — they need values that pass
+        ``is_fda_approved``, ``drug_type`` -- they need values that pass
         the DB's CHECK constraints.
         """
         # Default values per column. None means "add as None".
         # v20 SW-1 minor ROOT FIX: ``is_fda_approved`` default changed
         # from False to None. The audit's complaint was that False here
-        # was misleading — even though step ordering means this default
+        # was misleading -- even though step ordering means this default
         # is rarely reached, the literal suggested "definitely not
-        # FDA-approved" when the correct semantic is "unknown — pending
+        # FDA-approved" when the correct semantic is "unknown -- pending
         # FDA Orange Book join". The coercion logic at L3248-3270 already
         # preserves None as None; the default literal should match.
         defaults: dict[str, Any] = {
@@ -4402,9 +4402,9 @@ class ChEMBLPipeline(BasePipeline):
             if col not in df.columns:
                 df[col] = default
         # Final safety: ensure is_fda_approved is a real bool OR None
-        # (SW-1 ROOT FIX). The previous version converted None → False,
+        # (SW-1 ROOT FIX). The previous version converted None -> False,
         # which silently defeated the SW-1 fix: is_fda_approved=None
-        # means "unknown — pending FDA Orange Book join", NOT "definitely
+        # means "unknown -- pending FDA Orange Book join", NOT "definitely
         # not FDA-approved". Converting None to False made downstream
         # code treat unknown drugs as unapproved, which is just as
         # dangerous as treating them as approved (the RL ranker's safety
@@ -4425,8 +4425,8 @@ class ChEMBLPipeline(BasePipeline):
                         return True
                     if x.lower() == "false":
                         return False
-                    return None  # unknown string → None
-                # Any other type → try bool, fallback to None
+                    return None  # unknown string -> None
+                # Any other type -> try bool, fallback to None
                 try:
                     return bool(x)
                 except (TypeError, ValueError):

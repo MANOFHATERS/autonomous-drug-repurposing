@@ -1,4 +1,4 @@
-"""Confidence-tier classification for gene–disease association scores.
+"""Confidence-tier classification for gene-disease association scores.
 
 This module is the SINGLE source of truth for confidence-tier thresholds
 across the platform.  It is consumed by the DisGeNET pipeline
@@ -13,13 +13,13 @@ variants*, Nucleic Acids Research (https://doi.org/10.1093/nar/gkz1021).
 Per §2.3 of the publication, the DisGeNET Disease-Specific Genomic Profile
 (DSGP) score bands are:
 
-- ``[0.0, 0.06)``   — sub-weak (below the published weak-evidence floor)
-- ``[0.06, 0.3)``   — weak evidence
-- ``[0.3, 1.0]``    — strong evidence
+- ``[0.0, 0.06)``   -- sub-weak (below the published weak-evidence floor)
+- ``[0.06, 0.3)``   -- weak evidence
+- ``[0.3, 1.0]``    -- strong evidence
 
-The previous ``0.7 → "very_high"`` tier is REMOVED — no publication
-supports it.  The previous ``0.0 → "low"``, ``0.1 → "medium"``,
-``0.3 → "high"`` tiers are REPLACED by the publication-aligned tiers
+The previous ``0.7 -> "very_high"`` tier is REMOVED -- no publication
+supports it.  The previous ``0.0 -> "low"``, ``0.1 -> "medium"``,
+``0.3 -> "high"`` tiers are REPLACED by the publication-aligned tiers
 above.
 
 Design
@@ -30,7 +30,7 @@ Design
 - Tier thresholds are configurable at runtime via the ``tiers`` parameter.
   The DisGeNET pipeline passes the parsed ``DISGENET_CONFIDENCE_TIERS``
   list from ``config/settings.py``.
-- A defensive assertion fires if the score is NaN or negative — these
+- A defensive assertion fires if the score is NaN or negative -- these
   should never reach the classifier (validate_gda_scores clips first).
 """
 
@@ -45,22 +45,22 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Default confidence tiers — publication-aligned (Piñero et al. 2020).
+# Default confidence tiers -- publication-aligned (Piñero et al. 2020).
 # ---------------------------------------------------------------------------
 DEFAULT_CONFIDENCE_TIERS: list[tuple[float, str]] = [
-    # P1-004 ROOT FIX (v100 forensic — SCIENTIFIC MISLABEL):
+    # P1-004 ROOT FIX (v100 forensic -- SCIENTIFIC MISLABEL):
     # The previous labels were ("weak", "moderate", "strong") mapped to
     # thresholds (0.0, 0.06, 0.3). Per Piñero et al. 2020 §2.3 the bands are:
-    #   [0.0, 0.06)   — sub-weak (below the published weak-evidence floor)
-    #   [0.06, 0.3)   — WEAK evidence (the published weak band)
-    #   [0.3, 1.0]    — strong evidence
+    #   [0.0, 0.06)   -- sub-weak (below the published weak-evidence floor)
+    #   [0.06, 0.3)   -- WEAK evidence (the published weak band)
+    #   [0.3, 1.0]    -- strong evidence
     # The previous code labeled [0.0, 0.06) as "weak" (Piñero calls this
     # sub-weak) and [0.06, 0.3) as "moderate" (Piñero calls this weak).
     # P1-058 ROOT FIX: the [0.06, 0.3) band is "weak" per Piñero 2020,
     # not "moderate". The previous v43 fix labeled this "moderate" which
     # inflated the perceived confidence of weak-evidence GDA edges.
     # This INFLATED the perceived confidence of every weak-evidence GDA
-    # edge — patient-safety risk because downstream ML filters expecting
+    # edge -- patient-safety risk because downstream ML filters expecting
     # confidence_tier == "weak" only caught SUB-FLOOR scores, missing the
     # actual weak band. ROOT FIX: rename labels to ("sub_weak", "weak",
     # "strong") so the label set is scientifically accurate. The DB CHECK
@@ -70,9 +70,9 @@ DEFAULT_CONFIDENCE_TIERS: list[tuple[float, str]] = [
     # (backfill + constraint swap) are updated in lockstep so the four
     # sites remain in agreement.
     # (Parallel V100 fix BUG #4 applied the same root fix.)
-    (0.0, "sub_weak"),   # [0.0, 0.06)  — sub-weak (below the published weak-evidence floor; Piñero et al. 2020 §2.3)
-    (0.06, "weak"),      # [0.06, 0.3)  — weak evidence (Piñero et al. 2020 §2.3 weak band)
-    (0.3, "strong"),     # [0.3, 1.0]   — strong evidence (Piñero et al. 2020 §2.3)
+    (0.0, "sub_weak"),   # [0.0, 0.06)  -- sub-weak (below the published weak-evidence floor; Piñero et al. 2020 §2.3)
+    (0.06, "weak"),      # [0.06, 0.3)  -- weak evidence (Piñero et al. 2020 §2.3 weak band)
+    (0.3, "strong"),     # [0.3, 1.0]   -- strong evidence (Piñero et al. 2020 §2.3)
 ]
 """Default confidence-tier thresholds (Piñero et al. 2020).
 
@@ -81,13 +81,13 @@ The first tier whose ``threshold <= score`` (and which is below the next
 tier's threshold) wins.  ``score = 0.0`` always falls in the first tier
 (``"sub_weak"``).
 
-v100 P1-004 ROOT FIX (SCIENTIFIC MISLABEL — forensic root fix):
+v100 P1-004 ROOT FIX (SCIENTIFIC MISLABEL -- forensic root fix):
 The previous labels were ``"weak"`` / ``"moderate"`` / ``"strong"``
 mapped to thresholds (0.0, 0.06, 0.3). Per Piñero et al. 2020 §2.3 the
-bands are sub-weak / weak / strong — there is NO "moderate" band in the
+bands are sub-weak / weak / strong -- there is NO "moderate" band in the
 publication. P1-058 ROOT FIX: the [0.06, 0.3) band is "weak" per Piñero
 2020, not "moderate". The previous v43 fix labeled this "moderate", which
-inflated the perceived confidence of every weak-evidence GDA edge —
+inflated the perceived confidence of every weak-evidence GDA edge --
 a patient-safety risk because downstream ML filters expecting
 ``confidence_tier == "weak"`` only caught SUB-FLOOR scores
 and missed the actual weak band, while models trained on
@@ -103,11 +103,11 @@ schema (``pipelines/schema/v1.json``), SCHEMA.md, and migration 012
 remain in agreement.
 
 The v43 fix (which introduced the weak/moderate/strong labels to keep
-the DB schema stable) is now SUPERSEDED — the DB schema is updated
+the DB schema stable) is now SUPERSEDED -- the DB schema is updated
 alongside the Python labels so the label set is BOTH scientifically
 correct AND schema-consistent.
 
-(Parallel V100 fix BUG #4 applied the same root fix — same labels,
+(Parallel V100 fix BUG #4 applied the same root fix -- same labels,
 same migration 012 number, same scope. Kept this comment for the more
 detailed forensic trail.)
 """
@@ -133,7 +133,7 @@ def classify_confidence(
     score : float or None
         The DisGeNET DSGP score, expected to be in ``[-1, 1]`` (the
         protective-association range) or ``[0, 1]`` (the unsigned
-        range).  NaN and None MUST NOT reach this function —
+        range).  NaN and None MUST NOT reach this function --
         :func:`cleaning.missing_values.validate_gda_scores` is responsible
         for clipping before classification (SCI-12, SCI-13).  A defensive
         assertion fires if these invariants are violated.
@@ -150,7 +150,7 @@ def classify_confidence(
     ------
     ValueError
         If ``score`` is None, NaN, less than -1.0, or greater than 1.0
-        (defensive check — should never fire if the caller respects the
+        (defensive check -- should never fire if the caller respects the
         SCI-12 / SCI-13 contract).  Negative scores in ``[-1, 0)`` are
         classified as ``"sub_weak"`` (the lowest tier).
 
@@ -160,13 +160,13 @@ def classify_confidence(
     ``assert`` statements, which are SILENTLY DISABLED when Python is
     invoked with ``-O`` (optimized mode). For a biomedical platform
     where bad scores propagate to drug-repurposing predictions, that
-    is unacceptable — a NaN score would silently classify as "sub_weak"
+    is unacceptable -- a NaN score would silently classify as "sub_weak"
     instead of raising. We replace the asserts with explicit
     ``ValueError`` raises that fire regardless of optimization level.
 
     v84 FORENSIC ROOT FIX (BUG #49): removed the deprecated
     ``allow_negative`` parameter entirely. The v82 fix kept it as a
-    backward-compat shim that emitted a ``DeprecationWarning`` — dead
+    backward-compat shim that emitted a ``DeprecationWarning`` -- dead
     code in practice since the default was already ``True`` and no
     caller passed ``False``. Negative scores in ``[-1, 0)`` are ALWAYS
     classified as ``"sub_weak"`` (the lowest tier); the
@@ -176,7 +176,7 @@ def classify_confidence(
     # Defensive invariant (SCI-12): the caller (validate_gda_scores) is
     # responsible for clipping and coercing before this function is
     # called.  If we ever see a None or NaN score here, the contract has
-    # been violated — fail LOUDLY with a real exception (not assert,
+    # been violated -- fail LOUDLY with a real exception (not assert,
     # which is disabled by `python -O`).
     if score is None:
         raise ValueError(
@@ -189,7 +189,7 @@ def classify_confidence(
         )
 
     # v84 FORENSIC ROOT FIX (BUG #49): removed the deprecated
-    # ``allow_negative=False`` code path (dead code — the default was
+    # ``allow_negative=False`` code path (dead code -- the default was
     # already ``True`` and no caller passed ``False``). Negative scores
     # in ``[-1, 0)`` are ALWAYS classified as the lowest tier ("sub_weak").
     # The ``_score_direction`` lineage column preserves the sign for
@@ -232,13 +232,13 @@ def classify_confidence(
     # association (score = -0.8) classifies as "strong" (matching +0.8).
     # The previous max(0.0, ...) clamped ALL negative scores to 0.0,
     # classifying every protective association as the lowest tier
-    # regardless of magnitude — losing the strength information.
+    # regardless of magnitude -- losing the strength information.
     #
     # P1-013 ROOT FIX (v100 forensic): the v90 abs() fix is OPT-IN. The
     # DisGeNET and OMIM pipelines (the ONLY callers in production) pass
     # ``score_range=(0.0, 1.0)`` and ``preserve_direction=False`` to
     # ``validate_gda_scores`` because Piñero 2020 DSGP scores are
-    # UNSIGNED — they live in [0, 1] and do not encode direction. Under
+    # UNSIGNED -- they live in [0, 1] and do not encode direction. Under
     # that default configuration, ``validate_gda_scores`` clips any
     # negative score to 0.0 BEFORE this function is reached, so the
     # abs() branch never fires in the standard pipeline flow.
@@ -252,7 +252,7 @@ def classify_confidence(
     # direction; the ``_score_direction`` lineage column (set by
     # ``validate_gda_scores``) preserves the sign for downstream ranking.
     #
-    # This is NOT dead code — it is a deliberate opt-in feature gate.
+    # This is NOT dead code -- it is a deliberate opt-in feature gate.
     # The v90 "ROOT FIX" framing was misleading because it suggested
     # the fix applied to the default pipeline; this comment makes the
     # opt-in semantics explicit so future maintainers don't rip out the
@@ -264,7 +264,7 @@ def classify_confidence(
     # the tier whose threshold <= score.
     idx = bisect.bisect_right(thresholds, _bisect_score) - 1
     if idx < 0:
-        # score < the lowest threshold — fall back to the lowest tier.
+        # score < the lowest threshold -- fall back to the lowest tier.
         # This should not happen in practice (the lowest threshold is 0.0
         # and we clamped negative scores to 0.0 above), but defensive
         # programming.

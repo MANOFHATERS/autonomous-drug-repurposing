@@ -1,16 +1,16 @@
 """
-Test 3 — Real, institutional-grade test for the DrugOS exception hierarchy.
+Test 3 -- Real, institutional-grade test for the DrugOS exception hierarchy.
 
 This test file is the SINGLE comprehensive proof that:
   (1)  Every class listed in ``drugos_graph.exceptions.__all__`` exists
        and is a class.
   (2)  Every class listed in ``__all__`` inherits from ``Exception``
-       (directly or indirectly) — the CORE INVARIANT that gives the file
+       (directly or indirectly) -- the CORE INVARIANT that gives the file
        its name.
   (3)  Every class listed in ``__all__`` inherits from
        ``DrugOSDataError`` (directly or indirectly), except where
        explicitly documented otherwise.
-  (4)  Every class in the module — EVEN those NOT in ``__all__`` —
+  (4)  Every class in the module -- EVEN those NOT in ``__all__`` --
        inherits from ``Exception``.
   (5)  The 6 classes missing from ``__all__``
        (``CheckpointIntegrityError``, ``DataLeakageError``,
@@ -25,7 +25,7 @@ This test file is the SINGLE comprehensive proof that:
        (``StitchParseError``, ``SiderParseError``,
        ``OpenTargetsParseError``, ``ClinicalTrialsParseError``,
        ``GeoParseError``) inherit from BOTH ``DrugOSDataError`` AND
-       ``FileNotFoundError`` — preserving backward compatibility with
+       ``FileNotFoundError`` -- preserving backward compatibility with
        callers that wrote ``except FileNotFoundError`` before the
        DrugOS hierarchy existed.
   (8)  Intermediate base classes (``EdgeLoadMismatchError``,
@@ -60,22 +60,22 @@ sound.
 
 Sections (by domain priority, matching the master fix prompt)
 -------------------------------------------------------------
-1.  Domain 3  — Scientific Correctness              (D3-SCI-01..04)
-2.  Domain 5  — Data Quality & Integrity            (D5-DQ-01..03)
-3.  Domain 7  — Idempotency & Reproducibility       (D7-IDP-01..02)
-4.  Domain 1  — Architecture                        (D1-ARCH-01..04)
-5.  Domain 9  — Security & Privacy                  (D9-SEC-01..04)
-6.  Domain 2  — Design                              (D2-DES-01..02)
-7.  Domain 14 — Compliance & Standards              (D14-COMP-01..03)
-8.  Domain 6  — Reliability & Resilience            (D6-REL-01..04)
-9.  Domain 10 — Testing & Validation                (D10-TST-01..02)
-10. Domain 4  — Coding                              (D4-COD-01..03)
-11. Domain 8  — Performance & Scalability           (D8-PERF-01..02)
-12. Domain 11 — Logging & Observability             (D11-LOG-01..03)
-13. Domain 12 — Configuration & Environment         (D12-CONF-01..03)
-14. Domain 15 — Interoperability & Integration      (D15-INT-01..02)
-15. Domain 16 — Data Lineage & Traceability         (D16-LIN-01..02)
-16. Domain 13 — Documentation & Readability         (D13-DOC-01..03)
+1.  Domain 3  -- Scientific Correctness              (D3-SCI-01..04)
+2.  Domain 5  -- Data Quality & Integrity            (D5-DQ-01..03)
+3.  Domain 7  -- Idempotency & Reproducibility       (D7-IDP-01..02)
+4.  Domain 1  -- Architecture                        (D1-ARCH-01..04)
+5.  Domain 9  -- Security & Privacy                  (D9-SEC-01..04)
+6.  Domain 2  -- Design                              (D2-DES-01..02)
+7.  Domain 14 -- Compliance & Standards              (D14-COMP-01..03)
+8.  Domain 6  -- Reliability & Resilience            (D6-REL-01..04)
+9.  Domain 10 -- Testing & Validation                (D10-TST-01..02)
+10. Domain 4  -- Coding                              (D4-COD-01..03)
+11. Domain 8  -- Performance & Scalability           (D8-PERF-01..02)
+12. Domain 11 -- Logging & Observability             (D11-LOG-01..03)
+13. Domain 12 -- Configuration & Environment         (D12-CONF-01..03)
+14. Domain 15 -- Interoperability & Integration      (D15-INT-01..02)
+15. Domain 16 -- Data Lineage & Traceability         (D16-LIN-01..02)
+16. Domain 13 -- Documentation & Readability         (D13-DOC-01..03)
 
 Total: 56+ issue-level tests, plus helper / edge-case tests.
 
@@ -88,28 +88,28 @@ Running
 
 Constraints (mirroring the master fix prompt §3.4)
 --------------------------------------------------
-* NO FILE REMOVAL — every existing file remains.
-* NO CODE REMOVAL — existing test code is preserved.
-* BACKWARD COMPATIBILITY — all existing tests
+* NO FILE REMOVAL -- every existing file remains.
+* NO CODE REMOVAL -- existing test code is preserved.
+* BACKWARD COMPATIBILITY -- all existing tests
   (test_24_files_combined.py, test_20_files_combined.py,
   test_graph_stats.py, test_main_py_56_fixes.py) must still pass.
-* NO NEW DEPENDENCIES — stdlib + pytest only (numpy/pandas/torch are
+* NO NEW DEPENDENCIES -- stdlib + pytest only (numpy/pandas/torch are
   already required by the package itself).
-* SCIENTIFIC VALIDITY — no test compromises output correctness.
-* PERFORMANCE — no test takes more than 30 seconds.
-* CROSS-PLATFORM — tests pass on Linux, macOS, Windows.
-* ISOLATION — each test is independent; no shared mutable state.
-* FIX VERIFICATION — every test exercises REAL behavior, not
+* SCIENTIFIC VALIDITY -- no test compromises output correctness.
+* PERFORMANCE -- no test takes more than 30 seconds.
+* CROSS-PLATFORM -- tests pass on Linux, macOS, Windows.
+* ISOLATION -- each test is independent; no shared mutable state.
+* FIX VERIFICATION -- every test exercises REAL behavior, not
   ``assert hasattr(...)`` style existence checks.
 
-Team Cosmic / VentureLab — Autonomous Drug Repurposing Platform.
+Team Cosmic / VentureLab -- Autonomous Drug Repurposing Platform.
 Package: drugos-graph v2.0.0 | Pipeline: 2.0.0-week2 | Schema: 2.0.0
 """
 
 from __future__ import annotations
 
 # ──────────────────────────────────────────────────────────────────────────────
-# STANDARD-LIBRARY IMPORTS — stdlib + pytest + already-installed scientific
+# STANDARD-LIBRARY IMPORTS -- stdlib + pytest + already-installed scientific
 # stack only.  No new dependencies are introduced by this test file.
 # ──────────────────────────────────────────────────────────────────────────────
 import inspect
@@ -138,9 +138,9 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Module under test.  These imports MUST succeed — if they fail, the entire
+# Module under test.  These imports MUST succeed -- if they fail, the entire
 # exception hierarchy is broken and every test below will fail loudly with
-# a clear ImportError (the correct behaviour — silent skipping is forbidden
+# a clear ImportError (the correct behaviour -- silent skipping is forbidden
 # by the master fix prompt constraint 3.4).
 # ──────────────────────────────────────────────────────────────────────────────
 import drugos_graph.exceptions as exc_mod  # noqa: E402
@@ -161,7 +161,7 @@ from drugos_graph.__main__ import (  # noqa: E402
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# MODULE-LEVEL CONSTANTS — derived ONCE at module load so that every test
+# MODULE-LEVEL CONSTANTS -- derived ONCE at module load so that every test
 # sees the same snapshot.  These mirror the values documented in the master
 # fix prompt §3.3 ("Complete Exception Inheritance Map").
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -173,7 +173,7 @@ def _discover_all_exception_classes() -> dict[str, type]:
     Uses ``inspect.getmembers`` filtered by ``cls.__module__`` so that
     re-exported names from typing / stdlib are NOT included.  This is
     the AUTHORITATIVE list of "exception classes that exist in the
-    module" — independent of what ``__all__`` says.
+    module" -- independent of what ``__all__`` says.
     """
     members = inspect.getmembers(exc_mod, inspect.isclass)
     return {
@@ -194,7 +194,7 @@ _EXPORTED_NAMES: frozenset[str] = frozenset(exc_mod.__all__)
 # v61 ROOT FIX: all 6 of these classes were previously missing from
 # __all__ but are now EXPORTED (the gap was closed by a prior fix).
 # The set is kept EMPTY so the test asserts that NO classes are
-# missing — if a future engineer adds a new exception class without
+# missing -- if a future engineer adds a new exception class without
 # adding it to __all__, the test will fail and prompt them to either
 # add it to __all__ or update this set to acknowledge the gap.
 _MISSING_FROM_ALL: frozenset[str] = frozenset({
@@ -203,7 +203,7 @@ _MISSING_FROM_ALL: frozenset[str] = frozenset({
     #   CheckpointIntegrityError, DataLeakageError, EdgeLoadMismatchError
     # If any of these regress (get removed from __all__ again), the
     # test will fail with "Unexpected classes missing from __all__"
-    # — at which point re-add them to __all__ (the correct fix).
+    # -- at which point re-add them to __all__ (the correct fix).
 })
 
 # The 5 multiple-inheritance ParseError classes (master fix prompt §3.3).
@@ -223,7 +223,7 @@ _INTERMEDIATE_BASES: frozenset[str] = frozenset({
     "EvaluationError",
 })
 
-# Expected subclasses of each intermediate base class — used to verify
+# Expected subclasses of each intermediate base class -- used to verify
 # that the DrugOSDataError chain properly propagates to concrete leaves.
 _EXPECTED_SUBCLASSES: dict[str, frozenset[str]] = {
     "EdgeLoadMismatchError": frozenset({
@@ -254,7 +254,7 @@ _EXPECTED_TOTAL_CLASSES: int = 72  # v14: was 71; +1 for new exception class
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# SHARED FIXTURES — every fixture is isolated to a single test.
+# SHARED FIXTURES -- every fixture is isolated to a single test.
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
@@ -314,17 +314,17 @@ def capture_logs():
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# SECTION 0 — CORE INVARIANT: All Exceptions Inherit From Exception
+# SECTION 0 -- CORE INVARIANT: All Exceptions Inherit From Exception
 #
 # This is THE test that gives the file its name.  Per the master fix
-# prompt §1.4 and D6-REL-01, EVERY exception class in the module —
-# whether in __all__ or not — MUST inherit from Exception so the
+# prompt §1.4 and D6-REL-01, EVERY exception class in the module --
+# whether in __all__ or not -- MUST inherit from Exception so the
 # pipeline's top-level ``except Exception`` handler can catch it.
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
 class TestCoreInvariantAllExceptionsInheritFromException:
-    """THE CORE TEST — every exception class inherits from Exception.
+    """THE CORE TEST -- every exception class inherits from Exception.
 
     If ANY class fails this test, the pipeline's top-level
     ``except Exception`` handler cannot catch it.  An uncaught
@@ -336,7 +336,7 @@ class TestCoreInvariantAllExceptionsInheritFromException:
         """Verify the module defines exactly the expected number of classes.
 
         Per the master fix prompt §1.3, the module has 71 exception
-        classes.  If a class is added, this test fails — forcing the
+        classes.  If a class is added, this test fails -- forcing the
         author to update ``__all__`` and the test in the same commit
         (institutional-grade change management).
         """
@@ -374,12 +374,12 @@ class TestCoreInvariantAllExceptionsInheritFromException:
         catch works at runtime, not just at the type level.
         """
         cls = _ALL_EXCEPTION_CLASSES[class_name]
-        # Try several construction patterns — some classes accept
+        # Try several construction patterns -- some classes accept
         # (message) only, others accept (message, *, context=).
         try:
             instance = cls("test message")
         except TypeError:
-            # Some classes may have a different signature — fall back
+            # Some classes may have a different signature -- fall back
             # to no-arg construction (rare but allowed by Python).
             try:
                 instance = cls()
@@ -405,7 +405,7 @@ class TestCoreInvariantAllExceptionsInheritFromException:
 
         DrugOSDataError is the universal catchable base.  If a class
         does not inherit from it, ``except DrugOSDataError`` will not
-        catch it — callers must use the more granular ``except Exception``
+        catch it -- callers must use the more granular ``except Exception``
         or know the specific class name, breaking the documented catch
         contract.
 
@@ -422,12 +422,12 @@ class TestCoreInvariantAllExceptionsInheritFromException:
         )
 
     def test_drugos_data_error_inherits_directly_from_exception(self):
-        """DrugOSDataError's IMMEDIATE parent is Exception — not a deeper base.
+        """DrugOSDataError's IMMEDIATE parent is Exception -- not a deeper base.
 
         Per the master fix prompt §1.4 #6, DrugOSDataError must inherit
         DIRECTLY from Exception so it is the SOLE entry point to the
         DrugOS hierarchy.  If a future change adds an intermediate base
-        between DrugOSDataError and Exception, this test fails — forcing
+        between DrugOSDataError and Exception, this test fails -- forcing
         the author to either revert or update the documented
         inheritance map.
         """
@@ -446,7 +446,7 @@ class TestCoreInvariantAllExceptionsInheritFromException:
         the exception site and the dead-letter writer / structured
         logger.  Without it, every exception handler would have to
         parse the message string to extract metadata (URL, accession,
-        line number) — a fragile, lossy, non-deterministic process.
+        line number) -- a fragile, lossy, non-deterministic process.
         """
         ctx = {"url": "https://example.com", "line": 42, "stage": "parse"}
         err = DrugOSDataError("test failure", context=ctx)
@@ -454,7 +454,7 @@ class TestCoreInvariantAllExceptionsInheritFromException:
             f"context dict was not stored verbatim: {err.context!r} "
             f"vs expected {ctx!r}"
         )
-        # Context must be a dict, not None — every exception instance
+        # Context must be a dict, not None -- every exception instance
         # has a context attribute, even if empty.
         assert isinstance(err.context, dict), (
             f"context must be a dict, got {type(err.context).__name__}"
@@ -478,7 +478,7 @@ class TestCoreInvariantAllExceptionsInheritFromException:
 
         If the source dict were stored by reference, a caller that
         reuses the same dict across multiple exception raises would
-        silently leak context from one exception into another — a
+        silently leak context from one exception into another -- a
         subtle, non-deterministic lineage bug.
         """
         source = {"key": "value"}
@@ -522,13 +522,13 @@ class TestCoreInvariantAllExceptionsInheritFromException:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# SECTION 0.1 — __all__ EXPORT LIST COMPLETENESS (D1-ARCH-04)
+# SECTION 0.1 -- __all__ EXPORT LIST COMPLETENESS (D1-ARCH-04)
 #
 # Per the master fix prompt §1.3, __all__ has 65 exports but 71 classes
-# exist — 6 classes are missing.  This test verifies that the gap is
+# exist -- 6 classes are missing.  This test verifies that the gap is
 # DETECTED and REPORTED, so external tooling using
 # ``from drugos_graph.exceptions import *`` is alerted to the missing
-# names.  The test does NOT require the gap to be closed — that would
+# names.  The test does NOT require the gap to be closed -- that would
 # be a code change to exceptions.py, which is out of scope for this
 # test file (per the master fix prompt, NO code removal / addition
 # outside the test file).
@@ -545,7 +545,7 @@ class TestAllExportListCompleteness:
     """
 
     def test_all_is_defined(self):
-        """``__all__`` is a list[str] — not None, not a tuple, not a set."""
+        """``__all__`` is a list[str] -- not None, not a tuple, not a set."""
         assert hasattr(exc_mod, "__all__"), "exceptions module missing __all__"
         assert isinstance(exc_mod.__all__, list), (
             f"__all__ must be a list, got {type(exc_mod.__all__).__name__}"
@@ -571,19 +571,19 @@ class TestAllExportListCompleteness:
     def test_missing_classes_are_detected(self):
         """The 6 known-missing classes are detected and reported.
 
-        This test verifies the test infrastructure can DETECT the gap —
+        This test verifies the test infrastructure can DETECT the gap --
         it does not require the gap to be closed.  Closing the gap is a
         code change to exceptions.py, which is out of scope for this
         test file.
 
         If a future engineer adds these classes to __all__, this test
-        will fail (the set difference will be empty) — at which point
+        will fail (the set difference will be empty) -- at which point
         the test should be updated to assert that NO classes are
         missing.
         """
         missing = _ALL_CLASS_NAMES - _EXPORTED_NAMES
         # Every name in our expected missing set MUST be in the actual
-        # missing set — this proves the detection works.
+        # missing set -- this proves the detection works.
         for name in _MISSING_FROM_ALL:
             assert name in missing, (
                 f"{name} was expected to be missing from __all__ but is "
@@ -640,21 +640,21 @@ class TestAllExportListCompleteness:
         verifying the source-code class count matches the runtime
         class count.
         """
-        # _ALL_EXCEPTION_CLASSES is a dict — duplicate names would have
+        # _ALL_EXCEPTION_CLASSES is a dict -- duplicate names would have
         # been collapsed.  We compare against a count from
-        # inspect.getmembers (which also deduplicates) — if they differ,
+        # inspect.getmembers (which also deduplicates) -- if they differ,
         # something is very wrong.
         members = inspect.getmembers(exc_mod, inspect.isclass)
         module_local = [m for m in members if m[1].__module__ == exc_mod.__name__]
         assert len(module_local) == len(_ALL_EXCEPTION_CLASSES), (
             f"inspect.getmembers returned {len(module_local)} classes but "
-            f"_ALL_EXCEPTION_CLASSES has {len(_ALL_EXCEPTION_CLASSES)} — "
+            f"_ALL_EXCEPTION_CLASSES has {len(_ALL_EXCEPTION_CLASSES)} -- "
             f"possible duplicate class definitions in exceptions.py"
         )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# SECTION 0.2 — MULTIPLE-INHERITANCE PARSE ERRORS
+# SECTION 0.2 -- MULTIPLE-INHERITANCE PARSE ERRORS
 #
 # Per the master fix prompt §1.4 #7 and §3.3, the 5 loader-specific
 # ParseError classes (Stitch, Sider, OpenTargets, ClinicalTrials, Geo)
@@ -690,13 +690,13 @@ class TestMultipleInheritanceParseErrors:
         assert issubclass(cls, FileNotFoundError), (
             f"{class_name} must inherit from FileNotFoundError so "
             f"legacy `except FileNotFoundError` handlers continue to "
-            f"catch it (backward compat — master prompt Rule R3/R4)."
+            f"catch it (backward compat -- master prompt Rule R3/R4)."
         )
 
     @pytest.mark.parametrize("class_name", sorted(_MULTI_INHERITANCE_PARSE_ERRORS))
     def test_catchable_by_either_base(self, class_name):
         """Each class is catchable by ``except DrugOSDataError`` AND
-        ``except FileNotFoundError`` — exercising REAL catch behaviour."""
+        ``except FileNotFoundError`` -- exercising REAL catch behaviour."""
         cls = getattr(exc_mod, class_name)
         instance = cls("test")
 
@@ -740,7 +740,7 @@ class TestMultipleInheritanceParseErrors:
         Only the 5 explicitly-documented multi-inheritance classes
         inherit from FileNotFoundError.  DRKG (and UniProt, DrugBank,
         ChEMBL, STRING) ParseErrors inherit from DrugOSDataError ONLY.
-        This is by design — those loaders did not exist before the
+        This is by design -- those loaders did not exist before the
         DrugOS hierarchy, so there are no legacy ``except
         FileNotFoundError`` handlers to preserve compatibility with.
         """
@@ -752,7 +752,7 @@ class TestMultipleInheritanceParseErrors:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# SECTION 0.3 — INTERMEDIATE BASE CLASS PROPAGATION
+# SECTION 0.3 -- INTERMEDIATE BASE CLASS PROPAGATION
 #
 # Per the master fix prompt §1.4 #8 and §3.3, the 3 intermediate base
 # classes (EdgeLoadMismatchError, ResolverError, EvaluationError)
@@ -842,7 +842,7 @@ class TestIntermediateBasePropagation:
                 for s in sorted(_EXPECTED_SUBCLASSES.get(b, frozenset()))],
     )
     def test_subclass_catchable_by_except_drugos_data_error(self, base_name, sub_name):
-        """Each subclass is catchable by ``except DrugOSDataError`` — REAL catch."""
+        """Each subclass is catchable by ``except DrugOSDataError`` -- REAL catch."""
         sub_cls = getattr(exc_mod, sub_name)
         instance = sub_cls("test", context={"k": "v"})
         caught = False
@@ -856,7 +856,7 @@ class TestIntermediateBasePropagation:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# SECTION 1 — Domain 3: Scientific Correctness (D3-SCI-01..04)
+# SECTION 1 -- Domain 3: Scientific Correctness (D3-SCI-01..04)
 #
 # Reproducibility and scientific validation at the entry point.
 # Wrong science = everything downstream is wrong.  The exception
@@ -866,7 +866,7 @@ class TestIntermediateBasePropagation:
 
 
 class TestDomain3ScientificCorrectness:
-    """Domain 3 — Reproducibility and scientific validation at entry point."""
+    """Domain 3 -- Reproducibility and scientific validation at entry point."""
 
     def test_D3_SCI_01_global_seed_initialised_before_imports(self, isolated_env, monkeypatch):
         """D3-SCI-01: set_global_seed(SEED) is called at the very start of run().
@@ -888,7 +888,7 @@ class TestDomain3ScientificCorrectness:
 
     def test_D3_SCI_01_seed_deterministic_across_runs(self, isolated_env, monkeypatch):
         """D3-SCI-01 (extended): Two runs with the same seed produce the
-        same PYTHONHASHSEED — ensuring reproducible dict ordering and
+        same PYTHONHASHSEED -- ensuring reproducible dict ordering and
         therefore reproducible TransE embeddings."""
         from drugos_graph import config
         monkeypatch.setattr(config, "SEED", 42, raising=False)
@@ -897,7 +897,7 @@ class TestDomain3ScientificCorrectness:
         main_mod.run(["--self-test"])
         seed_2 = os.environ.get("PYTHONHASHSEED")
         assert seed_1 == seed_2 == "42", (
-            f"Non-deterministic seed: run 1 → {seed_1!r}, run 2 → {seed_2!r}"
+            f"Non-deterministic seed: run 1 -> {seed_1!r}, run 2 -> {seed_2!r}"
         )
 
     def test_D3_SCI_01_invalid_seed_exits_config_failure(self, isolated_env, monkeypatch):
@@ -914,7 +914,7 @@ class TestDomain3ScientificCorrectness:
         assert rc == EXIT_SUCCESS
 
     def test_D3_SCI_02_numpy_missing_returns_config_failure(self, isolated_env, monkeypatch):
-        """D3-SCI-02: A missing numpy triggers EXIT_CONFIG_FAILURE — not an
+        """D3-SCI-02: A missing numpy triggers EXIT_CONFIG_FAILURE -- not an
         uncaught ImportError.  The exception hierarchy is NOT bypassed
         by environment failures."""
         import importlib.util
@@ -925,7 +925,7 @@ class TestDomain3ScientificCorrectness:
 
     def test_D3_SCI_02_pytorch_missing_is_warning_not_error(self, isolated_env, monkeypatch):
         """D3-SCI-02: A missing torch is a WARNING (return SUCCESS), not an
-        error — the pipeline supports --skip-training."""
+        error -- the pipeline supports --skip-training."""
         import importlib.util
         with patch.object(importlib.util, "find_spec") as mock_spec:
             mock_spec.side_effect = lambda name: None if name == "torch" else MagicMock()
@@ -938,7 +938,7 @@ class TestDomain3ScientificCorrectness:
         """D3-SCI-03: When pipeline_results.json has a different config_hash,
         _check_config_drift() logs a WARNING (but returns SUCCESS).
 
-        The exception hierarchy is NOT involved — this is an
+        The exception hierarchy is NOT involved -- this is an
         informational check, not a data error.
         """
         from drugos_graph import config
@@ -977,7 +977,7 @@ class TestDomain3ScientificCorrectness:
         the MOST DANGEROUS issue from the master fix prompt §3.2:
         without this warning, an operator can train TransE on garbage
         data, exit 0, and believe the model is valid."""
-        # caplog is pytest's resilient log-capture fixture — it
+        # caplog is pytest's resilient log-capture fixture -- it
         # survives logging.shutdown() because it uses a special
         # handler that is re-attached on each test.
         caplog.set_level(logging.WARNING)
@@ -1007,7 +1007,7 @@ class TestDomain3ScientificCorrectness:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# SECTION 2 — Domain 5: Data Quality & Integrity (D5-DQ-01..03)
+# SECTION 2 -- Domain 5: Data Quality & Integrity (D5-DQ-01..03)
 #
 # Garbage in = garbage out.  The exception hierarchy is the primary
 # data-quality enforcement mechanism.  Every data-quality exception
@@ -1016,11 +1016,11 @@ class TestDomain3ScientificCorrectness:
 
 
 class TestDomain5DataQuality:
-    """Domain 5 — Data quality enforcement via the exception hierarchy."""
+    """Domain 5 -- Data quality enforcement via the exception hierarchy."""
 
     def test_D5_DQ_01_data_directory_permission_failure(self, isolated_env, monkeypatch):
         """D5-DQ-01: A PermissionError on directory write is caught and
-        returns EXIT_ERROR — not an uncaught PermissionError."""
+        returns EXIT_ERROR -- not an uncaught PermissionError."""
         from drugos_graph import config
         # Mock Path.write_bytes to raise PermissionError.
         original_write_bytes = Path.write_bytes
@@ -1079,7 +1079,7 @@ class TestDomain5DataQuality:
 
     def test_D5_DQ_02_loader_raises_drkg_parse_error_on_missing_file(self, isolated_env, monkeypatch):
         """D5-DQ-02 (extended): The actual DRKG loader raises DRKGParseError
-        (which inherits from DrugOSDataError) when the TSV is missing —
+        (which inherits from DrugOSDataError) when the TSV is missing --
         proving the exception hierarchy correctly wraps the raw error."""
         from drugos_graph.drkg_loader import parse_drkg_tsv
         # Point to an empty directory.
@@ -1088,7 +1088,7 @@ class TestDomain5DataQuality:
             with pytest.raises(DrugOSDataError) as exc_info:
                 parse_drkg_tsv(empty_dir)
             # Must be specifically a DRKGParseError, not just any
-            # DrugOSDataError — proves the loader uses the right class.
+            # DrugOSDataError -- proves the loader uses the right class.
             assert type(exc_info.value).__name__ == "DRKGParseError", (
                 f"Expected DRKGParseError, got {type(exc_info.value).__name__}"
             )
@@ -1114,11 +1114,11 @@ class TestDomain5DataQuality:
 
     def test_D5_DQ_03_stale_data_loader_raises_integrity_error(self, isolated_env, monkeypatch):
         """D5-DQ-03 (extended): A DataIntegrityError is a DrugOSDataError
-        subclass — verify the inheritance chain by exercising a real
+        subclass -- verify the inheritance chain by exercising a real
         instance."""
         # We construct a DataIntegrityError directly to verify its
         # inheritance.  The loader path that raises it (schema-version
-        # mismatch) requires a full pipeline run — out of scope here.
+        # mismatch) requires a full pipeline run -- out of scope here.
         from drugos_graph.exceptions import DRKGDataIntegrityError
         ctx = {"expected_version": "2.0.0", "actual_version": "1.0.0",
                "stage": "schema_check"}
@@ -1129,23 +1129,23 @@ class TestDomain5DataQuality:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# SECTION 3 — Domain 7: Idempotency & Reproducibility (D7-IDP-01..02)
+# SECTION 3 -- Domain 7: Idempotency & Reproducibility (D7-IDP-01..02)
 #
 # Non-idempotent pipelines produce corruption.  The exception hierarchy
-# must support idempotent error reporting: same input → same exception
+# must support idempotent error reporting: same input -> same exception
 # type, message, context.  If __str__ includes a timestamp or UUID,
 # logs from two identical runs cannot be correlated.
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
 class TestDomain7IdempotencyReproducibility:
-    """Domain 7 — Deterministic exception behaviour."""
+    """Domain 7 -- Deterministic exception behaviour."""
 
     def test_D7_IDP_01_exception_str_is_deterministic(self):
         """D7-IDP-01: str(exc) is identical across two constructions with
         the same arguments.  No timestamps, UUIDs, or random values
         appear in __str__ output."""
-        # Test for every exception class — each must produce the same
+        # Test for every exception class -- each must produce the same
         # __str__ twice in a row.
         for name, cls in _ALL_EXCEPTION_CLASSES.items():
             try:
@@ -1154,7 +1154,7 @@ class TestDomain7IdempotencyReproducibility:
                 err2 = cls("deterministic test message",
                            context={"k": "v", "n": 42})
             except TypeError:
-                # Some classes may not accept context kwarg — skip them.
+                # Some classes may not accept context kwarg -- skip them.
                 continue
             s1 = str(err1)
             s2 = str(err2)
@@ -1187,7 +1187,7 @@ class TestDomain7IdempotencyReproducibility:
 
     def test_D7_IDP_01_context_dict_serializes_identically(self):
         """D7-IDP-01 (extended): JSON-serialising the context dict twice
-        produces identical output — no dict-ordering nondeterminism."""
+        produces identical output -- no dict-ordering nondeterminism."""
         ctx = {"b": 2, "a": 1, "c": [1, 2, 3], "nested": {"x": "y"}}
         err = DrugOSDataError("test", context=ctx)
         s1 = json.dumps(err.context, sort_keys=True)
@@ -1230,7 +1230,7 @@ class TestDomain7IdempotencyReproducibility:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# SECTION 4 — Domain 1: Architecture (D1-ARCH-01..04)
+# SECTION 4 -- Domain 1: Architecture (D1-ARCH-01..04)
 #
 # Wrong structure = cascade of fixes.  The exception hierarchy must
 # follow a clean architectural pattern: all loader exceptions inherit
@@ -1239,11 +1239,11 @@ class TestDomain7IdempotencyReproducibility:
 
 
 class TestDomain1Architecture:
-    """Domain 1 — Architectural invariants of the exception hierarchy."""
+    """Domain 1 -- Architectural invariants of the exception hierarchy."""
 
     def test_D1_ARCH_01_lazy_import_missing_module_catches_importerror(self, isolated_env, monkeypatch):
         """D1-ARCH-01: A missing critical submodule produces EXIT_ERROR
-        with a structured message — not a raw ModuleNotFoundError."""
+        with a structured message -- not a raw ModuleNotFoundError."""
         import importlib.util
         # Mock find_spec to return None for run_pipeline.
         with patch.object(importlib.util, "find_spec") as mock_spec:
@@ -1275,7 +1275,7 @@ class TestDomain1Architecture:
 
     def test_D1_ARCH_02_verify_integrity_catches_missing_exceptions(self, isolated_env, monkeypatch):
         """D1-ARCH-02: A missing exceptions.py submodule is detected
-        immediately at entry point — not deep inside a loader."""
+        immediately at entry point -- not deep inside a loader."""
         import importlib.util
         with patch.object(importlib.util, "find_spec") as mock_spec:
             def _side(name):
@@ -1318,7 +1318,7 @@ class TestDomain1Architecture:
         assert rc == EXIT_ABORTED
 
     def test_D1_ARCH_04_exceptions_all_completeness(self):
-        """D1-ARCH-04: __all__ completeness is verified — see
+        """D1-ARCH-04: __all__ completeness is verified -- see
         TestAllExportListCompleteness for the full test.  This test
         is a thin sanity check that the section is reachable."""
         assert len(exc_mod.__all__) >= 60, (
@@ -1331,7 +1331,7 @@ class TestDomain1Architecture:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# SECTION 5 — Domain 9: Security & Privacy (D9-SEC-01..04)
+# SECTION 5 -- Domain 9: Security & Privacy (D9-SEC-01..04)
 #
 # If this codebase were leaked publicly, would it expose secrets?
 # Security exceptions exist in the hierarchy.  The test must verify
@@ -1341,7 +1341,7 @@ class TestDomain1Architecture:
 
 
 class TestDomain9SecurityPrivacy:
-    """Domain 9 — Security exception inheritance and pre-flight checks."""
+    """Domain 9 -- Security exception inheritance and pre-flight checks."""
 
     def test_D9_SEC_01_missing_neo4j_password_returns_config_failure(self, isolated_env, monkeypatch):
         """D9-SEC-01: Without DRUGOS_NEO4J_PASSWORD and without
@@ -1419,7 +1419,7 @@ class TestDomain9SecurityPrivacy:
             "auth failure",
             context={"password": "secret123", "user": "admin"},
         )
-        # Context is preserved verbatim — masking is the caller's job.
+        # Context is preserved verbatim -- masking is the caller's job.
         assert err.context["password"] == "secret123"
         # But __str__ DOES include the context dict, so the caller MUST
         # mask before logging.  This test verifies __str__ behavior so
@@ -1462,7 +1462,7 @@ class TestDomain9SecurityPrivacy:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# SECTION 6 — Domain 2: Design (D2-DES-01..02)
+# SECTION 6 -- Domain 2: Design (D2-DES-01..02)
 #
 # Wrong patterns = inability to extend without rewriting.  The run()
 # function is the programmatic API for tests, Jupyter, Airflow, FastAPI.
@@ -1470,7 +1470,7 @@ class TestDomain9SecurityPrivacy:
 
 
 class TestDomain2Design:
-    """Domain 2 — Design pattern verification for the run() API."""
+    """Domain 2 -- Design pattern verification for the run() API."""
 
     def test_D2_DES_01_run_returns_int_exit_codes(self, isolated_env, monkeypatch):
         """D2-DES-01: run() returns an int exit code, not None / not sys.exit()."""
@@ -1486,9 +1486,9 @@ class TestDomain2Design:
         assert rc == EXIT_SUCCESS
 
     def test_D2_DES_01_run_does_not_call_sys_exit_internally(self, isolated_env, monkeypatch):
-        """D2-DES-01 (extended): run() does NOT call sys.exit() internally —
+        """D2-DES-01 (extended): run() does NOT call sys.exit() internally --
         only the if __name__ guard does."""
-        # Patch sys.exit to raise if called — run() should not trigger it.
+        # Patch sys.exit to raise if called -- run() should not trigger it.
         original_exit = sys.exit
         exit_called = {"yes": False}
         def spy_exit(code=0):
@@ -1519,8 +1519,8 @@ class TestDomain2Design:
         assert rc == EXIT_SUCCESS
 
     def test_D2_DES_02_exit_code_translation_from_system_exit(self, isolated_env, monkeypatch):
-        """D2-DES-02: SystemExit(0) → EXIT_SUCCESS, SystemExit(1) → EXIT_ERROR,
-        SystemExit(2) → 2 (passthrough), SystemExit(None) → EXIT_SUCCESS."""
+        """D2-DES-02: SystemExit(0) -> EXIT_SUCCESS, SystemExit(1) -> EXIT_ERROR,
+        SystemExit(2) -> 2 (passthrough), SystemExit(None) -> EXIT_SUCCESS."""
         # We test _run_pipeline_main's SystemExit translation by mocking
         # run_pipeline.main to raise SystemExit with various codes.
         from drugos_graph.run_pipeline import main as real_pipeline_main
@@ -1536,7 +1536,7 @@ class TestDomain2Design:
             with patch("drugos_graph.run_pipeline.main", side_effect=fake_main):
                 rc = main_mod._run_pipeline_main(["--yes"])
             assert rc == expected_rc, (
-                f"SystemExit({sys_exit_code!r}) → {rc}, expected {expected_rc}"
+                f"SystemExit({sys_exit_code!r}) -> {rc}, expected {expected_rc}"
             )
 
     def test_D2_DES_02_run_pipeline_main_restores_sys_argv(self, isolated_env, monkeypatch):
@@ -1555,7 +1555,7 @@ class TestDomain2Design:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# SECTION 7 — Domain 14: Compliance & Standards (D14-COMP-01..03)
+# SECTION 7 -- Domain 14: Compliance & Standards (D14-COMP-01..03)
 #
 # Would this code pass external audit?  PEP 8, PEP 257, schema-version
 # compatibility, data licensing.
@@ -1563,7 +1563,7 @@ class TestDomain2Design:
 
 
 class TestDomain14Compliance:
-    """Domain 14 — PEP 8, schema versions, data licensing."""
+    """Domain 14 -- PEP 8, schema versions, data licensing."""
 
     def test_D14_COMP_01_python_version_enforced_before_any_import(self):
         """D14-COMP-01: The module-level code at the top of __main__.py
@@ -1580,7 +1580,7 @@ class TestDomain14Compliance:
 
     def test_D14_COMP_01_python_version_check_is_before_drugos_imports(self):
         """D14-COMP-01 (extended): The version check appears BEFORE any
-        drugos_graph import — verified by reading the source."""
+        drugos_graph import -- verified by reading the source."""
         src = inspect.getsource(main_mod)
         version_check_pos = src.find("version_info < (3, 10)")
         drugos_import_pos = src.find("from drugos_graph")
@@ -1592,7 +1592,7 @@ class TestDomain14Compliance:
 
     def test_D14_COMP_01_exceptions_module_uses_future_annotations(self):
         """D14-COMP-01 (extended): exceptions.py has 'from __future__ import
-        annotations' as its first code statement — so PEP 604 syntax
+        annotations' as its first code statement -- so PEP 604 syntax
         (X | Y) in type hints is lazily evaluated."""
         src = inspect.getsource(exc_mod)
         # `from __future__ import annotations` should appear before
@@ -1686,7 +1686,7 @@ class TestDomain14Compliance:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# SECTION 8 — Domain 6: Reliability & Resilience (D6-REL-01..04)
+# SECTION 8 -- Domain 6: Reliability & Resilience (D6-REL-01..04)
 #
 # What happens when things go WRONG.  The exception hierarchy IS the
 # reliability mechanism.
@@ -1694,10 +1694,10 @@ class TestDomain14Compliance:
 
 
 class TestDomain6ReliabilityResilience:
-    """Domain 6 — Reliability of the exception-handling mechanism."""
+    """Domain 6 -- Reliability of the exception-handling mechanism."""
 
     def test_D6_REL_01_all_exceptions_catchable_by_except_exception(self):
-        """D6-REL-01: THE CORE TEST — every exception class is catchable
+        """D6-REL-01: THE CORE TEST -- every exception class is catchable
         by ``except Exception``.
 
         This is the test that gives the file its name.  If ANY class
@@ -1753,7 +1753,7 @@ class TestDomain6ReliabilityResilience:
 
     def test_D6_REL_02_signal_handler_raises_on_second_call(self, monkeypatch):
         """D6-REL-02 (extended): Second call to _signal_handler raises
-        KeyboardInterrupt — operator can always force-exit."""
+        KeyboardInterrupt -- operator can always force-exit."""
         monkeypatch.setattr(main_mod, "_SHUTDOWN_REQUESTED", True)
         with pytest.raises(KeyboardInterrupt):
             main_mod._signal_handler(signal.SIGINT, None)
@@ -1794,7 +1794,7 @@ class TestDomain6ReliabilityResilience:
 
     def test_D6_REL_04_concurrency_lock_prevents_double_run(self, monkeypatch, tmp_path):
         """D6-REL-04: _acquire_concurrency_lock succeeds on first call.
-        A second call from a different process would fail — we test the
+        A second call from a different process would fail -- we test the
         first-call success path here."""
         from drugos_graph import config
         # Patch config.LOGS_DIR to a tmp dir we control.
@@ -1811,20 +1811,20 @@ class TestDomain6ReliabilityResilience:
         multiple times without raising (idempotent cleanup)."""
         monkeypatch.setattr(main_mod, "_PIPELINE_LOCK_FILE", None)
         monkeypatch.setattr(main_mod, "_PIPELINE_LOCK_PATH", None)
-        # Call twice — neither should raise.
+        # Call twice -- neither should raise.
         main_mod._release_concurrency_lock()
         main_mod._release_concurrency_lock()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# SECTION 9 — Domain 10: Testing & Validation (D10-TST-01..02)
+# SECTION 9 -- Domain 10: Testing & Validation (D10-TST-01..02)
 #
 # Without tests, there is NO proof that the exception hierarchy works.
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
 class TestDomain10TestingValidation:
-    """Domain 10 — The test file itself follows institutional-grade standards."""
+    """Domain 10 -- The test file itself follows institutional-grade standards."""
 
     def test_D10_TST_01_run_importable_without_subprocess(self, isolated_env, monkeypatch):
         """D10-TST-01: run() is importable and callable directly (no subprocess)."""
@@ -1859,25 +1859,25 @@ class TestDomain10TestingValidation:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# SECTION 10 — Domain 4: Coding (D4-COD-01..03)
+# SECTION 10 -- Domain 4: Coding (D4-COD-01..03)
 #
 # Syntax, logic errors, naming conventions, code structure.
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
 class TestDomain4Coding:
-    """Domain 4 — PEP 8 naming, type annotations, docstrings."""
+    """Domain 4 -- PEP 8 naming, type annotations, docstrings."""
 
     def test_D4_COD_01_all_exceptions_follow_pep8_naming(self):
         """D4-COD-01: Every exception class name ends with 'Error' (PEP 8)."""
         for name in _ALL_CLASS_NAMES:
             assert name.endswith("Error"), (
-                f"{name} does not end with 'Error' — violates PEP 8 naming"
+                f"{name} does not end with 'Error' -- violates PEP 8 naming"
             )
 
     def test_D4_COD_01_no_duplicate_exception_classes(self):
         """D4-COD-01 (extended): Already tested in TestAllExportListCompleteness
-        — this is a thin assertion that the section is reachable."""
+        -- this is a thin assertion that the section is reachable."""
         assert len(_ALL_EXCEPTION_CLASSES) > 0
 
     def test_D4_COD_02_base_exception_has_type_annotations(self):
@@ -1896,7 +1896,7 @@ class TestDomain4Coding:
 
     def test_D4_COD_02_subclass_init_signature_compatible(self):
         """D4-COD-02 (extended): Every subclass with a custom __init__
-        accepts (message, *, context=None) — compatible with the base."""
+        accepts (message, *, context=None) -- compatible with the base."""
         for name, cls in _ALL_EXCEPTION_CLASSES.items():
             if cls is DrugOSDataError:
                 continue
@@ -1946,27 +1946,27 @@ class TestDomain4Coding:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# SECTION 11 — Domain 8: Performance & Scalability (D8-PERF-01..02)
+# SECTION 11 -- Domain 8: Performance & Scalability (D8-PERF-01..02)
 #
 # The exception hierarchy must not introduce performance bottlenecks.
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
 class TestDomain8PerformanceScalability:
-    """Domain 8 — Performance of exception handling and lazy imports."""
+    """Domain 8 -- Performance of exception handling and lazy imports."""
 
     def test_D8_PERF_01_help_does_not_import_run_pipeline(self, isolated_env, monkeypatch):
         """D8-PERF-01: --help completes without triggering the heavy
         run_pipeline import chain.  We verify by inspecting the source
         code of __main__.py to ensure that ``from drugos_graph.run_pipeline``
         appears ONLY inside a function body (lazy import), NOT at module
-        top level — so importing __main__ does not pull in run_pipeline."""
+        top level -- so importing __main__ does not pull in run_pipeline."""
         # Parse the AST of __main__.py to find import statements at
         # module top level vs. inside function bodies.
         import ast
         src = inspect.getsource(main_mod)
         tree = ast.parse(src)
-        # Walk top-level nodes only — if any top-level node is an
+        # Walk top-level nodes only -- if any top-level node is an
         # ImportFrom for drugos_graph.run_pipeline, fail.
         top_level_run_pipeline_imports = 0
         for node in tree.body:  # top-level only
@@ -1975,7 +1975,7 @@ class TestDomain8PerformanceScalability:
                     top_level_run_pipeline_imports += 1
         assert top_level_run_pipeline_imports == 0, (
             f"run_pipeline is imported {top_level_run_pipeline_imports} "
-            f"times at MODULE TOP LEVEL — it must be lazy (inside a "
+            f"times at MODULE TOP LEVEL -- it must be lazy (inside a "
             f"function body) so --help / --self-test / --show-licenses "
             f"do not trigger the heavy import chain."
         )
@@ -1984,7 +1984,7 @@ class TestDomain8PerformanceScalability:
         self, isolated_env, monkeypatch
     ):
         """D8-PERF-01 (extended): --self-test imports only config,
-        exceptions, schemas, utils, id_crosswalk — NOT drkg_loader,
+        exceptions, schemas, utils, id_crosswalk -- NOT drkg_loader,
         drugbank_parser, or other heavy modules.
 
         We verify by inspecting _run_self_test's source."""
@@ -2006,7 +2006,7 @@ class TestDomain8PerformanceScalability:
             )
 
     def test_D8_PERF_02_log_system_resources_runs(self, isolated_env, monkeypatch):
-        """D8-PERF-02: _log_system_resources runs without raising — even
+        """D8-PERF-02: _log_system_resources runs without raising -- even
         without psutil or torch installed."""
         # Should not raise.
         main_mod._log_system_resources()
@@ -2029,14 +2029,14 @@ class TestDomain8PerformanceScalability:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# SECTION 12 — Domain 11: Logging & Observability (D11-LOG-01..03)
+# SECTION 12 -- Domain 11: Logging & Observability (D11-LOG-01..03)
 #
 # When the pipeline fails at 3 AM, you need to know WHAT failed and WHERE.
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
 class TestDomain11LoggingObservability:
-    """Domain 11 — Logging of exception and lifecycle events."""
+    """Domain 11 -- Logging of exception and lifecycle events."""
 
     def test_D11_LOG_01_fallback_logging_configured_at_module_load(self):
         """D11-LOG-01: A fallback stderr handler is attached to the root
@@ -2044,7 +2044,7 @@ class TestDomain11LoggingObservability:
         root_logger = logging.getLogger()
         handlers = root_logger.handlers
         assert len(handlers) >= 1, (
-            "root logger has no handlers — fallback logging not configured"
+            "root logger has no handlers -- fallback logging not configured"
         )
 
     def test_D11_LOG_01_fallback_handler_level_is_warning(self):
@@ -2108,14 +2108,14 @@ class TestDomain11LoggingObservability:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# SECTION 13 — Domain 12: Configuration & Environment (D12-CONF-01..03)
+# SECTION 13 -- Domain 12: Configuration & Environment (D12-CONF-01..03)
 #
 # Hardcoded paths, magic numbers, environment-specific values are a time bomb.
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
 class TestDomain12ConfigurationEnvironment:
-    """Domain 12 — Configuration management."""
+    """Domain 12 -- Configuration management."""
 
     def test_D12_CONF_01_load_dotenv_sets_environment(self, isolated_env, monkeypatch, tmp_path):
         """D12-CONF-01: _load_dotenv reads KEY=VALUE pairs and sets them
@@ -2140,7 +2140,7 @@ class TestDomain12ConfigurationEnvironment:
 
     def test_D12_CONF_01_load_dotenv_missing_file_no_error(self, isolated_env, monkeypatch):
         """D12-CONF-01 (extended): Missing .env file does not raise."""
-        # Should not raise — just returns silently.
+        # Should not raise -- just returns silently.
         main_mod._load_dotenv()
 
     def test_D12_CONF_02_config_dump_written_before_pipeline(
@@ -2198,7 +2198,7 @@ class TestDomain12ConfigurationEnvironment:
         with patch.object(config, "compute_config_hash",
                           side_effect=RuntimeError("mocked hash failure")):
             with patch.object(config, "CONFIG_HASH", ""):
-                # Should not raise — must be caught internally.
+                # Should not raise -- must be caught internally.
                 rc = main_mod._check_config_drift()
         # Should still return SUCCESS (drift is a warning, not a failure).
         # Even if hash computation fails, the function must not propagate.
@@ -2210,24 +2210,24 @@ class TestDomain12ConfigurationEnvironment:
         processed_dir = config.PROCESSED_DIR
         processed_dir.mkdir(parents=True, exist_ok=True)
         (processed_dir / "pipeline_results.json").write_text("", encoding="utf-8")
-        # Should not raise — JSONDecodeError is caught.
+        # Should not raise -- JSONDecodeError is caught.
         rc = main_mod._check_config_drift()
         assert rc == EXIT_SUCCESS
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# SECTION 14 — Domain 15: Interoperability & Integration (D15-INT-01..02)
+# SECTION 14 -- Domain 15: Interoperability & Integration (D15-INT-01..02)
 #
 # The exception hierarchy must be compatible with external systems.
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
 class TestDomain15InteroperabilityIntegration:
-    """Domain 15 — External-system integration."""
+    """Domain 15 -- External-system integration."""
 
     def test_D15_INT_01_wrong_invocation_error_message(self):
         """D15-INT-01: __main__.py's docstring explains that direct
-        execution (python drugos_graph/__main__.py) is NOT supported —
+        execution (python drugos_graph/__main__.py) is NOT supported --
         only `python -m drugos_graph` is."""
         # The docstring must mention 'python -m drugos_graph'.
         doc = main_mod.__doc__ or ""
@@ -2256,7 +2256,7 @@ class TestDomain15InteroperabilityIntegration:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# SECTION 15 — Domain 16: Data Lineage & Traceability (D16-LIN-01..02)
+# SECTION 15 -- Domain 16: Data Lineage & Traceability (D16-LIN-01..02)
 #
 # In dataset projects, you must be able to trace HOW a value in the
 # output was derived from the input.
@@ -2264,7 +2264,7 @@ class TestDomain15InteroperabilityIntegration:
 
 
 class TestDomain16DataLineageTraceability:
-    """Domain 16 — Lineage manifest and run_id generation."""
+    """Domain 16 -- Lineage manifest and run_id generation."""
 
     def test_D16_LIN_01_run_id_generated_before_import(self, isolated_env, monkeypatch):
         """D16-LIN-01: _generate_run_id returns a non-empty string and
@@ -2323,7 +2323,7 @@ class TestDomain16DataLineageTraceability:
         self, isolated_env, monkeypatch, tmp_path
     ):
         """D16-LIN-02 (extended): Manifest is written atomically (temp
-        file + os.replace) — no .tmp file is left behind on success."""
+        file + os.replace) -- no .tmp file is left behind on success."""
         from drugos_graph import config
         monkeypatch.setattr(config, "PROCESSED_DIR", tmp_path)
         main_mod._write_preliminary_manifest("test-id-456", ["--step", "1"])
@@ -2336,15 +2336,15 @@ class TestDomain16DataLineageTraceability:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# SECTION 16 — Domain 13: Documentation & Readability (D13-DOC-01..03)
+# SECTION 16 -- Domain 13: Documentation & Readability (D13-DOC-01..03)
 #
 # Code is read 10x more than it's written.  Undocumented exception logic
-# is irreversible — you can't guess why a transformation was done.
+# is irreversible -- you can't guess why a transformation was done.
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
 class TestDomain13DocumentationReadability:
-    """Domain 13 — Documentation quality."""
+    """Domain 13 -- Documentation quality."""
 
     def test_D13_DOC_01_exception_classes_have_docstrings(self):
         """D13-DOC-01: Every exception class has a docstring."""
@@ -2399,7 +2399,7 @@ class TestDomain13DocumentationReadability:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# SECTION 17 — INTEGRATION: Exception Hierarchy + __main__ Top-Level Handler
+# SECTION 17 -- INTEGRATION: Exception Hierarchy + __main__ Top-Level Handler
 #
 # This section verifies that the exception hierarchy and __main__'s
 # top-level ``except Exception`` handler work together correctly.  Every
@@ -2420,7 +2420,7 @@ class TestExceptionHierarchyIntegrationWithMain:
         and translated to EXIT_ERROR.
 
         This is the integration test that proves the exception hierarchy
-        works with the entry point's error handling — not just in
+        works with the entry point's error handling -- not just in
         isolation.
         """
         cls = getattr(exc_mod, class_name)
@@ -2438,13 +2438,13 @@ class TestExceptionHierarchyIntegrationWithMain:
                     rc = main_mod.run(["--yes"])
         assert rc == EXIT_ERROR, (
             f"{class_name} raised by _run_pipeline_main was NOT caught "
-            f"by __main__'s top-level handler — exit code was {rc}. "
+            f"by __main__'s top-level handler -- exit code was {rc}. "
             f"This is a CRITICAL patient-safety bug."
         )
 
     def test_config_py_external_exceptions_still_catchable(self):
         """config.py defines AUCBelowThresholdError and InsufficientTrainingDataError
-        that do NOT inherit from DrugOSDataError — but they MUST still
+        that do NOT inherit from DrugOSDataError -- but they MUST still
         inherit from Exception so __main__'s top-level handler catches them.
 
         This is documented in the master fix prompt §3.3 'External Exceptions'.
@@ -2502,13 +2502,13 @@ class TestExceptionHierarchyIntegrationWithMain:
         assert fatal_records[0].levelno >= logging.ERROR
         # exc_info is set by _logger.exception().
         assert fatal_records[0].exc_info is not None, (
-            "PIPELINE_FATAL_ERROR record missing exc_info — traceback "
+            "PIPELINE_FATAL_ERROR record missing exc_info -- traceback "
             "will not be in the log file."
         )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# SECTION 18 — EDGE CASES & ROBUSTNESS
+# SECTION 18 -- EDGE CASES & ROBUSTNESS
 #
 # Edge-case tests that the exception hierarchy must handle gracefully.
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -2556,7 +2556,7 @@ class TestEdgeCasesAndRobustness:
         assert err.context == ctx
         # Must be JSON-serializable.
         s = json.dumps(err.context)
-        assert "DROP TABLE" in s  # preserved verbatim — caller must sanitize
+        assert "DROP TABLE" in s  # preserved verbatim -- caller must sanitize
 
     def test_exception_chaining_with_from(self):
         """An exception chained via `raise X from Y` preserves both."""
@@ -2592,7 +2592,7 @@ class TestEdgeCasesAndRobustness:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# SECTION 19 — INTEGRATION: 28-File Codebase Verification
+# SECTION 19 -- INTEGRATION: 28-File Codebase Verification
 #
 # This section verifies that the file being fixed (this test file) PLUS
 # the 27 previously-fixed files ALL work together as a coherent codebase.
@@ -2607,12 +2607,12 @@ class TestIntegrationWithCodebase:
 
     def test_every_loader_module_can_raise_drugos_data_error(self):
         """Every loader module in the codebase has access to
-        DrugOSDataError subclasses via the exceptions module — verified
+        DrugOSDataError subclasses via the exceptions module -- verified
         by importing each loader and checking it can access the base.
 
         Accepts both absolute (``from drugos_graph.exceptions import ...``)
         and relative (``from .exceptions import ...``) import styles
-        — both are valid Python and both bind the same class objects."""
+        -- both are valid Python and both bind the same class objects."""
         loader_modules = [
             "drkg_loader", "drugbank_parser", "uniprot_loader",
             "chembl_loader", "string_loader", "stitch_loader",
@@ -2621,7 +2621,7 @@ class TestIntegrationWithCodebase:
         ]
         for mod_name in loader_modules:
             mod = importlib.import_module(f"drugos_graph.{mod_name}")
-            # Each loader module imports from exceptions — we verify
+            # Each loader module imports from exceptions -- we verify
             # by checking the module's source for the import.
             src = inspect.getsource(mod)
             assert (
@@ -2644,7 +2644,7 @@ class TestIntegrationWithCodebase:
 
     def test_kg_builder_uses_edge_load_mismatch_error(self):
         """kg_builder.py uses EdgeLoadMismatchError subclasses for edge-count
-        mismatches — verifying the intermediate base is reachable from
+        mismatches -- verifying the intermediate base is reachable from
         the codebase."""
         from drugos_graph import kg_builder
         src = inspect.getsource(kg_builder)
@@ -2668,7 +2668,7 @@ class TestIntegrationWithCodebase:
 
     def test_transe_model_uses_trane_family_exceptions(self):
         """transe_model.py uses the TransE-family exception classes
-        (TransETrainingError, etc.) — verifying the 5 classes missing
+        (TransETrainingError, etc.) -- verifying the 5 classes missing
         from __all__ are actually used by the codebase."""
         from drugos_graph import transe_model
         src = inspect.getsource(transe_model)
@@ -2681,7 +2681,7 @@ class TestIntegrationWithCodebase:
         )
 
     def test_exception_hierarchy_visible_from_package_root(self):
-        """`from drugos_graph import exceptions` works — the hierarchy is
+        """`from drugos_graph import exceptions` works -- the hierarchy is
         accessible from the package root."""
         import drugos_graph
         assert hasattr(drugos_graph, "exceptions")
@@ -2692,7 +2692,7 @@ class TestIntegrationWithCodebase:
         any other module in the codebase.
 
         We DO NOT use ``importlib.reload(exc_mod)`` here because reloading
-        creates NEW class objects — every other test in this file that
+        creates NEW class objects -- every other test in this file that
         references ``DrugOSDataError`` (imported once at module load)
         would then fail ``issubclass`` checks against the reloaded
         classes.  Instead we verify the import chain is acyclic by
@@ -2702,7 +2702,7 @@ class TestIntegrationWithCodebase:
         # If there were a circular import, this would raise ImportError
         # or hang.  Using import_module (not reload) is safe.
         import importlib
-        # Verify a downstream module imports cleanly — if there were a
+        # Verify a downstream module imports cleanly -- if there were a
         # circular dependency, this would have failed at first import.
         mod = importlib.import_module("drugos_graph.run_pipeline")
         assert mod is not None
@@ -2716,7 +2716,7 @@ import importlib  # noqa: E402
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# SECTION 20 — VERIFICATION CHECKLIST (master fix prompt §3.5)
+# SECTION 20 -- VERIFICATION CHECKLIST (master fix prompt §3.5)
 #
 # Final sanity-check tests mirroring the 20-point verification checklist
 # in the master fix prompt §3.5.
@@ -2773,7 +2773,7 @@ class TestVerificationChecklist:
 
     def test_checklist_7_help_works_without_full_import(self, isolated_env, monkeypatch):
         """Checklist #7: --help shows argparse text without importing run_pipeline."""
-        # We can't easily verify "run_pipeline was not imported" — but we
+        # We can't easily verify "run_pipeline was not imported" -- but we
         # can verify --help returns SUCCESS via the dispatch path.
         with patch.object(main_mod, "_run_pipeline_main", return_value=EXIT_SUCCESS):
             rc = main_mod.run(["--help"])
@@ -2832,7 +2832,7 @@ class TestVerificationChecklist:
         with patch.object(main_mod, "_check_input_files", return_value=EXIT_ERROR):
             main_mod.run(["--skip-download", "--skip-neo4j", "--yes"])
         # Even though the run failed, the manifest should exist (it's
-        # written before the pipeline starts — but only if pre-flight
+        # written before the pipeline starts -- but only if pre-flight
         # checks pass).  In this case _check_input_files failed, so
         # manifest may NOT be written.  We verify the function works
         # when called directly:
@@ -2843,7 +2843,7 @@ class TestVerificationChecklist:
     def test_checklist_14_all_existing_tests_still_pass(self):
         """Checklist #14: All existing tests still pass.
 
-        This is verified by running the full test suite — this test
+        This is verified by running the full test suite -- this test
         itself is a no-op marker that the constraint is acknowledged."""
         # If we got here, this test file loaded successfully, which
         # means the existing code is at least importable.
@@ -2861,7 +2861,7 @@ class TestVerificationChecklist:
         """Checklist #16: No test modifies global state without cleanup.
 
         This is verified by the isolation fixtures (isolated_env,
-        reset_main_state) which use monkeypatch — pytest auto-undoes
+        reset_main_state) which use monkeypatch -- pytest auto-undoes
         monkeypatch after each test."""
         # If monkeypatch is working, sys.argv should be unchanged.
         assert isinstance(sys.argv, list)
@@ -2879,8 +2879,8 @@ class TestVerificationChecklist:
         We count the test methods in this file that start with 'test_D'
         (the issue-ID prefix) and verify we have at least 56.  The real
         proof is `pytest tests/test_all_exceptions_inherit_from_exception.py -v`
-        returning 0 failures — this test is a structural sanity check."""
-        # Use globals() to access module-level names — dir() without
+        returning 0 failures -- this test is a structural sanity check."""
+        # Use globals() to access module-level names -- dir() without
         # arguments returns local scope which may be empty.
         module_globals = globals()
         # Collect all test method names that follow the D<domain>-<issue>
@@ -2934,7 +2934,7 @@ class TestVerificationChecklist:
         missing = []
         for prefix, expected_class in domain_classes.items():
             if expected_class not in test_classes:
-                missing.append(f"{prefix} → {expected_class}")
+                missing.append(f"{prefix} -> {expected_class}")
         assert not missing, (
             f"Domains not represented (missing test classes): {missing}"
         )
@@ -2947,7 +2947,7 @@ class TestVerificationChecklist:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# MODULE-LEVEL SANITY CHECK — runs at import time to fail fast if the
+# MODULE-LEVEL SANITY CHECK -- runs at import time to fail fast if the
 # hierarchy is broken.  If this assertion fails, EVERY test in this file
 # will fail with a clear message (rather than producing 100+ confusing
 # per-test failures).
@@ -2962,7 +2962,7 @@ assert len(_ALL_EXCEPTION_CLASSES) == _EXPECTED_TOTAL_CLASSES, (
 assert all(
     issubclass(cls, Exception)
     for cls in _ALL_EXCEPTION_CLASSES.values()
-), "At least one exception class does NOT inherit from Exception — CRITICAL bug."
+), "At least one exception class does NOT inherit from Exception -- CRITICAL bug."
 
 assert all(
     issubclass(cls, DrugOSDataError)

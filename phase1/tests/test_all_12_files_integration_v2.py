@@ -5,7 +5,7 @@ This test verifies that the 12 files the user identified as "fixed"
 (11 already-fixed + the new normalizer.py) work TOGETHER as a cohesive
 system.  It exercises the cross-module contract:
 
-  config → database → cleaning → entity_resolution → pipelines
+  config -> database -> cleaning -> entity_resolution -> pipelines
 
 The 12 files (in dependency order):
 
@@ -40,7 +40,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 
 # ===========================================================================
-# Section 1: All 12 files exist (no files removed — Constraint #1)
+# Section 1: All 12 files exist (no files removed -- Constraint #1)
 # ===========================================================================
 
 
@@ -64,7 +64,7 @@ class TestAllTwelveFilesExist:
 
     @pytest.mark.parametrize("file_path", FILES)
     def test_file_exists(self, file_path):
-        """File must exist — no files removed (Constraint #1)."""
+        """File must exist -- no files removed (Constraint #1)."""
         full_path = PROJECT_ROOT / file_path
         assert full_path.exists(), f"File removed: {file_path}"
 
@@ -115,7 +115,7 @@ class TestAllTwelveModulesImport:
         """The cleaning package version is unchanged (backward compat)."""
         import cleaning
         # cleaning/__init__.py was modified minimally; version should stay 2.0.0
-        # OR be bumped to 2.1.0 — either is acceptable as long as it's documented.
+        # OR be bumped to 2.1.0 -- either is acceptable as long as it's documented.
         assert cleaning.__version__ in ("2.0.0", "2.1.0")
 
 
@@ -208,7 +208,7 @@ class TestInChIKeyContractConsistency:
         """database.loaders._validate_inchikey accepts/rejects as expected."""
         from database.loaders import _validate_inchikey as loaders_validate
         if not key:
-            # Empty string — loaders._validate_inchikey("") raises ValueError
+            # Empty string -- loaders._validate_inchikey("") raises ValueError
             with pytest.raises(ValueError):
                 loaders_validate(key)
             return
@@ -243,7 +243,7 @@ class TestInChIKeyContractConsistency:
 
 
 # ===========================================================================
-# Section 4: End-to-end pipeline flow (config → DB → cleaning)
+# Section 4: End-to-end pipeline flow (config -> DB -> cleaning)
 # ===========================================================================
 
 
@@ -357,8 +357,8 @@ class TestEndToEndPipelineFlow:
         assert len(result) == 2
 
         # is_fda_approved should be derived correctly
-        # Aspirin: max_phase=4 → True
-        # TestCompound: max_phase=0 → False
+        # Aspirin: max_phase=4 -> True
+        # TestCompound: max_phase=0 -> False
         assert result["is_fda_approved"].iloc[0] is True or result["is_fda_approved"].iloc[0] == True
         assert result["is_fda_approved"].iloc[1] is False or result["is_fda_approved"].iloc[1] == False
 

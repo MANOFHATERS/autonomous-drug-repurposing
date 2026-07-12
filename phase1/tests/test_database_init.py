@@ -7,20 +7,20 @@ migrations) via the lazy-loading __getattr__ pattern, and that the entire
 database layer functions correctly end-to-end.
 
 Test Categories:
-  1. Package API Surface — every symbol in __all__ is importable
-  2. Lazy Loading Behaviour — no side effects at import time
-  3. Connection Management — engine, session, init, health check
-  4. ORM Models — schema creation, column definitions, constraints
-  5. Bulk Data Operations — upsert/update with real data and SQLite
-  6. Lookup Helpers — foreign-key resolution maps
-  7. Migrations — schema migration runner
-  8. Data Quality Validation — validate_data_quality_infrastructure
-  9. Security Audit — _validate_database_security
-  10. Idempotency — repeated operations produce same results
-  11. Error Handling — informative errors for bad imports
-  12. Observability — logging and callbacks
-  13. Gene Symbol Resolution — build_gene_to_uniprot_maps + resolve
-  14. Full E2E Pipeline — load data → resolve → upsert → query
+  1. Package API Surface -- every symbol in __all__ is importable
+  2. Lazy Loading Behaviour -- no side effects at import time
+  3. Connection Management -- engine, session, init, health check
+  4. ORM Models -- schema creation, column definitions, constraints
+  5. Bulk Data Operations -- upsert/update with real data and SQLite
+  6. Lookup Helpers -- foreign-key resolution maps
+  7. Migrations -- schema migration runner
+  8. Data Quality Validation -- validate_data_quality_infrastructure
+  9. Security Audit -- _validate_database_security
+  10. Idempotency -- repeated operations produce same results
+  11. Error Handling -- informative errors for bad imports
+  12. Observability -- logging and callbacks
+  13. Gene Symbol Resolution -- build_gene_to_uniprot_maps + resolve
+  14. Full E2E Pipeline -- load data -> resolve -> upsert -> query
 """
 
 from __future__ import annotations
@@ -52,7 +52,7 @@ if str(PROJECT_ROOT) not in sys.path:
 import os
 os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
 
-# Now import the database package — this MUST NOT trigger side effects
+# Now import the database package -- this MUST NOT trigger side effects
 import database
 from database.connection import Base
 
@@ -714,7 +714,7 @@ class TestBulkDataOperations:
         })
         count = database.bulk_upsert_gda(db_session, gda_df)
         db_session.commit()
-        # NULL-gene row is quarantined — 0 rows inserted into GDA table.
+        # NULL-gene row is quarantined -- 0 rows inserted into GDA table.
         assert int(count) == 0, (
             f"BUG-A-002: expected 0 rows inserted (NULL-gene row quarantined), "
             f"got {int(count)}. Coalescing to empty string silently merges "
@@ -731,7 +731,7 @@ class TestBulkDataOperations:
         val = result.scalar()
         assert val == 0, (
             f"BUG-A-002 regression: found {val} row(s) with NULL/empty "
-            f"gene_symbol in GDA table — should have been quarantined."
+            f"gene_symbol in GDA table -- should have been quarantined."
         )
 
     def test_bulk_upsert_gda_idempotent(self, db_session):
@@ -1189,12 +1189,12 @@ class TestGeneSymbolResolution:
 
 
 class TestFullE2EPipeline:
-    """End-to-end test: load data → resolve → upsert → query → verify."""
+    """End-to-end test: load data -> resolve -> upsert -> query -> verify."""
 
     def test_drug_protein_interaction_pipeline(
         self, db_session, sample_drug_df, sample_protein_df
     ):
-        """Full pipeline: drugs + proteins → resolve IDs → insert DPI."""
+        """Full pipeline: drugs + proteins -> resolve IDs -> insert DPI."""
         # Step 1: Load drugs
         drug_count = database.bulk_upsert_drugs(
             db_session, sample_drug_df
@@ -1264,7 +1264,7 @@ class TestFullE2EPipeline:
     def test_gene_disease_pipeline(
         self, db_session, sample_protein_df
     ):
-        """Full pipeline: proteins → build gene map → resolve → upsert GDA."""
+        """Full pipeline: proteins -> build gene map -> resolve -> upsert GDA."""
         # Step 1: Load proteins
         database.bulk_upsert_proteins(
             db_session, sample_protein_df

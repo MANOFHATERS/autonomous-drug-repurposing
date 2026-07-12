@@ -1,34 +1,34 @@
 #!/usr/bin/env python3
 """
-Unified 4-Phase Platform Runner — Phase 1 + 2 + 3 + 4 in ONE command
+Unified 4-Phase Platform Runner -- Phase 1 + 2 + 3 + 4 in ONE command
 ====================================================================
 
 This is the SINGLE top-level entry point for the fully connected
 Autonomous Drug Repurposing Platform. It chains ALL FOUR phases with
 REAL data flow:
 
-  Phase 1  →  Phase 2  →  Phase 3  →  Phase 4
+  Phase 1  ->  Phase 2  ->  Phase 3  ->  Phase 4
   ─────────────────────────────────────────────
   Phase 1 (data ingestion):
     Reads (or auto-generates) the processed_data CSVs from the 7
     biomedical sources (ChEMBL, DrugBank, UniProt, STRING, DisGeNET,
     OMIM, PubChem). If the CSVs don't exist, auto-invokes Phase 1 in
-    sample mode (embedded CSVs — no API calls, biologically valid real
+    sample mode (embedded CSVs -- no API calls, biologically valid real
     IDs). See ``phase1/README.md`` and ``phase1/Makefile``.
 
   Phase 2 (knowledge graph construction):
-    Runs the Phase 1→2 bridge
+    Runs the Phase 1->2 bridge
     (``phase2.drugos_graph.phase1_bridge.run_phase1_to_phase2``) which
     reads Phase 1 CSVs/PostgreSQL, stages them into Phase 2 node/edge
     dicts (Compound, Protein, Pathway, Disease, ClinicalOutcome nodes
     + treats/inhibits/activates/part_of/disrupted_in/causes edges),
     and loads them into a graph builder. The staged data is the REAL
-    knowledge graph — not synthetic.
+    knowledge graph -- not synthetic.
 
   Phase 3 (graph transformer training):
     The GT-RL bridge loads the REAL Phase 2 staged data via
     ``GTRLBridge.load_graph_from_phase1()`` (ROOT FIX: this was the
-    missing wire — Phase 3 previously only had ``build_demo_graph()``
+    missing wire -- Phase 3 previously only had ``build_demo_graph()``
     which generated a SYNTHETIC random graph). The GT model trains on
     the REAL graph and predicts drug-disease interaction scores for
     every untested pair.
@@ -41,7 +41,7 @@ REAL data flow:
 This runner is the ANSWER to the user's forensic audit finding:
 "Phase 1+2+3+4 are 0% connected." Before this script, there was NO
 single entry point that ran all 4 phases on REAL data. ``run_unified.py``
-chained Phase 1→2 only; ``run_real_pipeline.py`` chained Phase 3→4 on
+chained Phase 1->2 only; ``run_real_pipeline.py`` chained Phase 3->4 on
 a SYNTHETIC demo graph. This script closes the gap.
 
 USAGE
@@ -60,11 +60,11 @@ USAGE
 
 EXIT CODES
 ----------
-  0  — Success (all 4 phases ran, scientific validation PASSED)
-  1  — Phase 1 data unavailable / pipeline failure
-  2  — Phase 1→2 bridge failure (zero nodes staged)
-  3  — Phase 3+4 pipeline failure (GT training or RL ranking)
-  4  — Scientific validation FAILED (GT AUC < 0.85, KP recovery < 20%)
+  0  -- Success (all 4 phases ran, scientific validation PASSED)
+  1  -- Phase 1 data unavailable / pipeline failure
+  2  -- Phase 1->2 bridge failure (zero nodes staged)
+  3  -- Phase 3+4 pipeline failure (GT training or RL ranking)
+  4  -- Scientific validation FAILED (GT AUC < 0.85, KP recovery < 20%)
 """
 from __future__ import annotations
 
@@ -172,7 +172,7 @@ def _ensure_phase1_data(phase1_dir: str) -> bool:
 
     log.warning(
         "Phase 1 processed_data not found at %s. Auto-invoking Phase 1 "
-        "in sample mode (embedded CSVs — no API calls, biologically "
+        "in sample mode (embedded CSVs -- no API calls, biologically "
         "valid real IDs).",
         phase1_dir,
     )
@@ -196,7 +196,7 @@ def _ensure_phase1_data(phase1_dir: str) -> bool:
         if proc.returncode == 0 and os.path.isdir(phase1_dir):
             log.info(
                 "Phase 1 sample data generated at %s. The platform will "
-                "run end-to-end on these samples — biologically valid "
+                "run end-to-end on these samples -- biologically valid "
                 "(real InChIKeys, UniProt IDs, DOIDs) but small (~70 "
                 "nodes). For the full 10K-drug KG, run Phase 1 with "
                 "proper API credentials.",
@@ -226,7 +226,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description=(
             "Run the FULL 4-phase Autonomous Drug Repurposing Platform "
-            "(Phase 1 → 2 → 3 → 4) on REAL biomedical data."
+            "(Phase 1 -> 2 -> 3 -> 4) on REAL biomedical data."
         )
     )
     parser.add_argument(
@@ -251,7 +251,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--gt-num-layers", type=int, default=3,
-        help="GT transformer layers (default: 3 for 3-hop drug→protein→pathway→disease)",
+        help="GT transformer layers (default: 3 for 3-hop drug->protein->pathway->disease)",
     )
     parser.add_argument(
         "--gt-num-heads", type=int, default=4,
@@ -297,9 +297,9 @@ def main() -> int:
     })
 
     print("\n" + "=" * 78)
-    print("AUTONOMOUS DRUG REPURPOSING PLATFORM — FULL 4-PHASE RUN")
-    print("Phase 1 (Data Ingestion) → Phase 2 (Knowledge Graph) →")
-    print("Phase 3 (Graph Transformer) → Phase 4 (RL Hypothesis Ranker)")
+    print("AUTONOMOUS DRUG REPURPOSING PLATFORM -- FULL 4-PHASE RUN")
+    print("Phase 1 (Data Ingestion) -> Phase 2 (Knowledge Graph) ->")
+    print("Phase 3 (Graph Transformer) -> Phase 4 (RL Hypothesis Ranker)")
     print("=" * 78 + "\n")
 
     # ─── PHASE 1: Data Ingestion ──────────────────────────────────
@@ -320,7 +320,7 @@ def main() -> int:
 
     # ─── PHASE 2: Knowledge Graph Construction ────────────────────
     print("=" * 60)
-    print("PHASE 2: Knowledge Graph Construction (Phase 1 → 2 bridge)")
+    print("PHASE 2: Knowledge Graph Construction (Phase 1 -> 2 bridge)")
     print("=" * 60)
 
     from drugos_graph.phase1_bridge import (
@@ -341,7 +341,7 @@ def main() -> int:
         # FAILED" with exit code 2, masking the real bug. Now only
         # expected runtime/environment errors are caught; programming
         # bugs propagate as crashes with full tracebacks.
-        log.error("Phase 1→2 bridge FAILED: %s", exc, exc_info=True)
+        log.error("Phase 1->2 bridge FAILED: %s", exc, exc_info=True)
         return 2
 
     staged = bridge_result["staged"]
@@ -391,12 +391,12 @@ def main() -> int:
             rl_timesteps=args.rl_timesteps,
             rl_top_n=args.rl_top_n,
             allow_invalid_output=args.allow_invalid_output,
-            # ROOT FIX (Phase 1+2+3+4): pass the REAL Phase 1→2 staged
+            # ROOT FIX (Phase 1+2+3+4): pass the REAL Phase 1->2 staged
             # data so the GT model trains on the actual biomedical KG
             # instead of a synthetic demo graph.
             phase1_staged_data=staged,
             # V31 ROOT FIX (P0-1): 3-layer model for 3-hop
-            # drug→protein→pathway→disease pattern.
+            # drug->protein->pathway->disease pattern.
             gt_embedding_dim=args.gt_embedding_dim,
             gt_num_layers=args.gt_num_layers,
             gt_num_heads=args.gt_num_heads,
@@ -416,7 +416,7 @@ def main() -> int:
     # R-021 root fix: all results[...] accesses use .get() with defaults
     # so a missing key from the bridge does not blow up the summary print.
     print("\n" + "=" * 78)
-    print("FULL 4-PHASE PIPELINE COMPLETE — SUMMARY")
+    print("FULL 4-PHASE PIPELINE COMPLETE -- SUMMARY")
     print("=" * 78)
     print(f"  Phase 1 CSVs:            {len(csv_files)} files")
     print(f"  Phase 2 nodes staged:    {summary['nodes_staged']}")
@@ -467,8 +467,8 @@ def main() -> int:
     print("\n" + "=" * 78)
     print("ROOT-LEVEL FIX VERIFIED: Phase 1 + 2 + 3 + 4 ARE 100% CONNECTED")
     print("=" * 78)
-    print("  Phase 1 (7 biomedical sources) → Phase 2 (KG bridge) →")
-    print("  Phase 3 (GT trained on REAL KG) → Phase 4 (RL ranked REAL pairs)")
+    print("  Phase 1 (7 biomedical sources) -> Phase 2 (KG bridge) ->")
+    print("  Phase 3 (GT trained on REAL KG) -> Phase 4 (RL ranked REAL pairs)")
     print("  The candidates above are REAL drug-disease pairs ranked by the")
     print("  RL agent using GT predictions on the REAL biomedical KG.")
     print("=" * 78)

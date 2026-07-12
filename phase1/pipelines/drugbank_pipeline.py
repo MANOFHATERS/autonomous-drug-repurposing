@@ -91,7 +91,7 @@ Scientific Assumptions
    would erroneously satisfy an FDA safety gate if this flag were
    named ``is_fda_approved``. We therefore emit:
      * ``is_globally_approved`` = ``is_approved`` (any-regulator flag)
-     * ``is_fda_approved`` = ``None`` (unknown — must be validated
+     * ``is_fda_approved`` = ``None`` (unknown -- must be validated
        against the FDA Orange Book before use in any FDA-only filter)
 
 2. **Organism filter**: by default only targets/enzymes/transporters with
@@ -102,7 +102,7 @@ Scientific Assumptions
    pegylated proteins) are NOT dropped. Synthetic 27-char SYNTH keys
    (``SYNTH{hash}-{hash}-{hash}``, generated via
    ``entity_resolution.base.make_synthetic_inchikey`` so the SAME
-   biologic from any source gets the SAME key — v34/v35 ROOT FIX for
+   biologic from any source gets the SAME key -- v34/v35 ROOT FIX for
    CRITICAL #2). The Drug model supports this via ``String(50)`` +
    ``CheckConstraint``. Audit issue S7.
 
@@ -319,8 +319,8 @@ __all__ = ["DrugBankPipeline"]  # COM12: explicit public surface.
 # CF1: XML namespace map (config-overridable for forward compat).
 NS: dict[str, str] = {"db": DRUGBANK_XML_NAMESPACE}
 
-# v43 ROOT FIX (Chain 2 — modern drugs invisible): DrugBank 5.1.10+
-# contains 6-digit IDs (DB10000+ series — nutraceuticals + multi-source
+# v43 ROOT FIX (Chain 2 -- modern drugs invisible): DrugBank 5.1.10+
+# contains 6-digit IDs (DB10000+ series -- nutraceuticals + multi-source
 # entries + sub-entries), and DrugBank 5.3.x reserves DB1000000+ (7
 # digits) for future expansions. The previous regex `^DB\d{5}$`
 # silently rejected ALL 6-digit and 7-digit IDs at parse time, dropping
@@ -333,10 +333,10 @@ NS: dict[str, str] = {"db": DRUGBANK_XML_NAMESPACE}
 # accepted by BOTH phases. Without this, Phase 1 would drop an ID that
 # Phase 2 accepts, fragmenting the KG.
 #
-# Before: re.match("^DB\\d{5}$", "DB123456") → None (REJECT)
-# After:  re.match("^DB\\d{5,7}$", "DB123456") → Match (ACCEPT)
+# Before: re.match("^DB\\d{5}$", "DB123456") -> None (REJECT)
+# After:  re.match("^DB\\d{5,7}$", "DB123456") -> Match (ACCEPT)
 #
-# v82 FORENSIC ROOT FIX (P1-9 — _synthesize_drugbank_id 8-hex form
+# v82 FORENSIC ROOT FIX (P1-9 -- _synthesize_drugbank_id 8-hex form
 # rejected by DQ4):
 #   ``pipelines/_v50_downloaders.py::_synthesize_drugbank_id`` (the v50
 #   open-data fallback when DrugBank XML is missing AND download_mode=
@@ -344,15 +344,15 @@ NS: dict[str, str] = {"db": DRUGBANK_XML_NAMESPACE}
 #   ``DBA1B2C3D4``) plus the ``DBSYNTH000000`` sentinel for missing
 #   InChIKeys. The previous regex ``^DB\d{5,7}$`` REJECTED both forms
 #   (8-hex contains letters; DBSYNTH000000 is 14 chars). DQ4 (line ~1961)
-#   then SKIPPED every synthesized drug → the pipeline produced ZERO
+#   then SKIPPED every synthesized drug -> the pipeline produced ZERO
 #   drugs in v50 open-data fallback mode. The ``load()`` path's VARCHAR(64)
 #   column accepted the IDs, but DQ4 in the clean/parse path rejected
 #   them BEFORE they ever reached load(). The v50 fallback was effectively
 #   dead code.
 # ROOT FIX: extend the regex to ALSO accept:
-#   1. ``DB[\dA-F]{8}`` — the 8-hex synthesized form (uppercase hex only,
+#   1. ``DB[\dA-F]{8}`` -- the 8-hex synthesized form (uppercase hex only,
 #      matching what ``hashlib.sha256(...).hexdigest()[:8].upper()`` emits).
-#   2. ``DBSYNTH\d{6}`` — the missing-InChIKey sentinel.
+#   2. ``DBSYNTH\d{6}`` -- the missing-InChIKey sentinel.
 # The regex is still ANCHORED (``^...$``) so partial matches cannot slip
 # through. Real DrugBank IDs (DB\d{5,7}) continue to match the first
 # alternative. The Drug model's drugbank_id column is VARCHAR(64), so all
@@ -371,7 +371,7 @@ _DRUGBANK_ID_RE: re.Pattern[str] = re.compile(
 # copies (``_constants.CANONICAL_INCHIKEY_REGEX``, ``_INCHIKEY_RE``
 # here, and ``INCHIKEY_PATTERN`` in base_pipeline). If any copy
 # diverged, InChIKeys that passed cleaning could fail dedup or DB
-# insert — silent data loss at stage boundaries. ROOT FIX: import
+# insert -- silent data loss at stage boundaries. ROOT FIX: import
 # the SINGLE canonical regex from ``cleaning._constants`` so there
 # is exactly one source of truth.
 from cleaning._constants import CANONICAL_INCHIKEY_REGEX as _INCHIKEY_RE  # noqa: E402
@@ -385,9 +385,9 @@ def _is_valid_inchikey(key: str) -> bool:
     except ImportError:
         return bool(isinstance(key, str) and _INCHIKEY_RE.match(key.strip().upper()))
 
-# INT6: UniProt accession regex — canonical pattern per UniProt documentation.
+# INT6: UniProt accession regex -- canonical pattern per UniProt documentation.
 # 6-char accessions start with [OPQ] (e.g. P00734, Q9NZ52).
-# 10-char accessions start with [A-NR-Z] (e.g. A0A0K3AVT9) — O, P, Q are
+# 10-char accessions start with [A-NR-Z] (e.g. A0A0K3AVT9) -- O, P, Q are
 # reserved for the 6-char format and must NOT appear as the first letter
 # of a 10-char accession.
 # SCI-FIX: Previous pattern ^[A-Z][0-9]... accepted ANY letter as the first
@@ -402,20 +402,20 @@ _UNIPROT_RE: re.Pattern[str] = re.compile(
 # D5 / COM2: map DrugBank action verbs to InteractionType enum values.
 # Source: database/models.py:150 InteractionType enum.
 # v90 ROOT FIX (BUG #3): "inducer" maps to "inducer" (CYP induction
-# is a PHARMACOLOGICALLY DISTINCT mechanism — it UPREGULATES enzyme
+# is a PHARMACOLOGICALLY DISTINCT mechanism -- it UPREGULATES enzyme
 # expression, the opposite of inhibition). Mapping "inducer" to
 # "unknown" lost the pharmacological direction, causing the KG to
-# treat CYP inducers and inhibitors identically → GT model cannot
-# learn pharmacological direction → predictions are pharmacologically
-# incoherent. "substrate" maps to "substrate" for the same reason —
+# treat CYP inducers and inhibitors identically -> GT model cannot
+# learn pharmacological direction -> predictions are pharmacologically
+# incoherent. "substrate" maps to "substrate" for the same reason --
 # a CYP substrate is a drug metabolized BY the enzyme, distinct from
 # an inhibitor/inducer that AFFECTS the enzyme.
 ACTION_TO_ENUM: dict[str, str] = {
     "inhibitor": "inhibitor",
     "agonist": "agonist",
     "antagonist": "antagonist",
-    "inducer": "inducer",  # v90: was "unknown" — CYP induction is pharmacologically distinct
-    "substrate": "substrate",  # v90: was "unknown" — CYP substrate is pharmacologically distinct
+    "inducer": "inducer",  # v90: was "unknown" -- CYP induction is pharmacologically distinct
+    "substrate": "substrate",  # v90: was "unknown" -- CYP substrate is pharmacologically distinct
     "binder": "binding_agent",
     "blocker": "blocker",
     "modulator": "modulator",
@@ -561,7 +561,7 @@ def _sanitize_text(value: str | None) -> str | None:
     code path that writes to CSV produces well-formed output. The atomic
     writer (``_atomic_write_csv``) uses ``quoting=csv.QUOTE_ALL`` which
     would escape newlines, but not all write paths go through the atomic
-    writer — the embedded sample path is a direct ``df.to_csv()`` call.
+    writer -- the embedded sample path is a direct ``df.to_csv()`` call.
 
     Parameters
     ----------
@@ -579,7 +579,7 @@ def _sanitize_text(value: str | None) -> str | None:
     # P2-9 ROOT FIX: replace newlines/tabs with spaces instead of keeping
     # them. This ensures CSV integrity across ALL write paths, not just
     # the atomic writer (which uses QUOTE_ALL). Multi-line indication
-    # text is now single-line — the words are preserved but the line
+    # text is now single-line -- the words are preserved but the line
     # breaks that would break CSV parsing are gone.
     cleaned = cleaned.replace("\r\n", " ").replace("\n", " ").replace("\r", " ").replace("\t", " ")
     cleaned = "".join(char for char in cleaned if char.isprintable() or char == " ")
@@ -1040,7 +1040,7 @@ class DrugBankPipeline(BasePipeline):
         v49 ROOT FIX (DrugBank academic downloads paused since May 2026):
         DrugBank has paused academic downloads. Even registered users
         cannot currently download the XML file. The previous code raised
-        FileNotFoundError and aborted the entire pipeline — cascading
+        FileNotFoundError and aborted the entire pipeline -- cascading
         into Phase 2 having no Compound-treats-Disease edges.
         ROOT FIX: in sample mode (DRUGOS_DOWNLOAD_MODE=sample, the
         default), if the DrugBank XML is missing, fall back to an
@@ -1066,7 +1066,7 @@ class DrugBankPipeline(BasePipeline):
             If the file is not well-formed XML (R10) or SHA-256 mismatch (SEC1).
         """
         # v49 ROOT FIX: DrugBank fallback when XML unavailable.
-        # v50 ROOT FIX: extend to FULL mode too — when the XML is
+        # v50 ROOT FIX: extend to FULL mode too -- when the XML is
         # unavailable AND download_mode is full, use the open-data
         # solution (ChEMBL FDA-approved + RxNorm REST API).
         xml_path = DRUGBANK_XML_PATH
@@ -1083,19 +1083,19 @@ class DrugBankPipeline(BasePipeline):
                 "drugs (Aspirin, Acetaminophen, Ibuprofen, Caffeine, "
                 "Diazepam, Warfarin, Metformin, Atorvastatin, Captopril, "
                 "Lisinopril). The full production run uses the open-data "
-                "solution (ChEMBL FDA-approved + RxNorm REST API) — see "
+                "solution (ChEMBL FDA-approved + RxNorm REST API) -- see "
                 "`pipelines._v50_downloaders.download_drugbank_open_data`.",
                 self.source_name, xml_path,
             )
             return self._write_embedded_drugbank_samples()
         if not _xml_available and self.download_mode == "full":
-            # v50 ROOT FIX: DrugBank 100% solution — open-data fallback.
+            # v50 ROOT FIX: DrugBank 100% solution -- open-data fallback.
             # When DrugBank academic downloads are paused (as they have
             # been since May 2026) AND the operator explicitly asked for
             # full mode, build a DrugBank-equivalent dataset from:
             #   1. ChEMBL FDA-approved subset (max_phase=4)
             #   2. FDA Orange Book open data
-            #   3. RxNorm REST API (https://rxnav.nlm.nih.gov/) — no login
+            #   3. RxNorm REST API (https://rxnav.nlm.nih.gov/) -- no login
             # This produces a full ~10K-drug dataset with real InChIKeys,
             # SMILES, mechanisms, AND indications (from RxNorm). It's
             # scientifically valid and 100% open-data.
@@ -1264,11 +1264,11 @@ class DrugBankPipeline(BasePipeline):
         download_mode is "full", this method builds a DrugBank-equivalent
         dataset by combining three open-data sources:
 
-        1. ChEMBL FDA-approved subset (max_phase=4) — provides drug
+        1. ChEMBL FDA-approved subset (max_phase=4) -- provides drug
            names, InChIKeys, SMILES, molecular weights, and mechanisms.
-        2. RxNorm REST API (https://rxnav.nlm.nih.gov/) — provides
-           drug → indication mappings. No login required.
-        3. (Optional) FDA Orange Book — provides FDA approval metadata.
+        2. RxNorm REST API (https://rxnav.nlm.nih.gov/) -- provides
+           drug -> indication mappings. No login required.
+        3. (Optional) FDA Orange Book -- provides FDA approval metadata.
 
         The result is a CSV at raw_dir/drugbank_open_drugs.csv with the
         same schema as the embedded sample dataset (drugbank_id, name,
@@ -1318,7 +1318,7 @@ class DrugBankPipeline(BasePipeline):
                 return drugs_csv
         except (OSError, ValueError, pd.errors.ParserError) as exc:  # v85 FORENSIC ROOT FIX (BUG #51)
             logger.warning(
-                "[%s] Open-data DrugBank solution failed (%s) — falling "
+                "[%s] Open-data DrugBank solution failed (%s) -- falling "
                 "back to embedded samples.",
                 self.source_name, exc,
             )
@@ -1361,7 +1361,7 @@ class DrugBankPipeline(BasePipeline):
         if str(raw_path).endswith(".csv"):
             logger.info(
                 "[%s] Loading embedded DrugBank samples from %s (v49 "
-                "sample mode — DrugBank XML unavailable).",
+                "sample mode -- DrugBank XML unavailable).",
                 self.source_name, _log_path(raw_path),
             )
             return self._clean_embedded_samples(raw_path)
@@ -1438,7 +1438,7 @@ class DrugBankPipeline(BasePipeline):
             # LIN5 / LIN6: compute cleaned-DataFrame SHA-256.
             self._sha256_cleaned = _compute_df_sha256(drugs_df)
 
-            # v29 ROOT FIX (audit P1-24): ID format divergence — normalize
+            # v29 ROOT FIX (audit P1-24): ID format divergence -- normalize
             # to canonical form before writing. DrugBank IDs and InChIKeys
             # in drugs_df, plus DrugBank IDs and UniProt accessions in
             # interactions_df, are uppercased + stripped. This guarantees
@@ -1539,15 +1539,15 @@ class DrugBankPipeline(BasePipeline):
                 index=False, compression="gzip",
             )
         if not indications_df.empty:
-            # v79 FORENSIC ROOT FIX (P0-B4 — _clean_embedded_samples
+            # v79 FORENSIC ROOT FIX (P0-B4 -- _clean_embedded_samples
             #   bypassing _write_structured_indications):
             #   The v78 code wrote the embedded indications CSV directly
             #   from ``embedded_drugbank_indications()``, BYPASSING
             #   ``_write_structured_indications`` (which maps indication
-            #   text → OMIM IDs and derives ``indication_type`` from the
+            #   text -> OMIM IDs and derives ``indication_type`` from the
             #   DrugBank ``<groups>`` field). The bypass preserved DOID
             #   IDs end-to-end with NO OMIM cross-reference and NO
-            #   ``indication_type`` → P0-B1 (zero treats edges) and
+            #   ``indication_type`` -> P0-B1 (zero treats edges) and
             #   P0-B5 (ClinicalOutcome patient-safety regression) both
             #   fired.
             # ROOT FIX (contract, not suppression): the embedded sample
@@ -1555,24 +1555,24 @@ class DrugBankPipeline(BasePipeline):
             #   generated indications. ``embedded_drugbank_indications()``
             #   (v79 P0-B1 + P0-B5 fix) now emits:
             #     - ``indication_type`` (="approved" for all FDA-approved
-            #       embedded drugs) — enables the withdrawn-drug safety
+            #       embedded drugs) -- enables the withdrawn-drug safety
             #       hook in sample mode.
             #     - OMIM ``disease_id`` where a mapping exists in
-            #       ``embedded_omim_gda()`` (Epilepsy→OMIM:137160,
-            #       Hypercholesterolemia→OMIM:143890) — the treats edge
+            #       ``embedded_omim_gda()`` (Epilepsy->OMIM:137160,
+            #       Hypercholesterolemia->OMIM:143890) -- the treats edge
             #       matches the OMIM-keyed ``disease_id_set`` directly.
             #     - DOID IDs preserved as ``doid_id`` for rows without
-            #       an OMIM match — the bridge's v78 fallback stages
+            #       an OMIM match -- the bridge's v78 fallback stages
             #       them as synthetic Disease nodes.
             #   ``_write_structured_indications`` (called in ``load()``)
             #   has a "do not overwrite curated fixture" guard (line
-            #   ~3157: ``if indications_path.exists(): return``) — so
+            #   ~3157: ``if indications_path.exists(): return``) -- so
             #   when this curated CSV is present, the auto-generation
             #   is skipped. This is the architecturally correct path:
             #   the curated fixture is PREFERRED over the lossy free-
             #   text matching that ``_write_structured_indications``
             #   would perform (documented 5-15% false-positive rate).
-            #   The bypass is no longer a bug — it is the curated-
+            #   The bypass is no longer a bug -- it is the curated-
             #   fixture contract, and the embedded sample now satisfies
             #   the schema (``drugbank_id, disease_id, disease_name,
             #   indication_type, source``) that the bridge expects.
@@ -1885,7 +1885,7 @@ class DrugBankPipeline(BasePipeline):
         # DQ16 / P11: log memory usage for large interaction lists.
         if len(interactions_records) >= 50_000:
             # FIX-P2-13 (audit P2): ``sys.getsizeof(list)`` returns the
-            # size of the list's pointer array ONLY — it does NOT include
+            # size of the list's pointer array ONLY -- it does NOT include
             # the dict objects the pointers reference. For 50K interactions
             # with ~15 keys each, the previous ``getsizeof`` reported
             # ~400 KB (the pointer array) while the actual resident set
@@ -2053,7 +2053,7 @@ class DrugBankPipeline(BasePipeline):
         # satisfy an FDA safety gate if this flag were named
         # ``is_fda_approved``. Therefore we emit:
         #   * ``is_globally_approved`` = ``is_approved`` (any-regulator)
-        #   * ``is_fda_approved``     = ``None`` (unknown — must be
+        #   * ``is_fda_approved``     = ``None`` (unknown -- must be
         #     validated against the FDA Orange Book downstream)
         # DrugBank retains the 'approved' tag on withdrawn drugs.
         is_withdrawn = "withdrawn" in groups
@@ -2089,7 +2089,7 @@ class DrugBankPipeline(BasePipeline):
 
         # v6 fix (bug #B9): extract <indication> text from DrugBank XML so
         # the bridge can derive real Compound-treats-Disease edges. Without
-        # this column the bridge produced zero treats edges — TransE had no
+        # this column the bridge produced zero treats edges -- TransE had no
         # positive training signal for the drug-repurposing task.
         indication = _all_text(elem.find("db:indication", NS))
 
@@ -2134,7 +2134,7 @@ class DrugBankPipeline(BasePipeline):
             "molecular_formula": props_formula,
             # SW-1 parity: emit is_globally_approved (any-regulator flag
             # from DrugBank <group>approved</group>) + is_fda_approved=None
-            # (unknown — pending FDA Orange Book validation).
+            # (unknown -- pending FDA Orange Book validation).
             "is_globally_approved": is_approved,
             "is_fda_approved": is_fda_approved,  # None until FDA Orange Book join
             "is_withdrawn": is_withdrawn,  # S3: new explicit safety flag
@@ -2194,12 +2194,12 @@ class DrugBankPipeline(BasePipeline):
 
         # Second pass: load experimental, OVERWRITING calculated when present.
         # P2-4 ROOT FIX: the previous code overwrote calculated properties
-        # with experimental ones unconditionally — even when the experimental
+        # with experimental ones unconditionally -- even when the experimental
         # <value> element was empty (producing value=None). This meant a
         # calculated LogP of 3.97 would be overwritten by an experimental
         # LogP of None (empty <value></value> tag). The "experimental >
         # calculated" precedence must be "experimental-if-non-empty >
-        # calculated" — a None experimental value is NOT more reliable than
+        # calculated" -- a None experimental value is NOT more reliable than
         # a calculated value; it is MISSING data.
         exp_props = elem.find("db:experimental-properties", NS)
         if exp_props is not None:
@@ -2210,7 +2210,7 @@ class DrugBankPipeline(BasePipeline):
                     key = kind.lower().replace(" ", "_").replace("-", "_")
                     # P2-4 ROOT FIX: only overwrite if the experimental
                     # value is non-empty. A None value from <value></value>
-                    # means the experimental measurement was not recorded —
+                    # means the experimental measurement was not recorded --
                     # it should NOT overwrite a valid calculated value.
                     if value is not None:
                         if key in props and props[key]["value"] != value:
@@ -2225,7 +2225,7 @@ class DrugBankPipeline(BasePipeline):
                             )
                         props[key] = {"value": value, "source": "experimental"}
                     else:
-                        # Experimental value is empty — keep calculated.
+                        # Experimental value is empty -- keep calculated.
                         if key in props:
                             logger.debug(
                                 "[%s] Property %s: experimental value is empty/None, "
@@ -2641,7 +2641,7 @@ class DrugBankPipeline(BasePipeline):
                 # `SYNTH-{drugbank_id}` (13 chars) which does NOT match
                 # the resolver's `make_synthetic_inchikey` 27-char format
                 # (`SYNTH{hash}-...`). This caused biologics (insulin,
-                # antibodies — the highest-value drug class) to become TWO
+                # antibodies -- the highest-value drug class) to become TWO
                 # graph nodes: one with `SYNTH-DB00001` from DrugBank, one
                 # with `SYNTH{hash}` from the resolver. Both represent the
                 # same molecule.
@@ -2667,9 +2667,9 @@ class DrugBankPipeline(BasePipeline):
                     # legacy ``f"SYNTH-{dbid}"`` format (13 chars), which
                     # does NOT match the resolver's 27-char ``SYNTH{hash}-...``
                     # format. That re-introduced the original CRITICAL #2 bug
-                    # (biologics → 2 graph nodes, entity resolution silently
+                    # (biologics -> 2 graph nodes, entity resolution silently
                     # fails). We now raise so the operator can investigate
-                    # why the resolver module isn't importable — silent
+                    # why the resolver module isn't importable -- silent
                     # degradation is unacceptable for biologics (the highest-
                     # value drug class).
                     raise RuntimeError(
@@ -2699,7 +2699,7 @@ class DrugBankPipeline(BasePipeline):
                         df.at[idx, "inchikey"] = make_synthetic_inchikey(_hash_input)
                     except (ImportError, AttributeError, ValueError, RuntimeError) as _exc:  # v85 FORENSIC ROOT FIX (BUG #51)
                         # v35 ROOT FIX: see comment in the
-                        # DRUGBANK_GENERATE_SYNTH_KEYS branch above — raise
+                        # DRUGBANK_GENERATE_SYNTH_KEYS branch above -- raise
                         # instead of silently degrading to legacy SYNTH-{dbid}.
                         raise RuntimeError(
                             f"DrugBank _generate_synth_keys: failed to import "
@@ -2976,7 +2976,7 @@ class DrugBankPipeline(BasePipeline):
             "drug_type": None,
             # SW-1 parity: is_globally_approved defaults to False
             # (no regulator has approved); is_fda_approved defaults to
-            # None (unknown — pending FDA Orange Book validation).
+            # None (unknown -- pending FDA Orange Book validation).
             "is_globally_approved": False,
             "is_fda_approved": None,
             "is_withdrawn": False,
@@ -2998,7 +2998,7 @@ class DrugBankPipeline(BasePipeline):
 
         # SAFE boolean coercion for is_globally_approved, is_fda_approved,
         # and is_withdrawn.
-        # CRITICAL FIX (scientific correctness — patient safety):
+        # CRITICAL FIX (scientific correctness -- patient safety):
         # The old code `df[col].astype(bool)` blindly converts ANY non-empty
         # string to True, including the literal string "False", "0", "no",
         # and "N". For a drug-repurposing platform this is life-critical:
@@ -3007,7 +3007,7 @@ class DrugBankPipeline(BasePipeline):
         #   - True values: True, "true", "True", "TRUE", 1, "1", "yes", "Y"
         #   - False values: False, "false", "False", "FALSE", 0, "0", "no",
         #                   "N", None, NaN, "" (empty string)
-        #   - Anything else: default to False (defensive — never claim a
+        #   - Anything else: default to False (defensive -- never claim a
         #     drug is approved unless explicitly affirmed).
         def _safe_bool(series: "pd.Series") -> "pd.Series":
             true_values = {True, "true", "True", "TRUE", "t", "T", "1", 1, "yes", "Yes", "YES", "y", "Y"}
@@ -3144,14 +3144,14 @@ class DrugBankPipeline(BasePipeline):
         # so the phase1_bridge can use Path A (structured) instead of
         # falling back to Path B (scientifically-unsound free-text
         # substring matching). The previous pipeline never produced this
-        # file — the bridge's Path A never fired and all treats edges
+        # file -- the bridge's Path A never fired and all treats edges
         # were derived from free-text matching of disease names against
         # DrugBank <indication> strings.
         #
-        # The structured file maps (drugbank_id → disease_id) by looking
+        # The structured file maps (drugbank_id -> disease_id) by looking
         # up known Disease names from the OMIM CSV (if present) in the
         # indication text. This is a controlled vocabulary match, NOT
-        # free-text matching — only Disease IDs that already exist in the
+        # free-text matching -- only Disease IDs that already exist in the
         # OMIM output are eligible, preserving referential integrity.
         try:
             self._write_structured_indications(drugs_df)
@@ -3161,15 +3161,15 @@ class DrugBankPipeline(BasePipeline):
             # ``_write_structured_indications`` when the OMIM CSV is
             # missing (see lines ~2572-2587). The v9 ROOT FIX promised
             # operators would SEE that failure so they could fix the DAG
-            # ordering (DrugBank depends on OMIM) — but the bare except
+            # ordering (DrugBank depends on OMIM) -- but the bare except
             # downgraded it to ``logger.warning``, defeating the fix
             # silently. The secondary CSV write only fails for two
             # genuinely non-critical reasons (disk full, permission
-            # denied on the file) — both are OSError subclasses.
+            # denied on the file) -- both are OSError subclasses.
             # RuntimeError, KeyError, ValueError, and every programming
             # bug now propagate so the run fails loudly.
             #
-            # The structured indications CSV is a secondary output — the
+            # The structured indications CSV is a secondary output -- the
             # primary drugbank_drugs.csv has already been persisted. A
             # disk-full or permission-denied here MUST NOT abort the
             # entire DrugBank pipeline (the drugs + interactions are
@@ -3196,7 +3196,7 @@ class DrugBankPipeline(BasePipeline):
         """BUG-A-005 root fix: produce drugbank_indications.csv.
 
         Maps each drug's free-text ``indication`` field to known Disease
-        IDs from the OMIM output (controlled vocabulary match — only
+        IDs from the OMIM output (controlled vocabulary match -- only
         Disease IDs already present in omim_gene_disease_associations.csv
         are eligible, preserving referential integrity).
 
@@ -3208,10 +3208,10 @@ class DrugBankPipeline(BasePipeline):
         (Path B).
 
         NOTE: If a curated drugbank_indications.csv already exists
-        (e.g. a hand-curated test fixture), it is NOT overwritten —
+        (e.g. a hand-curated test fixture), it is NOT overwritten --
         the curated file is preferred over the auto-generated one.
 
-        v65 ROOT FIX (P1-041) — SCIENTIFIC ACCURACY DISCLOSURE
+        v65 ROOT FIX (P1-041) -- SCIENTIFIC ACCURACY DISCLOSURE
         -------------------------------------------------------
         The mapping logic uses word-boundary regex matching of OMIM
         disease names against DrugBank's free-text ``indication`` field.
@@ -3223,7 +3223,7 @@ class DrugBankPipeline(BasePipeline):
             mellitus" even when the drug is specifically approved ONLY
             for type 2 (the broad match conflates subtypes).
           - "Anemia" matches inside "aplastic anemia" / "sickle cell
-            anemia" / "iron-deficiency anemia" — drugs indicated for
+            anemia" / "iron-deficiency anemia" -- drugs indicated for
             one subtype get tagged with the broader OMIM term.
           - The word-boundary filter (``\\b{dname}\\b``) and the
             >5-char minimum length filter (P1-031 / v37 ROOT FIX)
@@ -3235,12 +3235,12 @@ class DrugBankPipeline(BasePipeline):
           - DrugBank's ``indication`` field is FREE-TEXT prose, not a
             controlled vocabulary. A drug indicated for "type 2
             diabetes" may have an indication string like "for the
-            management of elevated blood glucose" — which contains
+            management of elevated blood glucose" -- which contains
             NEITHER "diabetes" NOR "mellitus" and is missed entirely.
           - OMIM disease names skew toward rare/Mendelian disease
             ("Diabetes mellitus, insulin-resistant, type A") while
             DrugBank indications skew toward common/complex disease
-            ("type 2 diabetes") — the vocabularies overlap maybe 30%.
+            ("type 2 diabetes") -- the vocabularies overlap maybe 30%.
 
         **Why we ship this anyway:**
           - The downstream KG consumer (Phase 2 Graph Transformer)
@@ -3252,19 +3252,19 @@ class DrugBankPipeline(BasePipeline):
             edges if a higher-quality curated source is available.
           - The ``indication_type`` column (approved / withdrawn /
             investigational / etc.) is derived from the drug's
-            DrugBank ``<groups>`` field — it is RELIABLE even when the
+            DrugBank ``<groups>`` field -- it is RELIABLE even when the
             disease mapping is lossy. Patient-safety-critical flagging
             (withdrawn drugs) is preserved.
 
         **Production-grade fix (NOT YET IMPLEMENTED):**
           - Use DrugBank's structured ``<indication>`` element parsed
             into disease ontology IDs (DrugBank doesn't actually expose
-            this — would require MeSH/DOID cross-referencing).
-          - OR use a curated drug→disease mapping from a licensed
+            this -- would require MeSH/DOID cross-referencing).
+          - OR use a curated drug->disease mapping from a licensed
             source (e.g. DrugBank Central, FDA Labels API, RXNORM).
           - Until then, operators who need high-precision
-            drug→disease edges should provide a hand-curated
-            ``drugbank_indications.csv`` in PROCESSED_DATA_DIR — the
+            drug->disease edges should provide a hand-curated
+            ``drugbank_indications.csv`` in PROCESSED_DATA_DIR -- the
             "do not overwrite curated fixture" guard below ensures
             the curated file is preferred over the auto-generated one.
         """
@@ -3279,21 +3279,21 @@ class DrugBankPipeline(BasePipeline):
         if indications_path.exists():
             logger.debug(
                 "[%s] drugbank_indications.csv already exists (%d bytes) "
-                "— not overwriting (curated fixture or previous run).",
+                "-- not overwriting (curated fixture or previous run).",
                 self.source_name, indications_path.stat().st_size,
             )
             return
         # Load the controlled vocabulary of known diseases from OMIM output.
         omim_path = PROCESSED_DATA_DIR / "omim_gene_disease_associations.csv"
         if not omim_path.exists():
-            # v76 ROOT FIX (T-042 — DrugBank no longer hard-fails when
+            # v76 ROOT FIX (T-042 -- DrugBank no longer hard-fails when
             # OMIM CSV is missing; decouples DrugBank from OMIM in the DAG):
             #   The previous code raised RuntimeError when the OMIM CSV was
             #   missing. This created a HARD dependency: DrugBank could not
             #   run until OMIM finished. The master DAG wired
             #   ``omim >> drugbank`` to enforce this. But the coupling was
             #   brittle: if OMIM failed (API key missing, network error),
-            #   DrugBank was SKIPPED via the dependency chain — losing ALL
+            #   DrugBank was SKIPPED via the dependency chain -- losing ALL
             #   DrugBank drug + target data from the knowledge graph, a
             #   major data loss. The BranchPythonOperator checks for
             #   DrugBank XML existence, NOT for OMIM CSV existence, so if
@@ -3307,7 +3307,7 @@ class DrugBankPipeline(BasePipeline):
             #   downstream consumers (phase1_bridge) don't fail on a
             #   missing file. The DrugBank drug + target data is preserved
             #   (the KG still gets all DrugBank drugs and their protein
-            #   interactions — only the drug→disease indication edges are
+            #   interactions -- only the drug->disease indication edges are
             #   empty when OMIM is unavailable). This is the scientifically
             #   correct trade-off: a KG with DrugBank drugs but no
             #   indication edges is FAR more useful than a KG with NO
@@ -3315,9 +3315,9 @@ class DrugBankPipeline(BasePipeline):
             #   the master DAG is removed in the same v76 fix so DrugBank
             #   runs in parallel with OMIM (both write to different files).
             logger.warning(
-                "[%s] OMIM CSV not found at %s — DrugBank indications "
+                "[%s] OMIM CSV not found at %s -- DrugBank indications "
                 "will be EMPTY (header-only). DrugBank drug + target data "
-                "is still loaded; only drug→disease indication edges are "
+                "is still loaded; only drug->disease indication edges are "
                 "skipped. This is expected when OMIM_API_KEY is not set or "
                 "OMIM pipeline failed. The KG will have DrugBank drugs but "
                 "no indication edges from this run. (v76 T-042 root fix: "
@@ -3326,8 +3326,8 @@ class DrugBankPipeline(BasePipeline):
             )
             # Write a header-only CSV so downstream consumers (phase1_bridge)
             # can read it without FileNotFoundError. The empty DataFrame
-            # means zero indication rows — the KG simply has no
-            # drug→disease edges from DrugBank for this run.
+            # means zero indication rows -- the KG simply has no
+            # drug->disease edges from DrugBank for this run.
             import csv as _csv_empty
             tmp_fd_empty, tmp_path_empty_str = tempfile.mkstemp(
                 dir=indications_path.parent,
@@ -3351,7 +3351,7 @@ class DrugBankPipeline(BasePipeline):
                 tmp_path_empty.replace(indications_path)
                 logger.info(
                     "[%s] Wrote header-only drugbank_indications.csv "
-                    "(0 indication rows — OMIM CSV was missing).",
+                    "(0 indication rows -- OMIM CSV was missing).",
                     self.source_name,
                 )
             except (OSError, csv.Error, ValueError):  # v85 FORENSIC ROOT FIX (BUG #51)
@@ -3398,7 +3398,7 @@ class DrugBankPipeline(BasePipeline):
                 tmp_path_s.replace(indications_path)
                 logger.info(
                     "[%s] Wrote header-only drugbank_indications.csv "
-                    "(0 indication rows — OMIM CSV schema mismatch).",
+                    "(0 indication rows -- OMIM CSV schema mismatch).",
                     self.source_name,
                 )
             except (OSError, csv.Error, ValueError):  # v85 FORENSIC ROOT FIX (BUG #51)
@@ -3406,14 +3406,14 @@ class DrugBankPipeline(BasePipeline):
                     tmp_path_s.unlink()
                 raise
             return
-        # Build a (disease_name → disease_id) map. Use only unique names.
-        # v37 ROOT FIX (Chain 5 — DrugBank→OMIM free-text matching):
+        # Build a (disease_name -> disease_id) map. Use only unique names.
+        # v37 ROOT FIX (Chain 5 -- DrugBank->OMIM free-text matching):
         # The previous code iterated ``disease_vocab.items()`` in DICT
         # INSERTION ORDER. The first match won, which meant longer / more
         # specific OMIM namesill NEVER got a chance if a shorter /
         # broader name happened to come first in the dict. Example:
         # "Diabetes mellitus" (broader) appears before
-        # "Diabetes mellitus, insulin-resistant, type A" (specific) →
+        # "Diabetes mellitus, insulin-resistant, type A" (specific) ->
         # every diabetic drug got tagged with the BROAD name, losing
         # the specific subtype signal the RL ranker needs.
         #
@@ -3421,9 +3421,9 @@ class DrugBankPipeline(BasePipeline):
         # (1) Sort disease_vocab by name length DESCENDING so the most
         #     specific name is tried first.
         # (2) BREAK out of the inner loop after the first match (one
-        #     indication → one disease mapping). The previous code
+        #     indication -> one disease mapping). The previous code
         #     continued iterating, producing N rows for N matching
-        #     disease names — multiplying edges into the KG.
+        #     disease names -- multiplying edges into the KG.
         # (3) Skip very short disease names (<=5 chars) to avoid
         #     spurious substring hits on common English words. The
         #     previous ``len(dname) < 4`` threshold let through names
@@ -3474,7 +3474,7 @@ class DrugBankPipeline(BasePipeline):
                 # indication, including for withdrawn killer drugs
                 # (Vioxx DB00709, Baycol DB00463, thalidomide, cisapride).
                 # The RL ranker's safety filter consumed this label as
-                # "approved for heart disease" on Vioxx — a drug withdrawn
+                # "approved for heart disease" on Vioxx -- a drug withdrawn
                 # for causing heart attacks. Derive the indication_type
                 # from the drug's DrugBank <groups> field (already
                 # extracted into drugs_df as the "groups" column by the
@@ -3491,7 +3491,7 @@ class DrugBankPipeline(BasePipeline):
 
                 def _derive_indication_type(dbid: str) -> str:
                     g = groups_by_drug.get(dbid, "")
-                    # V19 ROOT FIX (PS-5 residual — verification agent
+                    # V19 ROOT FIX (PS-5 residual -- verification agent
                     # flagged this): the V18 substring-match logic
                     # (``if "approved" in g:``) misclassifies
                     # ``vet_approved``-only drugs as ``"approved"`` because
@@ -3503,11 +3503,11 @@ class DrugBankPipeline(BasePipeline):
                     # of tokens and do exact token matching. DrugBank's
                     # ``<groups>`` field is a pipe-delimited list (e.g.
                     # ``"approved|withdrawn"``, ``"vet_approved"``,
-                    # ``"investigational|approved"``) — token-set matching
+                    # ``"investigational|approved"``) -- token-set matching
                     # correctly distinguishes ``approved`` from
                     # ``vet_approved``.
                     # v36 ROOT FIX (Phase 1 Issue #21): also split on
-                    # COMMAS — some older DrugBank XML versions used
+                    # COMMAS -- some older DrugBank XML versions used
                     # comma separators (e.g. ``"approved, withdrawn"``).
                     # Without this, the entire string became one token
                     # ``"approved, withdrawn"`` which matched nothing,
@@ -3519,7 +3519,7 @@ class DrugBankPipeline(BasePipeline):
                         for t in _sep_pattern.split(g)
                         if t.strip()
                     )
-                    # Order matters — most safety-relevant first.
+                    # Order matters -- most safety-relevant first.
                     if "withdrawn" in tokens:
                         return "withdrawn"
                     if "illicit" in tokens:
@@ -3558,7 +3558,7 @@ class DrugBankPipeline(BasePipeline):
                         # boundaries (``\b`` matches between a word char
                         # and a non-word char, and ``-`` is non-word).
                         # This caused TWO classes of false positives in
-                        # drug→disease indication edges:
+                        # drug->disease indication edges:
                         #   (a) "diabetes" matched inside "pre-diabetes"
                         #       (a DIFFERENT condition) because ``\b``
                         #       fired between ``-`` and ``d``.
@@ -3590,7 +3590,7 @@ class DrugBankPipeline(BasePipeline):
                             # v37 ROOT FIX (Chain 5): BREAK after the
                             # first (most specific) match. The previous
                             # code continued iterating, producing multiple
-                            # rows per drug — polluting the KG with
+                            # rows per drug -- polluting the KG with
                             # duplicate drug-treats-disease edges.
                             break
             os.replace(tmp_path, indications_path)
@@ -3814,11 +3814,11 @@ class DrugBankPipeline(BasePipeline):
         # A4 / ID8 / R7 / P4: single session for the whole load().
         owns_session = session is None
         # v29 ROOT FIX (audit P1-4): capture the return value of
-        # __enter__() — the previous code discarded it, so ``session``
+        # __enter__() -- the previous code discarded it, so ``session``
         # was the context manager, not the Session. Standalone load()
         # calls crashed with AttributeError on session.flush() /
         # session.rollback() / session.close(). Also, the previous
-        # finally block only called session.close() — it NEVER called
+        # finally block only called session.close() -- it NEVER called
         # __exit__(), so the commit never happened and ALL loaded data
         # was silently rolled back when load() ran standalone.
         _session_cm = None
@@ -3838,7 +3838,7 @@ class DrugBankPipeline(BasePipeline):
             # LIN1-LIN4 / BUG-16.2 fix: populate self._pipeline_run_db_id
             # BEFORE upserting DPI rows so each DPI row carries the correct
             # lineage ID back to its PipelineRun audit row. Without this,
-            # all DrugBank DPI rows have pipeline_run_id=NULL — breaking
+            # all DrugBank DPI rows have pipeline_run_id=NULL -- breaking
             # the lineage chain that downstream phases use to trace which
             # pipeline run produced a given drug-protein edge.
             self._pipeline_run_db_id = self._get_or_create_pipeline_run_id(session)
@@ -3874,7 +3874,7 @@ class DrugBankPipeline(BasePipeline):
             # ``except Exception: pass`` which silently swallowed
             # IntegrityError. ROOT FIX: log the warning.
             # FIX-P2-2 (audit P2): after IntegrityError the SQLAlchemy
-            # session is POISONED — every subsequent op raises
+            # session is POISONED -- every subsequent op raises
             # PendingRollbackError. The previous code only logged and
             # CONTINUED, so all downstream queries/upserts in this load()
             # call silently failed. Root fix: roll back the session so
@@ -3890,7 +3890,7 @@ class DrugBankPipeline(BasePipeline):
             except (OperationalError, IntegrityError, PendingRollbackError) as _flush_exc:  # pragma: no cover - defensive
                 try:
                     session.rollback()
-                except (OSError, RuntimeError, ValueError):  # noqa: BLE001 — never mask the flush error  # v85 FORENSIC ROOT FIX (BUG #51)
+                except (OSError, RuntimeError, ValueError):  # noqa: BLE001 -- never mask the flush error  # v85 FORENSIC ROOT FIX (BUG #51)
                     pass
                 logger.warning(
                     "[drugbank] session.flush() failed (rolled back; "
@@ -3955,7 +3955,7 @@ class DrugBankPipeline(BasePipeline):
                     _session_cm.__exit__(*_exc_info)
                 # v85/v90 ROOT FIX (BUG #21/51): the previous
                 # ``except Exception: pass`` silently swallowed
-                # __exit__ failures — if commit fails because the DB
+                # __exit__ failures -- if commit fails because the DB
                 # connection dropped, the caller saw load() return
                 # success with NO data committed. Changed to catch
                 # DB errors (OperationalError, InterfaceError) and
@@ -3963,7 +3963,7 @@ class DrugBankPipeline(BasePipeline):
                 except (OperationalError, InterfaceError, OSError, RuntimeError, ValueError) as _exit_exc:  # pragma: no cover - defensive
                     logger.error(
                         "[drugbank] session __exit__ failed (commit/rollback "
-                        "may not have completed — loaded data may be lost): "
+                        "may not have completed -- loaded data may be lost): "
                         "%s",
                         _exit_exc,
                     )
@@ -3993,7 +3993,7 @@ class DrugBankPipeline(BasePipeline):
         breaking the lineage chain that downstream phases (Neo4j export,
         ML training) use to trace which pipeline run produced a given
         drug-protein edge. A NULL lineage ID is fatal for reproducibility
-        — if a wet-lab validation fails, we cannot trace back to the
+        -- if a wet-lab validation fails, we cannot trace back to the
         exact data version that produced the bad prediction.
 
         Returns
@@ -4001,7 +4001,7 @@ class DrugBankPipeline(BasePipeline):
         int or None
             The integer ``pipeline_runs.id`` of the row for this run,
             or None if the lookup-or-create failed (in which case DPI
-            rows will have NULL pipeline_run_id — flagged in the audit
+            rows will have NULL pipeline_run_id -- flagged in the audit
             log but not fatal).
         """
         try:
@@ -4017,11 +4017,11 @@ class DrugBankPipeline(BasePipeline):
             # microseconds with `run_date.replace(microsecond=0)`.
             # If two DrugBank pipeline runs start within the same
             # second (e.g. in tests or rapid re-runs), they get the
-            # SAME truncated run_date → the query finds the FIRST
-            # run's PipelineRun row → DPI rows are linked to the
+            # SAME truncated run_date -> the query finds the FIRST
+            # run's PipelineRun row -> DPI rows are linked to the
             # WRONG pipeline run (data lineage corruption). If the
             # first run was a failure, the second run's successful
-            # DPIs appear under the failed run → audit trail is wrong.
+            # DPIs appear under the failed run -> audit trail is wrong.
             # ROOT FIX: keep full microsecond precision so each run
             # has a unique run_date. The DB column is TIMESTAMP or
             # DATETIME which both support microsecond precision in
@@ -4060,7 +4060,7 @@ class DrugBankPipeline(BasePipeline):
             # R1 defensive: this lineage-tracking path is best-effort.
             # If we cannot create a PipelineRun row (e.g. transient DB
             # error, schema drift, deadlock-victim), we MUST NOT abort
-            # the actual data load — that would block the entire weekly
+            # the actual data load -- that would block the entire weekly
             # DrugBank refresh and leave the staging DB stale. Instead,
             # we log a WARNING and let the DPI rows carry a NULL
             # pipeline_run_id. The audit log captures the failure so
@@ -4193,7 +4193,7 @@ class DrugBankPipeline(BasePipeline):
         # to non-nullable ``int64`` at line 4144-4145. If ANY NaN
         # survived the ``dropna`` at line 4118 (e.g. due to index
         # misalignment or a race condition), the ``.astype("int64")``
-        # call raises ``ValueError`` — crashing the pipeline. ROOT FIX:
+        # call raises ``ValueError`` -- crashing the pipeline. ROOT FIX:
         # do a FINAL defensive dropna right before the non-nullable
         # cast, so the cast is guaranteed to succeed. This is belt-and-
         # suspenders: the dropna at line 4118 should have caught
@@ -4201,7 +4201,7 @@ class DrugBankPipeline(BasePipeline):
         # pipeline is non-negotiable.
         resolved_interactions["drug_id"] = resolved_interactions["drug_id"].astype("Int64")
         resolved_interactions["protein_id"] = resolved_interactions["protein_id"].astype("Int64")
-        # Final defensive dropna — guarantees no NaN reaches the int64 cast.
+        # Final defensive dropna -- guarantees no NaN reaches the int64 cast.
         resolved_interactions = resolved_interactions.dropna(
             subset=["drug_id", "protein_id"]
         ).copy()

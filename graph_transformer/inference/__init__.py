@@ -66,7 +66,7 @@ def predict_drug_disease_scores(
     # V91 ROOT FIX (dead code removal): the previous edit prepended a
     # BUG #19 try/finally block but LEFT the old per-batch-encode body
     # as the executing path (calling model(...) per batch, which re-
-    # encodes the graph every batch — BUG #46 NOT actually fixed), and
+    # encodes the graph every batch -- BUG #46 NOT actually fixed), and
     # appended the encode-once optimization as DEAD CODE after the
     # finally (unreachable because the try block returns). This combined
     # both defects: BUG #46 was never in effect, AND 35 lines of dead
@@ -160,8 +160,8 @@ def top_k_novel_predictions(
     # full variance) for the RL training CSV, but ``top_k_novel_predictions``
     # used the default ``apply_temperature=True`` (calibrated, compressed
     # variance) for Phase 6 inference. The RL policy was trained on raw
-    # scores but inferred on calibrated scores → out-of-distribution
-    # features → unreliable Phase 6 rankings.
+    # scores but inferred on calibrated scores -> out-of-distribution
+    # features -> unreliable Phase 6 rankings.
     #
     # The fix: use ``apply_temperature=False`` here so Phase 6's candidate
     # pool is scored with the SAME distribution the RL agent was trained
@@ -171,7 +171,7 @@ def top_k_novel_predictions(
         num_drugs=num_drugs, num_diseases=num_diseases,
         exclude_edges=exclude_edges,
         apply_temperature=False,  # V31 P1-12: match RL training distribution
-    )  # (num_drugs, num_diseases) on device — raw sigmoid, same as RL training
+    )  # (num_drugs, num_diseases) on device -- raw sigmoid, same as RL training
 
     # Flatten and find top-K novel
     known_set = set((d.lower(), v.lower()) for d, v in known_pairs)

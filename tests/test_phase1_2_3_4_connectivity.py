@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
-# © 2024-2026 Autonomous Drug Repurposing Platform — Team Cosmic / VentureLab
+# © 2024-2026 Autonomous Drug Repurposing Platform -- Team Cosmic / VentureLab
 """
-ROOT FIX (Phase 1+2+3+4 100% Connection) — Forensic Verification Suite
+ROOT FIX (Phase 1+2+3+4 100% Connection) -- Forensic Verification Suite
 =======================================================================
 
 This test suite PROVES that all 4 phases of the Autonomous Drug
@@ -11,18 +11,18 @@ Repurposing Platform are 100% connected with REAL data flow:
   Phase 1 (Data Ingestion)
     ↓ produces processed_data CSVs from 7 biomedical sources
   Phase 2 (Knowledge Graph)
-    ↓ phase1_bridge reads CSVs → stages Phase1StagedData
+    ↓ phase1_bridge reads CSVs -> stages Phase1StagedData
   Phase 3 (Graph Transformer)
     ↓ BiomedicalGraphBuilder.from_phase1_staged_data() converts
-      Phase 2 staged dicts → Phase 3 graph format
+      Phase 2 staged dicts -> Phase 3 graph format
     ↓ GTRLBridge.load_graph_from_phase1() populates the bridge
   Phase 4 (RL Ranker)
     ↓ GTRLBridge.run_full_pipeline(phase1_staged_data=staged)
-      trains GT on REAL graph → RL ranks REAL predictions
+      trains GT on REAL graph -> RL ranks REAL predictions
 
 The user's forensic audit found these phases were 0% connected:
-  - run_unified.py chained Phase 1→2 only
-  - run_real_pipeline.py chained Phase 3→4 on a SYNTHETIC demo graph
+  - run_unified.py chained Phase 1->2 only
+  - run_real_pipeline.py chained Phase 3->4 on a SYNTHETIC demo graph
   - There was NO code path to load a REAL graph into Phase 3
 
 This suite verifies the ROOT FIX at the source-code level:
@@ -33,7 +33,7 @@ This suite verifies the ROOT FIX at the source-code level:
   - The 5 DOCX node types are all present
   - The graph has real edges (not zero)
 
-Every test runs REAL CODE — no string-matching on comments, no
+Every test runs REAL CODE -- no string-matching on comments, no
 mock-only tests. The tests use the Phase 1 embedded sample CSVs
 (biologically valid real IDs) so they run in CI without API keys.
 """
@@ -61,7 +61,7 @@ if _PHASE2_ROOT not in sys.path:
 
 
 # ---------------------------------------------------------------------------
-# Fixtures — generate Phase 1 sample data + run the Phase 1→2 bridge ONCE
+# Fixtures -- generate Phase 1 sample data + run the Phase 1->2 bridge ONCE
 # ---------------------------------------------------------------------------
 
 @pytest.fixture(scope="session")
@@ -70,12 +70,12 @@ def phase1_processed_dir(tmp_path_factory: pytest.TempPathFactory) -> str:
 
     v91 ROOT FIX: changed scope from "module" to "session" so the data
     is generated ONCE per test session. The previous module scope caused
-    test-isolation errors when run with other test modules — each module
+    test-isolation errors when run with other test modules -- each module
     re-ran `pipelines samples`, and if another test had modified the
     processed_data dir, the re-generation failed with errors.
     """
     # Check if the default dir already has CSVs (from a previous fixture
-    # call or from CI setup). If so, reuse it — don't regenerate.
+    # call or from CI setup). If so, reuse it -- don't regenerate.
     default_dir = os.path.join(_PHASE1_ROOT, "processed_data")
     if os.path.isdir(default_dir):
         existing_csvs = [
@@ -115,7 +115,7 @@ def phase1_processed_dir(tmp_path_factory: pytest.TempPathFactory) -> str:
 
 @pytest.fixture(scope="session")
 def staged_data(phase1_processed_dir: str) -> Any:
-    """Run the Phase 1→2 bridge to produce Phase1StagedData from REAL CSVs."""
+    """Run the Phase 1->2 bridge to produce Phase1StagedData from REAL CSVs."""
     from drugos_graph.phase1_bridge import (
         run_phase1_to_phase2,
         RecordingGraphBuilder,
@@ -128,14 +128,14 @@ def staged_data(phase1_processed_dir: str) -> Any:
     )
     staged = result["staged"]
     assert staged.total_nodes > 0, (
-        f"Phase 1→2 bridge staged ZERO nodes from {phase1_processed_dir}. "
+        f"Phase 1->2 bridge staged ZERO nodes from {phase1_processed_dir}. "
         f"Summary: {result['summary']}"
     )
     return staged
 
 
 # ---------------------------------------------------------------------------
-# Tests — Phase 1 → Phase 2 connection (already verified by v75/v77, re-verified here)
+# Tests -- Phase 1 -> Phase 2 connection (already verified by v75/v77, re-verified here)
 # ---------------------------------------------------------------------------
 
 class TestPhase1ToPhase2Connection:
@@ -154,27 +154,27 @@ class TestPhase1ToPhase2Connection:
     def test_staged_data_has_compound_nodes(self, staged_data: Any) -> None:
         """Phase 2 must stage Compound nodes from Phase 1 drugbank_drugs.csv."""
         assert len(staged_data.compound_nodes) > 0, (
-            "Phase 2 staged ZERO Compound nodes — Phase 1 drugbank_drugs.csv "
+            "Phase 2 staged ZERO Compound nodes -- Phase 1 drugbank_drugs.csv "
             "may be empty or the bridge failed to read it."
         )
 
     def test_staged_data_has_disease_nodes(self, staged_data: Any) -> None:
         """Phase 2 must stage Disease nodes from Phase 1 OMIM/DisGeNET CSVs."""
         assert len(staged_data.disease_nodes) > 0, (
-            "Phase 2 staged ZERO Disease nodes — Phase 1 "
+            "Phase 2 staged ZERO Disease nodes -- Phase 1 "
             "omim_gene_disease_associations.csv may be empty."
         )
 
     def test_staged_data_has_edges(self, staged_data: Any) -> None:
         """Phase 2 must stage edges (at least drug-protein or drug-disease)."""
         assert staged_data.total_edges > 0, (
-            "Phase 2 staged ZERO edges — the bridge failed to convert "
+            "Phase 2 staged ZERO edges -- the bridge failed to convert "
             "Phase 1 interactions into graph edges."
         )
 
 
 # ---------------------------------------------------------------------------
-# Tests — Phase 2 → Phase 3 connection (THE ROOT FIX)
+# Tests -- Phase 2 -> Phase 3 connection (THE ROOT FIX)
 # ---------------------------------------------------------------------------
 
 class TestPhase2ToPhase3Connection:
@@ -190,7 +190,7 @@ class TestPhase2ToPhase3Connection:
         from graph_transformer.data.graph_builder import BiomedicalGraphBuilder
         assert hasattr(BiomedicalGraphBuilder, "from_phase1_staged_data"), (
             "BiomedicalGraphBuilder.from_phase1_staged_data does not exist. "
-            "This is the ROOT FIX method that connects Phase 2 → Phase 3."
+            "This is the ROOT FIX method that connects Phase 2 -> Phase 3."
         )
 
     def test_from_phase1_staged_data_produces_real_graph(
@@ -218,7 +218,7 @@ class TestPhase2ToPhase3Connection:
             )
 
         # Edge indices must be non-empty tensors. Not every edge type
-        # will have edges (e.g. pathway→disrupted_in→disease may be 0
+        # will have edges (e.g. pathway->disrupted_in->disease may be 0
         # if the sample data has no pathway-disease connections), but
         # at least ONE edge type must have edges.
         assert isinstance(edge_indices, dict)
@@ -230,7 +230,7 @@ class TestPhase2ToPhase3Connection:
             )
             total_edges += eidx.shape[1]
         assert total_edges > 0, (
-            "All edge types have zero edges — the converter failed to map "
+            "All edge types have zero edges -- the converter failed to map "
             "any Phase 2 edges to Phase 3 edge types."
         )
 
@@ -267,7 +267,7 @@ class TestPhase2ToPhase3Connection:
             if ntype not in node_maps or len(node_maps[ntype]) == 0:
                 import logging
                 logging.getLogger(__name__).warning(
-                    f"Node type '{ntype}' has zero nodes — Phase 1 sample "
+                    f"Node type '{ntype}' has zero nodes -- Phase 1 sample "
                     f"data may not include this entity type. The GT model "
                     f"will still train on drug-disease edges."
                 )
@@ -275,9 +275,9 @@ class TestPhase2ToPhase3Connection:
     def test_real_graph_has_docx_edge_types(
         self, staged_data: Any
     ) -> None:
-        """The graph must have at least the drug→treats→disease edge type.
+        """The graph must have at least the drug->treats->disease edge type.
 
-        DOCX: "Drug → treats/is tested for → Disease"
+        DOCX: "Drug -> treats/is tested for -> Disease"
         """
         from graph_transformer.data.graph_builder import BiomedicalGraphBuilder
 
@@ -289,7 +289,7 @@ class TestPhase2ToPhase3Connection:
 
         # The graph must have at least ONE edge type (either forward or reverse).
         assert len(edge_indices) > 0, (
-            "Graph has ZERO edge types — the converter failed to map any "
+            "Graph has ZERO edge types -- the converter failed to map any "
             "Phase 2 edges to Phase 3 edge types."
         )
 
@@ -309,7 +309,7 @@ class TestPhase2ToPhase3Connection:
 
         This is the ROOT FIX: known_pairs were previously synthetic random
         pairs or hardcoded drug names. Now they are extracted from the
-        actual Phase 1→2 staged treats edges.
+        actual Phase 1->2 staged treats edges.
         """
         from graph_transformer.data.graph_builder import BiomedicalGraphBuilder
 
@@ -328,7 +328,7 @@ class TestPhase2ToPhase3Connection:
         if len(treats_edges) > 0:
             assert len(known_pairs) > 0, (
                 f"Phase 2 has {len(treats_edges)} (Compound, treats, Disease) "
-                f"edges but known_pairs is empty — the converter failed to "
+                f"edges but known_pairs is empty -- the converter failed to "
                 f"extract known treatment pairs from REAL treats edges."
             )
 
@@ -343,7 +343,7 @@ class TestPhase2ToPhase3Connection:
 
 
 # ---------------------------------------------------------------------------
-# Tests — Phase 3 → Phase 4 connection (GTRLBridge.load_graph_from_phase1)
+# Tests -- Phase 3 -> Phase 4 connection (GTRLBridge.load_graph_from_phase1)
 # ---------------------------------------------------------------------------
 
 class TestPhase3BridgeConnection:
@@ -365,7 +365,7 @@ class TestPhase3BridgeConnection:
         sig = inspect.signature(GTRLBridge.run_full_pipeline)
         assert "phase1_staged_data" in sig.parameters, (
             "run_full_pipeline does not accept phase1_staged_data parameter. "
-            "This is the ROOT FIX parameter that wires Phase 2 → Phase 3."
+            "This is the ROOT FIX parameter that wires Phase 2 -> Phase 3."
         )
 
     def test_load_graph_from_phase1_populates_bridge(
@@ -404,25 +404,25 @@ class TestPhase3BridgeConnection:
         # Allow deduplication to reduce the count, but it should be close.
         assert actual_drugs <= expected_drugs, (
             f"bridge has {actual_drugs} drugs but staged_data has "
-            f"{expected_drugs} compound_nodes — load_graph_from_phase1 "
+            f"{expected_drugs} compound_nodes -- load_graph_from_phase1 "
             f"may have added synthetic nodes."
         )
         assert actual_drugs > 0, "bridge has ZERO drugs after loading real data"
 
 
 # ---------------------------------------------------------------------------
-# Tests — Full 4-phase data flow (the integration test)
+# Tests -- Full 4-phase data flow (the integration test)
 # ---------------------------------------------------------------------------
 
 class TestFull4PhaseDataFlow:
-    """Verify the COMPLETE data flow: Phase 1 CSVs → Phase 2 staged →
-    Phase 3 graph → Phase 4 RL input. This is the integration test that
+    """Verify the COMPLETE data flow: Phase 1 CSVs -> Phase 2 staged ->
+    Phase 3 graph -> Phase 4 RL input. This is the integration test that
     proves all 4 phases are 100% connected."""
 
     def test_full_data_flow_produces_real_graph(
         self, staged_data: Any
     ) -> None:
-        """End-to-end: staged data → bridge → graph with real drug/disease names."""
+        """End-to-end: staged data -> bridge -> graph with real drug/disease names."""
         import torch
         from graph_transformer.gt_rl_bridge import GTRLBridge
 
@@ -444,7 +444,7 @@ class TestFull4PhaseDataFlow:
             # score = len(drugs) * len(diseases). Must be > 0.
             total_pairs = len(bridge.drug_names) * len(bridge.disease_names)
             assert total_pairs > 0, (
-                "Zero drug-disease pairs would be scored — the graph is empty"
+                "Zero drug-disease pairs would be scored -- the graph is empty"
             )
 
     def test_run_real_pipeline_has_phase1_staged_data_param(self) -> None:
@@ -455,7 +455,7 @@ class TestFull4PhaseDataFlow:
         run_full_path = os.path.join(_ROOT, "run_full_platform.py")
         assert os.path.isfile(run_full_path), (
             "run_full_platform.py does not exist. This is the ONE unified "
-            "entry point that chains Phase 1 → 2 → 3 → 4 on REAL data."
+            "entry point that chains Phase 1 -> 2 -> 3 -> 4 on REAL data."
         )
 
     def test_synthetic_fallback_warning_exists(self) -> None:

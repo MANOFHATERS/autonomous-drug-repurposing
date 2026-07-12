@@ -3,7 +3,7 @@ SQLite-compatible database test helpers.
 
 These replicate the logic of ``database.loaders`` but use the SQLite dialect
 so they work with the in-memory test database.  They are the authoritative
-test versions — every loader test calls these instead of the PostgreSQL-
+test versions -- every loader test calls these instead of the PostgreSQL-
 specific originals.
 """
 
@@ -34,7 +34,7 @@ def _now() -> datetime:
 
 
 def _df_to_dicts(df: pd.DataFrame) -> List[dict]:
-    """Convert a DataFrame to a list of dicts, coercing NaN → None."""
+    """Convert a DataFrame to a list of dicts, coercing NaN -> None."""
     return df.where(df.notna(), None).to_dict(orient="records")
 
 

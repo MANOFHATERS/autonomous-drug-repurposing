@@ -1,5 +1,5 @@
 """
-DrugOS Graph Module — ID Crosswalk Service
+DrugOS Graph Module -- ID Crosswalk Service
 ==========================================
 CRITICAL for scientific correctness.
 
@@ -15,9 +15,9 @@ namespaces for what is biologically the SAME protein:
 
   STRING      -> "9606.ENSP000003..."  (Ensembl PROTEIN ID)
   STITCH      -> "9606.ENSP000003..."  (Ensembl PROTEIN ID, same as STRING)
-  ChEMBL      -> "CHEMBL218"           (ChEMBL target dictionary ID — NOT a protein accession)
+  ChEMBL      -> "CHEMBL218"           (ChEMBL target dictionary ID -- NOT a protein accession)
   OpenTargets -> "ENSG00000123456"     (Ensembl GENE ID)
-  UniProt     -> "P23219"              (UniProt accession — the scientific standard)
+  UniProt     -> "P23219"              (UniProt accession -- the scientific standard)
 
 Without an explicit crosswalk Neo4j creates five separate ``:Protein``
 nodes for the same real protein (e.g. COX1/PTGS1), and graph traversals
@@ -26,7 +26,7 @@ results.
 
 This module provides ID translation services built from publicly
 available cross-reference files. For the sandbox/no-network case, a
-small built-in crosswalk of well-known drug targets is shipped — see
+small built-in crosswalk of well-known drug targets is shipped -- see
 ``data/verified_uniprot_gene_crosswalk.yaml`` (30 entries, all manually
 verified against UniProtKB/Swiss-Prot and NCBI Gene).
 
@@ -61,7 +61,7 @@ Thread-safety contract
 - Translators (``ensembl_protein_to_uniprot_ac()`` and friends) are safe
   to call concurrently with other translators on the same instance.
 - Loaders (``load_*()`` methods) MUST NOT be called concurrently with
-  translators on the same instance — use ``merge()`` to combine
+  translators on the same instance -- use ``merge()`` to combine
   crosswalks built in parallel by separate instances.
 
 Backward-compatibility note
@@ -69,7 +69,7 @@ Backward-compatibility note
 The five original translator methods (``ensembl_protein_to_uniprot_ac``,
 ``chembl_target_to_uniprot_ac``, ``ensembl_gene_to_uniprot_ac``,
 ``uniprot_ac_to_ncbi_gene_id``, ``ncbi_gene_id_to_uniprot_ac``) return
-``Optional[str]`` — the primary (highest-priority) value — to preserve
+``Optional[str]`` -- the primary (highest-priority) value -- to preserve
 the historical public contract. Multi-valued variants are exposed as
 ``*_all()`` methods (returning ``List[str]``), and provenance-tagged
 variants as ``*_with_provenance()``. This satisfies audit issue DES-2
@@ -111,17 +111,17 @@ from typing import (
     Union,
 )
 
-# Optional dependency — pandas is used for the fast STRING loader path
+# Optional dependency -- pandas is used for the fast STRING loader path
 # (PERF-3) but is NOT required at import time.
-try:  # pragma: no cover — exercised only when pandas is missing
+try:  # pragma: no cover -- exercised only when pandas is missing
     import pandas as _pd  # type: ignore[import-not-found]
 except ImportError:  # pragma: no cover
     _pd = None  # type: ignore[assignment]
 
-# Optional dependency — PyYAML is required to read the externalized builtin
+# Optional dependency -- PyYAML is required to read the externalized builtin
 # table (CONF-2). If missing, the module falls back to a hardcoded copy
 # (kept in sync with the YAML) and logs a WARNING.
-try:  # pragma: no cover — exercised only when PyYAML is missing
+try:  # pragma: no cover -- exercised only when PyYAML is missing
     import yaml as _yaml
 except ImportError:  # pragma: no cover
     _yaml = None  # type: ignore[assignment]
@@ -138,7 +138,7 @@ if not any(isinstance(h, logging.NullHandler) for h in logger.handlers):
 
 
 # =============================================================================
-# Section 1 — Module-level constants & format validators
+# Section 1 -- Module-level constants & format validators
 # =============================================================================
 
 # ── SCI-6: UniProt accession format validator ──────────────────────────────
@@ -151,7 +151,7 @@ if not any(isinstance(h, logging.NullHandler) for h in logger.handlers):
 #   - 10-char form: same 6-char prefix + [A-Z0-9]{3}[0-9] suffix
 #     (extended form, used when the 6-char namespace is exhausted)
 # The regex below correctly implements this. The comment was the only
-# thing wrong — the code was always correct.
+# thing wrong -- the code was always correct.
 #   Swiss-Prot (reviewed):   [OPQ][0-9][A-Z0-9]{3}[0-9]                                (6 chars)
 #   TrEMBL   (unreviewed):   [A-NR-Z][0-9][A-Z0-9]{3}[0-9]                            (6 chars)
 #                            [UJ][0-9][A-Z0-9]{3}[0-9][A-Z0-9]{3}[0-9]                (10 chars)
@@ -162,7 +162,7 @@ _UNIPROT_AC_PATTERN: Final[re.Pattern[str]] = re.compile(
     # 6-char Swiss-Prot / TrEMBL
     r"[OPQ][0-9][A-Z0-9]{3}[0-9]"
     r"|[A-NR-Z][0-9][A-Z0-9]{3}[0-9]"
-    # 10-char TrEMBL — 6-char prefix + 4-char suffix
+    # 10-char TrEMBL -- 6-char prefix + 4-char suffix
     # e.g. A0A024R2R7, A0A0A0A0A0
     r"|[UJ][0-9][A-Z0-9]{3}[0-9][A-Z0-9]{3}[0-9]"
     r"|[A-NR-Z][0-9][A-Z0-9]{3}[0-9][A-Z0-9]{3}[0-9]"
@@ -177,7 +177,7 @@ _UNIPROT_AC_PATTERN: Final[re.Pattern[str]] = re.compile(
 # dead-lettered these, dropping ~5-10% of ChEMBL-referenced compounds
 # from the KG. The fix: re.IGNORECASE flag. ``_validate_chembl_id``
 # (below) continues to UPPERCASE the match before returning so the
-# canonical form is always uppercase — consistent with ChEMBL's
+# canonical form is always uppercase -- consistent with ChEMBL's
 # official spec.
 _CHEMBL_ID_PATTERN: Final[re.Pattern[str]] = re.compile(r"^CHEMBL\d+$", re.IGNORECASE)
 
@@ -191,11 +191,11 @@ _ENSG_PATTERN: Final[re.Pattern[str]] = re.compile(r"^ENSG\d{11}$")
 _UMLS_CUI_PATTERN: Final[re.Pattern[str]] = re.compile(r"^C\d{7}$")
 
 # ── v29 ROOT FIX (audit L-5): Compound ID format validators ───────────────
-# Compound ID fragmentation: 7 disjoint namespaces — DrugBank ID (DB00107),
+# Compound ID fragmentation: 7 disjoint namespaces -- DrugBank ID (DB00107),
 # ChEMBL ID (CHEMBL218), PubChem CID (CID5311025), STITCH CIDm/CIDs
 # (CIDm00002244 / CIDs00002244), SIDER bare CID (CID5311025), DRKG MESH
 # (MESH:D000544), and InChIKey (BSYNRYMUTXBXSQ-UHFFFAOYSA-N).
-# InChIKey is the canonical Compound ID (project doc Section 3 — see
+# InChIKey is the canonical Compound ID (project doc Section 3 -- see
 # entity_resolver.py header). The validators below let
 # ``_normalize_compound_id_to_inchikey()`` recognise inputs in any namespace
 # and attempt crosswalk lookup.
@@ -204,7 +204,7 @@ _INCHIKEY_PATTERN: Final[re.Pattern[str]] = re.compile(
 )
 # DrugBank ID: DB00107 (DB + 5 digits, sometimes DB + 7 digits for newer entries)
 _DRUGBANK_ID_PATTERN: Final[re.Pattern[str]] = re.compile(r"^DB\d{5,7}$")
-# PubChem CID: CID5311025 (CID + digits) — bare int forms are also accepted
+# PubChem CID: CID5311025 (CID + digits) -- bare int forms are also accepted
 # and coerced to ``CID<int>`` form before lookup.
 _PUBCHEM_CID_PATTERN: Final[re.Pattern[str]] = re.compile(r"^CID\d+$")
 # STITCH CIDm / CIDs (legacy 4th-char stereochemistry marker)
@@ -414,7 +414,7 @@ _DLQ_SAMPLE_CAP: Final[int] = int(os.environ.get("DRUGOS_DLQ_SAMPLE_CAP", "10000
 
 
 # =============================================================================
-# Section 2 — Data model: NamedTuples for builtin entries and provenance
+# Section 2 -- Data model: NamedTuples for builtin entries and provenance
 # =============================================================================
 
 
@@ -456,7 +456,7 @@ class Provenance(NamedTuple):
     source_sha256: str
 
 
-# Storage type aliases — values in multi-valued dicts are paired with
+# Storage type aliases -- values in multi-valued dicts are paired with
 # their Provenance.
 _StoredValue = List[Tuple[str, Provenance]]
 
@@ -472,7 +472,7 @@ class AmbiguousMappingError(ValueError):
 
 
 # =============================================================================
-# Section 3 — Externalized builtin table (CONF-2)
+# Section 3 -- Externalized builtin table (CONF-2)
 # =============================================================================
 
 
@@ -481,7 +481,7 @@ def _load_builtin_yaml(path: Path) -> Tuple[VerifiedEntry, ...]:
 
     Implements CONF-2 / DOC-3 / COMP-1. Falls back to a hardcoded copy
     (kept in sync with the YAML) if PyYAML is unavailable or the file is
-    missing — never raises at import time (production-safe). On any
+    missing -- never raises at import time (production-safe). On any
     fallback a WARNING is logged.
 
     Args:
@@ -492,7 +492,7 @@ def _load_builtin_yaml(path: Path) -> Tuple[VerifiedEntry, ...]:
     """
     if _yaml is None:
         logger.warning(
-            "PyYAML not available — falling back to hardcoded builtin "
+            "PyYAML not available -- falling back to hardcoded builtin "
             "table. Install PyYAML (`pip install pyyaml`) for the full "
             "externalized experience."
         )
@@ -500,7 +500,7 @@ def _load_builtin_yaml(path: Path) -> Tuple[VerifiedEntry, ...]:
 
     if not path.exists():
         logger.error(
-            "Builtin crosswalk YAML not found at %s — falling back to "
+            "Builtin crosswalk YAML not found at %s -- falling back to "
             "hardcoded builtin table. Check BUILTIN_PATH or set the "
             "DRUGOS_BUILTIN_CROSSWALK env var.",
             _redact_path(path),
@@ -512,7 +512,7 @@ def _load_builtin_yaml(path: Path) -> Tuple[VerifiedEntry, ...]:
             data = _yaml.safe_load(f)
     except (OSError, _yaml.YAMLError) as e:  # type: ignore[union-attr]
         logger.error(
-            "Failed to parse builtin YAML at %s: %s: %s — falling back "
+            "Failed to parse builtin YAML at %s: %s: %s -- falling back "
             "to hardcoded builtin table.",
             _redact_path(path), type(e).__name__, e,
         )
@@ -536,7 +536,7 @@ def _load_builtin_yaml(path: Path) -> Tuple[VerifiedEntry, ...]:
             continue
     if not entries:
         logger.error(
-            "Builtin YAML at %s contained zero valid entries — falling "
+            "Builtin YAML at %s contained zero valid entries -- falling "
             "back to hardcoded builtin table.",
             _redact_path(path),
         )
@@ -544,45 +544,45 @@ def _load_builtin_yaml(path: Path) -> Tuple[VerifiedEntry, ...]:
     return tuple(entries)
 
 
-# Hardcoded fallback — MUST stay in sync with
+# Hardcoded fallback -- MUST stay in sync with
 # ``data/verified_uniprot_gene_crosswalk.yaml``. The IRS1 entry has the
 # SCI-1 fix (gene_id "3667", NOT "2645").
 _HARDCODED_BUILTIN_FALLBACK: Final[Tuple[VerifiedEntry, ...]] = (
-    VerifiedEntry("P23219", "5742",  "PTGS1",   "COX-1 — aspirin target"),
-    VerifiedEntry("P35354", "5743",  "PTGS2",   "COX-2 — celecoxib target"),
+    VerifiedEntry("P23219", "5742",  "PTGS1",   "COX-1 -- aspirin target"),
+    VerifiedEntry("P35354", "5743",  "PTGS2",   "COX-2 -- celecoxib target"),
     VerifiedEntry("P00519", "25",    "ABL1",    "Imatinib primary target (BCR-ABL)"),
     VerifiedEntry("P10721", "3815",  "KIT",     "Imatinib target (GIST)"),
     VerifiedEntry("P09619", "5159",  "PDGFRB",  "Imatinib target"),
     VerifiedEntry("P00533", "1956",  "EGFR",    "Erlotinib / gefitinib target"),
     VerifiedEntry("P04626", "2064",  "ERBB2",   "Trastuzumab target (HER2)"),
-    VerifiedEntry("P14672", "5562",  "PRKAA1",  "AMPK alpha 1 — metformin downstream"),
-    VerifiedEntry("P54646", "5563",  "PRKAA2",  "AMPK alpha 2 — metformin downstream"),
+    VerifiedEntry("P14672", "5562",  "PRKAA1",  "AMPK alpha 1 -- metformin downstream"),
+    VerifiedEntry("P54646", "5563",  "PRKAA2",  "AMPK alpha 2 -- metformin downstream"),
     VerifiedEntry("P06213", "3643",  "INSR",    "Insulin receptor"),
     # SCI-1 FIX: IRS1 Gene ID was 2645 (GFAP); corrected to 3667 (IRS1).
-    VerifiedEntry("P35568", "3667",  "IRS1",    "Insulin receptor substrate 1 — SCI-1 fix"),
+    VerifiedEntry("P35568", "3667",  "IRS1",    "Insulin receptor substrate 1 -- SCI-1 fix"),
     VerifiedEntry("P11712", "1559",  "CYP2C9",  "Warfarin metabolism (S-isomer)"),
-    VerifiedEntry("P00735", "2147",  "F2",      "Prothrombin — warfarin target end-effect"),
-    VerifiedEntry("P00742", "2159",  "F10",     "Factor X — warfarin target end-effect"),
+    VerifiedEntry("P00735", "2147",  "F2",      "Prothrombin -- warfarin target end-effect"),
+    VerifiedEntry("P00742", "2159",  "F10",     "Factor X -- warfarin target end-effect"),
     VerifiedEntry("P00451", "7450",  "VWF",     "von Willebrand factor"),
-    VerifiedEntry("P08172", "1813",  "DRD2",    "Dopamine D2 — antipsychotic target"),
-    VerifiedEntry("P31645", "6532",  "SLC6A4",  "Serotonin transporter — SSRIs"),
+    VerifiedEntry("P08172", "1813",  "DRD2",    "Dopamine D2 -- antipsychotic target"),
+    VerifiedEntry("P31645", "6532",  "SLC6A4",  "Serotonin transporter -- SSRIs"),
     VerifiedEntry("P23975", "6531",  "SLC6A3",  "Dopamine transporter"),
     VerifiedEntry("P04035", "3156",  "HMGCR",   "Atorvastatin, simvastatin target"),
     VerifiedEntry("P12821", "1636",  "ACE",     "Lisinopril, enalapril target"),
-    VerifiedEntry("P08588", "153",   "ADRB1",   "Beta-1 — metoprolol target"),
-    VerifiedEntry("P07550", "154",   "ADRB2",   "Beta-2 — albuterol target"),
+    VerifiedEntry("P08588", "153",   "ADRB1",   "Beta-1 -- metoprolol target"),
+    VerifiedEntry("P07550", "154",   "ADRB2",   "Beta-2 -- albuterol target"),
     VerifiedEntry("P06401", "5241",  "PGR",     "Progesterone receptor"),
-    VerifiedEntry("P03372", "2099",  "ESR1",    "Estrogen receptor alpha — tamoxifen target"),
-    VerifiedEntry("P04150", "2908",  "NR3C1",   "Glucocorticoid receptor — dexamethasone target"),
-    VerifiedEntry("O76074", "8654",  "PDE5A",   "PDE5 — sildenafil target"),
-    VerifiedEntry("P42345", "2475",  "MTOR",    "mTOR — rapamycin / everolimus target"),
-    VerifiedEntry("P00374", "1719",  "DHFR",    "DHFR — methotrexate target"),
+    VerifiedEntry("P03372", "2099",  "ESR1",    "Estrogen receptor alpha -- tamoxifen target"),
+    VerifiedEntry("P04150", "2908",  "NR3C1",   "Glucocorticoid receptor -- dexamethasone target"),
+    VerifiedEntry("O76074", "8654",  "PDE5A",   "PDE5 -- sildenafil target"),
+    VerifiedEntry("P42345", "2475",  "MTOR",    "mTOR -- rapamycin / everolimus target"),
+    VerifiedEntry("P00374", "1719",  "DHFR",    "DHFR -- methotrexate target"),
     VerifiedEntry("P38398", "672",   "BRCA1",   "Breast cancer susceptibility"),
-    VerifiedEntry("P04637", "7157",  "TP53",    "p53 — multiple cancers"),
+    VerifiedEntry("P04637", "7157",  "TP53",    "p53 -- multiple cancers"),
 )
 
 
-# The module-level constant — populated at import time from the YAML
+# The module-level constant -- populated at import time from the YAML
 # (CONF-2). Existing imports of ``VERIFIED_UNIPROT_GENE_CROSSWALK`` continue
 # to work; the only difference is that entries are now NamedTuples rather
 # than raw 3-tuples (DOC-3). Positional unpacking still works because
@@ -593,7 +593,7 @@ VERIFIED_UNIPROT_GENE_CROSSWALK: Final[Tuple[VerifiedEntry, ...]] = (
 
 
 # =============================================================================
-# Section 4 — Source classes (ARCH-3: separate loaders from translators)
+# Section 4 -- Source classes (ARCH-3: separate loaders from translators)
 # =============================================================================
 
 
@@ -612,7 +612,7 @@ class CrosswalkSource:
 
 
 # =============================================================================
-# Section 5 — The IDCrosswalk class
+# Section 5 -- The IDCrosswalk class
 # =============================================================================
 
 
@@ -640,7 +640,7 @@ class IDCrosswalk:
     Thread-safety:
         - Translators are safe to call concurrently with other translators.
         - Loaders MUST NOT be called concurrently with translators on
-          the same instance — use ``merge()`` for parallel-built
+          the same instance -- use ``merge()`` for parallel-built
           crosswalks.
     """
 
@@ -651,7 +651,7 @@ class IDCrosswalk:
         self._logger: logging.Logger = logger or globals()["logger"]
 
         # DES-1 / DES-2: separate dicts per namespace, all multi-valued.
-        # Each value is a list of (ac, Provenance) tuples — see GUARD-LINE-1.
+        # Each value is a list of (ac, Provenance) tuples -- see GUARD-LINE-1.
         # Backward-compat note: direct injection of plain strings into these
         # dicts (e.g. ``cw.ensembl_protein_to_uniprot["ENSP..."] = "P23219"``)
         # is supported by the translators via ``_coerce_stored_list``. This
@@ -667,17 +667,17 @@ class IDCrosswalk:
         self.uniprot_secondary_to_primary: Dict[str, str] = {}
 
         # ── SCI-3 / SCI-9 (added by opentargets_loader v2.0 audit fix) ──
-        # Disease → UMLS CUI crosswalk (populated by
+        # Disease -> UMLS CUI crosswalk (populated by
         # ``load_opentargets_diseases``). Maps EFO/MONDO/HP/MP/Orphanet/
-        # SNOMED/OTAR disease IDs → UMLS CUIs.
+        # SNOMED/OTAR disease IDs -> UMLS CUIs.
         self.disease_to_umls: Dict[str, Any] = {}
-        # ENSG → NCBI Gene ID crosswalk (populated by
-        # ``load_ensembl_to_ncbi_gene``). Maps Ensembl gene IDs → NCBI
+        # ENSG -> NCBI Gene ID crosswalk (populated by
+        # ``load_ensembl_to_ncbi_gene``). Maps Ensembl gene IDs -> NCBI
         # Gene IDs (used to unify OpenTargets ENSG-keyed Gene edges with
         # DRKG NCBI-keyed Gene nodes).
         self.ensg_to_ncbi_gene: Dict[str, Any] = {}
 
-        # ── v29 ROOT FIX (audit L-5): Compound ID → InChIKey crosswalk ──
+        # ── v29 ROOT FIX (audit L-5): Compound ID -> InChIKey crosswalk ──
         # Populated by ``register_compound_inchikey()`` (called by the
         # entity_resolver after Phase 1's entity resolution runs) or by
         # ``load_compound_inchikey_crosswalk()`` (bulk TSV loader).
@@ -686,7 +686,7 @@ class IDCrosswalk:
         # DRKG MESH ``MESH:D000544``, etc.). Values are InChIKeys (the
         # canonical Compound ID per project doc Section 3 / Risk-1).
         # Multi-valued storage matching the existing crosswalk pattern
-        # (DES-2) — each value is a list of ``(inchikey, Provenance)``
+        # (DES-2) -- each value is a list of ``(inchikey, Provenance)``
         # tuples. Most compound IDs map to exactly one InChIKey, but
         # some (e.g. bare PubChem CIDs without stereo info) may map to
         # multiple InChIKeys (one per stereoisomer). The primary
@@ -696,7 +696,7 @@ class IDCrosswalk:
         # the ``disease_to_umls`` / ``ensg_to_ncbi_gene`` convention);
         # the translator method is ``compound_id_to_inchikey()`` (long
         # form, matches ``disease_id_to_umls_cui()``). The two names
-        # MUST stay distinct — otherwise the instance attribute shadows
+        # MUST stay distinct -- otherwise the instance attribute shadows
         # the class method (Python name-resolution rule).
         self.compound_to_inchikey: Dict[str, Any] = {}
 
@@ -730,7 +730,7 @@ class IDCrosswalk:
             # ``disease_id_to_umls_cui[_all]`` and
             # ``ensembl_gene_to_ncbi_gene[_all]`` but the namespaces
             # were missing from this dict, so the DLQ silently dropped
-            # every unresolved disease / ENSG→NCBI miss (the helper
+            # every unresolved disease / ENSG->NCBI miss (the helper
             # returns immediately when ``bucket is None``). Adding
             # them here activates the DLQ for those namespaces.
             "disease": set(),
@@ -752,7 +752,7 @@ class IDCrosswalk:
             "compound_id_to_inchikey": {"calls": 0, "hits": 0, "misses": 0},
         }
 
-        # GUARD-COMP-1: audit trail — instance ID and built_at timestamp
+        # GUARD-COMP-1: audit trail -- instance ID and built_at timestamp
         self._instance_id: str = str(uuid.uuid4())
         self._built_at: str = _iso_now()
 
@@ -763,7 +763,7 @@ class IDCrosswalk:
         # ``reverse_lookup`` previously iterated every entry in every
         # namespace dict on EACH call (O(n) per call). ``canonicalize``
         # calls ``reverse_lookup`` once per invocation, so a batch of n
-        # canonicalize() calls ran in O(n²) total — slow on real
+        # canonicalize() calls ran in O(n²) total -- slow on real
         # production data (STRING aliases alone are ~100K entries).
         # The cache maps UniProt AC (UPPERCASED, matching
         # ``reverse_lookup``'s already-uppercased target) to a dict of
@@ -781,7 +781,7 @@ class IDCrosswalk:
 
         Pre-audit, this dict name was used. Existing tests that read it
         continue to see the same ENSG-keyed data. Setting via this alias
-        is not supported — use ``ensg_to_uniprot`` directly.
+        is not supported -- use ``ensg_to_uniprot`` directly.
         """
         return self.ensg_to_uniprot
 
@@ -849,7 +849,7 @@ class IDCrosswalk:
         Call this exactly ONCE per translator invocation, AFTER the
         lookup has been performed, with the correct ``hit`` flag. Do
         NOT call this with ``hit=False`` up-front and then manually
-        bump ``hits`` — that double-counts misses.
+        bump ``hits`` -- that double-counts misses.
         """
         stats = self._translator_stats.get(translator_name)
         if stats is None:
@@ -864,7 +864,7 @@ class IDCrosswalk:
             rate = stats["hits"] / stats["calls"]
             if rate < 0.10 and stats["calls"] % 1000 == 0:
                 self._logger.warning(
-                    "Translator %s has low hit rate: %d/%d (%.1f%%) — "
+                    "Translator %s has low hit rate: %d/%d (%.1f%%) -- "
                     "consider loading additional source files.",
                     translator_name, stats["hits"], stats["calls"], rate * 100,
                 )
@@ -874,7 +874,7 @@ class IDCrosswalk:
         for existing_name, _ in self._source_summary_structured:
             if existing_name == name:
                 self._logger.warning(
-                    "Source %r loaded twice — possible re-run without "
+                    "Source %r loaded twice -- possible re-run without "
                     "reset(). Counts will be cumulative.",
                     name,
                 )
@@ -885,7 +885,7 @@ class IDCrosswalk:
         """Warn ONCE if a translator is called before any load_* (ARCH-6)."""
         if not self._loaded and not self._warned_unloaded:
             self._logger.warning(
-                "IDCrosswalk queried before any load_*() — all "
+                "IDCrosswalk queried before any load_*() -- all "
                 "translators will return None. Call load_builtin() at "
                 "minimum."
             )
@@ -928,16 +928,16 @@ class IDCrosswalk:
           - SCI-7 / GUARD-SCI-2: organism documented; builtin table is
             Homo sapiens (tax_id=9606).
           - DQ-2: duplicate detection on UniProt ACs, Gene IDs, symbols.
-          - DOC-2: idempotent — second call is a no-op + WARNING.
+          - DOC-2: idempotent -- second call is a no-op + WARNING.
           - COMP-1: ``BUILTIN_TABLE_VERSION`` included in summary.
 
         Returns:
-            Number of entries loaded (0 if already loaded — see DOC-2).
+            Number of entries loaded (0 if already loaded -- see DOC-2).
         """
         # DOC-2 idempotency
         if self._builtin_loaded:
             self._logger.warning(
-                "load_builtin() called twice — possible re-run; no-op. "
+                "load_builtin() called twice -- possible re-run; no-op. "
                 "Use clear() before reload if you intend to reseed."
             )
             return 0
@@ -974,7 +974,7 @@ class IDCrosswalk:
             if strict:
                 raise AssertionError(f"Builtin table has duplicates: {msg}")
             self._logger.error(
-                "Builtin table has duplicates: %s — DRUGOS_STRICT=1 would "
+                "Builtin table has duplicates: %s -- DRUGOS_STRICT=1 would "
                 "have raised.", msg,
             )
 
@@ -1017,7 +1017,7 @@ class IDCrosswalk:
             ).append((entry.uniprot_ac, prov))
             added += 1
 
-        # IDEM-4: deterministic ordering — sort each list
+        # IDEM-4: deterministic ordering -- sort each list
         self._sort_all_lists()
 
         self._loaded = True
@@ -1050,7 +1050,7 @@ class IDCrosswalk:
 
         Returns:
             Number of NEW UniProt<->Gene mappings added (one per record,
-            not double-counted — COD-3).
+            not double-counted -- COD-3).
         """
         t0 = time.time()
         added_u2g = 0
@@ -1107,7 +1107,7 @@ class IDCrosswalk:
                 )
                 added_g2u += 1
 
-            # SCI-3 / DQ-3: secondary accessions — tolerant + correct dict
+            # SCI-3 / DQ-3: secondary accessions -- tolerant + correct dict
             secs = rec.get("secondary_accessions") or []
             if isinstance(secs, str):
                 self._logger.warning(
@@ -1160,10 +1160,10 @@ class IDCrosswalk:
         Implements:
           - INT-1: canonical key form is bare ENSP (``ENSP00000358091``);
             ``9606.`` prefix and ``.N`` isoform suffix are stripped.
-          - DQ-1: multi-valued — multiple UniProt ACs per ENSP preserved;
+          - DQ-1: multi-valued -- multiple UniProt ACs per ENSP preserved;
             Swiss-Prot ACs prioritized over TrEMBL.
-          - REL-1: I/O wrapped in try/except — pipeline never crashes.
-          - REL-3: partial-load rollback — temp dict only committed on
+          - REL-1: I/O wrapped in try/except -- pipeline never crashes.
+          - REL-3: partial-load rollback -- temp dict only committed on
             successful full parse.
           - GUARD-REL-2: version-mismatch detection on the header row.
           - GUARD-PERF-1: memory-ceiling check.
@@ -1181,13 +1181,13 @@ class IDCrosswalk:
         Returns:
             Number of mappings added. Returns 0 on missing file, corrupt
             file, version mismatch, path-traversal refusal, or memory
-            ceiling breach — never raises.
+            ceiling breach -- never raises.
         """
         # SEC-2: path-traversal check
         if not self._validate_allowed_dir(aliases_path, allowed_dir):
             self._logger.error(
                 "load_string_aliases: path %r is outside allowed_dir %r "
-                "— refusing to load (SEC-2).",
+                "-- refusing to load (SEC-2).",
                 _redact_path(aliases_path),
                 _redact_path(allowed_dir) if allowed_dir else "n/a",
             )
@@ -1203,7 +1203,7 @@ class IDCrosswalk:
             source_hash = _sha256_of_file(aliases_path)
         except OSError as e:
             self._logger.warning(
-                "load_string_aliases: could not hash %s (%s: %s) — "
+                "load_string_aliases: could not hash %s (%s: %s) -- "
                 "proceeding without hash.",
                 _redact_path(aliases_path), type(e).__name__, e,
             )
@@ -1237,7 +1237,7 @@ class IDCrosswalk:
                 parts = first_data_line.rstrip("\n").split("\t")
                 if len(parts) < 3:
                     self._logger.warning(
-                        "load_string_aliases: version mismatch — first "
+                        "load_string_aliases: version mismatch -- first "
                         "data row has %d columns, expected >= 3. File: %s",
                         len(parts), _redact_path(aliases_path),
                     )
@@ -1246,7 +1246,7 @@ class IDCrosswalk:
                 # First column should start with f"{tax_id}."
                 if not parts[0].startswith(f"{tax_id}."):
                     self._logger.warning(
-                        "load_string_aliases: version mismatch — first "
+                        "load_string_aliases: version mismatch -- first "
                         "data row's first column %r does not start with "
                         "expected prefix %r. File: %s",
                         parts[0][:32], f"{tax_id}.", _redact_path(aliases_path),
@@ -1303,7 +1303,7 @@ class IDCrosswalk:
             )
             self._stage_marker(source_name, 0, time.time() - t0, source_hash)
             return 0
-        except Exception as e:  # pragma: no cover — last-resort guard
+        except Exception as e:  # pragma: no cover -- last-resort guard
             self._logger.error(
                 "load_string_aliases: unexpected error on %s: %s: %s. "
                 "Returning 0 mappings (partial load of %d entries "
@@ -1324,7 +1324,7 @@ class IDCrosswalk:
             self._stage_marker(source_name, 0, time.time() - t0, source_hash)
             return 0
 
-        # IDEM-4: deterministic ordering — sort each list (Swiss-Prot first
+        # IDEM-4: deterministic ordering -- sort each list (Swiss-Prot first
         # via _sort_ac_list)
         for k in temp:
             temp[k] = self._sort_ac_list(temp[k])
@@ -1335,7 +1335,7 @@ class IDCrosswalk:
             if existing is None:
                 self.ensembl_protein_to_uniprot[k] = v
             else:
-                # Merge — preserve unique ACs
+                # Merge -- preserve unique ACs
                 merged = list(self._coerce_stored_list(existing))
                 seen = {ac for ac, _ in merged}
                 for ac, prov in v:
@@ -1381,18 +1381,18 @@ class IDCrosswalk:
         Args:
             db_path: Path to the ChEMBL SQLite database.
             allowed_dir: Optional directory that ``db_path`` must be inside.
-            organism_tax_id: NCBI taxonomy ID filter (default 9606 — human).
+            organism_tax_id: NCBI taxonomy ID filter (default 9606 -- human).
 
         Returns:
             Number of mappings added. Returns 0 on missing file, schema
-            drift, locked DB (after retries), or memory ceiling breach —
+            drift, locked DB (after retries), or memory ceiling breach --
             never raises.
         """
         # SEC-2: path-traversal check
         if not self._validate_allowed_dir(db_path, allowed_dir):
             self._logger.error(
                 "load_chembl_target_components: path %r is outside "
-                "allowed_dir %r — refusing to load (SEC-2).",
+                "allowed_dir %r -- refusing to load (SEC-2).",
                 _redact_path(db_path),
                 _redact_path(allowed_dir) if allowed_dir else "n/a",
             )
@@ -1419,7 +1419,7 @@ class IDCrosswalk:
             organism_tax_id,
         )
 
-        # SECURITY: never string-format user input into this SQL — use ?
+        # SECURITY: never string-format user input into this SQL -- use ?
         # placeholders. (GUARD-SEC-1)
         # Expected schema (documented for GUARD-DQ-1):
         #   target_dictionary(tid, chembl_id, tax_id, ...)
@@ -1461,7 +1461,7 @@ class IDCrosswalk:
                 if "locked" in str(e).lower() and attempt < max_attempts - 1:
                     self._logger.warning(
                         "load_chembl_target_components: SQLite locked "
-                        "(attempt %d/%d) — retrying in %.1fs.",
+                        "(attempt %d/%d) -- retrying in %.1fs.",
                         attempt + 1, max_attempts, backoff_seconds[attempt],
                     )
                     time.sleep(backoff_seconds[attempt])
@@ -1517,11 +1517,11 @@ class IDCrosswalk:
                         confidence="chembl_curated", loaded_at=_iso_now(),
                         source_sha256=source_hash,
                     )
-                    # SCI-4: append (multi-subunit) — never overwrite
+                    # SCI-4: append (multi-subunit) -- never overwrite
                     temp.setdefault(chembl_id, []).append((ac_clean, prov))
                     added += 1
         except sqlite3.DatabaseError as e:
-            # REL-1: any other SQLite error — return partial count, no crash
+            # REL-1: any other SQLite error -- return partial count, no crash
             self._logger.warning(
                 "load_chembl_target_components: SQLite error on %s: %s: %s. "
                 "Returning 0 mappings (partial load of %d entries discarded).",
@@ -1597,7 +1597,7 @@ class IDCrosswalk:
         Implements:
           - ARCH-1: this method (previously missing).
           - SCI-2: populates ``ensg_to_uniprot`` with real ENSG IDs.
-          - REL-1: I/O wrapped in try/except — pipeline never crashes.
+          - REL-1: I/O wrapped in try/except -- pipeline never crashes.
           - REL-3: partial-load rollback.
           - GUARD-PERF-1: memory ceiling.
           - GUARD-IDEM-1: source file SHA-256.
@@ -1610,13 +1610,13 @@ class IDCrosswalk:
 
         Returns:
             Number of mappings added. Returns 0 on missing file, parse
-            error, or memory ceiling breach — never raises.
+            error, or memory ceiling breach -- never raises.
         """
         # SEC-2: path-traversal check
         if not self._validate_allowed_dir(targets_path, allowed_dir):
             self._logger.error(
                 "load_opentargets_targets: path %r is outside allowed_dir "
-                "%r — refusing to load (SEC-2).",
+                "%r -- refusing to load (SEC-2).",
                 _redact_path(targets_path),
                 _redact_path(allowed_dir) if allowed_dir else "n/a",
             )
@@ -1750,9 +1750,9 @@ class IDCrosswalk:
 
     # ── OpenTargets disease crosswalk (SCI-3) ────────────────────────────
     # Added by opentargets_loader v2.0 institutional-grade audit fix
-    # (opentargets_loader_repair_prompt.md — Section 5.4).
+    # (opentargets_loader_repair_prompt.md -- Section 5.4).
     #
-    # OpenTargets disease IDs are EFO/MONDO/HP/MP/Orphanet/SNOMED/OTAR —
+    # OpenTargets disease IDs are EFO/MONDO/HP/MP/Orphanet/SNOMED/OTAR --
     # they are NOT UMLS CUIs used by DRKG/DrugBank. Without this crosswalk,
     # the KG fragments into disconnected disease clusters (one cluster per
     # ontology, with no edges between them). This is the SCI-3 fix.
@@ -1763,7 +1763,7 @@ class IDCrosswalk:
         diseases_path: Path,
         allowed_dir: Optional[Path] = None,
     ) -> int:
-        """Load OpenTargets disease metadata JSONL (disease → UMLS CUI).
+        """Load OpenTargets disease metadata JSONL (disease -> UMLS CUI).
 
         Implements SCI-3. Expected file format: one JSON object per line,
         each ``{"id": "EFO_0000311", "name": "Alzheimer's disease",
@@ -1780,13 +1780,13 @@ class IDCrosswalk:
 
         Returns:
             Number of mappings added. Returns 0 on missing file, parse
-            error, or memory ceiling breach — never raises.
+            error, or memory ceiling breach -- never raises.
         """
         # SEC-2: path-traversal check
         if not self._validate_allowed_dir(diseases_path, allowed_dir):
             self._logger.error(
                 "load_opentargets_diseases: path %r is outside allowed_dir "
-                "%r — refusing to load (SEC-2).",
+                "%r -- refusing to load (SEC-2).",
                 _redact_path(diseases_path),
                 _redact_path(allowed_dir) if allowed_dir else "n/a",
             )
@@ -1967,13 +1967,13 @@ class IDCrosswalk:
         results = self._coerce_stored_list(raw)
         return [cui for cui, _ in results if _UMLS_CUI_PATTERN.match(cui)]
 
-    # ── Ensembl gene → NCBI gene ID crosswalk (SCI-9) ───────────────────
+    # ── Ensembl gene -> NCBI gene ID crosswalk (SCI-9) ───────────────────
     # Added by opentargets_loader v2.0 institutional-grade audit fix
-    # (opentargets_loader_repair_prompt.md — Section 5.4 / SCI-9).
+    # (opentargets_loader_repair_prompt.md -- Section 5.4 / SCI-9).
     #
     # OpenTargets target IDs are ENSG IDs; DRKG Gene nodes use NCBI Gene
     # IDs. Without this crosswalk, the OpenTargets loader emits orphan
-    # Gene nodes (Compound → targets → Gene where Gene is keyed by ENSG,
+    # Gene nodes (Compound -> targets -> Gene where Gene is keyed by ENSG,
     # disconnected from DRKG's NCBI-keyed Gene nodes). This is the SCI-9
     # fix.
     # ---------------------------------------------------------------------
@@ -1983,7 +1983,7 @@ class IDCrosswalk:
         ensembl_to_ncbi_path: Path,
         allowed_dir: Optional[Path] = None,
     ) -> int:
-        """Load an Ensembl → NCBI Gene ID crosswalk (TSV from BioMart).
+        """Load an Ensembl -> NCBI Gene ID crosswalk (TSV from BioMart).
 
         Implements SCI-9. Expected file format (tab-separated, with header):
 
@@ -1995,25 +1995,25 @@ class IDCrosswalk:
         ``self.ensg_to_ncbi_gene``.
 
         Args:
-            ensembl_to_ncbi_path: Path to the Ensembl→NCBI crosswalk TSV.
+            ensembl_to_ncbi_path: Path to the Ensembl->NCBI crosswalk TSV.
             allowed_dir: Optional directory that the path must be inside.
 
         Returns:
             Number of mappings added. Returns 0 on missing file, parse
-            error, or memory ceiling breach — never raises.
+            error, or memory ceiling breach -- never raises.
         """
         # SEC-2: path-traversal check
         if not self._validate_allowed_dir(ensembl_to_ncbi_path, allowed_dir):
             self._logger.error(
                 "load_ensembl_to_ncbi_gene: path %r is outside allowed_dir "
-                "%r — refusing to load (SEC-2).",
+                "%r -- refusing to load (SEC-2).",
                 _redact_path(ensembl_to_ncbi_path),
                 _redact_path(allowed_dir) if allowed_dir else "n/a",
             )
             return 0
         if not ensembl_to_ncbi_path.exists():
             self._logger.warning(
-                "Ensembl→NCBI crosswalk file not found: %s",
+                "Ensembl->NCBI crosswalk file not found: %s",
                 _redact_path(ensembl_to_ncbi_path),
             )
             return 0
@@ -2163,12 +2163,12 @@ class IDCrosswalk:
         results = self._coerce_stored_list(raw)
         return [n for n, _ in results if n and n.isdigit()]
 
-    # ── Compound ID → InChIKey crosswalk (v29 ROOT FIX audit L-5) ──────
+    # ── Compound ID -> InChIKey crosswalk (v29 ROOT FIX audit L-5) ──────
     # Compound ID fragmentation: DrugBank ID / ChEMBL ID / PubChem CID /
-    # STITCH CIDm/CIDs / SIDER bare CID / DRKG MESH / InChIKey — 7
+    # STITCH CIDm/CIDs / SIDER bare CID / DRKG MESH / InChIKey -- 7
     # disjoint namespaces for the same Compound entity.
     # ``merge_mappings_by_inchikey()`` in entity_resolver only fires when
-    # InChIKey is present — STITCH/SIDER/DRKG edges reference Compounds
+    # InChIKey is present -- STITCH/SIDER/DRKG edges reference Compounds
     # by non-InChIKey IDs that don't match InChIKey-keyed nodes. The KG
     # had 7 disjoint subgraphs.
     # Root fix: this crosswalk + the ``_normalize_compound_id_to_inchikey()``
@@ -2190,7 +2190,7 @@ class IDCrosswalk:
         """Register a single ``compound_id -> inchikey`` mapping (v29 L-5).
 
         Called by the entity_resolver after Phase 1's entity resolution
-        runs — Phase 1 builds the InChIKey mappings from DrugBank /
+        runs -- Phase 1 builds the InChIKey mappings from DrugBank /
         ChEMBL / PubChem compound records, and pushes each
         ``(source_id, inchikey)`` pair into this crosswalk via this
         method so the loaders can normalize Compound references.
@@ -2236,7 +2236,7 @@ class IDCrosswalk:
             return 1
         existing_list = self._coerce_stored_list(existing)
         if any(stored_ik == ik for stored_ik, _ in existing_list):
-            return 0  # already present — idempotent
+            return 0  # already present -- idempotent
         existing_list.append((ik, prov))
         self.compound_to_inchikey[key] = existing_list
         self._invalidate_reverse_index_cache()
@@ -2247,7 +2247,7 @@ class IDCrosswalk:
         path: Path,
         allowed_dir: Optional[Path] = None,
     ) -> int:
-        """Bulk-load a Compound ID → InChIKey crosswalk from a TSV file.
+        """Bulk-load a Compound ID -> InChIKey crosswalk from a TSV file.
 
         Expected TSV format (header row required)::
 
@@ -2268,20 +2268,20 @@ class IDCrosswalk:
 
         Returns:
             Number of mappings added. Returns 0 on missing file or parse
-            error — never raises.
+            error -- never raises.
         """
         # SEC-2: path-traversal check
         if not self._validate_allowed_dir(path, allowed_dir):
             self._logger.error(
                 "load_compound_inchikey_crosswalk: path %r is outside "
-                "allowed_dir %r — refusing to load (SEC-2).",
+                "allowed_dir %r -- refusing to load (SEC-2).",
                 _redact_path(path),
                 _redact_path(allowed_dir) if allowed_dir else "n/a",
             )
             return 0
         if not path.exists():
             self._logger.warning(
-                "Compound ID→InChIKey crosswalk file not found: %s",
+                "Compound ID->InChIKey crosswalk file not found: %s",
                 _redact_path(path),
             )
             return 0
@@ -2350,7 +2350,7 @@ class IDCrosswalk:
         elapsed = time.time() - t0
         self._stage_marker(source_name, added, elapsed, source_hash)
         self._logger.info(
-            "IDCrosswalk: added %d Compound→InChIKey mappings", added,
+            "IDCrosswalk: added %d Compound->InChIKey mappings", added,
         )
         return added
 
@@ -2363,7 +2363,7 @@ class IDCrosswalk:
 
         Returns the primary (first) InChIKey, or ``None`` if no mapping
         is known. The caller should still create the Compound node with
-        the original ID if ``None`` is returned — the missing mapping
+        the original ID if ``None`` is returned -- the missing mapping
         will be filled in later by ``merge_mappings_by_inchikey()`` once
         Phase 1's entity resolution runs.
 
@@ -2372,7 +2372,7 @@ class IDCrosswalk:
         ``compound_id_to_inchikey_with_provenance()``.
         """
         self._check_unloaded_warning()
-        # Short-circuit: input is already an InChIKey — return it.
+        # Short-circuit: input is already an InChIKey -- return it.
         if compound_id is not None and isinstance(compound_id, str) \
                 and _INCHIKEY_PATTERN.match(compound_id.strip()):
             self._record_translator_call("compound_id_to_inchikey", True)
@@ -2431,7 +2431,7 @@ class IDCrosswalk:
 
         Lookup order:
           1. ``CID<int>`` form (canonical PubChem CID key).
-          2. Bare integer form (e.g. ``"5311025"``) — coerced to
+          2. Bare integer form (e.g. ``"5311025"``) -- coerced to
              ``CID5311025`` for backward-compat with callers that strip
              the ``CID`` prefix.
           3. Original form as-is (covers DrugBank ID, ChEMBL ID, MESH,
@@ -2467,7 +2467,7 @@ class IDCrosswalk:
 
         Returns the primary (highest-priority) UniProt AC. The primary is
         the first Swiss-Prot AC if any are present, otherwise the first
-        TrEMBL AC. Returns ``None`` if no mapping is known — the caller
+        TrEMBL AC. Returns ``None`` if no mapping is known -- the caller
         should STILL create the Protein node but use the original ENSP
         as the ID and flag it as ``unresolved_protein_id``.
 
@@ -2478,7 +2478,7 @@ class IDCrosswalk:
           - INT-1: input normalized to bare ENSP before lookup. Also
             tolerates direct-injection of prefixed keys (backward-compat
             with ``cw.ensembl_protein_to_uniprot["9606.ENSP..."] = "P23219"``).
-          - INT-4: stored values validated before return — invalid ACs
+          - INT-4: stored values validated before return -- invalid ACs
             are filtered out and logged.
           - GUARD-REL-1: unresolved IDs tracked in DLQ.
           - OBS-1: hit/miss tracked.
@@ -2522,12 +2522,12 @@ class IDCrosswalk:
         and prefixed forms (INT-1 + backward-compat for direct injection).
 
         Lookup order:
-          1. Bare ENSP form (``ENSP00000358091``) — the canonical key
+          1. Bare ENSP form (``ENSP00000358091``) -- the canonical key
              used by ``load_string_aliases()``.
-          2. Original input form (e.g. ``9606.ENSP00000358091``) — for
+          2. Original input form (e.g. ``9606.ENSP00000358091``) -- for
              backward-compat with code/tests that inject the prefixed
              form directly into the dict.
-          3. Prefixed form (``9606.{bare}``) — for backward-compat with
+          3. Prefixed form (``9606.{bare}``) -- for backward-compat with
              direct injection when the input was bare.
         """
         if ensp_id is None:
@@ -2561,7 +2561,7 @@ class IDCrosswalk:
 
         Multi-valued: returns the primary AC (first in source order, then
         Swiss-Prot preferred). Multi-subunit complexes (e.g. GABA-A with
-        5 subunits) are preserved internally — use
+        5 subunits) are preserved internally -- use
         ``chembl_target_to_uniprot_ac_all()`` to retrieve all subunits.
         """
         self._check_unloaded_warning()
@@ -2622,7 +2622,7 @@ class IDCrosswalk:
         """Translate OpenTargets ``ENSG00000...`` -> UniProt AC.
 
         With builtin-only, returns ``None`` for all ENSG IDs (the builtin
-        table contains gene SYMBOLS, not ENSG IDs — see SCI-2). Run
+        table contains gene SYMBOLS, not ENSG IDs -- see SCI-2). Run
         ``load_opentargets_targets()`` first to populate real ENSG IDs.
 
         Backward-compat: if ``ensg_id`` is actually a gene symbol (e.g.
@@ -2863,10 +2863,10 @@ class IDCrosswalk:
         ROOT FIX for F5.2.7 / BUG-D-007 / RT-4 / Compound-1:
         The v9/v10/v11 forensic audits claimed the entity_resolver
         called ``crosswalk.canonicalize(...)`` to enrich gene aliases
-        with cross-source canonical IDs — but ``IDCrosswalk`` had NO
+        with cross-source canonical IDs -- but ``IDCrosswalk`` had NO
         ``canonicalize`` method. The call raised ``AttributeError``,
         was silently caught by an ``except Exception`` (logged at
-        ``DEBUG`` — invisible in production), and canonicalization
+        ``DEBUG`` -- invisible in production), and canonicalization
         NEVER happened. Three "FORENSIC VALIDATED" stamps were placed
         on a fix that had never actually run.
 
@@ -3098,7 +3098,7 @@ class IDCrosswalk:
         Previously this method iterated every entry in every namespace
         dict on EACH call (O(n) per call). ``canonicalize`` calls
         ``reverse_lookup`` once per invocation, so a batch of n
-        canonicalize() calls ran in O(n²) total — prohibitively slow
+        canonicalize() calls ran in O(n²) total -- prohibitively slow
         on real production data (STRING aliases alone are ~100K
         entries). The reverse-lookup index is now built lazily on
         first call and cached on the instance; subsequent calls are
@@ -3112,7 +3112,7 @@ class IDCrosswalk:
                 "ncbi_gene_id", "uniprot_secondary",
             )}
         target = str(uniprot_ac).strip().upper()
-        # Lazy build — first call after load (or after cache
+        # Lazy build -- first call after load (or after cache
         # invalidation) pays the one-time O(n) build cost; every
         # subsequent call is O(1).
         if self._reverse_index_cache is None:
@@ -3260,7 +3260,7 @@ class IDCrosswalk:
         # v24 ROOT FIX (FORENSIC-P2-LOADERS §4): the docstring said
         # "exponential backoff" but the code used a fixed 0.34s sleep.
         # On network errors, implement actual exponential backoff:
-        # 0.34s → 0.68s → 1.36s → 2.72s → 5.44s (max), reset on success.
+        # 0.34s -> 0.68s -> 1.36s -> 2.72s -> 5.44s (max), reset on success.
         BATCH_SIZE = 200
         RATE_LIMIT_S = 0.34
         MAX_BACKOFF_S = 5.44
@@ -3375,7 +3375,7 @@ class IDCrosswalk:
         out: Dict[str, Dict[str, Any]] = {}
         for ns, bucket in self._unresolved.items():
             sample = sorted(bucket)[:100]
-            # Use _unresolved_counts (total, includes duplicates) — not
+            # Use _unresolved_counts (total, includes duplicates) -- not
             # just len(bucket) (which dedupes).
             total = self._unresolved_counts.get(ns, 0)
             out[ns] = {
@@ -3491,7 +3491,7 @@ class IDCrosswalk:
         """Sort a list of (ac, provenance) tuples deterministically.
 
         Swiss-Prot ACs (starting with [OPQ]) are placed BEFORE TrEMBL ACs
-        (starting with [A-NR-Z]) — see DQ-1. Within each group, sort
+        (starting with [A-NR-Z]) -- see DQ-1. Within each group, sort
         alphabetically.
         """
         def sort_key(item: Tuple[str, Provenance]) -> Tuple[int, str]:
@@ -3510,11 +3510,11 @@ class IDCrosswalk:
             # same multi-valued storage pattern. Sort alphabetically
             # (InChIKeys have no Swiss-Prot / TrEMBL analogue so the
             # plain sort via ``sorted(lst, key=lambda x: x[0])`` is the
-            # right call — bypass ``_sort_ac_list`` which is AC-specific).
+            # right call -- bypass ``_sort_ac_list`` which is AC-specific).
         ):
             for k in list(d.keys()):
                 d[k] = self._sort_ac_list(self._coerce_stored_list(d[k]))
-        # v29 ROOT FIX (audit L-5): Compound ID -> InChIKey dict —
+        # v29 ROOT FIX (audit L-5): Compound ID -> InChIKey dict --
         # sort each value list alphabetically by InChIKey for determinism.
         for k in list(self.compound_to_inchikey.keys()):
             lst = self._coerce_stored_list(self.compound_to_inchikey[k])
@@ -3529,7 +3529,7 @@ class IDCrosswalk:
         # v29 ROOT FIX (audit L-9/I-7): _sort_all_lists is called at
         # the end of every loader (load_builtin, load_string_aliases,
         # load_chembl_target_components, load_opentargets_targets,
-        # load_from_uniprot_records, …). Invalidate the reverse-lookup
+        # load_from_uniprot_records, ...). Invalidate the reverse-lookup
         # cache here so the next ``reverse_lookup`` call rebuilds it
         # from the freshly-loaded data. This is the single chokepoint
         # that covers every loader without requiring each loader to
@@ -3538,7 +3538,7 @@ class IDCrosswalk:
 
 
 # =============================================================================
-# Section 6 — Module-level singleton (thread-safe, IDEM-1, IDEM-2)
+# Section 6 -- Module-level singleton (thread-safe, IDEM-1, IDEM-2)
 # =============================================================================
 
 _default_lock: threading.Lock = threading.Lock()
@@ -3562,7 +3562,7 @@ def get_default_crosswalk() -> IDCrosswalk:
 
 
 def reset_default_crosswalk() -> None:
-    """For tests only — clears the singleton.
+    """For tests only -- clears the singleton.
 
     Acquires the lock to be safe against any in-flight
     ``get_default_crosswalk()`` calls (IDEM-2).
@@ -3573,18 +3573,18 @@ def reset_default_crosswalk() -> None:
 
 
 # =============================================================================
-# Section 6.5 — v29 ROOT FIX (audit L-5): Compound ID normalization helper
+# Section 6.5 -- v29 ROOT FIX (audit L-5): Compound ID normalization helper
 # =============================================================================
-# Compound ID fragmentation: 7 disjoint namespaces — DrugBank ID, ChEMBL ID,
+# Compound ID fragmentation: 7 disjoint namespaces -- DrugBank ID, ChEMBL ID,
 # PubChem CID, STITCH CIDm/CIDs, SIDER bare CID, DRKG MESH, InChIKey.
 # ``merge_mappings_by_inchikey()`` in entity_resolver only fires when
-# InChIKey is present — STITCH/SIDER/DRKG edges reference Compounds by
+# InChIKey is present -- STITCH/SIDER/DRKG edges reference Compounds by
 # non-InChIKey IDs that don't match InChIKey-keyed nodes. The KG had 7
 # disjoint subgraphs.
 # Root fix: this module-level helper is called from stitch_loader,
 # sider_loader, drkg_loader on every Compound src_id/dst_id BEFORE
 # building edge records. When a mapping exists in the crosswalk, the
-# Compound reference is rewritten to the canonical InChIKey — unifying
+# Compound reference is rewritten to the canonical InChIKey -- unifying
 # it with the InChIKey-keyed Compound nodes produced by DrugBank /
 # ChEMBL / PubChem loaders. When no mapping exists, the original ID is
 # returned unchanged (with a WARNING log) so the pipeline does not
@@ -3592,7 +3592,7 @@ def reset_default_crosswalk() -> None:
 # once Phase 1's entity resolution runs and populates the crosswalk.
 # ---------------------------------------------------------------------
 
-# Per-process cache of compound_id → InChIKey lookups that returned no
+# Per-process cache of compound_id -> InChIKey lookups that returned no
 # mapping. Avoids re-warning (and re-logging) for the same ID across
 # millions of rows (DRKG has ~6M triples; SIDER ~310K rows; STITCH
 # ~1.6M). The cache lives at module scope so it survives across loader
@@ -3618,9 +3618,9 @@ def _normalize_compound_id_to_inchikey(
     *,
     source: str = "loader",
 ) -> str:
-    """Normalize a Compound ID (any namespace) → InChIKey when possible.
+    """Normalize a Compound ID (any namespace) -> InChIKey when possible.
 
-    v29 ROOT FIX (audit L-5): Compound ID fragmentation — STITCH/SIDER/
+    v29 ROOT FIX (audit L-5): Compound ID fragmentation -- STITCH/SIDER/
     DRKG used non-InChIKey IDs. Now normalizes to InChIKey via
     crosswalk before loading.
 
@@ -3638,7 +3638,7 @@ def _normalize_compound_id_to_inchikey(
     Returns:
         The InChIKey (27-char ``XXXXXXXXXXXXXX-XXXXXXXXXX-X`` form)
         if a mapping exists in the crosswalk. The original ID unchanged
-        if no mapping exists — never returns ``None``, never raises.
+        if no mapping exists -- never returns ``None``, never raises.
 
     Side effects:
         - Logs a WARNING (once per unique compound_id, per process) when
@@ -3649,7 +3649,7 @@ def _normalize_compound_id_to_inchikey(
           ``_translator_stats['compound_id_to_inchikey']`` hit/miss
           counters (OBS-1).
     """
-    # Defensive coercion — callers in vectorised loops occasionally pass
+    # Defensive coercion -- callers in vectorised loops occasionally pass
     # numpy/pandas scalars. ``str(None) == "None"`` so guard explicitly.
     if compound_id is None:
         return ""
@@ -3664,27 +3664,27 @@ def _normalize_compound_id_to_inchikey(
     # Acquire a crosswalk instance (caller's or default singleton).
     try:
         cw = crosswalk if crosswalk is not None else get_default_crosswalk()
-    except Exception:  # pragma: no cover — defensive
+    except Exception:  # pragma: no cover -- defensive
         # If the crosswalk can't be acquired (e.g. circular import at
         # module load), fall through to returning the original ID.
         return s
 
     try:
         inchikey = cw.compound_id_to_inchikey(s)
-    except Exception:  # pragma: no cover — defensive
+    except Exception:  # pragma: no cover -- defensive
         return s
 
     if inchikey is not None and _INCHIKEY_PATTERN.match(inchikey):
         return inchikey
 
-    # No mapping — log WARNING once per unique ID, return original.
+    # No mapping -- log WARNING once per unique ID, return original.
     with _COMPOUND_ID_MISS_CACHE_LOCK:
         if len(_COMPOUND_ID_MISS_CACHE) < _COMPOUND_ID_MISS_CACHE_CAP:
             if s not in _COMPOUND_ID_MISS_CACHE:
                 _COMPOUND_ID_MISS_CACHE.add(s)
                 logger.warning(
                     "compound_id_to_inchikey miss (%s source=%s): no "
-                    "InChIKey mapping for %r — passing original ID "
+                    "InChIKey mapping for %r -- passing original ID "
                     "through. The mapping will be populated when Phase "
                     "1's entity resolution runs.",
                     s[:32], source, s,
@@ -3712,7 +3712,7 @@ reset_default_crosswalk = _reset_default_crosswalk_with_cache_clear  # type: ign
 
 
 # =============================================================================
-# Section 7 — __all__ (COD-5)
+# Section 7 -- __all__ (COD-5)
 # =============================================================================
 
 __all__ = [

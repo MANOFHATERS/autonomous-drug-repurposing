@@ -1,16 +1,16 @@
-"""v77 Forensic Root-Fix Test Suite — verifies ACTUAL behavior (not comments).
+"""v77 Forensic Root-Fix Test Suite -- verifies ACTUAL behavior (not comments).
 
 This test suite was written to address the user's complaint that previous AIs
 claimed issues were fixed but cross-verification showed they persisted. Every
-test in this suite runs REAL CODE and asserts ACTUAL BEHAVIOR — no string-
+test in this suite runs REAL CODE and asserts ACTUAL BEHAVIOR -- no string-
 matching on comments, no grep-only checks. If a test passes here, the fix is
 genuinely in place at runtime.
 
 Covers all 10 Compound Issues from the audit:
   #1  Vioxx appears as SAFE repurposing candidate
   #2  ChEMBERTa silent-disable cascade
-  #3  ChEMBL v50 mode produces Drug nodes with zero Drug→Protein edges
-  #4  Phase 1→Phase 2 bridge silent CSV fallback
+  #3  ChEMBL v50 mode produces Drug nodes with zero Drug->Protein edges
+  #4  Phase 1->Phase 2 bridge silent CSV fallback
   #5  HGT training numerical instability
   #6  Score scale chaos across 7 loaders
   #7  Negative sampling data leakage
@@ -44,12 +44,12 @@ for _p in (str(_PHASE1_ROOT), str(_PHASE2_ROOT)):
 
 
 # =============================================================================
-# Compound Issue #1 — Vioxx appears as SAFE repurposing candidate
+# Compound Issue #1 -- Vioxx appears as SAFE repurposing candidate
 # =============================================================================
 
 class TestCompoundIssue1VioxxPatientSafety:
     """Verify Vioxx (and all FDA-withdrawn drugs) are correctly flagged
-    is_withdrawn=TRUE and is_globally_approved=FALSE — both at the
+    is_withdrawn=TRUE and is_globally_approved=FALSE -- both at the
     migration level (curated name seed) and at the ORM level (Python hook).
     """
 
@@ -145,7 +145,7 @@ class TestCompoundIssue1VioxxPatientSafety:
 
 
 # =============================================================================
-# Compound Issue #2 — ChEMBERTa silent-disable cascade
+# Compound Issue #2 -- ChEMBERTa silent-disable cascade
 # =============================================================================
 
 class TestCompoundIssue2ChembertaCascade:
@@ -179,7 +179,7 @@ class TestCompoundIssue2ChembertaCascade:
 
 
 # =============================================================================
-# Compound Issue #3 — ChEMBL v50 mode filename mismatch
+# Compound Issue #3 -- ChEMBL v50 mode filename mismatch
 # =============================================================================
 
 class TestCompoundIssue3ChembblV50Filename:
@@ -204,7 +204,7 @@ class TestCompoundIssue3ChembblV50Filename:
 
 
 # =============================================================================
-# Compound Issue #4 — Phase 1→Phase 2 bridge silent CSV fallback
+# Compound Issue #4 -- Phase 1->Phase 2 bridge silent CSV fallback
 # =============================================================================
 
 class TestCompoundIssue4Phase1Bridge:
@@ -235,7 +235,7 @@ class TestCompoundIssue4Phase1Bridge:
 
 
 # =============================================================================
-# Compound Issue #5 — HGT training numerical instability
+# Compound Issue #5 -- HGT training numerical instability
 # =============================================================================
 
 class TestCompoundIssue5HgtNumericalStability:
@@ -270,7 +270,7 @@ class TestCompoundIssue5HgtNumericalStability:
 
 
 # =============================================================================
-# Compound Issue #6 — Score scale chaos across 7 loaders
+# Compound Issue #6 -- Score scale chaos across 7 loaders
 # =============================================================================
 
 class TestCompoundIssue6ScoreScaleNormalization:
@@ -315,7 +315,7 @@ class TestCompoundIssue6ScoreScaleNormalization:
 
 
 # =============================================================================
-# Compound Issue #7 — Negative sampling data leakage
+# Compound Issue #7 -- Negative sampling data leakage
 # =============================================================================
 
 class TestCompoundIssue7NegativeSamplingLeakage:
@@ -342,7 +342,7 @@ class TestCompoundIssue7NegativeSamplingLeakage:
 
 
 # =============================================================================
-# Compound Issue #8 — Regression test suite portability + v56 string-matching
+# Compound Issue #8 -- Regression test suite portability + v56 string-matching
 # =============================================================================
 
 class TestCompoundIssue8TestSuiteQuality:
@@ -382,7 +382,7 @@ class TestCompoundIssue8TestSuiteQuality:
 
 
 # =============================================================================
-# Compound Issue #9 — Migration chain on fresh DB
+# Compound Issue #9 -- Migration chain on fresh DB
 # =============================================================================
 
 class TestCompoundIssue9MigrationChain:
@@ -450,7 +450,7 @@ class TestCompoundIssue9MigrationChain:
 
 
 # =============================================================================
-# Compound Issue #10 — Drug-target semantics systematically inverted
+# Compound Issue #10 -- Drug-target semantics systematically inverted
 # =============================================================================
 
 class TestCompoundIssue10SemanticInversion:
@@ -474,14 +474,14 @@ class TestCompoundIssue10SemanticInversion:
         assert _section_to_relation("transporters", "") == "transported_by"
 
     def test_clinicaltrals_completed_positive_is_treats(self):
-        """ClinicalTrials: Completed + primary_outcome_met=True → 'treats'.
-        Completed + primary_outcome_met=False → 'tested_for'."""
+        """ClinicalTrials: Completed + primary_outcome_met=True -> 'treats'.
+        Completed + primary_outcome_met=False -> 'tested_for'."""
         from drugos_graph import clinicaltrials_loader
         cfg = clinicaltrials_loader.ClinicalTrialsConfig()
         state = clinicaltrials_loader._LoaderState(
             cfg, "fake_sha256", "2024-01-01T00:00:00Z"
         )
-        # Positive trial → treats
+        # Positive trial -> treats
         record = {
             "nct_id": "NCT00000001",
             "drug_mesh": "D000001",
@@ -498,7 +498,7 @@ class TestCompoundIssue10SemanticInversion:
         assert edge["rel_type"] == "treats", \
             f"Positive trial must be 'treats', got {edge['rel_type']!r}"
 
-        # Negative trial → tested_for
+        # Negative trial -> tested_for
         state2 = clinicaltrials_loader._LoaderState(
             cfg, "fake_sha256", "2024-01-01T00:00:00Z"
         )
@@ -537,7 +537,7 @@ class TestV77RootFixes:
         failure that made the freshness policy a no-op."""
         src = (_PHASE2_ROOT / "drugos_graph" / "disgenet_loader.py").read_text()
         assert "from phase1.pipelines.disgenet_pipeline import DisGeNETPipeline" in src, \
-            "Must import DisGeNETPipeline (capital G, NET) — not DisgenetPipeline"
+            "Must import DisGeNETPipeline (capital G, NET) -- not DisgenetPipeline"
 
     def test_omim_min_score_allows_provisional_edges(self):
         """OMIM_MIN_SCORE must be 0.3 (not 0.5) so that mapping_key=3

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MIT
-# © 2024-2026 Autonomous Drug Repurposing Platform — Team Cosmic / VentureLab
+# © 2024-2026 Autonomous Drug Repurposing Platform -- Team Cosmic / VentureLab
 """
 Comprehensive package-level tests for ``entity_resolution``.
 
@@ -11,22 +11,22 @@ regression test in this file, organised by domain.
 
 Sections
 --------
-1.  Domain 1 — Architecture (D1-1 → D1-5)
-2.  Domain 2 — Design (D2-1 → D2-5)
-3.  Domain 3 — Knowledge / Scientific Correctness (D3-1 → D3-8)
-4.  Domain 4 — Coding (D4-1 → D4-5)
-5.  Domain 5 — Data Quality & Integrity (D5-1 → D5-5)
-6.  Domain 6 — Reliability & Resilience (D6-1 → D6-6)
-7.  Domain 7 — Idempotency & Reproducibility (D7-1 → D7-5)
-8.  Domain 8 — Performance & Scalability (D8-1 → D8-6)
-9.  Domain 9 — Security & Privacy (D9-1 → D9-7)
-10. Domain 10 — Testing & Validation (D10-1 → D10-7)
-11. Domain 11 — Logging & Observability (D11-1 → D11-5)
-12. Domain 12 — Configuration & Environment Management (D12-1 → D12-5)
-13. Domain 13 — Documentation & Readability (D13-1 → D13-10)
-14. Domain 14 — Compliance & Standards Adherence (D14-1 → D14-7)
-15. Domain 15 — Interoperability & Integration (D15-1 → D15-6)
-16. Domain 16 — Data Lineage & Traceability (D16-1 → D16-7)
+1.  Domain 1 -- Architecture (D1-1 -> D1-5)
+2.  Domain 2 -- Design (D2-1 -> D2-5)
+3.  Domain 3 -- Knowledge / Scientific Correctness (D3-1 -> D3-8)
+4.  Domain 4 -- Coding (D4-1 -> D4-5)
+5.  Domain 5 -- Data Quality & Integrity (D5-1 -> D5-5)
+6.  Domain 6 -- Reliability & Resilience (D6-1 -> D6-6)
+7.  Domain 7 -- Idempotency & Reproducibility (D7-1 -> D7-5)
+8.  Domain 8 -- Performance & Scalability (D8-1 -> D8-6)
+9.  Domain 9 -- Security & Privacy (D9-1 -> D9-7)
+10. Domain 10 -- Testing & Validation (D10-1 -> D10-7)
+11. Domain 11 -- Logging & Observability (D11-1 -> D11-5)
+12. Domain 12 -- Configuration & Environment Management (D12-1 -> D12-5)
+13. Domain 13 -- Documentation & Readability (D13-1 -> D13-10)
+14. Domain 14 -- Compliance & Standards Adherence (D14-1 -> D14-7)
+15. Domain 15 -- Interoperability & Integration (D15-1 -> D15-6)
+16. Domain 16 -- Data Lineage & Traceability (D16-1 -> D16-7)
 """
 
 from __future__ import annotations
@@ -54,7 +54,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 # IMPORTANT: every import below goes through the package façade, never
-# through submodules.  This is the fix for audit D10-1 — the previous
+# through submodules.  This is the fix for audit D10-1 -- the previous
 # test suite imported from submodules, so the package's public contract
 # was structurally untested.
 import entity_resolution  # noqa: E402
@@ -123,7 +123,7 @@ def _aspirin_pubchem_df() -> pd.DataFrame:
 
 
 # ===========================================================================
-# §1. DOMAIN 1 — ARCHITECTURE (D1-1 → D1-5)
+# §1. DOMAIN 1 -- ARCHITECTURE (D1-1 -> D1-5)
 # ===========================================================================
 
 
@@ -148,7 +148,7 @@ class TestDomain1Architecture:
             for m in violation_re.finditer(text):
                 offenders.append(f"{f.name}: {m.group(0).strip()}")
         assert not offenders, (
-            "D1-1 violation — absolute intra-package imports found:\n"
+            "D1-1 violation -- absolute intra-package imports found:\n"
             + "\n".join(offenders)
         )
 
@@ -228,7 +228,7 @@ class TestDomain1Architecture:
 
 
 # ===========================================================================
-# §2. DOMAIN 2 — DESIGN (D2-1 → D2-5)
+# §2. DOMAIN 2 -- DESIGN (D2-1 -> D2-5)
 # ===========================================================================
 
 
@@ -314,12 +314,12 @@ class TestDomain2Design:
 
 
 # ===========================================================================
-# §3. DOMAIN 3 — KNOWLEDGE / SCIENTIFIC CORRECTNESS (D3-1 → D3-8)
+# §3. DOMAIN 3 -- KNOWLEDGE / SCIENTIFIC CORRECTNESS (D3-1 -> D3-8)
 # ===========================================================================
 
 
 class TestDomain3Knowledge:
-    """Audit IDs D3-1 through D3-8.  Highest priority — patient safety."""
+    """Audit IDs D3-1 through D3-8.  Highest priority -- patient safety."""
 
     def test_bulk_mode_no_pubchem(self, caplog):
         """D3-1: bulk path ``build_mapping`` never calls PubChem even when enabled."""
@@ -355,7 +355,7 @@ class TestDomain3Knowledge:
             source="chembl",
         )
         # Now ingest a near-miss name (DIFFERENT InChIKey so the
-        # inchikey_exact / connectivity paths don't fire — collapse
+        # inchikey_exact / connectivity paths don't fire -- collapse
         # is off by default so connectivity won't merge either).
         # "asprin" (transposed 'i' and 'r') should fuzzy-match
         # "aspirin" at >= 0.85 via token_sort_ratio.
@@ -366,7 +366,7 @@ class TestDomain3Knowledge:
         )
         # The fuzzy match should have merged both records.
         assert len(r.mapping) == 1, (
-            f"D3-2: fuzzy match did not merge — mapping has "
+            f"D3-2: fuzzy match did not merge -- mapping has "
             f"{len(r.mapping)} entries"
         )
         # The fuzzy path was exercised (counter incremented).
@@ -408,7 +408,7 @@ class TestDomain3Knowledge:
               "name": "thalidomide-enantiomer-S-form", "drugbank_id": "DB_S"}],
             source="drugbank",
         )
-        # They must remain distinct — thalidomide enantiomers have
+        # They must remain distinct -- thalidomide enantiomers have
         # drastically different safety profiles.
         assert len(r.mapping) == 2, (
             "D3-4 violation: stereoisomers silently collapsed"
@@ -437,7 +437,7 @@ class TestDomain3Knowledge:
     def test_synthetic_key_source_independence(self):
         """D3-5: synthetic InChIKey is source-INDEPENDENT.
 
-        Same normalized name from two sources → same synthetic key.
+        Same normalized name from two sources -> same synthetic key.
         """
         from entity_resolution.base import make_synthetic_inchikey
         # Two records with no InChIKey, same name, different sources.
@@ -531,7 +531,7 @@ class TestDomain3Knowledge:
 
 
 # ===========================================================================
-# §4. DOMAIN 4 — CODING (D4-1 → D4-5)
+# §4. DOMAIN 4 -- CODING (D4-1 -> D4-5)
 # ===========================================================================
 
 
@@ -585,9 +585,9 @@ class TestDomain4Coding:
         PEP 257 recommends imperative mood for the summary line.  We
         verify the summary starts with a capital letter and is a single
         short sentence (the period convention varies between Google
-        and NumPy styles — both are accepted here).
+        and NumPy styles -- both are accepted here).
         """
-        # ``normalize_name`` — "Normalize a drug or protein name ..."
+        # ``normalize_name`` -- "Normalize a drug or protein name ..."
         doc = normalize_name.__doc__ or ""
         first_line = doc.strip().split("\n")[0]
         # Should start with a capitalised imperative verb.
@@ -601,7 +601,7 @@ class TestDomain4Coding:
 
 
 # ===========================================================================
-# §5. DOMAIN 5 — DATA QUALITY & INTEGRITY (D5-1 → D5-5)
+# §5. DOMAIN 5 -- DATA QUALITY & INTEGRITY (D5-1 -> D5-5)
 # ===========================================================================
 
 
@@ -641,8 +641,8 @@ class TestDomain5DataQuality:
         r.add_source_records(
             [
                 {"name": "Aspirin", "inchikey": "BSYNRYMUTXBXSQ-UHFFFAOYSA-N"},
-                {},  # invalid — missing required 'name'
-                {"name": ""},  # invalid — empty name
+                {},  # invalid -- missing required 'name'
+                {"name": ""},  # invalid -- empty name
             ],
             source="chembl",
         )
@@ -688,7 +688,7 @@ class TestDomain5DataQuality:
 
 
 # ===========================================================================
-# §6. DOMAIN 6 — RELIABILITY & RESILIENCE (D6-1 → D6-6)
+# §6. DOMAIN 6 -- RELIABILITY & RESILIENCE (D6-1 -> D6-6)
 # ===========================================================================
 
 
@@ -833,7 +833,7 @@ class TestDomain6Reliability:
         from entity_resolution.base import _ProcessGlobalRateLimiter
         _ProcessGlobalRateLimiter._reset_for_tests()
         # Two resolvers pointing at the same base URL should share
-        # one rate budget — calling acquire() twice in quick succession
+        # one rate budget -- calling acquire() twice in quick succession
         # should respect the configured delay.
         delay = 0.05
         t0 = time.monotonic()
@@ -847,7 +847,7 @@ class TestDomain6Reliability:
 
 
 # ===========================================================================
-# §7. DOMAIN 7 — IDEMPOTENCY & REPRODUCIBILITY (D7-1 → D7-5)
+# §7. DOMAIN 7 -- IDEMPOTENCY & REPRODUCIBILITY (D7-1 -> D7-5)
 # ===========================================================================
 
 
@@ -937,7 +937,7 @@ class TestDomain7Idempotency:
 
 
 # ===========================================================================
-# §8. DOMAIN 8 — PERFORMANCE & SCALABILITY (D8-1 → D8-6)
+# §8. DOMAIN 8 -- PERFORMANCE & SCALABILITY (D8-1 -> D8-6)
 # ===========================================================================
 
 
@@ -981,7 +981,7 @@ class TestDomain8Performance:
         # The fuzzy sweep should not crash and should respect the
         # ceiling (verified by the absence of an error).
         result = r._match_by_name("drug_99")
-        # Result may be None (no match above threshold) — that's fine.
+        # Result may be None (no match above threshold) -- that's fine.
         assert result is None or result in r.mapping
 
     def test_resolve_single_scaling_warning(self):
@@ -1043,7 +1043,7 @@ class TestDomain8Performance:
 
 
 # ===========================================================================
-# §9. DOMAIN 9 — SECURITY & PRIVACY (D9-1 → D9-7)
+# §9. DOMAIN 9 -- SECURITY & PRIVACY (D9-1 -> D9-7)
 # ===========================================================================
 
 
@@ -1146,7 +1146,7 @@ class TestDomain9Security:
 
 
 # ===========================================================================
-# §10. DOMAIN 10 — TESTING & VALIDATION (D10-1 → D10-7)
+# §10. DOMAIN 10 -- TESTING & VALIDATION (D10-1 -> D10-7)
 # ===========================================================================
 
 
@@ -1183,7 +1183,7 @@ class TestDomain10Testing:
         """D10-4: import succeeds even when pandas/requests are absent.
 
         Uses a subprocess (see TestDomain6Reliability.test_import_survives_missing_optional_deps
-        for the rationale — running this in-process would pollute the
+        for the rationale -- running this in-process would pollute the
         test session's sys.modules and break identity checks in
         subsequent tests).
         """
@@ -1238,7 +1238,7 @@ class TestDomain10Testing:
 
 
 # ===========================================================================
-# §11. DOMAIN 11 — LOGGING & OBSERVABILITY (D11-1 → D11-5)
+# §11. DOMAIN 11 -- LOGGING & OBSERVABILITY (D11-1 -> D11-5)
 # ===========================================================================
 
 
@@ -1296,7 +1296,7 @@ class TestDomain11Logging:
 
 
 # ===========================================================================
-# §12. DOMAIN 12 — CONFIGURATION & ENVIRONMENT MANAGEMENT (D12-1 → D12-5)
+# §12. DOMAIN 12 -- CONFIGURATION & ENVIRONMENT MANAGEMENT (D12-1 -> D12-5)
 # ===========================================================================
 
 
@@ -1359,7 +1359,7 @@ class TestDomain12Configuration:
 
 
 # ===========================================================================
-# §13. DOMAIN 13 — DOCUMENTATION & READABILITY (D13-1 → D13-10)
+# §13. DOMAIN 13 -- DOCUMENTATION & READABILITY (D13-1 -> D13-10)
 # ===========================================================================
 
 
@@ -1452,7 +1452,7 @@ class TestDomain13Documentation:
 
 
 # ===========================================================================
-# §14. DOMAIN 14 — COMPLIANCE & STANDARDS ADHERENCE (D14-1 → D14-7)
+# §14. DOMAIN 14 -- COMPLIANCE & STANDARDS ADHERENCE (D14-1 -> D14-7)
 # ===========================================================================
 
 
@@ -1511,7 +1511,7 @@ class TestDomain14Compliance:
 
 
 # ===========================================================================
-# §15. DOMAIN 15 — INTEROPERABILITY & INTEGRATION (D15-1 → D15-6)
+# §15. DOMAIN 15 -- INTEROPERABILITY & INTEGRATION (D15-1 -> D15-6)
 # ===========================================================================
 
 
@@ -1598,7 +1598,7 @@ class TestDomain15Interoperability:
 
 
 # ===========================================================================
-# §16. DOMAIN 16 — DATA LINEAGE & TRACEABILITY (D16-1 → D16-7)
+# §16. DOMAIN 16 -- DATA LINEAGE & TRACEABILITY (D16-1 -> D16-7)
 # ===========================================================================
 
 
@@ -1697,7 +1697,7 @@ class TestDomain16Lineage:
 
 
 # ===========================================================================
-# Doctest runner — runs every doctest in the module docstring.
+# Doctest runner -- runs every doctest in the module docstring.
 # ===========================================================================
 
 

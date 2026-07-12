@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: MIT
-# © 2024-2026 Autonomous Drug Repurposing Platform — Team Cosmic / VentureLab
+# © 2024-2026 Autonomous Drug Repurposing Platform -- Team Cosmic / VentureLab
 """
 Real integration test for ALL 16 fixed files combined.
 
 Verifies that the entire dataset pipeline works end-to-end after the
 resolver_utils.py upgrade.  These are NOT fake "is the module there"
-checks — every test exercises real cross-module behaviour and asserts
+checks -- every test exercises real cross-module behaviour and asserts
 on real outputs.
 
 The 16 files covered:
@@ -30,11 +30,11 @@ The 16 files covered:
 16. entity_resolution/resolver_utils.py  ← THE FILE UPGRADED IN THIS PR
 
 Cross-cutting flows exercised:
-  - Config → Database → Loaders → Cleaning → Entity Resolution
+  - Config -> Database -> Loaders -> Cleaning -> Entity Resolution
   - DrugResolver uses resolver_utils functions for indexing, fuzzy match,
     confidence lookup, validation, and duplicate detection.
   - ProteinResolver ditto.
-  - InChIKey validation flows from cleaning.normalizer → resolver_utils →
+  - InChIKey validation flows from cleaning.normalizer -> resolver_utils ->
     drug_resolver (single source of truth).
   - METHOD_CONFIDENCE dict and MatchConfidence enum stay in sync across
     the resolver_utils.py and base.py modules.
@@ -195,7 +195,7 @@ class TestCrossModuleInchikeyValidation:
         that cleaning.normalizer.is_valid_inchikey accepts (including
         synthetic, mixture, and lowercase keys)."""
         from entity_resolution.resolver_utils import is_valid_inchikey
-        # Synthetic key — must be accepted (the legacy strict pattern
+        # Synthetic key -- must be accepted (the legacy strict pattern
         # would have rejected it; the delegation fixes this).
         assert is_valid_inchikey("SYNTH-001") is True
 
@@ -260,11 +260,11 @@ class TestMethodConfidenceEnumSyncAcrossModules:
 
 
 # =============================================================================
-# Group 4: Config → Database → Cleaning → Entity Resolution pipeline
+# Group 4: Config -> Database -> Cleaning -> Entity Resolution pipeline
 # =============================================================================
 
 class TestEndToEndPipelineFlow:
-    """End-to-end: settings → DB models → cleaning → entity resolution."""
+    """End-to-end: settings -> DB models -> cleaning -> entity resolution."""
 
     def test_settings_can_be_loaded(self):
         """config.settings must expose settings used by the rest of the pipeline."""
@@ -293,7 +293,7 @@ class TestEndToEndPipelineFlow:
         """resolver_utils.is_valid_inchikey must agree with normalizer's version."""
         from entity_resolution.resolver_utils import is_valid_inchikey
         from cleaning.normalizer import is_valid_inchikey as normalizer_is_valid
-        # Test on a synthetic key — the legacy strict pattern would reject it,
+        # Test on a synthetic key -- the legacy strict pattern would reject it,
         # but the delegation should accept it.
         assert is_valid_inchikey("SYNTH-001") == normalizer_is_valid("SYNTH-001") == True
 
@@ -306,7 +306,7 @@ class TestDrugResolverWithUpgradedResolverUtils:
     """DrugResolver must continue to work correctly with the upgraded resolver_utils."""
 
     def test_exact_inchikey_match(self):
-        """Same InChIKey from ChEMBL and DrugBank → single canonical entry."""
+        """Same InChIKey from ChEMBL and DrugBank -> single canonical entry."""
         from entity_resolution.drug_resolver import DrugResolver
         resolver = DrugResolver()
         resolver.add_source_records(
@@ -352,7 +352,7 @@ class TestDrugResolverWithUpgradedResolverUtils:
             }],
             source="drugbank",
         )
-        # Two separate entries — stereoisomers NOT merged.
+        # Two separate entries -- stereoisomers NOT merged.
         assert len(resolver.mapping) == 2
 
     def test_synthetic_inchikey_does_not_corrupt_connectivity_index(self):
@@ -436,7 +436,7 @@ class TestProteinResolverWithUpgradedResolverUtils:
     """ProteinResolver must continue to work with the upgraded resolver_utils."""
 
     def test_uniprot_exact_match(self):
-        """Same UniProt ID from UniProt + STRING sources → single entry."""
+        """Same UniProt ID from UniProt + STRING sources -> single entry."""
         from entity_resolution.protein_resolver import ProteinResolver
         resolver = ProteinResolver()
         resolver.add_uniprot_records([{
@@ -550,7 +550,7 @@ class TestResolverUtilsCleaningInterop:
 
     def test_is_valid_inchikey_uses_normalizer(self):
         """Resolver's is_valid_inchikey must produce the same results as the
-        normalizer's — including for SYNTH and lowercase inputs."""
+        normalizer's -- including for SYNTH and lowercase inputs."""
         from entity_resolution.resolver_utils import is_valid_inchikey
         from cleaning.normalizer import is_valid_inchikey as normalizer_is_valid
         test_keys = [
@@ -617,7 +617,7 @@ class TestResolverUtilsDrugResolverInterop:
         """DrugResolver must use resolver_utils.find_duplicate_ids."""
         from entity_resolution.drug_resolver import DrugResolver
         resolver = DrugResolver()
-        # Two records with the same chembl_id — should be flagged.
+        # Two records with the same chembl_id -- should be flagged.
         resolver.add_source_records(
             [
                 {"inchikey": "BSYNRYMUTXBXSQ-UHFFFAOYAS-N", "name": "A", "chembl_id": "CHEMBL25"},
@@ -625,7 +625,7 @@ class TestResolverUtilsDrugResolverInterop:
             ],
             source="test",
         )
-        # The duplicate should have been logged — verify via stats.
+        # The duplicate should have been logged -- verify via stats.
         assert resolver.get_stats().get("duplicate_ids_detected", 0) >= 1
 
 
@@ -665,7 +665,7 @@ class TestResolverUtilsProteinResolverInterop:
 
 
 # =============================================================================
-# Group 11: Backward compatibility — all legacy functions still work
+# Group 11: Backward compatibility -- all legacy functions still work
 # =============================================================================
 
 class TestBackwardCompatibility:
@@ -697,7 +697,7 @@ class TestBackwardCompatibility:
         assert is_valid_inchikey("invalid") is False
 
     def test_build_name_index_legacy_signature(self):
-        """build_name_index(records, name_field='name') — legacy signature."""
+        """build_name_index(records, name_field='name') -- legacy signature."""
         from entity_resolution.resolver_utils import build_name_index
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
@@ -773,7 +773,7 @@ class TestBackwardCompatibility:
         assert ok is True
 
     def test_find_duplicate_ids_legacy_signature(self):
-        """find_duplicate_ids(records, id_fields=default) — legacy signature."""
+        """find_duplicate_ids(records, id_fields=default) -- legacy signature."""
         from entity_resolution.resolver_utils import find_duplicate_ids
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
@@ -999,17 +999,17 @@ class TestSixteenDomainVerification:
 
 
 # =============================================================================
-# Group 13: Smoke test — entire pipeline runs without errors
+# Group 13: Smoke test -- entire pipeline runs without errors
 # =============================================================================
 
 class TestFullPipelineSmoke:
     """Smoke test: simulate the entire dataset pipeline flow.
 
-    Config → Database → Loaders → Cleaning → Entity Resolution
+    Config -> Database -> Loaders -> Cleaning -> Entity Resolution
     """
 
     def test_pipeline_imports_all_modules(self):
-        """Import every module used by the pipeline — must not raise."""
+        """Import every module used by the pipeline -- must not raise."""
         import config  # noqa: F401
         import config.settings  # noqa: F401
         import database  # noqa: F401
@@ -1049,14 +1049,14 @@ class TestFullPipelineSmoke:
             "pubchem_cid": 2244,
         }
 
-        # Step 1: Clean — normalise InChIKey case.
+        # Step 1: Clean -- normalise InChIKey case.
         chembl["inchikey"] = normalize_inchikey(chembl["inchikey"])
 
-        # Step 2: Validate — all three InChIKeys must be valid.
+        # Step 2: Validate -- all three InChIKeys must be valid.
         for r in [chembl, drugbank, pubchem]:
             assert is_valid_inchikey(r["inchikey"]), f"Invalid: {r['inchikey']}"
 
-        # Step 3: Resolve — merge into a single canonical entry.
+        # Step 3: Resolve -- merge into a single canonical entry.
         resolver = DrugResolver()
         resolver.add_source_records([chembl], source="chembl")
         resolver.add_source_records([drugbank], source="drugbank")
@@ -1100,7 +1100,7 @@ class TestFullPipelineSmoke:
 
 
 # =============================================================================
-# Group 14: Regression — verify no existing tests broke
+# Group 14: Regression -- verify no existing tests broke
 # =============================================================================
 
 class TestNoRegression:
@@ -1108,7 +1108,7 @@ class TestNoRegression:
 
     def test_compute_match_confidence_fuzzy_still_0_85(self):
         from entity_resolution.resolver_utils import compute_match_confidence
-        # This was the D3-3 fix value — must not regress.
+        # This was the D3-3 fix value -- must not regress.
         assert compute_match_confidence("fuzzy") == 0.85
 
     def test_compute_match_confidence_inchikey_exact_still_1_0(self):
@@ -1121,7 +1121,7 @@ class TestNoRegression:
 
     def test_normalize_name_aspirin_parens(self):
         from entity_resolution.resolver_utils import normalize_name
-        # Legacy test case — must continue to pass.
+        # Legacy test case -- must continue to pass.
         assert normalize_name("Aspirin (acetylsalicylic acid)") == "aspirin"
 
     def test_normalize_name_acetyl_salicylic(self):

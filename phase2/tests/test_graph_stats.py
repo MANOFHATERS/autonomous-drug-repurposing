@@ -12,7 +12,7 @@ Test coverage across 16 domains:
   - Domain 10: Testing (comprehensive mock-based verification)
   - Domain 14: Compliance (JSON round-trip, type consistency)
 
-All tests use mocked Neo4j driver — no actual database connection required.
+All tests use mocked Neo4j driver -- no actual database connection required.
 """
 
 import json
@@ -138,7 +138,7 @@ def _make_mock_session(
                 ),
             }]
         elif "Disease" in query and "doid" in query and "AS cnt" in query:
-            # Disease name/DOID sanity check — expects cnt key
+            # Disease name/DOID sanity check -- expects cnt key
             return [{"cnt": 0}]
         elif "Disease" in query and "name" in query:
             return [{
@@ -153,7 +153,7 @@ def _make_mock_session(
         elif "withdrawn = true" in query:
             return [{"cnt": 0}]
         elif "labels(s)[0]" in query and "labels(t)[0]" in query:
-            # Edge direction check — return valid pairs only
+            # Edge direction check -- return valid pairs only
             return [
                 {"src_lbl": "Compound", "dst_lbl": "Disease", "cnt": 5000},
                 {"src_lbl": "Compound", "dst_lbl": "Protein", "cnt": 15000},
@@ -810,7 +810,7 @@ class TestSanityChecks(unittest.TestCase):
 
 
 class TestCheckEdgeExists(unittest.TestCase):
-    """Test _check_edge_exists helper — the core query builder."""
+    """Test _check_edge_exists helper -- the core query builder."""
 
     def _setup_gs(self):
         gs = _make_graph_stats()
@@ -899,7 +899,7 @@ class TestCheckEdgeExists(unittest.TestCase):
 
 
 class TestLabelDistributionReport(unittest.TestCase):
-    """Test label_distribution_report — Fix 13.1, 10.11."""
+    """Test label_distribution_report -- Fix 13.1, 10.11."""
 
     def _setup_gs(self, **kwargs):
         gs = _make_graph_stats()
@@ -944,7 +944,7 @@ class TestLabelDistributionReport(unittest.TestCase):
 
 
 class TestGenerateDataReadme(unittest.TestCase):
-    """Test generate_data_readme — Fix 15.8, 13.10."""
+    """Test generate_data_readme -- Fix 15.8, 13.10."""
 
     def _setup_gs(self):
         gs = _make_graph_stats()
