@@ -20,13 +20,10 @@ import {
 } from "@/lib/services/openfda";
 
 const OPENFDA_REACHABLE = (() => {
-  try {
-    // Quick synchronous reachability check using fetch with a short timeout.
-    // We rely on jest's testTimeout for the actual assertions.
-    return true;
-  } catch {
-    return false;
-  }
+  // FE-027: Previously this had a try/catch that always returned true, causing
+  // a no-unreachable lint error on the catch block. Simplified to a constant
+  // since the live-test guard is handled by jest's testTimeout.
+  return true;
 })();
 
 const describeLive = OPENFDA_REACHABLE ? describe : describe.skip;
