@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Unified Platform Runner — Phase 1 + Phase 2 in one command
+Unified Platform Runner -- Phase 1 + Phase 2 in one command
 ==========================================================
 
 This is the SINGLE top-level entry point for the unified Autonomous Drug
 Repurposing Platform. It chains:
 
-  Phase 1  →  Bridge  →  Phase 2
+  Phase 1  ->  Bridge  ->  Phase 2
   ───────────────────────────────
   Phase 1 (data ingestion):
     Reads the processed_data CSVs that Phase 1's pipelines have already
@@ -42,18 +42,18 @@ USAGE
 
 EXIT CODES
 ----------
-  0  — Success (data loaded, no errors)
-  1  — Bridge produced zero nodes (Phase 1 outputs likely missing)
-  2  — Bridge produced zero edges (interactions or OMIM CSV likely empty)
-  3  — Neo4j connection failed in production (v75 T-032: applies whenever
+  0  -- Success (data loaded, no errors)
+  1  -- Bridge produced zero nodes (Phase 1 outputs likely missing)
+  2  -- Bridge produced zero edges (interactions or OMIM CSV likely empty)
+  3  -- Neo4j connection failed in production (v75 T-032: applies whenever
        the runner is in production mode AND no Neo4j is reachable, whether
        --neo4j-uri was explicitly supplied OR auto-detected from
        DRUGOS_NEO4J_URI env var OR the default bolt://localhost:7687
        fallback. Set DRUGOS_ALLOW_NO_NEO4J=1 to acknowledge and continue
        with the in-memory RecordingGraphBuilder.)
-  4  — V1 launch criteria not met (only when --full-pipeline)
-  5  — Full pipeline raised an unexpected exception
-  6  — --require-full-data set but Phase 1 sample mode would be used (T-011)
+  4  -- V1 launch criteria not met (only when --full-pipeline)
+  5  -- Full pipeline raised an unexpected exception
+  6  -- --require-full-data set but Phase 1 sample mode would be used (T-011)
 """
 
 from __future__ import annotations
@@ -99,17 +99,17 @@ except ImportError as _seed_import_exc:
     )
 
 
-# v20 Compound-2/8 ROOT FIX — Production escape-hatch guard (run_unified side).
+# v20 Compound-2/8 ROOT FIX -- Production escape-hatch guard (run_unified side).
 # The same guard exists in run_pipeline.py, but run_pipeline.py is only
 # imported when --full-pipeline is on. For --no-full-pipeline (bridge-only)
 # runs, this guard ensures escape hatches are still refused in production.
 #
-# v75 ROOT FIX (T-031 — escape-hatch guard runs at import time):
+# v75 ROOT FIX (T-031 -- escape-hatch guard runs at import time):
 #   The v74 code called ``_check_production_escape_hatches_unified()`` at
 #   MODULE IMPORT TIME (top-level call at line 151). This ran BEFORE
 #   ``main()``, BEFORE argparse processed ``--help``, and BEFORE any
 #   logging was set up. If DRUGOS_ENVIRONMENT=prod and an escape-hatch
-#   flag was set, the module raised ``SystemExit(1)`` — so
+#   flag was set, the module raised ``SystemExit(1)`` -- so
 #   ``python run_unified.py --help`` exited 1 with NO help output,
 #   confusing operators.
 #
@@ -122,7 +122,7 @@ except ImportError as _seed_import_exc:
 #         logger instead of being a bare stderr write.
 #     (3) The guard runs ONCE per process (main() is called once), not
 #         on every import (the v74 module-level call ran on every
-#         import — including by the Airflow _trigger_phase2 subprocess
+#         import -- including by the Airflow _trigger_phase2 subprocess
 #         which imports run_unified indirectly).
 def _check_production_escape_hatches_unified() -> None:
     env = os.environ.get("DRUGOS_ENVIRONMENT", "dev").lower()
@@ -147,7 +147,7 @@ def _check_production_escape_hatches_unified() -> None:
             )
 
 
-# v75 ROOT FIX (T-031): the call is now made inside main() — see the
+# v75 ROOT FIX (T-031): the call is now made inside main() -- see the
 # call site after _setup_logging(args.verbose).
 
 
@@ -176,7 +176,7 @@ def _build_real_neo4j(uri: str, user: str, password: str):
 def main(argv: Optional[list] = None) -> int:
     parser = argparse.ArgumentParser(
         prog="run_unified.py",
-        description="Run the unified Phase 1 → Phase 2 pipeline.",
+        description="Run the unified Phase 1 -> Phase 2 pipeline.",
     )
     parser.add_argument(
         "--phase1-dir",
@@ -198,11 +198,11 @@ def main(argv: Optional[list] = None) -> int:
         default=True,
         help=(
             "v15 ROOT FIX (REM-25): after the bridge stages data, also "
-            "run the FULL Phase 2 pipeline (entity resolution → PyG "
-            "HeteroData build → training data construction → TransE "
-            "training → validation → V1 launch criteria check). "
+            "run the FULL Phase 2 pipeline (entity resolution -> PyG "
+            "HeteroData build -> training data construction -> TransE "
+            "training -> validation -> V1 launch criteria check). "
             "v20 ROOT FIX (Phase1↔Phase2 connection): the previous "
-            "default was False — operators had to explicitly pass "
+            "default was False -- operators had to explicitly pass "
             "--full-pipeline to get an AUC. Most users never did, "
             "leading to the audit's complaint that the runner exits 0 "
             "but produces no model. Default is now True; pass "
@@ -214,7 +214,7 @@ def main(argv: Optional[list] = None) -> int:
         dest="full_pipeline",
         action="store_false",
         help=(
-            "v20: opt OUT of the full pipeline. Stops at the bridge — "
+            "v20: opt OUT of the full pipeline. Stops at the bridge -- "
             "no TransE training, no AUC, no V1 launch criteria check. "
             "Useful for quick smoke-tests in dev."
         ),
@@ -223,7 +223,7 @@ def main(argv: Optional[list] = None) -> int:
     # used ``action='store_true', default=True`` with NO inverse flag.
     # That made ``--skip-download`` a no-op (it was already True) AND
     # locked the operator out of ever enabling downloads from this
-    # entry point — the audit's #1 P0 blocker. ``BooleanOptionalAction``
+    # entry point -- the audit's #1 P0 blocker. ``BooleanOptionalAction``
     # exposes BOTH ``--skip-download`` AND ``--no-skip-download`` so the
     # user can choose. Default stays True (Phase 1 CSVs are the
     # authoritative data source per the build doc), but operators can
@@ -233,11 +233,11 @@ def main(argv: Optional[list] = None) -> int:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Skip network downloads in step7 (use Phase 1 CSVs only). "
-             "Default True — the bridge is the authoritative data source. "
+             "Default True -- the bridge is the authoritative data source. "
              "Pass --no-skip-download to enable live downloads of "
              "STRING/UniProt/ChEMBL/DrugBank/SIDER/etc.",
     )
-    # v63 ROOT FIX (P2C-003+016 — ChEMBERTa silent-disable cascade):
+    # v63 ROOT FIX (P2C-003+016 -- ChEMBERTa silent-disable cascade):
     # The audit required a --no-chemberta CLI flag for dev environments
     # where the ChEMBERTa checkpoint download is too slow or HF_TOKEN is
     # unavailable. Without this flag, dev runs either (a) raised
@@ -246,7 +246,7 @@ def main(argv: Optional[list] = None) -> int:
     # var which is undocumented and easy to forget. The flag sets the
     # env var BEFORE step9 runs, so the dev path is explicit and
     # auditable. In production (DRUGOS_ENVIRONMENT=prod), the flag is
-    # IGNORED — ChEMBERTa is mandatory and failure is fatal.
+    # IGNORED -- ChEMBERTa is mandatory and failure is fatal.
     parser.add_argument(
         "--no-chemberta",
         action="store_true",
@@ -255,22 +255,22 @@ def main(argv: Optional[list] = None) -> int:
              "(dev convenience flag). Sets DRUGOS_USE_CHEMBERTA=0 and "
              "DRUGOS_STRICT_FEATURES=0 so the pipeline falls back to "
              "random Xavier features for Compound nodes WITHOUT raising. "
-             "The Graph Transformer will NOT learn molecular structure — "
+             "The Graph Transformer will NOT learn molecular structure -- "
              "AUC reflects transductive memorisation only. "
              "IGNORED in production (DRUGOS_ENVIRONMENT=prod) where "
              "ChEMBERTa is mandatory.",
     )
-    # v73 ROOT FIX (T-011 — auto-invoked Phase 1 sample mode produces
+    # v73 ROOT FIX (T-011 -- auto-invoked Phase 1 sample mode produces
     # sample-sized KG silently):
     #   The previous runner auto-invoked Phase 1 in SAMPLE mode
     #   (50-200 records per source) when ``phase1/processed_data/`` did
-    #   not exist. The operator saw "UNIFIED RUN COMPLETE — N nodes, M
+    #   not exist. The operator saw "UNIFIED RUN COMPLETE -- N nodes, M
     #   edges loaded" with no indication that N and M were sample-scale
     #   (tens) instead of production-scale (millions). The runner exited
     #   0. The staged_graph.json persisted at the sample scale. Phase 2
     #   training ran on the sample graph and reported an AUC that looked
     #   valid but was meaningless. The V1 launch criteria check could
-    #   PASS on the sample graph — operators could declare V1 launch on
+    #   PASS on the sample graph -- operators could declare V1 launch on
     #   a sample-sized KG. ``make dry-run`` auto-invoked sample-mode
     #   Phase 1 and reported success; CI that ran ``make dry-run`` and
     #   checked exit code 0 saw green even though no real data was
@@ -292,7 +292,7 @@ def main(argv: Optional[list] = None) -> int:
             "deployments, and any context where a sample-sized KG "
             "(tens of nodes) would be misleading. When this flag is "
             "NOT set, a LOUD warning is printed to stderr indicating "
-            "the KG is sample-scale — but the run continues (dev mode)."
+            "the KG is sample-scale -- but the run continues (dev mode)."
         ),
     )
     args = parser.parse_args(argv)
@@ -323,7 +323,7 @@ def main(argv: Optional[list] = None) -> int:
     _setup_logging(args.verbose)
     log = logging.getLogger("unified")
 
-    # v75 ROOT FIX (T-031 — escape-hatch guard runs at import time):
+    # v75 ROOT FIX (T-031 -- escape-hatch guard runs at import time):
     # Call the production escape-hatch guard HERE, after logging is set
     # up and after argparse has processed --help. The v74 module-level
     # call (line 151) ran before main() and broke --help in production
@@ -333,32 +333,32 @@ def main(argv: Optional[list] = None) -> int:
     _check_production_escape_hatches_unified()
 
     # ─── 1. Phase 1 outputs sanity check ──────────────────────────────────
-    # v29 ROOT FIX (audit O-1 — "run_unified.py does NOT run Phase 1"):
+    # v29 ROOT FIX (audit O-1 -- "run_unified.py does NOT run Phase 1"):
     # The audit found that a fresh ``python run_unified.py`` exits 1
     # immediately because Phase 1's processed_data/ doesn't exist on a
     # fresh clone. The v28 code just said "run Phase 1 first" and gave
     # up. ROOT FIX: actually invoke Phase 1 here, so the unified runner
     # is truly unified. We try the Phase 1 master pipeline; if it
     # fails (e.g. no DrugBank license, no network), we fall back to the
-    # embedded samples (no API calls, no DB writes — biologically valid
+    # embedded samples (no API calls, no DB writes -- biologically valid
     # real InChIKeys/UniProt IDs/DOIDs) so the platform ALWAYS produces
     # a graph and an AUC even on a fresh laptop with no credentials.
     #
-    # v73 ROOT FIX (T-011 — sample-mode KG is silent):
+    # v73 ROOT FIX (T-011 -- sample-mode KG is silent):
     #   Track whether the run ended up in sample mode (Tier 2 fallback)
     #   so the final summary log can emit a LOUD, multi-line warning.
     #   The previous code logged a single WARNING line that was easy to
     #   miss in a long log scroll. Now we print a banner to BOTH the
     #   log AND stderr so the operator cannot miss it. If
     #   ``--require-full-data`` was passed, we exit non-zero (code 6)
-    #   BEFORE auto-invoking sample mode — CI gates can catch this.
+    #   BEFORE auto-invoking sample mode -- CI gates can catch this.
     _sample_mode_used = False
     if not args.phase1_dir.exists():
         # v73 ROOT FIX (T-011): if --require-full-data was passed, refuse
         # to auto-invoke Phase 1 sample mode. Exit code 6 is documented
         # in the EXIT CODES section above. This is the CI / production
-        # guard — operators who want the dev fallback simply omit the
-        # flag and the existing layered Tier 1 → Tier 2 → Tier 3 path
+        # guard -- operators who want the dev fallback simply omit the
+        # flag and the existing layered Tier 1 -> Tier 2 -> Tier 3 path
         # runs as before.
         if args.require_full_data:
             print(
@@ -373,7 +373,7 @@ def main(argv: Optional[list] = None) -> int:
             )
             return 6
         log.warning(
-            "Phase 1 processed_data dir not found: %s — attempting to "
+            "Phase 1 processed_data dir not found: %s -- attempting to "
             "run Phase 1 master pipeline now (v49 root fix).", args.phase1_dir,
         )
         # v73 ROOT FIX (T-011): LOUD multi-line banner to BOTH log and
@@ -388,11 +388,11 @@ def main(argv: Optional[list] = None) -> int:
             + "Phase 1 processed_data/ does not exist. The unified runner\n"
             + "will auto-invoke Phase 1 in SAMPLE MODE (50-200 records per\n"
             + "source). The resulting Knowledge Graph will be SAMPLE-SCALE\n"
-            + "(tens of nodes) — NOT production-scale (millions of nodes).\n"
+            + "(tens of nodes) -- NOT production-scale (millions of nodes).\n"
             + "\n"
             + "This is suitable for:\n"
             + "  * dev smoke-tests of the bridge + Phase 2 pipeline\n"
-            + "  * verifying the unified runner wires Phase 1 → Phase 2\n"
+            + "  * verifying the unified runner wires Phase 1 -> Phase 2\n"
             + "\n"
             + "This is NOT suitable for:\n"
             + "  * V1 launch sign-off (the AUC reflects transductive\n"
@@ -415,19 +415,19 @@ def main(argv: Optional[list] = None) -> int:
         # redirected to a file. The operator CANNOT miss this.
         print(_sample_banner, file=sys.stderr)
         _sample_mode_used = True
-        # v61 ROOT FIX (silent break point #3 — forensic deep fix):
+        # v61 ROOT FIX (silent break point #3 -- forensic deep fix):
         # The v49 code tried `python -m pipelines` (full sample-mode run
         # which makes API calls to ChEMBL/UniProt/STRING/DisGeNET/OMIM/
         # PubChem). When ANY API was unreachable (no network, rate-limit,
         # missing API keys, DrugBank academic license paused), the entire
-        # Phase 1 master pipeline FAILED and run_unified.py exited 1 —
+        # Phase 1 master pipeline FAILED and run_unified.py exited 1 --
         # the user saw "Phase 1 auto-invocation failed" with NO fallback.
         # ROOT FIX: layered fallback strategy.
         #   Tier 1: try `python -m pipelines all` (full sample mode with
-        #     API calls — produces the richest dataset when network +
+        #     API calls -- produces the richest dataset when network +
         #     credentials are available).
         #   Tier 2: if Tier 1 fails, try `python -m pipelines samples`
-        #     (embedded sample CSVs — NO API calls, NO DB writes,
+        #     (embedded sample CSVs -- NO API calls, NO DB writes,
         #     biologically valid real IDs). This ALWAYS succeeds as long
         #     as the phase1 package imports cleanly.
         #   Tier 3: if even Tier 2 fails (phase1 package broken), give
@@ -439,7 +439,7 @@ def main(argv: Optional[list] = None) -> int:
             log.info(
                 "Tier 1: invoking `python -m pipelines all` "
                 "(DRUGOS_DOWNLOAD_MODE=sample, makes API calls to all "
-                "7 sources — needs network + API keys)."
+                "7 sources -- needs network + API keys)."
             )
             _env = dict(os.environ)
             _env["DRUGOS_DOWNLOAD_MODE"] = _env.get(
@@ -447,7 +447,7 @@ def main(argv: Optional[list] = None) -> int:
             )
             # R-001: subprocess is imported at module level (top-level), so
             # subprocess.SubprocessError in the except clause resolves correctly.
-            # R-033: 60s GUARANTEED Tier 1 would fail on any real hardware —
+            # R-033: 60s GUARANTEED Tier 1 would fail on any real hardware --
             # `python -m pipelines all` makes API calls to 7 external sources
             # and easily exceeds 60s. 600s (10 min) is long enough for a real
             # attempt but short enough that operators do not wait hours for
@@ -462,11 +462,11 @@ def main(argv: Optional[list] = None) -> int:
                 phase1_succeeded = True
                 log.info(
                     "Tier 1 succeeded: Phase 1 master pipeline completed "
-                    "— processed_data available at %s", args.phase1_dir,
+                    "-- processed_data available at %s", args.phase1_dir,
                 )
             else:
                 log.warning(
-                    "Tier 1 failed (rc=%d) — falling back to Tier 2 "
+                    "Tier 1 failed (rc=%d) -- falling back to Tier 2 "
                     "(embedded samples, no API calls). stderr tail: %s",
                     _proc.returncode, (_proc.stderr or "")[-500:],
                 )
@@ -474,7 +474,7 @@ def main(argv: Optional[list] = None) -> int:
         # subprocess.SubprocessError resolves correctly in this except clause.
         except (subprocess.SubprocessError, OSError, ValueError) as _tier1_exc:
             log.warning(
-                "Tier 1 exception: %s — falling back to Tier 2.",
+                "Tier 1 exception: %s -- falling back to Tier 2.",
                 _tier1_exc,
             )
 
@@ -484,7 +484,7 @@ def main(argv: Optional[list] = None) -> int:
                 _phase1_root = str(HERE / "phase1")
                 log.info(
                     "Tier 2: invoking `python -m pipelines samples` "
-                    "(embedded CSVs — no API calls, no DB writes, "
+                    "(embedded CSVs -- no API calls, no DB writes, "
                     "biologically valid real IDs). This ALWAYS succeeds "
                     "if the phase1 package imports cleanly."
                 )
@@ -498,7 +498,7 @@ def main(argv: Optional[list] = None) -> int:
                     log.info(
                         "Tier 2 succeeded: embedded sample CSVs written "
                         "to %s. The platform will run end-to-end on "
-                        "these samples — biologically valid (real "
+                        "these samples -- biologically valid (real "
                         "InChIKeys, UniProt IDs, DOIDs) but small (~70 "
                         "nodes). For the full 10K-drug KG, run Tier 1 "
                         "with proper API credentials.", args.phase1_dir,
@@ -515,7 +515,7 @@ def main(argv: Optional[list] = None) -> int:
                     "Tier 2 exception: %s", _tier2_exc,
                 )
 
-        # --- Tier 3: total failure — actionable error ---
+        # --- Tier 3: total failure -- actionable error ---
         if not phase1_succeeded:
             log.error(
                 "All Phase 1 invocation tiers failed. Manual options: "
@@ -529,16 +529,16 @@ def main(argv: Optional[list] = None) -> int:
             return 1
     else:
         log.info("=" * 70)
-        log.info("UNIFIED RUNNER — Phase 1 → Bridge → Phase 2")
+        log.info("UNIFIED RUNNER -- Phase 1 -> Bridge -> Phase 2")
         log.info("=" * 70)
         log.info("Phase 1 processed_data: %s", args.phase1_dir)
 
     # ─── 2. Build or select the graph builder ─────────────────────────────
-    # v36 ROOT FIX (Neo4j persistence — user's #1 complaint):
+    # v36 ROOT FIX (Neo4j persistence -- user's #1 complaint):
     # "All data lives in RecordingGraphBuilder (in-memory). Nothing
     # persists. No Neo4j writes." The previous code defaulted to
     # RecordingGraphBuilder when --neo4j-uri was omitted, which meant
-    # a fresh ``python run_unified.py`` produced NO persistent KG —
+    # a fresh ``python run_unified.py`` produced NO persistent KG --
     # the 67 nodes / 66 edges were dropped on process exit unless the
     # operator explicitly passed --neo4j-uri.
     #
@@ -568,7 +568,7 @@ def main(argv: Optional[list] = None) -> int:
         or os.environ.get("NEO4J_PASSWORD")
         or "neo4j"
     )
-    # R-020 root fix: the previous "auto-detect" was theater — on a fresh
+    # R-020 root fix: the previous "auto-detect" was theater -- on a fresh
     # laptop without Neo4j it ALWAYS tried bolt://localhost:7687 first,
     # ALWAYS failed (ConnectionError), ALWAYS fell back to RecordingGraphBuilder.
     # The 5-second connection timeout added latency to every run. Now: if no
@@ -580,7 +580,7 @@ def main(argv: Optional[list] = None) -> int:
             log.info("Neo4j mode: connecting to %s", neo4j_uri)
             builder = _build_real_neo4j(neo4j_uri, neo4j_user, neo4j_password)
             neo4j_connected = True
-            log.info("Neo4j connection ESTABLISHED — KG will be persisted.")
+            log.info("Neo4j connection ESTABLISHED -- KG will be persisted.")
         except (OSError, ValueError, ConnectionError) as exc:
             log.warning(
                 "Neo4j connection to %s failed: %s. Falling back to "
@@ -590,7 +590,7 @@ def main(argv: Optional[list] = None) -> int:
             )
     else:
         log.info(
-            "No --neo4j-uri or DRUGOS_NEO4J_URI set — using "
+            "No --neo4j-uri or DRUGOS_NEO4J_URI set -- using "
             "RecordingGraphBuilder (in-memory). The staged graph WILL "
             "be persisted to disk as staged_graph.json. To use Neo4j, "
             "pass --neo4j-uri bolt://localhost:7687."
@@ -616,7 +616,7 @@ def main(argv: Optional[list] = None) -> int:
     # ─── 3. Run the bridge ────────────────────────────────────────────────
     from drugos_graph.phase1_bridge import run_phase1_to_phase2
 
-    log.info("Running Phase 1 → Phase 2 bridge...")
+    log.info("Running Phase 1 -> Phase 2 bridge...")
     result = run_phase1_to_phase2(
         phase1_processed_dir=args.phase1_dir,
         builder=builder,
@@ -668,15 +668,15 @@ def main(argv: Optional[list] = None) -> int:
         with open(_persist_path, "w") as _f:
             json.dump(_persist_payload, _f, indent=2, default=str)
         log.info(
-            "Staged graph PERSISTED to %s (dry-run artifact — Neo4j is "
+            "Staged graph PERSISTED to %s (dry-run artifact -- Neo4j is "
             "the production store when --neo4j-uri is set).",
             _persist_path,
         )
     except OSError as _persist_os_exc:
-        # v54 ROOT FIX (ROOT-4 — staged_graph.json bare except):
+        # v54 ROOT FIX (ROOT-4 -- staged_graph.json bare except):
         # Split the bare `except Exception` into specific clauses.
         # OSError (disk full, permission denied, path too long) is
-        # ERROR-level — the operator needs to know the graph was NOT
+        # ERROR-level -- the operator needs to know the graph was NOT
         # persisted, because downstream consumers (Phase 3, RL ranker)
         # will not find the file.
         # v75 ROOT FIX (T-033): replaced the fragile
@@ -687,31 +687,31 @@ def main(argv: Optional[list] = None) -> int:
         # detect whether the assignment at line 705 ever ran. The
         # placeholder ``'staged_graph.json'`` (the default filename the
         # try block WOULD have used) is now a clear fallback string
-        # only — no ``dir()`` introspection, no scope ambiguity.
-        _path_for_msg = str(_persist_path) if _persist_path is not None else "staged_graph.json (default — assignment did not run)"
+        # only -- no ``dir()`` introspection, no scope ambiguity.
+        _path_for_msg = str(_persist_path) if _persist_path is not None else "staged_graph.json (default -- assignment did not run)"
         log.error(
             "FAILED to persist staged graph to disk (OSError): %s. "
             "The staged graph was loaded into the builder but NOT "
             "written to %s. Downstream consumers (Phase 3, RL ranker) "
             "will NOT find this file. Check disk space and permissions. "
-            "(v54 ROOT-4 fix — was silently dropped in v48; v75 T-033 "
-            "fix — replaced dir() check with explicit None init).",
+            "(v54 ROOT-4 fix -- was silently dropped in v48; v75 T-033 "
+            "fix -- replaced dir() check with explicit None init).",
             _persist_os_exc,
             _path_for_msg,
         )
     except (TypeError, ValueError) as _persist_json_exc:
         # JSON serialization errors (non-serializable objects in payload)
-        # — ERROR-level because this indicates a code bug in the payload
+        # -- ERROR-level because this indicates a code bug in the payload
         # construction.
         log.error(
             "FAILED to persist staged graph to disk (JSON serialization "
             "error): %s. The staged graph payload contains non-serializable "
             "objects. This is a code bug in run_unified.py's persistence "
-            "block — report to the development team. (v54 ROOT-4 fix).",
+            "block -- report to the development team. (v54 ROOT-4 fix).",
             _persist_json_exc,
         )
     except (OSError, PermissionError) as _persist_exc:
-        # Catch-all for I/O errors — WARNING (non-fatal) but
+        # Catch-all for I/O errors -- WARNING (non-fatal) but
         # with full traceback so the operator can diagnose.
         log.warning(
             "Failed to persist staged graph to disk (unexpected I/O error, "
@@ -748,14 +748,14 @@ def main(argv: Optional[list] = None) -> int:
 
     # ─── 5. Exit-code contract ───────────────────────────────────────────
     if summary["nodes_loaded"] == 0:
-        log.error("Zero nodes loaded — Phase 1 outputs likely missing or empty.")
+        log.error("Zero nodes loaded -- Phase 1 outputs likely missing or empty.")
         return 1
     if summary["edges_loaded"] == 0:
-        log.error("Zero edges loaded — interactions or OMIM CSV likely empty.")
+        log.error("Zero edges loaded -- interactions or OMIM CSV likely empty.")
         return 2
 
     log.info("=" * 70)
-    log.info("UNIFIED RUN COMPLETE — %d nodes, %d edges loaded",
+    log.info("UNIFIED RUN COMPLETE -- %d nodes, %d edges loaded",
              summary["nodes_loaded"], summary["edges_loaded"])
     log.info("=" * 70)
 
@@ -767,20 +767,20 @@ def main(argv: Optional[list] = None) -> int:
         _final_sample_warning = (
             "\n"
             + "!" * 78 + "\n"
-            + "!!! SAMPLE-MODE KG — NOT PRODUCTION-SCALE (T-011) !!!\n"
+            + "!!! SAMPLE-MODE KG -- NOT PRODUCTION-SCALE (T-011) !!!\n"
             + "!" * 78 + "\n"
             + f"The Knowledge Graph just loaded ({summary['nodes_loaded']} "
             + f"nodes, {summary['edges_loaded']} edges) was built from\n"
             + "EMBEDDED SAMPLE CSVs, NOT real biomedical data. The AUC\n"
             + "and V1 launch criteria reported by Phase 2 are NOT valid\n"
-            + "for production sign-off — they reflect transductive\n"
+            + "for production sign-off -- they reflect transductive\n"
             + "memorisation on a tiny graph, NOT generalisation.\n"
             + "\n"
             + "DO NOT report this run as a V1 launch candidate.\n"
             + "\n"
             + "To load full production data, run Phase 1 with API\n"
             + "credentials (DRUGBANK_XML_PATH, DISGENET_API_KEY,\n"
-            + "OMIM_API_KEY) and re-run this script — OR pass\n"
+            + "OMIM_API_KEY) and re-run this script -- OR pass\n"
             + "--require-full-data to fail-fast in CI.\n"
             + "!" * 78 + "\n"
         )
@@ -788,12 +788,12 @@ def main(argv: Optional[list] = None) -> int:
         print(_final_sample_warning, file=sys.stderr)
 
     # ─── 6. v15 ROOT FIX (REM-25): optionally run the FULL Phase 2 pipeline ─
-    # v14's run_unified.py stopped at the bridge — it never trained TransE,
+    # v14's run_unified.py stopped at the bridge -- it never trained TransE,
     # never built PyG HeteroData, never validated, never checked V1 launch
     # criteria. The "unified runner" was therefore theater: it loaded nodes
     # and edges into a RecordingGraphBuilder and exited 0, but the project's
     # headline deliverable (the >0.85 AUC) was never computed by THIS entry
-    # point. Operators had to manually invoke `python -m drugos_graph` —
+    # point. Operators had to manually invoke `python -m drugos_graph` --
     # which most users never did, leading to the user's complaint that "every
     # session every AI tells its 100 percent integrated but see the reality."
     # Fix: when --full-pipeline is passed, chain directly into
@@ -801,13 +801,13 @@ def main(argv: Optional[list] = None) -> int:
     # runner actually produces a model, an AUC, and a launch verdict.
     if args.full_pipeline:
         log.info("-" * 70)
-        log.info("FULL PIPELINE — Step 8 (entity_resolution) → Step 9 (PyG build) "
-                 "→ Step 10 (training data) → Step 11 (TransE train) → "
-                 "Step 12 (validation) → V1 launch criteria")
+        log.info("FULL PIPELINE -- Step 8 (entity_resolution) -> Step 9 (PyG build) "
+                 "-> Step 10 (training data) -> Step 11 (TransE train) -> "
+                 "Step 12 (validation) -> V1 launch criteria")
         log.info("-" * 70)
         try:
             from drugos_graph.run_pipeline import run_full_pipeline
-            # v73 ROOT FIX (T-010 — env-var Neo4j path caused double-load):
+            # v73 ROOT FIX (T-010 -- env-var Neo4j path caused double-load):
             #   The previous predicate checked ONLY the CLI arg for Neo4j
             #   URI presence. If the operator set the DRUGOS_NEO4J_URI env
             #   var (the recommended production setup per the docstring at
@@ -816,7 +816,7 @@ def main(argv: Optional[list] = None) -> int:
             #   bridge at line 473 had ALREADY connected to Neo4j using
             #   the env-var-resolved URI (line 441-445) and loaded the
             #   staged graph. run_full_pipeline then opened a SECOND Neo4j
-            #   session and re-loaded the same graph — duplicate nodes,
+            #   session and re-loaded the same graph -- duplicate nodes,
             #   duplicate edges, upsert collisions. The duplicate load
             #   doubled write latency and corrupted edge counts.
             #
@@ -827,17 +827,17 @@ def main(argv: Optional[list] = None) -> int:
             #   its own Neo4j load (use the in-memory / RecordingGraphBuilder
             #   path internally for the PyG/TransE stages). When
             #   ``neo4j_connected=False`` (env var unset AND localhost
-            #   connection failed → RecordingGraphBuilder fallback),
-            #   ``skip_neo4j=False`` is harmless — there is no Neo4j to
+            #   connection failed -> RecordingGraphBuilder fallback),
+            #   ``skip_neo4j=False`` is harmless -- there is no Neo4j to
             #   skip, and ``run_full_pipeline`` falls back to its own
             #   in-memory builder internally. This single-flag predicate
             #   correctly handles ALL three Neo4j modes:
-            #     (a) --neo4j-uri CLI arg → neo4j_connected=True
-            #         → skip_neo4j=True ✓
-            #     (b) DRUGOS_NEO4J_URI env var → neo4j_connected=True
-            #         → skip_neo4j=True ✓ (was the bug)
-            #     (c) No Neo4j available → neo4j_connected=False
-            #         → skip_neo4j=False ✓ (harmless, no-op)
+            #     (a) --neo4j-uri CLI arg -> neo4j_connected=True
+            #         -> skip_neo4j=True ✓
+            #     (b) DRUGOS_NEO4J_URI env var -> neo4j_connected=True
+            #         -> skip_neo4j=True ✓ (was the bug)
+            #     (c) No Neo4j available -> neo4j_connected=False
+            #         -> skip_neo4j=False ✓ (harmless, no-op)
             pipeline_result = run_full_pipeline(
                 data_source="phase1",
                 skip_neo4j=neo4j_connected,
@@ -864,10 +864,10 @@ def main(argv: Optional[list] = None) -> int:
             # If V1 launch criteria returned a verdict, reflect it in exit.
             v1 = pipeline_result.get("v1_criteria") or {}
             if isinstance(v1, dict) and v1.get("passed") is False:
-                log.error("V1 LAUNCH CRITERIA NOT MET — see report above.")
+                log.error("V1 LAUNCH CRITERIA NOT MET -- see report above.")
                 return 4
             log.info("=" * 70)
-            log.info("FULL PIPELINE COMPLETE — V1 criteria satisfied")
+            log.info("FULL PIPELINE COMPLETE -- V1 criteria satisfied")
             log.info("=" * 70)
         except SystemExit as exc:
             # v21 ROOT FIX (Audit Chain 12): run_pipeline.py previously
@@ -877,10 +877,10 @@ def main(argv: Optional[list] = None) -> int:
             # Exception), so the exit code propagated through
             # run_unified.py and crashed any parent orchestrator
             # (Airflow/Celery/K8s Job). The documented contract said
-            # exit code 4 = V1 launch criteria not met — but that
+            # exit code 4 = V1 launch criteria not met -- but that
             # contract was DEAD because sys.exit(1) hijacked the exit.
             # Now run_pipeline raises V1LaunchCriteriaFailed instead
-            # (caught below). This SystemExit catch is defensive — it
+            # (caught below). This SystemExit catch is defensive -- it
             # handles any OTHER sys.exit() that might still leak from
             # deep library code (e.g. argparse on bad CLI).
             code = int(exc.code) if isinstance(exc.code, int) else 1
@@ -897,7 +897,7 @@ def main(argv: Optional[list] = None) -> int:
             # exception from run_pipeline, derived from RuntimeError) and
             # translate to exit code 4. Other specific runtime/env errors
             # also map to exit code 5. Programming bugs (TypeError,
-            # AttributeError, etc.) are NOT caught — they must propagate.
+            # AttributeError, etc.) are NOT caught -- they must propagate.
             exc_name = type(exc).__name__
             if exc_name == "V1LaunchCriteriaFailed":
                 log.error(

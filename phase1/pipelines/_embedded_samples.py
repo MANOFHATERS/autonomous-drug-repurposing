@@ -7,7 +7,7 @@ platform runs end-to-end on a laptop.
 
 The samples are biologically meaningful: real InChIKeys, real UniProt
 accessions, real DOID/MIM IDs, real STRING ENSP IDs. The Phase 2 KG
-built from these samples is small but scientifically valid — the
+built from these samples is small but scientifically valid -- the
 TransE link-prediction target (Compound-treats-Disease) has real
 edges, and the AUC computation produces a meaningful (if low-power)
 number.
@@ -215,7 +215,7 @@ def embedded_string_ppi() -> pd.DataFrame:
         # STRING_DROP_SELF_INTERACTIONS, so the row was dead-letter noise.
         # Replaced with a real PPI edge: PRKAA1 (AMPK alpha) <-> PTGS2,
         # connected via AMPK's known inhibition of COX-2 expression
-        # (PMID: 18509025) — a biologically meaningful cross-pathway link
+        # (PMID: 18509025) -- a biologically meaningful cross-pathway link
         # between metabolic sensing (AMPK) and inflammatory signaling (PTGS2).
         {"protein1": "9606.ENSP00000303641", "protein2": "9606.ENSP00000000412",
          "uniprot_ac_a": "P54619", "uniprot_ac_b": "P35354",
@@ -376,9 +376,9 @@ def embedded_drugbank_interactions() -> pd.DataFrame:
 
 
 def embedded_drugbank_indications() -> pd.DataFrame:
-    """DrugBank structured indications (drug → disease).
+    """DrugBank structured indications (drug -> disease).
 
-    v79 FORENSIC ROOT FIX (P0-B1 + P0-B5 — DOID/OMIM mismatch + missing
+    v79 FORENSIC ROOT FIX (P0-B1 + P0-B5 -- DOID/OMIM mismatch + missing
     indication_type column):
       P0-B1: The v78 embedded sample emitted ONLY DOID-format disease IDs
         (e.g. ``DOID:1826`` for Epilepsy). The Phase 2 bridge's
@@ -391,8 +391,8 @@ def embedded_drugbank_indications() -> pd.DataFrame:
         in ``embedded_omim_gda()``, emit the OMIM ID as ``disease_id``
         (and keep the DOID as ``doid_id`` for reference). This makes
         the treats-edge match the OMIM-keyed ``disease_id_set``
-        directly — no fallback needed — and preserves the
-        gene→disease→drug multi-hop path the Graph Transformer needs.
+        directly -- no fallback needed -- and preserves the
+        gene->disease->drug multi-hop path the Graph Transformer needs.
         Rows without an OMIM match keep the DOID ID; the bridge's v78
         fallback stages them as synthetic Disease nodes.
       P0-B5: The v78 embedded sample was MISSING the ``indication_type``
@@ -401,9 +401,9 @@ def embedded_drugbank_indications() -> pd.DataFrame:
         investigational / illicit). Without it, the bridge's
         ClinicalOutcome nodes got ``indication_type="unknown"`` for
         embedded samples but ``"approved"`` / ``"withdrawn"`` for real
-        XML — patient-safety hooks (withdrawn-drug detection) could NOT
+        XML -- patient-safety hooks (withdrawn-drug detection) could NOT
         fire in sample mode. ROOT FIX: add ``indication_type="approved"``
-        to every embedded row (all 10 embedded drugs are FDA-approved —
+        to every embedded row (all 10 embedded drugs are FDA-approved --
         this is scientifically accurate and enables the
         withdrawn-drug safety hook to be tested in sample mode by
         flipping one row to ``"withdrawn"``).
@@ -453,7 +453,7 @@ def embedded_drugbank_indications() -> pd.DataFrame:
         # P0-B1 ROOT FIX: Epilepsy maps to OMIM:137160 (Epilepsy, juvenile
         # myoclonic) which IS in embedded_omim_gda() (GABRA1 gene). Use
         # the OMIM ID as disease_id so the treats edge matches the
-        # OMIM-keyed disease_id_set directly — no fallback needed.
+        # OMIM-keyed disease_id_set directly -- no fallback needed.
         {"drugbank_id": "DB00829", "drug_inchikey": "AAOVKBJEBZCEQK-UHFFFAOYSA-N",
          "drug_name": "Diazepam",
          "disease_id": "OMIM:137160", "disease_name": "Epilepsy",
@@ -463,7 +463,7 @@ def embedded_drugbank_indications() -> pd.DataFrame:
         # v84 FORENSIC ROOT FIX (BUG #48): corrected the Warfarin
         # disease mapping. The previous entry said
         # ``disease_name="Hypertension"`` (DOID:10763) but the
-        # indication said "For the prevention of thrombosis" — a
+        # indication said "For the prevention of thrombosis" -- a
         # CONTRADICTION. Warfarin is an anticoagulant used for
         # thrombosis prevention, NOT hypertension. DOID:10763 IS
         # Hypertension. This data error created a spurious
@@ -516,23 +516,23 @@ def embedded_omim_gda() -> pd.DataFrame:
         # silent join failures when read without explicit dtypes (e.g. by
         # the Phase 2 bridge using csv.reader).
         #
-        # v93 ROOT FIX (P1-047 — gene_mim / disease_id / phenotype_mim
+        # v93 ROOT FIX (P1-047 -- gene_mim / disease_id / phenotype_mim
         #   conflation): the previous sample had gene_mim=176805,
-        #   disease_id="OMIM:176805", AND phenotype_mim=176805 — all
+        #   disease_id="OMIM:176805", AND phenotype_mim=176805 -- all
         #   three were the SAME number. This conflated the GENE MIM
         #   (176805 = PTGS1 gene, also known as COX1) with the DISEASE
         #   MIM (the phenotype). In OMIM's data model, the gene MIM and
-        #   the disease MIM are DIFFERENT numbers — the gene MIM
+        #   the disease MIM are DIFFERENT numbers -- the gene MIM
         #   identifies the gene locus, while the phenotype MIM identifies
         #   the clinical disorder caused by variants in that gene. The
         #   PTGS1 gene (MIM 176805) is associated with the phenotype
         #   "Platelet-type bleeding disorder 8" (MIM 609800) per OMIM
         #   #609800. Conflating them produced a sample where the KG
-        #   would create a self-loop (gene → disease with the same MIM),
+        #   would create a self-loop (gene -> disease with the same MIM),
         #   corrupting downstream Graph Transformer edge features and
         #   making the sample useless for testing GDA scoring. Root fix:
         #   use the real PTGS1 gene MIM (176805) for gene_mim, the real
-        #   disease MIM (609800 — Platelet-type bleeding disorder 8)
+        #   disease MIM (609800 -- Platelet-type bleeding disorder 8)
         #   for disease_id and phenotype_mim. Verified against OMIM
         #   morbidmap.txt (PTGS1, 609800, (3)).
         {"gene_symbol": "PTGS1", "gene_id": 5742, "gene_mim": 176805,
@@ -567,7 +567,7 @@ def embedded_omim_susceptibility() -> pd.DataFrame:
 
     The previous code mapped ``omim_susceptibility`` to the SAME function
     as ``omim_gda`` (``embedded_omim_gda``), producing byte-identical CSV
-    files. The susceptibility file should be a SUBSET — only rows where
+    files. The susceptibility file should be a SUBSET -- only rows where
     ``is_susceptibility=True``. This filter produces the 4 susceptibility
     rows (PTGS2/Colorectal cancer, ADORA2A/Vascular disorders,
     HMGCR/Hypercholesterolemia, ACE/Myocardial infarction) while the GDA
@@ -663,14 +663,14 @@ def write_all_samples(processed_dir) -> dict:
     """Write all embedded sample datasets as CSVs to the processed_data dir.
 
     Used as a last-resort fallback when ANY pipeline cannot reach its API
-    in sample mode. Returns a dict mapping source-name → file-path.
+    in sample mode. Returns a dict mapping source-name -> file-path.
 
     v65 ROOT FIX (P1-040): the previous implementation wrote each CSV
-    NON-atomically — ``df.to_csv(path, ...)`` truncates the file before
+    NON-atomically -- ``df.to_csv(path, ...)`` truncates the file before
     writing the body, so a concurrent call to ``write_all_samples`` (e.g.
     from the ``all`` command's fallback at __init__.py:2801) could leave
     a partially-written CSV that the Phase 2 bridge would then crash on
-    (malformed CSV → pandas ParserError). Root fix: write to a ``.tmp``
+    (malformed CSV -> pandas ParserError). Root fix: write to a ``.tmp``
     sidecar file in the same directory, then atomically ``os.replace``
     it to the final path. ``os.replace`` is atomic on POSIX and Windows
     for files within the same filesystem. We also use ``filelock`` when
@@ -724,11 +724,11 @@ def write_all_samples(processed_dir) -> dict:
                 with lock:
                     _atomic_write_csv(df, path, filename)
             except FileLockTimeout:
-                # Another process holds the lock — skip this file
+                # Another process holds the lock -- skip this file
                 # (the other process will write it). We still record
                 # the path in `written` so callers know where it SHOULD be.
                 logger.warning(
-                    "Could not acquire lock for %s — another process is "
+                    "Could not acquire lock for %s -- another process is "
                     "writing it. Skipping.", path,
                 )
         else:
@@ -757,10 +757,10 @@ def _atomic_write_csv(df, path, filename) -> None:
             df.to_csv(tmp_path, index=False)
         # os.replace is atomic on POSIX and Windows for files within
         # the same filesystem. Readers either see the OLD file or the
-        # NEW file — never a partial write.
+        # NEW file -- never a partial write.
         os.replace(tmp_path, path)
     except Exception:
-        # Clean up the .tmp file on any failure — don't leave orphaned
+        # Clean up the .tmp file on any failure -- don't leave orphaned
         # .tmp files in the processed_data dir.
         try:
             if tmp_path.exists():

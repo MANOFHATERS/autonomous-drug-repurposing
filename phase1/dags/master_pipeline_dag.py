@@ -346,7 +346,7 @@ def download_omim() -> None:
     OMIMPipeline().run_download_and_clean_only()
 
 
-@task()  # v41: retries+timeout inherited from DEFAULT_ARGS
+@task(trigger_rule=TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS)  # P1-032 ROOT FIX
 @fail_fast_on_http_4xx  # v83 DAG-2
 def download_pubchem() -> None:
     """Run the PubChem pipeline: download+clean only (load after entity resolution).
@@ -354,11 +354,6 @@ def download_pubchem() -> None:
     v35 ROOT FIX (issue 35): previously called ``PubChemPipeline().run()``
     (the FULL run, including load into DB). This caused a DOUBLE-LOAD: the
     ``download_pubchem`` task loaded PubChem data into the ``drugs`` table,
-
-    P1-071 ROOT FIX: added ``trigger_rule=none_failed_min_one_success`` so
-    that pubchem_download and pubchem_load do not fail the DAG when upstream
-    tasks that are NOT required for PubChem (e.g. drugbank_load) are skipped.
-    """
     then the ``load_pubchem_enrichment`` task (line 414 below) called
     ``PubChemPipeline().run_load_only()`` which loaded the SAME data
     AGAIN. Both loads were idempotent (upsert), so the duplicate was
@@ -367,6 +362,32 @@ def download_pubchem() -> None:
     ``run_download_and_clean_only()`` so only the ``load_pubchem_enrichment``
     task loads (matching the pattern used by ChEMBL, DrugBank, UniProt,
     STRING, DisGeNET, and OMIM in this DAG).
+
+    P1-032 ROOT FIX (trigger_rule actually set, not just documented):
+      The previous version of this function had a docstring CLAIMING
+      ``trigger_rule=none_failed_min_one_success`` was set (the P1-071
+      "ROOT FIX" comment), but the ``@task()`` decorator did NOT actually
+      pass ``trigger_rule``. The default ``all_success`` was used. When
+      the DrugBank ``BranchPythonOperator`` skipped ``drugbank_load``
+      (DrugBank XML missing — common since DrugBank paused academic
+      downloads in May 2026), ``pubchem_download`` saw 1 skipped
+      upstream → ``all_success`` failed → ``pubchem_download`` was
+      SKIPPED. PubChem enrichment never ran. The KG had ZERO PubChem
+      CIDs, molecular formulas, molecular weights. The Makefile's
+      DrugBank fallback (ChEMBL-derived FDA-approved drug set) did NOT
+      trigger ``drugbank_load`` success — it triggered the skip branch.
+
+      ROOT FIX: pass ``trigger_rule=TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS``
+      to the ``@task()`` decorator EXPLICITLY. With this trigger rule:
+        - At least one upstream must have SUCCEEDED (so a total
+          chembl_load+drugbank_load failure still propagates).
+        - No upstream may have FAILED (so a real DrugBank crash after
+          retries still aborts the join — preserves the v39 patient-
+          safety fix).
+        - SKIPPED upstreams are OK (so the operator's deliberate choice
+          to skip DrugBank doesn't kill PubChem enrichment).
+      This closes the "DAG reports GREEN but produces ZERO PubChem data"
+      hole. The same fix is applied to ``load_pubchem_enrichment`` below.
     """
     from pipelines.pubchem_pipeline import PubChemPipeline
     PubChemPipeline().run_download_and_clean_only()
@@ -431,14 +452,25 @@ def load_omim() -> None:
     OMIMPipeline().run_load_only()
 
 
-@task()  # v41: retries+timeout inherited from DEFAULT_ARGS
+@task(trigger_rule=TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS)  # P1-032 ROOT FIX
 @fail_fast_on_http_4xx  # v83 DAG-2
 def load_pubchem_enrichment() -> None:
     """FIX AUDIT-27: PubChem data already downloaded.
 
-    P1-071 ROOT FIX: added ``trigger_rule=none_failed_min_one_success`` so
-    that this task runs even if some upstream tasks are skipped, as long
-    as pubchem_download succeeds.
+    P1-032 ROOT FIX (trigger_rule actually set, not just documented):
+      The previous version's docstring CLAIMED
+      ``trigger_rule=none_failed_min_one_success`` was set (the P1-071
+      "ROOT FIX" comment), but the ``@task()`` decorator did NOT pass
+      ``trigger_rule``. The default ``all_success`` was used. When
+      ``pubchem_download`` was skipped (e.g. when ``drugbank_load`` was
+      skipped due to missing DrugBank XML), ``load_pubchem_enrichment``
+      was ALSO skipped via the same ``all_success`` cascade — even though
+      the existing PubChem enrichment data in the ``drugs`` table did
+      not need re-loading. ROOT FIX: pass
+      ``trigger_rule=TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS``
+      explicitly so this task runs as long as no upstream FAILED and at
+      least one SUCCEEDED. Matches the same fix on ``download_pubchem``
+      above.
     """
     from pipelines.pubchem_pipeline import PubChemPipeline
     PubChemPipeline().run_load_only()
@@ -614,6 +646,75 @@ def _trigger_phase2() -> None:
             "--phase1-dir", str(_project_root / "phase1" / "processed_data"),
             "--full-pipeline",
         ]
+
+    # P1-041 ROOT FIX (pre-flight check: fail Phase 2 if ChEMBL DPI is missing):
+    #   If the latest ChEMBL pipeline_run has ``metadata_json.dpi_missing=True``
+    #   AND ``metadata_json.dpi_missing_acknowledged=False``, the KG is
+    #   DPI-degraded (ZERO drug-protein interactions). Phase 2 would build
+    #   a KG with no pharmacological edges — every drug-target prediction
+    #   would be broken. The operator MUST explicitly acknowledge by
+    #   re-running ChEMBL with ``DRUGOS_ALLOW_PERMISSIVE_DPI=2`` (which
+    #   sets ``dpi_missing_acknowledged=True``). This pre-flight check
+    #   fails the trigger_phase2 task RED until the operator acknowledges.
+    try:
+        import json as _json
+        import sqlite3 as _sqlite3
+        _phase1_db = _project_root / "phase1" / "data" / "drugos.db"
+        _phase1_db_alt = _project_root / "phase1" / "drugos.db"
+        _db_path = (
+            _phase1_db if _phase1_db.exists()
+            else (_phase1_db_alt if _phase1_db_alt.exists() else None)
+        )
+        if _db_path is not None:
+            _conn = _sqlite3.connect(str(_db_path))
+            try:
+                _row = _conn.execute(
+                    "SELECT metadata_json FROM pipeline_runs "
+                    "WHERE source = 'chembl' "
+                    "ORDER BY id DESC LIMIT 1"
+                ).fetchone()
+                if _row is not None and _row[0]:
+                    try:
+                        _meta = _json.loads(_row[0])
+                    except (ValueError, TypeError):
+                        _meta = {}
+                    if (
+                        _meta.get("dpi_missing") is True
+                        and _meta.get("dpi_missing_acknowledged") is not True
+                    ):
+                        raise RuntimeError(
+                            "P1-041 pre-flight check FAILED: the latest "
+                            "ChEMBL pipeline_run has dpi_missing=True and "
+                            "dpi_missing_acknowledged=False. The KG would "
+                            "be DPI-degraded (ZERO drug-protein "
+                            "interactions). To proceed, the operator MUST "
+                            "explicitly acknowledge by re-running ChEMBL "
+                            "with DRUGOS_ALLOW_PERMISSIVE_DPI=2 (override-"
+                            "acknowledged). This pre-flight check prevents "
+                            "Phase 2 from building a silently degraded KG."
+                        )
+                    if _meta.get("dpi_missing") is True:
+                        logger.warning(
+                            "P1-041 pre-flight check: ChEMBL DPI is "
+                            "missing BUT operator has acknowledged "
+                            "(dpi_missing_acknowledged=True). Proceeding "
+                            "with DPI-degraded KG."
+                        )
+            finally:
+                _conn.close()
+    except RuntimeError:
+        raise
+    except Exception as _preflight_exc:  # noqa: BLE001
+        # Defensive: never block Phase 2 on a pre-flight check infrastructure
+        # error (e.g. DB not yet initialized for first run, schema mismatch).
+        # Log and continue — the ChEMBL pipeline's own STRICT/PERMISSIVE
+        # logic is the primary enforcement point.
+        logger.warning(
+            "P1-041 pre-flight check could not query pipeline_runs "
+            "metadata (non-fatal): %s. Proceeding — ChEMBL pipeline's "
+            "own STRICT/PERMISSIVE logic is the primary enforcement.",
+            _preflight_exc,
+        )
 
     neo4j_uri = os.environ.get("DRUGOS_NEO4J_URI")
     if neo4j_uri:

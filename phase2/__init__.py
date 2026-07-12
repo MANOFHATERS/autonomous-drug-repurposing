@@ -1,6 +1,6 @@
-"""Phase 2 — DrugOS Knowledge Graph package.
+"""Phase 2 -- DrugOS Knowledge Graph package.
 
-v43 ROOT FIX (Chain 7 — bare-import packaging): the Phase 2 modules
+v43 ROOT FIX (Chain 7 -- bare-import packaging): the Phase 2 modules
 under ``drugos_graph/`` use absolute imports like
 ``from drugos_graph.kg_builder import ...`` which require ``phase2/``
 to be on ``sys.path``. Previously this required the operator to either
@@ -14,7 +14,7 @@ ANY current working directory. Operators can now do::
 
 without setting up sys.path themselves.
 
-The bootstrap is idempotent — it only inserts paths into ``sys.path``
+The bootstrap is idempotent -- it only inserts paths into ``sys.path``
 if they're not already there.
 """
 from __future__ import annotations

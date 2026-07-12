@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""v82 REAL-CODE VERIFICATION — runs the ACTUAL module functions (not test
+"""v82 REAL-CODE VERIFICATION -- runs the ACTUAL module functions (not test
 files, not smoke tests) to confirm every P0-G1..G4 and P1-A1..A14 root-cause
 fix works at runtime.
 
@@ -67,7 +67,7 @@ try:
     ik2 = cw.compound_id_to_inchikey("CID2244")
     check("P0-G1 compound_id_to_inchikey('CID2244') resolves (7-namespace unification)",
           ik2 == "BSYNRYMUTXBXSQ-UHFFFAOYSA-N", f"got {ik2}")
-    # Idempotent: re-register same mapping → returns 0
+    # Idempotent: re-register same mapping -> returns 0
     n3 = cw.register_compound_inchikey(
         "DB00945", "BSYNRYMUTXBXSQ-UHFFFAOYSA-N",
         source="drugbank", confidence="verified",
@@ -166,12 +166,12 @@ try:
     single = "BSYNRYMUTXBXSQ-UHFFFAOYSA-N"
     check("P1-A1 single InChIKey does NOT match mixture pattern",
           not _MIXTURE_INCHIKEY_PATTERN.match(single),
-          "single key matched — pattern uses * (zero-or-more), bug NOT fixed")
+          "single key matched -- pattern uses * (zero-or-more), bug NOT fixed")
     # A real mixture (2+ components joined by -) SHOULD match
     mixture = "BSYNRYMUTXBXSQ-UHFFFAOYSA-N-AGAFWYVAAKGVHW-UHFFFAOYSA-N"
     check("P1-A1 real mixture (2 components) matches pattern",
           bool(_MIXTURE_INCHIKEY_PATTERN.match(mixture)),
-          "mixture did NOT match — pattern is too strict")
+          "mixture did NOT match -- pattern is too strict")
 except Exception as e:
     check("P1-A1 import + run", False, f"{type(e).__name__}: {e}")
 
@@ -187,28 +187,28 @@ try:
     lower = "a1b2c3d4-e5f6-4789-abcd-ef1234567890"
     check("P1-A3 lowercase UUID v4 accepted",
           bool(OMIM_API_KEY_FORMAT_RE.match(lower)))
-    # Uppercase UUID v4 (clipboard paste from Windows) — previously REJECTED
+    # Uppercase UUID v4 (clipboard paste from Windows) -- previously REJECTED
     upper = "A1B2C3D4-E5F6-4789-ABCD-EF1234567890"
     check("P1-A3 uppercase UUID v4 accepted (was rejected before fix)",
           bool(OMIM_API_KEY_FORMAT_RE.match(upper)),
-          "uppercase UUID rejected — regex is case-sensitive, bug NOT fixed")
+          "uppercase UUID rejected -- regex is case-sensitive, bug NOT fixed")
     # Mixed case UUID v4
     mixed = "A1b2C3d4-E5f6-4789-Abcd-Ef1234567890"
     check("P1-A3 mixed-case UUID v4 accepted",
           bool(OMIM_API_KEY_FORMAT_RE.match(mixed)))
-    # Non-UUID (36 chars but wrong structure) — should be REJECTED.
+    # Non-UUID (36 chars but wrong structure) -- should be REJECTED.
     # The v83 RFC-4122 regex validates the version + variant bits, so a
     # 36-char string with wrong structure is rejected.
     bad = "a1b2c3d4e5f67890abcdef1234567890------"
     check("P1-A3 non-UUID 36-char string REJECTED (structure validation)",
           not OMIM_API_KEY_FORMAT_RE.match(bad),
-          "non-UUID accepted — regex doesn't validate UUID structure")
-    # Non-v4 UUID (3rd group starts with 7, not 4) — REJECTED by v83 regex
+          "non-UUID accepted -- regex doesn't validate UUID structure")
+    # Non-v4 UUID (3rd group starts with 7, not 4) -- REJECTED by v83 regex
     non_v4 = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
     check("P1-A3 non-v4 UUID REJECTED (version-bit validation)",
           not OMIM_API_KEY_FORMAT_RE.match(non_v4),
-          "non-v4 UUID accepted — regex doesn't validate version bit")
-    # Too short — REJECTED
+          "non-v4 UUID accepted -- regex doesn't validate version bit")
+    # Too short -- REJECTED
     check("P1-A3 short string REJECTED",
           not OMIM_API_KEY_FORMAT_RE.match("abc"))
 except Exception as e:
@@ -219,19 +219,19 @@ except Exception as e:
 # ═══════════════════════════════════════════════════════════════════════════
 try:
     from database.loaders import _validate_activity_type, _VALID_ACTIVITY_TYPES
-    # "ic50" (ChEMBL lowercase) — previously REJECTED. Should return canonical 'IC50'.
+    # "ic50" (ChEMBL lowercase) -- previously REJECTED. Should return canonical 'IC50'.
     result = _validate_activity_type("ic50")
     check("P1-A7 _validate_activity_type('ic50') returns canonical 'IC50' (was quarantined)",
           result == "IC50", f"got {result!r}")
-    # "IC50" (uppercase) — should also work, return canonical 'IC50'
+    # "IC50" (uppercase) -- should also work, return canonical 'IC50'
     result2 = _validate_activity_type("IC50")
     check("P1-A7 _validate_activity_type('IC50') returns canonical 'IC50'",
           result2 == "IC50", f"got {result2!r}")
-    # "Ki" (mixed case) — should work, return canonical 'Ki'
+    # "Ki" (mixed case) -- should work, return canonical 'Ki'
     result3 = _validate_activity_type("ki")
     check("P1-A7 _validate_activity_type('ki') returns canonical 'Ki'",
           result3 == "Ki", f"got {result3!r}")
-    # Invalid — should raise
+    # Invalid -- should raise
     try:
         _validate_activity_type("NOT_AN_ACTIVITY_TYPE")
         check("P1-A7 invalid activity_type raises ValueError", False,
@@ -249,17 +249,17 @@ try:
     cb = _CircuitBreaker()
     # Force into OPEN state
     cb._state = "OPEN"
-    cb._last_failure_time = -1e9  # long ago → recovery timeout elapsed
+    cb._last_failure_time = -1e9  # long ago -> recovery timeout elapsed
     # First call: should transition to HALF_OPEN and allow ONE probe
     first = cb.allow_request()
     check("P1-A8 HALF_OPEN first probe allowed", first, f"got {first}")
     # Second call: should be REJECTED (probe in flight)
     second = cb.allow_request()
     check("P1-A8 HALF_OPEN second probe REJECTED (single-probe semantic)",
-          not second, f"got {second} — probe-in-flight flag NOT working")
-    # Simulate probe success → CLOSED
+          not second, f"got {second} -- probe-in-flight flag NOT working")
+    # Simulate probe success -> CLOSED
     cb.record_success()
-    check("P1-A8 after record_success → CLOSED", cb.state == "CLOSED",
+    check("P1-A8 after record_success -> CLOSED", cb.state == "CLOSED",
           f"state={cb.state}")
     # Now requests should be allowed again
     after_close = cb.allow_request()
@@ -278,7 +278,7 @@ try:
         os.environ["DRUGOS_ENVIRONMENT"] = "staging"
         is_staging_prod = is_production_environment()
         check("P1-A11 is_production_environment('staging') == False",
-              not is_staging_prod, f"got {is_staging_prod} — staging treated as prod")
+              not is_staging_prod, f"got {is_staging_prod} -- staging treated as prod")
         # Production IS production
         os.environ["DRUGOS_ENVIRONMENT"] = "production"
         is_prod_prod = is_production_environment()
@@ -315,7 +315,7 @@ try:
         check("P1-A12 could not extract UPDATE SQL", False, "text() block not found")
     check("P1-A12 pubchem_cid uses COALESCE (preserves existing CID)",
           "COALESCE(:pubchem_cid, drugs.pubchem_cid)" in src,
-          "pubchem_cid not wrapped in COALESCE — existing CIDs would be overwritten")
+          "pubchem_cid not wrapped in COALESCE -- existing CIDs would be overwritten")
 except Exception as e:
     check("P1-A12 inspect", False, f"{type(e).__name__}: {e}")
 
@@ -391,10 +391,10 @@ try:
     # Should NOT have two separate `with _lifecycle_lock:` blocks
     lock_count = src.count("with _lifecycle_lock:")
     check("P1-A4 configure_engine uses ONE _lifecycle_lock block (no race gap)",
-          lock_count == 1, f"found {lock_count} lock blocks — race gap exists")
+          lock_count == 1, f"found {lock_count} lock blocks -- race gap exists")
     check("P1-A4 no dispose_engine() call between lock blocks",
           "dispose_engine(force=True)" not in src,
-          "still calls dispose_engine inside configure_engine — gap exists")
+          "still calls dispose_engine inside configure_engine -- gap exists")
 except Exception as e:
     check("P1-A4 inspect", False, f"{type(e).__name__}: {e}")
 
@@ -409,7 +409,7 @@ try:
     # comments stripped (to avoid pyformat mis-parsing %(table)s in comments).
     check("P1-A13 uses conn.execute(text(...)) for SQLite migration execution",
           "conn.execute(text(stmt_for_execution))" in _src,
-          "text() not used — exec_driver_sql still present (injection risk)")
+          "text() not used -- exec_driver_sql still present (injection risk)")
     # The old exec_driver_sql(stmt_stripped) call should NOT be present
     # (it was replaced by the safer text() approach).
     _active_calls = [l for l in _src.split("\n")
@@ -449,7 +449,7 @@ try:
           "P0-G2 pre-load block not found")
     check("P0-G2 step7a uses unresolved_policy='keep_ensembl'",
           'unresolved_policy="keep_ensembl"' in _src,
-          "still uses default 'drop' — STRING edges would be dropped")
+          "still uses default 'drop' -- STRING edges would be dropped")
 except Exception as e:
     check("P0-G2 inspect", False, f"{type(e).__name__}: {e}")
 

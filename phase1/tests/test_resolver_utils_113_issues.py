@@ -1,32 +1,32 @@
 # SPDX-License-Identifier: MIT
-# © 2024-2026 Autonomous Drug Repurposing Platform — Team Cosmic / VentureLab
+# © 2024-2026 Autonomous Drug Repurposing Platform -- Team Cosmic / VentureLab
 """
 Comprehensive real tests for ``entity_resolution.resolver_utils.py``.
 
 This test file verifies EVERY one of the 113 fixes specified in the
 ``resolver_utils_113_issues_fix_prompt.md`` document, across all 16 domains.
 
-The tests are NOT fake "is the function there" checks — every test exercises
+The tests are NOT fake "is the function there" checks -- every test exercises
 real behavior and asserts on real outputs.  When a test fails, it pinpoints
 exactly which fix was broken.
 
 Test organisation (mirrors the fix-prompt sections):
-  Domain 1  — Architecture (FIX #1 – #6)
-  Domain 2  — Design (FIX #7 – #14)
-  Domain 3  — Scientific Correctness (FIX #15 – #24)
-  Domain 4  — Coding (FIX #25 – #37)
-  Domain 5  — Data Quality & Integrity (FIX #38 – #46)
-  Domain 6  — Reliability & Resilience (FIX #47 – #52)
-  Domain 7  — Idempotency & Reproducibility (FIX #53 – #57)
-  Domain 8  — Performance & Scalability (FIX #58 – #62)
-  Domain 9  — Security & Privacy (FIX #63 – #67)
-  Domain 10 — Testing & Validation (FIX #68 – #78)
-  Domain 11 — Logging & Observability (FIX #79 – #83)
-  Domain 12 — Configuration & Environment Management (FIX #84 – #88)
-  Domain 13 — Documentation & Readability (FIX #89 – #96)
-  Domain 14 — Compliance & Standards Adherence (FIX #97 – #101)
-  Domain 15 — Interoperability & Integration (FIX #102 – #107)
-  Domain 16 — Data Lineage & Traceability (FIX #108 – #114)
+  Domain 1  -- Architecture (FIX #1 - #6)
+  Domain 2  -- Design (FIX #7 - #14)
+  Domain 3  -- Scientific Correctness (FIX #15 - #24)
+  Domain 4  -- Coding (FIX #25 - #37)
+  Domain 5  -- Data Quality & Integrity (FIX #38 - #46)
+  Domain 6  -- Reliability & Resilience (FIX #47 - #52)
+  Domain 7  -- Idempotency & Reproducibility (FIX #53 - #57)
+  Domain 8  -- Performance & Scalability (FIX #58 - #62)
+  Domain 9  -- Security & Privacy (FIX #63 - #67)
+  Domain 10 -- Testing & Validation (FIX #68 - #78)
+  Domain 11 -- Logging & Observability (FIX #79 - #83)
+  Domain 12 -- Configuration & Environment Management (FIX #84 - #88)
+  Domain 13 -- Documentation & Readability (FIX #89 - #96)
+  Domain 14 -- Compliance & Standards Adherence (FIX #97 - #101)
+  Domain 15 -- Interoperability & Integration (FIX #102 - #107)
+  Domain 16 -- Data Lineage & Traceability (FIX #108 - #114)
 """
 
 from __future__ import annotations
@@ -101,7 +101,7 @@ def _reset_method_confidence_between_tests():
 
 
 # =============================================================================
-# Domain 1 — Architecture (FIX #1 – #6)
+# Domain 1 -- Architecture (FIX #1 - #6)
 # =============================================================================
 
 class TestFix1InchikeyDelegation:
@@ -296,7 +296,7 @@ class TestFix6RegisterMethodUpdatesCustom:
 
 
 # =============================================================================
-# Domain 2 — Design (FIX #7 – #14)
+# Domain 2 -- Design (FIX #7 - #14)
 # =============================================================================
 
 class TestFix7CanonicalIndexInputShapes:
@@ -344,7 +344,7 @@ class TestFix8CanonicalIndexKeyGeneration:
         # The key should be a 16-char hex string
         key = index["aspirin"]
         assert len(key) == 16
-        int(key, 16)  # should not raise — valid hex
+        int(key, 16)  # should not raise -- valid hex
 
     def test_deterministic_key_for_same_content(self):
         """Same content in different order should produce same key."""
@@ -496,7 +496,7 @@ class TestFix14ValidateRecordDispatcher:
 
 
 # =============================================================================
-# Domain 3 — Scientific Correctness (FIX #15 – #24)  [P0 — HIGHEST PRIORITY]
+# Domain 3 -- Scientific Correctness (FIX #15 - #24)  [P0 -- HIGHEST PRIORITY]
 # =============================================================================
 
 class TestFix15UniprotRegex:
@@ -598,7 +598,7 @@ class TestFix19ExtractInchikeySkipsSynthetic:
     """FIX #19 / BUG-SCI-05: extract_inchikey_first_block rejects synthetic keys."""
 
     def test_synthetic_key_returns_none(self):
-        # Synthetic InChIKey — SYNTH-prefixed.
+        # Synthetic InChIKey -- SYNTH-prefixed.
         assert extract_inchikey_first_block("SYNTHABCDEF12345-UHFFFAOYSA-N") is None
 
     def test_real_inchikey_returns_block(self):
@@ -630,7 +630,7 @@ class TestFix20NormalizeStripsStereoHyphens:
     leading/trailing hyphens but PRESERVES stereo indicators.
 
     The previous version of this test expected stereo indicators
-    ``(R)``/``(S)``/``(E)``/``(Z)`` to be stripped — that was the
+    ``(R)``/``(S)``/``(E)``/``(Z)`` to be stripped -- that was the
     buggy behavior the FORENSIC_AUDIT_REPORT flagged as PS-4
     (patient-safety catastrophe: ``(R)-thalidomide`` is a sedative
     while ``(S)-thalidomide`` is a teratogen; merging them kills
@@ -833,7 +833,7 @@ class TestFix24ValidateProteinRecordStrictFormats:
 
 
 # =============================================================================
-# Domain 4 — Coding (FIX #25 – #37)
+# Domain 4 -- Coding (FIX #25 - #37)
 # =============================================================================
 
 class TestFix25PrecompiledRegexes:
@@ -1035,7 +1035,7 @@ class TestFix35ImportTimeLogLevel:
         rapidfuzz import block.  The warning is deferred to first use of
         ``fuzzy_match_score`` (FIX #51).
 
-        NOTE: We do NOT reload the module here — reloading would create
+        NOTE: We do NOT reload the module here -- reloading would create
         a new MatchResult / ValidationReport / NormalizedName /
         ConnectivityBlock class, breaking ``isinstance`` checks in
         subsequent tests that import these classes at the top of the
@@ -1105,7 +1105,7 @@ class TestFix37FuzzyLogSanitization:
 
 
 # =============================================================================
-# Domain 5 — Data Quality & Integrity (FIX #38 – #46)
+# Domain 5 -- Data Quality & Integrity (FIX #38 - #46)
 # =============================================================================
 
 class TestFix38FindDuplicateIdsCrossBatch:
@@ -1281,8 +1281,8 @@ class TestFix45InchikeyInchiConsistency:
     """FIX #45 / GAP-DQ-08: inchikey↔inchi cross-field consistency (best-effort)."""
 
     def test_consistency_check_does_not_crash_without_rdkit(self):
-        """Without RDKit, the check is silently skipped — must not crash."""
-        # Use a clearly inconsistent pair — should pass without RDKit.
+        """Without RDKit, the check is silently skipped -- must not crash."""
+        # Use a clearly inconsistent pair -- should pass without RDKit.
         ok, _ = validate_drug_record(
             {
                 "name": "X",
@@ -1325,7 +1325,7 @@ class TestFix46MolecularWeightRangeCheck:
 
 
 # =============================================================================
-# Domain 6 — Reliability & Resilience (FIX #47 – #52)
+# Domain 6 -- Reliability & Resilience (FIX #47 - #52)
 # =============================================================================
 
 class TestFix47RegisterMethodThreadSafe:
@@ -1444,7 +1444,7 @@ class TestFix52BuildCanonicalHandlesAttributeError:
 
 
 # =============================================================================
-# Domain 7 — Idempotency & Reproducibility (FIX #53 – #57)
+# Domain 7 -- Idempotency & Reproducibility (FIX #53 - #57)
 # =============================================================================
 
 class TestFix53MethodConfidenceOverrideContext:
@@ -1547,11 +1547,11 @@ class TestFix57RoundedConfidence:
 
 
 # =============================================================================
-# Domain 8 — Performance & Scalability (FIX #58 – #62)
+# Domain 8 -- Performance & Scalability (FIX #58 - #62)
 # =============================================================================
 
 class TestFix58PrecompiledRegexes:
-    """FIX #58 / BUG-PERF-01: same as FIX #25 — regexes precompiled."""
+    """FIX #58 / BUG-PERF-01: same as FIX #25 -- regexes precompiled."""
 
     def test_patterns_are_compiled(self):
         from entity_resolution.resolver_utils import (
@@ -1656,8 +1656,8 @@ class TestFix62FindDuplicateIdsStreaming:
         records = [
             {"chembl_id": "CHEMBL25"},
             {"chembl_id": "CHEMBL99"},
-            {"chembl_id": "CHEMBL25"},  # 2nd occurrence → yields
-            {"chembl_id": "CHEMBL99"},  # 2nd occurrence → yields
+            {"chembl_id": "CHEMBL25"},  # 2nd occurrence -> yields
+            {"chembl_id": "CHEMBL99"},  # 2nd occurrence -> yields
         ]
         results = list(find_duplicate_ids_streaming(
             records, id_fields=("chembl_id",),
@@ -1679,11 +1679,11 @@ class TestFix62FindDuplicateIdsStreaming:
 
 
 # =============================================================================
-# Domain 9 — Security & Privacy (FIX #63 – #67)
+# Domain 9 -- Security & Privacy (FIX #63 - #67)
 # =============================================================================
 
 class TestFix63FuzzyLogSanitization:
-    """FIX #63 / BUG-SEC-01: same as FIX #37 — names truncated in logs."""
+    """FIX #63 / BUG-SEC-01: same as FIX #37 -- names truncated in logs."""
 
     def test_log_truncated(self, caplog):
         long_name = "a" * 100
@@ -1766,8 +1766,8 @@ class TestFix67SanitizeOutput:
 
 
 # =============================================================================
-# Domain 10 — Testing & Validation (FIX #68 – #78)
-# (These tests verify that the required tests exist and pass — they ARE the tests.)
+# Domain 10 -- Testing & Validation (FIX #68 - #78)
+# (These tests verify that the required tests exist and pass -- they ARE the tests.)
 # =============================================================================
 
 class TestFix68NormalizeNestedParens:
@@ -1789,11 +1789,11 @@ class TestFix69NormalizeStereoIndicators:
     ``(S)-warfarin`` do NOT merge into the same canonical entity.
 
     The previous version of this test expected stereo indicators to be
-    STRIPPED — that was the buggy behavior the FORENSIC_AUDIT_REPORT
+    STRIPPED -- that was the buggy behavior the FORENSIC_AUDIT_REPORT
     flagged as PS-4 (patient-safety catastrophe: (R)-thalidomide is a
-    sedative, (S)-thalidomide is a teratogen — merging them kills
+    sedative, (S)-thalidomide is a teratogen -- merging them kills
     patients). The fix preserves stereo indicators as lowercase letters
-    prefixed to the name: ``(R)-aspirin`` → ``r-aspirin``.
+    prefixed to the name: ``(R)-aspirin`` -> ``r-aspirin``.
     """
 
     @pytest.mark.parametrize("name,expected", [
@@ -1976,7 +1976,7 @@ class TestFix78ValidateDrugRecordStrictMalformed:
 
 
 # =============================================================================
-# Domain 11 — Logging & Observability (FIX #79 – #83)
+# Domain 11 -- Logging & Observability (FIX #79 - #83)
 # =============================================================================
 
 class TestFix79ConsistentLogging:
@@ -2056,7 +2056,7 @@ class TestFix83UnknownMethodCallerContext:
 
 
 # =============================================================================
-# Domain 12 — Configuration & Environment Management (FIX #84 – #88)
+# Domain 12 -- Configuration & Environment Management (FIX #84 - #88)
 # =============================================================================
 
 class TestFix84MethodConfidenceConfigurable:
@@ -2132,14 +2132,14 @@ class TestFix88NormalizeNameAllowChars:
         assert "1.2.3" in result
 
     def test_custom_allow_chars_empty(self):
-        # No additional chars — only a-z and 0-9.
+        # No additional chars -- only a-z and 0-9.
         result = normalize_name("a-b.c", allow_chars="")
         assert "-" not in result
         assert "." not in result
 
 
 # =============================================================================
-# Domain 13 — Documentation & Readability (FIX #89 – #96)
+# Domain 13 -- Documentation & Readability (FIX #89 - #96)
 # =============================================================================
 
 class TestFix89DocstringExamplesCorrect:
@@ -2238,7 +2238,7 @@ class TestFix96RecordSchema:
 
 
 # =============================================================================
-# Domain 14 — Compliance & Standards Adherence (FIX #97 – #101)
+# Domain 14 -- Compliance & Standards Adherence (FIX #97 - #101)
 # =============================================================================
 
 class TestFix97UniprotRegexCompliant:
@@ -2295,7 +2295,7 @@ class TestFix100RecordSchemaValidation:
         assert not ok
 
     def test_non_strict_allows_unknown_fields(self):
-        """Non-strict mode is lenient — only required-field presence checked."""
+        """Non-strict mode is lenient -- only required-field presence checked."""
         ok, _ = validate_drug_record(
             {"name": "X", "totally_made_up_field": "value"},
             strict=False,
@@ -2326,7 +2326,7 @@ class TestFix101DeprecationWarnings:
 
 
 # =============================================================================
-# Domain 15 — Interoperability & Integration (FIX #102 – #107)
+# Domain 15 -- Interoperability & Integration (FIX #102 - #107)
 # =============================================================================
 
 class TestFix102InchikeyValidatorAgreement:
@@ -2430,7 +2430,7 @@ class TestFix107GetRegisteredMethods:
 
 
 # =============================================================================
-# Domain 16 — Data Lineage & Traceability (FIX #108 – #114)
+# Domain 16 -- Data Lineage & Traceability (FIX #108 - #114)
 # =============================================================================
 
 class TestFix108MatchResultProvenance:
@@ -2488,8 +2488,8 @@ class TestFix111FindDuplicateIdsReturnIndices:
         records = [
             {"chembl_id": "CHEMBL25"},   # index 0
             {"chembl_id": "CHEMBL99"},   # index 1
-            {"chembl_id": "CHEMBL25"},   # index 2 — duplicate
-            {"chembl_id": "CHEMBL25"},   # index 3 — duplicate
+            {"chembl_id": "CHEMBL25"},   # index 2 -- duplicate
+            {"chembl_id": "CHEMBL25"},   # index 3 -- duplicate
         ]
         result = find_duplicate_ids(
             records, id_fields=("chembl_id",), return_indices=True,
@@ -2579,7 +2579,7 @@ class TestFix114ConnectivityBlockProvenance:
 
 
 # =============================================================================
-# Integration verification — cross-cutting checks
+# Integration verification -- cross-cutting checks
 # =============================================================================
 
 class TestIntegrationVerification:

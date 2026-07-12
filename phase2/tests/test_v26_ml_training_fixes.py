@@ -1,28 +1,28 @@
-"""Tests for FIX-D (ML Training Correctness) — issues C-14, C-12, C-13, C-21.
+"""Tests for FIX-D (ML Training Correctness) -- issues C-14, C-12, C-13, C-21.
 
 These tests verify the four ML-training-correctness fixes applied in v26:
 
-  * C-14 — ``kg_builder --dedup`` CLI was a stub. ``total_removed`` was
+  * C-14 -- ``kg_builder --dedup`` CLI was a stub. ``total_removed`` was
     always 0 because the branch only logged "need full triple (src, rel,
     dst)" for each edge type. The fix wires the CLI to actually call
     ``DrugOSGraphBuilder.deduplicate_edges_deterministic`` for each
     (src, rel, dst) triple derived from ``CORE_EDGE_TYPES``.
 
-  * C-12 — Train/val/test split in ``step11_train_transe`` was fully
+  * C-12 -- Train/val/test split in ``step11_train_transe`` was fully
     random over mixed-relation triples, and ``temporal_split_pairs``
     (training_data.py) was dead code. The fix attempts a temporal split
     via ``temporal_split_pairs`` when approval-year data is available,
     and otherwise falls back to a stratified-by-relation-type random
     split (each relation contributes proportional 80/10/10).
 
-  * C-13 — ``chemberta_encoder.py`` (1925 lines) is real but was never
+  * C-13 -- ``chemberta_encoder.py`` (1925 lines) is real but was never
     invoked from ``run_pipeline.py``. ``step9_build_pyg`` always fell
     back to random Xavier features. The fix wires ``step9_build_pyg`` to
     optionally compute ChEMBERTa SMILES embeddings (opt-in via
     ``DRUGOS_USE_CHEMBERTA=1`` + ``HF_TOKEN`` + ``transformers``) and
     attach them via ``PyGBuilder.add_chemberta_features``.
 
-  * C-21 — ``pyg_builder.build_from_drkg`` wrote every (src, dst) pair
+  * C-21 -- ``pyg_builder.build_from_drkg`` wrote every (src, dst) pair
     from ``edge_maps`` to ``edge_index`` without deduplication. The fix
     adds a (src, dst) deduplication pass per edge type.
 """
@@ -66,7 +66,7 @@ def test_kg_builder_dedup_cli_actually_dedups():
                 logger.info("Dedup for %s: need full triple (src, rel, dst)", rel_type)
             print(f"\\nDedup complete. Removed {total_removed} duplicate edges.")
 
-    ``total_removed`` was always 0 — no dedup happened. The fix calls
+    ``total_removed`` was always 0 -- no dedup happened. The fix calls
     ``builder.deduplicate_edges_deterministic(src, rel, dst)`` for each
     edge-type triple derived from ``CORE_EDGE_TYPES``.
     """
@@ -133,7 +133,7 @@ def test_kg_builder_dedup_cli_invokes_real_method_with_mock():
     end_idx = src.find("\n        else:", idx)
     branch = src[idx:end_idx]
 
-    # The branch starts with "elif args.dedup:" — strip the leading
+    # The branch starts with "elif args.dedup:" -- strip the leading
     # ``elif ...:`` line and dedent so we can exec it inside a function.
     body_start = branch.find("\n") + 1
     body = branch[body_start:]
@@ -189,7 +189,7 @@ def test_kg_builder_dedup_cli_invokes_real_method_with_mock():
         )
 
     # ``print`` must have been called with the REAL removed count, not 0.
-    # 5 (per call) * n_calls >= 5 → total_removed >= 5.
+    # 5 (per call) * n_calls >= 5 -> total_removed >= 5.
     assert captured_stdout, (
         "C-14 FAIL: --dedup branch did not print a summary line."
     )
@@ -200,7 +200,7 @@ def test_kg_builder_dedup_cli_invokes_real_method_with_mock():
     total = int(m.group(1))
     assert total > 0, (
         f"C-14 FAIL: --dedup branch reported Removed {total} duplicate "
-        f"edges — should be > 0 since the mock returned 5 per call. "
+        f"edges -- should be > 0 since the mock returned 5 per call. "
         f"(stub returned 0.)"
     )
 
@@ -246,7 +246,7 @@ def test_pyg_builder_deduplicates_edges():
     )
 
     # Verify the unique pairs are exactly {(0,0), (1,1), (2,0)} (in any
-    # order — the dedup preserves first-occurrence order, so the expected
+    # order -- the dedup preserves first-occurrence order, so the expected
     # order is (0,0), (1,1), (2,0)).
     pairs = {(int(ei[0, i].item()), int(ei[1, i].item())) for i in range(ei.size(1))}
     assert pairs == {(0, 0), (1, 1), (2, 0)}, (
@@ -330,7 +330,7 @@ def test_chemberta_integration_is_wired():
     # ``add_chemberta_features`` must be called.
     # Strip comments so a docstring mention doesn't satisfy the test.
     src_no_comments = re.sub(r"#.*$", "", src)
-    # Also strip docstrings (triple-quoted strings) — naive but effective
+    # Also strip docstrings (triple-quoted strings) -- naive but effective
     # for this test: remove text between triple-quotes.
     src_no_docstrings = re.sub(
         r'"""[\s\S]*?"""', "", src_no_comments
@@ -354,7 +354,7 @@ def test_chemberta_integration_is_wired():
         "HF_TOKEN" in src or "HUGGING_FACE_HUB_TOKEN" in src
     ), (
         "C-13 FAIL: run_pipeline.py does not check HF_TOKEN / "
-        "HUGGING_FACE_HUB_TOKEN — the chemberta integration would "
+        "HUGGING_FACE_HUB_TOKEN -- the chemberta integration would "
         "attempt to download a gated model without authentication."
     )
 
@@ -400,7 +400,7 @@ def test_chemberta_integration_is_optional_and_off_by_default():
         except Exception as exc:
             # If the underlying PyGBuilder fails for unrelated
             # reasons (e.g. PyG not installed in CI), we still want
-            # to assert the chemberta_used flag — but the build
+            # to assert the chemberta_used flag -- but the build
             # failure prevents that. Accept the failure as
             # "infrastructure missing" and verify only via source.
             pytest.skip(
@@ -480,7 +480,7 @@ def test_step11_uses_stratified_split_when_no_approval_years():
 
     This test exercises the split-selection logic in isolation by
     importing step11 and invoking it on a tiny synthetic graph. We do
-    NOT attempt to actually train TransE — we only verify that the split
+    NOT attempt to actually train TransE -- we only verify that the split
     indices cover every relation type proportionally (the previous
     fully-random split could put a rare relation entirely in test).
     """
@@ -540,7 +540,7 @@ def test_step11_uses_stratified_split_when_no_approval_years():
     # temporal_split_pairs itself).
     assert "_split_metadata" in src, (
         "C-12 FAIL: step11_train_transe does not inspect the "
-        "_split_metadata field returned by temporal_split_pairs — "
+        "_split_metadata field returned by temporal_split_pairs -- "
         "it cannot tell whether the split was actually temporal."
     )
 

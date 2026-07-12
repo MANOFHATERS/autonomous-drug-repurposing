@@ -141,7 +141,7 @@ NEGATIVE_SAMPLING_SCHEMA_VERSION: str = "2.1.0"
 # Fix 12.1: Configurable cache size with env var override
 DEFAULT_NEGATIVE_CACHE_SIZE: int = 500_000
 
-# v84 FORENSIC ROOT FIX (BUG #21 — magic multiplier):
+# v84 FORENSIC ROOT FIX (BUG #21 -- magic multiplier):
 # The previous flat 50x multiplier was justified by a hand-wavy "~98%
 # probability in graphs with up to 80% coverage" claim. The real
 # probability of finding N unique negatives in a graph with positive
@@ -150,7 +150,7 @@ DEFAULT_NEGATIVE_CACHE_SIZE: int = 500_000
 # For a target success probability P_target and observed density p,
 # the minimum multiplier k is:
 #   k = ceil(log(1 - P_target) / log(p))
-# Default p=0.8, P_target=0.98 → k = ceil(log(0.02)/log(0.8)) = 28,
+# Default p=0.8, P_target=0.98 -> k = ceil(log(0.02)/log(0.8)) = 28,
 # so 50 is a conservative cap. We compute the multiplier from the
 # actual graph density at sampler-construction time (see
 # KGNegativeSampler._compute_max_attempts) and fall back to this
@@ -194,7 +194,7 @@ _ATC_RELATIONSHIPS: Dict[str, set] = {
     "S": {"D", "J", "N", "P", "R"},
     "V": {"J"},
 }
-# v84 FORENSIC ROOT FIX (BUG #22 — import inside loop):
+# v84 FORENSIC ROOT FIX (BUG #22 -- import inside loop):
 # The previous code re-imported `os` inside the inner loop and re-read
 # the env var on every neighbor pair. While Python caches imports, this
 # was both a code smell and a race-condition risk if the env var changed
@@ -209,7 +209,7 @@ for _cls_a, _neighbors in _ATC_RELATIONSHIPS.items():
         _ATC_SIMILARITY[(_cls_a, _cls_b)] = _ATC_NEIGHBOR_SIMILARITY
         _ATC_SIMILARITY[(_cls_b, _cls_a)] = _ATC_NEIGHBOR_SIMILARITY
     _ATC_SIMILARITY[(_cls_a, _cls_a)] = 1.0
-# v84 ROOT FIX (BUG #8 — missing-pair default).
+# v84 ROOT FIX (BUG #8 -- missing-pair default).
 # Sentinel similarity used for ATC class pairs that have NO entry in
 # the curated _ATC_RELATIONSHIPS map. The previous code defaulted to
 # 0.0 (maximally dissimilar) via .get((a,b), 0.0), which collapsed the
@@ -281,7 +281,7 @@ class NegativeSampler:
         v35 ROOT FIX (M-18): this class is the drug-disease
         link-prediction sampler. For TransE KG-embedding training
         (where negatives must be INTEGER entity indices, not string
-        IDs), use ``KGNegativeSampler`` instead — see its docstring
+        IDs), use ``KGNegativeSampler`` instead -- see its docstring
         for the migration guide.
 
         Args:
@@ -371,7 +371,7 @@ class NegativeSampler:
         # ``_get_drug_degree`` and ``_get_disease_degree`` are O(1)
         # lookups instead of O(N) linear scans of the positive set
         # per call. The previous code did a full iteration of
-        # ``self.positive_pairs`` for every confidence computation —
+        # ``self.positive_pairs`` for every confidence computation --
         # on a 5K-positive / 75K-negative training set, that was
         # 75K * 5K = 375M operations just for confidence grading.
         # The cached Counter turns this into 75K dict lookups.
@@ -400,20 +400,20 @@ class NegativeSampler:
         # Fix 7.1: Seeded RNG for reproducibility
         # P2-017 ROOT FIX: the original code only validated `seed`
         # (the explicit per-instance arg). When `seed is None`, it
-        # fell through to `np.random.default_rng(SEED)` — but if SEED
+        # fell through to `np.random.default_rng(SEED)` -- but if SEED
         # itself was None (e.g., DRUGOS_SEED env var unset AND the
         # config fallback returned None), `default_rng(None)` creates
         # an UNSEEDED Generator (OS-entropy-seeded, non-deterministic).
         # The `except (TypeError, ValueError)` clause never fires
         # because `default_rng(None)` does not raise. The NegativeSampler
         # then claims reproducibility (`self.seed = SEED = None`) but
-        # actually uses OS entropy — an FDA 21 CFR Part 11 violation.
+        # actually uses OS entropy -- an FDA 21 CFR Part 11 violation.
         # The fix: validate SEED is not None before calling default_rng.
         self.seed = seed
         if seed is not None:
             self._rng = np.random.default_rng(seed)
         elif SEED is not None:
-            # Module-level SEED fallback — validate it's not None.
+            # Module-level SEED fallback -- validate it's not None.
             try:
                 self._rng = np.random.default_rng(SEED)
                 self.seed = SEED
@@ -421,7 +421,7 @@ class NegativeSampler:
                 self._rng = None
                 self.seed = None
         else:
-            # P2-017 ROOT FIX: SEED is None — cannot guarantee
+            # P2-017 ROOT FIX: SEED is None -- cannot guarantee
             # reproducibility. In regulatory mode, this is a hard
             # violation. Otherwise, fall back to None and warn loudly.
             _regulatory = (
@@ -439,7 +439,7 @@ class NegativeSampler:
             self._rng = None
             self.seed = None
             logger.warning(
-                "NegativeSampler: SEED is None — RNG will be unseeded "
+                "NegativeSampler: SEED is None -- RNG will be unseeded "
                 "and results will NOT be reproducible. Set DRUGOS_SEED "
                 "env var to fix. (P2-017 root fix)"
             )
@@ -645,7 +645,7 @@ class NegativeSampler:
         drug with few indications has more unexplored therapeutic potential.
 
         v35 ROOT FIX (H-9): O(1) Counter lookup. The previous code
-        iterated ``self.positive_pairs`` per call — O(N) per lookup,
+        iterated ``self.positive_pairs`` per call -- O(N) per lookup,
         O(N*P) per confidence-batch (P = batch size). With the cached
         ``_drug_degree_counter`` built in ``__init__``, this is now a
         single dict lookup.
@@ -660,7 +660,7 @@ class NegativeSampler:
         for repurposing discoveries.
 
         v35 ROOT FIX (H-9): O(1) Counter lookup. Same fix rationale
-        as ``_get_drug_degree`` — the previous O(N) per-call scan
+        as ``_get_drug_degree`` -- the previous O(N) per-call scan
         became a single dict lookup via the cached
         ``_disease_degree_counter``.
         """
@@ -678,7 +678,7 @@ class NegativeSampler:
 
         v35 ROOT FIX (L-14): the previous code clamped the final
         confidence to ``[0.3, 0.9]`` via ``max(0.3, min(0.9, ...))``.
-        The clamp HID signals — a drug with 50 known indications
+        The clamp HID signals -- a drug with 50 known indications
         (high prior of NOT treating a new disease) and a disease with
         30 known treatments (high saturation) would still get clamped
         to 0.9, indistinguishable from a drug with 11 indications.
@@ -701,7 +701,7 @@ class NegativeSampler:
         density_signal = min(density / 5.0, 1.0)
 
         raw_confidence = 0.4 + 0.2 * drug_signal + 0.15 * disease_signal + 0.25 * density_signal
-        # L-14: lower bound only — no upper clamp.
+        # L-14: lower bound only -- no upper clamp.
         return max(0.3, round(raw_confidence, 4))
 
     def _compute_class_confidence(
@@ -726,12 +726,12 @@ class NegativeSampler:
         if atc_known == atc_sampled:
             return 0.3
 
-        # v84 FORENSIC ROOT FIX (BUG #8 — wrong-class confidence collapse):
+        # v84 FORENSIC ROOT FIX (BUG #8 -- wrong-class confidence collapse):
         # The previous code defaulted missing ATC pairs to similarity=0.0
         # via _ATC_SIMILARITY.get((a,b), 0.0), which made every unknown
         # pair MAXIMALLY dissimilar (confidence=0.5, the upper bound).
         # Since most ATC pairs are NOT in the curated _ATC_RELATIONSHIPS
-        # map, the majority of wrong-class negatives collapsed to 0.5 —
+        # map, the majority of wrong-class negatives collapsed to 0.5 --
         # destroying the confidence gradient. Scientifically, "no
         # documented relationship" means "uncertain", not "maximally
         # dissimilar". ROOT FIX: use _ATC_UNKNOWN_SIMILARITY=0.5 as the
@@ -787,7 +787,7 @@ class NegativeSampler:
         and configuration. Supports regulatory compliance audits.
 
         v35 ROOT FIX (L-13): the previous code called
-        ``datetime.now(timezone.utc).isoformat()`` ONCE PER SAMPLE —
+        ``datetime.now(timezone.utc).isoformat()`` ONCE PER SAMPLE --
         for a 75K-negative training set that was 75K system calls and
         75K isoformat serialisations, adding ~1.8s to the negative
         sampling run. The fix caches the timestamp at the start of
@@ -930,7 +930,7 @@ class NegativeSampler:
             else:
                 # v35 ROOT FIX (M-11): in regulatory mode (FDA 21 CFR
                 # Part 11), an unseeded RNG fallback is a REPRODUCIBILITY
-                # VIOLATION — the model could pass the 0.85 AUC launch
+                # VIOLATION -- the model could pass the 0.85 AUC launch
                 # gate on one run and fail it on the next, with no way
                 # to audit which run was canonical. The previous code
                 # silently created ``np.random.default_rng()`` (unseeded)
@@ -981,12 +981,12 @@ class NegativeSampler:
         # drugs and diseases. Biomedical KGs have heavy-tailed degree
         # distributions (TP53, EGFR, "disease" hub nodes with thousands
         # of edges). Uniform sampling under-represents hub nodes as
-        # negatives — but the rejection filter then rejects the FEWER
+        # negatives -- but the rejection filter then rejects the FEWER
         # valid negatives for high-degree drugs (because most of their
         # disease pairs are positives). Net effect: low-degree drugs
         # are over-sampled as negatives, high-degree drugs are
         # under-sampled. The KGNegativeSampler class correctly uses
-        # Bernoulli degree-weighting per Wang et al. 2014 — but this
+        # Bernoulli degree-weighting per Wang et al. 2014 -- but this
         # legacy random_sampling (used by combined_sampling for the
         # random strategy, which gets 50% of the budget by default)
         # did NOT.
@@ -1016,7 +1016,7 @@ class NegativeSampler:
             ) / (_disease_degrees.sum() + _eps * n_diseases)
             logger.info(
                 "P2-007 root fix: built Bernoulli degree-weighted "
-                "probabilities for random_sampling — "
+                "probabilities for random_sampling -- "
                 "drug_degree_max=%.0f, disease_degree_max=%.0f, "
                 "drug_probs_sum=%.4f, disease_probs_sum=%.4f. "
                 "Mirrors KGNegativeSampler (Wang et al. 2014).",
@@ -1037,7 +1037,7 @@ class NegativeSampler:
             # P2-007 ROOT FIX: use degree-weighted choice instead of
             # uniform integers. rng.choice with p=probs samples indices
             # proportional to degree, so hubs (TP53, etc.) are sampled
-            # as negatives in proportion to their degree — preventing
+            # as negatives in proportion to their degree -- preventing
             # the systematic under-representation of hub pairs that
             # depressed AUC on hub-heavy test sets.
             drug_indices = rng.choice(
@@ -1101,7 +1101,7 @@ class NegativeSampler:
         # warns if < 90% of target, but proceeds anyway. The model then
         # trains on FEWER negatives than the configured neg_ratio, with
         # no hard enforcement. AUC is computed against a smaller
-        # negative pool — easier to distinguish — silently inflated.
+        # negative pool -- easier to distinguish -- silently inflated.
         # The fix: emit a CRITICAL log (and an explicit error in
         # regulatory mode) when shortfall > 10%, so operators cannot
         # miss the silent AUC inflation. We do NOT raise by default in
@@ -1117,7 +1117,7 @@ class NegativeSampler:
             logger.critical(
                 "P2-016 root fix: random_sampling shortfall of %d/%d "
                 "negatives (%.1f%%). Model will train on fewer negatives "
-                "than the configured neg_ratio — AUC may be silently "
+                "than the configured neg_ratio -- AUC may be silently "
                 "inflated due to smaller negative pool. Consider "
                 "increasing max_attempts, decreasing neg_ratio, or "
                 "expanding the drug/disease pools. (regulatory_mode=%s)",
@@ -1162,7 +1162,7 @@ class NegativeSampler:
         v35 ROOT FIX (M-4): use the FULL set of known ATC classes per
         disease (not just the first / majority class). The previous
         code collapsed ``disease_atc_map[d_id]`` to a single string via
-        ``atc.strip()[0].upper()`` when ``atc`` was a string — but the
+        ``atc.strip()[0].upper()`` when ``atc`` was a string -- but the
         H-6 fix in ``training_data._build_disease_atc_map`` now passes
         the full ``Dict[str, List[Tuple[str, int]]]`` (per-disease class
         distribution with vote counts). The fix detects both the legacy
@@ -1172,7 +1172,7 @@ class NegativeSampler:
         from sampling candidates in BOTH ``A`` and ``C``.
 
         v35 ROOT FIX (M-14): the inner drug-loop previously used
-        ``break`` when ``n_to_sample <= 0`` — this terminated the
+        ``break`` when ``n_to_sample <= 0`` -- this terminated the
         ENTIRE outer ``for drug_id`` loop after the first drug whose
         candidate pool was exhausted (or whose remaining budget hit 0).
         The fix changes this to ``continue`` so the next drug still
@@ -1257,7 +1257,7 @@ class NegativeSampler:
                 # mode (DRUGOS_REGULATORY_MODE=1 or
                 # DRUGOS_DETERMINISTIC_MODE=1), an unseeded RNG
                 # fallback is an FDA 21 CFR Part 11 reproducibility
-                # violation — the negative-sampling distribution
+                # violation -- the negative-sampling distribution
                 # would differ between runs, so the model could
                 # pass the 0.85 AUC launch gate on one run and fail
                 # it on the next, with no way to audit which run
@@ -1278,7 +1278,7 @@ class NegativeSampler:
                         "requires an explicit seed. Either pass "
                         "rng=np.random.default_rng(SEED) explicitly or "
                         "construct NegativeSampler with seed=... "
-                        "(FIX-P1-D-8 root fix — mirrors the M-11 fix "
+                        "(FIX-P1-D-8 root fix -- mirrors the M-11 fix "
                         "in random_sampling at lines 860-873)."
                     )
                 rng = np.random.default_rng()
@@ -1335,7 +1335,7 @@ class NegativeSampler:
                 sampled_indices = np.arange(n_candidates)
 
             for raw_idx in sampled_indices:
-                # v84 FORENSIC ROOT FIX (BUG #7 — loop var rebind):
+                # v84 FORENSIC ROOT FIX (BUG #7 -- loop var rebind):
                 # The previous code did `for idx in sampled_indices: idx = int(idx)`
                 # which rebound the loop variable inside the body. This is a
                 # Python anti-pattern: a `continue` or `break` after the
@@ -1350,13 +1350,13 @@ class NegativeSampler:
                 if pair in self._rejection_pairs or pair in self.negative_cache:
                     continue
 
-                # v84 FORENSIC ROOT FIX (BUG #1 — alphabetical sort masquerading
+                # v84 FORENSIC ROOT FIX (BUG #1 -- alphabetical sort masquerading
                 # as similarity-based selection):
                 # The M-4 ROOT FIX comment promised to "pick the atc_known as
                 # the closest-class member from the full known set (the
                 # lowest-similarity class gives the strongest mechanistic-
                 # mismatch signal)". The implementation `next(iter(sorted(
-                # known_classes)))` was a LIE — sorted() on single-letter
+                # known_classes)))` was a LIE -- sorted() on single-letter
                 # ATC codes is alphabetical (A, B, C, ...), NOT similarity-
                 # based. Drugs with known diseases spanning class "A" always
                 # got atc_known="A" regardless of the sampled class, even
@@ -1368,7 +1368,7 @@ class NegativeSampler:
                 # compute the biological similarity via _ATC_SIMILARITY
                 # (with _ATC_UNKNOWN_SIMILARITY=0.5 fallback for pairs not
                 # in the curated map), and pick the known class with the
-                # LOWEST similarity to the sampled class — this gives the
+                # LOWEST similarity to the sampled class -- this gives the
                 # strongest mechanistic-mismatch signal as documented.
                 atc_known = ""
                 if known_classes:
@@ -1391,7 +1391,7 @@ class NegativeSampler:
                             key=lambda _k: (_sim_to_sampled(_k), _k),
                         )
                     else:
-                        # No sampled class signal — fall back to first
+                        # No sampled class signal -- fall back to first
                         # known class alphabetically for backward compat.
                         atc_known = next(iter(sorted(known_classes)))
 
@@ -1550,10 +1550,10 @@ class NegativeSampler:
     def combined_sampling(
         self,
         # v100 ROOT FIX (BUG P2-035): type-hint correctness fix (NOT a
-        # runtime bug — the defaults are None, not mutable objects, so
+        # runtime bug -- the defaults are None, not mutable objects, so
         # there is no mutable-default-arg bug here). The previous type
         # hints said `Dict[str, List[str]]`, `Dict[str, Any]`, and
-        # `List[Dict]` — but the defaults are None, so the ACTUAL type
+        # `List[Dict]` -- but the defaults are None, so the ACTUAL type
         # is `Optional[Dict[...]]` / `Optional[List[...]]`. The lie
         # confused static analysis (mypy/pyright reported spurious
         # "None is not assignable to Dict" errors at call sites that
@@ -1567,13 +1567,13 @@ class NegativeSampler:
         # v100 ROOT FIX (BUG P2-041): the `**_extra: Any` parameter was
         # REMOVED. The previous "v36 ROOT FIX (Chain 9)" added `**_extra`
         # to absorb KGNegativeSampler-style kwargs (`relation_idx`,
-        # `head_type`, `tail_type`) that `train_transe` passes — but
+        # `head_type`, `tail_type`) that `train_transe` passes -- but
         # NegativeSampler is the COMPOUND-DISEASE-ONLY sampler and
         # silently produced `(Compound, Disease)` negatives even when a
         # caller asked for `(Gene, interacts_with, Gene)` negatives.
         # That is a SCIENTIFIC correctness bug: the API LIED rather
         # than raising. Now the function raises `TypeError` on
-        # unexpected kwargs — the correct behavior — and callers who
+        # unexpected kwargs -- the correct behavior -- and callers who
         # need type-constrained KG sampling must use
         # `KGNegativeSampler.combined_sampling` directly.
     ) -> List[Dict]:
@@ -1588,10 +1588,10 @@ class NegativeSampler:
         non-treats relations. A caller that passed
         ``head_type="Gene", tail_type="Gene"`` to this method
         (NegativeSampler.combined_sampling) used to silently get
-        ``(Compound, Disease)`` negatives — wrong for
+        ``(Compound, Disease)`` negatives -- wrong for
         ``(Gene, interacts_with, Gene)`` triples. The previous
         ``v36 ROOT FIX (Chain 9): added **_extra`` note claimed this
-        was acceptable because "NegativeSampler ignores these" — but
+        was acceptable because "NegativeSampler ignores these" -- but
         silently ignoring a type constraint is a SCIENTIFIC bug, not
         a graceful API. The fix REMOVES ``**_extra`` so the function
         now raises ``TypeError`` if a caller passes unexpected kwargs
@@ -1643,7 +1643,7 @@ class NegativeSampler:
         # v35 ROOT FIX (M-6): normalise strategy weights to sum to 1.0
         # so the per-strategy allocations add up to total_negatives.
         # The previous code did ``int(total_negatives * w)`` for each
-        # weight WITHOUT normalising — if the user passed weights that
+        # weight WITHOUT normalising -- if the user passed weights that
         # summed to 0.9 (e.g. {random: 0.5, wrong_class: 0.3,
         # failed_phase3: 0.1}), the three allocations summed to
         # 0.9*total_negatives and 10% of the budget was silently
@@ -1655,7 +1655,7 @@ class NegativeSampler:
         # FIX-P1-D-11 (root): the previous code used
         # ``zip(strategy_weights.values(), normalised_weights.values())``
         # to pair each original weight with its normalised counterpart.
-        # ``zip`` pairs by POSITION, not by key — both dicts are built
+        # ``zip`` pairs by POSITION, not by key -- both dicts are built
         # from the same source so insertion order matches in Python
         # 3.7+, BUT a future refactor could change one dict's
         # construction order without the other, silently comparing
@@ -1711,7 +1711,7 @@ class NegativeSampler:
 
         # Strategy (a): Random
         # L-33: round() instead of int() so 0.5 is rounded to nearest
-        # int rather than truncated — prevents systematic under-allocation
+        # int rather than truncated -- prevents systematic under-allocation
         # when weights are normalised (M-6) and a weight's product is
         # x.5 (truncation loses ~0.5 negatives per strategy, ~1.5 total).
         n_random = round(total_negatives * strategy_weights.get("random", 0.5))
@@ -1747,7 +1747,7 @@ class NegativeSampler:
         else:
             # FIX-P4-13 (v42): the previous log line passed
             # ``failed_trials is not None`` to the ``%s`` slot, which
-            # logged the BOOLEAN ``True`` / ``False`` — misleading
+            # logged the BOOLEAN ``True`` / ``False`` -- misleading
             # because the operator wants to see the COUNT of failed
             # trials that were (or were not) provided. Now logs the
             # actual length (0 when absent / empty).
@@ -1793,12 +1793,12 @@ class NegativeSampler:
         v36 ROOT FIX (Chain 9): added ``**_extra`` to absorb any
         keyword args a caller might pass that are intended for the
         KGNegativeSampler signature (which takes only ``neg_samples``).
-        This makes the two samplers API-compatible — passing the wrong
+        This makes the two samplers API-compatible -- passing the wrong
         instance no longer raises ``TypeError``. The two samplers
         still produce semantically different output (NegativeSampler
         returns drug-disease index pairs; KGNegativeSampler returns
         generic head-tail index pairs), so callers SHOULD still pass
-        the correct instance — but at least the API is now uniform.
+        the correct instance -- but at least the API is now uniform.
 
         Args:
             negatives: Negative samples. If None, uses cache.
@@ -1926,9 +1926,9 @@ class NegativeSampler:
 # training because:
 #
 #   1. Its constructor takes ``all_drug_ids: List[str]`` and
-#      ``all_disease_ids: List[str]`` — not integer entity indices.
+#      ``all_disease_ids: List[str]`` -- not integer entity indices.
 #   2. Its ``combined_sampling`` method requires ``drug_disease_map``,
-#      ``disease_atc_map``, ``failed_trials`` kwargs — domain-specific
+#      ``disease_atc_map``, ``failed_trials`` kwargs -- domain-specific
 #      objects that don't exist in the TransE training path.
 #   3. Its ``to_negative_indices`` returns string-ID pairs, not the
 #      ``(head_indices, tail_indices)`` tuple of ints that
@@ -1941,7 +1941,7 @@ class NegativeSampler:
 # This call signature does NOT match the actual constructor, so it
 # raised ``TypeError``, was caught by the ``except Exception`` block,
 # and ``negative_sampler`` stayed ``None``. ``train_transe`` then fell
-# back to CRUDE RANDOM CORRUPTION — the exact bug the audit identified
+# back to CRUDE RANDOM CORRUPTION -- the exact bug the audit identified
 # in F6.3.4. Tests passed because the toy fixture was too small to
 # reach the negative-sampling code path.
 #
@@ -1958,11 +1958,11 @@ class NegativeSampler:
 # Type-constrained corruption (strategy="type_constrained"):
 #   For each positive triple (h, r, t), the tail is corrupted with a
 #   random entity of the SAME type as t (e.g., a Disease tail is
-#   corrupted with another Disease entity — never a Compound or Gene).
+#   corrupted with another Disease entity -- never a Compound or Gene).
 #   This is the scientifically-correct approach for biomedical KGs
 #   per Sun et al. 2019 and Wang et al. 2023. Without type
 #   constraints, TransE learns to push a Compound head away from ALL
-#   entity types, not just non-treating Diseases — producing
+#   entity types, not just non-treating Diseases -- producing
 #   type-incompatible negatives that the code's own warning says
 #   make "AUC numbers NOT comparable to literature."
 # ======================================================================
@@ -1995,7 +1995,7 @@ class KGNegativeSampler:
         Type-constrained negative sampling was introduced by Wang et al.
         (2014) and is the standard for biomedical KG embedding. Without
         type constraints, a (Compound, treats, Disease) triple might be
-        corrupted to (Compound, treats, Gene) — which is meaningless
+        corrupted to (Compound, treats, Gene) -- which is meaningless
         because ``treats`` only connects Compounds to Diseases. The model
         wastes capacity learning to push Compounds away from Genes, which
         is not the desired signal.
@@ -2042,19 +2042,19 @@ class KGNegativeSampler:
                 f"{self.VALID_STRATEGIES}"
             )
         # v13 ROOT FIX (SF-1 / RE-12 / Compound-2 "AUC Enforcement
-        # Theater"): v12 auto-downgraded ``type_constrained`` → ``random``
+        # Theater"): v12 auto-downgraded ``type_constrained`` -> ``random``
         # with only a CRITICAL log when ``entity_type_lookup`` was empty.
         # This created a SILENT DEGRADATION path that bypassed the SF-1
         # abort in run_pipeline.py step11: the construction "succeeded"
         # (no exception), so the try/except in step11 never fired, and
         # the pipeline ran with random corruption while logging CRITICAL
         # at a level most operators ignore in production. The 0.85 AUC
-        # V1 launch criterion was therefore unverifiable — a model
+        # V1 launch criterion was therefore unverifiable -- a model
         # trained on random-corruption negatives could trivially pass.
         #
         # v13 fix: RAISE ValueError instead of auto-downgrading. The
         # SF-1 abort in run_pipeline.py step11 catches this and returns
-        # ``{"skipped": True, "reason": ...}`` — making the degradation
+        # ``{"skipped": True, "reason": ...}`` -- making the degradation
         # observable, diagnosable, and blockable. Operators who
         # genuinely want random corruption can pass
         # ``strategy="random"`` explicitly.
@@ -2066,7 +2066,7 @@ class KGNegativeSampler:
                 "run_pipeline.py step11, OR "
                 "(b) explicitly pass strategy='random' to acknowledge "
                 "that AUC numbers will NOT be comparable to literature. "
-                "(SF-1 / RE-12 / Compound-2 root fix — v12 silently "
+                "(SF-1 / RE-12 / Compound-2 root fix -- v12 silently "
                 "downgraded here, bypassing the step11 abort.)"
             )
         if num_negatives <= 0:
@@ -2087,7 +2087,7 @@ class KGNegativeSampler:
         # only put TRAIN triples into known_triples (per the ML-6 fix),
         # so val/test triples were NOT in the rejection set. This
         # created false negatives: the sampler produced a triple that
-        # was actually a held-out positive → AUC was structurally
+        # was actually a held-out positive -> AUC was structurally
         # inflated because the model "learned" to push apart pairs it
         # would later be evaluated on.
         #
@@ -2098,7 +2098,7 @@ class KGNegativeSampler:
         self._rejection_set: Set[Tuple[int, int, int]] = (
             self.known_triples | self.held_out_pairs
         )
-        # v84 FORENSIC ROOT FIX (BUG #16 — _sampling_method never set):
+        # v84 FORENSIC ROOT FIX (BUG #16 -- _sampling_method never set):
         # The previous code read `getattr(self, "_sampling_method", "bernoulli")`
         # in combined_sampling but NEVER set the attribute in __init__. The
         # entire bernoulli-vs-uniform branch was effectively hardcoded to
@@ -2107,22 +2107,22 @@ class KGNegativeSampler:
         # `sampling_method` constructor parameter (default "bernoulli" for
         # backward compat) and store it as `self._sampling_method`.
         # Valid values: "bernoulli" (degree-weighted, Wang et al. 2014)
-        # or "uniform" (flat random — for ablations / debugging).
+        # or "uniform" (flat random -- for ablations / debugging).
         if sampling_method not in ("bernoulli", "uniform"):
             raise ValueError(
                 f"sampling_method must be 'bernoulli' or 'uniform', "
                 f"got {sampling_method!r}. (v84 BUG #16 root fix)"
             )
         self._sampling_method: str = sampling_method
-        # v84 FORENSIC ROOT FIX (BUG #6 — held_out_entities for transductive
+        # v84 FORENSIC ROOT FIX (BUG #6 -- held_out_entities for transductive
         # TransE): The previous code unconditionally built
         # `self._held_out_entities` and excluded them from the negative
-        # sampling pool. But TransE is a TRANSDUCTIVE model — it learns
+        # sampling pool. But TransE is a TRANSDUCTIVE model -- it learns
         # embeddings for ALL entities (including held-out) during training
         # and evaluates on a subset of triples among those same entities.
         # Excluding held-out entities from the negative pool means TransE
         # never sees them as negatives during training, then is asked to
-        # rank them as negatives at eval time — a train/eval distribution
+        # rank them as negatives at eval time -- a train/eval distribution
         # mismatch that makes held-out AUC essentially random. ROOT FIX:
         # gate the held-out entity exclusion on model_type. For
         # model_type="transductive" (TransE baseline), do NOT exclude
@@ -2147,7 +2147,7 @@ class KGNegativeSampler:
             # during training; excluding held-out entities from negatives
             # creates a train/eval distribution mismatch.
             logger.info(
-                "KGNegativeSampler: model_type=%s — held-out entities "
+                "KGNegativeSampler: model_type=%s -- held-out entities "
                 "are KEPT in the negative sampling pool (transductive "
                 "convention). (v84 BUG #6 root fix)",
                 self._model_type,
@@ -2164,12 +2164,12 @@ class KGNegativeSampler:
             )
 
         # v13 ROOT FIX (SW-14 / PS-12 / SW-15 / Compound-8):
-        # ``relation_to_types`` maps relation_idx → (head_type, tail_type).
+        # ``relation_to_types`` maps relation_idx -> (head_type, tail_type).
         # Populated by run_pipeline.py step11 from ``edge_maps`` keys
         # (which are ``(src_type, rel, dst_type)`` tuples). Without this
         # map, ``combined_sampling(relation_idx=r)`` cannot look up the
         # correct head/tail types and falls back to (Compound, Disease)
-        # for ALL relations — producing biologically meaningless
+        # for ALL relations -- producing biologically meaningless
         # negatives for 5 of 6 edge types. The v12 fix added the
         # ``relation_idx`` kwarg to ``combined_sampling`` but never
         # populated this attribute, so the lookup was inert.
@@ -2192,10 +2192,10 @@ class KGNegativeSampler:
         # Disease that only appears in test treats triples),
         # entity_type_lookup has ZERO entries for that type, so
         # _type_to_indices[type] is empty. The __init__ check at line
-        # 1812 only verifies entity_type_lookup is non-empty OVERALL —
+        # 1812 only verifies entity_type_lookup is non-empty OVERALL --
         # it passes even when individual per-type pools are empty. Then
         # combined_sampling() falls back to random corruption PER BATCH
-        # (line 2042-2048) with only a WARNING — for relations whose
+        # (line 2042-2048) with only a WARNING -- for relations whose
         # head/tail type has no train entities, ALL negatives are random
         # (not type-constrained), inflating AUC for those relations.
         #
@@ -2206,7 +2206,7 @@ class KGNegativeSampler:
         # can handle them explicitly. In production mode
         # (DRUGOS_ENVIRONMENT=prod), RAISE so the pipeline aborts rather
         # than silently training on random negatives for rare types. In
-        # dev mode, log CRITICAL and record the degraded relations —
+        # dev mode, log CRITICAL and record the degraded relations --
         # combined_sampling will fall back to random for those relations
         # only (not per-batch, but per-relation, deterministically).
         self._relations_with_empty_pools: set = set()
@@ -2221,7 +2221,7 @@ class KGNegativeSampler:
                         "an EMPTY entity pool (head pool '%s'=%d, tail "
                         "pool '%s'=%d). type_constrained negatives for "
                         "this relation will fall back to random "
-                        "corruption — AUC for this relation will be "
+                        "corruption -- AUC for this relation will be "
                         "INFLATED (random negatives are easier to "
                         "distinguish than type-correct negatives). This "
                         "is the P2C-014 compound issue: the v53 fix "
@@ -2243,7 +2243,7 @@ class KGNegativeSampler:
                         f"type_constrained sampling: "
                         f"{sorted(self._relations_with_empty_pools)}. In "
                         f"production (DRUGOS_ENVIRONMENT={_env_mode_p2c014}), "
-                        f"this is a launch-blocking failure — AUC for "
+                        f"this is a launch-blocking failure -- AUC for "
                         f"these relations would be inflated by random "
                         f"negatives. Either: (a) ensure every relation's "
                         f"head/tail type has at least one TRAIN entity, "
@@ -2253,7 +2253,7 @@ class KGNegativeSampler:
                     )
                 logger.critical(
                     "KGNegativeSampler: %d relation(s) have empty entity "
-                    "pools — recorded for per-relation random fallback "
+                    "pools -- recorded for per-relation random fallback "
                     "in combined_sampling (dev mode). Relations: %s. "
                     "(P2C-014)",
                     len(self._relations_with_empty_pools),
@@ -2291,7 +2291,7 @@ class KGNegativeSampler:
         ``(Compound head, Disease tail)`` pairs regardless of the
         positive triple's edge type. This produced type-correct
         negatives only for ``(Compound, treats, Disease)`` triples
-        and garbage for every other edge type — ``(Protein, interacts_with,
+        and garbage for every other edge type -- ``(Protein, interacts_with,
         Protein)`` got ``(Compound, Disease)`` negatives with no
         semantic relationship to the positive triple. The new API
         accepts the relation's head/tail types (or a relation_idx
@@ -2306,13 +2306,13 @@ class KGNegativeSampler:
         P0-F10 (entity-level leakage): the v53 root fix built
         ``self._held_out_entities`` (a set of held-out head + tail
         entity indices) promising to "EXCLUDE them from the negative
-        sampling pool" — but the actual filter was NEVER applied in
+        sampling pool" -- but the actual filter was NEVER applied in
         ``combined_sampling()``. Held-out entities (drugs / diseases
         that appear ONLY in val or test) could still be sampled as
         negatives during training. For an inductive HGT, this is
         entity-level leakage: the model's embedding for a held-out
         drug is influenced by the negative signal during training,
-        then that same embedding is used in held-out evaluation —
+        then that same embedding is used in held-out evaluation --
         structurally inflating AUC. ROOT FIX: filter both head_pool
         and tail_pool against ``self._held_out_entities`` BEFORE
         sampling. If the filtered pool becomes empty (every entity
@@ -2325,7 +2325,7 @@ class KGNegativeSampler:
         training, ``self._rng`` is advanced by every batch's
         negative-sampling call. By the time held-out evaluation runs
         at the end of training, ``self._rng`` has been advanced N
-        epochs × M batches — so the held-out AUC depends on training
+        epochs × M batches -- so the held-out AUC depends on training
         duration. Two models trained for 100 vs 50 epochs get
         DIFFERENT held-out AUCs from the same model state. ROOT FIX:
         accept an optional ``rng`` parameter that defaults to
@@ -2338,7 +2338,7 @@ class KGNegativeSampler:
         Args:
             total_negatives: Total number of negative samples to generate.
                 If None, uses ``self.num_negatives``.
-            relation_idx: Optional relation index — used to look up
+            relation_idx: Optional relation index -- used to look up
                 head/tail types via ``self.relation_to_types`` (if set).
             head_type: Explicit head entity type (overrides relation lookup).
             tail_type: Explicit tail entity type (overrides relation lookup).
@@ -2377,7 +2377,7 @@ class KGNegativeSampler:
             if head_type is None or tail_type is None:
                 logger.warning(
                     "KGNegativeSampler.combined_sampling: called without "
-                    "relation_idx or head_type/tail_type — defaulting "
+                    "relation_idx or head_type/tail_type -- defaulting "
                     "to (Compound, Disease). This is correct ONLY for "
                     "the treats relation; all other relations get "
                     "type-wrong negatives."
@@ -2388,21 +2388,21 @@ class KGNegativeSampler:
         head_pool = self._type_to_indices.get(head_type, [])
         tail_pool = self._type_to_indices.get(tail_type, [])
 
-        # v81 FORENSIC ROOT FIX (P0-F10 — entity-level leakage prevention):
+        # v81 FORENSIC ROOT FIX (P0-F10 -- entity-level leakage prevention):
         # The v53 root fix built ``self._held_out_entities`` (a set of
         # held-out head + tail entity indices from ``held_out_pairs``)
         # and the docstring promised to "EXCLUDE them from the negative
-        # sampling pool" — but the actual filter was NEVER applied in
+        # sampling pool" -- but the actual filter was NEVER applied in
         # ``combined_sampling()``. Held-out entities (drugs / diseases
         # that appear ONLY in val or test) could still be sampled as
         # negatives during training. For an inductive HGT, this is
         # entity-level leakage: the model's embedding for a held-out
         # drug is influenced by the negative signal during training,
-        # then that same embedding is used in held-out evaluation —
+        # then that same embedding is used in held-out evaluation --
         # structurally inflating AUC. ROOT FIX: filter both head_pool
         # and tail_pool against ``self._held_out_entities`` BEFORE
         # sampling. If the filtered pool becomes empty (every entity
-        # of that type is held-out — pathological unit-test config),
+        # of that type is held-out -- pathological unit-test config),
         # fall back to the full pool with a CRITICAL log so the
         # operator sees the leakage risk.
         _held_out_entities = getattr(self, "_held_out_entities", set()) or set()
@@ -2418,7 +2418,7 @@ class KGNegativeSampler:
                     "KGNegativeSampler.combined_sampling: entity-level "
                     "leakage filter removed %d head + %d tail candidate(s) "
                     "that are in held_out_pairs (val/test entities). "
-                    "Pools: head %d→%d, tail %d→%d. (v81 P0-F10 root fix)",
+                    "Pools: head %d->%d, tail %d->%d. (v81 P0-F10 root fix)",
                     _n_h_filtered, _n_t_filtered,
                     len(_head_pool_full), len(head_pool),
                     len(_tail_pool_full), len(tail_pool),
@@ -2455,12 +2455,12 @@ class KGNegativeSampler:
         # v81 FORENSIC ROOT FIX (P0-F11): use the caller-provided ``rng``
         # when supplied (evaluation path), else fall back to ``self._rng``
         # (training path). This isolates held-out eval RNG state from
-        # training RNG state — two models trained for different epoch
+        # training RNG state -- two models trained for different epoch
         # counts now produce IDENTICAL held-out AUCs from the same model
         # state, satisfying the reproducibility contract.
         _active_rng = rng if rng is not None else self._rng
 
-        # v43 ROOT FIX (Chain 6 — uniform negative sampling biases
+        # v43 ROOT FIX (Chain 6 -- uniform negative sampling biases
         # against hub nodes): Biomedical KGs have hub nodes (TP53,
         # EGFR with thousands of edges). Uniform sampling over-
         # represents hubs as negatives. Wang et al. 2014 ("Knowledge
@@ -2471,7 +2471,7 @@ class KGNegativeSampler:
         # are MORE likely to be sampled as negatives, which actually
         # DOWNWEIGHTS them in the loss because the model sees them
         # more often). The previous code used self._rng.choice(pool)
-        # which is uniform — biasing the model to push embeddings
+        # which is uniform -- biasing the model to push embeddings
         # AWAY from hubs, making predictions for clinically-relevant
         # targets (which are hubs) WORSE than for obscure ones.
         # The fix: build degree-weighted probability arrays once per
@@ -2480,7 +2480,7 @@ class KGNegativeSampler:
         _sampling_method = getattr(self, "_sampling_method", "bernoulli")
         _pools_nonempty = len(head_pool) > 0 and len(tail_pool) > 0
         if _sampling_method == "bernoulli" and _pools_nonempty:
-            # v84 FORENSIC ROOT FIX (BUG #5 — stale bernoulli cache key):
+            # v84 FORENSIC ROOT FIX (BUG #5 -- stale bernoulli cache key):
             # The previous cache key was `(head_type, tail_type)` only. The
             # cache was built from the (possibly filtered) pool on the
             # first call, but if `_held_out_entities` was empty on the
@@ -2498,14 +2498,14 @@ class KGNegativeSampler:
             if not hasattr(self, "_bernoulli_probs_cache"):
                 self._bernoulli_probs_cache: dict = {}
             if _cache_key_ht not in self._bernoulli_probs_cache:
-                # v84 FORENSIC ROOT FIX (BUG #4 — bernoulli degree leakage):
+                # v84 FORENSIC ROOT FIX (BUG #4 -- bernoulli degree leakage):
                 # The previous code built `_head_degrees` / `_tail_degrees`
                 # from `self._rejection_set` (which includes held-out val/
                 # test triples per the v36 Chain 9 fix). The bernoulli
                 # degree distribution was therefore built from train+val+
                 # test triples. A held-out drug with high val/test degree
                 # got a HIGHER sampling probability in the bernoulli
-                # distribution — meaning the model was more likely to see
+                # distribution -- meaning the model was more likely to see
                 # that held-out drug as a negative during training. This
                 # is entity-level leakage: the sampler biased toward
                 # held-out entities, indirectly revealing their existence
@@ -2528,7 +2528,7 @@ class KGNegativeSampler:
                 # from the SAME `self.known_triples` using the SAME
                 # idx maps, then reassigns `_head_degrees = _train_head_degrees`).
                 # The first loop's `_head_degrees` / `_tail_degrees`
-                # computations were DEAD CODE — wasted work that
+                # computations were DEAD CODE -- wasted work that
                 # produced the same values only to be discarded. ROOT
                 # FIX: deleted the dead first loop; kept ONLY the
                 # `_head_idx_map` / `_tail_idx_map` construction (which
@@ -2536,12 +2536,12 @@ class KGNegativeSampler:
                 # loop itself.
                 _head_idx_map = {e: i for i, e in enumerate(head_pool)}
                 _tail_idx_map = {e: i for i, e in enumerate(tail_pool)}
-                # v88 ROOT FIX (BUG #42 — Bernoulli cache leaks held-out
+                # v88 ROOT FIX (BUG #42 -- Bernoulli cache leaks held-out
                 # degree info into training): rebuild a TRAIN-ONLY degree
                 # distribution from `self.known_triples` (train-only)
                 # and use it for the Bernoulli cache. The `_rejection_set`
                 # is still used for the per-sample known-positive filter
-                # (which is correct — we want to reject held-out triples
+                # (which is correct -- we want to reject held-out triples
                 # as negatives). But the DEGREE DISTRIBUTION used for
                 # sampling should reflect train connectivity only.
                 _train_head_degrees = np.zeros(len(head_pool), dtype=np.float64)
@@ -2580,15 +2580,15 @@ class KGNegativeSampler:
         # from ~15% to <5%.
         #
         # Background: the v21 fix correctly filters out negatives that are
-        # already in ``known_triples``. But the KG is incomplete — many real
+        # already in ``known_triples``. But the KG is incomplete -- many real
         # drug-disease pairs are NOT in ``known_triples``. A single-pass
         # sampler has no probabilistic bound on the fraction of kept
         # "negatives" that are actually unknown true positives. The audit
         # estimated this at 5-15%, actively corrupting training (the model
         # learns to push apart pairs that should be close).
         #
-        # Root fix: oversample 2x candidates → filter against known_triples
-        # → estimate the false-negative rate from the filter ratio → randomly
+        # Root fix: oversample 2x candidates -> filter against known_triples
+        # -> estimate the false-negative rate from the filter ratio -> randomly
         # subsample to the target count. The 2x oversample spreads the
         # residual unknown-positive mass over a larger candidate pool and
         # the subsample draws uniformly, so the per-sample false-negative
@@ -2596,7 +2596,7 @@ class KGNegativeSampler:
         # probabilistic upper bound, assuming the KG captures the majority
         # of true pairs).
         _n_target = n
-        # v88 ROOT FIX (BUG #44 — oversample factor hardcoded at 2x):
+        # v88 ROOT FIX (BUG #44 -- oversample factor hardcoded at 2x):
         # compute the oversample factor from graph density. Denser graphs
         # need MORE oversampling to drive the residual false-negative
         # rate below the target threshold. Clamp at [2, 20].
@@ -2620,7 +2620,7 @@ class KGNegativeSampler:
         # v21 ROOT FIX (Audit section 7 finding 1 / Chain 6 - "Fake
         # known-positive filter"): the previous code had a comment that
         # said "Filter out known positives (false negatives)" but the
-        # code did NOT implement any filter — it just appended every
+        # code did NOT implement any filter -- it just appended every
         # sampled (h, t) pair. Training negatives therefore included
         # TRUE POSITIVES, biasing TransE training: the model learned to
         # push apart pairs that should be close. Validation AUC was
@@ -2630,7 +2630,7 @@ class KGNegativeSampler:
         #
         # Fix: actually filter against ``self.known_triples``. We use
         # ``relation_idx`` (defaulting to 0 only when the caller
-        # genuinely doesn't know — but every caller in train_transe
+        # genuinely doesn't know -- but every caller in train_transe
         # now passes the correct relation_idx, so this default is
         # defensive only) to build the (h, r, t) lookup key. We also
         # filter against ALL known triples regardless of relation
@@ -2640,16 +2640,16 @@ class KGNegativeSampler:
         # v36 ROOT FIX (Chain 9): use the COMBINED rejection set
         # (train triples + held-out val/test triples) instead of just
         # ``known_triples``. This prevents the sampler from producing
-        # a held-out positive as a negative — which would structurally
+        # a held-out positive as a negative -- which would structurally
         # inflate the reported AUC because the model "learns" to push
         # apart pairs it will later be evaluated on.
         _known_all = self._rejection_set  # set of (h, r, t) tuples
-        # v88 ROOT FIX (BUG #35 — relation-agnostic filter over-filters
+        # v88 ROOT FIX (BUG #35 -- relation-agnostic filter over-filters
         # valid negatives for non-treats relations): make the relation-
         # agnostic filter CONFIGURABLE via
         # `DRUGOS_FILTER_HT_PAIRS_ALL_RELATIONS=1`, default OFF. The
         # relation-specific filter `(h, r, t) in _known_all` is ALWAYS
-        # applied — that's the standard KG embedding filter.
+        # applied -- that's the standard KG embedding filter.
         import os as _os_v88
         _filter_ht_pairs_all_rels = _os_v88.environ.get(
             "DRUGOS_FILTER_HT_PAIRS_ALL_RELATIONS", "0"
@@ -2680,7 +2680,7 @@ class KGNegativeSampler:
                 # previously used a 2-tuple `(head_type, tail_type)`.
                 # The lookup ALWAYS returned None, making the entire
                 # bernoulli-degree-weighted sampling path dead code
-                # (the sampler silently fell back to uniform — the
+                # (the sampler silently fell back to uniform -- the
                 # Wang et al. 2014 Bernoulli scheme was never actually
                 # applied, biasing the model to push embeddings AWAY
                 # from hubs, making predictions for clinically-relevant
@@ -2715,8 +2715,8 @@ class KGNegativeSampler:
                     # type-constrained path correctly used ``self._rng.choice``.
                     # This split made the sampler NON-REPRODUCIBLE whenever
                     # Bernoulli sampling was active: two runs with the same
-                    # seed/config/data produced different negatives → different
-                    # AUCs → V1 launch criterion unverifiable.
+                    # seed/config/data produced different negatives -> different
+                    # AUCs -> V1 launch criterion unverifiable.
                     #
                     # P0-F11: routing through ``_active_rng`` (which is
                     # ``self._rng`` during training but a fresh
@@ -2740,11 +2740,11 @@ class KGNegativeSampler:
                 strat = "random"
             # v21: ACTUAL known-positive filter (not comment-only).
             # 1) Relation-specific check: is (h_idx, _r_idx, t_idx)
-            #    a known true triple? If yes, skip — this is the
+            #    a known true triple? If yes, skip -- this is the
             #    standard KG embedding negative filter.
             # 2) Relation-agnostic check (defensive): is (h_idx, t_idx)
             #    a known pair under ANY relation? If yes, skip with a
-            #    debug log — this catches cross-relation false negatives
+            #    debug log -- this catches cross-relation false negatives
             #    that the relation-specific check would miss.
             if (h_idx, _r_idx, t_idx) in _known_all:
                 n_skipped_as_known += 1
@@ -2780,7 +2780,7 @@ class KGNegativeSampler:
         # sampled (h, t) pairs are already in known_triples, then a
         # comparable fraction of the kept "negatives" are unknown true
         # positives (drug-disease pairs the KG happens to be missing).
-        # This is a probabilistic upper bound — the actual false-negative
+        # This is a probabilistic upper bound -- the actual false-negative
         # rate is bounded above by the observed known-positive density
         # under the assumption that the KG captures the majority of
         # true pairs (so the unseen-pair rate is at most ~ the seen-pair

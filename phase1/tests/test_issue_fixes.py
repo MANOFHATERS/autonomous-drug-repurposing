@@ -41,7 +41,7 @@ def sqlite_engine():
 def db_session(sqlite_engine):
     """Create a session bound to the in-memory SQLite database."""
     from database.connection import Base
-    import database.models  # noqa: F401 — ensure models are registered
+    import database.models  # noqa: F401 -- ensure models are registered
     Base.metadata.create_all(bind=sqlite_engine)
     with Session(sqlite_engine) as session:
         yield session
@@ -122,7 +122,7 @@ class TestFix2GDANullGeneSymbol:
             # v59 ROOT FIX: disease_id must match the DisGeNET pattern
             # ^C\d{7}$ (7 digits after C). The previous 'C0001'/'C0002'
             # (4 digits) were rejected by _validate_disease_id, causing
-            # BOTH rows to be quarantined — the NULL-gene row AND the
+            # BOTH rows to be quarantined -- the NULL-gene row AND the
             # BRCA1 row. Use valid 7-digit CUIs so only the NULL-gene
             # row is quarantined (the intended test scenario).
             "disease_id": ["C0001000", "C0002000"],
@@ -140,7 +140,7 @@ class TestFix2GDANullGeneSymbol:
             f"got {int(result)}"
         )
         rows = db_session.query(GeneDiseaseAssociation).all()
-        # No row should have empty gene_symbol — the NULL row was quarantined.
+        # No row should have empty gene_symbol -- the NULL row was quarantined.
         null_gene_rows = [r for r in rows if r.gene_symbol == ""]
         assert len(null_gene_rows) == 0, (
             "BUG-A-002 regression: NULL gene_symbol was coalesced to empty "
@@ -415,7 +415,7 @@ class TestFix14OmimScoreNotFlat:
 
         scores = df["score"].unique()
         assert len(scores) > 1, "Scores should be varied, not all the same"
-        assert 1.0 not in scores, "Score 1.0 should not appear — replaced by nuanced scoring"
+        assert 1.0 not in scores, "Score 1.0 should not appear -- replaced by nuanced scoring"
         assert df.loc[0, "score"] == 0.9  # mapping_key=3
         assert df.loc[1, "score"] == 0.7  # mapping_key=2
         assert df.loc[2, "score"] == 0.5  # mapping_key=1

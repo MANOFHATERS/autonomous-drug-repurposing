@@ -1,5 +1,5 @@
 """
-V28 Forensic Audit Fixes — Test Suite for W-04..W-13, D-01..D-10, S-01..S-03.
+V28 Forensic Audit Fixes -- Test Suite for W-04..W-13, D-01..D-10, S-01..S-03.
 
 This test suite verifies each root-level fix applied in V28 to the V27
 codebase. Every test is a ROOT-LEVEL verification (not a surface check):
@@ -235,9 +235,9 @@ class TestW08RareDiseaseFlagPerDisease(unittest.TestCase):
         self.assertEqual(_is_rare_disease("cystic fibrosis"), 1)
         # v89: sickle cell disease IS rare (~100K US, orphan)
         self.assertEqual(_is_rare_disease("sickle cell disease"), 1)
-        # v89: Parkinson's is NOT rare (~1M US) — was incorrectly rare before
+        # v89: Parkinson's is NOT rare (~1M US) -- was incorrectly rare before
         self.assertEqual(_is_rare_disease("parkinson disease"), 0)
-        # v89: MS is NOT rare (~400K US, over 200K threshold) — was incorrectly rare before
+        # v89: MS is NOT rare (~400K US, over 200K threshold) -- was incorrectly rare before
         self.assertEqual(_is_rare_disease("multiple sclerosis"), 0)
         # Pain should NOT be flagged rare (common condition)
         self.assertEqual(_is_rare_disease("pain"), 0)
@@ -277,7 +277,7 @@ class TestW09RareThresholdAbsolute(unittest.TestCase):
     The v88 W-09 fix used an absolute pathway threshold (RARE_DISEASE_PATHWAY_THRESHOLD=2).
     The v89 fix replaces this with curated disease prevalence data from WHO/Orphanet.
     FDA/EU defines rare disease as prevalence <5 per 10K population. This is
-    scientifically correct — disease rarity is defined by PREVALENCE, not by
+    scientifically correct -- disease rarity is defined by PREVALENCE, not by
     graph topology (pathway count).
     """
 

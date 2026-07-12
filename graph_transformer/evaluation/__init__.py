@@ -15,7 +15,7 @@ import torch
 # defined``. The NameError was swallowed by the ``except Exception`` in
 # ``gt_rl_bridge.train_model`` (line ~1052), so ``test_auc_verified``
 # was NEVER set and the scientific_validation gate silently fell back
-# to the trainer's AUC — defeating the entire purpose of the
+# to the trainer's AUC -- defeating the entire purpose of the
 # "verified AUC" cross-check. Declaring the module logger here is the
 # root-cause fix.
 logger = logging.getLogger(__name__)
@@ -40,7 +40,7 @@ def evaluate_link_prediction(
     implementation (V90 BUG #36 "genuinely independent path") called
     ``model.forward_logits`` per batch (which internally encodes the
     graph) and then ``model.forward`` per batch (which AGAIN encodes
-    internally) — TWO full graph encodings per batch. The encode is
+    internally) -- TWO full graph encodings per batch. The encode is
     the most expensive op in the pipeline (4-layer transformer over
     the full graph), so this roughly DOUBLED eval compute.
 
@@ -56,7 +56,7 @@ def evaluate_link_prediction(
       1. It uses a FRESH ``nn.BCEWithLogitsLoss()`` (no pos_weight),
          matching the trainer's _eval_criterion (BUG #26 fix).
       2. It re-applies the link_predictor's temperature via
-         ``link_predictor.forward(apply_temperature=True)`` — if
+         ``link_predictor.forward(apply_temperature=True)`` -- if
          temperature calibration is wrong, the verified accuracy
          will diverge from the trainer's accuracy.
       3. The independent code path (this function vs trainer's
@@ -88,12 +88,12 @@ def evaluate_link_prediction(
     link_predictor's ``forward`` method instead of manual sigmoid.
 
     ROOT FIX (S-09): DOCUMENT that ``apply_temperature`` has NO EFFECT
-    on AUC. AUC measures RANKING quality — it computes the probability
+    on AUC. AUC measures RANKING quality -- it computes the probability
     that a randomly chosen positive is ranked above a randomly chosen
     negative. Temperature scaling is MONOTONIC (sigmoid(logits/T)
     preserves order), so the ranking is unchanged, so the AUC is
     unchanged. The audit's finding S-09 was that the previous code
-    implied the parameter affected AUC (it doesn't — it only affects
+    implied the parameter affected AUC (it doesn't -- it only affects
     ACCURACY, which uses a fixed 0.5 threshold).
 
     Args:
@@ -133,7 +133,7 @@ def evaluate_link_prediction(
     model.eval()
     try:
         # ROOT FIX (v92): the file previously contained TWO parallel
-        # implementations mashed together — a legacy path that ended
+        # implementations mashed together -- a legacy path that ended
         # with an ``if`` statement and NO body, followed by a newer
         # per-batch path at the WRONG indent level (outside the ``try``
         # block). This caused ``compileall`` to fail with IndentationError,
@@ -147,7 +147,7 @@ def evaluate_link_prediction(
         # P3-017 ROOT FIX: encode the graph ONCE for the entire evaluation
         # (not twice per batch). The previous code called the model-level
         # forward per batch (which internally encodes the graph) and then
-        # called it AGAIN per batch for probabilities — TWO full graph
+        # called it AGAIN per batch for probabilities -- TWO full graph
         # encodings per batch. The encode is the most expensive op in the
         # pipeline (4-layer transformer over the full graph), so this
         # roughly DOUBLED eval compute.
@@ -164,7 +164,7 @@ def evaluate_link_prediction(
         #   1. It uses a FRESH ``nn.BCEWithLogitsLoss()`` (no pos_weight),
         #      matching the trainer's _eval_criterion (BUG #26 fix).
         #   2. It re-applies the link_predictor's temperature via
-        #      ``link_predictor.forward(apply_temperature=True)`` — if
+        #      ``link_predictor.forward(apply_temperature=True)`` -- if
         #      temperature calibration is wrong, the verified accuracy
         #      will diverge from the trainer's accuracy.
         #   3. The independent code path (this function vs trainer's

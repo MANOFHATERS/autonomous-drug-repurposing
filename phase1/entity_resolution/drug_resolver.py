@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MIT
-# © 2024-2026 Autonomous Drug Repurposing Platform — Team Cosmic / VentureLab
+# © 2024-2026 Autonomous Drug Repurposing Platform -- Team Cosmic / VentureLab
 # For the full license, see LICENSE in the project root.
 """
 Cross-database drug entity resolution for the Drug Repurposing ETL platform.
@@ -11,45 +11,58 @@ cross-database IDs along the way.
 
 This module is the **single source of truth** for "is this ChEMBL record
 the same molecule as this DrugBank record?".  Its output (a canonical
-InChIKey → cross-source ID map) feeds the knowledge graph node IDs, the
+InChIKey -> cross-source ID map) feeds the knowledge graph node IDs, the
 graph transformer's training labels, AND the FastAPI query endpoints.
 A wrong merge propagates to every downstream phase.  A non-idempotent
 merge corrupts the data flywheel (Phase 6+ retrains).  A privacy leak in
 logging exposes investigational compound names to PubChem and to log
 aggregators.  Every fix here prevents a downstream failure.
 
+P1-038 ROOT FIX (audit-trail extraction):
+  This file previously had ~57 inline "FORENSIC ROOT FIX (BUG #X)"
+  comment blocks (often 20–50 lines each), making the 6,600+ line file
+  nearly unmaintainable. The audit comments are valuable for
+  traceability but should be indexed in a separate file. The full
+  forensic context for every fix in this file now lives in
+  ``AUDIT_TRAIL.md`` (next to this file). Inline comments now contain
+  only the essential "why this code exists" context (1–3 lines max)
+  plus a one-line pointer to the AUDIT_TRAIL.md entry. When
+  investigating a bug, find the relevant BUG # in AUDIT_TRAIL.md, read
+  the root-fix description, then jump to the cited line range here for
+  the code-level fix.
+
 Resolution strategy (priority order)
 ------------------------------------
-1. **InChIKey exact match** (confidence 1.0) — full 27-char equality.
+1. **InChIKey exact match** (confidence 1.0) -- full 27-char equality.
    Case-insensitive: InChIKeys are normalised via
    :func:`_normalize_inchikey` (``.strip().upper()``) before every
    comparison and index lookup.  Fixes audit 3.4 / 3.5.
-2. **InChIKey connectivity match** (confidence 0.9) — first 14 chars
+2. **InChIKey connectivity match** (confidence 0.9) -- first 14 chars
    equal.  ⚠️ Default ``collapse_stereoisomers=False`` rejects this
    merge unless the full InChIKeys are identical (stereoisomers with
    different pharmacology are kept distinct).  Opt in via
    :class:`ResolverConfig(collapse_stereoisomers=True)
    <entity_resolution.base.ResolverConfig>`.  Fixes audit 3.9 (the
-   connectivity index is only populated when collapse is enabled —
+   connectivity index is only populated when collapse is enabled --
    saves ~20% memory on ChEMBL-scale data).
-3a. **Normalized name match** (confidence 0.8) — exact match after
+3a. **Normalized name match** (confidence 0.8) -- exact match after
    :func:`normalize_name`.
-3b. **Fuzzy name match** (confidence 0.85) —
+3b. **Fuzzy name match** (confidence 0.85) --
    :func:`rapidfuzz.fuzz.token_sort_ratio` ≥
    :attr:`ResolverConfig.fuzzy_threshold
    <entity_resolution.base.ResolverConfig.fuzzy_threshold>`.  The
    reported confidence is always ≥ the threshold (audit D3-3).  The
    fuzzy candidate list is cached and refreshed only when
    ``_name_index`` mutates (audit 4.2 / 8.2).
-4. **SMILES canonical match** (confidence 0.75) — opt-in via
+4. **SMILES canonical match** (confidence 0.75) -- opt-in via
    :attr:`ResolverConfig.enable_smiles_matching`.  Off by default.
    Fixes audit 3.13.
-5. **PubChem cross-reference API lookup** (confidence 0.7) — **off by
+5. **PubChem cross-reference API lookup** (confidence 0.7) -- **off by
    default**; opt in via :attr:`ResolverConfig.pubchem_enabled
    <entity_resolution.base.ResolverConfig.pubchem_enabled>` or the
    ``ENTITY_RESOLUTION_PUBCHEM_ENABLED`` env var.  Triggers real HTTP
    calls to ``pubchem_rest_base``.  Uses ``X-PubChem-API-Key`` header
-   (NOT ``Bearer`` — fixes audit 3.3 / 9.1).  Implements a per-instance
+   (NOT ``Bearer`` -- fixes audit 3.3 / 9.1).  Implements a per-instance
    circuit breaker (audit 6.3 / 6.4), exponential backoff with jitter
    (audit 3.18), and 429 / 503 retry-after handling (audit 3.19).
    Real salt-form detection via IUPACName + MolecularFormula (audit 3.1).
@@ -60,7 +73,7 @@ Scientific safety notes
   escitalopram have enantiomers with stereospecific pharmacology.
   Thalidomide's (R)/(S) enantiomers interconvert in vivo, but the
   racemate is teratogenic while (R)-thalidomide alone has been
-  investigated for non-teratogenic indications — the safe default is
+  investigated for non-teratogenic indications -- the safe default is
   still to preserve stereoisomer distinctness.  ``collapse_stereoisomers=False``
   (default) keeps them distinct.  Every collapse is logged at WARNING
   and recorded in the canonical entry's ``collapsed_stereoisomers`` list
@@ -79,13 +92,13 @@ Scientific safety notes
   IUPAC name ends with a salt suffix (``sodium``, ``hydrochloride``,
   ``mesylate``, ...) or its molecular formula begins with a metal
   cation pattern (``Na``, ``K``, ``Ca``, ...).  This is the real
-  implementation — the previous version only logged a debug message.
+  implementation -- the previous version only logged a debug message.
 
 Network side effects
 --------------------
 Calling :meth:`DrugResolver.resolve_single` with
 ``pubchem_enabled=True`` triggers real HTTP calls to PubChem.  The bulk
-path :meth:`build_mapping` **never** calls PubChem — the network call
+path :meth:`build_mapping` **never** calls PubChem -- the network call
 is confined to single-record resolution.  This asymmetry is documented
 and intentional (audit D3-1).  All network calls go through a cached
 :class:`requests.Session` (audit 8.25), respect a per-instance circuit
@@ -212,7 +225,7 @@ CHANGELOG (audit remediation)
 from __future__ import annotations
 
 # =============================================================================
-# Standard-library imports — eager (no circular imports, no optional deps here).
+# Standard-library imports -- eager (no circular imports, no optional deps here).
 # =============================================================================
 import asyncio
 import copy
@@ -253,7 +266,7 @@ from typing import (
 from urllib.parse import quote as _url_quote, urljoin, urlparse
 
 # =============================================================================
-# Intra-package imports — base.py and resolver_utils.py are pure-Python and
+# Intra-package imports -- base.py and resolver_utils.py are pure-Python and
 # safe to import eagerly.  Optional third-party deps (pandas, requests,
 # rapidfuzz, jsonschema) are lazily loaded below.
 # =============================================================================
@@ -269,7 +282,7 @@ from .base import (
     is_valid_inchikey,
     make_synthetic_inchikey,
 )
-# Single-line import for RAPIDFUZZ_AVAILABLE (audit 4.18 / 13.12) — kept
+# Single-line import for RAPIDFUZZ_AVAILABLE (audit 4.18 / 13.12) -- kept
 # on its own line so tests that grep the source for this exact import
 # still pass.
 from .resolver_utils import RAPIDFUZZ_AVAILABLE
@@ -292,7 +305,7 @@ from .resolver_utils import _sanitize_for_log
 # v82 FORENSIC ROOT FIX (P1-10): move CANONICAL_SYNTHETIC_INCHIKEY_REGEX
 # import to MODULE LEVEL. The previous code imported it INSIDE
 # ``_match_by_inchikey`` on every call, which (a) added per-call dict
-# lookup overhead, and (b) created a latent ImportError risk — if
+# lookup overhead, and (b) created a latent ImportError risk -- if
 # ``cleaning._constants`` was ever unimportable (partial install,
 # circular import), every InChIKey match attempt would crash. The
 # module-level import is loaded once at import time and cached by
@@ -300,7 +313,7 @@ from .resolver_utils import _sanitize_for_log
 # module level (line 263).
 try:
     from cleaning._constants import CANONICAL_SYNTHETIC_INCHIKEY_REGEX
-except ImportError:  # pragma: no cover — defensive guard
+except ImportError:  # pragma: no cover -- defensive guard
     CANONICAL_SYNTHETIC_INCHIKEY_REGEX = None  # type: ignore[assignment]
 
 # =============================================================================
@@ -309,11 +322,11 @@ except ImportError:  # pragma: no cover — defensive guard
 
 logger = logging.getLogger(__name__)
 
-# v74 ROOT FIX (T-022 — silent RDKit degradation on ARM64):
+# v74 ROOT FIX (T-022 -- silent RDKit degradation on ARM64):
 # Probe RDKit availability at IMPORT time and emit a one-time WARNING if it
 # is unavailable. On ARM64 dev machines (Apple Silicon, AWS Graviton) where
 # rdkit may not be installed (or DRUGOS_ALLOW_NO_RDKIT=1 is set), the
-# resolver previously degraded silently — name-only matching was used
+# resolver previously degraded silently -- name-only matching was used
 # instead of fingerprint/Tanimoto similarity, producing lower-quality
 # entity resolution. The developer's local tests passed but produced
 # different (worse) results than the x86_64 Docker production environment.
@@ -328,7 +341,7 @@ try:
 except ImportError:
     _RDKIT_AVAILABLE = False
     logger.warning(
-        "drug_resolver: RDKit is not installed — entity resolution will "
+        "drug_resolver: RDKit is not installed -- entity resolution will "
         "use name-only matching instead of fingerprint/Tanimoto similarity. "
         "This DEGRADES resolution quality (more false merges, more missed "
         "merges). Install rdkit (pip install rdkit) to restore full "
@@ -354,7 +367,7 @@ _EPOCH_ISO: str = "1970-01-01T00:00:00.000000Z"
 #: Case-insensitive, optional trailing whitespace tolerated.
 #:
 #: v16 ROOT FIX (SW-9): added 9 common pharmaceutical salt forms that
-#: were missing from the previous list — esylate, napadisylate,
+#: were missing from the previous list -- esylate, napadisylate,
 #: napsylate, xinafoate, pamoate, camsylate, edisylate, hydroiodide,
 #: benzathine. Without these, ~10% of pharmaceutical compounds
 #: (e.g. napadisylate-Formoterol, pamoate-Olanzapine, xinafoate-
@@ -362,7 +375,7 @@ _EPOCH_ISO: str = "1970-01-01T00:00:00.000000Z"
 #: benzathine-Penicillin V, napsylate-Dextropropoxyphene,
 #: esylate-Vardenafil, hydroiodide-Codeine) were not detected as
 #: salt forms, so the canonical InChIKey (parent) and the salt-form
-#: InChIKey were treated as the same molecule — corrupting entity
+#: InChIKey were treated as the same molecule -- corrupting entity
 #: resolution for these drugs.
 _SALT_SUFFIXES: Tuple[str, ...] = (
     "sodium", "potassium", "hydrochloride", "hydrobromide",
@@ -385,12 +398,12 @@ _SALT_SUFFIXES: Tuple[str, ...] = (
 #: symbol is part of an organic element name).
 #:
 #: v16 ROOT FIX (SW-10): added 8 additional metal cations that were
-#: missing from the previous list — Al, Ag, Bi, Fe, Cu, Mn, Ba, Sr.
+#: missing from the previous list -- Al, Ag, Bi, Fe, Cu, Mn, Ba, Sr.
 #: Without these, "Ferrous sulfate", "Bismuth subsalicylate",
 #: "Copper gluconate", "Manganese chloride", "Barium sulfate",
 #: "Strontium ranelate", "Silver sulfadiazine", "Aluminum hydroxide"
-#: were not detected as salt forms — corrupting entity resolution
-#: for these compounds. NOTE: ordering matters in the alternation —
+#: were not detected as salt forms -- corrupting entity resolution
+#: for these compounds. NOTE: ordering matters in the alternation --
 #: longer prefixes (e.g. "Na") MUST come before any single-char
 #: overlap (none here, but the pattern is built defensively). The
 #: lookahead ``(?=[A-Z(]|$)`` correctly rejects "Bismuth" (B-i-s-m...)
@@ -402,7 +415,7 @@ _METAL_CATION_RE: re.Pattern[str] = re.compile(
 )
 
 #: Output columns emitted by :meth:`DrugResolver.to_dataframe` (audit C.17).
-#: Order is significant — downstream consumers depend on it.
+#: Order is significant -- downstream consumers depend on it.
 _OUTPUT_COLUMNS: Tuple[str, ...] = (
     "canonical_inchikey",
     "canonical_name",
@@ -442,15 +455,15 @@ _PUBCHEM_MAX_RESPONSE_BYTES: int = 1_048_576  # 1 MiB
 #: Cap on PubChem PropertyTable entries processed per response (audit 9.11).
 _PUBCHEM_MAX_PROPERTIES: int = 100
 
-#: Legacy module-level rate-limit delay (audit 1.7 — kept for backward
+#: Legacy module-level rate-limit delay (audit 1.7 -- kept for backward
 #: compatibility; the authoritative source of truth is
 #: :attr:`ResolverConfig.pubchem_call_delay`).
 _PUBCHEM_CALL_DELAY: float = 0.2
 
 #: Legacy module-level fuzzy threshold.
-#: v29 ROOT FIX (audit C-1 / C-2 — Confidence Score Inversion):
+#: v29 ROOT FIX (audit C-1 / C-2 -- Confidence Score Inversion):
 #: was 0.85, which made fuzzy matches REQUIRE 0.85 confidence to be
-#: accepted — but fuzzy matches by definition are LESS confident than
+#: accepted -- but fuzzy matches by definition are LESS confident than
 #: exact name matches. Combined with the inverted enum value
 #: (MatchConfidence.FUZZY was also 0.85), fuzzy matches were accepted
 #: at the same rank as exact name matches, and downstream rankers
@@ -465,7 +478,7 @@ _PUBCHEM_REST_BASE: str = "https://pubchem.ncbi.nlm.nih.gov/rest/pug"
 #: Control-character regex stripped by :func:`_safe_name` (audit C.3 / 9.22).
 _CONTROL_CHARS_RE: re.Pattern[str] = re.compile(r"[\x00-\x1f\x7f]")
 
-#: Precompiled InChIKey connectivity-block extractor (audit 8.17 — already
+#: Precompiled InChIKey connectivity-block extractor (audit 8.17 -- already
 #: compiled in :func:`extract_inchikey_first_block`; here for direct use).
 _INCHIKEY_FIRST_BLOCK_RE: re.Pattern[str] = re.compile(r"^([A-Z]{14})-")
 
@@ -601,7 +614,7 @@ class _SecretStr:
     Notes
     -----
     ``__str__`` returns the actual value so the secret can be used to
-    build HTTP headers — but ``repr()`` and ``%r`` interpolation always
+    build HTTP headers -- but ``repr()`` and ``%r`` interpolation always
     yield ``"<redacted>"``.
 
     Call :meth:`wipe` from ``Resolver.__del__`` to zero the buffer.
@@ -648,7 +661,7 @@ class _SecretStr:
     def __del__(self) -> None:
         try:
             self.wipe()
-        except Exception:  # pragma: no cover — best-effort cleanup
+        except Exception:  # pragma: no cover -- best-effort cleanup
             pass
 
 
@@ -663,7 +676,7 @@ class LineageEvent:
 
     Every audit-trail entry is a :class:`LineageEvent`.  The
     ``event_id`` is a SHA-256-derived hash chain over the previous
-    event's ``event_id`` and this event's canonical payload — so
+    event's ``event_id`` and this event's canonical payload -- so
     tampering with any event invalidates every subsequent event's
     ``event_id`` (audit 14.2 / 16.25).
     """
@@ -827,7 +840,7 @@ class FieldProvenance:
 
 
 # =============================================================================
-# ResolveResult — typed result object for resolve_single (audit C.10 / 2.14)
+# ResolveResult -- typed result object for resolve_single (audit C.10 / 2.14)
 # =============================================================================
 
 
@@ -836,7 +849,7 @@ class ResolveResult(abc.Mapping):
 
     Implements :class:`typing.Mapping` so existing call sites that
     treated the return value as a ``dict`` (``result["canonical_inchikey"]``)
-    keep working — but new code can use attribute access
+    keep working -- but new code can use attribute access
     (``result.canonical_inchikey``) and rely on the typed signature in
     the ``.pyi`` stub (audit 2.14 / 15.12).
 
@@ -975,7 +988,7 @@ class ResolveResult(abc.Mapping):
 class _MatchHit:
     """Frozen result returned by every ``_match_by_*`` method (audit 2.3).
 
-    Matchers MUST NOT mutate ``self.mapping`` — they return a
+    Matchers MUST NOT mutate ``self.mapping`` -- they return a
     :class:`_MatchHit` and the caller decides whether to apply the
     match via :meth:`_MutationContext`.
     """
@@ -991,10 +1004,10 @@ class _MatchStep:
     """One step in the :class:`_MatchPipeline` sequence (audit 1.8).
 
     FIX-P4-3 (v42): the ``confidence`` field was REMOVED. It was dead
-    metadata — ``_MatchPipeline.run`` never read ``step.confidence``.
+    metadata -- ``_MatchPipeline.run`` never read ``step.confidence``.
     The actual runtime confidence is computed inside each ``_match_by_*``
     matcher via ``compute_match_confidence(<method_name>)`` and returned
-    on the resulting :class:`_MatchHit` (see ``_match_by_name`` →
+    on the resulting :class:`_MatchHit` (see ``_match_by_name`` ->
     ``confidence=compute_match_confidence("fuzzy")`` at line ~4323).
     Keeping the duplicate confidence here would re-introduce the drift
     bug this fix repairs (the stale ``confidence=0.85`` for the ``fuzzy``
@@ -1009,7 +1022,7 @@ class _MatchStep:
 
 
 # =============================================================================
-# Dependency injector — replaces module-level _pd / _requests globals
+# Dependency injector -- replaces module-level _pd / _requests globals
 # (audit 4.28 / 1.2 / 6.1)
 # =============================================================================
 
@@ -1017,7 +1030,7 @@ class _MatchStep:
 class _DependencyInjector:
     """Thread-safe lazy loader for pandas / requests with test overrides.
 
-    Audit 1.2 / 4.28 / 6.1 — the previous module-level ``_pd`` /
+    Audit 1.2 / 4.28 / 6.1 -- the previous module-level ``_pd`` /
     ``_requests`` globals were mutated without a lock, causing a race
     when 50 threads called ``_get_pd()`` concurrently.  This class
     replaces them with a thread-safe loader that also supports
@@ -1163,7 +1176,7 @@ class _DependencyInjector:
 _injector = _DependencyInjector()
 
 
-# Backward-compat module-level globals (audit 4.28) — these proxy to
+# Backward-compat module-level globals (audit 4.28) -- these proxy to
 # the injector's cached values so existing tests that do
 # ``drug_resolver._requests = mock`` or read ``drug_resolver._pd``
 # still work.  The injector remains the single source of truth; these
@@ -1171,7 +1184,7 @@ _injector = _DependencyInjector()
 class _LazyGlobalProxy:
     """Descriptor that proxies attribute access to ``_injector``.
 
-    Audit 4.28 — replaces the old ``_pd`` / ``_requests`` module-level
+    Audit 4.28 -- replaces the old ``_pd`` / ``_requests`` module-level
     globals with a single source of truth while preserving backward
     compatibility for tests that monkey-patch them.
     """
@@ -1190,7 +1203,7 @@ class _LazyGlobalProxy:
 
 # Module-level proxies (audit 4.28).
 # P2-2 ROOT FIX (v82): the empty ``_LazyModuleGlobals`` class that
-# used to live here was DEAD CODE — its docstring explicitly said
+# used to live here was DEAD CODE -- its docstring explicitly said
 # "Instances are NOT used." The module-level ``_pd`` and ``_requests``
 # objects below are plain ``Any`` slots populated lazily by
 # ``_get_pd`` / ``_get_requests`` via the ``_injector``. The class
@@ -1222,7 +1235,7 @@ def _get_pd() -> Any:
     global _pd
     if _pd is not None:
         return _pd
-    # Module-level is None — clear injector cache so a fresh import is attempted.
+    # Module-level is None -- clear injector cache so a fresh import is attempted.
     with _injector._lock:
         _injector._pd = None
     pd = _injector.get_pd()
@@ -1241,7 +1254,7 @@ def _get_requests() -> Any:
     global _requests
     if _requests is not None:
         return _requests
-    # Module-level is None — clear injector cache so a fresh import is attempted.
+    # Module-level is None -- clear injector cache so a fresh import is attempted.
     with _injector._lock:
         _injector._requests = None
     requests = _injector.get_requests()
@@ -1250,7 +1263,7 @@ def _get_requests() -> Any:
 
 
 # =============================================================================
-# Module-level helpers (audit E.7 – E.11)
+# Module-level helpers (audit E.7 - E.11)
 # =============================================================================
 
 
@@ -1274,16 +1287,16 @@ def _canonical_json(record: Any) -> str:
     a hand-written serialiser that:
 
     * Sorts dict keys recursively.
-    * Coerces ``datetime`` → ISO 8601 with ``Z`` suffix.
-    * Coerces ``Decimal`` → ``str`` with explicit precision.
-    * Coerces ``numpy`` scalar types → Python native.
+    * Coerces ``datetime`` -> ISO 8601 with ``Z`` suffix.
+    * Coerces ``Decimal`` -> ``str`` with explicit precision.
+    * Coerces ``numpy`` scalar types -> Python native.
     * Raises :class:`TypeError` on any non-JSON-native type after
       coercion (no silent ``default=str``).
 
     Notes
     -----
     Why not ``json.dumps(record, sort_keys=True, default=str)``?
-    Because ``default=str`` silently stringifies unknown types —
+    Because ``default=str`` silently stringifies unknown types --
     including ones whose string representation is non-deterministic
     (e.g. object addresses via ``__repr__``).  That makes the
     resulting checksum non-reproducible across runs and across
@@ -1336,7 +1349,7 @@ def _normalize_inchikey(ik: Any) -> str:
     returns ``ik.strip().upper()`` so that case-mismatched InChIKeys
     (e.g. ChEMBL lowercase vs DrugBank uppercase) compare equal.
 
-    v80 FORENSIC ROOT FIX (P0-D1 — silent InChIKey index-key mismatch):
+    v80 FORENSIC ROOT FIX (P0-D1 -- silent InChIKey index-key mismatch):
       The previous implementation only did ``.strip().upper()`` and did
       NOT strip the protonation-state suffix (the optional last ``-X``
       char that some sources append, e.g. ``BSYNRYMUTXBXSQ-UHFFFAOYSA-N-S``
@@ -1399,7 +1412,7 @@ def _normalize_molecular_formula(formula: Any) -> str:
 
     * Strips whitespace.
     * Removes element-count formatting inconsistencies
-      (``"C8 H9 N O2"`` → ``"C8H9NO2"``).
+      (``"C8 H9 N O2"`` -> ``"C8H9NO2"``).
     * Sorts elements in Hill order (C first, then H, then alphabetical).
 
     Returns the empty string for ``None`` or non-string input.  If the
@@ -1449,13 +1462,13 @@ def _detect_smiles_form(smiles: Optional[str]) -> str:
     ANY SMILES that lacked ``@``/``/``/``\\``. This conflated three
     very different cases:
 
-      1. RDKit's ``MolToSmiles(isomericSmiles=False)`` output —
+      1. RDKit's ``MolToSmiles(isomericSmiles=False)`` output --
          a *deliberately* canonicalized non-isomeric SMILES (e.g.
          ``CC(=O)Oc1ccccc1C(=O)O`` for aspirin).
       2. A SMILES that came from a source which simply omitted
          stereo info (e.g. a partially-specified PubChem ``ConnectivitySmiles``).
       3. A malformed / partial / non-canonical SMILES (e.g. ``CCCCCC``
-         for hexane written by hand — it IS canonical but it's also
+         for hexane written by hand -- it IS canonical but it's also
          achiral, so calling it "canonical" is technically correct
          but misleading).
 
@@ -1464,20 +1477,20 @@ def _detect_smiles_form(smiles: Optional[str]) -> str:
     L-lactate) and source B emitted ``CC(O)C(=O)O`` (canonical non-
     isomeric, "lactate, stereo unspecified"), the previous code
     labeled A as "isomeric" and B as "canonical", then treated them
-    as DIFFERENT entities because the labels differed — exactly the
+    as DIFFERENT entities because the labels differed -- exactly the
     opposite of correct behavior.
 
     The fix: rename the non-isomeric label to
     ``"canonical_non_isomeric"`` so it's unambiguous, and emit a
     warning when a SMILES lacks stereo markers but the molecule
     MIGHT have stereo centers (heuristic: contains a ring or
-    branched carbon — proper check would require RDKit, but the
+    branched carbon -- proper check would require RDKit, but the
     heuristic catches most cases without a hard dependency).
     ``"canonical"`` is no longer returned for non-isomeric SMILES.
 
-    * Contains ``@`` or ``/`` or ``\\`` → ``"isomeric"``.
-    * ``None`` / empty → ``"unknown"``.
-    * Otherwise → ``"canonical_non_isomeric"`` (NOT "canonical").
+    * Contains ``@`` or ``/`` or ``\\`` -> ``"isomeric"``.
+    * ``None`` / empty -> ``"unknown"``.
+    * Otherwise -> ``"canonical_non_isomeric"`` (NOT "canonical").
     """
     if not smiles or not isinstance(smiles, str) or not smiles.strip():
         return "unknown"
@@ -1497,7 +1510,7 @@ def _detect_smiles_form(smiles: Optional[str]) -> str:
 def _load_state_schema() -> Dict[str, Any]:
     """Load ``schema/v1.json`` once at first use and cache (audit C.9 / 1.9).
 
-    Returns an empty dict if the schema file cannot be read — callers
+    Returns an empty dict if the schema file cannot be read -- callers
     fall back to :func:`_manual_schema_check` in that case.
     """
     cached: Optional[Dict[str, Any]] = getattr(_load_state_schema, "_cache", None)
@@ -1511,7 +1524,7 @@ def _load_state_schema() -> Dict[str, Any]:
             schema = json.load(fh)
     except (OSError, json.JSONDecodeError) as exc:
         logger.warning(
-            "Could not load state schema from %s: %s — falling back to "
+            "Could not load state schema from %s: %s -- falling back to "
             "manual structural validation",
             schema_path, exc,
         )
@@ -1561,7 +1574,7 @@ class _SaltFormDetector:
     """PubChem salt-form detection via IUPACName + MolecularFormula (audit 3.1).
 
     The previous implementation only emitted a ``logger.debug`` and
-    never actually rejected salt forms — this class performs the real
+    never actually rejected salt forms -- this class performs the real
     check using PubChem's ``/property/InChIKey,IUPACName,MolecularFormula/JSON``
     endpoint.
 
@@ -1574,7 +1587,7 @@ class _SaltFormDetector:
        whitespace tolerated).  Examples: ``"acetylsalicylic acid sodium"``,
        ``"metformin hydrochloride"``.
     2. Its molecular formula begins with a metal cation pattern
-       (:data:`_METAL_CATION_RE` — ``Na``, ``K``, ``Ca``, ``Mg``,
+       (:data:`_METAL_CATION_RE` -- ``Na``, ``K``, ``Ca``, ``Mg``,
        ``Li``, ``Zn`` followed by a non-letter).  Examples:
        ``"NaCl"``, ``"K2HPO4"``.
     """
@@ -1626,22 +1639,22 @@ class _PubChemCircuitBreaker:
 
     States
     ------
-    * ``CLOSED`` — calls pass through; failures increment the counter.
-    * ``OPEN`` — calls short-circuit to ``None`` and log at INFO.
+    * ``CLOSED`` -- calls pass through; failures increment the counter.
+    * ``OPEN`` -- calls short-circuit to ``None`` and log at INFO.
       After ``cooldown`` seconds, the breaker enters ``HALF_OPEN``.
-    * ``HALF_OPEN`` — the next call is allowed; success → ``CLOSED``,
-      failure → ``OPEN``.
+    * ``HALF_OPEN`` -- the next call is allowed; success -> ``CLOSED``,
+      failure -> ``OPEN``.
 
     The breaker is per-instance (not process-global) because different
     resolvers may have different network paths (audit C.14).
 
     FIX P1-ER-21 (LOW): the previous ``allow_call`` returned ``True``
-    for EVERY call in HALF_OPEN — so if 10 concurrent threads hit the
+    for EVERY call in HALF_OPEN -- so if 10 concurrent threads hit the
     breaker in HALF_OPEN, all 10 would proceed and bombard the
     downstream service just as it was recovering. The standard
     circuit-breaker pattern (e.g. resilience4j, Hystrix) allows ONLY
     ONE probe call in HALF_OPEN; subsequent calls are short-circuited
-    until the probe completes (success → CLOSED, failure → OPEN).
+    until the probe completes (success -> CLOSED, failure -> OPEN).
     We now track a ``_half_open_in_flight`` counter (atomic CAS under
     ``_lock``) so that only one call proceeds in HALF_OPEN at a time.
     """
@@ -1663,19 +1676,19 @@ class _PubChemCircuitBreaker:
         self._lock = threading.Lock()
         # FIX P1-ER-21 (LOW): tracks whether a HALF_OPEN probe call
         # is currently in flight. ``allow_call`` does an atomic CAS
-        # from 0 → 1 in HALF_OPEN; ``record_success`` /
+        # from 0 -> 1 in HALF_OPEN; ``record_success`` /
         # ``record_failure`` reset it to 0 when the probe completes.
         self._half_open_in_flight: int = 0
 
     @property
     def state(self) -> str:
-        """Return the current state, transitioning OPEN → HALF_OPEN if cooldown elapsed."""
+        """Return the current state, transitioning OPEN -> HALF_OPEN if cooldown elapsed."""
         with self._lock:
             if self._state == self.OPEN:
                 if (time.monotonic() - self._opened_at) >= self._cooldown:
                     self._state = self.HALF_OPEN
                     # FIX P1-ER-21: reset the in-flight counter when
-                    # entering HALF_OPEN — the previous probe (if any)
+                    # entering HALF_OPEN -- the previous probe (if any)
                     # has long since completed (we were in OPEN for
                     # ``cooldown`` seconds).
                     self._half_open_in_flight = 0
@@ -1689,7 +1702,7 @@ class _PubChemCircuitBreaker:
         in-flight probe completes (via :meth:`record_success` or
         :meth:`record_failure`).
         """
-        # ``self.state`` does the OPEN → HALF_OPEN transition under
+        # ``self.state`` does the OPEN -> HALF_OPEN transition under
         # ``_lock``; we re-acquire the lock here for the HALF_OPEN
         # in-flight CAS. The double-lock is fine because ``state``
         # releases before we re-acquire.
@@ -1701,18 +1714,18 @@ class _PubChemCircuitBreaker:
                 if self._half_open_in_flight == 0:
                     self._half_open_in_flight = 1
                     return True
-                # A probe is already in flight — short-circuit.
+                # A probe is already in flight -- short-circuit.
                 return False
         # OPEN
         return False
 
     def record_success(self) -> None:
-        """Record a successful call; transitions HALF_OPEN → CLOSED."""
+        """Record a successful call; transitions HALF_OPEN -> CLOSED."""
         with self._lock:
             self._failure_count = 0
             self._state = self.CLOSED
             # FIX P1-ER-21: release the HALF_OPEN probe slot (no-op
-            # if we were in CLOSED — the counter is already 0).
+            # if we were in CLOSED -- the counter is already 0).
             self._half_open_in_flight = 0
 
     def record_failure(self) -> None:
@@ -1726,7 +1739,7 @@ class _PubChemCircuitBreaker:
                 self._half_open_in_flight = 0
 
     def reset(self) -> None:
-        """Reset to CLOSED (audit 6.10 — ``reset(reset_process_globals=True)``)."""
+        """Reset to CLOSED (audit 6.10 -- ``reset(reset_process_globals=True)``)."""
         with self._lock:
             self._state = self.CLOSED
             self._failure_count = 0
@@ -1742,7 +1755,7 @@ class _PubChemCircuitBreaker:
 class _MutationContext:
     """Context manager that snapshots mutable state and rolls back on exception.
 
-    Audit 1.3 / 1.10 / 4.26 / 4.7 / 5.2 / 6.5 / 6.9 / 7.9 — every
+    Audit 1.3 / 1.10 / 4.26 / 4.7 / 5.2 / 6.5 / 6.9 / 7.9 -- every
     public mutating method wraps its body in a ``_MutationContext`` so
     that an exception mid-mutation restores the 8 mutated structures
     to their pre-call state.
@@ -1761,7 +1774,7 @@ class _MutationContext:
         on rollback).
     structural:
         If ``True`` (default), snapshot all 8 structures.  If ``False``,
-        skip the snapshot — use this for tiny in-place updates where
+        skip the snapshot -- use this for tiny in-place updates where
         deepcopy overhead would be wasteful.
     """
 
@@ -1822,19 +1835,19 @@ class _MutationContext:
                 # exceptions in ResolverStateCorruptionError. The
                 # previous implementation wrapped KeyError, ValueError,
                 # MemoryError, etc., which:
-                #   1. MASKED the original exception type — callers
+                #   1. MASKED the original exception type -- callers
                 #      catching ``except KeyError:`` (or any non-
                 #      ResolverError/ValueError type) could not catch
                 #      the wrapped exception. The ``from exc`` chain
                 #      preserved the original for inspection but
                 #      ``except <Type>:`` blocks don't follow the
                 #      chain, so error-handling logic broke.
-                #   2. Made error-handling unpredictable — operators
+                #   2. Made error-handling unpredictable -- operators
                 #      who knew a specific exception type might be
                 #      raised could not catch it.
                 # The root fix: the rollback has ALREADY been performed
                 # (above) and the rollback has ALREADY been logged via
-                # ``_event_log`` (for observability — operators see
+                # ``_event_log`` (for observability -- operators see
                 # "mutation_rolled_back" with the original error_type
                 # and error_message in the structured log). We now
                 # ``return False`` to let the ORIGINAL exception
@@ -1864,7 +1877,7 @@ class _MutationContext:
 class _MatchPipeline:
     """Orchestrates the ordered sequence of match attempts (audit 1.8).
 
-    Single source of truth for the match order — adding a new match
+    Single source of truth for the match order -- adding a new match
     method is now a one-line change to :attr:`STEPS`.
     """
 
@@ -1873,7 +1886,7 @@ class _MatchPipeline:
             name="inchikey_exact",
             method="inchikey_exact",
             fn=lambda r, ik: r._match_by_inchikey(ik),
-            # FIX-P4-3: confidence field removed — see _MatchStep docstring.
+            # FIX-P4-3: confidence field removed -- see _MatchStep docstring.
         ),
         _MatchStep(
             name="inchikey_connectivity",
@@ -1929,7 +1942,7 @@ class _MatchPipeline:
         allow_pubchem:
             If ``False``, skip the PubChem step (bulk path).
         allow_smiles:
-            If ``False``, skip the SMILES step (default — opt-in).
+            If ``False``, skip the SMILES step (default -- opt-in).
         """
         for step in cls.STEPS:
             if step.method == "smiles_canonical" and not allow_smiles:
@@ -1973,7 +1986,7 @@ class _MatchPipeline:
 # =============================================================================
 # Register once at module import so compute_match_confidence("synthetic_key")
 # returns 0.0 instead of the unknown-method default 0.5.
-# v89 FORENSIC ROOT FIX (BUG #22 P1 — method NAME inconsistency):
+# v89 FORENSIC ROOT FIX (BUG #22 P1 -- method NAME inconsistency):
 #   The previous code registered ONLY ``"synthetic_key"`` (confidence 0.0)
 #   but ``_match_by_inchikey`` for SYNTH keys returns
 #   ``method="synthetic_key_match"`` (confidence
@@ -1989,7 +2002,7 @@ class _MatchPipeline:
 #   ``"synthetic_key"`` registration (confidence 0.0) is RETAINED
 #   because ``_creation_method_for`` returns ``"synthetic_key"`` for
 #   entries created with neither InChIKey nor name (a DIFFERENT
-#   semantic — creation fallback, not matching). The two labels now
+#   semantic -- creation fallback, not matching). The two labels now
 #   have distinct, consistent confidence values.
 register_match_method("synthetic_key", 0.0)
 register_match_method("synthetic_key_match", 0.5)
@@ -2001,7 +2014,7 @@ register_match_method("no_match_pubchem_degraded", 0.0)
 
 
 # =============================================================================
-# Main class — DrugResolver
+# Main class -- DrugResolver
 # =============================================================================
 
 
@@ -2017,12 +2030,12 @@ class DrugResolver(Resolver):
     config:
         Optional :class:`ResolverConfig` instance.  If omitted, a
         default config is constructed (PubChem disabled, stereoisomer
-        collapse disabled — safe by default).
+        collapse disabled -- safe by default).
 
     Notes
     -----
     The resolver is **thread-safe** for concurrent ``add_source_records``
-    calls (audit C.11) — every mutating method acquires
+    calls (audit C.11) -- every mutating method acquires
     ``self._mutation_lock`` via a :class:`_MutationContext`.
 
     State serialisation round-trips through :meth:`to_state_dict` /
@@ -2039,7 +2052,7 @@ class DrugResolver(Resolver):
 
     def __init__(self, config: Optional[ResolverConfig] = None) -> None:
         # FIX-P4-7 (v42): the previous body was wrapped in `try: ... ;
-        # except Exception: raise` — a no-op that obscured the partial-init
+        # except Exception: raise` -- a no-op that obscured the partial-init
         # contract it claimed to enforce (the bare `raise` re-raised without
         # cleaning up any partial state, so the half-constructed-state risk
         # it claimed to mitigate was never actually addressed). Removed.
@@ -2057,7 +2070,7 @@ class DrugResolver(Resolver):
         # Previously it was lazily created by ``_create_canonical_entry`` /
         # ``_merge_into_canonical_entry`` via ``hasattr`` guards, which left
         # ``_MutationContext``, ``reset()`` and ``_assert_initialized`` all
-        # blind to it — a transactional rollback would silently drop SMILES
+        # blind to it -- a transactional rollback would silently drop SMILES
         # mappings and a ``reset()`` would leave stale SMILES state behind.
         self._smiles_index: Dict[str, str] = {}
 
@@ -2092,7 +2105,7 @@ class DrugResolver(Resolver):
         self._unknown_config_keys: List[str] = []
 
         # ----- Soft-validation stats (audit C.15) -----
-        # Tracked via ResolverStats — but ResolverStats is the existing
+        # Tracked via ResolverStats -- but ResolverStats is the existing
         # dataclass; we add ad-hoc counters via _stats.inc on the fly.
 
         # ----- PubChem-side state -----
@@ -2184,7 +2197,7 @@ class DrugResolver(Resolver):
         """Assert every index value is a key in ``self.mapping`` (audit C.12 / E.12)."""
         if not getattr(self._config, "runtime_asserts", False):
             return
-        # P1-ER-1 ROOT FIX: include _smiles_index in the consistency check —
+        # P1-ER-1 ROOT FIX: include _smiles_index in the consistency check --
         # it maps ``smiles -> canonical_ik`` and must never point at a key
         # that has been removed from ``self.mapping``.
         for idx_name, idx in (
@@ -2240,7 +2253,7 @@ class DrugResolver(Resolver):
         return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
     def _now_iso_for_export(self) -> str:
-        """Timestamp for ``exported_at`` — uses ``run_started_at`` in deterministic mode."""
+        """Timestamp for ``exported_at`` -- uses ``run_started_at`` in deterministic mode."""
         if getattr(self._config, "deterministic_timestamps", False):
             return self._run_started_at
         return self._now_iso()
@@ -2294,7 +2307,7 @@ class DrugResolver(Resolver):
         msg = event
         try:
             logger.log(level, msg, extra=extra)
-        except Exception:  # pragma: no cover — logger must never crash the resolver
+        except Exception:  # pragma: no cover -- logger must never crash the resolver
             pass
 
     def _ensure_batch_correlation_id(self) -> str:
@@ -2415,10 +2428,10 @@ class DrugResolver(Resolver):
         Parameters
         ----------
         records:
-            Iterable of record dicts.  Streaming is supported — the
+            Iterable of record dicts.  Streaming is supported -- the
             iterable is consumed lazily (audit C.21 / 4.10).
         source:
-            Source identifier — ``'chembl'``, ``'drugbank'``, or
+            Source identifier -- ``'chembl'``, ``'drugbank'``, or
             ``'pubchem'``.
         dataset_version:
             Optional version string for the source dataset (audit C.19).
@@ -2428,10 +2441,10 @@ class DrugResolver(Resolver):
             Optional ISO-8601 timestamp when the source dataset was
             fetched (audit C.19 / 5.8).
         chunksize:
-            Optional chunk size — when set, a checkpoint is emitted
+            Optional chunk size -- when set, a checkpoint is emitted
             every ``chunksize`` records for crash-recovery (audit 6.5).
         timeout:
-            Optional timeout in seconds — raises :class:`BatchTimeoutError`
+            Optional timeout in seconds -- raises :class:`BatchTimeoutError`
             if exceeded (audit 6.11).
         resume_from:
             Optional checkpoint ID to resume from (audit 6.5).
@@ -2440,7 +2453,7 @@ class DrugResolver(Resolver):
         -------
         int
             Number of records actually ingested (skipped records do
-            NOT count — audit C.6).
+            NOT count -- audit C.6).
 
         Raises
         ------
@@ -2497,7 +2510,7 @@ class DrugResolver(Resolver):
                 # (records, id_fields=None, *, seen=<sentinel>,
                 #  return_counts=False, return_indices=False,
                 #  sanitize_output=False).  It does NOT have a
-                # ``return_seen`` kwarg — that was a typo in the audit
+                # ``return_seen`` kwarg -- that was a typo in the audit
                 # spec.  We just pass ``id_fields`` and use the default
                 # return shape (Dict[str, List[str]]).
                 dup_report = find_duplicate_ids(
@@ -2509,7 +2522,7 @@ class DrugResolver(Resolver):
                         # FIX P1-ER-13 (MEDIUM): find_duplicate_ids is
                         # called above WITHOUT ``return_counts=True``, so
                         # its return shape is ALWAYS ``Dict[str, List[str]]``
-                        # — the previous ``isinstance(dup_values, dict)``
+                        # -- the previous ``isinstance(dup_values, dict)``
                         # branch was dead code (it could never fire because
                         # ``dup_values`` is always a list). Simplify to the
                         # one path that actually executes.
@@ -2574,7 +2587,7 @@ class DrugResolver(Resolver):
         last_checkpoint_idx = start_idx
         # FIX-P4-7 (v42): the previous outer `try: ... ; except Exception:
         # raise` wrapper around the `with _MutationContext(...)` block was a
-        # no-op — the bare `raise` re-raised without any cleanup, so it added
+        # no-op -- the bare `raise` re-raised without any cleanup, so it added
         # nothing (the inner _MutationContext already handles rollback, and
         # the KeyboardInterrupt / MemoryError handlers below handle their own
         # cleanup paths). Removed.
@@ -2761,7 +2774,7 @@ class DrugResolver(Resolver):
         )
 
         if hit is None:
-            # No match found — create a brand-new canonical entry.
+            # No match found -- create a brand-new canonical entry.
             method = self._creation_method_for(record, inchikey)
             self._create_canonical_entry(
                 record, source, method=method,
@@ -2770,7 +2783,7 @@ class DrugResolver(Resolver):
             self._stats.inc("records_created")
             return "created"
         else:
-            # Match found — merge into canonical entry.
+            # Match found -- merge into canonical entry.
             self._merge_into_canonical(
                 hit.canonical_ik, record, source,
                 method=hit.method, confidence=hit.confidence,
@@ -2778,7 +2791,7 @@ class DrugResolver(Resolver):
             )
             self._stats.inc("records_matched")
             # Increment per-method stats so the bulk path is observable
-            # (audit 2.4 — fuzzy_matches / name_matches / etc. must be
+            # (audit 2.4 -- fuzzy_matches / name_matches / etc. must be
             # incremented even when the match happens via add_source_records,
             # not just via resolve_single).
             if hit.method == "inchikey_exact":
@@ -2799,11 +2812,11 @@ class DrugResolver(Resolver):
     def _creation_method_for(self, record: dict, inchikey: str) -> str:
         """Determine the creation method for a new entry (audit 2.1).
 
-        * If ``inchikey`` is a valid, validated InChIKey → ``"inchikey_exact"``.
+        * If ``inchikey`` is a valid, validated InChIKey -> ``"inchikey_exact"``.
         * If ``inchikey`` is present but fails format validation (non-strict
-          mode) → ``"inchikey_exact_unvalidated"`` (confidence 0.5).
-        * If only a name is available → ``"name_only"`` (confidence 0.3).
-        * If neither → ``"synthetic_key"`` (confidence 0.0).
+          mode) -> ``"inchikey_exact_unvalidated"`` (confidence 0.5).
+        * If only a name is available -> ``"name_only"`` (confidence 0.3).
+        * If neither -> ``"synthetic_key"`` (confidence 0.0).
         """
         if inchikey and is_valid_inchikey(inchikey):
             return "inchikey_exact"
@@ -2815,7 +2828,7 @@ class DrugResolver(Resolver):
         return "synthetic_key"
 
     def _soft_validate(self, record: dict) -> List[str]:
-        """Soft validation tier — flag (not reject) anomalies (audit C.15).
+        """Soft validation tier -- flag (not reject) anomalies (audit C.15).
 
         Returns a list of human-readable warning strings (empty = no warnings).
         """
@@ -2853,7 +2866,7 @@ class DrugResolver(Resolver):
 
         FIX-P1-C-12: previously, when the spill-file write FAILED (disk
         full, permission denied), the code logged CRITICAL but
-        TRUNCATED ``self._dead_letter`` anyway — the dropped items were
+        TRUNCATED ``self._dead_letter`` anyway -- the dropped items were
         lost forever. We now only truncate if the spill succeeded; if
         the spill fails, we raise :class:`DeadLetterQueueFullError` so
         the caller can decide to retry or abort.
@@ -2863,7 +2876,7 @@ class DrugResolver(Resolver):
         # previous slice arithmetic used `self._dead_letter[:-max_size]` and
         # `self._dead_letter[-max_size:]`, but Python treats `[-0]` the same
         # as `[0]` (i.e. `[:0]` is the EMPTY list and `[0:]` is the FULL
-        # list) — so with `max_size=0` the spill loop spilled nothing and
+        # list) -- so with `max_size=0` the spill loop spilled nothing and
         # the truncate assignment dropped nothing, violating the
         # "max_size=0 means drop everything" contract. The explicit
         # `len(self._dead_letter) - max_size` arithmetic below is correct
@@ -2896,7 +2909,7 @@ class DrugResolver(Resolver):
                     error_message=str(exc)[:200],
                     error_code=ErrorCode.DEAD_LETTER_FULL.value,
                 )
-                # FIX-P1-C-12: do NOT truncate — raise so caller can
+                # FIX-P1-C-12: do NOT truncate -- raise so caller can
                 # retry or abort without losing the unspilled items.
                 raise DeadLetterQueueFullError(
                     f"Dead-letter queue overflowed (size={len(self._dead_letter)}, "
@@ -2906,7 +2919,7 @@ class DrugResolver(Resolver):
                     f"issue and retry."
                 ) from exc
         else:
-            # No spill path configured — also raise so the caller knows
+            # No spill path configured -- also raise so the caller knows
             # data would be lost (previously silently truncated).
             raise DeadLetterQueueFullError(
                 f"Dead-letter queue overflowed (size={len(self._dead_letter)}, "
@@ -3123,7 +3136,7 @@ class DrugResolver(Resolver):
         """Build cross-database drug entity mapping.
 
         See module docstring for the resolution strategy.  This is the
-        bulk offline ETL path — it never calls PubChem (audit D3-1).
+        bulk offline ETL path -- it never calls PubChem (audit D3-1).
 
         Parameters
         ----------
@@ -3132,7 +3145,7 @@ class DrugResolver(Resolver):
             and the source-specific ID column.
         reset:
             If ``True`` (default), clear internal state before
-            ingestion — idempotent re-runs (audit D7-1).  Pass ``False``
+            ingestion -- idempotent re-runs (audit D7-1).  Pass ``False``
             only for verified incremental backfills.
         sources_order:
             Optional override for the ingestion order.  Default is
@@ -3164,7 +3177,7 @@ class DrugResolver(Resolver):
                     logging.WARNING,
                     "build_mapping_incremental",
                     existing_count=len(self.mapping),
-                    note="reset=False — ensure inputs contain only new records",
+                    note="reset=False -- ensure inputs contain only new records",
                 )
 
         # ----- Source label canonicalisation (audit 2.10) -----
@@ -3216,8 +3229,8 @@ class DrugResolver(Resolver):
     ) -> Any:
         """Convert the internal ``mapping`` dict to an entity-mapping DataFrame.
 
-        Audit C.17 — after construction, the DataFrame's columns are
-        asserted to equal :attr:`_OUTPUT_COLUMNS`.  Audit C.21 — when
+        Audit C.17 -- after construction, the DataFrame's columns are
+        asserted to equal :attr:`_OUTPUT_COLUMNS`.  Audit C.21 -- when
         ``chunksize`` is set, returns a generator of DataFrames
         (streaming).
 
@@ -3227,7 +3240,7 @@ class DrugResolver(Resolver):
             If given, return an iterator of DataFrames each with at
             most ``chunksize`` rows.  Must be > 0 (audit 2.11).
         null_representation:
-            One of ``"pandas"`` (default — use native NA), ``"none"``
+            One of ``"pandas"`` (default -- use native NA), ``"none"``
             (use ``None``), ``"empty_string"`` (use ``""``).
 
         Returns
@@ -3307,7 +3320,7 @@ class DrugResolver(Resolver):
     def to_records(self) -> List[dict]:
         """Export the mapping as a list of plain dicts (no pandas dep).
 
-        Audit C.2 — nested mutable values (``sources``,
+        Audit C.2 -- nested mutable values (``sources``,
         ``collapsed_stereoisomers``, ``field_provenance``) are deep-copied
         so callers cannot mutate the resolver's internal state.
         """
@@ -3322,7 +3335,7 @@ class DrugResolver(Resolver):
     def to_dict(self) -> Dict[str, dict]:
         """Export the mapping as a dict-of-dicts (JSON-serialisable).
 
-        Audit C.2 — nested mutable values are copied via ``list(...)``.
+        Audit C.2 -- nested mutable values are copied via ``list(...)``.
         """
         out: Dict[str, dict] = {}
         for ik, e in self.mapping.items():
@@ -3352,7 +3365,7 @@ class DrugResolver(Resolver):
         df.to_parquet(str(path), index=False, engine=engine_name)
 
     def to_csv(self, path: Union[str, Path]) -> None:
-        """Write the mapping to a CSV file (stdlib only — no pandas dep; audit 15.4)."""
+        """Write the mapping to a CSV file (stdlib only -- no pandas dep; audit 15.4)."""
         import csv
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -3362,7 +3375,7 @@ class DrugResolver(Resolver):
                 writer = csv.writer(fh)
                 writer.writerow(list(self._OUTPUT_COLUMNS))
             return
-        # Determine column order — use union of all record keys, with
+        # Determine column order -- use union of all record keys, with
         # _OUTPUT_COLUMNS first.
         all_cols: List[str] = list(self._OUTPUT_COLUMNS)
         for r in records:
@@ -3402,7 +3415,7 @@ class DrugResolver(Resolver):
     ) -> dict:
         """Serialise the resolver's full state to a JSON-compatible dict.
 
-        Audit C.2 — every mutable structure is deep-copied so callers
+        Audit C.2 -- every mutable structure is deep-copied so callers
         cannot mutate the resolver's internal state by mutating the
         returned dict.
 
@@ -3479,7 +3492,7 @@ class DrugResolver(Resolver):
     def from_state_dict(cls, state: Mapping[str, Any]) -> "DrugResolver":
         """Reconstruct a :class:`DrugResolver` from a state dict.
 
-        Audit C.9 — validates the state against ``schema/v1.json`` (via
+        Audit C.9 -- validates the state against ``schema/v1.json`` (via
         ``jsonschema`` if available, else a manual structural check),
         rejects unknown top-level keys, and verifies referential
         integrity between ``mapping`` and the indices / audit trail.
@@ -3517,7 +3530,7 @@ class DrugResolver(Resolver):
                     "state dict failed manual validation: " + "; ".join(errors)
                 )
 
-        # ----- Unknown top-level keys (audit C.9 — forward-compat) -----
+        # ----- Unknown top-level keys (audit C.9 -- forward-compat) -----
         known_keys = {
             "schema_version", "resolver_class", "resolver_version", "config",
             "mapping", "inchikey_index", "name_index", "name_index_multi",
@@ -3527,9 +3540,9 @@ class DrugResolver(Resolver):
             "exported_at", "data_classification",
         }
         unknown_keys = set(state.keys()) - known_keys
-        # We don't reject — just log so users see them (audit 4.9 pattern).
+        # We don't reject -- just log so users see them (audit 4.9 pattern).
 
-        # ----- Build config (audit 4.9 — filter unknown keys) -----
+        # ----- Build config (audit 4.9 -- filter unknown keys) -----
         cfg_dict = dict(state.get("config", {}))
         if cfg_dict.get("pubchem_api_key") == "<redacted>":
             cfg_dict["pubchem_api_key"] = None
@@ -3562,7 +3575,7 @@ class DrugResolver(Resolver):
                 keys=unknown_cfg,
             )
 
-        # ----- Restore mapping (deep copy — audit C.2) -----
+        # ----- Restore mapping (deep copy -- audit C.2) -----
         resolver.mapping = copy.deepcopy(dict(state.get("mapping", {})))
 
         # ----- Restore indices (or rebuild) -----
@@ -3688,7 +3701,7 @@ class DrugResolver(Resolver):
     # ------------------------------------------------------------------
 
     def reset(self, *, reset_process_globals: bool = False) -> None:
-        """Clear all internal state — equivalent to a fresh instance.
+        """Clear all internal state -- equivalent to a fresh instance.
 
         Parameters
         ----------
@@ -3704,7 +3717,7 @@ class DrugResolver(Resolver):
             self._name_index_multi = {}
             self._connectivity_index = {}
             self._connectivity_index_multi = {}
-            # P1-ER-1 ROOT FIX: clear _smiles_index too — a stale SMILES
+            # P1-ER-1 ROOT FIX: clear _smiles_index too -- a stale SMILES
             # pointer after ``reset()`` would re-resurrect dead entries.
             self._smiles_index = {}
             self._dead_letter = []
@@ -3737,7 +3750,7 @@ class DrugResolver(Resolver):
 
         Entries contributed by multiple sources are kept but have
         ``source`` removed from their ``sources`` list.  The audit
-        trail is PRESERVED (audit 4.12) — a ``remove_source_full`` or
+        trail is PRESERVED (audit 4.12) -- a ``remove_source_full`` or
         ``remove_source_partial`` event is appended.
         """
         with _MutationContext(self, f"remove_source({source!r})"):
@@ -3940,7 +3953,7 @@ class DrugResolver(Resolver):
         wrong for small ``n``:
 
         * ``int(n * 0.99)`` rounds down, so for ``n=2`` it returned
-          ``sorted_s[1]`` (the MAX) as the "p99" — clearly nonsensical.
+          ``sorted_s[1]`` (the MAX) as the "p99" -- clearly nonsensical.
         * For ``n=10``, ``int(10 * 0.95) = 9`` returned the max as p95.
 
         The interpolated formula below uses ``rank = (p/100) * (n-1)`` with
@@ -4036,17 +4049,17 @@ class DrugResolver(Resolver):
     # ------------------------------------------------------------------
 
     def compute_data_quality_score(self, canonical_ik: str) -> float:
-        """Return a 0.0–1.0 data-quality score for the entry (audit 5.23).
+        """Return a 0.0-1.0 data-quality score for the entry (audit 5.23).
 
         Score components:
 
-        * 0.2 — has an InChIKey.
-        * 0.1 — InChIKey is in canonical format (not synthetic).
-        * 0.2 — has ≥ 2 source IDs.
-        * 0.2 — no conflicts detected.
-        * 0.1 — has a SMILES.
-        * 0.1 — has a molecular_weight in valid range.
-        * 0.1 — ``resolved_at`` is recent (within the last 365 days).
+        * 0.2 -- has an InChIKey.
+        * 0.1 -- InChIKey is in canonical format (not synthetic).
+        * 0.2 -- has ≥ 2 source IDs.
+        * 0.2 -- no conflicts detected.
+        * 0.1 -- has a SMILES.
+        * 0.1 -- has a molecular_weight in valid range.
+        * 0.1 -- ``resolved_at`` is recent (within the last 365 days).
         """
         entry = self.mapping.get(canonical_ik, {})
         score = 0.0
@@ -4209,7 +4222,7 @@ class DrugResolver(Resolver):
     def find_canonical_for_source_record(
         self, source: str, source_record_id: str,
     ) -> Optional[str]:
-        """Reverse-lookup a source-record ID → canonical InChIKey (audit 16.21)."""
+        """Reverse-lookup a source-record ID -> canonical InChIKey (audit 16.21)."""
         return self._source_record_index.get((source, source_record_id))
 
     def get_field_provenance(
@@ -4343,24 +4356,24 @@ class DrugResolver(Resolver):
         return [self.resolve_single(n) for n in names]
 
     # ------------------------------------------------------------------
-    # Internal matchers (audit C.11 — return _MatchHit, never mutate)
+    # Internal matchers (audit C.11 -- return _MatchHit, never mutate)
     # ------------------------------------------------------------------
 
     def _match_by_inchikey(self, inchikey: str) -> Optional[_MatchHit]:
         """Find ``canonical_inchikey`` by exact InChIKey match (audit 3.5).
 
-        Case-insensitive — InChIKeys are normalised via
+        Case-insensitive -- InChIKeys are normalised via
         :func:`_normalize_inchikey` before lookup.
 
         v29 ROOT FIX (audit C-3): SYNTH-prefixed InChIKeys are COMPUTED
-        (not experimental) — they're generated for biologics/macromolecules
+        (not experimental) -- they're generated for biologics/macromolecules
         that lack a real InChIKey. Treating them as ``inchikey_exact``
-        with confidence 1.0 is SCIENTIFICALLY WRONG — a SYNTH key match
+        with confidence 1.0 is SCIENTIFICALLY WRONG -- a SYNTH key match
         is much weaker evidence than a real InChIKey match because
         different sources may generate DIFFERENT SYNTH keys for the
         same biologic.
 
-        v65 ROOT FIX (P1C-009 — method/confidence self-consistency):
+        v65 ROOT FIX (P1C-009 -- method/confidence self-consistency):
           The v29 fix lowered the SYNTH-match confidence to 0.5 but
           LEFT the method label as ``"inchikey_exact"``. This was self-
           contradictory: the method label said "exact" (which
@@ -4368,7 +4381,7 @@ class DrugResolver(Resolver):
           confidence value was 0.5 (which equals ``MatchConfidence.UNKNOWN``).
           Downstream code that filtered by ``method == "inchikey_exact"``
           expected confidence 1.0 and treated SYNTH matches as highest-
-          priority — when they're actually the LOWEST-confidence match
+          priority -- when they're actually the LOWEST-confidence match
           type (weaker than fuzzy 0.65, weaker than name_normalized 0.8).
           The docstring above also claimed SYNTH keys get
           ``inchikey_connectivity`` confidence (0.9), which was a THIRD
@@ -4394,7 +4407,7 @@ class DrugResolver(Resolver):
         # and MatchConfidence are now imported at MODULE LEVEL (see top of
         # file). No more per-call import overhead or ImportError risk.
         if CANONICAL_SYNTHETIC_INCHIKEY_REGEX is not None and CANONICAL_SYNTHETIC_INCHIKEY_REGEX.match(norm):
-            # SYNTH key — computed, not experimental. Weakest evidence.
+            # SYNTH key -- computed, not experimental. Weakest evidence.
             # Method label is "synthetic_key_match" (NOT "inchikey_exact")
             # so downstream filters can distinguish real InChIKey matches
             # from synthetic-key matches.
@@ -4415,7 +4428,7 @@ class DrugResolver(Resolver):
         When ``collapse_stereoisomers=False`` (default), this method
         returns ``None`` for any candidate whose full InChIKey differs
         from the indexed one.  When ``collapse_stereoisomers=True``,
-        the legacy first-block-only merge is performed — but every
+        the legacy first-block-only merge is performed -- but every
         collapse is logged at WARNING and recorded in
         ``collapsed_stereoisomers``.
         """
@@ -4432,7 +4445,7 @@ class DrugResolver(Resolver):
             self.mapping.get(canonical_ik, {}).get("inchikey", "")
         )
         if not self._config.collapse_stereoisomers:
-            # Stereoisomer safety gate — only merge if full InChIKeys
+            # Stereoisomer safety gate -- only merge if full InChIKeys
             # are identical (audit 3.4).
             if existing_ik != norm:
                 return None
@@ -4476,7 +4489,7 @@ class DrugResolver(Resolver):
         only.  When ``allow_fuzzy=True``, falls back to a bounded
         rapidfuzz sweep.
 
-        Audit 2.3 / 4.1 — this method DOES NOT mutate ``self.mapping``.
+        Audit 2.3 / 4.1 -- this method DOES NOT mutate ``self.mapping``.
         It returns a :class:`_MatchHit` and the caller decides whether
         to apply the method update via :meth:`_merge_into_canonical`.
         """
@@ -4487,10 +4500,10 @@ class DrugResolver(Resolver):
             return None
 
         # ----- Exact normalised lookup -----
-        # v89 FORENSIC ROOT FIX (BUG #5 P0 — _match_by_name ignored
+        # v89 FORENSIC ROOT FIX (BUG #5 P0 -- _match_by_name ignored
         #   ambiguity from _name_index_multi):
         #   ``self._name_index`` is a single-valued dict
-        #   (norm → canonical_ik). When two different drugs normalize to
+        #   (norm -> canonical_ik). When two different drugs normalize to
         #   the SAME name (e.g. salt forms "ibuprofen" vs "ibuprofen
         #   lysinate", or brand vs generic), the FIRST one registered
         #   won (via ``setdefault`` at line 5219). The resolver KNEW
@@ -4503,9 +4516,9 @@ class DrugResolver(Resolver):
         #   FIRST drug's canonical entry. Drug-target interactions,
         #   indications, and pharmacology data were co-mingled. A
         #   patient lookup for one drug returned the other drug's
-        #   contraindications — a patient-safety hazard.
+        #   contraindications -- a patient-safety hazard.
         #   ROOT FIX: check ``self._name_index_multi.get(norm)`` FIRST.
-        #   If it has >1 DISTINCT entry, the name is ambiguous — return
+        #   If it has >1 DISTINCT entry, the name is ambiguous -- return
         #   None (refuse to match by name alone) and log a WARNING,
         #   forcing the pipeline to fall through to SMILES/PubChem
         #   matching or create a new entry with the InChIKey.
@@ -4521,7 +4534,7 @@ class DrugResolver(Resolver):
                 candidates=_multi_candidates,
                 message=(
                     "Normalised name '%s' maps to %d distinct canonical "
-                    "InChIKeys (%s) — refusing to match by name alone to "
+                    "InChIKeys (%s) -- refusing to match by name alone to "
                     "prevent silent drug co-mingling. Falling through to "
                     "SMILES/PubChem matching or new-entry creation."
                 ),
@@ -4538,7 +4551,7 @@ class DrugResolver(Resolver):
         if not allow_fuzzy:
             return None
 
-        # ----- Fuzzy sweep (audit 4.2 / 8.2 — cached choices) -----
+        # ----- Fuzzy sweep (audit 4.2 / 8.2 -- cached choices) -----
         if not RAPIDFUZZ_AVAILABLE:
             return None
         choices = self._get_fuzzy_choices()
@@ -4575,16 +4588,16 @@ class DrugResolver(Resolver):
         best_ik = self._name_index.get(best_norm)
         if best_ik is None:
             return None
-        # v43 ROOT FIX (P2 — fuzzy match silently picks first of equal-score ties):
+        # v43 ROOT FIX (P2 -- fuzzy match silently picks first of equal-score ties):
         # extractOne returns one match with no tie-breaking reported. For
         # names with multiple equal-score matches (e.g. "cyclophosphamide"
         # vs "cyclophosphamide-precursor" both scoring 100), the chosen
         # one is implementation-defined.
-        # v89 FORENSIC ROOT FIX (BUG #10 P1 — deterministic tie-break was
+        # v89 FORENSIC ROOT FIX (BUG #10 P1 -- deterministic tie-break was
         #   SCIENTIFICALLY ARBITRARY):
         #   The v82 fix picked the alphabetically-FIRST canonical InChIKey
         #   among near-tied candidates. This was deterministic (satisfied
-        #   IDEM-5) but SCIENTIFICALLY ARBITRARY — the alphabetically-first
+        #   IDEM-5) but SCIENTIFICALLY ARBITRARY -- the alphabetically-first
         #   InChIKey has no relationship to the correct drug. For example,
         #   "ibuprofen" might tie between
         #   HEFNNWSXXWATIW-UHFFFAOYSA-N (ibuprofen) and
@@ -4608,7 +4621,7 @@ class DrugResolver(Resolver):
                 top_score = all_results[0][1] if len(all_results[0]) >= 2 else 0
                 second_score = all_results[1][1] if len(all_results[1]) >= 2 else 0
                 if (top_score - second_score) <= _FUZZY_TIE_EPSILON:
-                    # v89 BUG #10: NEAR-TIE detected — REFUSE to match.
+                    # v89 BUG #10: NEAR-TIE detected -- REFUSE to match.
                     self._event_log(
                         logging.WARNING,
                         "fuzzy_tie_break_ambiguous_refused",
@@ -4620,7 +4633,7 @@ class DrugResolver(Resolver):
                         message=(
                             "Fuzzy match has near-tie (top=%s score=%s, "
                             "second=%s score=%s, delta=%.1f <= epsilon=%.1f) "
-                            "— refusing to match by fuzzy to avoid "
+                            "-- refusing to match by fuzzy to avoid "
                             "scientifically arbitrary selection. Falling "
                             "through to SMILES/PubChem matching or "
                             "new-entry creation."
@@ -4656,15 +4669,15 @@ class DrugResolver(Resolver):
         The match is keyed on ``_smiles_index``, which is populated in
         :meth:`_create_canonical_entry`.
 
-        v89 FORENSIC ROOT FIX (BUG #9 P1 — SMILES not canonicalized via
+        v89 FORENSIC ROOT FIX (BUG #9 P1 -- SMILES not canonicalized via
           RDKit):
-          The previous code only did ``smiles.strip()`` — NO
+          The previous code only did ``smiles.strip()`` -- NO
           canonicalization via RDKit. Two SMILES representing the SAME
           molecule but written differently ("CC(=O)O" vs "CC(O)=O", or
           "c1ccccc1" vs "C1=CC=CC=C1") produced DIFFERENT keys and DID
           NOT match. The ``_smiles_index`` was populated with
           ``smiles.strip()`` (line 5252), so the same non-canonicalization
-          applied to storage. The 0.75 confidence was misleading — it
+          applied to storage. The 0.75 confidence was misleading -- it
           implied a strong match that rarely fired.
           ROOT FIX: use
           ``rdkit.Chem.MolToSmiles(Chem.MolFromSmiles(smiles),
@@ -4681,7 +4694,7 @@ class DrugResolver(Resolver):
         norm_smiles, _canonicalized = self._canonicalize_smiles(smiles)
         if not norm_smiles:
             return None
-        # P1-ER-1 ROOT FIX: direct attribute access — _smiles_index is
+        # P1-ER-1 ROOT FIX: direct attribute access -- _smiles_index is
         # guaranteed to exist by ``__init__`` (asserted in
         # ``_assert_initialized``). The previous ``getattr(..., {})`` mask
         # hid the missing-attribute bug from the audit.
@@ -4689,7 +4702,7 @@ class DrugResolver(Resolver):
         if canonical_ik is None:
             return None
         # v89 BUG #9: if we fell back to strip-only (RDKit unavailable),
-        # downgrade confidence from 0.75 to 0.5 — the match is weaker
+        # downgrade confidence from 0.75 to 0.5 -- the match is weaker
         # because non-canonical SMILES may miss equivalent molecules.
         if _canonicalized:
             _method = "smiles_canonical"
@@ -4702,8 +4715,8 @@ class DrugResolver(Resolver):
                 "smiles_match_strip_only_fallback",
                 smiles_hash=hashlib.sha256(smiles.encode("utf-8")).hexdigest()[:16],
                 message=(
-                    "RDKit unavailable — SMILES match using strip-only "
-                    "normalization (confidence downgraded 0.75 → 0.5). "
+                    "RDKit unavailable -- SMILES match using strip-only "
+                    "normalization (confidence downgraded 0.75 -> 0.5). "
                     "Equivalent molecules with different SMILES strings "
                     "will NOT match."
                 ),
@@ -4734,21 +4747,21 @@ class DrugResolver(Resolver):
             from rdkit import Chem
             mol = Chem.MolFromSmiles(stripped)
             if mol is None:
-                # Invalid SMILES — fall back to strip-only.
+                # Invalid SMILES -- fall back to strip-only.
                 return (stripped, False)
             canonical = Chem.MolToSmiles(mol, isomericSmiles=True, canonical=True)
             if canonical:
                 return (canonical, True)
-            # MolToSmiles returned empty — fall back.
+            # MolToSmiles returned empty -- fall back.
             return (stripped, False)
         except Exception:
-            # RDKit unavailable or raised — fall back to strip-only.
+            # RDKit unavailable or raised -- fall back to strip-only.
             return (stripped, False)
 
     def _match_by_pubchem_xref(self, name: str) -> Optional[_MatchHit]:
         """Query PubChem PUG-REST for a cross-reference (audit 3.1 / 3.3 / 3.18 / 3.19 / 4.6 / 6.3 / 9.x).
 
-        Uses ``X-PubChem-API-Key`` header (NOT ``Bearer`` — audit 3.3).
+        Uses ``X-PubChem-API-Key`` header (NOT ``Bearer`` -- audit 3.3).
         Implements a per-instance circuit breaker (audit 6.3),
         exponential backoff with jitter (audit 3.18), 429 / 503
         retry-after handling (audit 3.19), and real salt-form detection
@@ -4777,7 +4790,7 @@ class DrugResolver(Resolver):
 
         # Process-global rate limiting (audit D6-6).
         # NOTE: ``_PUBCHEM_CALL_DELAY`` is the legacy module-level constant
-        # (audit 1.7 — kept for backward compat with downstream code that
+        # (audit 1.7 -- kept for backward compat with downstream code that
         # imports it by name).  The authoritative source of truth is
         # ``ResolverConfig.pubchem_call_delay``; the two are kept in sync
         # by ``_check_module_constants_in_sync()`` at module import.
@@ -4840,7 +4853,7 @@ class DrugResolver(Resolver):
                 # NOTE: we call ``requests.get()`` directly (not a cached
                 # Session) so existing tests that mock ``m_req.get`` keep
                 # working (audit 4.28).  Audit 8.25 (connection pooling)
-                # is partially satisfied — full session pooling can be
+                # is partially satisfied -- full session pooling can be
                 # re-enabled in a future revision after the test suite is
                 # updated to mock ``Session().get`` instead.
                 response = requests.get(
@@ -4884,7 +4897,7 @@ class DrugResolver(Resolver):
 
                 response.raise_for_status()
 
-                # Content-Type pre-check (audit 4.5 — permissive: only
+                # Content-Type pre-check (audit 4.5 -- permissive: only
                 # reject when Content-Type is clearly non-JSON).  This
                 # preserves backward compatibility with tests that mock
                 # a non-JSON Content-Type and expect ``pubchem_failures``
@@ -4902,7 +4915,7 @@ class DrugResolver(Resolver):
 
                 # Parse JSON. FIX-P1-C-9: previously called
                 # ``response.json()`` AFTER the stream was already
-                # consumed by ``iter_content`` — ``response.json()``
+                # consumed by ``iter_content`` -- ``response.json()``
                 # re-reads ``response.content`` which was now empty, so
                 # every PubChem xref match silently returned ``{}`` and
                 # never produced a hit. Parse the captured ``body`` bytes
@@ -4965,9 +4978,9 @@ class DrugResolver(Resolver):
                     if hit is not None:
                         self._stats.inc("pubchem_successes")
                         self._pubchem_circuit.record_success()
-                        # P1-ER-8 ROOT FIX: a PubChem-derived match — even
+                        # P1-ER-8 ROOT FIX: a PubChem-derived match -- even
                         # when the underlying lookup was an exact InChIKey
-                        # hit — MUST be reported as ``pubchem_xref`` (0.7),
+                        # hit -- MUST be reported as ``pubchem_xref`` (0.7),
                         # NOT as ``inchikey_exact`` (1.0). PubChem xrefs are
                         # subject to salt-form / tautomer ambiguity, so a
                         # 1.0 confidence here would mislead downstream
@@ -4983,7 +4996,7 @@ class DrugResolver(Resolver):
                     if hit is not None:
                         self._stats.inc("pubchem_successes")
                         self._pubchem_circuit.record_success()
-                        # P1-ER-8 ROOT FIX: same rationale — downgrade to
+                        # P1-ER-8 ROOT FIX: same rationale -- downgrade to
                         # ``pubchem_xref`` (0.7) instead of reporting the
                         # underlying ``inchikey_connectivity`` (0.9).
                         return _MatchHit(
@@ -5151,9 +5164,9 @@ class DrugResolver(Resolver):
     ) -> str:
         """Create a new canonical entry and return its ``canonical_inchikey``.
 
-        Audit 2.1 — the ``method`` parameter is now passed by the
+        Audit 2.1 -- the ``method`` parameter is now passed by the
         caller that knows WHY the entry is being created (instead of
-        being hard-coded to ``"inchikey_exact"``).  Audit 2.13 — the
+        being hard-coded to ``"inchikey_exact"``).  Audit 2.13 -- the
         empty-name fallback uses ``canonical_ik[:14]`` (not the
         non-existent ``record['canonical_inchikey']`` field).
 
@@ -5171,14 +5184,14 @@ class DrugResolver(Resolver):
             SHA-256-derived checksum of the input record (audit C.8).
         """
         with _MutationContext(self, f"create_entry({source!r}, {method!r})", structural=False):
-            # v89 ROOT FIX (BUG #34 — _create_canonical_entry does not
+            # v89 ROOT FIX (BUG #34 -- _create_canonical_entry does not
             # mutate record["inchikey"], leaking the non-normalized
             # value to callers):
             #   The previous code did ``inchikey = _normalize_inchikey(
             #   record.get("inchikey", "") or "")`` and stored the
             #   NORMALIZED value in the canonical entry (line ~5140:
             #   ``"inchikey": inchikey``). But the ORIGINAL ``record``
-            #   dict was NOT mutated — ``record["inchikey"]`` still had
+            #   dict was NOT mutated -- ``record["inchikey"]`` still had
             #   the protonation suffix (e.g. ``RZVAJAI...-U`` instead of
             #   ``RZVAJAI...``). If the caller later inspected the
             #   record (e.g. for a subsequent lookup, a log, or storing
@@ -5190,20 +5203,20 @@ class DrugResolver(Resolver):
             #   the caller's record dict is consistent with the
             #   canonical entry. This is safe because:
             #     1. The record dict is constructed by ``_df_to_records``
-            #        (a fresh dict per row) — no aliasing concerns.
-            #     2. The normalization is idempotent — calling
+            #        (a fresh dict per row) -- no aliasing concerns.
+            #     2. The normalization is idempotent -- calling
             #        ``_normalize_inchikey`` on an already-normalized
             #        value returns the same value.
             #     3. Downstream code that uses the record (e.g.
             #        ``_merge_into_canonical``) re-normalizes, so
-            #        normalizing here doesn't change behavior — it just
+            #        normalizing here doesn't change behavior -- it just
             #        prevents the leaky abstraction.
             _raw_inchikey = record.get("inchikey", "") or ""
             inchikey = _normalize_inchikey(_raw_inchikey)
             # Mutate the record in place so callers see the normalized
             # value. Only mutate if the record actually has an inchikey
             # field (avoid creating a new key on a record that doesn't
-            # have one — that would be a different kind of leak).
+            # have one -- that would be a different kind of leak).
             if "inchikey" in record and record["inchikey"] != inchikey:
                 record["inchikey"] = inchikey
             name = record.get("name", "") or ""
@@ -5211,11 +5224,11 @@ class DrugResolver(Resolver):
 
             if not inchikey:
                 # Source-INDEPENDENT synthetic key (audit 3.6 / D3-5).
-                # v66 ROOT FIX (P1C-019 — empty-name collision):
+                # v66 ROOT FIX (P1C-019 -- empty-name collision):
                 #   The previous code did ``norm = normalize_name(name) or
                 #   "unknown"`` which collapsed EVERY empty-named biologic
                 #   to the literal string ``"unknown"``, then called
-                #   ``make_synthetic_inchikey("unknown")`` — producing the
+                #   ``make_synthetic_inchikey("unknown")`` -- producing the
                 #   IDENTICAL synthetic InChIKey for distinct biologics.
                 #   They were silently merged into one canonical entry.
                 #   ROOT FIX: if the normalized name is empty/whitespace,
@@ -5229,7 +5242,7 @@ class DrugResolver(Resolver):
                 #   unnamed ones.
                 norm = normalize_name(name)
                 if not norm or not norm.strip():
-                    # Empty/whitespace name — disambiguate by source +
+                    # Empty/whitespace name -- disambiguate by source +
                     # record index so distinct unnamed biologics don't
                     # collide. This is the ONLY sanctioned fallback;
                     # ``"unknown"`` is forbidden (P1C-019).
@@ -5329,11 +5342,11 @@ class DrugResolver(Resolver):
             }
 
             # Empty-name fallback (audit 2.13 / 3.7).
-            # v82 FORENSIC ROOT FIX (P1-14 — SYNTH key fallback produces
+            # v82 FORENSIC ROOT FIX (P1-14 -- SYNTH key fallback produces
             #   meaningless names):
             #   For SYNTH keys, ``canonical_ik[:14]`` is "SYNTH" + 9 base-26
             #   hash chars (e.g. "SYNTHABCDEFG"). The fallback name became
-            #   "UNKNOWN_SYNTHABCDEFG" — a meaningless name that returns
+            #   "UNKNOWN_SYNTHABCDEFG" -- a meaningless name that returns
             #   nothing useful when queried. ROOT FIX: for SYNTH keys, use
             #   a more descriptive fallback that includes the source label
             #   and a short hash suffix, making it at least traceable to
@@ -5346,7 +5359,7 @@ class DrugResolver(Resolver):
                     or record.get("pubchem_cid")
                 )
                 if not fallback:
-                    # No source ID available — use a descriptive fallback.
+                    # No source ID available -- use a descriptive fallback.
                     if canonical_ik.startswith("SYNTH"):
                         # SYNTH key: include source + short hash for traceability.
                         _short_hash = canonical_ik[5:11] if len(canonical_ik) > 10 else canonical_ik
@@ -5365,7 +5378,7 @@ class DrugResolver(Resolver):
             norm_name = normalize_name(name)
             if norm_name:
                 # D13-14: don't overwrite an existing entry in the
-                # single-valued index — log a WARNING instead.
+                # single-valued index -- log a WARNING instead.
                 if norm_name in self._name_index and self._name_index[norm_name] != canonical_ik:
                     self._event_log(
                         logging.WARNING,
@@ -5380,12 +5393,12 @@ class DrugResolver(Resolver):
                 self._name_index_generation += 1
 
             # Connectivity index (audit 3.9).
-            # v82 FORENSIC ROOT FIX (P1-4) → v89 ROOT FIX (BUG #41):
+            # v82 FORENSIC ROOT FIX (P1-4) -> v89 ROOT FIX (BUG #41):
             #   v82 ALWAYS populated ``_connectivity_index`` even when
             #   ``collapse_stereoisomers=False`` (the default). But
             #   ``_match_by_connectivity`` (line ~4393) returns ``None``
             #   when ``collapse_stereoisomers=False`` and the full
-            #   InChIKeys differ — so the index was populated but NEVER
+            #   InChIKeys differ -- so the index was populated but NEVER
             #   USED for matching in the default config. This wasted
             #   ~20% memory on ChEMBL-scale data (~2M drugs).
             #
@@ -5394,14 +5407,14 @@ class DrugResolver(Resolver):
             #   useful when stereoisomer collapse is enabled (the only
             #   code path that reads it). When collapse is disabled
             #   (default), ``_match_by_connectivity`` returns ``None``
-            #   for any candidate whose full InChIKey differs — it
+            #   for any candidate whose full InChIKey differs -- it
             #   never reads ``_connectivity_index``. The v82 rationale
             #   ("for diagnostics, future features, and the explicit
-            #   collapse path") is weak — diagnostics can use
+            #   collapse path") is weak -- diagnostics can use
             #   ``extract_inchikey_first_block`` on demand.
             #
             #   When ``collapse_stereoisomers=True``, the index is
-            #   populated AND read by ``_match_by_connectivity`` —
+            #   populated AND read by ``_match_by_connectivity`` --
             #   unchanged from v82. The behavior is identical to v82
             #   in the collapse-enabled path; only the default path
             #   (collapse disabled) is optimized to skip the wasted
@@ -5415,7 +5428,7 @@ class DrugResolver(Resolver):
                     self._connectivity_index_multi.setdefault(first_block, []).append(canonical_ik)
 
             # SMILES index (audit 3.13). P1-ER-1 ROOT FIX: removed the
-            # ``hasattr`` lazy-init guard — ``__init__`` now declares
+            # ``hasattr`` lazy-init guard -- ``__init__`` now declares
             # ``_smiles_index`` as a first-class core index.
             # v89 FORENSIC ROOT FIX (BUG #9 P1): canonicalize SMILES via
             # RDKit before indexing so equivalent molecules with different
@@ -5512,8 +5525,8 @@ class DrugResolver(Resolver):
     ) -> None:
         """Merge source-specific IDs into an existing canonical entry.
 
-        Audit 2.2 — records the MERGE method (not the entry's creation
-        method) in the audit trail.  Audit C.16 — detects and records
+        Audit 2.2 -- records the MERGE method (not the entry's creation
+        method) in the audit trail.  Audit C.16 -- detects and records
         cross-source conflicts (does not silently drop them).
 
         Parameters
@@ -5579,13 +5592,13 @@ class DrugResolver(Resolver):
                         entry[field_name] = incoming_val
                         diffs.append((field_name, existing_val, incoming_val))
                     elif policy == "keep_newer":
-                        # Source dataset fetched_at — prefer newer.
+                        # Source dataset fetched_at -- prefer newer.
                         # v29 ROOT FIX (audit C-6): the previous code could
                         # compare the SAME source's fetched_at against
                         # itself (when _find_source_for_field returned None
                         # and the default SourceDatasetMeta(source=source)
                         # was used). In that case meta_in IS meta_existing,
-                        # so fetched_at > fetched_at is always False —
+                        # so fetched_at > fetched_at is always False --
                         # keep_newer never fires. ROOT FIX: skip the
                         # comparison when the sources are the same.
                         meta_in = self._source_dataset_registry.get(source)
@@ -5615,7 +5628,7 @@ class DrugResolver(Resolver):
                             "record_index": record_index,
                         })
                         self._check_dead_letter_size()
-                    # ``keep_existing`` (default) — no-op.
+                    # ``keep_existing`` (default) -- no-op.
 
             # ----- Merge chemical properties (audit C.16 / 2.9) -----
             property_fields = (
@@ -5665,13 +5678,13 @@ class DrugResolver(Resolver):
                 diffs.append(("sources", tuple(sources[:-1]), tuple(sources)))
 
             # ----- Update InChIKey index (alternative keys) -----
-            # v89 FORENSIC ROOT FIX (BUG #14 P1 — InChIKey collision
+            # v89 FORENSIC ROOT FIX (BUG #14 P1 -- InChIKey collision
             #   silently skipped):
             #   The previous code added ``incoming_ik`` to
             #   ``_inchikey_index`` ONLY if it was not already present.
             #   If ``incoming_ik`` WAS already in the index pointing to
             #   a DIFFERENT ``canonical_ik``, the code silently skipped
-            #   the update — the conflict was not logged, not dead-
+            #   the update -- the conflict was not logged, not dead-
             #   lettered, not recorded in the audit trail. Two different
             #   canonical entries now shared the same InChIKey in their
             #   source data, but only one owned it in the index. Future
@@ -5683,12 +5696,12 @@ class DrugResolver(Resolver):
             #   and record the conflict in the audit trail. Do NOT
             #   overwrite the existing mapping (the first entry owns the
             #   key). The conflicting record is still merged into its
-            #   own canonical entry — only the index is not updated.
+            #   own canonical entry -- only the index is not updated.
             incoming_ik = _normalize_inchikey(record.get("inchikey", "") or "")
             if incoming_ik:
                 _existing_owner = self._inchikey_index.get(incoming_ik)
                 if _existing_owner is None:
-                    # Not present — add it.
+                    # Not present -- add it.
                     self._inchikey_index[incoming_ik] = canonical_ik
                 elif _existing_owner != canonical_ik:
                     # COLLISION: incoming_ik is already owned by a
@@ -5705,7 +5718,7 @@ class DrugResolver(Resolver):
                             "InChIKey %s is already owned by canonical "
                             "entry %s; incoming record from source '%s' "
                             "belongs to canonical entry %s. NOT "
-                            "overwriting the index — the second entry's "
+                            "overwriting the index -- the second entry's "
                             "records will not be findable by this "
                             "InChIKey. Investigate the data source for "
                             "InChIKey collisions."
@@ -5717,7 +5730,7 @@ class DrugResolver(Resolver):
                         "inchikey": incoming_ik,
                         "existing_owner": _existing_owner,
                         "incoming_owner": canonical_ik,
-                        "message": "InChIKey collision — index not updated",
+                        "message": "InChIKey collision -- index not updated",
                     })
 
             # ----- Update name index -----
@@ -5901,7 +5914,7 @@ class DrugResolver(Resolver):
         self._name_index_multi = {}
         self._connectivity_index = {}
         self._connectivity_index_multi = {}
-        # P1-ER-1 ROOT FIX: unconditional clear — _smiles_index always exists.
+        # P1-ER-1 ROOT FIX: unconditional clear -- _smiles_index always exists.
         self._smiles_index = {}
         self._source_record_index = {}
         for canonical_ik, entry in self.mapping.items():
@@ -5914,12 +5927,12 @@ class DrugResolver(Resolver):
                 if norm:
                     self._name_index.setdefault(norm, canonical_ik)
                     self._name_index_multi.setdefault(norm, []).append(canonical_ik)
-            # v82 FORENSIC ROOT FIX (P1-4) → v89 ROOT FIX (BUG #41):
+            # v82 FORENSIC ROOT FIX (P1-4) -> v89 ROOT FIX (BUG #41):
             #   v82 ALWAYS populated the connectivity index, even when
             #   ``collapse_stereoisomers=False`` (the default). But
             #   ``_match_by_connectivity`` (line ~4393) returns ``None``
             #   when ``collapse_stereoisomers=False`` and the full
-            #   InChIKeys differ — so the index was populated but NEVER
+            #   InChIKeys differ -- so the index was populated but NEVER
             #   USED for matching in the default config. This wasted
             #   ~20% memory on ChEMBL-scale data (~2M drugs).
             #
@@ -5928,14 +5941,14 @@ class DrugResolver(Resolver):
             #   useful when stereoisomer collapse is enabled (the only
             #   code path that reads it). When collapse is disabled
             #   (default), ``_match_by_connectivity`` returns ``None``
-            #   for any candidate whose full InChIKey differs — it
+            #   for any candidate whose full InChIKey differs -- it
             #   never reads ``_connectivity_index``. The v82 rationale
             #   ("for diagnostics, future features, and the explicit
-            #   collapse path") is weak — diagnostics can use
+            #   collapse path") is weak -- diagnostics can use
             #   ``extract_inchikey_first_block`` on demand.
             #
             #   When ``collapse_stereoisomers=True``, the index is
-            #   populated AND read by ``_match_by_connectivity`` —
+            #   populated AND read by ``_match_by_connectivity`` --
             #   unchanged from v82. The behavior is identical to v82
             #   in the collapse-enabled path; only the default path
             #   (collapse disabled) is optimized to skip the wasted
@@ -6043,7 +6056,7 @@ class DrugResolver(Resolver):
         return True
 
     def __del__(self) -> None:
-        """Best-effort cleanup — wipe any secret buffers (audit C.12)."""
+        """Best-effort cleanup -- wipe any secret buffers (audit C.12)."""
         try:
             if hasattr(self, "_config") and hasattr(self._config, "pubchem_api_key"):
                 key = getattr(self._config, "pubchem_api_key", None)
@@ -6057,7 +6070,7 @@ class DrugResolver(Resolver):
 # Module-level public helpers (audit 6.14 / 13.5 / 1.1 / 13.6)
 # =============================================================================
 
-# Direct alias to base.is_synthetic_inchikey — avoids the previous
+# Direct alias to base.is_synthetic_inchikey -- avoids the previous
 # wrapper's local-import recursion risk (audit 6.14).
 _is_synthetic_inchikey_alias = _base_is_synthetic_inchikey
 
@@ -6096,7 +6109,7 @@ def build_mapping(
         If ``True``, return ``(df, resolver)`` so callers retain
         observability hooks (``get_stats()``, ``get_audit_trail()``,
         ``get_pubchem_failure_count()``, the dead-letter queue, the
-        circuit-breaker state).  Audit 1.1 — recommended for
+        circuit-breaker state).  Audit 1.1 -- recommended for
         production use.
 
     Returns
@@ -6120,7 +6133,7 @@ def _check_module_constants_in_sync() -> None:
     """Assert module-level constants match :class:`ResolverConfig` defaults (audit 1.7).
 
     Called once at module import.  Raises :class:`RuntimeError` on
-    mismatch — protects against silent drift between the legacy
+    mismatch -- protects against silent drift between the legacy
     constants and the authoritative config defaults.
     """
     defaults = ResolverConfig()
@@ -6243,7 +6256,7 @@ def _self_test() -> None:
     result = resolver.resolve_single("Aspirin")
     assert result["match_method"] == "name_normalized"
     assert result.match_method == "name_normalized"
-    print("OK — _self_test passed")
+    print("OK -- _self_test passed")
 
 
 if __name__ == "__main__":
@@ -6255,382 +6268,382 @@ if __name__ == "__main__":
 # ---------------------------------------------------------------------------
 # AUDIT REMEDIATION MATRIX
 # ---------------------------------------------------------------------------
-# Each line: <finding-id> → <symbol/line-range> → <fix-summary>
+# Each line: <finding-id> -> <symbol/line-range> -> <fix-summary>
 #
-# DOMAIN 1 — ARCHITECTURE
-# 1.1  → build_mapping(return_resolver=True)               — observability retained
-# 1.2  → _DependencyInjector (thread-safe lazy loaders)    — race fixed
-# 1.3  → _MutationContext                                  — transactional mutations
-# 1.4  → add_source_records(Iterable + max_records_per_batch) — bounded input
-# 1.5  → _mutation_lock + _MutationContext                 — concurrent safety
-# 1.6  → resolve_single -> ResolveResult                   — ABC compliant
-# 1.7  → _check_module_constants_in_sync()                 — sync enforced
-# 1.8  → _MatchPipeline                                    — single source of truth
-# 1.9  → _load_state_schema + jsonschema validation        — schema validated
-# 1.10 → copy.deepcopy in to_state_dict                    — no live refs
+# DOMAIN 1 -- ARCHITECTURE
+# 1.1  -> build_mapping(return_resolver=True)               -- observability retained
+# 1.2  -> _DependencyInjector (thread-safe lazy loaders)    -- race fixed
+# 1.3  -> _MutationContext                                  -- transactional mutations
+# 1.4  -> add_source_records(Iterable + max_records_per_batch) -- bounded input
+# 1.5  -> _mutation_lock + _MutationContext                 -- concurrent safety
+# 1.6  -> resolve_single -> ResolveResult                   -- ABC compliant
+# 1.7  -> _check_module_constants_in_sync()                 -- sync enforced
+# 1.8  -> _MatchPipeline                                    -- single source of truth
+# 1.9  -> _load_state_schema + jsonschema validation        -- schema validated
+# 1.10 -> copy.deepcopy in to_state_dict                    -- no live refs
 #
-# DOMAIN 2 — DESIGN
-# 2.1  → _create_canonical_entry(method=...)               — honest method/confidence
-# 2.2  → _merge_into_canonical records merge method        — correct audit method
-# 2.3  → _match_by_name returns _MatchHit                  — no retroactive mutation
-# 2.4  → resolve_single uses actual method from matcher    — accurate method reporting
-# 2.5  → MatchConfidence.NO_MATCH = 0.0 (registered)       — no_match returns 0.0
-# 2.6  → _find_duplicate_ids_typed wrapper                 — explicit return_seen=False
-# 2.7  → sources column JSON-encoded                       — unambiguous delimiter
-# 2.8  → _record_conflict for ID fields                    — conflicts recorded
-# 2.9  → _record_conflict for property fields (float tol)  — conflicts recorded
-# 2.10 → sources_map case-insensitive                      — canonical label map
-# 2.11 → to_dataframe validates chunksize > 0              — explicit validation
-# 2.12 → get_parquet_engine tries pyarrow then fastparquet — engine fallback
-# 2.13 → empty-name fallback uses canonical_ik[:14]        — uniqueness guaranteed
-# 2.14 → ResolveResult dataclass                           — typed result object
+# DOMAIN 2 -- DESIGN
+# 2.1  -> _create_canonical_entry(method=...)               -- honest method/confidence
+# 2.2  -> _merge_into_canonical records merge method        -- correct audit method
+# 2.3  -> _match_by_name returns _MatchHit                  -- no retroactive mutation
+# 2.4  -> resolve_single uses actual method from matcher    -- accurate method reporting
+# 2.5  -> MatchConfidence.NO_MATCH = 0.0 (registered)       -- no_match returns 0.0
+# 2.6  -> _find_duplicate_ids_typed wrapper                 -- explicit return_seen=False
+# 2.7  -> sources column JSON-encoded                       -- unambiguous delimiter
+# 2.8  -> _record_conflict for ID fields                    -- conflicts recorded
+# 2.9  -> _record_conflict for property fields (float tol)  -- conflicts recorded
+# 2.10 -> sources_map case-insensitive                      -- canonical label map
+# 2.11 -> to_dataframe validates chunksize > 0              -- explicit validation
+# 2.12 -> get_parquet_engine tries pyarrow then fastparquet -- engine fallback
+# 2.13 -> empty-name fallback uses canonical_ik[:14]        -- uniqueness guaranteed
+# 2.14 -> ResolveResult dataclass                           -- typed result object
 #
-# DOMAIN 3 — KNOWLEDGE / SCIENTIFIC CORRECTNESS
-# 3.1  → _SaltFormDetector (IUPACName + MolecularFormula)  — real salt-form detection
-# 3.2  → salt-form heuristic comment removed               — misleading comment fixed
-# 3.3  → X-PubChem-API-Key header (not Bearer)             — correct auth mechanism
-# 3.4  → _normalize_inchikey for case-insensitive compare  — stereoisomer gate fixed
-# 3.5  → _match_by_inchikey normalises input               — case-insensitive lookup
-# 3.6  → synthetic key collision disambiguation via salt   — collision-free
-# 3.7  → empty-name records dead-lettered OR salted key    — distinct keys
-# 3.8  → validate_drug_record(strict=bulk_strict_validation) — full strict mode
-# 3.9  → connectivity index only when collapse=True        — 20% memory savings
-# 3.10 → thalidomide docstring rewritten                   — scientific accuracy
-# 3.11 → name_is_synthetic flag (not prefix matching)      — correct fallback detection
-# 3.12 → compute_match_confidence("no_match") = 0.0        — registered via register_match_method
-# 3.13 → _match_by_smiles + _smiles_index                  — SMILES matching fallback
-# 3.14 → smiles_form detection (isomeric/canonical/unknown) — stereofilm tracked
-# 3.15 → _df_to_records row-by-row converter               — handles pd.NA/NaT/inf
-# 3.16 → _normalize_molecular_formula (Hill order)         — formula normalisation
-# 3.17 → exc.response null-deref protection                — HTTPError handling fixed
-# 3.18 → backoff with jitter (C.13)                        — jitter implemented
-# 3.19 → HTTP 429/503 retriable + Retry-After              — retriable status codes
-# 3.20 → resolve_batch_async via ThreadPoolExecutor+sem    — concurrent lookups
+# DOMAIN 3 -- KNOWLEDGE / SCIENTIFIC CORRECTNESS
+# 3.1  -> _SaltFormDetector (IUPACName + MolecularFormula)  -- real salt-form detection
+# 3.2  -> salt-form heuristic comment removed               -- misleading comment fixed
+# 3.3  -> X-PubChem-API-Key header (not Bearer)             -- correct auth mechanism
+# 3.4  -> _normalize_inchikey for case-insensitive compare  -- stereoisomer gate fixed
+# 3.5  -> _match_by_inchikey normalises input               -- case-insensitive lookup
+# 3.6  -> synthetic key collision disambiguation via salt   -- collision-free
+# 3.7  -> empty-name records dead-lettered OR salted key    -- distinct keys
+# 3.8  -> validate_drug_record(strict=bulk_strict_validation) -- full strict mode
+# 3.9  -> connectivity index only when collapse=True        -- 20% memory savings
+# 3.10 -> thalidomide docstring rewritten                   -- scientific accuracy
+# 3.11 -> name_is_synthetic flag (not prefix matching)      -- correct fallback detection
+# 3.12 -> compute_match_confidence("no_match") = 0.0        -- registered via register_match_method
+# 3.13 -> _match_by_smiles + _smiles_index                  -- SMILES matching fallback
+# 3.14 -> smiles_form detection (isomeric/canonical/unknown) -- stereofilm tracked
+# 3.15 -> _df_to_records row-by-row converter               -- handles pd.NA/NaT/inf
+# 3.16 -> _normalize_molecular_formula (Hill order)         -- formula normalisation
+# 3.17 -> exc.response null-deref protection                -- HTTPError handling fixed
+# 3.18 -> backoff with jitter (C.13)                        -- jitter implemented
+# 3.19 -> HTTP 429/503 retriable + Retry-After              -- retriable status codes
+# 3.20 -> resolve_batch_async via ThreadPoolExecutor+sem    -- concurrent lookups
 #
-# DOMAIN 4 — CODING
-# 4.1  → _match_by_name returns _MatchHit (no mutation)    — read-only matcher
-# 4.2  → cached _get_fuzzy_choices with generation counter  — choices cached
-# 4.3  → version-tolerant extractOne unpack                — handles rapidfuzz 2.x and 3.x
-# 4.4  → fuzzy_threshold runtime assert                    — bounds checked
-# 4.5  → try response.json() before Content-Type check     — permissive JSON parse
-# 4.6  → streaming response + size cap before download     — DoS protection
-# 4.7  → from_state_dict deep-copies mapping               — no live refs
-# 4.8  → unknown stats recorded in _unknown_stats_restored — explicit handling
-# 4.9  → ResolverConfig(**filtered_cfg) filters unknown    — forward-compat
-# 4.10 → remove_source single-pass rebuild                 — O(n) not O(n×m)
-# 4.11 → subsumed by 4.10                                  — single-pass rebuild
-# 4.12 → remove_source preserves audit trail (archived)    — audit trail safe
-# 4.13 → _canonical_json (no default=str)                  — deterministic serialiser
-# 4.14 → SHA-256 truncated to 32 hex chars                 — strong checksum
-# 4.15 → isinstance(df, pd.DataFrame) explicit check       — type-safe dispatch
-# 4.16 → row-by-row converter (no df.where)                — NA-safe
-# 4.17 → log sampling for DEBUG                            — sample_rate config
-# 4.18 → RAPIDFUZZ_AVAILABLE at top-level                  — top-level import
-# 4.19 → fuzz_scorer alias (was fuzz_fuzz)                 — clear alias
-# 4.20 → redundant check removed                           — assert in runtime_asserts
-# 4.21 → urllib.parse.quote directly                       — stdlib usage
-# 4.22 → pubchem_max_retries docstring + max_attempts alias — clear semantics
-# 4.23 → backoff_base from config                          — no magic numbers
-# 4.24 → resolve_single_async via asyncio.to_thread        — non-blocking
-# 4.25 → self.mapping.get(canonical_ik) with None handling — desync-safe
-# 4.26 → _MutationContext for multi-step mutations         — transactional
-# 4.27 → _assert_initialized at end of __init__            — invariant check
-# 4.28 → _DependencyInjector + override() for tests        — testable
-# 4.29 → find_duplicate_ids(return_seen=False) explicit    — typed contract
+# DOMAIN 4 -- CODING
+# 4.1  -> _match_by_name returns _MatchHit (no mutation)    -- read-only matcher
+# 4.2  -> cached _get_fuzzy_choices with generation counter  -- choices cached
+# 4.3  -> version-tolerant extractOne unpack                -- handles rapidfuzz 2.x and 3.x
+# 4.4  -> fuzzy_threshold runtime assert                    -- bounds checked
+# 4.5  -> try response.json() before Content-Type check     -- permissive JSON parse
+# 4.6  -> streaming response + size cap before download     -- DoS protection
+# 4.7  -> from_state_dict deep-copies mapping               -- no live refs
+# 4.8  -> unknown stats recorded in _unknown_stats_restored -- explicit handling
+# 4.9  -> ResolverConfig(**filtered_cfg) filters unknown    -- forward-compat
+# 4.10 -> remove_source single-pass rebuild                 -- O(n) not O(n×m)
+# 4.11 -> subsumed by 4.10                                  -- single-pass rebuild
+# 4.12 -> remove_source preserves audit trail (archived)    -- audit trail safe
+# 4.13 -> _canonical_json (no default=str)                  -- deterministic serialiser
+# 4.14 -> SHA-256 truncated to 32 hex chars                 -- strong checksum
+# 4.15 -> isinstance(df, pd.DataFrame) explicit check       -- type-safe dispatch
+# 4.16 -> row-by-row converter (no df.where)                -- NA-safe
+# 4.17 -> log sampling for DEBUG                            -- sample_rate config
+# 4.18 -> RAPIDFUZZ_AVAILABLE at top-level                  -- top-level import
+# 4.19 -> fuzz_scorer alias (was fuzz_fuzz)                 -- clear alias
+# 4.20 -> redundant check removed                           -- assert in runtime_asserts
+# 4.21 -> urllib.parse.quote directly                       -- stdlib usage
+# 4.22 -> pubchem_max_retries docstring + max_attempts alias -- clear semantics
+# 4.23 -> backoff_base from config                          -- no magic numbers
+# 4.24 -> resolve_single_async via asyncio.to_thread        -- non-blocking
+# 4.25 -> self.mapping.get(canonical_ik) with None handling -- desync-safe
+# 4.26 -> _MutationContext for multi-step mutations         -- transactional
+# 4.27 -> _assert_initialized at end of __init__            -- invariant check
+# 4.28 -> _DependencyInjector + override() for tests        -- testable
+# 4.29 -> find_duplicate_ids(return_seen=False) explicit    -- typed contract
 #
-# DOMAIN 5 — DATA QUALITY & INTEGRITY
-# 5.1  → synthetic key collision disambiguation            — no silent overwrite
-# 5.2  → _assert_indices_consistent                        — referential integrity
-# 5.3  → _assert_audit_trail_consistent                    — audit trail integrity
-# 5.4  → soft validation rejects empty names               — no silent merge
-# 5.5  → _ingested_record_keys prevents re-ingestion       — within-batch dedup
-# 5.6  → _record_conflict for ID fields                    — conflict detection
-# 5.7  → _record_conflict for property fields              — conflict detection
-# 5.8  → SourceDatasetMeta.fetched_at + prefer_fresher_data — freshness tracking
-# 5.9  → null_representation param in to_dataframe          — explicit NA handling
-# 5.10 → soft validation checks types                      — type validation
-# 5.11 → soft validation flags MW outside [1,10000]        — range validation
-# 5.12 → soft validation flags malformed InChIKeys         — format validation
-# 5.13 → soft validation flags malformed source IDs        — ID validation
-# 5.14 → InChIKey↔InChI cross-check (RDKit optional)       — cross-field validation
-# 5.15 → soft validation rejects empty normalised names    — completeness
-# 5.16 → subsumed by 3.6                                   — collision disambiguation
-# 5.17 → input_checksum recomputed on every merge          — provenance tracking
-# 5.18 → SHA-256 (not SHA-1)                               — strong hash
-# 5.19 → _ingested_record_keys                             — batch dedup
-# 5.20 → find_duplicate_ids extended id_fields             — comprehensive dedup
-# 5.21 → subsumed by 3.15                                  — NaN handling
-# 5.22 → _assert_output_schema                             — schema enforcement
-# 5.23 → compute_data_quality_score                        — composite DQ score
-# 5.24 → soft validation flags sources/ID mismatch         — consistency check
+# DOMAIN 5 -- DATA QUALITY & INTEGRITY
+# 5.1  -> synthetic key collision disambiguation            -- no silent overwrite
+# 5.2  -> _assert_indices_consistent                        -- referential integrity
+# 5.3  -> _assert_audit_trail_consistent                    -- audit trail integrity
+# 5.4  -> soft validation rejects empty names               -- no silent merge
+# 5.5  -> _ingested_record_keys prevents re-ingestion       -- within-batch dedup
+# 5.6  -> _record_conflict for ID fields                    -- conflict detection
+# 5.7  -> _record_conflict for property fields              -- conflict detection
+# 5.8  -> SourceDatasetMeta.fetched_at + prefer_fresher_data -- freshness tracking
+# 5.9  -> null_representation param in to_dataframe          -- explicit NA handling
+# 5.10 -> soft validation checks types                      -- type validation
+# 5.11 -> soft validation flags MW outside [1,10000]        -- range validation
+# 5.12 -> soft validation flags malformed InChIKeys         -- format validation
+# 5.13 -> soft validation flags malformed source IDs        -- ID validation
+# 5.14 -> InChIKey↔InChI cross-check (RDKit optional)       -- cross-field validation
+# 5.15 -> soft validation rejects empty normalised names    -- completeness
+# 5.16 -> subsumed by 3.6                                   -- collision disambiguation
+# 5.17 -> input_checksum recomputed on every merge          -- provenance tracking
+# 5.18 -> SHA-256 (not SHA-1)                               -- strong hash
+# 5.19 -> _ingested_record_keys                             -- batch dedup
+# 5.20 -> find_duplicate_ids extended id_fields             -- comprehensive dedup
+# 5.21 -> subsumed by 3.15                                  -- NaN handling
+# 5.22 -> _assert_output_schema                             -- schema enforcement
+# 5.23 -> compute_data_quality_score                        -- composite DQ score
+# 5.24 -> soft validation flags sources/ID mismatch         -- consistency check
 #
-# DOMAIN 6 — RELIABILITY & RESILIENCE
-# 6.1  → subsumed by 1.2                                   — lazy-import race
-# 6.2  → _check_dead_letter_size + spill                   — bounded dead-letter
-# 6.3  → _PubChemCircuitBreaker                            — circuit breaker
-# 6.4  → graceful degradation (degraded=True)              — degraded result
-# 6.5  → resume_from checkpoint                            — crash recovery
-# 6.6  → exc.response null-deref protection                — safe HTTPError handling
-# 6.7  → broadened except (ValueError, KeyError, JSONDecodeError) — full parse errors
-# 6.8  → dead_letter_on_soft_warning config                — soft-warning dead-letter
-# 6.9  → from_state_dict_repair                            — corruption repair
-# 6.10 → reset(reset_process_globals=True)                 — full reset
-# 6.11 → add_source_records(timeout=...)                   — timeout protection
-# 6.12 → eager_imports config                              — eager loading
-# 6.13 → subsumed by 6.12                                  — eager requests
-# 6.14 → _is_synthetic_inchikey_alias (no recursion)       — recursion fixed
-# 6.15 → remove_source via _MutationContext                — thread-safe
-# 6.16 → KeyboardInterrupt protection + checkpoint         — interrupt safety
-# 6.17 → _emergency_spill on MemoryError                   — memory protection
-# 6.18 → _is_dns_error + permanent dead-letter             — DNS handling
-# 6.19 → conflict_policy="dead_letter"                     — conflict quarantine
-# 6.20 → to_parquet uses cached engine                     — efficient write
-# 6.21 → to_json streaming (subclass)                      — streaming JSON
-# 6.22 → from_json via base (ijson fallback)               — streaming parse
-# 6.23 → to_parquet/to_csv retry omitted (single call)     — write safety
-# 6.24 → from_state_dict_repair handles corruption         — recovery
+# DOMAIN 6 -- RELIABILITY & RESILIENCE
+# 6.1  -> subsumed by 1.2                                   -- lazy-import race
+# 6.2  -> _check_dead_letter_size + spill                   -- bounded dead-letter
+# 6.3  -> _PubChemCircuitBreaker                            -- circuit breaker
+# 6.4  -> graceful degradation (degraded=True)              -- degraded result
+# 6.5  -> resume_from checkpoint                            -- crash recovery
+# 6.6  -> exc.response null-deref protection                -- safe HTTPError handling
+# 6.7  -> broadened except (ValueError, KeyError, JSONDecodeError) -- full parse errors
+# 6.8  -> dead_letter_on_soft_warning config                -- soft-warning dead-letter
+# 6.9  -> from_state_dict_repair                            -- corruption repair
+# 6.10 -> reset(reset_process_globals=True)                 -- full reset
+# 6.11 -> add_source_records(timeout=...)                   -- timeout protection
+# 6.12 -> eager_imports config                              -- eager loading
+# 6.13 -> subsumed by 6.12                                  -- eager requests
+# 6.14 -> _is_synthetic_inchikey_alias (no recursion)       -- recursion fixed
+# 6.15 -> remove_source via _MutationContext                -- thread-safe
+# 6.16 -> KeyboardInterrupt protection + checkpoint         -- interrupt safety
+# 6.17 -> _emergency_spill on MemoryError                   -- memory protection
+# 6.18 -> _is_dns_error + permanent dead-letter             -- DNS handling
+# 6.19 -> conflict_policy="dead_letter"                     -- conflict quarantine
+# 6.20 -> to_parquet uses cached engine                     -- efficient write
+# 6.21 -> to_json streaming (subclass)                      -- streaming JSON
+# 6.22 -> from_json via base (ijson fallback)               -- streaming parse
+# 6.23 -> to_parquet/to_csv retry omitted (single call)     -- write safety
+# 6.24 -> from_state_dict_repair handles corruption         -- recovery
 #
-# DOMAIN 7 — IDEMPOTENCY & REPRODUCIBILITY
-# 7.1  → _ingested_record_keys                             — idempotent build_mapping
-# 7.2  → _ingested_record_keys                             — idempotent add_source_records
-# 7.3  → created_at + resolved_at separated                — creation time preserved
-# 7.4  → deterministic_timestamps config                   — reproducible exported_at
-# 7.5  → deterministic timestamps for audit events         — reproducible audit
-# 7.6  → sorted choices for deterministic truncation       — reproducible fuzzy
-# 7.7  → subsumed by 2.3                                   — no retroactive mutation
-# 7.8  → subsumed by 4.13                                  — canonical JSON
-# 7.9  → subsumed by 1.10                                  — no live refs
-# 7.10 → subsumed by 6.9                                   — consistency validation
-# 7.11 → random_seed config                                — reproducible randomness
-# 7.12 → isolated_rate_limiter config (documented)         — per-instance limiter
-# 7.13 → compute_match_confidence doesn't mutate registry  — no rounding mutation
-# 7.14 → _unknown_stats_restored                           — lossless stat restore
-# 7.15 → allow_api_key_round_trip (documented)             — round-trip safety
-# 7.16 → _ingested_record_keys verification                — backfilling safety
+# DOMAIN 7 -- IDEMPOTENCY & REPRODUCIBILITY
+# 7.1  -> _ingested_record_keys                             -- idempotent build_mapping
+# 7.2  -> _ingested_record_keys                             -- idempotent add_source_records
+# 7.3  -> created_at + resolved_at separated                -- creation time preserved
+# 7.4  -> deterministic_timestamps config                   -- reproducible exported_at
+# 7.5  -> deterministic timestamps for audit events         -- reproducible audit
+# 7.6  -> sorted choices for deterministic truncation       -- reproducible fuzzy
+# 7.7  -> subsumed by 2.3                                   -- no retroactive mutation
+# 7.8  -> subsumed by 4.13                                  -- canonical JSON
+# 7.9  -> subsumed by 1.10                                  -- no live refs
+# 7.10 -> subsumed by 6.9                                   -- consistency validation
+# 7.11 -> random_seed config                                -- reproducible randomness
+# 7.12 -> isolated_rate_limiter config (documented)         -- per-instance limiter
+# 7.13 -> compute_match_confidence doesn't mutate registry  -- no rounding mutation
+# 7.14 -> _unknown_stats_restored                           -- lossless stat restore
+# 7.15 -> allow_api_key_round_trip (documented)             -- round-trip safety
+# 7.16 -> _ingested_record_keys verification                -- backfilling safety
 #
-# DOMAIN 8 — PERFORMANCE & SCALABILITY
-# 8.1  → fuzzy_max_candidates + deterministic truncation    — bounded fuzzy sweep
-# 8.2  → cached _get_fuzzy_choices                         — no per-call list()
-# 8.3  → subsumed by 4.10                                  — single-pass rebuild
-# 8.4  → to_dataframe(chunksize=N) streams                 — chunked export
-# 8.5  → to_state_dict(include_indices=False)              — compact checkpoints
-# 8.6  → _df_to_records row-by-row                         — streaming records
-# 8.7  → records: Iterable[dict]                           — streaming ingestion
-# 8.8  → resolve_batch_async via Semaphore                 — parallel resolution
-# 8.9  → find_duplicate_ids caller-managed seen            — caller responsibility
-# 8.10 → _canonical_json hand-written                      — faster than sort_keys
-# 8.11 → subsumed by 3.20                                  — concurrent PubChem
-# 8.12 → resolve_batch + resolve_batch_async               — batch PubChem
-# 8.13 → _name_index_multi grows linearly (documented)     — bounded multi-index
-# 8.14 → max_audit_trail_per_entry + archived spill        — bounded audit trail
-# 8.15 → subsumed by 6.2                                   — bounded dead-letter
-# 8.16 → to_dataframe streaming chunksize                  — true streaming
-# 8.17 → INCHIKEY_FIRST_BLOCK_RE precompiled               — reused regex
-# 8.18 → normalize_name cache (in resolver_utils)          — configurable cache
-# 8.19 → subsumed by 3.9                                   — connectivity index lazy
-# 8.20 → subsumed by 6.20                                  — ParquetWriter
-# 8.21 → to_json via base (subclass)                       — streaming JSON
-# 8.22 → from_json via base (ijson fallback)               — streaming parse
-# 8.23 → row-by-row converter (no df.where copy)           — efficient NA handling
-# 8.24 → resolve_single_async + add_source_records_async   — async API
-# 8.25 → _get_requests_session cached                      — connection pooling
+# DOMAIN 8 -- PERFORMANCE & SCALABILITY
+# 8.1  -> fuzzy_max_candidates + deterministic truncation    -- bounded fuzzy sweep
+# 8.2  -> cached _get_fuzzy_choices                         -- no per-call list()
+# 8.3  -> subsumed by 4.10                                  -- single-pass rebuild
+# 8.4  -> to_dataframe(chunksize=N) streams                 -- chunked export
+# 8.5  -> to_state_dict(include_indices=False)              -- compact checkpoints
+# 8.6  -> _df_to_records row-by-row                         -- streaming records
+# 8.7  -> records: Iterable[dict]                           -- streaming ingestion
+# 8.8  -> resolve_batch_async via Semaphore                 -- parallel resolution
+# 8.9  -> find_duplicate_ids caller-managed seen            -- caller responsibility
+# 8.10 -> _canonical_json hand-written                      -- faster than sort_keys
+# 8.11 -> subsumed by 3.20                                  -- concurrent PubChem
+# 8.12 -> resolve_batch + resolve_batch_async               -- batch PubChem
+# 8.13 -> _name_index_multi grows linearly (documented)     -- bounded multi-index
+# 8.14 -> max_audit_trail_per_entry + archived spill        -- bounded audit trail
+# 8.15 -> subsumed by 6.2                                   -- bounded dead-letter
+# 8.16 -> to_dataframe streaming chunksize                  -- true streaming
+# 8.17 -> INCHIKEY_FIRST_BLOCK_RE precompiled               -- reused regex
+# 8.18 -> normalize_name cache (in resolver_utils)          -- configurable cache
+# 8.19 -> subsumed by 3.9                                   -- connectivity index lazy
+# 8.20 -> subsumed by 6.20                                  -- ParquetWriter
+# 8.21 -> to_json via base (subclass)                       -- streaming JSON
+# 8.22 -> from_json via base (ijson fallback)               -- streaming parse
+# 8.23 -> row-by-row converter (no df.where copy)           -- efficient NA handling
+# 8.24 -> resolve_single_async + add_source_records_async   -- async API
+# 8.25 -> _get_requests_session cached                      -- connection pooling
 #
-# DOMAIN 9 — SECURITY & PRIVACY
-# 9.1  → X-PubChem-API-Key header (not Bearer)             — correct auth
-# 9.2  → _safe_name + _sanitize_for_log everywhere         — PII redaction
-# 9.3  → _safe_name for canonical names in logs            — PII redaction
-# 9.4  → name_hash in PubChem logs                         — no raw name
-# 9.5  → to_state_dict(redact_pii=True)                    — PII redaction
-# 9.6  → to_masked_dict masks all secrets                  — full masking
-# 9.7  → source sanitisation + control-char rejection      — input sanitisation
-# 9.8  → pubchem_rest_base URL validation (in ResolverConfig.validate) — SSRF protection
-# 9.9  → pubchem_ca_bundle existence check (in ResolverConfig.validate) — TLS safety
-# 9.10 → subsumed by 9.8                                   — SSRF protection
-# 9.11 → _PUBCHEM_MAX_PROPERTIES cap                       — DoS protection
-# 9.12 → max_records_per_batch cap                         — DoS protection
-# 9.13 → redact_dead_letter_pii config (additive)          — PII redaction in DLQ
-# 9.14 → state_file_mode 0o600 (recommended; via base)      — file permissions
-# 9.15 → allowed_paths_root config (additive)              — path traversal protection
-# 9.16 → state_encryption_key config (additive)            — encryption at rest
-# 9.17 → subsumed by C.12                                  — path masking
-# 9.18 → _SecretStr wrapper                                — no env-var leak
-# 9.19 → _state_access_log                                 — state access audit
-# 9.20 → User-Agent header                                 — identification
-# 9.21 → Accept header                                     — content negotiation
-# 9.22 → _safe_name strips control chars                   — log injection protection
-# 9.23 → urljoin for URL construction                      — safe URL building
-# 9.24 → _SecretStr single source of truth                 — unified secret handling
-# 9.25 → controlled_substance_list config (additive)       — DLP observability
+# DOMAIN 9 -- SECURITY & PRIVACY
+# 9.1  -> X-PubChem-API-Key header (not Bearer)             -- correct auth
+# 9.2  -> _safe_name + _sanitize_for_log everywhere         -- PII redaction
+# 9.3  -> _safe_name for canonical names in logs            -- PII redaction
+# 9.4  -> name_hash in PubChem logs                         -- no raw name
+# 9.5  -> to_state_dict(redact_pii=True)                    -- PII redaction
+# 9.6  -> to_masked_dict masks all secrets                  -- full masking
+# 9.7  -> source sanitisation + control-char rejection      -- input sanitisation
+# 9.8  -> pubchem_rest_base URL validation (in ResolverConfig.validate) -- SSRF protection
+# 9.9  -> pubchem_ca_bundle existence check (in ResolverConfig.validate) -- TLS safety
+# 9.10 -> subsumed by 9.8                                   -- SSRF protection
+# 9.11 -> _PUBCHEM_MAX_PROPERTIES cap                       -- DoS protection
+# 9.12 -> max_records_per_batch cap                         -- DoS protection
+# 9.13 -> redact_dead_letter_pii config (additive)          -- PII redaction in DLQ
+# 9.14 -> state_file_mode 0o600 (recommended; via base)      -- file permissions
+# 9.15 -> allowed_paths_root config (additive)              -- path traversal protection
+# 9.16 -> state_encryption_key config (additive)            -- encryption at rest
+# 9.17 -> subsumed by C.12                                  -- path masking
+# 9.18 -> _SecretStr wrapper                                -- no env-var leak
+# 9.19 -> _state_access_log                                 -- state access audit
+# 9.20 -> User-Agent header                                 -- identification
+# 9.21 -> Accept header                                     -- content negotiation
+# 9.22 -> _safe_name strips control chars                   -- log injection protection
+# 9.23 -> urljoin for URL construction                      -- safe URL building
+# 9.24 -> _SecretStr single source of truth                 -- unified secret handling
+# 9.25 -> controlled_substance_list config (additive)       -- DLP observability
 #
-# DOMAIN 10 — TESTING & VALIDATION
-# 10.1 → __main__ block with doctest + _self_test          — self-tests
-# 10.2 → runtime_asserts config + _assert_* methods        — runtime invariants
-# 10.3 → .pyi stub updated for ResolveResult               — type stub
-# 10.4 → schema validation tests in test_drug_resolver_master_fix.py — schema tests
-# 10.5 → unknown stat handling tested                      — exception path tested
-# 10.6 → audit-fix tests in test_drug_resolver_master_fix.py — per-finding tests
-# 10.7 → property tests in test_drug_resolver_master_fix.py — hypothesis-free invariants
-# 10.8 → mutation testing documented (out of file scope)   — docs
-# 10.9 → subsumed by 10.7                                  — property tests
-# 10.10 → case-mismatched InChIKey test                    — regression test
-# 10.11 → salt-form rejection test                         — regression test
-# 10.12 → PubChem auth test (skipped without key)          — integration test
-# 10.13 → no_match confidence test                         — regression test
-# 10.14 → rapidfuzz 2.x unpacking test                     — regression test
-# 10.15 → exc.response=None test                           — regression test
-# 10.16 → HTTP 429 retry test                              — regression test
-# 10.17 → benchmarks in test suite (out of file scope)     — bench tests
-# 10.18 → load tests in test suite (out of file scope)     — load tests
-# 10.19 → concurrent tests in test_drug_resolver_master_fix.py — concurrency
-# 10.20 → crash-recovery tests in test_drug_resolver_master_fix.py — recovery
+# DOMAIN 10 -- TESTING & VALIDATION
+# 10.1 -> __main__ block with doctest + _self_test          -- self-tests
+# 10.2 -> runtime_asserts config + _assert_* methods        -- runtime invariants
+# 10.3 -> .pyi stub updated for ResolveResult               -- type stub
+# 10.4 -> schema validation tests in test_drug_resolver_master_fix.py -- schema tests
+# 10.5 -> unknown stat handling tested                      -- exception path tested
+# 10.6 -> audit-fix tests in test_drug_resolver_master_fix.py -- per-finding tests
+# 10.7 -> property tests in test_drug_resolver_master_fix.py -- hypothesis-free invariants
+# 10.8 -> mutation testing documented (out of file scope)   -- docs
+# 10.9 -> subsumed by 10.7                                  -- property tests
+# 10.10 -> case-mismatched InChIKey test                    -- regression test
+# 10.11 -> salt-form rejection test                         -- regression test
+# 10.12 -> PubChem auth test (skipped without key)          -- integration test
+# 10.13 -> no_match confidence test                         -- regression test
+# 10.14 -> rapidfuzz 2.x unpacking test                     -- regression test
+# 10.15 -> exc.response=None test                           -- regression test
+# 10.16 -> HTTP 429 retry test                              -- regression test
+# 10.17 -> benchmarks in test suite (out of file scope)     -- bench tests
+# 10.18 -> load tests in test suite (out of file scope)     -- load tests
+# 10.19 -> concurrent tests in test_drug_resolver_master_fix.py -- concurrency
+# 10.20 -> crash-recovery tests in test_drug_resolver_master_fix.py -- recovery
 #
-# DOMAIN 11 — LOGGING & OBSERVABILITY
-# 11.1 → _event_log structured logging                     — structured logs
-# 11.2 → to_prometheus                                     — metrics export
-# 11.3 → correlation_id in every event                     — tracing
-# 11.4 → _safe_name + _sanitize_for_log                    — PII redaction
-# 11.5 → log_sample_rate config                            — log sampling
-# 11.6 → error context in every WARNING/ERROR              — debuggable errors
-# 11.7 → get_dead_letter_count / get_mapping_size / etc.   — convenience accessors
-# 11.8 → health()                                          — health check
-# 11.9 → register_alert_callback                           — alerting hooks
-# 11.10 → subsumed by 4.17                                 — log sampling
-# 11.11 → subsumed by 9.3                                  — PII redaction
-# 11.12 → _pubchem_bulk_warned once-per-instance           — deduplicated warnings
-# 11.13 → log sampling for stereoisomer collapses          — sampled warnings
-# 11.14 → source IDs in merge logs                         — data lineage
-# 11.15 → _confidence_histogram + get_confidence_histogram — confidence distribution
-# 11.16 → _metrics + get_latency_stats                     — latency metrics
-# 11.17 → _estimate_memory                                 — memory metrics
-# 11.18 → get_pubchem_success_rate                         — success rate
-# 11.19 → level taxonomy documented                        — log level discipline
-# 11.20 → ErrorCode enum in every ERROR                    — structured error codes
-# 11.21 → resolver_constructed event with config_hash      — config audit
-# 11.22 → _query_log + get_query_log                       — query audit
+# DOMAIN 11 -- LOGGING & OBSERVABILITY
+# 11.1 -> _event_log structured logging                     -- structured logs
+# 11.2 -> to_prometheus                                     -- metrics export
+# 11.3 -> correlation_id in every event                     -- tracing
+# 11.4 -> _safe_name + _sanitize_for_log                    -- PII redaction
+# 11.5 -> log_sample_rate config                            -- log sampling
+# 11.6 -> error context in every WARNING/ERROR              -- debuggable errors
+# 11.7 -> get_dead_letter_count / get_mapping_size / etc.   -- convenience accessors
+# 11.8 -> health()                                          -- health check
+# 11.9 -> register_alert_callback                           -- alerting hooks
+# 11.10 -> subsumed by 4.17                                 -- log sampling
+# 11.11 -> subsumed by 9.3                                  -- PII redaction
+# 11.12 -> _pubchem_bulk_warned once-per-instance           -- deduplicated warnings
+# 11.13 -> log sampling for stereoisomer collapses          -- sampled warnings
+# 11.14 -> source IDs in merge logs                         -- data lineage
+# 11.15 -> _confidence_histogram + get_confidence_histogram -- confidence distribution
+# 11.16 -> _metrics + get_latency_stats                     -- latency metrics
+# 11.17 -> _estimate_memory                                 -- memory metrics
+# 11.18 -> get_pubchem_success_rate                         -- success rate
+# 11.19 -> level taxonomy documented                        -- log level discipline
+# 11.20 -> ErrorCode enum in every ERROR                    -- structured error codes
+# 11.21 -> resolver_constructed event with config_hash      -- config audit
+# 11.22 -> _query_log + get_query_log                       -- query audit
 #
-# DOMAIN 12 — CONFIGURATION & ENVIRONMENT MANAGEMENT
-# 12.1 → subsumed by 1.7                                   — magic numbers
-# 12.2 → MAPPING_SCHEMA_VERSION in __init__.py             — version source
-# 12.3 → schema_version check in from_state_dict           — version enforcement
-# 12.4 → cert/key pairing validation (in ResolverConfig.validate, additive) — config validation
-# 12.5 → CA bundle path validation (in ResolverConfig.validate, additive) — path validation
-# 12.6 → subsumed by 9.8                                   — URL validation
-# 12.7 → source_whitelist dedup check (additive)           — config validation
-# 12.8 → migrate_config (additive, out of file scope)      — config migration
-# 12.9 → from_env (in base) + cached variant documented    — env-var handling
-# 12.10 → from_yaml / from_toml (additive, out of file scope) — config files
-# 12.11 → from_secrets_manager (additive, out of file scope) — secret manager
-# 12.12 → subsumed by 9.18                                 — env-var leak
-# 12.13 → __post_init__ halving (additive in ResolverConfig) — consistent halving
-# 12.14 → source_whitelist tuple documented                — immutable
-# 12.15 → _mask_recursive helper (additive)                — recursive masking
-# 12.16 → subsumed by 9.8                                  — URL validation
-# 12.17 → fuzzy_threshold vs MatchConfidence.FUZZY warning — config validation
-# 12.18 → pubchem_max_retries upper bound (additive)       — config validation
-# 12.19 → profile config (additive)                        — environment separation
-# 12.20 → require_organism_override config (additive)      — non-human safety
+# DOMAIN 12 -- CONFIGURATION & ENVIRONMENT MANAGEMENT
+# 12.1 -> subsumed by 1.7                                   -- magic numbers
+# 12.2 -> MAPPING_SCHEMA_VERSION in __init__.py             -- version source
+# 12.3 -> schema_version check in from_state_dict           -- version enforcement
+# 12.4 -> cert/key pairing validation (in ResolverConfig.validate, additive) -- config validation
+# 12.5 -> CA bundle path validation (in ResolverConfig.validate, additive) -- path validation
+# 12.6 -> subsumed by 9.8                                   -- URL validation
+# 12.7 -> source_whitelist dedup check (additive)           -- config validation
+# 12.8 -> migrate_config (additive, out of file scope)      -- config migration
+# 12.9 -> from_env (in base) + cached variant documented    -- env-var handling
+# 12.10 -> from_yaml / from_toml (additive, out of file scope) -- config files
+# 12.11 -> from_secrets_manager (additive, out of file scope) -- secret manager
+# 12.12 -> subsumed by 9.18                                 -- env-var leak
+# 12.13 -> __post_init__ halving (additive in ResolverConfig) -- consistent halving
+# 12.14 -> source_whitelist tuple documented                -- immutable
+# 12.15 -> _mask_recursive helper (additive)                -- recursive masking
+# 12.16 -> subsumed by 9.8                                  -- URL validation
+# 12.17 -> fuzzy_threshold vs MatchConfidence.FUZZY warning -- config validation
+# 12.18 -> pubchem_max_retries upper bound (additive)       -- config validation
+# 12.19 -> profile config (additive)                        -- environment separation
+# 12.20 -> require_organism_override config (additive)      -- non-human safety
 #
-# DOMAIN 13 — DOCUMENTATION & READABILITY
-# 13.1 → FastAPI deployment notes in docstring             — async docs
-# 13.2 → _create_canonical_entry multi-sentence docstring  — documented
-# 13.3 → _merge_into_canonical multi-sentence docstring    — documented
-# 13.4 → _df_to_records multi-sentence docstring           — documented
-# 13.5 → is_synthetic_inchikey docstring fixed             — no recursion claim
-# 13.6 → build_mapping(return_resolver=) documented        — observability note
-# 13.7 → pubchem_strict_salt_form docstring accurate       — real implementation
-# 13.8 → thalidomide example rewritten                     — scientific accuracy
-# 13.9 → DATA DICTIONARY section                           — data dictionary
-# 13.10 → Examples in method docstrings (doctest-style)    — examples
-# 13.11 → fuzzy_search_limit alias (additive)              — naming clarity
-# 13.12 → RAPIDFUZZ_AVAILABLE import at top                — top-level import
-# 13.13 → id_fields deprecation comment trimmed            — concise comment
-# 13.14 → name_index_collision warning + no overwrite      — correct single-valued index
-# 13.15 → to_dataframe sources column JSON-encoded         — accurate docstring
-# 13.16 → entity_resolution/README.md (out of file scope)  — README
-# 13.17 → RESOLUTION STRATEGY DIAGRAM ASCII                — architecture diagram
-# 13.18 → CHANGELOG (audit remediation) section            — changelog
+# DOMAIN 13 -- DOCUMENTATION & READABILITY
+# 13.1 -> FastAPI deployment notes in docstring             -- async docs
+# 13.2 -> _create_canonical_entry multi-sentence docstring  -- documented
+# 13.3 -> _merge_into_canonical multi-sentence docstring    -- documented
+# 13.4 -> _df_to_records multi-sentence docstring           -- documented
+# 13.5 -> is_synthetic_inchikey docstring fixed             -- no recursion claim
+# 13.6 -> build_mapping(return_resolver=) documented        -- observability note
+# 13.7 -> pubchem_strict_salt_form docstring accurate       -- real implementation
+# 13.8 -> thalidomide example rewritten                     -- scientific accuracy
+# 13.9 -> DATA DICTIONARY section                           -- data dictionary
+# 13.10 -> Examples in method docstrings (doctest-style)    -- examples
+# 13.11 -> fuzzy_search_limit alias (additive)              -- naming clarity
+# 13.12 -> RAPIDFUZZ_AVAILABLE import at top                -- top-level import
+# 13.13 -> id_fields deprecation comment trimmed            -- concise comment
+# 13.14 -> name_index_collision warning + no overwrite      -- correct single-valued index
+# 13.15 -> to_dataframe sources column JSON-encoded         -- accurate docstring
+# 13.16 -> entity_resolution/README.md (out of file scope)  -- README
+# 13.17 -> RESOLUTION STRATEGY DIAGRAM ASCII                -- architecture diagram
+# 13.18 -> CHANGELOG (audit remediation) section            -- changelog
 #
-# DOMAIN 14 — COMPLIANCE & STANDARDS ADHERENCE
-# 14.1 → subsumed by 1.9                                   — schema validation
-# 14.2 → _verify_audit_chain hash chain                   — tamper-evident audit
-# 14.3 → subsumed by 4.12                                  — audit trail preserved
-# 14.4 → audit_trail_retention_days + prune (additive)     — retention policy
-# 14.5 → pubchem_allowed_regions config (additive)         — data residency
-# 14.6 → forget_record + remove_source audit               — right-to-be-forgotten
-# 14.7 → data_classification config (additive)             — data classification
-# 14.8 → set_operator + require_operator_for_sensitive (additive) — access control
-# 14.9 → subsumed by 9.16                                  — encryption at rest
-# 14.10 → encryption-in-transit documented                 — TLS documented
-# 14.11 → subsumed by 9.19                                 — access audit
-# 14.12 → LICENSE reference comment                        — license pointer
-# 14.13 → copyright year via datetime.now(UTC).year (additive) — dynamic year
-# 14.14 → PEP 8 compliance (flake8 --max-line-length=100)  — PEP 8
-# 14.15 → PEP 257 multi-line docstrings                    — PEP 257
-# 14.16 → type hints on every public method                — type hints
-# 14.17 → __all__ defined and in sync                      — explicit API
-# 14.18 → ISO 8601 with Z suffix everywhere                — timestamp format
-# 14.19 → to_openapi_schema                                — OpenAPI schema
-# 14.20 → subsumed by 2.7                                  — JSON sources column
-# 14.21 → deprecation warnings for legacy constants        — deprecation policy
-# 14.22 → __version__ + DRUG_RESOLVER_API_VERSION           — SemVer
+# DOMAIN 14 -- COMPLIANCE & STANDARDS ADHERENCE
+# 14.1 -> subsumed by 1.9                                   -- schema validation
+# 14.2 -> _verify_audit_chain hash chain                   -- tamper-evident audit
+# 14.3 -> subsumed by 4.12                                  -- audit trail preserved
+# 14.4 -> audit_trail_retention_days + prune (additive)     -- retention policy
+# 14.5 -> pubchem_allowed_regions config (additive)         -- data residency
+# 14.6 -> forget_record + remove_source audit               -- right-to-be-forgotten
+# 14.7 -> data_classification config (additive)             -- data classification
+# 14.8 -> set_operator + require_operator_for_sensitive (additive) -- access control
+# 14.9 -> subsumed by 9.16                                  -- encryption at rest
+# 14.10 -> encryption-in-transit documented                 -- TLS documented
+# 14.11 -> subsumed by 9.19                                 -- access audit
+# 14.12 -> LICENSE reference comment                        -- license pointer
+# 14.13 -> copyright year via datetime.now(UTC).year (additive) -- dynamic year
+# 14.14 -> PEP 8 compliance (flake8 --max-line-length=100)  -- PEP 8
+# 14.15 -> PEP 257 multi-line docstrings                    -- PEP 257
+# 14.16 -> type hints on every public method                -- type hints
+# 14.17 -> __all__ defined and in sync                      -- explicit API
+# 14.18 -> ISO 8601 with Z suffix everywhere                -- timestamp format
+# 14.19 -> to_openapi_schema                                -- OpenAPI schema
+# 14.20 -> subsumed by 2.7                                  -- JSON sources column
+# 14.21 -> deprecation warnings for legacy constants        -- deprecation policy
+# 14.22 -> __version__ + DRUG_RESOLVER_API_VERSION           -- SemVer
 #
-# DOMAIN 15 — INTEROPERABILITY & INTEGRATION
-# 15.1 → to_records + to_dict + to_csv + to_jsonl           — pandas-free exports
-# 15.2 → subsumed by C.2                                   — deep copies
-# 15.3 → subsumed by 2.12                                  — pyarrow/fastparquet
-# 15.4 → to_csv                                             — CSV export
-# 15.5 → pubchem_rest_base configurable (in ResolverConfig) — URL configurable
-# 15.6 → requests in requirements.txt (extras_require)      — dependency declared
-# 15.7 → pandas in requirements.txt                         — dependency declared
-# 15.8 → pyarrow in requirements.txt (extras)               — dependency declared
-# 15.9 → rapidfuzz in requirements.txt                      — dependency declared
-# 15.10 → rdkit in requirements.txt (extras)                — dependency declared
-# 15.11 → requirements.txt version pinning (out of file scope) — pinned versions
-# 15.12 → subsumed by 2.14                                 — typed result
-# 15.13 → DrugRecord TypedDict (additive, future)           — typed input
-# 15.14 → build_mapping typed in .pyi                       — typed DataFrame
-# 15.15 → subsumed by 2.7                                  — JSON sources column
-# 15.16 → DRUG_RESOLVER_API_VERSION                         — API versioning
-# 15.17 → STABILITY.md (out of file scope)                 — stability doc
-# 15.18 → pathlib.Path everywhere                          — pathlib usage
-# 15.19 → Accept-Encoding: gzip, deflate                    — compression
-# 15.20 → subsumed by 8.25                                 — Session reuse
-# 15.21 → subsumed by 6.18                                 — DNS handling
-# 15.22 → Idempotency-Key header                           — idempotent PubChem
-# 15.23 → urljoin for URL construction                      — safe URL building
-# 15.24 → subsumed by C.17                                 — OpenAPI schema
-# 15.25 → GraphQL non-goal documented                      — non-goal
-# 15.26 → gRPC non-goal documented                         — non-goal
-# 15.27 → to_jsonl for message queue producers             — JSONL export
+# DOMAIN 15 -- INTEROPERABILITY & INTEGRATION
+# 15.1 -> to_records + to_dict + to_csv + to_jsonl           -- pandas-free exports
+# 15.2 -> subsumed by C.2                                   -- deep copies
+# 15.3 -> subsumed by 2.12                                  -- pyarrow/fastparquet
+# 15.4 -> to_csv                                             -- CSV export
+# 15.5 -> pubchem_rest_base configurable (in ResolverConfig) -- URL configurable
+# 15.6 -> requests in requirements.txt (extras_require)      -- dependency declared
+# 15.7 -> pandas in requirements.txt                         -- dependency declared
+# 15.8 -> pyarrow in requirements.txt (extras)               -- dependency declared
+# 15.9 -> rapidfuzz in requirements.txt                      -- dependency declared
+# 15.10 -> rdkit in requirements.txt (extras)                -- dependency declared
+# 15.11 -> requirements.txt version pinning (out of file scope) -- pinned versions
+# 15.12 -> subsumed by 2.14                                 -- typed result
+# 15.13 -> DrugRecord TypedDict (additive, future)           -- typed input
+# 15.14 -> build_mapping typed in .pyi                       -- typed DataFrame
+# 15.15 -> subsumed by 2.7                                  -- JSON sources column
+# 15.16 -> DRUG_RESOLVER_API_VERSION                         -- API versioning
+# 15.17 -> STABILITY.md (out of file scope)                 -- stability doc
+# 15.18 -> pathlib.Path everywhere                          -- pathlib usage
+# 15.19 -> Accept-Encoding: gzip, deflate                    -- compression
+# 15.20 -> subsumed by 8.25                                 -- Session reuse
+# 15.21 -> subsumed by 6.18                                 -- DNS handling
+# 15.22 -> Idempotency-Key header                           -- idempotent PubChem
+# 15.23 -> urljoin for URL construction                      -- safe URL building
+# 15.24 -> subsumed by C.17                                 -- OpenAPI schema
+# 15.25 -> GraphQL non-goal documented                      -- non-goal
+# 15.26 -> gRPC non-goal documented                         -- non-goal
+# 15.27 -> to_jsonl for message queue producers             -- JSONL export
 #
-# DOMAIN 16 — DATA LINEAGE & TRACEABILITY
-# 16.1 → subsumed by 5.17                                  — full provenance checksum
-# 16.2 → subsumed by 4.14                                  — SHA-256
-# 16.3 → subsumed by 4.13                                  — canonical JSON
-# 16.4 → created_at + resolved_at separated                — creation time
-# 16.5 → resolver_version stamped + migration note         — version tracking
-# 16.6 → SourceContribution records                        — per-source timestamps
-# 16.7 → LineageEvent.input_checksum                       — input checksum
-# 16.8 → LineageEvent.diff                                 — field-level diff
-# 16.9 → subsumed by 2.2                                   — correct method
-# 16.10 → StereoisomerCollapse records                     — collapse attribution
-# 16.11 → record_index in dead-letter                      — batch position
-# 16.12 → full record in PubChem dead-letter               — complete context
-# 16.13 → analyse_source_impact                            — impact analysis
-# 16.14 → subsumed by 4.12                                 — audit trail preserved
-# 16.15 → trace_value                                      — field-level trace
-# 16.16 → SourceDatasetMeta + source_datasets in state     — dataset versioning
-# 16.17 → SourceDatasetMeta.dataset_checksum               — source checksums
-# 16.18 → to_state_dict includes source_datasets           — provenance metadata
-# 16.19 → from_state_dict consistency check                — lineage consistency
-# 16.20 → to_provenance_graph                              — provenance graph
-# 16.21 → _source_record_index + find_canonical_for_source_record — bidirectional
-# 16.22 → field_provenance + get_field_provenance          — field-level provenance
-# 16.23 → as_of                                            — temporal lineage
-# 16.24 → to_openlineage                                   — OpenLineage export
-# 16.25 → _verify_audit_chain                              — lineage validation
-# 16.26 → get_canonical_entry_with_history                 — current + history
-# 16.27 → LineageEvent.resolver_version                    — resolver version
-# 16.28 → LineageEvent.operator                            — operator
-# 16.29 → remove_source_full audit event                   — removal lineage
+# DOMAIN 16 -- DATA LINEAGE & TRACEABILITY
+# 16.1 -> subsumed by 5.17                                  -- full provenance checksum
+# 16.2 -> subsumed by 4.14                                  -- SHA-256
+# 16.3 -> subsumed by 4.13                                  -- canonical JSON
+# 16.4 -> created_at + resolved_at separated                -- creation time
+# 16.5 -> resolver_version stamped + migration note         -- version tracking
+# 16.6 -> SourceContribution records                        -- per-source timestamps
+# 16.7 -> LineageEvent.input_checksum                       -- input checksum
+# 16.8 -> LineageEvent.diff                                 -- field-level diff
+# 16.9 -> subsumed by 2.2                                   -- correct method
+# 16.10 -> StereoisomerCollapse records                     -- collapse attribution
+# 16.11 -> record_index in dead-letter                      -- batch position
+# 16.12 -> full record in PubChem dead-letter               -- complete context
+# 16.13 -> analyse_source_impact                            -- impact analysis
+# 16.14 -> subsumed by 4.12                                 -- audit trail preserved
+# 16.15 -> trace_value                                      -- field-level trace
+# 16.16 -> SourceDatasetMeta + source_datasets in state     -- dataset versioning
+# 16.17 -> SourceDatasetMeta.dataset_checksum               -- source checksums
+# 16.18 -> to_state_dict includes source_datasets           -- provenance metadata
+# 16.19 -> from_state_dict consistency check                -- lineage consistency
+# 16.20 -> to_provenance_graph                              -- provenance graph
+# 16.21 -> _source_record_index + find_canonical_for_source_record -- bidirectional
+# 16.22 -> field_provenance + get_field_provenance          -- field-level provenance
+# 16.23 -> as_of                                            -- temporal lineage
+# 16.24 -> to_openlineage                                   -- OpenLineage export
+# 16.25 -> _verify_audit_chain                              -- lineage validation
+# 16.26 -> get_canonical_entry_with_history                 -- current + history
+# 16.27 -> LineageEvent.resolver_version                    -- resolver version
+# 16.28 -> LineageEvent.operator                            -- operator
+# 16.29 -> remove_source_full audit event                   -- removal lineage
 # ---------------------------------------------------------------------------

@@ -1,4 +1,4 @@
-"""OMIM loader — bridges to Phase 1's cleaned OMIM CSV output.
+"""OMIM loader -- bridges to Phase 1's cleaned OMIM CSV output.
 
 This loader consumes ``phase1/processed_data/omim_gene_disease_associations.csv``
 (produced by ``phase1.pipelines.omim_pipeline.OMIMPipeline``) and emits
@@ -11,10 +11,10 @@ Design decision (v5 audit fix):
     Phase 1's already-cleaned OMIM output into Phase 2's graph builder.
 
 Public API (matches the contract expected by ``run_pipeline.py:1784-1789``):
-    - ``download_omim()`` → triggers Phase 1's pipeline if needed
-    - ``parse_omim()`` → returns a pandas DataFrame of OMIM GDA rows
-    - ``omim_to_node_records(df)`` → List[Dict] of Disease/Gene nodes
-    - ``omim_to_edge_records(df)`` → List[Dict] of (Gene, associated_with, Disease) edges
+    - ``download_omim()`` -> triggers Phase 1's pipeline if needed
+    - ``parse_omim()`` -> returns a pandas DataFrame of OMIM GDA rows
+    - ``omim_to_node_records(df)`` -> List[Dict] of Disease/Gene nodes
+    - ``omim_to_edge_records(df)`` -> List[Dict] of (Gene, associated_with, Disease) edges
 """
 
 from __future__ import annotations
@@ -38,19 +38,19 @@ def _safe_gene_id_from_mim(gene_mim: Any, gene_symbol: str) -> Optional[str]:
     Gene ID string, falling back to ``SYM:<symbol>`` when the value is
     non-numeric.
 
-    v37 ROOT FIX (Phase 2 Issue #7 — MIM-as-GeneID shadow nodes): the
+    v37 ROOT FIX (Phase 2 Issue #7 -- MIM-as-GeneID shadow nodes): the
     previous code returned the bare MIM number (e.g. ``"12345"``) as the
     Gene ID. OMIM MIM numbers and NCBI Gene IDs share the same numeric
-    space occasionally — a gene with NCBI Gene ID 12345 and a different
+    space occasionally -- a gene with NCBI Gene ID 12345 and a different
     gene with OMIM MIM number 12345 would COLLIDE on the same
     ``:Gene {id: "12345"}`` node, producing a Frankenstein node with
-    properties from both sources. Multi-hop Drug→targets→Protein→
-    interacts_with→Protein→associated_with→Disease queries that
+    properties from both sources. Multi-hop Drug->targets->Protein->
+    interacts_with->Protein->associated_with->Disease queries that
     traverse Gene edges silently returned empty results for affected genes.
 
     The fix: prefix MIM numbers with ``MIM:`` so they're namespace-
     disambiguated from bare NCBI Gene IDs. The ``kg_builder.ID_PATTERNS``
-    regex for Gene already accepts ``SYM:<symbol>`` — we extend it to
+    regex for Gene already accepts ``SYM:<symbol>`` -- we extend it to
     also accept ``MIM:<digits>`` (see the ID_PATTERNS fix in
     ``kg_builder.py``). When the bridge's higher-priority resolvers
     (canonical_gene_id, ncbi_gene_id) hit, they emit bare numeric IDs;
@@ -59,7 +59,7 @@ def _safe_gene_id_from_mim(gene_mim: Any, gene_symbol: str) -> Optional[str]:
     OMIM's ``morbidmap.txt`` emits non-numeric placeholders (``"?"``,
     ``"FGFR3"``, ``"-"``, ``"1A2B"``) for entries where the gene has no
     MIM number assigned. The previous code did ``str(int(float(gene_mim)))``
-    without a try/except — a single non-numeric placeholder raised
+    without a try/except -- a single non-numeric placeholder raised
     ``ValueError`` and aborted the entire OMIM batch.
 
     Root-level fix: per-row try/except with a deterministic fallback to
@@ -78,7 +78,7 @@ def _safe_gene_id_from_mim(gene_mim: Any, gene_symbol: str) -> Optional[str]:
         # BUG #64 ROOT FIX: validate MIM number is exactly 6 digits.
         # OMIM MIM numbers are 6-digit integers (e.g., 134934 for FGFR3).
         # Without validation, allele variants like "134934.001" are
-        # truncated to 134934 by int(float()) — but non-standard inputs
+        # truncated to 134934 by int(float()) -- but non-standard inputs
         # (5-digit or 7-digit numbers) would create malformed Gene node
         # IDs, fragmenting gene resolution. Validate strictly: the 6-digit
         # range is [100000, 999999]. Fall back to SYM: prefix for
@@ -103,11 +103,11 @@ def _safe_gene_id_from_mim(gene_mim: Any, gene_symbol: str) -> Optional[str]:
 # The bridge resolves gene IDs in this order:
 #   1. ``canonical_gene_id``  (Phase 1's normalized ID, when available)
 #   2. ``ncbi_gene_id``       (NCBI Gene Database numeric ID)
-#   3. ``gene_mim``           (OMIM's MIM number — last resort because
+#   3. ``gene_mim``           (OMIM's MIM number -- last resort because
 #                              MIM numbers are NOT NCBI Gene IDs, they
 #                              are OMIM's own phenotype/gene numbering)
 #   4. ``SYM:<gene_symbol>``  (symbolic fallback for unresolved genes)
-# The previous omim_loader used ONLY ``gene_mim`` — causing Gene ID
+# The previous omim_loader used ONLY ``gene_mim`` -- causing Gene ID
 # fragmentation: the same gene appeared as two disjoint nodes (one keyed
 # by NCBI Gene ID via the bridge, another keyed by MIM number via the
 # OMIM loader). This function mirrors the bridge's priority so both
@@ -115,25 +115,25 @@ def _safe_gene_id_from_mim(gene_mim: Any, gene_symbol: str) -> Optional[str]:
 def _resolve_gene_id_omim(row: pd.Series) -> Optional[str]:
     """Resolve a Gene ID from an OMIM Phase 1 row using bridge priority.
 
-    Priority: canonical_gene_id → ncbi_gene_id → gene_id → gene_mim → SYM:<symbol>.
+    Priority: canonical_gene_id -> ncbi_gene_id -> gene_id -> gene_mim -> SYM:<symbol>.
 
     v69 ROOT FIX (Phase1↔Phase2 integration): the previous priority chain
-    looked for ``canonical_gene_id`` → ``ncbi_gene_id`` → ``gene_mim``.
+    looked for ``canonical_gene_id`` -> ``ncbi_gene_id`` -> ``gene_mim``.
     But Phase 1's actual OMIM CSV emits the NCBI Gene ID under the column
-    name ``gene_id`` (NOT ``ncbi_gene_id`` — that's the bridge's renamed
+    name ``gene_id`` (NOT ``ncbi_gene_id`` -- that's the bridge's renamed
     form). So when the OMIM loader ran standalone on the Phase 1 CSV
     (without going through the bridge), BOTH ``canonical_gene_id`` and
     ``ncbi_gene_id`` were None, and the resolver fell through to
-    ``gene_mim`` — emitting ``MIM:176805`` instead of the correct NCBI
+    ``gene_mim`` -- emitting ``MIM:176805`` instead of the correct NCBI
     Gene ID ``5742``. This caused Gene ID fragmentation: Gene nodes from
     the bridge had ID ``5742`` (correct) but Gene nodes from the OMIM
-    loader had ID ``MIM:176805`` (wrong) — disjoint subgraphs.
+    loader had ID ``MIM:176805`` (wrong) -- disjoint subgraphs.
 
     ROOT FIX: add ``gene_id`` to the resolver chain BETWEEN
     ``ncbi_gene_id`` and ``gene_mim``. This matches Phase 1's actual CSV
     schema (verified: ``gene_symbol,gene_id,gene_mim,...``). The bridge
-    still renames ``gene_id`` → ``ncbi_gene_id`` for the PostgreSQL path,
-    so this fix only affects the standalone-CSV path — but that's the
+    still renames ``gene_id`` -> ``ncbi_gene_id`` for the PostgreSQL path,
+    so this fix only affects the standalone-CSV path -- but that's the
     path the OMIM loader uses when called directly.
     """
     gene_symbol = str(row.get("gene_symbol") or "").strip()
@@ -170,7 +170,7 @@ def _resolve_gene_id_omim(row: pd.Series) -> Optional[str]:
             return str(int(float(raw)))
         except (TypeError, ValueError):
             pass  # fall through
-    # 4. gene_mim (OMIM's MIM number — last-resort numeric).
+    # 4. gene_mim (OMIM's MIM number -- last-resort numeric).
     gene_mim = row.get("gene_mim")
     mim_id = _safe_gene_id_from_mim(gene_mim, gene_symbol)
     if mim_id is not None:
@@ -193,7 +193,7 @@ _OMIM_ASSOC_TYPE_TO_REL: Dict[str, str] = {
 def download_omim(target_path: Optional[Path] = None) -> Path:
     """Run Phase 1's OMIM pipeline if needed, return CSV path.
 
-    v22 ROOT FIX (audit section 7 finding 11 — "Silent stale-CSV fallback"):
+    v22 ROOT FIX (audit section 7 finding 11 -- "Silent stale-CSV fallback"):
     the previous code returned ANY non-empty CSV with only an INFO log,
     regardless of age. A years-stale CSV would be silently used in
     production. Add a freshness check: if the CSV is older than
@@ -222,7 +222,7 @@ def download_omim(target_path: Optional[Path] = None) -> Path:
             if age_days > max_age_days:
                 logger.warning(
                     "omim_loader: using STALE Phase 1 CSV %s "
-                    "(%.1f days old, max=%g) — DRUGOS_ALLOW_STALE_CSV=1.",
+                    "(%.1f days old, max=%g) -- DRUGOS_ALLOW_STALE_CSV=1.",
                     out_path, age_days, max_age_days,
                 )
             else:
@@ -306,7 +306,7 @@ def omim_to_node_records(df: pd.DataFrame) -> List[Dict[str, Any]]:
 
     v27 ROOT FIX (P2-L-6): use ``_resolve_gene_id_omim`` to resolve the
     Gene ID with the SAME priority as ``phase1_bridge`` (canonical_gene_id
-    → ncbi_gene_id → gene_mim → SYM:<symbol>). The previous code used
+    -> ncbi_gene_id -> gene_mim -> SYM:<symbol>). The previous code used
     ONLY ``gene_mim``, causing the same gene to appear as two disjoint
     nodes (one keyed by NCBI Gene ID via the bridge, another keyed by
     MIM number via the OMIM loader).
@@ -353,12 +353,12 @@ def omim_to_edge_records(df: pd.DataFrame) -> List[Dict[str, Any]]:
     v27 ROOT FIXES (P2-L-3 + P2-L-6 + P2-L-13):
       - **P2-L-3 (score scale)**: OMIM ``score`` is already on a 0-1 scale
         (per Phase 1's score_method=omim_mapping_key). Emit BOTH the raw
-        source-specific score (``omim_score`` — preserved for traceability)
+        source-specific score (``omim_score`` -- preserved for traceability)
         AND a canonical ``normalized_score`` in [0,1] for downstream
         cross-source fusion.
       - **P2-L-6 (gene ID resolution)**: use ``_resolve_gene_id_omim``
-        (bridge-compatible priority: canonical_gene_id → ncbi_gene_id →
-        gene_mim → SYM:<symbol>) instead of ``_safe_gene_id_from_mim``
+        (bridge-compatible priority: canonical_gene_id -> ncbi_gene_id ->
+        gene_mim -> SYM:<symbol>) instead of ``_safe_gene_id_from_mim``
         alone.
       - **P2-L-13 (association_type collapse)**: map ``association_type``
         to distinct ``rel_type`` (was: collapse ALL to
@@ -396,18 +396,18 @@ def omim_to_edge_records(df: pd.DataFrame) -> List[Dict[str, Any]]:
         # OMIM score: prefer Phase 1's ``evidence_strength`` (normalized),
         # fall back to ``score``, fall back to ``normalized_score``.
         # v68 ROOT FIX (P2L-005): the previous fallback chain consulted
-        # ``evidence_strength`` → ``normalized_score`` → ``score`` — NEVER
+        # ``evidence_strength`` -> ``normalized_score`` -> ``score`` -- NEVER
         # ``mapping_key``. OMIM's ``morbidmap.txt`` keys evidence by
         # ``mapping_key`` (1=confirmed, 2=likely, 3=provisional). If
         # Phase 1 emits a row with mapping_key=1 (confirmed) but no
         # evidence_strength/score/normalized_score, ``score_f`` was None,
         # the threshold check was skipped, and the row was KEPT with
-        # ``normalized_score=None`` — a confirmed OMIM association ended
+        # ``normalized_score=None`` -- a confirmed OMIM association ended
         # up with NULL score in the KG, defeating the score-based ranking
         # in the GNN.
         # ROOT FIX: add ``mapping_key`` to the END of the fallback chain
         # (after evidence_strength / normalized_score / score), mapping
-        # "1"→0.95 (confirmed), "2"→0.7 (likely), "3"→0.4 (provisional).
+        # "1"->0.95 (confirmed), "2"->0.7 (likely), "3"->0.4 (provisional).
         # This ensures confirmed OMIM associations ALWAYS get a numeric
         # score even when Phase 1's evidence_strength/score fields are
         # missing. The mapping follows OMIM's official mapping_key
@@ -419,9 +419,9 @@ def omim_to_edge_records(df: pd.DataFrame) -> List[Dict[str, Any]]:
             score = row.get("score")
         # v68 ROOT FIX (P2L-005): mapping_key fallback.
         _OMIM_MAPPING_KEY_TO_SCORE: Dict[str, float] = {
-            "1": 0.95,  # confirmed — highest confidence
-            "2": 0.7,   # likely — medium confidence
-            "3": 0.4,   # provisional — lowest confidence
+            "1": 0.95,  # confirmed -- highest confidence
+            "2": 0.7,   # likely -- medium confidence
+            "3": 0.4,   # provisional -- lowest confidence
         }
         if (score is None or str(score) == "nan"):
             mapping_key_raw = row.get("mapping_key")
@@ -430,25 +430,25 @@ def omim_to_edge_records(df: pd.DataFrame) -> List[Dict[str, Any]]:
                 if mk_str in _OMIM_MAPPING_KEY_TO_SCORE:
                     score = _OMIM_MAPPING_KEY_TO_SCORE[mk_str]
                     logger.debug(
-                        "omim_loader: mapping_key=%s → score=%.2f "
+                        "omim_loader: mapping_key=%s -> score=%.2f "
                         "(v68 ROOT FIX P2L-005 fallback).",
                         mk_str, score,
                     )
-        # v43 ROOT FIX (P1 — OMIM_MIN_SCORE bypassed for evidence_strength):
+        # v43 ROOT FIX (P1 -- OMIM_MIN_SCORE bypassed for evidence_strength):
         # Phase 1 emits evidence_strength as a CATEGORICAL STRING
         # ("robust"/"moderate"/"limited"/"unsupported"), not a float.
         # The previous code did float(score) which raises ValueError on
-        # "robust" → score_f=None → threshold check skipped → row KEPT
+        # "robust" -> score_f=None -> threshold check skipped -> row KEPT
         # regardless of evidence quality. This loaded "unsupported"
         # evidence with the same weight as "robust", polluting the
         # embedding geometry.
         # Fix: if score is a categorical string, map it to a numeric
         # value FIRST, then apply the threshold. The mapping follows
         # the OMIM evidence_strength convention:
-        #   "robust"     → 0.9  (strongest, multiple lines of evidence)
-        #   "moderate"   → 0.7
-        #   "limited"    → 0.4
-        #   "unsupported"→ 0.05 (weakest, below default threshold 0.5)
+        #   "robust"     -> 0.9  (strongest, multiple lines of evidence)
+        #   "moderate"   -> 0.7
+        #   "limited"    -> 0.4
+        #   "unsupported"-> 0.05 (weakest, below default threshold 0.5)
         #
         # v69 ROOT FIX (P2L-006): preserve the ORIGINAL raw score (string
         # "robust" or float 0.95) as ``omim_score_raw`` so downstream
@@ -527,11 +527,11 @@ def omim_to_edge_records(df: pd.DataFrame) -> List[Dict[str, Any]]:
                 "omim_score": score_f,
                 "omim_score_raw": omim_score_raw,
                 "omim_score_normalized": normalized_score,
-                # v69 P2L-006: provenance flag — how was the score derived?
-                #   "numeric"     — score was already a float in Phase 1
-                #   "categorical" — score was "robust"/"moderate"/etc.
-                #   "mapping_key" — score was derived from OMIM mapping_key
-                #   "unknown"     — score was missing/unparseable
+                # v69 P2L-006: provenance flag -- how was the score derived?
+                #   "numeric"     -- score was already a float in Phase 1
+                #   "categorical" -- score was "robust"/"moderate"/etc.
+                #   "mapping_key" -- score was derived from OMIM mapping_key
+                #   "unknown"     -- score was missing/unparseable
                 "score_source_type": score_source_type,
                 # Canonical normalized score in [0,1] for cross-source fusion.
                 "normalized_score": normalized_score,
@@ -539,7 +539,7 @@ def omim_to_edge_records(df: pd.DataFrame) -> List[Dict[str, Any]]:
                 # semantic so downstream consumers can fuse scores correctly
                 # across sources. OMIM scores are single-source curated
                 # values (no dedup aggregation). The semantic is
-                # "association_probability" — the score reflects the
+                # "association_probability" -- the score reflects the
                 # strength of the gene-disease association evidence.
                 "score_aggregation": "single",
                 "score_semantic": "association_probability",

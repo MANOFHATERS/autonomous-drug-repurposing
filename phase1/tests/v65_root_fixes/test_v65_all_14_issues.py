@@ -1,5 +1,5 @@
 """
-v65 ROOT FIX verification suite — all 14 audit issues (P1C-001 .. P1C-014).
+v65 ROOT FIX verification suite -- all 14 audit issues (P1C-001 .. P1C-014).
 
 Each test verifies the ROOT fix, not a surface symptom. The tests are
 designed so that if ANY issue regresses, the corresponding test FAILS
@@ -8,7 +8,7 @@ matters.
 
 These tests run against the REAL source files (not mocks). They import
 the actual modules and exercise the actual code paths. No smoke tests,
-no stubs — real forensic verification.
+no stubs -- real forensic verification.
 
 Run with:
     cd phase1 && python -m pytest tests/v65_root_fixes/test_v65_all_14_issues.py -v
@@ -36,7 +36,7 @@ if str(_PHASE1_ROOT) not in sys.path:
 # P1C-001: gene_symbol / disease_id server_default vs CHECK contradiction
 # ============================================================================
 class TestP1C001_GdaSchemaContradiction:
-    """P1C-001 — gene_symbol server_default="" contradicted CHECK <> ''.
+    """P1C-001 -- gene_symbol server_default="" contradicted CHECK <> ''.
 
     ROOT FIX: gene_symbol is nullable=True (no server_default); the
     chk_gda_gene_symbol_nonempty CHECK was REMOVED. disease_id is
@@ -65,7 +65,7 @@ class TestP1C001_GdaSchemaContradiction:
             if hasattr(c, "name") and c.name and "gene_symbol_nonempty" in c.name
         }
         assert not check_names, (
-            "chk_gda_gene_symbol_nonempty must be REMOVED — it contradicted "
+            "chk_gda_gene_symbol_nonempty must be REMOVED -- it contradicted "
             f"the old server_default=''. Found: {check_names}"
         )
 
@@ -87,7 +87,7 @@ class TestP1C001_GdaSchemaContradiction:
             if hasattr(c, "name") and c.name and "disease_id_nonempty" in c.name
         }
         assert "chk_gda_disease_id_nonempty" in check_names, (
-            "chk_gda_disease_id_nonempty must be PRESERVED — an empty "
+            "chk_gda_disease_id_nonempty must be PRESERVED -- an empty "
             "disease_id is scientifically meaningless."
         )
 
@@ -96,7 +96,7 @@ class TestP1C001_GdaSchemaContradiction:
 # P1C-002: UniProt test-fixture acceptance (<6-char alphanumeric + staging)
 # ============================================================================
 class TestP1C002_UniprotTestFixtureAcceptance:
-    """P1C-002 — <6-char alphanumeric UniProt IDs accepted by default.
+    """P1C-002 -- <6-char alphanumeric UniProt IDs accepted by default.
 
     ROOT FIX: default DRUGOS_ENVIRONMENT to "prod" (fail-closed), remove
     "staging" from the allow-test list, and REMOVE the <6-char
@@ -108,13 +108,13 @@ class TestP1C002_UniprotTestFixtureAcceptance:
         """models._validate_uniprot_id must default to 'prod' (not 'dev').
 
         The validator reads DRUGOS_ENVIRONMENT at CALL time (not import
-        time), so we set/unset the env var and call the function — no
+        time), so we set/unset the env var and call the function -- no
         module reload needed (reloading re-registers ORM classes and
         raises 'Table already defined').
         """
         os.environ.pop("DRUGOS_ENVIRONMENT", None)
         import database.models as m
-        # P001 is a <6-char alphanumeric — must be REJECTED by default.
+        # P001 is a <6-char alphanumeric -- must be REJECTED by default.
         with pytest.raises(ValueError, match="Invalid UniProt accession"):
             m._validate_uniprot_id("P001")
 
@@ -140,7 +140,7 @@ class TestP1C002_UniprotTestFixtureAcceptance:
             os.environ.pop("DRUGOS_ENVIRONMENT", None)
 
     def test_models_rejects_test_prefix_in_staging(self):
-        """staging must be production-like — TEST fixtures REJECTED."""
+        """staging must be production-like -- TEST fixtures REJECTED."""
         os.environ["DRUGOS_ENVIRONMENT"] = "staging"
         import database.models as m
         try:
@@ -183,7 +183,7 @@ class TestP1C002_UniprotTestFixtureAcceptance:
 # P1C-003: STRING_MIN_COMBINED_SCORE default 400 vs 700
 # ============================================================================
 class TestP1C003_StringScoreThreshold:
-    """P1C-003 — .env.example shipped 400, contradicting the 700 default.
+    """P1C-003 -- .env.example shipped 400, contradicting the 700 default.
 
     ROOT FIX: .env.example uses 700, CONFIG_REGISTRY default is 700,
     config validation warns when score < 700 (not < 400).
@@ -250,7 +250,7 @@ class TestP1C003_StringScoreThreshold:
 # P1C-004: is_valid_inchikey fallback uses permissive INCHIKEY_PATTERN
 # ============================================================================
 class TestP1C004_InchikeyFallbackStrict:
-    """P1C-004 — fallback used permissive INCHIKEY_PATTERN (accepts -X suffix).
+    """P1C-004 -- fallback used permissive INCHIKEY_PATTERN (accepts -X suffix).
 
     ROOT FIX: fallback uses _STRICT_INCHIKEY_PATTERN (27-char only).
     """
@@ -302,7 +302,7 @@ class TestP1C004_InchikeyFallbackStrict:
 # P1C-005: session.rollback() in _quarantine_gda_rows rolls back ENTIRE txn
 # ============================================================================
 class TestP1C005_QuarantineSavepoint:
-    """P1C-005 — session.rollback() rolled back the ENTIRE transaction.
+    """P1C-005 -- session.rollback() rolled back the ENTIRE transaction.
 
     ROOT FIX: use session.begin_nested() (SAVEPOINT) so only the
     dead-letter inserts are rolled back, preserving the caller's staged rows.
@@ -351,7 +351,7 @@ class TestP1C005_QuarantineSavepoint:
             reason = Column(String, nullable=True)
             # Add a CHECK that will reject the quarantine insert (simulating
             # the CHECK constraint failure that P1C-005 is about).
-            details_json = Column(String, nullable=False)  # NOT NULL — forces failure
+            details_json = Column(String, nullable=False)  # NOT NULL -- forces failure
             run_id = Column(String, nullable=True)
 
         class ValidGDA(Base):
@@ -390,7 +390,7 @@ class TestP1C005_QuarantineSavepoint:
             # Query it fresh from the DB.
             surviving = session.query(ValidGDA).filter_by(gene_symbol="TP53").all()
             assert len(surviving) == 1, (
-                "The caller's valid GDA row was LOST — _quarantine_gda_rows "
+                "The caller's valid GDA row was LOST -- _quarantine_gda_rows "
                 "rolled back the entire transaction instead of using a "
                 "savepoint. This is the P1C-005 bug."
             )
@@ -404,10 +404,10 @@ class TestP1C005_QuarantineSavepoint:
 # P1C-006: is_globally_approved nullable=True no server_default
 # ============================================================================
 class TestP1C006_IsGloballyApprovedServerDefault:
-    """P1C-006 — is_globally_approved was nullable with no server_default.
+    """P1C-006 -- is_globally_approved was nullable with no server_default.
 
     ROOT FIX: nullable=False, server_default="0" (matching is_fda_approved
-    and is_withdrawn). No NULLs — INSERTs that omit the column get False.
+    and is_withdrawn). No NULLs -- INSERTs that omit the column get False.
     """
 
     def test_is_globally_approved_has_server_default(self):
@@ -451,7 +451,7 @@ class TestP1C006_IsGloballyApprovedServerDefault:
 # P1C-007: validate_gda_scores dedup collapses NaN==NaN
 # ============================================================================
 class TestP1C007_ValidateGdaScoresNanSentinel:
-    """P1C-007 — drop_duplicates collapsed NaN==NaN rows into one.
+    """P1C-007 -- drop_duplicates collapsed NaN==NaN rows into one.
 
     ROOT FIX: apply the NaN-sentinel pattern from deduplicator.py before
     drop_duplicates, so rows with NaN in any dedup key survive.
@@ -495,7 +495,7 @@ class TestP1C007_ValidateGdaScoresNanSentinel:
 # P1C-008: dedup_interactions conflates pre_filter_drops + duplicates_removed
 # ============================================================================
 class TestP1C008_DedupInteractionsPreFilterSplit:
-    """P1C-008 — dedup_interactions used conflated duplicates_removed metric.
+    """P1C-008 -- dedup_interactions used conflated duplicates_removed metric.
 
     ROOT FIX: split pre_filter_drops (null/quarantine) from
     duplicates_removed (true merges), matching dedup_by_inchikey.
@@ -531,7 +531,7 @@ class TestP1C008_DedupInteractionsPreFilterSplit:
     def test_pre_filter_row_count_captured(self):
         """The source must capture _pre_filter_row_count before filtering."""
         src = (_PHASE1_ROOT / "cleaning" / "deduplicator.py").read_text()
-        # Search the ENTIRE source — the function is very large and the
+        # Search the ENTIRE source -- the function is very large and the
         # pre_filter_drops line may be far from the function start.
         assert "_pre_filter_row_count = int(len(working))" in src, (
             "dedup_interactions must capture _pre_filter_row_count after "
@@ -547,7 +547,7 @@ class TestP1C008_DedupInteractionsPreFilterSplit:
 # P1C-009: SYNTH InChIKey match method="inchikey_exact" confidence=0.5
 # ============================================================================
 class TestP1C009_SynthKeyMatchMethodLabel:
-    """P1C-009 — SYNTH match labeled inchikey_exact with confidence 0.5.
+    """P1C-009 -- SYNTH match labeled inchikey_exact with confidence 0.5.
 
     ROOT FIX: method="synthetic_key_match", confidence uses the new
     MatchConfidence.SYNTHETIC_KEY_MATCH enum (not a hardcoded 0.5).
@@ -598,7 +598,7 @@ class TestP1C009_SynthKeyMatchMethodLabel:
 # P1C-010: Dev-default credential check only looks for REPLACE_USER
 # ============================================================================
 class TestP1C010_CosmicCosmicCredentialDetection:
-    """P1C-010 — cosmic:cosmic credentials silently accepted in prod.
+    """P1C-010 -- cosmic:cosmic credentials silently accepted in prod.
 
     ROOT FIX: settings.py also checks for 'cosmic:cosmic@' in DATABASE_URL.
     """
@@ -653,7 +653,7 @@ class TestP1C010_CosmicCosmicCredentialDetection:
 # P1C-011: Duplicate if/else dead code in cleaning/__init__.py
 # ============================================================================
 class TestP1C011_DeadIfElseRemoved:
-    """P1C-011 — both if/else branches were identical (dead code).
+    """P1C-011 -- both if/else branches were identical (dead code).
 
     ROOT FIX: removed the if/else; single direct assignment.
     """
@@ -683,7 +683,7 @@ class TestP1C011_DeadIfElseRemoved:
 # P1C-012: Inline regex duplicates _INCHIKEY_PATTERN in deduplicator.py
 # ============================================================================
 class TestP1C012_InlineRegexReplaced:
-    """P1C-012 — inline regex `^[A-Z]{14}-[A-Z]{10}-[A-Z]$` risked divergence.
+    """P1C-012 -- inline regex `^[A-Z]{14}-[A-Z]{10}-[A-Z]$` risked divergence.
 
     ROOT FIX: use the imported _INCHIKEY_PATTERN compiled pattern.
     """
@@ -713,7 +713,7 @@ class TestP1C012_InlineRegexReplaced:
 # P1C-013: n_normalised over-counts (dead variable)
 # ============================================================================
 class TestP1C013_DeadNNormalisedRemoved:
-    """P1C-013 — n_normalised counted all strings ending in 'N' (over-count).
+    """P1C-013 -- n_normalised counted all strings ending in 'N' (over-count).
 
     ROOT FIX: removed the dead n_normalised variable (the log already used
     _norm_mask.sum() correctly).
@@ -736,7 +736,7 @@ class TestP1C013_DeadNNormalisedRemoved:
 # P1C-014: _ACTIVITY_VALUE_MAX alias points to CENSORED (1e6) not NON-PHYSICAL (1e9)
 # ============================================================================
 class TestP1C014_ActivityValueMaxNameConflict:
-    """P1C-014 — _ACTIVITY_VALUE_MAX meant 1e6 in _constants but 1e9 in deduplicator.
+    """P1C-014 -- _ACTIVITY_VALUE_MAX meant 1e6 in _constants but 1e9 in deduplicator.
 
     ROOT FIX: deduplicator no longer defines _ACTIVITY_VALUE_MAX (uses
     _ACTIVITY_NON_PHYSICAL_MAX directly). _constants renamed the alias to
@@ -793,14 +793,14 @@ class TestP1C014_ActivityValueMaxNameConflict:
         import cleaning._constants as c
         import cleaning.deduplicator as d
         import cleaning.normalizer as n
-        # All three must agree on 1e6 (censored) — none may be 1e9.
+        # All three must agree on 1e6 (censored) -- none may be 1e9.
         for mod, name in [(c, "_constants"), (d, "deduplicator"), (n, "normalizer")]:
             if hasattr(mod, "_ACTIVITY_VALUE_MAX"):
                 val = mod._ACTIVITY_VALUE_MAX
                 assert val == 1e6, (
                     f"{name}._ACTIVITY_VALUE_MAX must be 1e6 (censored), "
                     f"got {val}. No module may define it as 1e9 (the "
-                    f"non-physical threshold) — that was the P1C-014 bug."
+                    f"non-physical threshold) -- that was the P1C-014 bug."
                 )
 
 

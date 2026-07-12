@@ -53,8 +53,8 @@
         },
         "activity_type": {
           "type": "string",
-          "enum": ["IC50", "Ki", "Kd", "EC50"],
-          "description": "Standardised activity type (case-sensitive). Filtered to CHEMBL_ACTIVITY_TYPES during clean_activities()."
+          "enum": ["IC50", "EC50", "Ki", "Kd", "potency", "AC50", "pIC50", "pEC50", "pKi", "pKd", "pKb", "pED50", "pAC50", "ED50", "Kb", "unknown"],
+          "description": "Standardised activity type (case-sensitive). Filtered to CHEMBL_ACTIVITY_TYPES during clean_activities(). P1-031 ROOT FIX: enum aligned with the ORM ActivityType enum (database/models.py) so operators can legitimately extend CHEMBL_ACTIVITY_TYPES to include AC50, pIC50, etc. without hitting an import-time RuntimeError."
         },
         "activity_value": {
           "type": ["number", "null"],

@@ -1,4 +1,4 @@
-"""DisGeNET loader — bridges to Phase 1's cleaned DisGeNET CSV output.
+"""DisGeNET loader -- bridges to Phase 1's cleaned DisGeNET CSV output.
 
 This loader consumes ``phase1/processed_data/disgenet_gene_disease_associations.csv``
 (produced by ``phase1.pipelines.disgenet_pipeline.DisgenetPipeline``) and
@@ -15,7 +15,7 @@ Fix: use the correct prefixed filename as the default; the parser still
 accepts an explicit filepath override for backward compat.
 
 v70 ROOT FIX (P2L-047): OpenTargets DOID uses underscore ("DOID_1438")
-but DisGeNET DOID uses colon ("DOID:1438") — no join was possible
+but DisGeNET DOID uses colon ("DOID:1438") -- no join was possible
 between OpenTargets-emitted and DisGeNET-emitted Disease nodes for the
 same disease. Phase 1's disgenet_pipeline ALREADY normalizes to colon
 form, so the disgenet_loader receives canonical colon-form IDs. As a
@@ -57,7 +57,7 @@ _DISGENET_ASSOC_TYPE_TO_REL: Dict[str, str] = {
 # or colon form. Used by ``_normalise_disease_id_to_colon`` below to
 # ensure cross-source MERGE works between OpenTargets-emitted and
 # DisGeNET-emitted Disease nodes. The mapping mirrors the one in
-# opentargets_loader._normalise_ontology_id — kept here as a defensive
+# opentargets_loader._normalise_ontology_id -- kept here as a defensive
 # copy so the two loaders do not hard-depend on each other for this
 # critical normalization.
 _CANONICAL_ONTOLOGY_CASE: Dict[str, str] = {
@@ -155,7 +155,7 @@ def download_disgenet(target_path: Optional[Path] = None) -> Path:
     Otherwise it invokes ``phase1.pipelines.disgenet_pipeline.DisgenetPipeline().run()``
     to download + clean + load.
 
-    v22 ROOT FIX (audit section 7 finding 11 — "Silent stale-CSV fallback"):
+    v22 ROOT FIX (audit section 7 finding 11 -- "Silent stale-CSV fallback"):
     the previous code returned ANY non-empty CSV with only an INFO log,
     regardless of age. A years-stale CSV would be silently used in
     production. Add a freshness check: if the CSV is older than
@@ -185,7 +185,7 @@ def download_disgenet(target_path: Optional[Path] = None) -> Path:
             if age_days > max_age_days:
                 logger.warning(
                     "disgenet_loader: using STALE Phase 1 CSV %s "
-                    "(%.1f days old, max=%g) — DRUGOS_ALLOW_STALE_CSV=1.",
+                    "(%.1f days old, max=%g) -- DRUGOS_ALLOW_STALE_CSV=1.",
                     out_path, age_days, max_age_days,
                 )
             else:
@@ -200,7 +200,7 @@ def download_disgenet(target_path: Optional[Path] = None) -> Path:
         # v77 ROOT FIX (scientific bug): the import was `from phase1.pipelines.disgenet_pipeline import DisgenetPipeline`
         # (lowercase 'g') but the actual class name is `DisGeNETPipeline` (capital G, NET).
         # This ImportError was ALWAYS raised, so the DisgenetPipeline NEVER actually
-        # ran from the loader — it always fell back to whatever stale CSV was present.
+        # ran from the loader -- it always fell back to whatever stale CSV was present.
         # This is a silent scientific data-loss bug: the DisGeNET freshness policy
         # was a no-op because the pipeline that refreshes the CSV could never be
         # invoked. Fix: use the correct class name.
@@ -213,7 +213,7 @@ def download_disgenet(target_path: Optional[Path] = None) -> Path:
         # at ERROR (not WARNING). The previous bare ``except Exception``
         # caught programmer errors (AttributeError, TypeError, NameError)
         # in DisgenetPipeline and silently fell back to a potentially
-        # stale/partial CSV — masking Phase 1 regressions. Unexpected
+        # stale/partial CSV -- masking Phase 1 regressions. Unexpected
         # exceptions are now RE-RAISED so operators see real bugs.
         logger.error(
             "disgenet_loader: Phase 1 DisgenetPipeline import failed (%s: %s). "
@@ -223,7 +223,7 @@ def download_disgenet(target_path: Optional[Path] = None) -> Path:
         )
     except (OSError, FileNotFoundError) as exc:
         # v71 P2L-004: file-system errors (disk full, permission denied,
-        # file not found) are expected failure modes — fall back to CSV.
+        # file not found) are expected failure modes -- fall back to CSV.
         logger.error(
             "disgenet_loader: Phase 1 DisgenetPipeline failed with file "
             "system error (%s: %s). Falling back to whatever CSV is "
@@ -232,7 +232,7 @@ def download_disgenet(target_path: Optional[Path] = None) -> Path:
         )
     # v71 P2L-004: any OTHER exception (AttributeError, TypeError,
     # NameError, ValueError, RuntimeError, etc.) is a PROGRAMMER ERROR
-    # in DisgenetPipeline — re-raise so the bug is visible instead of
+    # in DisgenetPipeline -- re-raise so the bug is visible instead of
     # masked by a silent stale-CSV fallback.
     # v68 ROOT FIX (P2L-003): when the user passes a custom ``target_path``
     # AND the cached file was stale, the code above fell through to
@@ -368,7 +368,7 @@ def disgenet_to_node_records(df: pd.DataFrame) -> List[Dict[str, Any]]:
         # numeric NCBI gene ID. The previous code emitted 'NCBIGene:2645'
         # which fell through to the gene_symbol fallback on every row.
         # Also BUG-A-002 (mentioned in audit): the column may be named
-        # ``gene_id`` in some Phase 1 versions — accept both names.
+        # ``gene_id`` in some Phase 1 versions -- accept both names.
         ncbi_gene_id = (
             row.get("ncbi_gene_id")
             if row.get("ncbi_gene_id") is not None
@@ -408,7 +408,7 @@ def disgenet_to_edge_records(df: pd.DataFrame) -> List[Dict[str, Any]]:
       - **P2-L-3 (score scale)**: DisGeNET ``score`` / ``gda_score`` are
         already on a 0-1 scale (per DisGeNET docs at
         https://www.disgenet.org/documentation). Emit BOTH the raw
-        source-specific score (``disgenet_score`` — preserved for
+        source-specific score (``disgenet_score`` -- preserved for
         traceability) AND a canonical ``normalized_score`` in [0,1] for
         downstream model training / cross-source fusion.
       - **P2-L-13 (association_type collapse)**: the previous code
@@ -432,7 +432,7 @@ def disgenet_to_edge_records(df: pd.DataFrame) -> List[Dict[str, Any]]:
     """
     # v27 ROOT FIX (P2-L-13): distinct rel_type per association_type.
     # v42 ROOT FIX (P2 #9): moved to module-level constant (was rebuilt
-    # inside the function on every call — trivially cheap but inconsistent
+    # inside the function on every call -- trivially cheap but inconsistent
     # with omim_loader._OMIM_ASSOC_TYPE_TO_REL which is module-level).
     # Now uses the module-level _DISGENET_ASSOC_TYPE_TO_REL defined above.
 
@@ -528,7 +528,7 @@ def disgenet_to_edge_records(df: pd.DataFrame) -> List[Dict[str, Any]]:
                 # DisGeNET pre-aggregates across sources server-side, so
                 # each row is a SINGLE source-specific score (no further
                 # dedup aggregation is needed). This is INCOMPATIBLE with
-                # OpenTargets' MAX-pooling — downstream fusion that
+                # OpenTargets' MAX-pooling -- downstream fusion that
                 # averages ``normalized_score`` across OpenTargets and
                 # DisGeNET edges mixes MAX-pooled scores with sum-normalized
                 # scores, producing biased rankings.

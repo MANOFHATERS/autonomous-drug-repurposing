@@ -1,34 +1,34 @@
 """
-Test 1 — Real test for drugos_graph/__main__.py (institutional-grade fix).
+Test 1 -- Real test for drugos_graph/__main__.py (institutional-grade fix).
 
 This test file verifies EVERY one of the 56 fixes from
 ``DrugOS_main_py_Master_Fix_Prompt_56_Issues_16_Domains.docx`` by
 exercising the actual behavior of ``drugos_graph.__main__``.
 
 The test is structured by domain (matching the master fix prompt's
-priority order).  Every test exercises REAL behavior — no ``assert
+priority order).  Every test exercises REAL behavior -- no ``assert
 hasattr(...)`` style existence checks.  Tests call ``run([...])`` or
 individual helper functions and assert on the actual returned values
 / exit codes / observable side effects.
 
 Sections
 --------
-1. Domain 3 — Scientific Correctness (4 issues)
-2. Domain 5 — Data Quality & Integrity (3 issues)
-3. Domain 7 — Idempotency & Reproducibility (2 issues)
-4. Domain 1 — Architecture (4 issues)
-5. Domain 9 — Security & Privacy (4 issues)
-6. Domain 2 — Design (2 issues)
-7. Domain 14 — Compliance & Standards Adherence (3 issues)
-8. Domain 6 — Reliability & Resilience (4 issues)
-9. Domain 10 — Testing & Validation (2 issues)
-10. Domain 4 — Coding (3 issues)
-11. Domain 8 — Performance & Scalability (2 issues)
-12. Domain 11 — Logging & Observability (3 issues)
-13. Domain 12 — Configuration & Environment (3 issues)
-14. Domain 15 — Interoperability & Integration (2 issues)
-15. Domain 16 — Data Lineage & Traceability (2 issues)
-16. Domain 13 — Documentation & Readability (3 issues)
+1. Domain 3 -- Scientific Correctness (4 issues)
+2. Domain 5 -- Data Quality & Integrity (3 issues)
+3. Domain 7 -- Idempotency & Reproducibility (2 issues)
+4. Domain 1 -- Architecture (4 issues)
+5. Domain 9 -- Security & Privacy (4 issues)
+6. Domain 2 -- Design (2 issues)
+7. Domain 14 -- Compliance & Standards Adherence (3 issues)
+8. Domain 6 -- Reliability & Resilience (4 issues)
+9. Domain 10 -- Testing & Validation (2 issues)
+10. Domain 4 -- Coding (3 issues)
+11. Domain 8 -- Performance & Scalability (2 issues)
+12. Domain 11 -- Logging & Observability (3 issues)
+13. Domain 12 -- Configuration & Environment (3 issues)
+14. Domain 15 -- Interoperability & Integration (2 issues)
+15. Domain 16 -- Data Lineage & Traceability (2 issues)
+16. Domain 13 -- Documentation & Readability (3 issues)
 
 Total: 56 issue-level fixes verified.
 
@@ -112,12 +112,12 @@ def reset_main_state(monkeypatch: pytest.MonkeyPatch):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# SECTION 1 — Domain 3: Scientific Correctness (D3-SCI-01..04)
+# SECTION 1 -- Domain 3: Scientific Correctness (D3-SCI-01..04)
 # ═══════════════════════════════════════════════════════════════════════════
 
 
 class TestDomain3ScientificCorrectness:
-    """Domain 3 — Reproducibility and scientific validation at entry point."""
+    """Domain 3 -- Reproducibility and scientific validation at entry point."""
 
     def test_D3_SCI_01_global_seed_initialised_before_imports(self, isolated_env, monkeypatch):
         """D3-SCI-01: set_global_seed(SEED) is called at the very start of run().
@@ -180,7 +180,7 @@ class TestDomain3ScientificCorrectness:
 
     def test_D3_SCI_02_pytorch_missing_is_warning_not_error(self, isolated_env, monkeypatch):
         """D3-SCI-02: A missing torch is a WARNING (return SUCCESS), not an
-        error — the pipeline supports --skip-training."""
+        error -- the pipeline supports --skip-training."""
         import importlib.util
         with patch.object(importlib.util, "find_spec") as mock_spec:
             def _side(name):
@@ -243,12 +243,12 @@ class TestDomain3ScientificCorrectness:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# SECTION 2 — Domain 5: Data Quality & Integrity (D5-DQ-01..03)
+# SECTION 2 -- Domain 5: Data Quality & Integrity (D5-DQ-01..03)
 # ═══════════════════════════════════════════════════════════════════════════
 
 
 class TestDomain5DataQuality:
-    """Domain 5 — Pre-flight data directory and input-file checks."""
+    """Domain 5 -- Pre-flight data directory and input-file checks."""
 
     def test_D5_DQ_01_writable_dirs_pass(self, isolated_env):
         """D5-DQ-01: When all critical dirs are writable, returns SUCCESS."""
@@ -312,12 +312,12 @@ class TestDomain5DataQuality:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# SECTION 3 — Domain 7: Idempotency & Reproducibility (D7-IDP-01..02)
+# SECTION 3 -- Domain 7: Idempotency & Reproducibility (D7-IDP-01..02)
 # ═══════════════════════════════════════════════════════════════════════════
 
 
 class TestDomain7Idempotency:
-    """Domain 7 — Re-run detection and incomplete-run detection."""
+    """Domain 7 -- Re-run detection and incomplete-run detection."""
 
     def test_D7_IDP_01_identical_run_warns(self, isolated_env, monkeypatch):
         """D7-IDP-01: A previous successful run with the same config_hash
@@ -333,7 +333,7 @@ class TestDomain7Idempotency:
         assert rc == EXIT_SUCCESS
 
     def test_D7_IDP_01_no_previous_run_no_warning(self, isolated_env):
-        """D7-IDP-01: No previous pipeline_results.json → no warning."""
+        """D7-IDP-01: No previous pipeline_results.json -> no warning."""
         rc = main_mod._check_idempotency()
         assert rc == EXIT_SUCCESS
 
@@ -349,7 +349,7 @@ class TestDomain7Idempotency:
         assert rc == EXIT_SUCCESS  # WARNING only
 
     def test_D7_IDP_02_orphaned_checkpoints_detected(self, isolated_env):
-        """D7-IDP-02: Checkpoint files without pipeline_results.json → WARN."""
+        """D7-IDP-02: Checkpoint files without pipeline_results.json -> WARN."""
         from drugos_graph import config
         config.CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
         (config.CHECKPOINT_DIR / "step_5.json").write_text("{}", encoding="utf-8")
@@ -362,12 +362,12 @@ class TestDomain7Idempotency:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# SECTION 4 — Domain 1: Architecture (D1-ARCH-01..04)
+# SECTION 4 -- Domain 1: Architecture (D1-ARCH-01..04)
 # ═══════════════════════════════════════════════════════════════════════════
 
 
 class TestDomain1Architecture:
-    """Domain 1 — Lazy import, package integrity, runtime context, __all__."""
+    """Domain 1 -- Lazy import, package integrity, runtime context, __all__."""
 
     def test_D1_ARCH_01_lazy_import_help_runs_without_pipeline(self, isolated_env, monkeypatch):
         """D1-ARCH-01: --help must NOT eagerly import run_pipeline.
@@ -397,10 +397,10 @@ class TestDomain1Architecture:
         elapsed = time.monotonic() - start
         # argparse --help raises SystemExit(0); run() catches it and returns 0.
         assert rc == EXIT_SUCCESS
-        assert elapsed < 5.0, f"--help took {elapsed:.2f}s — slow import path?"
+        assert elapsed < 5.0, f"--help took {elapsed:.2f}s -- slow import path?"
 
     def test_D1_ARCH_02_package_integrity_passes(self, isolated_env):
-        """D1-ARCH-02: All critical submodules are present → SUCCESS."""
+        """D1-ARCH-02: All critical submodules are present -> SUCCESS."""
         rc = main_mod._verify_package_integrity()
         assert rc == EXIT_SUCCESS
 
@@ -453,12 +453,12 @@ class TestDomain1Architecture:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# SECTION 5 — Domain 9: Security & Privacy (D9-SEC-01..04)
+# SECTION 5 -- Domain 9: Security & Privacy (D9-SEC-01..04)
 # ═══════════════════════════════════════════════════════════════════════════
 
 
 class TestDomain9Security:
-    """Domain 9 — Credential validation, root check, secret masking, path tampering."""
+    """Domain 9 -- Credential validation, root check, secret masking, path tampering."""
 
     def test_D9_SEC_01_missing_neo4j_password_fails(self, isolated_env, monkeypatch):
         """D9-SEC-01: Without DRUGOS_NEO4J_PASSWORD (and not --skip-neo4j),
@@ -534,12 +534,12 @@ class TestDomain9Security:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# SECTION 6 — Domain 2: Design (D2-DES-01..02)
+# SECTION 6 -- Domain 2: Design (D2-DES-01..02)
 # ═══════════════════════════════════════════════════════════════════════════
 
 
 class TestDomain2Design:
-    """Domain 2 — run() function design, exit-code contract."""
+    """Domain 2 -- run() function design, exit-code contract."""
 
     def test_D2_DES_01_run_returns_int_not_calls_sys_exit(self, isolated_env, monkeypatch):
         """D2-DES-01: run() returns an integer exit code; it does NOT call
@@ -567,12 +567,12 @@ class TestDomain2Design:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# SECTION 7 — Domain 14: Compliance & Standards (D14-COMP-01..03)
+# SECTION 7 -- Domain 14: Compliance & Standards (D14-COMP-01..03)
 # ═══════════════════════════════════════════════════════════════════════════
 
 
 class TestDomain14Compliance:
-    """Domain 14 — Python version, license display, schema compatibility."""
+    """Domain 14 -- Python version, license display, schema compatibility."""
 
     def test_D14_COMP_01_python_version_enforced_at_import(self):
         """D14-COMP-01: The module raises SystemExit if Python < 3.10.
@@ -613,12 +613,12 @@ class TestDomain14Compliance:
         (config.PROCESSED_DIR / "pipeline_results.json").write_text(json.dumps({
             "schema_version": "1.0.0",  # Different from current SCHEMA_VERSION
         }), encoding="utf-8")
-        # Without --require-schema-match → warning only.
+        # Without --require-schema-match -> warning only.
         rc = main_mod._check_schema_version()
         assert rc == EXIT_SUCCESS
 
     def test_D14_COMP_03_schema_mismatch_with_require_fails(self, isolated_env, monkeypatch):
-        """D14-COMP-03: With --require-schema-match, mismatch → CONFIG_FAILURE."""
+        """D14-COMP-03: With --require-schema-match, mismatch -> CONFIG_FAILURE."""
         from drugos_graph import config
         config.PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
         (config.PROCESSED_DIR / "pipeline_results.json").write_text(json.dumps({
@@ -631,12 +631,12 @@ class TestDomain14Compliance:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# SECTION 8 — Domain 6: Reliability & Resilience (D6-REL-01..04)
+# SECTION 8 -- Domain 6: Reliability & Resilience (D6-REL-01..04)
 # ═══════════════════════════════════════════════════════════════════════════
 
 
 class TestDomain6Reliability:
-    """Domain 6 — Top-level exception handler, signals, cleanup, lock."""
+    """Domain 6 -- Top-level exception handler, signals, cleanup, lock."""
 
     def test_D6_REL_01_uncaught_exception_returns_error(self, isolated_env, monkeypatch):
         """D6-REL-01: An uncaught exception from the pipeline returns ERROR,
@@ -653,7 +653,7 @@ class TestDomain6Reliability:
         """D6-REL-02: SIGINT triggers _signal_handler which sets the
         _SHUTDOWN_REQUESTED flag."""
         monkeypatch.setattr(main_mod, "_SHUTDOWN_REQUESTED", False)
-        # Directly invoke the signal handler — simulating an actual SIGINT.
+        # Directly invoke the signal handler -- simulating an actual SIGINT.
         main_mod._signal_handler(signal.SIGINT, None)
         assert main_mod._SHUTDOWN_REQUESTED is True
 
@@ -674,7 +674,7 @@ class TestDomain6Reliability:
     def test_D6_REL_04_concurrent_lock_blocks_second_acquire(self, isolated_env):
         """D6-REL-04: A second concurrent process is blocked from acquiring
         the lock.  This test uses a real subprocess because fcntl.flock
-        is per-process, not per-file-descriptor — so an in-process
+        is per-process, not per-file-descriptor -- so an in-process
         second acquire would succeed (and not actually test the lock).
 
         Note: config.py caches PROJECT_ROOT at import time, so the
@@ -694,7 +694,7 @@ class TestDomain6Reliability:
         script = textwrap.dedent(f"""
             import sys, os, fcntl
             sys.path.insert(0, {str(_PROJECT_ROOT)!r})
-            # Don't import drugos_graph — just open the lock file directly
+            # Don't import drugos_graph -- just open the lock file directly
             # and try fcntl.flock.  This isolates the OS-level lock check
             # from any config.py import-time caching.
             lock_path = {lock_path!r}
@@ -724,12 +724,12 @@ class TestDomain6Reliability:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# SECTION 9 — Domain 10: Testing & Validation (D10-TST-01..02)
+# SECTION 9 -- Domain 10: Testing & Validation (D10-TST-01..02)
 # ═══════════════════════════════════════════════════════════════════════════
 
 
 class TestDomain10Testing:
-    """Domain 10 — Testability hook and --self-test."""
+    """Domain 10 -- Testability hook and --self-test."""
 
     def test_D10_TST_01_run_callable_directly(self, isolated_env, monkeypatch):
         """D10-TST-01: run() is importable and callable without subprocess."""
@@ -762,12 +762,12 @@ class TestDomain10Testing:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# SECTION 10 — Domain 4: Coding (D4-COD-01..03)
+# SECTION 10 -- Domain 4: Coding (D4-COD-01..03)
 # ═══════════════════════════════════════════════════════════════════════════
 
 
 class TestDomain4Coding:
-    """Domain 4 — Module docstring, type annotations, guard comment."""
+    """Domain 4 -- Module docstring, type annotations, guard comment."""
 
     def test_D4_COD_01_module_docstring_present_and_comprehensive(self):
         """D4-COD-01: __main__ has a non-trivial module docstring."""
@@ -782,7 +782,7 @@ class TestDomain4Coding:
         """D4-COD-02: run() has a return type annotation of `int`."""
         import inspect
         sig = inspect.signature(main_mod.run)
-        # PEP 604 union or plain int — both acceptable.
+        # PEP 604 union or plain int -- both acceptable.
         return_annotation = str(sig.return_annotation)
         assert "int" in return_annotation, \
             f"run() return annotation must be int, got {return_annotation!r}"
@@ -803,18 +803,18 @@ class TestDomain4Coding:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# SECTION 11 — Domain 8: Performance (D8-PERF-01..02)
+# SECTION 11 -- Domain 8: Performance (D8-PERF-01..02)
 # ═══════════════════════════════════════════════════════════════════════════
 
 
 class TestDomain8Performance:
-    """Domain 8 — Lazy import + system resource logging."""
+    """Domain 8 -- Lazy import + system resource logging."""
 
     def test_D8_PERF_01_self_test_avoids_run_pipeline_import(self, isolated_env, monkeypatch):
         """D8-PERF-01: --self-test does NOT import run_pipeline.
 
         We verify by patching importlib.import_module to raise on
-        'drugos_graph.run_pipeline' — --self-test should still succeed.
+        'drugos_graph.run_pipeline' -- --self-test should still succeed.
         """
         import importlib
         real_import = importlib.import_module
@@ -841,12 +841,12 @@ class TestDomain8Performance:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# SECTION 12 — Domain 11: Logging & Observability (D11-LOG-01..03)
+# SECTION 12 -- Domain 11: Logging & Observability (D11-LOG-01..03)
 # ═══════════════════════════════════════════════════════════════════════════
 
 
 class TestDomain11Logging:
-    """Domain 11 — Fallback logging, preamble, structured exit log."""
+    """Domain 11 -- Fallback logging, preamble, structured exit log."""
 
     def test_D11_LOG_01_fallback_handler_installed_at_import(self):
         """D11-LOG-01: A StreamHandler is installed at module import time
@@ -883,12 +883,12 @@ class TestDomain11Logging:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# SECTION 13 — Domain 12: Configuration & Environment (D12-CONF-01..03)
+# SECTION 13 -- Domain 12: Configuration & Environment (D12-CONF-01..03)
 # ═══════════════════════════════════════════════════════════════════════════
 
 
 class TestDomain12Configuration:
-    """Domain 12 — .env loading, config dump, drift detection."""
+    """Domain 12 -- .env loading, config dump, drift detection."""
 
     def test_D12_CONF_01_load_dotenv_sets_env_vars(self, isolated_env, monkeypatch, tmp_path):
         """D12-CONF-01: _load_dotenv reads KEY=VALUE pairs from .env and
@@ -943,12 +943,12 @@ class TestDomain12Configuration:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# SECTION 14 — Domain 15: Interoperability & Integration (D15-INT-01..02)
+# SECTION 14 -- Domain 15: Interoperability & Integration (D15-INT-01..02)
 # ═══════════════════════════════════════════════════════════════════════════
 
 
 class TestDomain15Interoperability:
-    """Domain 15 — Wrong invocation handling + programmatic API."""
+    """Domain 15 -- Wrong invocation handling + programmatic API."""
 
     def test_D15_INT_01_relative_import_message_present(self):
         """D15-INT-01: The module source contains a clear error message for
@@ -982,12 +982,12 @@ class TestDomain15Interoperability:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# SECTION 15 — Domain 16: Data Lineage & Traceability (D16-LIN-01..02)
+# SECTION 15 -- Domain 16: Data Lineage & Traceability (D16-LIN-01..02)
 # ═══════════════════════════════════════════════════════════════════════════
 
 
 class TestDomain16Lineage:
-    """Domain 16 — run_id generation + preliminary manifest."""
+    """Domain 16 -- run_id generation + preliminary manifest."""
 
     def test_D16_LIN_01_run_id_generated_in_main(self, isolated_env, monkeypatch):
         """D16-LIN-01: _generate_run_id() produces a non-empty string and
@@ -1027,7 +1027,7 @@ class TestDomain16Lineage:
                     f"env var {key} leaked value into manifest"
 
     def test_D16_LIN_02_manifest_atomic_write(self, isolated_env):
-        """D16-LIN-02: Manifest write is atomic — no .tmp file left behind
+        """D16-LIN-02: Manifest write is atomic -- no .tmp file left behind
         on success."""
         main_mod._write_preliminary_manifest("atomic_test", ["--self-test"])
         from drugos_graph import config
@@ -1037,12 +1037,12 @@ class TestDomain16Lineage:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# SECTION 16 — Domain 13: Documentation & Readability (D13-DOC-01..03)
+# SECTION 16 -- Domain 13: Documentation & Readability (D13-DOC-01..03)
 # ═══════════════════════════════════════════════════════════════════════════
 
 
 class TestDomain13Documentation:
-    """Domain 13 — Docstring, quick-start prompt, startup banner."""
+    """Domain 13 -- Docstring, quick-start prompt, startup banner."""
 
     def test_D13_DOC_01_docstring_documents_exit_codes(self):
         """D13-DOC-01: Module docstring documents all 5 exit codes."""
@@ -1091,21 +1091,21 @@ class TestEndToEndExitCodeContract:
     """Verify the end-to-end exit-code contract from the master fix prompt §3.3."""
 
     def test_self_test_exit_code_zero(self, isolated_env):
-        """End-to-end: --self-test → exit 0."""
+        """End-to-end: --self-test -> exit 0."""
         assert main_mod.run(["--self-test"]) == 0
 
     def test_show_licenses_exit_code_zero(self, isolated_env):
-        """End-to-end: --show-licenses → exit 0."""
+        """End-to-end: --show-licenses -> exit 0."""
         assert main_mod.run(["--show-licenses"]) == 0
 
     def test_missing_neo4j_password_exit_code_three(self, isolated_env, monkeypatch):
-        """End-to-end: missing Neo4j password (no --skip-neo4j) → exit 3."""
+        """End-to-end: missing Neo4j password (no --skip-neo4j) -> exit 3."""
         monkeypatch.delenv("DRUGOS_NEO4J_PASSWORD", raising=False)
         rc = main_mod.run([])  # No --skip-neo4j, no --self-test
         assert rc == EXIT_CONFIG_FAILURE  # 3
 
     def test_root_without_allow_root_exit_code_four(self, isolated_env, monkeypatch):
-        """End-to-end: root without --allow-root → exit 4."""
+        """End-to-end: root without --allow-root -> exit 4."""
         monkeypatch.setattr(os, "geteuid", lambda: 0)
         # Need --skip-neo4j so we don't fail on password check first.
         monkeypatch.setenv("DRUGOS_NEO4J_PASSWORD", "x")

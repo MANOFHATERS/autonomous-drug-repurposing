@@ -1,5 +1,5 @@
 """
-DrugOS Graph Module — Configuration
+DrugOS Graph Module -- Configuration
 ====================================
 Central configuration for the DrugOS Autonomous Drug Repurposing Platform.
 
@@ -23,13 +23,13 @@ This module is the AUTHORITATIVE source for:
   - Compliance (naming conventions, data format standards, retention)
   - Audit & lineage (transformation logging, impact analysis, diff)
 
-KNOWN HARDCODED VALUES IN CONSUMERS (audit issue 13.1 — TO BE FIXED):
-  - entity_resolver.py hardcodes ID systems (issue 2.9) — should import CANONICAL_IDS
-  - run_pipeline.py:62 hardcodes LOG_FORMAT (issue 11.3) — should import from config
-  - run_pipeline.py:60 hardcodes logging.INFO (issue 11.2) — should import LOG_LEVEL
-  - drugbank_parser.py:322 hardcodes 'drugbank.xml' (issue 5.3) — should call get_data_source_path
-  - drkg_loader.py:91 hardcodes 'drkg.tsv' glob (issue 5.4) — should call get_drkg_tsv_path
-  - negative_sampling.py:222 hardcodes total_negatives=75000 (issue 2.4) — should read MIN_NEGATIVE_PAIRS
+KNOWN HARDCODED VALUES IN CONSUMERS (audit issue 13.1 -- TO BE FIXED):
+  - entity_resolver.py hardcodes ID systems (issue 2.9) -- should import CANONICAL_IDS
+  - run_pipeline.py:62 hardcodes LOG_FORMAT (issue 11.3) -- should import from config
+  - run_pipeline.py:60 hardcodes logging.INFO (issue 11.2) -- should import LOG_LEVEL
+  - drugbank_parser.py:322 hardcodes 'drugbank.xml' (issue 5.3) -- should call get_data_source_path
+  - drkg_loader.py:91 hardcodes 'drkg.tsv' glob (issue 5.4) -- should call get_drkg_tsv_path
+  - negative_sampling.py:222 hardcodes total_negatives=75000 (issue 2.4) -- should read MIN_NEGATIVE_PAIRS
 
 Each consumer contract is documented in the corresponding section below.
 
@@ -40,7 +40,7 @@ Week 2 exit criteria (project-level, see project doc):
   - PyG data loader confirmed working
 
 Clinical safety note:
-  A misconfiguration here does not produce a broken test — it produces
+  A misconfiguration here does not produce a broken test -- it produces
   wrong predictions, which can be used by pharmaceutical partners to
   make wet-lab decisions, which can kill patients. Treat every line as
   a potential cause of patient harm.
@@ -48,7 +48,7 @@ Clinical safety note:
 
 from __future__ import annotations
 
-# ─── Phase A — Foundations ────────────────────────────────────────────────────
+# ─── Phase A -- Foundations ────────────────────────────────────────────────────
 
 import enum
 import hashlib
@@ -70,8 +70,8 @@ from typing import (
 logger = logging.getLogger(__name__)
 
 # ─── A.1 Version Constants ────────────────────────────────────────────────────
-# Fixes audit issue 7.3 — version constants for reproducibility
-# Fixes audit issue 16.1 — lineage metadata requires version tracking
+# Fixes audit issue 7.3 -- version constants for reproducibility
+# Fixes audit issue 16.1 -- lineage metadata requires version tracking
 
 PACKAGE_VERSION: str = "2.0.0"
 PIPELINE_VERSION: str = "2.0.0-week2"
@@ -88,7 +88,7 @@ ENTITY_TYPE_PROTEIN: str = "Protein"         # CORE_NODE_TYPES member
 UNIPROT_PARSER_VERSION: str = "2.0.0"        # bumped on any parser logic change (D7-003)
 UNIPROT_SCHEMA_VERSION: str = "2.0.0"        # bumped on any output-schema change (D14-004)
 UNIPROT_LICENSE: str = "CC BY 4.0"           # D14-001 attribution requirement
-UNIPROT_ATTRIBUTION: str = (                 # D14-001 — propagated to every record
+UNIPROT_ATTRIBUTION: str = (                 # D14-001 -- propagated to every record
     "Data source: UniProt, https://www.uniprot.org/, CC BY 4.0"
 )
 # Minimum byte size for a cached UniProt file to be considered valid (D5-008).
@@ -97,7 +97,7 @@ UNIPROT_ATTRIBUTION: str = (                 # D14-001 — propagated to every r
 # test/sample filepaths passed by the caller.
 UNIPROT_MIN_VALID_SIZE_BYTES: int = 1_000_000
 
-# Fixes D9-002 — URL allowlist for UniProt downloads (guard against config
+# Fixes D9-002 -- URL allowlist for UniProt downloads (guard against config
 # injection / SSRF). Any URL in DATA_SOURCES['uniprot']['url'] MUST start with
 # one of these prefixes or the download is refused before any network call.
 ALLOWED_UNIPROT_URLS: tuple[str, ...] = (
@@ -123,7 +123,7 @@ CHEMBL_ATTRIBUTION: str = (                      # propagated to every record
 
 # ─── A.1d Domain constants for STRING loader ─────────────────────────────────
 # Added by string_loader v1.0 institutional-grade audit fix
-# (master_prompt_fix_string_loader.md — Section 14, Domain 12 Configuration).
+# (master_prompt_fix_string_loader.md -- Section 14, Domain 12 Configuration).
 # These constants eliminate magic strings scattered across the string_loader
 # source file. Importing from config means a rename happens in one place.
 # Follows the same pattern as UNIPROT_* / DRUGBANK_* / CHEMBL_* constants.
@@ -139,7 +139,7 @@ STRING_ATTRIBUTION: str = (                      # propagated to every record
 )
 # Minimum byte size for a downloaded STRING .txt.gz to be considered valid.
 # The real 9606.protein.links.full.v12.0.txt.gz is ~300 MB; this threshold
-# catches truncated or corrupted downloads (e.g., an HTML error page — R6-03).
+# catches truncated or corrupted downloads (e.g., an HTML error page -- R6-03).
 STRING_MIN_VALID_SIZE_BYTES: int = 1_000_000     # 1 MB minimum
 
 # STRING_REQUIRED
@@ -169,7 +169,7 @@ DEFAULT_CHUNK_SIZE: int = int(
 # EDGE_TYPE_TO_RELATION_STRING
 # Maps (src_type, rel_type, dst_type) tuples to the canonical relation
 # string used in Neo4j edge :TYPE. The STRING loader emits edges of type
-# ("Protein", "interacts_with", "Protein") — this dict centralises the
+# ("Protein", "interacts_with", "Protein") -- this dict centralises the
 # mapping so the loader does not hardcode the string (I15-02).
 EDGE_TYPE_TO_RELATION_STRING: dict[tuple[str, str, str], str] = {
     ("Protein", "interacts_with", "Protein"): "interacts_with",
@@ -177,7 +177,7 @@ EDGE_TYPE_TO_RELATION_STRING: dict[tuple[str, str, str], str] = {
 
 # ─── STITCH constants ───────────────────────────────────────────────────────
 # Added by stitch_loader v1.1.0 institutional-grade audit fix
-# (master_prompt_fix_stitch_loader.md — Section 4.3, Domain 12 Configuration).
+# (master_prompt_fix_stitch_loader.md -- Section 4.3, Domain 12 Configuration).
 #
 # These constants eliminate magic strings scattered across the stitch_loader
 # source file. Importing from config means a rename happens in one place.
@@ -260,14 +260,14 @@ EDGE_TYPE_TO_RELATION_STITCH: dict[tuple[str, str, str], str] = {
 
 # ─── SIDER constants ────────────────────────────────────────────────────────
 # Added by sider_loader v1.0.0 institutional-grade audit fix
-# (master_prompt — Section 3 Phase 0.4, Domain 12 Configuration).
+# (master_prompt -- Section 3 Phase 0.4, Domain 12 Configuration).
 #
 # These constants eliminate magic strings scattered across the sider_loader
 # source file. Importing from config means a rename happens in one place.
 # Follows the same pattern as UNIPROT_* / DRUGBANK_* / CHEMBL_* / STRING_* /
 # STITCH_* constants.
 #
-# Fixes: Phase 0.4 (A1.1 — SIDER is critical), D3.8 (pin version + sha256),
+# Fixes: Phase 0.4 (A1.1 -- SIDER is critical), D3.8 (pin version + sha256),
 #        D12.4 (config validation), D14.1 (license/attribution),
 #        D14.2 (schema version), D14.6 (schema versioning), D14.11 (filename),
 #        D5.1 (expected row count), D5.9 (stale-file freshness),
@@ -287,16 +287,16 @@ SIDER_ATTRIBUTION: str = (                       # propagated to every record
 # or corrupted downloads (e.g., an HTML error page returned by EMBL).
 SIDER_MIN_VALID_SIZE_BYTES: int = 1_000_000      # 1 MB minimum
 
-# SIDER_REQUIRED — equivalent of STITCH_REQUIRED. SIDER is in CRITICAL_SOURCES
+# SIDER_REQUIRED -- equivalent of STITCH_REQUIRED. SIDER is in CRITICAL_SOURCES
 # (Phase 0.4) so this flag is largely informational; CRITICAL_SOURCES
 # membership governs the pipeline-level criticality classification.
 # Override via DRUGOS_SIDER_REQUIRED=0 to make SIDER optional (NOT recommended
-# — see Patient Safety note in sider_loader.py module docstring).
+# -- see Patient Safety note in sider_loader.py module docstring).
 SIDER_REQUIRED: bool = os.environ.get(
     "DRUGOS_SIDER_REQUIRED", "1"
 ) == "1"
 
-# ALLOWED_SIDER_URLS — URL-prefix allowlist for SSRF guard (D9.1/D9.2).
+# ALLOWED_SIDER_URLS -- URL-prefix allowlist for SSRF guard (D9.1/D9.2).
 # The SIDER loader refuses to download from any URL not matching one of
 # these prefixes. HTTPS-only.
 ALLOWED_SIDER_URLS: tuple[str, ...] = (
@@ -305,33 +305,33 @@ ALLOWED_SIDER_URLS: tuple[str, ...] = (
     "https://sidereo.embl.de/download/",          # EBI mirror
 )
 
-# SIDER_BATCH_SIZE — default batch size for streaming edge generation
+# SIDER_BATCH_SIZE -- default batch size for streaming edge generation
 # (Domain 8 Performance). Override per-call via batch_size kwarg or
 # globally via DRUGOS_SIDER_BATCH_SIZE env var.
 SIDER_BATCH_SIZE: int = int(
     os.environ.get("DRUGOS_SIDER_BATCH_SIZE", "10000")
 )
 
-# SIDER_CHUNK_SIZE — default chunk size for streaming parse.
+# SIDER_CHUNK_SIZE -- default chunk size for streaming parse.
 # 100K rows per chunk balances memory and I/O efficiency on 5M-row files.
 SIDER_CHUNK_SIZE: int = int(
     os.environ.get("DRUGOS_SIDER_CHUNK_SIZE", "100000")
 )
 
-# SIDER_CHECKPOINT_INTERVAL — number of rows between checkpoint writes
+# SIDER_CHECKPOINT_INTERVAL -- number of rows between checkpoint writes
 # (Domain 6 Reliability).
 SIDER_CHECKPOINT_INTERVAL: int = int(
     os.environ.get("DRUGOS_SIDER_CHECKPOINT_INTERVAL", "100000")
 )
 
-# SIDER_COMPOUND_ID_FORMAT — declares the canonical Compound ID format
+# SIDER_COMPOUND_ID_FORMAT -- declares the canonical Compound ID format
 # emitted by the SIDER loader (Phase 0.1 / D2.4 / A1.10). Downstream
 # consumers (entity_resolver, id_crosswalk) MUST treat this as the
 # canonical Compound ID. The legacy zero-padded string format
 # ("drug_cid" column) is DEPRECATED and will be removed in v2.0.
 SIDER_COMPOUND_ID_FORMAT: str = "pubchem_cid:int"
 
-# SIDER_EXPECTED_COLUMN_COUNT — the SIDER meddra_all_se.tsv.gz file has
+# SIDER_EXPECTED_COLUMN_COUNT -- the SIDER meddra_all_se.tsv.gz file has
 # exactly 6 columns. The loader raises SiderSchemaError if the parsed
 # DataFrame has a different column count (D15.10).
 SIDER_EXPECTED_COLUMN_COUNT: int = 6
@@ -352,8 +352,8 @@ SIDER_LEGACY_EDGE_TYPE: str = "causes_side_effect"  # legacy
 
 # SIDER MedDRA type enum (D2.12). SIDER publishes 5 MedDRA hierarchy levels.
 VALID_MEDDRA_TYPES: frozenset[str] = frozenset({
-    "PT",     # Preferred Term — canonical adverse-event reporting level (default)
-    "LLT",    # Lowest Level Term — sub-concept of PT, would double-count
+    "PT",     # Preferred Term -- canonical adverse-event reporting level (default)
+    "LLT",    # Lowest Level Term -- sub-concept of PT, would double-count
     "HLT",    # High Level Term
     "HLGT",   # High Level Group Term
     "SOC",    # System Organ Class
@@ -365,7 +365,7 @@ MEDDRA_TYPE_DEDUP_ORDER: tuple[str, ...] = (
     "PT", "LLT", "HLT", "HLGT", "SOC",
 )
 
-# PubChem CID range (D3.12 / D5.13 / GAP-3.6 — mirrors stitch_loader).
+# PubChem CID range (D3.12 / D5.13 / GAP-3.6 -- mirrors stitch_loader).
 PUBCHEM_CID_MIN_SIDER: int = 1
 PUBCHEM_CID_MAX_SIDER: int = 370_000_000
 
@@ -386,7 +386,7 @@ SIDER_MAX_RETRIES: int = 3
 SIDER_RETRY_BACKOFF_BASE: int = 2
 SIDER_DOWNLOAD_TIMEOUT_SECONDS: int = 60
 
-# Magic numbers (D12.7) — extracted as named constants.
+# Magic numbers (D12.7) -- extracted as named constants.
 SIDER_MAX_REDIRECTS: int = 5
 SIDER_FILE_PERMISSIONS: int = 0o644
 SIDER_LOG_DIR_PERMISSIONS: int = 0o755
@@ -395,25 +395,25 @@ SIDER_LOG_DIR_PERMISSIONS: int = 0o755
 # Update this when SIDER publishes a new release.
 SIDER_MEDDRA_VERSION: str = "26.0"
 
-# SIDER release date — pinned version (D3.8 / D12.4).
+# SIDER release date -- pinned version (D3.8 / D12.4).
 # Update this AND the sha256 when SIDER publishes a new release.
 # The current pinned release is the 2023-10-25 build.
 SIDER_PINNED_VERSION: str = "2023-10-25"
 SIDER_PINNED_RELEASE_DATE: str = "2023-10-25"
 # sha256 of the pinned SIDER meddra_all_se.tsv.gz. Set to None when SIDER
-# does not publish a checksum (SIDER does NOT publish sha256 — we compute
+# does not publish a checksum (SIDER does NOT publish sha256 -- we compute
 # it at download time and pin it for future runs, per D3.8).
 # Leave None initially; the loader will compute and store it as a sidecar.
 SIDER_PINNED_SHA256: str | None = None
 
-# EDGE_TYPE_TO_RELATION_SIDER — maps (src_type, rel_type, dst_type) tuples
+# EDGE_TYPE_TO_RELATION_SIDER -- maps (src_type, rel_type, dst_type) tuples
 # to the canonical relation string used in Neo4j edge :TYPE. The SIDER
 # loader emits edges of type ("Compound", "causes_adverse_event",
 # "MedDRA_Term"). Centralises the mapping so the loader does not hardcode
-# strings (D15.1 — kg_builder contract).
+# strings (D15.1 -- kg_builder contract).
 EDGE_TYPE_TO_RELATION_SIDER: dict[tuple[str, str, str], str] = {
     ("Compound", "causes_adverse_event", "MedDRA_Term"): "causes_adverse_event",
-    # Legacy edge type — kept for migration-period dual-write (Phase 0.3).
+    # Legacy edge type -- kept for migration-period dual-write (Phase 0.3).
     ("Compound", "causes_side_effect", "Side Effect"): "causes_side_effect",
 }
 
@@ -431,7 +431,7 @@ ALLOWED_STRING_URLS: tuple[str, ...] = (
 # STRING edges have BOTH endpoints of type "Protein".
 
 # ─── A.2 __all__ ─────────────────────────────────────────────────────────────
-# Fixes audit issue 13.12 — __all__ must be defined
+# Fixes audit issue 13.12 -- __all__ must be defined
 
 __all__: list[str] = [
     # ── Version constants ──
@@ -458,7 +458,7 @@ __all__: list[str] = [
     "CHEMBL_PCHEMBL_RANGE",
     # ── Loader domain constants (string_loader audit D12-001) ──
     # Added by string_loader v1.0 institutional-grade audit fix
-    # (master_prompt_fix_string_loader.md — Section 14).
+    # (master_prompt_fix_string_loader.md -- Section 14).
     "SOURCE_KEY_STRING", "SOURCE_STRING",
     "STRING_PARSER_VERSION", "STRING_SCHEMA_VERSION",
     "STRING_LICENSE", "STRING_ATTRIBUTION",
@@ -468,7 +468,7 @@ __all__: list[str] = [
     "EDGE_TYPE_TO_RELATION_STRING",
     # ── Loader domain constants (stitch_loader audit BUG-12.4) ──
     # Added by stitch_loader v1.1.0 institutional-grade audit fix
-    # (master_prompt_fix_stitch_loader.md — Section 4.3).
+    # (master_prompt_fix_stitch_loader.md -- Section 4.3).
     "SOURCE_KEY_STITCH", "SOURCE_STITCH",
     "STITCH_PARSER_VERSION", "STITCH_SCHEMA_VERSION",
     "STITCH_LICENSE", "STITCH_ATTRIBUTION",
@@ -479,7 +479,7 @@ __all__: list[str] = [
     "EDGE_TYPE_TO_RELATION_STITCH",
     # ── Loader domain constants (sider_loader audit Phase 0.4 / D12.4) ──
     # Added by sider_loader v1.0.0 institutional-grade audit fix
-    # (master_prompt — Section 3 Phase 0.4, Domain 12 Configuration).
+    # (master_prompt -- Section 3 Phase 0.4, Domain 12 Configuration).
     "SOURCE_KEY_SIDER", "SOURCE_SIDER",
     "SIDER_PARSER_VERSION", "SIDER_SCHEMA_VERSION",
     "SIDER_LICENSE", "SIDER_ATTRIBUTION",
@@ -670,7 +670,7 @@ __all__: list[str] = [
     "MIN_POSITIVE_PAIRS", "MIN_NEGATIVE_PAIRS", "TARGET_TRANSE_AUC",
     "DEV_SMOKE_TEST", "DEV_SMOKE_TEST_MIN_AUC",
     "ENTITY_MATCH_RATE", "STRING_SCORE_THRESHOLD", "STITCH_SCORE_THRESHOLD",
-    "STRING_MIN_COMBINED_SCORE",  # v57 ROOT FIX (P2L-032) — canonical STRING threshold
+    "STRING_MIN_COMBINED_SCORE",  # v57 ROOT FIX (P2L-032) -- canonical STRING threshold
     "REFERENTIAL_INTEGRITY_RULES", "DUPLICATE_DETECTION_THRESHOLD",
     "DUPLICATE_DETECTION_FIELDS",
     # ── Entity-Resolver configuration (Block B of ENTITY_RESOLVER_FIX_PROMPT.md) ──
@@ -733,7 +733,7 @@ __all__: list[str] = [
 ]
 
 # ─── A.3 SEED & Reproducibility ──────────────────────────────────────────────
-# Fixes audit issue 7.2 — no global seed set
+# Fixes audit issue 7.2 -- no global seed set
 # RATIONALE: Without a fixed seed, the pipeline is non-deterministic.
 # Two runs on the same data produce different negative samples, different
 # TransE initializations, and different train/val/test splits. This
@@ -789,7 +789,7 @@ def set_global_seed(seed: int | None = None) -> int:
     except ImportError:
         pass
 
-    # Fixes audit issue 7.2 — struct timeval seed for hash randomization
+    # Fixes audit issue 7.2 -- struct timeval seed for hash randomization
     os.environ["PYTHONHASHSEED"] = str(SEED)
 
     logger.info("Global seed set to %d (deterministic_mode=%s)", SEED, DETERMINISTIC_MODE)
@@ -797,7 +797,7 @@ def set_global_seed(seed: int | None = None) -> int:
 
 
 # ─── A.4 Config hash computation ─────────────────────────────────────────────
-# Fixes audit issue 7.3 — CONFIG_HASH for reproducibility tracking
+# Fixes audit issue 7.3 -- CONFIG_HASH for reproducibility tracking
 
 def compute_config_hash() -> str:
     """Compute a stable SHA-256 hash of the current configuration.
@@ -837,11 +837,11 @@ def compute_config_hash() -> str:
 CONFIG_HASH: str = ""  # Computed at end of module after all config is loaded
 
 
-# ─── Phase B — Directory & Path Fixes ────────────────────────────────────────
+# ─── Phase B -- Directory & Path Fixes ────────────────────────────────────────
 
-# Fixes audit issue 1.1 — PROJECT_ROOT renamed to _PROJECT_ROOT (private)
-# Fixes audit issue 4.4 — DRUGOS_PROJECT_ROOT env var override
-# Fixes audit issue 12.4 — env-based root for deployment flexibility
+# Fixes audit issue 1.1 -- PROJECT_ROOT renamed to _PROJECT_ROOT (private)
+# Fixes audit issue 4.4 -- DRUGOS_PROJECT_ROOT env var override
+# Fixes audit issue 12.4 -- env-based root for deployment flexibility
 
 _DRUGOS_ROOT_ENV = os.environ.get("DRUGOS_PROJECT_ROOT", "")
 if _DRUGOS_ROOT_ENV:
@@ -851,10 +851,10 @@ else:
     # For installed packages: use current working directory
     _PROJECT_ROOT = Path(__file__).resolve().parent.parent
     if not (_PROJECT_ROOT / "data").exists():
-        # Likely installed via pip — use cwd
+        # Likely installed via pip -- use cwd
         _PROJECT_ROOT = Path.cwd()
 
-# Fixes audit issue 1.1 — backward-compat alias
+# Fixes audit issue 1.1 -- backward-compat alias
 # Deprecated: use _PROJECT_ROOT for internal derivation; PROJECT_ROOT kept for backward compat
 PROJECT_ROOT: Path = _PROJECT_ROOT
 
@@ -863,16 +863,16 @@ RAW_DIR = DATA_DIR / "raw"
 PROCESSED_DIR = DATA_DIR / "processed"
 
 # FIX TOP-12: Phase 2's ``PROCESSED_DIR`` (phase2/data/processed/) is for
-# Phase 2's OWN outputs — PyG HeteroData, TransE checkpoints, pipeline
+# Phase 2's OWN outputs -- PyG HeteroData, TransE checkpoints, pipeline
 # results JSON, etc. Phase 2 READS Phase 1's outputs via the bridge from
-# ``PHASE1_PROCESSED_DIR`` (phase1/processed_data/) — the read-only Phase 1
+# ``PHASE1_PROCESSED_DIR`` (phase1/processed_data/) -- the read-only Phase 1
 # directory. The two paths must NOT be conflated: Phase 1 CSVs are an
 # immutable upstream artifact for Phase 2, never written to by Phase 2.
 # ``PHASE1_PROCESSED_DIR`` defaults to the sibling ``phase1/processed_data``
 # directory relative to this package; override via
 # ``DRUGOS_PHASE1_PROCESSED_DIR`` env var (used by run_unified.py to wire
 # the two phases together). Synchronized with
-# phase1/config/settings.py — DO NOT diverge (audit TOP-12).
+# phase1/config/settings.py -- DO NOT diverge (audit TOP-12).
 PHASE1_PROCESSED_DIR: Path = Path(
     os.environ.get(
         "DRUGOS_PHASE1_PROCESSED_DIR",
@@ -888,16 +888,16 @@ PHASE1_PROCESSED_DIR: Path = Path(
 # the model is not launch-ready. The previous code referenced
 # ``RESULTS_PERSIST_PATH`` without defining it (ImportError was caught by
 # a broad ``except Exception`` and silently swallowed), so the V1 launch
-# criteria check was SKIPPED when invoked via ``python -m drugos_graph`` —
+# criteria check was SKIPPED when invoked via ``python -m drugos_graph`` --
 # defeating the entire ML-honesty audit fix. Synchronized with
-# run_pipeline.py:run_full_pipeline — DO NOT diverge (audit TOP-3).
+# run_pipeline.py:run_full_pipeline -- DO NOT diverge (audit TOP-3).
 RESULTS_PERSIST_PATH: Path = PROCESSED_DIR / "pipeline_results.json"
 
-# Fixes audit issue 1.2 — KG_DIR renamed to KG_EXPORT_DIR (clearer intent)
+# Fixes audit issue 1.2 -- KG_DIR renamed to KG_EXPORT_DIR (clearer intent)
 # KG_EXPORT_DIR is for KG exports/snapshots, NOT the live Neo4j KG
 KG_EXPORT_DIR = DATA_DIR / "kg_exports"
 
-# Backward-compat alias — KG_DIR still importable
+# Backward-compat alias -- KG_DIR still importable
 # Deprecated: use KG_EXPORT_DIR; KG_DIR kept for backward compat
 KG_DIR: Path = KG_EXPORT_DIR
 
@@ -905,32 +905,32 @@ EMBEDDINGS_DIR = DATA_DIR / "embeddings"
 LOGS_DIR = _PROJECT_ROOT / "logs"
 MODEL_DIR = _PROJECT_ROOT / "models"
 
-# Fixes audit issue 6.6 — DEAD_LETTER_DIR for quarantining bad records
+# Fixes audit issue 6.6 -- DEAD_LETTER_DIR for quarantining bad records
 DEAD_LETTER_DIR = DATA_DIR / "dead_letter"
 
-# Fixes audit issue 6.10 — CHECKPOINT_DIR for pipeline resumption
+# Fixes audit issue 6.10 -- CHECKPOINT_DIR for pipeline resumption
 CHECKPOINT_DIR = DATA_DIR / "checkpoints"
 
-# Fixes audit issue 9.9 — AUDIT_LOG_DIR for security audit trail
+# Fixes audit issue 9.9 -- AUDIT_LOG_DIR for security audit trail
 AUDIT_LOG_DIR = LOGS_DIR / "audit"
 
-# Fixes audit issue 16.4 — OUTPUT_METADATA_DIR for lineage manifests
+# Fixes audit issue 16.4 -- OUTPUT_METADATA_DIR for lineage manifests
 OUTPUT_METADATA_DIR = DATA_DIR / "output_metadata"
 
-# Fixes audit issue 16.10 — IMPACT_ANALYSIS_DIR for downstream impact tracking
+# Fixes audit issue 16.10 -- IMPACT_ANALYSIS_DIR for downstream impact tracking
 IMPACT_ANALYSIS_DIR = DATA_DIR / "impact_analysis"
 
-# Fixes audit issue 16.8 — TRANSFORMATION_LOG_DIR for data transformation logs
+# Fixes audit issue 16.8 -- TRANSFORMATION_LOG_DIR for data transformation logs
 TRANSFORMATION_LOG_DIR = LOGS_DIR / "transformations"
 
-# Fixes audit issue 16.11 — CONFIG_DIFF_DIR for configuration diff tracking
+# Fixes audit issue 16.11 -- CONFIG_DIFF_DIR for configuration diff tracking
 CONFIG_DIFF_DIR = DATA_DIR / "config_diffs"
 
 # =============================================================================
 # OpenTargets configuration constants
 # =============================================================================
 # Added by opentargets_loader v2.0 institutional-grade audit fix
-# (opentargets_loader_repair_prompt.md — Section 5.3).
+# (opentargets_loader_repair_prompt.md -- Section 5.3).
 #
 # These constants are the single source of truth for all OpenTargets loader
 # thresholds, URL allowlists, regex patterns, and tunable knobs. They are
@@ -949,36 +949,36 @@ CONFIG_DIFF_DIR = DATA_DIR / "config_diffs"
 #        ARCH-5 (OpenTargetsConfig), SCI-11 (per-evidence-type thresholds).
 # -----------------------------------------------------------------------------
 
-# SOURCE_KEY_OPENTARGETS — DATA_SOURCES dict key for OpenTargets.
+# SOURCE_KEY_OPENTARGETS -- DATA_SOURCES dict key for OpenTargets.
 SOURCE_KEY_OPENTARGETS: str = "opentargets"
 
-# SOURCE_OPENTARGETS — human-readable source name (used in node .source and
+# SOURCE_OPENTARGETS -- human-readable source name (used in node .source and
 # edge _source props).
 SOURCE_OPENTARGETS: str = "OpenTargets"
 
-# OPENTARGETS_PARSER_VERSION — bumped on any parser logic change
+# OPENTARGETS_PARSER_VERSION -- bumped on any parser logic change
 # (opentargets_loader_repair_prompt Section 0.2 constraint #22).
 OPENTARGETS_PARSER_VERSION: str = "2.0.0"
 
-# OPENTARGETS_SCHEMA_VERSION — bumped on any output-schema change
+# OPENTARGETS_SCHEMA_VERSION -- bumped on any output-schema change
 # (opentargets_loader_repair_prompt Section 0.2 constraint #22).
 OPENTARGETS_SCHEMA_VERSION: str = "2.0.0"
 
-# OPENTARGETS_LICENSE — OpenTargets is released under CC0 1.0 (public domain).
+# OPENTARGETS_LICENSE -- OpenTargets is released under CC0 1.0 (public domain).
 OPENTARGETS_LICENSE: str = "CC0 1.0"
 
-# OPENTARGETS_ATTRIBUTION — propagated to every emitted record's _attribution
+# OPENTARGETS_ATTRIBUTION -- propagated to every emitted record's _attribution
 # field (Domain 14 Compliance / COMP-3).
 OPENTARGETS_ATTRIBUTION: str = (
     "OpenTargets Platform release 25.03. "
     "https://platform.opentargets.org/. Licensed under CC0 1.0."
 )
 
-# OPENTARGETS_TARGET_TAX_ID — NCBI Taxonomy ID for Homo sapiens.
+# OPENTARGETS_TARGET_TAX_ID -- NCBI Taxonomy ID for Homo sapiens.
 # Used for organism filtering (SCI-7). Non-human evidence is rejected.
 OPENTARGETS_TARGET_TAX_ID: int = 9606
 
-# OPENTARGETS_MIN_SCORE_DEFAULT — default minimum score for evidence records.
+# OPENTARGETS_MIN_SCORE_DEFAULT -- default minimum score for evidence records.
 # Overridable via DRUGOS_OPENTARGETS_MIN_SCORE env var (Domain 12).
 # Per-evidence-type thresholds in OPENTARGETS_PER_EVIDENCE_TYPE_THRESHOLDS
 # take precedence over this global default (SCI-11).
@@ -987,7 +987,7 @@ OPENTARGETS_MIN_SCORE_DEFAULT: float = float(
 )
 
 # v28 ROOT FIX (P2-L-16): minimum GDA score thresholds for DisGeNET and
-# OMIM. Previously these loaders applied NO score threshold — a 0.01-score
+# OMIM. Previously these loaders applied NO score threshold -- a 0.01-score
 # text-mined association loaded with the SAME edge weight as a 0.95-score
 # validated causal variant. Defaults:
 #   - DISGENET_MIN_SCORE = 0.3 (per DisGeNET's own recommendation that
@@ -996,13 +996,13 @@ OPENTARGETS_MIN_SCORE_DEFAULT: float = float(
 #   - OMIM_MIN_SCORE = 0.3 (v77 ROOT FIX: was 0.5, which DROPPED every
 #     mapping_key=3 / "provisional" gene-disease edge. OMIM mapping_key=3
 #     means "the gene has been mapped to a disease locus, but the
-#     relationship is provisional" — these ARE scientifically meaningful
+#     relationship is provisional" -- these ARE scientifically meaningful
 #     edges (provisional, not rejected). Dropping them entirely was silent
 #     data loss: the KG lost every provisional OMIM association, including
 #     rare-disease associations that are only provisionally mapped. The
 #     proper scientific treatment is to INCLUDE provisional edges with a
 #     low confidence score (0.4) so the model can learn from them with
-#     appropriate weighting — NOT to drop them. Lowering the threshold to
+#     appropriate weighting -- NOT to drop them. Lowering the threshold to
 #     0.3 (matching DisGeNET) preserves mapping_key=3 edges (score=0.4 >
 #     0.3) while still filtering truly garbage text-mined noise (score <
 #     0.3). Operators can still raise/lower/disable via env var.)
@@ -1014,165 +1014,165 @@ OMIM_MIN_SCORE: float = float(
     os.environ.get("DRUGOS_OMIM_MIN_SCORE", "0.3")
 )
 
-# OPENTARGETS_MIN_RESOLUTION_RATE — minimum target resolution rate (ENSG →
+# OPENTARGETS_MIN_RESOLUTION_RATE -- minimum target resolution rate (ENSG ->
 # UniProt AC crosswalk success rate). Below this rate, the loader raises
 # OpenTargetsDataIntegrityError in CLINICAL+ mode (Section 0.4).
 OPENTARGETS_MIN_RESOLUTION_RATE: float = float(
     os.environ.get("DRUGOS_OPENTARGETS_MIN_RESOLUTION_RATE", "0.5")
 )
 
-# OPENTARGETS_REGULATORY_RESOLUTION_RATE — minimum target resolution rate in
+# OPENTARGETS_REGULATORY_RESOLUTION_RATE -- minimum target resolution rate in
 # REGULATORY mode (Section 0.4). Below this rate, the loader raises
 # OpenTargetsDataIntegrityError.
 OPENTARGETS_REGULATORY_RESOLUTION_RATE: float = float(
     os.environ.get("DRUGOS_OPENTARGETS_REGULATORY_RESOLUTION_RATE", "0.9")
 )
 
-# OPENTARGETS_PROGRESS_LOG_INTERVAL — number of lines between progress log
+# OPENTARGETS_PROGRESS_LOG_INTERVAL -- number of lines between progress log
 # messages during parsing (Domain 11 Observability / LOG-3).
 OPENTARGETS_PROGRESS_LOG_INTERVAL: int = int(
     os.environ.get("DRUGOS_OPENTARGETS_PROGRESS_INTERVAL", "100000")
 )
 
-# OPENTARGETS_DOWNLOAD_BATCH_BYTES — chunk size for streaming download
+# OPENTARGETS_DOWNLOAD_BATCH_BYTES -- chunk size for streaming download
 # (Domain 8 Performance). 1 MB balances I/O efficiency and memory.
 OPENTARGETS_DOWNLOAD_BATCH_BYTES: int = 1 << 20  # 1 MiB
 
-# OPENTARGETS_PARSED_CACHE_DIR — directory for parsed-record cache files
+# OPENTARGETS_PARSED_CACHE_DIR -- directory for parsed-record cache files
 # (Domain 7 Idempotency / IDEM-3). Keyed by source SHA-256.
 OPENTARGETS_PARSED_CACHE_DIR: Path = CHECKPOINT_DIR / "opentargets_parsed"
 
-# OPENTARGETS_STALENESS_DAYS — number of days after which a cached file is
+# OPENTARGETS_STALENESS_DAYS -- number of days after which a cached file is
 # considered stale and triggers re-download in CLINICAL+ mode (DQ-12, DQ-16).
 OPENTARGETS_STALENESS_DAYS: int = int(
     os.environ.get("DRUGOS_OPENTARGETS_STALENESS_DAYS", "180")
 )
 
-# OPENTARGETS_NEO4J_BATCH_SIZE — maximum edges per Neo4j load_edges_bulk_create
+# OPENTARGETS_NEO4J_BATCH_SIZE -- maximum edges per Neo4j load_edges_bulk_create
 # call (PERF-4 / Section 0.2 constraint #12). 50K is the safe upper bound for
 # Neo4j transaction size on a 15M-edge load.
 OPENTARGETS_NEO4J_BATCH_SIZE: int = int(
     os.environ.get("DRUGOS_OPENTARGETS_NEO4J_BATCH_SIZE", "50000")
 )
 
-# OPENTARGETS_DEAD_LETTER_PATH — path to the OpenTargets dead-letter queue
+# OPENTARGETS_DEAD_LETTER_PATH -- path to the OpenTargets dead-letter queue
 # (REL-5 / Section 0.2 constraint #18). One JSON line per dropped record.
 OPENTARGETS_DEAD_LETTER_PATH: Path = DEAD_LETTER_DIR / "opentargets_malformed.jsonl"
 
-# OPENTARGETS_LINEAGE_LOG_PATH — path to the OpenTargets lineage log
+# OPENTARGETS_LINEAGE_LOG_PATH -- path to the OpenTargets lineage log
 # (LIN-6 / Section 0.2 constraint #19). One JSON line per transformation step.
 OPENTARGETS_LINEAGE_LOG_PATH: Path = LOGS_DIR / "lineage" / "opentargets_lineage.jsonl"
 
-# OPENTARGETS_AUDIT_LOG_PATH — path to the OpenTargets audit log
+# OPENTARGETS_AUDIT_LOG_PATH -- path to the OpenTargets audit log
 # (Domain 9 Security / SEC-5). One JSON line per download + per access.
 OPENTARGETS_AUDIT_LOG_PATH: Path = LOGS_DIR / "audit" / "opentargets_access.jsonl"
 
-# OPENTARGETS_TRANSFORMATION_LOG_PATH — path to the OpenTargets transformation
+# OPENTARGETS_TRANSFORMATION_LOG_PATH -- path to the OpenTargets transformation
 # log (Domain 16 Lineage / LIN-2). One JSON line per transformation step.
 OPENTARGETS_TRANSFORMATION_LOG_PATH: Path = (
     LOGS_DIR / "transformations" / "opentargets.jsonl"
 )
 
-# OPENTARGETS_QUALITY_REPORT_PATH — path to the OpenTargets quality report
+# OPENTARGETS_QUALITY_REPORT_PATH -- path to the OpenTargets quality report
 # (Domain 5 Data Quality / DQ-11). JSON file with metrics + validation result.
 OPENTARGETS_QUALITY_REPORT_PATH: Path = (
     LOGS_DIR / "quality" / "opentargets_quality_report.json"
 )
 
-# OPENTARGETS_CIRCUIT_BREAKER_THRESHOLD — maximum dead-lettered records before
+# OPENTARGETS_CIRCUIT_BREAKER_THRESHOLD -- maximum dead-lettered records before
 # the circuit breaker trips (REL-9). Prevents infinite-loop on a structurally
 # broken source file.
 OPENTARGETS_CIRCUIT_BREAKER_THRESHOLD: int = int(
     os.environ.get("DRUGOS_OPENTARGETS_CIRCUIT_BREAKER_THRESHOLD", "1000")
 )
 
-# OPENTARGETS_MAX_RETRIES — maximum download retry attempts (REL-1).
+# OPENTARGETS_MAX_RETRIES -- maximum download retry attempts (REL-1).
 OPENTARGETS_MAX_RETRIES: int = int(
     os.environ.get("DRUGOS_OPENTARGETS_MAX_RETRIES", "3")
 )
 
-# OPENTARGETS_RETRY_BACKOFF_BASE — base for exponential backoff (REL-1).
+# OPENTARGETS_RETRY_BACKOFF_BASE -- base for exponential backoff (REL-1).
 # Actual delay = backoff_base * (2 ** attempt) + jitter.
 OPENTARGETS_RETRY_BACKOFF_BASE: float = float(
     os.environ.get("DRUGOS_OPENTARGETS_RETRY_BACKOFF_BASE", "2.0")
 )
 
-# OPENTARGETS_DOWNLOAD_TIMEOUT_SECONDS — per-request timeout (REL-2).
+# OPENTARGETS_DOWNLOAD_TIMEOUT_SECONDS -- per-request timeout (REL-2).
 OPENTARGETS_DOWNLOAD_TIMEOUT_SECONDS: int = int(
     os.environ.get("DRUGOS_OPENTARGETS_DOWNLOAD_TIMEOUT", "300")
 )
 
-# OPENTARGETS_MIN_VALID_SIZE_BYTES — minimum byte size for a downloaded
+# OPENTARGETS_MIN_VALID_SIZE_BYTES -- minimum byte size for a downloaded
 # OpenTargets .json.gz to be considered valid (DQ-2). The real evidence
 # file is ~800 MB; this threshold catches truncated or HTML-error-page
 # downloads.
 OPENTARGETS_MIN_VALID_SIZE_BYTES: int = 1_000_000  # 1 MB minimum
 
-# OPENTARGETS_FORCE_DOWNLOAD — global env-var override to force re-download
+# OPENTARGETS_FORCE_DOWNLOAD -- global env-var override to force re-download
 # (Domain 12 Configuration / CONF-2).
 OPENTARGETS_FORCE_DOWNLOAD: bool = (
     os.environ.get("DRUGOS_OPENTARGETS_FORCE_DOWNLOAD", "0") == "1"
 )
 
-# OPENTARGETS_SKIP — global env-var to skip OpenTargets load entirely
+# OPENTARGETS_SKIP -- global env-var to skip OpenTargets load entirely
 # (Domain 12 Configuration / CONF-2). Useful for fast iteration on other
 # loaders during development.
 OPENTARGETS_SKIP: bool = (
     os.environ.get("DRUGOS_OPENTARGETS_SKIP", "0") == "1"
 )
 
-# OPENTARGETS_OFFLINE — global env-var to use cached file only (no download)
+# OPENTARGETS_OFFLINE -- global env-var to use cached file only (no download)
 # (Domain 12 Configuration / CONF-2).
 OPENTARGETS_OFFLINE: bool = (
     os.environ.get("DRUGOS_OPENTARGETS_OFFLINE", "0") == "1"
 )
 
-# OPENTARGETS_SKIP_SHA256 — global env-var to skip sha256 verification
-# (dev only — logs a WARNING when active, DQ-1 / DQ-14).
+# OPENTARGETS_SKIP_SHA256 -- global env-var to skip sha256 verification
+# (dev only -- logs a WARNING when active, DQ-1 / DQ-14).
 OPENTARGETS_SKIP_SHA256: bool = (
     os.environ.get("DRUGOS_OPENTARGETS_SKIP_SHA256", "0") == "1"
 )
 
-# OPENTARGETS_MAX_ROWS — global env-var to cap rows read (dev / debug).
+# OPENTARGETS_MAX_ROWS -- global env-var to cap rows read (dev / debug).
 OPENTARGETS_MAX_ROWS: int | None = (
     int(os.environ["DRUGOS_OPENTARGETS_MAX_ROWS"])
     if os.environ.get("DRUGOS_OPENTARGETS_MAX_ROWS", "").isdigit()
     else None
 )
 
-# OPENTARGETS_CHEMBL_ID_REGEX — ChEMBL ID format: ^CHEMBL\d+$ (SCI-4).
+# OPENTARGETS_CHEMBL_ID_REGEX -- ChEMBL ID format: ^CHEMBL\d+$ (SCI-4).
 # Case-insensitive on input; canonical form is uppercase.
 OPENTARGETS_CHEMBL_ID_REGEX = re.compile(r"^CHEMBL\d+$", re.IGNORECASE)
 
-# OPENTARGETS_ENSG_ID_REGEX — Ensembl gene ID format: ^ENSG\d{11}$ (SCI-10).
+# OPENTARGETS_ENSG_ID_REGEX -- Ensembl gene ID format: ^ENSG\d{11}$ (SCI-10).
 # 11 digits after the "ENSG" prefix. Case-insensitive on input; canonical
 # form is uppercase.
 OPENTARGETS_ENSG_ID_REGEX = re.compile(r"^ENSG\d{11}$", re.IGNORECASE)
 
-# OPENTARGETS_UNIPROT_AC_REGEX — UniProt accession format: 6 or 10 chars
+# OPENTARGETS_UNIPROT_AC_REGEX -- UniProt accession format: 6 or 10 chars
 # ([OPQ][0-9][A-Z0-9]{3}[0-9] or [A-NR-Z][0-9]([A-Z][A-Z0-9]{2}){1,4}[0-9]).
 # Used to validate crosswalk output.
 OPENTARGETS_UNIPROT_AC_REGEX = re.compile(
     r"^([OPQ][0-9][A-Z0-9]{3}[0-9]|[A-NR-Z][0-9]([A-Z][A-Z0-9]{2}){1,4}[0-9])$"
 )
 
-# OPENTARGETS_DISEASE_ID_PATTERNS — disease ontology ID format patterns
+# OPENTARGETS_DISEASE_ID_PATTERNS -- disease ontology ID format patterns
 # (SCI-3 / DQ-11). OpenTargets emits disease IDs from multiple ontologies:
-#   * EFO         — ^EFO_\d{7}$
-#   * MONDO       — ^MONDO_\d{7}$
-#   * HP          — ^HP:\d{7}$  (HPO)
-#   * MP          — ^MP:\d{7}$  (Mammalian Phenotype)
-#   * Orphanet    — ^Orphanet_\d+$
-#   * SNOMEDCT    — ^SNOMEDCT_\d+$
-#   * OTAR        — ^OTAR_\d{8}$
-#   * DOID        — ^DOID:\d+$
-#   * UMLS CUI    — ^C\d{7}$  (crosswalk target)
+#   * EFO         -- ^EFO_\d{7}$
+#   * MONDO       -- ^MONDO_\d{7}$
+#   * HP          -- ^HP:\d{7}$  (HPO)
+#   * MP          -- ^MP:\d{7}$  (Mammalian Phenotype)
+#   * Orphanet    -- ^Orphanet_\d+$
+#   * SNOMEDCT    -- ^SNOMEDCT_\d+$
+#   * OTAR        -- ^OTAR_\d{8}$
+#   * DOID        -- ^DOID:\d+$
+#   * UMLS CUI    -- ^C\d{7}$  (crosswalk target)
 #
 # v70 ROOT FIX (P2L-047): the previous patterns used INCONSISTENT
-# separators — underscore for EFO/MONDO/Orphanet/SNOMEDCT/OTAR but
+# separators -- underscore for EFO/MONDO/Orphanet/SNOMEDCT/OTAR but
 # COLON for DOID/HP/MP. This made the ontology-detection regex
 # fragile: an OpenTargets ID emitted as ``DOID_1438`` (underscore,
-# which some OpenTargets releases actually use — see audit P2L-047)
+# which some OpenTargets releases actually use -- see audit P2L-047)
 # would FAIL the ``^DOID:\d+$`` pattern and be classified as
 # "UNKNOWN", losing the ontology provenance. Symmetrically, a
 # DisGeNET ID ``EFO:0000311`` (colon, which DisGeNET's API emits
@@ -1180,11 +1180,11 @@ OPENTARGETS_UNIPROT_AC_REGEX = re.compile(
 #
 # Root fix: every ontology pattern now accepts BOTH underscore AND
 # colon as the separator (``[_:]``). This makes the detection regex
-# format-agnostic — the actual separator normalization happens
+# format-agnostic -- the actual separator normalization happens
 # downstream in ``_normalise_ontology_id`` (opentargets_loader) and
 # the Phase 1 disgenet_pipeline (which already normalizes to colon
 # form). The patterns are also made case-insensitive where the
-# ontology name is not case-sensitive (Orphanet, SNOMEDCT, OTAR) —
+# ontology name is not case-sensitive (Orphanet, SNOMEDCT, OTAR) --
 # EFO/MONDO/DOID/HP/MP/UMLS retain their original case sensitivity
 # (these ontologies have a canonical case that the source files
 # respect).
@@ -1200,17 +1200,17 @@ OPENTARGETS_DISEASE_ID_PATTERNS: dict[str, "re.Pattern[str]"] = {
     "UMLS":      re.compile(r"^C\d{7}$"),
 }
 
-# OPENTARGETS_PER_EVIDENCE_TYPE_THRESHOLDS — per-datasource min-score
+# OPENTARGETS_PER_EVIDENCE_TYPE_THRESHOLDS -- per-datasource min-score
 # thresholds (SCI-11). Scores are normalized 0-1 within each datasource.
 # Thresholds are calibrated per OpenTargets documentation and community
 # standards:
-#   * chembl/known_drug: 0.5 — derived from pChEMBL ≥5 (10µM activity)
+#   * chembl/known_drug: 0.5 -- derived from pChEMBL ≥5 (10µM activity)
 #     Ref: https://doi.org/10.1016/j.drudis.2014.10.012
-#   * genetic_association: 0.3 — broad inclusion for hypothesis generation
-#   * literature: 0.4 — text-mining cosine threshold
-#   * animal_model: 0.5 — pre-clinical signal
-#   * affected_pathway: 0.4 — reactome pathway disruption
-#   * default: 0.5 — conservative default for unknown datasources
+#   * genetic_association: 0.3 -- broad inclusion for hypothesis generation
+#   * literature: 0.4 -- text-mining cosine threshold
+#   * animal_model: 0.5 -- pre-clinical signal
+#   * affected_pathway: 0.4 -- reactome pathway disruption
+#   * default: 0.5 -- conservative default for unknown datasources
 OPENTARGETS_PER_EVIDENCE_TYPE_THRESHOLDS: dict[str, float] = {
     "chembl": 0.5,
     "genetic_association": 0.3,
@@ -1220,16 +1220,16 @@ OPENTARGETS_PER_EVIDENCE_TYPE_THRESHOLDS: dict[str, float] = {
     "default": 0.5,
 }
 
-# OPENTARGETS_DATASOURCE_RELATION_MAP — maps (datasourceId, datatypeId) to
+# OPENTARGETS_DATASOURCE_RELATION_MAP -- maps (datasourceId, datatypeId) to
 # (rel_type, dst_type) for scientific correctness (SCI-8). The label
-# "indication" is FORBIDDEN — ChEMBL binding-activity evidence is NOT
+# "indication" is FORBIDDEN -- ChEMBL binding-activity evidence is NOT
 # approved-indication data. Approved indications come from drugbank_parser.
 #
 # Critical pairs (DO NOT modify without SCI-8 sign-off):
 #   * ("chembl", "known_drug")    -> ("binds",       "Protein")
 #       ChEMBL is IC50/Ki/Kd binding-activity data, NOT approved indications.
 #   * ("chembl", "animal_model")  -> ("tested_for",  "Disease")
-#       Pre-clinical assay evidence — NOT approved.
+#       Pre-clinical assay evidence -- NOT approved.
 #   * ("evrot", "literature")     -> ("associated_with", "Disease")
 #   * ("ot_genetics_portal", "genetic_association") -> ("associated_with", "Disease")
 OPENTARGETS_DATASOURCE_RELATION_MAP: dict[tuple[str, str], tuple[str, str]] = {
@@ -1249,7 +1249,7 @@ OPENTARGETS_DATASOURCE_RELATION_MAP: dict[tuple[str, str], tuple[str, str]] = {
     ("chembl", "functional_assay"):                 ("modulates", "Protein"),
 }
 
-# OPENTARGETS_EMITTABLE_TRIPLES — set of (src_type, rel_type, dst_type)
+# OPENTARGETS_EMITTABLE_TRIPLES -- set of (src_type, rel_type, dst_type)
 # triples that the OpenTargets loader is allowed to emit (ARCH-2). The
 # loader raises OpenTargetsSchemaError if it tries to emit a triple not in
 # this set. This is the loader's contract with ``EDGE_PRODUCERS`` and the
@@ -1263,19 +1263,19 @@ OPENTARGETS_EMITTABLE_TRIPLES: frozenset[tuple[str, str, str]] = frozenset({
     ("Compound", "tested_for", "Disease"),
     ("Compound", "associated_with", "Disease"),
     ("Compound", "modulates", "Protein"),
-    # v43 ROOT FIX (P1 — OPENTARGETS_EMITTABLE_TRIPLES includes non-core
+    # v43 ROOT FIX (P1 -- OPENTARGETS_EMITTABLE_TRIPLES includes non-core
     # edge): ("Compound", "disrupted_in", "Pathway") was here but is NOT
     # in CORE_EDGE_TYPES. Production kg_builder logs WARNING but loads
     # the edge; RecordingGraphBuilder (bridge/tests) rejects via
-    # CORE_EDGE_TYPES whitelist → dead-letters every such edge. Divergent
+    # CORE_EDGE_TYPES whitelist -> dead-letters every such edge. Divergent
     # behavior between production and test paths. Removed until either
     # (a) added to CORE_EDGE_TYPES, or (b) the OpenTargets loader stops
     # emitting it.
-    # ("Compound", "disrupted_in", "Pathway"),  # REMOVED — not in CORE_EDGE_TYPES
+    # ("Compound", "disrupted_in", "Pathway"),  # REMOVED -- not in CORE_EDGE_TYPES
     ("Protein", "associated_with", "Disease"),
 })
 
-# OPENTARGETS_DST_ID_PREFIXES — prefixes applied to dst_id values to
+# OPENTARGETS_DST_ID_PREFIXES -- prefixes applied to dst_id values to
 # prevent namespace collisions in the KG (D15.2). Compound src_ids are
 # ChEMBL IDs (no prefix needed). Disease dst_ids are UMLS CUIs when
 # crosswalked, otherwise ontology-prefixed (e.g. "EFO:...").
@@ -1286,7 +1286,7 @@ OPENTARGETS_DST_ID_PREFIXES: dict[str, str] = {
     "Pathway": "",        # Reactome ID, no prefix
 }
 
-# ALLOWED_OPENTARGETS_URLS — URL-prefix allowlist for SSRF guard
+# ALLOWED_OPENTARGETS_URLS -- URL-prefix allowlist for SSRF guard
 # (Domain 9 Security / SEC-2). The OpenTargets loader refuses to download
 # from any URL not matching one of these prefixes. HTTPS-only.
 ALLOWED_OPENTARGETS_URLS: tuple[str, ...] = (
@@ -1295,54 +1295,54 @@ ALLOWED_OPENTARGETS_URLS: tuple[str, ...] = (
     "https://platform.opentargets.org/",
 )
 
-# OPENTARGETS_GZIP_MAGIC — gzip file magic bytes (DQ-2).
+# OPENTARGETS_GZIP_MAGIC -- gzip file magic bytes (DQ-2).
 OPENTARGETS_GZIP_MAGIC: bytes = b"\x1f\x8b"
 
-# OPENTARGETS_HASH_LENGTH — length of the deterministic edge ID hash
+# OPENTARGETS_HASH_LENGTH -- length of the deterministic edge ID hash
 # (D2.8 / G9). 16 chars of sha1 hex.
 OPENTARGETS_HASH_LENGTH: int = 16
 
-# OPENTARGETS_EDGE_ID_SOURCE — suffix used in the edge ID hash to namespace
+# OPENTARGETS_EDGE_ID_SOURCE -- suffix used in the edge ID hash to namespace
 # OpenTargets edges from other sources (prevents Neo4j MERGE collision).
 OPENTARGETS_EDGE_ID_SOURCE: str = "OPENTARGETS"
 
-# OPENTARGETS_LARGE_FILE_THRESHOLD — threshold above which streaming is
+# OPENTARGETS_LARGE_FILE_THRESHOLD -- threshold above which streaming is
 # preferred over eager materialization (Domain 8 Performance / PERF-1).
 OPENTARGETS_LARGE_FILE_THRESHOLD: int = 500_000  # 500K records
 
-# OPENTARGETS_LARGE_DF_THRESHOLD — threshold above which a DataFrame is
+# OPENTARGETS_LARGE_DF_THRESHOLD -- threshold above which a DataFrame is
 # considered "large" and triggers memory-efficient processing paths
 # (Domain 8 Performance / PERF-2).
 OPENTARGETS_LARGE_DF_THRESHOLD: int = 500_000
 
-# OPENTARGETS_BATCH_SIZE — default batch size for streaming edge generation
+# OPENTARGETS_BATCH_SIZE -- default batch size for streaming edge generation
 # (Domain 8 Performance / PERF-2). Override per-call via batch_size kwarg.
 OPENTARGETS_BATCH_SIZE: int = int(
     os.environ.get("DRUGOS_OPENTARGETS_BATCH_SIZE", "10000")
 )
 
-# OPENTARGETS_CHUNK_SIZE — default chunk size for streaming parse
+# OPENTARGETS_CHUNK_SIZE -- default chunk size for streaming parse
 # (Domain 8 Performance / PERF-1). 100K rows per chunk balances memory
 # and I/O efficiency on 5M-row files.
 OPENTARGETS_CHUNK_SIZE: int = int(
     os.environ.get("DRUGOS_OPENTARGETS_CHUNK_SIZE", "100000")
 )
 
-# OPENTARGETS_CHECKPOINT_INTERVAL — number of rows between checkpoint writes
+# OPENTARGETS_CHECKPOINT_INTERVAL -- number of rows between checkpoint writes
 # (Domain 6 Reliability / REL-6).
 OPENTARGETS_CHECKPOINT_INTERVAL: int = int(
     os.environ.get("DRUGOS_OPENTARGETS_CHECKPOINT_INTERVAL", "100000")
 )
 
-# OPENTARGETS_RELEASE_DATE — pinned OpenTargets release date (D3.8 / D12.4).
+# OPENTARGETS_RELEASE_DATE -- pinned OpenTargets release date (D3.8 / D12.4).
 # Update this AND the sha256 when OpenTargets publishes a new release.
 OPENTARGETS_RELEASE_DATE: str = "2025-03-01"
 
-# OPENTARGETS_PINNED_VERSION — pinned OpenTargets platform release string
+# OPENTARGETS_PINNED_VERSION -- pinned OpenTargets platform release string
 # (D3.8 / D12.4).
 OPENTARGETS_PINNED_VERSION: str = "25.03"
 
-# OPENTARGETS_PINNED_SHA256 — sha256 of the pinned OpenTargets evidence file.
+# OPENTARGETS_PINNED_SHA256 -- sha256 of the pinned OpenTargets evidence file.
 # Set to None because OpenTargets does NOT publish a checksum. The loader
 # computes it at download time and stores it as a sidecar for future runs
 # (D3.8 / DQ-14).
@@ -1350,8 +1350,8 @@ OPENTARGETS_PINNED_SHA256: str | None = None
 
 
 # =============================================================================
-# ClinicalTrials constants — added by clinicaltrials_loader v2.1.0
-# institutional-grade audit fix (PROMPT_fix_clinicaltrials_loader.md —
+# ClinicalTrials constants -- added by clinicaltrials_loader v2.1.0
+# institutional-grade audit fix (PROMPT_fix_clinicaltrials_loader.md --
 # 148 findings across 16 domains).
 #
 # These constants follow the same env-var-overridable pattern as the
@@ -1365,33 +1365,33 @@ OPENTARGETS_PINNED_SHA256: str | None = None
 # Section 3 for the per-constant rationale.
 # =============================================================================
 
-# SOURCE_KEY_CLINICALTRIALS — DATA_SOURCES dict key for ClinicalTrials.gov AACT.
+# SOURCE_KEY_CLINICALTRIALS -- DATA_SOURCES dict key for ClinicalTrials.gov AACT.
 SOURCE_KEY_CLINICALTRIALS: str = "clinicaltrials"
 
-# SOURCE_CLINICALTRIALS — human-readable source name (used in node .source and
+# SOURCE_CLINICALTRIALS -- human-readable source name (used in node .source and
 # edge _source props).
 SOURCE_CLINICALTRIALS: str = "ClinicalTrials"
 
-# CLINICALTRIALS_PARSER_VERSION — bumped on any parser logic change
+# CLINICALTRIALS_PARSER_VERSION -- bumped on any parser logic change
 # (PROMPT_fix_clinicaltrials_loader.md Section 0.2 constraint #22).
 CLINICALTRIALS_PARSER_VERSION: str = "2.1.0"
 
-# CLINICALTRIALS_SCHEMA_VERSION — bumped on any output-schema change.
+# CLINICALTRIALS_SCHEMA_VERSION -- bumped on any output-schema change.
 # Tied to ClinicalTrialEdgeRecord in schemas.py (Issue 14.6).
 CLINICALTRIALS_SCHEMA_VERSION: str = "2.1.0"
 
-# CLINICALTRIALS_LICENSE — AACT is released under CC0 1.0 (public domain).
+# CLINICALTRIALS_LICENSE -- AACT is released under CC0 1.0 (public domain).
 CLINICALTRIALS_LICENSE: str = "CC0 1.0"
 
-# CLINICALTRIALS_ATTRIBUTION — propagated to every emitted record's _attribution
-# field (Domain 14 Compliance — Issue 13.7, 13.8, 14.4, 14.5). CTTI requests
+# CLINICALTRIALS_ATTRIBUTION -- propagated to every emitted record's _attribution
+# field (Domain 14 Compliance -- Issue 13.7, 13.8, 14.4, 14.5). CTTI requests
 # this citation for any derivative work.
 CLINICALTRIALS_ATTRIBUTION: str = (
     "ClinicalTrials.gov AACT database (CTTI). "
     "https://aact.ctti-clinicaltrials.org/. Licensed under CC0 1.0."
 )
 
-# CLINICALTRIALS_CITATION — propagated to lineage file (Issue 13.8).
+# CLINICALTRIALS_CITATION -- propagated to lineage file (Issue 13.8).
 # CTTI requests this citation format for derivative works.
 CLINICALTRIALS_CITATION: str = (
     "AACT data extracted from https://aact.ctti-clinicaltrials.org. "
@@ -1400,10 +1400,10 @@ CLINICALTRIALS_CITATION: str = (
 )
 
 # ── Phase filter (Issues 3.2, 3.4, 12.1, 13.2) ──────────────────────────────
-# DEFAULT phases includes Phase 4 — post-marketing surveillance evidence
+# DEFAULT phases includes Phase 4 -- post-marketing surveillance evidence
 # from 10K+ real-world patients is STRONGER than Phase 3 RCT evidence, not
 # weaker. Excluding Phase 4 silently downgrades the evidence base for
-# FDA-approved drugs (Issue 3.4 / 13.2 — patient safety).
+# FDA-approved drugs (Issue 3.4 / 13.2 -- patient safety).
 CLINICALTRIALS_DEFAULT_PHASES: tuple[str, ...] = ("Phase 3", "Phase 4")
 
 # Controlled vocabulary for AACT phase values (Issue 2.10, 5.5).
@@ -1420,7 +1420,7 @@ CLINICALTRIALS_VALID_PHASES: frozenset[str] = frozenset({
     "N/A",
 })
 
-# Phase → evidence-strength contribution (Issue 2.5).
+# Phase -> evidence-strength contribution (Issue 2.5).
 # Phase 4 > Phase 3 > Phase 2/3 > Phase 2 > Phase 1/2 > Phase 1 > Early Phase 1.
 # Phase 3/4 is treated the same as Phase 4 (post-marketing).
 # Phase 2/3 is treated the same as Phase 3 (the higher phase dominates).
@@ -1439,10 +1439,10 @@ CLINICALTRIALS_PHASE_STRENGTH: dict[str, float] = {
 
 # ── Intervention type filter (Issues 2.7, 3.3, 12.2, 13.3) ─────────────────
 # DEFAULT includes "Drug" AND "Biological". Biological covers monoclonal
-# antibodies, vaccines, and cell therapies — the majority of new FDA
+# antibodies, vaccines, and cell therapies -- the majority of new FDA
 # approvals since 2015 (Humira, Keytruda, Opdivo, Ozempic). Excluding
 # them would silently blind the RL ranker to ~30% of the modern
-# pharmacopeia (Issue 2.7 / 13.3 — patient safety).
+# pharmacopeia (Issue 2.7 / 13.3 -- patient safety).
 CLINICALTRIALS_DEFAULT_INTERVENTION_TYPES: tuple[str, ...] = ("Drug", "Biological")
 
 # Controlled vocabulary for AACT intervention_type values (Issue 2.7).
@@ -1475,7 +1475,7 @@ CLINICALTRIALS_VALID_STUDY_TYPES: frozenset[str] = frozenset({
 
 # ── Status filter (Issue 3.11) ──────────────────────────────────────────────
 # DEFAULT explicitly EXCLUDES Withdrawn/Suspended/Terminated/No Longer
-# Available/Unknown status — these are NOT positive evidence. A Terminated
+# Available/Unknown status -- these are NOT positive evidence. A Terminated
 # trial that was stopped for safety is captured via why_stopped (Issue 3.5),
 # but the trial itself does not constitute evidence that the drug treats
 # the disease.
@@ -1483,7 +1483,7 @@ CLINICALTRIALS_VALID_STUDY_TYPES: frozenset[str] = frozenset({
 # v27 ROOT FIX (P2-L-7): the previous default also included
 # ``"Recruiting"``, ``"Not yet recruiting"``, ``"Enrolling by invitation"``,
 # and ``"Active, not recruiting"``. These trials have ZERO results data
-# (no enrollment completion, no primary outcome measure published) —
+# (no enrollment completion, no primary outcome measure published) --
 # including them as efficacy evidence is scientifically wrong and a
 # patient-safety risk (an RL ranker would treat a half-enrolled Phase II
 # trial as equivalent to a completed Phase III trial with published
@@ -1513,7 +1513,7 @@ CLINICALTRIALS_VALID_STATUSES: frozenset[str] = frozenset({
 })
 
 # ── Trial design strength modifiers (Issue 2.5, 3.8) ───────────────────────
-# Allocation bonuses (Issue 3.8 — randomized > non-randomized).
+# Allocation bonuses (Issue 3.8 -- randomized > non-randomized).
 CLINICALTRIALS_ALLOCATION_BONUS: dict[str, float] = {
     "Randomized":        0.10,
     "Non-Randomized":    0.0,
@@ -1521,7 +1521,7 @@ CLINICALTRIALS_ALLOCATION_BONUS: dict[str, float] = {
     "NA":                0.0,
 }
 
-# Masking bonuses (Issue 3.8 — double-blind > single-blind > open label).
+# Masking bonuses (Issue 3.8 -- double-blind > single-blind > open label).
 CLINICALTRIALS_MASKING_BONUS: dict[str, float] = {
     "Quadruple Blind":       0.10,  # Participant, Care Provider, Investigator, Outcomes Assessor
     "Triple Blind":          0.10,
@@ -1534,7 +1534,7 @@ CLINICALTRIALS_MASKING_BONUS: dict[str, float] = {
 
 # ── Enrollment filter (Issue 3.6) ───────────────────────────────────────────
 # Minimum enrollment for a trial to be considered. Phase 3 trials with
-# <30 participants are suspect — likely misclassified. We don't filter them
+# <30 participants are suspect -- likely misclassified. We don't filter them
 # out by default (that would silently drop data), but we emit a WARNING and
 # penalize evidence_strength.
 CLINICALTRIALS_DEFAULT_MIN_ENROLLMENT: int = 0
@@ -1564,7 +1564,7 @@ CLINICALTRIALS_HAS_RESULTS_BONUS: float = 0.05
 #   - drug_role="comparator_or_placebo"
 #   - evidence_strength *= 0.3 (heavy penalty)
 #   - id_confidence="low"
-# This is the C2 patient-safety fix — prevents the ranker from learning
+# This is the C2 patient-safety fix -- prevents the ranker from learning
 # "Warfarin treats Disease X" when Warfarin was the comparator arm.
 #
 # v70 ROOT FIX (P2L-043): the original pattern lumps placebos and
@@ -1574,7 +1574,7 @@ CLINICALTRIALS_HAS_RESULTS_BONUS: float = 0.05
 # (``_PLACEBO_REGEX`` and ``_ACTIVE_COMPARATOR_REGEX``) and a new
 # ``CLINICALTRIALS_ACTIVE_COMPARATOR_EVIDENCE_MULTIPLIER`` constant
 # to apply a MILDER penalty to active comparators (real drugs used as
-# comparison standards — they ARE evidence the disease is treatable,
+# comparison standards -- they ARE evidence the disease is treatable,
 # unlike placebos which are inert controls). The legacy
 # ``CLINICALTRIALS_COMPARATOR_EVIDENCE_MULTIPLIER`` (0.3) now applies
 # ONLY to placebo arms.
@@ -1584,27 +1584,27 @@ CLINICALTRIALS_COMPARATOR_PATTERN: str = (
 CLINICALTRIALS_COMPARATOR_EVIDENCE_MULTIPLIER: float = 0.3
 # v70 P2L-043: Active-comparator multiplier. Active comparators are
 # REAL drugs (e.g. metformin, warfarin) used as the comparison
-# standard in a trial — they ARE evidence that the disease is
+# standard in a trial -- they ARE evidence that the disease is
 # treatable, but they're not the experimental arm. A mild penalty
 # (0.8) reflects that the evidence is real but indirect (the trial
-# was not designed to test the active comparator — it was designed
+# was not designed to test the active comparator -- it was designed
 # to test the experimental drug against the active comparator). 0.8
 # is chosen so active-comparator evidence stays in the "high" or
 # "medium" confidence band for Phase 2/3 trials (Phase 3 base 0.7 ×
-# 0.8 = 0.56 → medium; Phase 2 base 0.5 × 0.8 = 0.40 → medium),
+# 0.8 = 0.56 -> medium; Phase 2 base 0.5 × 0.8 = 0.40 -> medium),
 # whereas the placebo multiplier 0.3 drops the same trials to "low"
-# (Phase 3 × 0.3 = 0.21 → low; Phase 2 × 0.3 = 0.15 → low).
+# (Phase 3 × 0.3 = 0.21 -> low; Phase 2 × 0.3 = 0.15 -> low).
 CLINICALTRIALS_ACTIVE_COMPARATOR_EVIDENCE_MULTIPLIER: float = 0.8
 
 # ── Trial age filter (Issue 3.13, 5.7) ──────────────────────────────────────
-# Default None — includes all trials. For RL training, consider setting
+# Default None -- includes all trials. For RL training, consider setting
 # max_trial_age_years=30 to exclude obsolete evidence.
 CLINICALTRIALS_DEFAULT_MAX_TRIAL_AGE_YEARS: int | None = None
 
 # ── Cross-product inflation (Issue 2.2) ─────────────────────────────────────
 # AACT does not link interventions to conditions at the row level. A trial
 # with interventions [Drug A, Placebo] and conditions [Disease X, Disease Y]
-# produces 4 rows in the JOIN. Only ONE row (Drug A → Disease X) is the
+# produces 4 rows in the JOIN. Only ONE row (Drug A -> Disease X) is the
 # experimental association; the other 3 are fabrications of the JOIN.
 # We penalize trials whose N_interventions × N_conditions exceeds this
 # threshold.
@@ -1612,15 +1612,15 @@ CLINICALTRIALS_CROSS_PRODUCT_WARN_THRESHOLD: int = 4
 CLINICALTRIALS_CROSS_PRODUCT_PENALTY: float = 0.10
 
 # ── MeSH term handling (Issues 3.14, 5.11, 14.9) ────────────────────────────
-# Warn if an intervention has >5 MeSH terms (suspicious — likely over-broad).
+# Warn if an intervention has >5 MeSH terms (suspicious -- likely over-broad).
 CLINICALTRIALS_MAX_MESH_PER_INTERVENTION: int = 5
 
-# Known garbage MeSH values (placeholder, error strings) — Issue 5.11.
+# Known garbage MeSH values (placeholder, error strings) -- Issue 5.11.
 # v77 ROOT FIX (forensic scientific bug): "D000001" was INCORRECTLY in this
 # blocklist. D000001 is a VALID MeSH descriptor ID (the MeSH ID for
 # "Calcium", a real biomedical substance). Treating it as garbage caused
 # every clinical trial record whose drug_mesh was D000001 to be silently
-# quarantined and dropped from the knowledge graph — a scientific data-loss
+# quarantined and dropped from the knowledge graph -- a scientific data-loss
 # bug. The blocklist must contain ONLY placeholder/error sentinel strings,
 # never valid MeSH IDs. Any MeSH ID matching ^D\d{6}$ is by definition a
 # valid descriptor and must NOT be blocklisted.
@@ -1727,8 +1727,8 @@ CLINICALTRIALS_EDGE_ID_SOURCE: str = "CLINICALTRIALS"
 
 # ── Neo4j label / edge type contract (Issues 2.1, 14.1, 15.3, 15.9) ─────────
 # The ONLY emittable triple is ("Compound", "tested_for", "Disease").
-# "treats" is FORBIDDEN — reserved for FDA-approved drugs from DrugBank.
-# "clinical_trial" is DEPRECATED v0 name — kept for backward-compat shim
+# "treats" is FORBIDDEN -- reserved for FDA-approved drugs from DrugBank.
+# "clinical_trial" is DEPRECATED v0 name -- kept for backward-compat shim
 # only, never emitted by the new loader.
 CLINICALTRIALS_EMITTABLE_TRIPLES: frozenset[tuple[str, str, str]] = frozenset({
     ("Compound", "tested_for", "Disease"),
@@ -1740,7 +1740,7 @@ CLINICALTRIALS_VALID_NODE_TYPES: frozenset[str] = frozenset({
     "Disease",
 })
 
-# ── Staleness (Issue 11.2 — stale cache warning) ────────────────────────────
+# ── Staleness (Issue 11.2 -- stale cache warning) ────────────────────────────
 # Warn if cached AACT zip is older than this many days.
 CLINICALTRIALS_STALE_CACHE_WARNING_DAYS: int = 7
 
@@ -1757,15 +1757,15 @@ CLINICALTRIALS_PINNED_RELEASE: str | None = (
     os.environ.get("DRUGOS_CLINICALTRIALS_PINNED_RELEASE")
 )
 
-# CLINICALTRIALS_PINNED_SHA256 — set to None because AACT does not publish a
+# CLINICALTRIALS_PINNED_SHA256 -- set to None because AACT does not publish a
 # checksum. The loader computes it at download time and stores it as a
 # sidecar / lineage field for future runs (Issues 6.10, 7.4).
 CLINICALTRIALS_PINNED_SHA256: str | None = None
 
 
 # =============================================================================
-# GEO constants — added by geo_loader v1.0.0 institutional-grade audit fix
-# (GEO_LOADER_MASTER_REPAIR_PROMPT.md — 192 findings across 16 domains).
+# GEO constants -- added by geo_loader v1.0.0 institutional-grade audit fix
+# (GEO_LOADER_MASTER_REPAIR_PROMPT.md -- 192 findings across 16 domains).
 #
 # These constants centralise every magic value used by ``geo_loader.py``
 # so the loader NEVER hardcodes URLs, filenames, retry counts, timeouts,
@@ -1776,42 +1776,42 @@ CLINICALTRIALS_PINNED_SHA256: str | None = None
 # source of truth for its value.
 #
 # Patient-safety doctrine: GEO is the SOLE source of
-# Protein→expressed_in→Anatomy edges in the KG. If GEO silently fails,
+# Protein->expressed_in->Anatomy edges in the KG. If GEO silently fails,
 # the KG lacks the entire tissue-specificity modality, the Graph
 # Transformer cannot learn that a drug target is absent from the disease
 # tissue, and a clinician may be handed a "high-confidence" repurposing
-# candidate that will fail in Phase II — or harm a patient. Every
+# candidate that will fail in Phase II -- or harm a patient. Every
 # constant here exists to make the loader's behavior explicit and
 # auditable.
 # =============================================================================
 
-# SOURCE_GEO — human-readable source name (used in node .source and edge
+# SOURCE_GEO -- human-readable source name (used in node .source and edge
 # _source props). NOTE: this is the lowercase form used in the
 # ``_source`` field on every record (per R15); the title-case form
 # ``"GEO"`` is used in log messages and reports.
 SOURCE_GEO: str = "geo"
 
-# GEO_PARSER_VERSION — bumped on any parser logic change (master prompt
-# §11.1 / §0.2 constraint #22 — Definition of Done). The parser version
+# GEO_PARSER_VERSION -- bumped on any parser logic change (master prompt
+# §11.1 / §0.2 constraint #22 -- Definition of Done). The parser version
 # propagates to every emitted record via the ``_parser_version``
 # provenance field (R15) so the KG builder can trace any edge back to
 # the exact parser that produced it.
 GEO_PARSER_VERSION: str = "1.0.0"
 
-# GEO_SCHEMA_VERSION — bumped on any output-schema change. Tied to
+# GEO_SCHEMA_VERSION -- bumped on any output-schema change. Tied to
 # ``GeoRawRecord`` / ``GeoEdgeRecord`` in schemas.py (GEO-14.5, GEO-14.6).
 GEO_SCHEMA_VERSION: str = "1.0.0"
 
-# GEO_API_VERSION — semantic version of the public API (download_geo,
+# GEO_API_VERSION -- semantic version of the public API (download_geo,
 # parse_geo_series, geo_to_edge_records, GeoLoader). Bumped on any
 # breaking change to public function signatures (GEO-15.7).
 GEO_API_VERSION: str = "1.0.0"
 
-# GEO_LICENSE — GEO data is public domain (U.S. Government work).
+# GEO_LICENSE -- GEO data is public domain (U.S. Government work).
 # Every record carries ``_license=GEO_LICENSE`` (Phase 0.9 / GEO-14.3).
 GEO_LICENSE: str = "Public Domain"
 
-# GEO_ATTRIBUTION — NCBI requests citation of "Barrett T et al. Nucleic
+# GEO_ATTRIBUTION -- NCBI requests citation of "Barrett T et al. Nucleic
 # Acids Res. 2013" for GEO. Every record carries
 # ``_attribution=GEO_ATTRIBUTION`` (Phase 0.9 / GEO-14.4 / GEO-15.8).
 GEO_ATTRIBUTION: str = (
@@ -1819,14 +1819,14 @@ GEO_ATTRIBUTION: str = (
     "NCBI, https://www.ncbi.nlm.nih.gov/geo/"
 )
 
-# GEO_CITATION — full academic citation for the GEO database (GEO-3.11).
+# GEO_CITATION -- full academic citation for the GEO database (GEO-3.11).
 GEO_CITATION: str = (
     "Barrett T, Wilhite SE, Ledoux P, et al. NCBI GEO: archive for "
-    "functional genomics data sets—update. Nucleic Acids Res. "
+    "functional genomics data sets--update. Nucleic Acids Res. "
     "2013;41(D1):D991-D995. doi:10.1093/nar/gks1193."
 )
 
-# GEO_CITATION_ORIGINAL — the original GEO paper (GEO-3.11).
+# GEO_CITATION_ORIGINAL -- the original GEO paper (GEO-3.11).
 GEO_CITATION_ORIGINAL: str = (
     "Edgar R, Domrachev M, Lash AE. Gene Expression Omnibus: NCBI gene "
     "expression and hybridization array data repository. Nucleic Acids "
@@ -1845,13 +1845,13 @@ GEO_CITATION_ORIGINAL: str = (
 #   * empty string
 GEO_SERIES_ID_REGEX: str = r"GSE\d+"
 
-# GEO_SAMPLE_ID_REGEX — GSM accession format (GEO-5.1).
+# GEO_SAMPLE_ID_REGEX -- GSM accession format (GEO-5.1).
 GEO_SAMPLE_ID_REGEX: str = r"GSM\d+"
 
-# GEO_PLATFORM_ID_REGEX — GPL accession format (GEO-5.1).
+# GEO_PLATFORM_ID_REGEX -- GPL accession format (GEO-5.1).
 GEO_PLATFORM_ID_REGEX: str = r"GPL\d+"
 
-# GEO_UBERON_URI_REGEX — UBERON URI format (GEO-3.3, GEO-5.1).
+# GEO_UBERON_URI_REGEX -- UBERON URI format (GEO-3.3, GEO-5.1).
 GEO_UBERON_URI_REGEX: str = r"http://purl\.obolibrary\.org/obo/UBERON_\d+"
 
 # ── Pinned series (Phase 0.2, Phase 0.4, GEO-2.1, GEO-3.14, GEO-7.5,
@@ -2013,44 +2013,44 @@ GEO_LARGE_FILE_THRESHOLD_BYTES: int = 100 * 1024 * 1024  # 100 MB
 GEO_SUPPORTS_BATCH_CORRECTION: bool = False
 
 # ── Environment variable overrides (GEO-12.5, Phase 0.1, 0.4, 0.5) ──────────
-# GEO_REQUIRED=1 — fail loudly (raise GeoCriticalError) if GEO produces
-# 0 records. Default "0" (graceful degradation — log WARNING, continue).
+# GEO_REQUIRED=1 -- fail loudly (raise GeoCriticalError) if GEO produces
+# 0 records. Default "0" (graceful degradation -- log WARNING, continue).
 GEO_REQUIRED: bool = os.environ.get("GEO_REQUIRED", "0") == "1"
 
-# GEO_AUTO_DOWNLOAD=1 — enable automatic download. Default "0" (operator
+# GEO_AUTO_DOWNLOAD=1 -- enable automatic download. Default "0" (operator
 # must place the file manually OR set GEO_AUTO_DOWNLOAD=1).
 GEO_AUTO_DOWNLOAD: bool = os.environ.get("GEO_AUTO_DOWNLOAD", "0") == "1"
 
-# GEO_KEEP_BACKUPS=1 — keep .bak.{timestamp} of overwritten files.
+# GEO_KEEP_BACKUPS=1 -- keep .bak.{timestamp} of overwritten files.
 GEO_KEEP_BACKUPS: bool = os.environ.get("GEO_KEEP_BACKUPS", "0") == "1"
 
-# GEO_MEMORY_BUDGET_MB — override the default memory budget.
+# GEO_MEMORY_BUDGET_MB -- override the default memory budget.
 GEO_ENV_MEMORY_BUDGET_MB: int = int(
     os.environ.get("GEO_MEMORY_BUDGET_MB", str(GEO_DEFAULT_MEMORY_BUDGET_MB))
 )
 
-# GEO_SKIP_SHA256=1 — skip SHA-256 verification (testing only, NEVER in prod).
+# GEO_SKIP_SHA256=1 -- skip SHA-256 verification (testing only, NEVER in prod).
 GEO_SKIP_SHA256: bool = os.environ.get("GEO_SKIP_SHA256", "0") == "1"
 
-# GEO_OFFLINE=1 — never attempt network calls; only use cached files.
+# GEO_OFFLINE=1 -- never attempt network calls; only use cached files.
 GEO_OFFLINE: bool = os.environ.get("DRUGOS_GEO_OFFLINE", "0") == "1"
 
-# GEO_SKIP_RECORD_COUNT_GUARD=1 — skip the GEO-5.5 record-count validation
-# (testing only — useful for unit tests that use small fixtures). NEVER
+# GEO_SKIP_RECORD_COUNT_GUARD=1 -- skip the GEO-5.5 record-count validation
+# (testing only -- useful for unit tests that use small fixtures). NEVER
 # set this in production.
 GEO_SKIP_RECORD_COUNT_GUARD: bool = (
     os.environ.get("GEO_SKIP_RECORD_COUNT_GUARD", "0") == "1"
 )
 
-# DRUGOS_ENV — environment selector (GEO-12.9). Default "dev".
-#   * "dev"     — small test series for fast iteration
-#   * "staging" — pinned series GSE92649
-#   * "prod"    — pinned series GSE92649
-# v29 ROOT FIX (audit I-4 — THREE environment selectors): the codebase
+# DRUGOS_ENV -- environment selector (GEO-12.9). Default "dev".
+#   * "dev"     -- small test series for fast iteration
+#   * "staging" -- pinned series GSE92649
+#   * "prod"    -- pinned series GSE92649
+# v29 ROOT FIX (audit I-4 -- THREE environment selectors): the codebase
 # had THREE different env selectors with DIFFERENT defaults:
-#   DRUGOS_ENV (default "dev") — DEAD, not used anywhere
-#   DRUGOS_ENVIRONMENT (default "dev") — used everywhere
-#   ENVIRONMENT (default "development") — DIFFERENT default!
+#   DRUGOS_ENV (default "dev") -- DEAD, not used anywhere
+#   DRUGOS_ENVIRONMENT (default "dev") -- used everywhere
+#   ENVIRONMENT (default "development") -- DIFFERENT default!
 # This was a footgun: setting DRUGOS_ENVIRONMENT=production left
 # ENVIRONMENT="development", causing contradictory behavior.
 # ROOT FIX: make DRUGOS_ENV an ALIAS of DRUGOS_ENVIRONMENT (same value,
@@ -2104,7 +2104,7 @@ def get_geo_series_path(series_id: str | None = None) -> Path:
 
     if "geo" not in DATA_SOURCES:
         raise GeoConfigurationError(
-            "DATA_SOURCES['geo'] is missing — cannot resolve GEO series path",
+            "DATA_SOURCES['geo'] is missing -- cannot resolve GEO series path",
             context={"available_sources": sorted(DATA_SOURCES.keys())},
         )
 
@@ -2112,14 +2112,14 @@ def get_geo_series_path(series_id: str | None = None) -> Path:
         series_id = DATA_SOURCES["geo"].get("version")
         if not series_id:
             raise GeoConfigurationError(
-                "DATA_SOURCES['geo']['version'] is missing — cannot resolve "
+                "DATA_SOURCES['geo']['version'] is missing -- cannot resolve "
                 "default GEO series ID",
                 context={"geo_config_keys": sorted(DATA_SOURCES["geo"].keys())},
             )
 
     if not _re.fullmatch(GEO_SERIES_ID_REGEX, series_id):
         raise GeoConfigurationError(
-            f"Invalid GEO series_id {series_id!r} — must match "
+            f"Invalid GEO series_id {series_id!r} -- must match "
             f"{GEO_SERIES_ID_REGEX}",
             context={"series_id": series_id, "regex": GEO_SERIES_ID_REGEX},
         )
@@ -2136,7 +2136,7 @@ _ALL_DIR_CONSTANTS = [
 ]
 
 # Thread-safe lazy directory initialization
-# Fixes audit issue 4.2 — ensure_dirs not called before I/O
+# Fixes audit issue 4.2 -- ensure_dirs not called before I/O
 _dirs_lock = threading.Lock()
 _dirs_initialized = False
 
@@ -2163,7 +2163,7 @@ def ensure_dirs() -> None:
             try:
                 d.mkdir(parents=True, exist_ok=True)
             except OSError as exc:
-                # Fixes audit issue 6.1 — graceful degradation
+                # Fixes audit issue 6.1 -- graceful degradation
                 logger.warning(
                     "Could not create directory %s: %s. "
                     "Operations requiring this directory will fail.",
@@ -2172,7 +2172,7 @@ def ensure_dirs() -> None:
         _dirs_initialized = True
 
 
-# ─── Phase D — Data Source Registry ──────────────────────────────────────────
+# ─── Phase D -- Data Source Registry ──────────────────────────────────────────
 # Fixes audit issues 5.1, 5.2, 5.5, 5.8, 5.9, 5.10, 6.2, 6.3,
 #   7.7, 14.4, 15.1, 15.2, 16.5
 #
@@ -2201,40 +2201,40 @@ DATA_SOURCES: dict[str, dict[str, Any]] = {
         "filename": "drkg.tar.gz",
         "tsv_file": "drkg.tsv",
         "description": (
-            "Drug Repurposing Knowledge Graph — "
+            "Drug Repurposing Knowledge Graph -- "
             "97K nodes, 5.9M edges"
         ),
         "version_note": "Stable release; no version number in URL",
-        # Fixes audit issue 7.7 — structured version field
+        # Fixes audit issue 7.7 -- structured version field
         "version": "2.0",
         "pinned": True,
         "release_date": "2023-06-01",
-        # Fixes audit issue 5.1 — checksums for integrity
+        # Fixes audit issue 5.1 -- checksums for integrity
         "sha256": None,  # To be computed after first download
         "md5": None,
-        # Fixes audit issue 14.4 — license
+        # Fixes audit issue 14.4 -- license
         "license": "MIT",
-        # Fixes audit issue 8.1 — expected size
+        # Fixes audit issue 8.1 -- expected size
         "size_bytes": 500_000_000,
         "max_size_bytes": 1_000_000_000,
-        # Fixes audit issue 5.9 — expected record count
+        # Fixes audit issue 5.9 -- expected record count
         "expected_record_count": 5_874_261,
-        # Fixes audit issue 5.10 — freshness tracking
+        # Fixes audit issue 5.10 -- freshness tracking
         "last_updated": None,
         "expected_update_frequency_days": 365,
         "last_downloaded_at": None,
-        # Fixes audit issues 6.2, 6.3 — download resilience
+        # Fixes audit issues 6.2, 6.3 -- download resilience
         "retry_count": 3,
         "retry_backoff_seconds": 30,
         "timeout_seconds": 300,
-        # Fixes audit issue 15.2 — url scheme
+        # Fixes audit issue 15.2 -- url scheme
         "url_scheme": "https",
-        # Fixes audit issue 15.1 — schema version
+        # Fixes audit issue 15.1 -- schema version
         "schema_version": "1.0",
     },
     "drugbank": {
         "url": (
-            # Fixes audit issue 5.2 — pinned to specific release
+            # Fixes audit issue 5.2 -- pinned to specific release
             "https://go.drugbank.com/releases/5-1-12/downloads/"
             "all-full-database.xml"
         ),
@@ -2268,7 +2268,7 @@ DATA_SOURCES: dict[str, dict[str, Any]] = {
     },
     "chembl": {
         "url": (
-            # Fixes audit issue 5.2 — pinned to chembl_35
+            # Fixes audit issue 5.2 -- pinned to chembl_35
             "https://ftp.ebi.ac.uk/pub/databases/chembl/ChEMBLdb/"
             "rel/chembl_35/chembl_35_sqlite.tar.gz"
         ),
@@ -2366,11 +2366,11 @@ DATA_SOURCES: dict[str, dict[str, Any]] = {
     },
     "uniprot": {
         "url": (
-            # Fixes audit issue 5.2 — pinned to 2024_03 release.
-            # Fixes D12-002 — URL must point at the FLAT .dat.gz file, NOT the
+            # Fixes audit issue 5.2 -- pinned to 2024_03 release.
+            # Fixes D12-002 -- URL must point at the FLAT .dat.gz file, NOT the
             # .tar.gz archive. The previous URL (uniprot_sprot-only2024_03.tar.gz)
             # downloaded a tar archive that gzip.open() could decompress but
-            # whose first bytes were a tar header, not an "ID " line — the
+            # whose first bytes were a tar header, not an "ID " line -- the
             # parser silently produced ZERO records. Production would launch
             # with an empty Protein subgraph.
             "https://ftp.uniprot.org/pub/databases/uniprot/"
@@ -2431,7 +2431,7 @@ DATA_SOURCES: dict[str, dict[str, Any]] = {
         # audit fix (PROMPT_fix_clinicaltrials_loader.md Issues 3.4, 12.1,
         # 12.2). These mirror CLINICALTRIALS_DEFAULT_* constants for callers
         # that read the config dict instead of the constants.
-        "default_phases": ("Phase 3", "Phase 4"),  # Issue 3.4, 12.1 — Phase 4 included
+        "default_phases": ("Phase 3", "Phase 4"),  # Issue 3.4, 12.1 -- Phase 4 included
         "default_intervention_types": ("Drug", "Biological"),  # Issue 12.2
         "default_study_types": ("Interventional",),  # Issue 3.7
         "default_allowed_statuses": (
@@ -2473,7 +2473,7 @@ DATA_SOURCES: dict[str, dict[str, Any]] = {
         "schema_version": "5.0",
     },
     "sider": {
-        # Phase 0.4 / D3.8 / D14.11 — pinned version + canonical filename.
+        # Phase 0.4 / D3.8 / D14.11 -- pinned version + canonical filename.
         # The meddra_all_se.tsv.gz file is the canonical SIDER adverse-event
         # file (6 columns, no header). The previous filename
         # "sider_side_effects.tsv.gz" was non-canonical; renamed to
@@ -2484,7 +2484,7 @@ DATA_SOURCES: dict[str, dict[str, Any]] = {
         ),
         "filename": "sider_meddra_all_se.tsv.gz",
         "description": (
-            "SIDER side effect database — drug-side effect pairs with "
+            "SIDER side effect database -- drug-side effect pairs with "
             "MedDRA terms. SOLE source of adverse-event data feeding the "
             "RL safety-signal dimension (Phase 0.4 / G6)."
         ),
@@ -2494,17 +2494,17 @@ DATA_SOURCES: dict[str, dict[str, Any]] = {
             "Update version + release_date + sha256 together when SIDER "
             "publishes a new release."
         ),
-        # Phase 0.4 / D3.8 — pinned version.
+        # Phase 0.4 / D3.8 -- pinned version.
         "version": "2023-10-25",
         "pinned": True,
         "release_date": "2023-10-25",
-        # SIDER does not publish sha256 — we compute and store it as a
+        # SIDER does not publish sha256 -- we compute and store it as a
         # sidecar at first download (D3.8 / D4.19). Leave None here; the
         # loader will populate data/raw/sider_meddra_all_se.tsv.gz.sha256.
         "sha256": None,
         "md5": None,
         "license": "CC0 1.0",
-        # D5.1 — expected size + record count for integrity check.
+        # D5.1 -- expected size + record count for integrity check.
         # Real SIDER meddra_all_se.tsv.gz is ~50 MB compressed, ~5M rows.
         "size_bytes": 50_000_000,
         "max_size_bytes": 500_000_000,
@@ -2512,15 +2512,15 @@ DATA_SOURCES: dict[str, dict[str, Any]] = {
         "last_updated": None,
         "expected_update_frequency_days": 365,
         "last_downloaded_at": None,
-        # D6.1 / D6.2 — retry / timeout.
+        # D6.1 / D6.2 -- retry / timeout.
         "retry_count": 3,
         "retry_backoff_seconds": 30,
         "timeout_seconds": 120,
         "url_scheme": "https",
         "schema_version": "1.0.0",
-        # D16.5 — MedDRA vocabulary version. SIDER 2023 uses MedDRA v26.0.
+        # D16.5 -- MedDRA vocabulary version. SIDER 2023 uses MedDRA v26.0.
         "meddra_version": "26.0",
-        # D3.3 — sibling SIDER files for future expansion (FDA labels +
+        # D3.3 -- sibling SIDER files for future expansion (FDA labels +
         # frequencies). NOT downloaded by default; loader supports them
         # via parse_sider_fda_labels / parse_sider_frequencies.
         "sibling_files": {
@@ -2529,7 +2529,7 @@ DATA_SOURCES: dict[str, dict[str, Any]] = {
         },
     },
     "geo": {
-        # Fixes audit issue 3.5 — GEO URL was a placeholder (GSE1 doesn't exist)
+        # Fixes audit issue 3.5 -- GEO URL was a placeholder (GSE1 doesn't exist)
         # RATIONALE: GSE92649 is a real gene expression dataset used in
         # drug repurposing literature (Cheng et al., 2018, Sci Rep).
         # The placeholder GSE1 was a non-existent example URL.
@@ -2539,7 +2539,7 @@ DATA_SOURCES: dict[str, dict[str, Any]] = {
         ),
         "filename": "geo_expression.soft.gz",
         "description": (
-            "GEO Gene Expression Omnibus — GSE92649 gene expression data "
+            "GEO Gene Expression Omnibus -- GSE92649 gene expression data "
             "for drug repurposing (Cheng et al., 2018)"
         ),
         "version_note": (
@@ -2564,7 +2564,7 @@ DATA_SOURCES: dict[str, dict[str, Any]] = {
         "url_scheme": "https",
         "schema_version": "GEO-SOFT-2.0",
         # ── New GEO keys added by geo_loader v1.0.0 institutional-grade
-        #    audit fix (GEO_LOADER_MASTER_REPAIR_PROMPT.md — Domains 9, 12).
+        #    audit fix (GEO_LOADER_MASTER_REPAIR_PROMPT.md -- Domains 9, 12).
         # ─ GEO-9.3: NCBI API key (optional, increases rate limit).
         "ncbi_api_key": None,
         # ─ GEO-12.4: subdir under RAW_DIR (matches GEO_SUBDIR constant).
@@ -2588,7 +2588,7 @@ DATA_SOURCES: dict[str, dict[str, Any]] = {
         # ─ GEO-16.7: series submission date for staleness checks.
         "submission_date": "2018-01-01",
     },
-    # Fixes audit issue 3.4 — reactome and kegg missing from DATA_SOURCES
+    # Fixes audit issue 3.4 -- reactome and kegg missing from DATA_SOURCES
     "reactome": {
         "url": (
             "https://reactome.org/download/current/"
@@ -2596,7 +2596,7 @@ DATA_SOURCES: dict[str, dict[str, Any]] = {
         ),
         "filename": "reactome_pathways.gmt.zip",
         "description": (
-            "Reactome pathway database — biological pathway definitions "
+            "Reactome pathway database -- biological pathway definitions "
             "with gene/protein participants"
         ),
         "version_note": "Uses 'current' redirect; pin for reproducibility.",
@@ -2624,7 +2624,7 @@ DATA_SOURCES: dict[str, dict[str, Any]] = {
         ),
         "filename": "kegg_pathway_links.txt",
         "description": (
-            "KEGG pathway-gene links for Homo sapiens — "
+            "KEGG pathway-gene links for Homo sapiens -- "
             "gene-to-pathway associations"
         ),
         "version_note": "KEGG API endpoint; version is current.",
@@ -2648,30 +2648,30 @@ DATA_SOURCES: dict[str, dict[str, Any]] = {
     },
 }
 
-# Fixes audit issue 7.7 — machine-readable data sources version
+# Fixes audit issue 7.7 -- machine-readable data sources version
 # Also used by __init__.py for lineage tracking
 __data_sources_version__: dict[str, str] = {
     k: v["version"] for k, v in DATA_SOURCES.items()
 }
 
-# Fixes audit issue 6.7 — source criticality classification
+# Fixes audit issue 6.7 -- source criticality classification
 # CRITICAL_SOURCES: pipeline fails if these cannot be loaded
 # OPTIONAL_SOURCES: pipeline continues with warning if these fail
 #
 # NOTE (stitch_loader v1.1.0 institutional-grade audit fix):
 # "stitch" was promoted from OPTIONAL_SOURCES to CRITICAL_SOURCES per
-# master_prompt_fix_stitch_loader.md BUG-5.2 — STITCH contributes ~20M
-# Compound→Protein edges and is critical for V1 launch criterion AUC > 0.85.
+# master_prompt_fix_stitch_loader.md BUG-5.2 -- STITCH contributes ~20M
+# Compound->Protein edges and is critical for V1 launch criterion AUC > 0.85.
 # STITCH_REQUIRED env var (default "1") controls the soft/hard failure
 # mode at runtime; CRITICAL_SOURCES membership governs the pipeline-level
 # criticality classification.
 CRITICAL_SOURCES: frozenset[str] = frozenset({
     "drkg", "drugbank", "chembl", "opentargets", "string", "stitch",
-    # Phase 0.4 (master_prompt A1.1 / D6.3 / G6) — SIDER was promoted from
+    # Phase 0.4 (master_prompt A1.1 / D6.3 / G6) -- SIDER was promoted from
     # OPTIONAL_SOURCES to CRITICAL_SOURCES. SIDER is the SOLE source of
     # adverse-event data feeding the RL safety-signal dimension; if SIDER
     # silently fails, the safety ranker sees zero adverse events for every
-    # drug and ranks dangerous drugs as GREEN (recommend) → patient harm.
+    # drug and ranks dangerous drugs as GREEN (recommend) -> patient harm.
     # SIDER_REQUIRED env var (default "1") controls the soft/hard failure
     # mode at runtime; CRITICAL_SOURCES membership governs the pipeline-
     # level criticality classification.
@@ -2682,7 +2682,7 @@ OPTIONAL_SOURCES: frozenset[str] = frozenset({
     "geo", "reactome", "kegg",
 })
 
-# Fixes audit issue 6.7 — failure policy
+# Fixes audit issue 6.7 -- failure policy
 # RATIONALE: For a clinical-grade pipeline, the default should be
 # to fail fast when critical data is missing, rather than silently
 # producing an incomplete graph.
@@ -2695,7 +2695,7 @@ ON_SOURCE_FAILURE: str = os.environ.get(
 def get_data_source_path(source_name: str) -> Path:
     """Get the expected local path for a data source file.
 
-    Fixes audit issue 5.3 — no hardcoded filenames.
+    Fixes audit issue 5.3 -- no hardcoded filenames.
     Consumers should call this instead of hardcoding filenames.
 
     Parameters
@@ -2721,13 +2721,13 @@ def get_data_source_path(source_name: str) -> Path:
     return RAW_DIR / DATA_SOURCES[source_name]["filename"]
 
 
-# ─── Phase C — Dataclass Hardening ───────────────────────────────────────────
+# ─── Phase C -- Dataclass Hardening ───────────────────────────────────────────
 
-# Fixes audit issue 9.1 — Neo4jConfig password leakage
-# Fixes audit issue 4.11 — dataclasses should be frozen
-# Fixes audit issue 4.12 — __post_init__ validation missing
-# Fixes audit issue 2.11 — Neo4jConfig password should be Optional[str]
-# Fixes audit issue 1.5 — get_neo4j_config singleton
+# Fixes audit issue 9.1 -- Neo4jConfig password leakage
+# Fixes audit issue 4.11 -- dataclasses should be frozen
+# Fixes audit issue 4.12 -- __post_init__ validation missing
+# Fixes audit issue 2.11 -- Neo4jConfig password should be Optional[str]
+# Fixes audit issue 1.5 -- get_neo4j_config singleton
 # v35 ROOT FIX (L-5): once-per-process flag for the Neo4jConfig
 # password-not-set warning (prevents the same warning from cluttering
 # the log when Neo4jConfig is constructed multiple times in a single
@@ -2744,10 +2744,10 @@ class Neo4jConfig:
     variable. If the variable is not set, a placeholder default is
     used. Production deployments MUST set the environment variable.
 
-    Fixes audit issue 4.11 — frozen=True prevents accidental mutation
-    Fixes audit issue 9.1 — __repr__ masks password
-    Fixes audit issue 9.10 — to_dict masks password
-    Fixes audit issue 15.7 — to_json for API serialization
+    Fixes audit issue 4.11 -- frozen=True prevents accidental mutation
+    Fixes audit issue 9.1 -- __repr__ masks password
+    Fixes audit issue 9.10 -- to_dict masks password
+    Fixes audit issue 15.7 -- to_json for API serialization
     """
     uri: str = field(
         default_factory=lambda: os.environ.get(
@@ -2759,8 +2759,8 @@ class Neo4jConfig:
             "DRUGOS_NEO4J_USER", "neo4j"
         )
     )
-    # Fixes audit issue 2.11 — password should be Optional, read from env
-    # Fixes audit issue 9.2 — password never hardcoded in source
+    # Fixes audit issue 2.11 -- password should be Optional, read from env
+    # Fixes audit issue 9.2 -- password never hardcoded in source
     password: Optional[str] = field(
         default_factory=lambda: os.environ.get(
             "DRUGOS_NEO4J_PASSWORD", None
@@ -2785,7 +2785,7 @@ class Neo4jConfig:
     pagecache: str = "4G"
 
     def __post_init__(self):
-        # Fixes audit issue 4.12 — validate config values on construction
+        # Fixes audit issue 4.12 -- validate config values on construction
         if self.max_connection_pool_size < 1:
             raise ValueError(
                 f"max_connection_pool_size must be >= 1, "
@@ -2806,7 +2806,7 @@ class Neo4jConfig:
             )
         if not self.password:
             # v35 ROOT FIX (L-5): the previous code warned UNCONDITIONALLY
-            # whenever password was empty — including --skip-neo4j runs
+            # whenever password was empty -- including --skip-neo4j runs
             # where Neo4j is never contacted. The warning fires on every
             # Neo4jConfig construction (including the singleton), so a
             # single pipeline run could emit the same warning 5+ times
@@ -2830,7 +2830,7 @@ class Neo4jConfig:
                 )
                 _NEO4J_PASSWORD_WARNING_EMITTED = True
 
-    # Fixes audit issue 9.1 — __repr__ must NOT expose password
+    # Fixes audit issue 9.1 -- __repr__ must NOT expose password
     def __repr__(self) -> str:
         pwd_display = "<set>" if self.password else "<not set>"
         return (
@@ -2840,20 +2840,20 @@ class Neo4jConfig:
             f"connection_timeout={self.connection_timeout})"
         )
 
-    # Fixes audit issue 9.10 — to_dict with password masking
+    # Fixes audit issue 9.10 -- to_dict with password masking
     def to_dict(self) -> dict[str, Any]:
         """Return config as dict with password masked."""
         d = asdict(self)
         d["password"] = "<redacted>" if self.password else "<not set>"
         return d
 
-    # Fixes audit issue 15.7 — to_json for API serialization
+    # Fixes audit issue 15.7 -- to_json for API serialization
     def to_json(self) -> str:
         """Return config as JSON with password masked."""
         return json.dumps(self.to_dict(), indent=2)
 
 
-# Fixes audit issue 1.5 — get_neo4j_config() singleton
+# Fixes audit issue 1.5 -- get_neo4j_config() singleton
 _neo4j_config_lock = threading.Lock()
 _neo4j_config_instance: Optional[Neo4jConfig] = None
 
@@ -2875,7 +2875,7 @@ def get_neo4j_config() -> Neo4jConfig:
         return _neo4j_config_instance
 
 
-# ─── Phase C.2 — PyGConfig ───────────────────────────────────────────────────
+# ─── Phase C.2 -- PyGConfig ───────────────────────────────────────────────────
 
 # FIX(issue-79): reverse edge naming convention constant.
 REVERSE_EDGE_PREFIX: str = "rev_"
@@ -2904,7 +2904,7 @@ def _warn_num_neighbors_dead() -> None:
         return
     _NUM_NEIGHBORS_DEAD_WARNED = True
     logger.warning(
-        "PyGConfig.num_neighbors is currently DEAD CODE — it is declared "
+        "PyGConfig.num_neighbors is currently DEAD CODE -- it is declared "
         "but NOT consumed by any module (no GraphSAGE/GAT neighbor sampler "
         "is wired in). Setting it has NO effect on training, evaluation, "
         "or reproducibility. This warning fires once per process. "
@@ -2916,11 +2916,11 @@ def _warn_num_neighbors_dead() -> None:
 class PyGConfig:
     """PyG graph construction and training settings.
 
-    Fixes audit issue 4.11 — frozen=True
-    Fixes audit issue 4.12 — __post_init__ validation
-    Fixes audit issue 7.2 — seed field for reproducibility
-    Fixes audit issue 2.7 — dead fields documented with WIRING comments
-    Fixes audit issue 3.16 — neg_sampling_ratio raised from 2.0 to 10.0
+    Fixes audit issue 4.11 -- frozen=True
+    Fixes audit issue 4.12 -- __post_init__ validation
+    Fixes audit issue 7.2 -- seed field for reproducibility
+    Fixes audit issue 2.7 -- dead fields documented with WIRING comments
+    Fixes audit issue 3.16 -- neg_sampling_ratio raised from 2.0 to 10.0
 
     CHANGELOG (pyg_builder audit fix release):
         - Added disjoint_train_ratio (issue-17, issue-65)
@@ -2961,7 +2961,7 @@ class PyGConfig:
         "Compound", "treats", "Disease"
     )
 
-    # ─── DEAD CODE — Neighbor sampling (BUG P2-031 + P2-054) ───────────
+    # ─── DEAD CODE -- Neighbor sampling (BUG P2-031 + P2-054) ───────────
     # v100 ROOT FIX (BUG P2-031 + P2-054): this field is DEAD CODE.
     # It is declared but NEVER consumed by any consumer module. No
     # GraphSAGE / GAT neighbor sampler is wired in, so setting
@@ -2972,14 +2972,14 @@ class PyGConfig:
     # ``_warn_num_neighbors_dead()`` whenever a non-default value is
     # observed, so operators who set it get a LOUD signal instead of
     # silent acceptance. If a neighbor sampler is ever implemented,
-    # this field WILL affect reproducibility — the ``seed`` field
+    # this field WILL affect reproducibility -- the ``seed`` field
     # above already covers that future case (issue 2.7).
     num_neighbors: List[int] = field(
         default_factory=lambda: [30, 20]
     )
     batch_size: int = 2048
 
-    # Fixes audit issue 7.2 — seed for reproducibility
+    # Fixes audit issue 7.2 -- seed for reproducibility
     seed: int = field(
         default_factory=lambda: SEED
     )
@@ -3068,7 +3068,7 @@ class PyGConfig:
             _warn_num_neighbors_dead()
 
 
-# ─── Phase C.3 — TransEConfig ────────────────────────────────────────────────
+# ─── Phase C.3 -- TransEConfig ────────────────────────────────────────────────
 # Extended by transe_model.py v2.2.1 institutional-grade repair.
 # 16-domain forensic repair: 308 issues.
 # All new fields have RATIONALE comments and env-var overrides.
@@ -3116,7 +3116,7 @@ class TransEConfig:
     # RATIONALE: 256-dim embeddings are standard for TransE on biomedical
     # KGs (per DRKG paper, Huang et al., 2020). Smaller dims lose
     # expressiveness; larger dims increase GPU memory and overfitting risk.
-    # FIX C12.2: embedding_dim — was hardcoded in TransEModel.__init__.
+    # FIX C12.2: embedding_dim -- was hardcoded in TransEModel.__init__.
     embedding_dim: int = field(
         default_factory=lambda: int(os.environ.get("DRUGOS_TRANSE_EMBEDDING_DIM", "256"))
     )
@@ -3126,7 +3126,7 @@ class TransEConfig:
     # (higher recall, lower precision); higher margins risk overfitting
     # on noise in biomedical KGs where many edges are inferred, not
     # experimentally verified.
-    # FIX C12.3: margin — was a bare float 1.0 in MarginRankingLoss.
+    # FIX C12.3: margin -- was a bare float 1.0 in MarginRankingLoss.
     margin: float = field(
         default_factory=lambda: float(os.environ.get("DRUGOS_TRANSE_MARGIN", "1.0"))
     )
@@ -3135,7 +3135,7 @@ class TransEConfig:
     # RATIONALE: Adam with lr=0.001 is the standard optimizer for KGE
     # models (Sun et al., 2019 comparative study). SGD is too slow on
     # sparse biomedical KGs; AdamW is an option but not the default.
-    # FIX C12.4: learning_rate — was hardcoded as 0.001 in train_transe.
+    # FIX C12.4: learning_rate -- was hardcoded as 0.001 in train_transe.
     learning_rate: float = field(
         default_factory=lambda: float(os.environ.get("DRUGOS_TRANSE_LR", "0.001"))
     )
@@ -3143,14 +3143,14 @@ class TransEConfig:
     # RATIONALE: 1e-5 L2 regularization prevents embedding collapse
     # without excessive smoothing. Biomedical KGs benefit from mild
     # regularization due to noise in edge annotations.
-    # FIX C12.5: weight_decay — was hardcoded as 1e-5 in train_transe.
+    # FIX C12.5: weight_decay -- was hardcoded as 1e-5 in train_transe.
     weight_decay: float = field(
         default_factory=lambda: float(os.environ.get("DRUGOS_TRANSE_WEIGHT_DECAY", "1e-5"))
     )
 
     # RATIONALE: Adam is the default and most battle-tested optimizer
     # for KGE. "sgd" is available for ablation studies.
-    # FIX C12.6: optimizer_name — was hardcoded as "adam".
+    # FIX C12.6: optimizer_name -- was hardcoded as "adam".
     optimizer_name: str = field(
         default_factory=lambda: os.environ.get("DRUGOS_TRANSE_OPTIMIZER", "adam")
     )
@@ -3159,7 +3159,7 @@ class TransEConfig:
     # RATIONALE: 100 epochs is sufficient for convergence on the DRKG-scale
     # biomedical KG (~100K entities, ~2M edges). Early stopping (patience)
     # prevents overfitting if validation AUC plateaus.
-    # FIX C12.7: num_epochs — was hardcoded as 100 in train_transe.
+    # FIX C12.7: num_epochs -- was hardcoded as 100 in train_transe.
     num_epochs: int = field(
         default_factory=lambda: int(os.environ.get("DRUGOS_TRANSE_EPOCHS", "100"))
     )
@@ -3167,7 +3167,7 @@ class TransEConfig:
     # RATIONALE: Evaluate every 5 epochs to detect overfitting early
     # without excessive validation overhead. On DRKG-scale graphs,
     # each evaluation takes ~10-30s on a single GPU.
-    # FIX C12.8: eval_every — was hardcoded as 5 in train_transe.
+    # FIX C12.8: eval_every -- was hardcoded as 5 in train_transe.
     eval_every: int = field(
         default_factory=lambda: int(os.environ.get("DRUGOS_TRANSE_EVAL_EVERY", "5"))
     )
@@ -3176,7 +3176,7 @@ class TransEConfig:
     # and gradient noise. Larger batches (4096+) may cause OOM on
     # 8GB GPUs with 256-dim embeddings. gpu_utils.recommend_batch_size
     # auto-tunes at runtime.
-    # FIX C12.9: batch_size — was hardcoded as 1024 in train_transe.
+    # FIX C12.9: batch_size -- was hardcoded as 1024 in train_transe.
     batch_size: int = field(
         default_factory=lambda: int(os.environ.get("DRUGOS_TRANSE_BATCH_SIZE", "1024"))
     )
@@ -3185,7 +3185,7 @@ class TransEConfig:
     # TransE (Bordes et al., 2013). More negatives improve ranking
     # quality but slow training. When using NegativeSampler,
     # this parameter is ignored (sampler controls count).
-    # FIX C12.10: num_negatives — was a positional arg with default 10.
+    # FIX C12.10: num_negatives -- was a positional arg with default 10.
     num_negatives: int = field(
         default_factory=lambda: int(os.environ.get("DRUGOS_TRANSE_NUM_NEGATIVES", "10"))
     )
@@ -3194,7 +3194,7 @@ class TransEConfig:
     # outlier triples (e.g., entities with very few edges produce
     # large gradient magnitudes). Biomedical KGs are particularly
     # prone to this due to long-tail degree distributions.
-    # FIX C12.11: grad_clip_norm — was not implemented (R6.3).
+    # FIX C12.11: grad_clip_norm -- was not implemented (R6.3).
     grad_clip_norm: float = field(
         default_factory=lambda: float(os.environ.get("DRUGOS_TRANSE_GRAD_CLIP", "1.0"))
     )
@@ -3202,9 +3202,9 @@ class TransEConfig:
     # RATIONALE: Early stopping with patience=10 epochs prevents
     # overfitting. If validation AUC does not improve for 10
     # consecutive evaluations, training stops. This is the most
-    # important training schedule parameter for patient safety —
+    # important training schedule parameter for patient safety --
     # an overfit model makes wrong predictions.
-    # FIX C12.12: patience — was not implemented (C4.32).
+    # FIX C12.12: patience -- was not implemented (C4.32).
     patience: int = field(
         default_factory=lambda: int(os.environ.get("DRUGOS_TRANSE_PATIENCE", "10"))
     )
@@ -3212,7 +3212,7 @@ class TransEConfig:
     # ── AUC enforcement ───────────────────────────────────────────────────
     # v28 ROOT FIX (audit TOP-13): the previous rationale said "0.78 is
     # the minimum AUC for the Week 2 exit criterion" and "the TransE
-    # BASELINE has a lower bar (0.78)" — but the actual default value
+    # BASELINE has a lower bar (0.78)" -- but the actual default value
     # below is 0.85, NOT 0.78. That mismatch made the rationale
     # scientifically dishonest: an operator reading the comment would
     # assume target_auc=0.78 (the DRKG baseline), but production
@@ -3222,7 +3222,7 @@ class TransEConfig:
     #   * 0.85 is the V1 launch threshold per the project DOCX
     #     (Section 8: ">0.85 AUC on held-out drug-disease pairs"). This
     #     is the LAUNCH criterion for the entire pipeline, NOT just for
-    #     the Graph Transformer — the DOCX treats TransE as the Week 2
+    #     the Graph Transformer -- the DOCX treats TransE as the Week 2
     #     baseline that must already clear 0.85 to be V1-launchable.
     #   * The 0.78 figure cited in v9-v27 comments was the DRKG-paper
     #     TransE baseline AUC reported in the published literature; it
@@ -3233,7 +3233,7 @@ class TransEConfig:
     #     claim of ">0.85 AUC on held-out drug-disease pairs". A model
     #     with true AUC 0.65 (realistic for small graphs) was being
     #     deployed under the ">0.85" claim because the threshold was
-    #     0.78 — that gap is now closed.
+    #     0.78 -- that gap is now closed.
     #   * Teams that explicitly want the relaxed DRKG-baseline bar can
     #     still set DRUGOS_TRANSE_TARGET_AUC=0.78 in the environment
     #     (documented deviation, NOT the default).
@@ -3254,14 +3254,14 @@ class TransEConfig:
     # ── Reproducibility ───────────────────────────────────────────────────
     # RATIONALE: Seed for reproducibility. When None, falls back to
     # the global SEED from config.py. Set explicitly for regulatory runs.
-    # FIX I7.2: seed — existed but was not applied in train_transe.
+    # FIX I7.2: seed -- existed but was not applied in train_transe.
     seed: int = field(
         default_factory=lambda: SEED
     )
 
     # v28 ROOT FIX (audit ML-9): score_direction is an explicit contract
     # between the model and the loss function. TransE (Bordes 2013)
-    # defines ``score(h, r, t) = -||h + r - t||`` — LOWER score = MORE
+    # defines ``score(h, r, t) = -||h + r - t||`` -- LOWER score = MORE
     # plausible triple. The training loss ``(pos - neg + margin)``
     # assumes this convention; if a future "higher is better" model
     # (e.g. a similarity-based scorer) is dropped in, the loss would
@@ -3270,7 +3270,7 @@ class TransEConfig:
     # field makes the convention explicit and lets the trainer assert
     # it before computing loss. Allowed values: ``"lower_better"``
     # (TransE family) or ``"higher_better"`` (similarity-based scorers
-    # — currently unsupported; trainer will raise).
+    # -- currently unsupported; trainer will raise).
     score_direction: str = field(
         default_factory=lambda: os.environ.get(
             "DRUGOS_TRANSE_SCORE_DIRECTION", "lower_better"
@@ -3280,18 +3280,18 @@ class TransEConfig:
     # v28 ROOT FIX (audit ML-14): Bordes 2013 §3.2 specifies a STRICT
     # ``== 1`` L2-norm constraint on relation embeddings (normalize
     # after every gradient step). The pre-v28 code soft-clamped to
-    # ``<= 1`` instead — preserving the model's ability to learn
+    # ``<= 1`` instead -- preserving the model's ability to learn
     # relations of different magnitudes. The audit (ML-14) flags this
     # as a deviation from the published algorithm. The fix is
     # configurable:
     #   * ``"soft_clamp"``: scale to <=1 only when norm > 1. Empirical
     #     evidence on DRKG (n=3 runs): AUC 0.847 ± 0.012 vs strict's
-    #     0.841 ± 0.014 — within 1σ, not statistically significant
+    #     0.841 ± 0.014 -- within 1σ, not statistically significant
     #     (Welch t-test p=0.58, n=6). Statistically underpowered.
     #   * ``"strict_bordes"`` (DEFAULT since v29): hard-normalize to
     #     ==1 (Bordes 2013 §3.2 verbatim). Algorithmic-fidelity audits
     #     require this.
-    # v29 ROOT FIX (audit M-10): was "soft_clamp" — deviates from
+    # v29 ROOT FIX (audit M-10): was "soft_clamp" -- deviates from
     # Bordes 2013. Changed default to "strict" (||r||=1).
     # See ``TransEModel.normalize_relation_embeddings`` for full
     # rationale and the empirical AUC comparison.
@@ -3301,14 +3301,14 @@ class TransEConfig:
         )
     )
 
-    # v56 ROOT FIX (Scientific Correctness — TransE L1 vs L2 norm):
-    # The audit flagged "TransE L1 vs L2 norm — DOCX spec says L1; code
+    # v56 ROOT FIX (Scientific Correctness -- TransE L1 vs L2 norm):
+    # The audit flagged "TransE L1 vs L2 norm -- DOCX spec says L1; code
     # uses L2 in default config (config.py norm=2)". This was based on
     # an older version of the code. The ACTUAL current state:
     #   - Scoring function (transe_model.py line 692): uses p=1 (L1 norm)
     #     ✅ Matches Bordes et al. 2013 §3.1: "d(h+l, t) = ||h + l - t||_1"
     #   - Embedding normalization (transe_model.py lines 616, 710, 770):
-    #     uses p=2 (L2 norm) ✅ This is STANDARD PRACTICE — normalizing
+    #     uses p=2 (L2 norm) ✅ This is STANDARD PRACTICE -- normalizing
     #     embeddings to the unit L2 sphere is different from the scoring
     #     function's distance norm. Bordes 2013 uses L1 for distance but
     #     L2 for embedding normalization.
@@ -3325,10 +3325,10 @@ class TransEConfig:
     # ── Safety & filtering ────────────────────────────────────────────────
     # RATIONALE: Contraindication mode controls how contraindicated
     # drug-disease pairs are handled in predictions.
-    #   "filter" — exclude from results entirely (safest).
-    #   "flag"   — include but mark as contraindicated (for review).
-    #   "none"   — no filtering (testing only).
-    # FIX K3.10: contraindication_mode — was not implemented.
+    #   "filter" -- exclude from results entirely (safest).
+    #   "flag"   -- include but mark as contraindicated (for review).
+    #   "none"   -- no filtering (testing only).
+    # FIX K3.10: contraindication_mode -- was not implemented.
     contraindication_mode: str = field(
         default_factory=lambda: os.environ.get(
             "DRUGOS_TRANSE_CONTRAINDICATION_MODE", "filter"
@@ -3337,12 +3337,12 @@ class TransEConfig:
 
     # RATIONALE: Minimum training triples to proceed. Training on
     # fewer triples produces statistically meaningless embeddings.
-    # FIX C4.10: min_train_triples — was not validated.
+    # FIX C4.10: min_train_triples -- was not validated.
     # v22 ROOT FIX (audit Chain 1): in dev mode (default), lower to 5 so
     # the toy fixture can train. Production keeps 100.
     # P2-024 ROOT FIX: the default is computed via default_factory,
     # which IS re-evaluated on each TransEConfig() instantiation.
-    # However, the value is then frozen on the instance — if an
+    # However, the value is then frozen on the instance -- if an
     # operator sets DRUGOS_ENVIRONMENT AFTER constructing a
     # TransEConfig, the cached value on that instance persists.
     # Operators who need to change env vars mid-run MUST construct
@@ -3362,7 +3362,7 @@ class TransEConfig:
 
     # RATIONALE: Minimum validation triples for AUC computation.
     # AUC with <30 samples is statistically unreliable (wide CI).
-    # FIX K3.4: min_val_triples — was not validated.
+    # FIX K3.4: min_val_triples -- was not validated.
     # v22 ROOT FIX: in dev mode, lower to 2 so the toy fixture can validate.
     min_val_triples: int = field(
         default_factory=lambda: int(
@@ -3378,7 +3378,7 @@ class TransEConfig:
     # ── Logging & observability ───────────────────────────────────────────
     # RATIONALE: Log negative samples to JSONL for FDA 21 CFR Part 11
     # audit trails. Off by default (large files). Enable for regulatory runs.
-    # FIX I7.16: log_negatives — was not implemented.
+    # FIX I7.16: log_negatives -- was not implemented.
     log_negatives: bool = field(
         default_factory=lambda: os.environ.get("DRUGOS_TRANSE_LOG_NEGATIVES", "0") == "1"
     )
@@ -3386,7 +3386,7 @@ class TransEConfig:
     # ── Internal constants ────────────────────────────────────────────────
     # RATIONALE: 0.5 is the default corruption ratio for head vs tail
     # corruption in TransE. 0.5 corrupts heads and tails equally.
-    # FIX C12.14: neg_corrupt_head_ratio — was hardcoded as 0.5.
+    # FIX C12.14: neg_corrupt_head_ratio -- was hardcoded as 0.5.
     neg_corrupt_head_ratio: float = field(
         default_factory=lambda: float(
             os.environ.get("DRUGOS_TRANSE_NEG_CORRUPT_RATIO", "0.5")
@@ -3401,7 +3401,7 @@ class TransEConfig:
     # FIX R6.2: was not implemented.
     #
     # FIX-P4-14 (v42): the field was renamed from ``nan_loss_threshold``
-    # to ``max_loss_threshold`` to match what it actually checks — a
+    # to ``max_loss_threshold`` to match what it actually checks -- a
     # HUGE (diverging) loss, NOT a NaN loss. NaN / Inf losses are
     # checked separately at transe_model.py:2804 via
     # ``torch.isnan(loss) or torch.isinf(loss)``; this threshold is the
@@ -3409,7 +3409,7 @@ class TransEConfig:
     # legacy name was actively misleading: an operator seeing
     # "nan_loss_threshold" would reasonably expect it to fire on NaN,
     # but NaN is never comparable via ``>`` (NaN > x is always False),
-    # so the threshold NEVER fired on NaN — only on huge finite values.
+    # so the threshold NEVER fired on NaN -- only on huge finite values.
     # The env var ``DRUGOS_TRANSE_NAN_THRESHOLD`` is kept as a legacy
     # alias for backward compatibility; the new canonical env var is
     # ``DRUGOS_TRANSE_MAX_LOSS_THRESHOLD``.
@@ -3513,16 +3513,16 @@ class TransEConfig:
         # so an unsupported "higher_better" model would fail FAST
         # (clear ValueError) instead of silently training backwards.
         # We accept both values here so a future higher_better model
-        # can be added with a new loss path — but the trainer (not the
+        # can be added with a new loss path -- but the trainer (not the
         # config) is responsible for branching on this value.
-        # v84 FORENSIC ROOT FIX (BUG #13 — TransEConfig must lock
+        # v84 FORENSIC ROOT FIX (BUG #13 -- TransEConfig must lock
         # score_direction to "lower_better"): the previous code accepted
         # BOTH "lower_better" and "higher_better" in TransEConfig's
         # __post_init__. A user could construct a TransEConfig with
         # score_direction="higher_better", pass it to a TransE model,
         # and only discover the incompatibility on the first batch
         # (when the trainer's assertion fired). ROOT FIX: TransEConfig
-        # is TransE-SPECIFIC — it MUST be "lower_better" only. A
+        # is TransE-SPECIFIC -- it MUST be "lower_better" only. A
         # "higher_better" config belongs to a different config class
         # (e.g. a future HGTConfig). Reject "higher_better" at config
         # construction time so the failure is immediate and the error
@@ -3541,7 +3541,7 @@ class TransEConfig:
                 f"plausible). Got {self.score_direction!r}. A "
                 f"'higher_better' model requires a different config "
                 f"class (e.g. a future HGTConfig) and a different loss "
-                f"formula — drop-in substitution into train_transe will "
+                f"formula -- drop-in substitution into train_transe will "
                 f"silently train BACKWARDS. (v84 BUG #13 root fix)"
             )
         # v28 ML-14: validate relation_norm_mode so an invalid value
@@ -3560,7 +3560,7 @@ class TransEConfig:
             )
 
 
-# ─── Phase C.4 — EvaluationConfig ────────────────────────────────────────────
+# ─── Phase C.4 -- EvaluationConfig ────────────────────────────────────────────
 # Added by evaluation.py v2.0 audit fix (MASTER_REPAIR_PROMPT_evaluation.md).
 # Centralises all evaluation parameters so no magic numbers exist in
 # evaluation.py. Fixes E12-002, E12-001, E12-003, E12-004, E2-002, E2-005,
@@ -3573,7 +3573,7 @@ from typing import Literal as _Literal
 class EvaluationConfig:
     """Configuration for evaluation metrics.
 
-    Fixes audit issue E12-002 — evaluation parameters centralised.
+    Fixes audit issue E12-002 -- evaluation parameters centralised.
     All fields have RATIONALE comments explaining the value.
 
     To override: set DRUGOS_EVAL_CONFIG env var to a JSON object
@@ -3592,17 +3592,17 @@ class EvaluationConfig:
     # Fixes E12-004.
     default_higher_is_better: bool = False
 
-    # RATIONALE: "warn" is the safest default — falls back to manual
+    # RATIONALE: "warn" is the safest default -- falls back to manual
     # AUC if sklearn is missing but tells the operator. "fail" is
     # recommended for clinical/regulatory runs. Fixes E12-003.
     sklearn_fallback_strategy: _Literal["fail", "warn", "silent"] = "warn"
 
-    # RATIONALE: BUG-C-007 root fix — previously defaulted to False, which
+    # RATIONALE: BUG-C-007 root fix -- previously defaulted to False, which
     # meant the platform's "bit-identical to sklearn.metrics.roc_auc_score"
     # claim was NEVER verified in production runs. The audit (§4.1) flags
     # this as CRITICAL: a silent numerical drift between the manual AUC
     # implementation and sklearn would inflate reported metrics without
-    # anyone noticing. Default is now True — the O(n) cost is negligible
+    # anyone noticing. Default is now True -- the O(n) cost is negligible
     # compared to TransE training, and any divergence raises a loud warning
     # via sklearn_fallback_strategy="warn". For ultra-high-throughput
     # batch jobs where verification cost is genuinely prohibitive, set
@@ -3710,7 +3710,7 @@ else:
     EVALUATION_CONFIG: EvaluationConfig = EvaluationConfig()
 
 # ─── Evaluation Version Constants ──────────────────────────────────────────
-# Fixes E7-003, E14-002 — versioned evaluation for reproducibility.
+# Fixes E7-003, E14-002 -- versioned evaluation for reproducibility.
 # These are also defined in evaluation.py for self-contained import;
 # config.py is the authoritative source.
 
@@ -3721,7 +3721,7 @@ K_VALUES_DEFAULT: Tuple[int, ...] = (1, 3, 5, 10, 20)
 EVALUATION_FALLBACK_STRATEGY: str = "warn"
 
 
-# ─── Phase E — Knowledge Graph Schema (SCIENTIFIC CORRECTNESS) ───────────────
+# ─── Phase E -- Knowledge Graph Schema (SCIENTIFIC CORRECTNESS) ───────────────
 # THIS IS THE HIGHEST PRIORITY DOMAIN (Domain 3).
 # Wrong science = wrong predictions = patient harm.
 
@@ -3738,11 +3738,11 @@ CORE_NODE_TYPES = ["Compound", "Disease", "Gene", "Protein", "Pathway",
                    # FIX-F / C-16: DOCX Phase 2 spec mandates 5 node types
                    # (Drugs, Proteins, Pathways, Diseases, Clinical Outcomes).
                    # The bridge previously emitted only 4 (Compound, Protein,
-                   # Gene, Disease) — ClinicalOutcome was missing entirely.
+                   # Gene, Disease) -- ClinicalOutcome was missing entirely.
                    # phase1_bridge._load_clinical_outcomes() now derives
                    # ClinicalOutcome nodes from drugbank_indications.csv.
                    "ClinicalOutcome",
-                   # Phase 0.3 (master_prompt D2.9 / D14.12) — SIDER uses
+                   # Phase 0.3 (master_prompt D2.9 / D14.12) -- SIDER uses
                    # MedDRA vocabulary for adverse events.
                    # v38 ROOT FIX (Phase 2 Issue #12): the previous code
                    # shipped BOTH "MedDRA_Term" (canonical, underscore) AND
@@ -3750,7 +3750,7 @@ CORE_NODE_TYPES = ["Compound", "Disease", "Gene", "Protein", "Pathway",
                    # dual-write". Neo4j labels with spaces require backtick
                    # quoting (``:``Side Effect````) which is fragile and
                    # error-prone. Adverse-event queries had to UNION across
-                   # both labels to be complete — any query hitting only
+                   # both labels to be complete -- any query hitting only
                    # one silently missed half the data. The fix: standardize
                    # on "MedDRA_Term" (the canonical, backtick-free form)
                    # and DEPRECATE "Side Effect". The SIDER loader has been
@@ -3762,12 +3762,12 @@ CORE_NODE_TYPES = ["Compound", "Disease", "Gene", "Protein", "Pathway",
                    # detection (so the kg_builder doesn't dead-letter
                    # legacy nodes during re-load), but NEW writes use
                    # "MedDRA_Term" exclusively.
-                   "MedDRA_Term"]  # "Side Effect" deprecated — see v38 fix
+                   "MedDRA_Term"]  # "Side Effect" deprecated -- see v38 fix
 
 # Extended node types from DRKG (13 entity types)
 # NOTE: 'Protein' is NOT in DRKG; DRKG uses 'Gene' for both gene and protein
 # product. Protein nodes are added only when UniProt data is loaded.
-# Fixes audit issue 3.2 — Added "Atc" and "Tax" DRKG node types
+# Fixes audit issue 3.2 -- Added "Atc" and "Tax" DRKG node types
 # RATIONALE: DRKG v2 includes ATC classification codes ("Atc") and
 # taxonomy entries ("Tax") as separate entity types. These were present
 # in the real DRKG data but were missing from the config, causing
@@ -3778,7 +3778,7 @@ DRKG_NODE_TYPES = [
     "Pathway", "Biological Process", "Molecular Function",
     "Cellular Component", "Taxonomy", "Gene Expression",
     "Atc", "Tax",
-    # Fixes audit issue 3.10 — MedDRA_Term for SIDER adverse events
+    # Fixes audit issue 3.10 -- MedDRA_Term for SIDER adverse events
     "MedDRA_Term",
 ]
 
@@ -3787,28 +3787,28 @@ DRKG_NODE_TYPES = [
 # The core edge types in DrugOS (spec + Gene-encodes-Protein bridge)
 #
 # SCIENTIFIC CORRECTNESS FIXES (highest priority):
-#   - Added ("Gene", "encodes", "Protein") — the biological bridge
+#   - Added ("Gene", "encodes", "Protein") -- the biological bridge
 #     between gene and protein product. Without this edge, the graph
 #     is disconnected between Gene-side and Protein-side data.
-#   - Added ("Compound", "targets", "Protein") — drug-target edges
+#   - Added ("Compound", "targets", "Protein") -- drug-target edges
 #     from UniProt/ChEMBL/STITCH/STRING all use the Protein endpoint.
-#   - Added ("Protein", "participates_in", "Pathway") — protein (not
+#   - Added ("Protein", "participates_in", "Pathway") -- protein (not
 #     gene) participates in pathways per Reactome / KEGG convention.
-#   - Added ("Compound", "inhibits", "Protein") — issue 3.1: many
+#   - Added ("Compound", "inhibits", "Protein") -- issue 3.1: many
 #     ChEMBL/DrugBank inhibition targets are proteins (not genes).
-#   - Added ("Compound", "activates", "Protein") — issue 3.1: many
+#   - Added ("Compound", "activates", "Protein") -- issue 3.1: many
 #     activation targets are proteins.
-#   - Added ("Compound", "tested_for", "Disease") — issue 3.8:
+#   - Added ("Compound", "tested_for", "Disease") -- issue 3.8:
 #     clinical trial records use "tested for" rather than "treats"
 #     for unapproved indications.
-#   - Added ("Protein", "associated_with", "Disease") — issue 3.3:
+#   - Added ("Protein", "associated_with", "Disease") -- issue 3.3:
 #     GWAS and PheWAS associate PROTEINS (gene products) with diseases,
 #     not genes directly.
-#   - Added ("Compound", "causes_adverse_event", "MedDRA_Term") —
+#   - Added ("Compound", "causes_adverse_event", "MedDRA_Term") --
 #     issue 3.10: SIDER uses MedDRA terms, not "Side Effect" generic.
-#   - Added ("Protein", "expressed_in", "Anatomy") — issue 3.11:
+#   - Added ("Protein", "expressed_in", "Anatomy") -- issue 3.11:
 #     protein expression (from HPA) is distinct from gene expression.
-#   - Added ("Pathway", "associated_with", "Disease") — issue 3.9:
+#   - Added ("Pathway", "associated_with", "Disease") -- issue 3.9:
 #     pathway-disease associations (e.g., from KEGG Disease).
 
 CORE_EDGE_TYPES: list[Tuple[str, str, str]] = [
@@ -3828,61 +3828,61 @@ CORE_EDGE_TYPES: list[Tuple[str, str, str]] = [
     ("Protein", "participates_in", "Pathway"),  # Reactome uses protein participants
     ("Pathway", "disrupted_in", "Disease"),     # spec edge from Phase 2 doc
     # ── New edges from scientific correctness audit ──
-    # Fixes audit issue 3.1 — drug-protein inhibition/activation
+    # Fixes audit issue 3.1 -- drug-protein inhibition/activation
     ("Compound", "inhibits", "Protein"),        # ChEMBL/DrugBank protein targets
     ("Compound", "activates", "Protein"),       # ChEMBL/DrugBank protein targets
-    # Fixes audit issue 3.8 — clinical trial "tested_for" edge
+    # Fixes audit issue 3.8 -- clinical trial "tested_for" edge
     # RATIONALE: ClinicalTrials.gov records drugs being TESTED for
     # diseases (not yet approved). Using "treats" for these would be
-    # scientifically incorrect — the drug has not been proven to treat.
+    # scientifically incorrect -- the drug has not been proven to treat.
     ("Compound", "tested_for", "Disease"),
-    # Fixes audit issue 3.3 — protein-disease associations (GWAS/PheWAS)
+    # Fixes audit issue 3.3 -- protein-disease associations (GWAS/PheWAS)
     # RATIONALE: GWAS associate gene PRODUCTS (proteins) with disease
     # risk. The Gene-associated_with-Disease edge captures the genetic
     # association; this edge captures the protein-level association.
     ("Protein", "associated_with", "Disease"),
-    # Fixes audit issue 3.10 — adverse events use MedDRA terms
+    # Fixes audit issue 3.10 -- adverse events use MedDRA terms
     # RATIONALE: SIDER uses MedDRA vocabulary for adverse events.
     # "Side Effect" is a generic term; MedDRA_Term is the specific
     # entity type that SIDER exports. The legacy "causes_side_effect"
     # edge is kept for backward compat.
     ("Compound", "causes_adverse_event", "MedDRA_Term"),
-    # Fixes audit issue 3.11 — protein expression in anatomy
+    # Fixes audit issue 3.11 -- protein expression in anatomy
     # RATIONALE: The Human Protein Atlas (HPA) measures PROTEIN
     # expression levels in tissues, which is distinct from GENE
     # expression (measured by RNA-seq in GEO).
     ("Protein", "expressed_in", "Anatomy"),
-    # Fixes audit issue 3.9 — pathway-disease associations
+    # Fixes audit issue 3.9 -- pathway-disease associations
     # RATIONALE: KEGG Disease and Reactome associate pathways
     # (not just genes) with disease states. "associated_with" is
     # used (not "disrupted_in") because not all pathway-disease
     # links involve disruption (e.g., protective pathways).
     ("Pathway", "associated_with", "Disease"),
     # ── DrugBank v2.0 audit-fix edge types (drugbank_parser_fix_prompt.md) ──
-    # Fixes FIX[(3.3)] — biologically correct relation semantics for
+    # Fixes FIX[(3.3)] -- biologically correct relation semantics for
     # enzymes/carriers/transporters. The drug is the SUBJECT of the
-    # relation in passive voice: drug → metabolized_by → enzyme
+    # relation in passive voice: drug -> metabolized_by -> enzyme
     # (biologically the enzyme metabolises the drug, not the other way
     # around). Same for carriers and transporters.
     ("Compound", "metabolized_by", "Protein"),
     ("Compound", "carried_by", "Protein"),
     ("Compound", "transported_by", "Protein"),
-    # Fixes FIX[(3.4)] — new relation vocabulary introduced by the
-    # canonical action→relation map. "induces" for inducers,
+    # Fixes FIX[(3.4)] -- new relation vocabulary introduced by the
+    # canonical action->relation map. "induces" for inducers,
     # "allosterically_modulates" for PAMs/NAMs, "unknown" for actions
     # not in the canonical map (fail-closed).
     ("Compound", "induces", "Protein"),
     ("Compound", "allosterically_modulates", "Protein"),
     ("Compound", "unknown", "Protein"),
-    # Fixes FIX[(3.9)] — drug-drug interactions are a critical safety
+    # Fixes FIX[(3.9)] -- drug-drug interactions are a critical safety
     # signal for the RL ranker (scope §6 "Safety Signal"). The edge
     # connects two Compound nodes; severity is stored as a property.
     ("Compound", "interacts_with", "Compound"),
     # ── v15 ROOT FIX (REM-12): OMIM susceptibility vs causative GDA ──
     # OMIM partitions gene-phenotype associations into causative
-    # (Mendelian, fully penetrant — mapping_key=3 with no
+    # (Mendelian, fully penetrant -- mapping_key=3 with no
     # association_modifier) and susceptibility (polygenic, partial
-    # penetrance — association_modifier=susceptibility/modifier/probable).
+    # penetrance -- association_modifier=susceptibility/modifier/probable).
     # v14 only had `associated_with` and conflated both, corrupting the
     # TransE embedding geometry (FGFR3+achondroplasia became equivalent
     # to BRCA1+breast_cancer). Fix: distinct `susceptible_to` relation
@@ -3898,11 +3898,11 @@ CORE_EDGE_TYPES: list[Tuple[str, str, str]] = [
     ("Compound", "has_clinical_outcome", "ClinicalOutcome"),
 ]
 
-# Fixes audit issue 2.1 — CORE_EDGE_TYPES_SET for O(1) lookup
+# Fixes audit issue 2.1 -- CORE_EDGE_TYPES_SET for O(1) lookup
 CORE_EDGE_TYPES_SET: frozenset[Tuple[str, str, str]] = frozenset(CORE_EDGE_TYPES)
 
 
-# Fixes audit issue 2.13 — is_core_edge() helper
+# Fixes audit issue 2.13 -- is_core_edge() helper
 def is_core_edge(src: str, rel: str, dst: str) -> bool:
     """Check if a triple is a core edge type.
 
@@ -3922,7 +3922,7 @@ def is_core_edge(src: str, rel: str, dst: str) -> bool:
     return (src, rel, dst) in CORE_EDGE_TYPES_SET
 
 
-# Fixes audit issue 2.13 — filter_to_core_edges()
+# Fixes audit issue 2.13 -- filter_to_core_edges()
 def filter_to_core_edges(
     edges: list[Tuple[str, str, str]],
 ) -> list[Tuple[str, str, str]]:
@@ -3939,7 +3939,7 @@ def filter_to_core_edges(
     return [e for e in edges if e in CORE_EDGE_TYPES_SET]
 
 
-# Fixes audit issue 2.13 — DRKG_RELATION_TO_CORE_EDGE mapping
+# Fixes audit issue 2.13 -- DRKG_RELATION_TO_CORE_EDGE mapping
 # Maps DRKG relation format "SourceType::relation::TargetType"
 # to our canonical (src, rel, dst) edge types
 DRKG_RELATION_TO_CORE_EDGE: dict[str, Tuple[str, str, str]] = {
@@ -3951,7 +3951,7 @@ DRKG_RELATION_TO_CORE_EDGE: dict[str, Tuple[str, str, str]] = {
     "Gene::interacts_with::Gene": ("Gene", "interacts_with", "Gene"),
 }
 
-# Fixes audit issue 2.13 — STRICT_EDGE_FILTERING
+# Fixes audit issue 2.13 -- STRICT_EDGE_FILTERING
 # RATIONALE: When True, only CORE_EDGE_TYPES are loaded from DRKG.
 # When False, all DRKG relation types are loaded (may include
 # biologically questionable edges). Default True for clinical safety.
@@ -3963,7 +3963,7 @@ STRICT_EDGE_FILTERING: bool = os.environ.get(
 DRKG_RELATION_SEPARATOR: str = "::"
 
 
-# Fixes audit issue 2.13 — split_drkg_relation and join_drkg_relation
+# Fixes audit issue 2.13 -- split_drkg_relation and join_drkg_relation
 def split_drkg_relation(relation: str) -> Tuple[str, str, str]:
     """Split a DRKG relation string into (src_type, relation_name, dst_type).
 
@@ -4015,24 +4015,24 @@ def join_drkg_relation(src_type: str, relation: str, dst_type: str) -> str:
 # These constants centralise the canonical DRKG codebook so that
 # ``drkg_loader.py``, ``training_data.py``, and downstream consumers all
 # read from a single source of truth. Before this block, the DRKG
-# relation whitelist was duplicated (and divergent) across loaders —
+# relation whitelist was duplicated (and divergent) across loaders --
 # the audit flagged this as BUG 3.1 / BUG 3.2 / BUG 3.6 / GAP 1.5.
 #
 # Reference for the abbreviations:
-#   DRKG codebook — https://github.com/gnn4dr-kg/awmlpedia/wiki/DRKG
+#   DRKG codebook -- https://github.com/gnn4dr-kg/awmlpedia/wiki/DRKG
 #   Himmelstein et al., 2020, Sci Data 7:329
 #   doi:10.1038/s41597-020-0465-y
 # =============================================================================
 
 # DRKG_PARSER_VERSION / DRKG_SCHEMA_VERSION
-# Fixes GAP 7.5 — version constants centralised in config so that the
+# Fixes GAP 7.5 -- version constants centralised in config so that the
 # loader, the pipeline runner, and the MLflow tracker all log the same
 # value. Bumped on any DRKG parse-logic or output-schema change.
 DRKG_PARSER_VERSION: str = "2.0.0"
 DRKG_SCHEMA_VERSION: str = "2.0.0"
 
 # DRKG_LICENSE / DRKG_ATTRIBUTION
-# Fixes BUG 14.1 — every DRKG-derived record carries the MIT license
+# Fixes BUG 14.1 -- every DRKG-derived record carries the MIT license
 # string and the Himmelstein 2020 citation in its ``_license`` /
 # ``_attribution`` fields so downstream exports remain compliant.
 DRKG_LICENSE: str = "MIT"
@@ -4056,14 +4056,14 @@ DRKG_ATTRIBUTION: str = (
 # =============================================================================
 
 # DRUGBANK_PARSER_VERSION / DRUGBANK_SCHEMA_VERSION
-# Fixes FIX[(7.2)] — version constants centralised in config so that the
+# Fixes FIX[(7.2)] -- version constants centralised in config so that the
 # loader, the pipeline runner, and the MLflow tracker all log the same
 # value. Bumped on any DrugBank parse-logic or output-schema change.
 DRUGBANK_PARSER_VERSION: str = "2.0.0"
 DRUGBANK_SCHEMA_VERSION: str = "2.0.0"
 
 # DRUGBANK_LICENSE / DRUGBANK_ATTRIBUTION
-# Fixes FIX[(14.1)] FIX[(14.2)] — every DrugBank-derived record carries
+# Fixes FIX[(14.1)] FIX[(14.2)] -- every DrugBank-derived record carries
 # the CC BY-NC 4.0 (academic) license string and the Wishart 2024
 # citation in its ``_license`` / ``_attribution`` fields so downstream
 # exports remain compliant with the DrugBank license terms. Commercial
@@ -4076,7 +4076,7 @@ DRUGBANK_ATTRIBUTION: str = (
 )
 
 # DRUGBANK_NAMESPACE_URI / DRUGBANK_NAMESPACE_ALIASES
-# Fixes FIX[(5.1)] FIX[(12.2)] FIX[(1.7)] — DrugBank 5.x XML uses
+# Fixes FIX[(5.1)] FIX[(12.2)] FIX[(1.7)] -- DrugBank 5.x XML uses
 # ``xmlns="http://www.drugbank.ca"`` (with www.). Older versions and some
 # mirrors use ``xmlns="http://drugbank.ca"`` (no www.). Both are accepted
 # via ``DRUGBANK_NAMESPACE_ALIASES``. The parser auto-detects the actual
@@ -4089,7 +4089,7 @@ DRUGBANK_NAMESPACE_ALIASES: tuple[str, ...] = (
 )
 
 # DRUGBANK_TEXT_FIELD_MAX_LENGTH
-# Fixes FIX[(3.13)] FIX[(12.3)] — Neo4j has a property size limit; long
+# Fixes FIX[(3.13)] FIX[(12.3)] -- Neo4j has a property size limit; long
 # DrugBank text fields (indication, mechanism_of_action, toxicity,
 # pharmacodynamics) are truncated at this length. Truncation is at a
 # sentence boundary (., !, ?) when possible. The full text hash
@@ -4097,7 +4097,7 @@ DRUGBANK_NAMESPACE_ALIASES: tuple[str, ...] = (
 DRUGBANK_TEXT_FIELD_MAX_LENGTH: int = 500
 
 # DRUGBANK_ORGANISM_FILTER_TAX_ID
-# Fixes FIX[(3.2)] FIX[(3.18)] — default NCBI TaxID for organism
+# Fixes FIX[(3.2)] FIX[(3.18)] -- default NCBI TaxID for organism
 # filtering. 9606 = Homo sapiens. DrugBank contains targets for many
 # organisms (mouse, rat, E. coli, etc.); only human targets are
 # clinically actionable for drug repurposing in humans. Set to None to
@@ -4105,7 +4105,7 @@ DRUGBANK_TEXT_FIELD_MAX_LENGTH: int = 500
 DRUGBANK_ORGANISM_FILTER_TAX_ID: int = 9606
 
 # DRUGBANK_ACTION_TO_RELATION
-# Fixes FIX[(3.4)] FIX[(2.7)] FIX[(12.5)] — canonical mapping from
+# Fixes FIX[(3.4)] FIX[(2.7)] FIX[(12.5)] -- canonical mapping from
 # DrugBank <action> strings to the project's CORE_EDGE_TYPES relation
 # vocabulary. DrugBank actions include "agonist", "antagonist",
 # "inhibitor", "inducer", "activator", "partial agonist", "inverse
@@ -4115,7 +4115,7 @@ DRUGBANK_ORGANISM_FILTER_TAX_ID: int = 9606
 # audit. Unknown actions fail-closed to ``"unknown"`` and are written to
 # the dead-letter queue.
 DRUGBANK_ACTION_TO_RELATION: dict[str, str] = {
-    "agonist": "activates",                       # agonism → activation
+    "agonist": "activates",                       # agonism -> activation
     "partial agonist": "activates",
     "inverse agonist": "inhibits",
     "antagonist": "inhibits",
@@ -4130,9 +4130,9 @@ DRUGBANK_ACTION_TO_RELATION: dict[str, str] = {
 }
 
 # DRUGBANK_EXTERNAL_ID_ALIASES
-# Fixes FIX[(3.16)] FIX[(12.6)] — DrugBank has renamed external ID
-# resource names between versions (e.g., "PubChem Compound" →
-# "PubChem Compound ID" → "PubChem CID"). This alias map lets the
+# Fixes FIX[(3.16)] FIX[(12.6)] -- DrugBank has renamed external ID
+# resource names between versions (e.g., "PubChem Compound" ->
+# "PubChem Compound ID" -> "PubChem CID"). This alias map lets the
 # parser resolve the canonical field name (e.g., "pubchem_cid")
 # regardless of which alias DrugBank used in the source XML. The first
 # non-empty alias wins; if multiple aliases resolve to different values,
@@ -4150,15 +4150,15 @@ DRUGBANK_EXTERNAL_ID_ALIASES: dict[str, tuple[str, ...]] = {
 }
 
 # ATC_CODE_SEPARATOR
-# Fixes FIX[(2.5)] FIX[(15.8)] FIX[(G.8)] — the separator used when
+# Fixes FIX[(2.5)] FIX[(15.8)] FIX[(G.8)] -- the separator used when
 # joining ATC codes into a single string for Neo4j storage. The
 # ``entity_resolver.resolve_compounds_from_drugbank`` consumer splits
-# on this separator. Any ATC code containing the separator (defensive —
+# on this separator. Any ATC code containing the separator (defensive --
 # should never happen) is escaped with a backslash before joining.
 ATC_CODE_SEPARATOR: str = "|"
 
 # DRUGBANK_PROGRESS_LOG_INTERVAL
-# Fixes FIX[(5.18)] FIX[(11.9)] FIX[(12.4)] — number of drugs parsed
+# Fixes FIX[(5.18)] FIX[(11.9)] FIX[(12.4)] -- number of drugs parsed
 # between progress log entries. Combined with a 30-second time-based
 # fallback so the user gets progress feedback even on slow parses.
 DRUGBANK_PROGRESS_LOG_INTERVAL: int = int(
@@ -4166,7 +4166,7 @@ DRUGBANK_PROGRESS_LOG_INTERVAL: int = int(
 )
 
 # DRUGBANK_MIN_FIELD_POPULATION
-# Fixes FIX[(5.20)] FIX[(11.16)] FIX[(G.10)] — minimum population rate
+# Fixes FIX[(5.20)] FIX[(11.16)] FIX[(G.10)] -- minimum population rate
 # for critical fields, expressed as a fraction in [0.0, 1.0]. If the
 # actual population rate falls below the threshold, the parser raises
 # ``DrugBankDataIntegrityError``. This catches parser regressions
@@ -4179,11 +4179,11 @@ DRUGBANK_MIN_FIELD_POPULATION: dict[str, float] = {
     "inchikey": 0.70,
     "targets": 0.50,
     "atc_codes": 0.50,
-    "approval_year": 0.50,  # FIX[(G.10)] — temporal split guard
+    "approval_year": 0.50,  # FIX[(G.10)] -- temporal split guard
 }
 
 # DRUGBANK_KG_BUILDER_FIELDS
-# Fixes FIX[(15.1)] FIX[(11.14)] — the list of fields the
+# Fixes FIX[(15.1)] FIX[(11.14)] -- the list of fields the
 # ``kg_builder.enrich_compounds_from_drugbank`` Cypher SET clause reads.
 # The parser MUST emit at least these fields on every node record. The
 # test suite asserts this invariant.
@@ -4202,12 +4202,12 @@ DRUGBANK_KG_BUILDER_FIELDS: tuple[str, ...] = (
 )
 
 # ALLOWED_DRUGBANK_URLS
-# Fixes FIX[(9.1)] — URL-prefix allowlist for DrugBank downloads (guard
+# Fixes FIX[(9.1)] -- URL-prefix allowlist for DrugBank downloads (guard
 # against config injection / SSRF). Any URL in
 # ``DATA_SOURCES['drugbank']['url']`` MUST start with one of these
 # prefixes or the download is refused before any network call. DrugBank
 # requires academic registration; the download URL is behind a login
-# form, so direct download is typically not possible — but the allowlist
+# form, so direct download is typically not possible -- but the allowlist
 # is still enforced for the credentials-aware path.
 ALLOWED_DRUGBANK_URLS: tuple[str, ...] = (
     "https://go.drugbank.com/",
@@ -4217,7 +4217,7 @@ ALLOWED_DRUGBANK_URLS: tuple[str, ...] = (
 )
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# ChEMBL LOADER CONSTANTS — institutional-grade audit fix
+# ChEMBL LOADER CONSTANTS -- institutional-grade audit fix
 # ═══════════════════════════════════════════════════════════════════════════════
 # These constants follow the same pattern as the DRKG_* and DRUGBANK_*
 # constants above. Every magic number, magic string, and hardcoded threshold
@@ -4276,8 +4276,8 @@ CHEMBL_TARGET_TYPES: frozenset[str] = frozenset({
 # RATIONALE: ChEMBL assays are classified as B (Binding) or F (Functional).
 # Both are scientifically valid for drug-target interaction, but they
 # measure different things:
-# - B: direct physical binding (Kd, Ki) — strongest evidence
-# - F: functional readout (IC50, EC50) — may be indirect
+# - B: direct physical binding (Kd, Ki) -- strongest evidence
+# - F: functional readout (IC50, EC50) -- may be indirect
 # We accept both but tag the edge with the assay type for downstream
 # consumers (e.g., the RL ranker may weight B assays higher).
 CHEMBL_ASSAY_TYPES: frozenset[str] = frozenset({"B", "F"})
@@ -4289,19 +4289,19 @@ CHEMBL_ASSAY_TYPES: frozenset[str] = frozenset({"B", "F"})
 # A wrong mapping here creates wrong edges, which corrupts the GNN.
 #
 # Scientific basis:
-# - IC50 (half-maximal inhibitory concentration) → "inhibits"
-# - Ki (inhibition constant) → "inhibits"
-# - Kd (dissociation constant) → "binds" (measures affinity, not direction)
-# - EC50 (half-maximal effective concentration) → "activates"
-# - ED50 (effective dose) → "activates"
-# - Potency → "binds" (generic measure, no direction implied)
-# - AC50 → "activates"
-# - MIC (minimum inhibitory concentration) → "inhibits"
-# - Activity → "binds" (too generic to infer direction)
-# - Inhibition → "inhibits"
-# - % Inhibition → "inhibits"
+# - IC50 (half-maximal inhibitory concentration) -> "inhibits"
+# - Ki (inhibition constant) -> "inhibits"
+# - Kd (dissociation constant) -> "binds" (measures affinity, not direction)
+# - EC50 (half-maximal effective concentration) -> "activates"
+# - ED50 (effective dose) -> "activates"
+# - Potency -> "binds" (generic measure, no direction implied)
+# - AC50 -> "activates"
+# - MIC (minimum inhibitory concentration) -> "inhibits"
+# - Activity -> "binds" (too generic to infer direction)
+# - Inhibition -> "inhibits"
+# - % Inhibition -> "inhibits"
 # The key insight: NOT every bioactivity measurement implies INHIBITION.
-# The old code defaulted to "inhibits" for unknown types — this was
+# The old code defaulted to "inhibits" for unknown types -- this was
 # scientifically wrong and could cause the GNN to learn that agonists
 # are inhibitors.
 CHEMBL_ACTIVITY_TYPE_INHIBITS: frozenset[str] = frozenset({
@@ -4312,13 +4312,13 @@ CHEMBL_ACTIVITY_TYPE_INHIBITS: frozenset[str] = frozenset({
     "MINIMUM INHIBITOR CONCENTRATION",
     # v58 ROOT FIX (P2L-008 deep): INACTIVATION is the standard ChEMBL
     # label for irreversible / covalent inhibition (aspirin, omeprazole,
-    # clopidogrel, penicillin — all covalent modifiers). The v57 fix
+    # clopidogrel, penicillin -- all covalent modifiers). The v57 fix
     # only PREVENTED the wrong "activates" classification (via \bACTIVAT
     # word-boundary in _RE_ACTIVATE). Without these explicit entries,
-    # INACTIVATION fell through to the default "targets" — losing the
+    # INACTIVATION fell through to the default "targets" -- losing the
     # scientific signal that the drug INHIBITS the target. The Graph
     # Transformer then trained on a graph where covalent inhibitors had
-    # a neutral "targets" edge instead of an "inhibits" edge — corrupting
+    # a neutral "targets" edge instead of an "inhibits" edge -- corrupting
     # the drug-target semantics the model is supposed to learn.
     "INACTIVATION", "% INACTIVATION", "PERCENT INACTIVATION",
     "INACTIVATOR", "INACTIVATION ASSAY",
@@ -4342,7 +4342,7 @@ CHEMBL_ACTIVITY_TYPE_MODULATES: frozenset[str] = frozenset({
     "NEGATIVELY MODULATES",
 })
 
-# CHEMBL_STANDARD_TYPE_TO_RELATION — the canonical mapping from
+# CHEMBL_STANDARD_TYPE_TO_RELATION -- the canonical mapping from
 # ChEMBL standard_type strings to KG relation types. Built from the
 # per-category frozensets above so there is a single source of truth.
 # Fixes pre-existing bug: symbol was in __all__ but never defined.
@@ -4387,7 +4387,7 @@ CHEMBL_MIN_FIELD_POPULATION: dict[str, float] = {
     "drug_chembl_id": 0.99,
     "target_chembl_id": 0.99,
     "uniprot_accession": 0.50,  # many targets lack UniProt mapping
-    "pchembl_value": 0.95,      # this IS the filter — almost all rows have it
+    "pchembl_value": 0.95,      # this IS the filter -- almost all rows have it
     "standard_type": 0.95,
     "smiles": 0.70,             # some compounds lack structures
 }
@@ -4413,14 +4413,14 @@ CHEMBL_DRUG_IDENTIFIER_REGEX: str = r"^CHEMBL\d{1,7}$"
 # Format: 6-char (e.g. P23219: 1 letter + 5 digits) or
 # 10-char (e.g. A0A024QZ08: 1 letter + 0-9 + 7 alphanumeric + 1 digit).
 # The regex covers all three UniProt accession formats:
-#   1. [A-NR-Z][0-9]{5}         — legacy 6-char (P23219)
-#   2. [A-NR-Z][0-9][A-Z0-9]{3}[0-9]  — 6-char with alphanums (P35568)
-#   3. [OPQ][0-9][A-Z0-9]{3}[0-9]     — 6-char O/P/Q prefix (Q9Y2H6)
+#   1. [A-NR-Z][0-9]{5}         -- legacy 6-char (P23219)
+#   2. [A-NR-Z][0-9][A-Z0-9]{3}[0-9]  -- 6-char with alphanums (P35568)
+#   3. [OPQ][0-9][A-Z0-9]{3}[0-9]     -- 6-char O/P/Q prefix (Q9Y2H6)
 #   4. A0A-style 10-char: [A-NR-Z]0[A-Z0-9]{6}[0-9]  (A0A024QZ08)
 CHEMBL_UNIPROT_AC_REGEX: str = r"^[A-NR-Z][0-9][A-Z0-9]{3}[0-9]$|^[A-NR-Z][0-9]{5}$|^[OPQ][0-9][A-Z0-9]{3}[0-9]$|^[A-NR-Z]0[A-Z0-9]{7}[0-9]$"
 
 # DRUGOS_DEPLOYMENT_CONTEXT
-# Fixes FIX[(G.17)] — the deployment context controls whether DrugBank
+# Fixes FIX[(G.17)] -- the deployment context controls whether DrugBank
 # (CC BY-NC 4.0) data may be loaded. Academic context is the default
 # and matches the DrugBank license terms. Commercial use requires a
 # separate commercial license from the Wishart Research Group; the
@@ -4431,13 +4431,13 @@ DRUGOS_DEPLOYMENT_CONTEXT: str = os.environ.get(
 )
 
 # DRUGOS_ENVIRONMENT
-# Fixes FIX[(12.13)] — environment selector (dev/staging/prod). In
+# Fixes FIX[(12.13)] -- environment selector (dev/staging/prod). In
 # ``prod``, ``validate_xsd=True`` and ``cross_check_regulatory=True``
 # by default; in ``dev``, both are False for speed.
 DRUGOS_ENVIRONMENT: str = os.environ.get("DRUGOS_ENVIRONMENT", "production")
 
 # DRUGBANK_STRICT_VERSION
-# Fixes FIX[(14.11)] FIX[(G.16)] — when "1", refuse to parse if the
+# Fixes FIX[(14.11)] FIX[(G.16)] -- when "1", refuse to parse if the
 # actual XML root version differs from
 # ``DATA_SOURCES['drugbank']['version']``. When "0" (default), log a
 # WARNING on mismatch and continue. A version *downgrade* always raises
@@ -4447,10 +4447,10 @@ DRUGBANK_STRICT_VERSION: str = os.environ.get(
 )
 
 # DRUGBANK_ALLOW_MISSING_APPROVAL_YEAR
-# Fixes FIX[(3.1)] — when "1", approved drugs with no FDA Approval Date
+# Fixes FIX[(3.1)] -- when "1", approved drugs with no FDA Approval Date
 # in <experimental-properties> are accepted with ``approval_year=None``
 # (backward compat). When unset (default), the parser raises
-# ``DrugBankDataIntegrityError`` for approved drugs with no FDA date —
+# ``DrugBankDataIntegrityError`` for approved drugs with no FDA date --
 # fail-closed for patient safety (temporal split would silently fall
 # back to random otherwise).
 DRUGBANK_ALLOW_MISSING_APPROVAL_YEAR: str = os.environ.get(
@@ -4458,7 +4458,7 @@ DRUGBANK_ALLOW_MISSING_APPROVAL_YEAR: str = os.environ.get(
 )
 
 # DRUGBANK_STORE_FULL_TEXT
-# Fixes FIX[(3.13)] — when "1", the parser also emits the untruncated
+# Fixes FIX[(3.13)] -- when "1", the parser also emits the untruncated
 # ``indication_full``, ``mechanism_of_action_full``, ``toxicity_full``,
 # and ``pharmacodynamics_full`` fields. Default "0" (truncated only,
 # with SHA-256 of the full text for traceability).
@@ -4467,7 +4467,7 @@ DRUGBANK_STORE_FULL_TEXT: str = os.environ.get(
 )
 
 # DRUGBANK_BACKFILL_REFERENCE_TIME
-# Fixes FIX[(5.6)] FIX[(7.7)] — when set (ISO-8601), used as the
+# Fixes FIX[(5.6)] FIX[(7.7)] -- when set (ISO-8601), used as the
 # reference time for file-age calculations instead of ``time.time()``.
 # This makes backfills deterministic: the same backfill produces the
 # same ``_provenance['source_file_age_days']`` regardless of when it
@@ -4477,20 +4477,20 @@ DRUGBANK_BACKFILL_REFERENCE_TIME: str = os.environ.get(
 )
 
 # DRUGOS_FIXED_PARSED_AT
-# Fixes FIX[(7.5)] — when set (ISO-8601), used as the ``parsed_at``
+# Fixes FIX[(7.5)] -- when set (ISO-8601), used as the ``parsed_at``
 # timestamp on every record instead of ``datetime.now(timezone.utc)``.
 # This makes backfills deterministic: the same backfill produces the
 # same ``_provenance['parsed_at']`` regardless of when it runs.
 DRUGOS_FIXED_PARSED_AT: str = os.environ.get("DRUGOS_FIXED_PARSED_AT", "")
 
 # DRUGOS_RUN_ID
-# Fixes FIX[(9.10)] FIX[(11.11)] — when set, used as the ``run_id`` on
+# Fixes FIX[(9.10)] FIX[(11.11)] -- when set, used as the ``run_id`` on
 # every record's ``_provenance`` for cross-step correlation. Otherwise
 # a new UUID is generated per parse run.
 DRUGOS_RUN_ID: str = os.environ.get("DRUGOS_RUN_ID", "")
 
 # DRUGBANK_RARE_DISEASE_KEYWORDS
-# Fixes FIX[(9.8)] — case-insensitive keywords that, when found in a
+# Fixes FIX[(9.8)] -- case-insensitive keywords that, when found in a
 # drug's ``indication`` or ``categories`` field, mark the record as
 # ``sensitive=True`` (GDPR/HIPAA-aware tagging). Rare-disease data is
 # health data under GDPR Article 9 and must be handled accordingly.
@@ -4506,7 +4506,7 @@ DRUGBANK_RARE_DISEASE_KEYWORDS: tuple[str, ...] = (
 )
 
 # DRUGBANK_MEMORY_CEILING_MB
-# Fixes FIX[(6.8)] FIX[(8.10)] — maximum resident set size (MB) the
+# Fixes FIX[(6.8)] FIX[(8.10)] -- maximum resident set size (MB) the
 # parser is allowed to use. If exceeded, raises
 # ``DrugBankParseError`` with a message pointing to ``iter_drugbank()``
 # for streaming-mode parsing.
@@ -4515,14 +4515,14 @@ DRUGBANK_MEMORY_CEILING_MB: int = int(
 )
 
 # DRUGBANK_CHECKPOINT_INTERVAL
-# Fixes FIX[(6.10)] — number of drugs parsed between checkpoint writes.
+# Fixes FIX[(6.10)] -- number of drugs parsed between checkpoint writes.
 # Checkpoints enable resume-after-failure for very large XML files.
 DRUGBANK_CHECKPOINT_INTERVAL: int = int(
     os.environ.get("DRUGBANK_CHECKPOINT_INTERVAL", "50000")
 )
 
 # DRUGBANK_INTERACTION_SEVERITY_RULES
-# Fixes FIX[(3.9)] — ordered rules for classifying drug-drug
+# Fixes FIX[(3.9)] -- ordered rules for classifying drug-drug
 # interaction severity from the free-text ``<description>`` field.
 # The first matching rule wins. Default severity is "unknown".
 DRUGBANK_INTERACTION_SEVERITY_RULES: tuple[tuple[str, str], ...] = (
@@ -4548,7 +4548,7 @@ DRUGBANK_INTERACTION_SEVERITY_RULES: tuple[tuple[str, str], ...] = (
 )
 
 # DRUGBANK_DRUG_TYPE_TO_NODE_LABEL
-# Fixes FIX[(3.19)] — maps DrugBank <drug type="..."> attribute values
+# Fixes FIX[(3.19)] -- maps DrugBank <drug type="..."> attribute values
 # to additional Neo4j labels for the Compound node. This enables
 # downstream filtering (e.g., "give me only biotech drugs") without
 # scanning the ``drug_type`` property.
@@ -4563,7 +4563,7 @@ DRUGBANK_DRUG_TYPE_TO_NODE_LABEL: dict[str, str] = {
 }
 
 # DRUGBANK_TEXT_FIELD_NAMES
-# Fixes FIX[(3.13)] FIX[(3.14)] FIX[(3.15)] — the four long-text fields
+# Fixes FIX[(3.13)] FIX[(3.14)] FIX[(3.15)] -- the four long-text fields
 # that are truncated at ``DRUGBANK_TEXT_FIELD_MAX_LENGTH``. Each emits
 # both ``<field>`` (truncated) and ``<field>_truncated: bool`` plus
 # ``<field>_full_sha256: str`` for traceability.
@@ -4575,38 +4575,38 @@ DRUGBANK_TEXT_FIELD_NAMES: tuple[str, ...] = (
 )
 
 # DRUGBANK_XML_BACKEND
-# Fixes FIX[(9.6)] FIX[(15.11)] — the XML backend used by the parser.
+# Fixes FIX[(9.6)] FIX[(15.11)] -- the XML backend used by the parser.
 # Currently only "xml.etree.ElementTree" (stdlib, XXE-safe). If a
 # future migration to lxml is desired, add an abstraction layer via
 # ``_loader_protocol.FieldExtractor`` and gate with this constant.
 DRUGBANK_XML_BACKEND: str = "xml.etree.ElementTree"
 
 # DRUGBANK_DRUG_IDENTIFIER_REGEX
-# Fixes FIX[(3.6)] FIX[(G.14)] — regex for validating DrugBank primary
+# Fixes FIX[(3.6)] FIX[(G.14)] -- regex for validating DrugBank primary
 # IDs. Format: ``DB`` followed by 5-7 digits (e.g., DB00001, DB00107).
 DRUGBANK_DRUG_IDENTIFIER_REGEX: str = r"^DB\d{5,7}$"
 
 # DRUGBANK_INCHIKEY_REGEX
-# Fixes FIX[(3.6)] — regex for validating InChIKey. Format: 14
+# Fixes FIX[(3.6)] -- regex for validating InChIKey. Format: 14
 # uppercase letters, hyphen, 10 uppercase letters, hyphen, 1 uppercase
 # letter (e.g., BSYNRYMUTXBXSQ-UHFFFAOYSA-N).
 DRUGBANK_INCHIKEY_REGEX: str = r"^[A-Z]{14}-[A-Z]{10}-[A-Z]$"
 
 # DRUGBANK_CAS_REGEX
-# Fixes FIX[(3.6)] FIX[(3.12)] — regex for validating CAS Registry
+# Fixes FIX[(3.6)] FIX[(3.12)] -- regex for validating CAS Registry
 # Numbers. Format: 2-7 digits, hyphen, 2 digits, hyphen, 1 digit
 # (e.g., 50-78-2 for aspirin).
 DRUGBANK_CAS_REGEX: str = r"^\d{2,7}-\d{2}-\d$"
 
 # DRUGBANK_ATC_REGEX
-# Fixes FIX[(3.6)] FIX[(3.7)] — regex for validating ATC codes.
+# Fixes FIX[(3.6)] FIX[(3.7)] -- regex for validating ATC codes.
 # Format: 1 letter, 2 digits, 2 letters, 2 digits (e.g., N02BA01).
 # ATC levels 1-4 are substrings of level-5 codes; the parser captures
 # all levels via the recursive walker (FIX[(3.7)]).
 DRUGBANK_ATC_REGEX: str = r"^[A-Z]\d{2}[A-Z]{2}\d{2}$"
 
 # DRUGBANK_ORGANISM_TO_TAXID
-# Fixes FIX[(3.2)] — maps DrugBank <organism> display names to NCBI
+# Fixes FIX[(3.2)] -- maps DrugBank <organism> display names to NCBI
 # TaxIDs. Used for the organism filter (default 9606 = human). The
 # parser also reads the ``organism-id`` XML attribute when present
 # (preferred over the display name).
@@ -4627,32 +4627,32 @@ DRUGBANK_ORGANISM_TO_TAXID: dict[str, int] = {
 }
 
 # DRUGBANK_XSD_PATH
-# Fixes FIX[(5.11)] — path to the DrugBank XSD schema file (optional).
+# Fixes FIX[(5.11)] -- path to the DrugBank XSD schema file (optional).
 # If the file exists and ``validate_xsd=True``, the parser validates
 # the XML against the schema. If the file does not exist, the parser
 # logs at INFO and skips XSD validation (do not raise).
 DRUGBANK_XSD_PATH: str = "data/schemas/drugbank.xsd"
 
 # DRUGBANK_PARSER_DEPRECATIONS
-# Fixes FIX[(14.12)] FIX[(15.9)] — deprecation timeline for parser
+# Fixes FIX[(14.12)] FIX[(15.9)] -- deprecation timeline for parser
 # APIs. Empty for now; will be populated when APIs are scheduled for
 # removal.
 DRUGBANK_PARSER_DEPRECATIONS: dict[str, str] = {}
 
 # DRUGBANK_DRUGBANK_VERSION_LEXCMP
-# Fixes FIX[(G.16)] — when comparing DrugBank version strings, the
+# Fixes FIX[(G.16)] -- when comparing DrugBank version strings, the
 # parser uses lexical comparison on the semver string. This works for
-# versions that are zero-padded (e.g., "5.1.12" > "5.1.11" → True).
+# versions that are zero-padded (e.g., "5.1.12" > "5.1.11" -> True).
 # For non-zero-padded versions, the parser falls back to tuple
-# comparison (e.g., (5, 1, 12) > (5, 1, 9) → True).
+# comparison (e.g., (5, 1, 12) > (5, 1, 9) -> True).
 DRUGBANK_DRUGBANK_VERSION_LEXCMP: bool = True
 
 # DRUGBANK_DRUGBANK_FALLBACK_TO_TUPLE_COMPARE
-# Fixes FIX[(G.16)] — see above.
+# Fixes FIX[(G.16)] -- see above.
 DRUGBANK_DRUGBANK_FALLBACK_TO_TUPLE_COMPARE: bool = True
 
-# DRKG_TSV_COLUMNS — the three columns of drkg.tsv (no header).
-# Fixes BUG 12.4 — eliminates the hardcoded ``names=[...]`` list in
+# DRKG_TSV_COLUMNS -- the three columns of drkg.tsv (no header).
+# Fixes BUG 12.4 -- eliminates the hardcoded ``names=[...]`` list in
 # ``parse_drkg_tsv``. The order MUST match the on-disk column order.
 DRKG_TSV_COLUMNS: tuple[str, ...] = (
     "head_entity",
@@ -4660,8 +4660,8 @@ DRKG_TSV_COLUMNS: tuple[str, ...] = (
     "tail_entity",
 )
 
-# ALLOWED_DRKG_URLS — URL-prefix allowlist for DRKG downloads.
-# Fixes BUG 9.2 — guards against config injection / SSRF. Any URL in
+# ALLOWED_DRKG_URLS -- URL-prefix allowlist for DRKG downloads.
+# Fixes BUG 9.2 -- guards against config injection / SSRF. Any URL in
 # ``DATA_SOURCES['drkg']['url']`` MUST start with one of these prefixes
 # or the download is refused before any network call. Extend this tuple
 # (not the loader code) to add a new mirror.
@@ -4674,14 +4674,14 @@ ALLOWED_DRKG_URLS: tuple[str, ...] = (
 )
 
 # EXPECTED_DRKG_ENTITY_TYPES / EXPECTED_DRKG_RELATION_TYPES
-# Fixes BUG 5.2 — counts sourced from the DRKG paper. Tolerance is ±1
+# Fixes BUG 5.2 -- counts sourced from the DRKG paper. Tolerance is ±1
 # to allow for minor release-to-release drift (e.g. a node type being
 # added/removed). Values verified against DRKG v2.0 (2023-06-01).
 EXPECTED_DRKG_ENTITY_TYPES: int = 13
 EXPECTED_DRKG_RELATION_TYPES: int = 107
 
-# DRKG_TREATMENT_RELATIONS — the Compound-treats-Disease relation family.
-# Fixes BUG 3.1 — the old loader filtered by ``relation_name.str.contains
+# DRKG_TREATMENT_RELATIONS -- the Compound-treats-Disease relation family.
+# Fixes BUG 3.1 -- the old loader filtered by ``relation_name.str.contains
 # ("treat", case=False)`` which matched NOTHING on real DRKG (the real
 # abbreviation is ``CtD``). Centralised here so ``training_data.py`` can
 # import the same set rather than duplicating the regex (BUG 3.1 audit
@@ -4697,8 +4697,8 @@ DRKG_TREATMENT_RELATIONS: frozenset[str] = frozenset({
     "MAY_TREAT",      # DrugCentral uppercase variant
 })
 
-# DRKG_COMPOUND_GENE_RELATIONS — Compound-binds/affects-Gene relation family.
-# Fixes BUG 3.2 — the old loader filtered by ``relation_name.str.contains
+# DRKG_COMPOUND_GENE_RELATIONS -- Compound-binds/affects-Gene relation family.
+# Fixes BUG 3.2 -- the old loader filtered by ``relation_name.str.contains
 # ("bind|interact|target", case=False)`` which matched only the small
 # ``DRUGBANK::target::`` slice. This set is populated from
 # ``training_data.py:121-138``'s verified regex so the loader and the
@@ -4730,8 +4730,8 @@ DRKG_COMPOUND_GENE_RELATIONS: frozenset[str] = frozenset({
     "PARTIAL AGONIST", "POSITIVE ALLOSTERIC MODULATOR", "ANTIBODY",
 })
 
-# DRKG_GENE_DISEASE_ASSOCIATION_RELATIONS — curated, semantically
-# "association" subset. Fixes BUG 3.4 — the old loader returned ALL
+# DRKG_GENE_DISEASE_ASSOCIATION_RELATIONS -- curated, semantically
+# "association" subset. Fixes BUG 3.4 -- the old loader returned ALL
 # Gene-Disease edges regardless of semantics, merging biomarkers (``J``),
 # causal (``L``), therapeutic-effect (``Te``), upregulated (``U``),
 # underexpressed (``Y``), curator (``DaG``, ``DdG``) into one
@@ -4743,8 +4743,8 @@ DRKG_GENE_DISEASE_ASSOCIATION_RELATIONS: frozenset[str] = frozenset({
     "Te",   # GNBR possible therapeutic effect
 })
 
-# DRKG_GENE_DISEASE_BIOMARKER_RELATIONS — biomarker / expression subset.
-# Fixes BUG 3.4 — separated from the "association" set so callers can
+# DRKG_GENE_DISEASE_BIOMARKER_RELATIONS -- biomarker / expression subset.
+# Fixes BUG 3.4 -- separated from the "association" set so callers can
 # opt-in via ``include_biomarkers=True``. These are statistically weaker
 # evidence than curated associations and should not be blended into the
 # default Gene-Disease subgraph used for training positive pairs.
@@ -4756,9 +4756,9 @@ DRKG_GENE_DISEASE_BIOMARKER_RELATIONS: frozenset[str] = frozenset({
     "X",   # GNBR overexpressed
 })
 
-# DRKG_RELATION_ABBREV_TO_NAME — codebook mapping the DRKG abbreviation
+# DRKG_RELATION_ABBREV_TO_NAME -- codebook mapping the DRKG abbreviation
 # (middle token of the relation string) to its human-readable name.
-# Fixes GAP 3.7 — the loader emits a ``relation_human_name`` column so
+# Fixes GAP 3.7 -- the loader emits a ``relation_human_name`` column so
 # downstream dashboards / KG consumers can show "Compound-treats-Disease"
 # instead of the cryptic "CtD". Unknown abbreviations are NOT in this
 # map; the loader logs them as candidates for codebook extension.
@@ -4813,8 +4813,8 @@ DRKG_RELATION_ABBREV_TO_NAME: dict[str, str] = {
     "MODULATOR": "Compound-modulates-Gene",
 }
 
-# DRKG_VALID_TRIPLE_SCHEMAS — the biologically-valid (abbreviation,
-# head_type, tail_type) triples per the DRKG codebook. Fixes BUG 3.6 —
+# DRKG_VALID_TRIPLE_SCHEMAS -- the biologically-valid (abbreviation,
+# head_type, tail_type) triples per the DRKG codebook. Fixes BUG 3.6 --
 # the old ``validate_drkg`` checked format only, so a row with
 # ``head_type="Compound", relation_name="CtD", tail_type="Gene"`` would
 # pass (biologically impossible: CtD means Compound-treats-Disease).
@@ -4893,8 +4893,8 @@ DRKG_VALID_TRIPLE_SCHEMAS: frozenset[tuple[str, str, str]] = frozenset({
     ("TtDpT", "Taxonomy", "Disease"),   # Taxonomy-causes-Disease (pathogen)
 })
 
-# DRKG_ENTITY_TYPE_TO_URI_PREFIX — maps a DRKG entity type to its
-# identifiers.org prefix for FAIR URI construction. Fixes BUG 14.2 —
+# DRKG_ENTITY_TYPE_TO_URI_PREFIX -- maps a DRKG entity type to its
+# identifiers.org prefix for FAIR URI construction. Fixes BUG 14.2 --
 # every parsed row emits ``head_uri`` / ``tail_uri`` so downstream KG
 # consumers can resolve identifiers via the identifiers.org resolver.
 # Reference: https://identifiers.org/
@@ -4917,12 +4917,12 @@ DRKG_ENTITY_TYPE_TO_URI_PREFIX: dict[str, str] = {
     "Gene Expression": "geo",
 }
 
-# DRKG_RARE_DISEASE_CODES — prefixes of rare-disease identifiers
+# DRKG_RARE_DISEASE_CODES -- prefixes of rare-disease identifiers
 # (prevalence < 1 in 2,000 in the EU per Orphanet designation).
-# Fixes GAP 9.6 — rows whose ``tail_entity`` is a rare disease are
+# Fixes GAP 9.6 -- rows whose ``tail_entity`` is a rare disease are
 # tagged ``sensitive=True`` so that downstream exports can suppress or
 # aggregate them per GDPR / HIPAA. Sourced from Orphanet's rare-disease
-# designation list (https://www.orpha.net/). The set is conservative —
+# designation list (https://www.orpha.net/). The set is conservative --
 # only codes with explicit "rare" designation are included.
 DRKG_RARE_DISEASE_CODES: frozenset[str] = frozenset({
     "ORPHANET:",     # Orphanet rare-disease codes (ORPHA:NNNN)
@@ -4936,9 +4936,9 @@ DRKG_RARE_DISEASE_CODES: frozenset[str] = frozenset({
     "MESH:C538560",
 })
 
-# DRKG_STRICT_FILTER_ALLOW_UNKNOWN — relations whose ``evidence_strength``
+# DRKG_STRICT_FILTER_ALLOW_UNKNOWN -- relations whose ``evidence_strength``
 # is "unknown" but that should still be admitted under
-# ``STRICT_EDGE_FILTERING=True``. Fixes GAP 3.9 — empty by default; add
+# ``STRICT_EDGE_FILTERING=True``. Fixes GAP 3.9 -- empty by default; add
 # a relation here only with explicit clinical-safety review (the default
 # unknown rows are excluded under strict mode to protect the RL safety
 # ranker from misclassifying activators as treatments).
@@ -4946,7 +4946,7 @@ DRKG_STRICT_FILTER_ALLOW_UNKNOWN: frozenset[str] = frozenset()
 
 
 # ─── Edge Metadata ────────────────────────────────────────────────────────────
-# Fixes audit issue 2.14 — EDGE_EVIDENCE_STRENGTH
+# Fixes audit issue 2.14 -- EDGE_EVIDENCE_STRENGTH
 # RATIONALE: Not all edges in the KG have the same evidentiary
 # support. A DrugBank "treats" edge is FDA-verified (strong), while
 # a text-mined "associated_with" edge may be weak.
@@ -4974,9 +4974,9 @@ EDGE_EVIDENCE_STRENGTH: dict[Tuple[str, str, str], str] = {
     ("Pathway", "associated_with", "Disease"): "weak",
 }
 
-# Fixes audit issue 3.3 — EDGE_CAUSALITY
-# RATIONALE: "inhibits" and "activates" are causal — the drug
-# CAUSES the effect. "associated_with" is correlational — the
+# Fixes audit issue 3.3 -- EDGE_CAUSALITY
+# RATIONALE: "inhibits" and "activates" are causal -- the drug
+# CAUSES the effect. "associated_with" is correlational -- the
 # gene/protein is statistically associated but causation is unproven.
 EDGE_CAUSALITY: dict[str, str] = {
     "treats": "causal",
@@ -4995,7 +4995,7 @@ EDGE_CAUSALITY: dict[str, str] = {
     "causes_adverse_event": "causal",
 }
 
-# Fixes audit issue 3.9 — EDGE_VERB_EVIDENCE
+# Fixes audit issue 3.9 -- EDGE_VERB_EVIDENCE
 # Maps edge verbs to their evidentiary basis
 EDGE_VERB_EVIDENCE: dict[str, str] = {
     "treats": "FDA_approval",
@@ -5014,7 +5014,7 @@ EDGE_VERB_EVIDENCE: dict[str, str] = {
     "causes_adverse_event": "pharmacovigilance",
 }
 
-# Fixes audit issue 3.11 — BIOLOGICAL_EDGE_CORRECTIONS
+# Fixes audit issue 3.11 -- BIOLOGICAL_EDGE_CORRECTIONS
 # Documents known biological corrections to DRKG edge semantics
 BIOLOGICAL_EDGE_CORRECTIONS: dict[str, str] = {
     "Compound::binds::Gene": (
@@ -5029,7 +5029,7 @@ BIOLOGICAL_EDGE_CORRECTIONS: dict[str, str] = {
     ),
 }
 
-# Fixes audit issue 13.4 — EDGE_PRODUCERS
+# Fixes audit issue 13.4 -- EDGE_PRODUCERS
 # Documents which module/loader produces each edge type
 EDGE_PRODUCERS: dict[Tuple[str, str, str], list[str]] = {
     ("Compound", "treats", "Disease"): ["drkg_loader", "drugbank_parser"],
@@ -5056,8 +5056,8 @@ EDGE_PRODUCERS: dict[Tuple[str, str, str], list[str]] = {
 }
 
 
-# ─── Phase F — AUC Enforcement (MOST CRITICAL) ──────────────────────────────
-# Fixes audit issue 2.6 — AUC enforcement with clinical safety
+# ─── Phase F -- AUC Enforcement (MOST CRITICAL) ──────────────────────────────
+# Fixes audit issue 2.6 -- AUC enforcement with clinical safety
 
 class AUCEnforcementLevel(enum.Enum):
     """AUC enforcement strictness levels.
@@ -5081,12 +5081,12 @@ class AUCEnforcementLevel(enum.Enum):
 #   * V1_LAUNCH_AUC = 0.78 (displayed to operator, used by default
 #     threshold checks)
 # Any code path that called assert_auc_meets_threshold(auc) WITHOUT an
-# explicit threshold silently enforced 0.78 — accepting a model the
+# explicit threshold silently enforced 0.78 -- accepting a model the
 # DOCX would reject. Now both values match: 0.85.
 #
 # v25 ROOT FIX (forensic verification of v24 claims): the v22 "fix"
 # lowered V1_LAUNCH_AUC to 0.5 in dev mode so the toy fixture could
-# pass — but that made "V1 LAUNCH CRITERIA: PASSED" scientifically
+# pass -- but that made "V1 LAUNCH CRITERIA: PASSED" scientifically
 # meaningless in dev mode (any signal > random passes). The DOCX
 # explicitly demands >0.85 AUC. Tests in v9/v10/v11 still assert 0.85
 # and were silently broken. v25 restores 0.85 as the constant
@@ -5098,18 +5098,18 @@ class AUCEnforcementLevel(enum.Enum):
 #   * Smoke test still passes (run_unified.py sets DRUGOS_DEV_SMOKE_TEST=1
 #     when DRUGOS_ENVIRONMENT != production)
 #   * Production deployments get the strict 0.85 check
-#   * The dev_mode flag is HONEST — operators see "PASSED (dev smoke test;
+#   * The dev_mode flag is HONEST -- operators see "PASSED (dev smoke test;
 #     production threshold 0.85 not met: AUC=0.52)" not "PASSED" silently
 V1_LAUNCH_AUC: float = 0.85
 
-# Fixes audit issue 2.6 — STRICT_AUC_ENFORCEMENT defaults to True
-# RATIONALE: Clinical safety — better to fail loudly than produce
+# Fixes audit issue 2.6 -- STRICT_AUC_ENFORCEMENT defaults to True
+# RATIONALE: Clinical safety -- better to fail loudly than produce
 # wrong predictions. A model with AUC < 0.78 is worse than no model.
 STRICT_AUC_ENFORCEMENT: bool = os.environ.get(
     "DRUGOS_STRICT_AUC_ENFORCEMENT", "1"
 ) == "1"
 
-# AUC_ENFORCEMENT_LEVEL — derived from STRICT_AUC_ENFORCEMENT (default
+# AUC_ENFORCEMENT_LEVEL -- derived from STRICT_AUC_ENFORCEMENT (default
 # "standard" when strict, "relaxed" otherwise). Override via
 # DRUGOS_AUC_ENFORCEMENT_LEVEL env var (one of: relaxed, standard,
 # clinical, regulatory).
@@ -5125,11 +5125,11 @@ AUC_ENFORCEMENT_LEVEL: AUCEnforcementLevel = AUCEnforcementLevel(
 class AUCBelowThresholdError(Exception):
     """Raised when model AUC falls below the required threshold.
 
-    This is a CRITICAL error for clinical safety — a model that
+    This is a CRITICAL error for clinical safety -- a model that
     fails to meet the AUC threshold should NEVER be used for
     drug repurposing predictions.
 
-    Fixes audit issue 2.6 — explicit AUC enforcement error.
+    Fixes audit issue 2.6 -- explicit AUC enforcement error.
 
     v100 ROOT FIX (BUG P2-058): the exception now carries structured
     ``actual_auc`` and ``threshold`` attributes (previously it was a
@@ -5211,7 +5211,7 @@ def assert_auc_meets_threshold(
     has_test_triples : bool or None, optional
         Whether held-out test triples were available for evaluation.
         When ``target_auc > 0`` and ``has_test_triples is False``, the
-        function MUST refuse to pass — a ``best_val_auc`` fallback is
+        function MUST refuse to pass -- a ``best_val_auc`` fallback is
         not acceptable because it reflects validation-set performance
         (potentially overfit), not held-out test-set performance per
         the DOCX V1 criterion. When ``None`` (default), the previous
@@ -5226,10 +5226,10 @@ def assert_auc_meets_threshold(
             v26 ROOT FIX (Issue C-2): the return value is AUTHORITATIVE.
             In RELAXED mode the function logs a WARNING and returns
             ``False`` WITHOUT raising. Callers MUST check the return
-            value — never assume the absence of an exception means the
+            value -- never assume the absence of an exception means the
             AUC met the threshold. The previous behavior caused callers
             (``transe_model.py``) to log "AUC enforcement PASSED:
-            0.6722 >= 0.8500" — a mathematical falsehood — because the
+            0.6722 >= 0.8500" -- a mathematical falsehood -- because the
             function returned ``False`` silently in RELAXED mode.
 
     Raises
@@ -5255,7 +5255,7 @@ def assert_auc_meets_threshold(
         # enforcement so the toy fixture can complete end-to-end. The
         # previous code always used STANDARD when STRICT_AUC_ENFORCEMENT=1
         # (the default), which raised AUCBelowThresholdError on the toy
-        # fixture's AUC 0.67 < 0.85 → V1 launch criteria always failed.
+        # fixture's AUC 0.67 < 0.85 -> V1 launch criteria always failed.
         # Production (DRUGOS_ENVIRONMENT=production) keeps STANDARD.
         _dev_mode = os.environ.get("DRUGOS_ENVIRONMENT", "production").lower() not in ("prod", "production")
         if _dev_mode and not STRICT_AUC_ENFORCEMENT:
@@ -5281,7 +5281,7 @@ def assert_auc_meets_threshold(
     # v82 ROOT FIX (P0-F7): when target_auc > 0 and no test_triples were
     # provided, the actual_auc is based on best_val_auc (validation set),
     # NOT on held-out test-set evaluation. The DOCX V1 criterion is
-    # ">0.85 AUC on held-out drug-disease pairs" — a validation-set AUC
+    # ">0.85 AUC on held-out drug-disease pairs" -- a validation-set AUC
     # cannot satisfy this criterion because it may reflect overfitting.
     # When has_test_triples is explicitly False and threshold > 0, the
     # function MUST return False / raise, regardless of actual_auc.
@@ -5291,7 +5291,7 @@ def assert_auc_meets_threshold(
             f"target_auc={threshold:.4f} > 0. The actual_auc={actual_auc:.4f} "
             f"is based on validation-set (best_val_auc), not held-out "
             f"test-set evaluation. The DOCX V1 criterion requires test-set "
-            f"AUC — a validation AUC may reflect overfitting and cannot "
+            f"AUC -- a validation AUC may reflect overfitting and cannot "
             f"verify the criterion. Enforcement level: {enforcement_level.value}"
         )
         logger.error("AUC enforcement refused (no test triples): %s", msg)
@@ -5341,7 +5341,7 @@ def check_auc_meets_threshold(
 
     v26 ROOT FIX (Issue C-2): companion to ``assert_auc_meets_threshold``.
     Callers that want to CHECK the AUC without RAISING should use this
-    function — it ALWAYS returns a ``(meets, reason)`` tuple and never
+    function -- it ALWAYS returns a ``(meets, reason)`` tuple and never
     raises ``AUCBelowThresholdError``. This is the non-enforcing mirror
     of ``assert_auc_meets_threshold`` and exists so callers cannot
     accidentally treat "no exception" as "meets threshold" (which is
@@ -5358,7 +5358,7 @@ def check_auc_meets_threshold(
         Override enforcement level for the side-effect log message.
         Defaults to the same env-var-derived level as
         ``assert_auc_meets_threshold``. Note: this function NEVER
-        raises regardless of enforcement level — it only logs.
+        raises regardless of enforcement level -- it only logs.
 
     Returns
     -------
@@ -5408,7 +5408,7 @@ def check_auc_meets_threshold(
     return False, reason
 
 
-# Fixes audit issues 2.4, 2.5 — training data count enforcement
+# Fixes audit issues 2.4, 2.5 -- training data count enforcement
 STRICT_PAIR_COUNTS: bool = os.environ.get(
     "DRUGOS_STRICT_PAIR_COUNTS", "1"
 ) == "1"
@@ -5485,12 +5485,12 @@ def assert_negative_pair_count(count: int, minimum: int | None = None) -> bool:
     return count >= minimum
 
 
-# ─── Phase G — Entity Resolution & Data Quality ──────────────────────────────
+# ─── Phase G -- Entity Resolution & Data Quality ──────────────────────────────
 
-# Fixes audit issue 3.12 — CANONICAL_IDS Compound should be InChIKey
+# Fixes audit issue 3.12 -- CANONICAL_IDS Compound should be InChIKey
 # RATIONALE: InChIKey is the IUPAC standard for unique chemical
 # identification. DrugBank IDs are database-specific and don't map
-# across sources. InChIKey is universal — ChEMBL, PubChem, and
+# across sources. InChIKey is universal -- ChEMBL, PubChem, and
 # DrugBank all provide InChIKey for every compound.
 #
 # v57 ROOT FIX (P2C-002 + P2C-007): add canonical IDs for
@@ -5498,7 +5498,7 @@ def assert_negative_pair_count(count: int, minimum: int | None = None) -> bool:
 # schema validator. CORE_NODE_TYPES includes ClinicalOutcome and
 # MedDRA_Term; DRKG_NODE_TYPES includes Anatomy. Previously
 # CANONICAL_IDS had NO entries for these three types, so
-# ``entity_resolver.resolve_canonical_id`` returned None silently —
+# ``entity_resolver.resolve_canonical_id`` returned None silently --
 # clinical outcomes, MedDRA terms, and anatomical entities could not
 # be canonicalized. The schema validator only forward-checked
 # (CANONICAL_IDS keys must be node types), not reverse-checked
@@ -5518,12 +5518,33 @@ CANONICAL_IDS: dict[str, str] = {
     # backward compat is preserved). Richer metadata (description +
     # validator function name) lives in ``CANONICAL_IDS_METADATA``
     # below.
-    "ClinicalOutcome": "meddra_id",   # MedDRA code (e.g. 10002083)
-    "MedDRA_Term": "meddra_id",       # MedDRA code (e.g. 10002083)
+    #
+    # P2-001 FORENSIC ROOT FIX (Team 4 -- namespace collision):
+    # The previous code set BOTH ``ClinicalOutcome`` AND ``MedDRA_Term``
+    # to ``"meddra_id"``. This is a NAMESPACE COLLISION -- any code that
+    # resolves by ID field alone (rather than by ``(node_type, id_field)``
+    # tuple) conflates the two biologically distinct objects. A
+    # ClinicalOutcome node with ``meddra_id=10002083`` (a clinical-trial-
+    # derived outcome record) and a MedDRA_Term node with
+    # ``meddra_id=10002083`` (a vocabulary term) became indistinguishable.
+    # Cross-database queries that JOIN on canonical_id silently merged
+    # the two node types. The DOCX Phase 2 spec mandates them as
+    # DISTINCT node types.
+    #
+    # ROOT FIX: ClinicalOutcome now uses ``clinical_outcome_id`` (the
+    # ``CO:<drug_id>:<disease_id>:<indication_type>`` format already
+    # emitted by ``phase1_bridge._derive_clinical_outcome_nodes`` and
+    # already matched by ``kg_builder.ID_PATTERNS["ClinicalOutcome"]``).
+    # MedDRA_Term retains ``meddra_id`` (the vocabulary's own canonical
+    # code). The ``(node_type, id_field)`` tuples are now unique:
+    #   ("ClinicalOutcome", "clinical_outcome_id") vs
+    #   ("MedDRA_Term", "meddra_id")
+    "ClinicalOutcome": "clinical_outcome_id",  # CO:<drug>:<disease>:<indication>
+    "MedDRA_Term": "meddra_id",                # MedDRA code (e.g. 10002083)
     "Anatomy": "uberon_id",           # UBERON ontology ID (e.g. UBERON:0000061)
     # v71 ROOT FIX (P2C-002 + P2C-007 completion): canonical IDs for
     # the 10 DRKG_NODE_TYPES that were missing entries. The reverse
-    # schema check (_validate_canonical_ids_reverse) caught these —
+    # schema check (_validate_canonical_ids_reverse) caught these --
     # without canonical IDs, entity_resolver.resolve_canonical_id
     # returns None silently for these node types, fragmenting them
     # across namespaces. Each field name matches the property emitted
@@ -5551,7 +5572,7 @@ CANONICAL_IDS: dict[str, str] = {
 CANONICAL_IDS_METADATA: dict[str, dict[str, str]] = {
     "Compound": {
         "field": "inchikey",
-        "description": "IUPAC InChIKey (e.g. RZVAJINKQORUOD-UHFFFAOYSA-N) — universal chemical identifier",
+        "description": "IUPAC InChIKey (e.g. RZVAJINKQORUOD-UHFFFAOYSA-N) -- universal chemical identifier",
         "validator": "is_inchikey",
     },
     "Disease": {
@@ -5561,12 +5582,12 @@ CANONICAL_IDS_METADATA: dict[str, dict[str, str]] = {
     },
     "Gene": {
         "field": "ncbi_gene_id",
-        "description": "NCBI Gene ID (e.g. 1956) — canonical for genes",
+        "description": "NCBI Gene ID (e.g. 1956) -- canonical for genes",
         "validator": "is_ncbi_gene_id",
     },
     "Protein": {
         "field": "uniprot_id",
-        "description": "UniProt accession (e.g. P04626) — canonical for proteins",
+        "description": "UniProt accession (e.g. P04626) -- canonical for proteins",
         "validator": "is_uniprot_id",
     },
     "Pathway": {
@@ -5574,24 +5595,33 @@ CANONICAL_IDS_METADATA: dict[str, dict[str, str]] = {
         "description": "Reactome pathway ID (e.g. R-HSA-177929)",
         "validator": "is_reactome_id",
     },
+    # P2-001 FORENSIC ROOT FIX (Team 4): ClinicalOutcome now uses
+    # ``clinical_outcome_id`` (CO:<drug>:<disease>:<indication>) -- NOT
+    # ``meddra_id``. The two node types MUST have distinct canonical ID
+    # fields so ``(node_type, id_field)`` tuples are unique.
     "ClinicalOutcome": {
-        "field": "meddra_id",
-        "description": "MedDRA code (e.g. 10002083) — canonical ID for clinical outcomes",
-        "validator": "is_meddra_code",
+        "field": "clinical_outcome_id",
+        "description": (
+            "Clinical outcome canonical ID -- format "
+            "'CO:<drugbank_id>:<disease_key>:<indication_type>' (e.g. "
+            "'CO:DB00001:DOID:0050133:approved'). Distinct from "
+            "MedDRA_Term's meddra_id to prevent namespace collision."
+        ),
+        "validator": "is_clinical_outcome_id",
     },
     "MedDRA_Term": {
         "field": "meddra_id",
-        "description": "MedDRA code (e.g. 10002083) — canonical ID for MedDRA vocabulary terms",
+        "description": "MedDRA code (e.g. 10002083) -- canonical ID for MedDRA vocabulary terms",
         "validator": "is_meddra_code",
     },
     "Anatomy": {
         "field": "uberon_id",
-        "description": "UBERON ontology ID (e.g. UBERON:0000061) — canonical ID for anatomy",
+        "description": "UBERON ontology ID (e.g. UBERON:0000061) -- canonical ID for anatomy",
         "validator": "is_uberon_id",
     },
 }
 
-# Fixes audit issue 2.2 — frozen copy for validation
+# Fixes audit issue 2.2 -- frozen copy for validation
 CANONICAL_IDS_FROZEN: frozenset[Tuple[str, str]] = frozenset(
     CANONICAL_IDS.items()
 )
@@ -5612,13 +5642,21 @@ ID_MAPPING_PRIORITY: dict[str, list[str]] = {
     "Pathway": ["reactome_id", "kegg_id", "drkg_id"],
     # v57 ROOT FIX (P2C-002 + P2C-007): canonical ID priority for the
     # 3 previously-missing node types.
-    "ClinicalOutcome": ["meddra_id", "mesh_id", "name"],
+    #
+    # P2-001 FORENSIC ROOT FIX (Team 4): ClinicalOutcome's FIRST priority
+    # is now ``clinical_outcome_id`` (the CO:<drug>:<disease>:<indication>
+    # format emitted by phase1_bridge._derive_clinical_outcome_nodes).
+    # ``meddra_id`` is retained as a SECONDARY lookup (some ClinicalOutcome
+    # nodes from SIDER may carry a meddra_id cross-reference) but is no
+    # longer the PRIMARY canonical field -- that would collide with
+    # MedDRA_Term's meddra_id namespace.
+    "ClinicalOutcome": ["clinical_outcome_id", "meddra_id", "mesh_id", "name"],
     "MedDRA_Term": ["meddra_id", "meddra_name", "name"],
     "Anatomy": ["uberon_id", "mesh_id", "name"],
     # v71 ROOT FIX (P2C-002 + P2C-007 completion): ID_MAPPING_PRIORITY
     # for the 10 DRKG_NODE_TYPES that were missing entries. Without
     # these, resolve_canonical_id returns None for DRKG-loaded nodes
-    # of these types — they fragment across namespaces.
+    # of these types -- they fragment across namespaces.
     "Pharmacologic Class": ["atc_code", "name"],
     "Side Effect": ["umls_cui", "meddra_id", "name"],
     "Symptom": ["umls_cui", "meddra_id", "mesh_id", "name"],
@@ -5631,13 +5669,13 @@ ID_MAPPING_PRIORITY: dict[str, list[str]] = {
     "Tax": ["ncbi_taxid", "name"],
 }
 
-# Fixes audit issue 2.2 — frozen copy for validation
+# Fixes audit issue 2.2 -- frozen copy for validation
 ID_MAPPING_PRIORITY_FROZEN: dict[str, tuple[str, ...]] = {
     k: tuple(v) for k, v in ID_MAPPING_PRIORITY.items()
 }
 
 
-# Fixes audit issue 2.3 — resolve_canonical_id()
+# Fixes audit issue 2.3 -- resolve_canonical_id()
 def resolve_canonical_id(
     entity_type: str,
     id_mapping: dict[str, str],
@@ -5664,7 +5702,7 @@ def resolve_canonical_id(
     return None
 
 
-# Fixes audit issue 2.9 — get_canonical_id_system()
+# Fixes audit issue 2.9 -- get_canonical_id_system()
 def get_canonical_id_system(entity_type: str) -> str:
     """Get the canonical ID system name for an entity type.
 
@@ -5690,7 +5728,7 @@ def get_canonical_id_system(entity_type: str) -> str:
     return CANONICAL_IDS[entity_type]
 
 
-# Fixes audit issue 3.14 — tiered entity confidence thresholds
+# Fixes audit issue 3.14 -- tiered entity confidence thresholds
 # RATIONALE: Three-tier confidence:
 #   >= 0.95 = high_conf (stored, full trust)
 #   0.85-0.95 = low_conf_flag (stored, flagged for downstream filter)
@@ -5712,7 +5750,7 @@ ENTITY_CONFIDENCE_REJECT_THRESHOLD: float = float(
 )
 
 
-# Fixes audit issue 3.14 — flag_entity_confidence()
+# Fixes audit issue 3.14 -- flag_entity_confidence()
 def flag_entity_confidence(confidence: float) -> str:
     """Classify entity confidence into a tier.
 
@@ -5736,7 +5774,7 @@ def flag_entity_confidence(confidence: float) -> str:
         return "rejected"
 
 
-# Fixes audit issue 3.15 — entity-type-specific match rates
+# Fixes audit issue 3.15 -- entity-type-specific match rates
 ENTITY_MATCH_RATE: float = float(
     os.environ.get("DRUGOS_ENTITY_MATCH_RATE", "0.95")
 )
@@ -5769,7 +5807,7 @@ def get_entity_match_rate(entity_type: str) -> float:
     return ENTITY_MATCH_RATE_BY_TYPE.get(entity_type, ENTITY_MATCH_RATE)
 
 
-# Fixes audit issue 3.12 — InChIKey validation
+# Fixes audit issue 3.12 -- InChIKey validation
 # v40 ROOT FIX (P2 #10): corrected the comment. InChIKey is a 27-char
 # hash: 14 chars (connectivity) + hyphen + 10 chars (stereo + protonation
 # + version hash) + hyphen + 1 char (version flag, 'N' or 'B'). The
@@ -5797,7 +5835,7 @@ def validate_inchikey(inchikey: str) -> bool:
     return bool(INCHIKEY_REGEX.match(inchikey))
 
 
-# Fixes audit issue 5.6 — referential integrity rules
+# Fixes audit issue 5.6 -- referential integrity rules
 REFERENTIAL_INTEGRITY_RULES: dict[str, str] = {
     "Compound_treats_Disease": (
         "Compound must exist in DrugBank or ChEMBL; "
@@ -5813,7 +5851,7 @@ REFERENTIAL_INTEGRITY_RULES: dict[str, str] = {
     ),
 }
 
-# Fixes audit issue 5.7 — duplicate detection
+# Fixes audit issue 5.7 -- duplicate detection
 DUPLICATE_DETECTION_THRESHOLD: float = float(
     os.environ.get("DRUGOS_DUPLICATE_THRESHOLD", "0.95")
 )
@@ -5945,7 +5983,7 @@ MIN_NODES_W2: int = 500_000
 # stricter quality gate. This catches incomplete DRKG loads where
 # only a subset of relation types is successfully parsed.
 MIN_EDGES_W2: int = 6_000_000
-# v22 ROOT FIX (audit Chain 1 / V1 launch criteria — "default run exits 1
+# v22 ROOT FIX (audit Chain 1 / V1 launch criteria -- "default run exits 1
 # with no model trained, no AUC computed"): the previous hard-coded
 # thresholds (15000 positive pairs, 75000 negative pairs, 0.85 AUC) are
 # correct for the production 10,000-drug dataset but make the toy/dev
@@ -5978,7 +6016,7 @@ def _get_dev_mode() -> bool:
 
 
 _DEV_MODE: bool = _get_dev_mode()  # import-time snapshot; use _get_dev_mode() for dynamic reads
-# v25 ROOT FIX: DRUGOS_DEV_SMOKE_TEST — when set to "1" (default in dev
+# v25 ROOT FIX: DRUGOS_DEV_SMOKE_TEST -- when set to "1" (default in dev
 # mode), the V1 launch criteria check returns passed=True with a clearly
 # marked dev_mode=True flag, EVEN IF AUC < 0.85, as long as AUC >= 0.5
 # (better than random). This is HONEST: the operator sees
@@ -5990,26 +6028,26 @@ DEV_SMOKE_TEST: bool = (
     _DEV_MODE and os.environ.get("DRUGOS_DEV_SMOKE_TEST", "1") == "1"
 )
 # Minimum AUC for dev smoke test mode (must be > 0.5 random baseline).
-# FIX TOP-7: the previous default 0.5 IS the random baseline — a model
+# FIX TOP-7: the previous default 0.5 IS the random baseline -- a model
 # that scores 0.5 AUC has zero real predictive power (it ranks a random
 # positive no better than chance against a random negative). Setting the
 # smoke-test floor to 0.5 therefore made the dev smoke-test verdict
 # meaningless: ANY model that ran end-to-end passed, including one that
 # had learned nothing. 0.6 is the conventional "above random, below
-# meaningful" threshold used in ML benchmarking — it lets the smoke test
+# meaningful" threshold used in ML benchmarking -- it lets the smoke test
 # verify the pipeline ran end-to-end while still flagging a model that
 # has not learned the basic ranking task. Synchronized with
-# phase2/drugos_graph/config.py — DO NOT diverge (audit TOP-7).
+# phase2/drugos_graph/config.py -- DO NOT diverge (audit TOP-7).
 DEV_SMOKE_TEST_MIN_AUC: float = float(
     os.environ.get("DRUGOS_DEV_SMOKE_TEST_MIN_AUC", "0.6")
 )
 # v22: in dev mode, the toy fixture has ~9 positive pairs and ~22 negative
 # pairs. Set the dev thresholds to 1 so the pipeline can pass V1 launch
 # criteria end-to-end. Production keeps 15000 / 75000.
-# v29 ROOT FIX (audit I-11): was 1 in dev — statistically meaningless. Now 10.
+# v29 ROOT FIX (audit I-11): was 1 in dev -- statistically meaningless. Now 10.
 # (Previously tracked as audit L-12; the audit ID was renamed to I-11 in
 # the final forensic report. The fix is the same: a positive-pair count
-# of 1 produces a held-out AUC on (literally) one sample — that AUC has
+# of 1 produces a held-out AUC on (literally) one sample -- that AUC has
 # a CI of [0, 1] and conveys zero information about model quality. The
 # MINIMUM statistically defensible count is ~10 (the toy fixture
 # produces ~9; operators who hit the floor should bump the fixture
@@ -6027,12 +6065,12 @@ NEGATIVE_SAMPLING_SCHEMA_VERSION: str = "2.1.0"
 # authoritative reference. Default: 500_000 (see negative_sampling.py).
 NEGATIVE_CACHE_SIZE_ENV_VAR: str = "DRUGOS_NEGATIVE_CACHE_SIZE"
 # v9 ROOT FIX (audit F7.6): the misleading comment claimed this was an
-# alias for TransEConfig().target_auc — but the value differed (0.78 vs
+# alias for TransEConfig().target_auc -- but the value differed (0.78 vs
 # 0.85), so it was NOT an alias. Now both are 0.85 so it really is one.
 # v25 ROOT FIX: see V1_LAUNCH_AUC comment above. TARGET_TRANSE_AUC is
 # now the constant 0.85 (matches DOCX, matches TransEConfig.target_auc
 # default). The v22 "lower to 0.5 in dev mode" compromise was
-# scientifically dishonest — it made "V1 LAUNCH CRITERIA: PASSED"
+# scientifically dishonest -- it made "V1 LAUNCH CRITERIA: PASSED"
 # meaningless because any signal > random passed. v25 keeps 0.85
 # always and uses DRUGOS_DEV_SMOKE_TEST=1 to let the V1 criteria
 # check return passed=True with a clearly-marked dev_mode=True flag
@@ -6042,7 +6080,7 @@ NEGATIVE_CACHE_SIZE_ENV_VAR: str = "DRUGOS_NEGATIVE_CACHE_SIZE"
 # Previously: TransEConfig.target_auc was env-overridable via
 # DRUGOS_TRANSE_TARGET_AUC, but this module-level constant was
 # hard-coded to 0.85. Setting the env var changed the dataclass
-# default but not this constant — causing the two layers to disagree.
+# default but not this constant -- causing the two layers to disagree.
 # Callers using ``TransEConfig().target_auc`` enforced the env value;
 # callers using ``TARGET_TRANSE_AUC`` enforced 0.85. The fix: read
 # the same env var at module load time. Both layers now agree.
@@ -6051,14 +6089,14 @@ TARGET_TRANSE_AUC: float = float(
 )  # Synchronized with TransEConfig().target_auc (v37 fix)
 
 # FIX TOP-1: STRING combined_score >= 700 is the canonical high-confidence
-# cutoff (Szklarczyk et al. 2023, Nucleic Acids Research — >= 700 achieves
+# cutoff (Szklarczyk et al. 2023, Nucleic Acids Research -- >= 700 achieves
 # >80% precision on KEGG pathway benchmarks; >= 400 achieves only ~50%).
 # Phase 1's settings.py previously used version-derived thresholds
 # (400 for v12.0), dropping ~75% of the high-confidence PPIs that Phase 1
 # retained. Phase 2 then silently lost most of its protein-protein
 # interaction graph. All versions now use 700 as the canonical threshold.
 # Operators can still override via DRUGOS_STRING_SCORE_THRESHOLD.
-# Synchronized with phase1/config/settings.py — DO NOT diverge (audit TOP-1).
+# Synchronized with phase1/config/settings.py -- DO NOT diverge (audit TOP-1).
 STRING_SCORE_THRESHOLD: int = int(
     os.environ.get("DRUGOS_STRING_SCORE_THRESHOLD", "700")
 )
@@ -6071,10 +6109,10 @@ STITCH_SCORE_THRESHOLD: int = int(
 # STRING-db documentation at https://string-db.org/cgi/info). Three
 # different loaders were using three different thresholds for the SAME
 # scoring system:
-#   * string_loader.py: STRING_SCORE_THRESHOLD (default 700) — correct
-#   * stitch_loader.py: STITCH_SCORE_THRESHOLD (default 700) — but the
+#   * string_loader.py: STRING_SCORE_THRESHOLD (default 700) -- correct
+#   * stitch_loader.py: STITCH_SCORE_THRESHOLD (default 700) -- but the
 #     audit found 400 in some legacy paths
-#   * drkg_loader.py:   (none — DRKG does NOT use STRING's combined_score
+#   * drkg_loader.py:   (none -- DRKG does NOT use STRING's combined_score
 #                       system, so no threshold change needed there)
 #
 # ROOT FIX: introduce ``STRING_MIN_COMBINED_SCORE`` as the SINGLE
@@ -6087,7 +6125,7 @@ STITCH_SCORE_THRESHOLD: int = int(
 # var (which ``STRING_SCORE_THRESHOLD`` already reads).
 #
 # ``STRING_SCORE_THRESHOLD`` and ``STITCH_SCORE_THRESHOLD`` are retained
-# as back-compat aliases pointing at the same canonical value — the
+# as back-compat aliases pointing at the same canonical value -- the
 # string_loader and stitch_loader both fall back to this constant when
 # no per-call override is supplied. New code SHOULD read
 # ``STRING_MIN_COMBINED_SCORE`` directly so the dependency on a single
@@ -6095,11 +6133,11 @@ STITCH_SCORE_THRESHOLD: int = int(
 STRING_MIN_COMBINED_SCORE: int = STRING_SCORE_THRESHOLD  # v57 ROOT FIX (P2L-032)
 
 
-# ─── Phase H — Reliability, Performance, Security ────────────────────────────
+# ─── Phase H -- Reliability, Performance, Security ────────────────────────────
 
 # ─── H.1 Data Quality Functions ──────────────────────────────────────────────
 
-# Fixes audit issue 5.1 — checksum verification
+# Fixes audit issue 5.1 -- checksum verification
 def verify_checksum(
     filepath: Path | str,
     expected_sha256: str | None = None,
@@ -6180,7 +6218,7 @@ def compute_and_record_checksum(
     return digest
 
 
-# Fixes audit issue 5.10 — data freshness check
+# Fixes audit issue 5.10 -- data freshness check
 def check_data_freshness(
     source_name: str,
     max_age_days: int | None = None,
@@ -6231,7 +6269,7 @@ def check_data_freshness(
     }
 
 
-# Fixes audit issue 5.9 — disk space check
+# Fixes audit issue 5.9 -- disk space check
 def check_disk_space(
     required_bytes: int,
     path: Path | None = None,
@@ -6260,7 +6298,7 @@ def check_disk_space(
     }
 
 
-# Fixes audit issue 5.9 — record count check
+# Fixes audit issue 5.9 -- record count check
 def check_record_count(
     source_name: str,
     actual_count: int,
@@ -6290,7 +6328,7 @@ def check_record_count(
     }
 
 
-# Fixes audit issue 6.2 — download with retry
+# Fixes audit issue 6.2 -- download with retry
 def download_with_retry(
     url: str,
     dest_path: Path | str,
@@ -6324,14 +6362,14 @@ def download_with_retry(
     # ``urllib.request.urlretrieve`` which has three catastrophic defects
     # for multi-GB scientific dataset downloads (DRKG ~1GB, DrugBank
     # ~5GB, ChEMBL ~30GB, STRING ~15GB):
-    #   1. NO RESUME — a 30GB download that fails at 29GB restarts from
+    #   1. NO RESUME -- a 30GB download that fails at 29GB restarts from
     #      byte 0. On flaky networks (academic VPNs, hotel WiFi) a
     #      multi-GB download could loop forever.
-    #   2. NO AUTH HEADERS — DrugBank, OpenTargets, and STRING downloads
+    #   2. NO AUTH HEADERS -- DrugBank, OpenTargets, and STRING downloads
     #      require authentication cookies / API tokens. urlretrieve
     #      cannot send arbitrary headers, so the call silently hit the
     #      login page (HTML) and saved it as the dataset file.
-    #   3. NO Content-Length VERIFICATION — a truncated download (e.g.
+    #   3. NO Content-Length VERIFICATION -- a truncated download (e.g.
     #      proxy killing the connection at 4GB) silently produced a
     #      partial file that downstream loaders accepted as complete,
     #      corrupting the KG.
@@ -6358,7 +6396,7 @@ def download_with_retry(
     # Range: bytes=<existing_size>- header so the server resumes from
     # the byte after the last byte we already have. RFC 7233 §2.1.
     # If the server ignores Range (returns 200 instead of 206), we
-    # restart from scratch — handled by the mode="wb" vs "ab" branch.
+    # restart from scratch -- handled by the mode="wb" vs "ab" branch.
     existing_size = dest_path.stat().st_size if dest_path.exists() else 0
     expected_total: int | None = None
 
@@ -6366,7 +6404,7 @@ def download_with_retry(
     for attempt in range(max_retries):
         try:
             # Send Range header for resume. Servers that don't support
-            # Range will return 200 OK with the full body — detected
+            # Range will return 200 OK with the full body -- detected
             # below via status_code check.
             if existing_size > 0:
                 headers["Range"] = f"bytes={existing_size}-"
@@ -6422,7 +6460,7 @@ def download_with_retry(
                     )
 
                 bytes_written = existing_size
-                # 1 MiB chunk — large enough to amortize syscall overhead
+                # 1 MiB chunk -- large enough to amortize syscall overhead
                 # on multi-GB files, small enough to flush progress
                 # frequently and limit memory pressure.
                 with open(dest_path, file_mode) as f:
@@ -6432,7 +6470,7 @@ def download_with_retry(
                             bytes_written += len(chunk)
 
             # Content-Length verification (the original urlretrieve had
-            # none — a truncated download silently produced a corrupt
+            # none -- a truncated download silently produced a corrupt
             # file that downstream loaders would accept).
             if expected_total is not None and bytes_written != expected_total:
                 raise OSError(
@@ -6473,9 +6511,9 @@ def download_with_retry(
     )
 
 
-# ─── H.2 Reliability — Dead Letter, Checkpoints ─────────────────────────────
+# ─── H.2 Reliability -- Dead Letter, Checkpoints ─────────────────────────────
 
-# Fixes audit issue 6.6 — dead letter queue
+# Fixes audit issue 6.6 -- dead letter queue
 def dead_letter_record(
     source: str,
     record: dict[str, Any],
@@ -6516,7 +6554,7 @@ def dead_letter_record(
     return filepath
 
 
-# Fixes audit issue 6.10 — checkpoint support
+# Fixes audit issue 6.10 -- checkpoint support
 def write_checkpoint(
     step_name: str,
     data: dict[str, Any],
@@ -6573,7 +6611,7 @@ def read_latest_checkpoint(step_name: str) -> dict[str, Any] | None:
 
 # ─── H.3 Performance ─────────────────────────────────────────────────────────
 
-# Fixes audit issue 8.1 — parse_memory_string
+# Fixes audit issue 8.1 -- parse_memory_string
 def parse_memory_string(mem_str: str) -> int:
     """Parse a memory string (e.g. '4G', '512M') into bytes.
 
@@ -6654,7 +6692,7 @@ def auto_size_neo4j_memory(
     }
 
 
-# Fixes audit issue 8.6 — BATCH_SIZE_BY_NODE_TYPE
+# Fixes audit issue 8.6 -- BATCH_SIZE_BY_NODE_TYPE
 # RATIONALE: Different node types have different average record sizes.
 # Compounds (with SMILES, ATC codes) are larger than Genes.
 BATCH_SIZE_BY_NODE_TYPE: dict[str, int] = {
@@ -6666,36 +6704,36 @@ BATCH_SIZE_BY_NODE_TYPE: dict[str, int] = {
     "default": 5000,
 }
 
-# Fixes audit issue 8.3 — CHUNK_SIZE for file processing
+# Fixes audit issue 8.3 -- CHUNK_SIZE for file processing
 # RATIONALE: 100K rows per chunk balances memory vs I/O for pandas.
 CHUNK_SIZE: int = int(os.environ.get("DRUGOS_CHUNK_SIZE", "100000"))
 
-# Fixes audit issue 8.7 — ChemBERTa dim by model
+# Fixes audit issue 8.7 -- ChemBERTa dim by model
 CHEMBERTA_DIM_BY_MODEL: dict[str, int] = {
     "seyonec/ChemBERTa-zinc-base-v1": 768,
     "seyonec/ChemBERTa-pubmed-base-v1": 768,
     # v71 ROOT FIX (P2C-006): add the renamed canonical model ID.
     # "seyonec/ChemBERTa-77M-MLM" is the renamed version of
-    # "seyonec/ChemBERTa-zinc-base-v1" — same 77M params, same 768-dim
+    # "seyonec/ChemBERTa-zinc-base-v1" -- same 77M params, same 768-dim
     # embeddings. Operators who set DRUGOS_CHEMBERTA_MODEL to this
     # (per the old .env.example) no longer hit the "default" fallback.
     "seyonec/ChemBERTa-77M-MLM": 768,
     "default": 768,
 }
 
-# Fixes audit issue 8.8 — embedding dim by graph size
+# Fixes audit issue 8.8 -- embedding dim by graph size
 EMBEDDING_DIM_BY_GRAPH_SIZE: dict[str, int] = {
     "small": 128,     # < 100K nodes
     "medium": 256,    # 100K - 1M nodes
     "large": 512,     # > 1M nodes
 }
 
-# Fixes audit issue 8.10 — DeviceConfig
+# Fixes audit issue 8.10 -- DeviceConfig
 @dataclass(frozen=True)
 class DeviceConfig:
     """Device selection for PyTorch operations.
 
-    Fixes audit issue 8.10 — no device configuration.
+    Fixes audit issue 8.10 -- no device configuration.
     """
     device: str = field(
         default_factory=lambda: os.environ.get(
@@ -6729,26 +6767,26 @@ class DeviceConfig:
 
 # ─── H.4 Security ────────────────────────────────────────────────────────────
 
-# Fixes audit issue 9.3 — PII fields
+# Fixes audit issue 9.3 -- PII fields
 PII_FIELDS: frozenset[str] = frozenset({
     "patient_name", "patient_id", "ssn", "email",
     "phone", "address", "date_of_birth", "medical_record_number",
 })
 
-# Fixes audit issue 9.4 — REDACT_PII
+# Fixes audit issue 9.4 -- REDACT_PII
 REDACT_PII: bool = os.environ.get("DRUGOS_REDACT_PII", "1") == "1"
 
-# Fixes audit issue 9.5 — file permissions
+# Fixes audit issue 9.5 -- file permissions
 FILE_PERMISSIONS: dict[str, int] = {
     "data_files": 0o640,   # Owner read/write, group read
     "config_files": 0o600, # Owner read/write only
     "log_files": 0o644,    # Owner read/write, group/other read
 }
 
-# Fixes audit issue 9.7 — encrypt at rest
+# Fixes audit issue 9.7 -- encrypt at rest
 ENCRYPT_AT_REST: bool = os.environ.get("DRUGOS_ENCRYPT_AT_REST", "0") == "1"
 
-# Fixes audit issue 9.8 — secrets registry
+# Fixes audit issue 9.8 -- secrets registry
 SECRETS_REGISTRY: dict[str, str] = {
     "neo4j_password": "DRUGOS_NEO4J_PASSWORD",
     "mlflow_tracking_uri": "MLFLOW_TRACKING_URI",
@@ -6806,7 +6844,7 @@ def require_secret(name: str) -> str:
     return get_secret(name, required=True)  # type: ignore[return-value]
 
 
-# Fixes audit issue 9.10 — safe_config_dict
+# Fixes audit issue 9.10 -- safe_config_dict
 def safe_config_dict() -> dict[str, Any]:
     """Return a dict of public, non-secret config values.
 
@@ -6849,13 +6887,13 @@ def safe_config_dict() -> dict[str, Any]:
     return result
 
 
-# Fixes audit issue 9.9 — MASK_OUTPUT_FIELDS
+# Fixes audit issue 9.9 -- MASK_OUTPUT_FIELDS
 MASK_OUTPUT_FIELDS: frozenset[str] = frozenset({
     "password", "secret", "api_key", "token", "credential",
 })
 
 
-# Fixes audit issue 9.9 — audit_log
+# Fixes audit issue 9.9 -- audit_log
 def audit_log(
     event_type: str,
     details: str = "",
@@ -6893,17 +6931,17 @@ def audit_log(
         return None
 
 
-# ─── Phase I — Logging, Config, Compliance, Lineage ──────────────────────────
+# ─── Phase I -- Logging, Config, Compliance, Lineage ──────────────────────────
 
 # ─── I.1 Logging ─────────────────────────────────────────────────────────────
-# Fixes audit issue 11.4 — structured logging
+# Fixes audit issue 11.4 -- structured logging
 
 LOG_FORMAT: str = (
     "%(asctime)s | %(name)s | %(levelname)s | %(message)s"
 )
 LOG_LEVEL: str = os.environ.get("DRUGOS_LOG_LEVEL", "INFO")
 
-# Fixes audit issue 11.5 — log levels dict
+# Fixes audit issue 11.5 -- log levels dict
 LOG_LEVELS: dict[str, int] = {
     "DEBUG": logging.DEBUG,
     "INFO": logging.INFO,
@@ -6912,7 +6950,7 @@ LOG_LEVELS: dict[str, int] = {
     "CRITICAL": logging.CRITICAL,
 }
 
-# Fixes audit issue 11.7 — structured logging
+# Fixes audit issue 11.7 -- structured logging
 STRUCTURED_LOGGING: bool = os.environ.get(
     "DRUGOS_STRUCTURED_LOGGING", "0"
 ) == "1"
@@ -6921,7 +6959,7 @@ STRUCTURED_LOGGING: bool = os.environ.get(
 class JsonFormatter(logging.Formatter):
     """JSON log formatter for structured logging.
 
-    Fixes audit issue 11.4 — structured logging support.
+    Fixes audit issue 11.4 -- structured logging support.
     """
 
     def format(self, record: logging.LogRecord) -> str:
@@ -6938,7 +6976,7 @@ class JsonFormatter(logging.Formatter):
         return json.dumps(log_entry, default=str)
 
 
-# Fixes audit issue 11.5 — log rotation
+# Fixes audit issue 11.5 -- log rotation
 LOG_MAX_BYTES: int = int(
     os.environ.get("DRUGOS_LOG_MAX_BYTES", str(100 * 1024 * 1024))
 )
@@ -6946,7 +6984,7 @@ LOG_BACKUP_COUNT: int = int(
     os.environ.get("DRUGOS_LOG_BACKUP_COUNT", "5")
 )
 
-# Fixes audit issue 11.10 — RUN_ID and CORRELATION_ID
+# Fixes audit issue 11.10 -- RUN_ID and CORRELATION_ID
 RUN_ID: str = os.environ.get(
     "DRUGOS_RUN_ID",
     datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S"),
@@ -6957,7 +6995,7 @@ CORRELATION_ID: str = os.environ.get(
 
 
 # ─── I.2 Configuration Management ────────────────────────────────────────────
-# Fixes audit issue 12.3 — config file loading
+# Fixes audit issue 12.3 -- config file loading
 
 CONFIG_FILE: str | None = os.environ.get("DRUGOS_CONFIG_FILE")
 DATA_SOURCES_FILE: str | None = os.environ.get("DRUGOS_DATA_SOURCES_FILE")
@@ -7008,11 +7046,11 @@ def apply_config_overrides(overrides: dict[str, Any] | None = None) -> None:
                 logger.info("Config override: %s = %r (was %r)", key, value, old_val)
 
 
-# Fixes audit issue 12.10 — environment configs
+# Fixes audit issue 12.10 -- environment configs
 # v29 ROOT FIX (audit I-4): ENVIRONMENT was defaulting to "development"
 # while DRUGOS_ENVIRONMENT defaults to "dev". These are DIFFERENT
 # strings, so code that checked ENVIRONMENT got "development" while
-# code that checked DRUGOS_ENVIRONMENT got "dev" — contradictory.
+# code that checked DRUGOS_ENVIRONMENT got "dev" -- contradictory.
 # ROOT FIX: make ENVIRONMENT an alias of DRUGOS_ENVIRONMENT (same
 # default "dev"). The ENVIRONMENT_CONFIGS dict below now keys on
 # "dev" / "staging" / "prod" (matching DRUGOS_ENVIRONMENT values).
@@ -7026,7 +7064,7 @@ ENVIRONMENT: str = os.environ.get("DRUGOS_ENVIRONMENT", "production")
 # any production code path (only referenced by a single unit test).
 # They gave the false impression that switching
 # ``DRUGOS_ENVIRONMENT=prod`` would auto-apply LOG_LEVEL=WARNING,
-# STRICT_AUC_ENFORCEMENT=True, REDACT_PII=True, etc. — but it did
+# STRICT_AUC_ENFORCEMENT=True, REDACT_PII=True, etc. -- but it did
 # nothing of the sort. Operators who relied on this for production
 # safety were silently unprotected.
 #
@@ -7049,7 +7087,7 @@ def apply_environment_config(env: str | None = None) -> None:
     """Apply environment-specific configuration.
 
     .. deprecated:: v29
-       Forensic audit finding I-5: this function was dead code —
+       Forensic audit finding I-5: this function was dead code --
        defined but never called by any production path. It is now a
        no-op that emits a :class:`DeprecationWarning`. Production
        safety switches (``STRICT_AUC_ENFORCEMENT``, ``REDACT_PII``,
@@ -7078,25 +7116,25 @@ class ComplianceConfig:
 
     Fixes audit issues 14.4, 14.5, 14.6, 14.7, 14.8, 14.9.
     """
-    # Fixes audit issue 14.5 — data retention
+    # Fixes audit issue 14.5 -- data retention
     retention_days: int = int(
         os.environ.get("DRUGOS_RETENTION_DAYS", "2555")  # 7 years default
     )
-    # Fixes audit issue 14.6 — audit trail
+    # Fixes audit issue 14.6 -- audit trail
     audit_trail_enabled: bool = os.environ.get(
         "DRUGOS_AUDIT_TRAIL", "1"
     ) == "1"
-    # Fixes audit issue 14.7 — data format standards
+    # Fixes audit issue 14.7 -- data format standards
     date_format: str = "ISO 8601"
     encoding: str = "UTF-8"
     csv_delimiter: str = ","
     csv_quoting: int = 1  # csv.QUOTE_MINIMAL
-    # Fixes audit issue 14.8 — naming conventions
+    # Fixes audit issue 14.8 -- naming conventions
     node_id_format: str = "snake_case"
     edge_type_format: str = "snake_case"
 
 
-# Fixes audit issue 14.5 — global retention days
+# Fixes audit issue 14.5 -- global retention days
 RETENTION_DAYS: int = int(
     os.environ.get("DRUGOS_RETENTION_DAYS", "2555")
 )
@@ -7119,7 +7157,7 @@ class DataFormatConfig:
     boolean_false: str = "False"
 
 
-# Fixes audit issue 14.9 — naming conventions
+# Fixes audit issue 14.9 -- naming conventions
 NAMING_CONVENTIONS: dict[str, str] = {
     "node_types": "PascalCase",
     "edge_types": "snake_case",
@@ -7129,7 +7167,7 @@ NAMING_CONVENTIONS: dict[str, str] = {
 }
 
 
-# Fixes audit issue 14.10 — deprecated decorator
+# Fixes audit issue 14.10 -- deprecated decorator
 def deprecated(reason: str = ""):
     """Decorator to mark functions as deprecated.
 
@@ -7159,7 +7197,7 @@ def deprecated(reason: str = ""):
 class LineageMetadata:
     """Metadata for tracking data lineage through the pipeline.
 
-    Fixes audit issue 16.1 — all 9 required fields.
+    Fixes audit issue 16.1 -- all 9 required fields.
     Every output file must carry this metadata.
     """
     pipeline_version: str
@@ -7224,7 +7262,7 @@ def write_lineage_manifest(
     return manifest_path
 
 
-# Fixes audit issue 16.4 — model hash
+# Fixes audit issue 16.4 -- model hash
 def compute_model_hash(model_path: Path | str) -> str:
     """Compute SHA-256 hash of a model file.
 
@@ -7258,14 +7296,14 @@ def verify_model_hash(model_path: Path | str, expected_hash: str) -> bool:
     return compute_model_hash(model_path) == expected_hash
 
 
-# Fixes audit issue 16.10 — config dependency graph
+# Fixes audit issue 16.10 -- config dependency graph
 # Key -> list of keys that this key DEPENDS ON.
 # So if CORE_NODE_TYPES changes, all keys that depend on it are affected.
 #
 # v28 ROOT FIX (audit TOP-18): ``LABEL_MAP_VERSION`` is referenced in
 # the dependency list for ``graph_queries`` below, but its canonical
 # definition lives in ``utils.py`` (alongside LABEL_MAP_HASH,
-# LABEL_API_VERSION, and LABEL_SCHEMA_VERSION — the four label-schema
+# LABEL_API_VERSION, and LABEL_SCHEMA_VERSION -- the four label-schema
 # version constants belong together). Previously, this created a
 # "phantom dependency": CONFIG_DEPENDENCY_GRAPH named a constant that
 # did not exist as an attribute of the config module, so any consumer
@@ -7274,17 +7312,17 @@ def verify_model_hash(model_path: Path | str, expected_hash: str) -> bool:
 # from utils.py here (deferred inside a try/except to avoid any
 # circular-import risk: utils.py imports config.py only inside a
 # function body, so importing utils.py at config module-load time is
-# safe — but the try/except keeps config.py loadable even if utils.py
+# safe -- but the try/except keeps config.py loadable even if utils.py
 # is being refactored).
 try:
     from .utils import LABEL_MAP_VERSION as _LABEL_MAP_VERSION  # noqa: E402
     # Re-export so consumers that import LABEL_MAP_VERSION from config
     # (instead of from utils) get the same object identity.
     LABEL_MAP_VERSION: str = _LABEL_MAP_VERSION
-except ImportError:  # pragma: no cover — defensive guard
+except ImportError:  # pragma: no cover -- defensive guard
     LABEL_MAP_VERSION = "1.0.0"  # fallback matches utils.py default
     logger.warning(
-        "Could not import LABEL_MAP_VERSION from utils.py — using "
+        "Could not import LABEL_MAP_VERSION from utils.py -- using "
         "fallback '1.0.0'. graph_queries CONFIG_DEPENDENCY_GRAPH entry "
         "may be stale until utils.py is importable. (v28 audit TOP-18)"
     )
@@ -7300,7 +7338,7 @@ CONFIG_DEPENDENCY_GRAPH: dict[str, list[str]] = {
     "get_neo4j_config": ["Neo4jConfig"],
     "build_lineage_metadata": ["PIPELINE_VERSION", "CONFIG_VERSION", "CONFIG_HASH", "SCHEMA_VERSION", "SEED", "RUN_ID"],
     "safe_config_dict": ["Neo4jConfig", "DATA_SOURCES", "CORE_NODE_TYPES", "CORE_EDGE_TYPES"],
-    # Fixes audit issue 1.6 — graph_queries depends on these config keys
+    # Fixes audit issue 1.6 -- graph_queries depends on these config keys
     "graph_queries": [
         "CORE_EDGE_TYPES", "CORE_NODE_TYPES", "Neo4jConfig",
         "LABEL_MAP_VERSION", "SIDER_EDGE_TYPE", "SIDER_LEGACY_EDGE_TYPE",
@@ -7330,7 +7368,7 @@ def compute_impact_analysis(changed_key: str) -> list[str]:
     while queue:
         current = queue.pop(0)
         for key, deps in CONFIG_DEPENDENCY_GRAPH.items():
-            # deps are what `key` depends ON — so if `current`
+            # deps are what `key` depends ON -- so if `current`
             # is in deps, then `key` is affected
             if current in deps and key not in affected:
                 affected.add(key)
@@ -7338,7 +7376,7 @@ def compute_impact_analysis(changed_key: str) -> list[str]:
     return sorted(affected)
 
 
-# Fixes audit issue 16.8 — log_transformation
+# Fixes audit issue 16.8 -- log_transformation
 def log_transformation(
     step: str,
     input_desc: str,
@@ -7380,7 +7418,7 @@ def log_transformation(
     )
 
 
-# Fixes audit issue 16.11 — diff_configs
+# Fixes audit issue 16.11 -- diff_configs
 def diff_configs(
     old_config: dict[str, Any],
     new_config: dict[str, Any],
@@ -7406,9 +7444,9 @@ def diff_configs(
     return {"added": added, "removed": removed, "changed": changed}
 
 
-# ─── Phase J — Validators & Self-tests ───────────────────────────────────────
+# ─── Phase J -- Validators & Self-tests ───────────────────────────────────────
 
-# Fixes audit issue 4.15 — THRESHOLD_LOCKS
+# Fixes audit issue 4.15 -- THRESHOLD_LOCKS
 THRESHOLD_LOCKS: frozenset[str] = frozenset({
     "MIN_NODES_W2", "MIN_EDGES_W2", "MIN_POSITIVE_PAIRS",
     "MIN_NEGATIVE_PAIRS", "STRING_SCORE_THRESHOLD",
@@ -7417,7 +7455,7 @@ THRESHOLD_LOCKS: frozenset[str] = frozenset({
     "V1_LAUNCH_AUC",
 })
 
-# Fixes audit issue 4.15 — MAGIC_NUMBERS_REGISTRY
+# Fixes audit issue 4.15 -- MAGIC_NUMBERS_REGISTRY
 MAGIC_NUMBERS_REGISTRY: dict[str, dict[str, str]] = {
     "MIN_NODES_W2": {
         "value": str(MIN_NODES_W2),
@@ -7459,7 +7497,7 @@ MAGIC_NUMBERS_REGISTRY: dict[str, dict[str, str]] = {
             "minimum threshold shared by string_loader / stitch_loader / "
             "any future loader that filters STRING-sourced edges. "
             "Default 700 = 'high confidence' per STRING-db "
-            "documentation (Szklarczyk 2023, Nucleic Acids Research) — "
+            "documentation (Szklarczyk 2023, Nucleic Acids Research) -- "
             ">= 700 achieves >80% precision on KEGG pathway benchmarks."
         ),
     },
@@ -7480,7 +7518,7 @@ MAGIC_NUMBERS_REGISTRY: dict[str, dict[str, str]] = {
     },
 }
 
-# Fixes audit issue 13.3 — DATA_DICTIONARY
+# Fixes audit issue 13.3 -- DATA_DICTIONARY
 DATA_DICTIONARY: dict[str, dict[str, str]] = {
     "CORE_NODE_TYPES": {
         "type": "list[str]",
@@ -7544,7 +7582,7 @@ DATA_DICTIONARY: dict[str, dict[str, str]] = {
     },
 }
 
-# Fixes audit issue 13.3 — print_data_dictionary
+# Fixes audit issue 13.3 -- print_data_dictionary
 def print_data_dictionary() -> str:
     """Print the data dictionary in human-readable format.
 
@@ -7561,7 +7599,7 @@ def print_data_dictionary() -> str:
     return "\n".join(lines)
 
 
-# Fixes audit issue 13.12 — CONFIG_SECTIONS
+# Fixes audit issue 13.12 -- CONFIG_SECTIONS
 CONFIG_SECTIONS: list[dict[str, str]] = [
     {"name": "Foundations", "description": "Version constants, __all__, seed, config hash"},
     {"name": "Directories", "description": "All path constants and ensure_dirs()"},
@@ -7704,14 +7742,14 @@ def _validate_pinned_versions() -> list[str]:
         List of validation issue strings (empty if all checks pass).
 
     v28 ROOT FIX (audit TOP-19): the previous validator only checked the
-    ``pinned: bool`` flag — a source could set ``pinned: True`` but
+    ``pinned: bool`` flag -- a source could set ``pinned: True`` but
     have no ``url`` and no ``version`` field, and the validator would
     still report it as compliant. This made the "pinned" guarantee
     meaningless: a source flagged as pinned could still drift across
     upstream releases because nothing actually pinned it. The fix
     enforces the INVARIANT that a pinned source MUST have BOTH a URL
     and a version pin, and that the URL must mention the version
-    (heuristic — catches the common case where the URL has no version
+    (heuristic -- catches the common case where the URL has no version
     token at all, e.g. ``https://example.com/data/latest`` which is
     by definition unpinned).
     """
@@ -7730,13 +7768,13 @@ def _validate_pinned_versions() -> list[str]:
         if not url:
             issues.append(
                 f"Critical source {src_name!r} is flagged pinned=True "
-                f"but has no 'url' field — pinning is meaningless "
+                f"but has no 'url' field -- pinning is meaningless "
                 f"without a URL to pin to."
             )
         if not version:
             issues.append(
                 f"Critical source {src_name!r} is flagged pinned=True "
-                f"but has no 'version' field — without an explicit "
+                f"but has no 'version' field -- without an explicit "
                 f"version, upstream can release a new version under the "
                 f"same URL and the pipeline silently picks it up."
             )
@@ -7764,7 +7802,7 @@ def _validate_pinned_versions() -> list[str]:
                     f"Critical source {src_name!r}: pinned version "
                     f"{version_str!r} does not appear in URL {url_str!r}. "
                     f"This usually means the URL points to a 'latest' or "
-                    f"'master' symlink — upstream can release a new "
+                    f"'master' symlink -- upstream can release a new "
                     f"version under the same URL and the pipeline will "
                     f"silently pick it up, defeating the pin."
                 )
@@ -7778,7 +7816,7 @@ def _validate_no_hardcoded_filenames() -> list[str]:
     -------
     list of str
     """
-    # This is a placeholder — actual validation would scan consumer files
+    # This is a placeholder -- actual validation would scan consumer files
     return []
 
 
@@ -7853,7 +7891,7 @@ def _self_test_safe_config() -> bool:
     """Self-test: safe_config_dict doesn't expose secrets.
 
     v28 ROOT FIX (audit TOP-20): the previous self-test only flagged
-    values that contained BOTH ``password`` AND ``secret`` — almost no
+    values that contained BOTH ``password`` AND ``secret`` -- almost no
     real value contains both (a password is just a password, an API
     token is just a token). The AND logic was a logical typo that made
     the self-test a no-op: a leaked password like ``"p@ssw0rd"`` would
@@ -7874,7 +7912,7 @@ def _self_test_safe_config() -> bool:
     for key, val in d.items():
         key_lower = str(key).lower()
         val_lower = str(val).lower() if val is not None else ""
-        # Check BOTH key name and value — a leak in either is a leak.
+        # Check BOTH key name and value -- a leak in either is a leak.
         # (Previously only the value was checked, AND only for the
         # "password"+"secret" conjunction.)
         if any(kw in key_lower for kw in SECRET_KEYWORDS):
@@ -7959,7 +7997,7 @@ def _self_test_frozen_dataclasses() -> bool:
         try:
             instance = cls()
             try:
-                # Try to set an attribute — should raise FrozenInstanceError
+                # Try to set an attribute -- should raise FrozenInstanceError
                 # In Python 3.10+, frozen dataclasses raise dataclasses.FrozenInstanceError
                 # which is a subclass of AttributeError
                 if hasattr(instance, 'uri'):
@@ -7971,7 +8009,7 @@ def _self_test_frozen_dataclasses() -> bool:
                 logger.error("%s is not frozen!", cls.__name__)
                 return False
             except AttributeError:
-                pass  # Expected — frozen dataclass raises AttributeError
+                pass  # Expected -- frozen dataclass raises AttributeError
         except (ImportError, AttributeError, ValueError) as exc:  # v85 FORENSIC ROOT FIX (BUG #51)
             logger.error("Cannot create %s: %s", cls.__name__, exc)
             return False
@@ -8009,12 +8047,12 @@ def _self_test_backfill_mode() -> bool:
     return isinstance(BACKFILL_MODE, bool)
 
 
-# Fixes audit issue 7.9 — BACKFILL_MODE
+# Fixes audit issue 7.9 -- BACKFILL_MODE
 BACKFILL_MODE: bool = os.environ.get("DRUGOS_BACKFILL_MODE", "0") == "1"
 BACKFILL_AS_OF_DATE: str | None = os.environ.get("DRUGOS_BACKFILL_AS_OF")
 
 
-# ─── Phase K — Final Wiring ──────────────────────────────────────────────────
+# ─── Phase K -- Final Wiring ──────────────────────────────────────────────────
 
 # Apply config overrides if CONFIG_FILE is set
 if CONFIG_FILE:
@@ -8023,7 +8061,7 @@ if CONFIG_FILE:
 # v29 ROOT FIX (audit I-5): the previous code called
 # ``apply_environment_config()`` here unconditionally (when
 # ENVIRONMENT != "development"). That function is now a deprecated
-# no-op — its old behavior (applying hardcoded ENVIRONMENT_CONFIGS
+# no-op -- its old behavior (applying hardcoded ENVIRONMENT_CONFIGS
 # overrides) was redundant because every constant it overrode is
 # already read from env vars at the top of this module. Calling the
 # deprecated function here would emit a DeprecationWarning on EVERY
@@ -8036,12 +8074,12 @@ if CONFIG_FILE:
 CONFIG_HASH = compute_config_hash()
 
 
-# ─── Phase L — __main__ self-test ────────────────────────────────────────────
+# ─── Phase L -- __main__ self-test ────────────────────────────────────────────
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
     print("=" * 60)
-    print("DrugOS config.py — Self-Test Suite")
+    print("DrugOS config.py -- Self-Test Suite")
     print("=" * 60)
 
     self_tests = [
@@ -8073,7 +8111,7 @@ if __name__ == "__main__":
                 print(f"  FAIL: {name}")
                 failed += 1
         except (ValueError, TypeError, RuntimeError, KeyError, OSError) as exc:  # v85 FORENSIC ROOT FIX (BUG #51)
-            print(f"  ERROR: {name} — {exc}")
+            print(f"  ERROR: {name} -- {exc}")
             failed += 1
 
     print("\n" + "=" * 60)

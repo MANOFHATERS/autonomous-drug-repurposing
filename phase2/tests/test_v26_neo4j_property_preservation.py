@@ -1,4 +1,4 @@
-"""FIX-B (Neo4j Node Property Strip) — patient-safety regression test.
+"""FIX-B (Neo4j Node Property Strip) -- patient-safety regression test.
 
 This test file is the FORENSIC proof that the production Neo4j load path
 (``run_pipeline.step3_load_neo4j``) preserves patient-safety properties
@@ -20,7 +20,7 @@ Before FIX-B, ``step3_load_neo4j`` reconstructed each node as a bare
 The bridge (``phase1_bridge.RecordingGraphBuilder``) had already populated
 the full property dicts (``withdrawn``, ``fda_approved``,
 ``clinical_status``, ``molecular_weight``, ``inchikey``, ``smiles``,
-etc.) on Compound nodes — and the in-memory test path preserved them —
+etc.) on Compound nodes -- and the in-memory test path preserved them --
 but the production Neo4j load path STRIPPED them. Cerivastatin
 (withdrawn 2001 for rhabdomyolysis) would have its ``withdrawn=True``
 flag LOST in production Neo4j. The RL safety ranker would then treat
@@ -29,10 +29,10 @@ it as SAFE. Patient-safety risk.
 THE FIX
 -------
 ``step1_load_phase1`` now exposes a ``node_props_lookup`` dict keyed by
-``(label, node_id)`` → full property dict. ``step3_load_neo4j`` reads
+``(label, node_id)`` -> full property dict. ``step3_load_neo4j`` reads
 this lookup (when provided) to build the per-type node lists. The
 production ``kg_builder.load_nodes_batch`` then applies
-``NODE_PROPERTY_WHITELIST`` + ``SYSTEM_PROPS`` itself — keeping the
+``NODE_PROPERTY_WHITELIST`` + ``SYSTEM_PROPS`` itself -- keeping the
 whitelist as the single source of truth for schema enforcement.
 
 THE TEST
@@ -43,7 +43,7 @@ THE TEST
    via ``step1_load_phase1`` or directly from the recorder).
 3. Call ``step3_load_neo4j(..., skip_neo4j=True, dry_run_capture=capture)``
    so we can inspect the exact node dicts that WOULD have been sent to
-   Neo4j — without contacting Neo4j.
+   Neo4j -- without contacting Neo4j.
 4. Assert that every Compound node in the captured ``entity_type_data``
    retains ``withdrawn``, ``fda_approved``, ``clinical_status``,
    ``molecular_weight``, ``inchikey``, ``smiles``.
@@ -51,7 +51,7 @@ THE TEST
    the legacy bare-dict shape (so the fix is backward-compatible).
 6. Assert that the production whitelist (``NODE_PROPERTY_WHITELIST``)
    would NOT strip the patient-safety properties (the whitelist
-   explicitly allows them — bug #B5 fix).
+   explicitly allows them -- bug #B5 fix).
 """
 
 from __future__ import annotations
@@ -100,7 +100,7 @@ class TestStep1ExposesNodePropsLookup:
             "step1_load_phase1 must expose 'node_props_lookup' so step3 "
             "can load Compound nodes with their patient-safety properties "
             "(withdrawn/fda_approved/clinical_status). Without this key, "
-            "step3 falls back to bare {id, entity_type} dicts — destroying "
+            "step3 falls back to bare {id, entity_type} dicts -- destroying "
             "every clinical-safety property in the production Neo4j load "
             "path. Patient-safety risk."
         )
@@ -109,7 +109,7 @@ class TestStep1ExposesNodePropsLookup:
         result = step1_load_phase1(phase1_processed_dir=PHASE1_PROCESSED)
         npl: Dict[Tuple[str, str], Dict[str, Any]] = result["node_props_lookup"]
         assert len(npl) > 0, (
-            "node_props_lookup is empty — the bridge produced no nodes, "
+            "node_props_lookup is empty -- the bridge produced no nodes, "
             "or step1_load_phase1 failed to walk recorder.node_loads."
         )
 
@@ -122,14 +122,14 @@ class TestStep1ExposesNodePropsLookup:
             v for (label, _nid), v in npl.items() if label == "Compound"
         ]
         assert len(compound_entries) > 0, (
-            "node_props_lookup contains zero Compound entries — the toy "
+            "node_props_lookup contains zero Compound entries -- the toy "
             "fixture must ship at least one drug."
         )
         for n in compound_entries:
             # These three are the RL-safety ranker's primary signals.
             assert "withdrawn" in n, (
                 f"Compound {n.get('id')} lost its 'withdrawn' flag in "
-                f"node_props_lookup — patient-safety signal destroyed."
+                f"node_props_lookup -- patient-safety signal destroyed."
             )
             assert "fda_approved" in n, (
                 f"Compound {n.get('id')} lost its 'fda_approved' flag."
@@ -140,7 +140,7 @@ class TestStep1ExposesNodePropsLookup:
 
 
 # ---------------------------------------------------------------------------
-# 2. _build_entity_type_data — direct unit test of the helper
+# 2. _build_entity_type_data -- direct unit test of the helper
 # ---------------------------------------------------------------------------
 class TestBuildEntityTypeData:
     """The shared helper used by both the dry-run capture and the live
@@ -188,7 +188,7 @@ class TestBuildEntityTypeData:
     def test_drkg_path_falls_back_to_bare_dict(self):
         """When node_props_lookup is None (DRKG path), each node dict
         is the legacy bare ``{"id": eid, "entity_type": etype}`` shape.
-        This locks in backward compatibility — DRKG nodes don't carry
+        This locks in backward compatibility -- DRKG nodes don't carry
         rich properties, so we must NOT regress that path."""
         # Fake entity_maps with two labels and a couple of IDs each.
         entity_maps = {
@@ -211,7 +211,7 @@ class TestBuildEntityTypeData:
     def test_phase1_path_falls_back_for_missing_lookup_entry(self):
         """If a node ID is in entity_maps but missing from
         node_props_lookup, the helper falls back to the bare-dict shape
-        rather than crashing. (Defensive — keeps production running
+        rather than crashing. (Defensive -- keeps production running
         even if the lookup is partially populated.)"""
         entity_maps = {"Compound": {"DB00001": 0, "DB00002": 1}}
         # Only DB00001 has a full property dict; DB00002 is missing.
@@ -243,7 +243,7 @@ class TestStep3DryRunCapture:
 
     @pytest.fixture(scope="class")
     def captured(self) -> Dict[str, Any]:
-        """Run step1 → step3 (skip_neo4j=True) and capture the
+        """Run step1 -> step3 (skip_neo4j=True) and capture the
         entity_type_data that step3 would have loaded."""
         r1 = step1_load_phase1(phase1_processed_dir=PHASE1_PROCESSED)
         entity_maps = r1["entity_maps"]
@@ -270,7 +270,7 @@ class TestStep3DryRunCapture:
     def test_capture_flag_node_props_lookup_provided(self, captured):
         assert captured.get("node_props_lookup_provided") is True, (
             "dry_run_capture['node_props_lookup_provided'] must be True "
-            "when node_props_lookup was supplied — confirms the Phase 1 "
+            "when node_props_lookup was supplied -- confirms the Phase 1 "
             "branch was actually taken."
         )
 
@@ -278,18 +278,18 @@ class TestStep3DryRunCapture:
         etd = captured["entity_type_data"]
         compound_nodes = etd.get("Compound", [])
         assert len(compound_nodes) > 0, (
-            "No Compound nodes in captured entity_type_data — Phase 1 toy "
+            "No Compound nodes in captured entity_type_data -- Phase 1 toy "
             "fixture must ship at least one drug."
         )
         for n in compound_nodes:
             assert "withdrawn" in n, (
                 f"Compound {n.get('id')} would have its 'withdrawn' flag "
-                f"STRIPPED by the Neo4j load path — patient-safety signal "
+                f"STRIPPED by the Neo4j load path -- patient-safety signal "
                 f"destroyed. This is exactly the FIX-B regression."
             )
             # withdrawn must be a real bool, not None.
             assert n["withdrawn"] is not None, (
-                f"Compound {n.get('id')} 'withdrawn' is None — the bridge "
+                f"Compound {n.get('id')} 'withdrawn' is None -- the bridge "
                 f"explicitly coerces to bool to avoid this."
             )
 
@@ -308,7 +308,7 @@ class TestStep3DryRunCapture:
             )
 
     def test_compound_nodes_retain_pchem_properties(self, captured):
-        """Bonus: the bridge also emits molecular_weight/inchikey/smiles —
+        """Bonus: the bridge also emits molecular_weight/inchikey/smiles --
         they must survive the Neo4j load path too."""
         etd = captured["entity_type_data"]
         for n in etd.get("Compound", []):
@@ -334,11 +334,11 @@ class TestStep3DryRunCapture:
 
 
 # ---------------------------------------------------------------------------
-# 4. DRKG path backward-compat — step3 with node_props_lookup=None
+# 4. DRKG path backward-compat -- step3 with node_props_lookup=None
 # ---------------------------------------------------------------------------
 class TestStep3DrkgPathBackwardCompat:
     """When node_props_lookup is None (the DRKG path), step3 must still
-    produce bare-dict node shapes — same as before FIX-B. This locks
+    produce bare-dict node shapes -- same as before FIX-B. This locks
     down that the fix did not regress the DRKG path."""
 
     @pytest.fixture(scope="class")
@@ -366,7 +366,7 @@ class TestStep3DrkgPathBackwardCompat:
         """DRKG path: each node dict is {id, entity_type} only."""
         etd = captured_drkg["entity_type_data"]
         # Check at least the Compound nodes (which we know have full
-        # props on the Phase 1 path — so this confirms the DRKG path
+        # props on the Phase 1 path -- so this confirms the DRKG path
         # really is producing the legacy bare shape).
         compound_nodes = etd.get("Compound", [])
         assert len(compound_nodes) > 0
@@ -379,7 +379,7 @@ class TestStep3DrkgPathBackwardCompat:
     def test_drkg_path_does_not_have_withdrawn(self, captured_drkg):
         """Sanity check: the DRKG path explicitly does NOT carry
         withdrawn/fda_approved (DRKG nodes have no rich properties).
-        This is the inverse of the Phase 1 test — confirms the two
+        This is the inverse of the Phase 1 test -- confirms the two
         paths are distinguishable."""
         etd = captured_drkg["entity_type_data"]
         for n in etd.get("Compound", []):
@@ -394,7 +394,7 @@ class TestStep3DrkgPathBackwardCompat:
 class TestWhitelistPreservesSafetyProperties:
     """The kg_builder.load_nodes_batch applies NODE_PROPERTY_WHITELIST
     itself. Lock down that the whitelist does NOT strip the
-    patient-safety properties — that would re-introduce the bug at a
+    patient-safety properties -- that would re-introduce the bug at a
     different layer."""
 
     def test_withdrawn_is_whitelisted_for_compound(self):
@@ -404,14 +404,14 @@ class TestWhitelistPreservesSafetyProperties:
         for k in ("withdrawn", "fda_approved", "clinical_status",
                   "molecular_weight", "inchikey", "smiles", "id"):
             assert k in allowed, (
-                f"'{k}' is NOT in the Compound NODE_PROPERTY_WHITELIST — "
+                f"'{k}' is NOT in the Compound NODE_PROPERTY_WHITELIST -- "
                 f"kg_builder.load_nodes_batch would silently strip it, "
                 f"re-introducing the FIX-B bug at the whitelist layer."
             )
 
     def test_entity_type_is_NOT_whitelisted(self):
         """Sanity: 'entity_type' (the legacy bare-dict key) is NOT in
-        the whitelist — it would be stripped by load_nodes_batch. This
+        the whitelist -- it would be stripped by load_nodes_batch. This
         confirms the whitelist really is the schema enforcer."""
         from drugos_graph.kg_builder import NODE_PROPERTY_WHITELIST, SYSTEM_PROPS
 
@@ -420,7 +420,7 @@ class TestWhitelistPreservesSafetyProperties:
 
 
 # ---------------------------------------------------------------------------
-# 6. End-to-end: bridge → step1 → step3 (dry-run) → Compound safety props
+# 6. End-to-end: bridge -> step1 -> step3 (dry-run) -> Compound safety props
 # ---------------------------------------------------------------------------
 class TestEndToEndPropertyPreservation:
     """The full proof: the same Compound node that the bridge emits
@@ -439,11 +439,11 @@ class TestEndToEndPropertyPreservation:
             (nid, props) for (label, nid), props in node_props_lookup.items()
             if label == "Compound" and props.get("withdrawn") is True
         ]
-        # The toy fixture may or may not include a withdrawn drug — if
+        # The toy fixture may or may not include a withdrawn drug -- if
         # it does, the property must round-trip into step3's payload.
         if not withdrawn_compounds:
             pytest.skip(
-                "Toy fixture has no withdrawn Compound — cannot verify "
+                "Toy fixture has no withdrawn Compound -- cannot verify "
                 "the withdrawn=True round-trip. (Bridge still emits "
                 "withdrawn=False for every Compound; that's covered by "
                 "the other tests.)"
@@ -468,7 +468,7 @@ class TestEndToEndPropertyPreservation:
             assert captured_by_id[nid].get("withdrawn") is True, (
                 f"Withdrawn Compound {nid} had withdrawn=True in the "
                 f"bridge output but withdrawn={captured_by_id[nid].get('withdrawn')!r} "
-                f"in step3's Neo4j payload — patient-safety signal lost."
+                f"in step3's Neo4j payload -- patient-safety signal lost."
             )
 
     def test_every_compound_in_step3_payload_has_a_bridge_source(self):
@@ -489,6 +489,6 @@ class TestEndToEndPropertyPreservation:
             key = ("Compound", n["id"])
             assert key in node_props_lookup, (
                 f"Compound {n['id']} in step3's Neo4j payload has no "
-                f"corresponding bridge entry in node_props_lookup — "
+                f"corresponding bridge entry in node_props_lookup -- "
                 f"step3 invented a phantom node."
             )

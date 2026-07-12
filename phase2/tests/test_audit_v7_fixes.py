@@ -34,7 +34,7 @@ sys.path.insert(0, str(PHASE1_DIR))
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class TestBugC001BootstrapCI:
-    """BUG-C-001: Bootstrap CI was fabricated — EvaluationResult had no
+    """BUG-C-001: Bootstrap CI was fabricated -- EvaluationResult had no
     pos_scores field, getattr always returned [], synthetic Gaussian
     fallback always fired."""
 
@@ -78,7 +78,7 @@ class TestBugC002AucEnforcement:
             AUCBelowThresholdError,
         )
         # v26 FIX-A: in RELAXED mode (dev default), the function returns
-        # meets=False WITHOUT raising — this is intentional (callers must
+        # meets=False WITHOUT raising -- this is intentional (callers must
         # check the return value). In STANDARD mode, it raises
         # AUCBelowThresholdError. This test verifies BOTH contracts.
         # RELAXED mode: returns False, does not raise
@@ -112,7 +112,7 @@ class TestBugC005WeightsOnlyLoad:
         import re
         from drugos_graph import transe_model
         src = open(transe_model.__file__).read()
-        # Strip all comments and docstrings — we only care about actual
+        # Strip all comments and docstrings -- we only care about actual
         # code calls. The string "weights_only=False" may appear in
         # explanatory comments (the BUG-C-005 fix narrative) which is
         # fine; what matters is the actual torch.load() call uses True.
@@ -148,7 +148,7 @@ class TestBugC005WeightsOnlyLoad:
             f"(found {good_calls + bad_calls} torch.load calls total)"
         )
         assert bad_calls == 0, (
-            f"found {bad_calls} torch.load(weights_only=False) calls — "
+            f"found {bad_calls} torch.load(weights_only=False) calls -- "
             "security regression"
         )
 
@@ -172,7 +172,7 @@ class TestBugC006TargetAucDefault:
 
 
 class TestBugC007VerifySklearn:
-    """BUG-C-007: verify_sklearn_agreement=False by default — the
+    """BUG-C-007: verify_sklearn_agreement=False by default -- the
     'bit-identical to sklearn' AUC claim was never verified in
     production runs."""
 
@@ -246,7 +246,7 @@ class TestBugC011RawMrrQualifier:
         assert "mrr_raw" in result, "mrr_raw key missing"
         assert "mrr_is_filtered" in result, "mrr_is_filtered flag missing"
         assert result["mrr_is_filtered"] is False, (
-            "must be False — we report raw, not filtered"
+            "must be False -- we report raw, not filtered"
         )
         assert "ranking_setting" in result, "ranking_setting key missing"
         assert result["ranking_setting"] == "raw"
@@ -260,7 +260,7 @@ class TestBugC011RawMrrQualifier:
 
 
 class TestBugC013RelationNorm:
-    """BUG-C-013: relation embeddings never normalized — Bordes 2013
+    """BUG-C-013: relation embeddings never normalized -- Bordes 2013
     explicitly notes relation norm drift as a known failure mode."""
 
     def test_normalize_relation_embeddings_method_exists(self):
@@ -283,7 +283,7 @@ class TestBugC013RelationNorm:
     def test_relation_norms_preserved_when_below_one(self):
         """v61 ROOT FIX (test stale after v29): the v29 fix changed the
         default ``relation_norm_mode`` from ``"soft_clamp"`` to
-        ``"strict_bordes"`` (Bordes 2013 §3.2 verbatim — hard-normalize
+        ``"strict_bordes"`` (Bordes 2013 §3.2 verbatim -- hard-normalize
         to ==1 after every step). This test was written for the
         soft_clamp default and now needs to explicitly configure the
         model with ``relation_norm_mode="soft_clamp"`` to verify the
@@ -302,7 +302,7 @@ class TestBugC013RelationNorm:
         after_norm = m.relation_embeddings.weight[0].norm(p=2).item()
         # Norms below 1 should be preserved (soft constraint, not hard)
         assert abs(original_norm - after_norm) < 0.01, (
-            f"norm changed from {original_norm} to {after_norm} — "
+            f"norm changed from {original_norm} to {after_norm} -- "
             "soft constraint should not normalize below 1"
         )
 
@@ -338,7 +338,7 @@ class TestBugD002EdgeValidation:
 
 
 class TestBugD003CypherMinCoalesce:
-    """BUG-D-003: min(coalesce(...), 1.0) used 11x — Cypher has no scalar
+    """BUG-D-003: min(coalesce(...), 1.0) used 11x -- Cypher has no scalar
     two-arg min(x,y), only aggregating min(x)."""
 
     def test_no_min_coalesce_in_graph_queries(self):
@@ -498,7 +498,7 @@ class TestBugE001EntityToIdxUsed:
 
         v61 ROOT FIX (test stale after v60): the v60 fix made
         DRUGOS_STRICT_FEATURES default to "1" (ON). step11 invokes
-        step9 (PyG build) which invokes ChEMBERTa feature extraction —
+        step9 (PyG build) which invokes ChEMBERTa feature extraction --
         and without HF_TOKEN, ChEMBERTa fails, raising
         FeatureFailureError in strict mode. This test is about TransE
         training, NOT ChEMBERTa features, so we explicitly disable
@@ -534,7 +534,7 @@ class TestBugE001EntityToIdxUsed:
                 )
             except ValueError as e:
                 # If the synthetic data is still too small after dedup, the
-                # guard raises ValueError — that's the CORRECT behavior
+                # guard raises ValueError -- that's the CORRECT behavior
                 # (better than silently training on too few triples). Accept
                 # this as a pass with a note.
                 err = str(e)
@@ -548,7 +548,7 @@ class TestBugE001EntityToIdxUsed:
             except Exception as e:
                 # v14: the data-leakage guard (DataLeakageError) may also fire
                 # if the synthetic data's train/val split has overlapping
-                # triples. This is the CORRECT behavior — the guard exists to
+                # triples. This is the CORRECT behavior -- the guard exists to
                 # prevent the model from memorizing validation triples. The
                 # test's purpose is to verify step11 doesn't CRASH on
                 # synthetic data; a guard firing as designed is acceptable.
@@ -562,7 +562,7 @@ class TestBugE001EntityToIdxUsed:
                 # v61 ROOT FIX: the v39 guard raises TransETrainingError
                 # when AUC <= 0.5 (worse than random). The synthetic data
                 # in this test produces AUC ~0.43 (random embeddings on
-                # synthetic triples) — the guard fires as designed. This
+                # synthetic triples) -- the guard fires as designed. This
                 # is NOT a crash; it's a safety guard preventing deployment
                 # of a worse-than-random model. Treat as a skip (pass).
                 if ("TransETrainingError" in type(e).__name__
@@ -651,7 +651,7 @@ class TestBugA002GdaQuarantine:
 
 
 class TestBugA003ExpectedSchemaFromOrm:
-    """BUG-A-003: EXPECTED_SCHEMA stale — phantom columns."""
+    """BUG-A-003: EXPECTED_SCHEMA stale -- phantom columns."""
 
     def test_no_phantom_columns(self):
         from database.migrations.run_migrations import EXPECTED_SCHEMA
@@ -721,7 +721,7 @@ class TestBugA007A008OmimValidation:
     def test_no_numeric_gene_symbol(self):
         """BUG-A-008: OMIM pipeline produced gene_symbol='26' (a number).
         Real gene symbols like FBN1, FGFR3, HBB contain digits but are
-        NOT pure numbers — they start with letters."""
+        NOT pure numbers -- they start with letters."""
         import csv
         csv_path = PHASE1_DIR / "processed_data" / "omim_gene_disease_associations.csv"
         if not csv_path.exists():
@@ -821,11 +821,11 @@ class TestEndToEndPhase1Phase2Connection:
 
         v61 ROOT FIX (test stale after v15): the v15 fix made
         --full-pipeline default to True, so `run_unified.py --json`
-        runs the FULL pipeline (entity resolution → PyG build → TransE
-        training → validation). On the sample dataset, TransE training
+        runs the FULL pipeline (entity resolution -> PyG build -> TransE
+        training -> validation). On the sample dataset, TransE training
         alone takes 30-60s, making the 60s test timeout too tight.
         ROOT FIX: use --no-full-pipeline for this smoke test (the
-        bridge-only path verifies Phase 1 → Phase 2 connection without
+        bridge-only path verifies Phase 1 -> Phase 2 connection without
         the ML training overhead). The full-pipeline path is verified
         by the actual `python run_unified.py` invocation in CI.
         """
@@ -875,7 +875,7 @@ class TestEndToEndPhase1Phase2Connection:
         # v26 FIX-F (C-16): entity_maps now includes ClinicalOutcome
         # (derived from drugbank_indications.csv). The bridge emits 5
         # entity types: Compound, Protein, Gene, Disease, ClinicalOutcome.
-        # (Pathway is configured but not produced from the toy fixture —
+        # (Pathway is configured but not produced from the toy fixture --
         # a WARNING is logged; real STRING/Reactome/KEGG data is required.)
         expected_types = {"Compound", "Protein", "Gene", "Disease", "ClinicalOutcome"}
         actual_types = set(r["entity_maps"].keys())
@@ -915,7 +915,7 @@ class TestEndToEndPhase1Phase2Connection:
 
         v61 ROOT FIX (test stale after v60): the v60 fix made
         DRUGOS_STRICT_FEATURES default to "1" (ON). step9 invokes
-        ChEMBERTa feature extraction — and without HF_TOKEN, ChEMBERTa
+        ChEMBERTa feature extraction -- and without HF_TOKEN, ChEMBERTa
         fails, raising FeatureFailureError in strict mode. This test is
         about PyG HeteroData construction, NOT ChEMBERTa features, so
         we explicitly disable strict mode.

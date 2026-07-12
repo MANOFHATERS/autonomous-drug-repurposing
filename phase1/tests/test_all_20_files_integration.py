@@ -1,5 +1,5 @@
 """
-Test 2 of 3 — Integration test for ALL 20 files in the Drug Repurposing dataset pipeline.
+Test 2 of 3 -- Integration test for ALL 20 files in the Drug Repurposing dataset pipeline.
 
 Files covered (19 already fixed + 1 newly fixed = 20):
 
@@ -268,7 +268,7 @@ class TestPipelinesModule:
 
 
 # ===========================================================================
-# 20. pipelines/base_pipeline.py   (File 20 — NEWLY FIXED)
+# 20. pipelines/base_pipeline.py   (File 20 -- NEWLY FIXED)
 # ===========================================================================
 class TestBasePipelineModule:
     """File 20: the upgraded institutional-grade base_pipeline.py."""
@@ -445,7 +445,7 @@ class TestBasePipelineIntegration:
             ("string", "protein_protein_interactions.csv", "combined_score", "Int64"),
             ("disgenet", "gene_disease_associations.csv", "score", "float64"),
             ("disgenet", "gene_disease_associations.csv", "gene_id", "Int64"),
-            # OMIM — institutional-grade schema (master prompt §6).
+            # OMIM -- institutional-grade schema (master prompt §6).
             # The legacy `mim_number` column is replaced by `mapping_key`
             # (the only integer column in the new schema that always has a value).
             ("omim", "omim_gene_disease_associations.csv", "mapping_key", "Int64"),
@@ -505,7 +505,7 @@ class TestEndToEndWithBasePipeline:
             def clean(self, raw_path):
                 return pd.read_csv(raw_path)
             def load(self, df, session=None):
-                # Mock load — just return row count
+                # Mock load -- just return row count
                 return len(df)
 
         p = E2EPipeline()

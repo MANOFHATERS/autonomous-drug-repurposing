@@ -1,5 +1,5 @@
 """
-DrugOS Graph Module — STITCH Loader (Institutional-Grade v1.1.0)
+DrugOS Graph Module -- STITCH Loader (Institutional-Grade v1.1.0)
 =================================================================
 Downloads, parses, validates, and converts STITCH chemical-protein
 interaction (CPI) data into knowledge-graph edge records for the
@@ -16,15 +16,15 @@ Project Context
 The Autonomous Drug Repurposing Platform mines 10,000 FDA-approved drugs
 against every known disease using a chained pipeline:
 
-1. **Knowledge Graph (Neo4j)** — built by this loader + 9 sibling loaders
+1. **Knowledge Graph (Neo4j)** -- built by this loader + 9 sibling loaders
    (ChEMBL, DrugBank, UniProt, STRING, DisGeNET, OMIM, PubChem, SIDER,
    ClinicalTrials).
-2. **Graph Transformer (PyTorch + PyG)** — predicts a 0-1 therapeutic-
+2. **Graph Transformer (PyTorch + PyG)** -- predicts a 0-1 therapeutic-
    likelihood score for every untested drug-disease pair by message-passing
    over the graph this loader helps build.
-3. **RL Hypothesis Ranker (Stable-Baselines3, PPO)** — ranks the top
+3. **RL Hypothesis Ranker (Stable-Baselines3, PPO)** -- ranks the top
    predictions by plausibility x safety x market opportunity.
-4. **Clinical decision layer** — pharma partners and clinicians consume
+4. **Clinical decision layer** -- pharma partners and clinicians consume
    the ranking.
 
 STITCH CPIs are **edges** in that graph. They tell the model "Drug X
@@ -32,8 +32,8 @@ binds/inhibits/activates Protein Y with combined confidence score Z."
 The RL safety ranker aggregates adverse-event edges from SIDER onto the
 same Compound node. **The STITCH loader is upstream of every
 drug-disease prediction the platform ever makes.** A silently corrupted
-STITCH edge — wrong CID, wrong protein, wrong direction, wrong organism,
-wrong enantiomer — trains the Graph Transformer on garbage associations;
+STITCH edge -- wrong CID, wrong protein, wrong direction, wrong organism,
+wrong enantiomer -- trains the Graph Transformer on garbage associations;
 the RL ranker then ranks the wrong drugs; a clinician prescribes based on
 the ranking; **and a patient is harmed.**
 
@@ -49,26 +49,26 @@ Scientific Scope
 - **Score range:** integers in ``[0, 1000]`` (combined_score)
 - **Confidence bands:** ``<400`` = low, ``400-700`` = medium, ``>700`` = high
 - **Organism:** Homo sapiens (NCBI taxid 9606) by default; the loader
-  refuses to silently ingest non-human rows (BUG-3.4 — patient safety).
+  refuses to silently ingest non-human rows (BUG-3.4 -- patient safety).
 - **ID format:**
   * Chemical IDs are PubChem CIDs prefixed with stereo-chemistry code:
-    ``CIDm00002244`` (FLAT / merged form — stereoisomers folded together,
+    ``CIDm00002244`` (FLAT / merged form -- stereoisomers folded together,
     e.g. warfarin where stereo annotation is absent) or
     ``CIDs00002244`` (STEREO-SPECIFIC form, e.g. S-warfarin, 5x more
     potent than R-warfarin).
-    The distinction is preserved (BUG-3.1 — patient safety).
+    The distinction is preserved (BUG-3.1 -- patient safety).
     V18 ROOT FIX (SW-16): ``CIDm`` is the flat/merged form, NOT
-    "racemic mixture" — and NOT stereo-specific. A racemic mixture is
-    a 50:50 mix of two enantiomers — a physical sample. ``CIDm`` ("m" =
+    "racemic mixture" -- and NOT stereo-specific. A racemic mixture is
+    a 50:50 mix of two enantiomers -- a physical sample. ``CIDm`` ("m" =
     "merged") is just the absence of stereo annotation in the
     SMILES/InChI; the underlying molecule may be achiral, racemic, or
     simply unspecified. ``CIDs`` ("s" = "stereo") keeps stereoisomers
     SEPARATE. Calling ``CIDm`` "stereo-specific" was scientifically
     wrong (inverted). V35 ROOT FIX (V35-P2-LOADERS-FIXES H-3):
     previous docstring text at this location said
-    "``CIDm00002244`` (stereo-specific...)" — INVERTED. The code at
-    line ~2763 correctly maps ``m → non_stereo`` and
-    ``s → stereo_specific``; the docstring is now aligned with the
+    "``CIDm00002244`` (stereo-specific...)" -- INVERTED. The code at
+    line ~2763 correctly maps ``m -> non_stereo`` and
+    ``s -> stereo_specific``; the docstring is now aligned with the
     code.
   * Protein IDs are Ensembl protein IDs prefixed with taxid
     (e.g. ``9606.ENSP00000358091``), translated to UniProt accessions
@@ -92,7 +92,7 @@ Regulatory Compliance
   trail required for clinical decision support. Each entry is timestamped
   (ISO-8601 UTC), includes the ``load_id`` correlation ID, and is
   append-only.
-- **HIPAA:** N/A (no PHI — see PII Declaration above).
+- **HIPAA:** N/A (no PHI -- see PII Declaration above).
 - **GDPR:** N/A (no EU data subjects).
 - **CC0 1.0 (STITCH license):** Every edge record carries
   ``_license="CC0 1.0"`` and ``_attribution="Data source: STITCH
@@ -117,30 +117,30 @@ References
 
 Design Patterns
 ---------------
-- **Adapter** — ``StitchLoader`` adapts the module-level functions to the
+- **Adapter** -- ``StitchLoader`` adapts the module-level functions to the
   ``Loader`` Protocol (PEP 544) so ``run_pipeline.py`` can treat all
   loaders polymorphically (BUG-1.1).
-- **Facade** — ``load_stitch()`` orchestrates the full pipeline:
+- **Facade** -- ``load_stitch()`` orchestrates the full pipeline:
   download -> parse -> validate -> resolve -> edge_records -> (optional)
   Neo4j load (BUG-1.4).
-- **Strategy** — ``unresolved_policy`` kwarg on ``stitch_to_edge_records``
+- **Strategy** -- ``unresolved_policy`` kwarg on ``stitch_to_edge_records``
   selects between ``keep`` / ``drop`` / ``dlq`` / ``warn`` (BUG-2.3).
-- **Iterator** — ``iter_stitch_cpi`` and ``iter_stitch_edges`` provide
+- **Iterator** -- ``iter_stitch_cpi`` and ``iter_stitch_edges`` provide
   streaming APIs for memory-bounded processing of the 20M-row file
   (BUG-8.2).
-- **Dead-Letter Queue** — malformed rows are written to
+- **Dead-Letter Queue** -- malformed rows are written to
   ``data/dead_letter/stitch_malformed.jsonl`` for forensic inspection
   rather than silently dropped (BUG-6.4).
-- **Circuit Breaker** — ``download_stitch`` trips after 5 consecutive
+- **Circuit Breaker** -- ``download_stitch`` trips after 5 consecutive
   failures and stays open for 1 hour to avoid hammering stitch.embl.de
   during outages (mirrors string_loader R6-12 pattern).
-- **Formal Action Map** — ``STITCH_ACTION_TO_REL_TYPE`` maps canonical
+- **Formal Action Map** -- ``STITCH_ACTION_TO_REL_TYPE`` maps canonical
   STITCH action strings to ``CORE_EDGE_TYPES`` relation names with
-  exact-match-then-prefix fallback (BUG-2.5 — patient safety).
+  exact-match-then-prefix fallback (BUG-2.5 -- patient safety).
 
 Public API
 ----------
-Backward compatibility (master prompt Rule R3) — the three original
+Backward compatibility (master prompt Rule R3) -- the three original
 public functions remain importable with the SAME signatures, SAME types,
 and SAME default behaviors:
 
@@ -148,7 +148,7 @@ and SAME default behaviors:
 - ``parse_stitch_interactions(filepath=None, score_threshold=None) -> pd.DataFrame``
 - ``stitch_to_edge_records(df, crosswalk=None) -> List[Dict]``
 
-New public functions (additive only — Rule R2/R3):
+New public functions (additive only -- Rule R2/R3):
 
 - ``parse_stitch_raw(filepath=None) -> pd.DataFrame``
 - ``filter_by_score(df, threshold) -> pd.DataFrame``
@@ -166,7 +166,7 @@ Aliases (additive, no rename):
 
 New public classes:
 
-- ``StitchLoader``  (Loader Protocol adapter — BUG-1.1)
+- ``StitchLoader``  (Loader Protocol adapter -- BUG-1.1)
 
 Environment Variables
 ---------------------
@@ -206,42 +206,42 @@ Coding Standards
 
 SCHEMA CHANGELOG
 ----------------
-**v1.0.0** (legacy — the original 158-line prototype):
+**v1.0.0** (legacy -- the original 158-line prototype):
 - Emitted edge dicts with five props keys:
   ``source, score, action, protein_id_resolved, protein_ensembl_original``.
 - No provenance, no license, no schema version, no audit trail.
-- CIDm and CIDs were merged into the same CID (BUG-3.1 — patient safety).
+- CIDm and CIDs were merged into the same CID (BUG-3.1 -- patient safety).
 - Non-human rows silently ingested if config URL changed (BUG-3.4).
 
-**v1.1.0** (this release — institutional-grade audit fix):
+**v1.1.0** (this release -- institutional-grade audit fix):
 - Added ``_source``, ``_license``, ``_attribution``, ``_schema_version``,
   ``_parser_version``, ``_provenance`` to every edge ``props`` dict
   (BUG-14.1, BUG-14.2, BUG-7.3, BUG-15.1).
 - Added nested ``_stitch`` sub-dict holding STITCH-specific metadata
-  (BUG-15.1) — keeps top-level props compliant with the
+  (BUG-15.1) -- keeps top-level props compliant with the
   ``kg_builder.load_edges_bulk_create`` contract.
 - Added ``evidence_channels`` and ``channel_scores`` for all 6 STITCH
   evidence channels (BUG-3.5).
 - Added ``stitch_chemical_id``, ``stereochemistry``, ``stereochemistry_code``
-  preserving the CIDm vs CIDs distinction (BUG-3.1 — patient safety).
+  preserving the CIDm vs CIDs distinction (BUG-3.1 -- patient safety).
 - Added ``organism_taxid``, ``directed``, ``source_version``,
   ``crosswalk_version``, ``load_id``, ``parsed_at`` to every edge props
   (BUG-3.4, BUG-7.1, GAP-7.4, BUG-7.3).
-- ``score`` is now ``Optional[int]`` — ``None`` for missing, never the
+- ``score`` is now ``Optional[int]`` -- ``None`` for missing, never the
   ``0`` sentinel (BUG-3.5).
 - Added ``evidence_count`` and ``duplicate_sources`` for dedup lineage
   (BUG-5.1, BUG-2.4).
 - Added ``primary_evidence`` and ``has_experimental_evidence`` flags for
   RL ranker weighting (BUG-3.5).
 - Added ``pubchem_cid`` (int form) alongside legacy ``chemical_cid``
-  (string form, BUG-15.2 — interoperability).
+  (string form, BUG-15.2 -- interoperability).
 - Preserved the five legacy ``props`` keys verbatim (Rule R3):
   ``source, score, action, protein_id_resolved, protein_ensembl_original``.
 
 **Migration path:** downstream consumers that read the legacy 5 keys
 continue to work unchanged. New consumers SHOULD prefer the ``_``-prefixed
 keys (``_source``, ``_license``, ``_attribution``, ``_schema_version``,
-``_provenance``) — the legacy ``source`` alias is scheduled for removal
+``_provenance``) -- the legacy ``source`` alias is scheduled for removal
 in v2.0.0.
 
 How to Update the Pinned Version
@@ -256,8 +256,8 @@ When STITCH publishes a new release (e.g. v5.0 -> v5.1):
    new row count from the STITCH release notes.
 5. Update ``DATA_SOURCES["stitch"]["size_bytes"]`` to the new file size.
 6. Optionally set ``DATA_SOURCES["stitch"]["sha256"]`` to the published
-   checksum (STITCH does not always publish one — leave ``None`` if not).
-7. Run ``pytest tests/test_stitch_loader.py -v`` — all 80+ regression
+   checksum (STITCH does not always publish one -- leave ``None`` if not).
+7. Run ``pytest tests/test_stitch_loader.py -v`` -- all 80+ regression
    tests MUST pass.
 8. Run ``load_stitch(skip_neo4j=True, force=True)`` to download the new
    file and verify row counts are within [0.5x, 2.0x] of expected (BUG-5.2).
@@ -269,60 +269,60 @@ CHANGELOG
 - v1.1.0 (this release): Institutional-grade rewrite addressing all 80
   audit IDs from ``master_prompt_fix_stitch_loader.md``. See SCHEMA
   CHANGELOG above for the schema additions.
-- v1.0.0 (legacy): Original 158-line prototype — no audit IDs covered.
+- v1.0.0 (legacy): Original 158-line prototype -- no audit IDs covered.
 
 See Also
 --------
-- ``drugos_graph/string_loader.py`` — gold-standard reference loader
-- ``drugos_graph/chembl_loader.py`` — second reference loader (Compound→Protein)
-- ``drugos_graph/uniprot_loader.py`` — third reference loader (Protein nodes)
-- ``drugos_graph/id_crosswalk.py`` — Ensembl-to-UniProt translation
-- ``drugos_graph/schemas.py`` — TypedDict contracts (StitchEdgeRecord etc.)
-- ``drugos_graph/exceptions.py`` — STITCH exception hierarchy
-- ``docs/stitch_data_dictionary.md`` — column + edge props documentation
-- ``docs/stitch_lineage.md`` — forward/reverse lineage + rollback Cypher
-- ``docs/SCHEMA_CHANGELOG.md`` — cross-loader schema change history
+- ``drugos_graph/string_loader.py`` -- gold-standard reference loader
+- ``drugos_graph/chembl_loader.py`` -- second reference loader (Compound->Protein)
+- ``drugos_graph/uniprot_loader.py`` -- third reference loader (Protein nodes)
+- ``drugos_graph/id_crosswalk.py`` -- Ensembl-to-UniProt translation
+- ``drugos_graph/schemas.py`` -- TypedDict contracts (StitchEdgeRecord etc.)
+- ``drugos_graph/exceptions.py`` -- STITCH exception hierarchy
+- ``docs/stitch_data_dictionary.md`` -- column + edge props documentation
+- ``docs/stitch_lineage.md`` -- forward/reverse lineage + rollback Cypher
+- ``docs/SCHEMA_CHANGELOG.md`` -- cross-loader schema change history
 
 Edge Cases
 ----------
 The loader handles these edge cases explicitly (GAP-10.4):
 
-- **Empty file** → ``CriticalDataSourceError`` (0 rows on required source).
-- **Header-only file** → ``CriticalDataSourceError`` (0 data rows).
-- **Malformed TSV** (wrong column count) → ``StitchParseError``.
-- **Wrong columns** (renamed in future STITCH version) → ``StitchParseError``.
-- **NULL protein IDs** → DLQ with ``reason="null_protein_id"``.
-- **Out-of-range scores** (>1000 or <0) → DLQ with
+- **Empty file** -> ``CriticalDataSourceError`` (0 rows on required source).
+- **Header-only file** -> ``CriticalDataSourceError`` (0 data rows).
+- **Malformed TSV** (wrong column count) -> ``StitchParseError``.
+- **Wrong columns** (renamed in future STITCH version) -> ``StitchParseError``.
+- **NULL protein IDs** -> DLQ with ``reason="null_protein_id"``.
+- **Out-of-range scores** (>1000 or <0) -> DLQ with
   ``reason="out_of_range_score"``.
-- **Duplicates** (same chemical-protein pair, multiple channels) →
+- **Duplicates** (same chemical-protein pair, multiple channels) ->
   ``_dedup_edges`` with default ``max_combined_score`` strategy
   (BUG-5.1, BUG-2.4).
-- **Self-loops** (chemical binding itself — N/A for STITCH but
-  defensive) → dropped.
-- **Multi-organism** (mouse/rat/yeast prefixes) → non-human rows to DLQ
-  with ``reason="non_target_organism"`` (BUG-3.4 — patient safety).
-- **CIDm vs CIDs** → both preserved (BUG-3.1 — patient safety).
-- **Truncated gzip** → ``StitchParseError`` (BUG-6.3).
-- **Invalid CID range** (0 or > 370M) → DLQ with
+- **Self-loops** (chemical binding itself -- N/A for STITCH but
+  defensive) -> dropped.
+- **Multi-organism** (mouse/rat/yeast prefixes) -> non-human rows to DLQ
+  with ``reason="non_target_organism"`` (BUG-3.4 -- patient safety).
+- **CIDm vs CIDs** -> both preserved (BUG-3.1 -- patient safety).
+- **Truncated gzip** -> ``StitchParseError`` (BUG-6.3).
+- **Invalid CID range** (0 or > 370M) -> DLQ with
   ``reason="invalid_pubchem_cid"`` (GAP-3.6).
-- **Invalid ENSP format** (after taxid strip) → DLQ with
+- **Invalid ENSP format** (after taxid strip) -> DLQ with
   ``reason="invalid_ensp_format"`` (BUG-4.6).
-- **Missing score column** → ``StitchDataIntegrityError`` (BUG-4.3,
-  BUG-11.5 — patient safety).
-- **Unknown action string** → fallback to ``"binds"`` with WARNING,
+- **Missing score column** -> ``StitchDataIntegrityError`` (BUG-4.3,
+  BUG-11.5 -- patient safety).
+- **Unknown action string** -> fallback to ``"binds"`` with WARNING,
   ``action_mapping_method="fallback_binds"`` (BUG-2.5).
-- **Unresolved Ensembl protein** → ``unresolved_policy`` decides
+- **Unresolved Ensembl protein** -> ``unresolved_policy`` decides
   (default ``keep`` for backward compat; ``dlq`` recommended for V1).
 
 Known Failure Modes
 -------------------
-- **STITCH source URL changes** without config update →
+- **STITCH source URL changes** without config update ->
   ``StitchSecurityError`` (URL not in allowlist). Recovery: update
   ``ALLOWED_STITCH_URLS`` in config.py.
-- **STITCH file format changes** (column rename) → ``StitchParseError``
+- **STITCH file format changes** (column rename) -> ``StitchParseError``
   (BUG-5.3). Recovery: update ``EXPECTED_STITCH_COLUMNS`` and bump
   ``STITCH_PARSER_VERSION``.
-- **Crosswalk empty** (no Ensembl-to-UniProt mapping loaded) → most
+- **Crosswalk empty** (no Ensembl-to-UniProt mapping loaded) -> most
   edges unresolved. Recovery: run ``load_uniprot_entries`` first.
 
 Test Coverage
@@ -337,7 +337,7 @@ Fixes: All 80 audit IDs from BUG-3.1 through GAP-16.5. See inline
 """
 
 # =============================================================================
-# AUDIT ID COVERAGE BLOCK — All 80 audit IDs from
+# AUDIT ID COVERAGE BLOCK -- All 80 audit IDs from
 # master_prompt_fix_stitch_loader.md are addressed below.
 #
 # Each ID appears either as an inline `# Fixes <id>:` comment at the
@@ -348,7 +348,7 @@ Fixes: All 80 audit IDs from BUG-3.1 through GAP-16.5. See inline
 # Verify with: grep -oE '# Fixes [A-Z]+-[0-9]+\.[0-9]+' \
 #   drugos_graph/stitch_loader.py | sort -u | wc -l  # MUST be >= 80
 # =============================================================================
-# ── Domain 3 — Scientific Correctness (BUG-3 / GAP-3) ──
+# ── Domain 3 -- Scientific Correctness (BUG-3 / GAP-3) ──
 # Fixes BUG-3.1: Preserve CIDm (non-stereo/flat) vs CIDs (stereo-specific) distinction
 # Fixes BUG-3.2: Validate species prefix is 9606 (human) before stripping
 # Fixes BUG-3.3: Enforce combined_score as Int64 in [0, 1000]; validate threshold
@@ -356,7 +356,7 @@ Fixes: All 80 audit IDs from BUG-3.1 through GAP-16.5. See inline
 # Fixes BUG-3.5: Retain all 6 evidence-channel scores + emit evidence_channels
 # Fixes GAP-3.6: Validate CID is in PubChem range [1, 370_000_000]
 #
-# ── Domain 5 — Data Quality & Integrity (BUG-5 / GAP-5) ──
+# ── Domain 5 -- Data Quality & Integrity (BUG-5 / GAP-5) ──
 # Fixes BUG-5.1: Add _dedup_edges with max_combined_score / union_evidence / keep_all
 # Fixes BUG-5.2: Add _verify_row_count; raise CriticalDataSourceError on 0 rows
 # Fixes BUG-5.3: Add EXPECTED_STITCH_COLUMNS + _validate_columns
@@ -364,40 +364,40 @@ Fixes: All 80 audit IDs from BUG-3.1 through GAP-16.5. See inline
 # Fixes BUG-5.5: Validate CID in PubChem range; optional REST existence check
 # Fixes GAP-5.6: Add _check_freshness with 2x max_age_days fatal threshold
 #
-# ── Domain 7 — Idempotency & Reproducibility (BUG-7 / GAP-7) ──
+# ── Domain 7 -- Idempotency & Reproducibility (BUG-7 / GAP-7) ──
 # Fixes BUG-7.1: Add crosswalk_version to every edge props; crosswalk_copy kwarg
 # Fixes BUG-7.2: Compute SHA-256 of input; store in sidecar + df.attrs + edge props
 # Fixes BUG-7.3: Add _build_provenance_dict; _provenance sub-dict on every edge
 # Fixes GAP-7.4: Add _get_load_id + _reset_load_id; process-cached UUID per run
 #
-# ── Domain 1 — Architecture (BUG-1 / GAP-1) ──
+# ── Domain 1 -- Architecture (BUG-1 / GAP-1) ──
 # Fixes BUG-1.1: Add StitchLoader adapter class satisfying Loader Protocol
 # Fixes GAP-1.2: Add explicit __all__ list with all public symbols
 # Fixes GAP-1.3: Split parse_stitch_interactions into stages (raw/validate/filter/dedup)
 # Fixes BUG-1.4: Add load_stitch facade orchestrating download -> parse -> edges
 # Fixes BUG-1.5: Add _verify_integrity umbrella; gzip magic, size, checksum checks
 #
-# ── Domain 9 — Security & Privacy (BUG-9 / GAP-9) ──
+# ── Domain 9 -- Security & Privacy (BUG-9 / GAP-9) ──
 # Fixes BUG-9.1: Add ALLOWED_STITCH_URLS to config; _validate_url checks HTTPS+allowlist
 # Fixes BUG-9.2: Add _create_ssl_context with certifi + CERT_REQUIRED + check_hostname
 # Fixes GAP-9.3: Add PII Declaration + Regulatory Compliance sections to module docstring
 # Fixes GAP-9.4: Add _validate_filename_safe rejecting path traversal, null bytes, non-.gz
 #
-# ── Domain 2 — Design (BUG-2) ──
+# ── Domain 2 -- Design (BUG-2) ──
 # Fixes BUG-2.1: Move id_crosswalk import to top of module; isinstance check
 # Fixes BUG-2.2: Add StitchEdgeRecord + StitchEdgeProps + StitchCPIRecord + metrics TypedDicts
 # Fixes BUG-2.3: Add unresolved_policy parameter (keep/drop/dlq/warn); default keep
 # Fixes BUG-2.4: Add dedup=True parameter (default); calls _dedup_edges before edge-building
 # Fixes BUG-2.5: Replace substring matching with STITCH_ACTION_TO_REL_TYPE formal map
 #
-# ── Domain 14 — Compliance & Standards (BUG-14 / GAP-14) ──
+# ── Domain 14 -- Compliance & Standards (BUG-14 / GAP-14) ──
 # Fixes BUG-14.1: Add STITCH_LICENSE + STITCH_ATTRIBUTION to config; emit on every edge
 # Fixes BUG-14.2: Add STITCH_PARSER_VERSION + STITCH_SCHEMA_VERSION; emit on every edge
 # Fixes BUG-14.3: Run black + ruff + mypy --strict; PEP 8/257/563/544 compliance
 # Fixes GAP-14.4: Validate every (src_type, rel_type, dst_type) against CORE_EDGE_TYPES_SET
 # Fixes GAP-14.5: Add DeprecationWarning for legacy CIDm/CIDs merging; env var preserves v0
 #
-# ── Domain 6 — Reliability & Resilience (BUG-6 / GAP-6) ──
+# ── Domain 6 -- Reliability & Resilience (BUG-6 / GAP-6) ──
 # Fixes BUG-6.1: Add _retry_with_backoff + _atomic_download (.part + os.replace)
 # Fixes BUG-6.2: Replace FileNotFoundError with StitchParseError (subclasses FileNotFoundError)
 # Fixes BUG-6.3: Wrap pd.read_csv in try/except for BadGzipFile, EmptyDataError, ParserError
@@ -405,13 +405,13 @@ Fixes: All 80 audit IDs from BUG-3.1 through GAP-16.5. See inline
 # Fixes GAP-6.5: Add _write_checkpoint + _read_checkpoint; checkpoint every 100K rows
 # Fixes GAP-6.6: Add try/except at 3 boundaries; on_error parameter (raise/skip/dlq)
 #
-# ── Domain 10 — Testing & Validation (BUG-10 / GAP-10) ──
+# ── Domain 10 -- Testing & Validation (BUG-10 / GAP-10) ──
 # Fixes BUG-10.1: Create tests/test_stitch_loader.py with 80+ test functions
 # Fixes BUG-10.2: Create tests/fixtures/stitch/ with 14 .tsv.gz fixtures
 # Fixes GAP-10.3: Add precondition + postcondition + invariant asserts
 # Fixes GAP-10.4: Add Edge Cases + Known Failure Modes + Test Coverage sections to docstring
 #
-# ── Domain 4 — Coding (BUG-4 / GAP-4) ──
+# ── Domain 4 -- Coding (BUG-4 / GAP-4) ──
 # Fixes BUG-4.1: Replace itertuples loop with vectorized crosswalk + list comprehension
 # Fixes GAP-4.2: Add type annotations to all module-level and local variables
 # Fixes BUG-4.3: Replace silent 'if score in df.columns' with explicit raise
@@ -420,40 +420,40 @@ Fixes: All 80 audit IDs from BUG-3.1 through GAP-16.5. See inline
 # Fixes BUG-4.6: Validate protein_string_id after taxid strip; drop empty/invalid ENSP
 # Fixes GAP-4.7: Replace all f-string logging with lazy %-style; LoggerAdapter
 #
-# ── Domain 8 — Performance & Scalability (BUG-8 / GAP-8) ──
+# ── Domain 8 -- Performance & Scalability (BUG-8 / GAP-8) ──
 # Fixes BUG-8.1: Vectorized crosswalk lookup (BUG-4.1) + optional multiprocessing.Pool
 # Fixes BUG-8.2: Add chunksize parameter + iter_stitch_cpi + iter_stitch_edges streaming APIs
 # Fixes GAP-8.3: Batch crosswalk lookup via _batch_resolve_proteins
 # Fixes GAP-8.4: Chain filter + dropna + single .copy() at end
 #
-# ── Domain 11 — Logging & Observability (GAP-11 / BUG-11) ──
+# ── Domain 11 -- Logging & Observability (GAP-11 / BUG-11) ──
 # Fixes GAP-11.1: Stage-by-stage row count logging; structured extra={} for JSON handlers
 # Fixes GAP-11.2: StitchLoaderMetrics dataclass + to_dict(); load_stitch returns it
 # Fixes BUG-11.3: Add _append_audit_log writing JSONL to logs/audit/stitch_transformations.jsonl
 # Fixes GAP-11.4: Add _emit_metrics helper; optional prometheus_client + statsd support
 # Fixes BUG-11.5: Replaced silent skip with explicit raise; logger.warning BEFORE raise
 #
-# ── Domain 12 — Configuration (BUG-12 / GAP-12) ──
+# ── Domain 12 -- Configuration (BUG-12 / GAP-12) ──
 # Fixes BUG-12.1: Enforce combined_score as Int64; _validate_score_threshold raises
 # Fixes GAP-12.2: Add 9 STITCH env vars (FILEPATH, URL, FORCE, SKIP, BATCH_SIZE, etc.)
 # Fixes GAP-12.3: Add MB=1_000_000 + KiB + MiB constants; replace 1e6 magic number
 # Fixes GAP-12.4: Add _validate_stitch_config; checks 16 required keys + URL HTTPS + filename .gz
 #
-# ── Domain 15 — Interoperability (BUG-15 / GAP-15) ──
+# ── Domain 15 -- Interoperability (BUG-15 / GAP-15) ──
 # Fixes BUG-15.1: Move STITCH-specific metadata to nested props['_stitch'] sub-dict
 # Fixes BUG-15.2: Convert chemical_cid string to int via _normalize_cid; emit pubchem_cid
 # Fixes GAP-15.3: Add _detect_stitch_version; raise StitchDataIntegrityError on mismatch
 # Fixes GAP-15.4: Add encoding='utf-8-sig' to pd.read_csv (handles BOM)
 # Fixes GAP-15.5: Add test_gap_15_5_cross_loader_integration; documented in data dictionary
 #
-# ── Domain 16 — Lineage & Traceability (BUG-16 / GAP-16) ──
+# ── Domain 16 -- Lineage & Traceability (BUG-16 / GAP-16) ──
 # Fixes BUG-16.1: source_sha256 + input_sha256 in _provenance (BUG-7.2); output_sha256
 # Fixes BUG-16.2: _append_audit_log per stage with input/output counts + parameters + hash
 # Fixes GAP-16.3: Add _hash_edges (sort by src_id/dst_id/rel_type, JSON serialize, SHA-256)
 # Fixes GAP-16.4: STITCH_PROVENANCE_KEYS tuple (21 keys) in schemas.py; _validate_provenance
 # Fixes GAP-16.5: Add _compute_impact_analysis (added/removed/updated/unchanged)
 #
-# ── Domain 13 — Documentation (GAP-13) ──
+# ── Domain 13 -- Documentation (GAP-13) ──
 # Fixes GAP-13.1: Expand module docstring to ~250 lines with 14 sections
 # Fixes GAP-13.2: Add References section with STITCH publication (Kuhn 2014), file format docs
 # Fixes GAP-13.3: Audit ID Coverage Block at top of module; inline # Fixes <audit-id> comments
@@ -526,7 +526,7 @@ from .config import (
     STITCH_REQUIRED,
     STITCH_SCHEMA_VERSION,
     STITCH_SCORE_THRESHOLD,
-    STRING_MIN_COMBINED_SCORE,  # v57 ROOT FIX (P2L-032) — canonical STRING threshold alias
+    STRING_MIN_COMBINED_SCORE,  # v57 ROOT FIX (P2L-032) -- canonical STRING threshold alias
     get_data_source_path,
 )
 from .exceptions import (
@@ -566,8 +566,8 @@ PARSER_VERSION: str = STITCH_PARSER_VERSION      # "1.0.0"
 SCHEMA_VERSION: str = STITCH_SCHEMA_VERSION      # "1.1.0"
 
 # Fixes GAP-12.3: MB constant (decimal, not MiB) for size formatting.
-# MB  = 1_000_000     (decimal, SI convention) — for human-readable file sizes.
-# MiB = 1_048_576     (binary) — for memory/disk usage.
+# MB  = 1_000_000     (decimal, SI convention) -- for human-readable file sizes.
+# MiB = 1_048_576     (binary) -- for memory/disk usage.
 MB: int = 1_000_000
 MIB: int = 1_024 * 1_024
 KIB: int = 1_024
@@ -582,32 +582,32 @@ STITCH_VERSION: str = "5.0"
 # below PREVIOUSLY said:
 #   "CIDm = stereo-specific structure (specific enantiomer...)"
 #   "CIDs = non-stereo / flat form"
-# — that is the OPPOSITE of what the code at line ~2763 does
-# (``m → non_stereo``, ``s → stereo_specific``). The "m" in CIDm stands
-# for "merged" — stereoisomers are folded together (= FLAT / non-stereo).
-# The "s" in CIDs stands for "stereo" — stereoisomers are kept SEPARATE
+# -- that is the OPPOSITE of what the code at line ~2763 does
+# (``m -> non_stereo``, ``s -> stereo_specific``). The "m" in CIDm stands
+# for "merged" -- stereoisomers are folded together (= FLAT / non-stereo).
+# The "s" in CIDs stands for "stereo" -- stereoisomers are kept SEPARATE
 # (= STEREO-SPECIFIC). The corrected text:
 #   CIDm = FLAT / merged form (stereoisomers folded together, e.g.
 #          warfarin where stereo annotation is absent).
 #   CIDs = STEREO-SPECIFIC form (e.g. S-warfarin, 5x more potent than
-#          R-warfarin — keeping enantiomers separate).
-# V18 ROOT FIX (SW-16): NOT "racemic mixture" — see module docstring.
+#          R-warfarin -- keeping enantiomers separate).
+# V18 ROOT FIX (SW-16): NOT "racemic mixture" -- see module docstring.
 # S-warfarin is 5x more potent than R-warfarin and has a narrower therapeutic
-# window — merging CIDm and CIDs would aggregate adverse events incorrectly
+# window -- merging CIDm and CIDs would aggregate adverse events incorrectly
 # and could lead to lethal dose recommendations. See BUG-3.1.
 #
 # v57 ROOT FIX (P2L-038): STITCH compound IDs use 4+ different prefixes
 # for the SAME underlying PubChem CID: ``CIDsm`` (stereospecific / separate
-# enantiomers), ``CIDs`` (stereo-specific form per STITCH docs — see v27
+# enantiomers), ``CIDs`` (stereo-specific form per STITCH docs -- see v27
 # ROOT FIX above), ``CIDf`` (different connectivity / salt form), ``CIDm``
 # (merged / flat form), and bare ``CID`` (no stereo annotation). The
 # previous loader only handled ``CIDm`` and ``CIDs`` (regex
 # ``r"^(CID[ms])(\d+)$"``), silently DLQ-ing every ``CIDsm`` / ``CIDf`` /
-# bare ``CID`` row as "malformed" — a catastrophic data loss for any
+# bare ``CID`` row as "malformed" -- a catastrophic data loss for any
 # STITCH release that uses the newer prefix variants. Worse, when the
 # same molecule appeared under multiple prefixes (e.g. ``CIDs00002244``
 # in the stereo-specific file AND ``CIDm00002244`` in the merged file),
-# the loader emitted separate edges with the SAME numeric CID — which
+# the loader emitted separate edges with the SAME numeric CID -- which
 # then either got deduplicated by the crosswalk or created duplicate
 # Compound nodes when the crosswalk missed.
 #
@@ -615,7 +615,7 @@ STITCH_VERSION: str = "5.0"
 # strips ANY of the 5 known prefixes (``CIDsm``, ``CIDs``, ``CIDf``,
 # ``CIDm``, ``CID``) and returns the bare numeric PubChem CID as a
 # stripped-integer string (e.g. ``"2244"`` for aspirin). All downstream
-# code uses the normalized CID as the canonical Compound ID — so
+# code uses the normalized CID as the canonical Compound ID -- so
 # ``CIDs00002244``, ``CIDm00002244``, ``CIDsm00002244``, ``CIDf00002244``,
 # and ``CID00002244`` ALL map to Compound ``2244``. The original prefix
 # (e.g. ``"sm"``, ``"s"``, ``"f"``, ``"m"``, or ``""``) is preserved on
@@ -642,19 +642,19 @@ STITCH_CID_BARE_PREFIX: str = "CID"  # v57 ROOT FIX (P2L-038)
 # accepted the legacy STITCH prefixes (CIDsm, CIDs, CIDf, CIDm, bare
 # CID) but NOT the newer "CID0" / "CID1" format that SIDER's
 # production files use (see SIDER_CIDM_REGEX / SIDER_CIDS_REGEX in
-# sider_loader.py — they accept CIDm|CID0 and CIDs|CID1 respectively).
+# sider_loader.py -- they accept CIDm|CID0 and CIDs|CID1 respectively).
 # If a user pointed the STITCH loader at a newer-format STITCH file
 # (e.g. chemical.actions.tsv from a 2024+ release using CID0/CID1),
-# EVERY row would fail extraction → DLQ → 0 rows parsed →
+# EVERY row would fail extraction -> DLQ -> 0 rows parsed ->
 # SiderCriticalError. The SIDER and STITCH loaders handled format
-# evolution inconsistently — SIDER accepted both formats, STITCH only
+# evolution inconsistently -- SIDER accepted both formats, STITCH only
 # the legacy one.
 #
 # Root fix: add ``0`` and ``1`` to the stereo-code alternation so
 # the regex accepts CID0 (newer flat, semantically equivalent to
 # CIDm) and CID1 (newer stereo, semantically equivalent to CIDs).
 # The stereo-code mapping in ``_stitch_stereo_label`` is also updated
-# to map "0" → "non_stereo_merged" and "1" → "stereo_specific" so
+# to map "0" -> "non_stereo_merged" and "1" -> "stereo_specific" so
 # downstream consumers see consistent labels across the legacy and
 # newer formats. The alternation order is preserved (longest first:
 # ``sm`` before ``s``) so regex greedy-matching does the right thing.
@@ -667,14 +667,14 @@ def _normalize_stitch_cid(cid: Any) -> str:
     """Normalize a STITCH compound ID to the canonical bare PubChem CID (v57 ROOT FIX P2L-038).
 
     Accepts any of the known STITCH CID prefix variants:
-      * ``CIDsm00002244`` (stereospecific — enantiomers kept separate)
+      * ``CIDsm00002244`` (stereospecific -- enantiomers kept separate)
       * ``CIDs00002244``  (stereo-specific per STITCH docs)
       * ``CIDf00002244``  (different connectivity / salt form)
-      * ``CIDm00002244``  (merged / flat form — stereoisomers folded)
+      * ``CIDm00002244``  (merged / flat form -- stereoisomers folded)
       * ``CID00002244``   (no stereo annotation)
-      * ``CID000002244``  (newer flat format — 4th char ``0``, semantically = CIDm)
-      * ``CID100002244``  (newer stereo format — 4th char ``1``, semantically = CIDs)
-      * ``00002244``      (bare digits — also accepted)
+      * ``CID000002244``  (newer flat format -- 4th char ``0``, semantically = CIDm)
+      * ``CID100002244``  (newer stereo format -- 4th char ``1``, semantically = CIDs)
+      * ``00002244``      (bare digits -- also accepted)
 
     v70 ROOT FIX (P2L-040): added support for the newer ``CID0`` (flat)
     and ``CID1`` (stereo) formats that SIDER's production files use.
@@ -687,7 +687,7 @@ def _normalize_stitch_cid(cid: Any) -> str:
 
     Returns the bare numeric PubChem CID as a string with leading zeros
     stripped (e.g. ``"2244"`` for aspirin, NOT ``"00002244"``). This is
-    the canonical Compound identifier used everywhere downstream — node
+    the canonical Compound identifier used everywhere downstream -- node
     IDs, edge src_ids, and crosswalk lookups all key on this normalized
     form so the same molecule is never split into multiple Compound
     nodes by prefix variants.
@@ -697,7 +697,7 @@ def _normalize_stitch_cid(cid: Any) -> str:
 
     See Also
     --------
-    ``_stitch_stereo_code`` — companion that returns the stereo prefix
+    ``_stitch_stereo_code`` -- companion that returns the stereo prefix
     code (``"sm"`` / ``"s"`` / ``"f"`` / ``"m"`` / ``"0"`` / ``"1"`` /
     ``""``) for property preservation.
     """
@@ -756,16 +756,16 @@ def _stitch_stereo_label(stereo_code: str) -> str:
     """Map a STITCH stereo code to a human-readable label (v57 ROOT FIX P2L-038).
 
     Mapping:
-      * ``"sm"`` → ``"stereo_specific_merged"``  (stereo + merged record)
-      * ``"s"``  → ``"stereo_specific"``         (per STITCH docs — kept separate)
-      * ``"f"``  → ``"different_connectivity"``  (different connectivity / salt)
-      * ``"m"``  → ``"non_stereo_merged"``       (flat / merged — stereoisomers folded)
-      * ``""``   → ``"unknown"``                  (no stereo annotation)
+      * ``"sm"`` -> ``"stereo_specific_merged"``  (stereo + merged record)
+      * ``"s"``  -> ``"stereo_specific"``         (per STITCH docs -- kept separate)
+      * ``"f"``  -> ``"different_connectivity"``  (different connectivity / salt)
+      * ``"m"``  -> ``"non_stereo_merged"``       (flat / merged -- stereoisomers folded)
+      * ``""``   -> ``"unknown"``                  (no stereo annotation)
 
     v70 ROOT FIX (P2L-040): added mappings for the newer STITCH CID
     format's prefix codes:
-      * ``"0"`` → ``"non_stereo_merged"``    (newer flat format = CIDm)
-      * ``"1"`` → ``"stereo_specific"``      (newer stereo format = CIDs)
+      * ``"0"`` -> ``"non_stereo_merged"``    (newer flat format = CIDm)
+      * ``"1"`` -> ``"stereo_specific"``      (newer stereo format = CIDs)
     The newer codes map to the SAME semantic labels as their legacy
     equivalents so downstream consumers see consistent labels regardless
     of which format the source file uses.
@@ -793,11 +793,11 @@ STITCH_CONFIDENCE_BANDS: Dict[str, Tuple[int, int]] = {
     "high":   (700, 1001),   # STITCH: >700 = high
 }
 
-# Fixes BUG-3.3: STITCH_SCORE_RANGE — combined_score is integer in [0, 1000].
+# Fixes BUG-3.3: STITCH_SCORE_RANGE -- combined_score is integer in [0, 1000].
 STITCH_SCORE_RANGE: Tuple[int, int] = (0, 1000)
 STITCH_SCORE_DTYPE: str = "Int64"               # pandas nullable integer
 
-# Fixes BUG-3.5: STITCH_EVIDENCE_CHANNELS — the 6 per-channel score columns.
+# Fixes BUG-3.5: STITCH_EVIDENCE_CHANNELS -- the 6 per-channel score columns.
 # combined_score is the 7th column (weighted aggregate); handled separately.
 STITCH_EVIDENCE_CHANNELS: Tuple[str, ...] = (
     "experimental",    # wet-lab evidence (strong, reliable)
@@ -808,8 +808,8 @@ STITCH_EVIDENCE_CHANNELS: Tuple[str, ...] = (
     "prediction",      # predicted interaction (computational)
 )
 
-# Fixes BUG-5.3: EXPECTED_STITCH_COLUMNS — the 9 required columns in v5.0.
-# (Some STITCH releases omit the 'action' column — treated as optional below.)
+# Fixes BUG-5.3: EXPECTED_STITCH_COLUMNS -- the 9 required columns in v5.0.
+# (Some STITCH releases omit the 'action' column -- treated as optional below.)
 EXPECTED_STITCH_COLUMNS: Tuple[str, ...] = (
     "chemical", "protein", "action",
     "experimental", "database", "textmining",
@@ -838,7 +838,7 @@ STITCH_DTYPE_SCHEMA: Dict[str, str] = {
     "combined_score": "Int64",
 }
 
-# Fixes BUG-3.4: ORGANISM_TAXID_HUMAN — STITCH IDs are prefixed with NCBI
+# Fixes BUG-3.4: ORGANISM_TAXID_HUMAN -- STITCH IDs are prefixed with NCBI
 # taxonomy ID followed by a dot, e.g. "9606.ENSP00000358091" for human.
 ORGANISM_TAXID_HUMAN: int = 9606
 ORGANISM_TAXID_DEFAULT: int = ORGANISM_TAXID_HUMAN
@@ -864,7 +864,7 @@ ORGANISM_PREFIX_BY_TAXID: Dict[int, str] = {
 PUBCHEM_CID_MIN: int = 1
 PUBCHEM_CID_MAX: int = 370_000_000
 
-# Fixes BUG-4.6: Ensembl protein ID regex — supports optional ".N" isoform suffix.
+# Fixes BUG-4.6: Ensembl protein ID regex -- supports optional ".N" isoform suffix.
 # Example matches: "9606.ENSP00000358091", "9606.ENSP00000358091.2"
 ENSEMBL_PROTEIN_ID_REGEX: re.Pattern[str] = re.compile(
     r"^(\d+)\.ENSP\d{11}(\.\d+)?$"
@@ -882,10 +882,10 @@ UNIPROT_AC_REGEX: re.Pattern[str] = re.compile(
     r"|^[A-NR-Z]0[A-Z0-9]{7}[0-9]$"
 )
 
-# Fixes BUG-2.5: STITCH_ACTION_TO_REL_TYPE — formal action -> relation map.
+# Fixes BUG-2.5: STITCH_ACTION_TO_REL_TYPE -- formal action -> relation map.
 # Replaces the v0 substring matching ("inhibit" in action -> "inhibits") which
 # silently mislabeled "reactivation" as "activates" and "non-inhibitory" as
-# "inhibits" (BUG-2.5 — patient safety).
+# "inhibits" (BUG-2.5 -- patient safety).
 # All values MUST be in CORE_EDGE_TYPES_SET as (Compound, <rel_type>, Protein).
 STITCH_ACTION_TO_REL_TYPE: Dict[str, str] = {
     "inhibition": "inhibits",
@@ -903,10 +903,10 @@ STITCH_ACTION_TO_REL_TYPE: Dict[str, str] = {
     # "reactivation" = reactivating an inhibited enzyme = functionally
     # activation. Map to "activates" (the scientifically correct relation).
     "reactivation": "activates",
-    # "non-inhibitory" = NOT inhibition — could be activation, binding, or
+    # "non-inhibitory" = NOT inhibition -- could be activation, binding, or
     # unknown. Mapping to "activates" is WRONG (BUG #59 patient-safety
     # risk: spurious activates edges). Map to "binds" (direction unknown)
-    # — the conservative, patient-safe choice that never invents a
+    # -- the conservative, patient-safe choice that never invents a
     # direction the source data does not support.
     "non-inhibitory": "binds",
 }
@@ -947,7 +947,7 @@ _LEGACY_PROPS_KEYS: Tuple[str, ...] = (
 _DLQ_BUFFER: List[Dict[str, Any]] = []
 _DLQ_BUFFER_LOCK: threading.Lock = threading.Lock()
 
-# Edge type constants (BUG-15.1 — kg_builder contract).
+# Edge type constants (BUG-15.1 -- kg_builder contract).
 _SRC_TYPE: str = "Compound"
 _DST_TYPE: str = "Protein"
 _DEFAULT_REL_TYPE: str = "binds"
@@ -1052,7 +1052,7 @@ def _get_logger(load_id: Optional[str] = None) -> logging.LoggerAdapter:
 
 
 # ===== SECTION 5: CONFIGURATION & ENVIRONMENT =====
-# Fixes GAP-12.4: _validate_stitch_config(cfg) — validate config on startup.
+# Fixes GAP-12.4: _validate_stitch_config(cfg) -- validate config on startup.
 # Fixes GAP-12.2: _resolve_stitch_filepath(filepath) priority: arg > env > config.
 # Fixes GAP-12.2: _get_stitch_config() honoring DRUGOS_STITCH_URL env override.
 # Fixes GAP-12.2: _resolve_force(force) honoring DRUGOS_STITCH_FORCE_DOWNLOAD env.
@@ -1064,7 +1064,7 @@ def _get_stitch_config() -> Dict[str, Any]:
     """Return a copy of DATA_SOURCES['stitch'], with env-var overrides applied.
 
     Honors:
-        DRUGOS_STITCH_URL — override the download URL (after _validate_url).
+        DRUGOS_STITCH_URL -- override the download URL (after _validate_url).
 
     Returns
     -------
@@ -1222,11 +1222,11 @@ def _resolve_score_threshold(score_threshold: Optional[int] = None) -> int:
     ``STRING_MIN_COMBINED_SCORE`` (the canonical cross-loader STRING
     combined_score minimum threshold) instead of ``STITCH_SCORE_THRESHOLD``.
     STITCH uses the SAME scoring system as STRING (both are 0-1000
-    integer scores from the Szklarczyk group at EMBL — STITCH is the
+    integer scores from the Szklarczyk group at EMBL -- STITCH is the
     compound-protein analogue of STRING's protein-protein database),
     so they MUST share the same threshold. Previously stitch_loader
     fell back to ``STITCH_SCORE_THRESHOLD`` while string_loader fell
-    back to ``STRING_SCORE_THRESHOLD`` — two separate config keys with
+    back to ``STRING_SCORE_THRESHOLD`` -- two separate config keys with
     the same default (700) but no enforced linkage, leaving the door
     open to silent drift if a future contributor changed one without
     the other. The canonical ``STRING_MIN_COMBINED_SCORE`` is defined
@@ -1311,7 +1311,7 @@ def _get_load_id() -> str:
 
 
 def _reset_load_id() -> None:
-    """Reset the cached load_id (for tests only — GAP-7.4)."""
+    """Reset the cached load_id (for tests only -- GAP-7.4)."""
     global _LOAD_ID
     with _LOAD_ID_LOCK:
         _LOAD_ID = None
@@ -1442,7 +1442,7 @@ def _validate_url(url: str) -> None:
             f"{_sanitize_url_for_logging(url)!r}",
             context={"url": _sanitize_url_for_logging(url)},
         )
-    # Fixes BUG-9.1: SSRF guard — reject URLs that resolve to private IPs.
+    # Fixes BUG-9.1: SSRF guard -- reject URLs that resolve to private IPs.
     try:
         host: str = url.split("://", 1)[1].split("/", 1)[0].split(":", 1)[0]
         # Skip SSRF check for hostnames we cannot resolve (e.g., in tests).
@@ -1452,15 +1452,15 @@ def _validate_url(url: str) -> None:
             ip_obj = ipaddress.ip_address(ip)
             if ip_obj.is_private or ip_obj.is_loopback or ip_obj.is_link_local:
                 raise StitchSecurityError(
-                    f"STITCH URL host {host!r} resolves to private IP {ip} — "
+                    f"STITCH URL host {host!r} resolves to private IP {ip} -- "
                     f"SSRF guard rejected.",
                     context={"host": host, "ip": ip},
                 )
         except socket.gaierror:
-            # Cannot resolve — let the actual download fail with a clear error.
+            # Cannot resolve -- let the actual download fail with a clear error.
             pass
     except (IndexError, ValueError):
-        pass  # malformed URL — let downstream raise a clearer error
+        pass  # malformed URL -- let downstream raise a clearer error
 
 
 def _validate_filename_safe(filename: str) -> None:
@@ -1517,7 +1517,7 @@ def _set_secure_file_permissions(path: Path, mode: int = 0o600) -> None:
         try:
             os.chmod(path, mode)
         except OSError:
-            pass  # best-effort — don't fail the download on chmod errors
+            pass  # best-effort -- don't fail the download on chmod errors
 
 
 def _create_ssl_context() -> ssl.SSLContext:
@@ -1635,7 +1635,7 @@ def _verify_checksum(path: Path, cfg: Dict[str, Any]) -> str:
 def _verify_integrity(path: Path, cfg: Dict[str, Any]) -> str:
     """Umbrella helper: gzip magic + size + checksum (BUG-1.5).
 
-    Returns the computed SHA-256 (always — even when cfg['sha256'] is None).
+    Returns the computed SHA-256 (always -- even when cfg['sha256'] is None).
     """
     # Fixes BUG-1.5: integrity verification umbrella.
     _verify_gzip_magic_bytes(path)
@@ -1653,7 +1653,7 @@ def _verify_row_count(df: pd.DataFrame, cfg: Dict[str, Any]) -> None:
     Raises
     ------
     CriticalDataSourceError
-        If row count is 0 (0 edges on required source — patient safety).
+        If row count is 0 (0 edges on required source -- patient safety).
     StitchDataIntegrityError
         If row count ratio is outside [0.5, 2.0] AND the file is
         production-sized (>= 50% of expected).
@@ -1664,14 +1664,14 @@ def _verify_row_count(df: pd.DataFrame, cfg: Dict[str, Any]) -> None:
         # 0 rows on required source = critical failure.
         if STITCH_REQUIRED:
             raise CriticalDataSourceError(
-                f"STITCH file produced 0 rows — possible empty/corrupted download. "
-                f"STITCH is in CRITICAL_SOURCES — patient safety guard.",
+                f"STITCH file produced 0 rows -- possible empty/corrupted download. "
+                f"STITCH is in CRITICAL_SOURCES -- patient safety guard.",
                 context={"actual_rows": 0},
             )
         return
     expected: int = int(cfg.get("expected_record_count", 0))
     if expected <= 0:
-        return  # no expected count configured — skip check
+        return  # no expected count configured -- skip check
     # Skip check for non-production-sized files (test fixtures, samples)
     if actual < expected * 0.5:
         logger.info(
@@ -1710,7 +1710,7 @@ def _check_freshness(gz_path: Path, cfg: Dict[str, Any]) -> None:
     age_days: float = age_seconds / 86400
     if age_days > 2 * expected_days:
         raise StitchDataIntegrityError(
-            f"STITCH file is {age_days:.1f} days old — exceeds 2x expected "
+            f"STITCH file is {age_days:.1f} days old -- exceeds 2x expected "
             f"update frequency ({expected_days} days).",
             context={"path": str(gz_path), "age_days": round(age_days, 1),
                      "expected_frequency_days": expected_days},
@@ -2348,7 +2348,7 @@ def _validate_columns(df: pd.DataFrame) -> None:
         logger.warning(
             "stitch_unexpected_columns",
             extra={"unexpected_columns": sorted(unexpected),
-                   "hint": "Could be new columns in a future STITCH version — "
+                   "hint": "Could be new columns in a future STITCH version -- "
                            "consider schema bump."},
         )
 
@@ -2383,7 +2383,7 @@ def _validate_score_scale(df: pd.DataFrame) -> None:
     Raises
     ------
     StitchDataIntegrityError
-        If max score > 1000 (suggests scale mismatch — patient safety).
+        If max score > 1000 (suggests scale mismatch -- patient safety).
     """
     # Fixes BUG-3.3: score scale validation.
     if "score" not in df.columns or len(df) == 0:
@@ -2491,11 +2491,11 @@ def _map_action_to_rel_type(action: Optional[str]) -> Tuple[str, str]:
     for canonical, rel_type in STITCH_ACTION_TO_REL_TYPE.items():
         if normalized.startswith(canonical):
             return (rel_type, "prefix")
-    # Fallback: 'binds' with WARNING (fail-safe — STITCH default)
+    # Fallback: 'binds' with WARNING (fail-safe -- STITCH default)
     logger.warning(
         "stitch_action_fallback_binds",
         extra={"original_action": action, "normalized": normalized,
-               "hint": "Action not in STITCH_ACTION_TO_REL_TYPE — "
+               "hint": "Action not in STITCH_ACTION_TO_REL_TYPE -- "
                        "falling back to 'binds'."},
     )
     return ("binds", "fallback_binds")
@@ -2513,7 +2513,7 @@ def _validate_edge_triple(src_type: str, rel_type: str, dst_type: str) -> None:
     triple: Tuple[str, str, str] = (src_type, rel_type, dst_type)
     if triple not in CORE_EDGE_TYPES_SET:
         raise StitchDataIntegrityError(
-            f"STITCH edge triple {triple!r} not in CORE_EDGE_TYPES_SET — "
+            f"STITCH edge triple {triple!r} not in CORE_EDGE_TYPES_SET -- "
             f"would create an edge the Graph Transformer cannot traverse.",
             context={"src_type": src_type, "rel_type": rel_type,
                      "dst_type": dst_type, "triple": triple},
@@ -2652,7 +2652,7 @@ def parse_stitch_raw(
         logger.warning(
             "stitch_score_column_missing_critical",
             extra={"columns": list(df.columns),
-                   "hint": "Filter would be silently skipped — raising."},
+                   "hint": "Filter would be silently skipped -- raising."},
         )
         raise StitchDataIntegrityError(
             f"STITCH file has neither 'combined_score' nor 'score' column. "
@@ -2748,8 +2748,8 @@ def _validate_and_strip_taxid_prefix(
     -------
     tuple of (bare_ensp, taxid)
         (bare_ensp, expected_taxid) if prefix matches expected_taxid.
-        (None, taxid) if prefix matches a different taxid — caller should DLQ.
-        (None, None) if no prefix — caller should DLQ.
+        (None, taxid) if prefix matches a different taxid -- caller should DLQ.
+        (None, None) if no prefix -- caller should DLQ.
     """
     # Fixes BUG-3.2: validate species prefix before stripping.
     if not isinstance(protein_id, str) or not protein_id:
@@ -2919,11 +2919,11 @@ def _extract_chemical_metadata(df: pd.DataFrame) -> pd.DataFrame:
     """Extract CID, stereochemistry, and stitch_chemical_id from the chemical column (BUG-3.1).
 
     Adds three new columns:
-      * ``chemical_cid``: bare numeric string (e.g. "00002244") — legacy compat.
+      * ``chemical_cid``: bare numeric string (e.g. "00002244") -- legacy compat.
       * ``stitch_chemical_id``: full original ID (e.g. "CIDm00002244").
       * ``stereochemistry``: "stereo_specific" / "non_stereo" / "unknown".
       * ``stereochemistry_code``: "m" / "s" / "".
-      * ``pubchem_cid``: int form (e.g. 2244) — matches DrugBank/ChEMBL convention (BUG-15.2).
+      * ``pubchem_cid``: int form (e.g. 2244) -- matches DrugBank/ChEMBL convention (BUG-15.2).
 
     Invalid CIDs (extraction failed) are written to the DLQ with
     reason="cid_extraction_failed". CIDs outside PubChem range are written
@@ -2936,13 +2936,13 @@ def _extract_chemical_metadata(df: pd.DataFrame) -> pd.DataFrame:
 
     # v28 ROOT FIX (P2-L-17): the previous code emitted a DeprecationWarning
     # on EVERY parse call (gated by a one-shot ``_LEGACY_CID_MERGE_WARNED``
-    # global flag — but Python's default warning filter shows
+    # global flag -- but Python's default warning filter shows
     # DeprecationWarnings only once per source line PER PROCESS, so the
     # flag was redundant). Worse, the warning fired regardless of whether
-    # the consumer ever accessed ``props['chemical_cid']`` — which is
+    # the consumer ever accessed ``props['chemical_cid']`` -- which is
     # impossible to detect. Operators quickly learned to ignore the
     # warning, defeating its purpose. The BUG-3.1 fix (preserve CIDm vs
-    # CIDs distinction) is now the ONLY behavior — the warning has no
+    # CIDs distinction) is now the ONLY behavior -- the warning has no
     # informational value. Removed.
     # The legacy merge mode (DRUGOS_STITCH_LEGACY_CID_MERGE=1) remains
     # supported for operators who need the v0 behavior; it sets
@@ -2953,13 +2953,13 @@ def _extract_chemical_metadata(df: pd.DataFrame) -> pd.DataFrame:
     # Extract the prefix and the bare numeric CID.
     # FIX-P1-B-13 (audit P1): the previous character class ``[m,s]``
     # admitted a literal COMMA because commas are ordinary literals
-    # inside ``[]``. So ``r"^(CID[m,s])(\d+)$"`` matched "CIDm…", "CIDs…",
-    # AND "CID,…" (e.g. a corrupted "CID,12345" would pass the regex and
+    # inside ``[]``. So ``r"^(CID[m,s])(\d+)$"`` matched "CIDm...", "CIDs...",
+    # AND "CID,..." (e.g. a corrupted "CID,12345" would pass the regex and
     # pollute ``_stitch_prefix`` with a comma). Root fix: drop the comma
-    # — ``[ms]`` matches ONLY ``m`` or ``s``.
+    # -- ``[ms]`` matches ONLY ``m`` or ``s``.
     #
     # v57 ROOT FIX (P2L-038): extend the regex to cover ALL known STITCH
-    # CID prefix variants — ``CIDsm``, ``CIDs``, ``CIDf``, ``CIDm``, and
+    # CID prefix variants -- ``CIDsm``, ``CIDs``, ``CIDf``, ``CIDm``, and
     # bare ``CID``. Previously only ``CIDm`` and ``CIDs`` matched; rows
     # with ``CIDsm`` / ``CIDf`` / ``CID`` prefixes were silently DLQ-ed
     # as malformed (catastrophic data loss for STITCH releases that use
@@ -2974,10 +2974,10 @@ def _extract_chemical_metadata(df: pd.DataFrame) -> pd.DataFrame:
     # (stereo) formats that SIDER's production files use. The SIDER
     # loader accepts both legacy and newer formats (see SIDER_CIDM_REGEX
     # / SIDER_CIDS_REGEX); without this fix, STITCH was inconsistent
-    # with SIDER — pointing the STITCH loader at a newer-format STITCH
+    # with SIDER -- pointing the STITCH loader at a newer-format STITCH
     # file would dead-letter every row. The stereo-code mapping in
-    # ``_stitch_stereo_label`` maps "0" → "non_stereo_merged" and "1"
-    # → "stereo_specific" (semantically equivalent to CIDm / CIDs).
+    # ``_stitch_stereo_label`` maps "0" -> "non_stereo_merged" and "1"
+    # -> "stereo_specific" (semantically equivalent to CIDm / CIDs).
     extracted: pd.DataFrame = df["chemical"].str.extract(
         r"^CID(sm|s|f|m|0|1)?(\d+)$", expand=True
     )
@@ -3003,7 +3003,7 @@ def _extract_chemical_metadata(df: pd.DataFrame) -> pd.DataFrame:
     # chemical_cid: bare numeric string (legacy compat).
     # v57 ROOT FIX (P2L-038): use ``_normalize_stitch_cid`` so the
     # canonical form is the stripped-integer string (e.g. "2244" rather
-    # than "00002244") — this matches the canonical Compound ID format
+    # than "00002244") -- this matches the canonical Compound ID format
     # used everywhere downstream and ensures CIDsm/CIDs/CIDf/CIDm/CID
     # variants all map to the SAME canonical ID.
     df["chemical_cid"] = df["chemical"].apply(_normalize_stitch_cid)
@@ -3023,18 +3023,18 @@ def _extract_chemical_metadata(df: pd.DataFrame) -> pd.DataFrame:
     # stereochemistry columns
     # v27 ROOT FIX (P2-L-5): the previous code (including the v16 "SW-16"
     # "fix" comment) mapped
-    #   CIDm -> "stereo_specific"   (WRONG — 'm' = merged = flat/non-stereo)
-    #   CIDs -> "non_stereo"        (WRONG — 's' = stereo-specific separate)
+    #   CIDm -> "stereo_specific"   (WRONG -- 'm' = merged = flat/non-stereo)
+    #   CIDs -> "non_stereo"        (WRONG -- 's' = stereo-specific separate)
     #   ""   -> "unknown"
     # Per the STITCH documentation
     # (https://stitch.embl.de/info/compound_id_format):
-    #   "CIDm" = merged form — stereoisomers are merged into a single
+    #   "CIDm" = merged form -- stereoisomers are merged into a single
     #            entry (i.e. the molecule is treated as FLAT / non-stereo).
-    #   "CIDs" = stereo-specific — the molecule has defined stereochemistry
+    #   "CIDs" = stereo-specific -- the molecule has defined stereochemistry
     #            and is kept as a separate entry per stereoisomer.
     # The previous code (and the v16 "fix" comment) inverted these
     # labels. The v16 comment even claimed "STITCH's 'CIDs' prefix does
-    # NOT mean racemic mixture" — true, but it ALSO does not mean
+    # NOT mean racemic mixture" -- true, but it ALSO does not mean
     # "non_stereo": 'CIDs' means STEREO-SPECIFIC. The 'm' in 'CIDm'
     # stands for "merged", which means stereoisomers are folded together
     # (= FLAT / non-stereo). The corrected mapping:
@@ -3058,7 +3058,7 @@ def _extract_chemical_metadata(df: pd.DataFrame) -> pd.DataFrame:
 
     # Drop rows where CID extraction failed
     # v57 ROOT FIX (P2L-038): ``_normalize_stitch_cid`` returns ``""``
-    # (empty string) when the regex does not match — not NaN. Update the
+    # (empty string) when the regex does not match -- not NaN. Update the
     # malformed check to also catch empty strings so CIDsm / CIDf / CID
     # rows that previously failed the legacy ``r"^(CID[ms])(\d+)$"``
     # regex now succeed (correctly normalized) while genuinely malformed
@@ -3100,7 +3100,7 @@ def _extract_chemical_metadata(df: pd.DataFrame) -> pd.DataFrame:
     if len(df) > 0:
         df["pubchem_cid"] = df["chemical_cid"].apply(_normalize_cid).astype("int64")
         # v9 ROOT FIX (audit F5.2.3 / F6): the previous line set
-        # ``chemical_cid = pubchem_cid.astype(str)`` producing "2244" — a
+        # ``chemical_cid = pubchem_cid.astype(str)`` producing "2244" -- a
         # bare integer string. STITCH edges then emitted src_id="2244"
         # which fails ID_PATTERNS["Compound"] = ^(...|CID\d+|...)$. The
         # SIDER loader (BUG-B-004) was correctly fixed to emit f"CID{int}"
@@ -3138,17 +3138,17 @@ def _dedup_edges(
         'score', and the 6 evidence-channel columns.
     conflict_resolution : str, default "max_combined_score"
         Strategy for deduplication:
-          * "max_combined_score" — keep row with max score; aggregate channel
+          * "max_combined_score" -- keep row with max score; aggregate channel
             scores as max per channel.
-          * "union_evidence" — aggregate all channel scores as max per channel;
+          * "union_evidence" -- aggregate all channel scores as max per channel;
             recompute combined_score as the max.
-          * "keep_all" — no dedup (preserve v0 behavior for backward compat).
+          * "keep_all" -- no dedup (preserve v0 behavior for backward compat).
 
     Returns
     -------
     pd.DataFrame
         Deduplicated DataFrame with new columns:
-          * ``evidence_count``: int — number of source rows merged.
+          * ``evidence_count``: int -- number of source rows merged.
           * ``duplicate_sources``: list of per-channel sources merged.
     """
     # Fixes BUG-5.1: deduplication with conflict resolution.
@@ -3168,7 +3168,7 @@ def _dedup_edges(
                      "valid_strategies": list(valid_strategies)},
         )
 
-    # Group by (chemical, protein) — collapse duplicates.
+    # Group by (chemical, protein) -- collapse duplicates.
     # BUG-2.1 / BUG-5.1: For robustness, fall back to (chemical_cid, protein_string_id)
     # if the canonical (chemical, protein) columns are absent (e.g., synthetic test
     # DataFrames that only contain the post-extraction columns).
@@ -3183,18 +3183,18 @@ def _dedup_edges(
             group_cols = list(cand)
             break
     if not group_cols:
-        # Cannot find suitable group columns — skip dedup entirely.
+        # Cannot find suitable group columns -- skip dedup entirely.
         df["evidence_count"] = 1
         df["duplicate_sources"] = [[] for _ in range(len(df))]
         logger.warning(
             "stitch_dedup_skipped_no_group_columns",
             extra={"columns": list(df.columns),
                    "hint": "Neither (chemical, protein) nor (chemical_cid, "
-                           "protein_string_id) columns are present — skipping dedup."},
+                           "protein_string_id) columns are present -- skipping dedup."},
         )
         return df
 
-    # Build aggregation dict — only aggregate columns that exist in df.
+    # Build aggregation dict -- only aggregate columns that exist in df.
     # Evidence channels and score use "max"; all other columns use "first"
     # to carry forward metadata (chemical_cid, stitch_chemical_id,
     # stereochemistry, protein_string_id, etc.) added by _extract_chemical_metadata.
@@ -3349,7 +3349,7 @@ def validate_stitch(
         # accepted them. The character class ``[ms01]`` matches
         # ``m``, ``s``, ``0``, or ``1`` (the four single-char
         # stereo codes); ``sm`` and ``f`` are not in this class
-        # but are still accepted by the parser — they are simply
+        # but are still accepted by the parser -- they are simply
         # not counted in the "malformed_chemical_ids" metric
         # (which is a per-row boolean, not a count of accepted
         # variants). This is acceptable because the metric's purpose
@@ -3364,7 +3364,7 @@ def validate_stitch(
         # ID validation regex from ENSP-only to ENS[GPTE] so the
         # validation report does not flag ENSG / ENST / ENSE rows as
         # "malformed" (the parser's ENSEMBL_PROTEIN_ID_REGEX in
-        # string_loader.py was already broadened — this mirror fix
+        # string_loader.py was already broadened -- this mirror fix
         # keeps the validation report consistent with the parser).
         bad_protein: pd.Series = ~df["protein"].str.match(r"^\d+\.ENS[GPTE]\d{11}", na=False)  # v70 P2L-034 mirror
         report["malformed_protein_ids"] = int(bad_protein.sum())
@@ -3386,10 +3386,10 @@ def parse_stitch_interactions(
     Backward-compatible signature (Rule R3):
     ``parse_stitch_interactions(filepath=None, score_threshold=None) -> pd.DataFrame``.
 
-    New optional kwargs (additive only — Rule R3):
-      * ``organism_taxid`` — int (default 9606) — BUG-3.4.
-      * ``conflict_resolution`` — str (default "max_combined_score") — BUG-5.1.
-      * ``dedup`` — bool (default True) — BUG-2.4.
+    New optional kwargs (additive only -- Rule R3):
+      * ``organism_taxid`` -- int (default 9606) -- BUG-3.4.
+      * ``conflict_resolution`` -- str (default "max_combined_score") -- BUG-5.1.
+      * ``dedup`` -- bool (default True) -- BUG-2.4.
 
     Internally calls: parse_stitch_raw -> filter_by_organism -> filter_by_score
     -> _extract_chemical_metadata -> _validate_protein_ids -> _dedup_edges.
@@ -3468,7 +3468,7 @@ def parse_stitch_interactions(
     return df
 
 
-# Alias for backward compat (GAP-1.2 — mirrors chembl_loader convention).
+# Alias for backward compat (GAP-1.2 -- mirrors chembl_loader convention).
 parse_stitch = parse_stitch_interactions
 
 
@@ -3712,7 +3712,7 @@ def _build_edge_dict(
     # https://stitch.embl.de/info/scoring) to a canonical 0-1 range so it
     # is comparable with DisGeNET / OpenTargets / OMIM / DrugBank scores
     # already on a 0-1 scale. Emit BOTH the raw source-specific score
-    # (``score`` / ``stitch_combined_score`` — preserved for traceability)
+    # (``score`` / ``stitch_combined_score`` -- preserved for traceability)
     # AND a canonical ``normalized_score`` in [0,1] for downstream model
     # training / fusion. STITCH max is 1000.
     if score_int is not None:
@@ -3726,7 +3726,7 @@ def _build_edge_dict(
     # If caller passed an explicit rel_type, use that; else use the mapped one
     final_rel_type: str = rel_type if rel_type else mapped_rel
 
-    # Validate triple (GAP-14.4) — raises if invalid
+    # Validate triple (GAP-14.4) -- raises if invalid
     _validate_edge_triple(_SRC_TYPE, final_rel_type, _DST_TYPE)
 
     # Stereochemistry metadata (BUG-3.1)
@@ -3751,9 +3751,9 @@ def _build_edge_dict(
     evidence_count: int = int(row.get("evidence_count", 1))
     duplicate_sources: List[str] = list(row.get("duplicate_sources", []) or [])
 
-    # Top-level props (BUG-15.1: standard keys only — STITCH-specific metadata nested)
+    # Top-level props (BUG-15.1: standard keys only -- STITCH-specific metadata nested)
     props: Dict[str, Any] = {
-        # ── Legacy keys (Rule R3 — preserved verbatim) ──
+        # ── Legacy keys (Rule R3 -- preserved verbatim) ──
         "source": SOURCE_STITCH,
         "score": score_int,
         # v27 ROOT FIX (P2-L-3): raw source-specific score, preserved
@@ -3778,7 +3778,7 @@ def _build_edge_dict(
         "_attribution": STITCH_ATTRIBUTION,
         "_schema_version": SCHEMA_VERSION,
         "_parser_version": PARSER_VERSION,
-        # ── STITCH-specific metadata (nested — BUG-15.1) ──
+        # ── STITCH-specific metadata (nested -- BUG-15.1) ──
         "_stitch": {
             "stitch_chemical_id": stitch_chemical_id,
             "chemical_cid": chemical_cid,
@@ -3840,14 +3840,14 @@ def stitch_to_edge_records(
     Backward-compatible signature (Rule R3):
     ``stitch_to_edge_records(df, crosswalk=None) -> List[Dict]``.
 
-    New optional kwargs (additive only — Rule R3):
-      * ``unresolved_policy`` — "keep" (default) | "drop" | "dlq" | "warn" (BUG-2.3).
-      * ``dedup`` — bool (default True) (BUG-2.4).
-      * ``conflict_resolution`` — "max_combined_score" | "union_evidence" | "keep_all" (BUG-5.1).
-      * ``organism_taxid`` — int (default 9606) (BUG-3.4).
-      * ``on_error`` — "raise" | "skip" | "dlq" (default "dlq") (GAP-6.6).
-      * ``crosswalk_copy`` — bool (default False) — deepcopy crosswalk (BUG-7.1).
-      * ``n_workers`` — int (default 1) — parallel crosswalk lookup (BUG-8.1).
+    New optional kwargs (additive only -- Rule R3):
+      * ``unresolved_policy`` -- "keep" (default) | "drop" | "dlq" | "warn" (BUG-2.3).
+      * ``dedup`` -- bool (default True) (BUG-2.4).
+      * ``conflict_resolution`` -- "max_combined_score" | "union_evidence" | "keep_all" (BUG-5.1).
+      * ``organism_taxid`` -- int (default 9606) (BUG-3.4).
+      * ``on_error`` -- "raise" | "skip" | "dlq" (default "dlq") (GAP-6.6).
+      * ``crosswalk_copy`` -- bool (default False) -- deepcopy crosswalk (BUG-7.1).
+      * ``n_workers`` -- int (default 1) -- parallel crosswalk lookup (BUG-8.1).
 
     Parameters
     ----------
@@ -3857,7 +3857,7 @@ def stitch_to_edge_records(
         If None, uses ``get_default_crosswalk()``.
     unresolved_policy : {"keep", "drop", "dlq", "warn"}, default "keep"
         Policy for proteins where Ensembl->UniProt translation fails:
-          * "keep" (default — backward compat): emit edge with raw ENSP ID.
+          * "keep" (default -- backward compat): emit edge with raw ENSP ID.
           * "drop": skip the edge entirely.
           * "dlq": write to ``data/dead_letter/stitch_unresolved_protein.jsonl``.
           * "warn": emit edge AND log WARNING.
@@ -3907,7 +3907,7 @@ def stitch_to_edge_records(
         import copy as _copy
         crosswalk = _copy.deepcopy(crosswalk)
 
-    # v29 ROOT FIX (audit L-5): import the Compound ID → InChIKey
+    # v29 ROOT FIX (audit L-5): import the Compound ID -> InChIKey
     # normalizer so we can rewrite STITCH's CID-based src_ids to the
     # canonical InChIKey form BEFORE building edge records. Imported
     # lazily (inside the function) to mirror the existing pattern
@@ -3947,7 +3947,7 @@ def stitch_to_edge_records(
     )
     _validate_provenance(provenance)
 
-    # Build edge records (list comprehension over df.to_dict — BUG-4.1)
+    # Build edge records (list comprehension over df.to_dict -- BUG-4.1)
     edges: List[Dict[str, Any]] = []
     n_resolved: int = 0
     n_unresolved_dropped: int = 0
@@ -3963,7 +3963,7 @@ def stitch_to_edge_records(
             # variants all collapse to the SAME canonical Compound ID
             # (e.g. ``2244``) before the crosswalk rewrites it to InChIKey.
             # The previous code read ``chemical_cid`` (already populated
-            # by ``_extract_chemical_metadata`` to ``CID2244`` form) — but
+            # by ``_extract_chemical_metadata`` to ``CID2244`` form) -- but
             # if any caller bypassed ``_extract_chemical_metadata`` (e.g.
             # a unit test passing a raw df), the prefix-variant IDs would
             # leak through unchanged and create duplicate Compound nodes.
@@ -3973,14 +3973,14 @@ def stitch_to_edge_records(
             # ``CID2244`` matches with stereo code = ""). The fallback to
             # ``chemical_cid`` / ``pubchem_cid`` preserves back-compat.
             #
-            # v69 ROOT FIX (P2L-038 — COMPLETE): the v57 fix only
+            # v69 ROOT FIX (P2L-038 -- COMPLETE): the v57 fix only
             # normalized the ``chemical`` column. The FALLBACK path
             # (line ~3888) still used the buggy
             # ``str(row.get("chemical_cid") or row.get("pubchem_cid") or "")``
             # which produces INCONSISTENT IDs:
             #   - ``chemical_cid`` is the bare numeric STRING with leading
-            #     zeros (e.g. "00002244" — STITCH zero-pads to 8 digits).
-            #   - ``pubchem_cid`` is the int form (e.g. 2244 — no leading
+            #     zeros (e.g. "00002244" -- STITCH zero-pads to 8 digits).
+            #   - ``pubchem_cid`` is the int form (e.g. 2244 -- no leading
             #     zeros).
             # The ``or`` short-circuits: if ``chemical_cid`` is truthy
             # (non-empty), use it; else use ``pubchem_cid``. So src_id is
@@ -3992,10 +3992,10 @@ def stitch_to_edge_records(
             # ROOT FIX: route BOTH fallback values through
             # ``_normalize_stitch_cid`` so they always produce the
             # canonical bare-int form (e.g. "2244"). The function handles:
-            #   - "00002244"     → "2244" (strips leading zeros via int())
-            #   - "CID00002244"  → "2244"
-            #   - 2244 (int)     → "2244"
-            #   - "CIDs00002244" → "2244"
+            #   - "00002244"     -> "2244" (strips leading zeros via int())
+            #   - "CID00002244"  -> "2244"
+            #   - 2244 (int)     -> "2244"
+            #   - "CIDs00002244" -> "2244"
             # This guarantees a single canonical ID regardless of which
             # column the fallback hits.
             raw_chemical: Any = row.get("chemical")
@@ -4041,13 +4041,13 @@ def stitch_to_edge_records(
                 })
                 continue
 
-            # v29 ROOT FIX (audit L-5): Compound ID fragmentation —
+            # v29 ROOT FIX (audit L-5): Compound ID fragmentation --
             # STITCH/SIDER/DRKG used non-InChIKey IDs. Now normalizes to
             # InChIKey via crosswalk before loading. STITCH emits
             # ``src_id`` as ``CID<digits>`` (PubChem CID format). When
-            # the crosswalk has a CID→InChIKey mapping (populated by
+            # the crosswalk has a CID->InChIKey mapping (populated by
             # Phase 1 entity resolution), the Compound reference is
-            # rewritten to the canonical InChIKey — unifying it with
+            # rewritten to the canonical InChIKey -- unifying it with
             # the InChIKey-keyed Compound nodes produced by DrugBank /
             # ChEMBL / PubChem loaders. When no mapping exists, the
             # original CID passes through unchanged (with a WARNING).
@@ -4115,10 +4115,10 @@ def stitch_to_edge_records(
                         extra={"protein_ensembl": protein_raw, "row_index": i},
                     )
                     n_unresolved_kept += 1
-                else:  # "keep" — default
+                else:  # "keep" -- default
                     n_unresolved_kept += 1
 
-            # Map action to rel_type (BUG-2.5) — pass empty to let _build_edge_dict decide
+            # Map action to rel_type (BUG-2.5) -- pass empty to let _build_edge_dict decide
             edge: Dict[str, Any] = _build_edge_dict(
                 src_id, dst_id,
                 rel_type="",  # let _build_edge_dict use _map_action_to_rel_type
@@ -4249,14 +4249,14 @@ def iter_stitch_edges(
             for edge in stitch_to_edge_records(chunk, crosswalk=crosswalk, **kwargs):
                 yield edge
     else:
-        # Treat as path — use iter_stitch_cpi
+        # Treat as path -- use iter_stitch_cpi
         for chunk in iter_stitch_cpi(df_or_path):
             for edge in stitch_to_edge_records(chunk, crosswalk=crosswalk, **kwargs):
                 yield edge
 
 
 def stitch_to_node_records(df: pd.DataFrame) -> List[Dict[str, Any]]:
-    """Return an empty list — STITCH emits edges only (BUG-1.1).
+    """Return an empty list -- STITCH emits edges only (BUG-1.1).
 
     Compound nodes come from DrugBank/ChEMBL; Protein nodes come from
     UniProt. STITCH has no unique nodes to contribute.
@@ -4362,7 +4362,7 @@ class StitchLoader:
     """Adapter implementing the ``Loader`` Protocol for STITCH (BUG-1.1).
 
     Allows ``run_pipeline.py`` to treat all loaders polymorphically via
-    the PEP 544 ``Loader`` Protocol (structural typing — no inheritance
+    the PEP 544 ``Loader`` Protocol (structural typing -- no inheritance
     required).
 
     Examples
@@ -4374,7 +4374,7 @@ class StitchLoader:
     True
     """
 
-    name: str = SOURCE_KEY_STITCH   # class attribute — "stitch"
+    name: str = SOURCE_KEY_STITCH   # class attribute -- "stitch"
 
     def __init__(self, *, score_threshold: Optional[int] = None) -> None:
         self.score_threshold = score_threshold
@@ -4476,19 +4476,19 @@ def load_stitch(
     -------
     dict
         Result dict with keys:
-          * ``edges``          — int, number of edge records created
-          * ``loaded``         — int, number of edges loaded into Neo4j
+          * ``edges``          -- int, number of edge records created
+          * ``loaded``         -- int, number of edges loaded into Neo4j
                                  (0 if skip_neo4j=True)
-          * ``skipped_neo4j``  — bool
-          * ``validation``     — StitchValidationReport dict
-          * ``dlq_path``       — str, path to the dead-letter queue file
-          * ``load_id``        — str, correlation ID for rollback
-          * ``source_sha256``  — str, SHA-256 of the source file
-          * ``source_version`` — str, STITCH release version
-          * ``errors``         — list of str, non-fatal error summaries
-          * ``metrics``        — StitchLoaderMetrics dict
-          * ``output_sha256``  — str, SHA-256 of the sorted edges list
-          * ``impact``         — dict (only if impact_analysis=True)
+          * ``skipped_neo4j``  -- bool
+          * ``validation``     -- StitchValidationReport dict
+          * ``dlq_path``       -- str, path to the dead-letter queue file
+          * ``load_id``        -- str, correlation ID for rollback
+          * ``source_sha256``  -- str, SHA-256 of the source file
+          * ``source_version`` -- str, STITCH release version
+          * ``errors``         -- list of str, non-fatal error summaries
+          * ``metrics``        -- StitchLoaderMetrics dict
+          * ``output_sha256``  -- str, SHA-256 of the sorted edges list
+          * ``impact``         -- dict (only if impact_analysis=True)
 
     Raises
     ------
@@ -4503,7 +4503,7 @@ def load_stitch(
         On download failure.
     """
     # Fixes BUG-1.4: facade pattern.
-    # Fixes BUG-11.5: silent-failure detection — 0 edges = ERROR.
+    # Fixes BUG-11.5: silent-failure detection -- 0 edges = ERROR.
     load_id: str = _get_load_id()
     errors: List[str] = []
     metrics: "_StitchLoaderMetricsDataclass" = _StitchLoaderMetricsDataclass()
@@ -4659,7 +4659,7 @@ def load_stitch(
         # For now, document the contract and return an empty diff.
         impact_result = {
             "added": len(edges), "removed": 0, "updated": 0, "unchanged": 0,
-            "note": "Impact analysis requires Neo4j connection — "
+            "note": "Impact analysis requires Neo4j connection -- "
                     "see docs/stitch_lineage.md for Cypher queries.",
         }
         impact_path: Path = LOGS_DIR / "audit" / f"stitch_impact_{load_id}.jsonl"

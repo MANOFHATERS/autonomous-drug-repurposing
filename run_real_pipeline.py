@@ -268,7 +268,7 @@ def main() -> int:  # R-027: was -> None with sys.exit()
 
     # ─── Summary (R-029: removed 30-line static "V90 ROOT FIXES STATUS") ──
     print("\n" + "=" * 70)
-    print("REAL 4-PHASE PIPELINE COMPLETE — SUMMARY")
+    print("REAL 4-PHASE PIPELINE COMPLETE -- SUMMARY")
     print("=" * 70)
     print(f"  Phase 2 nodes staged:    {bridge_summary['nodes_staged']}")
     print(f"  Phase 2 edges staged:    {bridge_summary['edges_staged']}")

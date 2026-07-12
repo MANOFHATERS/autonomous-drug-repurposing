@@ -143,7 +143,7 @@ class TestCrossModuleContracts:
 
 
 class TestChembertaPyGIntegration:
-    """Test the chemberta_encoder → pyg_builder data flow contract."""
+    """Test the chemberta_encoder -> pyg_builder data flow contract."""
 
     def test_encode_result_satisfies_pyg_contract(self):
         """ChembertaEncodeResult shape matches what add_chemberta_features expects.
@@ -184,7 +184,7 @@ class TestChembertaCacheSchema:
     def test_cache_payload_has_all_required_keys(self):
         """ChembertaCachePayload TypedDict documents all fields."""
         from drugos_graph.chemberta_encoder import ChembertaCachePayload
-        # TypedDict with total=False — just verify it's defined
+        # TypedDict with total=False -- just verify it's defined
         assert ChembertaCachePayload.__annotations__
 
     def test_cache_format_version_in_payload(self):
@@ -251,19 +251,19 @@ class TestFullPipelineDataFlow:
     """Test that the full data flow from SMILES to embedding result works."""
 
     def test_smiles_to_result_full_flow(self):
-        """End-to-end: SMILES → validate → tokenize → encode → result."""
+        """End-to-end: SMILES -> validate -> tokenize -> encode -> result."""
         # v6 fix (bug #B1): skip when transformers is not installed.
         # The previous code unconditionally patched
         # `drugos_graph.chemberta_encoder.AutoModel.from_pretrained`, but
-        # when `transformers` is missing `AutoModel` is `None` —
-        # `patch("…None.from_pretrained")` crashes with AttributeError.
+        # when `transformers` is missing `AutoModel` is `None` --
+        # `patch("...None.from_pretrained")` crashes with AttributeError.
         # The test should SKIP, not FAIL, in that environment.
         try:
             import transformers  # noqa: F401
         except ImportError:
             pytest.skip(
-                "transformers not installed — chemberta_encoder.AutoModel is "
-                "None, cannot exercise SMILES→embedding flow."
+                "transformers not installed -- chemberta_encoder.AutoModel is "
+                "None, cannot exercise SMILES->embedding flow."
             )
 
         from drugos_graph.chemberta_encoder import encode_smiles
@@ -301,7 +301,7 @@ class TestFullPipelineDataFlow:
         # Verify the result
         assert result.embeddings.shape == (3, 768)
         # NOTE: chemberta_encoder sorts by SMILES for deterministic cache
-        # (master_prompt_fix_chemberta_encoder.md — Domain 7 Idempotency).
+        # (master_prompt_fix_chemberta_encoder.md -- Domain 7 Idempotency).
         # We use set comparison to verify all expected compound IDs are
         # present without coupling the test to the internal sort order.
         assert set(result.compound_ids) == {"benzene", "acetic_acid", "ethanol"}
@@ -324,8 +324,8 @@ class TestFullPipelineDataFlow:
             import transformers  # noqa: F401
         except ImportError:
             pytest.skip(
-                "transformers not installed — chemberta_encoder.AutoModel is "
-                "None, cannot exercise SMILES→embedding flow."
+                "transformers not installed -- chemberta_encoder.AutoModel is "
+                "None, cannot exercise SMILES->embedding flow."
             )
 
         from drugos_graph.chemberta_encoder import encode_smiles

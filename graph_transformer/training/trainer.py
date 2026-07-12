@@ -135,7 +135,7 @@ class GraphTransformerTrainer:
         # The scheduler implements warmup (pct_start=0.1) + cosine decay,
         # which is the standard practice for transformer training. The
         # previous code used plain Adam with constant lr=5e-4 for all
-        # epochs — no warmup, no decay. The first few epochs had large
+        # epochs -- no warmup, no decay. The first few epochs had large
         # gradients (random init) that destabilized training without
         # warmup, and the last few epochs had small gradients that needed
         # a lower lr to converge. OneCycleLR fixes both: warmup for the
@@ -187,7 +187,7 @@ class GraphTransformerTrainer:
         # signal. The training criterion uses pos_weight (BUG #26 / 8.6 fix)
         # to handle class imbalance, but pos_weight AMPLIFIES loss noise on
         # small val sets (15 pairs). Using the pos_weighted loss for early
-        # stopping caused checkpoint thrashing — float noise flipped the
+        # stopping caused checkpoint thrashing -- float noise flipped the
         # "improvement" signal every epoch. The fix uses a SEPARATE
         # unweighted BCEWithLogitsLoss for the early-stopping decision,
         # while the pos_weighted criterion is still used for gradient
@@ -207,7 +207,7 @@ class GraphTransformerTrainer:
         #
         # V90 ROOT FIX (BUG #33): persist best_epoch as an instance attribute
         # so save_checkpoint / load_checkpoint can save and restore it. The
-        # previous code kept best_epoch as a LOCAL variable inside fit() —
+        # previous code kept best_epoch as a LOCAL variable inside fit() --
         # it was lost on reload, so the user could not tell which epoch
         # produced the best model. The fix stores it on self so it survives
         # save/load round-trips.
@@ -308,7 +308,7 @@ class GraphTransformerTrainer:
             # total_steps = epochs * n_batches, so calling step() once per
             # batch exactly exhausts the schedule over the full training
             # run. If self.scheduler is None (train_epoch called directly
-            # without fit()), this is a no-op — preserves backward compat.
+            # without fit()), this is a no-op -- preserves backward compat.
             if self.scheduler is not None:
                 self.scheduler.step()
 
@@ -330,7 +330,7 @@ class GraphTransformerTrainer:
         """Evaluate model on a dataset.
 
         V30 ROOT FIX (8.2): the original evaluate() REQUIRED 3 mandatory
-        args (drug_indices, disease_indices, labels) — there was no
+        args (drug_indices, disease_indices, labels) -- there was no
         no-arg evaluation path. Callers expecting an sklearn-style API
         crashed with TypeError. The fix: if all 3 args are None, the
         method uses the last-stored val data (from the most recent fit()
@@ -463,7 +463,7 @@ class GraphTransformerTrainer:
         # thought the model was "barely better than random" when in
         # fact the val set was degenerate. The fix logs a CRITICAL
         # warning so the issue is visible in logs (and downstream
-        # consumers can detect it), but does NOT raise — the trainer's
+        # consumers can detect it), but does NOT raise -- the trainer's
         # fit() loop calls evaluate() every epoch, and raising would
         # crash training on the first degenerate epoch (common on tiny
         # demo graphs with small val sets). The AUC=0.5 fallback is
@@ -472,7 +472,7 @@ class GraphTransformerTrainer:
             logger.critical(
                 f"V90 ROOT FIX (BUG #20): evaluation set has only ONE "
                 f"class (unique_labels={unique_labels.tolist()}). AUC "
-                f"is undefined for a single-class set — returning 0.5 "
+                f"is undefined for a single-class set -- returning 0.5 "
                 f"fallback. The previous code silently returned 0.5 "
                 f"with no warning, misleading the user into thinking "
                 f"the model was 'barely better than random' when in "
@@ -574,7 +574,7 @@ class GraphTransformerTrainer:
         V30 ROOT FIX (8.5): drug-aware split enforcement. The DOCX V1
         contract requires "Three-way train/val/test split (drug-aware)".
         The original trainer accepted arbitrary indices without verifying
-        that train/val/test drugs are disjoint — silently violatable.
+        that train/val/test drugs are disjoint -- silently violatable.
         The fix raises ValueError if the same drug index appears in both
         train and val (we cannot check test because fit() doesn't see it,
         but train/val disjointness is the minimum bar).
@@ -610,7 +610,7 @@ class GraphTransformerTrainer:
                 pos_weight > 2.0 caused below-random test AUC, pass
                 ``pos_weight_clamp_max=2.0`` to reproduce the demo-
                 scale clamp behavior. P3-S03 ROOT FIX: the previous
-                hardcoded clamp of 2.0 was too tight for production —
+                hardcoded clamp of 2.0 was too tight for production --
                 it under-weighted positives on imbalanced graphs,
                 causing the model to predict LOW for everything (high
                 accuracy, low recall on positives). The parameter is
@@ -621,7 +621,7 @@ class GraphTransformerTrainer:
                 scaling. P3-S02 ROOT FIX (Guo et al. 2017): the
                 previous code split the val set 50/50 for early-
                 stopping vs calibration, which leaves too few samples
-                for EITHER purpose on small graphs (15 val pairs →
+                for EITHER purpose on small graphs (15 val pairs ->
                 7 for early stopping, 7 for calibration). Guo et al.
                 require a SEPARATE held-out calibration set, not a
                 split of the val set. If these args are provided,
@@ -653,7 +653,7 @@ class GraphTransformerTrainer:
         overlap = train_drugs_set & val_drugs_set
         if overlap:
             raise ValueError(
-                f"V30 ROOT FIX (8.5): drug-aware split violation — "
+                f"V30 ROOT FIX (8.5): drug-aware split violation -- "
                 f"{len(overlap)} drug indices appear in BOTH train and val "
                 f"(examples: {list(overlap)[:5]}). The DOCX V1 contract "
                 f"requires drug-disjoint splits to prevent leakage. Use "
@@ -666,7 +666,7 @@ class GraphTransformerTrainer:
         # n_neg / n_pos))`` which was too tight for production graphs with
         # severe class imbalance (e.g. 1 positive per 100 negatives =
         # pos_weight 100). Clamping to 2.0 under-weights positives, so the
-        # model learns to predict LOW for everything → high accuracy but
+        # model learns to predict LOW for everything -> high accuracy but
         # low recall on positives (exactly the failure mode the audit
         # flagged). The clamp ceiling is now a parameter
         # (``pos_weight_clamp_max``, default 10.0). The bridge passes
@@ -700,7 +700,7 @@ class GraphTransformerTrainer:
         # called on a trainer that already had self.best_epoch set from a
         # prior run (the local started at 0, self retained the old value).
         # The return dict and early-stopping log used the LOCAL, while
-        # save_checkpoint used self — so the saved value did not match
+        # save_checkpoint used self -- so the saved value did not match
         # the reported value. We now use self.best_epoch EVERYWHERE,
         # initializing it to 0 at the start of fit() so re-fitting on
         # an already-trained trainer resets cleanly (no stale state).
@@ -723,12 +723,12 @@ class GraphTransformerTrainer:
         # enough that both the warmup phase AND the anneal phase have at
         # least 1 step each. With pct_start=0.1, total_steps=5 gives
         # warmup_steps = int(0.1 * 5) = 0, which makes the anneal phase
-        # span the full 5 steps but the warmup phase has 0 steps —
+        # span the full 5 steps but the warmup phase has 0 steps --
         # PyTorch's internal division (step_num - start_step) / (end_step
         # - start_step) then divides by zero. We require total_steps >=
         # MIN_STEPS_FOR_SCHEDULER (10) so that warmup_steps = int(0.1 *
         # 10) = 1 >= 1. Below this threshold, skip the scheduler (LR
-        # remains constant) — these tiny training runs are for debugging
+        # remains constant) -- these tiny training runs are for debugging
         # only, not production, so the lack of warmup/decay is
         # acceptable.
         MIN_STEPS_FOR_SCHEDULER = 15
@@ -748,7 +748,7 @@ class GraphTransformerTrainer:
                 f"(max_lr={self.learning_rate}, total_steps={total_steps}, "
                 f"pct_start=0.1, anneal=cos). Warmup for first 10% of "
                 f"steps, then cosine decay to ~0. The previous code used "
-                f"plain Adam with constant lr — no warmup, no decay."
+                f"plain Adam with constant lr -- no warmup, no decay."
             )
         else:
             self.scheduler = None
@@ -808,19 +808,19 @@ class GraphTransformerTrainer:
             # stopping, not the pos_weighted training loss. The training
             # criterion (self.criterion) has pos_weight applied (8.6 fix)
             # which AMPLIFIES float noise on small val sets (15 pairs).
-            # The 1e-4 epsilon was too tight — pos_weight amplification
+            # The 1e-4 epsilon was too tight -- pos_weight amplification
             # caused >1e-4 noise swings every epoch, leading to checkpoint
             # thrashing and a "best" model that was a noise artifact.
             #
             # P3-016 ROOT FIX: the previous code RE-ENCODED the entire
             # graph here (self.model.encode(...) over 4 transformer layers)
-            # just to recompute the unweighted val loss — but evaluate()
+            # just to recompute the unweighted val loss -- but evaluate()
             # ALREADY returned an unweighted val loss (it uses
             # self._eval_criterion, which is a fresh BCEWithLogitsLoss
             # with NO pos_weight, per the BUG #26 fix). The re-encode
             # doubled the per-epoch eval compute (encode is the most
             # expensive op: O(layers * edges * dim)). The fix reuses
-            # ``val_metrics["loss"]`` directly — it IS the unweighted
+            # ``val_metrics["loss"]`` directly -- it IS the unweighted
             # val loss, computed once during the evaluate() call. The
             # 1e-3 epsilon is retained for float-noise robustness.
             val_loss_unweighted = float(val_metrics["loss"])
@@ -862,15 +862,15 @@ class GraphTransformerTrainer:
         #   epochs_trained = 41
         #   test_auc = 0.875
         # The 0.40 gap between val AUC and test AUC is mathematically
-        # impossible if val were a real signal — it's noise.
+        # impossible if val were a real signal -- it's noise.
         #
         # V30 ROOT FIX (8.11): the S-12 fix disabled checkpoint restoration
-        # for small val sets — the caller thinks they have the best model
+        # for small val sets -- the caller thinks they have the best model
         # but they have the LAST (possibly overfit) model. The new behavior:
         # ALWAYS restore the best_state_dict if one was saved. The S-12
         # "use the final model" path was making things WORSE (the final
         # model is the most overfit). The best-val-loss model is the
-        # RIGHT choice even on small val sets — val loss is continuous
+        # RIGHT choice even on small val sets -- val loss is continuous
         # and varies smoothly with model quality, unlike val AUC which
         # is discrete noise.
         if self.best_state_dict is not None:
@@ -880,13 +880,13 @@ class GraphTransformerTrainer:
                 f"V30 ROOT FIX (8.11): Restored best model (selected by "
                 f"val LOSS={self.best_val_loss:.4f} at epoch {self.best_epoch}, "
                 f"val set size={len(val_labels)}). The S-12 'use final model' "
-                f"path was removed — it was making things worse by using the "
+                f"path was removed -- it was making things worse by using the "
                 f"most-overfit model."
             )
         else:
             logger.warning(
                 f"V30 ROOT FIX (8.11): no best_state_dict was saved (no "
-                f"epoch improved val loss). Using the FINAL model — this "
+                f"epoch improved val loss). Using the FINAL model -- this "
                 f"may be overfit if training ran for many epochs."
             )
 
@@ -919,7 +919,7 @@ class GraphTransformerTrainer:
         # half the val data is used for early stopping and half for
         # temperature calibration. On tiny val sets this may leave
         # too few samples for either purpose, but that's the honest
-        # tradeoff — the alternative (using the same set for both)
+        # tradeoff -- the alternative (using the same set for both)
         # produces overfit temperature values that silently distort
         # downstream consumers.
         if calibrate_temperature and (
@@ -927,7 +927,7 @@ class GraphTransformerTrainer:
             and cal_disease_idx is not None
             and cal_labels is not None
         ):
-            # P3-S02 ROOT FIX (Guo et al. 2017): production path — caller
+            # P3-S02 ROOT FIX (Guo et al. 2017): production path -- caller
             # provided a SEPARATE held-out calibration set. Use it directly.
             # No val split, no overfitting risk. This is the scientifically
             # correct path.
@@ -937,7 +937,7 @@ class GraphTransformerTrainer:
                         f"P3-S02 ROOT FIX: using provided held-out "
                         f"calibration set (n_cal={len(cal_labels)}) for "
                         f"temperature scaling. Guo et al. 2017 require "
-                        f"a separate cal set — this is the production path."
+                        f"a separate cal set -- this is the production path."
                     )
                     self._calibrate_temperature(
                         cal_drug_idx, cal_disease_idx, cal_labels,
@@ -959,7 +959,7 @@ class GraphTransformerTrainer:
                 )
                 self._calibration_failed = True
         elif calibrate_temperature and len(val_labels) >= 4:
-            # P3-S02 ROOT FIX (Guo et al. 2017): FALLBACK path — caller did
+            # P3-S02 ROOT FIX (Guo et al. 2017): FALLBACK path -- caller did
             # NOT provide a separate calibration set. We split the val set
             # 50/50 for early-stopping vs calibration. This is NOT
             # scientifically correct (Guo et al. require a separate set),
@@ -970,7 +970,7 @@ class GraphTransformerTrainer:
                 f"P3-S02 ROOT FIX: no separate calibration set provided. "
                 f"Falling back to splitting the val set 50/50 for early-"
                 f"stopping vs calibration. Guo et al. 2017 require a "
-                f"SEPARATE held-out calibration set — splitting the val "
+                f"SEPARATE held-out calibration set -- splitting the val "
                 f"set leaves too few samples for EITHER purpose on small "
                 f"graphs and risks overfitting the temperature. Pass "
                 f"cal_drug_idx/cal_disease_idx/cal_labels to fit() for "
@@ -1012,7 +1012,7 @@ class GraphTransformerTrainer:
                 self._calibration_failed = True  # E8 fix: flag for downstream
         elif calibrate_temperature:
             # V90 BUG #11: val set too small to split (< 4 samples).
-            # Log a CRITICAL warning — the temperature parameter will
+            # Log a CRITICAL warning -- the temperature parameter will
             # remain at its default (1.0), which means no calibration.
             logger.critical(
                 f"V90 ROOT FIX (BUG #11): val set too small to split "
@@ -1186,33 +1186,33 @@ class GraphTransformerTrainer:
         # (self.best_epoch, set during fit() when val_loss improved),
         # not the LAST epoch (self.training_history[-1]["epoch"]).
         # The previous code's "best_epoch" field stored the last epoch,
-        # which was misleading — on checkpoint reload the user saw
+        # which was misleading -- on checkpoint reload the user saw
         # best_epoch = 500 (last) when the actual best was epoch 42.
         # V90 ROOT FIX (BUG #21 + #33): save self.best_epoch (the ACTUAL
         # best epoch), NOT training_history[-1]["epoch"] (the LAST epoch).
-        # The previous code confused "last" with "best" — if training ran
+        # The previous code confused "last" with "best" -- if training ran
         # 80 epochs with early stopping at epoch 40, the checkpoint saved
         # best_epoch=80 (wrong). The fix saves self.best_epoch, which is
         # set in fit() when val_loss actually improves.
         # V90 ROOT FIX (BUG #41): skip saving best_state_dict if None.
         # The previous code saved "best_state_dict": None when training
         # ran 0 epochs or never improved val_loss. On load, this restored
-        # None — useless but not incorrect. The fix skips the key entirely
+        # None -- useless but not incorrect. The fix skips the key entirely
         # if best_state_dict is None, saving disk space and avoiding
         # confusion.
         from .. import __version__ as _gt_version, __schema_version__ as _gt_schema
         # ROOT FIX (v92): the previous code had three syntax errors that
         # broke ``compileall`` and CI's build job for every PR:
-        #   1. Line 957 ended with ``}, path)`` — a leftover from an
+        #   1. Line 957 ended with ``}, path)`` -- a leftover from an
         #      inline ``torch.save({...}, path)`` that was refactored to
         #      a named ``checkpoint`` dict but the ``, path)`` was never
         #      removed. This is invalid Python (tuple expression with no
         #      opening paren).
         #   2. Line 948 was a DUPLICATE ``best_epoch`` key (the same key
-        #      was already on line 946). flake8 F601 — silently keeps
+        #      was already on line 946). flake8 F601 -- silently keeps
         #      only the last value, which happened to be identical, but
         #      it's a code smell indicating a botched merge.
-        #   3. Line 959 had a stray ``}`` — another leftover from the
+        #   3. Line 959 had a stray ``}`` -- another leftover from the
         #      botched refactor.
         # The fix below is the SINGLE canonical checkpoint dict. The
         # actual ``torch.save(checkpoint, path)`` call already exists

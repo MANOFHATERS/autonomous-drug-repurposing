@@ -1,4 +1,4 @@
-"""v82 Forensic Root-Fix Tests — 5 compound/cross-file chains.
+"""v82 Forensic Root-Fix Tests -- 5 compound/cross-file chains.
 
 Each test reproduces the EXACT failure scenario from the issue audit
 and verifies the root-level fix holds. Tests exercise REAL production
@@ -51,7 +51,7 @@ class TestChain1InchikeySuffix:
         df_b = pd.DataFrame([{"inchikey": canonical, "name": "DrugB"}])
         mapping = r.build_mapping(chembl_df=df_b, drugbank_df=df_a, pubchem_df=pd.DataFrame())
         assert len(mapping) == 1, (
-            f"Expected 1 canonical Compound node, got {len(mapping)} — "
+            f"Expected 1 canonical Compound node, got {len(mapping)} -- "
             "duplicate nodes would split Compound->Protein edges in the KG"
         )
 
@@ -96,7 +96,7 @@ class TestChain2StringAliases:
         r.build_mapping(pd.DataFrame(), string_aliases_df=aliases_df, string_df=pd.DataFrame())
         result = r.resolve_single(string_id="9606.ENSP00000000233")
         assert result is not None, (
-            "resolve_single(string_id=...) must return the provisional entry — "
+            "resolve_single(string_id=...) must return the provisional entry -- "
             "if this returns None, STRING-only proteins are unresolved in the KG"
         )
 
@@ -143,7 +143,7 @@ class TestChain3PromotionPerformance:
         stats = r.get_stats()
         # O(N*M) would take 10+ seconds; O(1) index takes < 1 second.
         assert elapsed < 2.0, (
-            f"Promotion took {elapsed:.3f}s — O(N*M) fallback likely still firing"
+            f"Promotion took {elapsed:.3f}s -- O(N*M) fallback likely still firing"
         )
         assert stats["records_matched"] == 1000, (
             f"Expected 1000 promotions via alias-uniprot index, got {stats['records_matched']}"
@@ -159,7 +159,7 @@ class TestChain3PromotionPerformance:
         r = ProteinResolver()
         r.build_mapping(pd.DataFrame(), string_aliases_df=pd.DataFrame(aliases), string_df=pd.DataFrame())
         assert len(r._provisional_by_alias_uniprot) == 1
-        # Ingest the matching UniProt record — should promote.
+        # Ingest the matching UniProt record -- should promote.
         r.add_uniprot_records([{"uniprot_id": "P12345", "gene_symbol": "TEST", "organism": "Homo sapiens"}])
         # The promoted synthetic uid should be removed from the index bucket.
         bucket = r._provisional_by_alias_uniprot.get("P12345", [])
@@ -201,7 +201,7 @@ class TestChain4CensorPreservation:
         deduped = dedup_interactions(df, keys=["drug_id", "target_id"], keep="best", handle_censored=True)
         assert len(deduped) == 1
         assert float(deduped["activity_value"].iloc[0]) == 500.0, (
-            "Precise 500nM must win over censored 1000nM — censored values are deprioritized"
+            "Precise 500nM must win over censored 1000nM -- censored values are deprioritized"
         )
 
     def test_dedup_legacy_fallback_no_crash(self):

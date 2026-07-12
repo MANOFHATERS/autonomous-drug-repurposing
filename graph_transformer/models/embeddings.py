@@ -55,12 +55,12 @@ class _SafeBatchNorm1d(nn.Module):
 
     ROOT FIX (X-07): the audit found that the previous "silent fallback"
     was dangerous: "If a user sets ``batch_size=1`` for debugging, every
-    BatchNorm layer runs in eval mode using RUNNING STATS — which are
+    BatchNorm layer runs in eval mode using RUNNING STATS -- which are
     initialized to mean=0, var=1 (untrained). So the BatchNorm does
     nothing useful. The user sees the model 'train' without errors but
     the BatchNorm layers are effectively identity layers. The model's
     behavior with ``batch_size=1`` is DIFFERENT from ``batch_size=32``
-    — silently."
+    -- silently."
 
     The fix: emit a LOUD CRITICAL-level warning the FIRST time
     batch_size=1 is detected in train mode (per instance). This makes
@@ -114,7 +114,7 @@ class _SafeBatchNorm1d(nn.Module):
                     f"BatchNorm is effectively an IDENTITY layer. "
                     f"The model's behavior with batch_size=1 is "
                     f"DIFFERENT from batch_size>=2. Do NOT use "
-                    f"batch_size=1 for training or evaluation — use "
+                    f"batch_size=1 for training or evaluation -- use "
                     f"batch_size>=2 to get correct BatchNorm behavior. "
                     f"(This warning is emitted ONCE per _SafeBatchNorm1d "
                     f"instance to avoid log spam.)"
@@ -148,7 +148,7 @@ class NodeTypeEmbedding(nn.Module):
     which exposes the learned type embeddings for downstream consumers
     (dashboard visualization, model inspection, etc.). Previously it
     was only used internally by ``NodeTypeProjection`` and exported in
-    ``models/__init__.py`` without any external caller — making the
+    ``models/__init__.py`` without any external caller -- making the
     export "API surface pollution". The V11 fix wires it into the
     public API of the main model class.
 

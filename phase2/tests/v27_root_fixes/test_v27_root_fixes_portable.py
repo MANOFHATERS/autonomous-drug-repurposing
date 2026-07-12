@@ -1,5 +1,5 @@
 """
-v27 ROOT FIXES — PORTABLE regression suite (v58 deep rebuild)
+v27 ROOT FIXES -- PORTABLE regression suite (v58 deep rebuild)
 ==============================================================
 
 This file REPLACES the v27_root_fixes test suite that the user reported
@@ -17,26 +17,26 @@ CI dashboards / pytest filters continue to work, but the PATHS are
 portable.
 
 Coverage (each test maps to a category from the user's report):
-    test_phase1_importable                      — package importability
-    test_phase2_importable                      — package importability
-    test_bridge_importable                      — bridge importability
-    test_migrations_dir_exists                  — migration files present
-    test_migration_001_no_forward_fk            — T-001 portable
-    test_migration_006_has_withdrawn_seed       — T-002 portable
-    test_migration_008_withdrawn_guard          — T-002 portable
-    test_migration_009_real_regex               — T-003 portable
-    test_chembl_loader_importable               — module loadability
-    test_chembl_inactivation_inhibits           — P2L-008 portable
-    test_chembl_activation_unchanged            — P2L-008 regression guard
-    test_clinicaltrials_importable              — module loadability
-    test_clinicaltrials_completed_classification — P2L-041 portable
-    test_chemberta_encoder_importable           — module loadability
-    test_run_pipeline_importable                — module loadability
-    test_phase1_bridge_importable               — module loadability
-    test_phase1_bridge_total_nodes              — P2C-001 portable
-    test_phase1_bridge_prod_detection           — P2C-008 portable
-    test_no_hardcoded_absolute_paths            — portability meta-test
-    test_phase1_phase2_connection_smoke         — end-to-end smoke
+    test_phase1_importable                      -- package importability
+    test_phase2_importable                      -- package importability
+    test_bridge_importable                      -- bridge importability
+    test_migrations_dir_exists                  -- migration files present
+    test_migration_001_no_forward_fk            -- T-001 portable
+    test_migration_006_has_withdrawn_seed       -- T-002 portable
+    test_migration_008_withdrawn_guard          -- T-002 portable
+    test_migration_009_real_regex               -- T-003 portable
+    test_chembl_loader_importable               -- module loadability
+    test_chembl_inactivation_inhibits           -- P2L-008 portable
+    test_chembl_activation_unchanged            -- P2L-008 regression guard
+    test_clinicaltrials_importable              -- module loadability
+    test_clinicaltrials_completed_classification -- P2L-041 portable
+    test_chemberta_encoder_importable           -- module loadability
+    test_run_pipeline_importable                -- module loadability
+    test_phase1_bridge_importable               -- module loadability
+    test_phase1_bridge_total_nodes              -- P2C-001 portable
+    test_phase1_bridge_prod_detection           -- P2C-008 portable
+    test_no_hardcoded_absolute_paths            -- portability meta-test
+    test_phase1_phase2_connection_smoke         -- end-to-end smoke
 """
 
 from __future__ import annotations
@@ -50,9 +50,9 @@ import pytest
 
 # ─── PORTABLE path computation (no hardcoded absolute paths) ───────────
 # Every path is derived from __file__ so the suite runs anywhere.
-# HERE = phase2/tests/v27_root_fixes/  →  PHASE2_TESTS = phase2/tests/
-# →  PHASE2_ROOT = phase2/  →  UNIFIED_ROOT = codebase root
-# →  PHASE1_ROOT = codebase/phase1
+# HERE = phase2/tests/v27_root_fixes/  ->  PHASE2_TESTS = phase2/tests/
+# ->  PHASE2_ROOT = phase2/  ->  UNIFIED_ROOT = codebase root
+# ->  PHASE1_ROOT = codebase/phase1
 HERE = Path(__file__).resolve().parent
 PHASE2_TESTS = HERE.parent            # phase2/tests/
 PHASE2_ROOT = PHASE2_TESTS.parent     # phase2/
@@ -198,7 +198,7 @@ def test_migration_009_real_regex():
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# P2L-008 — ChEMBL classifier (portable behavioral tests)
+# P2L-008 -- ChEMBL classifier (portable behavioral tests)
 # ═══════════════════════════════════════════════════════════════════════
 
 def test_chembl_inactivation_inhibits():
@@ -216,7 +216,7 @@ def test_chembl_activation_unchanged():
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# P2L-041 — ClinicalTrials classifier (portable behavioral tests)
+# P2L-041 -- ClinicalTrials classifier (portable behavioral tests)
 # ═══════════════════════════════════════════════════════════════════════
 
 def test_clinicaltrials_completed_classification():
@@ -233,7 +233,7 @@ def test_clinicaltrials_completed_classification():
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# P2C-001 — Phase1StagedData.total_nodes (portable)
+# P2C-001 -- Phase1StagedData.total_nodes (portable)
 # ═══════════════════════════════════════════════════════════════════════
 
 def test_phase1_bridge_total_nodes():
@@ -252,7 +252,7 @@ def test_phase1_bridge_total_nodes():
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# P2C-008 — prod-by-default when DATABASE_URL is set (portable)
+# P2C-008 -- prod-by-default when DATABASE_URL is set (portable)
 # ═══════════════════════════════════════════════════════════════════════
 
 def test_phase1_bridge_prod_detection(monkeypatch):
@@ -295,18 +295,18 @@ def test_no_hardcoded_absolute_paths():
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# End-to-end smoke: Phase 1 → Phase 2 bridge runs without crashing
+# End-to-end smoke: Phase 1 -> Phase 2 bridge runs without crashing
 # ═══════════════════════════════════════════════════════════════════════
 
 def test_phase1_phase2_connection_smoke(monkeypatch):
-    """End-to-end smoke test: the Phase 1 → Phase 2 bridge MUST run
+    """End-to-end smoke test: the Phase 1 -> Phase 2 bridge MUST run
     without crashing in dev mode (no DATABASE_URL). This is the
     portable equivalent of the v27 'integration smoke' test.
     """
     # Force dev mode (no DATABASE_URL) so the bridge uses CSV fixtures
     # if available, OR returns an empty dict if no CSVs exist.
     # v58: use monkeypatch.delenv so the env is restored after the test
-    # (no leakage into other tests). Do NOT delete from sys.modules —
+    # (no leakage into other tests). Do NOT delete from sys.modules --
     # that breaks test isolation by causing the next test's
     # `import drugos_graph.phase1_bridge` to return a DIFFERENT module
     # object than the one already imported as
@@ -319,7 +319,7 @@ def test_phase1_phase2_connection_smoke(monkeypatch):
     )
     # read_phase1_outputs MUST either return a dict (CSV path) OR raise
     # FileNotFoundError (no CSVs). It MUST NOT raise any other exception
-    # — that would indicate a regression in the bridge.
+    # -- that would indicate a regression in the bridge.
     try:
         out = read_phase1_outputs(prefer_postgres=False)
         assert isinstance(out, dict), f"bridge must return dict, got {type(out)}"

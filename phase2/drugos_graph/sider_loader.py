@@ -1,4 +1,4 @@
-"""DrugOS Graph Module — SIDER Loader (Institutional-Grade v1.0.0)
+"""DrugOS Graph Module -- SIDER Loader (Institutional-Grade v1.0.0)
 ==================================================================
 Downloads, parses, validates, and converts SIDER adverse-event data into
 knowledge-graph node + edge records for the Autonomous Drug Repurposing
@@ -15,33 +15,33 @@ Project Context
 The Autonomous Drug Repurposing Platform mines 10,000 FDA-approved drugs
 against every known disease using a chained pipeline:
 
-1. **Knowledge Graph (Neo4j)** — built by this loader + 10 sibling loaders
+1. **Knowledge Graph (Neo4j)** -- built by this loader + 10 sibling loaders
    (ChEMBL, DrugBank, UniProt, STRING, DisGeNET, OMIM, PubChem, STITCH,
    DRKG, ClinicalTrials).
-2. **Graph Transformer (PyTorch + PyG)** — predicts a 0-1 therapeutic-
+2. **Graph Transformer (PyTorch + PyG)** -- predicts a 0-1 therapeutic-
    likelihood score for every untested drug-disease pair by message-passing
    over the graph this loader helps build.
-3. **RL Hypothesis Ranker (Stable-Baselines3, PPO)** — ranks the top
+3. **RL Hypothesis Ranker (Stable-Baselines3, PPO)** -- ranks the top
    predictions by plausibility x **safety signal** x market opportunity.
-4. **Clinical decision layer** — pharma partners + clinicians consume the
+4. **Clinical decision layer** -- pharma partners + clinicians consume the
    ranking.
 
 SIDER adverse events are **edges** in that graph. They tell the RL ranker
 "Drug X causes adverse event Y." The RL ranker aggregates these onto the
 Compound node and assigns a **safety tier**:
 
-  * GREEN (recommend) — few adverse events
-  * YELLOW (caution) — moderate adverse events
-  * RED (do not recommend) — severe adverse events
+  * GREEN (recommend) -- few adverse events
+  * YELLOW (caution) -- moderate adverse events
+  * RED (do not recommend) -- severe adverse events
 
 **SIDER is the SOLE source of adverse-event data feeding the safety-signal
 dimension.** If SIDER data is wrong, missing, or orphaned, the safety
 ranker has no adverse events to aggregate, every drug is ranked GREEN,
 and a clinician/pharma partner may recommend a dangerous drug to a
-patient → **patient dies → criminal liability for the team.**
+patient -> **patient dies -> criminal liability for the team.**
 
 .. warning::
-    **PATIENT SAFETY — READ BEFORE MODIFYING THIS FILE**
+    **PATIENT SAFETY -- READ BEFORE MODIFYING THIS FILE**
 
     The 36 ☠️ patient-safety flags in the audit dominate all other
     concerns. If a fix to a patient-safety item conflicts with a fix to a
@@ -49,15 +49,15 @@ patient → **patient dies → criminal liability for the team.**
 
     The four Phase-0 fixes (below) are mandatory and ship FIRST:
 
-    * **Phase 0.1** — ``pubchem_cid`` is ``int64``, not zero-padded string
+    * **Phase 0.1** -- ``pubchem_cid`` is ``int64``, not zero-padded string
       (D2.4 / D15.1 / G2 / G3 / G4 / G5 / D5.13).
-    * **Phase 0.2** — ``meddra_type_filter="PT"`` is the default (D3.1 / G1)
+    * **Phase 0.2** -- ``meddra_type_filter="PT"`` is the default (D3.1 / G1)
       to prevent PT/LLT double-counting.
-    * **Phase 0.3** — Canonical spelling = ``MedDRA_Term`` (underscore) for
+    * **Phase 0.3** -- Canonical spelling = ``MedDRA_Term`` (underscore) for
       nodes and ``causes_adverse_event`` for edges (D2.9 / D14.1 / D14.2 /
       D15.11 / G7). Legacy ``Side Effect`` + ``causes_side_effect`` kept
       behind a deprecation guard.
-    * **Phase 0.4** — SIDER is in ``CRITICAL_SOURCES``; 0-row parse raises
+    * **Phase 0.4** -- SIDER is in ``CRITICAL_SOURCES``; 0-row parse raises
       ``SiderCriticalError`` (A1.1 / D6.3 / G6).
 
 Scientific Scope
@@ -70,7 +70,7 @@ Scientific Scope
   =====  ==================  ===================================================
   Col    Name                Description
   =====  ==================  ===================================================
-  1      stitch_id_flat      CIDm-prefixed PubChem CID (FLAT form — merged
+  1      stitch_id_flat      CIDm-prefixed PubChem CID (FLAT form -- merged
                             stereoisomers; e.g. CID000001070 = warfarin as a
                             racemate, R- + S-warfarin combined)
   2      stitch_id_stereo    CIDs-prefixed PubChem CID (STEREO-SPECIFIC form;
@@ -84,13 +84,13 @@ Scientific Scope
 - **MedDRA hierarchy:** 5 levels (SOC > HLGT > HGT > PT > LLT). PT
   (Preferred Term) is the canonical level for adverse-event reporting;
   LLT (Lowest Level Term) is a sub-concept that would double-count if
-  emitted alongside PT (D3.1 — patient safety).
+  emitted alongside PT (D3.1 -- patient safety).
 - **UMLS CUI format:** ``^C\\d{7}$`` (e.g. ``C0018790``).
 - **PubChem CID range:** integers in ``[1, 370_000_000]``.
-- **CIDm vs CIDs (v28 ROOT FIX, P2-L-14 — corrects prior
+- **CIDm vs CIDs (v28 ROOT FIX, P2-L-14 -- corrects prior
   self-contradiction):** Per STITCH docs
   (https://string-db.org/cgi/help?sessionId=&subpage=8#steroid):
-    * **CIDm = FLAT (merged-stereoisomer) form** — used in SIDER column 1
+    * **CIDm = FLAT (merged-stereoisomer) form** -- used in SIDER column 1
       (``stitch_id_flat``). CIDm IDs have the prefix ``CIDm`` and encode
       the compound as a racemic mixture / unspecified stereochemistry
       (e.g. CIDm100000070 = warfarin racemate; both R- and S-warfarin
@@ -100,12 +100,12 @@ Scientific Scope
       STITCH v5 production format uses ``CID0`` for FLAT (4th char = 0)
       and ``CID1`` for STEREO-SPECIFIC (4th char = 1). The example now
       uses ``CID0...`` to match the FLAT label.
-    * **CIDs = STEREO-SPECIFIC (separate-stereoisomer) form** — used in
+    * **CIDs = STEREO-SPECIFIC (separate-stereoisomer) form** -- used in
       SIDER column 2 (``stitch_id_stereo``). CIDs IDs have the prefix
       ``CIDs`` and encode a single, specific stereoisomer
       (e.g. CIDs100000706 = S-warfarin, the more pharmacologically
       active enantiomer).
-  The FLAT (CIDm) ID is the canonical Compound node ID used by SIDER —
+  The FLAT (CIDm) ID is the canonical Compound node ID used by SIDER --
   it matches what STITCH/DrugBank/ChEMBL emit (D3.2 / Phase 0.1). The
   previous docstring contradicted itself (lines 73-74 said CIDm=racemic
   while lines 87-89 said CIDm=stereo-specific); this rewrite aligns
@@ -134,13 +134,13 @@ Regulatory Compliance
   timestamped (ISO-8601 UTC), includes the ``load_id`` correlation ID,
   and is append-only. The regulatory audit log uses chained sha256
   (each line includes ``prev_hash``) for tamper-evidence (D16.12).
-- **HIPAA:** N/A (no PHI — see PII Declaration above).
+- **HIPAA:** N/A (no PHI -- see PII Declaration above).
 - **GDPR:** N/A (no EU data subjects).
 - **CC0 1.0 (SIDER license):** Every record carries ``_license`` and
   ``_attribution`` fields (D14.7). CC0 1.0 is public domain; attribution
   is requested as a courtesy by the SIDER consortium.
 - **Data retention:** Raw SIDER files are retained in ``data/raw/`` until
-  superseded by a new pinned release (D3.8 / D7.3 — stale-file freshness
+  superseded by a new pinned release (D3.8 / D7.3 -- stale-file freshness
   check at 365 days).
 
 References
@@ -157,28 +157,28 @@ References
 
 Design Patterns
 ---------------
-- **Adapter** — ``SiderLoader`` adapts the module-level functions to the
+- **Adapter** -- ``SiderLoader`` adapts the module-level functions to the
   ``Loader`` Protocol (PEP 544) so ``run_pipeline.py`` can treat all
   loaders polymorphically (A1.4).
-- **Facade** — ``load_sider()`` orchestrates the full pipeline: download
+- **Facade** -- ``load_sider()`` orchestrates the full pipeline: download
   -> parse -> validate -> emit -> (optional) audit log.
-- **Iterator** — ``iter_sider_rows`` and ``iter_sider_edges`` provide
+- **Iterator** -- ``iter_sider_rows`` and ``iter_sider_edges`` provide
   streaming APIs for memory-bounded processing of the 5M-row file (D6.7).
-- **Dead-Letter Queue** — malformed rows are written to
+- **Dead-Letter Queue** -- malformed rows are written to
   ``logs/dlq/sider_dlq.jsonl`` for forensic inspection rather than
   silently dropped (D5.12 / D6.5).
-- **Strategy** — ``meddra_type_filter`` kwarg selects between PT-only
+- **Strategy** -- ``meddra_type_filter`` kwarg selects between PT-only
   (default, patient-safe), LLT-inclusive, or no filter (D3.1 / Phase 0.2).
-- **Atomic Download** — files are written to ``.part`` then renamed via
+- **Atomic Download** -- files are written to ``.part`` then renamed via
   ``os.replace`` after sha256 verification (D4.10 / G10).
-- **Circuit Breaker** — download trips after ``SIDER_MAX_RETRIES``
+- **Circuit Breaker** -- download trips after ``SIDER_MAX_RETRIES``
   consecutive failures (D6.1).
-- **Mutual Exclusion Guard** — calling both canonical and legacy edge
+- **Mutual Exclusion Guard** -- calling both canonical and legacy edge
   emitters in the same process raises ``SiderDualWriteError`` (D2.13 / G13).
 
 Public API
 ----------
-Backward compatibility (master prompt Rule R3) — the five original public
+Backward compatibility (master prompt Rule R3) -- the five original public
 functions remain importable with the SAME positional signatures, SAME
 types, and SAME default behaviors:
 
@@ -186,14 +186,14 @@ types, and SAME default behaviors:
 - ``parse_sider_side_effects(filepath=None) -> pd.DataFrame``
 - ``sider_to_node_records(df) -> List[Dict]``
 - ``sider_to_edge_records(df) -> List[Dict]``
-- ``sider_to_legacy_edge_records(df) -> List[Dict]``  (deprecated — D2.10)
+- ``sider_to_legacy_edge_records(df) -> List[Dict]``  (deprecated -- D2.10)
 
-New public functions (additive only — Rule R2/R3):
+New public functions (additive only -- Rule R2/R3):
 
 - ``parse_sider_raw(filepath=None) -> pd.DataFrame``
 - ``validate_sider(df) -> dict``
-- ``parse_sider_fda_labels(filepath=None) -> pd.DataFrame``   (D3.3 — stub)
-- ``parse_sider_frequencies(filepath=None) -> pd.DataFrame``  (D3.3 — stub)
+- ``parse_sider_fda_labels(filepath=None) -> pd.DataFrame``   (D3.3 -- stub)
+- ``parse_sider_frequencies(filepath=None) -> pd.DataFrame``  (D3.3 -- stub)
 - ``iter_sider_rows(filepath=None, chunksize=100_000) -> Iterator[pd.DataFrame]``
 - ``iter_sider_edges(df_or_path, *, batch_size=10_000, **kwargs)``
 - ``diff_sider_outputs(old_df, new_df) -> dict``              (D16.10)
@@ -205,7 +205,7 @@ Aliases (additive, no rename):
 
 New public class:
 
-- ``SiderLoader``  (Loader Protocol adapter — A1.4)
+- ``SiderLoader``  (Loader Protocol adapter -- A1.4)
 
 Environment Variables
 ---------------------
@@ -219,7 +219,7 @@ Env var                         Purpose
 ``DRUGOS_SIDER_URL``            Override the download URL (D12.3)
 ``DRUGOS_SIDER_FORCE_DOWNLOAD`` Force re-download (D12.3)
 ``DRUGOS_SIDER_SKIP``           Skip SIDER load entirely (D12.3)
-``DRUGOS_SIDER_OFFLINE``        Use cached file only — no download (D12.3)
+``DRUGOS_SIDER_OFFLINE``        Use cached file only -- no download (D12.3)
 ``DRUGOS_SIDER_LOCAL_PATH``     Alias for DRUGOS_SIDER_FILEPATH (D12.3)
 ``DRUGOS_SIDER_MAX_ROWS``       Cap rows read (D12.3 / D12.12)
 ``DRUGOS_SIDER_ALLOW_LEGACY``   Allow legacy emitter post-migration (D14.10)
@@ -244,20 +244,20 @@ Coding Standards
 
 SCHEMA CHANGELOG
 ----------------
-**v0** (legacy — the original 149-line prototype):
+**v0** (legacy -- the original 149-line prototype):
 - Emitted 5-field node records and 6-field edge records.
-- ``drug_cid`` was a zero-padded string (e.g. ``"00002244"``) — MISMATCHED
+- ``drug_cid`` was a zero-padded string (e.g. ``"00002244"``) -- MISMATCHED
   with STITCH/DrugBank/ChEMBL which emit ``pubchem_cid: int`` (D2.4 / D15.1).
-- Emitted both PT and LLT rows as separate edges → double-counting (D3.1).
+- Emitted both PT and LLT rows as separate edges -> double-counting (D3.1).
 - No provenance, no license, no schema version, no audit trail.
 - Used the legacy ``"Side Effect"`` / ``"causes_side_effect"`` labels
-  (Phase 0.3 — these are now spelled ``"MedDRA_Term"`` /
+  (Phase 0.3 -- these are now spelled ``"MedDRA_Term"`` /
   ``"causes_adverse_event"`` canonically).
 
-**v1.0.0** (this release — institutional-grade audit fix):
+**v1.0.0** (this release -- institutional-grade audit fix):
 - Added ``pubchem_cid: int64`` (canonical), kept ``drug_cid: str`` as a
   deprecated alias for one release cycle (Phase 0.1 / D2.4).
-- Default ``meddra_type_filter="PT"`` (Phase 0.2 / D3.1) — PT-only by default.
+- Default ``meddra_type_filter="PT"`` (Phase 0.2 / D3.1) -- PT-only by default.
 - Canonical labels ``"MedDRA_Term"`` (node) and ``"causes_adverse_event"``
   (edge) (Phase 0.3 / D2.9 / D14.1).
 - SIDER promoted to ``CRITICAL_SOURCES``; 0-row parse raises
@@ -266,7 +266,7 @@ SCHEMA CHANGELOG
 - Added deterministic edge ``id`` via sha1 hash (D2.8 / G9).
 - Added dead-letter queue at ``logs/dlq/sider_dlq.jsonl`` (D5.12 / D6.5).
 - Added audit logs at ``logs/audit/sider_access.jsonl`` (D9.5) and
-  ``logs/audit/sider_regulatory.jsonl`` (D16.12 — chained-hash tamper-evident).
+  ``logs/audit/sider_regulatory.jsonl`` (D16.12 -- chained-hash tamper-evident).
 - Added transformation log at ``logs/transformations/sider.jsonl`` (D16.2).
 - Added quality report at ``logs/quality/sider_quality_report.json`` (D5.11).
 - Added lineage log at ``logs/lineage/sider_lineage.jsonl`` (D11.3).
@@ -297,8 +297,8 @@ When SIDER publishes a new release:
 5. Update ``DATA_SOURCES["sider"]["size_bytes"]`` if changed.
 6. Compute sha256 of the new file and update
    ``DATA_SOURCES["sider"]["sha256"]`` (or leave None and let the loader
-   pin it as a sidecar at first download — D3.8).
-7. Run ``pytest tests/test_sider_loader.py -v`` — all regression tests
+   pin it as a sidecar at first download -- D3.8).
+7. Run ``pytest tests/test_sider_loader.py -v`` -- all regression tests
    MUST pass.
 8. Run ``load_sider(force=True)`` to download the new file and verify
    row counts are within ``[EXPECTED_SIDER_ROW_COUNT_MIN,
@@ -308,50 +308,50 @@ When SIDER publishes a new release:
 
 See Also
 --------
-- ``drugos_graph/stitch_loader.py`` — gold-standard reference loader
-- ``drugos_graph/string_loader.py`` — second reference loader (PPI edges)
-- ``drugos_graph/chembl_loader.py`` — third reference loader (Compound→Protein)
-- ``drugos_graph/schemas.py`` — TypedDict contracts (SiderEdgeRecord etc.)
-- ``drugos_graph/exceptions.py`` — SIDER exception hierarchy
-- ``scripts/migrate_sidetoeffect_to_meddraterm.py`` — one-time Cypher migration
+- ``drugos_graph/stitch_loader.py`` -- gold-standard reference loader
+- ``drugos_graph/string_loader.py`` -- second reference loader (PPI edges)
+- ``drugos_graph/chembl_loader.py`` -- third reference loader (Compound->Protein)
+- ``drugos_graph/schemas.py`` -- TypedDict contracts (SiderEdgeRecord etc.)
+- ``drugos_graph/exceptions.py`` -- SIDER exception hierarchy
+- ``scripts/migrate_sidetoeffect_to_meddraterm.py`` -- one-time Cypher migration
 
 Edge Cases
 ----------
 The loader handles these edge cases explicitly (D10.3):
 
-- **Empty file** → ``SiderCriticalError`` (0 rows on required source — G6).
-- **Header-only file** → ``SiderCriticalError`` (0 data rows — G6).
-- **Malformed TSV** (wrong column count) → ``SiderSchemaError`` (D15.10).
-- **Wrong columns** (renamed in future SIDER version) → ``SiderSchemaError``.
-- **NULL stitch_id_flat** → DLQ with ``reason="null_stitch_id_flat"`` (D4.5).
-- **Regex no-match** (stitch_id_flat not ``CIDm\\d+``) → DLQ with
-  ``reason="regex_no_match"`` (D4.5 — distinguished from null).
-- **Out-of-range CID** (0 or > 370M) → DLQ with
+- **Empty file** -> ``SiderCriticalError`` (0 rows on required source -- G6).
+- **Header-only file** -> ``SiderCriticalError`` (0 data rows -- G6).
+- **Malformed TSV** (wrong column count) -> ``SiderSchemaError`` (D15.10).
+- **Wrong columns** (renamed in future SIDER version) -> ``SiderSchemaError``.
+- **NULL stitch_id_flat** -> DLQ with ``reason="null_stitch_id_flat"`` (D4.5).
+- **Regex no-match** (stitch_id_flat not ``CIDm\\d+``) -> DLQ with
+  ``reason="regex_no_match"`` (D4.5 -- distinguished from null).
+- **Out-of-range CID** (0 or > 370M) -> DLQ with
   ``reason="pubchem_cid_out_of_range"`` (D3.12 / D5.13).
-- **Invalid UMLS CUI** (not ``C\\d{7}``) → DLQ with
+- **Invalid UMLS CUI** (not ``C\\d{7}``) -> DLQ with
   ``reason="invalid_umls_cui"`` (D3.4 / D5.6).
-- **Unknown meddra_type** → DLQ with ``reason="unknown_meddra_type"`` (D2.12).
-- **Invalid side_effect_name** (empty / NULL / NA sentinel) → DLQ with
+- **Unknown meddra_type** -> DLQ with ``reason="unknown_meddra_type"`` (D2.12).
+- **Invalid side_effect_name** (empty / NULL / NA sentinel) -> DLQ with
   ``reason="invalid_side_effect_name"`` (D3.9).
-- **stitch_id_flat / stitch_id_stereo numeric mismatch** → DLQ with
+- **stitch_id_flat / stitch_id_stereo numeric mismatch** -> DLQ with
   ``reason="stitch_id_numeric_mismatch"`` (D3.10 / D5.4).
-- **Duplicates** (same drug-effect pair, multiple meddra_type) →
+- **Duplicates** (same drug-effect pair, multiple meddra_type) ->
   ``_dedupe_edges`` keeping PT-preferential (D2.7).
-- **Truncated gzip** → ``SiderParseError`` (D6.4).
-- **UTF-8 BOM** → handled via ``encoding="utf-8-sig"`` (D4.14).
-- **CRLF line endings** → handled via pandas default (D10.3).
-- **Quoted fields** (SIDER uses no quoting) → ``quoting=csv.QUOTE_NONE``
+- **Truncated gzip** -> ``SiderParseError`` (D6.4).
+- **UTF-8 BOM** -> handled via ``encoding="utf-8-sig"`` (D4.14).
+- **CRLF line endings** -> handled via pandas default (D10.3).
+- **Quoted fields** (SIDER uses no quoting) -> ``quoting=csv.QUOTE_NONE``
   (D4.15 / D14.8).
 
 Known Failure Modes
 -------------------
-- **SIDER source URL changes** without config update →
+- **SIDER source URL changes** without config update ->
   ``SiderDownloadError`` (URL not in allowlist). Recovery: update
   ``ALLOWED_SIDER_URLS`` in config.py.
-- **SIDER file format changes** (column rename) → ``SiderSchemaError``
+- **SIDER file format changes** (column rename) -> ``SiderSchemaError``
   (D15.10). Recovery: update ``SIDER_COLUMN_NAMES`` and bump
   ``SIDER_PARSER_VERSION``.
-- **SIDER publishes new release** → stale-file warning (D5.9). Recovery:
+- **SIDER publishes new release** -> stale-file warning (D5.9). Recovery:
   see "How to Update the Pinned Version" above.
 
 Test Coverage
@@ -366,7 +366,7 @@ Fixes: All 214 audit IDs from ``sider_loader_fix_prompt.md``. See inline
 """
 
 # =============================================================================
-# AUDIT ID COVERAGE BLOCK — All audit IDs from sider_loader_fix_prompt.md are
+# AUDIT ID COVERAGE BLOCK -- All audit IDs from sider_loader_fix_prompt.md are
 # addressed below. Each ID appears either as an inline `# Fixes <id>:` comment
 # at the specific code location it fixes, OR in this block as a one-line
 # summary referencing where the fix lives.
@@ -493,11 +493,11 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from ._loader_protocol import Loader  # noqa: F401
 
-# v29 ROOT FIX (audit L-5): Compound ID → InChIKey normalizer.
+# v29 ROOT FIX (audit L-5): Compound ID -> InChIKey normalizer.
 # Imported here (top of file) so ``_build_edge_record`` can call it
 # without paying the import cost on every row. The function itself
 # is a thin shim around ``IDCrosswalk.compound_id_to_inchikey()``
-# that returns the original ID unchanged when no mapping is found —
+# that returns the original ID unchanged when no mapping is found --
 # so the import does NOT introduce a hard runtime dependency on a
 # configured crosswalk (the default singleton loads the builtin
 # table on first call and gracefully returns the original ID with
@@ -511,30 +511,30 @@ from .id_crosswalk import _normalize_compound_id_to_inchikey
 PARSER_VERSION: str = SIDER_PARSER_VERSION      # "1.0.0"
 SCHEMA_VERSION: str = SIDER_SCHEMA_VERSION      # "1.0.0"
 
-# Fixes D14.4: SIDER_COLUMN_NAMES — explicit, named (no longer "col_names").
+# Fixes D14.4: SIDER_COLUMN_NAMES -- explicit, named (no longer "col_names").
 # The SIDER meddra_all_se.tsv.gz file has 6 columns in this exact order.
 #
-# V19 ROOT FIX (PS-7 / RT-3 — forensic re-audit found v15 "ROOT FIX" was
+# V19 ROOT FIX (PS-7 / RT-3 -- forensic re-audit found v15 "ROOT FIX" was
 # itself the bug):
 # The file's OWN module docstring (lines 73-74) and the official SIDER
 # documentation (http://sideeffects.embl.de/data/) BOTH state:
-#   col 1: stitch_id_flat    — CIDm-prefixed (or CID0 in newer format) = FLAT
-#   col 2: stitch_id_stereo  — CIDs-prefixed (or CID1 in newer format) = STEREO
-#   col 3: UMLS concept id as side effect label  — C\d{7}
-#   col 4: MedDRA concept type                   — PT|LLT|HLT|HLGT|SOC
-#   col 5: UMLS concept id (MedDRA)              — C\d{7}
-#   col 6: side effect name                      — string
+#   col 1: stitch_id_flat    -- CIDm-prefixed (or CID0 in newer format) = FLAT
+#   col 2: stitch_id_stereo  -- CIDs-prefixed (or CID1 in newer format) = STEREO
+#   col 3: UMLS concept id as side effect label  -- C\d{7}
+#   col 4: MedDRA concept type                   -- PT|LLT|HLT|HLGT|SOC
+#   col 5: UMLS concept id (MedDRA)              -- C\d{7}
+#   col 6: side effect name                      -- string
 #
 # The v15 "ROOT FIX" comment block (now removed) falsely claimed the
-# opposite — that col 1 is STEREO and col 2 is FLAT — and used that false
+# opposite -- that col 1 is STEREO and col 2 is FLAT -- and used that false
 # claim to justify swapping the tuple. The swap caused SIDER_CIDM_REGEX
 # (the FLAT regex) to be applied to col 2 values (which actually contain
 # STEREO CIDs), and SIDER_CIDS_REGEX (the STEREO regex) to be applied to
 # col 1 values (which actually contain FLAT CIDs). Every row failed the
-# cross-column regex check → DLQ → 0 rows parsed → SiderCriticalError.
+# cross-column regex check -> DLQ -> 0 rows parsed -> SiderCriticalError.
 #
 # The v9/v10/v11/v15 "FORENSIC VALIDATED" stamp was earned against fixture
-# files that used the SAME (wrong) column order — the production file does
+# files that used the SAME (wrong) column order -- the production file does
 # not. The verification agents in this V19 cycle cross-checked the tuple
 # against the file's own docstring and the official SIDER schema, both of
 # which agree: col 1 = FLAT, col 2 = STEREO.
@@ -542,15 +542,15 @@ SCHEMA_VERSION: str = SIDER_SCHEMA_VERSION      # "1.0.0"
 # Fix: restore the correct order (col 1 = stitch_id_flat, col 2 = stitch_id_stereo)
 # so each regex matches its intended column. This is the OPPOSITE of v15's swap.
 SIDER_COLUMN_NAMES: Tuple[str, ...] = (
-    "stitch_id_flat",      # col 1 — FLAT  (CIDm / CID0)
-    "stitch_id_stereo",    # col 2 — STEREO (CIDs / CID1)
+    "stitch_id_flat",      # col 1 -- FLAT  (CIDm / CID0)
+    "stitch_id_stereo",    # col 2 -- STEREO (CIDs / CID1)
     "umls_id_label",
     "meddra_type",
     "umls_id_meddra",
     "side_effect_name",
 )
 
-# Fixes D4.4 / GAP-4.4: SIDER_DTYPE_SCHEMA — explicit dtype for each column.
+# Fixes D4.4 / GAP-4.4: SIDER_DTYPE_SCHEMA -- explicit dtype for each column.
 # All six raw columns are string (nullable). The parser adds derived columns
 # (pubchem_cid as Int64, stereochemistry as string, _source_row as int64)
 # AFTER the initial read.
@@ -566,7 +566,7 @@ SIDER_DTYPE_SCHEMA: Dict[str, str] = {
 # Fixes Phase 0.1 / D2.1 / D2.2 / D2.3: Regex for extracting the PubChem CID
 # from the stitch_id_flat / stitch_id_stereo columns.
 #
-# v0 BUG: ``r"CID,m,s](\d+)"`` — the character class `[,m,s]` matched ANY of
+# v0 BUG: ``r"CID,m,s](\d+)"`` -- the character class `[,m,s]` matched ANY of
 # ",", "m", "s" (the comma was a literal member of the class, not a
 # separator). This silently allowed malformed IDs to parse.
 #
@@ -574,31 +574,31 @@ SIDER_DTYPE_SCHEMA: Dict[str, str] = {
 # * CIDm prefix (stitch_id_flat, col 1)  -> r"^CIDm(\d+)$"
 # * CIDs prefix (stitch_id_stereo, col 2) -> r"^CIDs(\d+)$"
 #
-# v15 ROOT FIX (runtime crash — SIDER produced 0 rows in production):
+# v15 ROOT FIX (runtime crash -- SIDER produced 0 rows in production):
 # The previous regex ONLY matched the legacy STITCH format `CIDm\d+` /
 # `CIDs\d+` (e.g. `CIDm0000085`, `CIDs0000085`). The actual SIDER
 # `meddra_all_se.tsv.gz` release (verified 2024-08) uses the newer
 # STITCH flat/stereo encoding where the 4th character is a digit:
-#   • `CID100000085` — stereo-specific (4th char = '1')
-#   • `CID000010917` — flat / non-stereo (4th char = '0')
+#   • `CID100000085` -- stereo-specific (4th char = '1')
+#   • `CID000010917` -- flat / non-stereo (4th char = '0')
 # The legacy regex `^CIDm(\d+)$` failed on EVERY row of the production
-# file (309,849 rows → 0 parsed → SiderCriticalError). The v9/v10/v11
+# file (309,849 rows -> 0 parsed -> SiderCriticalError). The v9/v10/v11
 # "FORENSIC VALIDATED" stamp was earned against a fixture file that
-# used the legacy CIDm/CIDs format — the production file does not.
+# used the legacy CIDm/CIDs format -- the production file does not.
 # Fix: accept BOTH formats via alternation:
-#   • `^CIDm(\d+)$` — legacy mixture (CIDm0000085)
-#   • `^CIDs(\d+)$` — legacy stereo (CIDs0000085)
-#   • `^CID0(\d+)$` — newer flat (CID000010917)  ← PRODUCTION FORMAT
-#   • `^CID1(\d+)$` — newer stereo (CID100000085) ← PRODUCTION FORMAT
+#   • `^CIDm(\d+)$` -- legacy mixture (CIDm0000085)
+#   • `^CIDs(\d+)$` -- legacy stereo (CIDs0000085)
+#   • `^CID0(\d+)$` -- newer flat (CID000010917)  ← PRODUCTION FORMAT
+#   • `^CID1(\d+)$` -- newer stereo (CID100000085) ← PRODUCTION FORMAT
 #
 # v70 ROOT FIX (P2L-035): the previous regex
 #     r"^(?:CIDm|CID0)(\d+)$"
 # used a NON-CAPTURING group for the prefix alternation, so only the
 # numeric portion was captured. Downstream consumers could not tell
 # whether the source file used the legacy "CIDm" format or the newer
-# "CID0" format — provenance information was erased. This matters
+# "CID0" format -- provenance information was erased. This matters
 # because SIDER/STITCH format evolution is an active concern (the
-# legacy → newer transition already happened once), and being able to
+# legacy -> newer transition already happened once), and being able to
 # tell which format a given row came from is critical for debugging
 # format-mismatch issues (e.g. the cross-loader inconsistency flagged
 # in P2L-040 where STITCH only accepted CID[ms] but SIDER accepted
@@ -613,7 +613,7 @@ SIDER_DTYPE_SCHEMA: Dict[str, str] = {
 #      clearer than ``match.group(1)``).
 #   3. Are accessible via ``.str.extract(...).groupdict()`` or
 #      ``pd.Series.str.extract`` with named groups becoming column
-#      names — making the extract call produce a clean DataFrame
+#      names -- making the extract call produce a clean DataFrame
 #      with columns ``prefix`` and ``cid`` instead of an opaque
 #      integer-indexed Series.
 #
@@ -638,14 +638,14 @@ SIDER_CIDM_REGEX: re.Pattern[str] = re.compile(
 )
 # Audit fix (v5 Tier-4): the previous regex used lowercase 'd' (CIds)
 # instead of uppercase 'D' (CIDs). The SIDER stereo-CID format is
-# "CIDs" + digits — confirmed by the comment on line 514. The typo
+# "CIDs" + digits -- confirmed by the comment on line 514. The typo
 # silently disabled stereo-ID validation and made the CIDm/CIDs
 # cross-column consistency check dead code.
 #
 # v15 ROOT FIX: also accept the newer `CID1\d+` production format.
 #
 # v70 ROOT FIX (P2L-035): same named-capture-group fix as
-# SIDER_CIDM_REGEX above — preserve the prefix as provenance.
+# SIDER_CIDM_REGEX above -- preserve the prefix as provenance.
 SIDER_CIDS_REGEX: re.Pattern[str] = re.compile(
     r"^(?P<prefix>CIDs|CID1)(?P<cid>\d+)$"
 )
@@ -663,10 +663,10 @@ SIDER_CSV_ESCAPECHAR: str = "\\"
 # The previous code had TWO overlapping but DIFFERENT constants:
 #   SIDER_NA_VALUES = ["", "NA", "NULL", "None", "NaN"]        (missing "null")
 #   SIDER_NA_SENTINELS = ("", "NA", "NULL", "None", "NaN", "null")
-# SIDER_NA_VALUES was used in pd.read_csv(na_values=...) — so lowercase
+# SIDER_NA_VALUES was used in pd.read_csv(na_values=...) -- so lowercase
 # "null" was NOT treated as NA during CSV parsing, slipping through as
 # a valid string value. SIDER_NA_SENTINELS (with "null") was used in
-# the .str.lower().isin() check — but only AFTER parsing, so "null"
+# the .str.lower().isin() check -- but only AFTER parsing, so "null"
 # rows were already in the DataFrame as non-NA strings.
 # Root fix: consolidate into ONE constant with ALL sentinels (including
 # lowercase "null"), and use it EVERYWHERE (both pd.read_csv and the
@@ -691,17 +691,17 @@ SIDER_EDGE_ID_SOURCE_LEGACY: str = "SIDER_LEGACY"
 # (MedDRA, SNOMED-CT, RxNorm, etc.). To prevent SIDER MedDRA CUIs from
 # colliding with DisGeNET Disease UMLS CUIs (prefixed "Disease:"), we prefix
 # SIDER MedDRA CUIs with "MedDRA:". The Compound src_id is the int
-# pubchem_cid (no prefix needed — Compound IDs are integers).
+# pubchem_cid (no prefix needed -- Compound IDs are integers).
 SIDER_DST_ID_PREFIX: str = "MedDRA:"
 
-# v69 ROOT FIX (P2L-036 — SIDER dst_id "MedDRA:C..." may not match
+# v69 ROOT FIX (P2L-036 -- SIDER dst_id "MedDRA:C..." may not match
 # kg_builder.ID_PATTERNS, risking 100% dead-lettering of SIDER edges).
 #
 # The audit flagged that SIDER_DST_ID_PREFIX = "MedDRA:" produces dst_ids
 # like "MedDRA:C0018790" but the kg_builder.ID_PATTERNS["MedDRA_Term"]
 # regex contract was NEVER verified in this file. If the pattern expected
 # bare "C0018790" (no prefix) or "MedDRA_C0018790" (underscore), every
-# SIDER edge would be silently dead-lettered at the Cypher MERGE step —
+# SIDER edge would be silently dead-lettered at the Cypher MERGE step --
 # silent KG layer loss.
 #
 # ROOT FIX: at module load time, build a representative SIDER dst_id and
@@ -709,13 +709,13 @@ SIDER_DST_ID_PREFIX: str = "MedDRA:"
 # contract is violated, raise a loud ``SIDERContractError`` at import
 # time so the operator sees the mismatch IMMEDIATELY (not after a 6-hour
 # pipeline run that silently dropped every SIDER edge). This is a
-# defensive contract check — it catches contract drift if either side
+# defensive contract check -- it catches contract drift if either side
 # changes.
 #
 # Verified contract (as of v69):
 #   kg_builder.ID_PATTERNS["MedDRA_Term"] = r"^(\d{8}|MedDRA:C\d{7})$"
 #   SIDER_DST_ID_PREFIX = "MedDRA:"
-#   Sample dst_id = "MedDRA:C0018790" → matches MedDRA:C\d{7} ✓
+#   Sample dst_id = "MedDRA:C0018790" -> matches MedDRA:C\d{7} ✓
 import re as _re_for_sider_contract_check
 
 
@@ -748,13 +748,13 @@ def _verify_sider_dst_id_contract() -> None:
     # line ~899).
     _local_logger = logging.getLogger(__name__)
     # Build a representative dst_id. UMLS CUIs are "C" + 7 digits.
-    _representative_cui = "C0018790"  # Pruritus — common adverse event
+    _representative_cui = "C0018790"  # Pruritus -- common adverse event
     _representative_dst_id = f"{SIDER_DST_ID_PREFIX}{_representative_cui}"
     try:
         from .kg_builder import ID_PATTERNS as _kg_id_patterns
     except ImportError:
         # kg_builder not yet importable (circular import during package
-        # init). Log a warning and skip the check — the contract will be
+        # init). Log a warning and skip the check -- the contract will be
         # enforced the first time the loader is used in a full pipeline
         # run. This is acceptable because the contract is ALSO enforced
         # per-edge at the kg_builder._load_edges step (just less loudly).
@@ -787,7 +787,7 @@ def _verify_sider_dst_id_contract() -> None:
             f"ranker to under-count adverse events."
         )
     _local_logger.debug(
-        "sider_loader: P2L-036 contract verified — dst_id=%r matches "
+        "sider_loader: P2L-036 contract verified -- dst_id=%r matches "
         "kg_builder.ID_PATTERNS['MedDRA_Term']=%r",
         _representative_dst_id, _meddra_pattern,
     )
@@ -797,11 +797,11 @@ def _verify_sider_dst_id_contract() -> None:
 try:
     _verify_sider_dst_id_contract()
 except SIDERContractError:
-    # Re-raise — this is a hard contract violation.
+    # Re-raise -- this is a hard contract violation.
     raise
-except Exception as _sider_contract_exc:  # pragma: no cover — defensive
+except Exception as _sider_contract_exc:  # pragma: no cover -- defensive
     # Any other exception (e.g. circular import) is logged but does not
-    # block module load — the per-edge check at kg_builder._load_edges
+    # block module load -- the per-edge check at kg_builder._load_edges
     # will catch the mismatch at runtime.
     # v69: use logging.getLogger directly because ``logger`` may not be
     # defined yet at this point in module load.
@@ -812,7 +812,7 @@ except Exception as _sider_contract_exc:  # pragma: no cover — defensive
         type(_sider_contract_exc).__name__, _sider_contract_exc,
     )
 
-# Edge type constants (D15.1 — kg_builder contract).
+# Edge type constants (D15.1 -- kg_builder contract).
 _SRC_TYPE: str = "Compound"
 _DST_TYPE_CANONICAL: str = SIDER_NODE_TYPE              # "MedDRA_Term"
 _DST_TYPE_LEGACY: str = SIDER_LEGACY_NODE_TYPE          # "Side Effect"
@@ -867,13 +867,13 @@ SIDER_MODULE_SCHEMA_VERSION: str = SCHEMA_VERSION
 
 # Fixes D4.29 / D15.5: __all__ declaration.
 __all__: List[str] = [
-    # Original 5 public functions (Rule R3 — preserved)
+    # Original 5 public functions (Rule R3 -- preserved)
     "download_sider",
     "parse_sider_side_effects",
     "sider_to_node_records",
     "sider_to_edge_records",
     "sider_to_legacy_edge_records",
-    # New public functions (Rule R2 — additive)
+    # New public functions (Rule R2 -- additive)
     "parse_sider_raw",
     "validate_sider",
     "parse_sider_fda_labels",
@@ -899,7 +899,7 @@ __all__: List[str] = [
     "SIDER_DST_ID_PREFIX",
 ]
 
-# Alias — backward-compat (Rule R3). Defined at end of file after the
+# Alias -- backward-compat (Rule R3). Defined at end of file after the
 # canonical function is declared.
 parse_sider = None  # type: ignore[assignment]  # set at end of file
 
@@ -997,7 +997,7 @@ def _get_logger(load_id: Optional[str] = None) -> logging.LoggerAdapter:
 
 
 # ===== SECTION 5: CONFIGURATION & ENVIRONMENT =====
-# Fixes D12.4: _validate_sider_config(cfg) — validate config on startup.
+# Fixes D12.4: _validate_sider_config(cfg) -- validate config on startup.
 # Fixes D12.3: _resolve_sider_filepath(filepath) priority: arg > env > config.
 # Fixes D12.3: _get_sider_config() honoring DRUGOS_SIDER_URL env override.
 
@@ -1005,8 +1005,8 @@ def _get_sider_config() -> Dict[str, Any]:
     """Return a copy of DATA_SOURCES['sider'], with env-var overrides applied.
 
     Honors:
-        DRUGOS_SIDER_URL — override the download URL (after _validate_url).
-        DRUGOS_SIDER_LOCAL_PATH — alias for DRUGOS_SIDER_FILEPATH.
+        DRUGOS_SIDER_URL -- override the download URL (after _validate_url).
+        DRUGOS_SIDER_LOCAL_PATH -- alias for DRUGOS_SIDER_FILEPATH.
 
     Returns
     -------
@@ -1076,11 +1076,11 @@ def _validate_sider_config(cfg: Dict[str, Any]) -> None:
             f"SIDER retry_backoff_seconds must be >= 0, got: "
             f"{cfg.get('retry_backoff_seconds')!r}",
         )
-    # D12.4 — pinned must be True for SIDER (Phase 0.4 — critical source).
+    # D12.4 -- pinned must be True for SIDER (Phase 0.4 -- critical source).
     if not cfg.get("pinned", False):
         raise SiderCriticalError(
             "SIDER config 'pinned' must be True for a CRITICAL source "
-            "(Phase 0.4 — silent schema drift would harm patients).",
+            "(Phase 0.4 -- silent schema drift would harm patients).",
             context={"pinned": cfg.get("pinned")},
         )
 
@@ -1137,16 +1137,16 @@ def _is_offline() -> bool:
 
 
 def _skip_sha256() -> bool:
-    """Return True if sha256 verification should be skipped (D12.3 — dev only).
+    """Return True if sha256 verification should be skipped (D12.3 -- dev only).
 
     Honors ``DRUGOS_SIDER_SKIP_SHA256=1`` env var. Logs a WARNING when
-    active — skipping sha256 is dangerous in production (D3.8 / D9.3).
+    active -- skipping sha256 is dangerous in production (D3.8 / D9.3).
     """
     skip = os.environ.get("DRUGOS_SIDER_SKIP_SHA256", "0") == "1"
     if skip:
         logger.warning(
             "sider_sha256_verification_skipped",
-            extra={"hint": "DRUGOS_SIDER_SKIP_SHA256=1 — dev mode only"},
+            extra={"hint": "DRUGOS_SIDER_SKIP_SHA256=1 -- dev mode only"},
         )
     return skip
 
@@ -1260,7 +1260,7 @@ def _get_load_id() -> str:
 
 
 def _reset_load_id() -> None:
-    """Reset the process-cached load_id (test helper — D11.2).
+    """Reset the process-cached load_id (test helper -- D11.2).
 
     Also resets the dual-write mutual-exclusion flags (D2.13 / G13) so
     tests can exercise both emitters independently.
@@ -1277,7 +1277,7 @@ def _compute_sha256(path: Path, chunk_size: int = 1 << 20) -> str:
     """Compute the SHA-256 hex digest of a file (D3.8 / D7.2).
 
     Reads the file in 1 MB chunks to avoid loading the entire file into
-    memory (SIDER is ~50 MB compressed, ~5M rows uncompressed — would
+    memory (SIDER is ~50 MB compressed, ~5M rows uncompressed -- would
     OOM on small instances).
     """
     h = hashlib.sha256()
@@ -1315,7 +1315,7 @@ def _sanitize_for_cypher(s: str) -> str:
     """Sanitize a string for safe inclusion in a Cypher query (D9.7 / G8).
 
     Escapes backslashes, single quotes, and double quotes. This is a
-    DEFENSE-IN-DEPTH measure — callers should always use parameterized
+    DEFENSE-IN-DEPTH measure -- callers should always use parameterized
     queries, but if a string must be inlined (e.g. for a script), this
     prevents injection.
 
@@ -1351,7 +1351,7 @@ def _validate_url(url: str) -> None:
             "SIDER URL is empty or not a string.",
             context={"url": repr(url)},
         )
-    # D9.2 — URL scheme validation.
+    # D9.2 -- URL scheme validation.
     if not url.startswith(("https://", "http://")):
         raise SiderDownloadError(
             f"Invalid SIDER URL scheme: {url!r}",
@@ -1363,7 +1363,7 @@ def _validate_url(url: str) -> None:
             extra={"url": _sanitize_url_for_logging(url),
                    "hint": "Should be https://"},
         )
-    # D9.1 — URL allowlist (SSRF guard).
+    # D9.1 -- URL allowlist (SSRF guard).
     if not any(url.startswith(prefix) for prefix in ALLOWED_SIDER_URLS):
         raise SiderDownloadError(
             f"SIDER URL not in ALLOWED_SIDER_URLS: "
@@ -1371,7 +1371,7 @@ def _validate_url(url: str) -> None:
             context={"url": _sanitize_url_for_logging(url),
                      "allowlist": list(ALLOWED_SIDER_URLS)},
         )
-    # D9.1 — reject embedded credentials.
+    # D9.1 -- reject embedded credentials.
     if "@" in url.split("://", 1)[-1]:
         raise SiderDownloadError(
             f"SIDER URL contains embedded credentials (refusing): "
@@ -1446,13 +1446,13 @@ def _create_ssl_context() -> ssl.SSLContext:
         import certifi
         ctx.load_verify_locations(certifi.where())
     except ImportError:
-        # System CA store is the fallback — may be outdated on some distros.
+        # System CA store is the fallback -- may be outdated on some distros.
         pass
     return ctx
 
 
 def _is_private_ip(host: str) -> bool:
-    """Return True if ``host`` resolves to a private/internal IP (D9.1 — SSRF)."""
+    """Return True if ``host`` resolves to a private/internal IP (D9.1 -- SSRF)."""
     try:
         addr = socket.gethostbyname(host)
         ip_obj = ipaddress.ip_address(addr)
@@ -1647,7 +1647,7 @@ def _retry_with_backoff(
     for attempt in range(retry_count):
         try:
             return func()
-        except Exception as exc:  # noqa: BLE001 — caller decides
+        except Exception as exc:  # noqa: BLE001 -- caller decides
             last_exc = exc
             if attempt == retry_count - 1:
                 break
@@ -1704,16 +1704,16 @@ def _atomic_download(
     def _do_download() -> None:
         nonlocal bytes_downloaded
         bytes_downloaded = 0
-        # D4.9 — socket timeout.
+        # D4.9 -- socket timeout.
         socket.setdefaulttimeout(timeout)
-        # D9.9 — control redirects (max_redirects).
+        # D9.9 -- control redirects (max_redirects).
         opener: urllib.request.OpenerDirector = urllib.request.build_opener()
         opener.addheaders = [("User-Agent", request.header_items()[0][1])]
 
         with urllib.request.urlopen(
             request, timeout=timeout, context=ssl_context
         ) as resp:
-            # D9.9 — log redirects.
+            # D9.9 -- log redirects.
             final_url: str = resp.geturl()
             if final_url != url:
                 logger.warning(
@@ -1745,11 +1745,11 @@ def _atomic_download(
                                      "bytes_downloaded": bytes_downloaded,
                                      "max_size": max_size},
                         )
-                    # D2.15 — progress callback (called every chunk).
+                    # D2.15 -- progress callback (called every chunk).
                     if progress_callback is not None:
                         try:
                             progress_callback(bytes_downloaded, int(content_length) if content_length else 0)
-                        except Exception:  # noqa: BLE001 — callback errors must not crash
+                        except Exception:  # noqa: BLE001 -- callback errors must not crash
                             logger.warning(
                                 "sider_progress_callback_failed",
                                 extra={"error_type": "unknown"},
@@ -1761,7 +1761,7 @@ def _atomic_download(
         retry_backoff=retry_backoff,
     )
 
-    # D4.26 — zero-byte guard.
+    # D4.26 -- zero-byte guard.
     if bytes_downloaded == 0:
         try:
             part_path.unlink(missing_ok=True)
@@ -1786,7 +1786,7 @@ def _atomic_download(
                      "min_size": SIDER_MIN_VALID_SIZE_BYTES},
         )
 
-    # D6.4 — gzip magic-byte sniff.
+    # D6.4 -- gzip magic-byte sniff.
     try:
         with open(part_path, "rb") as f_check:
             magic: bytes = f_check.read(2)
@@ -1811,7 +1811,7 @@ def _atomic_download(
                      "magic_bytes": magic.hex()},
         )
 
-    # D4.10 — atomic rename.
+    # D4.10 -- atomic rename.
     os.replace(part_path, dest)
     _set_secure_file_permissions(dest)
     return dest
@@ -1828,7 +1828,7 @@ def _append_audit_log(event: Dict[str, Any], path: Optional[Path] = None) -> Non
     """
     log_path: Path = path or _AUDIT_LOG_PATH
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    # D9.8 — set secure dir permissions.
+    # D9.8 -- set secure dir permissions.
     try:
         os.chmod(log_path.parent, SIDER_LOG_DIR_PERMISSIONS)
     except OSError:
@@ -1877,7 +1877,7 @@ def _append_transformation_log(event: Dict[str, Any], path: Optional[Path] = Non
         )
 
 
-# D16.12 — Regulatory audit log (chained sha256, append-only, tamper-evident).
+# D16.12 -- Regulatory audit log (chained sha256, append-only, tamper-evident).
 _REG_AUDIT_PREV_HASH: str = "0" * 64  # genesis hash
 
 
@@ -2157,17 +2157,17 @@ def download_sider(
     'sider_meddra_all_se.tsv.gz'
     >>> download_sider(dry_run=True)  # doctest: +SKIP
     """
-    # Fixes Phase 0.4 / D6.3 — SIDER is CRITICAL; no graceful degradation.
-    # Fixes A1.9 / D4.27 — accept data_dir parameter (default RAW_DIR).
+    # Fixes Phase 0.4 / D6.3 -- SIDER is CRITICAL; no graceful degradation.
+    # Fixes A1.9 / D4.27 -- accept data_dir parameter (default RAW_DIR).
     cfg: Dict[str, Any] = _get_sider_config()
     _validate_sider_config(cfg)
     raw_dir: Path = Path(data_dir) if data_dir is not None else RAW_DIR
-    raw_dir.mkdir(parents=True, exist_ok=True)  # D4.12 — create dir if missing.
+    raw_dir.mkdir(parents=True, exist_ok=True)  # D4.12 -- create dir if missing.
     gz_path: Path = raw_dir / cfg["filename"]
     _validate_filename_safe(cfg["filename"])
     _validate_path_within_dir(gz_path, raw_dir)
 
-    # D12.3 — offline mode: skip download, use cached only.
+    # D12.3 -- offline mode: skip download, use cached only.
     if _is_offline():
         if not gz_path.exists():
             raise SiderCriticalError(
@@ -2180,7 +2180,7 @@ def download_sider(
         )
         return gz_path
 
-    # D2.15 — dry_run: log + return without downloading.
+    # D2.15 -- dry_run: log + return without downloading.
     if dry_run:
         logger.info(
             "sider_download_dry_run",
@@ -2189,7 +2189,7 @@ def download_sider(
         )
         return gz_path
 
-    # D2.15 — verify_only: check sha256 without downloading.
+    # D2.15 -- verify_only: check sha256 without downloading.
     if verify_only:
         if not gz_path.exists():
             raise SiderDownloadError(
@@ -2211,7 +2211,7 @@ def download_sider(
         )
         return gz_path
 
-    # Cache check (idempotency — D7.1).
+    # Cache check (idempotency -- D7.1).
     if gz_path.exists() and not _resolve_force(force):
         # Fixes D4.19 / D7.2: verify SHA-256 on cache hit.
         try:
@@ -2235,10 +2235,10 @@ def download_sider(
                 "sider_cache_corrupt_redownloading",
                 extra={"path": str(gz_path), "error": str(exc)},
             )
-            # D6.12 — quarantine the corrupt file.
+            # D6.12 -- quarantine the corrupt file.
             _quarantine_file(gz_path, reason=f"sha256_mismatch: {exc}")
 
-    # GAP-15.3 — version-skew check.
+    # GAP-15.3 -- version-skew check.
     sidecar_version: Optional[str] = _read_sidecar_version(gz_path)
     if sidecar_version is not None and sidecar_version != cfg.get("version"):
         logger.warning(
@@ -2251,7 +2251,7 @@ def download_sider(
         except OSError:
             pass
 
-    # D7.3 — stale-file detection (re-download if very stale).
+    # D7.3 -- stale-file detection (re-download if very stale).
     if gz_path.exists() and not _resolve_force(force):
         try:
             age_days: float = (time.time() - gz_path.stat().st_mtime) / 86400.0
@@ -2293,7 +2293,7 @@ def download_sider(
             progress_callback=progress_callback,
         )
     except SiderDownloadError:
-        # Phase 0.4 / G6 — SIDER is critical; raise SiderCriticalError.
+        # Phase 0.4 / G6 -- SIDER is critical; raise SiderCriticalError.
         if SIDER_REQUIRED:
             raise SiderCriticalError(
                 f"SIDER is required but download failed: {gz_path}",
@@ -2324,7 +2324,7 @@ def download_sider(
         _quarantine_file(gz_path, reason="post_download_integrity_check_failed")
         raise
 
-    # D3.8 / D7.2 — write sidecars.
+    # D3.8 / D7.2 -- write sidecars.
     if actual_sha:
         _write_sidecar_sha256(gz_path, actual_sha)
     _write_sidecar_version(gz_path, str(cfg.get("version", SIDER_PINNED_VERSION)))
@@ -2340,7 +2340,7 @@ def download_sider(
         "url": _sanitize_url_for_logging(cfg["url"]),
         "dest": str(gz_path), "size_bytes": size_bytes, "sha256": actual_sha,
     })
-    # D16.12 — regulatory audit trail entry.
+    # D16.12 -- regulatory audit trail entry.
     _append_regulatory_audit_log({
         "input_file_sha256": actual_sha,
         "output_record_count": 0,  # filled in after parse
@@ -2362,7 +2362,7 @@ def _validate_columns(df: pd.DataFrame) -> None:
     SiderSchemaError
         If the column count is not 6, or any required column is missing.
     """
-    # D15.10 — column count check.
+    # D15.10 -- column count check.
     if len(df.columns) != SIDER_EXPECTED_COLUMN_COUNT:
         raise SiderSchemaError(
             f"SIDER file has {len(df.columns)} columns, expected "
@@ -2415,8 +2415,8 @@ def _validate_umls_ids(df: pd.DataFrame) -> pd.DataFrame:
     PS-7 / RT-3 ROOT FIX (patient safety): previously only
     ``umls_id_meddra`` (column 5) was validated against
     ``^C\\d{7}$``, leaving ``umls_id_label`` (column 3) unchecked
-    — rows with a corrupt label CUI passed through silently and
-    reached the KG as ``Compound→has_side_effect`` edges with a
+    -- rows with a corrupt label CUI passed through silently and
+    reached the KG as ``Compound->has_side_effect`` edges with a
     corrupt ``umls_id_label`` property. Also use ``str.fullmatch``
     instead of ``str.match`` so partial matches at the start
     (e.g. ``"C0000000EXTRA"``) are rejected, and record which
@@ -2503,10 +2503,10 @@ def _extract_pubchem_cid(df: pd.DataFrame) -> pd.DataFrame:
     """Extract the integer ``pubchem_cid`` from ``stitch_id_flat`` (Phase 0.1).
 
     Adds three columns:
-      * ``pubchem_cid``       — Int64, the integer PubChem CID (canonical).
-      * ``stereochemistry``   — "flat" for col 1 (CIDm), "stereo" for col 2 (CIDs).
-      * ``stitch_id_raw``     — the original CIDm/CIDs string.
-      * ``drug_cid``          — DEPRECATED zero-padded str alias (Phase 0.1).
+      * ``pubchem_cid``       -- Int64, the integer PubChem CID (canonical).
+      * ``stereochemistry``   -- "flat" for col 1 (CIDm), "stereo" for col 2 (CIDs).
+      * ``stitch_id_raw``     -- the original CIDm/CIDs string.
+      * ``drug_cid``          -- DEPRECATED zero-padded str alias (Phase 0.1).
 
     Rows where ``stitch_id_flat`` is null go to DLQ with reason
     ``"null_stitch_id_flat"`` (D4.5 / D5.10). Rows where the regex does
@@ -2514,11 +2514,11 @@ def _extract_pubchem_cid(df: pd.DataFrame) -> pd.DataFrame:
     Rows where the CID is outside ``[1, 370M]`` go to DLQ with reason
     ``"pubchem_cid_out_of_range"`` (D3.12 / D5.13).
     """
-    # Fixes Phase 0.1 — canonical int pubchem_cid (was zero-padded str).
+    # Fixes Phase 0.1 -- canonical int pubchem_cid (was zero-padded str).
     df = df.copy()
     df["stitch_id_raw"] = df["stitch_id_flat"].astype("string")
 
-    # D4.5 / D5.10 — distinguish null from regex-no-match.
+    # D4.5 / D5.10 -- distinguish null from regex-no-match.
     null_mask: pd.Series = df["stitch_id_flat"].isna()
     n_null: int = int(null_mask.sum())
     if n_null > 0:
@@ -2534,11 +2534,11 @@ def _extract_pubchem_cid(df: pd.DataFrame) -> pd.DataFrame:
                 "load_id": _get_load_id(),
             })
 
-    # Phase 0.1 / D2.1 / D2.2 — anchored regex.
+    # Phase 0.1 / D2.1 / D2.2 -- anchored regex.
     # v70 ROOT FIX (P2L-035): the regex now uses NAMED capture groups
     # ``prefix`` and ``cid`` (see SIDER_CIDM_REGEX definition above).
     # ``.str.extract`` with a multi-group regex returns a DataFrame
-    # whose columns are the named groups — select the ``cid`` column
+    # whose columns are the named groups -- select the ``cid`` column
     # for the numeric portion (the previous behavior) and keep the
     # ``prefix`` column as a provenance field on the DataFrame so
     # downstream consumers can tell whether the source file used the
@@ -2570,7 +2570,7 @@ def _extract_pubchem_cid(df: pd.DataFrame) -> pd.DataFrame:
                 "load_id": _get_load_id(),
             })
 
-    # D3.10 / D5.4 — cross-column consistency: stitch_id_flat (CIDm) and
+    # D3.10 / D5.4 -- cross-column consistency: stitch_id_flat (CIDm) and
     # stitch_id_stereo (CIDs) should have the same numeric portion.
     # v70 P2L-035: select the ``cid`` named group from each extract
     # DataFrame (the previous code returned a Series directly because
@@ -2611,19 +2611,19 @@ def _extract_pubchem_cid(df: pd.DataFrame) -> pd.DataFrame:
     drop_mask: pd.Series = null_mask | regex_no_match_mask | mismatch_mask
     df = df.loc[~drop_mask].copy()
 
-    # Phase 0.1 — strip leading zeros, cast to Int64.
+    # Phase 0.1 -- strip leading zeros, cast to Int64.
     cid_str: pd.Series = flat_num.loc[~drop_mask].str.lstrip("0").replace("", "0")
     df["pubchem_cid"] = cid_str.astype("int64").astype("Int64")
 
-    # Phase 0.1 — deprecated str alias (zero-padded 8 digits).
+    # Phase 0.1 -- deprecated str alias (zero-padded 8 digits).
     df["drug_cid"] = df["pubchem_cid"].astype("string").str.zfill(8)
 
-    # D3.2 — stereochemistry column. CIDm = flat (col 1), CIDs = stereo (col 2).
-    # Default: "flat" (we use col 1 as the canonical Compound ID — matches
+    # D3.2 -- stereochemistry column. CIDm = flat (col 1), CIDs = stereo (col 2).
+    # Default: "flat" (we use col 1 as the canonical Compound ID -- matches
     # STITCH/DrugBank/ChEMBL).
     df["stereochemistry"] = "flat"
 
-    # D3.12 / D5.13 — CID range validation.
+    # D3.12 / D5.13 -- CID range validation.
     out_of_range_mask: pd.Series = (
         (df["pubchem_cid"] < PUBCHEM_CID_MIN_SIDER)
         | (df["pubchem_cid"] > PUBCHEM_CID_MAX_SIDER)
@@ -2663,7 +2663,7 @@ def _apply_meddra_type_filter(
         Parsed SIDER DataFrame.
     meddra_type_filter : str or None
         One of ``"PT"``, ``"LLT"``, ``"HLT"``, ``"HLGT"``, ``"SOC"``, or
-        ``None`` (no filter — emit all types).
+        ``None`` (no filter -- emit all types).
 
     Returns
     -------
@@ -2702,16 +2702,16 @@ def _dedupe(df: pd.DataFrame) -> pd.DataFrame:
     if "meddra_type" not in df.columns or "pubchem_cid" not in df.columns:
         return df
     n_before: int = len(df)
-    # D2.7 — sort by meddra_type with PT < LLT < HLT < HLGT < SOC ordering.
+    # D2.7 -- sort by meddra_type with PT < LLT < HLT < HLGT < SOC ordering.
     df["_sort_key"] = df["meddra_type"].map(
         {t: i for i, t in enumerate(MEDDRA_TYPE_DEDUP_ORDER)}
     ).fillna(len(MEDDRA_TYPE_DEDUP_ORDER))
     df = df.sort_values(["pubchem_cid", "umls_id_meddra", "_sort_key"]).drop(columns=["_sort_key"])
-    # D2.7 / D5.3 — dedupe by (pubchem_cid, umls_id_meddra).
+    # D2.7 / D5.3 -- dedupe by (pubchem_cid, umls_id_meddra).
     df = df.drop_duplicates(subset=["pubchem_cid", "umls_id_meddra"], keep="first")
     n_after: int = len(df)
     if n_before > n_after:
-        # D11.9 — INFO log of dedup ratio.
+        # D11.9 -- INFO log of dedup ratio.
         pct: float = 100.0 * (n_before - n_after) / max(n_before, 1)
         logger.info(
             "sider_dedup_complete",
@@ -2762,7 +2762,7 @@ def parse_sider_raw(
     #   `filepath or _resolve_sider_filepath(data_dir=data_dir) if data_dir is None else _resolve_sider_filepath(filepath)`
     # had two bugs:
     #   1. `_resolve_sider_filepath()` does NOT accept `data_dir` kwarg
-    #      (its signature is `filepath: Optional[Path] = None`) — raised
+    #      (its signature is `filepath: Optional[Path] = None`) -- raised
     #      TypeError on every call.
     #   2. The ternary was logically broken: `filepath or X if Y else Z`
     #      parses as `(filepath or X) if Y else Z`, so when `data_dir is None`
@@ -2785,10 +2785,10 @@ def parse_sider_raw(
 
     logger.info("sider_parse_raw_start", extra={"filepath": str(path)})
 
-    # D6.4 — wrap pd.read_csv in try/except for clear error types.
-    # D4.4 / D4.13 — dtype + encoding + quoting (D4.15) + on_bad_lines (D4.16).
-    # D4.17 — explicit NA values + keep_default_na=False.
-    # D7.9 — atomic read: read entire file into BytesIO first to prevent
+    # D6.4 -- wrap pd.read_csv in try/except for clear error types.
+    # D4.4 / D4.13 -- dtype + encoding + quoting (D4.15) + on_bad_lines (D4.16).
+    # D4.17 -- explicit NA values + keep_default_na=False.
+    # D7.9 -- atomic read: read entire file into BytesIO first to prevent
     #        mid-read modification.
     try:
         with open(path, "rb") as f_raw:
@@ -2812,27 +2812,27 @@ def parse_sider_raw(
             na_values=SIDER_NA_VALUES,
             keep_default_na=False,
             on_bad_lines="warn",
-            low_memory=False,  # D9.6 — explicit dtype, no heuristic guessing.
+            low_memory=False,  # D9.6 -- explicit dtype, no heuristic guessing.
             compression="gzip",
         )
-    except Exception as exc:  # noqa: BLE001 — wrap any pandas error
-        # D6.4 — wrap in SiderParseError with diagnostic context.
+    except Exception as exc:  # noqa: BLE001 -- wrap any pandas error
+        # D6.4 -- wrap in SiderParseError with diagnostic context.
         raise SiderParseError(
             f"Failed to parse SIDER file {path}: {type(exc).__name__}: {exc}",
             context={"filepath": str(path),
                      "error_type": type(exc).__name__, "error": str(exc)},
         ) from exc
 
-    # D15.10 — validate column count.
+    # D15.10 -- validate column count.
     _validate_columns(df)
 
-    # D16.7 — _source_row column (1-indexed line in source TSV).
+    # D16.7 -- _source_row column (1-indexed line in source TSV).
     df["_source_row"] = range(1, len(df) + 1)
 
-    # D7.5 — reset_index for deterministic iteration order.
+    # D7.5 -- reset_index for deterministic iteration order.
     df = df.reset_index(drop=True)
 
-    # D4.18 — log nunique BEFORE filtering.
+    # D4.18 -- log nunique BEFORE filtering.
     logger.info(
         "sider_parse_raw_complete",
         extra={"filepath": str(path), "rows": len(df),
@@ -2875,17 +2875,17 @@ def parse_sider_side_effects(
     Backward-compatible signature (Rule R3):
     ``parse_sider_side_effects(filepath=None) -> pd.DataFrame``.
 
-    Pipeline (mirrors stitch_loader stages — A1.3):
-      1. ``_open_gz(filepath)``                  — read raw bytes atomically.
-      2. ``parse_sider_raw(filepath)``           — pd.read_csv with strict dtype.
-      3. ``_validate_columns(df)``               — 6-column check (D15.10).
-      4. ``_extract_pubchem_cid(df)``            — Phase 0.1 — int pubchem_cid.
-      5. ``_validate_umls_ids(df)``              — D3.4 — UMLS CUI regex.
-      6. ``_validate_meddra_type(df)``           — D2.12 — type enum check.
-      7. ``_validate_side_effect_name(df)``      — D3.9 — name not null/NA.
-      8. ``_apply_meddra_type_filter(df, ...)``  — Phase 0.2 — PT-only by default.
-      9. ``_dedupe(df)``                         — D2.7 — PT-preferential dedup.
-     10. Attach provenance to ``df.attrs``       — A1.6 / D16.1.
+    Pipeline (mirrors stitch_loader stages -- A1.3):
+      1. ``_open_gz(filepath)``                  -- read raw bytes atomically.
+      2. ``parse_sider_raw(filepath)``           -- pd.read_csv with strict dtype.
+      3. ``_validate_columns(df)``               -- 6-column check (D15.10).
+      4. ``_extract_pubchem_cid(df)``            -- Phase 0.1 -- int pubchem_cid.
+      5. ``_validate_umls_ids(df)``              -- D3.4 -- UMLS CUI regex.
+      6. ``_validate_meddra_type(df)``           -- D2.12 -- type enum check.
+      7. ``_validate_side_effect_name(df)``      -- D3.9 -- name not null/NA.
+      8. ``_apply_meddra_type_filter(df, ...)``  -- Phase 0.2 -- PT-only by default.
+      9. ``_dedupe(df)``                         -- D2.7 -- PT-preferential dedup.
+     10. Attach provenance to ``df.attrs``       -- A1.6 / D16.1.
 
     Parameters
     ----------
@@ -2893,14 +2893,14 @@ def parse_sider_side_effects(
         Path to the SIDER .tsv.gz file. If None, resolves via
         ``_resolve_sider_filepath`` (env var > config default).
     meddra_type_filter : str or None, default "PT"
-        Phase 0.2 / D3.1 — filter to this MedDRA type. ``"PT"`` (Preferred
+        Phase 0.2 / D3.1 -- filter to this MedDRA type. ``"PT"`` (Preferred
         Term) is the canonical level for adverse-event reporting. Pass
-        ``None`` to emit all types (NOT recommended — would double-count
-        adverse events in the RL safety ranker — G1).
+        ``None`` to emit all types (NOT recommended -- would double-count
+        adverse events in the RL safety ranker -- G1).
     stereo_mode : {"flat", "stereo", "both"}, default "flat"
-        D3.2 — which stereochemistry form to emit. ``"flat"`` (default)
-        uses col 1 (CIDm — racemic mixture, canonical Compound node ID,
-        matches STITCH/DrugBank/ChEMBL). ``"stereo"`` uses col 2 (CIDs —
+        D3.2 -- which stereochemistry form to emit. ``"flat"`` (default)
+        uses col 1 (CIDm -- racemic mixture, canonical Compound node ID,
+        matches STITCH/DrugBank/ChEMBL). ``"stereo"`` uses col 2 (CIDs --
         stereo-specific). ``"both"`` emits two Compound nodes per row.
     limit : int, optional
         Cap the number of rows read (D2.16). Alias for ``max_rows``.
@@ -2932,7 +2932,7 @@ def parse_sider_side_effects(
         On BadGzipFile, EmptyDataError, ParserError, UnicodeDecodeError,
         or wrong column count.
     SiderCriticalError
-        If the parse produces 0 rows (Phase 0.4 / G6 — would cause every
+        If the parse produces 0 rows (Phase 0.4 / G6 -- would cause every
         drug to be ranked GREEN by the RL safety ranker).
     SiderDataQualityError
         If row count is outside ``[EXPECTED_SIDER_ROW_COUNT_MIN,
@@ -2955,16 +2955,16 @@ def parse_sider_side_effects(
     Int64Dtype()
     >>> df = parse_sider_side_effects(meddra_type_filter=None)  # all types
     """
-    # Fixes Phase 0.2 / D3.1 — PT-only by default.
-    # Fixes D2.16 / D8.3 — chunksize streaming.
-    # Fixes D8.8 — as_generator streaming.
-    # Fixes D12.3 / D12.12 — max_rows env var.
+    # Fixes Phase 0.2 / D3.1 -- PT-only by default.
+    # Fixes D2.16 / D8.3 -- chunksize streaming.
+    # Fixes D8.8 -- as_generator streaming.
+    # Fixes D12.3 / D12.12 -- max_rows env var.
     cfg: Dict[str, Any] = _get_sider_config()
     _validate_sider_config(cfg)
     # v15 ROOT FIX (runtime crash): the previous code called
     # `_resolve_sider_filepath(data_dir=data_dir)` but the function's
     # signature is `_resolve_sider_filepath(filepath: Optional[Path] = None)`
-    # — it does NOT accept a `data_dir` kwarg. This raised `TypeError:
+    # -- it does NOT accept a `data_dir` kwarg. This raised `TypeError:
     # _resolve_sider_filepath() got an unexpected keyword argument
     # 'data_dir'` on every invocation, aborting Step 6 of the pipeline.
     # Fix: when the caller supplies `data_dir`, resolve the path here
@@ -2982,10 +2982,10 @@ def parse_sider_side_effects(
             context={"filepath": str(path), "raw_dir": str(RAW_DIR)},
         )
 
-    # D12.3 / D12.12 — max_rows resolution (limit alias takes precedence).
+    # D12.3 / D12.12 -- max_rows resolution (limit alias takes precedence).
     effective_limit: Optional[int] = limit if limit is not None else _resolve_max_rows(max_rows)
 
-    # D8.3 / D8.8 — chunksize resolution.
+    # D8.3 / D8.8 -- chunksize resolution.
     effective_chunksize: Optional[int] = chunksize
     if as_generator and effective_chunksize is None:
         effective_chunksize = _resolve_chunk_size()
@@ -3002,28 +3002,28 @@ def parse_sider_side_effects(
 
     def _process_chunk(chunk: pd.DataFrame, chunk_idx: int = 0) -> pd.DataFrame:
         """Apply the full validation + extraction pipeline to one chunk."""
-        # D15.10 — column count check.
+        # D15.10 -- column count check.
         _validate_columns(chunk)
-        # D16.7 — _source_row column (1-indexed line in source TSV).
+        # D16.7 -- _source_row column (1-indexed line in source TSV).
         chunk["_source_row"] = range(
             chunk_idx * (effective_chunksize or len(chunk)) + 1,
             chunk_idx * (effective_chunksize or len(chunk)) + 1 + len(chunk),
         )
-        # D7.5 — reset_index for deterministic iteration order.
+        # D7.5 -- reset_index for deterministic iteration order.
         chunk = chunk.reset_index(drop=True)
-        # Phase 0.1 — extract pubchem_cid (also validates CID range).
+        # Phase 0.1 -- extract pubchem_cid (also validates CID range).
         chunk = _extract_pubchem_cid(chunk)
-        # D3.4 — UMLS CUI validation.
+        # D3.4 -- UMLS CUI validation.
         chunk = _validate_umls_ids(chunk)
-        # D2.12 — meddra_type validation.
+        # D2.12 -- meddra_type validation.
         chunk = _validate_meddra_type(chunk)
-        # D3.9 — side_effect_name validation.
+        # D3.9 -- side_effect_name validation.
         chunk = _validate_side_effect_name(chunk)
-        # Phase 0.2 — apply meddra_type_filter.
+        # Phase 0.2 -- apply meddra_type_filter.
         chunk = _apply_meddra_type_filter(chunk, meddra_type_filter)
-        # D2.7 — dedupe (PT-preferential).
+        # D2.7 -- dedupe (PT-preferential).
         chunk = _dedupe(chunk)
-        # D7.4 — deterministic sort by (pubchem_cid, umls_id_meddra).
+        # D7.4 -- deterministic sort by (pubchem_cid, umls_id_meddra).
         chunk = chunk.sort_values(["pubchem_cid", "umls_id_meddra"]).reset_index(drop=True)
         # Attach provenance to chunk.attrs.
         chunk.attrs["provenance"] = _build_provenance_dict(
@@ -3046,7 +3046,7 @@ def parse_sider_side_effects(
             context={"filepath": str(path), "error": str(exc)},
         ) from exc
 
-    # D4.4 / D4.13 / D4.14 / D4.15 / D4.16 / D4.17 — read_csv args.
+    # D4.4 / D4.13 / D4.14 / D4.15 / D4.16 / D4.17 -- read_csv args.
     read_kwargs: Dict[str, Any] = dict(
         sep="\t",
         header=None,
@@ -3069,7 +3069,7 @@ def parse_sider_side_effects(
     t_parse_start: float = time.perf_counter()
     try:
         result: Any = pd.read_csv(io.BytesIO(raw_bytes), **read_kwargs)
-    except Exception as exc:  # noqa: BLE001 — wrap any pandas error
+    except Exception as exc:  # noqa: BLE001 -- wrap any pandas error
         raise SiderParseError(
             f"Failed to parse SIDER file {path}: {type(exc).__name__}: {exc}",
             context={"filepath": str(path),
@@ -3095,36 +3095,36 @@ def parse_sider_side_effects(
             })
         return _chunk_iter()
 
-    # Non-chunked mode — process the single DataFrame.
+    # Non-chunked mode -- process the single DataFrame.
     df: pd.DataFrame = _process_chunk(result, chunk_idx=0)
     parse_time: float = time.perf_counter() - t_parse_start
 
-    # Phase 0.4 / G6 — 0-row parse is CRITICAL (would cause every drug to
+    # Phase 0.4 / G6 -- 0-row parse is CRITICAL (would cause every drug to
     # be ranked GREEN by the RL safety ranker).
     if len(df) == 0:
         _flush_dlq()
         raise SiderCriticalError(
-            f"SIDER parse produced 0 rows — RL safety ranker would rank "
+            f"SIDER parse produced 0 rows -- RL safety ranker would rank "
             f"all drugs GREEN. Aborting. (filepath={path})",
             context={"filepath": str(path), "sha256": source_sha256,
                      "meddra_type_filter": meddra_type_filter,
                      "stereo_mode": stereo_mode},
         )
 
-    # D5.1 — row-count guard (only for full-file reads, not limit reads).
+    # D5.1 -- row-count guard (only for full-file reads, not limit reads).
     if effective_limit is None and not _skip_row_count_guard():
         if not (EXPECTED_SIDER_ROW_COUNT_MIN <= len(df) <= EXPECTED_SIDER_ROW_COUNT_MAX):
             # For test fixtures (small row counts), this guard is too strict.
             # Only enforce if the file is the production-scale file.
             file_size: int = path.stat().st_size
             # v15 ROOT FIX: the previous threshold (SIDER_MIN_VALID_SIZE_BYTES=1MB)
-            # was too low — partial fixtures downloaded for testing (typically
+            # was too low -- partial fixtures downloaded for testing (typically
             # 2-5 MB) passed the size gate but failed the row-count gate,
             # raising SiderDataQualityError and aborting Step 6. Production
             # SIDER meddra_all_se.tsv.gz is ~120 MB. Fix: only enforce the
             # row-count guard when the file is at least 50 MB (clearly
             # production-scale). For smaller files (fixtures, partials),
-            # log a WARNING and continue — the operator can see the row count
+            # log a WARNING and continue -- the operator can see the row count
             # and decide whether to download the full file.
             PRODUCTION_SIZE_THRESHOLD = 50 * 1024 * 1024  # 50 MB
             if file_size >= PRODUCTION_SIZE_THRESHOLD:
@@ -3138,16 +3138,16 @@ def parse_sider_side_effects(
                              "filepath": str(path)},
                 )
             else:
-                # Fixture / partial file — warn but continue.
+                # Fixture / partial file -- warn but continue.
                 logger.warning(
-                    "SIDER row count %d below production minimum %d — file "
+                    "SIDER row count %d below production minimum %d -- file "
                     "size %d bytes (< 50 MB threshold). Treating as fixture/"
                     "partial; continuing. To enforce the production row-count "
                     "guard, download the full ~120 MB SIDER file.",
                     len(df), EXPECTED_SIDER_ROW_COUNT_MIN, file_size,
                 )
 
-    # D4.18 — log nunique BEFORE filtering (already filtered, but log now).
+    # D4.18 -- log nunique BEFORE filtering (already filtered, but log now).
     logger.info(
         "sider_parse_complete",
         extra={"rows": len(df),
@@ -3180,7 +3180,7 @@ def parse_sider_side_effects(
         "loader_version": PARSER_VERSION,
         "schema_version": SCHEMA_VERSION,
     })
-    # D5.11 — quality report.
+    # D5.11 -- quality report.
     _write_quality_report({
         "total_rows": int(len(df)),
         "unique_drugs": int(df["pubchem_cid"].nunique()),
@@ -3193,7 +3193,7 @@ def parse_sider_side_effects(
         "stereo_mode": stereo_mode,
         "meddra_type_counts": df["meddra_type"].value_counts().to_dict() if "meddra_type" in df.columns else {},
     })
-    # D16.9 — registry entry.
+    # D16.9 -- registry entry.
     _update_registry({
         "version": str(cfg.get("version", SIDER_PINNED_VERSION)),
         "sha256": source_sha256,
@@ -3203,7 +3203,7 @@ def parse_sider_side_effects(
         "schema_version": SCHEMA_VERSION,
         "parser_version": PARSER_VERSION,
     })
-    # D16.12 — regulatory audit trail entry.
+    # D16.12 -- regulatory audit trail entry.
     _append_regulatory_audit_log({
         "input_file_sha256": source_sha256,
         "output_record_count": int(len(df)),
@@ -3340,7 +3340,7 @@ def _build_edge_id(src_id: Any, dst_id: str, rel_type: str, is_legacy: bool = Fa
     ``sha1(f"{src_id}|{dst_id}|{rel_type}|SIDER" or "...|SIDER_LEGACY")[:16]``.
 
     The legacy suffix ensures canonical and legacy edges get DIFFERENT ids
-    (preventing accidental MERGE collision in Neo4j — D2.8).
+    (preventing accidental MERGE collision in Neo4j -- D2.8).
     """
     source_tag: str = SIDER_EDGE_ID_SOURCE_LEGACY if is_legacy else SIDER_EDGE_ID_SOURCE_CANONICAL
     payload: str = f"{src_id}|{dst_id}|{rel_type}|{source_tag}"
@@ -3356,9 +3356,9 @@ def _build_node_record(
     The node ``id`` is prefixed with ``"MedDRA:"`` per D15.2 to prevent
     collision with DisGeNET Disease UMLS CUIs (prefixed ``"Disease:"``).
 
-    v60 ROOT FIX (FORENSIC-DEEP — 3 CORE_NODE_TYPES have no canonical
+    v60 ROOT FIX (FORENSIC-DEEP -- 3 CORE_NODE_TYPES have no canonical
     ID system). The v57 fix added `CANONICAL_IDS["MedDRA_Term"] =
-    "meddra_id"` to config.py — but this SIDER loader never populated
+    "meddra_id"` to config.py -- but this SIDER loader never populated
     the `meddra_id` field on the node props. So when
     `entity_resolver.resolve_canonical_id` looked for `meddra_id` on
     a MedDRA_Term node, it returned None silently. SIDER edges had
@@ -3371,9 +3371,9 @@ def _build_node_record(
     """
     umls_id: str = str(row.get("umls_id_meddra", ""))
     name_raw: str = str(row.get("side_effect_name", ""))
-    # D9.7 — sanitize name for Cypher safety (defense in depth).
+    # D9.7 -- sanitize name for Cypher safety (defense in depth).
     name_safe: str = _sanitize_for_cypher(name_raw)
-    # D2.6 — meddra_type included in node props.
+    # D2.6 -- meddra_type included in node props.
     meddra_type: Optional[str] = _safe_str(row.get("meddra_type"))
     umls_id_label: Optional[str] = _safe_str(row.get("umls_id_label"))
     # v60 ROOT FIX: extract the numeric MedDRA code from the row.
@@ -3393,7 +3393,7 @@ def _build_node_record(
         meddra_id = str(meddra_id_raw).strip()
         if not meddra_id:
             meddra_id = None
-    # v82 ROOT FIX (P0 — MedDRA PT vs LLT confusion):
+    # v82 ROOT FIX (P0 -- MedDRA PT vs LLT confusion):
     # When a MedDRA term has both PT and LLT rows, the node's primary
     # ID ("id" field) should use the PT UMLS CUI (umls_id_meddra from
     # the PT row), NOT the LLT CUI. The current code uses
@@ -3403,7 +3403,7 @@ def _build_node_record(
     # concepts at different hierarchy levels with different CUIs).
     # When the LLT CUI is used as the node ID but the row's meddra_type
     # is "PT", the node ID and the MedDRA hierarchy level are
-    # inconsistent — a PT node that has an LLT CUI. This confuses
+    # inconsistent -- a PT node that has an LLT CUI. This confuses
     # downstream consumers (entity resolver, RL ranker) that rely on
     # the node ID to match the MedDRA hierarchy level.
     #
@@ -3420,26 +3420,26 @@ def _build_node_record(
     #
     # Additionally, for the edge-level dst_id: when meddra_type is "PT",
     # use umls_id_meddra (the PT CUI) directly. When meddra_type is
-    # "LLT", the LLT CUI is correct for the edge — it points to a
+    # "LLT", the LLT CUI is correct for the edge -- it points to a
     # specific LLT node. The default meddra_type_filter="PT" ensures
     # only PT edges are emitted in the default configuration.
-    # v82 ROOT FIX (P0 — MedDRA PT vs LLT node ID): When meddra_type is
+    # v82 ROOT FIX (P0 -- MedDRA PT vs LLT node ID): When meddra_type is
     # "PT", use umls_id_meddra (the PT CUI) as the primary node ID.
     # When meddra_type is "LLT" and a meddra_id is available, use the
     # meddra_id-based PT CUI if the meddra_id maps to a PT concept
-    # (this requires crosswalking which is not available inline — so
+    # (this requires crosswalking which is not available inline -- so
     # for now, just record the meddra_type in props and let the
     # entity resolver handle PT↔LLT mapping). The key correctness
     # guarantee is: the node "id" field and "meddra_type" in props
-    # are CONSISTENT — a PT node has a PT CUI, an LLT node has an
+    # are CONSISTENT -- a PT node has a PT CUI, an LLT node has an
     # LLT CUI. The dedup already sorts PT-first, so the surviving
     # row for each umls_id_meddra is the PT row when available.
     if meddra_type and meddra_type.upper() == "PT" and meddra_id:
-        # PT term with a meddra_id — prefer meddra_id as the canonical
+        # PT term with a meddra_id -- prefer meddra_id as the canonical
         # node ID (matches CANONICAL_IDS["MedDRA_Term"] = "meddra_id").
         primary_id = f"MedDRA:{meddra_id}"
     elif meddra_type and meddra_type.upper() == "LLT" and meddra_id:
-        # LLT term — use the meddra_id but mark as LLT in props so
+        # LLT term -- use the meddra_id but mark as LLT in props so
         # consumers know this is NOT a PT concept.
         primary_id = f"MedDRA:{meddra_id}"
     else:
@@ -3447,7 +3447,7 @@ def _build_node_record(
     return {
         "id": primary_id,
         "name": name_safe,
-        "entity_type": SIDER_NODE_TYPE,  # Phase 0.3 — "MedDRA_Term"
+        "entity_type": SIDER_NODE_TYPE,  # Phase 0.3 -- "MedDRA_Term"
         "source": SOURCE_SIDER,
         "props": {
             "source": SOURCE_SIDER,
@@ -3491,19 +3491,19 @@ def _build_edge_record(
     The ``src_id`` is the int ``pubchem_cid`` (Phase 0.1 / D15.8).
     The ``dst_id`` is ``"MedDRA:C0018790"`` (prefixed, per D15.2).
     The ``rel_type`` is ``"causes_adverse_event"`` (canonical) or
-    ``"causes_side_effect"`` (legacy — Phase 0.3).
+    ``"causes_side_effect"`` (legacy -- Phase 0.3).
     """
     # BUG-B-004: was bare int 5311025, now CID5311025 to match
     # ID_PATTERNS['Compound']. Preserved here as ``pubchem_cid_original``
     # for traceability in props (see v29 L-5 note below).
     pubchem_cid_original: str = f"CID{int(row['pubchem_cid'])}"
-    # v29 ROOT FIX (audit L-5): Compound ID fragmentation —
+    # v29 ROOT FIX (audit L-5): Compound ID fragmentation --
     # STITCH/SIDER/DRKG used non-InChIKey IDs. Now normalizes to
     # InChIKey via crosswalk before loading. SIDER emits ``src_id``
     # as ``CID<digits>`` (PubChem CID format). When the crosswalk
-    # has a CID→InChIKey mapping (populated by Phase 1 entity
+    # has a CID->InChIKey mapping (populated by Phase 1 entity
     # resolution), the edge ``src_id`` is rewritten to the canonical
-    # InChIKey — unifying it with the InChIKey-keyed Compound nodes
+    # InChIKey -- unifying it with the InChIKey-keyed Compound nodes
     # produced by DrugBank / ChEMBL / PubChem loaders. When no
     # mapping exists, the original CID passes through unchanged
     # (with a WARNING). ``pubchem_cid_original`` is preserved in
@@ -3515,15 +3515,15 @@ def _build_edge_record(
     rel_type: str = _REL_TYPE_LEGACY if is_legacy else _REL_TYPE_CANONICAL
     dst_type: str = _DST_TYPE_LEGACY if is_legacy else _DST_TYPE_CANONICAL
     edge_id: str = _build_edge_id(src_id, dst_id, rel_type, is_legacy=is_legacy)
-    # D4.6 — use None instead of "" for null meddra_type / umls_id_label.
+    # D4.6 -- use None instead of "" for null meddra_type / umls_id_label.
     meddra_type: Optional[str] = _safe_str(row.get("meddra_type"))
     umls_id_label: Optional[str] = _safe_str(row.get("umls_id_label"))
-    # D3.2 — stereochemistry column.
+    # D3.2 -- stereochemistry column.
     stereo: str = str(row.get("stereochemistry", "flat"))
     stitch_id_raw: str = str(row.get("stitch_id_raw", ""))
-    # D16.7 — _source_row.
+    # D16.7 -- _source_row.
     source_row: int = int(row.get("_source_row", 0))
-    # D16.8 — _record_hash.
+    # D16.8 -- _record_hash.
     record_hash_payload: str = json.dumps({
         "src_id": src_id, "dst_id": dst_id, "rel_type": rel_type,
         "umls_id_meddra": str(row.get("umls_id_meddra", "")),
@@ -3531,9 +3531,9 @@ def _build_edge_record(
         "source_row": source_row,
     }, sort_keys=True, default=str)
     record_hash: str = hashlib.sha256(record_hash_payload.encode("utf-8")).hexdigest()
-    # D2.6 / D14.7 — node + edge props.
+    # D2.6 / D14.7 -- node + edge props.
     props: Dict[str, Any] = {
-        # Legacy keys (preserved verbatim — Rule R3).
+        # Legacy keys (preserved verbatim -- Rule R3).
         "source": SOURCE_SIDER,
         "meddra_type": meddra_type,
         "umls_id_label": umls_id_label,
@@ -3543,7 +3543,7 @@ def _build_edge_record(
         "_attribution": SIDER_ATTRIBUTION,
         "_schema_version": SCHEMA_VERSION,
         "_parser_version": PARSER_VERSION,
-        # SIDER-specific metadata (nested — D15.1).
+        # SIDER-specific metadata (nested -- D15.1).
         # v29 ROOT FIX (audit L-5): ``pubchem_cid`` here preserves the
         # ORIGINAL CID-form ID (``pubchem_cid_original``), NOT the
         # normalized ``src_id`` which may be an InChIKey. This keeps the
@@ -3558,11 +3558,11 @@ def _build_edge_record(
             "record_hash": record_hash,
         },
         # Stereochemistry + Compound identity (D3.2 / Phase 0.1).
-        # v29 ROOT FIX (audit L-5): same — keep original CID here.
+        # v29 ROOT FIX (audit L-5): same -- keep original CID here.
         "pubchem_cid": pubchem_cid_original,
         "stereochemistry": stereo,
         "stitch_id_raw": stitch_id_raw,
-        # Adverse-event metadata (D3.3 — defaults; populated when FDA labels loaded).
+        # Adverse-event metadata (D3.3 -- defaults; populated when FDA labels loaded).
         "black_box_warning": False,
         "fda_label_count": 0,
         # Deterministic ordering + lineage.
@@ -3604,10 +3604,10 @@ def sider_to_node_records(
     df : pd.DataFrame
         Parsed SIDER DataFrame (output of ``parse_sider_side_effects``).
     meddra_type_filter : str or None, default "PT"
-        Phase 0.2 — filter to this MedDRA type before emitting nodes.
+        Phase 0.2 -- filter to this MedDRA type before emitting nodes.
         Pass ``None`` to emit all types.
     dedup : bool, default True
-        D2.5 — dedupe nodes by ``umls_id_meddra`` (PT-preferential).
+        D2.5 -- dedupe nodes by ``umls_id_meddra`` (PT-preferential).
 
     Returns
     -------
@@ -3621,7 +3621,7 @@ def sider_to_node_records(
     --------------
     .. warning::
         Using the canonical entity type ``"MedDRA_Term"`` (with underscore)
-        is critical — the RL safety ranker queries
+        is critical -- the RL safety ranker queries
         ``MATCH (:Compound)-[:causes_adverse_event]->(:MedDRA_Term)``.
         Emitting the legacy ``"Side Effect"`` would leave adverse events
         invisible to the ranker (G7).
@@ -3634,10 +3634,10 @@ def sider_to_node_records(
     >>> nodes[0]["entity_type"]  # doctest: +SKIP
     'MedDRA_Term'
     """
-    # Phase 0.2 — apply meddra_type_filter.
+    # Phase 0.2 -- apply meddra_type_filter.
     df_filtered: pd.DataFrame = _apply_meddra_type_filter(df, meddra_type_filter)
     if dedup and "umls_id_meddra" in df_filtered.columns:
-        # D2.5 — dedupe by umls_id_meddra (PT-preferential).
+        # D2.5 -- dedupe by umls_id_meddra (PT-preferential).
         df_filtered = _dedupe(df_filtered)
     # Build provenance once (D16.1).
     provenance: Dict[str, Any] = df.attrs.get("provenance", {})
@@ -3649,12 +3649,12 @@ def sider_to_node_records(
             meddra_type_filter=meddra_type_filter,
             stereo_mode="flat",
         )
-    # D2.5 — drop_duplicates by umls_id_meddra (node-level dedup).
+    # D2.5 -- drop_duplicates by umls_id_meddra (node-level dedup).
     if "umls_id_meddra" in df_filtered.columns:
         nodes_df: pd.DataFrame = df_filtered[["umls_id_meddra", "side_effect_name", "meddra_type", "umls_id_label"]].drop_duplicates(subset=["umls_id_meddra"], keep="first")
     else:
         nodes_df = df_filtered
-    # D4.7 — use to_dict(orient="records") instead of itertuples.
+    # D4.7 -- use to_dict(orient="records") instead of itertuples.
     records: List[Dict[str, Any]] = [
         _build_node_record(pd.Series(row), provenance)
         for row in nodes_df.to_dict(orient="records")
@@ -3691,7 +3691,7 @@ def _check_dual_write(is_legacy: bool) -> None:
             raise SiderDualWriteError(
                 "Both canonical (sider_to_edge_records) and legacy "
                 "(sider_to_legacy_edge_records) edge emitters called in "
-                "the same process — would double-count adverse events in "
+                "the same process -- would double-count adverse events in "
                 "the RL safety ranker. Use only ONE emitter. Set "
                 "DRUGOS_SIDER_ALLOW_LEGACY=1 to suppress (NOT recommended).",
                 context={"canonical_emitted": _CANONICAL_EMITTED,
@@ -3713,21 +3713,21 @@ def sider_to_edge_records(
     ``sider_to_edge_records(df) -> List[Dict]``.
 
     Emits edges of type ``("Compound", "causes_adverse_event", "MedDRA_Term")``
-    — the canonical SIDER endpoint per ``config.CORE_EDGE_TYPES`` (Phase 0.3).
+    -- the canonical SIDER endpoint per ``config.CORE_EDGE_TYPES`` (Phase 0.3).
 
     Parameters
     ----------
     df : pd.DataFrame
         Parsed SIDER DataFrame (output of ``parse_sider_side_effects``).
     meddra_type_filter : str or None, default "PT"
-        Phase 0.2 — filter to this MedDRA type before emitting edges.
+        Phase 0.2 -- filter to this MedDRA type before emitting edges.
     dedup : bool, default True
-        D2.7 — dedupe edges by (pubchem_cid, umls_id_meddra) PT-preferential.
+        D2.7 -- dedupe edges by (pubchem_cid, umls_id_meddra) PT-preferential.
     batch_size : int, optional
-        D8.10 — if set, yield batches of ``batch_size`` edges each.
+        D8.10 -- if set, yield batches of ``batch_size`` edges each.
         Requires ``as_generator=True``.
     as_generator : bool, default False
-        D8.8 — if True, return an iterator instead of a list. Required
+        D8.8 -- if True, return an iterator instead of a list. Required
         for very large DataFrames (>500K rows) to avoid OOM.
 
     Returns
@@ -3760,7 +3760,7 @@ def sider_to_edge_records(
     >>> # src_id was an int and suppressed the lie with +SKIP. After
     >>> # BUG-B-004, src_id is a STRING "CID5311025" (not int). This
     >>> # self-contained doctest verifies the contract WITHOUT requiring
-    >>> # the SIDER data files — so it actually runs (no +SKIP).
+    >>> # the SIDER data files -- so it actually runs (no +SKIP).
     >>> import pandas as pd
     >>> toy_df = pd.DataFrame({
     ...     "pubchem_cid": [5311025],
@@ -3771,14 +3771,14 @@ def sider_to_edge_records(
     >>> # We can verify the format directly:
     >>> f"CID{int(toy_df['pubchem_cid'][0])}"
     'CID5311025'
-    >>> # And the type is str, not int — the lie was claiming int.
+    >>> # And the type is str, not int -- the lie was claiming int.
     >>> isinstance(f"CID{int(toy_df['pubchem_cid'][0])}", str)
     True
     """
-    # D2.13 / G13 — dual-write mutual exclusion.
+    # D2.13 / G13 -- dual-write mutual exclusion.
     _check_dual_write(is_legacy=False)
 
-    # Phase 0.2 — apply meddra_type_filter.
+    # Phase 0.2 -- apply meddra_type_filter.
     df_filtered: pd.DataFrame = _apply_meddra_type_filter(df, meddra_type_filter)
     if dedup:
         df_filtered = _dedupe(df_filtered)
@@ -3792,7 +3792,7 @@ def sider_to_edge_records(
             stereo_mode="flat",
         )
 
-    # D6.7 / D8.1 — streaming for large DataFrames.
+    # D6.7 / D8.1 -- streaming for large DataFrames.
     use_streaming: bool = (
         as_generator
         or (len(df_filtered) > SIDER_LARGE_DF_THRESHOLD)
@@ -3800,7 +3800,7 @@ def sider_to_edge_records(
     if use_streaming:
         return _iter_sider_edges(df_filtered, provenance, batch_size=batch_size, is_legacy=False)
 
-    # D4.7 — vectorized edge construction via to_dict(orient="records").
+    # D4.7 -- vectorized edge construction via to_dict(orient="records").
     records: List[Dict[str, Any]] = [
         _build_edge_record(pd.Series(row), provenance, is_legacy=False)
         for row in df_filtered.to_dict(orient="records")
@@ -3828,7 +3828,7 @@ def _iter_sider_edges(
     """Streaming edge emitter (D6.7 / D8.1 / D8.8 / D8.10).
 
     Yields one edge record at a time (or one batch at a time if
-    ``batch_size`` is set — yields lists of dicts).
+    ``batch_size`` is set -- yields lists of dicts).
     """
     effective_batch: Optional[int] = _resolve_batch_size(batch_size) if batch_size else None
     records: List[Dict[str, Any]] = []
@@ -3910,9 +3910,9 @@ def sider_to_legacy_edge_records(
     df : pd.DataFrame
         Parsed SIDER DataFrame.
     meddra_type_filter : str or None, default "PT"
-        Phase 0.2 — filter to this MedDRA type.
+        Phase 0.2 -- filter to this MedDRA type.
     dedup : bool, default True
-        D2.7 — dedupe edges by (pubchem_cid, umls_id_meddra).
+        D2.7 -- dedupe edges by (pubchem_cid, umls_id_meddra).
 
     Returns
     -------
@@ -3930,24 +3930,24 @@ def sider_to_legacy_edge_records(
     DeprecationWarning
         Always emitted at the top of the function (D2.10).
     """
-    # D2.10 — emit DeprecationWarning.
+    # D2.10 -- emit DeprecationWarning.
     warnings.warn(_LEGACY_DEPRECATION_MSG, DeprecationWarning, stacklevel=2)
 
-    # D14.3 — post-migration guard: refuse unless DRUGOS_SIDER_ALLOW_LEGACY=1.
+    # D14.3 -- post-migration guard: refuse unless DRUGOS_SIDER_ALLOW_LEGACY=1.
     if not _allow_legacy():
         raise RuntimeError(
             "sider_to_legacy_edge_records is post-migration. The legacy "
             "edge type ('causes_side_effect' / 'Side Effect') has been "
             "superseded by the canonical ('causes_adverse_event' / "
             "'MedDRA_Term'). Set DRUGOS_SIDER_ALLOW_LEGACY=1 to suppress "
-            "this error and continue (NOT recommended — see migration "
+            "this error and continue (NOT recommended -- see migration "
             "guide in scripts/migrate_sidetoeffect_to_meddraterm.py)."
         )
 
-    # D2.13 / G13 — dual-write mutual exclusion.
+    # D2.13 / G13 -- dual-write mutual exclusion.
     _check_dual_write(is_legacy=True)
 
-    # Phase 0.2 — apply meddra_type_filter.
+    # Phase 0.2 -- apply meddra_type_filter.
     df_filtered: pd.DataFrame = _apply_meddra_type_filter(df, meddra_type_filter)
     if dedup:
         df_filtered = _dedupe(df_filtered)
@@ -3960,7 +3960,7 @@ def sider_to_legacy_edge_records(
             meddra_type_filter=meddra_type_filter,
             stereo_mode="flat",
         )
-    # D4.7 — vectorized edge construction via to_dict(orient="records").
+    # D4.7 -- vectorized edge construction via to_dict(orient="records").
     records: List[Dict[str, Any]] = [
         _build_edge_record(pd.Series(row), provenance, is_legacy=True)
         for row in df_filtered.to_dict(orient="records")
@@ -3969,7 +3969,7 @@ def sider_to_legacy_edge_records(
         "sider_edges_emitted_legacy",
         extra={"count": len(records),
                "meddra_type_filter": meddra_type_filter,
-               "warning": "legacy emitter — use sider_to_edge_records"},
+               "warning": "legacy emitter -- use sider_to_edge_records"},
     )
     _append_transformation_log({
         "event": "edges_emitted_legacy",
@@ -4252,7 +4252,7 @@ class SiderLoader:
     """Adapter implementing the ``Loader`` Protocol for SIDER (A1.4).
 
     Allows ``run_pipeline.py`` to treat all loaders polymorphically via
-    the PEP 544 ``Loader`` Protocol (structural typing — no inheritance
+    the PEP 544 ``Loader`` Protocol (structural typing -- no inheritance
     required).
 
     Examples
@@ -4264,7 +4264,7 @@ class SiderLoader:
     True
     """
 
-    name: str = SOURCE_KEY_SIDER   # class attribute — "sider"
+    name: str = SOURCE_KEY_SIDER   # class attribute -- "sider"
 
     def __init__(self, *, meddra_type_filter: Optional[str] = "PT") -> None:
         self.meddra_type_filter = meddra_type_filter
@@ -4332,7 +4332,7 @@ def load_sider(
     force : bool, default False
         Force re-download of the SIDER file.
     meddra_type_filter : str or None, default "PT"
-        Phase 0.2 — filter to this MedDRA type.
+        Phase 0.2 -- filter to this MedDRA type.
 
     Returns
     -------
@@ -4402,14 +4402,14 @@ def load_sider(
     # v29 ROOT FIX (Compound Chain 1 / Patient-Safety Bypass): the
     # forensic audit found parse_sider_frequencies was implemented but
     # NEVER CALLED. As a result, the RL safety ranker could not
-    # distinguish 50% ADRs from 0.01% ADRs — a drug causing frequent
+    # distinguish 50% ADRs from 0.01% ADRs -- a drug causing frequent
     # severe adverse events looked identical to a drug causing rare
     # minor ones. ROOT FIX: parse the frequencies file here, build a
     # lookup keyed by (compound_canonical_id, meddra_id), and attach
     # lower_bound / upper_bound / frequency_description as edge
     # properties on every (Compound, causes_adverse_event, MedDRA_Term)
     # edge that matches. Edges with no frequency data keep their
-    # existing properties — they just lack the frequency bounds.
+    # existing properties -- they just lack the frequency bounds.
     try:
         freq_df = parse_sider_frequencies()
         if not freq_df.empty:
@@ -4456,7 +4456,7 @@ def load_sider(
                 extra={"load_id": load_id,
                        "hint": "RL safety ranker will lack ADR frequency estimates"},
             )
-    except Exception as freq_exc:  # noqa: BLE001 — never crash load on freq
+    except Exception as freq_exc:  # noqa: BLE001 -- never crash load on freq
         logger.error(
             "sider_frequencies_attach_failed",
             extra={"load_id": load_id, "error": str(freq_exc)},
@@ -4486,7 +4486,7 @@ def load_sider(
 # ===== SECTION 15: INIT-TIME VALIDATION (D14.12 / D14.13) =====
 # Validate that the canonical SIDER node/edge types are in config.CORE_NODE_TYPES
 # and config.CORE_EDGE_TYPES at import time. Fail fast (loudly) if the
-# canonical spellings are missing — this would silently break the RL safety
+# canonical spellings are missing -- this would silently break the RL safety
 # ranker.
 
 def _init_validate_config() -> None:
@@ -4520,7 +4520,7 @@ def _init_validate_config() -> None:
 
 
 # Run init-time validation. Wrap in try/except so import doesn't crash the
-# whole package if config is broken — log ERROR instead (caller can detect
+# whole package if config is broken -- log ERROR instead (caller can detect
 # via the absence of SiderLoader).
 try:
     _init_validate_config()
@@ -4528,7 +4528,7 @@ except SiderCriticalError as _init_exc:
     logger.error(
         "sider_init_config_validation_failed",
         extra={"error": str(_init_exc),
-               "hint": "SIDER loader will fail at runtime — fix config.CORE_NODE_TYPES "
+               "hint": "SIDER loader will fail at runtime -- fix config.CORE_NODE_TYPES "
                        "and config.CORE_EDGE_TYPES to include MedDRA_Term + causes_adverse_event"},
     )
 

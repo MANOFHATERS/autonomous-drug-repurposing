@@ -97,21 +97,21 @@ REVERSE_RELATION_MAP: Dict[str, str] = {
 #
 # P3-040 ROOT FIX (comment accuracy): the previous comment claimed the set
 # covers "ALL 4 direct label-leaking relations × 2 directions = 8 edge
-# types". That was FALSE — the frozenset contains only 4 tuples (2
+# types". That was FALSE -- the frozenset contains only 4 tuples (2
 # forward + 2 reverse), not 8. The "× 2 directions" was already accounted
 # for by listing both forward and reverse tuples explicitly. The comment
 # made a reviewer think half the set was missing. We've corrected the
 # comment to match the actual contents (4 tuples: 2 forward + 2 reverse).
-# Multi-hop leakage (via drug→protein→pathway→disease) is NOT in this
+# Multi-hop leakage (via drug->protein->pathway->disease) is NOT in this
 # set because those edges carry legitimate biological signal that the
-# model SHOULD learn from — they only become leakage if a guaranteed
+# model SHOULD learn from -- they only become leakage if a guaranteed
 # path is injected for every KP (the W-02 bug, now removed in
 # graph_builder.py).
 LABEL_LEAKING_EDGES: frozenset = frozenset({
-    # Direct drug→disease therapeutic relationships (forward, 2 tuples)
+    # Direct drug->disease therapeutic relationships (forward, 2 tuples)
     ("drug", "treats", "disease"),
     ("drug", "tested_for", "disease"),
-    # Direct disease→drug reverse relationships (2 tuples)
+    # Direct disease->drug reverse relationships (2 tuples)
     ("disease", "treated_by", "drug"),
     ("disease", "tested_on", "drug"),
     # V30 ROOT FIX (1.3): the 4-tuple set above covers BOTH directions
@@ -145,7 +145,7 @@ DEFAULT_FEATURE_DIMS: Dict[str, int] = {
 # on held-out drug-disease pairs").
 # This threshold is for PRODUCTION-scale graphs (10K drugs, millions of pairs).
 # For demo-scale graphs (<100 drugs), achieving 0.85 AUC is scientifically
-# unrealistic — the model has too few training pairs to generalize. The
+# unrealistic -- the model has too few training pairs to generalize. The
 # get_auc_threshold_for_scale() function returns the appropriate threshold
 # based on graph size.
 V1_AUC_THRESHOLD: float = 0.85
@@ -185,10 +185,10 @@ def get_auc_threshold_for_scale(num_drugs: int) -> float:
         not GT AUC alone.)
       - 100-1000 drugs (pilot): 0.70 (medium capacity — the model has ~1K-10K
         training pairs, enough for moderate generalization.)
-      - >= 1000 drugs (production): 0.85 (full V1 launch contract — the model
+      - >= 1000 drugs (production): 0.85 (full V1 launch contract -- the model
         has 100K+ training pairs, enough for high AUC.)
 
-    This is NOT "lowering the bar" — it's using the SCIENTIFICALLY CORRECT
+    This is NOT "lowering the bar" -- it's using the SCIENTIFICALLY CORRECT
     threshold for each scale. A 30-drug demo graph CANNOT achieve 0.85 AUC
     by mathematical construction (the test set has ~30 pairs, and AUC on 30
     pairs has variance > 0.1). The 0.65 threshold for demos (P3-026) means

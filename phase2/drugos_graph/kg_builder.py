@@ -1,18 +1,18 @@
 """
-DrugOS Graph Module — Knowledge Graph Builder (Neo4j)
+DrugOS Graph Module -- Knowledge Graph Builder (Neo4j)
 ======================================================
 Institutional-grade rewrite of the Neo4j write layer for the DrugOS
 Autonomous Drug Repurposing Platform.
 
-Architecture (Facade Pattern — audit issue A-1):
-  DrugOSGraphBuilder  — public API facade (backward-compatible)
-    ├── GraphConnection     — connect, disconnect, retry, health, driver DI
-    ├── GraphSchemaManager  — create_constraints, create_indexes, version detect
-    ├── GraphNodeLoader     — load_nodes_batch, load_drkg_nodes
-    ├── GraphEdgeLoader     — load_edges_batch, load_edges_bulk_create, dedup
-    ├── DrugBankEnricher    — enrich_compounds_from_drugbank
-    ├── GraphStatsCollector — get_graph_stats, health_check
-    └── GraphJanitor        — clear_graph (dangerous ops isolated, access control)
+Architecture (Facade Pattern -- audit issue A-1):
+  DrugOSGraphBuilder  -- public API facade (backward-compatible)
+    ├── GraphConnection     -- connect, disconnect, retry, health, driver DI
+    ├── GraphSchemaManager  -- create_constraints, create_indexes, version detect
+    ├── GraphNodeLoader     -- load_nodes_batch, load_drkg_nodes
+    ├── GraphEdgeLoader     -- load_edges_batch, load_edges_bulk_create, dedup
+    ├── DrugBankEnricher    -- enrich_compounds_from_drugbank
+    ├── GraphStatsCollector -- get_graph_stats, health_check
+    └── GraphJanitor        -- clear_graph (dangerous ops isolated, access control)
 
 Patient Safety Context (NON-NEGOTIABLE):
   A bug in this file = wrong graph = wrong prediction = a pharma partner
@@ -21,13 +21,13 @@ Patient Safety Context (NON-NEGOTIABLE):
   `sensitive` properties written by DrugBankEnricher to classify drugs as
   red (dangerous) / yellow / green (safe). A null value on any of these
   properties means "no data" which is silently interpreted as "not
-  withdrawn" → green → SAFE. A withdrawn drug like Valdecoxib (withdrawn
+  withdrawn" -> green -> SAFE. A withdrawn drug like Valdecoxib (withdrawn
   for cardiovascular risk) would be classified as SAFE because the
   DrugBank XML didn't have the field in that record variant. This is a
   direct patient-harm pathway.
 
   Treat every line of this code as if a real patient's life depends on it
-  — because it does.
+  -- because it does.
 
 Fixes: A-1..A-7, D-1..D-6, S-1..S-5, C-1..C-7, DQ-1..DQ-7, R-1..R-7,
        I-1..I-5, P-1..P-6, S(9)-1..S(9)-6, T-1..T-6, L-1..L-6,
@@ -136,7 +136,7 @@ logger = logging.getLogger(__name__)
 # node/edge for bidirectional traceability (the INTEGRATION.md doc
 # promises "given any node in Neo4j, run a Cypher query to find the
 # exact Phase 1 CSV row that produced it"). Without these in the
-# whitelist, the real kg_builder silently stripped them — making the
+# whitelist, the real kg_builder silently stripped them -- making the
 # traceability contract false in production. RecordingGraphBuilder
 # tests didn't catch this because they don't apply the whitelist.
 SYSTEM_PROPS: frozenset[str] = frozenset({
@@ -162,17 +162,17 @@ SYSTEM_PROPS: frozenset[str] = frozenset({
 
 # BUG-D-011 root fix: source priority map. The ``deduplicate_edges_deterministic``
 # function orders by ``r._source_priority DESC`` but that property was NEVER
-# set when loading edges — making the "deterministic" dedup non-deterministic
+# set when loading edges -- making the "deterministic" dedup non-deterministic
 # (edges kept/dropped depended on Python dict insertion order). This map
 # assigns a numeric priority to each known source so dedup is reproducible.
 # Higher number = higher priority (kept over lower priority).
 SOURCE_PRIORITY_MAP: dict[str, int] = {
-    "drugbank": 100,        # FDA-approved drug labels — highest authority
+    "drugbank": 100,        # FDA-approved drug labels -- highest authority
     "drugbank_indications": 95,
     # v35 ROOT FIX (H-2): the bridge emits source="drugbank_indication"
     # (singular, no _text) for free-text-derived Compound-treats-Disease
     # edges (phase1_bridge.py:2130). Without this key, get_source_priority
-    # returned 0 → free-text treats edges were silently dropped during
+    # returned 0 -> free-text treats edges were silently dropped during
     # deduplicate_edges_deterministic in favor of any other edge (even
     # lower-quality DRKG edges at priority 25). Priority 100 matches
     # "drugbank" because the source IS DrugBank (just the free-text
@@ -208,7 +208,7 @@ def get_source_priority(source: str) -> int:
     return SOURCE_PRIORITY_MAP.get(source.lower().strip(), 0)
 
 # Fixes S-5 (Domain 3): Biomedical identifier validation patterns
-# Audit fix (v5 Tier-2 bug #20 — REPAIRED v6): the previous pattern only
+# Audit fix (v5 Tier-2 bug #20 -- REPAIRED v6): the previous pattern only
 # accepted 6-char Swiss-Prot accessions. Real DrugBank/UniProt data
 # contains 10-char TrEMBL accessions (e.g. A0A024R2R7, A0A1B0GUU5),
 # which were silently dead-lettered. The new pattern uses the official
@@ -224,12 +224,12 @@ def get_source_priority(source: str) -> int:
 # Q9BX66 (Swiss-Prot), A0A024R2R7-2 (TrEMBL + isoform).
 ID_PATTERNS: dict[str, str] = {
     # v28 ROOT FIX (P2-B-12): removed the ``NAME:[A-Za-z0-9 _.-]{1,64}``
-    # alternative — it accepted LITERALLY ANY string (any printable ASCII
+    # alternative -- it accepted LITERALLY ANY string (any printable ASCII
     # up to 64 chars) as a Compound ID. This made Compound ID validation
     # a no-op: typos, garbage strings, even ``NAME: `` (just a space)
     # passed. Production queries that filter by Compound ID then
     # returned inconsistent results (some edges pointed at the
-    # InChIKey-canonical node, others at the NAME: node — disjoint subgraphs).
+    # InChIKey-canonical node, others at the NAME: node -- disjoint subgraphs).
     # Removed: callers that need a non-InChIKey/non-DrugBank/non-ChEMBL
     # identifier SHOULD register a new prefix in ID_PATTERNS with a
     # TIGHTER regex (e.g. ``DRUG:<digits>``), not abuse the catch-all.
@@ -237,7 +237,7 @@ ID_PATTERNS: dict[str, str] = {
     # (_DRUGBANK_ID_RE) and Phase 2 drugbank_parser
     # (DRUGBANK_DRUG_IDENTIFIER_REGEX), all = ^DB\d{5,7}$. Previously
     # this was {5,6} which silently dead-lettered 7-digit DrugBank IDs
-    # that the parser accepts — fragmenting the KG.
+    # that the parser accepts -- fragmenting the KG.
     "Compound": r"^(DB\d{5,7}|CHEMBL\d+|CID\d+|[A-Z]{14}-[A-Z]{10}-[A-Z]|CIDm\d+|CIDs\d+|MESH:[A-Z]\d+)$",
     # v21 ROOT FIX (Audit section 4 finding 8 / Chain 9 - "Bridge emits
     # IDs that production rejects"): the previous Protein pattern
@@ -265,10 +265,10 @@ ID_PATTERNS: dict[str, str] = {
     # Disease: explicit prefixed forms only. BUG-D-015 root fix: removed
     # the ``[A-Z]+:\w+`` catch-all that accepted 'FOO:bar' as a Disease ID.
     # Now only valid biomedical disease ontologies are accepted.
-    # v9 ROOT FIX: accept BOTH underscore (EFO_0000400 — original EFO
-    # curie spec) and colon (EFO:0000400 — OpenTargets canonical form)
+    # v9 ROOT FIX: accept BOTH underscore (EFO_0000400 -- original EFO
+    # curie spec) and colon (EFO:0000400 -- OpenTargets canonical form)
     # for EFO, since the OpenTargets _normalise_ontology_id helper
-    # converts underscore → colon for ALL ontology prefixes. Without
+    # converts underscore -> colon for ALL ontology prefixes. Without
     # both forms, EFO IDs would be dead-lettered.
     # v34 ROOT FIX (CRITICAL #8): accept `SYNDROME:<slug>` IDs emitted
     # by the bridge when DrugBank indications have empty disease_id but
@@ -305,10 +305,10 @@ ID_PATTERNS: dict[str, str] = {
     "Gene Expression": r"^(GSE\d+|GSM\d+)$",
     # BUG-D-005 root fix: real ATC codes are 7 chars in the WHO format
     # (e.g. L01XC02, L04AA02, N02BA01). The structure is:
-    #   [A-Z]    — 1st level (anatomical main group, 1 letter)
-    #   \d{2}    — 2nd level (therapeutic main group, 2 digits)
-    #   [A-Z]{2} — 3rd+4th levels (therapeutic subgroup + chemical subgroup, 2 letters)
-    #   \d{2}    — 5th level (chemical substance, 2 digits)
+    #   [A-Z]    -- 1st level (anatomical main group, 1 letter)
+    #   \d{2}    -- 2nd level (therapeutic main group, 2 digits)
+    #   [A-Z]{2} -- 3rd+4th levels (therapeutic subgroup + chemical subgroup, 2 letters)
+    #   \d{2}    -- 5th level (chemical substance, 2 digits)
     # The previous pattern ``^[A-Z]\d{2}[A-Z]\d{2}[A-Z]\d{2}?$`` required
     # 8-9 chars (alternating letter/digit groups) and dead-lettered every
     # Atc node. New pattern accepts the WHO 7-char format AND optional
@@ -318,7 +318,7 @@ ID_PATTERNS: dict[str, str] = {
     # v9 ROOT FIX (audit F5.2.1): UniProt cross-reference edges emit
     # heterogeneous target types (Domain, OntologyTerm, Publication,
     # ExternalRef) based on the UniProt DB source. The previous code
-    # returned True for any unknown label — silently bypassing
+    # returned True for any unknown label -- silently bypassing
     # validation. Now we explicitly register these labels with
     # permissive curie-style patterns so the edges are validated but
     # not over-restricted. If a label is NOT in this dict, the new
@@ -333,11 +333,11 @@ ID_PATTERNS: dict[str, str] = {
 # Define allowed properties per node label. Anything not in this list
 # (or SYSTEM_PROPS) is silently dropped before Cypher execution.
 #
-# Audit fix (v6 — bug #B5/B6/B7/B8): the previous whitelist was missing
+# Audit fix (v6 -- bug #B5/B6/B7/B8): the previous whitelist was missing
 # every property the phase1_bridge actually emits (fda_approved,
 # clinical_status, groups, molecular_weight, molecular_formula,
 # completeness_score, gene_symbol, mim_id, uniprot_id, etc.). On a real
-# Neo4j load these were silently stripped — only the test path
+# Neo4j load these were silently stripped -- only the test path
 # (RecordingGraphBuilder, which does NOT apply the whitelist) noticed.
 # The whitelist now mirrors the bridge's actual output contract.
 NODE_PROPERTY_WHITELIST: dict[str, frozenset[str]] = {
@@ -359,7 +359,7 @@ NODE_PROPERTY_WHITELIST: dict[str, frozenset[str]] = {
         "rotatable_bond_count", "heavy_atom_count", "complexity",
         "max_phase", "completeness_score",
         "inchikey_source", "cas_number",
-        # ── v70 P2L-030: compound_id_aliases — list of alternate stable
+        # ── v70 P2L-030: compound_id_aliases -- list of alternate stable
         # Compound identifiers (drugbank_id, chembl_id, pubchem_cid,
         # chebi_id, inchikey when not canonical). Used by entity_resolver
         # and kg_builder to MERGE Compound nodes across sources even
@@ -390,20 +390,20 @@ NODE_PROPERTY_WHITELIST: dict[str, frozenset[str]] = {
         # ``member_count``, ``members`` (pipe-joined UniProt ACs), and
         # ``derivation_method`` on every STRING-derived Pathway node
         # (including the v53 fallback). Without these in the whitelist,
-        # production silently stripped them — losing the protein-membership
+        # production silently stripped them -- losing the protein-membership
         # data the Graph Explorer needs to render pathway chains.
         "member_count", "members", "derivation_method",
     }),
-    # FIX-F / C-16: ClinicalOutcome nodes — derived from
+    # FIX-F / C-16: ClinicalOutcome nodes -- derived from
     # drugbank_indications.csv by phase1_bridge._load_clinical_outcomes().
     #
-    # v78 FORENSIC ROOT FIX (BUG #5 — Silent Data-Loss): the v60 ROOT
+    # v78 FORENSIC ROOT FIX (BUG #5 -- Silent Data-Loss): the v60 ROOT
     # FIX added ``meddra_id``, ``mesh_id``, ``first_seen_drug_id`` to
     # the bridge's ClinicalOutcome node construction, AND added
     # ``CANONICAL_IDS["ClinicalOutcome"] = "meddra_id"`` +
     # ``ID_MAPPING_PRIORITY["ClinicalOutcome"] = ["meddra_id",
     # "mesh_id", "name"]`` to config.py. But this NODE_PROPERTY_WHITELIST
-    # entry was NEVER updated to include those fields — so the production
+    # entry was NEVER updated to include those fields -- so the production
     # ``GraphNodeLoader._whitelist_filter`` silently stripped them,
     # making ``entity_resolver.resolve_canonical_id`` return None for
     # every ClinicalOutcome node. The 5th DOCX-mandated node type was
@@ -412,7 +412,7 @@ NODE_PROPERTY_WHITELIST: dict[str, frozenset[str]] = {
     "ClinicalOutcome": frozenset({
         "id", "name", "disease_id", "disease_name",
         "indication_type", "source_drug_id", "source",
-        # v78 BUG #5 fix — canonical-ID fields the v60 ROOT FIX promised
+        # v78 BUG #5 fix -- canonical-ID fields the v60 ROOT FIX promised
         # would survive the production property-stripping pass.
         "meddra_id",            # CANONICAL_IDS["ClinicalOutcome"]
         "mesh_id",              # ID_MAPPING_PRIORITY fallback #2
@@ -438,12 +438,12 @@ NODE_PROPERTY_WHITELIST: dict[str, frozenset[str]] = {
 
 # Edge property whitelist per (src_label, rel_type, dst_label) triple.
 #
-# Audit fix (v6 — bug #B8): the previous whitelist was missing properties
+# Audit fix (v6 -- bug #B8): the previous whitelist was missing properties
 # the bridge emits on every edge type (is_known_action, source_id,
 # action_type, mapping_key, association_type, evidence, etc.). Real Neo4j
 # loads silently stripped them, breaking downstream lineage queries.
 #
-# BUG-D-006 root fix — the v6 whitelist is populated by iterating
+# BUG-D-006 root fix -- the v6 whitelist is populated by iterating
 # CORE_EDGE_TYPES, so if CORE_EDGE_TYPES is ever empty (config import
 # error, circular import, monkey-patched test fixture), the whitelist
 # stays {} and ALL edge properties are silently stripped in production.
@@ -515,7 +515,7 @@ for _src, _rel, _dst in CORE_EDGE_TYPES:
         _base = _base | frozenset({
             "evidence",  # bridge-emitted (drugbank_indication_text)
         })
-    # v29 ROOT FIX (audit L-4 — EDGE_PROPERTY_WHITELIST silently strips
+    # v29 ROOT FIX (audit L-4 -- EDGE_PROPERTY_WHITELIST silently strips
     # properties): the previous whitelist was missing GEO expression
     # properties, STITCH confidence channels, and SIDER frequency
     # bounds. The RL safety ranker needs these to distinguish 50% ADRs
@@ -544,7 +544,7 @@ for _src, _rel, _dst in CORE_EDGE_TYPES:
             "textmining_score",
         })
     if _rel in ("causes_adverse_event", "causes_side_effect"):
-        # SIDER adverse event edges — add frequency bounds
+        # SIDER adverse event edges -- add frequency bounds
         _base = _base | frozenset({
             "frequency_description",    # "Postmarketing", "Frequent", etc.
             "frequency_lower_bound",    # 0.0
@@ -557,7 +557,7 @@ for _src, _rel, _dst in CORE_EDGE_TYPES:
 # RT-8 ROOT FIX: the previous code raised ImportError at module
 # import time when EDGE_PROPERTY_WHITELIST was empty. This made
 # kg_builder unimportable for unit tests, partial pipelines, CI
-# lint runs, and error recovery — a single config regression took
+# lint runs, and error recovery -- a single config regression took
 # down the entire module surface, and the operator could not even
 # open a Python REPL to inspect kg_builder to debug. Move the
 # invariant check to a runtime function (called from
@@ -571,7 +571,7 @@ def _assert_edge_property_whitelist_populated() -> None:
     Called from DrugOSGraphBuilder.__init__ (and from
     load_edges_bulk_create as a defensive re-check) to ensure
     production edge loads never silently strip all properties.
-    Safe to call at module import time — it returns silently when
+    Safe to call at module import time -- it returns silently when
     the whitelist is populated (the normal case).
     """
     if not EDGE_PROPERTY_WHITELIST:
@@ -602,7 +602,7 @@ if not _import_time_skip:
     try:
         _assert_edge_property_whitelist_populated()
     except RuntimeError:
-        # Log a CRITICAL warning but DO NOT raise — allow the module
+        # Log a CRITICAL warning but DO NOT raise -- allow the module
         # to be imported so the operator can debug. The runtime check
         # in DrugOSGraphBuilder.__init__ will still raise when an
         # actual edge load is attempted.
@@ -676,10 +676,10 @@ _DATA_MAX_AGE_DAYS = int(os.environ.get("DRUGOS_DATA_MAX_AGE_DAYS", "30"))
 # module-level constant so callers (run_pipeline.py, run_unified.py) can
 # import it instead of hardcoding a DIFFERENT string. The previous code
 # had run_pipeline.py passing "CLEAR_ALL_DRUGOS_DATA" while kg_builder
-# expected "DELETE EVERYTHING I UNDERSTAND THE CONSEQUENCES" — they NEVER
+# expected "DELETE EVERYTHING I UNDERSTAND THE CONSEQUENCES" -- they NEVER
 # matched, so `clear_graph()` always raised SecurityError, was caught by
 # the `except Exception` in step3, and logged as a warning. The graph was
-# NEVER cleared → re-runs created DUPLICATE nodes/edges. The
+# NEVER cleared -> re-runs created DUPLICATE nodes/edges. The
 # `fresh_start=True` idempotency promise was dead code.
 DEFAULT_CLEAR_GRAPH_PHRASE = "DELETE EVERYTHING I UNDERSTAND THE CONSEQUENCES"
 _CLEAR_GRAPH_PHRASE = os.environ.get(
@@ -710,7 +710,7 @@ class LoadResult:
     errors: list[str] = field(default_factory=list)
 
     def __int__(self) -> int:
-        """Backward compatibility — old code expects int return."""
+        """Backward compatibility -- old code expects int return."""
         return self.created
 
     def __add__(self, other: LoadResult) -> LoadResult:
@@ -771,7 +771,7 @@ def _validate_id(label: str, value: str) -> bool:
     Invalid IDs go to the dead-letter queue with reason='invalid_id_format'.
 
     v9 ROOT FIX (audit F7.8): the previous code returned ``True`` for any
-    label not present in ID_PATTERNS — silently disabling validation for
+    label not present in ID_PATTERNS -- silently disabling validation for
     typo'd labels like 'MedDRATerm' (missing underscore). Now raises
     ``UnknownLabelError`` so the caller can either fix the label or
     explicitly register the new label's pattern in ID_PATTERNS.
@@ -790,7 +790,7 @@ def _validate_id(label: str, value: str) -> bool:
     return re.match(pat, str(value)) is not None
 
 
-# v43 ROOT FIX (Chain 1 — patient safety): single helper that translates
+# v43 ROOT FIX (Chain 1 -- patient safety): single helper that translates
 # a DRKG semantic type name (e.g. "MedDRA_Term") to its canonical Neo4j
 # storage label (e.g. "MedDRATerm"). All node and edge loaders MUST
 # route their label argument through this helper before sanitize_label,
@@ -798,7 +798,7 @@ def _validate_id(label: str, value: str) -> bool:
 #
 # This closes the patient-safety hole where SIDER adverse-event queries
 # returned ZERO results for every drug (because writes targeted
-# :MedDRA_Term while queries hit :MedDRATerm) — causing the RL safety
+# :MedDRA_Term while queries hit :MedDRATerm) -- causing the RL safety
 # ranker to classify every drug as "green/safe" including withdrawn
 # drugs like Valdecoxib (withdrawn 2005 for cardiovascular death).
 def _storage_label(label: str) -> str:
@@ -915,15 +915,15 @@ def _whitelist_filter(
     Fixes D-2, DQ-4, S(9)-6, IN-1 (Schema-Whitelist Rule §3.7):
     Only whitelisted properties pass through; everything else is dropped.
 
-    v36 ROOT FIX (Chain 6 — PATIENT SAFETY): None values are now ALSO
+    v36 ROOT FIX (Chain 6 -- PATIENT SAFETY): None values are now ALSO
     dropped. In Neo4j, ``SET n += {key: null}`` DELETES the property
     from the node. The previous code kept None values in the dict,
     so multi-source node enrichment (DrugBank sets ``withdrawn=True``,
-    ChEMBL enrichment batch omits ``withdrawn`` → its value is None
-    → ``SET n += row`` silently DELETES ``withdrawn=True`` from the
+    ChEMBL enrichment batch omits ``withdrawn`` -> its value is None
+    -> ``SET n += row`` silently DELETES ``withdrawn=True`` from the
     node). Patient-safety-critical flags (``withdrawn``, ``terminated``,
     ``illicit``, ``fda_approved``) were silently stripped. Same issue
-    exists for edge properties — see the FLAT-edge path below which
+    exists for edge properties -- see the FLAT-edge path below which
     already strips None (line ~1919); the nested-props path uses
     ``_whitelist_filter`` so this fix covers it.
 
@@ -938,15 +938,15 @@ def _whitelist_filter(
             continue
         # v36 ROOT FIX (Chain 6): drop None to prevent Neo4j property
         # erasure on ``SET n += row``. NaN values (pandas sentinel) are
-        # also dropped — they are equivalent to None for our purposes.
+        # also dropped -- they are equivalent to None for our purposes.
         #
-        # v43 ROOT FIX (P1 — _whitelist_filter drops None breaks bridge's
+        # v43 ROOT FIX (P1 -- _whitelist_filter drops None breaks bridge's
         # withdrawn=None sentinel): the v36 fix dropped ALL None values,
         # including the bridge's explicit withdrawn=None sentinel. The
         # bridge writes withdrawn=None when Phase 1 is silent so the
         # DrugBankEnricher coalesce can fire. But _whitelist_filter
-        # drops it → the coalesce sees a MISSING field, not an explicit
-        # None → different code paths produce different node properties.
+        # drops it -> the coalesce sees a MISSING field, not an explicit
+        # None -> different code paths produce different node properties.
         # Fix: keep None for SAFETY-CRITICAL fields (withdrawn, terminated,
         # illicit, fda_approved, is_fda_approved, is_withdrawn,
         # is_globally_approved) so the coalesce pattern works. Drop None
@@ -956,7 +956,7 @@ def _whitelist_filter(
         # safety-critical None fields. The module docstring explicitly
         # states that the RL safety ranker uses "withdrawn, terminated,
         # illicit, toxicity, and sensitive" properties. But "toxicity"
-        # was MISSING from this frozenset — so a drug with toxicity=None
+        # was MISSING from this frozenset -- so a drug with toxicity=None
         # had that property DROPPED by _whitelist_filter, and the RL
         # ranker interpreted the missing property as "not toxic" (safe).
         # This is the exact patient-harm pathway the docstring warns about.
@@ -1003,13 +1003,13 @@ def _deduplicate_batch(
     if duplicates:
         # v39 ROOT FIX (P2 #28): the previous code dead-lettered EVERY
         # duplicate, including legitimate re-loads (idempotent MERGE of
-        # the same Compound node from two different sources — e.g.
+        # the same Compound node from two different sources -- e.g.
         # DrugBank then ChEMBL). The dead-letter queue filled with
         # false-positive "duplicate" entries that weren't actually
         # errors, burying real data quality issues. The fix: only
         # dead-letter duplicates that come from the SAME source (the
         # ``_source`` field on the row). Cross-source re-loads are
-        # legitimate enrichment, not data quality errors — log them
+        # legitimate enrichment, not data quality errors -- log them
         # at DEBUG level but don't dead-letter them.
         _real_duplicates: list[Any] = []
         _cross_source_reloads: list[Any] = []
@@ -1034,7 +1034,7 @@ def _deduplicate_batch(
         )
         # Only dead-letter if we can confirm the row data is identical
         # (true duplicate, not cross-source enrichment). For now, we
-        # skip dead-lettering entirely — the warning log is sufficient
+        # skip dead-lettering entirely -- the warning log is sufficient
         # for operators to investigate. Dead-lettering will be re-enabled
         # once we have a reliable way to distinguish true dups from
         # cross-source re-loads.
@@ -1048,7 +1048,7 @@ def _deduplicate_batch(
 
 
 # ─── RunIdFilter for Logging ──────────────────────────────────────────────────
-# Fixes L-4: Inconsistent log format — add pipeline_run_id to every log entry.
+# Fixes L-4: Inconsistent log format -- add pipeline_run_id to every log entry.
 
 class _RunIdFilter(logging.Filter):
     """Add pipeline run_id to every log record."""
@@ -1061,7 +1061,7 @@ class _RunIdFilter(logging.Filter):
 # v35 ROOT FIX (L-6): the previous code called ``logger.addFilter``
 # UNCONDITIONALLY at module import time. In a Jupyter notebook or
 # pytest session that re-imports the module, this accumulates
-# DUPLICATE _RunIdFilter instances on the logger — every log record
+# DUPLICATE _RunIdFilter instances on the logger -- every log record
 # gets the ``run_id`` attribute set N times (once per filter), which
 # is harmless but wastes CPU. More importantly, the filter list grows
 # unbounded across re-imports. The fix checks whether a _RunIdFilter
@@ -1157,7 +1157,7 @@ class GraphConnection:
         # The previous code initialised ``driver = None`` and then assigned
         # the actual driver to ``self._driver`` via safe_call_with_retry.
         # The cleanup branch ``if driver is not None:`` was therefore ALWAYS
-        # False — orphaned Neo4j drivers from failed attempts leaked on
+        # False -- orphaned Neo4j drivers from failed attempts leaked on
         # every retry, eventually exhausting the connection pool.
         # Fix: track the most recently attempted driver in a closure variable
         # so the cleanup branch can close it on failure.
@@ -1328,7 +1328,7 @@ class GraphSchemaManager:
     Fixes A-1: Extracted from DrugOSGraphBuilder (god object split).
     Fixes R-3: Exception swallowing in constraint/index creation.
     Fixes CF-1: Hardcoded index list moved to config.
-    Fixes P-3: Constraints created one at a time → batched.
+    Fixes P-3: Constraints created one at a time -> batched.
     """
 
     def __init__(self, conn: GraphConnection) -> None:
@@ -1337,8 +1337,8 @@ class GraphSchemaManager:
     def create_constraints(self) -> None:
         """Create uniqueness constraints on node IDs for all entity types.
 
-        Fixes audit issue 1.1, 7.1 — deterministic order from config.
-        Fixes audit issue 3.1 — MedDRA_Term now gets a uniqueness constraint.
+        Fixes audit issue 1.1, 7.1 -- deterministic order from config.
+        Fixes audit issue 3.1 -- MedDRA_Term now gets a uniqueness constraint.
         Fixes R-3: Constraint failures raise CriticalDataSourceError.
         Fixes P-3: Batched constraint creation.
 
@@ -1364,8 +1364,8 @@ class GraphSchemaManager:
                         # had an if/else that emitted IDENTICAL 5.x Cypher
                         # in both branches. The "legacy" (Neo4j 4.x)
                         # branch used 5.x syntax (`FOR (n:L) REQUIRE`) on
-                        # 4.x servers, raising SyntaxError → caught by
-                        # the except below → CriticalDataSourceError →
+                        # 4.x servers, raising SyntaxError -> caught by
+                        # the except below -> CriticalDataSourceError ->
                         # graph build aborted. Now we ACTUALLY dispatch:
                         # 4.x uses `ON (n:L) ASSERT n.id IS UNIQUE`,
                         # 5.x uses `FOR (n:L) REQUIRE n.id IS UNIQUE`.
@@ -1467,7 +1467,7 @@ class GraphNodeLoader:
     Fixes DQ-4: Schema-whitelist filtering.
     Fixes DQ-5: Duplicate detection in input lists.
     Fixes DQ-6: Data freshness validation.
-    Fixes I-2: SET n += row not idempotent → coalesce pattern.
+    Fixes I-2: SET n += row not idempotent -> coalesce pattern.
     Fixes S-2: DrugBank enrichment preserved on re-runs.
     Fixes S-5: Biomedical identifier validation.
     Fixes L-5: Data lineage in logs.
@@ -1542,7 +1542,7 @@ class GraphNodeLoader:
         start_time = time.monotonic()
         batch_size = _validate_batch_size(batch_size, "batch_size")
 
-        # v43 ROOT FIX (Chain 1 — patient safety): translate semantic
+        # v43 ROOT FIX (Chain 1 -- patient safety): translate semantic
         # type name (e.g. "MedDRA_Term") to canonical Neo4j storage
         # label (e.g. "MedDRATerm") BEFORE sanitize_label. Closes the
         # SIDER adverse-event query hole.
@@ -1552,7 +1552,7 @@ class GraphNodeLoader:
         # Fixes NFR §3.9: Sanitize label
         safe_label = sanitize_label(storage_label)
 
-        # Whitelist for this label — look up by BOTH the original
+        # Whitelist for this label -- look up by BOTH the original
         # semantic type and the storage label so callers can use either
         # form (e.g. "MedDRA_Term" or "MedDRATerm") and still get the
         # correct whitelist.
@@ -1597,7 +1597,7 @@ class GraphNodeLoader:
                         )
                         total_dead_lettered += 1
                         logger.warning(
-                            "Node at batch index %d missing 'id' — sent to DLQ",
+                            "Node at batch index %d missing 'id' -- sent to DLQ",
                             i + row_idx,
                         )
                         continue
@@ -1611,7 +1611,7 @@ class GraphNodeLoader:
                         )
                         total_dead_lettered += 1
                         logger.warning(
-                            "Node %s id=%r failed validation for label %s — "
+                            "Node %s id=%r failed validation for label %s -- "
                             "sent to DLQ",
                             label, str(node_id)[:50], label,
                         )
@@ -1644,12 +1644,12 @@ class GraphNodeLoader:
                     #
                     # v70 ROOT FIX (P2L-030): for Compound nodes, the
                     # previous MERGE only matched by canonical `id`. But
-                    # biotech drugs (insulin, mAbs, vaccines — ~30% of
+                    # biotech drugs (insulin, mAbs, vaccines -- ~30% of
                     # modern FDA approvals) have no InChIKey, so their
                     # canonical id is `drugbank_id` (e.g. "DB00071").
                     # ChEMBL and PubChem emit the SAME compound with
                     # canonical id = InChIKey (e.g. "RZ..."). The two
-                    # never MERGE — fragmenting the KG for the entire
+                    # never MERGE -- fragmenting the KG for the entire
                     # biotech drug class.
                     #
                     # Root fix: when loading Compound nodes, first try
@@ -1673,7 +1673,7 @@ class GraphNodeLoader:
                     # re-load. `row` contains `compound_id_aliases` (a
                     # LIST), and on MATCH the existing
                     # `n.compound_id_aliases` was overwritten with the
-                    # new batch's aliases — losing any aliases that were
+                    # new batch's aliases -- losing any aliases that were
                     # added by a previous load. ROOT FIX: replace
                     # `n += row` on MATCH with an EXPLICIT property-by-
                     # property SET that uses `coalesce(n.x, row.x)` for
@@ -1690,7 +1690,7 @@ class GraphNodeLoader:
                     # pattern is DEPRECATED in Neo4j 5+ (replaced by
                     # `EXISTS`), and is O(N) PER ALIAS PER ROW (full
                     # label scan). For 10K compounds × 5 aliases, that
-                    # is 50K full-label scans PER BATCH — the load takes
+                    # is 50K full-label scans PER BATCH -- the load takes
                     # hours and times out. ROOT FIX: use a single
                     # `MATCH (existing:Compound) WHERE existing.id IN
                     # coalesce(row.compound_id_aliases, [])` lookup
@@ -1753,7 +1753,7 @@ class GraphNodeLoader:
                             f"n._created_at = $loaded_at\n"
                             # v100 P2-027: ON MATCH for non-Compound
                             # nodes also no longer uses `n += row` for
-                            # the same reason — overwriting list/map
+                            # the same reason -- overwriting list/map
                             # properties on every reload silently
                             # destroys accumulated state. Use
                             # coalesce(n.x, row.x) for each known
@@ -1809,7 +1809,7 @@ class GraphNodeLoader:
                         # skipped edges that were never processed (they
                         # were beyond ``len(nodes) - 1`` and would be
                         # silently lost). Use ``i + len(batch) - 1``
-                        # instead — ``len(batch)`` is the ACTUAL number
+                        # instead -- ``len(batch)`` is the ACTUAL number
                         # of rows in this batch (≤ ``batch_size``).
                         write_checkpoint(
                             checkpoint_key,
@@ -1820,7 +1820,7 @@ class GraphNodeLoader:
                         )
 
                 except (ServiceUnavailable, SessionExpired, OSError) as e:
-                    # Infrastructure error — re-raise
+                    # Infrastructure error -- re-raise
                     logger.error(
                         "Batch %d failed: %s. Checkpoint at %d. "
                         "Resume with same checkpoint_key.",
@@ -1828,7 +1828,7 @@ class GraphNodeLoader:
                     )
                     raise
                 except DrugOSDataError as e:
-                    # Data error — DLQ and continue
+                    # Data error -- DLQ and continue
                     logger.warning(
                         "Batch %d had data errors: %s. DLQ'd. Continuing.",
                         i, e,
@@ -1993,7 +1993,7 @@ class GraphEdgeLoader:
         """
         # v13 ROOT FIX (RT-8): defensive re-check at the edge-load
         # entry point. v12's docstring claimed this re-check existed
-        # but it did NOT — the runtime guard was dead code. A config
+        # but it did NOT -- the runtime guard was dead code. A config
         # regression that empties EDGE_PROPERTY_WHITELIST after
         # builder construction (e.g. monkey-patching CORE_EDGE_TYPES
         # in a notebook) would silently strip all properties from
@@ -2016,7 +2016,7 @@ class GraphEdgeLoader:
         # the entity_resolver alias system emits the lowercased
         # ``drugbank::treats::compound:disease``) maps to the SAME Neo4j
         # relationship type. Neo4j relationship types are case-sensitive
-        # in MERGE — without lowercasing, two edges for the same logical
+        # in MERGE -- without lowercasing, two edges for the same logical
         # relation get TWO Neo4j relationships, silently corrupting graph
         # statistics and training data. All ``CORE_EDGE_TYPES`` triples
         # already use lowercase relation names, so lowercasing here is
@@ -2042,7 +2042,7 @@ class GraphEdgeLoader:
         # Fixes P-1: Warn on single-edge batch
         if len(edges) == 1 and not allow_single_edge_batch:
             logger.warning(
-                "load_edges called with a single edge — this is "
+                "load_edges called with a single edge -- this is "
                 "catastrophically slow. Accumulate edges into batches "
                 "of >= 1000 before calling. Set allow_single_edge_batch=True "
                 "to suppress this warning."
@@ -2089,7 +2089,7 @@ class GraphEdgeLoader:
                     #
                     # v24 ROOT FIX (FORENSIC-P2-CORE §1): the previous
                     # code's ``_endpoint_keys`` set included ``"source"``
-                    # and ``"target"`` — but the phase1_bridge emits
+                    # and ``"target"`` -- but the phase1_bridge emits
                     # ``source`` as a DATA-SOURCE PROPERTY (e.g.
                     # ``source="chembl"``), NOT as an endpoint alias.
                     # The result: every bridge edge's ``source`` property
@@ -2104,7 +2104,7 @@ class GraphEdgeLoader:
                     # for the ``source`` / ``target`` keys is now
                     # documented in ``_loader_protocol.py`` (Loader
                     # Edge-Record Contract). Loaders MUST emit either
-                    # ``src_id``/``dst_id`` (preferred) OR an alias — never
+                    # ``src_id``/``dst_id`` (preferred) OR an alias -- never
                     # both. The kg_builder correctly preserves ``source``
                     # as a data-source property when ``src_id`` is present.
                     _used_src_alias: Optional[str] = None
@@ -2132,7 +2132,7 @@ class GraphEdgeLoader:
                         # v24: remove the used alias key so it doesn't
                         # leak into the props dict as a fake property.
                         # Only remove the alias that was ACTUALLY used
-                        # as an endpoint — leave other keys (e.g.
+                        # as an endpoint -- leave other keys (e.g.
                         # ``source="chembl"`` when ``src_id`` was already
                         # present) intact as legitimate properties.
                         if _used_src_alias is not None and _used_src_alias != "src_id":
@@ -2153,7 +2153,7 @@ class GraphEdgeLoader:
 
                     # BUG-D-002 root fix: validate endpoint IDs against
                     # ID_PATTERNS. The previous code only checked for
-                    # missing/empty IDs — invalid formats (SIDER bare-int
+                    # missing/empty IDs -- invalid formats (SIDER bare-int
                     # Compounds, OMIM Genes, OpenTargets MONDO_ Diseases)
                     # passed validation but silently failed the Cypher
                     # MATCH, making edges vanish with zero diagnostic.
@@ -2223,7 +2223,7 @@ class GraphEdgeLoader:
                         # v24 ROOT FIX: exclude endpoint ID keys and
                         # well-known system keys that should not appear
                         # as edge properties. NOTE: ``source`` and
-                        # ``target`` are NO LONGER in this set — they
+                        # ``target`` are NO LONGER in this set -- they
                         # are legitimate data-source property names
                         # emitted by the bridge (e.g. source="chembl").
                         # The endpoint-alias case (UniProt edges that
@@ -2262,7 +2262,7 @@ class GraphEdgeLoader:
                 # instead of (src_id, dst_id). The previous key collapsed
                 # legitimate multi-action edges (e.g. a dual-action drug
                 # with both "inhibits" and "activates" edges to the SAME
-                # target — when load_edges_batch is invoked with a single
+                # target -- when load_edges_batch is invoked with a single
                 # rel_type per call the previous key was already safe, but
                 # if any caller ever batches across rel_types the collapse
                 # was a silent data-loss bug). The rel_type is preserved
@@ -2328,7 +2328,7 @@ class GraphEdgeLoader:
                         # therefore indistinguishable from edges loaded
                         # by external/manual tools, breaking downstream
                         # lineage audits. ``_updated_at`` and
-                        # ``_version`` are intentionally omitted — they
+                        # ``_version`` are intentionally omitted -- they
                         # are MATCH-only semantics and a freshly-created
                         # edge has never been "updated".
                         cypher = (
@@ -2381,7 +2381,7 @@ class GraphEdgeLoader:
                         )
 
                     # Checkpoint
-                    # v100 ROOT FIX (BUG P2-051 — edge checkpoint resume
+                    # v100 ROOT FIX (BUG P2-051 -- edge checkpoint resume
                     # data loss): the previous code wrote
                     # `last_completed_idx: i + batch_size - 1` which
                     # OVERESTIMATES the last completed edge index for
@@ -2394,7 +2394,7 @@ class GraphEdgeLoader:
                     # range). For batch_size=1000, up to 999 edges per
                     # resume were silently lost. The node loader
                     # (lines 1749 above) already uses the correct
-                    # formula `i + len(batch) - 1` — apply the SAME
+                    # formula `i + len(batch) - 1` -- apply the SAME
                     # fix here. `len(batch)` is the ACTUAL number of
                     # rows in this batch (≤ `batch_size`).
                     if checkpoint_key:
@@ -2542,7 +2542,7 @@ class GraphEdgeLoader:
     ) -> dict[tuple[str, str, str], Union[int, LoadResult]]:
         """Load all DRKG edges using MERGE.
 
-        Fixes A-3: Deprecated — use load_drkg_edges_bulk(use_merge=True).
+        Fixes A-3: Deprecated -- use load_drkg_edges_bulk(use_merge=True).
         """
         results: dict[tuple[str, str, str], Union[int, LoadResult]] = {}
         for (src_type, rel_name, dst_type), edges in edge_type_data.items():
@@ -2569,10 +2569,10 @@ class GraphEdgeLoader:
     ) -> int:
         """Remove duplicate relationships of the given type.
 
-        Fixes A-3: Deprecated — non-deterministic. Use
+        Fixes A-3: Deprecated -- non-deterministic. Use
         deduplicate_edges_deterministic() instead.
         """
-        # v43 ROOT FIX (Chain 1): translate semantic → storage label
+        # v43 ROOT FIX (Chain 1): translate semantic -> storage label
         # v57 ROOT FIX (P2L-021): lowercase rel_type before sanitizing
         # so dedup matches the same canonical relationship type that
         # ``_load_edges`` writes (see the comment there).
@@ -2622,7 +2622,7 @@ class GraphEdgeLoader:
         int
             Number of duplicate edges removed.
         """
-        # v43 ROOT FIX (Chain 1): translate semantic → storage label
+        # v43 ROOT FIX (Chain 1): translate semantic -> storage label
         # v57 ROOT FIX (P2L-021): lowercase rel_type before sanitizing
         # so dedup matches the same canonical relationship type that
         # ``_load_edges`` writes (see the comment there).
@@ -2638,12 +2638,12 @@ class GraphEdgeLoader:
             #   `r._source_priority DESC, r._loaded_at ASC`
             # which was fragile under three conditions:
             #   (1) two edges with the SAME microsecond timestamp (tie-
-            #       breaker undefined — Cypher does not guarantee a
+            #       breaker undefined -- Cypher does not guarantee a
             #       stable sort, so the kept edge was non-deterministic);
             #   (2) `_loaded_at` is null (edges from old runs without
-            #       the lineage property — Cypher null-handling makes
+            #       the lineage property -- Cypher null-handling makes
             #       the sort non-deterministic);
-            #   (3) format variance (`+00:00` vs `Z` suffix — both valid
+            #   (3) format variance (`+00:00` vs `Z` suffix -- both valid
             #       ISO 8601 UTC but lexicographically different).
             # The fix coalesces null `_loaded_at` to a sentinel minimum
             # string and adds `id(r) ASC` (Neo4j's monotonically-
@@ -2655,7 +2655,7 @@ class GraphEdgeLoader:
                 f"ORDER BY src.id, dst.id, "
                 f"r._source_priority DESC, "
                 f"coalesce(r._loaded_at, '1970-01-01T00:00:00+00:00') ASC, "
-                # v43 ROOT FIX (P2 — id(r) ASC deprecated in Neo4j 6.x):
+                # v43 ROOT FIX (P2 -- id(r) ASC deprecated in Neo4j 6.x):
                 # The previous code used `id(r) ASC` which is deprecated
                 # in Neo4j 6.x and removed in 7.x. Use `elementId(r) ASC`
                 # instead (available since Neo4j 5.x). The elementId()
@@ -2699,7 +2699,7 @@ class DrugBankEnricher:
     """Enriches Compound nodes with DrugBank properties.
 
     Fixes A-1: Extracted from DrugOSGraphBuilder.
-    Fixes S-1: CRITICAL PATIENT SAFETY — coalesce pattern for safety fields.
+    Fixes S-1: CRITICAL PATIENT SAFETY -- coalesce pattern for safety fields.
     Fixes D-1: Accurate enriched count via Cypher RETURN.
     Fixes D-3: Configurable canonical key.
     Fixes I-3: Empty input raises CriticalDataSourceError.
@@ -2816,9 +2816,9 @@ class DrugBankEnricher:
                     continue
 
                 # ── Execute Cypher with coalesce for safety fields ──────
-                # Fixes S-1: CRITICAL — coalesce pattern prevents null overwrite
+                # Fixes S-1: CRITICAL -- coalesce pattern prevents null overwrite
                 # PATIENT SAFETY: withdrawn=null is interpreted by the RL
-                # safety ranker as "not withdrawn" → green → SAFE.
+                # safety ranker as "not withdrawn" -> green -> SAFE.
                 # Valdecoxib (withdrawn for CV risk) would be SAFE.
                 cypher = (
                     f"UNWIND $batch AS row\n"
@@ -2891,7 +2891,7 @@ class DrugBankEnricher:
                     if old_w != new_w and new_w is None:
                         logger.error(
                             "SAFETY: Compound %s withdrawn changed from "
-                            "%s to None — this should not happen with "
+                            "%s to None -- this should not happen with "
                             "coalesce pattern!",
                             record.get("matched_id", "?"), old_w,
                         )
@@ -2956,7 +2956,7 @@ class GraphStatsCollector:
     Fixes A-1: Extracted from DrugOSGraphBuilder.
     Fixes S-3: Misleading density calculation.
     Fixes S-4: labels(n)[0] non-deterministic.
-    Fixes P-4: get_graph_stats makes 4 round-trips → 1-2.
+    Fixes P-4: get_graph_stats makes 4 round-trips -> 1-2.
     Fixes IN-2: No interface contract for return value.
     """
 
@@ -3010,7 +3010,7 @@ class GraphStatsCollector:
                 total_edges += record["cnt"]
 
         # Fixes S-3: Typed-edge-aware density calculation
-        # Before: max_edges = n * (n-1) — assumes homogeneous complete graph
+        # Before: max_edges = n * (n-1) -- assumes homogeneous complete graph
         # After: per-edge-type maximum based on actual node type counts
         typed_max = 0
         for (src_type, _, dst_type) in CORE_EDGE_TYPES:
@@ -3071,7 +3071,7 @@ class GraphJanitor:
 
     Fixes A-1: Extracted from DrugOSGraphBuilder.
     Fixes S(9)-3: clear_graph no access control.
-    Fixes C-7: clear_graph returns None → ClearGraphResult.
+    Fixes C-7: clear_graph returns None -> ClearGraphResult.
     Fixes R-5: clear_graph not atomic on large graphs.
     """
 
@@ -3149,19 +3149,19 @@ class GraphJanitor:
                 # count to total_rels_deleted, assuming 1 rel per node.
                 # For densely-connected graphs (e.g. a Compound with 50
                 # target edges), this severely undercounted rel deletions
-                # — a node with 50 rels contributed only 1 to the count.
+                # -- a node with 50 rels contributed only 1 to the count.
                 # The fix uses Neo4j's actual deletion counters from
                 # result.consume().counters (nodes_deleted and
                 # relationships_deleted) which are accurate.
                 # v42 FORENSIC ROOT FIX (P0-4): the previous code called
-                # ``result.consume().counters()`` — but in the Neo4j Python
+                # ``result.consume().counters()`` -- but in the Neo4j Python
                 # driver, ``result.consume()`` returns a ``ResultSummary``
                 # whose ``.counters`` is an ATTRIBUTE (a SummaryCounters
                 # object), NOT a method. Calling ``.counters()`` raised
                 # ``TypeError: 'SummaryCounters' object is not callable`` on
                 # the first call, so clear_graph() crashed immediately and
                 # the graph could never be cleared. ROOT FIX: drop the
-                # parentheses — access the attribute directly.
+                # parentheses -- access the attribute directly.
                 counters = result.consume().counters
                 deleted_nodes = counters.nodes_deleted
                 deleted_rels = counters.relationships_deleted
@@ -3203,7 +3203,7 @@ class GraphJanitor:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  FACADE CLASS — DrugOSGraphBuilder
+#  FACADE CLASS -- DrugOSGraphBuilder
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class DrugOSGraphBuilder:
@@ -3212,15 +3212,15 @@ class DrugOSGraphBuilder:
     This is the Facade for the graph builder subsystem. It delegates to
     specialized internal classes while preserving the original public API.
 
-    Architecture (Facade Pattern — audit issue A-1):
-      DrugOSGraphBuilder  — public API facade (backward-compatible)
-        ├── GraphConnection     — connect, disconnect, retry, health, driver DI
-        ├── GraphSchemaManager  — create_constraints, create_indexes
-        ├── GraphNodeLoader     — load_nodes_batch, load_drkg_nodes
-        ├── GraphEdgeLoader     — load_edges_batch, load_edges_bulk_create, dedup
-        ├── DrugBankEnricher    — enrich_compounds_from_drugbank
-        ├── GraphStatsCollector — get_graph_stats, health_check
-        └── GraphJanitor        — clear_graph
+    Architecture (Facade Pattern -- audit issue A-1):
+      DrugOSGraphBuilder  -- public API facade (backward-compatible)
+        ├── GraphConnection     -- connect, disconnect, retry, health, driver DI
+        ├── GraphSchemaManager  -- create_constraints, create_indexes
+        ├── GraphNodeLoader     -- load_nodes_batch, load_drkg_nodes
+        ├── GraphEdgeLoader     -- load_edges_batch, load_edges_bulk_create, dedup
+        ├── DrugBankEnricher    -- enrich_compounds_from_drugbank
+        ├── GraphStatsCollector -- get_graph_stats, health_check
+        └── GraphJanitor        -- clear_graph
 
     Supports context manager protocol for safe connection handling.
 
@@ -3260,7 +3260,7 @@ class DrugOSGraphBuilder:
     ) -> None:
         # v13 ROOT FIX (RT-8): the v12 docstring at line 410-413
         # claimed this method calls
-        # ``_assert_edge_property_whitelist_populated()`` — but it did
+        # ``_assert_edge_property_whitelist_populated()`` -- but it did
         # NOT. The runtime guard was dead code. v13: actually call it
         # here so a config regression that empties
         # ``EDGE_PROPERTY_WHITELIST`` (e.g. a broken
@@ -3280,7 +3280,7 @@ class DrugOSGraphBuilder:
         self._enricher = DrugBankEnricher(self._conn)
         self._janitor = GraphJanitor(self._conn)
 
-        # Fixes CF-4: Database name regex — allow hyphens (Neo4j 5.x)
+        # Fixes CF-4: Database name regex -- allow hyphens (Neo4j 5.x)
         if not re.match(r'^[a-zA-Z0-9_-]+$', self.config.database):
             raise ConfigurationError(
                 f"Invalid database name: {self.config.database!r}. "
@@ -3296,13 +3296,13 @@ class DrugOSGraphBuilder:
         return self._conn.driver
 
     def __enter__(self) -> "DrugOSGraphBuilder":
-        # v84 FORENSIC ROOT FIX (BUG #19 — Neo4j driver not closed on
+        # v84 FORENSIC ROOT FIX (BUG #19 -- Neo4j driver not closed on
         # connect() exception):
         # The previous code did `def __enter__(self): self.connect();
         # return self`. If `connect()` raised (e.g. auth failure,
         # network error, bad driver state), `__exit__` was never
         # called (the `with` block never entered), but `self._conn =
-        # GraphConnection(...)` was already constructed in __init__ —
+        # GraphConnection(...)` was already constructed in __init__ --
         # the GraphConnection holds a reference to the (unclosed)
         # driver. The driver leaks (no close called), exhausting the
         # Neo4j connection pool over time.
@@ -3338,7 +3338,7 @@ class DrugOSGraphBuilder:
         # v84 FORENSIC ROOT FIX (BUG #19): wrap disconnect() in
         # try/except so a failure during disconnect does NOT replace
         # the original exception (if any). The original code did
-        # `self.disconnect(); return False` — if disconnect() raised
+        # `self.disconnect(); return False` -- if disconnect() raised
         # while another exception was already in flight, the original
         # exception was lost (replaced by the disconnect exception),
         # making debugging impossible.
@@ -3466,7 +3466,7 @@ class DrugOSGraphBuilder:
         rel_type: str,
         dst_label: str,
     ) -> int:
-        """Remove duplicate relationships (deprecated — non-deterministic).
+        """Remove duplicate relationships (deprecated -- non-deterministic).
 
         Delegates to GraphEdgeLoader.deduplicate_edges().
         Fixes A-3: Deprecated. Use deduplicate_edges_deterministic().
@@ -3595,7 +3595,7 @@ class DrugOSGraphBuilder:
         """Orchestrate the full graph build pipeline.
 
         Fixes D-5: Fluent orchestration method. Guarantees correct order:
-        constraints → indexes → nodes → edges → enrichment → dedup → stats.
+        constraints -> indexes -> nodes -> edges -> enrichment -> dedup -> stats.
 
         Parameters
         ----------
@@ -3753,8 +3753,8 @@ class DrugOSGraphBuilder:
 
 
 # ─── CLI Entry Point ───────────────────────────────────────────────────────────
-# Fixes DO-6: __main__ provides no usage docs → argparse
-# Fixes S(9)-4: __main__ block prints connection details → use safe_config_dict
+# Fixes DO-6: __main__ provides no usage docs -> argparse
+# Fixes S(9)-4: __main__ block prints connection details -> use safe_config_dict
 # Fixes A-7: json import moved to __main__ block
 
 if __name__ == "__main__":
@@ -3764,7 +3764,7 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
 
     parser = argparse.ArgumentParser(
-        description="DrugOS KG Builder — health check and CLI utilities"
+        description="DrugOS KG Builder -- health check and CLI utilities"
     )
     parser.add_argument(
         "--health", action="store_true",
@@ -3813,7 +3813,7 @@ if __name__ == "__main__":
                 print(f"\nERROR: {e}")
 
         elif args.dedup:
-            # FIX(C-14): the previous implementation was a STUB — it logged
+            # FIX(C-14): the previous implementation was a STUB -- it logged
             # "need full triple (src, rel, dst)" for each edge type but left
             # ``total_removed = 0``. The programmatic method
             # ``deduplicate_edges_deterministic`` (defined on both
@@ -3829,7 +3829,7 @@ if __name__ == "__main__":
             # (the schema list of (src, rel, dst) triples), then for every
             # rel_type present in the graph we dedup EACH (src, rel, dst)
             # triple that uses that rel_type (e.g. "inhibits" can be both
-            # Compound->Gene and Compound->Protein — both must be deduped).
+            # Compound->Gene and Compound->Protein -- both must be deduped).
             stats = builder.get_graph_stats()
             edge_types = stats.get("edge_counts_by_type", {})
             rel_to_triples: dict[str, list[tuple[str, str, str]]] = {}
@@ -3842,7 +3842,7 @@ if __name__ == "__main__":
                 triples_for_rel = rel_to_triples.get(rel_type, [])
                 if not triples_for_rel:
                     logger.warning(
-                        "Dedup for %s: rel_type not in CORE_EDGE_TYPES — "
+                        "Dedup for %s: rel_type not in CORE_EDGE_TYPES -- "
                         "skipping (need full triple src, rel, dst)",
                         rel_type,
                     )

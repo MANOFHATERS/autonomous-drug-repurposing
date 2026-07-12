@@ -1,5 +1,5 @@
 """
-v81 FORENSIC ROOT FIX — All 12 P0 issues verification
+v81 FORENSIC ROOT FIX -- All 12 P0 issues verification
 ======================================================
 Tests for the 12 P0 fixes from the forensic audit:
   P0-E1: _derive_pathways_from_string string_df reference removed
@@ -89,21 +89,21 @@ def test_p0_e3_normalized_score_helper_present():
     every edge-emission site calls. v81 verifies the helper exists and
     produces correct values for every source type."""
     from drugos_graph.phase1_bridge import _compute_normalized_score
-    # DisGeNET raw_score in [0,1] → passthrough
+    # DisGeNET raw_score in [0,1] -> passthrough
     assert _compute_normalized_score(raw_score=0.7, source="disgenet",
                                       rel_type="associated_with") == pytest.approx(0.7)
-    # ChEMBL pchembl_value 8.5 → 8.5/14 ≈ 0.607
+    # ChEMBL pchembl_value 8.5 -> 8.5/14 ≈ 0.607
     assert _compute_normalized_score(pchembl_value=8.5, source="chembl",
                                       rel_type="inhibits") == pytest.approx(8.5/14.0)
-    # STRING combined_score 850 → 850/1000 = 0.85
+    # STRING combined_score 850 -> 850/1000 = 0.85
     assert _compute_normalized_score(combined_score=850, source="string",
                                       rel_type="interacts_with") == pytest.approx(0.85)
-    # DrugBank treats approved → 1.0
+    # DrugBank treats approved -> 1.0
     assert _compute_normalized_score(indication_type="approved", source="drugbank",
                                       rel_type="treats") == 1.0
-    # DrugBank targets (no quantitative signal) → None (NOT 0.0)
+    # DrugBank targets (no quantitative signal) -> None (NOT 0.0)
     assert _compute_normalized_score(source="drugbank", rel_type="targets") is None
-    # OMIM associated_with → 1.0 (curated human genetics)
+    # OMIM associated_with -> 1.0 (curated human genetics)
     assert _compute_normalized_score(source="omim", rel_type="associated_with") == 1.0
 
 
@@ -173,22 +173,40 @@ def test_p0_f4_predict_drug_candidates_model_aware():
 # ---------------------------------------------------------------------------
 # P0-F5: GraphTransformerModel defines normalize_relation_embeddings
 # ---------------------------------------------------------------------------
+# P2-002 FORENSIC ROOT FIX (Team 4): phase2/drugos_graph/graph_transformer_model.py
+# was DELETED -- it was an INCOMPATIBLE HGT model (emb_dim=256, layers=3,
+# bilinear decoder) that could NOT load into Phase 3's
+# DrugRepurposingGraphTransformer (emb_dim=128, layers=4, separate
+# link_predictor). Per the DOCX architecture, Phase 2 produces PyG
+# HeteroData for Phase 3 to train -- NOT a trained model. This test now
+# verifies the DELETION is in effect (the module is gone) AND that
+# Phase 3's canonical model is importable as the backward-compat alias
+# ``GraphTransformerModel``.
 def test_p0_f5_hgt_normalize_relation_embeddings():
-    """v81 root fix: GraphTransformerModel defines
-    ``normalize_relation_embeddings`` as a no-op so train_transe doesn't
-    crash with AttributeError when given an HGT model."""
-    from drugos_graph.graph_transformer_model import GraphTransformerModel
-    assert hasattr(GraphTransformerModel, "normalize_relation_embeddings"), (
-        "P0-F5 REGRESSION: GraphTransformerModel.normalize_relation_embeddings missing"
+    """P2-002 root fix: phase2 graph_transformer_model.py DELETED;
+    Phase 3's DrugRepurposingGraphTransformer (aliased as
+    GraphTransformerModel) is the canonical model. The incompatible
+    Phase 2 HGT module must NOT exist."""
+    import importlib
+    # The Phase 2 module MUST NOT exist (P2-002 root fix: deleted).
+    try:
+        importlib.import_module("drugos_graph.graph_transformer_model")
+        raise AssertionError(
+            "P2-002 REGRESSION: drugos_graph.graph_transformer_model still "
+            "exists -- should have been DELETED per the DOCX architecture "
+            "(Phase 2 produces PyG HeteroData, Phase 3 trains the model)."
+        )
+    except ImportError:
+        pass  # expected -- module deleted
+
+    # Phase 3's canonical model MUST be importable as GraphTransformerModel.
+    from graph_transformer.models.graph_transformer import (
+        DrugRepurposingGraphTransformer,
+        GraphTransformerModel,
     )
-    # Verify it's callable as a no-op
-    class _MockHGT(GraphTransformerModel):
-        def __init__(self):
-            pass
-    mock = _MockHGT()
-    result = mock.normalize_relation_embeddings()
-    assert result is None, (
-        f"P0-F5 REGRESSION: expected None, got {result}"
+    assert GraphTransformerModel is DrugRepurposingGraphTransformer, (
+        "P2-002 REGRESSION: Phase 3's GraphTransformerModel alias must point "
+        "to DrugRepurposingGraphTransformer (the canonical architecture)."
     )
 
 
@@ -197,8 +215,8 @@ def test_p0_f5_hgt_normalize_relation_embeddings():
 # ---------------------------------------------------------------------------
 def test_p0_f6_auc_higher_is_better_model_aware():
     """v81 root fix: train_transe and _evaluate_triples both detect the
-    model's scoring direction (TransE: lower=better → False; HGT:
-    higher=better → True) and pass it to evaluate_link_prediction. The
+    model's scoring direction (TransE: lower=better -> False; HGT:
+    higher=better -> True) and pass it to evaluate_link_prediction. The
     previous code hardcoded ``higher_is_better=False`` which inverted
     HGT AUC and would select the WORST epoch as 'best'."""
     src = (PHASE2_PATH / "drugos_graph" / "transe_model.py").read_text()
@@ -282,7 +300,7 @@ def test_p0_f8_bernoulli_rng_reproducible():
     h1 = [s["head_idx"] for s in n1]
     h2 = [s["head_idx"] for s in n2]
     assert h1 == h2, (
-        f"P0-F8 REGRESSION: non-reproducible — {h1} != {h2}"
+        f"P0-F8 REGRESSION: non-reproducible -- {h1} != {h2}"
     )
 
 
@@ -346,7 +364,7 @@ def test_p0_f11_eval_rng_isolated():
     # Advance self._rng by calling combined_sampling without rng (training)
     for _ in range(5):
         sampler.combined_sampling(total_negatives=10, relation_idx=0)
-    # Now pass fresh rng with same seed twice — should produce identical output
+    # Now pass fresh rng with same seed twice -- should produce identical output
     rng1 = np.random.default_rng(99)
     rng2 = np.random.default_rng(99)
     n1 = sampler.combined_sampling(total_negatives=10, relation_idx=0, rng=rng1)
@@ -354,7 +372,7 @@ def test_p0_f11_eval_rng_isolated():
     h1 = [s["head_idx"] for s in n1]
     h2 = [s["head_idx"] for s in n2]
     assert h1 == h2, (
-        f"P0-F11 REGRESSION: eval RNG non-reproducible — {h1} != {h2}"
+        f"P0-F11 REGRESSION: eval RNG non-reproducible -- {h1} != {h2}"
     )
 
 
@@ -365,7 +383,7 @@ def test_p0_f12_production_refuse_missing_relation():
     """v81 root fix: in production mode (DRUGOS_ENVIRONMENT=prod),
     ``_evaluate_triples`` RAISES ``EvaluationError`` when a relation_idx
     is missing from ``negative_sampler.relation_to_types``. The previous
-    code only LOGGED the inflation — did not PREVENT it."""
+    code only LOGGED the inflation -- did not PREVENT it."""
     src = (PHASE2_PATH / "drugos_graph" / "transe_model.py").read_text()
     assert "_is_prod_f12" in src, (
         "P0-F12 REGRESSION: production-mode check not found"
@@ -389,7 +407,7 @@ def test_p0_f12_production_refuse_missing_relation():
 # Phase 1 ↔ Phase 2 connectivity (the user's #1 ask)
 # ---------------------------------------------------------------------------
 def test_phase1_phase2_bridge_connectivity():
-    """End-to-end: stage Phase 1 frames → load_into_graph →
+    """End-to-end: stage Phase 1 frames -> load_into_graph ->
     bridge_to_pyg_maps. Verify entity_maps and edge_maps are non-empty
     and contain the expected node types (Protein, Gene, Disease,
     Pathway per the DOCX 5-node-type contract)."""
@@ -432,7 +450,7 @@ def test_phase1_phase2_bridge_connectivity():
     )
     # Pathway node type should be present (DOCX contract)
     assert "Pathway" in entity_maps, (
-        f"Pathway node type missing — DOCX 5-node-type contract violated. "
+        f"Pathway node type missing -- DOCX 5-node-type contract violated. "
         f"Got: {list(entity_maps.keys())}"
     )
 

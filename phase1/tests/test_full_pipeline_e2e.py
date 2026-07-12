@@ -265,7 +265,7 @@ class TestStage5Omim:
             "disease_id": ["OMIM:114480", "OMIM:211980", "OMIM:141800"],
             "disease_name": ["Li-Fraumeni syndrome", "Lung cancer", "Alpha-thalassemia"],
             "association_type": ["confirmed", "confirmed", "confirmed"],
-            "score": [0.9, 0.9, 0.9],  # mapping_key=3 → score=0.9 per FIX AUDIT-14
+            "score": [0.9, 0.9, 0.9],  # mapping_key=3 -> score=0.9 per FIX AUDIT-14
             "source": ["omim", "omim", "omim"],
             "pmid_list": [None, None, None],
         })
