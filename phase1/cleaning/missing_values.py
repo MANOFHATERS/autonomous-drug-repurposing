@@ -3192,6 +3192,86 @@ def validate_gda_scores(
         # not import pipelines at module load due to circular-dep guard
         # ARCH-1, GUARD-A7). The pipeline's map IS the single source
         # of truth.
+        #
+        # P1-007 ROOT FIX (v100 forensic — RESTORED after parallel-agent regression):
+        # The verify command caught that this block was dropped during a parallel
+        # merge. Restoring the mapping_key-based verification logic.
+        if source == "omim":
+            try:
+                from pipelines.omim_pipeline import SCORE_BY_MAPPING_KEY
+                _OMIM_CATEGORICAL_MAP = SCORE_BY_MAPPING_KEY
+            except ImportError:
+                _OMIM_CATEGORICAL_MAP = {1: 0.5, 2: 0.6, 3: 0.9, 4: 0.8}
+            if "_omim_categorical_mapped" not in out.columns:
+                out["_omim_categorical_mapped"] = False
+            try:
+                needs_remap_mask = pd.Series(False, index=out.index)
+                # Path A (LIVE in standard pipeline): use the mapping_key column
+                # to verify/repair the score.
+                if "mapping_key" in out.columns:
+                    mk_numeric = pd.to_numeric(out["mapping_key"], errors="coerce")
+                    mk_valid = mk_numeric.notna() & mk_numeric.isin(list(_OMIM_CATEGORICAL_MAP.keys()))
+                    if mk_valid.any():
+                        expected_score = mk_numeric.map(_OMIM_CATEGORICAL_MAP)
+                        actual_score = pd.to_numeric(out["score"], errors="coerce")
+                        mismatch = (
+                            mk_valid
+                            & (
+                                actual_score.isna()
+                                | ((actual_score - expected_score).abs() > 1e-9)
+                            )
+                        )
+                        if mismatch.any():
+                            if "_original_score" not in out.columns:
+                                out["_original_score"] = None
+                            out.loc[mismatch, "_original_score"] = out.loc[mismatch, "score"]
+                            out.loc[mismatch, "score"] = expected_score.loc[mismatch]
+                            needs_remap_mask = needs_remap_mask | mismatch
+                            logger.warning(
+                                "validate_gda_scores: source='omim' — RE-MAPPED "
+                                "%d GDA score(s) whose value did not match the "
+                                "expected SCORE_BY_MAPPING_KEY mapping. This "
+                                "indicates an upstream inversion — the score "
+                                "has been corrected.",
+                                int(mismatch.sum()),
+                            )
+                # Path B (defensive): detect raw integer scores 1/2/3/4 and map them.
+                integer_score_mask = (
+                    out["score"].notna()
+                    & out["score"].apply(
+                        lambda v: (
+                            pd.notna(v)
+                            and isinstance(v, (int, float))
+                            and not isinstance(v, bool)
+                            and float(v).is_integer()
+                            and int(v) in _OMIM_CATEGORICAL_MAP
+                        )
+                    )
+                )
+                if integer_score_mask.any():
+                    if "_original_score" not in out.columns:
+                        out["_original_score"] = None
+                    out.loc[integer_score_mask, "_original_score"] = out.loc[integer_score_mask, "score"]
+                    out.loc[integer_score_mask, "score"] = out.loc[integer_score_mask, "score"].apply(lambda v: _OMIM_CATEGORICAL_MAP[int(v)])
+                    needs_remap_mask = needs_remap_mask | integer_score_mask
+                    logger.info(
+                        "validate_gda_scores: source='omim' — mapped %d raw-integer "
+                        "categorical GDA score(s) (1→0.5, 2→0.6, 3→0.9, 4→0.8).",
+                        int(integer_score_mask.sum()),
+                    )
+                n_categorical = int(needs_remap_mask.sum())
+                if n_categorical > 0:
+                    if "_score_was_clipped" not in out.columns:
+                        out["_score_was_clipped"] = False
+                    out.loc[needs_remap_mask, "_score_was_clipped"] = False
+                    out.loc[needs_remap_mask, "_omim_categorical_mapped"] = True
+                    _increment_metric("omim_categorical_scores_mapped", n_categorical)
+            except (TypeError, ValueError) as exc:
+                logger.warning(
+                    "validate_gda_scores: OMIM categorical mapping failed (%s) — "
+                    "falling back to standard clipping.", exc,
+                )
+
         # Track coerced-to-NaN values (CODE-14).
         coerced_nan_mask = out["score"].isna() & non_numeric_mask
         if "_score_was_coerced_nan" not in out.columns:
