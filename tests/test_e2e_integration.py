@@ -1011,7 +1011,7 @@ def test_scientific_gt_test_auc_above_random():
         # selects the checkpoint by val LOSS (continuous) instead of val
         # AUC (discrete), which gives a more reliable checkpoint. But
         # the TEST AUC can still be below 0.5 on a tiny test set due to
-        # statistical noise — this is EXPECTED on demo graphs and does
+        # statistical noise -- this is EXPECTED on demo graphs and does
         # NOT indicate a bug. The V1 launch threshold (0.85) is for
         # production (10K drugs), not for the 15-drug demo.
         # The test uses a relaxed threshold of > 0.4 (well below random
@@ -1119,7 +1119,7 @@ def test_scientific_known_positive_recovery_nonzero():
     )
     # ROOT FIX (FORENSIC-AUDIT-I14): the V26 split_data puts ALL KPs in
     # BOTH train (50x oversampled) AND test (1x). The I14 fix splits KPs
-    # 60/40 into train and test with NO OVERLAP — so with 2 KPs, 1 goes
+    # 60/40 into train and test with NO OVERLAP -- so with 2 KPs, 1 goes
     # to train and 1 goes to test. The test now checks that AT LEAST 1
     # KP is in test (per I14), not that ALL KPs are in test (the old
     # V26 behavior that I14 intentionally changed).
@@ -1143,7 +1143,7 @@ def test_scientific_known_positive_recovery_nonzero():
     )
     # NOTE: the individual KP-in-test checks (aspirin_in_test,
     # metformin_in_test) are NOT reported as pass/fail because the I14
-    # fix intentionally splits KPs 60/40 — with 2 KPs, exactly 1 goes
+    # fix intentionally splits KPs 60/40 -- with 2 KPs, exactly 1 goes
     # to train and 1 goes to test. Asserting that a SPECIFIC KP is in
     # test would be wrong (which KP goes to test is determined by the
     # random seed, not by the test). The combined check above
@@ -2080,7 +2080,7 @@ def test_v4_dead_code_237_unused_degree_vars_removed():
 
     ROOT FIX (B-04): the V26 bridge RE-WIRES ``compute_graph_degrees``
     into the active code path with FILTERED dicts (single edge type per
-    call). This is INTENTIONAL — it makes ``compute_graph_degrees`` NOT
+    call). This is INTENTIONAL -- it makes ``compute_graph_degrees`` NOT
     dead code. The V4 "dead code fix #2/#3/#7" removed the UNUSED
     VARIABLES (``ae_degrees``, ``disease_disrupted_degrees``) that were
     computed but never read. The B-04 fix then RE-ADDED
@@ -2096,7 +2096,7 @@ def test_v4_dead_code_237_unused_degree_vars_removed():
     # The OLD unused variable names must be gone
     no_ae_degrees = "ae_degrees = compute_graph_degrees" not in code_src
     no_disease_disrupted = "disease_disrupted_degrees = compute_graph_degrees" not in code_src
-    # compute_graph_degrees IS called (B-04 fix re-wires it) — that's correct,
+    # compute_graph_degrees IS called (B-04 fix re-wires it) -- that's correct,
     # not a regression. The call uses filtered dicts (single edge type).
     has_filtered_call = ("{ae_edge_key: ae_edge_idx}" in code_src or
                          "{disrupted_edge_key: disrupted_edge_idx}" in code_src or
@@ -2384,13 +2384,13 @@ def test_v4_final_phase3_phase4_100_percent_connected():
     phase6_src = inspect.getsource(GTRLBridge.get_top_k_novel_predictions)
     phase6_via_rl = "rl_model" in phase6_src
 
-    # Check 8: gnn_score is NOT dominant (v90 Compound #4 fix — circular
+    # Check 8: gnn_score is NOT dominant (v90 Compound #4 fix -- circular
     # RL distillation of GT). The user's audit explicitly required:
     #   "Remove gnn_score from the reward function entirely, OR reduce
     #    its weight to < 0.05 AND remove the multiplicative gnn_factor
     #    gate. The RL agent must not be a learned distillation of the
-    #    GT model — that is circular."
-    # The old test checked gnn_score >= 0.30 (dominant) — that was the
+    #    GT model -- that is circular."
+    # The old test checked gnn_score >= 0.30 (dominant) -- that was the
     # BUG. The v90 fix reduces it to 0.04 (< 0.05). This test now
     # verifies the CORRECT behavior: gnn_score is the WEAKEST feature.
     from rl.rl_drug_ranker import RewardConfig

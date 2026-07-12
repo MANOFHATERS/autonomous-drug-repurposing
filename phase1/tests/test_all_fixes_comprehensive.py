@@ -182,7 +182,7 @@ class TestIssue1_NullSourceId:
 
         dpi = db_session.query(DrugProteinInteraction).first()
         # The loader may store NULL source_id as either '' or NULL.
-        # Both are acceptable — the key is that the upsert didn't crash.
+        # Both are acceptable -- the key is that the upsert didn't crash.
         assert dpi.source_id in ("", None), (
             f"Expected '' or None, got {dpi.source_id!r}"
         )
@@ -587,7 +587,7 @@ class TestIssue19to23_RemovedDeps:
         """v26 FIX-C6: Airflow IS now in requirements.txt.
 
         The previous test asserted Airflow should NOT be in requirements
-        (the OLD broken behavior — Airflow was "provided by Docker base
+        (the OLD broken behavior -- Airflow was "provided by Docker base
         image" only, which made every DAG un-importable outside Docker
         and caused test_dag_structure.py to importorskip past all DAG
         validation). The FIX-C6 root fix adds apache-airflow>=2.8.0 to

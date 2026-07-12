@@ -5,8 +5,8 @@ the upgraded PubChem pipeline correctly addresses the 131 forensic-audit
 findings documented in ``PUBCHEM_PIPELINE_MASTER_FIX_PROMPT.md``, covering
 all 16 quality domains.
 
-Every test here verifies REAL behaviour with REAL assertions — no ``pass``
-statements, no ``assertTrue(True)``.  All tests are mock-based — no network
+Every test here verifies REAL behaviour with REAL assertions -- no ``pass``
+statements, no ``assertTrue(True)``.  All tests are mock-based -- no network
 access is required.
 
 The tests are grouped by domain, in the priority order mandated by the
@@ -27,7 +27,7 @@ Run::
 from __future__ import annotations
 
 import csv
-import inspect as _inspect  # stdlib inspect — the sqlalchemy import below shadows it
+import inspect as _inspect  # stdlib inspect -- the sqlalchemy import below shadows it
 import io
 import json
 import logging
@@ -120,7 +120,7 @@ def db_session(db_engine):
 # Sample-data fixtures
 # ---------------------------------------------------------------------------
 
-# Real-world InChIKeys (well-known drugs) — used across multiple tests.
+# Real-world InChIKeys (well-known drugs) -- used across multiple tests.
 ASPIRIN_INCHIKEY = "BSYNRYMUTXBXSQ-UHFFFAOYSA-N"  # CID 2244
 IBUPROFEN_INCHIKEY = "HEFNNWSXXWATIW-UHFFFAOYSA-N"  # CID 3672
 ESLITIALOPRAM_INCHIKEY = "WSEQXVZVJXVFPD-UHFFFAOYSA-N"  # (S)-citalopram
@@ -152,7 +152,7 @@ def make_pubchem_response(inchikey: str, cid: int, **overrides) -> dict:
 
 
 def make_chiral_response(inchikey: str, cid: int) -> dict:
-    """Build a response with stereochemistry — IsomericSMILES contains ``@``."""
+    """Build a response with stereochemistry -- IsomericSMILES contains ``@``."""
     return make_pubchem_response(
         inchikey,
         cid,
@@ -237,7 +237,7 @@ def insert_drug(session, inchikey: str, name: str = "Test Drug", **kwargs):
 
 
 # ===========================================================================
-# Domain 3 — Scientific Correctness (HIGHEST PRIORITY)
+# Domain 3 -- Scientific Correctness (HIGHEST PRIORITY)
 # ===========================================================================
 
 
@@ -247,7 +247,7 @@ class TestDomain3ScientificCorrectness:
     def test_sci_1_stereochemistry_preserved(self, tmp_pipeline):
         """SCI-1: canonical_smiles and isomeric_smiles are SEPARATE columns.
 
-        For chiral drugs they MUST differ — the isomeric SMILES contains
+        For chiral drugs they MUST differ -- the isomeric SMILES contains
         ``@`` while the canonical does not.  Losing stereochemistry makes
         (R)-thalidomide and (S)-thalidomide indistinguishable.
         """
@@ -318,12 +318,12 @@ class TestDomain3ScientificCorrectness:
         ]:
             ik = f"BSYNRYMUTXBXSQ-UHFFFAOYSA-{last_char}"
             assert _extract_protonation_state(ik) == expected
-        # Invalid InChIKey → None.
+        # Invalid InChIKey -> None.
         assert _extract_protonation_state("invalid") is None
         assert _extract_protonation_state(None) is None
 
     def test_sci_11_inchikey_mismatch_dead_lettered(self, tmp_pipeline):
-        """SCI-11: response InChIKey != requested → dead-letter, not stored."""
+        """SCI-11: response InChIKey != requested -> dead-letter, not stored."""
         # Request IK1, but PubChem returns IK2.
         response = make_pubchem_response(IBUPROFEN_INCHIKEY, cid=3672)
         records = tmp_pipeline._parse_pubchem_response(
@@ -349,12 +349,12 @@ class TestDomain3ScientificCorrectness:
             response, [ASPIRIN_INCHIKEY], batch_idx=0, batch_sha256="abc"
         )
         rec = records[0]
-        # Aspirin C9H8O4 — heavy atoms = 9 C + 4 O = 13 (H excluded).
+        # Aspirin C9H8O4 -- heavy atoms = 9 C + 4 O = 13 (H excluded).
         assert rec["heavy_atom_count"] == 13
 
     def test_sci_14_isotope_info_parsed(self, tmp_pipeline):
         """SCI-14: isotope labels parsed from isomeric SMILES."""
-        # [18F]fluorobenzene — a hypothetical PET tracer.
+        # [18F]fluorobenzene -- a hypothetical PET tracer.
         info = _extract_isotope_info("c1cc([18F])ccc1")
         assert info is not None
         d = json.loads(info)
@@ -368,11 +368,11 @@ class TestDomain3ScientificCorrectness:
 
     def test_sci_15_formal_charge_parsed(self, tmp_pipeline):
         """SCI-15: formal_charge parsed from isomeric SMILES."""
-        # [NH4+] — ammonium, formal charge +1.
+        # [NH4+] -- ammonium, formal charge +1.
         assert _extract_formal_charge("[NH4+]") == 1
-        # [Cl-] — chloride, formal charge -1.
+        # [Cl-] -- chloride, formal charge -1.
         assert _extract_formal_charge("[Cl-]") == -1
-        # [Ca+2] — calcium ion, formal charge +2.
+        # [Ca+2] -- calcium ion, formal charge +2.
         assert _extract_formal_charge("[Ca+2]") == 2
         # Neutral molecule.
         assert _extract_formal_charge("CCO") == 0
@@ -434,7 +434,7 @@ class TestDomain3ScientificCorrectness:
 
 
 # ===========================================================================
-# Domain 5 — Data Quality & Integrity
+# Domain 5 -- Data Quality & Integrity
 # ===========================================================================
 
 
@@ -445,7 +445,7 @@ class TestDomain5DataQuality:
         """DQ-1: duplicate InChIKeys in the drugs table are deduped before sending."""
         insert_drug(db_session, ASPIRIN_INCHIKEY, name="Aspirin")
         # Insert the SAME InChIKey again (deliberately).
-        # The unique constraint will catch this — but for testing dedup,
+        # The unique constraint will catch this -- but for testing dedup,
         # we mock the query.
         # Mock the ORM query result.
         mock_result = [
@@ -513,7 +513,7 @@ class TestDomain5DataQuality:
         assert len(info_logs) > 0
 
     def test_dq_13_duplicate_cid_lowest_kept(self, tmp_pipeline):
-        """DQ-13: duplicate InChIKey — lowest CID wins (PubChem convention)."""
+        """DQ-13: duplicate InChIKey -- lowest CID wins (PubChem convention)."""
         # Two records for the same InChIKey with different CIDs.
         response = {
             "PropertyTable": {
@@ -524,7 +524,7 @@ class TestDomain5DataQuality:
                         "MolecularFormula": "C9H8O4",
                     },
                     {
-                        "CID": 2244,  # lower — should win
+                        "CID": 2244,  # lower -- should win
                         "InChIKey": ASPIRIN_INCHIKEY,
                         "MolecularFormula": "C9H8O4",
                     },
@@ -553,7 +553,7 @@ class TestDomain5DataQuality:
         # DataFrame with one row missing pubchem_cid.
         df = pd.DataFrame({
             "inchikey": [ASPIRIN_INCHIKEY, IBUPROFEN_INCHIKEY],
-            "pubchem_cid": [2244, None],  # ibuprofen has no CID — will be dropped
+            "pubchem_cid": [2244, None],  # ibuprofen has no CID -- will be dropped
             "molecular_formula": ["C9H8O4", "C13H18O2"],
             "molecular_weight": [Decimal("180.063388"), Decimal("206.281212")],
         })
@@ -576,7 +576,7 @@ class TestDomain5DataQuality:
 
 
 # ===========================================================================
-# Domain 7 — Idempotency & Reproducibility
+# Domain 7 -- Idempotency & Reproducibility
 # ===========================================================================
 
 
@@ -637,7 +637,7 @@ class TestDomain7Idempotency:
 
 
 # ===========================================================================
-# Domain 1 — Architecture
+# Domain 1 -- Architecture
 # ===========================================================================
 
 
@@ -645,7 +645,7 @@ class TestDomain1Architecture:
     """Tests for ARCH-1 through ARCH-14."""
 
     def test_arch_1_load_accepts_session_parameter(self, tmp_pipeline):
-        """ARCH-1: load() accepts session= parameter (CRITICAL — was crashing)."""
+        """ARCH-1: load() accepts session= parameter (CRITICAL -- was crashing)."""
         import inspect
         sig = _inspect.signature(tmp_pipeline.load)
         assert "session" in sig.parameters
@@ -656,7 +656,7 @@ class TestDomain1Architecture:
         """ARCH-1: load(df, session=mock_session) does not raise TypeError."""
         df = pd.DataFrame(columns=list(COLUMN_ORDER))
         result = tmp_pipeline.load(df, session=db_session)
-        # Empty df → returns 0.
+        # Empty df -> returns 0.
         assert result == 0
 
     def test_arch_2_load_uses_passed_session(self, tmp_pipeline):
@@ -733,7 +733,7 @@ class TestDomain1Architecture:
         # Insert a drug row first (FK constraint).
         insert_drug(db_session, ASPIRIN_INCHIKEY, name="Aspirin")
         # Create the pubchem_compound_properties table directly via the
-        # loader's Table object — its metadata.create_all will issue the
+        # loader's Table object -- its metadata.create_all will issue the
         # CREATE TABLE against the test engine.
         engine = db_session.get_bind()
         _PUBCHEM_COMPOUND_PROPERTIES_TABLE.metadata.create_all(
@@ -787,7 +787,7 @@ class TestDomain1Architecture:
     def test_arch_7_env_var_override(self, monkeypatch):
         """ARCH-7: env vars override the default settings.
 
-        Uses ``_getenv_int`` directly (no ``importlib.reload`` — avoids
+        Uses ``_getenv_int`` directly (no ``importlib.reload`` -- avoids
         permanently mutating the module state for downstream tests).
         """
         from config.settings import _getenv_int
@@ -866,7 +866,7 @@ class TestDomain1Architecture:
 
 
 # ===========================================================================
-# Domain 2 — Design
+# Domain 2 -- Design
 # ===========================================================================
 
 
@@ -914,7 +914,7 @@ class TestDomain2Design:
 
     def test_design_9_backoff_has_jitter(self, tmp_pipeline):
         """DESIGN-9: backoff includes jitter."""
-        # Run _compute_backoff multiple times — values should vary.
+        # Run _compute_backoff multiple times -- values should vary.
         values = set()
         for _ in range(10):
             v = tmp_pipeline._compute_backoff(0, None)
@@ -924,7 +924,7 @@ class TestDomain2Design:
 
     def test_design_10_retry_after_respected(self, tmp_pipeline):
         """DESIGN-10: Retry-After header (delta-seconds form) is respected."""
-        # Retry-After: 10 → backoff must be >= 10.
+        # Retry-After: 10 -> backoff must be >= 10.
         backoff = tmp_pipeline._compute_backoff(0, "10")
         assert backoff >= 10.0
 
@@ -941,7 +941,7 @@ class TestDomain2Design:
         assert backoff >= 50.0
 
     def test_design_12_404_not_retried(self, tmp_pipeline):
-        """DESIGN-12: 404 is in PERMANENT_STATUS — not retried."""
+        """DESIGN-12: 404 is in PERMANENT_STATUS -- not retried."""
         assert 404 in PERMANENT_STATUS
         assert 404 not in TRANSIENT_STATUS
 
@@ -963,7 +963,7 @@ class TestDomain2Design:
         assert "contact:" in ua
 
     def test_design_19_dedupe_keeps_lowest_cid(self, tmp_pipeline):
-        """DESIGN-19: duplicate InChIKey → lowest CID kept."""
+        """DESIGN-19: duplicate InChIKey -> lowest CID kept."""
         response = {
             "PropertyTable": {
                 "Properties": [
@@ -999,7 +999,7 @@ class TestDomain2Design:
 
 
 # ===========================================================================
-# Domain 4 — Coding
+# Domain 4 -- Coding
 # ===========================================================================
 
 
@@ -1016,7 +1016,7 @@ class TestDomain4Coding:
 
     def test_code_4_load_dict_construction(self, tmp_pipeline):
         """CODE-4: load_df is built as a dict-of-columns, not column-by-column."""
-        # Verify by inspecting the load() method — it should build a dict.
+        # Verify by inspecting the load() method -- it should build a dict.
         import inspect
         src = _inspect.getsource(tmp_pipeline.load)
         assert "load_dict" in src
@@ -1069,7 +1069,7 @@ class TestDomain4Coding:
 
 
 # ===========================================================================
-# Domain 6 — Reliability & Resilience
+# Domain 6 -- Reliability & Resilience
 # ===========================================================================
 
 
@@ -1093,7 +1093,7 @@ class TestDomain6Reliability:
         """REL-9: PubChemUnreachableError raised after 3 connection failures."""
         # Simulate 3 consecutive connection failures on first batches.
         tmp_pipeline._consecutive_connection_failures = 3
-        # The check in _lookup_batch would raise — verify the exception type.
+        # The check in _lookup_batch would raise -- verify the exception type.
         with pytest.raises(PubChemUnreachableError):
             raise PubChemUnreachableError("simulated")
 
@@ -1112,7 +1112,7 @@ class TestDomain6Reliability:
 
 
 # ===========================================================================
-# Domain 9 — Security
+# Domain 9 -- Security
 # ===========================================================================
 
 
@@ -1151,7 +1151,7 @@ class TestDomain9Security:
         tmp_pipeline._write_dead_letters_file()
         dest = tmp_pipeline.raw_dir / "pubchem_dead_letters.csv"
         assert dest.exists()
-        # Check permissions (Unix only — skip on Windows).
+        # Check permissions (Unix only -- skip on Windows).
         if os.name == "posix":
             mode = dest.stat().st_mode & 0o777
             assert mode == 0o600, f"Expected 0o600, got {oct(mode)}"
@@ -1193,7 +1193,7 @@ class TestDomain9Security:
 
 
 # ===========================================================================
-# Domain 14 — Compliance & Standards
+# Domain 14 -- Compliance & Standards
 # ===========================================================================
 
 
@@ -1252,7 +1252,7 @@ class TestDomain14Compliance:
 
 
 # ===========================================================================
-# Domain 8 — Performance
+# Domain 8 -- Performance
 # ===========================================================================
 
 
@@ -1273,7 +1273,7 @@ class TestDomain8Performance:
             tmp_pipeline, "_fetch_and_archive_batch", lambda *a, **kw: None
         )
         tmp_pipeline._fetch_batches_sequential(batches, 3, tmp_pipeline.raw_dir)
-        # Should have slept 2 times (between batches 0→1 and 1→2; not after 2).
+        # Should have slept 2 times (between batches 0->1 and 1->2; not after 2).
         # Each sleep is the rate_limit_interval.
         rate_sleeps = [s for s in sleep_calls if s == tmp_pipeline.rate_limit_interval]
         assert len(rate_sleeps) == 2  # not 3
@@ -1287,7 +1287,7 @@ class TestDomain8Performance:
 
 
 # ===========================================================================
-# Domain 11 — Logging & Observability
+# Domain 11 -- Logging & Observability
 # ===========================================================================
 
 
@@ -1316,7 +1316,7 @@ class TestDomain11Logging:
 
 
 # ===========================================================================
-# Domain 12 — Configuration
+# Domain 12 -- Configuration
 # ===========================================================================
 
 
@@ -1349,14 +1349,14 @@ class TestDomain12Configuration:
         # Instantiate with valid defaults.
         p = PubChemPipeline()
         # Mutate to an invalid value.
-        p.batch_size = 0  # invalid — must be in (0, 100]
+        p.batch_size = 0  # invalid -- must be in (0, 100]
         with pytest.raises(PubChemPipelineError):
             p._validate_config()
 
     def test_conf_12_rest_base_validated(self, monkeypatch):
         """CONF-12: PUBCHEM_REST_BASE must be a valid HTTP(S) URL.
 
-        Same approach as test_conf_8 — avoids ``importlib.reload``.
+        Same approach as test_conf_8 -- avoids ``importlib.reload``.
         """
         from pipelines.pubchem_pipeline import PubChemPipeline, PubChemPipelineError
         p = PubChemPipeline()
@@ -1367,7 +1367,7 @@ class TestDomain12Configuration:
 
 
 # ===========================================================================
-# Domain 15 — Interoperability
+# Domain 15 -- Interoperability
 # ===========================================================================
 
 
@@ -1376,7 +1376,7 @@ class TestDomain15Interoperability:
 
     def test_int_1_schema_matches_output(self):
         """INT-1: schema v1.json matches the pipeline's output columns."""
-        # Same as COMP-1 — both verify the same contract.
+        # Same as COMP-1 -- both verify the same contract.
         schema_path = PROJECT_ROOT / "pipelines" / "schema" / "v1.json"
         with open(schema_path) as f:
             schema = json.load(f)
@@ -1414,12 +1414,12 @@ class TestDomain15Interoperability:
         records = tmp_pipeline._parse_pubchem_response(
             fault_response, [ASPIRIN_INCHIKEY], batch_idx=0, batch_sha256="abc"
         )
-        # No PropertyTable → no records.
+        # No PropertyTable -> no records.
         assert len(records) == 0
 
 
 # ===========================================================================
-# Domain 16 — Data Lineage & Traceability
+# Domain 16 -- Data Lineage & Traceability
 # ===========================================================================
 
 
@@ -1477,7 +1477,7 @@ class TestDomain16Lineage:
 
 
 # ===========================================================================
-# Domain 13 — Documentation
+# Domain 13 -- Documentation
 # ===========================================================================
 
 
@@ -1531,12 +1531,12 @@ class TestDomain13Documentation:
 
 
 # ===========================================================================
-# Domain 10 — Testing (meta — tests about tests)
+# Domain 10 -- Testing (meta -- tests about tests)
 # ===========================================================================
 
 
 class TestDomain10Testing:
-    """Tests for TEST-1 through TEST-16 — meta-tests about test coverage."""
+    """Tests for TEST-1 through TEST-16 -- meta-tests about test coverage."""
 
     def test_test_1_test_file_exists(self):
         """TEST-1: this test file exists."""
@@ -1581,31 +1581,31 @@ class TestEdgeCases:
         assert result == 0
 
     def test_safe_float_handles_none(self):
-        """_safe_float(None) → None."""
+        """_safe_float(None) -> None."""
         assert PubChemPipeline._safe_float(None) is None
 
     def test_safe_int_handles_none(self):
-        """_safe_int(None) → None."""
+        """_safe_int(None) -> None."""
         assert PubChemPipeline._safe_int(None) is None
 
     def test_safe_float_handles_valid_string(self):
-        """_safe_float('180.063388') → Decimal('180.063388')."""
+        """_safe_float('180.063388') -> Decimal('180.063388')."""
         result = PubChemPipeline._safe_float("180.063388")
         assert isinstance(result, Decimal)
         assert str(result) == "180.063388"
 
     def test_safe_int_handles_valid_string(self):
-        """_safe_int('2244') → 2244."""
+        """_safe_int('2244') -> 2244."""
         assert PubChemPipeline._safe_int("2244") == 2244
 
     def test_safe_float_handles_int(self):
-        """_safe_float(180) → Decimal('180.000000')."""
+        """_safe_float(180) -> Decimal('180.000000')."""
         result = PubChemPipeline._safe_float(180)
         assert isinstance(result, Decimal)
         assert str(result) == "180.000000"
 
     def test_safe_int_handles_float_string(self):
-        """_safe_int('2244.0') → 2244 (Decimal handles the conversion)."""
+        """_safe_int('2244.0') -> 2244 (Decimal handles the conversion)."""
         assert PubChemPipeline._safe_int("2244.0") == 2244
 
     def test_extract_protonation_state_invalid_returns_none(self):
@@ -1626,7 +1626,7 @@ class TestEdgeCases:
 
 
 class TestEndToEndIntegration:
-    """End-to-end tests for the download → clean → load flow."""
+    """End-to-end tests for the download -> clean -> load flow."""
 
     def test_full_pipeline_run_with_mocked_http(
         self, tmp_pipeline, db_session, monkeypatch
@@ -1634,9 +1634,9 @@ class TestEndToEndIntegration:
         """TEST-5: full pipeline run with mocked PubChem HTTP.
 
         This is a smoke test that exercises:
-        1. download() — queries DB, fetches PubChem responses (mocked).
-        2. clean() — parses the raw responses archive.
-        3. load() — persists to drugs + pubchem_compound_properties.
+        1. download() -- queries DB, fetches PubChem responses (mocked).
+        2. clean() -- parses the raw responses archive.
+        3. load() -- persists to drugs + pubchem_compound_properties.
         """
         # Insert a drug with NULL pubchem_cid.
         insert_drug(db_session, ASPIRIN_INCHIKEY, name="Aspirin")
@@ -1673,10 +1673,10 @@ class TestEndToEndIntegration:
             tmp_pipeline.download()
         except Exception as exc:
             # Some test environments may not have get_db_session working
-            # correctly with the mock — that's OK, the important thing is
+            # correctly with the mock -- that's OK, the important thing is
             # that download() doesn't crash with TypeError.
             assert not isinstance(exc, TypeError), (
-                f"download() raised TypeError — this is the ARCH-1 bug: {exc}"
+                f"download() raised TypeError -- this is the ARCH-1 bug: {exc}"
             )
 
         # Verify the lookup file was written.

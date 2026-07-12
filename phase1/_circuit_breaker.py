@@ -13,8 +13,8 @@ States
 - **OPEN** (failing): all requests are refused until ``reset_timeout``
   elapses, at which point the breaker transitions to HALF_OPEN.
 - **HALF_OPEN** (probing): exactly **one** probe request is allowed.
-  Subsequent requests are refused until the probe completes (success →
-  CLOSED, failure → OPEN).  This single-probe gate prevents a thundering
+  Subsequent requests are refused until the probe completes (success ->
+  CLOSED, failure -> OPEN).  This single-probe gate prevents a thundering
   herd when the protected service is still recovering.
 
 API
@@ -22,12 +22,12 @@ API
 The class exposes three equivalent check interfaces so callers can pick
 the one that matches their codebase convention:
 
-- ``allow_request() -> bool`` — returns True if the request should proceed.
-- ``is_open() -> bool`` — returns True if the breaker is open (call should
+- ``allow_request() -> bool`` -- returns True if the request should proceed.
+- ``is_open() -> bool`` -- returns True if the breaker is open (call should
   be refused).  This is the logical inverse of ``allow_request()`` for
   OPEN/CLOSED states; in HALF_OPEN the semantics differ subtly
   (``is_open`` returns False for the probe, ``allow_request`` returns True).
-- ``state`` property — returns the current state string.
+- ``state`` property -- returns the current state string.
 
 History
 -------
@@ -149,10 +149,10 @@ class _CircuitBreaker:
     def state(self) -> str:
         """Current breaker state (``'closed'``, ``'open'``, or ``'half_open'``).
 
-        v89 FORENSIC ROOT FIX (BUG #12 P1 — pure observation):
-          The previous implementation triggered an open → half_open
+        v89 FORENSIC ROOT FIX (BUG #12 P1 -- pure observation):
+          The previous implementation triggered an open -> half_open
           transition when the reset timeout had elapsed. This was a
-          SIDE EFFECT on a read-only property — the same class of bug
+          SIDE EFFECT on a read-only property -- the same class of bug
           as ``is_open()``. Monitoring code that read ``breaker.state``
           for dashboards inadvertently transitioned the breaker, and
           because the transition did NOT set
@@ -160,7 +160,7 @@ class _CircuitBreaker:
           ``allow_request()``, it could leave the breaker in a
           half-reserved state.
           ROOT FIX: this property is now PURE OBSERVATION. It returns
-          the current state string without any transition. The open →
+          the current state string without any transition. The open ->
           half_open transition is performed EXCLUSIVELY by
           ``allow_request()``.
         """
@@ -194,16 +194,16 @@ class _CircuitBreaker:
     # -- Core state transitions ----------------------------------------
 
     def record_success(self) -> None:
-        """Record a successful operation — closes the breaker."""
+        """Record a successful operation -- closes the breaker."""
         with self._lock:
             self._failure_count = 0
             self._state = "closed"
             self._half_open_probe_in_flight = False
 
     def record_failure(self) -> None:
-        """Record a failed operation — may open the breaker.
+        """Record a failed operation -- may open the breaker.
 
-        v89 FORENSIC ROOT FIX (BUG #13 P1 — half-open probe flag not cleared
+        v89 FORENSIC ROOT FIX (BUG #13 P1 -- half-open probe flag not cleared
           on threshold-path re-open):
           The previous code checked ``if self._state == "half_open"`` AFTER
           the ``if self._failure_count >= self._failure_threshold`` block.
@@ -227,7 +227,7 @@ class _CircuitBreaker:
             if self._state == "half_open":
                 # A failed probe in half_open trips the breaker back to
                 # open. ALWAYS clear the probe-in-flight flag when leaving
-                # half_open (v89 BUG #13 — was not cleared on the
+                # half_open (v89 BUG #13 -- was not cleared on the
                 # threshold-path re-open, leaving the breaker stuck).
                 self._state = "open"
                 self._half_open_probe_in_flight = False
@@ -266,7 +266,7 @@ class _CircuitBreaker:
 
         In half_open state, exactly ONE probe request is allowed.
         Subsequent requests are refused until the probe completes
-        (record_success → closed, record_failure → open).
+        (record_success -> closed, record_failure -> open).
         """
         with self._lock:
             current_state = self._state
@@ -289,20 +289,20 @@ class _CircuitBreaker:
     def is_open(self) -> bool:
         """Return True if the breaker is open and calls should be refused.
 
-        v89 FORENSIC ROOT FIX (BUG #12 P1 — is_open() mutated state):
+        v89 FORENSIC ROOT FIX (BUG #12 P1 -- is_open() mutated state):
           The previous implementation MUTATED state when called from the
           "open" state with an elapsed reset timeout: it transitioned to
           "half_open" AND set ``_half_open_probe_in_flight = True``. This
           RESERVED the probe slot, so a subsequent ``allow_request()``
           call (which sets the flag to False before the probe, then True
-          to reserve) saw the flag already True and returned False —
+          to reserve) saw the flag already True and returned False --
           refusing the actual probe. The breaker appeared stuck open even
           after the reset timeout. Any monitoring/dashboard code that
           called ``is_open()`` inadvertently broke the subsequent
           ``allow_request()`` call.
           ROOT FIX: make ``is_open()`` a PURE OBSERVATION method. It does
           NOT transition state, does NOT reserve probe slots. The
-          open → half_open transition is performed EXCLUSIVELY by
+          open -> half_open transition is performed EXCLUSIVELY by
           ``allow_request()``. Callers who want to actually acquire a
           probe slot MUST call ``allow_request()``.
 
@@ -320,7 +320,7 @@ class _CircuitBreaker:
         """
         with self._lock:
             if self._state == "open":
-                # Pure observation — do NOT transition to half_open here.
+                # Pure observation -- do NOT transition to half_open here.
                 # allow_request() performs the transition when a caller
                 # actually wants to acquire a probe slot.
                 return True

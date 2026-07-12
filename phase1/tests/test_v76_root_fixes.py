@@ -1,5 +1,5 @@
 """
-v76 ROOT FIX TEST SUITE — T-037 through T-047
+v76 ROOT FIX TEST SUITE -- T-037 through T-047
 ==============================================
 
 Forensic verification that all 11 issues (T-037..T-047) are root-fixed
@@ -469,7 +469,7 @@ class TestT047TransactionControlFilter:
 # ── Phase 1 ↔ Phase 2 connection verification ───────────────────────────────
 
 class TestPhase1Phase2Connection:
-    """Verify the Phase 1 → Phase 2 connection is 100% intact."""
+    """Verify the Phase 1 -> Phase 2 connection is 100% intact."""
 
     def test_trigger_phase2_wire_exists(self):
         """The master DAG must wire pubchem_load >> trigger_phase2."""

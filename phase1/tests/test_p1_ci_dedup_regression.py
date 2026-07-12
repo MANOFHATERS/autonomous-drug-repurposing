@@ -1,4 +1,4 @@
-"""P1 Forensic Root-Fix Verification Tests — CI + Dedup + Regression
+"""P1 Forensic Root-Fix Verification Tests -- CI + Dedup + Regression
 ===================================================================
 
 This test suite verifies the fixes applied in the current session:
@@ -7,7 +7,7 @@ This test suite verifies the fixes applied in the current session:
   3. _CircuitBreaker is consolidated into a shared module
   4. All prior P0/P1/P2 fixes remain in place (no regression)
 
-These tests are forensic — they inspect ACTUAL code and runtime behavior,
+These tests are forensic -- they inspect ACTUAL code and runtime behavior,
 not comments or string-matching on docs.
 """
 
@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-# Project root — this file is at phase1/tests/test_p1_ci_dedup_regression.py
+# Project root -- this file is at phase1/tests/test_p1_ci_dedup_regression.py
 # So REPO_ROOT = this_file /../../..  = autonomous-drug-repurposing/
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 PHASE1_ROOT = REPO_ROOT / "phase1"
@@ -195,7 +195,7 @@ class TestCircuitBreakerConsolidation:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 4. REGRESSION — PRIOR P0/P1/P2 FIXES MUST STILL BE IN PLACE
+# 4. REGRESSION -- PRIOR P0/P1/P2 FIXES MUST STILL BE IN PLACE
 # ═══════════════════════════════════════════════════════════════════════════
 
 class TestNoRegression:
@@ -214,10 +214,24 @@ class TestNoRegression:
                 break
 
     def test_p0_f5_normalize_relation_embeddings_exists(self):
-        """P0-F5: GraphTransformerModel must define normalize_relation_embeddings."""
-        content = (PHASE2_ROOT / "drugos_graph" / "graph_transformer_model.py").read_text()
-        assert "def normalize_relation_embeddings" in content, (
-            "GraphTransformerModel must define normalize_relation_embeddings (P0-F5)"
+        """P0-F5: Phase 2 graph_transformer_model.py DELETED per P2-002.
+
+        The previous test read the Phase 2 HGT model file and asserted it
+        defined ``normalize_relation_embeddings``. Per P2-002 ROOT FIX,
+        ``phase2/drugos_graph/graph_transformer_model.py`` was DELETED --
+        it was an INCOMPATIBLE HGT model (emb_dim=256, layers=3, bilinear
+        decoder) that could NOT load into Phase 3's
+        ``DrugRepurposingGraphTransformer`` (emb_dim=128, layers=4,
+        separate link_predictor). Per the DOCX architecture, Phase 2
+        produces PyG HeteroData for Phase 3 to train -- NOT a trained
+        model. This test now verifies the DELETION is in effect."""
+        p2_model_file = PHASE2_ROOT / "drugos_graph" / "graph_transformer_model.py"
+        assert not p2_model_file.exists(), (
+            "P2-002 REGRESSION: phase2/drugos_graph/graph_transformer_model.py "
+            "must NOT exist -- it was DELETED per the DOCX architecture "
+            "(Phase 2 produces PyG HeteroData, Phase 3 trains the model). "
+            "The incompatible HGT model caused Phase 2->3 checkpoint "
+            "handoff to be fundamentally broken."
         )
 
     def test_p0_f4_predict_drug_candidates_score_direction(self):

@@ -1,5 +1,5 @@
 """
-OMIM Pipeline — gene-phenotype mappings from OMIM (institutional-grade).
+OMIM Pipeline -- gene-phenotype mappings from OMIM (institutional-grade).
 
 This module is the upstream root of the gene-disease-association (GDA) data
 ingestion for the Autonomous Drug Repurposing Platform (Team Cosmic /
@@ -17,51 +17,51 @@ Download
   downloads endpoint. The API key is part of the URL **path** because OMIM's
   downloads endpoint does NOT accept ``Authorization: ApiKey`` headers (any
   such attempt returns 401). The previous code's "FIX #12" header-auth
-  attempt was fake — it has been removed (BUG-2.1).
+  attempt was fake -- it has been removed (BUG-2.1).
 - If ``OMIM_API_KEY`` is empty: raise ``RuntimeError``. The API path also
   requires a key, so silent fallthrough is forbidden (BUG-9.15).
 - Optional alternative: ``_download_via_api()`` paginates the OMIM REST API
   at ``/api/geneMap`` with the ``Authorization: ApiKey`` header (preferred
   over the query-string ``apiKey`` form to avoid CDN/proxy logging of the
-  key — BUG-2.2 / BUG-9.1). Page size is 1000 (OMIM max), rate-limited to
+  key -- BUG-2.2 / BUG-9.1). Page size is 1000 (OMIM max), rate-limited to
   at least 1 req/sec (P1-22 ROOT FIX: previously ~0.1 req/s effective rate
-  → 24h+ full ingest).
+  -> 24h+ full ingest).
 - Both paths write a SHA-256 sidecar and produce a manifest with full
   provenance.
 
 Clean
 -----
-1. Parse ``morbidmap.txt`` (tab-separated, **no header row** — BUG-3.1).
+1. Parse ``morbidmap.txt`` (tab-separated, **no header row** -- BUG-3.1).
    Single-loop reader: the first non-``#`` non-empty line is a DATA row,
    not a header. UTF-8 strict with a latin-1 fallback for non-UTF-8 bytes
    (BUG-6.8).
 2. Extract ``phenotype_name``, ``phenotype_mim``, ``mapping_key`` (1-4
-   only — BUG-3.20), and ``association_modifier`` (one of ``?``, ``{}``,
-   ``[]``, ``*``, ``+``, ``%`` or ``None`` — BUG-3.4) from the phenotype
+   only -- BUG-3.20), and ``association_modifier`` (one of ``?``, ``{}``,
+   ``[]``, ``*``, ``+``, ``%`` or ``None`` -- BUG-3.4) from the phenotype
    column via the canonical regex.
 3. Validate ``phenotype_mim`` is in ``[100100, 999999]`` (BUG-3.7,
    BUG-3.14, BUG-3.21). Reject outliers with WARNING + dead-letter.
-4. Filter ``mapping_key ∈ OMIM_MAPPING_KEYS_INCLUDE`` (default ``[3, 4]`` —
+4. Filter ``mapping_key ∈ OMIM_MAPPING_KEYS_INCLUDE`` (default ``[3, 4]`` --
    molecular basis known + contiguous gene syndromes; BUG-2.5, BUG-3.5,
    BUG-3.6). Log the active include-list at INFO at clean() start.
 5. Explode ``gene_symbols_raw`` on ``\\s*,\\s*`` (BUG-3.9). Uppercase
    (BUG-3.11) and HGNC-validate (BUG-3.10) the resulting symbols.
-6. Build ``disease_id = "OMIM:" + str(phenotype_mim)`` (BUG-3.8 — matches
+6. Build ``disease_id = "OMIM:" + str(phenotype_mim)`` (BUG-3.8 -- matches
    DisGeNET's format).
 7. Derive ``association_type`` from the leading marker (BUG-3.4, BUG-3.15):
-   ``{}``→``susceptibility``, ``[]``→``non_disease``, ``?``→``provisional``,
-   ``*``/``+``→``gene_locus``, ``%``→``mendelian_phenotype``, ``None``→``causal``.
+   ``{}``->``susceptibility``, ``[]``->``non_disease``, ``?``->``provisional``,
+   ``*``/``+``->``gene_locus``, ``%``->``mendelian_phenotype``, ``None``->``causal``.
 8. Route susceptibility (``{}``) records to a separate CSV
    (``omim_gene_disease_susceptibility.csv``) when
-   ``OMIM_EXCLUDE_SUSCEPTIBILITY=True`` (BUG-3.13 — the patient-harm
+   ``OMIM_EXCLUDE_SUSCEPTIBILITY=True`` (BUG-3.13 -- the patient-harm
    failure mode).
 9. Vectorized scoring (BUG-3.2, BUG-4.5):
    ``score = clip(base[mk] + 0.05·log1p(num_pmids) [+0.05·evidence_strength], 0, 1)``
    where ``base[3]=0.9``, ``base[4]=0.8``, ``base[2]=0.6``, ``base[1]=0.5``.
-   The score is never flat — every output row reflects its evidence.
+   The score is never flat -- every output row reflects its evidence.
 10. Derive ``confidence_tier`` from ``score`` via the shared
     ``classify_confidence`` (BUG-2.4, BUG-3.3). The legacy flat ``"high"``
-    is forbidden — the DB CHECK constraint requires ``weak``/``moderate``/
+    is forbidden -- the DB CHECK constraint requires ``weak``/``moderate``/
     ``strong`` (BUG-14.4).
 11. Extract ``inheritance_pattern`` from the phenotype name (BUG-3.18).
 12. Validate ``cyto_location`` format (BUG-3.22).
@@ -77,8 +77,8 @@ Clean
     ``hgnc_snapshot_version``, ``source_record_id``, ``source_line_number``,
     ``transformations``.
 16. Deterministic sort by ``(gene_symbol, disease_id, source)`` with
-    ``kind="mergesort"`` (BUG-7.14) → byte-identical CSV across runs.
-17. Atomic write via ``_save_processed_csv`` (BUG-1.9 — replaces
+    ``kind="mergesort"`` (BUG-7.14) -> byte-identical CSV across runs.
+17. Atomic write via ``_save_processed_csv`` (BUG-1.9 -- replaces
     ``_append_or_write_csv``): ``.tmp`` + ``os.replace``, ``utf-8``,
     ``\\n`` line terminator, ``QUOTE_ALL``, ``0o640`` permissions.
 18. Write a manifest (``omim_pipeline.manifest.json``) with SHA-256,
@@ -92,14 +92,14 @@ Clean
 
 Load
 ----
-1. Single DB session (BUG-1.6 — collapsed from two).
-2. Resolve ``gene_symbol → uniprot_id`` (with ``gene_mim`` as a secondary
-   lookup key — BUG-3.17).
+1. Single DB session (BUG-1.6 -- collapsed from two).
+2. Resolve ``gene_symbol -> uniprot_id`` (with ``gene_mim`` as a secondary
+   lookup key -- BUG-3.17).
 3. Dead-letter unresolved symbols to a CSV file AND the ``dead_letter_gda``
    DB table (BUG-6.12, BUG-16.20).
-4. Compute ``input_checksum`` (SHA-256 of the cleaned DataFrame — BUG-1.7).
+4. Compute ``input_checksum`` (SHA-256 of the cleaned DataFrame -- BUG-1.7).
 5. ``get_or_create_pipeline_run(session, run_id, source="omim", ...)``
-   → ``pipeline_run_id`` (BUG-2.9, BUG-16.1).
+   -> ``pipeline_run_id`` (BUG-2.9, BUG-16.1).
 6. ``bulk_upsert_gda(session, load_df, pipeline_run_id=..., score_type=
    "omim_mapping_key", score_method="omim_v1_{source_version}",
    input_checksum=..., dedup_already_done=True)`` (BUG-2.9, BUG-2.10,
@@ -114,7 +114,7 @@ Load
 Output Schema (master prompt §6)
 --------------------------------
 The cleaned DataFrame contains the following columns (additive over today's
-schema — none removed):
+schema -- none removed):
 
 Identity: gene_symbol, uniprot_id, gene_mim, disease_id, disease_name,
 disease_id_type, cyto_location, inheritance_pattern.
@@ -173,7 +173,7 @@ import pandas as pd
 import requests
 
 # ============================================================================
-# Project imports — cleaning utilities
+# Project imports -- cleaning utilities
 # ============================================================================
 from cleaning._constants import (
     normalize_gene_symbol,  # v29 ROOT FIX (audit P1-24)
@@ -187,7 +187,7 @@ from cleaning.confidence import (
 from cleaning.missing_values import _fingerprint_df, validate_gda_scores
 
 # ============================================================================
-# Project imports — configuration
+# Project imports -- configuration
 # ============================================================================
 from config.settings import (
     OMIM_API_BASE,
@@ -218,7 +218,7 @@ from config.settings import (
 )
 
 # ============================================================================
-# Project imports — database
+# Project imports -- database
 # ============================================================================
 from database.connection import get_db_session
 from database.loaders import (
@@ -231,7 +231,7 @@ from database.loaders import (
 from database.models import DeadLetterGDA, GeneDiseaseAssociation, PipelineRun
 
 # ============================================================================
-# Project imports — pipeline base
+# Project imports -- pipeline base
 # ============================================================================
 from pipelines.base_pipeline import (
     RETRYABLE_EXCEPTIONS,
@@ -290,8 +290,8 @@ SCHEMA_VERSION_STAMP: str = "2.0"
 #
 # v65 ROOT FIX (P1-031): the previous ``MAPPING_KEY_CONFIRMED`` and
 # ``OMIM_REQUEST_INTERVAL_MODULE`` aliases were marked
-# ``# noqa: F841 — dead-code backward-compat alias`` and were never
-# imported by any production module — only by tests that asserted their
+# ``# noqa: F841 -- dead-code backward-compat alias`` and were never
+# imported by any production module -- only by tests that asserted their
 # existence. The audit's fix is "Remove these aliases in a future major
 # version." v65 is that major version: the aliases are removed and the
 # tests are updated to use the canonical names from config.settings.
@@ -313,7 +313,7 @@ OMIM_DISGENET_OVERLAP_PATH: Path = (
 OMIM_RAW_MORBIDMAP_PATH: Path = RAW_DATA_DIR / "omim" / "morbidmap.txt"
 OMIM_RAW_API_JSON_PATH: Path = RAW_DATA_DIR / "omim" / "omim_genemaps.json"
 
-# Source URLs (sanitised at log time — never logged raw).
+# Source URLs (sanitised at log time -- never logged raw).
 OMIM_DOWNLOADS_URL_TEMPLATE: str = (
     "https://data.omim.org/downloads/{api_key}/morbidmap.txt"
 )
@@ -432,10 +432,10 @@ _install_omim_api_key_redaction_filter()
 SCORE_TYPE_OMIM: str = "omim_mapping_key"
 SCORE_METHOD_DEFAULT: str = "omim_v1"
 SCORE_BY_MAPPING_KEY: dict[int, float] = {
-    3: OMIM_CONFIRMED_SCORE,          # 0.9 — molecular basis known (strongest)
-    4: OMIM_CONTIGUOUS_SCORE,         # 0.8 — contiguous gene syndrome
-    2: OMIM_PHENOTYPE_MAPPED_SCORE,   # 0.6 — phenotype mapped
-    1: OMIM_GENE_MAPPED_SCORE,        # 0.5 — wild-type gene mapped
+    3: OMIM_CONFIRMED_SCORE,          # 0.9 -- molecular basis known (strongest)
+    4: OMIM_CONTIGUOUS_SCORE,         # 0.8 -- contiguous gene syndrome
+    2: OMIM_PHENOTYPE_MAPPED_SCORE,   # 0.6 -- phenotype mapped
+    1: OMIM_GENE_MAPPED_SCORE,        # 0.5 -- wild-type gene mapped
 }
 DEFAULT_MAPPING_KEY_SCORE: float = 0.4   # for mk=0 (unknown) or out-of-range
 PMID_BONUS_COEFFICIENT: float = 0.05     # 0.05 · log1p(num_pmids)
@@ -443,7 +443,7 @@ PMID_BONUS_CAP: float = 0.08             # cap at +0.08
 EVIDENCE_BONUS_COEFFICIENT: float = 0.05  # 0.05 · evidence_strength
 EVIDENCE_BONUS_CAP: float = 0.05         # cap at +0.05
 
-# BUG-3.4: phenotype markers — leading-character patterns.
+# BUG-3.4: phenotype markers -- leading-character patterns.
 # NOTE: morbidmap uses {...} and [...] as *wrappers* around the phenotype
 # name; the other markers (?, *, +, %) are leading single characters.
 MARKER_PATTERNS: list[tuple[re.Pattern[str], str]] = [
@@ -455,7 +455,7 @@ MARKER_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"^%(.*)$"), "%"),
 ]
 
-# BUG-3.4 / BUG-3.15: map association_modifier → association_type.
+# BUG-3.4 / BUG-3.15: map association_modifier -> association_type.
 ASSOCIATION_TYPE_DEFAULT: str = "causal"
 ASSOCIATION_TYPE_SUSCEPTIBILITY: str = "susceptibility"
 ASSOCIATION_TYPE_NON_DISEASE: str = "non_disease"
@@ -495,12 +495,12 @@ CYTO_RE: re.Pattern[str] = re.compile(r"^(\d{1,2}|X|Y)[pq]\d{1,2}(\.\d{1,2})?$")
 # BUG-7.10: morbidmap header parser for the "Generated:" line.
 # v65 ROOT FIX (P1-032): the ``re.MULTILINE`` flag is ESSENTIAL here.
 # Without it, ``^`` would match only the START OF THE WHOLE STRING, so
-# if the "Generated:" line is not the very first line (it isn't — the
+# if the "Generated:" line is not the very first line (it isn't -- the
 # morbidmap file starts with a comment block describing the format),
 # the regex would never match. With ``re.MULTILINE``, ``^`` matches
 # the start of EVERY LINE, so the regex correctly finds the
 # "Generated: YYYY-MM-DD" line wherever it appears in the file.
-# DO NOT remove this flag during refactoring — the regex will silently
+# DO NOT remove this flag during refactoring -- the regex will silently
 # break (return None instead of a date) and the pipeline will fall back
 # to the file's mtime, losing the curated "Generated:" date that OMIM
 # publishes for reproducibility audits.
@@ -508,10 +508,10 @@ GENERATED_RE: re.Pattern[str] = re.compile(
     r"^#\s*Generated:\s*(\d{4}-\d{2}-\d{2})", re.MULTILINE
 )
 
-# BUG-3.20: mapping key regex — tightened to [1-4] only.
+# BUG-3.20: mapping key regex -- tightened to [1-4] only.
 # v83 FORENSIC ROOT FIX (P1-9): the strict regex required (N) at END of
 # string and the lenient regex required (N), (comma after). Some older
-# morbidmap releases use "(N) autosomal recessive" (space, no comma) —
+# morbidmap releases use "(N) autosomal recessive" (space, no comma) --
 # NEITHER regex matched, so mapping_key stayed 0 and the record was
 # silently dropped by the OMIM_MAPPING_KEYS_INCLUDE=[3,4] filter.
 # ROOT FIX: the lenient regex now matches (N) followed by a comma OR a
@@ -520,24 +520,24 @@ GENERATED_RE: re.Pattern[str] = re.compile(
 MAPPING_KEY_RE: re.Pattern[str] = re.compile(r"\(([1-4])\)\s*$")
 MAPPING_KEY_RE_LENIENT: re.Pattern[str] = re.compile(r"\(([1-4])\)\s*[, ]")
 
-# BUG-3.21: MIM number regex — 5 to 7 digits, validated against range later.
+# BUG-3.21: MIM number regex -- 5 to 7 digits, validated against range later.
 #
-# v93 ROOT FIX (P1-032 — comment accuracy): the previous comment said
+# v93 ROOT FIX (P1-032 -- comment accuracy): the previous comment said
 # "Matches any comma-separated 5-7 digit number with a word boundary
 # after." This was MISLEADING in two ways:
-#   1. The regex is ``r",\s*(\d{5,7})\b"`` — the leading ``,`` IS part
+#   1. The regex is ``r",\s*(\d{5,7})\b"`` -- the leading ``,`` IS part
 #      of the match (the MIM number MUST be preceded by a comma in the
 #      morbidmap.txt format), so "comma-separated" was technically
 #      correct but ambiguous. The regex matches a 5-7 digit number that
 #      follows a comma, NOT any standalone 5-7 digit number.
 #   2. The regex ALLOWS leading zeros (e.g. "000123" matches ``\d{5,7}``
 #      and ``int("000123") == 123`` which is below the [100100, 999999]
-#      range). The regex is LOOSE — the downstream range check at line
+#      range). The regex is LOOSE -- the downstream range check at line
 #      ~572 (``100100 <= self.phenotype_mim <= 999999``) is the REAL
 #      validator. The regex is a PRE-FILTER only; the range check is
 #      authoritative.
 # We take the LAST match (in case the phenotype name contains multiple
-# comma-separated numbers) — the MIM number is conventionally the last
+# comma-separated numbers) -- the MIM number is conventionally the last
 # comma-separated numeric token before the mapping key. The downstream
 # range check (100100 ≤ mim ≤ 999999) catches false positives.
 MIM_NUMBER_RE: re.Pattern[str] = re.compile(r",\s*(\d{5,7})\b")
@@ -593,7 +593,7 @@ GDA_REQUIRED_COLUMNS: list[tuple[str, Any]] = [
     ("confidence_tier_method",   None),
     ("evidence_strength",        None),
     ("normalized_score",         None),
-    # PMIDs (BUG-4.5 / BUG-8.6 — vectorized scoring uses these)
+    # PMIDs (BUG-4.5 / BUG-8.6 -- vectorized scoring uses these)
     ("pmid_list",                None),
     ("original_pmid_count",      None),
     ("pmid_list_was_capped",     False),
@@ -613,26 +613,26 @@ def assert_is_omim_gda_df(df: pd.DataFrame) -> None:
     missing = [c for c in required if c not in df.columns]
     if missing:
         raise ValueError(
-            f"DataFrame does not satisfy OMIM GDA contract — "
+            f"DataFrame does not satisfy OMIM GDA contract -- "
             f"missing columns: {missing}"
         )
 
 
 # ============================================================================
-# Reproducibility — fix the random seed for retry-backoff jitter (BUG-7.4,
+# Reproducibility -- fix the random seed for retry-backoff jitter (BUG-7.4,
 # BUG-4.9).
 # ============================================================================
 random.seed(OMIM_RANDOM_SEED)
 
 
 # ============================================================================
-# BUG-1.4: OMIMRecord dataclass — canonical intermediate representation.
+# BUG-1.4: OMIMRecord dataclass -- canonical intermediate representation.
 # ============================================================================
 @dataclass(frozen=True)
 class OMIMRecord:
     """Frozen dataclass representing a single parsed OMIM record.
 
-    BUG-1.4: No abstraction for "OMIM record" — raw dicts everywhere.
+    BUG-1.4: No abstraction for "OMIM record" -- raw dicts everywhere.
     This dataclass is the canonical intermediate representation between
     parsing (morbidmap.txt or OMIM API JSON) and DataFrame construction.
     It is hashable and immutable so it can be safely deduplicated, cached,
@@ -793,7 +793,7 @@ class OMIMRecord:
 
 
 # ============================================================================
-# OMIMPipeline — institutional-grade rewrite.
+# OMIMPipeline -- institutional-grade rewrite.
 # ============================================================================
 class OMIMPipeline(BasePipeline):
     """OMIM pipeline for gene-phenotype association data.
@@ -803,11 +803,11 @@ class OMIMPipeline(BasePipeline):
     preserving the public method signatures (``download``, ``clean``,
     ``load``, ``run``) for backward compatibility with ``dags/omim_dag.py``.
 
-    Public methods (DO NOT change signatures — BUG-1.x anti-requirements):
-        - ``download() -> Path`` — fetch morbidmap.txt (or API JSON).
-        - ``clean(raw_path: Path) -> pd.DataFrame`` — full §7.3 pipeline.
-        - ``load(df: pd.DataFrame) -> int`` — full §7.16 lineage.
-        - ``run_load_only() -> int`` — re-validate CSV + manifest, then load.
+    Public methods (DO NOT change signatures -- BUG-1.x anti-requirements):
+        - ``download() -> Path`` -- fetch morbidmap.txt (or API JSON).
+        - ``clean(raw_path: Path) -> pd.DataFrame`` -- full §7.3 pipeline.
+        - ``load(df: pd.DataFrame) -> int`` -- full §7.16 lineage.
+        - ``run_load_only() -> int`` -- re-validate CSV + manifest, then load.
 
     The pipeline is idempotent: running ``clean()`` twice on the same input
     produces byte-identical CSV + manifest (BUG-7.1, BUG-7.14). Running
@@ -816,7 +816,7 @@ class OMIMPipeline(BasePipeline):
 
     source_name = "omim"
 
-    # v29 ROOT FIX (audit P1-22): was 0.1 req/s — 24h+ ingest. Increased to 1 req/s (10x).
+    # v29 ROOT FIX (audit P1-22): was 0.1 req/s -- 24h+ ingest. Increased to 1 req/s (10x).
     # OMIM's published API rate limit is 4 req/sec, so 1 req/sec is well
     # within tolerance. The previous setup effectively ran at ~0.1 req/s
     # under real ETL load (request latency + retries + the per-request
@@ -847,7 +847,7 @@ class OMIMPipeline(BasePipeline):
         self._validate_omim_config()
 
         # v83 FORENSIC ROOT FIX (P2-2): the previous code created
-        # ``self._session = requests.Session()`` here but NEVER used it —
+        # ``self._session = requests.Session()`` here but NEVER used it --
         # the only consumer was the dead ``_api_get`` method (P2-1), which
         # was itself never called by ``download()``. The unclosed session
         # leaked socket file descriptors across pipeline runs. ROOT FIX:
@@ -936,19 +936,19 @@ class OMIMPipeline(BasePipeline):
 
         If ``OMIM_API_KEY`` is set: download ``morbidmap.txt`` directly from
         OMIM's data-downloads endpoint. The key is part of the URL path
-        (BUG-2.1 — OMIM's downloads endpoint does NOT accept Authorization
+        (BUG-2.1 -- OMIM's downloads endpoint does NOT accept Authorization
         headers; the previous "FIX #12" header-auth attempt was fake).
 
         If ``OMIM_API_KEY`` is empty: raise RuntimeError. The API path also
         requires a key (BUG-9.15).
 
-        v83 FORENSIC ROOT FIX (P0-C12 — OMIM pipeline unusable in
+        v83 FORENSIC ROOT FIX (P0-C12 -- OMIM pipeline unusable in
         sample/laptop mode):
           The DOCX explicitly mandates "V1 is built on free, publicly
-          available biomedical data — making the $0 data-cost model
+          available biomedical data -- making the $0 data-cost model
           viable from day one" and "the platform runs end-to-end on a
           laptop". But OMIM requires a paid API key (OMIM_API_KEY env
-          var) — without it, the pipeline raised RuntimeError and the
+          var) -- without it, the pipeline raised RuntimeError and the
           KG build was blocked. The OMIM_API_KEY is free for academic
           use but requires manual registration, which violates the
           "out-of-the-box laptop run" mandate.
@@ -957,12 +957,12 @@ class OMIMPipeline(BasePipeline):
           OMIM_API_KEY is missing, fall back to the embedded sample
           GDA dataset (``_embedded_samples.embedded_omim_gda()``). The
           embedded sample is biologically valid (real MIM numbers, real
-          gene symbols, real disease associations — see the
+          gene symbols, real disease associations -- see the
           ``embedded_omim_gda`` docstring). It is written to
           ``raw_dir/omim_embedded_sample.csv`` and returned as the
           ``download()`` path; ``clean()`` then processes it like any
           other raw file. In full mode (DRUGOS_DOWNLOAD_MODE=full),
-          the API key is STILL required — the embedded sample is a
+          the API key is STILL required -- the embedded sample is a
           SAMPLE-mode fallback only, not a production replacement.
 
         Returns:
@@ -975,7 +975,7 @@ class OMIMPipeline(BasePipeline):
             if _download_mode == "sample":
                 logger.warning(
                     "[omim] OMIM_API_KEY is not set AND DRUGOS_DOWNLOAD_MODE=sample "
-                    "— falling back to embedded sample GDA dataset so the platform "
+                    "-- falling back to embedded sample GDA dataset so the platform "
                     "can run end-to-end on a laptop (per the DOCX V1 mandate). "
                     "Set OMIM_API_KEY + DRUGOS_DOWNLOAD_MODE=full for the complete "
                     "OMIM morbidmap corpus."
@@ -983,14 +983,14 @@ class OMIMPipeline(BasePipeline):
                 return self._write_embedded_sample()
             # BUG-9.15 / BUG-9.16: refuse to run without a key in full mode.
             raise RuntimeError(
-                "OMIM_API_KEY is not set — cannot download from OMIM in full mode. "
+                "OMIM_API_KEY is not set -- cannot download from OMIM in full mode. "
                 "Set the OMIM_API_KEY environment variable, OR set "
                 "DRUGOS_DOWNLOAD_MODE=sample to use the embedded sample dataset."
             )
         # BUG-12.6: warn (don't raise) if the key doesn't match UUID format.
         if not re.match(OMIM_API_KEY_FORMAT_RE, OMIM_API_KEY):
             logger.warning(
-                "[omim] OMIM_API_KEY does not match expected UUID format — "
+                "[omim] OMIM_API_KEY does not match expected UUID format -- "
                 "may be mistyped"
             )
 
@@ -1007,13 +1007,13 @@ class OMIMPipeline(BasePipeline):
             # needs to know the download failed).
             if _download_mode == "sample":
                 logger.warning(
-                    "[omim] morbidmap download failed in sample mode (%s) — "
+                    "[omim] morbidmap download failed in sample mode (%s) -- "
                     "falling back to embedded sample GDA dataset so the "
                     "platform can run end-to-end.",
                     self._sanitize_error_message(str(exc)),
                 )
                 return self._write_embedded_sample()
-            # Log the sanitised error and re-raise — do NOT silently fall
+            # Log the sanitised error and re-raise -- do NOT silently fall
             # through to the API path (BUG-6.7).
             logger.error(
                 "[omim] morbidmap download failed: %s",
@@ -1026,7 +1026,7 @@ class OMIMPipeline(BasePipeline):
 
         Used as a fallback when OMIM_API_KEY is missing OR the live
         download fails in sample mode. The embedded sample is biologically
-        valid (real MIM numbers, real gene symbols — see
+        valid (real MIM numbers, real gene symbols -- see
         ``_embedded_samples.embedded_omim_gda`` docstring) and produces a
         small but scientifically valid Knowledge Graph.
         """
@@ -1056,7 +1056,7 @@ class OMIMPipeline(BasePipeline):
         """Download morbidmap.txt from OMIM data downloads (BUG-2.1).
 
         OMIM's downloads endpoint requires the API key in the URL path.
-        We do NOT attempt header auth (it always returns 401 — BUG-2.1's
+        We do NOT attempt header auth (it always returns 401 -- BUG-2.1's
         "FIX #12" was fake).
         """
         dest = self.raw_dir / "morbidmap.txt" if self.raw_dir else OMIM_RAW_MORBIDMAP_PATH
@@ -1089,7 +1089,7 @@ class OMIMPipeline(BasePipeline):
                 logger.info("[omim] morbidmap source_version: %s", self._source_version)
             else:
                 self._source_version = "unknown"
-                logger.warning("[omim] morbidmap 'Generated:' line not found — source_version=unknown")
+                logger.warning("[omim] morbidmap 'Generated:' line not found -- source_version=unknown")
         except (OSError, UnicodeDecodeError) as exc:
             logger.warning("[omim] Could not read morbidmap header: %s", exc)
             self._source_version = "unknown"
@@ -1103,7 +1103,7 @@ class OMIMPipeline(BasePipeline):
                 age_days = (datetime.now(timezone.utc) - gen_date).days
                 if age_days > OMIM_MAX_AGE_DAYS:
                     logger.warning(
-                        "[omim] morbidmap is %d days old (> %d) — consider forcing refresh",
+                        "[omim] morbidmap is %d days old (> %d) -- consider forcing refresh",
                         age_days, OMIM_MAX_AGE_DAYS,
                     )
             except (ValueError, TypeError):
@@ -1122,27 +1122,27 @@ class OMIMPipeline(BasePipeline):
 
         return path
 
-    # v22 ROOT FIX (audit section 6 finding 4 / section 9 — "~150 lines of
+    # v22 ROOT FIX (audit section 6 finding 4 / section 9 -- "~150 lines of
     # dead code in omim_pipeline"): the three functions ``_download_via_api``,
     # ``_fetch_gene_map_page``, ``_write_gene_map_json`` (plus their helper
     # ``_checkpoint_json``) were defined but NEVER CALLED. ``download()``
-    # only invokes ``_download_morbidmap()`` — the morbidmap text file is
+    # only invokes ``_download_morbidmap()`` -- the morbidmap text file is
     # the production data source. The API path was a previous
     # implementation strategy that got replaced. All four functions have
     # been REMOVED to eliminate the dead code. The OMIM DAG docstring
     # has also been updated to remove references to the dead API path.
     # If a future operator needs the REST API path, they should re-add
-    # it and WIRE IT INTO ``download()`` as a true fallback — not leave
+    # it and WIRE IT INTO ``download()`` as a true fallback -- not leave
     # it as dead code that looks callable but isn't.
     #
     # v83 FORENSIC ROOT FIX (P2-1): the ``_api_get`` and ``_backoff_seconds``
-    # methods (90 lines) were ALSO dead code — never called by any
+    # methods (90 lines) were ALSO dead code -- never called by any
     # production path. The only consumer of ``_api_get`` was the already-
     # removed ``_download_via_api``. ``_api_get`` also referenced
     # ``self._session`` (removed in P2-2), so keeping it would have been
     # a latent AttributeError. Both methods have been REMOVED. The
     # ``_api_calls_made`` / ``_api_calls_retried`` counters are retained
-    # (set to 0 in ``__init__``) for metric-emission backward compat —
+    # (set to 0 in ``__init__``) for metric-emission backward compat --
     # they will always be 0 now, which is the correct value for a path
     # that no longer exists.
 
@@ -1179,14 +1179,14 @@ class OMIMPipeline(BasePipeline):
 
         # v83 P0-C12: short-circuit for the embedded sample CSV. The
         # embedded sample (written by ``_write_embedded_sample``) already
-        # has the cleaned schema — it was authored to match what the
+        # has the cleaned schema -- it was authored to match what the
         # full clean() pipeline produces. Re-running the morbidmap parser
         # on it would crash (it's a CSV, not a morbidmap.txt). Instead,
         # populate lineage columns and persist it as the cleaned output.
         if self._source_format == "embedded_csv" or raw_path.name == "omim_embedded_sample.csv":
-            logger.info("[omim] clean() — embedded sample CSV path (%s)", raw_path)
+            logger.info("[omim] clean() -- embedded sample CSV path (%s)", raw_path)
             df = pd.read_csv(raw_path)
-            # Ensure required columns exist (defensive — the embedded
+            # Ensure required columns exist (defensive -- the embedded
             # sample already has them, but future schema changes might
             # not). Add any missing column as None.
             required = [
@@ -1210,12 +1210,12 @@ class OMIMPipeline(BasePipeline):
 
         # BUG-2.5 / BUG-3.6: log the active mapping-key include-list at INFO.
         logger.info(
-            "[omim] clean() starting — OMIM_MAPPING_KEYS_INCLUDE=%s, "
+            "[omim] clean() starting -- OMIM_MAPPING_KEYS_INCLUDE=%s, "
             "OMIM_EXCLUDE_SUSCEPTIBILITY=%s",
             OMIM_MAPPING_KEYS_INCLUDE, OMIM_EXCLUDE_SUSCEPTIBILITY,
         )
 
-        # Step 1: parse — morbidmap.txt or JSON.
+        # Step 1: parse -- morbidmap.txt or JSON.
         if raw_path.suffix == ".json":
             records = self._parse_json(raw_path)
             self._source_format = "api_json"
@@ -1229,7 +1229,7 @@ class OMIMPipeline(BasePipeline):
 
         # Step 2: empty-handling (BUG-6.9).
         if not records:
-            logger.warning("[omim] No OMIM records extracted — writing empty manifest")
+            logger.warning("[omim] No OMIM records extracted -- writing empty manifest")
             df = self._empty_gda_df()
             self._populate_lineage_columns(df)
             self._save_processed_csv(df, OMIM_OUTPUT_PATH, primary_source="omim")
@@ -1253,7 +1253,7 @@ class OMIMPipeline(BasePipeline):
                 df = df[~mask_empty].copy()
                 self._silent_skip_counter["empty_phenotype_name"] = int(mask_empty.sum())
 
-        # Step 5: BUG-5.9 — warn on empty gene_symbols_raw.
+        # Step 5: BUG-5.9 -- warn on empty gene_symbols_raw.
         if "gene_symbols_raw" in df.columns:
             empty_mask = df["gene_symbols_raw"].fillna("").str.strip() == ""
             if empty_mask.any():
@@ -1262,7 +1262,7 @@ class OMIMPipeline(BasePipeline):
                     int(empty_mask.sum()),
                 )
 
-        # Step 6: BUG-2.5 / BUG-3.5 / BUG-3.6 — filter mapping_key.
+        # Step 6: BUG-2.5 / BUG-3.5 / BUG-3.6 -- filter mapping_key.
         if "mapping_key" in df.columns:
             before = len(df)
             df = df[df["mapping_key"].isin(OMIM_MAPPING_KEYS_INCLUDE)].copy()
@@ -1285,7 +1285,7 @@ class OMIMPipeline(BasePipeline):
             df["gene_symbol"] = df["gene_symbol"].str.upper()
             # Drop empty gene symbols (BUG-3.24).
             # v83 FORENSIC ROOT FIX (P2-3): the previous code only checked
-            # for "", "NAN", "NONE" — missing "NULL", "NA", "N/A" which
+            # for "", "NAN", "NONE" -- missing "NULL", "NA", "N/A" which
             # PubChem's NULL_STRING_VALUES includes. A morbidmap gene
             # symbol cell that parsed as the literal string "NULL" or
             # "N/A" would pass through as a valid gene symbol, corrupting
@@ -1301,12 +1301,12 @@ class OMIMPipeline(BasePipeline):
                 df = df[~empty_gene_mask].copy()
             self._log_row_count("exploded", df)
 
-        # Step 8: BUG-3.10 — HGNC validation (best-effort, non-blocking).
+        # Step 8: BUG-3.10 -- HGNC validation (best-effort, non-blocking).
         # v16 ROOT FIX (SF-5): the previous code silently skipped HGNC
         # validation when ``_load_hgnc_symbols()`` returned an empty
         # frozenset. The empty return was logged INSIDE _load_hgnc_symbols
         # (at DEBUG/WARNING), but the call site did NOT log anything
-        # — so the operator saw "hgnc_validated" in the run report
+        # -- so the operator saw "hgnc_validated" in the run report
         # without realizing NO validation actually happened. Placeholder
         # gene symbols (e.g. "LOC123456", "MIR7-1") leaked through.
         hgnc = _load_hgnc_symbols()
@@ -1315,7 +1315,7 @@ class OMIMPipeline(BasePipeline):
             n_unknown = int(mask.sum())
             if n_unknown:
                 logger.warning(
-                    "[omim] %d gene_symbols not in HGNC approved set — flagging",
+                    "[omim] %d gene_symbols not in HGNC approved set -- flagging",
                     n_unknown,
                 )
                 self._write_dead_letter_file(df[mask].copy(), reason="non_hgnc_symbol")
@@ -1324,10 +1324,10 @@ class OMIMPipeline(BasePipeline):
             self._log_row_count("hgnc_validated", df)
         else:
             # v16 SF-5: explicit WARNING at the call site.
-            # v20 SF-5 ROOT FIX: WARNING + metric alone are NOT enough —
+            # v20 SF-5 ROOT FIX: WARNING + metric alone are NOT enough --
             # placeholder/non-HGNC gene symbols still leak through into
             # the staging DB and downstream Knowledge Graph. The audit's
-            # complaint was that the skip was "silent" — but even with
+            # complaint was that the skip was "silent" -- but even with
             # the WARNING, the pipeline continues and emits poisoned
             # gene-disease edges. Production deployments must be able
             # to enforce HGNC validation as a hard gate.
@@ -1335,11 +1335,11 @@ class OMIMPipeline(BasePipeline):
             # Two strict-mode triggers:
             #   1. DRUGOS_STRICT=1 (global strict flag, same as ChEMBL)
             #   2. DRUGOS_OMIM_STRICT_HGNC=1 (OMIM-specific override)
-            # v22 ROOT FIX (audit section 6 finding 6 — "HGNC validation is
+            # v22 ROOT FIX (audit section 6 finding 6 -- "HGNC validation is
             # non-blocking"): the previous code only enforced HGNC validation
             # when DRUGOS_STRICT=1 was EXPLICITLY set. In production
             # deployments (DRUGOS_ENVIRONMENT=production), HGNC validation
-            # was still skipped silently — placeholder gene symbols
+            # was still skipped silently -- placeholder gene symbols
             # (LOC123456, MIR7-1) leaked into the staging DB and the KG.
             # Fix: production environment implies strict mode automatically.
             # Operators who want to skip HGNC validation must explicitly
@@ -1352,7 +1352,7 @@ class OMIMPipeline(BasePipeline):
                 or os.environ.get("DRUGOS_OMIM_STRICT_HGNC", "") == "1"
             )
             logger.warning(
-                "[omim] HGNC validation SKIPPED — _load_hgnc_symbols() "
+                "[omim] HGNC validation SKIPPED -- _load_hgnc_symbols() "
                 "returned an empty set (file missing or unreadable). "
                 "Placeholder / non-HGNC gene symbols will leak through. "
                 "Set HGNC_SYMBOLS_PATH env var or download the HGNC "
@@ -1369,7 +1369,7 @@ class OMIMPipeline(BasePipeline):
                     "(set DRUGOS_ENVIRONMENT=dev AND DRUGOS_OMIM_STRICT_HGNC=0)."
                 )
 
-        # Step 9: BUG-3.19 — coerce phenotype_mim to Int64, build disease_id.
+        # Step 9: BUG-3.19 -- coerce phenotype_mim to Int64, build disease_id.
         if "phenotype_mim" in df.columns:
             df["phenotype_mim"] = pd.to_numeric(df["phenotype_mim"], errors="coerce").astype("Int64")
             # Build disease_id only for valid (non-null) phenotype_mim.
@@ -1401,7 +1401,7 @@ class OMIMPipeline(BasePipeline):
                     df = df[~bad_disease_mask].copy()
                     self._silent_skip_counter["invalid_disease_id_format"] = n_bad
 
-        # Step 10: BUG-3.22 — cyto_location validation.
+        # Step 10: BUG-3.22 -- cyto_location validation.
         if "cyto_location" in df.columns:
             cyto_mask = df["cyto_location"].notna() & (df["cyto_location"].astype(str) != "")
             invalid = cyto_mask & ~df["cyto_location"].astype(str).str.match(CYTO_RE)
@@ -1410,11 +1410,11 @@ class OMIMPipeline(BasePipeline):
             n_invalid = int(invalid.sum())
             if n_invalid:
                 logger.warning(
-                    "[omim] %d malformed cyto_locations — keeping with flag",
+                    "[omim] %d malformed cyto_locations -- keeping with flag",
                     n_invalid,
                 )
 
-        # Step 11: BUG-3.18 — extract inheritance_pattern from phenotype_name.
+        # Step 11: BUG-3.18 -- extract inheritance_pattern from phenotype_name.
         # v83 FORENSIC ROOT FIX (P1-1 / COMP-5): the previous code extracted
         # the inheritance pattern into ``inheritance_pattern`` but LEFT the
         # trailing inheritance text in ``phenotype_name``. At Step 18,
@@ -1441,7 +1441,7 @@ class OMIMPipeline(BasePipeline):
                 axis=1,
             )
 
-        # Step 12: BUG-3.16 — pre-dedup before scoring.
+        # Step 12: BUG-3.16 -- pre-dedup before scoring.
         if {"phenotype_mim", "gene_symbol", "mapping_key"}.issubset(df.columns):
             before = len(df)
             df = df.drop_duplicates(
@@ -1454,7 +1454,7 @@ class OMIMPipeline(BasePipeline):
                 )
                 self._silent_skip_counter["pre_dedup"] = before - len(df)
 
-        # Step 13: BUG-3.4 / BUG-3.15 — derive association_type from modifier.
+        # Step 13: BUG-3.4 / BUG-3.15 -- derive association_type from modifier.
         if "association_modifier" in df.columns:
             df["association_type"] = df["association_modifier"].map(
                 MARKER_TO_ASSOCIATION_TYPE
@@ -1464,11 +1464,11 @@ class OMIMPipeline(BasePipeline):
             df["association_type"] = ASSOCIATION_TYPE_DEFAULT
             df["is_susceptibility"] = False
 
-        # Step 14: BUG-3.2 / BUG-3.3 / BUG-4.5 — vectorized scoring.
+        # Step 14: BUG-3.2 / BUG-3.3 / BUG-4.5 -- vectorized scoring.
         df = self._compute_scores(df)
         self._log_row_count("scored", df)
 
-        # Step 15: BUG-3.13 — route susceptibility records to separate CSV.
+        # Step 15: BUG-3.13 -- route susceptibility records to separate CSV.
         if OMIM_EXCLUDE_SUSCEPTIBILITY and "is_susceptibility" in df.columns:
             # v83 FORENSIC ROOT FIX (P2-16): the previous code used
             # ``df["is_susceptibility"] == True`` (with a suppressed E712
@@ -1493,7 +1493,7 @@ class OMIMPipeline(BasePipeline):
                 df = df[~susceptibility_mask].copy()
                 self._silent_skip_counter["routed_susceptibility"] = int(susceptibility_mask.sum())
 
-        # Step 16: BUG-3.24 — assert gene_symbol non-empty AND alphabetic.
+        # Step 16: BUG-3.24 -- assert gene_symbol non-empty AND alphabetic.
         # BUG-A-008 root fix: gene_symbol must be alphabetic (HGNC convention).
         # The previous code only checked for NaN/empty, allowing numeric
         # values like "26" (a clear parsing corruption) to slip through.
@@ -1505,7 +1505,7 @@ class OMIMPipeline(BasePipeline):
             if n_nan or n_empty:
                 raise RuntimeError(
                     f"clean() produced gene_symbol with {n_nan} NaN and "
-                    f"{n_empty} empty values — upstream parsing failed"
+                    f"{n_empty} empty values -- upstream parsing failed"
                 )
             # BUG-A-008: gene_symbol must start with a letter.
             # v42 ROOT FIX (P1-A-10): the previous regex was
@@ -1535,7 +1535,7 @@ class OMIMPipeline(BasePipeline):
                 df = df[~non_alphabetic_mask].copy()
                 self._silent_skip_counter["non_alphabetic_gene_symbol"] = n_bad
 
-        # Step 17: BUG-2.13 — rebuild source_id (always rebuild NaN cells).
+        # Step 17: BUG-2.13 -- rebuild source_id (always rebuild NaN cells).
         if "gene_mim" in df.columns and "phenotype_mim" in df.columns:
             df["source_id"] = None
             mask = df["gene_mim"].notna() & df["phenotype_mim"].notna()
@@ -1547,7 +1547,7 @@ class OMIMPipeline(BasePipeline):
                     + df.loc[mask, "phenotype_mim"].astype(str)
                 )
 
-        # Step 18: BUG-2.14 — map phenotype_name -> disease_name (BEFORE
+        # Step 18: BUG-2.14 -- map phenotype_name -> disease_name (BEFORE
         # _ensure_gda_columns so the explicit mapping wins).
         if "phenotype_name" in df.columns:
             df["disease_name"] = df["phenotype_name"]
@@ -1555,7 +1555,7 @@ class OMIMPipeline(BasePipeline):
         # Step 19: populate all lineage columns (Domain 16).
         self._populate_lineage_columns(df)
 
-        # Step 20: BUG-2.8 / §4.1 — validate_gda_scores with full kwargs.
+        # Step 20: BUG-2.8 / §4.1 -- validate_gda_scores with full kwargs.
         dedup_keys = ["gene_symbol", "disease_id", "source"]
         existing_keys = [k for k in dedup_keys if k in df.columns]
         df = validate_gda_scores(
@@ -1568,7 +1568,7 @@ class OMIMPipeline(BasePipeline):
         )
         self._log_row_count("validate_gda_scores", df)
 
-        # Step 21: BUG-2.4 / §4.3 — derive confidence_tier from score.
+        # Step 21: BUG-2.4 / §4.3 -- derive confidence_tier from score.
         if "score" in df.columns:
             df["confidence_tier"] = df["score"].apply(
                 lambda s: (
@@ -1582,10 +1582,10 @@ class OMIMPipeline(BasePipeline):
             df["confidence_tier"] = None
             df["confidence_tier_method"] = CONFIDENCE_TIER_METHOD_VERSION
 
-        # Step 22: BUG-2.11 — ensure all GDA columns exist with proper defaults.
+        # Step 22: BUG-2.11 -- ensure all GDA columns exist with proper defaults.
         df = self._ensure_gda_columns(df)
 
-        # Step 22b: BUG-2.13 / old "FIX #21" — drop records with no disease_id
+        # Step 22b: BUG-2.13 / old "FIX #21" -- drop records with no disease_id
         # (cannot join to diseases table). Route to dead-letter for auditability.
         if "disease_id" in df.columns:
             no_disease_mask = df["disease_id"].isna() | (df["disease_id"].astype(str) == "")
@@ -1602,7 +1602,7 @@ class OMIMPipeline(BasePipeline):
                 df = df[~no_disease_mask].copy()
                 self._silent_skip_counter["no_disease_id"] = n_dropped
 
-        # Step 23: BUG-5.19 — NaN assertions on required columns.
+        # Step 23: BUG-5.19 -- NaN assertions on required columns.
         for col in ["disease_id", "score", "confidence_tier", "source", "gene_symbol"]:
             if col in df.columns:
                 n_nan = int(df[col].isna().sum())
@@ -1611,20 +1611,20 @@ class OMIMPipeline(BasePipeline):
                         f"clean() produced {n_nan} NaN values in required column {col!r}"
                     )
 
-        # Step 24: BUG-7.14 — deterministic sort before write.
+        # Step 24: BUG-7.14 -- deterministic sort before write.
         sort_cols = [c for c in ["gene_symbol", "disease_id", "source"] if c in df.columns]
         if sort_cols:
             df = df.sort_values(sort_cols, kind="mergesort").reset_index(drop=True)
 
-        # Step 24b: BUG-25a/v6 — populate uniprot_id + canonical_gene_id at
+        # Step 24b: BUG-25a/v6 -- populate uniprot_id + canonical_gene_id at
         # clean() time using an embedded HGNC/NCBI/UniProt crosswalk so the
         # CSV (not just the DB) has these columns populated. The previous
         # implementation only resolved uniprot_id inside load() (which writes
-        # to DB), leaving the CSV with 100% NaN — the Phase 1 → Phase 2
+        # to DB), leaving the CSV with 100% NaN -- the Phase 1 -> Phase 2
         # bridge consumed the CSV and saw zero encodes edges.
         #
         # The crosswalk below is a static, well-known set of HGNC-approved
-        # gene symbols → (NCBI Gene ID, UniProt AC, gene MIM). All values
+        # gene symbols -> (NCBI Gene ID, UniProt AC, gene MIM). All values
         # are public, scientifically-correct identifiers. Production runs
         # that have a DB-backed gene_to_uniprot map SHOULD prefer the DB
         # data; this embedded crosswalk is a clean()-time fallback so the
@@ -1632,7 +1632,7 @@ class OMIMPipeline(BasePipeline):
         df = _resolve_gene_xref_embedded(df)
         self._log_row_count("gene_xref_resolved", df)
 
-        # v29 ROOT FIX (audit P1-24): ID format divergence — normalize to
+        # v29 ROOT FIX (audit P1-24): ID format divergence -- normalize to
         # canonical form before writing. ``gene_symbol`` is uppercased +
         # stripped; ``uniprot_id`` (populated by the embedded crosswalk
         # above) is uppercased + stripped. This guarantees downstream
@@ -1655,7 +1655,7 @@ class OMIMPipeline(BasePipeline):
                     if pd.notna(x) and x != "" else x
                 )
 
-        # Step 25: BUG-1.9 — atomic write via _save_processed_csv.
+        # Step 25: BUG-1.9 -- atomic write via _save_processed_csv.
         self._save_processed_csv(df, OMIM_OUTPUT_PATH, primary_source="omim")
         self._log_row_count("cleaned", df)
 
@@ -1666,17 +1666,17 @@ class OMIMPipeline(BasePipeline):
         # Step 27: flush quarantine (BUG-5.17).
         self._flush_quarantine()
 
-        # Step 28: BUG-11.17 — log silent-skip counters.
+        # Step 28: BUG-11.17 -- log silent-skip counters.
         if self._silent_skip_counter:
             logger.info(
                 "[omim] Silent-skip summary: %s", self._silent_skip_counter
             )
 
-        # Step 29: BUG-11.15 — pipeline duration log.
+        # Step 29: BUG-11.15 -- pipeline duration log.
         duration_ms = int((time.monotonic() - t0) * 1000)
         logger.info("[omim] clean duration_ms=%d", duration_ms)
 
-        # Step 30: BUG-11.7 — emit metrics.
+        # Step 30: BUG-11.7 -- emit metrics.
         self._emit_metric(
             "records_cleaned", len(df), tags={"source": "omim"}
         )
@@ -1692,8 +1692,8 @@ class OMIMPipeline(BasePipeline):
     def _parse_morbidmap(self, raw_path: Path) -> list[OMIMRecord]:
         """Parse OMIM morbidmap.txt into a list of OMIMRecord (BUG-3.1).
 
-        Single-loop reader — the first non-``#`` non-empty line is a DATA
-        row, not a header (BUG-3.1 — the previous two-loop pattern silently
+        Single-loop reader -- the first non-``#`` non-empty line is a DATA
+        row, not a header (BUG-3.1 -- the previous two-loop pattern silently
         dropped the first data row every run). UTF-8 strict with a latin-1
         fallback for non-UTF-8 bytes (BUG-6.8).
         """
@@ -1704,7 +1704,7 @@ class OMIMPipeline(BasePipeline):
             text = raw_path.read_text(encoding="utf-8-sig", errors="strict")
         except UnicodeDecodeError as exc:
             logger.warning(
-                "[omim] morbidmap not valid UTF-8 (%s) — falling back to latin-1",
+                "[omim] morbidmap not valid UTF-8 (%s) -- falling back to latin-1",
                 exc,
             )
             text = raw_path.read_text(encoding="latin-1", errors="replace")
@@ -1716,7 +1716,7 @@ class OMIMPipeline(BasePipeline):
             try:
                 record = OMIMRecord.from_morbidmap_line(line, line_no)
             except ValueError as exc:
-                # BUG-3.7 / BUG-3.14 / BUG-3.20 / BUG-3.25 — quarantine.
+                # BUG-3.7 / BUG-3.14 / BUG-3.20 / BUG-3.25 -- quarantine.
                 reason = self._classify_parse_failure(exc)
                 self._quarantine_line(line, line_no, reason=reason)
                 continue
@@ -1727,11 +1727,11 @@ class OMIMPipeline(BasePipeline):
 
         # BUG-5.1: completeness check.
         if len(records) < OMIM_MIN_EXPECTED_RECORDS:
-            # In test/dev contexts with small fixtures, this is OK — log a
+            # In test/dev contexts with small fixtures, this is OK -- log a
             # warning rather than aborting. Production runs will exceed 5000.
             logger.warning(
                 "[omim] Parsed %d records, below OMIM_MIN_EXPECTED_RECORDS=%d "
-                "— possible truncated download or test fixture",
+                "-- possible truncated download or test fixture",
                 len(records), OMIM_MIN_EXPECTED_RECORDS,
             )
 
@@ -1774,7 +1774,7 @@ class OMIMPipeline(BasePipeline):
         return "parse_failure"
 
     # ------------------------------------------------------------------
-    # _parse_phenotype_field — the canonical phenotype-column parser.
+    # _parse_phenotype_field -- the canonical phenotype-column parser.
     # ------------------------------------------------------------------
     @staticmethod
     def _parse_phenotype_field(
@@ -1786,7 +1786,7 @@ class OMIMPipeline(BasePipeline):
         where the leading marker is optional and conveys semantic type.
         The ``{}`` and ``[]`` markers wrap the entire phenotype name.
         An optional trailing inheritance pattern (e.g. ``, autosomal
-        recessive``) may follow the mapping key — it is preserved in
+        recessive``) may follow the mapping key -- it is preserved in
         ``phenotype_name`` so the caller can extract it via
         ``_extract_inheritance_pattern()`` (BUG-3.18).
 
@@ -1829,7 +1829,7 @@ class OMIMPipeline(BasePipeline):
                 break
 
         # Step 2 (BUG-3.20): extract the mapping key.
-        # Try the strict form first (mapping key at end of string — the
+        # Try the strict form first (mapping key at end of string -- the
         # canonical morbidmap format). If that fails, try the lenient form
         # which allows a trailing comma + inheritance annotation (BUG-3.18).
         mapping_key = 0
@@ -1842,7 +1842,7 @@ class OMIMPipeline(BasePipeline):
             if mk_lenient:
                 mapping_key = int(mk_lenient.group(1))
                 # Remove only the "(N)," part; keep the trailing text (which
-                # contains the inheritance pattern — BUG-3.18 extracts it
+                # contains the inheritance pattern -- BUG-3.18 extracts it
                 # separately).
                 remaining = (
                     remaining[: mk_lenient.start()]
@@ -1850,7 +1850,7 @@ class OMIMPipeline(BasePipeline):
                 ).strip()
 
         # Step 3 (BUG-3.21): extract the MIM number.
-        # Take the LAST 5-7 digit comma-separated number — the MIM number
+        # Take the LAST 5-7 digit comma-separated number -- the MIM number
         # is conventionally the last numeric token before the mapping key.
         phenotype_mim: int | None = None
         all_mim_matches = list(MIM_NUMBER_RE.finditer(remaining))
@@ -1917,14 +1917,14 @@ class OMIMPipeline(BasePipeline):
         """
         if "mapping_key" not in df.columns:
             raise ValueError(
-                "mapping_key column missing from OMIM cleaned df — "
+                "mapping_key column missing from OMIM cleaned df -- "
                 "clean() did not run scoring"
             )
 
-        # Base score from mapping_key (BUG-2.3 — every branch reachable).
+        # Base score from mapping_key (BUG-2.3 -- every branch reachable).
         base = df["mapping_key"].map(SCORE_BY_MAPPING_KEY).fillna(DEFAULT_MAPPING_KEY_SCORE)
 
-        # PMID bonus (BUG-4.5 — vectorized).
+        # PMID bonus (BUG-4.5 -- vectorized).
         if "original_pmid_count" in df.columns:
             pmid_count = pd.to_numeric(
                 df["original_pmid_count"], errors="coerce"
@@ -1945,7 +1945,7 @@ class OMIMPipeline(BasePipeline):
             ev = pd.Series([0.0] * len(df), dtype=float)
         evidence_bonus = np.minimum(ev * EVIDENCE_BONUS_COEFFICIENT, EVIDENCE_BONUS_CAP)
 
-        # BUG-4.19 — raise if score column missing (we're about to set it,
+        # BUG-4.19 -- raise if score column missing (we're about to set it,
         # so this check is just defensive).
         df["score"] = (base + pmid_bonus + evidence_bonus).clip(0.0, 1.0)
 
@@ -1964,7 +1964,7 @@ class OMIMPipeline(BasePipeline):
 
         BUG-2.11: consumes ``GDA_REQUIRED_COLUMNS`` as the single source
         of truth. BUG-2.13: always rebuilds NaN source_id cells. BUG-2.14:
-        ``phenotype_name → disease_name`` mapping is done BEFORE this method
+        ``phenotype_name -> disease_name`` mapping is done BEFORE this method
         (in clean()), so the default-None for disease_name only applies
         when no mapping was possible.
         """
@@ -2022,7 +2022,7 @@ class OMIMPipeline(BasePipeline):
         # BUG-16.17: dedup_strategy.
         df["dedup_strategy"] = "validate_gda_scores_dedup"
 
-        # BUG-16.18: filter_criteria — stored as a column for full traceability.
+        # BUG-16.18: filter_criteria -- stored as a column for full traceability.
         df["filter_criteria"] = f"mapping_key in {OMIM_MAPPING_KEYS_INCLUDE}"
 
         # BUG-16.19: exploded_from.
@@ -2038,16 +2038,16 @@ class OMIMPipeline(BasePipeline):
         # HGNC snapshot version (BUG-3.10).
         df["hgnc_snapshot_version"] = _hgnc_snapshot_version()
 
-        # source_record_id (BUG-16.12) — SHA-256 of (line_number + content),
+        # source_record_id (BUG-16.12) -- SHA-256 of (line_number + content),
         # truncated to 16 hex chars. Only computable for morbidmap records.
         # v83 FORENSIC ROOT FIX (P2-4): the previous code used
         # ``r.get('gene_symbols_raw', '')`` which returns ``NaN`` (not the
-        # default ``''``) when the cell value IS NaN — pandas ``.get()``
+        # default ``''``) when the cell value IS NaN -- pandas ``.get()``
         # returns the stored value, not the default, when the key exists
         # but the value is NaN. The f-string then produced ``"nan|..."``,
         # corrupting the hash. ROOT FIX: explicitly coalesce NaN/None to
         # empty string via ``pd.isna()`` check. (Note: ``nan or ''`` does
-        # NOT work because ``float('nan')`` is truthy in Python — it
+        # NOT work because ``float('nan')`` is truthy in Python -- it
         # returns ``nan``, not ``''``.)
         if "source_line_number" in df.columns and "gene_symbols_raw" in df.columns:
             def _compute_source_record_id(r: pd.Series) -> str | None:
@@ -2064,7 +2064,7 @@ class OMIMPipeline(BasePipeline):
             df["source_record_id"] = None
 
     # ------------------------------------------------------------------
-    # Atomic CSV write (BUG-1.9 — replaces _append_or_write_csv)
+    # Atomic CSV write (BUG-1.9 -- replaces _append_or_write_csv)
     # ------------------------------------------------------------------
     def _save_processed_csv(
         self,
@@ -2083,7 +2083,7 @@ class OMIMPipeline(BasePipeline):
         - Manifest with full provenance (BUG-1.7, BUG-16.10).
 
         Replaces the legacy ``_append_or_write_csv`` (BUG-1.9). The new
-        writer writes a fresh atomic file per run — never appends.
+        writer writes a fresh atomic file per run -- never appends.
         """
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -2326,7 +2326,7 @@ class OMIMPipeline(BasePipeline):
         ``created_at``, ``updated_at``) are excluded.
 
         Also translates the validator-emitted ``_``-prefixed lineage columns
-        to their DB column names (no underscore) — see DisGeNET's
+        to their DB column names (no underscore) -- see DisGeNET's
         ``csv_to_db`` mapping.
         """
         # Map CSV-only underscore-prefixed columns to DB column names.
@@ -2388,13 +2388,13 @@ class OMIMPipeline(BasePipeline):
                 If None, opens a new session via ``get_db_session()``.
 
         Returns:
-            Number of rows inserted + updated (NOT total_input — BUG-11.14).
+            Number of rows inserted + updated (NOT total_input -- BUG-11.14).
 
         Raises:
             RuntimeError: if required columns are missing or the DB upsert
                 fails irrecoverably.
         """
-        # BUG-4.21 / BUG-4.19 / BUG-4.20 — assert required columns.
+        # BUG-4.21 / BUG-4.19 / BUG-4.20 -- assert required columns.
         REQUIRED_LOAD_COLS = [
             "gene_symbol", "uniprot_id", "disease_id", "disease_name",
             "association_type", "score", "source", "pmid_list",
@@ -2414,23 +2414,23 @@ class OMIMPipeline(BasePipeline):
 
         # BUG-1.6: collapse into a single DB session.
         def _do_load(sess: Any) -> int:
-            # Step 1: build gene→uniprot maps (BUG-1.6).
+            # Step 1: build gene->uniprot maps (BUG-1.6).
             gene_to_uniprot, protein_name_to_uniprot = build_gene_to_uniprot_maps(sess)
             gene_to_uniprot_map_version = hashlib.sha256(
                 json.dumps(sorted(gene_to_uniprot.items()), default=str).encode("utf-8")
             ).hexdigest()
 
-            # Step 2: resolve gene_symbol → uniprot_id.
+            # Step 2: resolve gene_symbol -> uniprot_id.
             resolved_df = resolve_gene_symbol_to_uniprot(
                 df, gene_to_uniprot, protein_name_to_uniprot
             )
 
-            # Step 3: BUG-6.12 — dead-letter unresolved symbols.
+            # Step 3: BUG-6.12 -- dead-letter unresolved symbols.
             unresolved_mask = resolved_df["uniprot_id"].isna()
             n_unresolved = int(unresolved_mask.sum())
             if n_unresolved:
                 logger.warning(
-                    "[omim] %d / %d GDA records have unresolved gene_symbol — "
+                    "[omim] %d / %d GDA records have unresolved gene_symbol -- "
                     "routing to dead-letter",
                     n_unresolved, len(resolved_df),
                 )
@@ -2456,18 +2456,18 @@ class OMIMPipeline(BasePipeline):
             # the column on SQLite (INTEGER-affinity). The
             # gene_disease_associations.gene_id column is typed INTEGER
             # per models.py, so a UniProt string would either raise or
-            # be silently mistyped. Use the HGNC symbol → NCBI Gene ID
+            # be silently mistyped. Use the HGNC symbol -> NCBI Gene ID
             # map (loaded alongside _load_hgnc_symbols) when available;
             # otherwise leave canonical_gene_id NULL rather than
             # corrupting the column with a UniProt accession.
             #
             # v13 ROOT FIX (SW-18 regression): v12 introduced this
             # branch but NEVER populated ``self._hgnc_to_ncbi_gene_map``
-            # — so the else branch always ran and CLOBBERED
+            # -- so the else branch always ran and CLOBBERED
             # ``canonical_gene_id`` to None for ALL rows, including
             # the ones correctly populated by
             # ``_resolve_gene_xref_embedded()`` at clean() time
-            # (CFTR→1080, DMD→1756, etc.). The Phase 1 → Phase 2
+            # (CFTR->1080, DMD->1756, etc.). The Phase 1 -> Phase 2
             # bridge then saw 100% NULL canonical_gene_id and produced
             # zero Gene-encodes-Protein edges.
             #
@@ -2475,7 +2475,7 @@ class OMIMPipeline(BasePipeline):
             # ``_EMBEDDED_GENE_XREF`` (the same crosswalk that
             # ``_resolve_gene_xref_embedded`` uses at clean() time).
             # AND skip the overwrite when ``canonical_gene_id`` is
-            # already non-null (defense-in-depth — preserves values
+            # already non-null (defense-in-depth -- preserves values
             # populated by any upstream resolver).
             if not hasattr(self, "_hgnc_to_ncbi_gene_map") or not self._hgnc_to_ncbi_gene_map:
                 # Populate from the embedded crosswalk so the
@@ -2507,13 +2507,13 @@ class OMIMPipeline(BasePipeline):
                 if n_unresolved:
                     logger.warning(
                         "[omim] %d / %d gene_symbols could not be mapped to "
-                        "an NCBI Gene ID — canonical_gene_id set to NULL for "
+                        "an NCBI Gene ID -- canonical_gene_id set to NULL for "
                         "these",
                         n_unresolved, len(resolved_df),
                     )
             else:
                 logger.warning(
-                    "[omim] HGNC-to-NCBI-Gene-ID map not available — "
+                    "[omim] HGNC-to-NCBI-Gene-ID map not available -- "
                     "canonical_gene_id set to NULL for all %d rows (was "
                     "previously corrupted with UniProt accessions)",
                     len(resolved_df),
@@ -2552,7 +2552,7 @@ class OMIMPipeline(BasePipeline):
             resolved_df["gene_to_uniprot_map_version"] = gene_to_uniprot_map_version
             resolved_df["resolution_method"] = "gene_symbol_then_gene_mim"
 
-            # Step 5: BUG-2.9 — get_or_create_pipeline_run.
+            # Step 5: BUG-2.9 -- get_or_create_pipeline_run.
             pipeline_run_id = get_or_create_pipeline_run(
                 sess,
                 run_id=self.run_id,
@@ -2562,17 +2562,17 @@ class OMIMPipeline(BasePipeline):
             )
             resolved_df["pipeline_run_id"] = pipeline_run_id
 
-            # Step 6: BUG-1.7 / BUG-16.2 — input_checksum.
+            # Step 6: BUG-1.7 / BUG-16.2 -- input_checksum.
             input_checksum = self._sha256_cleaned or self._compute_df_checksum(resolved_df)
             resolved_df["input_checksum"] = input_checksum
 
-            # Step 6b: BUG-4.21 / mirror DisGeNET _build_load_df — filter to
+            # Step 6b: BUG-4.21 / mirror DisGeNET _build_load_df -- filter to
             # only DB-mapped columns. bulk_upsert_gda rejects DataFrames with
             # extra columns (e.g. phenotype_name, source_line_number) that
             # are useful for CSV lineage but not in the GDA table.
             load_df = self._build_load_df(resolved_df)
 
-            # Step 7: BUG-2.9 / BUG-2.10 / §4.2 — bulk_upsert_gda with full lineage.
+            # Step 7: BUG-2.9 / BUG-2.10 / §4.2 -- bulk_upsert_gda with full lineage.
             try:
                 result: UpsertResult = bulk_upsert_gda(
                     sess,
@@ -2594,7 +2594,7 @@ class OMIMPipeline(BasePipeline):
             # BUG-6.13: session health check after upsert.
             if result.failed > 0:
                 logger.error(
-                    "[omim] %d records failed upsert — inspecting session health",
+                    "[omim] %d records failed upsert -- inspecting session health",
                     result.failed,
                 )
                 try:
@@ -2602,13 +2602,13 @@ class OMIMPipeline(BasePipeline):
                     sess.execute(_sa_text("SELECT 1"))
                 except (OSError, RuntimeError, ValueError) as sess_exc:  # v85 FORENSIC ROOT FIX (BUG #51)
                     logger.error(
-                        "[omim] Session is poisoned — rolling back: %s",
+                        "[omim] Session is poisoned -- rolling back: %s",
                         self._sanitize_error_message(str(sess_exc)),
                     )
                     sess.rollback()
                     raise
 
-            # BUG-1.8: post-load DisGeNET dedup (log only — actual SQL is DB-specific).
+            # BUG-1.8: post-load DisGeNET dedup (log only -- actual SQL is DB-specific).
             self._post_load_disgenet_dedup(sess)
 
             # BUG-11.14: result detail logging.
@@ -2661,10 +2661,10 @@ class OMIMPipeline(BasePipeline):
             return loaded_count
 
         if session is not None:
-            # Called from BasePipeline.run() — use the provided session.
+            # Called from BasePipeline.run() -- use the provided session.
             return _do_load(session)
         else:
-            # Called standalone — open our own session.
+            # Called standalone -- open our own session.
             with get_db_session(
                 pipeline_name=self.source_name,
                 run_id=self.run_id,
@@ -2682,7 +2682,7 @@ class OMIMPipeline(BasePipeline):
         susceptibility / provisional / ...), ``mapping_key`` (1-4 OMIM
         phenotype-mapping confidence), ``cyto_location``, and
         ``inheritance_pattern``. If DisGeNET later removed the overlapping
-        row (curator decision), the OMIM data was GONE from the DB — only
+        row (curator decision), the OMIM data was GONE from the DB -- only
         recoverable from the CSV. ROOT FIX: instead of DELETE, set
         ``dedup_strategy = 'disgenet_overlap_retained'`` on the OMIM rows
         so downstream consumers (KG builder, Graph Transformer) can
@@ -2698,7 +2698,7 @@ class OMIMPipeline(BasePipeline):
             # "disgenet_all_predicted", "disgenet_literature"). Use
             # ``LIKE 'disgenet%'`` so the predicate matches ALL DisGeNET
             # sub-source-suffixed labels.
-            # v83 P1-6: UPDATE dedup_strategy instead of DELETE — preserves
+            # v83 P1-6: UPDATE dedup_strategy instead of DELETE -- preserves
             # OMIM-specific scientific metadata (association_type,
             # mapping_key, cyto_location, inheritance_pattern).
             result = session.execute(_sa_text(
@@ -2718,7 +2718,7 @@ class OMIMPipeline(BasePipeline):
             if marked_count:
                 logger.info(
                     "[omim] Post-load DisGeNET dedup: %d OMIM rows marked "
-                    "'disgenet_overlap_retained' (rows KEPT — OMIM-specific "
+                    "'disgenet_overlap_retained' (rows KEPT -- OMIM-specific "
                     "association_type/mapping_key/cyto_location/inheritance_pattern preserved)",
                     marked_count,
                 )
@@ -2727,7 +2727,7 @@ class OMIMPipeline(BasePipeline):
                     tags={"source": "omim"},
                 )
         except (OSError, RuntimeError, ValueError) as exc:  # v85 FORENSIC ROOT FIX (BUG #51)
-            # Non-fatal — log and continue. The OMIM rows are still loaded;
+            # Non-fatal -- log and continue. The OMIM rows are still loaded;
             # they're just not marked. Downstream ML can still filter.
             logger.warning(
                 "[omim] Post-load DisGeNET dedup marking failed (non-fatal): %s",
@@ -2737,7 +2737,7 @@ class OMIMPipeline(BasePipeline):
     # ------------------------------------------------------------------
     # Public API: run_load_only (BUG-7.5)
     # ------------------------------------------------------------------
-    # v29 ROOT FIX (audit P1-14): run_load_only() bypassed _write_run_log —
+    # v29 ROOT FIX (audit P1-14): run_load_only() bypassed _write_run_log --
     # no audit row produced. Now calls the audit logger so the load is
     # recorded. The previous implementation called self.load(df) and
     # returned the count without ever invoking self._write_run_log(),
@@ -2771,11 +2771,11 @@ class OMIMPipeline(BasePipeline):
         try:
             if not csv_path.exists():
                 raise RuntimeError(
-                    f"OMIM cleaned CSV not found at {csv_path} — run clean() first"
+                    f"OMIM cleaned CSV not found at {csv_path} -- run clean() first"
                 )
             if not manifest_path.exists():
                 raise RuntimeError(
-                    f"OMIM manifest not found at {manifest_path} — run clean() first"
+                    f"OMIM manifest not found at {manifest_path} -- run clean() first"
                 )
 
             # BUG-1.7: verify CSV SHA-256 matches manifest.
@@ -2784,7 +2784,7 @@ class OMIMPipeline(BasePipeline):
             expected_sha = manifest.get("output_csv_sha256")
             if expected_sha and actual_sha != expected_sha:
                 raise RuntimeError(
-                    f"CSV/manifest checksum mismatch — clean() must be re-run "
+                    f"CSV/manifest checksum mismatch -- clean() must be re-run "
                     f"(expected={expected_sha}, actual={actual_sha})"
                 )
 
@@ -2798,7 +2798,7 @@ class OMIMPipeline(BasePipeline):
             csv_schema_version = manifest.get("schema_version")
             if csv_schema_version != SCHEMA_VERSION_STAMP:
                 logger.warning(
-                    "[omim] Manifest schema_version %r != current %r — "
+                    "[omim] Manifest schema_version %r != current %r -- "
                     "may need to re-clean",
                     csv_schema_version, SCHEMA_VERSION_STAMP,
                 )
@@ -2862,11 +2862,11 @@ class OMIMPipeline(BasePipeline):
         csv_path = OMIM_OUTPUT_PATH
         if not csv_path.exists():
             raise RuntimeError(
-                f"OMIM cleaned CSV not found at {csv_path} — run clean() first"
+                f"OMIM cleaned CSV not found at {csv_path} -- run clean() first"
             )
         df = pd.read_csv(csv_path, encoding="utf-8")
         if "download_date" not in df.columns:
-            logger.warning("[omim] download_date column missing — loading all rows")
+            logger.warning("[omim] download_date column missing -- loading all rows")
             return self.load(df)
         df["download_date"] = pd.to_datetime(df["download_date"], errors="coerce", utc=True)
         mask = df["download_date"] > pd.Timestamp(since, tz="UTC")
@@ -2884,11 +2884,11 @@ class OMIMPipeline(BasePipeline):
         """Backfill OMIM data for a date range (BUG-15.18).
 
         NOTE: OMIM does not expose historical snapshots of morbidmap.txt.
-        This method is a documented no-op — it logs a WARNING and returns 0.
+        This method is a documented no-op -- it logs a WARNING and returns 0.
         """
         logger.warning(
             "[omim] run_backfill(%s, %s): OMIM does not expose historical "
-            "morbidmap snapshots — backfill is a no-op",
+            "morbidmap snapshots -- backfill is a no-op",
             start_date, end_date,
         )
         return 0
@@ -2899,13 +2899,13 @@ class OMIMPipeline(BasePipeline):
 # ============================================================================
 
 # ─── Embedded gene crosswalk (v6 fix for BUG-25a/B11) ─────────────────────────
-# Static HGNC → (NCBI Gene ID, UniProt AC, gene MIM) crosswalk used by
+# Static HGNC -> (NCBI Gene ID, UniProt AC, gene MIM) crosswalk used by
 # `_resolve_gene_xref_embedded()` to populate the `uniprot_id` and
 # `canonical_gene_id` columns at clean() time. All values are publicly
 # available, well-known identifiers from HGNC/NCBI/UniProt. Production
 # deployments with a DB-backed gene_to_uniprot map should prefer the DB
 # data; this embedded crosswalk is a clean()-time fallback so the CSV is
-# always usable downstream (the Phase 1 → Phase 2 bridge consumes the CSV
+# always usable downstream (the Phase 1 -> Phase 2 bridge consumes the CSV
 # directly, not the DB).
 _EMBEDDED_GENE_XREF: dict[str, dict[str, str]] = {
     # --- Original 9 clinically-important genes (kept for backward compat) ---
@@ -2988,7 +2988,7 @@ def _resolve_gene_xref_embedded(df: pd.DataFrame) -> pd.DataFrame:
 
     v83 FORENSIC ROOT FIX (P1-13): this dead stub has been REMOVED. The
     previous code kept a no-op first definition as a "safety net" in case
-    the second definition was accidentally deleted — but that safety net
+    the second definition was accidentally deleted -- but that safety net
     was itself the hazard: if a refactor removed the second definition,
     the stub would silently disable ALL gene-xref resolution, producing
     100%% NULL uniprot_id at clean() time and 100%% dead-letter at load()
@@ -3000,7 +3000,7 @@ def _resolve_gene_xref_embedded(df: pd.DataFrame) -> pd.DataFrame:
     """
     # v83 P1-13: forward to the real implementation defined below.
     # If the real definition is ever deleted, this call raises NameError
-    # immediately — no silent data loss.
+    # immediately -- no silent data loss.
     return _resolve_gene_xref_embedded_impl(df)
 
 
@@ -3009,14 +3009,14 @@ def _load_hgnc_symbols() -> frozenset[str]:
     """Load HGNC approved symbols (BUG-3.10).
 
     Cached for the process lifetime. If the HGNC file is missing, returns
-    an empty frozenset — the caller should treat that as "skip HGNC
+    an empty frozenset -- the caller should treat that as "skip HGNC
     validation" (OMIM is the source of truth for some recently-added
     symbols, so we don't fail the pipeline).
     """
     path = RAW_DATA_DIR / "hgnc" / "approved_symbols.tsv"
     if not path.exists():
         logger.warning(
-            "[omim] HGNC symbol file missing at %s — skipping HGNC validation",
+            "[omim] HGNC symbol file missing at %s -- skipping HGNC validation",
             path,
         )
         return frozenset()
@@ -3027,13 +3027,13 @@ def _load_hgnc_symbols() -> frozenset[str]:
             if col in hgnc_df.columns:
                 return frozenset(hgnc_df[col].dropna().str.upper())
         logger.warning(
-            "[omim] HGNC file %s missing expected column — skipping validation",
+            "[omim] HGNC file %s missing expected column -- skipping validation",
             path,
         )
         return frozenset()
     except (OSError, ValueError) as exc:
         logger.warning(
-            "[omim] Could not load HGNC symbols from %s: %s — skipping validation",
+            "[omim] Could not load HGNC symbols from %s: %s -- skipping validation",
             path, exc,
         )
         return frozenset()
@@ -3075,15 +3075,15 @@ def _hgnc_snapshot_version() -> str | None:
 # instead of the embedded 50-entry crosswalk."
 #
 # This loader implements that fix. It looks for an HGNC crosswalk file
-# at configurable paths (env var override → default RAW_DATA_DIR/hgnc/),
+# at configurable paths (env var override -> default RAW_DATA_DIR/hgnc/),
 # parses it into a {gene_symbol: {ncbi_gene_id, uniprot_id, gene_mim}}
 # dict, and is consumed by ``_resolve_gene_xref_embedded`` (which is
 # renamed in spirit to "resolve from the best available source").
 #
 # The file format expected is HGNC's "Complete HGNC dataset" TSV with
 # columns: HGNC ID, Approved symbol, NCBI gene ID, UniProt ID, OMIM ID.
-# (https://www.genenames.org/download/statistics/ → "Complete HGNC
-# dataset" → direct download link.)
+# (https://www.genenames.org/download/statistics/ -> "Complete HGNC
+# dataset" -> direct download link.)
 # =============================================================================
 
 
@@ -3121,7 +3121,7 @@ def _download_hgnc_crosswalk(dest_path: Path) -> Path:
     """
     import requests
 
-    # HGNC custom download endpoint — no login, returns TSV.
+    # HGNC custom download endpoint -- no login, returns TSV.
     # Columns selected: HGNC ID, Approved symbol, NCBI Gene ID, UniProt
     # accession, OMIM ID. Status=Approved filters out withdrawn/synonym
     # entries so we get a clean ~7,000-entry human gene crosswalk.
@@ -3140,7 +3140,7 @@ def _download_hgnc_crosswalk(dest_path: Path) -> Path:
     tmp_path = dest_path.with_suffix(dest_path.suffix + ".tmp")
 
     logger.info(
-        "[omim] Downloading HGNC complete crosswalk from %s → %s",
+        "[omim] Downloading HGNC complete crosswalk from %s -> %s",
         HGNC_DOWNLOAD_URL.split("?")[0] + "?...",  # hide query string from logs
         dest_path.name,
     )
@@ -3155,12 +3155,12 @@ def _download_hgnc_crosswalk(dest_path: Path) -> Path:
                 timeout=(30.0, 300.0),
             ) as resp:
                 resp.raise_for_status()
-                # Read content (TSV is small — ~7000 rows × 5 cols ≈ 500KB).
+                # Read content (TSV is small -- ~7000 rows × 5 cols ≈ 500KB).
                 content = resp.content
                 if not content or len(content) < 100:
                     raise RuntimeError(
                         f"HGNC download returned empty/too-small response "
-                        f"({len(content)} bytes) — endpoint may be down"
+                        f"({len(content)} bytes) -- endpoint may be down"
                     )
                 tmp_path.write_bytes(content)
             # Atomic rename.
@@ -3180,7 +3180,7 @@ def _download_hgnc_crosswalk(dest_path: Path) -> Path:
             if attempt < max_retries:
                 wait = 2 ** (attempt - 1)
                 logger.warning(
-                    "[omim] HGNC download attempt %d/%d failed: %s — retrying in %ds",
+                    "[omim] HGNC download attempt %d/%d failed: %s -- retrying in %ds",
                     attempt, max_retries, exc, wait,
                 )
                 import time as _time
@@ -3190,7 +3190,7 @@ def _download_hgnc_crosswalk(dest_path: Path) -> Path:
                     "[omim] HGNC download failed after %d attempts: %s",
                     max_retries, exc,
                 )
-    # All retries exhausted — re-raise the last exception.
+    # All retries exhausted -- re-raise the last exception.
     raise RuntimeError(
         f"HGNC crosswalk download failed after {max_retries} attempts: {last_exc}"
     ) from last_exc
@@ -3208,14 +3208,14 @@ def _load_hgnc_crosswalk() -> dict[str, dict[str, str]]:
     ``RAW_DATA_DIR/hgnc/hgnc_complete_set.tsv``). This closes the
     "99%% of OMIM records have NULL uniprot_id" gap on fresh deployments
     where the operator hasn't manually downloaded the file. The download
-    is best-effort — on network failure, fall back to the embedded
+    is best-effort -- on network failure, fall back to the embedded
     ~56-entry crosswalk (preserving the previous behaviour).
 
     Resolution order for the file path:
       1. ``$HGNC_CROSSWALK_PATH`` env var (explicit operator override).
       2. ``$RAW_DATA_DIR/hgnc/hgnc_complete_set.tsv`` (auto-downloaded
          by this function on first use, or by an operator's cron job).
-      3. ``$RAW_DATA_DIR/hgnc/approved_symbols.tsv`` (legacy file —
+      3. ``$RAW_DATA_DIR/hgnc/approved_symbols.tsv`` (legacy file --
          has symbols but NOT crosswalk columns; returns empty dict
          because we can't populate ncbi_gene_id/uniprot_id from it).
     """
@@ -3239,10 +3239,10 @@ def _load_hgnc_crosswalk() -> dict[str, dict[str, str]]:
         # of requiring the operator to manually place the file. The
         # previous code logged an INFO message and fell back to the
         # ~50-entry embedded crosswalk, which left 99% of OMIM GDA
-        # records with NULL uniprot_id at clean time — and (combined
+        # records with NULL uniprot_id at clean time -- and (combined
         # with the resolve_gene_symbol_to_uniprot overwrite bug) caused
         # 99% of OMIM Gene-Disease edges to be dead-lettered at load
-        # time. The DOCX mandates "scientifically trusted data" —
+        # time. The DOCX mandates "scientifically trusted data" --
         # silently degrading to 1% coverage is the opposite.
         #
         # ROOT FIX: attempt an automatic download from HGNC's custom
@@ -3251,14 +3251,14 @@ def _load_hgnc_crosswalk() -> dict[str, dict[str, str]]:
         # lru_cache is cleared first so the new file is picked up). If
         # the download fails (network error, HGNC blocks the request,
         # etc.), escalate to WARNING (was INFO) so the operator sees
-        # the degradation in the DAG log — and fall back to the
+        # the degradation in the DAG log -- and fall back to the
         # embedded crosswalk so the pipeline still runs.
         logger.warning(
             "[omim] HGNC full crosswalk not found at any candidate "
             "path %s. Attempting auto-download from HGNC (COMP-3 "
             "ROOT FIX). If download fails, will fall back to the "
             "embedded ~50-entry crosswalk (99%% of OMIM GDA records "
-            "will have NULL uniprot_id at clean time — this is a "
+            "will have NULL uniprot_id at clean time -- this is a "
             "WARNING, not INFO, because the DOCX mandates "
             "scientifically trusted data and silent degradation to 1%% "
             "coverage violates that mandate).",            [str(p) for p in candidate_paths],
@@ -3269,7 +3269,7 @@ def _load_hgnc_crosswalk() -> dict[str, dict[str, str]]:
             )
             # Clear the lru_cache so the next call re-reads the file.
             _load_hgnc_crosswalk.cache_clear()
-            # Re-try the load — the file should exist now.
+            # Re-try the load -- the file should exist now.
             return _load_hgnc_crosswalk()
         except (OSError, ValueError, pd.errors.ParserError) as exc:  # v85 FORENSIC ROOT FIX (BUG #51)
             logger.warning(
@@ -3359,7 +3359,7 @@ def _resolve_gene_xref_embedded_impl(df: pd.DataFrame) -> pd.DataFrame:
 
     v83 FORENSIC ROOT FIX (P1-2): the previous code returned an EMPTY dict
     when the HGNC crosswalk file was missing (the default for fresh
-    deployments — there was no auto-download). With only the ~56-entry
+    deployments -- there was no auto-download). With only the ~56-entry
     embedded crosswalk, ~99% of OMIM GDA rows had NULL ``uniprot_id``,
     were dead-lettered at load() time, and the KG was missing ~99% of
     OMIM Gene-Disease edges. ROOT FIX: ``_load_hgnc_crosswalk()`` now
@@ -3369,8 +3369,8 @@ def _resolve_gene_xref_embedded_impl(df: pd.DataFrame) -> pd.DataFrame:
     get full ~7,000-gene coverage without operator intervention.
 
     This is a clean()-time fallback so the CSV (not just the DB) has these
-    columns populated. The Phase 1 → Phase 2 bridge consumes the CSV
-    directly and previously saw 100% NaN — causing zero Gene-encodes-Protein
+    columns populated. The Phase 1 -> Phase 2 bridge consumes the CSV
+    directly and previously saw 100% NaN -- causing zero Gene-encodes-Protein
     edges in the loaded knowledge graph.
 
     Idempotent: rows whose `uniprot_id` is already non-empty are skipped.
@@ -3443,16 +3443,16 @@ def _strip_inheritance_pattern(phenotype_name: str | None) -> str | None:
     did NOT remove it from ``phenotype_name``. The downstream assignment
     ``df["disease_name"] = df["phenotype_name"]`` (clean() Step 18) then
     copied the inheritance-contaminated name into ``disease_name``, which
-    flows through the CSV → Phase 2 bridge → Neo4j Disease node ``name``
+    flows through the CSV -> Phase 2 bridge -> Neo4j Disease node ``name``
     property. Researchers see ``"Cystic fibrosis autosomal recessive"``
-    instead of ``"Cystic fibrosis"`` in the dashboard — a data-quality
+    instead of ``"Cystic fibrosis"`` in the dashboard -- a data-quality
     corruption that violates the DOCX's "scientifically trusted data"
     mandate.
 
     ROOT FIX (COMP-5): remove the inheritance pattern (and any trailing
     comma / whitespace left behind) so ``phenotype_name`` is the clean
     disease name. The ``inheritance_pattern`` column (extracted in
-    clean() Step 11) preserves the inheritance information separately —
+    clean() Step 11) preserves the inheritance information separately --
     no data is lost, it's just in the correct column.
 
     Examples:
@@ -3472,7 +3472,7 @@ def _strip_inheritance_pattern(phenotype_name: str | None) -> str | None:
     cleaned = _INHERITANCE_RE.sub("", phenotype_name)
     # Remove any trailing/leading commas + collapse whitespace left by the
     # substitution. Repeat the rstrip(",") in case the substitution left
-    # ", ," or similar artifacts (defensive — the regex word boundary
+    # ", ," or similar artifacts (defensive -- the regex word boundary
     # usually prevents this, but be robust).
     cleaned = re.sub(r"\s+,", ",", cleaned)
     cleaned = re.sub(r",\s*,", ",", cleaned)

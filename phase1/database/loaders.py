@@ -22,8 +22,8 @@ Module Version (CMP-03): {LOADERS_VERSION}
 
 Changelog
 ---------
-v1 — Initial loaders (723 lines).
-v2 — 123 fixes across 16 verification domains (SCI, DQ, IDEM, ARCH, …).
+v1 -- Initial loaders (723 lines).
+v2 -- 123 fixes across 16 verification domains (SCI, DQ, IDEM, ARCH, ...).
 """
 
 from __future__ import annotations
@@ -124,7 +124,7 @@ _WITHDRAWN_DRUG_NAMES_LOWER: frozenset[str] = frozenset({
     # Fluoroquinolones withdrawn for QT prolongation / hepatotoxicity
     "grepafloxacin", "raxar", "trovafloxacin", "trovan",
     "temafloxacin", "omniflox",
-    # Teratogens (thalidomide — restricted access)
+    # Teratogens (thalidomide -- restricted access)
     "thalidomide",
     # Migraine / ergot withdrawn for fibrotic complications
     "methysergide", "sansert",
@@ -184,7 +184,7 @@ _WITHDRAWN_DRUG_NAMES_LOWER: frozenset[str] = frozenset({
 # Default batch size (CFG-01, PERF-07)
 # ---------------------------------------------------------------------------
 # PostgreSQL parameter limit is 65 535.  For the drugs table with ~15 columns,
-# 1000 rows × 15 params = 15 000 parameters — well within limits.  For wider
+# 1000 rows × 15 params = 15 000 parameters -- well within limits.  For wider
 # tables, _calculate_safe_batch_size() auto-reduces to stay under the limit.
 DEFAULT_BATCH_SIZE = 1000
 
@@ -203,15 +203,15 @@ _VALID_ACTIVITY_TYPES: frozenset[str] = frozenset(e.value for e in ActivityType)
 _ACTIVITY_TYPE_LOWER_TO_CANONICAL: dict[str, str] = {
     v.lower(): v for v in _VALID_ACTIVITY_TYPES
 }
-# SCI-FIX: Added 'hpo' (Human Phenotype Ontology) — DisGeNET includes HPO
+# SCI-FIX: Added 'hpo' (Human Phenotype Ontology) -- DisGeNET includes HPO
 # disease IDs per Piñero et al. 2020. The ORM model and migration 004
 # both allow 'hpo', so the loader must accept it too.
-# CRITICAL FIX (scientific correctness — patient safety): 'icd10' and
+# CRITICAL FIX (scientific correctness -- patient safety): 'icd10' and
 # 'efo' MUST be in this set. ICD-10 is the WHO international standard
 # for clinical disease classification; EFO is the ontology used by
 # GWAS Catalog, UK Biobank, and Open Targets. Dropping either silently
 # hides real disease associations from the drug-repurposing model.
-# 'orphanet' is the rare-disease ontology — added for completeness.
+# 'orphanet' is the rare-disease ontology -- added for completeness.
 _VALID_DISEASE_ID_TYPES: frozenset[str] = frozenset(
     {"omim", "disgenet", "doid", "mesh", "umls", "hpo",
      "icd10", "efo", "orphanet"}
@@ -241,13 +241,13 @@ OMIM_DISEASE_ID_FORMAT: str = "OMIM:{mim}"
 # OMIM format note (BUG-3.8): the OMIM pipeline deliberately emits
 # ``disease_id = "OMIM:" + str(phenotype_mim)`` (e.g. ``"OMIM:219700"``) to
 # match the format DisGeNET uses in its API responses. The DisGeNET
-# pipeline's own ``_RE_OMIM`` pattern is ``^[0-9]{6}$`` (no prefix) — so
+# pipeline's own ``_RE_OMIM`` pattern is ``^[0-9]{6}$`` (no prefix) -- so
 # there are TWO scientifically-valid formats for OMIM disease IDs in this
 # codebase:
-#   1. ``OMIM:\d{4,7}`` — what the OMIM pipeline and DisGeNET API produce
-#   2. ``\d{4,7}``      — what the SQL migration and DisGeNET pipeline regex expect
+#   1. ``OMIM:\d{4,7}`` -- what the OMIM pipeline and DisGeNET API produce
+#   2. ``\d{4,7}``      -- what the SQL migration and DisGeNET pipeline regex expect
 # The validator accepts BOTH to avoid breaking either pipeline. The SQL
-# migration's CHECK constraint (``^\d{4,7}$``) is more restrictive — when
+# migration's CHECK constraint (``^\d{4,7}$``) is more restrictive -- when
 # the DB is created from SQL migrations, OMIM-prefixed IDs would be
 # rejected at the DB level. When the DB is created from ORM models (the
 # common case in dev / test), the Python validator is the only guard.
@@ -281,16 +281,16 @@ _DISEASE_ID_PATTERNS: dict[str, "re.Pattern[str]"] = {
     # CRITICAL: without this, ICD-10-coded disease associations are SILENTLY
     # DROPPED, hiding real disease connections from the drug-repurposing model.
     "icd10":     _re_mod_for_disease_id.compile(r"^[A-Z]\d{2}(\.[A-Z0-9]{1,4})?$"),
-    # EFO (Experimental Factor Ontology) IDs — OBO curie pattern.
-    # v79 FORENSIC ROOT FIX (P0-A1 — scientifically wrong regex silently
+    # EFO (Experimental Factor Ontology) IDs -- OBO curie pattern.
+    # v79 FORENSIC ROOT FIX (P0-A1 -- scientifically wrong regex silently
     # quarantined every EFO disease):
     #   The v78 regex was ``r"^EFO:_\d{7,}$"`` which requires an UNDERSCORE
     #   after the colon. Standard EFO CURIEs are ``EFO:0000400`` (diabetes),
-    #   ``EFO:0001360`` (thyroid carcinoma) — NO underscore. The regex's own
+    #   ``EFO:0001360`` (thyroid carcinoma) -- NO underscore. The regex's own
     #   comment examples did not match the regex. Every DisGeNET / GWAS
     #   Catalog row with disease_id_type='efo' was silently quarantined to
     #   dead_letter_gda and dropped from the KG. Diabetes, thyroid carcinoma,
-    #   etc. were invisible to the drug-repurposing model — exactly the
+    #   etc. were invisible to the drug-repurposing model -- exactly the
     #   patient-harm scenario the codebase's own comments warn about.
     # ROOT FIX: accept the standard CURIE format ``EFO:\d{6,}`` (colon +
     #   >=6 digits; 7 is the current standard but we accept >=6 to
@@ -299,14 +299,14 @@ _DISEASE_ID_PATTERNS: dict[str, "re.Pattern[str]"] = {
     # Examples: "EFO:0000400" (diabetes), "EFO:0001360" (thyroid carcinoma),
     #           "EFO_0000400" (OBO format).
     "efo":       _re_mod_for_disease_id.compile(r"^EFO[:_]\d{6,}$"),
-    # Orphanet rare-disease IDs: "ORPHA:nnnn" — known DisGeNET vocabulary.
+    # Orphanet rare-disease IDs: "ORPHA:nnnn" -- known DisGeNET vocabulary.
     "orphanet":  _re_mod_for_disease_id.compile(r"^ORPHA:\d+$"),
 }
 
-# Allowed disease_id_type enum values — kept in sync with the
+# Allowed disease_id_type enum values -- kept in sync with the
 # ``chk_gda_disease_id_type`` CHECK constraint in migration
 # ``001_initial_schema.sql`` (which must also be updated whenever this
-# list changes — see migration 007).
+# list changes -- see migration 007).
 ALLOWED_DISEASE_ID_TYPES: frozenset[str] = frozenset(_DISEASE_ID_PATTERNS.keys())
 
 # ---------------------------------------------------------------------------
@@ -402,7 +402,7 @@ def _add_to_dead_letter(
 
     v24 ROOT FIX (FORENSIC-P1-DATA V): the previous code defaulted
     ``enabled = True`` if the config import failed. This is a
-    fail-OPEN default — a config regression silently activates the
+    fail-OPEN default -- a config regression silently activates the
     dead-letter queue instead of failing loud. The audit flagged this
     as a silent-data-loss risk. Fix: fail CLOSED (enabled = False) so
     a config regression surfaces as a loud error (records are not
@@ -414,12 +414,12 @@ def _add_to_dead_letter(
         from config.settings import LOADERS_DEAD_LETTER_ENABLED
         enabled = LOADERS_DEAD_LETTER_ENABLED
     except Exception:
-        # v24: fail CLOSED — a config regression should NOT silently
+        # v24: fail CLOSED -- a config regression should NOT silently
         # activate the DLQ. Log the error so operators notice.
         enabled = False
         import logging as _logging
         _logging.getLogger(__name__).error(
-            "dead_letter_record: config import failed — DLQ DISABLED "
+            "dead_letter_record: config import failed -- DLQ DISABLED "
             "(v24 fail-closed default). Set LOADERS_DEAD_LETTER_ENABLED "
             "in config/settings.py to enable. Error: %s",
             "see prior traceback",
@@ -496,7 +496,7 @@ def _count_upsert_inserts_updates(
 
     On PostgreSQL, the rowcount returned by ``cursor.rowcount`` for an
     ``INSERT ... ON CONFLICT DO UPDATE`` statement is ``inserts + 2 *
-    updates`` — each UPDATE counts as 2 because the row is "touched"
+    updates`` -- each UPDATE counts as 2 because the row is "touched"
     twice (once for the INSERT attempt, once for the UPDATE). Treating
     rowcount as the inserted count therefore OVER-COUNTS by the number
     of updates, leading to inflated metrics in the UpsertResult and
@@ -514,7 +514,7 @@ def _count_upsert_inserts_updates(
     SQLite versions. We fall back to the chunk size as the total
     (inserted + updated) count and report updated=0. This is the same
     behavior as the pre-fix code (which also could not distinguish
-    inserts from updates on SQLite) — the total is correct, only the
+    inserts from updates on SQLite) -- the total is correct, only the
     split is approximate. Production runs on PostgreSQL get the
     accurate split.
 
@@ -549,22 +549,22 @@ def _count_upsert_inserts_updates(
         chunk_updates = len(rows) - chunk_inserts
         return chunk_inserts, chunk_updates
     # SQLite fallback: cannot distinguish inserts from updates reliably.
-    # v90 ROOT FIX (BUG #13 — P1 SQLite upsert rowcount unreliable):
+    # v90 ROOT FIX (BUG #13 -- P1 SQLite upsert rowcount unreliable):
     #   The previous code used ``result_cursor.rowcount`` which is
-    #   UNRELIABLE on SQLite for ``INSERT ... ON CONFLICT DO UPDATE`` —
+    #   UNRELIABLE on SQLite for ``INSERT ... ON CONFLICT DO UPDATE`` --
     #   it can return -1 (unsupported), 0 (no rows), or the total touched
     #   count. The code fell back to ``chunk_size`` (the INPUT size) when
     #   rowcount was falsy/0, which OVERSTATED the affected rows if some
     #   rows were quarantined upstream or if the INSERT silently inserted
     #   0 rows (e.g. all rows hit ON CONFLICT DO UPDATE but the UPDATE
     #   set no-op). Tests on SQLite showed "1000 inserted" when reality
-    #   was "0 inserted, 1000 updated" — divergent from PostgreSQL (which
+    #   was "0 inserted, 1000 updated" -- divergent from PostgreSQL (which
     #   uses xmax for accurate splits). ROOT FIX: use ``SELECT changes()``
     #   AFTER the executemany to get the actual affected-row count. This
     #   is SQLite's authoritative rowcount for the most recent
     #   INSERT/UPDATE/DELETE. We still cannot distinguish inserts from
     #   updates on SQLite (changes() returns touched rows, not the split),
-    #   so we report all as inserts (updated=0) — same as before. But the
+    #   so we report all as inserts (updated=0) -- same as before. But the
     #   TOTAL is now accurate, not a chunk_size guess.
     result_cursor = session.execute(stmt)
     # SQLite's changes() returns the number of rows modified by the most
@@ -574,7 +574,7 @@ def _count_upsert_inserts_updates(
     if actual_rowcount > 0:
         total = min(actual_rowcount, chunk_size)
     else:
-        # changes() returned 0 — either no rows were touched (all no-op
+        # changes() returned 0 -- either no rows were touched (all no-op
         # updates) or the driver doesn't support changes(). Fall back to
         # chunk_size as the conservative total (same as pre-v90 behavior).
         rowcount = (
@@ -591,7 +591,7 @@ def _df_to_dicts(df: pd.DataFrame) -> list[dict]:
     values to Python None (DES-01, CODE-01).
 
     Handles ``np.nan``, ``pd.NA``, ``pd.NaT``, and ``None`` uniformly.
-    Empty strings in nullable columns are NOT converted to None here —
+    Empty strings in nullable columns are NOT converted to None here --
     that is the caller's responsibility when semantically appropriate
     (see bulk_upsert_gda for the one exception).
     """
@@ -786,18 +786,18 @@ def _validate_inchikey(value: Any) -> str | None:
     """Validate InChIKey format (SCI-01).
 
     v24 ROOT FIX (FORENSIC-P1-DATA §1 / Audit Chain 3): this was the
-    4th divergent InChIKey validator — it did NOT delegate to the
+    4th divergent InChIKey validator -- it did NOT delegate to the
     canonical ``cleaning.normalizer.is_valid_inchikey`` and did NOT
     accept mixture InChIKeys (multiple-component keys separated by
     commas). Drug records with mixture InChIKeys passed the ORM
     (models._validate_inchikey delegates to canonical) but FAILED here
-    → the loader quarantined records the ORM accepted, producing the
+    -> the loader quarantined records the ORM accepted, producing the
     same "test-path-passes-but-production-fails" pattern as the rest
     of the codebase. Fix: delegate to the canonical validator so there
     is exactly ONE definition of "valid InChIKey" across the platform.
 
     P1-ER-2 ROOT FIX: removed TEST/OUTER/INNER/IK acceptance from the
-    fallback branch — those are test-fixture prefixes that must never
+    fallback branch -- those are test-fixture prefixes that must never
     appear in production data. The canonical validator now rejects them.
 
     P1-ER-7 ROOT FIX: at this DB write boundary, additionally call
@@ -808,7 +808,7 @@ def _validate_inchikey(value: Any) -> str | None:
     ``drug_resolver.synthesize_inchikey``. Suffixed keys
     (e.g. ``BSYNRYMUTXBXSQ-UHFFFAOYSA-N-a``) would otherwise create
     duplicate canonical entries in the ``drugs.inchikey`` PK column
-    (one row per protonation variant) — the DB boundary is the right
+    (one row per protonation variant) -- the DB boundary is the right
     place to enforce canonicalisation. Mixture keys are likewise
     rejected because each component must be its own row.
 
@@ -823,18 +823,18 @@ def _validate_inchikey(value: Any) -> str | None:
     except ImportError:
         # Fallback: if the cleaning module is not importable (e.g. in
         # a stripped-down test env), use the local regex. This is a
-        # degraded mode — the canonical validator is preferred.
+        # degraded mode -- the canonical validator is preferred.
         _canonical = None
     if _canonical is not None:
         if _canonical(value):
             # V100 ROOT FIX (BUG #20, P0 CRITICAL): the previous code had
             # an ADDITIONAL strict check here (is_strict_inchikey) that
-            # REJECTED suffixed and mixture InChIKeys — even though the
+            # REJECTED suffixed and mixture InChIKeys -- even though the
             # canonical validator (is_valid_inchikey) ACCEPTS them. This
             # made the loader DIVERGENT from the other 3 validators: a
             # mixture InChIKey passed the cleaning layer, passed the
             # normalizer, passed the ORM models validator, but was
-            # REJECTED at the DB loader → silent dead-letter → operator
+            # REJECTED at the DB loader -> silent dead-letter -> operator
             # sees "0 drugs loaded" but cleaning reported success.
             # Root fix: REMOVE the additional strict check. All 4
             # validators now use the SAME canonical function
@@ -852,7 +852,7 @@ def _validate_inchikey(value: Any) -> str | None:
         )
     # Degraded fallback (only if cleaning.normalizer is not importable).
     # P1-ER-2 / P1-ER-3 ROOT FIX: this fallback mirrors the canonical
-    # validator — pattern synchronized with normalizer.py / base.py /
+    # validator -- pattern synchronized with normalizer.py / base.py /
     # models.py. NO TEST/OUTER/INNER/IK acceptance here.
     if _STANDARD_INCHIKEY_RE.match(value):
         return value
@@ -872,7 +872,7 @@ def _validate_uniprot_id(value: Any) -> str | None:
     isoform suffixes (e.g. ``P04637-2``) or ``CHEMBL_TGT_*`` IDs that
     the ORM (models._validate_uniprot_id) accepts. This divergent
     wrapper logic caused the loader to quarantine records the ORM
-    accepted — same "test-path-passes-but-production-fails" pattern.
+    accepted -- same "test-path-passes-but-production-fails" pattern.
     Fix: accept isoform suffixes and CHEMBL_TGT_* IDs to match the ORM.
 
     Accepts standard UniProt accessions (e.g. P69999, Q9Y6K9), isoform
@@ -900,18 +900,18 @@ def _validate_uniprot_id(value: Any) -> str | None:
     # production (or unset), test fixtures are REJECTED to prevent
     # them leaking into the live `proteins` table.
     #
-    # v65 ROOT FIX (P1C-002 compound — mirror the models.py fix):
+    # v65 ROOT FIX (P1C-002 compound -- mirror the models.py fix):
     #   This validator is the LOADER-side mirror of
     #   `database.models._validate_uniprot_id`. The v57 fix updated
     #   models.py to default to "prod" but left THIS copy (loaders.py)
-    #   still defaulting to "dev" — creating the asymmetry the audit
+    #   still defaulting to "dev" -- creating the asymmetry the audit
     #   flagged: the ORM rejected test fixtures by default but the
     #   loader accepted them by default, so test-fixture proteins
     #   passed the loader and then hit the ORM at flush time (or worse,
     #   bypassed the ORM entirely via bulk_save_objects).
     #   ROOT FIX (matching models.py exactly):
     #     1. Default DRUGOS_ENVIRONMENT to "prod" (fail-closed).
-    #     2. Remove "staging" from the allow-test list — staging is
+    #     2. Remove "staging" from the allow-test list -- staging is
     #        production-like per .env.example.
     #     3. Remove the `<6-char alphanumeric` block ENTIRELY. Real
     #        UniProt accessions are always 6+ chars; the <6-char rule
@@ -1009,8 +1009,8 @@ def _validate_activity_type(value: Any) -> str | None:
     (``if value in _VALID_ACTIVITY_TYPES``) while ``_validate_drug_type``
     and ``_validate_interaction_type`` are case-INSENSITIVE (``value.lower()``).
     ChEMBL emits activity types as lowercase (``ic50``, ``ec50``, ``ki``,
-    ``kd``) — these were quarantined by the case-sensitive check, silently
-    dropping valid activity measurements. ROOT FIX: build a lowercase→canonical
+    ``kd``) -- these were quarantined by the case-sensitive check, silently
+    dropping valid activity measurements. ROOT FIX: build a lowercase->canonical
     mapping at module load time so the lookup is O(1) AND case-insensitive,
     and return the CANONICAL form (e.g. ``IC50``) so the DB stores
     consistent values regardless of the source's casing.
@@ -1052,16 +1052,16 @@ def _validate_disease_id_format(disease_id: Any, disease_id_type: Any) -> str:
 
     Format patterns (anchored to match the entire string):
 
-    - ``omim``     : ``^(?:OMIM:)?\\d{4,7}$`` — MIM number (e.g. ``100800``)
+    - ``omim``     : ``^(?:OMIM:)?\\d{4,7}$`` -- MIM number (e.g. ``100800``)
       (imported from ``cleaning._constants.CANONICAL_OMIM_DISEASE_ID_REGEX``)
-    - ``disgenet`` : ``^C\\d{7}$``            — UMLS CUI (e.g. ``C0003843``)
-    - ``umls``     : ``^C\\d{7}$``            — UMLS CUI (e.g. ``C0003843``)
-    - ``doid``     : ``^DOID:\\d+$``          — Disease Ontology (e.g. ``DOID:4``)
-    - ``mesh``     : ``^D\\d{6}$``            — MeSH descriptor (e.g. ``D000001``)
-    - ``hpo``      : ``^HP:\\d{7}$``          — HPO term (e.g. ``HP:0000001``)
+    - ``disgenet`` : ``^C\\d{7}$``            -- UMLS CUI (e.g. ``C0003843``)
+    - ``umls``     : ``^C\\d{7}$``            -- UMLS CUI (e.g. ``C0003843``)
+    - ``doid``     : ``^DOID:\\d+$``          -- Disease Ontology (e.g. ``DOID:4``)
+    - ``mesh``     : ``^D\\d{6}$``            -- MeSH descriptor (e.g. ``D000001``)
+    - ``hpo``      : ``^HP:\\d{7}$``          -- HPO term (e.g. ``HP:0000001``)
 
     v35 ROOT FIX (issue 31): when ``disease_id_type`` is ``None``, the
-    format check is no longer silently skipped — instead, we auto-detect
+    format check is no longer silently skipped -- instead, we auto-detect
     the type by trying each known pattern in turn. This catches malformed
     disease IDs that would otherwise flow into the DB unchecked (the SQL
     CHECK constraint allows NULL disease_id_type, so a None type was a
@@ -1092,18 +1092,18 @@ def _validate_disease_id_format(disease_id: Any, disease_id_type: Any) -> str:
         (v35 fix).
     """
     if disease_id is None:
-        # v59 ROOT FIX (compound of P1C-001 — disease_id contradiction):
+        # v59 ROOT FIX (compound of P1C-001 -- disease_id contradiction):
         # The previous code coerced ``None`` to ``""`` here, which then
         # crashed the downstream INSERT on PostgreSQL (CHECK ``disease_id <> ''``
         # rejected the empty string) while silently passing on SQLite
         # (SQLite does NOT enforce CHECK constraints against DEFAULT- or
         # code-supplied empty strings). The correct behavior is to
-        # reject NULL upfront — the caller (loader) must supply a real
+        # reject NULL upfront -- the caller (loader) must supply a real
         # disease_id or quarantine the row.
         raise ValueError(
-            "disease_id is None — cannot validate. The caller must "
+            "disease_id is None -- cannot validate. The caller must "
             "supply a non-None disease_id or quarantine the row. "
-            "(v59 ROOT FIX — empty string is rejected by the "
+            "(v59 ROOT FIX -- empty string is rejected by the "
             "chk_gda_disease_id_nonempty CHECK constraint on PostgreSQL.)"
         )
     disease_id = str(disease_id).strip()
@@ -1112,14 +1112,14 @@ def _validate_disease_id_format(disease_id: Any, disease_id_type: Any) -> str:
     # Previously, a None type caused the format check to be silently
     # skipped, allowing malformed disease IDs to enter the DB.
     if disease_id_type is None:
-        # Try each known pattern — if ANY matches, the disease_id is valid.
+        # Try each known pattern -- if ANY matches, the disease_id is valid.
         for type_name, pattern in _DISEASE_ID_PATTERNS.items():
             if pattern.match(disease_id):
                 return disease_id
-        # None matched — raise with a helpful error listing the patterns.
+        # None matched -- raise with a helpful error listing the patterns.
         raise ValueError(
             f"Invalid disease_id format: {disease_id!r} (disease_id_type "
-            f"is None — auto-detection failed, no known pattern matched). "
+            f"is None -- auto-detection failed, no known pattern matched). "
             f"Tried patterns: "
             + ", ".join(
                 f"{t}={p.pattern!r}"
@@ -1130,7 +1130,7 @@ def _validate_disease_id_format(disease_id: Any, disease_id_type: Any) -> str:
 
     pattern = _DISEASE_ID_PATTERNS.get(disease_id_type)
     if pattern is None:
-        # Unknown type — _validate_disease_id_type will have raised already.
+        # Unknown type -- _validate_disease_id_type will have raised already.
         # Defensive: skip format check for unknown types.
         return disease_id
 
@@ -1146,7 +1146,7 @@ def _validate_disease_id_format(disease_id: Any, disease_id_type: Any) -> str:
 def _validate_positive_float(value: Any, field_name: str) -> Any | None:
     """Validate that a numeric value is positive (SCI-05 for activity_value).
 
-    v29 ROOT FIX (audit D-15): Decimal→float coercion loses precision.
+    v29 ROOT FIX (audit D-15): Decimal->float coercion loses precision.
     Preserve Decimal for Numeric columns. Previously this function always
     returned ``float``, which silently truncated ``decimal.Decimal``
     inputs (e.g. ``Decimal('7.123456789')``) to ``float64`` before they
@@ -1154,9 +1154,9 @@ def _validate_positive_float(value: Any, field_name: str) -> Any | None:
     ``Numeric`` columns accept ``Decimal`` natively, so we preserve the
     input type:
 
-    - ``Decimal`` in → ``Decimal`` out (precision preserved)
-    - ``float`` / ``int`` in → ``float`` out (existing behaviour)
-    - ``None`` / ``NaN`` in → ``None`` out
+    - ``Decimal`` in -> ``Decimal`` out (precision preserved)
+    - ``float`` / ``int`` in -> ``float`` out (existing behaviour)
+    - ``None`` / ``NaN`` in -> ``None`` out
     """
     from decimal import Decimal as _Decimal
 
@@ -1172,7 +1172,7 @@ def _validate_positive_float(value: Any, field_name: str) -> Any | None:
             f"Invalid {field_name}: {fval}. Must be positive (> 0)."
         )
     # v29 ROOT FIX (audit D-15): preserve Decimal precision for Numeric
-    # columns (activity_value, molecular_weight, …). float() was only
+    # columns (activity_value, molecular_weight, ...). float() was only
     # used for the positivity check above; the returned value keeps the
     # original Decimal type when one was supplied.
     if is_decimal:
@@ -1260,7 +1260,7 @@ def _quarantine_invalid_record(
 ) -> None:
     """Log a WARNING and add an invalid record to the dead letter queue."""
     logger.warning(
-        "%s: quarantined invalid record: %s — %s",
+        "%s: quarantined invalid record: %s -- %s",
         operation,
         {k: v for k, v in record.items() if k in (
             "inchikey", "uniprot_id", "gene_symbol",
@@ -1313,7 +1313,7 @@ def _pre_validate_drugs(
             # DQ-02: Duplicate inchikey within batch
             if ik in seen_inchikeys:
                 logger.warning(
-                    "%s: duplicate inchikey in batch: %s — keeping last", operation, ik
+                    "%s: duplicate inchikey in batch: %s -- keeping last", operation, ik
                 )
             seen_inchikeys.add(ik)
 
@@ -1375,7 +1375,7 @@ def _pre_validate_proteins(
             # DQ-02: Duplicate uniprot_id within batch
             if uid in seen_uniprot_ids:
                 logger.warning(
-                    "%s: duplicate uniprot_id in batch: %s — keeping last",
+                    "%s: duplicate uniprot_id in batch: %s -- keeping last",
                     operation,
                     uid,
                 )
@@ -1420,7 +1420,7 @@ def _pre_validate_proteins(
                     record["sequence"] = _validate_sequence(seq)
                 except ValueError:
                     logger.warning(
-                        "%s: invalid sequence for %s — setting to None", operation, uid
+                        "%s: invalid sequence for %s -- setting to None", operation, uid
                     )
                     record["sequence"] = None
 
@@ -1483,7 +1483,7 @@ def _pre_validate_dpi(
                 )
 
             # DES-02: Convert empty string source to None.
-            # v89/v90 ROOT FIX (BUG #4 / BUG #38 — source="unknown" coercion
+            # v89/v90 ROOT FIX (BUG #4 / BUG #38 -- source="unknown" coercion
             #   masks NULL and triggers CHECK violation):
             #   The previous code coerced NULL/NaN/empty ``source`` to the
             #   sentinel ``"unknown"`` at the loader boundary, believing
@@ -1491,21 +1491,21 @@ def _pre_validate_dpi(
             #   nullable (models.py line 1249: ``nullable=True``), and the
             #   DB CHECK ``chk_dpi_source`` (models.py line 1371) is
             #   ``source IS NULL OR source IN ('chembl', 'drugbank', ...)``.
-            #   The coercion ``None → "unknown"`` turned a value the DB
+            #   The coercion ``None -> "unknown"`` turned a value the DB
             #   would have ACCEPTED (NULL) into a value the DB REJECTS
-            #   ("unknown" is not in the whitelist) — causing the entire
+            #   ("unknown" is not in the whitelist) -- causing the entire
             #   chunk to fail with a CHECK violation, fall back to row-by-
             #   row inserts (which ALSO fail), and dead-letter every row
             #   with error "CHECK constraint failed: chk_dpi_source".
             #   The dead-letter entries recorded source='unknown' (the
-            #   POST-coercion value), HIDING the loader's bug — operators
+            #   POST-coercion value), HIDING the loader's bug -- operators
             #   concluded the data had source='unknown' (which IS invalid)
             #   and tried to fix the data, when the real fix was to NOT
             #   coerce NULL to "unknown". ROOT FIX: let NULL stay NULL
-            #   (the CHECK allows it). Empty string → None. NaN → None.
+            #   (the CHECK allows it). Empty string -> None. NaN -> None.
             #   If a non-NULL default is desired in the future, use a
             #   VALID source value ('chembl' or 'drugbank') based on
-            #   pipeline context — NEVER 'unknown'.
+            #   pipeline context -- NEVER 'unknown'.
             src = record.get("source")
             if src is None or src == "" or (isinstance(src, float) and pd.isna(src)):
                 record["source"] = None
@@ -1577,17 +1577,17 @@ def _pre_validate_ppi(
                     # and protein_b_id but did NOT swap any direction-
                     # specific fields. For STRING PPIs, all score columns
                     # (combined/experimental/database/textmining) are
-                    # SYMMETRIC — no swap needed. But ``score_json`` is
+                    # SYMMETRIC -- no swap needed. But ``score_json`` is
                     # a free-form Text column for "source-specific payloads
                     # beyond STRING" (per models.py:1559-1560). If a non-
                     # STRING source (e.g. BioGRID, IntAct) stores direction-
                     # specific data in score_json (e.g. ``{"activation_a_to_b":
                     # true, "inhibition_b_to_a": false}``), the swap
-                    # SILENTLY CORRUPTS the semantics — the direction fields
+                    # SILENTLY CORRUPTS the semantics -- the direction fields
                     # now refer to the wrong protein pair.
                     #
                     # Root fix: detect direction-specific keys in score_json
-                    # and log a WARNING (do not auto-swap — the direction
+                    # and log a WARNING (do not auto-swap -- the direction
                     # schema is source-specific and we cannot reliably
                     # rename keys without understanding each source's
                     # contract). The operator must inspect and either
@@ -1624,7 +1624,7 @@ def _pre_validate_ppi(
                                         operation, _direction_keys,
                                     )
                         except (json.JSONDecodeError, TypeError, ValueError):
-                            # score_json is not valid JSON — leave it as-is
+                            # score_json is not valid JSON -- leave it as-is
                             # (the original string is preserved). This is
                             # not corruption; the field was already opaque.
                             pass
@@ -1655,15 +1655,15 @@ def _pre_validate_gda(
             # SCI-04: gene_symbol validation (if present and not empty)
             # v9 ROOT FIX (audit F3.2 / BUG-A-002): the previous code
             # caught ValueError from _validate_gene_symbol and set
-            # record["gene_symbol"] = "" — the exact pattern the v7 fix
+            # record["gene_symbol"] = "" -- the exact pattern the v7 fix
             # claimed to have removed. The record then made a wasted DB
             # round-trip, failed the CHECK (gene_symbol <> '') constraint,
             # and ended up in the in-process dead-letter queue that is
-            # lost on restart. Now we quarantine IMMEDIATELY — no DB
+            # lost on restart. Now we quarantine IMMEDIATELY -- no DB
             # round-trip, no mutation to empty string.
             #
             # P1-A10 ROOT FIX (v82): the v9 fix wrapped _validate_gene_symbol
-            # in an inner try/except that caught ValueError and re-raised —
+            # in an inner try/except that caught ValueError and re-raised --
             # dead code that added no logic but obscured the flow. The inner
             # except was a no-op (catch + re-raise = pass-through). ROOT FIX:
             # remove the dead inner try/except entirely. The ValueError from
@@ -1677,7 +1677,7 @@ def _pre_validate_gda(
                     record["gene_symbol"] = validated_gs
                 else:
                     raise ValueError(
-                        f"gene_symbol '{gs}' failed HGNC validation — "
+                        f"gene_symbol '{gs}' failed HGNC validation -- "
                         f"quarantining before DB round-trip"
                     )
 
@@ -1693,7 +1693,7 @@ def _pre_validate_gda(
             # CHECK constraint, so without this Python-side validation,
             # malformed disease IDs (e.g. disease_id_type='mesh' with
             # disease_id='INVALID') would be silently inserted into the
-            # staging DB. This is a scientific-correctness guard —
+            # staging DB. This is a scientific-correctness guard --
             # downstream knowledge-graph construction trusts that
             # disease_id values are well-formed for their declared type.
             if "disease_id" in record:
@@ -1732,7 +1732,7 @@ def _pre_validate_entity_mapping(
                     record["canonical_inchikey"] = _validate_inchikey(ik)
                 except ValueError:
                     logger.warning(
-                        "%s: invalid canonical_inchikey '%s' — quarantining",
+                        "%s: invalid canonical_inchikey '%s' -- quarantining",
                         operation,
                         ik,
                     )
@@ -1743,7 +1743,7 @@ def _pre_validate_entity_mapping(
             if ik is None and (name is None or not str(name).strip()):
                 raise ValueError(
                     "Entity mapping record has neither canonical_inchikey "
-                    "nor canonical_name — rejected (no identity)"
+                    "nor canonical_name -- rejected (no identity)"
                 )
 
             # SEC-04: Reject wildcard-only names
@@ -1770,23 +1770,23 @@ def _with_retry(max_retries: int = 3, base_delay: float = 0.5):
     """Decorator that wraps a function with exponential backoff retry on
     transient database errors (REL-07).
 
-    v90 ROOT FIX (BUG #12 — P1 max_retries=0 returns None + missing
+    v90 ROOT FIX (BUG #12 -- P1 max_retries=0 returns None + missing
     InterfaceError):
       1. The previous ``for attempt in range(max_retries)`` meant
          ``max_retries=0`` (a valid "no retries" config) produced
-         ``range(0)`` — the loop body NEVER executed, and the function
+         ``range(0)`` -- the loop body NEVER executed, and the function
          returned ``None`` instead of raising. Callers like
          ``get_uniprot_to_protein_id_map`` (decorated with
-         ``@_with_retry(max_retries=3)``) return ``MappingResult`` — but
+         ``@_with_retry(max_retries=3)``) return ``MappingResult`` -- but
          if ``max_retries`` were 0, they'd return ``None``, and the
          caller's ``mapping = mr.mapping`` would raise ``AttributeError``.
          ROOT FIX: use ``range(max_retries + 1)`` so ``max_retries=0``
          still runs the function ONCE (1 attempt, 0 retries). The retry
          condition ``attempt < max_retries - 1`` is preserved, so for
          ``max_retries=3`` the loop still does exactly 3 attempts
-         (attempts 0, 1, 2 — retry on 0 and 1, raise on 2).
+         (attempts 0, 1, 2 -- retry on 0 and 1, raise on 2).
       2. The previous code caught ONLY ``OperationalError``. Network-level
-         errors (``InterfaceError`` — connection drops, DNS failures,
+         errors (``InterfaceError`` -- connection drops, DNS failures,
          TCP resets) are a SEPARATE exception class in SQLAlchemy. A brief
          network blip during ``get_uniprot_to_protein_id_map`` killed the
          entire GDA load because ``InterfaceError`` was not retried.
@@ -1807,7 +1807,7 @@ def _with_retry(max_retries: int = 3, base_delay: float = 0.5):
                     if attempt < max_retries - 1:
                         delay = base_delay * (2**attempt)
                         logger.warning(
-                            "%s: attempt %d/%d failed: %s — retrying in %.1fs",
+                            "%s: attempt %d/%d failed: %s -- retrying in %.1fs",
                             func.__name__,
                             attempt + 1,
                             max_retries,
@@ -1823,7 +1823,7 @@ def _with_retry(max_retries: int = 3, base_delay: float = 0.5):
                             exc,
                         )
                         raise
-            # v90: unreachable now — range(max_retries + 1) always runs at
+            # v90: unreachable now -- range(max_retries + 1) always runs at
             # least one attempt, and the last attempt raises on failure.
             return None  # pragma: no cover
 
@@ -1881,7 +1881,7 @@ def _merge_group(group: pd.DataFrame) -> pd.Series:
 
     K fix: ``canonical_name`` is intentionally omitted from ``merge_cols``
     because this function is invoked via ``groupby('canonical_name',
-    include_groups=False)`` — the group key is not in ``group.columns``
+    include_groups=False)`` -- the group key is not in ``group.columns``
     and is already preserved on the resulting index. Including it here
     would shadow the real value with ``None`` after ``reset_index``.
     """
@@ -1906,7 +1906,7 @@ def _merge_group(group: pd.DataFrame) -> pd.Series:
 
 
 # ===========================================================================
-# 1. DRUGS — ON CONFLICT (inchikey) DO UPDATE
+# 1. DRUGS -- ON CONFLICT (inchikey) DO UPDATE
 # ===========================================================================
 
 
@@ -1997,13 +1997,13 @@ def bulk_upsert_drugs(
             # adds it to the drugs table, and the drugbank_pipeline
             # produces it. Without 'groups' in updatable_cols, the
             # upsert silently dropped it and the safety trigger never
-            # fired — withdrawn killer drugs stayed is_withdrawn=FALSE.
+            # fired -- withdrawn killer drugs stayed is_withdrawn=FALSE.
             "groups",
             # v42 ROOT FIX (P1-A-7): migration 008 added
             # ``is_globally_approved`` and the ORM declares it; the
             # chembl_pipeline + drugbank_pipeline both emit it. Without
             # ``is_globally_approved`` in updatable_cols, every
-            # subsequent upsert left the column STALE — approved drugs
+            # subsequent upsert left the column STALE -- approved drugs
             # silently flagged as not-approved after the next ChEMBL /
             # DrugBank refresh (defeating the SW-1 patient-safety fix).
             "is_globally_approved",
@@ -2028,17 +2028,17 @@ def bulk_upsert_drugs(
             # drug safety sync at the Python ORM layer. The PostgreSQL trigger
             # (trg_drugs_sync_withdrawn in migration 006) handles this for
             # production PostgreSQL, but SQLite (dev/test) does NOT support
-            # PostgreSQL's CREATE FUNCTION / EXECUTE FUNCTION syntax — the
+            # PostgreSQL's CREATE FUNCTION / EXECUTE FUNCTION syntax -- the
             # migration translator strips both, so the trigger is a no-op on
             # SQLite. This Python hook runs on BOTH dialects, catching every
             # ORM INSERT/UPDATE. Three-layer defense:
             #   1. PostgreSQL trigger (production direct SQL INSERTs)
-            #   2. This Python hook (both dialects — ORM INSERTs/UPDATEs)
-            #   3. Curated name seed (migration 006 DO block — migration-time)
+            #   2. This Python hook (both dialects -- ORM INSERTs/UPDATEs)
+            #   3. Curated name seed (migration 006 DO block -- migration-time)
             # The hook mirrors the trigger's logic:
-            #   - If groups contains 'withdrawn' → is_withdrawn=True
-            #   - If name is in the curated withdrawn list → is_withdrawn=True
-            #   - If is_withdrawn=True → is_globally_approved=False (patient
+            #   - If groups contains 'withdrawn' -> is_withdrawn=True
+            #   - If name is in the curated withdrawn list -> is_withdrawn=True
+            #   - If is_withdrawn=True -> is_globally_approved=False (patient
             #     safety invariant: a withdrawn drug is NOT a safe repurposing
             #     candidate, regardless of max_phase)
             for record in valid_chunk:
@@ -2049,7 +2049,7 @@ def bulk_upsert_drugs(
                 if _groups and "withdrawn" in _groups:
                     _is_withdrawn = True
                 # Check curated withdrawn-drug name list (same list as
-                # migration 006's DO block seed — catches ChEMBL/PubChem-
+                # migration 006's DO block seed -- catches ChEMBL/PubChem-
                 # loaded drugs that have name but not groups)
                 if not _is_withdrawn and _name:
                     for _wd_name in _WITHDRAWN_DRUG_NAMES_LOWER:
@@ -2057,8 +2057,8 @@ def bulk_upsert_drugs(
                         # ``startswith(_wd_name + " ")`` (space separator).
                         # This missed salt forms joined by hyphen
                         # ("rofecoxib-sodium") or underscore
-                        # ("troglitazone_HCl") — leaving withdrawn drugs
-                        # classified as NOT withdrawn → patient-safety hook
+                        # ("troglitazone_HCl") -- leaving withdrawn drugs
+                        # classified as NOT withdrawn -> patient-safety hook
                         # incomplete for salt forms. ROOT FIX: match space,
                         # hyphen, AND underscore separators (the three
                         # delimiters used in ChEMBL / PubChem / DrugBank
@@ -2097,7 +2097,7 @@ def bulk_upsert_drugs(
                 dropped_keys = all_keys - valid_drug_columns
                 if dropped_keys:
                     logger.debug(
-                        "bulk_upsert_drugs: chunk %d — ignoring non-Drug columns: %s",
+                        "bulk_upsert_drugs: chunk %d -- ignoring non-Drug columns: %s",
                         chunk_idx, sorted(dropped_keys),
                     )
                 filtered_chunk = [
@@ -2116,7 +2116,7 @@ def bulk_upsert_drugs(
                     index_elements=["inchikey"],
                     set_=update_dict,
                 )
-                # v51 ROOT FIX (COMPOUND-6 — Counter Inflation):
+                # v51 ROOT FIX (COMPOUND-6 -- Counter Inflation):
                 # Use _count_upsert_inserts_updates for accurate counts
                 # instead of result.inserted += len(valid_chunk) which
                 # counts updates as inserts.
@@ -2175,7 +2175,7 @@ def bulk_upsert_drugs(
 
 
 # ===========================================================================
-# 2. PROTEINS — ON CONFLICT (uniprot_id) DO UPDATE
+# 2. PROTEINS -- ON CONFLICT (uniprot_id) DO UPDATE
 # ===========================================================================
 
 
@@ -2261,18 +2261,18 @@ def bulk_upsert_proteins(
                 for record in valid_chunk:
                     all_keys.update(record.keys())
 
-                # v22 ROOT FIX (audit section 5 finding 10 — "Asymmetric
+                # v22 ROOT FIX (audit section 5 finding 10 -- "Asymmetric
                 # chunk filtering"): the drug loader filters records to
                 # Drug.__table__.columns.keys() before insert (avoids
                 # CompileError on extra lineage columns). The protein
-                # loader did NOT — extra lineage columns in a protein
+                # loader did NOT -- extra lineage columns in a protein
                 # DataFrame caused CompileError and 100% chunk dead-letter.
                 # Unify: apply the SAME column-filter pattern here.
                 valid_protein_columns: set[str] = set(Protein.__table__.columns.keys())
                 dropped_keys = all_keys - valid_protein_columns
                 if dropped_keys:
                     logger.debug(
-                        "bulk_upsert_proteins: chunk %d — ignoring non-Protein columns: %s",
+                        "bulk_upsert_proteins: chunk %d -- ignoring non-Protein columns: %s",
                         chunk_idx, sorted(dropped_keys),
                     )
                 filtered_chunk = [
@@ -2353,7 +2353,7 @@ def bulk_upsert_proteins(
 
 
 # ===========================================================================
-# 3. DRUG-PROTEIN INTERACTIONS — ON CONFLICT DO UPDATE
+# 3. DRUG-PROTEIN INTERACTIONS -- ON CONFLICT DO UPDATE
 # ===========================================================================
 
 
@@ -2410,31 +2410,31 @@ def bulk_upsert_dpi(
 
     df = _sanitize_dataframe(df.copy())
 
-    # DES-02 + IDEM-2: Remove fillna("") for source — use NULL consistently
-    # Empty string source_id → None (DES-04)
+    # DES-02 + IDEM-2: Remove fillna("") for source -- use NULL consistently
+    # Empty string source_id -> None (DES-04)
     #
     # v93 ROOT FIX (P1-028): the previous code had TWO bugs:
     #   1. ``df["source_id"].where(df["source_id"].notna(), None)`` was a
-    #      NO-OP — ``.where(cond, other)`` returns ``other`` where ``cond``
+    #      NO-OP -- ``.where(cond, other)`` returns ``other`` where ``cond``
     #      is False. ``.notna()`` is True for non-null, so ``where`` returns
-    #      the original value for non-null and ``None`` for null — but the
+    #      the original value for non-null and ``None`` for null -- but the
     #      row was ALREADY null, so this just re-wrote NULL with NULL.
     #   2. ``df["source_id"].replace("", None)`` on an object column
     #      converts empty strings to ``numpy.nan`` (NOT Python ``None``).
     #      On PostgreSQL with psycopg2, ``nan`` in a nullable column is
     #      inserted as NULL (correct). On some SQLAlchemy versions /
     #      dialects, ``nan`` may be inserted as the literal string "NaN"
-    #      or as 0 — silently corrupting the column.
+    #      or as 0 -- silently corrupting the column.
     #
     # Root fix: use a single ``mask`` + ``loc`` assignment that converts
     # empty strings DIRECTLY to Python ``None`` (not NaN), and removes
-    # the redundant ``.where()`` call. The ``pd.NA`` → ``None`` conversion
+    # the redundant ``.where()`` call. The ``pd.NA`` -> ``None`` conversion
     # happens at the SQLAlchemy layer during parameter binding.
     #
-    # P1-019 ROOT FIX (v100 forensic — NULL source_id dedup gap):
+    # P1-019 ROOT FIX (v100 forensic -- NULL source_id dedup gap):
     # The DB UniqueConstraint ``uq_dpi_drug_protein_source`` on (drug_id,
     # protein_id, source, source_id) uses NULLS DISTINCT semantics on
-    # PostgreSQL 15+ and SQLite — so two rows with the SAME (drug_id,
+    # PostgreSQL 15+ and SQLite -- so two rows with the SAME (drug_id,
     # protein_id, source) but NULL source_id are NOT considered duplicates
     # by the DB. The KG would silently accumulate duplicate DPI edges
     # whenever a source omits source_id (common for older ChEMBL records).
@@ -2451,7 +2451,7 @@ def bulk_upsert_dpi(
         # Build a composite dedup key that treats NULL source_id as a
         # sentinel so duplicate (drug_id, protein_id, source, NULL)
         # rows collapse. We only do this when the relevant columns are
-        # all present — otherwise we fall through and let the DB
+        # all present -- otherwise we fall through and let the DB
         # constraint handle what it can.
         _dedup_cols_present = all(
             c in df.columns
@@ -2474,7 +2474,7 @@ def bulk_upsert_dpi(
             _dropped = _before - len(df)
             if _dropped > 0:
                 logger.info(
-                    "bulk_upsert_dpi: P1-019 — dropped %d duplicate DPI "
+                    "bulk_upsert_dpi: P1-019 -- dropped %d duplicate DPI "
                     "row(s) with NULL source_id (DB UNIQUE constraint "
                     "treats NULL as distinct; application-level dedup "
                     "closes the gap).",
@@ -2631,7 +2631,7 @@ def bulk_upsert_dpi(
 
 
 # ===========================================================================
-# 4. PROTEIN-PROTEIN INTERACTIONS — ON CONFLICT DO UPDATE
+# 4. PROTEIN-PROTEIN INTERACTIONS -- ON CONFLICT DO UPDATE
 # ===========================================================================
 
 
@@ -2646,7 +2646,7 @@ def bulk_upsert_ppi(
     """Bulk upsert protein-protein interactions.
 
     ON CONFLICT (protein_a_id, protein_b_id) DO UPDATE for score
-    columns.  STRING scores are in [0, 1000] — NOT [0, 100].
+    columns.  STRING scores are in [0, 1000] -- NOT [0, 100].
 
     Parameters
     ----------
@@ -2793,7 +2793,7 @@ def bulk_upsert_ppi(
 
 
 # ===========================================================================
-# 5. GENE-DISEASE ASSOCIATIONS — ON CONFLICT DO UPDATE
+# 5. GENE-DISEASE ASSOCIATIONS -- ON CONFLICT DO UPDATE
 # ===========================================================================
 
 
@@ -2808,20 +2808,20 @@ def _quarantine_gda_rows(
     Writes the bad rows to a JSONL file under data/dead_letter/ so they
     are not silently lost. The previous code fillna('') which collapsed
     distinct genes with empty gene_symbols into one row, causing silent
-    data loss of Gene→Disease edges.
+    data loss of Gene->Disease edges.
 
     v9 ROOT FIX (audit F3.1): the previous implementation:
       1. Hardcoded the default path as
          /home/z/my-project/work/codebase/unified/phase1/data/dead_letter
          which does NOT exist on any other machine (verified by ls).
-      2. Wrapped the makedirs call in ``except Exception: return`` —
+      2. Wrapped the makedirs call in ``except Exception: return`` --
          silently swallowing the failure. Quarantined GDA records
          silently vanished: no file written, no error raised. The
          dead-letter audit trail was fictional.
     Now we:
       * Resolve the default path relative to the phase1 package itself
         (``phase1/data/dead_letter``) so it works on any install.
-      * Raise ``OSError`` if the directory cannot be created — fail
+      * Raise ``OSError`` if the directory cannot be created -- fail
         loudly so operators see the configuration problem.
 
     FIX-P3-5: previously wrote ONLY to a JSONL file; the
@@ -2829,7 +2829,7 @@ def _quarantine_gda_rows(
     model ``DeadLetterGDA`` were created but NEVER populated, making
     both dead code. Now also INSERTs into the table via
     ``session.bulk_save_objects`` so the ORM model is live and
-    queryable. The JSONL file is kept for human inspection — both
+    queryable. The JSONL file is kept for human inspection -- both
     destinations receive the same rows. If ``session`` is None the
     table write is skipped (backward-compat for any caller that does
     not yet pass a session).
@@ -2841,7 +2841,7 @@ def _quarantine_gda_rows(
     # FIX-P3-5: populate the dead_letter_gda table via the ORM so the
     # table and model are no longer dead code. The bulk_save_objects
     # path is wrapped in try/except so a DB failure does NOT prevent
-    # the JSONL write below — both destinations are best-effort.
+    # the JSONL write below -- both destinations are best-effort.
     if session is not None and len(df) > 0:
         try:
             orm_objs = []
@@ -2856,14 +2856,14 @@ def _quarantine_gda_rows(
                         source=row_dict.get("source"),
                         reason=reason,
                         details_json=json.dumps(row_dict, default=str),
-                        # v89 ROOT FIX (BUG #29 — loader side): write the
+                        # v89 ROOT FIX (BUG #29 -- loader side): write the
                         # integer pipeline_run_id directly, NOT
                         # str(pipeline_run_id). The model column is now
-                        # ``Integer FK → pipeline_runs.id`` (see models.py
+                        # ``Integer FK -> pipeline_runs.id`` (see models.py
                         # fix). The previous ``str(pipeline_run_id)``
                         # would now raise ``DataError: invalid input
                         # syntax for type integer`` on PostgreSQL and
-                        # ``TypeError`` on SQLite — the FK relationship is
+                        # ``TypeError`` on SQLite -- the FK relationship is
                         # preserved and dead-letter rows can be JOINed to
                         # pipeline_runs without a CAST.
                         pipeline_run_id=(
@@ -2872,14 +2872,14 @@ def _quarantine_gda_rows(
                     )
                 )
             if orm_objs:
-                # v65 ROOT FIX (P1C-005 — savepoint, not full rollback):
+                # v65 ROOT FIX (P1C-005 -- savepoint, not full rollback):
                 #   The previous code called ``session.rollback()`` when
                 #   the dead-letter flush failed. ``session.rollback()``
-                #   rolls back the ENTIRE transaction — including any
+                #   rolls back the ENTIRE transaction -- including any
                 #   valid GDA rows the caller had already staged in the
                 #   same session. The comment said "rollback the dead-
                 #   letter inserts" but that is NOT what
-                #   ``session.rollback()`` does — it rolls back to the
+                #   ``session.rollback()`` does -- it rolls back to the
                 #   last commit/savepoint, discarding EVERYTHING since.
                 #   If ``bulk_upsert_gda`` had staged 1000 valid GDA
                 #   rows and then called ``_quarantine_gda_rows`` (which
@@ -2897,7 +2897,7 @@ def _quarantine_gda_rows(
                 #   try/except catches the exception for logging (the
                 #   JSONL write below still runs).
                 #
-                # v89 ROOT FIX (BUG #30 — bulk_save_objects bypasses
+                # v89 ROOT FIX (BUG #30 -- bulk_save_objects bypasses
                 #   SQLAlchemy 2.0 unit-of-work):
                 #   ``session.bulk_save_objects()`` is a legacy SQLAlchemy
                 #   1.x API that bypasses the unit-of-work cascade. In
@@ -2907,14 +2907,14 @@ def _quarantine_gda_rows(
                 #   relationship cascades, and does NOT populate server-
                 #   side defaults (like ``created_at`` from
                 #   ``TimestampMixin``). The ``DeadLetterGDA`` model
-                #   currently has no ``@validates``, so this was safe —
+                #   currently has no ``@validates``, so this was safe --
                 #   but if a future ``@validates`` is added, it would be
                 #   silently bypassed. Server-side defaults (``created_at``,
                 #   ``updated_at``) may not be populated correctly via
                 #   ``bulk_save_objects`` on some dialects (PostgreSQL
                 #   triggers fire on UPDATE, not on ``bulk_save_objects``
                 #   INSERT). ROOT FIX: use ``session.add_all(orm_objs)``
-                #   — the SQLAlchemy 2.0 canonical API. Performance
+                #   -- the SQLAlchemy 2.0 canonical API. Performance
                 #   difference is negligible for dead-letter volumes
                 #   (typically <100 rows per chunk).
                 try:
@@ -2929,9 +2929,9 @@ def _quarantine_gda_rows(
                     )
                 except Exception:
                     # The savepoint was rolled back automatically by the
-                    # context manager — ONLY the dead-letter inserts are
+                    # context manager -- ONLY the dead-letter inserts are
                     # lost. The caller's staged rows are PRESERVED. We
-                    # DO NOT raise — the JSONL write below still runs so
+                    # DO NOT raise -- the JSONL write below still runs so
                     # the operator has the audit trail on disk.
                     logger.warning(
                         "bulk_upsert_gda: dead_letter_gda table flush failed; "
@@ -2949,7 +2949,7 @@ def _quarantine_gda_rows(
             )
 
     # Resolve default path RELATIVE to this module so it works on any
-    # install — not a hardcoded absolute path that only exists on the
+    # install -- not a hardcoded absolute path that only exists on the
     # original developer's machine.
     _PHASE1_ROOT = Path(__file__).resolve().parent.parent  # phase1/
     _DEFAULT_DL_DIR = str(_PHASE1_ROOT / "data" / "dead_letter")
@@ -3017,14 +3017,14 @@ def bulk_upsert_gda(
     ON CONFLICT (gene_symbol, disease_id, source) DO UPDATE for
     updatable columns.
 
-    DESIGN DECISION (v59 ROOT FIX — compound of P1C-001):
+    DESIGN DECISION (v59 ROOT FIX -- compound of P1C-001):
       Rows with NULL or empty ``gene_symbol`` OR ``disease_id`` are
       QUARANTINED (written to the ``dead_letter_gda`` table via
       ``_quarantine_gda_rows``) and dropped from the upsert payload.
       The previous code ``fillna("")`` on these columns crashed
       PostgreSQL (CHECK constraint ``disease_id <> ''`` rejected the
       empty DEFAULT) while silently passing on SQLite. The
-      ``source`` column is left NULL when missing — the CHECK
+      ``source`` column is left NULL when missing -- the CHECK
       ``chk_gda_source`` explicitly allows ``source IS NULL``,
       so no fillna is needed.
 
@@ -3068,8 +3068,8 @@ def bulk_upsert_gda(
     # FIX C5 / AUDIT-2 + BUG-A-002 root fix:
     # The previous code replaced NULL gene_symbol with '' so the unique
     # constraint could detect duplicates. BUT this silently collapsed
-    # DISTINCT genes with empty gene_symbols into one row — silent data
-    # loss of Gene→Disease edges. The correct behavior is to QUARANTINE
+    # DISTINCT genes with empty gene_symbols into one row -- silent data
+    # loss of Gene->Disease edges. The correct behavior is to QUARANTINE
     # rows with NULL/empty gene_symbol (they cannot be meaningfully
     # deduplicated by gene_symbol because they have no gene identity).
     # The unique constraint is now applied only to rows WITH a real
@@ -3081,7 +3081,7 @@ def bulk_upsert_gda(
         bad_count = int(null_count) + int(empty_count)
         if bad_count > 0:
             logger.error(
-                "bulk_upsert_gda: BUG-A-002 — %d records have NULL or empty "
+                "bulk_upsert_gda: BUG-A-002 -- %d records have NULL or empty "
                 "gene_symbol. Quarantining instead of fillna('') which "
                 "silently collapsed distinct genes into one row.",
                 bad_count,
@@ -3106,16 +3106,16 @@ def bulk_upsert_gda(
                 )
             # Drop the bad rows from the upsert payload.
             df = df[~bad_mask].copy()
-        # No more fillna('') — keep gene_symbol as-is (non-null).
+        # No more fillna('') -- keep gene_symbol as-is (non-null).
     else:
-        # No gene_symbol column at all — log and quarantine all rows.
+        # No gene_symbol column at all -- log and quarantine all rows.
         # v57 ROOT FIX (P1C-001): the previous code did `df["gene_symbol"] = ""`
         # which (combined with the old CHECK <> '' constraint) guaranteed
         # an IntegrityError on INSERT. Now that the constraint is removed
         # and gene_symbol is NULLABLE, we set NULL instead of "" and
         # quarantine the rows (same path as the bad_mask branch above).
         logger.error(
-            "bulk_upsert_gda: BUG-A-002 — input dataframe is missing the "
+            "bulk_upsert_gda: BUG-A-002 -- input dataframe is missing the "
             "gene_symbol column entirely. All rows will be quarantined."
         )
         df["gene_symbol"] = None
@@ -3133,20 +3133,20 @@ def bulk_upsert_gda(
                 "bulk_upsert_gda: failed to write quarantine for %d "
                 "rows: %s", len(bad_rows), q_exc,
             )
-        # P1-020 ROOT FIX (v100 forensic — early return instead of
+        # P1-020 ROOT FIX (v100 forensic -- early return instead of
         # processing an empty DataFrame):
         # The previous code did ``df = df[~bad_mask].copy()`` here. But
         # ``bad_mask = df["gene_symbol"].isna()`` was ALL True (every row
         # has NaN because we just set the column to None), so
         # ``df[~bad_mask]`` was EMPTY. The function then continued
-        # processing an empty DataFrame — running through the disease_id
-        # check, the chunk loop, the upsert, etc. — producing confusing
+        # processing an empty DataFrame -- running through the disease_id
+        # check, the chunk loop, the upsert, etc. -- producing confusing
         # "0 inserted, N quarantined" output. The ``result.total_input``
         # was set later (line ~3189) to ``len(df)`` (the ORIGINAL count)
         # but ``result.inserted`` was 0 and ``result.quarantined`` was
         # never explicitly set to ``total``. An operator monitoring the
         # pipeline saw "0 inserted" without a clear indication that ALL
-        # rows were quarantined because of the missing column — leading
+        # rows were quarantined because of the missing column -- leading
         # to debugging time spent looking at the wrong layer. ROOT FIX:
         # explicitly set ``result.quarantined = len(df)`` and
         # ``return result`` here so the function exits cleanly with an
@@ -3155,20 +3155,20 @@ def bulk_upsert_gda(
         result.total_input = _n_total
         result.quarantined = _n_total
         logger.warning(
-            "bulk_upsert_gda: P1-020 — input dataframe missing gene_symbol "
+            "bulk_upsert_gda: P1-020 -- input dataframe missing gene_symbol "
             "column; quarantined all %d row(s) and returning early (no "
             "upsert attempted).",
             _n_total,
         )
         return result
-        # (The previous ``df = df[~bad_mask].copy()`` line is removed —
+        # (The previous ``df = df[~bad_mask].copy()`` line is removed --
         # it would have produced an empty DataFrame and continued
         # processing, masking the real failure mode.)
 
     # v42 ROOT FIX (P1-A-9): the previous code did
     # ``df["disease_id"] = df["disease_id"].fillna("")`` with a comment
     # claiming that empty disease_id "doesn't violate any CHECK
-    # constraint". This is FALSE — migration 001 defines
+    # constraint". This is FALSE -- migration 001 defines
     # ``CONSTRAINT chk_gda_disease_id_nonempty CHECK (disease_id <> '')``
     # (line ~1070). Rows with NULL disease_id were converted to "" by fillna
     # and then FAILED the CHECK on INSERT, raising IntegrityError. ROOT
@@ -3185,7 +3185,7 @@ def bulk_upsert_gda(
         bad_count = int(null_count) + int(empty_count)
         if bad_count > 0:
             logger.error(
-                "bulk_upsert_gda: P1-A-9 — %d records have NULL or empty "
+                "bulk_upsert_gda: P1-A-9 -- %d records have NULL or empty "
                 "disease_id. Quarantining instead of fillna('') which "
                 "violates chk_gda_disease_id_nonempty CHECK (disease_id <> '') "
                 "and crashes the upsert.",
@@ -3212,9 +3212,9 @@ def bulk_upsert_gda(
                     "rows: %s", bad_count, q_exc,
                 )
             df = df[~bad_mask].copy()
-        # No fillna("") — keep disease_id as-is (non-null, non-empty).
+        # No fillna("") -- keep disease_id as-is (non-null, non-empty).
     else:
-        # v59 ROOT FIX (compound of P1C-001 — disease_id contradiction):
+        # v59 ROOT FIX (compound of P1C-001 -- disease_id contradiction):
         # The previous code did `df["disease_id"] = ""` which (combined
         # with the old `NOT NULL DEFAULT ''` + `CHECK (disease_id <> '')`
         # schema) guaranteed an IntegrityError on PostgreSQL. The DEFAULT
@@ -3224,10 +3224,10 @@ def bulk_upsert_gda(
         # set None, quarantine all rows, then drop them from the upsert
         # payload so the bulk insert sees no rows that would violate the
         # CHECK constraint. This is the SAME root pattern already
-        # applied for gene_symbol (loaders.py:2632-2658) — closing the
+        # applied for gene_symbol (loaders.py:2632-2658) -- closing the
         # compound gap that v57 left open.
         logger.error(
-            "bulk_upsert_gda: P1-A-9 + v59 — input dataframe is missing "
+            "bulk_upsert_gda: P1-A-9 + v59 -- input dataframe is missing "
             "the disease_id column entirely. All rows will be quarantined "
             "(NULL disease_id) and dropped from the upsert payload."
         )
@@ -3252,14 +3252,14 @@ def bulk_upsert_gda(
     # The DB CHECK constraint chk_gda_source allows `source IS NULL OR
     # source IN ('disgenet', 'omim')`. fillna("") converts valid NULL
     # to invalid "" which FAILS the CHECK constraint. ROOT FIX: leave
-    # NULL as NULL — the CHECK allows it, and NULL is semantically
+    # NULL as NULL -- the CHECK allows it, and NULL is semantically
     # correct ("source unknown"). If the source column has a default
     # value, the DB will apply it; otherwise it stays NULL.
-    # df["source"] = df["source"].fillna("")  # v29: REMOVED — causes CHECK violation
+    # df["source"] = df["source"].fillna("")  # v29: REMOVED -- causes CHECK violation
 
     # IDEM-3/CODE-7/IDEM-19: Sort by score descending with a deterministic
     # tiebreak (gene_id, disease_id, source ascending) before drop_duplicates,
-    # then keep="first" — ensures the highest-scored record survives AND the
+    # then keep="first" -- ensures the highest-scored record survives AND the
     # tiebreak is deterministic across runs / DB engines.
     #
     # When the caller passes ``dedup_already_done=True`` (e.g. the
@@ -3270,9 +3270,9 @@ def bulk_upsert_gda(
     # trusts the caller.  PERF-19: skipping the sort saves ~2s on 1M rows.
     # v38 ROOT FIX (Phase 1 Issue #42): the previous dedup key was
     # ``(gene_symbol, disease_id, source)``. HGNC renames gene symbols
-    # periodically (e.g. ``HUGO`` → ``HUGO1``). If DisGeNET has an
+    # periodically (e.g. ``HUGO`` -> ``HUGO1``). If DisGeNET has an
     # old-name record and OMIM has a new-name record for the SAME gene
-    # (same ``gene_id`` = NCBI Entrez Gene ID), they would NOT dedup —
+    # (same ``gene_id`` = NCBI Entrez Gene ID), they would NOT dedup --
     # two separate rows in the DB, creating duplicate Gene nodes in
     # the KG. The fix: prefer ``gene_id`` (the stable NCBI identifier)
     # when available, falling back to ``gene_symbol`` only when
@@ -3284,16 +3284,16 @@ def bulk_upsert_gda(
         # Use gene_id as the primary dedup key (stable across HGNC renames).
         dedup_cols = ["gene_id", "disease_id", "source"]
         logger.debug(
-            "v38 Issue #42: dedup by (gene_id, disease_id, source) — "
+            "v38 Issue #42: dedup by (gene_id, disease_id, source) -- "
             "stable across HGNC gene_symbol renames."
         )
     else:
-        # gene_id is missing or all-null — fall back to gene_symbol
+        # gene_id is missing or all-null -- fall back to gene_symbol
         # (the previous behaviour). This is less robust but maintains
         # backward compat for callers that don't populate gene_id.
         dedup_cols = ["gene_symbol", "disease_id", "source"]
         logger.debug(
-            "v38 Issue #42: gene_id not available — falling back to "
+            "v38 Issue #42: gene_id not available -- falling back to "
             "dedup by (gene_symbol, disease_id, source). NOTE: HGNC "
             "gene_symbol renames may cause duplicate rows for the same "
             "gene. Populate the gene_id column to fix this."
@@ -3304,7 +3304,7 @@ def bulk_upsert_gda(
         if "score" in df.columns:
             sort_cols.append("score")
             ascending.append(False)  # highest score first
-        # Deterministic tiebreak (IDEM-19) — lower gene_id wins on ties.
+        # Deterministic tiebreak (IDEM-19) -- lower gene_id wins on ties.
         for col in ("gene_id", "gene_symbol", "disease_id", "source"):
             if col in df.columns:
                 sort_cols.append(col)
@@ -3313,8 +3313,8 @@ def bulk_upsert_gda(
             df = df.sort_values(sort_cols, ascending=ascending, kind="mergesort")
         before = len(df)
         df = df.drop_duplicates(subset=dedup_cols, keep="first")
-        # v93 ROOT FIX (P1-026 — application-level NULL gene_symbol dedup):
-        #   pandas ``drop_duplicates`` treats NaN as DISTINCT — two rows
+        # v93 ROOT FIX (P1-026 -- application-level NULL gene_symbol dedup):
+        #   pandas ``drop_duplicates`` treats NaN as DISTINCT -- two rows
         #   with ``gene_symbol=NaN`` and the same ``(disease_id, source)``
         #   are NOT deduplicated. This is the same NULLs-are-distinct
         #   issue as the DB UNIQUE constraint. The functional UNIQUE
@@ -3352,7 +3352,7 @@ def bulk_upsert_gda(
             )
     else:
         logger.debug(
-            "bulk_upsert_gda: dedup_already_done=True — skipping internal "
+            "bulk_upsert_gda: dedup_already_done=True -- skipping internal "
             "sort/dedup (caller is responsible for dedup)"
         )
 
@@ -3412,7 +3412,7 @@ def bulk_upsert_gda(
         for _col in _optional_updatable_cols:
             if _col in df.columns:
                 updatable_cols.append(_col)
-        # NOTE: protein_id was removed from the GDA model — the GDA table
+        # NOTE: protein_id was removed from the GDA model -- the GDA table
         # uses uniprot_id (string FK) only, not the integer protein PK.
         if pipeline_run_id is not None:
             updatable_cols.append("pipeline_run_id")
@@ -3455,7 +3455,7 @@ def bulk_upsert_gda(
                     for col in updatable_cols
                     if col in all_keys
                 }
-                # v49 ROOT FIX (Compound-5 — bulk_upsert_gda always falls back):
+                # v49 ROOT FIX (Compound-5 -- bulk_upsert_gda always falls back):
                 # The v38 code used dedup_cols = ["gene_id", "disease_id",
                 # "source"] when gene_id was present, but the DB only had
                 # a unique index on (gene_symbol, disease_id, source).
@@ -3467,14 +3467,14 @@ def bulk_upsert_gda(
                 # So both conflict targets are now valid. The dedup_cols
                 # list chooses the right one based on data availability.
                 # On SQLite (no migration 010 applied yet), the gene_id
-                # path still raises — fall back to gene_symbol which
+                # path still raises -- fall back to gene_symbol which
                 # always works.
                 try:
                     stmt = stmt.on_conflict_do_update(
                         index_elements=dedup_cols,
                         set_=update_dict,
                     )
-                    # v49 ROOT FIX (Counter Inflation — Compound-6): use
+                    # v49 ROOT FIX (Counter Inflation -- Compound-6): use
                     # _count_upsert_inserts_updates for accurate counts.
                     # This function executes the statement itself (with
                     # RETURNING clause on PostgreSQL) and returns the
@@ -3484,14 +3484,14 @@ def bulk_upsert_gda(
                     )
                     result.inserted += _ins
                     result.updated += _upd
-                # v66 ROOT FIX (P1C-017 — bare except Exception catches ALL errors):
+                # v66 ROOT FIX (P1C-017 -- bare except Exception catches ALL errors):
                 #   The previous code used ``except Exception as _conflict_exc:``
-                #   which caught EVERY exception — including CHECK constraint
+                #   which caught EVERY exception -- including CHECK constraint
                 #   violations (IntegrityError), connection errors
                 #   (OperationalError), data type mismatches (ProgrammingError
                 #   for wrong column types), and deadlocks. For ANY of these
                 #   non-conflict-target errors, retrying with gene_symbol is
-                #   futile — the SAME underlying cause will fail again,
+                #   futile -- the SAME underlying cause will fail again,
                 #   doubling the error log spam and delaying the real failure.
                 #   ROOT FIX: catch ONLY the specific SQLAlchemy errors that
                 #   indicate a missing/invalid ON CONFLICT target, and inspect
@@ -3518,11 +3518,11 @@ def bulk_upsert_gda(
                     # If the gene_id conflict target failed (DB not yet
                     # migrated to v49), retry with gene_symbol which is
                     # always indexed. Only retry for the SPECIFIC conflict-
-                    # target error — never for unrelated failures.
+                    # target error -- never for unrelated failures.
                     if "gene_id" in dedup_cols and _is_conflict_target_error:
                         logger.debug(
                             "bulk_upsert_gda: gene_id conflict target "
-                            "failed (%s) — retrying with gene_symbol "
+                            "failed (%s) -- retrying with gene_symbol "
                             "(DB may not be migrated to v49).",
                             _conflict_exc,
                         )
@@ -3545,7 +3545,7 @@ def bulk_upsert_gda(
                         result.updated += _upd
                     else:
                         # Non-conflict-target error (CHECK violation,
-                        # connection drop, datatype mismatch, etc.) —
+                        # connection drop, datatype mismatch, etc.) --
                         # propagate to the outer handler. Do NOT retry
                         # with gene_symbol; it would fail the same way.
                         raise
@@ -3606,7 +3606,7 @@ def bulk_upsert_gda(
 
 
 # ===========================================================================
-# 6. ENTITY MAPPING — ON CONFLICT DO UPDATE
+# 6. ENTITY MAPPING -- ON CONFLICT DO UPDATE
 # ===========================================================================
 
 
@@ -3696,13 +3696,13 @@ def bulk_upsert_entity_mapping(
                         null_df = null_df.reset_index()
                     else:
                         # Last resort: the group key was lost. Log a
-                        # warning — this indicates _merge_group returned
+                        # warning -- this indicates _merge_group returned
                         # an unexpected shape. The rows will have NaN in
                         # canonical_name, which the downstream concat
                         # will surface.
                         logger.warning(
                             "bulk_upsert_entity_mapping: canonical_name "
-                            "column lost after groupby.apply — _merge_group "
+                            "column lost after groupby.apply -- _merge_group "
                             "may have returned an unexpected shape. "
                             "Affected rows will have NaN canonical_name. "
                             "(v39 P1 #45 fix)"
@@ -3728,12 +3728,12 @@ def bulk_upsert_entity_mapping(
             "string_id",
             "match_confidence",
             "match_method",
-            # v89 ROOT FIX (BUG #21 — loader side): add ``last_matched_at``
-            # to updatable_cols so the column (now declared on the ORM —
+            # v89 ROOT FIX (BUG #21 -- loader side): add ``last_matched_at``
+            # to updatable_cols so the column (now declared on the ORM --
             # see models.py fix) is populated on every upsert. The
             # previous updatable_cols omitted it, so even on prod DBs
             # (where migration 001 created the column), it was NEVER
-            # populated — making it dead data. Now it records the
+            # populated -- making it dead data. Now it records the
             # timestamp of the last successful entity resolution, which
             # is the documented contract in migration 001 line 1226:
             # "When the last resolution was performed".
@@ -3757,11 +3757,11 @@ def bulk_upsert_entity_mapping(
                 continue
 
             # Add lineage fields
-            # v89 ROOT FIX (BUG #21 — loader side): populate
+            # v89 ROOT FIX (BUG #21 -- loader side): populate
             # ``last_matched_at`` on every record so the column (now
             # declared on the ORM and in updatable_cols) actually receives
             # a value. The timestamp records when this entity-resolution
-            # match was performed — the documented contract per migration
+            # match was performed -- the documented contract per migration
             # 001 line 1226.
             _now_utc = datetime.datetime.now(datetime.timezone.utc)
             for rec in valid_chunk:
@@ -3942,7 +3942,7 @@ def bulk_upsert_entity_mapping(
 
 
 # ===========================================================================
-# 7. PubChem enrichment — conditional UPDATE on drugs
+# 7. PubChem enrichment -- conditional UPDATE on drugs
 # ===========================================================================
 
 
@@ -3954,7 +3954,7 @@ def bulk_update_drugs_from_pubchem(
     """Update drugs with PubChem data, refreshing ALL matching drugs.
 
     P1-A12 ROOT FIX (v82): the previous implementation had
-    ``WHERE inchikey = :inchikey AND pubchem_cid IS NULL`` — skipping
+    ``WHERE inchikey = :inchikey AND pubchem_cid IS NULL`` -- skipping
     CID refreshes for drugs that ALREADY had a CID. This meant
     molecular_formula / molecular_weight / smiles were never updated
     for drugs loaded from DrugBank (which sets pubchem_cid at insert
@@ -3962,7 +3962,7 @@ def bulk_update_drugs_from_pubchem(
     The SET clause uses COALESCE for ALL columns including pubchem_cid,
     so existing non-NULL values are preserved when the new value is NULL,
     and updated when the new value is non-NULL. This is the scientifically-
-    correct behavior — PubChem property refreshes should apply to ALL
+    correct behavior -- PubChem property refreshes should apply to ALL
     drugs, not just those without a CID.
 
     For each row in *df*, executes::
@@ -4007,11 +4007,11 @@ def bulk_update_drugs_from_pubchem(
     )
 
     # v29 ROOT FIX (audit D-15): determine the dialect ONCE outside the
-    # per-row loop — we only need to coerce Decimal→float on SQLite
+    # per-row loop -- we only need to coerce Decimal->float on SQLite
     # (whose parameter binding rejects Decimal). PostgreSQL's Numeric
     # columns accept Decimal natively, so we preserve precision there.
     #
-    # v66 ROOT FIX (P1C-021 — centralize + document asymmetry):
+    # v66 ROOT FIX (P1C-021 -- centralize + document asymmetry):
     #   The coercion is now ALSO registered process-wide as a sqlite3
     #   adapter in ``database/connection.py`` (see P1C-021 comment there).
     #   This per-row loop is kept as a DEFENSE-IN-DEPTH backstop for any
@@ -4033,7 +4033,7 @@ def bulk_update_drugs_from_pubchem(
             now = datetime.datetime.now(datetime.timezone.utc)
             for rec in chunk:
                 rec["updated_at"] = now
-                # v29 ROOT FIX (audit D-15): Decimal→float coercion loses
+                # v29 ROOT FIX (audit D-15): Decimal->float coercion loses
                 # precision. Preserve Decimal for Numeric columns on
                 # PostgreSQL (production). SQLite's parameter binding
                 # does NOT accept ``decimal.Decimal`` (raises
@@ -4072,7 +4072,7 @@ def bulk_update_drugs_from_pubchem(
 
 
 # ===========================================================================
-# 7b. PubChem compound properties (institutional-grade — fixes ARCH-5, INT-7)
+# 7b. PubChem compound properties (institutional-grade -- fixes ARCH-5, INT-7)
 # ===========================================================================
 
 
@@ -4169,16 +4169,16 @@ _PUBCHEM_COMPOUND_PROPERTIES_UPDATABLE_COLS: tuple[str, ...] = (
 def _build_pubchem_compound_properties_table() -> Any:
     """Construct the SQLAlchemy Core ``Table`` for ``pubchem_compound_properties``.
 
-    The Table object is a *description* of the schema — it does NOT
+    The Table object is a *description* of the schema -- it does NOT
     require the table to exist in the database at construction time.
     SQLAlchemy uses it to generate INSERT/UPDATE SQL.  The actual table
-    must exist in the DB before any SQL is executed — that's the
+    must exist in the DB before any SQL is executed -- that's the
     responsibility of migration 005 (or ``Base.metadata.create_all`` in
     tests).
 
-    V18 ROOT FIX (CD-2 — three-definition schema drift):
+    V18 ROOT FIX (CD-2 -- three-definition schema drift):
     Before v18, this Core Table was the THIRD divergent definition of
-    ``pubchem_compound_properties`` — different from BOTH the ORM model
+    ``pubchem_compound_properties`` -- different from BOTH the ORM model
     (``models.py:PubChemCompoundProperty``) AND migration 005. The
     audit flagged:
 
@@ -4194,11 +4194,11 @@ def _build_pubchem_compound_properties_table() -> Any:
 
     On a fresh DB, the FIRST definition to run wins:
       * If create_all() runs first (e.g. SQLite), the Core/Table-
-        derived schema is what's in the DB — missing FK, wrong types,
+        derived schema is what's in the DB -- missing FK, wrong types,
         wrong constraint name.
       * If migration 005 runs first (PostgreSQL), the migration schema
         wins, but then create_all() tries to ADD the divergent
-        constraint — silently failing on PG (already exists) or
+        constraint -- silently failing on PG (already exists) or
         succeeding on SQLite (no migration ran).
 
     The ROOT FIX is to align this Core Table to the ORM model exactly.
@@ -4227,7 +4227,7 @@ def _build_pubchem_compound_properties_table() -> Any:
         "pubchem_compound_properties",
         metadata,
         Column("id", Integer, primary_key=True, autoincrement=True),
-        # V18 CD-2: FK to drugs.inchikey (was missing — aligns with
+        # V18 CD-2: FK to drugs.inchikey (was missing -- aligns with
         # ORM + migration 005).
         Column(
             "inchikey", String(50),
@@ -4248,9 +4248,9 @@ def _build_pubchem_compound_properties_table() -> Any:
         Column("tpsa", Numeric(8, 2)),
         Column("tpsa_source", String(50), server_default="pubchem_calculated"),
         Column("complexity", Numeric(10, 2)),
-        # V18 CD-2: Integer (not SmallInteger) — aligns with ORM.
+        # V18 CD-2: Integer (not SmallInteger) -- aligns with ORM.
         # SmallInteger maxes at 32767; some proteins have 50000+ atoms
-        # in complex formulations — Integer (32-bit) is the safe choice.
+        # in complex formulations -- Integer (32-bit) is the safe choice.
         Column("h_bond_donor_count", Integer),
         Column("h_bond_acceptor_count", Integer),
         Column("rotatable_bond_count", Integer),
@@ -4263,13 +4263,13 @@ def _build_pubchem_compound_properties_table() -> Any:
         # full word taxonomy but left Core Table at String(1).
         Column("protonation_state", String(20)),
         Column("pubchem_release", String(100)),
-        # V18 CD-2: NOT NULL + server_default — aligns with ORM + migration.
+        # V18 CD-2: NOT NULL + server_default -- aligns with ORM + migration.
         Column("source_id", String(100), nullable=False, server_default=""),
         Column("source_version", String(100)),
         Column("download_date", DateTime(timezone=True), nullable=False),
         Column("download_method", String(20)),
         # FIX-P1-C-14: was ``String(64), nullable=False, server_default=""``
-        # — divergence from the ORM (models.py: Integer, FK to
+        # -- divergence from the ORM (models.py: Integer, FK to
         # pipeline_runs.id, nullable). The ORM definition is canonical;
         # the Core Table now matches: Integer FK with ON DELETE SET NULL,
         # nullable. The empty-string server_default would have coerced
@@ -4288,7 +4288,7 @@ def _build_pubchem_compound_properties_table() -> Any:
         Column("transformations", Text),
         Column("electronic_signature", Text),
         Column("triggered_by", Text),
-        # V18 CD-2: NOT NULL + server_default=NOW() — aligns with ORM +
+        # V18 CD-2: NOT NULL + server_default=NOW() -- aligns with ORM +
         # migration 005. Was nullable + no default before; NULL
         # enriched_at silently broke enrichment-age queries.
         Column(
@@ -4297,15 +4297,15 @@ def _build_pubchem_compound_properties_table() -> Any:
         ),
         # v90 ROOT FIX (BUG #23): `server_default=text("FALSE")` instead of
         #   the non-portable `server_default="0"`. This Column object mirrors
-        #   the ORM PubChemCompoundProperty model — the previous "0" literal
-        #   diverged from the ORM (`server_default="0"` → now also FALSE) and
+        #   the ORM PubChemCompoundProperty model -- the previous "0" literal
+        #   diverged from the ORM (`server_default="0"` -> now also FALSE) and
         #   migration 005 (`is_deleted BOOLEAN NOT NULL DEFAULT FALSE`).
         #   `text` is already imported at line 44 above.
         Column("is_deleted", Boolean, default=False, server_default=text("FALSE")),
         Column("created_at", DateTime(timezone=True)),
         Column("updated_at", DateTime(timezone=True)),
         # V18 CD-2: align constraint NAME to ORM (was
-        # "uq_pubchem_props_inchikey_cid" — divergent).
+        # "uq_pubchem_props_inchikey_cid" -- divergent).
         UniqueConstraint(
             "inchikey", "pubchem_cid",
             name="uq_pubchem_compound_properties_inchikey_cid",
@@ -4314,7 +4314,7 @@ def _build_pubchem_compound_properties_table() -> Any:
     )
 
 
-# Construct the Table once at module load.  This is a *description* — it
+# Construct the Table once at module load.  This is a *description* -- it
 # does not require the table to exist in the DB.  SQLAlchemy's
 # ``insert(table)`` requires a real Table object (not a proxy), so we
 # resolve eagerly here.
@@ -4331,14 +4331,14 @@ def bulk_upsert_pubchem_compound_properties(
     Persists the 15+ physicochemical properties fetched from PubChem that
     were previously dropped on the floor by the legacy pipeline.  Uses
     SQLAlchemy 2.0 dialect-aware ``INSERT ... ON CONFLICT DO UPDATE``
-    (PostgreSQL) or ``INSERT ... ON CONFLICT DO UPDATE`` (SQLite — both
+    (PostgreSQL) or ``INSERT ... ON CONFLICT DO UPDATE`` (SQLite -- both
     share the same SQLAlchemy API).
 
     Parameters
     ----------
     session : Session
         Active SQLAlchemy session.  The caller manages the transaction
-        boundary (commit/rollback) — this function does NOT commit.
+        boundary (commit/rollback) -- this function does NOT commit.
     df : pandas.DataFrame
         Cleaned PubChem enrichment DataFrame from
         ``PubChemPipeline.clean()``.  Must contain at least ``inchikey``,
@@ -4357,7 +4357,7 @@ def bulk_upsert_pubchem_compound_properties(
     Notes
     -----
     * Empty strings, NaN, NaT are converted to SQL NULL before insert
-      (SCI-18, DQ-3).  ``COALESCE`` semantics are NOT used here — every
+      (SCI-18, DQ-3).  ``COALESCE`` semantics are NOT used here -- every
       upsert overwrites the existing row's updatable columns with the new
       values.  This is intentional: PubChem data is authoritative for the
       (inchikey, cid) pair, and stale data should be replaced, not
@@ -4365,7 +4365,7 @@ def bulk_upsert_pubchem_compound_properties(
       historical rows for audit.
     * ``molecular_weight`` and ``exact_mass`` are expected to be
       ``decimal.Decimal`` instances (SCI-16).  The loader does NOT convert
-      floats to Decimal — that is ``clean()``'s responsibility.  If floats
+      floats to Decimal -- that is ``clean()``'s responsibility.  If floats
       are passed, SQLAlchemy will store them as-is and the NUMERIC(12,6)
       column will silently truncate to 6 decimal places (potentially
       losing precision for values like ``180.06338800000002``).
@@ -4409,7 +4409,7 @@ def bulk_upsert_pubchem_compound_properties(
             f"columns: {missing}"
         )
 
-    # Filter the DataFrame to ONLY the columns this loader writes —
+    # Filter the DataFrame to ONLY the columns this loader writes --
     # extra lineage columns from clean() (e.g. ``source``, ``as_of_date``)
     # are kept in the CSV but not persisted to this table.
     cols_to_use = [
@@ -4417,22 +4417,22 @@ def bulk_upsert_pubchem_compound_properties(
     ]
     df_filtered = df[cols_to_use].copy()
 
-    # Sanitise: convert NaN/NaT/empty-string → None (SCI-18, DQ-3).
+    # Sanitise: convert NaN/NaT/empty-string -> None (SCI-18, DQ-3).
     # ``_sanitize_dataframe`` is the existing helper used by the other
     # loaders; it does not convert empty strings to None (only NaN/NaT),
     # so we add an explicit pass for empty strings on object columns.
-    # v79 FORENSIC ROOT FIX (P0-A3 — "unknown" coercion nulled legitimate
+    # v79 FORENSIC ROOT FIX (P0-A3 -- "unknown" coercion nulled legitimate
     #   enum values):
-    #   The v78 code coerced the string "unknown" → None for ALL object
+    #   The v78 code coerced the string "unknown" -> None for ALL object
     #   columns. But "unknown" is a LEGITIMATE enum value in this schema:
-    #     DrugType.UNKNOWN        (models.py — the canonical "we looked and
+    #     DrugType.UNKNOWN        (models.py -- the canonical "we looked and
     #                              could not classify" sentinel)
-    #     ActivityType.UNKNOWN    (models.py — same semantic)
+    #     ActivityType.UNKNOWN    (models.py -- same semantic)
     #   PubChem compound properties legitimately return "unknown" for
     #   fields like canonical_smile, hydrogen_bond donor count, etc. when
     #   the property exists but the value is unspecified. Coercing these
     #   to None DESTROYED the distinction between "property missing"
-    #   (None) and "property present but value unknown" ("unknown") — a
+    #   (None) and "property present but value unknown" ("unknown") -- a
     #   distinction the downstream KG uses to decide whether to emit a
     #   Compound node property at all.
     # ROOT FIX: remove "unknown" from the null-coercion set. The only
@@ -4451,18 +4451,18 @@ def bulk_upsert_pubchem_compound_properties(
             else v
         )
 
-    # Pre-validate InChIKeys — invalid-format rows go to the loader's
+    # Pre-validate InChIKeys -- invalid-format rows go to the loader's
     # dead-letter queue (DQ-2, DQ-17).  We use the same regex as
     # ``database.models._validate_inchikey``.
     # v9 ROOT FIX (audit F3.8): the audit found SIX different InChIKey
     # regexes across the codebase. A key accepted by one validator was
-    # rejected by another — creating a "universal chemical identifier"
+    # rejected by another -- creating a "universal chemical identifier"
     # with 6 different definitions. Now we centralize: import the
     # canonical is_valid_inchikey from cleaning.normalizer and use it
     # everywhere. This is the single source of truth.
     # P1-ER-2 / P1-ER-3 ROOT FIX: the canonical validator no longer
     # accepts TEST/OUTER/INNER/IK test-fixture prefixes (they were
-    # developer conveniences that leaked into production data —
+    # developer conveniences that leaked into production data --
     # Chain 3). The fallback regex below is now synchronized with the
     # canonical contract: 27-char standard (with optional protonation
     # suffix per IUPAC) OR SYNTH prefix OR mixture. NO test-fixture
@@ -4473,15 +4473,15 @@ def bulk_upsert_pubchem_compound_properties(
             return _canonical_is_valid_inchikey(str(ik))
     except ImportError:
         # Fallback if cleaning module is not on path (test isolation).
-        # v43 ROOT FIX (Chain 8 — InChIKey regex divergence): the
+        # v43 ROOT FIX (Chain 8 -- InChIKey regex divergence): the
         # previous fallback regex was
         #   ^[A-Z]{14}-[A-Z]{10}-[A-Z](?:-[A-Za-z0-9]+)?$|^SYNTH
         # which accepts:
-        #   (a) suffixed keys (the (?:-[A-Za-z0-9]+)? clause) — these
+        #   (a) suffixed keys (the (?:-[A-Za-z0-9]+)? clause) -- these
         #       pass Python validation but FAIL the SQL CHECK constraint
         #       chk_drugs_inchikey (LENGTH=27 OR LIKE 'SYNTH%') at
-        #       INSERT time → silent dead-letter.
-        #   (b) bare "SYNTH" with no body (5 chars) — should be rejected.
+        #       INSERT time -> silent dead-letter.
+        #   (b) bare "SYNTH" with no body (5 chars) -- should be rejected.
         # The canonical pattern from cleaning._constants.CANONICAL_
         # INCHIKEY_REGEX is ^[A-Z]{14}-[A-Z]{10}-[A-Z]$ (strict 27-char,
         # NO suffix). The SYNTH prefix is handled separately by
@@ -4557,7 +4557,7 @@ def bulk_upsert_pubchem_compound_properties(
         )
         return result
 
-    # Convert to list of dicts (NaT/NaN → None handled by _df_to_dicts).
+    # Convert to list of dicts (NaT/NaN -> None handled by _df_to_dicts).
     records = _df_to_dicts(df_filtered)
     # Convert pubchem_cid from numpy Int64 to Python int (SQLAlchemy
     # handles this transparently, but explicit conversion avoids edge
@@ -4584,17 +4584,17 @@ def bulk_upsert_pubchem_compound_properties(
                     f"download_date is not ISO 8601: {dd!r} ({exc})"
                 ) from exc
         # ``updated_at`` set on every upsert (the table's updated_at
-        # trigger fires for ORM updates but NOT for Core inserts — set
+        # trigger fires for ORM updates but NOT for Core inserts -- set
         # it explicitly here).
         rec["updated_at"] = datetime.datetime.now(datetime.timezone.utc)
 
     # PubChem compound_properties has ~35 columns; 1000 × 35 = 35 000
-    # params — well under PostgreSQL's 65 535-parameter limit.  Cap
+    # params -- well under PostgreSQL's 65 535-parameter limit.  Cap
     # defensively at 1000 (PERF-07).
     safe_batch = min(batch_size, 1000)
 
     insert_class = _get_dialect_insert(session)
-    table = _PUBCHEM_COMPOUND_PROPERTIES_TABLE  # lazy proxy — resolves on use
+    table = _PUBCHEM_COMPOUND_PROPERTIES_TABLE  # lazy proxy -- resolves on use
 
     with _Timer("bulk_upsert_pubchem_compound_properties", len(records)):
         for chunk in _chunked(records, safe_batch):
@@ -4603,7 +4603,7 @@ def bulk_upsert_pubchem_compound_properties(
             try:
                 stmt = insert_class(table).values(chunk)
                 # Build the update dict referencing ``stmt.excluded``
-                # (the values that would have been inserted — used to
+                # (the values that would have been inserted -- used to
                 # populate the existing row on conflict).
                 update_dict = {
                     col: stmt.excluded[col]
@@ -4630,7 +4630,7 @@ def bulk_upsert_pubchem_compound_properties(
                 # to distinguish inserts (xmax = 0) from updates
                 # (xmax != 0). On SQLite (tests/dev), falls back to
                 # chunk size as the total (inserted+updated) with
-                # updated=0 — the total is correct, only the split
+                # updated=0 -- the total is correct, only the split
                 # is approximate.
                 chunk_inserts, chunk_updates = _count_upsert_inserts_updates(
                     session, stmt, len(chunk),
@@ -4645,11 +4645,11 @@ def bulk_upsert_pubchem_compound_properties(
                     result.inserted, result.updated,
                 )
             except (OperationalError, ProgrammingError) as exc:
-                # Per-row failures inside a chunk — fall back to single-row
+                # Per-row failures inside a chunk -- fall back to single-row
                 # inserts so we can identify the bad row.
                 logger.warning(
                     "bulk_upsert_pubchem_compound_properties: chunk failed (%s) "
-                    "— retrying as single-row inserts to isolate bad row",
+                    "-- retrying as single-row inserts to isolate bad row",
                     exc,
                 )
                 for rec in chunk:
@@ -4683,7 +4683,7 @@ def bulk_upsert_pubchem_compound_properties(
     # v29 ROOT FIX (audit D-16): on PostgreSQL, result.updated now
     # accurately reflects the number of UPDATEs (via xmax RETURNING).
     # On SQLite (tests/dev), we still cannot distinguish inserts from
-    # updates without an extra query — updated stays at 0 there and
+    # updates without an extra query -- updated stays at 0 there and
     # inserted holds the total (inserted + updated). The total
     # (inserted + updated) is correct on both dialects.
     logger.info(
@@ -4782,13 +4782,13 @@ def get_chembl_to_drug_id_map(
     Added for the institutional-grade ChEMBL pipeline rewrite (A9/P5).
     Used by ``ChEMBLPipeline.load()`` to resolve ``molecule_chembl_id``
     from ChEMBL activity records to the integer ``drug_id`` FK on the
-    ``drug_protein_interactions`` table — without loading every drug in
+    ``drug_protein_interactions`` table -- without loading every drug in
     the DB (PERF-03, A9, P5).
 
     Parameters
     ----------
     session : Session
-        Active SQLAlchemy session. Read-only — no commits issued.
+        Active SQLAlchemy session. Read-only -- no commits issued.
     chembl_ids : set[str] | None
         Optional filter to load only specific chembl_ids. Pass the set of
         ``molecule_chembl_id`` values seen in the activity stream to
@@ -4812,7 +4812,7 @@ def get_chembl_to_drug_id_map(
     ----------------
     ChEMBL IDs are stable, versioned identifiers of the form
     ``CHEMBL\\d+`` (e.g. ``CHEMBL25`` for aspirin). They are unique
-    within ChEMBL but NOT unique across sources — DrugBank has its own
+    within ChEMBL but NOT unique across sources -- DrugBank has its own
     ``drugbank_id`` column. This function returns only ChEMBL-sourced
     drugs (and any drug that has a populated ``chembl_id`` from any
     source's entity-resolution step).
@@ -4853,7 +4853,7 @@ def build_gene_to_uniprot_maps(
     """Build gene_symbol -> uniprot_id and protein_name -> uniprot_id
     mapping dicts.
 
-    Primary: gene_symbol (e.g., "HBA1") — highest priority.
+    Primary: gene_symbol (e.g., "HBA1") -- highest priority.
     Secondary: protein_name map for last-resort matching only.
 
     FIX C4: gene_name (which stores protein names, NOT gene symbols) is
@@ -4894,7 +4894,7 @@ def build_gene_to_uniprot_maps(
                     logger.warning(
                         "build_gene_to_uniprot_maps: duplicate "
                         "gene_symbol '%s' (existing uniprot=%s, "
-                        "new uniprot=%s) — keeping first",
+                        "new uniprot=%s) -- keeping first",
                         gs_key,
                         gene_to_uniprot[gs_key],
                         row.uniprot_id,
@@ -4905,7 +4905,7 @@ def build_gene_to_uniprot_maps(
                 skipped_gene_symbols += 1
                 logger.warning(
                     "build_gene_to_uniprot_maps: invalid "
-                    "gene_symbol '%s' (uniprot=%s) — skipping",
+                    "gene_symbol '%s' (uniprot=%s) -- skipping",
                     gs_key,
                     row.uniprot_id,
                 )
@@ -4950,7 +4950,7 @@ def resolve_gene_symbol_to_uniprot(
     Returns a NEW DataFrame with uniprot_id column added.  The input
     DataFrame is NOT modified (INT-06).
 
-    v83 COMP-3 ROOT FIX — preserve clean-time uniprot_id:
+    v83 COMP-3 ROOT FIX -- preserve clean-time uniprot_id:
       The OMIM pipeline's ``_resolve_gene_xref_embedded()`` (called at
       clean() time) populates ``uniprot_id`` from the HGNC crosswalk
       (~7,000 genes when the file is present, ~50 from the embedded
@@ -4961,7 +4961,7 @@ def resolve_gene_symbol_to_uniprot(
           df["uniprot_id"] = df["gene_symbol"].str.upper().map(gene_to_uniprot)
 
       If the DB map was empty (UniProt pipeline not yet loaded, or
-      proteins table empty), EVERY value became NaN — even rows where
+      proteins table empty), EVERY value became NaN -- even rows where
       clean() had already resolved a correct UniProt accession from
       HGNC. The OMIM ``load()`` method then dead-lettered 99% of GDA
       records as "unresolved gene_symbol", and the KG lost 99% of its
@@ -5019,7 +5019,7 @@ def resolve_gene_symbol_to_uniprot(
             .str.upper()
             .map(gene_to_uniprot)
         )
-        # v89 ROOT FIX (pandas 3.x dtype strictness — CI COMP-3 failure):
+        # v89 ROOT FIX (pandas 3.x dtype strictness -- CI COMP-3 failure):
         #   pandas 3.x with pyarrow string backend enforces strict dtype
         #   on ``df.loc[mask, col] = value`` assignments. If ``db_lookup``
         #   contains mixed types (e.g. str + None from .map() misses), the
@@ -5046,7 +5046,7 @@ def resolve_gene_symbol_to_uniprot(
         # Convert to str with NaN preservation, then assign.
         df.loc[need_resolution_mask, "uniprot_id"] = db_lookup.astype(object).where(db_lookup.notna(), other=pd.NA)
 
-    # Step 2: still-unresolved rows — try protein_name map as fallback.
+    # Step 2: still-unresolved rows -- try protein_name map as fallback.
     still_unresolved = df["uniprot_id"].isna()
     if still_unresolved.any():
         protein_name_fallback = (
@@ -5054,7 +5054,7 @@ def resolve_gene_symbol_to_uniprot(
             .str.upper()
             .map(protein_name_to_uniprot)
         )
-        # v89 ROOT FIX (pandas 3.x dtype strictness — same as Step 1):
+        # v89 ROOT FIX (pandas 3.x dtype strictness -- same as Step 1):
         # explicit ``.astype(object)`` to allow None values in the
         # string-dtype column.
         df.loc[still_unresolved, "uniprot_id"] = protein_name_fallback.astype(object)
@@ -5104,7 +5104,7 @@ def get_or_create_pipeline_run(
     Used by the DisGeNET pipeline (IDEM-10) to convert its UUID
     ``run_id`` into the integer FK that ``GeneDiseaseAssociation.pipeline_run_id``
     requires.  If a row with the same ``(source, run_date)`` already
-    exists (e.g. from a previous attempt), it is updated in place —
+    exists (e.g. from a previous attempt), it is updated in place --
     this preserves the ``UniqueConstraint(source, run_date)`` from the
     model and makes the operation idempotent.
 
@@ -5145,7 +5145,7 @@ def get_or_create_pipeline_run(
     if started_at is None:
         started_at = datetime.datetime.now(datetime.timezone.utc)
 
-    # Look up an existing row by (source, run_date) — UniqueConstraint
+    # Look up an existing row by (source, run_date) -- UniqueConstraint
     existing = session.execute(
         select(PipelineRun).where(
             PipelineRun.source == source,
@@ -5154,7 +5154,7 @@ def get_or_create_pipeline_run(
     ).scalar_one_or_none()
 
     if existing is not None:
-        # Update status / metadata in place — idempotent.
+        # Update status / metadata in place -- idempotent.
         existing.status = status
         return int(existing.id)
 
@@ -5267,7 +5267,7 @@ def bulk_upsert_pipeline_runs(
 
 
 # ===========================================================================
-# 10. Orphan GDA cleanup (ARCH-01 — moved from database.models)
+# 10. Orphan GDA cleanup (ARCH-01 -- moved from database.models)
 # ===========================================================================
 
 
@@ -5320,7 +5320,7 @@ def cleanup_orphan_gda_records(
     except (ImportError, ModuleNotFoundError) as exc:
         logger.warning(
             "cleanup_orphan_gda_records: could not load config: %s "
-            "— using default 24h",
+            "-- using default 24h",
             exc,
         )
         retention_hours = 24
@@ -5329,7 +5329,7 @@ def cleanup_orphan_gda_records(
     if not isinstance(retention_hours, (int, float)) or retention_hours < 0:
         logger.warning(
             "cleanup_orphan_gda_records: invalid retention_hours=%r "
-            "— using default 24h",
+            "-- using default 24h",
             retention_hours,
         )
         retention_hours = 24
@@ -5354,10 +5354,10 @@ def cleanup_orphan_gda_records(
         reference_timestamp = datetime.datetime.now(datetime.timezone.utc)
 
     for attempt in range(max_retries):
-        # v90 ROOT FIX (BUG #5 — P0 savepoint rollback rolled back ENTIRE
+        # v90 ROOT FIX (BUG #5 -- P0 savepoint rollback rolled back ENTIRE
         #   transaction): the previous code called ``session.rollback()``
         #   in the except blocks, which rolls back the ENTIRE outer
-        #   transaction — discarding any staged work the caller had in
+        #   transaction -- discarding any staged work the caller had in
         #   the same session (e.g. a bulk_upsert_gda batch). The comment
         #   said "[REL-03] Uses savepoint so caller transaction is not
         #   rolled back" but the implementation did the OPPOSITE. ROOT
@@ -5366,7 +5366,7 @@ def cleanup_orphan_gda_records(
         #   savepoint object) NOT ``session.rollback()``. If the
         #   savepoint was never created (begin_nested itself failed),
         #   fall back to session.rollback(). This preserves the caller's
-        #   staged work on transient errors — same pattern as
+        #   staged work on transient errors -- same pattern as
         #   _quarantine_gda_rows (line ~2637).
         savepoint = None
         try:
@@ -5376,7 +5376,7 @@ def cleanup_orphan_gda_records(
             # v16 ROOT FIX (DC-8): the previous code had an
             # ``if dialect == "sqlite": / else:`` branch where both
             # branches executed IDENTICAL SQL with IDENTICAL parameters.
-            # The branch served no purpose — collapse to a single call.
+            # The branch served no purpose -- collapse to a single call.
             # Both SQLite and PostgreSQL accept the same parameterized
             # DELETE with a UTC datetime binding; SQLAlchemy handles
             # the dialect-specific timestamp serialization.
@@ -5401,7 +5401,7 @@ def cleanup_orphan_gda_records(
             if deleted_count > max_delete_count:
                 logger.error(
                     "cleanup_orphan_gda_records: delete count (%d) "
-                    "exceeds MAX_DELETE_COUNT (%d) — rolling back. "
+                    "exceeds MAX_DELETE_COUNT (%d) -- rolling back. "
                     "Set LOADERS_MAX_DELETE_COUNT higher or use dry_run "
                     "to preview.",
                     deleted_count,
@@ -5418,7 +5418,7 @@ def cleanup_orphan_gda_records(
             if dry_run:
                 savepoint.rollback()
                 logger.info(
-                    "cleanup_orphan_gda_records: DRY RUN — would delete "
+                    "cleanup_orphan_gda_records: DRY RUN -- would delete "
                     "%d orphan records (retention=%dh, dialect=%s)",
                     deleted_count,
                     retention_hours,

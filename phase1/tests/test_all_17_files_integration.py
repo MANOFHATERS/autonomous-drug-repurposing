@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MIT
-# © 2024-2026 Autonomous Drug Repurposing Platform — Team Cosmic / VentureLab
+# © 2024-2026 Autonomous Drug Repurposing Platform -- Team Cosmic / VentureLab
 """
-TEST 2 — Combined integration test for ALL 17 files in the dataset pipeline.
+TEST 2 -- Combined integration test for ALL 17 files in the dataset pipeline.
 
 The 17 files covered (16 previously-fixed + the newly-fixed drug_resolver.py):
 
@@ -23,8 +23,8 @@ The 17 files covered (16 previously-fixed + the newly-fixed drug_resolver.py):
   16. entity_resolution/resolver_utils.py
   17. entity_resolution/drug_resolver.py  ← the newly-fixed file
 
-This is a REAL integration test — it exercises the dataset pipeline
-end-to-end (config → database → cleaning → entity_resolution) and
+This is a REAL integration test -- it exercises the dataset pipeline
+end-to-end (config -> database -> cleaning -> entity_resolution) and
 asserts that every file contributes correctly.  It is NOT a fake
 "check-this-attribute-exists" test.
 
@@ -51,12 +51,12 @@ if str(PROJECT_ROOT) not in sys.path:
 
 
 # =============================================================================
-# Part A — Each of the 17 files imports cleanly and exposes its public API.
+# Part A -- Each of the 17 files imports cleanly and exposes its public API.
 # =============================================================================
 
 class TestPartA_All17FilesImport:
     """Verify that every one of the 17 files imports cleanly and exposes
-    its documented public API surface.  This is the minimum bar — every
+    its documented public API surface.  This is the minimum bar -- every
     file must be loadable in isolation."""
 
     # ----- config (2 files) -----
@@ -207,7 +207,7 @@ class TestPartA_All17FilesImport:
 
 
 # =============================================================================
-# Part B — End-to-end pipeline execution on a small synthetic dataset.
+# Part B -- End-to-end pipeline execution on a small synthetic dataset.
 # =============================================================================
 
 class TestPartB_EndToEndPipeline:
@@ -350,7 +350,7 @@ class TestPartB_EndToEndPipeline:
             assert len(bulk_loaders) > 0
 
     def test_full_pipeline_end_to_end(self):
-        """End-to-end: clean → resolve → export in one shot.
+        """End-to-end: clean -> resolve -> export in one shot.
 
         This test exercises multiple files together:
           - cleaning.normalizer (is_valid_inchikey, normalize_inchikey)
@@ -408,7 +408,7 @@ class TestPartB_EndToEndPipeline:
 
 
 # =============================================================================
-# Part C — Cross-module invariants.
+# Part C -- Cross-module invariants.
 # =============================================================================
 
 class TestPartC_CrossModuleInvariants:
@@ -707,14 +707,14 @@ class TestPartC_CrossModuleInvariants:
 
 
 # =============================================================================
-# Part D — Idempotency, concurrency, and resilience (cross-cutting).
+# Part D -- Idempotency, concurrency, and resilience (cross-cutting).
 # =============================================================================
 
 class TestPartD_Resilience:
     """Cross-cutting resilience tests."""
 
     def test_resolver_idempotent_build_mapping(self):
-        """build_mapping(reset=True) is idempotent — calling twice gives the same result."""
+        """build_mapping(reset=True) is idempotent -- calling twice gives the same result."""
         import pandas as pd
         from entity_resolution.drug_resolver import DrugResolver
         chembl_df = pd.DataFrame([
@@ -874,7 +874,7 @@ class TestPartD_Resilience:
 
 
 # =============================================================================
-# Part E — Final sanity check: all 17 files contribute to the pipeline.
+# Part E -- Final sanity check: all 17 files contribute to the pipeline.
 # =============================================================================
 
 class TestPartE_AllFilesContribute:

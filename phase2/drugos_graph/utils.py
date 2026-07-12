@@ -1,5 +1,5 @@
 """
-DrugOS Graph — Neo4j Identifier Safety & DRKG Label Registry
+DrugOS Graph -- Neo4j Identifier Safety & DRKG Label Registry
 ============================================================
 
 This module is the **single source of truth** for mapping DRKG (Drug
@@ -19,7 +19,7 @@ The mapping is the **trust boundary** between biomedical data sources
 A bug here corrupts every downstream query, ML feature, and prediction.
 The RL safety ranker uses adverse-event frequencies derived from this
 mapping to classify drug candidates as green / yellow / red. Wrong
-labels → wrong frequencies → wrong safety tier → patient harm.
+labels -> wrong frequencies -> wrong safety tier -> patient harm.
 
 ARCHITECTURE
 ------------
@@ -36,7 +36,7 @@ ARCHITECTURE
 STRICT MODE
 -----------
 By default, ``drkg_node_type_to_neo4j_label(strict=True)`` raises
-``ValueError`` on unknown types. This is deliberate — silent fallback
+``ValueError`` on unknown types. This is deliberate -- silent fallback
 was the root cause of multiple data-quality bugs (audit issues 5.1,
 6.2, 7.3). To opt into the legacy fallback behavior (with WARNING log
 + dead-letter quarantine), pass ``strict=False`` or set the env var
@@ -56,12 +56,12 @@ change MUST:
 
 See: ``utils_py_forensic_audit.docx`` for the full 16-domain audit.
 
-Fixes audit issue 13.1 — comprehensive module docstring with design
+Fixes audit issue 13.1 -- comprehensive module docstring with design
 rationale, architecture, strict mode, and patient-safety notes.
 """
 
 # ─── Standard library imports ──────────────────────────────────────────────
-# Fixes audit issue 4.3 — explicit imports (no star imports)
+# Fixes audit issue 4.3 -- explicit imports (no star imports)
 from __future__ import annotations
 
 import functools
@@ -81,11 +81,11 @@ from types import MappingProxyType
 from typing import Any, Callable, Final, Literal, NamedTuple, NewType, TypeVar
 
 # ─── Optional third-party imports (graceful fallback) ──────────────────────
-# Fixes audit issue 11.3 — Prometheus counters (optional; no-op fallback)
+# Fixes audit issue 11.3 -- Prometheus counters (optional; no-op fallback)
 try:
     from prometheus_client import Counter as _PromCounter
     _HAS_PROMETHEUS: bool = True
-except ImportError:  # pragma: no cover — prometheus_client optional
+except ImportError:  # pragma: no cover -- prometheus_client optional
     _HAS_PROMETHEUS = False
     _PromCounter = None  # type: ignore[assignment, misc]
 
@@ -94,8 +94,8 @@ if not any(isinstance(h, logging.NullHandler) for h in logger.handlers):
     logger.addHandler(logging.NullHandler())
 
 # ─── Public API ────────────────────────────────────────────────────────────
-# Fixes audit issue 4.3 — explicit __all__ per PEP 8
-# Fixes audit issue 14.1 — PEP 8 compliance
+# Fixes audit issue 4.3 -- explicit __all__ per PEP 8
+# Fixes audit issue 14.1 -- PEP 8 compliance
 __all__: list[str] = [
     # Types
     "Label", "RelType", "IdentifierKind", "LabelEntry", "LabelResult",
@@ -118,21 +118,21 @@ __all__: list[str] = [
     "migrate_labels", "diff_label_maps",
     # Reliability helpers
     "safe_call_with_retry", "CircuitBreaker",
-    # Constants — backward-compat names (issues C2, C3)
+    # Constants -- backward-compat names (issues C2, C3)
     "DRKG_NODE_TYPE_TO_NEO4J_LABEL", "NEO4J_LABEL_TO_DRKG_NODE_TYPE",
     "DRKG_TYPE_TO_LABEL_ENTRY", "LABEL_REGISTRY",
-    # Constants — new names
+    # Constants -- new names
     "DEPRECATED_TYPES", "LEGACY_LABEL_ALIASES", "CASE_ALIASES",
     "LABEL_MAP_HASH", "LABEL_MAP_VERSION", "LABEL_API_VERSION",
     "LABEL_MAP_METADATA", "LABEL_SCHEMA_VERSION", "MAX_IDENTIFIER_LENGTH",
 ]
 
 # ─── Type Aliases ──────────────────────────────────────────────────────────
-# Fixes audit issue 2.5 — NewType for Label and RelType (type safety)
+# Fixes audit issue 2.5 -- NewType for Label and RelType (type safety)
 Label = NewType("Label", str)
 RelType = NewType("RelType", str)
 
-# Fixes audit issue 2.6 — Literal for kind parameter (PEP 484)
+# Fixes audit issue 2.6 -- Literal for kind parameter (PEP 484)
 # Includes all kind values used by existing callers (kg_builder, graph_stats,
 # graph_queries) for backward compatibility.
 IdentifierKind = Literal[
@@ -144,14 +144,14 @@ IdentifierKind = Literal[
     "rel type",
 ]
 
-# Fixes audit issue 2.7 — kind-specific validation patterns
+# Fixes audit issue 2.7 -- kind-specific validation patterns
 # Patterns are compiled lazily inside _KIND_PATTERNS (module-level constants
 # are fine because re.compile is deterministic and idempotent).
 #
 # v61 ROOT FIX (label pattern too strict): the previous pattern
 # `^[A-Z][A-Za-z0-9]*$` for "label" / "node label" / "source label"
 # REJECTED labels containing underscores. But the codebase's own
-# CORE_NODE_TYPES (config.py:3625) includes "MedDRA_Term" — a valid
+# CORE_NODE_TYPES (config.py:3625) includes "MedDRA_Term" -- a valid
 # Neo4j label with an underscore. Every call to sanitize_identifier()
 # with kind="label" on "MedDRA_Term" raised ValueError, breaking
 # SIDER loading, the graph_stats sanity checks, and the v43+ pathway
@@ -161,7 +161,7 @@ IdentifierKind = Literal[
 #   - Subsequent chars: letters, digits, underscores
 # ROOT FIX: change the label pattern to `^[A-Z][A-Za-z0-9_]*$`
 # (PascalCase start preserved for label convention, but underscores
-# allowed after the first char — matching all CORE_NODE_TYPES entries
+# allowed after the first char -- matching all CORE_NODE_TYPES entries
 # including "MedDRA_Term", "ClinicalOutcome", "Compound", etc.).
 _KIND_PATTERNS: Final[Mapping[str, "re.Pattern[str]"]] = MappingProxyType({
     "label": re.compile(r"^[A-Z][A-Za-z0-9_]*$"),
@@ -173,21 +173,21 @@ _KIND_PATTERNS: Final[Mapping[str, "re.Pattern[str]"]] = MappingProxyType({
 })
 
 # ─── Constants ─────────────────────────────────────────────────────────────
-# Fixes audit issue 8.5, 9.2 — MAX_IDENTIFIER_LENGTH = 1024 (DoS guard)
-# Fixes audit issue 4.4 — Final annotation on constants
+# Fixes audit issue 8.5, 9.2 -- MAX_IDENTIFIER_LENGTH = 1024 (DoS guard)
+# Fixes audit issue 4.4 -- Final annotation on constants
 MAX_IDENTIFIER_LENGTH: Final[int] = 1024
 
-# Fixes audit issue 12.5, 14.5 — semantic versioning for the label schema
+# Fixes audit issue 12.5, 14.5 -- semantic versioning for the label schema
 # Bump MAJOR on breaking change (entry removed/renamed), MINOR on additive
 # change (new entry), PATCH on metadata-only change.
 LABEL_SCHEMA_VERSION: Final[str] = "1.0.0"
 LABEL_MAP_VERSION: Final[str] = "1.0.0"
 LABEL_API_VERSION: Final[str] = "1.0.0"
 
-# Fixes audit issue 6.5 — dead-letter queue path
-# Fixes audit issue 9.4 — audit log path
-# Fixes audit issue 16.2 — label map changes audit trail
-# Fixes audit issue 16.3 — transformation log path
+# Fixes audit issue 6.5 -- dead-letter queue path
+# Fixes audit issue 9.4 -- audit log path
+# Fixes audit issue 16.2 -- label map changes audit trail
+# Fixes audit issue 16.3 -- transformation log path
 # These are relative to the project root (cwd at pipeline run time).
 DEAD_LETTER_PATH: Final[Path] = Path("data/dead_letter/labels.jsonl")
 AUDIT_LOG_PATH: Final[Path] = Path("logs/audit/sanitization_failures.jsonl")
@@ -195,10 +195,10 @@ AUDIT_TRAIL_PATH: Final[Path] = Path("logs/audit/label_map_changes.jsonl")
 TRANSFORMATION_LOG_PATH: Final[Path] = Path("logs/transformations/sanitization.jsonl")
 
 # ─── LabelEntry NamedTuple ─────────────────────────────────────────────────
-# Fixes audit issue 3.5 — LabelEntry carries ontology/version/source metadata
-# Fixes audit issue 3.6 — deprecation fields for Side Effect → MedDRA_Term
+# Fixes audit issue 3.5 -- LabelEntry carries ontology/version/source metadata
+# Fixes audit issue 3.6 -- deprecation fields for Side Effect -> MedDRA_Term
 class LabelEntry(NamedTuple):
-    """Rich metadata for a single DRKG type → Neo4j label mapping.
+    """Rich metadata for a single DRKG type -> Neo4j label mapping.
 
     Attributes
     ----------
@@ -229,7 +229,7 @@ class LabelEntry(NamedTuple):
 
 
 # ─── LabelResult dataclass ─────────────────────────────────────────────────
-# Fixes audit issue 16.4 — provenance for fallback labels
+# Fixes audit issue 16.4 -- provenance for fallback labels
 # Allows downstream code to know whether a label came from the dict or the
 # fallback path, so it can attach ``_label_source`` properties to Neo4j nodes.
 @dataclass(frozen=True)
@@ -254,14 +254,14 @@ class LabelResult:
 
 
 # ─── Raw mapping (the canonical registry data) ─────────────────────────────
-# Fixes audit issue 3.1 — MedDRA_Term added (CRITICAL patient-safety fix)
+# Fixes audit issue 3.1 -- MedDRA_Term added (CRITICAL patient-safety fix)
 # PATIENT SAFETY: MedDRA_Term is the canonical SIDER adverse-event endpoint.
 # Wrong/missing mapping here causes the RL safety ranker to see zero adverse
 # events for every drug, ranking dangerous drugs as safe. See audit issue 3.1.
 #
-# Fixes audit issue 3.6 — Side Effect marked deprecated (replaced by MedDRA_Term)
-# Fixes audit issue 3.7 — ATC/TAX case aliases (WHO ATC vs DRKG Atc)
-# Fixes audit issue 3.5 — LabelEntry carries ontology/version/source metadata
+# Fixes audit issue 3.6 -- Side Effect marked deprecated (replaced by MedDRA_Term)
+# Fixes audit issue 3.7 -- ATC/TAX case aliases (WHO ATC vs DRKG Atc)
+# Fixes audit issue 3.5 -- LabelEntry carries ontology/version/source metadata
 _RAW_LABEL_ENTRIES: Final[dict[str, LabelEntry]] = {
     "Compound": LabelEntry(
         neo4j_label="Compound",
@@ -283,7 +283,7 @@ _RAW_LABEL_ENTRIES: Final[dict[str, LabelEntry]] = {
     ),
     # PATIENT SAFETY: Protein is UniProt-only (NOT in DRKG). It must be in
     # the dict so kg_builder.create_constraints() creates a uniqueness
-    # constraint on Protein.id — otherwise MERGE creates duplicate Protein
+    # constraint on Protein.id -- otherwise MERGE creates duplicate Protein
     # nodes on pipeline re-runs (audit issue 3.1 root cause).
     "Protein": LabelEntry(
         neo4j_label="Protein",
@@ -303,7 +303,7 @@ _RAW_LABEL_ENTRIES: Final[dict[str, LabelEntry]] = {
         ontology_version="current",
         source="DRKG",
     ),
-    # Fixes audit issue 3.6 — Side Effect deprecated; use MedDRA_Term
+    # Fixes audit issue 3.6 -- Side Effect deprecated; use MedDRA_Term
     "Side Effect": LabelEntry(
         neo4j_label="SideEffect",
         ontology="MedDRA",
@@ -354,7 +354,7 @@ _RAW_LABEL_ENTRIES: Final[dict[str, LabelEntry]] = {
         ontology_version="v8",
         source="DRKG",
     ),
-    # Fixes audit issue 3.7 — 'Atc' is DRKG's spelling; 'ATC' is WHO standard.
+    # Fixes audit issue 3.7 -- 'Atc' is DRKG's spelling; 'ATC' is WHO standard.
     # Both map to the same 'Atc' Neo4j label (case alias).
     "Atc": LabelEntry(
         neo4j_label="Atc",
@@ -384,7 +384,7 @@ _RAW_LABEL_ENTRIES: Final[dict[str, LabelEntry]] = {
     # adverse-event endpoint. Without this entry, SIDER's
     # ('Compound', 'causes_adverse_event', 'MedDRA_Term') edges would
     # create nodes under a fallback label, and the RL safety ranker would
-    # see ZERO adverse events for every drug — ranking dangerous drugs
+    # see ZERO adverse events for every drug -- ranking dangerous drugs
     # as 'green' (safe). This entry is the single most important line
     # in this file for patient safety.
     "MedDRA_Term": LabelEntry(
@@ -397,10 +397,10 @@ _RAW_LABEL_ENTRIES: Final[dict[str, LabelEntry]] = {
 
 
 # ─── LabelRegistry ─────────────────────────────────────────────────────────
-# Fixes audit issue 1.5 — LabelRegistry encapsulates mapping + invariants
-# Fixes audit issue 4.5, 7.2 — MappingProxyType prevents runtime mutation
-# Fixes audit issue 6.7 — MappingProxyType is thread-safe for reads
-# Fixes audit issue 9.6 — defends against label hijacking by malicious plugins
+# Fixes audit issue 1.5 -- LabelRegistry encapsulates mapping + invariants
+# Fixes audit issue 4.5, 7.2 -- MappingProxyType prevents runtime mutation
+# Fixes audit issue 6.7 -- MappingProxyType is thread-safe for reads
+# Fixes audit issue 9.6 -- defends against label hijacking by malicious plugins
 T = TypeVar("T")
 
 
@@ -409,11 +409,11 @@ class LabelRegistry:
 
     The registry enforces three invariants at construction time:
 
-    1. **Value uniqueness** (issue 2.4) — no two DRKG types may map to the
+    1. **Value uniqueness** (issue 2.4) -- no two DRKG types may map to the
        same Neo4j label. Otherwise the reverse map silently loses entries.
-    2. **PascalCase labels** (issue 14.3) — all Neo4j labels must match
+    2. **PascalCase labels** (issue 14.3) -- all Neo4j labels must match
        ``^[A-Z][A-Za-z0-9]*$`` for RDF/JSON-LD interoperability (issue 15.7).
-    3. **Non-empty** (issue 12.3) — no empty keys or values.
+    3. **Non-empty** (issue 12.3) -- no empty keys or values.
 
     Once constructed, the registry is immutable: all internal mappings
     are wrapped in ``MappingProxyType``. Mutation raises ``TypeError``.
@@ -441,7 +441,7 @@ class LabelRegistry:
     """
 
     def __init__(self, mapping: Mapping[str, LabelEntry]) -> None:
-        # Fixes audit issue 2.4 — value uniqueness asserted at construction.
+        # Fixes audit issue 2.4 -- value uniqueness asserted at construction.
         # EXCEPTION: documented case aliases (issue 3.7) intentionally allow
         # multiple keys (e.g., 'ATC' and 'Atc') to map to the same Neo4j
         # label. We allow this and pick the canonical (first-seen) key for
@@ -464,14 +464,14 @@ class LabelRegistry:
                 f"unique Neo4j label unless it is a documented case alias "
                 f"(issue 2.4, 3.7)."
             )
-        # Fixes audit issue 14.3 — PascalCase enforced at construction
+        # Fixes audit issue 14.3 -- PascalCase enforced at construction
         for lbl in labels:
             if not re.match(r"^[A-Z][A-Za-z0-9]*$", lbl):
                 raise ValueError(
                     f"Neo4j label not PascalCase: {lbl!r}. Must match "
                     f"^[A-Z][A-Za-z0-9]*$ (issue 14.3)."
                 )
-        # Fixes audit issue 12.3 — no empty keys/values, no reserved prefixes
+        # Fixes audit issue 12.3 -- no empty keys/values, no reserved prefixes
         for k, v in mapping.items():
             if not k or not v.neo4j_label:
                 raise ValueError(
@@ -482,12 +482,12 @@ class LabelRegistry:
                     f"Neo4j label starts with underscore (reserved): "
                     f"{v.neo4j_label!r} (issue 12.3)."
                 )
-        # Wrap in MappingProxyType — mutation now raises TypeError (issue 4.5)
+        # Wrap in MappingProxyType -- mutation now raises TypeError (issue 4.5)
         self._entries: MappingProxyType[str, LabelEntry] = MappingProxyType(dict(mapping))
         self._forward: MappingProxyType[str, str] = MappingProxyType(
             {k: v.neo4j_label for k, v in mapping.items()}
         )
-        # Fixes audit issue 2.4 — reverse map: case aliases collapse to the
+        # Fixes audit issue 2.4 -- reverse map: case aliases collapse to the
         # CANONICAL (first-seen) key. We iterate mapping in insertion order
         # so the canonical spelling (e.g., 'Atc' before 'ATC') wins.
         reverse: dict[str, str] = {}
@@ -497,14 +497,14 @@ class LabelRegistry:
         self._reverse: MappingProxyType[str, str] = MappingProxyType(reverse)
 
     def lookup(self, drkg_type: str) -> str:
-        """Forward lookup: DRKG type → Neo4j label.
+        """Forward lookup: DRKG type -> Neo4j label.
 
         Raises ``KeyError`` if ``drkg_type`` is not in the registry.
         """
         return self._forward[drkg_type]
 
     def reverse_lookup(self, label: str) -> str:
-        """Reverse lookup: Neo4j label → DRKG type.
+        """Reverse lookup: Neo4j label -> DRKG type.
 
         Raises ``KeyError`` if ``label`` is not in the registry.
         """
@@ -535,7 +535,7 @@ class LabelRegistry:
     def hash(self) -> str:
         """SHA-256 content hash (first 16 hex chars) of the forward mapping.
 
-        Fixes audit issue 5.7, 16.5 — content hash for tamper detection.
+        Fixes audit issue 5.7, 16.5 -- content hash for tamper detection.
         Two registries with the same hash produce identical Neo4j graphs.
         """
         return hashlib.sha256(
@@ -543,10 +543,10 @@ class LabelRegistry:
         ).hexdigest()[:16]
 
 
-# Fixes audit issue 1.5 — instantiate the global registry (validates invariants)
+# Fixes audit issue 1.5 -- instantiate the global registry (validates invariants)
 LABEL_REGISTRY: Final[LabelRegistry] = LabelRegistry(_RAW_LABEL_ENTRIES)
 
-# ─── Backward-compat names (CONSTRAINT C2, C3 — must remain importable) ────
+# ─── Backward-compat names (CONSTRAINT C2, C3 -- must remain importable) ────
 # These names are imported by __init__.py (light reexport), kg_builder.py,
 # graph_stats.py, graph_queries.py, and existing tests. They MUST remain
 # the same Python objects across all imports (identity check in tests).
@@ -555,14 +555,14 @@ DRKG_NODE_TYPE_TO_NEO4J_LABEL: Final[Mapping[str, str]] = LABEL_REGISTRY._forwar
 NEO4J_LABEL_TO_DRKG_NODE_TYPE: Final[Mapping[str, str]] = LABEL_REGISTRY._reverse
 
 # ─── Derived constant maps ─────────────────────────────────────────────────
-# Fixes audit issue 3.6, 14.6 — deprecated types (Side Effect → MedDRA_Term)
+# Fixes audit issue 3.6, 14.6 -- deprecated types (Side Effect -> MedDRA_Term)
 DEPRECATED_TYPES: Final[Mapping[str, str]] = MappingProxyType({
     k: v.deprecation_replacement
     for k, v in _RAW_LABEL_ENTRIES.items()
     if v.deprecated and v.deprecation_replacement
 })
 
-# Fixes audit issue 15.4 — legacy label aliases for backward compat
+# Fixes audit issue 15.4 -- legacy label aliases for backward compat
 # When 'SideEffect' label is queried, redirect to 'MedDRATerm' (post-migration).
 # 'MedDRA_Term' is the semantic type name; 'MedDRATerm' is the storage label.
 LEGACY_LABEL_ALIASES: Final[Mapping[str, str]] = MappingProxyType({
@@ -571,17 +571,17 @@ LEGACY_LABEL_ALIASES: Final[Mapping[str, str]] = MappingProxyType({
     "MedDRA_Term": "MedDRATerm",
 })
 
-# Fixes audit issue 3.7 — case aliases for ATC/TAX
+# Fixes audit issue 3.7 -- case aliases for ATC/TAX
 # Applied BEFORE general normalization in _normalize_drkg_type.
 CASE_ALIASES: Final[Mapping[str, str]] = MappingProxyType({
     "ATC": "Atc",
     "TAX": "Tax",
 })
 
-# Fixes audit issue 5.7, 16.5 — content hash for tamper detection
+# Fixes audit issue 5.7, 16.5 -- content hash for tamper detection
 LABEL_MAP_HASH: Final[str] = LABEL_REGISTRY.hash
 
-# Fixes audit issue 16.1 — provenance metadata
+# Fixes audit issue 16.1 -- provenance metadata
 LABEL_MAP_METADATA: Final[Mapping[str, str]] = MappingProxyType({
     "version": LABEL_MAP_VERSION,
     "api_version": LABEL_API_VERSION,
@@ -594,8 +594,8 @@ LABEL_MAP_METADATA: Final[Mapping[str, str]] = MappingProxyType({
 
 
 # ─── Prometheus metrics (optional, with no-op fallback) ────────────────────
-# Fixes audit issue 11.3 — Prometheus counters for observability
-# Fixes audit issue 7.2 (idempotency) — re-import must NOT crash on duplicate
+# Fixes audit issue 11.3 -- Prometheus counters for observability
+# Fixes audit issue 7.2 (idempotency) -- re-import must NOT crash on duplicate
 # metric registration. We use a helper that either creates a new Counter or
 # retrieves an existing one from the default registry.
 class _NoOpCounter:
@@ -613,7 +613,7 @@ def _get_or_create_counter(
 ) -> Any:
     """Get an existing Counter from the default registry or create a new one.
 
-    Fixes audit issue 7.2 — re-import of utils.py must not crash on duplicate
+    Fixes audit issue 7.2 -- re-import of utils.py must not crash on duplicate
     metric registration. prometheus_client's default registry is process-global
     and rejects duplicate metric names. This helper checks the registry first
     and reuses an existing metric if present.
@@ -628,7 +628,7 @@ def _get_or_create_counter(
             return existing
         # Create a new one
         return _PromCounter(name, description, labelnames)
-    except Exception:  # noqa: BLE001 — defensive; never crash import over metrics
+    except Exception:  # noqa: BLE001 -- defensive; never crash import over metrics
         return _NoOpCounter()
 
 
@@ -655,16 +655,16 @@ QUARANTINE_TOTAL: Any = _get_or_create_counter(
 
 
 # ─── Helpers ───────────────────────────────────────────────────────────────
-# Fixes audit issue 2.1, 4.2, 7.3, 7.5 — normalize before lookup
+# Fixes audit issue 2.1, 4.2, 7.3, 7.5 -- normalize before lookup
 # Applied to both dict and fallback paths so equivalent inputs produce
 # identical labels (idempotency).
 def _normalize_drkg_type(node_type: str) -> str:
     """Normalize a DRKG type name before lookup.
 
     Pipeline:
-    1. Apply CASE_ALIASES (issue 3.7) — ``'ATC'`` → ``'Atc'``.
-    2. NFKC Unicode normalization (issue 7.5) — ``'café'`` ≡ ``'café'``.
-    3. Collapse whitespace runs to a single space (issue 4.2) — tabs,
+    1. Apply CASE_ALIASES (issue 3.7) -- ``'ATC'`` -> ``'Atc'``.
+    2. NFKC Unicode normalization (issue 7.5) -- ``'café'`` ≡ ``'café'``.
+    3. Collapse whitespace runs to a single space (issue 4.2) -- tabs,
        newlines, NBSP all become ASCII space.
     4. Strip leading/trailing whitespace.
 
@@ -677,7 +677,7 @@ def _normalize_drkg_type(node_type: str) -> str:
     Raises:
         TypeError: If ``node_type`` is not a string (issue 4.1).
     """
-    # Fixes audit issue 4.1 — explicit type check
+    # Fixes audit issue 4.1 -- explicit type check
     if not isinstance(node_type, str):
         raise TypeError(
             f"node_type must be str, got {type(node_type).__name__}: "
@@ -687,7 +687,7 @@ def _normalize_drkg_type(node_type: str) -> str:
     nt = CASE_ALIASES.get(node_type, node_type)
     # 2. NFKC normalization (issue 7.5)
     nt = unicodedata.normalize("NFKC", nt)
-    # 3. Collapse whitespace (issue 4.2) — \s+ matches all Unicode whitespace
+    # 3. Collapse whitespace (issue 4.2) -- \s+ matches all Unicode whitespace
     nt = re.sub(r"\s+", " ", nt)
     # 4. Strip
     return nt.strip()
@@ -700,7 +700,7 @@ _NORMALIZED_LOOKUP: Final[Mapping[str, str]] = MappingProxyType(
 _LABELS_SET: Final[frozenset[str]] = frozenset(LABEL_REGISTRY._forward.values())
 
 
-# Fixes audit issue 4.9, 9.3 — truncate, repr-escape, redact PII in errors
+# Fixes audit issue 4.9, 9.3 -- truncate, repr-escape, redact PII in errors
 # Prevents log corruption, log injection (ANSI escapes), and PII leaks.
 _PII_PATTERNS: Final[list[tuple["re.Pattern[str]", str]]] = [
     (re.compile(r"\b\d{3}-\d{2}-\d{4}\b"), "[SSN]"),
@@ -712,7 +712,7 @@ _PII_PATTERNS: Final[list[tuple["re.Pattern[str]", str]]] = [
 def _redact_pii(text: str) -> str:
     """Redact known PII patterns (SSN, EMAIL, PHONE) from text.
 
-    Fixes audit issue 9.3 — PII redaction in error messages and logs.
+    Fixes audit issue 9.3 -- PII redaction in error messages and logs.
     """
     for pattern, replacement in _PII_PATTERNS:
         text = pattern.sub(replacement, text)
@@ -722,8 +722,8 @@ def _redact_pii(text: str) -> str:
 def _safe_repr(s: object, max_len: int = 100) -> str:
     """Truncate, repr-escape, and PII-redact a value for safe logging.
 
-    Fixes audit issue 4.9 — name truncated to 100 chars and repr-escaped.
-    Fixes audit issue 9.3 — PII patterns redacted.
+    Fixes audit issue 4.9 -- name truncated to 100 chars and repr-escaped.
+    Fixes audit issue 9.3 -- PII patterns redacted.
     """
     if not isinstance(s, str):
         return repr(s)
@@ -737,13 +737,13 @@ def _safe_repr(s: object, max_len: int = 100) -> str:
 # These validators are referenced by ``config.CANONICAL_IDS_METADATA`` and
 # can be used by loaders to verify that a node's canonical ID is well-formed
 # before inserting it into the graph. Each returns ``True`` for valid IDs
-# and ``False`` otherwise (no exceptions — keeps the loader pipeline fast).
+# and ``False`` otherwise (no exceptions -- keeps the loader pipeline fast).
 # v57 ROOT FIX (P2C-002 + P2C-007): add canonical IDs for
 # ClinicalOutcome/MedDRA_Term/Anatomy and enforce reverse-check in
 # schema validator.
 
 # MedDRA code: 8-digit numeric string (e.g. 10002083). Leading zeros
-# are significant — MedDRA codes are NOT integers.
+# are significant -- MedDRA codes are NOT integers.
 _MEDDRA_CODE_RE: "re.Pattern[str]" = re.compile(r"^[0-9]{8}$")
 
 # UBERON ID: ``UBERON:<7-9 digits>`` (e.g. UBERON:0000061). The
@@ -751,7 +751,7 @@ _MEDDRA_CODE_RE: "re.Pattern[str]" = re.compile(r"^[0-9]{8}$")
 # 7 zero-padded digits.
 _UBERON_ID_RE: "re.Pattern[str]" = re.compile(r"^UBERON:[0-9]{7,9}$")
 
-# InChIKey: 14 chars — 14-char hash (uppercase letters + digits), hyphen,
+# InChIKey: 14 chars -- 14-char hash (uppercase letters + digits), hyphen,
 # 1-char flag, hyphen, 1-char checksum. E.g. RZVAJINKQORUOD-UHFFFAOYSA-N.
 _INCHIKEY_RE: "re.Pattern[str]" = re.compile(r"^[A-Z]{14}-[A-Z]{2}-[A-Z]$")
 
@@ -771,12 +771,39 @@ _UNIPROT_ID_RE: "re.Pattern[str]" = re.compile(
 # ``R-MMU-<digits>`` (Mus musculus), etc. We accept any ``R-XXX-<digits>``.
 _REACTOME_ID_RE: "re.Pattern[str]" = re.compile(r"^R-[A-Z]{3}-[0-9]+$")
 
+# P2-001 FORENSIC ROOT FIX (Team 4 -- namespace collision):
+# ClinicalOutcome canonical ID. Format: ``CO:<drugbank_id>:<disease_key>:<indication_type>``
+# (e.g. ``CO:DB00001:DOID:0050133:approved``). This is DISTINCT from
+# MedDRA_Term's ``meddra_id`` (8-digit numeric) -- the two MUST NOT share a
+# canonical ID field, otherwise entity resolution conflates clinical-trial-
+# derived outcome records with vocabulary terms.
+_CLINICAL_OUTCOME_ID_RE: "re.Pattern[str]" = re.compile(
+    r"^CO:[A-Za-z0-9_.:-]+:[A-Za-z0-9_.:-]+:[A-Za-z0-9_.:-]+$"
+)
+
+
+def is_clinical_outcome_id(value: object) -> bool:
+    """Return True iff ``value`` is a valid ClinicalOutcome canonical ID.
+
+    Pattern: ``CO:<drugbank_id>:<disease_key>:<indication_type>``
+    (e.g. ``CO:DB00001:DOID:0050133:approved``).
+
+    P2-001 FORENSIC ROOT FIX (Team 4): ClinicalOutcome and MedDRA_Term
+    previously shared the ``meddra_id`` canonical ID field, causing a
+    namespace collision. ClinicalOutcome now uses ``clinical_outcome_id``
+    (this validator's pattern) so ``(node_type, id_field)`` tuples are
+    unique. See ``config.CANONICAL_IDS`` and ``kg_builder.ID_PATTERNS``.
+    """
+    if not isinstance(value, str):
+        return False
+    return bool(_CLINICAL_OUTCOME_ID_RE.match(value))
+
 
 def is_meddra_code(value: object) -> bool:
     """Return True iff ``value`` is a valid 8-digit MedDRA code.
 
     MedDRA codes are 8-digit numeric strings (e.g. ``"10002083"``).
-    Leading zeros are significant — pass the value as a STRING, not an
+    Leading zeros are significant -- pass the value as a STRING, not an
     int. ``int`` inputs are rejected because they cannot preserve
     leading zeros.
 
@@ -861,14 +888,14 @@ def is_reactome_id(value: object) -> bool:
 
 
 # ─── Core sanitization ─────────────────────────────────────────────────────
-# Fixes audit issue 4.6, 8.4 — regex compiled lazily inside function
+# Fixes audit issue 4.6, 8.4 -- regex compiled lazily inside function
 # Python caches compiled regexes internally so there's no perf hit.
 def _sanitize_identifier_core(
     name: str,
     kind: IdentifierKind,
     context: dict[str, Any] | None = None,
 ) -> str:
-    """Core sanitization logic — pure function (no side effects beyond logs).
+    """Core sanitization logic -- pure function (no side effects beyond logs).
 
     Args:
         name: The identifier string to sanitize.
@@ -884,24 +911,24 @@ def _sanitize_identifier_core(
             sanitization, starts with a digit, or fails the kind-specific
             pattern (issue 2.7).
     """
-    # Fixes audit issue 4.1 — explicit type check with clear error
+    # Fixes audit issue 4.1 -- explicit type check with clear error
     if not isinstance(name, str):
         raise TypeError(
             f"name must be str, got {type(name).__name__}: "
             f"{_safe_repr(name)}"
         )
-    # Fixes audit issue 8.5, 9.2 — length limit (DoS guard)
+    # Fixes audit issue 8.5, 9.2 -- length limit (DoS guard)
     if len(name) > MAX_IDENTIFIER_LENGTH:
         raise ValueError(
             f"Identifier too long: {len(name)} chars (max "
             f"{MAX_IDENTIFIER_LENGTH}). Prefix: {_safe_repr(name)}. "
             f"See audit issue 8.5."
         )
-    # Fixes audit issue 7.5 — NFKC normalization for Unicode equivalence
+    # Fixes audit issue 7.5 -- NFKC normalization for Unicode equivalence
     normalized = unicodedata.normalize("NFKC", name)
     # Sanitize: replace every char NOT in [A-Za-z0-9_] with underscore
     sanitized = re.sub(r"[^A-Za-z0-9_]", "_", normalized)
-    # Fixes audit issue 8.1 — character check instead of re.match for default kind
+    # Fixes audit issue 8.1 -- character check instead of re.match for default kind
     if not sanitized or not (sanitized[0].isalpha() or sanitized[0] == "_"):
         _log_sanitization_failure(name, str(kind), "empty or invalid first char", context)
         raise ValueError(
@@ -909,7 +936,7 @@ def _sanitize_identifier_core(
             f"(original: {_safe_repr(name)}). Must match [A-Za-z_][A-Za-z0-9_]*. "
             f"Context: {context}"
         )
-    # Fixes audit issue 2.7 — kind-specific pattern check (non-default kinds)
+    # Fixes audit issue 2.7 -- kind-specific pattern check (non-default kinds)
     if kind != "identifier" and kind in _KIND_PATTERNS:
         if not _KIND_PATTERNS[kind].match(sanitized):
             _log_sanitization_failure(
@@ -920,7 +947,7 @@ def _sanitize_identifier_core(
                 f"kind-specific pattern {_KIND_PATTERNS[kind].pattern}. "
                 f"Original: {_safe_repr(name)}. Context: {context}"
             )
-    # Fixes audit issue 11.1, 16.3 — log transformation when mutation occurs
+    # Fixes audit issue 11.1, 16.3 -- log transformation when mutation occurs
     if sanitized != name:
         _log_transformation(kind=str(kind), original=name, sanitized=sanitized, context=context)
         SANITIZATION_TOTAL.labels(kind=str(kind), outcome="mutated").inc()  # type: ignore[attr-defined]
@@ -930,8 +957,8 @@ def _sanitize_identifier_core(
 
 
 # ─── Public sanitization functions ─────────────────────────────────────────
-# Fixes audit issue 2.5 — split into sanitize_label + sanitize_rel_type
-# Fixes audit issue 8.2 — lru_cache on hot-path pure functions
+# Fixes audit issue 2.5 -- split into sanitize_label + sanitize_rel_type
+# Fixes audit issue 8.2 -- lru_cache on hot-path pure functions
 @functools.lru_cache(maxsize=4096)
 def sanitize_label(name: str) -> Label:
     """Sanitize a Neo4j node label.
@@ -1016,7 +1043,7 @@ def sanitize_identifier(
         WHERE n.id = '{user_input}' RETURN n"`` is STILL vulnerable to
         injection via ``user_input``, even though the label is safe.
 
-        Fixes audit issue 9.1 — accurate security scope documented.
+        Fixes audit issue 9.1 -- accurate security scope documented.
 
     Args:
         name: The identifier string to sanitize.
@@ -1060,7 +1087,7 @@ def sanitize_identifier(
     # things like 'causes_side_effect' (not PascalCase).
     effective_kind: IdentifierKind = kind if kind in _KIND_PATTERNS else "identifier"
     result = _sanitize_identifier_core(name, effective_kind, context=context)
-    # Fixes audit issue 5.4 — opt-in strict mode that rejects mutation
+    # Fixes audit issue 5.4 -- opt-in strict mode that rejects mutation
     if strict and result != name:
         raise ValueError(
             f"Sanitization changed the input: {_safe_repr(name)} -> "
@@ -1070,7 +1097,7 @@ def sanitize_identifier(
     return result
 
 
-# Fixes audit issue 2.8 — batch API
+# Fixes audit issue 2.8 -- batch API
 def sanitize_identifiers(
     names: list[str],
     kind: IdentifierKind = "identifier",
@@ -1127,7 +1154,7 @@ def drkg_node_type_to_neo4j_label(
         strict: If True, raise on unknown types. If False, fall back
             to sanitization with WARNING + dead-letter. If None (default),
             falls back to the ``DRUGOS_STRICT_LABEL_MODE`` env var
-            (issue 12.4) — default 'strict'.
+            (issue 12.4) -- default 'strict'.
         context: Optional dict for error context (batch_index, row_id,
             file, correlation_id). Included in error messages and logs.
 
@@ -1152,17 +1179,17 @@ def drkg_node_type_to_neo4j_label(
             ...
         ValueError: Unknown DRKG node type: 'Unknown'...
     """
-    # Fixes audit issue 12.4 — env var override for strict mode
+    # Fixes audit issue 12.4 -- env var override for strict mode
     if strict is None:
         env_mode = os.environ.get("DRUGOS_STRICT_LABEL_MODE", "strict").lower()
         strict = env_mode == "strict"
-    # Fixes audit issue 4.1 — explicit type check
+    # Fixes audit issue 4.1 -- explicit type check
     if not isinstance(node_type, str):
         raise TypeError(
             f"node_type must be str, got {type(node_type).__name__}: "
             f"{_safe_repr(node_type)}"
         )
-    # Fixes audit issue 15.4 — legacy label aliases checked first
+    # Fixes audit issue 15.4 -- legacy label aliases checked first
     # If the caller passed a storage label (e.g., 'SideEffect'), redirect
     # to the canonical storage label (e.g., 'MedDRATerm').
     if node_type in LEGACY_LABEL_ALIASES:
@@ -1173,7 +1200,7 @@ def drkg_node_type_to_neo4j_label(
         )
         LABEL_LOOKUP_TOTAL.labels(path="legacy_alias").inc()  # type: ignore[attr-defined]
         return new_label
-    # Fixes audit issue 3.6 — deprecation warning for Side Effect
+    # Fixes audit issue 3.6 -- deprecation warning for Side Effect
     if node_type in DEPRECATED_TYPES:
         replacement = DEPRECATED_TYPES[node_type]
         warnings.warn(
@@ -1193,12 +1220,12 @@ def drkg_node_type_to_neo4j_label(
                 "context": context or {},
             },
         )
-    # Fixes audit issue 2.1 — normalize before lookup
+    # Fixes audit issue 2.1 -- normalize before lookup
     normalized = _normalize_drkg_type(node_type)
     if normalized in _NORMALIZED_LOOKUP:
         LABEL_LOOKUP_TOTAL.labels(path="dict").inc()  # type: ignore[attr-defined]
         return _NORMALIZED_LOOKUP[normalized]
-    # Fixes audit issue 2.2 — reject already-label inputs (caller error)
+    # Fixes audit issue 2.2 -- reject already-label inputs (caller error)
     # If the caller passed a Neo4j storage label (e.g., 'SideEffect') that
     # is NOT a DRKG type, that's almost certainly a caller bug.
     if node_type in _LABELS_SET:
@@ -1231,7 +1258,7 @@ def drkg_node_type_to_neo4j_label(
     return sanitized
 
 
-# Fixes audit issue 2.8 — batch variant
+# Fixes audit issue 2.8 -- batch variant
 def drkg_node_types_to_neo4j_labels(
     types: list[str],
     *,
@@ -1249,7 +1276,7 @@ def drkg_node_types_to_neo4j_labels(
     return [drkg_node_type_to_neo4j_label(t, strict=strict) for t in types]
 
 
-# Fixes audit issue 2.2, 10.3 — reverse lookup with strict mode
+# Fixes audit issue 2.2, 10.3 -- reverse lookup with strict mode
 def neo4j_label_to_drkg_node_type(
     label: str,
     *,
@@ -1259,7 +1286,7 @@ def neo4j_label_to_drkg_node_type(
     """Convert a Neo4j label back to its original DRKG node type.
 
     Used by ``graph_stats.py`` to convert labels read back from Neo4j
-    into canonical DRKG types for reporting (issue 1.4 — wired into
+    into canonical DRKG types for reporting (issue 1.4 -- wired into
     graph_stats.label_distribution_report).
 
     Args:
@@ -1283,7 +1310,7 @@ def neo4j_label_to_drkg_node_type(
         >>> neo4j_label_to_drkg_node_type("MedDRATerm")
         'MedDRA_Term'
     """
-    # Fixes audit issue 4.1 — explicit type check
+    # Fixes audit issue 4.1 -- explicit type check
     if not isinstance(label, str):
         raise TypeError(
             f"label must be str, got {type(label).__name__}: "
@@ -1302,7 +1329,7 @@ def neo4j_label_to_drkg_node_type(
     return label
 
 
-# Fixes audit issue 16.4 — provenance variant for fallback labels
+# Fixes audit issue 16.4 -- provenance variant for fallback labels
 def drkg_node_type_to_neo4j_label_with_provenance(
     node_type: str,
     *,
@@ -1345,7 +1372,7 @@ def drkg_node_type_to_neo4j_label_with_provenance(
 
 
 # ─── Reliability helpers ───────────────────────────────────────────────────
-# Fixes audit issue 6.3 — retry with exponential backoff
+# Fixes audit issue 6.3 -- retry with exponential backoff
 def safe_call_with_retry(
     fn: Callable[..., T],
     *args: Any,
@@ -1425,12 +1452,12 @@ def safe_call_with_retry(
                 },
             )
             time.sleep(sleep_time)
-    # Unreachable in practice — the loop either returns or raises.
+    # Unreachable in practice -- the loop either returns or raises.
     assert last_exc is not None
     raise last_exc
 
 
-# Fixes audit issue 6.4 — circuit breaker for cascading failure protection
+# Fixes audit issue 6.4 -- circuit breaker for cascading failure protection
 class CircuitBreaker:
     """Circuit breaker that trips after N consecutive failures.
 
@@ -1509,7 +1536,7 @@ class CircuitBreaker:
 
         Auto-resets if ``reset_after`` seconds have elapsed since the
         last failure, mirroring ``guard()`` semantics. This is a
-        non-raising probe — callers that want to raise should use
+        non-raising probe -- callers that want to raise should use
         ``guard()`` instead.
         """
         if not self._tripped:
@@ -1528,7 +1555,7 @@ class CircuitBreaker:
 _SANITIZATION_BREAKER: Final[CircuitBreaker] = CircuitBreaker(threshold=100)
 
 
-# Fixes audit issue 6.5 — dead-letter queue for unprocessable labels
+# Fixes audit issue 6.5 -- dead-letter queue for unprocessable labels
 def _quarantine_identifier(
     name: str,
     kind: str,
@@ -1576,7 +1603,7 @@ def _quarantine_identifier(
 
 
 # ─── Logging helpers ───────────────────────────────────────────────────────
-# Fixes audit issue 9.4, 11.5 — structured audit log of sanitization failures
+# Fixes audit issue 9.4, 11.5 -- structured audit log of sanitization failures
 def _log_sanitization_failure(
     name: object,
     kind: str,
@@ -1611,7 +1638,7 @@ def _log_sanitization_failure(
     logger.warning("sanitization_failure", extra=record)
 
 
-# Fixes audit issue 16.3 — transformation log for sanitization mutations
+# Fixes audit issue 16.3 -- transformation log for sanitization mutations
 def _log_transformation(
     *,
     kind: str,
@@ -1649,7 +1676,7 @@ def _log_transformation(
 
 
 # ─── Schema validation ────────────────────────────────────────────────────
-# Fixes audit issue 1.1, 1.2, 5.5, 5.6, 12.3 — startup validation
+# Fixes audit issue 1.1, 1.2, 5.5, 5.6, 12.3 -- startup validation
 def validate_schema() -> None:
     """Validate the label map against ``config.DRKG_NODE_TYPES`` and ``CORE_EDGE_TYPES``.
 
@@ -1662,7 +1689,7 @@ def validate_schema() -> None:
         2. The utils dict's only non-DRKG entry is ``"Protein"`` (UniProt-only).
         3. Every ``CORE_NODE_TYPES`` entry is in the utils dict.
         4. Every ``CORE_EDGE_TYPES`` endpoint (src and dst) is in the utils
-           dict (issue 5.6 — would have caught the MedDRA_Term bug).
+           dict (issue 5.6 -- would have caught the MedDRA_Term bug).
         5. All Neo4j labels are PascalCase (issue 14.3).
         6. All Neo4j labels are unique (issue 2.4, 10.7).
 
@@ -1680,7 +1707,7 @@ def validate_schema() -> None:
     cfg_set = set(cfg_drkg_types)
     utils_set = set(DRKG_NODE_TYPE_TO_NEO4J_LABEL.keys())
 
-    # Issue 1.1, 1.2 — every config DRKG type must be in the utils dict
+    # Issue 1.1, 1.2 -- every config DRKG type must be in the utils dict
     missing_from_utils = cfg_set - utils_set
     if missing_from_utils:
         raise ValueError(
@@ -1689,7 +1716,7 @@ def validate_schema() -> None:
             f"Add them to utils.py (audit issue 1.1, 1.2)."
         )
 
-    # Issue 1.2 — utils dict may have ONLY these non-DRKG extras
+    # Issue 1.2 -- utils dict may have ONLY these non-DRKG extras
     # (Protein is UniProt-only; ATC/TAX are case aliases of Atc/Tax)
     allowed_extras = {"Protein", "ATC", "TAX"}
     extras = utils_set - cfg_set
@@ -1701,7 +1728,7 @@ def validate_schema() -> None:
             f"Either add them to config or remove from utils (audit issue 1.2)."
         )
 
-    # Issue 5.5 — CORE_NODE_TYPES must be a subset of the utils dict
+    # Issue 5.5 -- CORE_NODE_TYPES must be a subset of the utils dict
     missing_core = set(CORE_NODE_TYPES) - utils_set
     if missing_core:
         raise ValueError(
@@ -1709,7 +1736,7 @@ def validate_schema() -> None:
             f"(audit issue 5.5)."
         )
 
-    # Issue 5.6 — CORE_EDGE_TYPES endpoints must all be in the utils dict
+    # Issue 5.6 -- CORE_EDGE_TYPES endpoints must all be in the utils dict
     # PATIENT SAFETY: This check would have caught the MedDRA_Term bug.
     for src, rel, dst in CORE_EDGE_TYPES:
         if src not in DRKG_NODE_TYPE_TO_NEO4J_LABEL:
@@ -1723,7 +1750,7 @@ def validate_schema() -> None:
                 f"Edge: ({src!r}, {rel!r}, {dst!r}). See audit issue 5.6."
             )
 
-    # Issue 14.3 — PascalCase enforced (already done in LabelRegistry.__init__
+    # Issue 14.3 -- PascalCase enforced (already done in LabelRegistry.__init__
     # but double-check here for defense in depth)
     for lbl in DRKG_NODE_TYPE_TO_NEO4J_LABEL.values():
         if not re.match(r"^[A-Z][A-Za-z0-9]*$", lbl):
@@ -1731,7 +1758,7 @@ def validate_schema() -> None:
                 f"Neo4j label not PascalCase: {lbl!r} (audit issue 14.3)."
             )
 
-    # Issue 2.4, 10.7 — Neo4j labels must be unique (with documented
+    # Issue 2.4, 10.7 -- Neo4j labels must be unique (with documented
     # case-alias exception for ATC/Atc and TAX/Tax per issue 3.7).
     labels_list = list(DRKG_NODE_TYPE_TO_NEO4J_LABEL.values())
     if len(set(labels_list)) != len(labels_list):
@@ -1756,17 +1783,17 @@ def validate_schema() -> None:
 
 
 # Run validation at module load (best-effort; skip if config not yet importable)
-# Fixes audit issue 1.1, 1.2 — startup schema validation
+# Fixes audit issue 1.1, 1.2 -- startup schema validation
 try:
     validate_schema()
 except ImportError:
-    # Defer to runtime call from run_pipeline.py — config may not yet be
+    # Defer to runtime call from run_pipeline.py -- config may not yet be
     # fully loaded in some import orders.
     logger.debug(
         "validate_schema deferred to runtime (config not yet importable)"
     )
 except ValueError as _schema_err:
-    # Schema drift is a fatal bug, but we don't crash the import — we log
+    # Schema drift is a fatal bug, but we don't crash the import -- we log
     # loudly so operators notice. run_pipeline.py should call
     # validate_schema() explicitly at startup and fail fast there.
     logger.error(
@@ -1776,7 +1803,7 @@ except ValueError as _schema_err:
 
 
 # ─── Plugin registration ──────────────────────────────────────────────────
-# Fixes audit issue 1.6 — register_node_type returns NEW registry (no global mutation)
+# Fixes audit issue 1.6 -- register_node_type returns NEW registry (no global mutation)
 def register_node_type(
     drkg_type: str,
     neo4j_label: str,
@@ -1787,7 +1814,7 @@ def register_node_type(
 ) -> LabelRegistry:
     """Register a custom node type. Returns a NEW LabelRegistry.
 
-    Does NOT mutate the global ``LABEL_REGISTRY`` — issue 7.2. The caller
+    Does NOT mutate the global ``LABEL_REGISTRY`` -- issue 7.2. The caller
     receives a new registry instance to use for its own loads.
 
     Args:
@@ -1844,7 +1871,7 @@ def register_node_types(mapping: Mapping[str, str]) -> LabelRegistry:
 
 
 # ─── Schema export ─────────────────────────────────────────────────────────
-# Fixes audit issue 15.3 — schema export for external systems (JSON)
+# Fixes audit issue 15.3 -- schema export for external systems (JSON)
 def export_label_schema() -> dict[str, Any]:
     """Export the label schema as a JSON-serializable dict.
 
@@ -1897,9 +1924,9 @@ def export_label_schema_json(indent: int = 2) -> str:
 
 
 # ─── Migration & diff ──────────────────────────────────────────────────────
-# Fixes audit issue 7.6 — migrate_labels for schema evolution
+# Fixes audit issue 7.6 -- migrate_labels for schema evolution
 def migrate_labels(builder: Any, old_to_new: Mapping[str, str]) -> dict[str, int]:
-    """Rename labels in an existing Neo4j graph. Idempotent — safe to re-run.
+    """Rename labels in an existing Neo4j graph. Idempotent -- safe to re-run.
 
     Uses Cypher SET/REMOVE to rename labels in-place:
     ``MATCH (n:Old) SET n:New REMOVE n:Old``. Requires a ``builder``
@@ -1908,10 +1935,10 @@ def migrate_labels(builder: Any, old_to_new: Mapping[str, str]) -> dict[str, int
 
     Args:
         builder: A DrugOSGraphBuilder (or compatible) instance.
-        old_to_new: Mapping of old_label → new_label.
+        old_to_new: Mapping of old_label -> new_label.
 
     Returns:
-        Dict mapping ``"{old}->{new}"`` → count of nodes relabeled.
+        Dict mapping ``"{old}->{new}"`` -> count of nodes relabeled.
     """
     report: dict[str, int] = {}
     for old_label, new_label in old_to_new.items():
@@ -1945,7 +1972,7 @@ def migrate_labels(builder: Any, old_to_new: Mapping[str, str]) -> dict[str, int
     return report
 
 
-# Fixes audit issue 16.6 — structured diff between label map versions
+# Fixes audit issue 16.6 -- structured diff between label map versions
 def diff_label_maps(
     old: Mapping[str, str],
     new: Mapping[str, str],
@@ -1976,7 +2003,7 @@ def diff_label_maps(
 
 
 # ─── Integrity verification ───────────────────────────────────────────────
-# Fixes audit issue 16.5 — verify hash at pipeline start (tamper detection)
+# Fixes audit issue 16.5 -- verify hash at pipeline start (tamper detection)
 def verify_label_map_integrity() -> None:
     """Verify the label map hash matches the value computed at module load.
 
@@ -1995,7 +2022,7 @@ def verify_label_map_integrity() -> None:
         )
 
 
-# Fixes audit issue 12.6, 16.7 — store + check graph version
+# Fixes audit issue 12.6, 16.7 -- store + check graph version
 def store_label_map_metadata_in_graph(builder: Any) -> None:
     """Store ``LABEL_MAP_VERSION``, ``LABEL_MAP_HASH``, etc. as Neo4j graph properties.
 
@@ -2073,7 +2100,7 @@ def check_label_map_version_matches_graph(builder: Any) -> None:
         session.close()
 
 
-# Fixes audit issue 16.2 — commit_label_map_change audit trail
+# Fixes audit issue 16.2 -- commit_label_map_change audit trail
 def commit_label_map_change(
     *,
     change_type: str,
@@ -2129,7 +2156,7 @@ def commit_label_map_change(
 
 
 # ─── Backward-compat: re-export _SAFE_IDENTIFIER_RE ────────────────────────
-# Fixes audit issue 4.6 — keep _SAFE_IDENTIFIER_RE name for backward compat
+# Fixes audit issue 4.6 -- keep _SAFE_IDENTIFIER_RE name for backward compat
 # (some external test suites may import it). Compiled lazily; this is the
 # same regex used by _sanitize_identifier_core via the default pattern.
 _SAFE_IDENTIFIER_RE: Final["re.Pattern[str]"] = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")

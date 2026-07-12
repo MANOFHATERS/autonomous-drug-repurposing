@@ -156,7 +156,7 @@ class TestIssue2InchikeyUnique:
             "inchikey": ["BSYNRYMUTXBXSQ-UHFFFAOYSA-N", "BSYNRYMUTXBXSQ-UHFFFAOYSA-N"],
             "name": ["Aspirin", "Aspirin Duplicate"],
         })
-        # Should not raise UniqueViolation — second row updates the first
+        # Should not raise UniqueViolation -- second row updates the first
         result = bulk_upsert_drugs(db_session, df)
         assert int(result) > 0
         db_session.commit()
@@ -360,7 +360,7 @@ class TestIssue6OOMPrevention:
 
 
 # ============================================================================
-# Issue #7: _load_activities uses iterrows() — catastrophically slow
+# Issue #7: _load_activities uses iterrows() -- catastrophically slow
 # ============================================================================
 
 
@@ -407,7 +407,7 @@ class TestIssue8DisgeNetAppend:
         """_save_csv_with_mode (deprecated) writes the df atomically.
 
         Per the 389-fix audit (DQ-6, ARCH-8): the save is now a simple
-        atomic write of the (already-deduped) df — no append, no concat
+        atomic write of the (already-deduped) df -- no append, no concat
         against an existing CSV.  Calling it twice with the same source
         overwrites the file with the second df.
         """
@@ -450,7 +450,7 @@ class TestIssue8DisgeNetAppend:
         result1 = pd.read_csv(output_path)
         assert len(result1) == 2
 
-        # Write a second df — per DQ-6 / ARCH-8, this OVERWRITES (no append).
+        # Write a second df -- per DQ-6 / ARCH-8, this OVERWRITES (no append).
         df2 = pd.DataFrame({
             "disease_id": ["C0003", "C0004"],
             "gene_symbol": ["EGFR", "BRCA2"],
@@ -461,7 +461,7 @@ class TestIssue8DisgeNetAppend:
             pipeline._save_csv_with_mode(df2, output_path)
 
         result2 = pd.read_csv(output_path)
-        # The file now contains df2 (NOT df1 + df2 — no append).
+        # The file now contains df2 (NOT df1 + df2 -- no append).
         assert len(result2) == 2
         assert set(result2["disease_id"]) == {"C0003", "C0004"}
 
@@ -659,7 +659,7 @@ class TestIssue12OmimDedupFirst:
         pipeline.clean(fixture)
         csv2 = op.OMIM_OUTPUT_PATH.read_bytes()
 
-        # CSVs must be byte-identical (idempotency — BUG-7.1).
+        # CSVs must be byte-identical (idempotency -- BUG-7.1).
         assert csv1 == csv2, "OMIM clean() is not idempotent (BUG-7.1)"
 
 
@@ -705,7 +705,7 @@ class TestIssue13ActualUpdatedCount:
 
 
 # ============================================================================
-# Issue #14: Entity resolution TRUNCATE → DELETE
+# Issue #14: Entity resolution TRUNCATE -> DELETE
 # ============================================================================
 
 
@@ -714,7 +714,7 @@ class TestIssue14AtomicEntityResolution:
 
     def test_entity_resolution_uses_atomic_swap(self):
         """master_pipeline_dag should use temp-table + DELETE/INSERT for
-        atomicity (cross-dialect — v9 ROOT FIX F3.5).
+        atomicity (cross-dialect -- v9 ROOT FIX F3.5).
 
         The previous test expected the literal string
         ``TRUNCATE TABLE entity_mapping``. TRUNCATE is PostgreSQL-specific
@@ -932,10 +932,10 @@ class TestIssue22PubChemPostFormat:
 
         Updated for the institutional-grade rewrite (PUBCHEM_PIPELINE_MASTER_FIX_PROMPT.md):
         the new ``_lookup_batch`` signature is
-        ``(self, batch_idx, inchikeys, total_batches)`` (ARCH-3 — HTTP I/O
+        ``(self, batch_idx, inchikeys, total_batches)`` (ARCH-3 -- HTTP I/O
         moved to download(), and the batch index is needed for lineage).
         The test patches ``self.http_session.post`` (no longer bare
-        ``requests.post`` — REL-12, ARCH-11).
+        ``requests.post`` -- REL-12, ARCH-11).
         """
         from pipelines.pubchem_pipeline import PubChemPipeline
         from unittest.mock import MagicMock, PropertyMock, patch
@@ -951,7 +951,7 @@ class TestIssue22PubChemPostFormat:
         mock_session = MagicMock()
         mock_session.post.return_value = mock_response
 
-        # Instantiate the pipeline normally — the constructor reads
+        # Instantiate the pipeline normally -- the constructor reads
         # settings and validates config.
         pipeline = PubChemPipeline()
         # Patch http_session to return our mock.
@@ -1193,7 +1193,7 @@ class TestIssue31SqliteNow:
 
 
 # ============================================================================
-# Issue #32: GDA uniprot_id is nullable=True but is a FK — orphans accumulate
+# Issue #32: GDA uniprot_id is nullable=True but is a FK -- orphans accumulate
 # ============================================================================
 
 
@@ -1319,7 +1319,7 @@ class TestTargetAccessionResolution:
         v16 ROOT FIX (SF-4): the previous test used a bare ``Exception``
         as the side_effect, which the broad ``except Exception`` caught.
         The fix narrows the except to ``requests.RequestException``,
-        ``json.JSONDecodeError``, ``ValueError``, ``TimeoutError`` — so
+        ``json.JSONDecodeError``, ``ValueError``, ``TimeoutError`` -- so
         the test must use one of those types. Non-network exceptions
         (e.g.ProgrammingError, KeyError indicating an API contract
         change) should now PROPAGATE so the operator can investigate.

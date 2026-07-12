@@ -23,7 +23,7 @@ if _PHASE1 not in sys.path:
 
 
 # =============================================================================
-# BUG #23 (P1) — STRING aliases DataFrame schema validation
+# BUG #23 (P1) -- STRING aliases DataFrame schema validation
 # =============================================================================
 
 class TestBug23StringAliasesSchemaValidation:
@@ -67,7 +67,7 @@ class TestBug23StringAliasesSchemaValidation:
 
 
 # =============================================================================
-# BUG #24 (P2) — @fail_fast_on_http_4xx on _trigger_phase2
+# BUG #24 (P2) -- @fail_fast_on_http_4xx on _trigger_phase2
 # =============================================================================
 
 class TestBug24TriggerPhase2FailFast:
@@ -78,7 +78,7 @@ class TestBug24TriggerPhase2FailFast:
         source = dag_path.read_text()
         assert "@fail_fast_on_http_4xx" in source, (
             "master_pipeline_dag.py must apply @fail_fast_on_http_4xx "
-            "(BUG #24 — _trigger_phase2 was missing the decorator)"
+            "(BUG #24 -- _trigger_phase2 was missing the decorator)"
         )
         lines = source.splitlines()
         for i, line in enumerate(lines):
@@ -93,7 +93,7 @@ class TestBug24TriggerPhase2FailFast:
 
 
 # =============================================================================
-# BUG #25 / #38 (P2/P3) — bare @task in all standalone DAGs
+# BUG #25 / #38 (P2/P3) -- bare @task in all standalone DAGs
 # =============================================================================
 
 class TestBug2538BareTaskInAllDags:
@@ -108,12 +108,12 @@ class TestBug2538BareTaskInAllDags:
         source = dag_path.read_text()
         assert "retries=2, execution_timeout=timedelta(hours=4)" not in source, (
             f"{dag_file} still has redundant @task params (BUG #25/#38). "
-            f"Use bare @task — params are inherited from DEFAULT_ARGS."
+            f"Use bare @task -- params are inherited from DEFAULT_ARGS."
         )
 
 
 # =============================================================================
-# BUG #26 (P2) — pre-flight check for drugos_graph package
+# BUG #26 (P2) -- pre-flight check for drugos_graph package
 # =============================================================================
 
 class TestBug26DrugosGraphPreflightCheck:
@@ -133,7 +133,7 @@ class TestBug26DrugosGraphPreflightCheck:
 
 
 # =============================================================================
-# BUG #27 (P2) — DRUGBANK_XML_PATH imported at module top
+# BUG #27 (P2) -- DRUGBANK_XML_PATH imported at module top
 # =============================================================================
 
 class TestBug27DrugbankXmlPathTopLevelImport:
@@ -158,7 +158,7 @@ class TestBug27DrugbankXmlPathTopLevelImport:
         func_source = "\n".join(func_body)
         assert "from config.settings import DRUGBANK_XML_PATH" not in func_source, (
             "_check_drugbank_xml must NOT import DRUGBANK_XML_PATH at runtime "
-            "(BUG #27 — move to module top)"
+            "(BUG #27 -- move to module top)"
         )
 
     def test_top_level_import_present(self):
@@ -171,7 +171,7 @@ class TestBug27DrugbankXmlPathTopLevelImport:
 
 
 # =============================================================================
-# BUG #28 (P2) — gzip integrity validation for STRING aliases
+# BUG #28 (P2) -- gzip integrity validation for STRING aliases
 # =============================================================================
 
 class TestBug28GzipIntegrityValidation:
@@ -191,7 +191,7 @@ class TestBug28GzipIntegrityValidation:
 
 
 # =============================================================================
-# BUG #29 (P2) — temp table cleanup with TRY/FINALLY
+# BUG #29 (P2) -- temp table cleanup with TRY/FINALLY
 # =============================================================================
 
 class TestBug29TempTableTryFinally:
@@ -209,7 +209,7 @@ class TestBug29TempTableTryFinally:
 
 
 # =============================================================================
-# BUG #30 (P2) — uniprot_id uniqueness validation before UPDATE
+# BUG #30 (P2) -- uniprot_id uniqueness validation before UPDATE
 # =============================================================================
 
 class TestBug30UniprotIdUniquenessCheck:
@@ -226,7 +226,7 @@ class TestBug30UniprotIdUniquenessCheck:
 
 
 # =============================================================================
-# BUG #31 (P2) — derived constants LOAD_PASS_NO_PUBCHEM and PUBCHEM_LOAD
+# BUG #31 (P2) -- derived constants LOAD_PASS_NO_PUBCHEM and PUBCHEM_LOAD
 # =============================================================================
 
 class TestBug31DerivedConstants:
@@ -247,7 +247,7 @@ class TestBug31DerivedConstants:
 
 
 # =============================================================================
-# BUG #32 (P2) — SMILES_CANONICAL in MatchConfidence enum
+# BUG #32 (P2) -- SMILES_CANONICAL in MatchConfidence enum
 # =============================================================================
 
 class TestBug32SmilesCanonicalEnum:
@@ -288,7 +288,7 @@ class TestBug32SmilesCanonicalEnum:
 
 
 # =============================================================================
-# BUG #33 (P2) — ChEMBL target data wired to build_mapping
+# BUG #33 (P2) -- ChEMBL target data wired to build_mapping
 # =============================================================================
 
 class TestBug33ChemblTargetWired:
@@ -316,7 +316,7 @@ class TestBug33ChemblTargetWired:
 
 
 # =============================================================================
-# BUG #34 (P2) — record["inchikey"] normalized in place
+# BUG #34 (P2) -- record["inchikey"] normalized in place
 # =============================================================================
 
 class TestBug34InchikeyNormalizedInPlace:
@@ -332,7 +332,7 @@ class TestBug34InchikeyNormalizedInPlace:
 
 
 # =============================================================================
-# BUG #35 (P2) — case-preserving gene symbol index
+# BUG #35 (P2) -- case-preserving gene symbol index
 # =============================================================================
 
 class TestBug35CasePreservingGeneSymbolIndex:
@@ -387,7 +387,7 @@ class TestBug35CasePreservingGeneSymbolIndex:
 
 
 # =============================================================================
-# BUG #36 (P2) — task_id constants + parse-time assertion
+# BUG #36 (P2) -- task_id constants + parse-time assertion
 # =============================================================================
 
 class TestBug36TaskIdConstants:
@@ -414,7 +414,7 @@ class TestBug36TaskIdConstants:
 
 
 # =============================================================================
-# BUG #37 (P3) — SLA < execution_timeout
+# BUG #37 (P3) -- SLA < execution_timeout
 # =============================================================================
 
 class TestBug37SlaLessThanTimeout:
@@ -427,12 +427,12 @@ class TestBug37SlaLessThanTimeout:
         timeout = DEFAULT_RETRY_ARGS["execution_timeout"]
         assert sla < timeout, (
             f"SLA ({sla}) must be < execution_timeout ({timeout}) (BUG #37). "
-            f"The SLA is advisory — it must fire BEFORE the hard kill."
+            f"The SLA is advisory -- it must fire BEFORE the hard kill."
         )
 
 
 # =============================================================================
-# BUG #39 (P3) — shared _dags_init module
+# BUG #39 (P3) -- shared _dags_init module
 # =============================================================================
 
 class TestBug39SharedDagsInit:
@@ -465,7 +465,7 @@ class TestBug39SharedDagsInit:
 
 
 # =============================================================================
-# BUG #40 (P3) — consistent DAG instance naming
+# BUG #40 (P3) -- consistent DAG instance naming
 # =============================================================================
 
 class TestBug40ConsistentDagNaming:
@@ -488,7 +488,7 @@ class TestBug40ConsistentDagNaming:
 
 
 # =============================================================================
-# BUG #41 (P3) — connectivity index gated on collapse_stereoisomers
+# BUG #41 (P3) -- connectivity index gated on collapse_stereoisomers
 # =============================================================================
 
 class TestBug41ConnectivityIndexGated:
@@ -513,7 +513,7 @@ class TestBug41ConnectivityIndexGated:
 
 
 # =============================================================================
-# BUG #42 (P3) — log warning on organism fallback to default
+# BUG #42 (P3) -- log warning on organism fallback to default
 # =============================================================================
 
 class TestBug42OrganismFallbackWarning:
@@ -534,7 +534,7 @@ class TestBug42OrganismFallbackWarning:
 
 
 # =============================================================================
-# BUG #43 (P3) — always add string_id column
+# BUG #43 (P3) -- always add string_id column
 # =============================================================================
 
 class TestBug43AlwaysAddStringIdColumn:
@@ -550,14 +550,14 @@ class TestBug43AlwaysAddStringIdColumn:
 
 
 # =============================================================================
-# BUG #44 (P3 Compound) — cross-cutting compound fix
+# BUG #44 (P3 Compound) -- cross-cutting compound fix
 # =============================================================================
 
 class TestBug44CompoundFix:
     """BUG #44: compound fix covering PubChem ordering, STRING mispairing,
     organism filter, override table, and default organism.
 
-    This is a compound bug — the individual fixes are verified by the
+    This is a compound bug -- the individual fixes are verified by the
     BUG #23, #28, #33, #35, #42, #43 tests above. This test class
     verifies the COMPOUND invariant: the master DAG and download_parallel
     produce the SAME DB semantics."""
@@ -572,7 +572,7 @@ class TestBug44CompoundFix:
         )
         assert "run_entity_resolution" in parallel_src, (
             "download_parallel.py must call run_entity_resolution (BUG #44 "
-            "compound — both paths must use the shared function)"
+            "compound -- both paths must use the shared function)"
         )
 
     def test_pubchem_loads_after_other_drugs_in_both_paths(self):

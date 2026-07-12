@@ -249,7 +249,7 @@ def test_p0_b6_disgenet_preserve_direction_false():
 
 def main():
     print("=" * 70)
-    print("v79 FORENSIC ROOT-FIX VERIFICATION — ALL 11 P0 ISSUES")
+    print("v79 FORENSIC ROOT-FIX VERIFICATION -- ALL 11 P0 ISSUES")
     print("=" * 70)
     print()
     tests = [

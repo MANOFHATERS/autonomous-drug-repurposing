@@ -210,7 +210,7 @@ def drug_aware_split(
         # after held-out filtering. If ALL train drugs were held-out, the
         # previous code produced an empty train_drugs tensor, which made
         # torch.isin return all-False, which triggered the fallback, which
-        # ALSO filtered held-out drugs — potentially infinite confusion.
+        # ALSO filtered held-out drugs -- potentially infinite confusion.
         # The fix: after filtering, if train_drugs is empty, pull drugs
         # from val_drugs (which has non-held-out drugs) to populate train.
         #
@@ -297,7 +297,7 @@ def drug_aware_split(
         # V4 B-F6 fix: ensure held-out drugs are not in train.
         # ROOT FIX (FORENSIC-AUDIT-I07): same empty-train guard as above.
         # V90 ROOT FIX (BUG #14, P1): same val_drugs filtering fix as
-        # above — filter held-out drugs from val_drugs BEFORE moving
+        # above -- filter held-out drugs from val_drugs BEFORE moving
         # them to train_drugs to prevent KP leakage into train.
         if held_out_set:
             train_drugs = train_drugs[~torch.tensor(
@@ -363,19 +363,19 @@ def compute_graph_degrees(
     ROOT FIX (B1): this function is now ACTUALLY CALLED by the bridge's
     ``save_rl_input_streaming`` and ``_compute_supplementary_features``
     methods to compute REAL supplementary features (safety, market,
-    unmet_need) from graph topology. Previously it was dead code —
+    unmet_need) from graph topology. Previously it was dead code --
     defined but never invoked. The V4 "dead code fix #2, #7" removed
     the CALL but left the DEFINITION, creating a false claim of cleanup.
     The V8 root fix RE-WIRES the function into 4 active call sites:
       1. AE count per drug (safety score)
-      2. Pathway count per disease (market score) — streaming path
-      3. Treat count per disease (unmet_need score) — streaming path
-      4. AE count, pathway count, treat count — non-streaming path
+      2. Pathway count per disease (market score) -- streaming path
+      3. Treat count per disease (unmet_need score) -- streaming path
+      4. AE count, pathway count, treat count -- non-streaming path
 
     ROOT FIX (FORENSIC-AUDIT-I08): vectorized with ``torch.bincount``
     instead of a Python-level loop. The previous code iterated over
     every edge index with ``indices.tolist()`` and ``degrees.get(idx, 0) + 1``
-    — a Python loop that is ~100× slower than ``torch.bincount`` for
+    -- a Python loop that is ~100× slower than ``torch.bincount`` for
     large edge counts. The bridge calls this function 4 times per
     ``generate_rl_input`` invocation, so the speedup compounds.
 

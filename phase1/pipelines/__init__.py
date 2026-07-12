@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MIT
-# © 2024-2026 Autonomous Drug Repurposing Platform — Team Cosmic / VentureLab
+# © 2024-2026 Autonomous Drug Repurposing Platform -- Team Cosmic / VentureLab
 """
-Pipelines package — Phase 1 ETL layer for the Autonomous Drug Repurposing
+Pipelines package -- Phase 1 ETL layer for the Autonomous Drug Repurposing
 Platform.
 
 This package is the **package marker for the Phase 1 ETL layer** of the
@@ -57,47 +57,47 @@ Architecture
 The pipelines package is organised into 8 submodules, each responsible for
 one clearly defined ETL concern:
 
-- **pipelines.base_pipeline** — Abstract base class (``BasePipeline``) that
+- **pipelines.base_pipeline** -- Abstract base class (``BasePipeline``) that
   enforces the ``download -> clean -> load`` contract and writes a
   ``pipeline_runs`` audit row for every run. Defines 3 abstract methods
   (``download``, ``clean``, ``load``) and the
   ``_get_processed_filename`` source-name-to-CSV-path mapping
   (``base_pipeline.py:174-185``).
 
-- **pipelines.chembl_pipeline** — ChEMBL REST API client. Small-molecule
+- **pipelines.chembl_pipeline** -- ChEMBL REST API client. Small-molecule
   bioactivity (IC50/Ki/Kd in nM). Source name ``"chembl"``. Output:
   ``drugs.csv``. KG contribution: Drug nodes + Drug->Protein edges.
 
-- **pipelines.drugbank_pipeline** — DrugBank XML parser. FDA-approved drug
+- **pipelines.drugbank_pipeline** -- DrugBank XML parser. FDA-approved drug
   metadata + targets. Source name ``"drugbank"``. Output:
   ``drugbank_drugs.csv``. KG contribution: Drug nodes (enriched) +
   Drug->Protein edges.
 
-- **pipelines.uniprot_pipeline** — UniProt REST client. Reviewed human
+- **pipelines.uniprot_pipeline** -- UniProt REST client. Reviewed human
   protein sequences. Source name ``"uniprot"``. Output: ``proteins.csv``.
   KG contribution: Protein nodes.
 
-- **pipelines.string_pipeline** — STRING PPI network client. Protein-protein
+- **pipelines.string_pipeline** -- STRING PPI network client. Protein-protein
   interactions. Source name ``"string"``. Output:
   ``protein_protein_interactions.csv``. KG contribution: Protein->Protein
   edges (Pathway membership).
 
-- **pipelines.disgenet_pipeline** — DisGeNET GDA client. Curated
+- **pipelines.disgenet_pipeline** -- DisGeNET GDA client. Curated
   gene-disease associations. Source name ``"disgenet"``. Output:
   ``gene_disease_associations.csv``. KG contribution: Gene->Disease edges.
 
-- **pipelines.omim_pipeline** — OMIM API client. Mendelian
+- **pipelines.omim_pipeline** -- OMIM API client. Mendelian
   gene-phenotype mappings. Source name ``"omim"``. Output:
   ``omim_gene_disease_associations.csv``. KG contribution: Gene->Disease
   edges (rare-disease signal).
 
-- **pipelines.pubchem_pipeline** — PubChem PUG REST client. Compound
+- **pipelines.pubchem_pipeline** -- PubChem PUG REST client. Compound
   structural/property data. Source name ``"pubchem"``. Output:
   ``pubchem_enrichment.csv``. KG contribution: Drug node enrichment
-  (molecular fingerprint — no new nodes).
+  (molecular fingerprint -- no new nodes).
 
 ``BasePipeline`` is an **abstract base class (ABC)**. It cannot be
-instantiated directly — ``BasePipeline()`` raises ``TypeError`` (ABC with
+instantiated directly -- ``BasePipeline()`` raises ``TypeError`` (ABC with
 abstract methods). It is exposed at the package top-level for type-checking
 and subclassing only. For ETL execution, use one of the 7 concrete
 subclasses.
@@ -114,7 +114,7 @@ Y``::
     from pipelines import get_pipeline, get_expected_pipelines
     from pipelines import validate_infrastructure, get_provenance
 
-The package-level import is complete — every public symbol from all 8
+The package-level import is complete -- every public symbol from all 8
 submodules is available directly. Direct submodule imports (e.g.
 ``from pipelines.chembl_pipeline import ChEMBLPipeline``) continue to work
 for backward compatibility and are required by the Makefile (lines 17-23,
@@ -132,7 +132,7 @@ first symbol attribute is accessed.
 This design is critical for Apache Airflow DAG parsing: Airflow's scheduler
 parses every DAG file on every heartbeat (default every 5 seconds).
 ``dags/master_pipeline_dag.py`` imports ``pipelines.chembl_pipeline`` (and
-the 6 others) inside task callables — but Python imports the ``pipelines``
+the 6 others) inside task callables -- but Python imports the ``pipelines``
 **package** first, which runs ``pipelines/__init__.py``. If this file
 eager-imported sqlalchemy/pandas/rdkit, every scheduler tick would pay
 200ms+ of import cost AND every DAG would fail to parse if any of those
@@ -148,7 +148,7 @@ explaining that ``rdkit`` is missing.
 
 Performance characteristics:
 
-- Importing the package is O(1) — no submodule loading occurs.
+- Importing the package is O(1) -- no submodule loading occurs.
 - First access to any symbol triggers its submodule import (one-time cost).
 - Subsequent accesses are O(1) dict lookups from the internal ``_loaded``
   cache.
@@ -160,7 +160,7 @@ Scientific Note on InChIKey Normalization
 InChIKeys use the format ``[A-Z]{14}-[A-Z]{10}-[A-Z]`` (27 characters
 total, 3 hyphen-separated blocks). The canonical regex pattern is
 ``INCHIKEY_PATTERN`` defined in ``entity_resolution/base.py`` and is
-re-used across the platform — do not redefine it.
+re-used across the platform -- do not redefine it.
 
 An InChIKey has three blocks separated by hyphens::
 
@@ -218,19 +218,19 @@ Pipeline-to-node/edge mapping (verified against each pipeline's
 - ``DisGeNETPipeline`` -> Gene-Disease edges (curated, score-weighted).
 - ``OMIMPipeline`` -> Gene-Disease edges (Mendelian / rare-disease signal).
 - ``PubChemPipeline`` -> Drug node enrichment (molecular formula, weight,
-  fingerprint — no new nodes, just enriched existing Drug nodes).
+  fingerprint -- no new nodes, just enriched existing Drug nodes).
 
 Recommended Processing Order
 ----------------------------
 The master DAG in ``dags/master_pipeline_dag.py`` enforces the following
 entity-resolution sequencing. It is a **scientific constraint**, not a code
-convention — reversing it produces orphan foreign keys and incorrect graph
+convention -- reversing it produces orphan foreign keys and incorrect graph
 topology.
 
 1. **Drug-producing pipelines run first:** ``chembl``, ``drugbank``,
    ``uniprot``, ``string`` (download+clean+load).
 2. **Disease-producing pipelines run in parallel:** ``disgenet``,
-   ``omim`` (download+clean only — load deferred).
+   ``omim`` (download+clean only -- load deferred).
 3. **PubChem enrichment is deferred** until after drug entity resolution
    because it queries the DB for existing drug InChIKeys.
 4. **Entity resolution runs** after the 4 primary drug/protein sources
@@ -258,33 +258,33 @@ accessed. This reduces the credential exposure window.
 Credential requirements per source (verified against each pipeline
 module):
 
-- **ChEMBL** — None. Public REST API, no key.
-- **DrugBank** — License file. Set ``DRUGBANK_XML_PATH`` env var to the
+- **ChEMBL** -- None. Public REST API, no key.
+- **DrugBank** -- License file. Set ``DRUGBANK_XML_PATH`` env var to the
   path of the DrugBank XML file (manually downloaded from drugbank.com
   with a paid academic/commercial license). Pipeline gracefully skips
   if missing (see ``master_pipeline_dag.py:64-83``).
-- **UniProt** — None. Public REST API, no key.
-- **STRING** — None. Public FTP download, no key.
-- **DisGeNET** — Optional API key. Set ``DISGENET_API_KEY`` env var.
+- **UniProt** -- None. Public REST API, no key.
+- **STRING** -- None. Public FTP download, no key.
+- **DisGeNET** -- Optional API key. Set ``DISGENET_API_KEY`` env var.
   The API key raises the rate limit; the pipeline works without it at
   lower throughput.
-- **OMIM** — Required API key. Set ``OMIM_API_KEY`` env var. The OMIM
+- **OMIM** -- Required API key. Set ``OMIM_API_KEY`` env var. The OMIM
   API rejects unauthenticated requests. The pipeline fails fast with a
   clear message if the key is missing.
-- **PubChem** — None. Public PUG REST, no key. (API key optional for
+- **PubChem** -- None. Public PUG REST, no key. (API key optional for
   higher rate limit.)
 
-**PII Handling:** This package processes drug, protein, and disease data —
+**PII Handling:** This package processes drug, protein, and disease data --
 **NO personally identifiable information (PII), NO protected health
 information (PHI), NO patient records.** The data is fully public (ChEMBL,
 UniProt, STRING, DisGeNET, OMIM, PubChem) or licensed-research (DrugBank).
 HIPAA/GDPR do not apply to this layer of the platform. The Phase 5 API
-layer may handle user-facing query logs — those are out of scope here.
+layer may handle user-facing query logs -- those are out of scope here.
 
 The ``_validate_security()`` function audits the credential configuration
 for insecure patterns (missing OMIM_API_KEY in production, in-memory
 SQLite in non-test envs, etc.). The ``get_config_summary()`` function
-returns a credential-masked dict safe for logging — it never exposes raw
+returns a credential-masked dict safe for logging -- it never exposes raw
 credential values, only ``<set>``/``<unset>``/``<masked>`` placeholders.
 
 Data Lineage & Transformation Entry Points
@@ -307,7 +307,7 @@ counts, error_message, and duration_seconds. It does NOT record: pipelines
 package version, input file checksum, output file checksum, code git SHA,
 or correlation ID. Closing this gap requires editing
 ``database/models.py`` (add columns) and ``base_pipeline.py:266-296``
-(populate them) — out of scope for this file. As a workaround,
+(populate them) -- out of scope for this file. As a workaround,
 ``pipelines.get_provenance()`` and ``pipelines.get_audit_trail()``
 provide package-level lineage metadata that can be logged alongside the
 DB row.
@@ -322,15 +322,15 @@ programmatic consumption.
 
 Configuration & Environment
 ---------------------------
-- ``PIPELINES_LAZY_IMPORT`` — Set to ``"0"`` to force eager loading at
+- ``PIPELINES_LAZY_IMPORT`` -- Set to ``"0"`` to force eager loading at
   import time (fail-fast mode for production debugging). Default: ``"1"``
   (lazy).
-- ``ENVIRONMENT`` — One of ``development``, ``staging``, ``production``,
+- ``ENVIRONMENT`` -- One of ``development``, ``staging``, ``production``,
   ``test``. In production, eager-loading failures are FAIL; in
   development, they are WARN (allows partial dev environments).
-- ``PIPELINES_SEED`` — Integer seed for downstream pipelines that use
+- ``PIPELINES_SEED`` -- Integer seed for downstream pipelines that use
   randomness. Set via ``set_seed(seed)``.
-- ``PIPELINES_GRACEFUL_DEGRADATION`` — Set to ``"1"`` to make
+- ``PIPELINES_GRACEFUL_DEGRADATION`` -- Set to ``"1"`` to make
   ``get_pipeline(name)`` return a ``_PipelineUnavailable`` sentinel
   instead of raising ``ImportError`` when a pipeline's deps are missing.
   Useful for the master DAG to skip a broken pipeline without crashing
@@ -338,56 +338,56 @@ Configuration & Environment
 
 Optional Utilities
 ------------------
-- ``get_pipeline(name)`` — Factory: return the pipeline CLASS for a source
+- ``get_pipeline(name)`` -- Factory: return the pipeline CLASS for a source
   name (NOT an instance).
-- ``get_expected_pipelines()`` — Single source of truth for the 7 source
+- ``get_expected_pipelines()`` -- Single source of truth for the 7 source
   names.
-- ``get_kg_mapping()`` — Return the pipeline-to-KG-node/edge mapping.
-- ``get_filtering_thresholds()`` — Return the scientific thresholds table
+- ``get_kg_mapping()`` -- Return the pipeline-to-KG-node/edge mapping.
+- ``get_filtering_thresholds()`` -- Return the scientific thresholds table
   (MIN_SCORE, MAPPING_KEY_CONFIRMED, etc.) with rationale.
-- ``get_data_dictionary()`` — Return the data dictionary for the 7 output
+- ``get_data_dictionary()`` -- Return the data dictionary for the 7 output
   CSVs.
-- ``get_source_attribution()`` — Return which sources contribute which
+- ``get_source_attribution()`` -- Return which sources contribute which
   fields to each output CSV.
-- ``find_affected_downstream(source_name)`` — Return the list of output
+- ``find_affected_downstream(source_name)`` -- Return the list of output
   files affected by a change to source_name.
-- ``compute_file_checksum(path)`` — SHA-256 checksum of a file (for
+- ``compute_file_checksum(path)`` -- SHA-256 checksum of a file (for
   lineage metadata).
-- ``validate_infrastructure()`` — Comprehensive package validation.
-- ``_validate_security()`` — Audit credential configuration.
-- ``get_config_summary()`` — Credential-masked config for safe logging.
-- ``validate_config()`` — Validate env-var configuration.
-- ``_reset()`` — Clear the lazy-loaded symbol cache for testing.
-- ``_log_import_status()`` — Log which symbols have been loaded.
-- ``get_provenance()`` — Provenance metadata (version, git SHA, etc.).
-- ``get_audit_trail()`` — Combined audit trail.
-- ``to_state_dict()`` / ``from_state_dict(state)`` — Serialise/restore
+- ``validate_infrastructure()`` -- Comprehensive package validation.
+- ``_validate_security()`` -- Audit credential configuration.
+- ``get_config_summary()`` -- Credential-masked config for safe logging.
+- ``validate_config()`` -- Validate env-var configuration.
+- ``_reset()`` -- Clear the lazy-loaded symbol cache for testing.
+- ``_log_import_status()`` -- Log which symbols have been loaded.
+- ``get_provenance()`` -- Provenance metadata (version, git SHA, etc.).
+- ``get_audit_trail()`` -- Combined audit trail.
+- ``to_state_dict()`` / ``from_state_dict(state)`` -- Serialise/restore
   package state for reproducibility.
-- ``set_correlation_id(cid)`` / ``get_correlation_id()`` — Correlation ID
+- ``set_correlation_id(cid)`` / ``get_correlation_id()`` -- Correlation ID
   for log correlation across pipelines.
-- ``set_seed(seed)`` — Set the global pipelines seed.
-- ``set_log_level(level)`` — Set the package logger level.
-- ``initialize()`` — Explicitly trigger eager loading.
-- ``reload()`` — Re-import the pipelines package and clear caches.
-- ``is_loaded()`` — Return True iff at least one symbol has been loaded.
-- ``is_reproducible()`` — Return True iff the package is configured for
+- ``set_seed(seed)`` -- Set the global pipelines seed.
+- ``set_log_level(level)`` -- Set the package logger level.
+- ``initialize()`` -- Explicitly trigger eager loading.
+- ``reload()`` -- Re-import the pipelines package and clear caches.
+- ``is_loaded()`` -- Return True iff at least one symbol has been loaded.
+- ``is_reproducible()`` -- Return True iff the package is configured for
   deterministic, reproducible runs.
-- ``health_check()`` — Return a health status dict.
-- ``get_metrics()`` — Return import metrics.
-- ``get_load_times()`` — Return per-symbol load times.
-- ``performance_benchmark()`` — Benchmark import time for every symbol.
-- ``recover_from_failure()`` — Recover from a failed import state.
-- ``get_dead_letters()`` — Return the dead-letter queue.
-- ``requires_api_version(min_version)`` — Assert version compatibility.
-- ``get_json_schema()`` — Load the JSON schema for the 7 output CSVs.
-- ``_deprecated(name, removal_version, alternative)`` — Emit a
+- ``health_check()`` -- Return a health status dict.
+- ``get_metrics()`` -- Return import metrics.
+- ``get_load_times()`` -- Return per-symbol load times.
+- ``performance_benchmark()`` -- Benchmark import time for every symbol.
+- ``recover_from_failure()`` -- Recover from a failed import state.
+- ``get_dead_letters()`` -- Return the dead-letter queue.
+- ``requires_api_version(min_version)`` -- Assert version compatibility.
+- ``get_json_schema()`` -- Load the JSON schema for the 7 output CSVs.
+- ``_deprecated(name, removal_version, alternative)`` -- Emit a
   DeprecationWarning for a public name.
 
 Changelog
 ---------
-v1.0.0 (AUDIT-34) — Initial 26-line convenience-imports file (8 classes
+v1.0.0 (AUDIT-34) -- Initial 26-line convenience-imports file (8 classes
     only).
-v2.0.0 — Complete institutional rewrite: PEP 562 lazy façade over 8
+v2.0.0 -- Complete institutional rewrite: PEP 562 lazy façade over 8
     pipeline submodules + base, full re-export of 20+ public constants,
     ``__version__``, ``__getattr__``/``__dir__``, SPDX header,
     ``validate_infrastructure``, ``_validate_security``,
@@ -395,8 +395,8 @@ v2.0.0 — Complete institutional rewrite: PEP 562 lazy façade over 8
     ``to_state_dict``/``from_state_dict``, ``PIPELINES_LAZY_IMPORT`` env
     toggle, full 16-domain compliance, 130 audit findings fixed.
 
-Public API contract — semver-protected. Breaking changes require major
-version bump. v2.0.0 is a breaking change from v1.0.0 — the public API
+Public API contract -- semver-protected. Breaking changes require major
+version bump. v2.0.0 is a breaking change from v1.0.0 -- the public API
 surface expanded from 8 names to 40+ names. Downstream consumers using
 ``from pipelines import *`` will see new names but no existing names were
 removed.
@@ -431,7 +431,7 @@ Minimum Python version: 3.9. Required for ``from __future__ import
 annotations`` (PEP 563) and ``dict[str, str]`` syntax (PEP 585).
 """
 
-# This file adheres to PEP 20 — see the docstring for explicit contracts,
+# This file adheres to PEP 20 -- see the docstring for explicit contracts,
 # dense institutional features, and fail-loud error handling.
 
 from __future__ import annotations
@@ -750,8 +750,8 @@ _DOWNSTREAM_DEPS: dict[str, list[str]] = {
 }
 
 # ---------------------------------------------------------------------------
-# Public API — explicit declaration (Domain 1: Architecture, Domain 14: PEP)
-# Public API contract — semver-protected. Breaking changes require major
+# Public API -- explicit declaration (Domain 1: Architecture, Domain 14: PEP)
+# Public API contract -- semver-protected. Breaking changes require major
 # version bump.
 # ---------------------------------------------------------------------------
 __all__: list[str] = [
@@ -799,7 +799,7 @@ __all__: list[str] = [
 # Cache for lazily-loaded symbols (IDEM-8: cache into _loaded, NOT globals(),
 # to allow _reset() to fully restore the package state between tests. The
 # entity_resolution package caches into globals() which is faster but causes
-# monkey-patch bleed — see IDEM-8.)
+# monkey-patch bleed -- see IDEM-8.)
 # ---------------------------------------------------------------------------
 _loaded: dict[str, Any] = {}
 
@@ -821,7 +821,7 @@ _correlation_id: Optional[str] = None
 # ``_LAZY_MODE = os.environ.get("PIPELINES_LAZY_IMPORT", "1") != "0"``
 # enabled lazy mode for ANY value other than the literal string "0".
 # So ``PIPELINES_LAZY_IMPORT=false``, ``=no``, ``=off``, ``=False`` all
-# silently ENABLED lazy loading — the opposite of what an operator
+# silently ENABLED lazy loading -- the opposite of what an operator
 # expects when they write ``=false``. The validate_config() function
 # (line ~2023) only accepts "0" or "1" as valid values, but the
 # _LAZY_MODE check used a different (looser) parser, so the validation
@@ -836,7 +836,7 @@ _LAZY_MODE: bool = (
 # Environment name (CONF-6).
 # FIX TOP-2: standardize on DRUGOS_ENVIRONMENT across both phases (Phase 1
 # previously read ENVIRONMENT). Synchronized with phase1/config/settings.py
-# — DO NOT diverge (audit TOP-2).
+# -- DO NOT diverge (audit TOP-2).
 _raw_env: str = (
     os.environ.get("DRUGOS_ENVIRONMENT")
     or os.environ.get("ENVIRONMENT", "development")
@@ -897,13 +897,13 @@ def __getattr__(name: str) -> Any:
 
     Error Handling
     ~~~~~~~~~~~~~~
-    - ``ImportError`` / ``ModuleNotFoundError`` — retried up to
+    - ``ImportError`` / ``ModuleNotFoundError`` -- retried up to
       ``_IMPORT_MAX_RETRIES`` times with exponential backoff. After
       exhausting retries, the failure is recorded in ``_dead_letters`` and
       a clear ``ImportError`` is raised naming the symbol, submodule, and
       original error. This prevents cryptic tracebacks during Airflow DAG
       parsing.
-    - ``AttributeError`` — raised when the submodule loads but does not
+    - ``AttributeError`` -- raised when the submodule loads but does not
       contain the expected symbol (version mismatch).
     - Unknown symbols raise ``AttributeError`` with the module name.
     - Circuit breaker: if 5 consecutive import failures occur, the circuit
@@ -929,7 +929,7 @@ def __getattr__(name: str) -> Any:
     ImportError
         If the target submodule cannot be imported after retries.
     """
-    # __version__ is defined at module level — no lazy load needed
+    # __version__ is defined at module level -- no lazy load needed
     if name == "__version__":
         return __version__
 
@@ -955,7 +955,7 @@ def __getattr__(name: str) -> Any:
     if open_until is not None and datetime.now(timezone.utc) < open_until:
         remaining = (open_until - datetime.now(timezone.utc)).total_seconds()
         raise ImportError(
-            f"Cannot import '{name}' — circuit breaker is open due to "
+            f"Cannot import '{name}' -- circuit breaker is open due to "
             f"{_CIRCUIT_BREAKER['failure_count']} consecutive failures. "
             f"Retry in {remaining:.0f} seconds."
         )
@@ -1006,7 +1006,7 @@ def __getattr__(name: str) -> Any:
                 time.sleep(_IMPORT_RETRY_BACKOFF * (2 ** attempt))
             # else: fall through to dead-letter recording below
 
-    # Exhausted retries — record in dead-letter queue (REL-4)
+    # Exhausted retries -- record in dead-letter queue (REL-4)
     _dead_letters.append({
         "symbol": name,
         "module": module_path,
@@ -1024,7 +1024,7 @@ def __getattr__(name: str) -> Any:
             + timedelta(seconds=_CIRCUIT_BREAKER["reset_timeout"])
         )
         logger.error(
-            "Circuit breaker opened after %d failures — will reset in %.0fs",
+            "Circuit breaker opened after %d failures -- will reset in %.0fs",
             _CIRCUIT_BREAKER["failure_count"],
             _CIRCUIT_BREAKER["reset_timeout"],
         )
@@ -1057,7 +1057,7 @@ def __dir__() -> list[str]:
 # Eager loading mode (IDEM-2, CONF-1, ARCH-11)
 # When PIPELINES_LAZY_IMPORT=0, pre-load all symbols at import time.
 # Failures are logged but do not raise (fail-fast opt-in for production
-# debugging — use validate_infrastructure() to detect them).
+# debugging -- use validate_infrastructure() to detect them).
 # ---------------------------------------------------------------------------
 if not _LAZY_MODE:
     logger.info(
@@ -1084,14 +1084,14 @@ def _reset() -> None:
     Use this in test fixtures to reset the pipelines package state
     between tests that require different configurations.
 
-    This function does **not** dispose the engine or close sessions —
+    This function does **not** dispose the engine or close sessions --
     it only clears the symbol cache so that subsequent attribute accesses
     re-import the submodules.
 
     We cache into ``_loaded`` (not ``globals()``) to allow ``_reset()`` to
     fully restore the package state between tests. The ``entity_resolution``
     package caches into ``globals()`` which is faster but causes monkey-
-    patch bleed — see IDEM-8.
+    patch bleed -- see IDEM-8.
 
     Usage in conftest.py::
 
@@ -1179,7 +1179,7 @@ def get_pipeline(name: str) -> type:
     P1-20 ROOT FIX
     --------------
     Previously this function called ``__getattr__(class_name)`` TWICE on
-    ImportError when ``PIPELINES_GRACEFUL_DEGRADATION=1`` was set — once
+    ImportError when ``PIPELINES_GRACEFUL_DEGRADATION=1`` was set -- once
     in the outer ``try`` and again in the nested ``try``. Because
     ``__getattr__`` records every import failure in ``_dead_letters`` AND
     increments the circuit-breaker counter (5 consecutive failures opens
@@ -1197,7 +1197,7 @@ def get_pipeline(name: str) -> type:
         return __getattr__(class_name)
     except ImportError as exc:
         if os.environ.get("PIPELINES_GRACEFUL_DEGRADATION", "0") == "1":
-            # Reuse the captured ImportError — do NOT call __getattr__
+            # Reuse the captured ImportError -- do NOT call __getattr__
             # again (would double-count the failure in the circuit
             # breaker and exhaust the open-threshold twice as fast).
             return _PipelineUnavailable(class_name, exc)  # type: ignore[return-value]
@@ -1283,7 +1283,7 @@ def get_filtering_thresholds() -> dict[str, dict[str, Any]]:
             "value": 0.06,
             "file": "disgenet_pipeline.py (389-fix, SCI-1)",
             "rationale": (
-                "DisGeNET scores in [0.06, 0.1) are 'weak evidence' — "
+                "DisGeNET scores in [0.06, 0.1) are 'weak evidence' -- "
                 "biologically meaningful, especially for rare diseases "
                 "(Piñero et al. 2020, Nucleic Acids Research). The "
                 "previous 0.1 default silently destroyed them. The new "
@@ -1301,15 +1301,15 @@ def get_filtering_thresholds() -> dict[str, dict[str, Any]]:
                 "Aligned to Piñero et al. 2020 §2.3: [0.0, 0.06) = sub_weak "
                 "(sub-floor, below the published weak-evidence floor), "
                 "[0.06, 0.3) = weak (the actual published weak-evidence "
-                "band), [0.3, 1.0] = strong evidence. The previous 0.7 → "
+                "band), [0.3, 1.0] = strong evidence. The previous 0.7 -> "
                 "'very_high' tier is removed (no publication supports it). "
                 "v100 P1-004 ROOT FIX (SCIENTIFIC MISLABEL): the previous "
-                "labels were ('weak', 'moderate', 'strong') — but Piñero "
+                "labels were ('weak', 'moderate', 'strong') -- but Piñero "
                 "2020 §2.3 does NOT define a 'moderate' band. The previous "
                 "code mislabeled [0.0, 0.06) as 'weak' (Piñero: sub-weak) "
                 "and [0.06, 0.3) as 'moderate' (Piñero: weak), inflating "
                 "the perceived confidence of every weak-evidence GDA edge "
-                "— a patient-safety risk. ROOT FIX: rename to "
+                "-- a patient-safety risk. ROOT FIX: rename to "
                 "('sub_weak', 'weak', 'strong') in lockstep across "
                 "cleaning.confidence, config.settings, SQL CHECK "
                 "chk_gda_confidence_tier (migration 012), ORM "
@@ -1320,7 +1320,7 @@ def get_filtering_thresholds() -> dict[str, dict[str, Any]]:
             "value": 3,
             "file": "config.settings:OMIM_MAPPING_KEYS_INCLUDE (v65 P1-031: alias removed)",
             "rationale": (
-                "OMIM mapping_key=3 means 'molecular basis known' — the "
+                "OMIM mapping_key=3 means 'molecular basis known' -- the "
                 "strongest mapping key with experimental validation. "
                 "OMIM_MAPPING_KEYS_INCLUDE defaults to [3, 4]. Key 4 = "
                 "contiguous gene syndrome (also loaded). Keys 1, 2 are "
@@ -1350,7 +1350,7 @@ def get_filtering_thresholds() -> dict[str, dict[str, Any]]:
                 "(~80% precision), >=900 = highest. The production "
                 "default is 700 (HIGH confidence). v43 ROOT FIX (P0): "
                 "the previous entry here said value=400 and labeled it "
-                "'high-confidence' — both were wrong. The actual "
+                "'high-confidence' -- both were wrong. The actual "
                 "production default (from STRING_VERSION_SCORE_"
                 "THRESHOLDS in config.settings) is 700, and 400 is "
                 "MEDIUM confidence, not high. The stale entry misled "
@@ -1386,7 +1386,7 @@ def get_filtering_thresholds() -> dict[str, dict[str, Any]]:
         "PUBCHEM_BATCH_SIZE": {
             "value": 95,
             "file": (
-                "pubchem_pipeline.py (institutional-grade — "
+                "pubchem_pipeline.py (institutional-grade -- "
                 "see config/settings.py:PUBCHEM_PIPELINE_BATCH_SIZE)"
             ),
             "rationale": (
@@ -1775,11 +1775,11 @@ def _validate_security() -> dict[str, Any]:
     Checks:
 
     1. ``OMIM_API_KEY`` is set (OMIM requires it).
-    2. ``DISGENET_API_KEY`` is set (FIX-C9: was WARNING, now ERROR —
+    2. ``DISGENET_API_KEY`` is set (FIX-C9: was WARNING, now ERROR --
        ``disgenet_pipeline.download()`` raises ``ValueError`` when
        ``DISGENET_USE_API=true`` and the key is unset, so the pipeline
        WILL crash on run, not "work at a lower rate limit").
-    3. ``DRUGBANK_XML_PATH`` is set (FIX-C9: was WARNING, now ERROR —
+    3. ``DRUGBANK_XML_PATH`` is set (FIX-C9: was WARNING, now ERROR --
        ``drugbank_pipeline.download()`` raises ``FileNotFoundError`` when
        the configured XML file is missing, so the pipeline WILL crash on
        run, not "gracefully skip").
@@ -1801,7 +1801,7 @@ def _validate_security() -> dict[str, Any]:
     """
     checks: list[dict[str, str]] = []
 
-    # Check 1: OMIM_API_KEY (CRITICAL — OMIM rejects unauthenticated requests)
+    # Check 1: OMIM_API_KEY (CRITICAL -- OMIM rejects unauthenticated requests)
     omim_key = os.environ.get("OMIM_API_KEY", "")
     if omim_key:
         checks.append({
@@ -1815,13 +1815,13 @@ def _validate_security() -> dict[str, Any]:
             "severity": "CRITICAL",
             "message": (
                 "OMIM_API_KEY is NOT set. OMIM API rejects unauthenticated "
-                "requests — OMIMPipeline will fail. Set OMIM_API_KEY env var."
+                "requests -- OMIMPipeline will fail. Set OMIM_API_KEY env var."
             ),
         })
 
-    # Check 2: DISGENET_API_KEY (FIX-C9: ERROR — pipeline WILL CRASH on run
+    # Check 2: DISGENET_API_KEY (FIX-C9: ERROR -- pipeline WILL CRASH on run
     # if DISGENET_USE_API=true and the key is unset, not "work at lower rate").
-    # See disgenet_pipeline.py:941-947 — raises ValueError.
+    # See disgenet_pipeline.py:941-947 -- raises ValueError.
     disgenet_key = os.environ.get("DISGENET_API_KEY", "")
     if disgenet_key:
         checks.append({
@@ -1835,15 +1835,15 @@ def _validate_security() -> dict[str, Any]:
             "severity": "ERROR",
             "message": (
                 "DISGENET_API_KEY is NOT set. DisGeNET pipeline WILL CRASH "
-                "on run — set the key or pass --skip-disgenet. "
+                "on run -- set the key or pass --skip-disgenet. "
                 "(disgenet_pipeline.download raises ValueError when "
                 "DISGENET_USE_API=true and the key is unset.)"
             ),
         })
 
-    # Check 3: DRUGBANK_XML_PATH (FIX-C9: ERROR — pipeline WILL CRASH on
+    # Check 3: DRUGBANK_XML_PATH (FIX-C9: ERROR -- pipeline WILL CRASH on
     # run if the configured XML file is missing, not "gracefully skip").
-    # See drugbank_pipeline.py:941-978 — raises FileNotFoundError.
+    # See drugbank_pipeline.py:941-978 -- raises FileNotFoundError.
     drugbank_path = os.environ.get("DRUGBANK_XML_PATH", "")
     if drugbank_path:
         checks.append({
@@ -1857,7 +1857,7 @@ def _validate_security() -> dict[str, Any]:
             "severity": "ERROR",
             "message": (
                 "DRUGBANK_XML_PATH is NOT set. DrugBank pipeline WILL CRASH "
-                "on run — set the path or pass --skip-drugbank. "
+                "on run -- set the path or pass --skip-drugbank. "
                 "(drugbank_pipeline.download raises FileNotFoundError when "
                 "the configured XML file is missing.)"
             ),
@@ -1884,7 +1884,7 @@ def _validate_security() -> dict[str, Any]:
     # The previous implementation initialised ``has_credentials_in_handlers = False``.
     # The inner loop body was a no-op (`if handler.level <= logging.INFO: pass`)
     # so the flag was NEVER set to True. The check therefore always reported
-    # "No credential leaks detected" — a security false-positive.
+    # "No credential leaks detected" -- a security false-positive.
     #
     # FIX: actually scan each handler's formatter format-string AND base
     # StreamHandler's stream target for credential-shaped content. Patterns
@@ -2014,7 +2014,7 @@ def get_config_summary() -> dict[str, Any]:
             # username (e.g. /home/john/drugbank/full_database.xml). The
             # raw value was previously returned, leaking the operator's
             # OS username into every config-summary log line. Mask to
-            # "<set>" when populated — operators only need to know the
+            # "<set>" when populated -- operators only need to know the
             # var is set, not its value (which is also validated by
             # validate_config() check #3).
             "DRUGBANK_XML_PATH": "<set>" if os.environ.get("DRUGBANK_XML_PATH") else "<unset>",
@@ -2104,7 +2104,7 @@ def validate_config() -> dict[str, Any]:
                 "check": "drugbank_path_in_prod",
                 "status": "WARN",
                 "message": (
-                    "DRUGBANK_XML_PATH not set in production — ensure the "
+                    "DRUGBANK_XML_PATH not set in production -- ensure the "
                     "master DAG's skip-drugbank branch is enabled."
                 ),
             })
@@ -2265,7 +2265,7 @@ def reload() -> None:
                 importlib.reload(_sys.modules[full_name])
             else:
                 importlib.import_module(full_name)
-        except Exception as exc:  # noqa: BLE001 — log and continue
+        except Exception as exc:  # noqa: BLE001 -- log and continue
             logger.warning(
                 "Failed to reload submodule %s: %s", full_name, exc
             )
@@ -2291,7 +2291,7 @@ def is_reproducible() -> bool:
     reproducible runs.
 
     The package itself is stateless (lazy loading, no module-level random
-    seeding). Pipeline classes may use randomness internally — verify per-
+    seeding). Pipeline classes may use randomness internally -- verify per-
     pipeline by reading the source.
 
     Returns
@@ -2317,10 +2317,10 @@ def health_check() -> dict[str, Any]:
     -------
     dict[str, Any]
         A health status with keys:
-        - ``"healthy"``: bool — ``True`` iff infrastructure AND security
+        - ``"healthy"``: bool -- ``True`` iff infrastructure AND security
           are both OK. FIX-C9: added so callers can do a single boolean
           check instead of inspecting ``"status"``.
-        - ``"issues"``: list[str] — human-readable messages for every
+        - ``"issues"``: list[str] -- human-readable messages for every
           check whose severity is ERROR or CRITICAL (FIX-C9). Empty list
           when healthy.
         - ``"status"``: ``"healthy"`` / ``"degraded"`` / ``"unhealthy"``
@@ -2475,7 +2475,7 @@ class _PipelineUnavailable:
     ``PIPELINES_GRACEFUL_DEGRADATION=1`` env var.
 
     Calling the sentinel raises the original ``ImportError``, so the
-    failure is not silently swallowed — it is deferred to call time.
+    failure is not silently swallowed -- it is deferred to call time.
     """
 
     def __init__(self, name: str, original_error: ImportError) -> None:
@@ -2535,7 +2535,7 @@ def get_audit_trail() -> dict[str, Any]:
     """Return the package-level audit trail.
 
     Combines provenance, dead letters, load times, and import status.
-    This is the package-level audit accessor — individual pipeline runs
+    This is the package-level audit accessor -- individual pipeline runs
     are recorded in the ``pipeline_runs`` DB table by
     ``BasePipeline._write_run_log`` (``base_pipeline.py:266-296``).
 
@@ -2673,7 +2673,7 @@ def requires_api_version(min_version: str) -> None:
             current = Version(__version__)
             required = Version(min_version)
         except InvalidVersion as exc:
-            # Malformed version string — fall back to tuple comparison.
+            # Malformed version string -- fall back to tuple comparison.
             logger.warning(
                 "packaging.version cannot parse %r or %r (%s); "
                 "falling back to tuple comparison",
@@ -2684,11 +2684,11 @@ def requires_api_version(min_version: str) -> None:
                 raise ImportError(
                     f"pipelines {min_version}+ required, got {__version__}"
                 )
-            return  # version OK — no need for tuple fallback
+            return  # version OK -- no need for tuple fallback
 
     # Tuple-comparison fallback (used when packaging is unavailable OR when
     # a version string is not PEP 440 compliant). NOTE: this fallback is
-    # intentionally more conservative than the original — it preserves the
+    # intentionally more conservative than the original -- it preserves the
     # pre-release suffix in the comparison so ``2.0.0-rc1`` is NOT silently
     # treated as equal to ``2.0.0``. Pre-release versions sort BEFORE the
     # release (``2.0.0-rc1`` < ``2.0.0``) because the suffix is compared
@@ -2753,19 +2753,19 @@ def _main(argv: list[str]) -> None:
 
     Commands::
 
-        list             — list all available pipelines
-        run <name>       — run a single pipeline by source_name
-        all              — run ALL pipelines (v49 ROOT FIX: replaces the
+        list             -- list all available pipelines
+        run <name>       -- run a single pipeline by source_name
+        all              -- run ALL pipelines (v49 ROOT FIX: replaces the
                            broken `make all` Makefile target). Respects
                            DRUGOS_DOWNLOAD_MODE env var (default "sample").
-        samples          — write ONLY the embedded sample CSVs to
+        samples          -- write ONLY the embedded sample CSVs to
                            processed_data/ (no API calls, no DB writes).
                            Used by run_unified.py as a last-resort
                            fallback when even sample-mode API calls fail.
-        validate         — run validate_infrastructure()
-        security         — run _validate_security()
-        health           — run health_check()
-        version          — print __version__
+        validate         -- run validate_infrastructure()
+        security         -- run _validate_security()
+        health           -- run health_check()
+        version          -- print __version__
     """
     import sys
     if not argv or argv[0] in ("-h", "--help"):
@@ -2814,7 +2814,7 @@ def _main(argv: list[str]) -> None:
                 print(f"[v49] {name}: OK")
             except Exception as exc:
                 failed.append((name, str(exc)))
-                print(f"[v49] {name}: FAILED — {exc}")
+                print(f"[v49] {name}: FAILED -- {exc}")
                 traceback.print_exc()
         print(f"\n[v49] Summary: {len(succeeded)} OK, {len(failed)} failed")
         if failed:

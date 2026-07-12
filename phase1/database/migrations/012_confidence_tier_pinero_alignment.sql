@@ -81,3 +81,54 @@ BEGIN
 END $$;
 
 COMMIT;
+
+-- ===========================================================================
+-- Post-migration verification (P1-043 ROOT FIX — assert the CHECK exists
+-- with the new label set). Runs AFTER COMMIT so the verification sees the
+-- committed state. If the DO block inside the transaction failed (e.g.
+-- the backfill UPDATE failed on a row with a NULL score), the CHECK
+-- constraint would be MISSING — this verification catches that and raises
+-- loudly so the operator knows the DB is in a half-migrated state.
+-- ===========================================================================
+DO $$
+DECLARE
+    _constraint_exists BOOLEAN;
+    _constraint_def TEXT;
+BEGIN
+    SELECT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'chk_gda_confidence_tier'
+          AND conrelid = 'gene_disease_associations'::regclass
+    ) INTO _constraint_exists;
+
+    IF NOT _constraint_exists THEN
+        RAISE EXCEPTION 'P1-043 VERIFICATION FAILED: chk_gda_confidence_tier constraint missing after migration 012 — the DB is in a half-migrated state (the DO block inside the transaction may have failed). Manual intervention required.';
+    END IF;
+
+    -- Verify the constraint definition contains the NEW label set.
+    -- pg_get_constraintdef returns the human-readable CHECK expression.
+    SELECT pg_get_constraintdef(oid) INTO _constraint_def
+    FROM pg_constraint
+    WHERE conname = 'chk_gda_confidence_tier'
+      AND conrelid = 'gene_disease_associations'::regclass;
+
+    IF _constraint_def IS NULL THEN
+        RAISE EXCEPTION 'P1-043 VERIFICATION FAILED: could not read chk_gda_confidence_tier definition';
+    END IF;
+
+    IF _constraint_def NOT LIKE '%sub_weak%' OR _constraint_def NOT LIKE '%weak%' OR _constraint_def NOT LIKE '%strong%' THEN
+        RAISE EXCEPTION 'P1-043 VERIFICATION FAILED: chk_gda_confidence_tier does not contain the new label set (sub_weak, weak, strong). Got: %', _constraint_def;
+    END IF;
+
+    -- Verify NO rows have the OLD 'moderate' label (the backfill should
+    -- have renamed them all to 'weak'). A residual 'moderate' row means
+    -- the backfill UPDATE failed mid-way.
+    IF EXISTS (
+        SELECT 1 FROM gene_disease_associations
+        WHERE confidence_tier = 'moderate'
+    ) THEN
+        RAISE EXCEPTION 'P1-043 VERIFICATION FAILED: gene_disease_associations still contains rows with confidence_tier=''moderate'' — the migration 012 backfill did not complete. Manual intervention required.';
+    END IF;
+
+    RAISE NOTICE 'P1-043 VERIFICATION PASSED: chk_gda_confidence_tier exists with new label set (sub_weak, weak, strong) and no residual ''moderate'' rows';
+END $$;

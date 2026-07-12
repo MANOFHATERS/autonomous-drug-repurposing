@@ -1,4 +1,4 @@
-"""DrugOS Graph Module — MLflow Experiment Tracker
+"""DrugOS Graph Module -- MLflow Experiment Tracker
 ====================================================
 Logs training metrics, model parameters, and artifacts to MLflow
 for experiment tracking and reproducibility.
@@ -34,7 +34,7 @@ class MLflowTracker:
             logger.info(f"MLflow initialized: experiment={experiment_name}")
         except ImportError:
             logger.warning(
-                "mlflow not installed — using local file logging. "
+                "mlflow not installed -- using local file logging. "
                 "Install with: pip install mlflow"
             )
         except Exception as e:
@@ -67,7 +67,7 @@ class MLflowTracker:
     def log_params(self, params: Dict[str, Any]) -> None:
         """Log hyperparameters."""
         # v35 ROOT FIX (L-1): the previous code appended to
-        # ``self._local_log`` UNCONDITIONALLY — even when MLflow was
+        # ``self._local_log`` UNCONDITIONALLY -- even when MLflow was
         # active and had already logged the params. For long runs
         # (100+ epochs × 5+ params), this caused ``_local_log`` to grow
         # unbounded (500+ entries). The fix only appends when MLflow is
@@ -80,7 +80,7 @@ class MLflowTracker:
 
     def log_metrics(self, metrics: Dict[str, float], step: int = 0) -> None:
         """Log training metrics."""
-        # v35 ROOT FIX (L-1): see ``log_params`` — only append to the
+        # v35 ROOT FIX (L-1): see ``log_params`` -- only append to the
         # local log when MLflow is NOT active.
         if self.mlflow and self.run:
             self.mlflow.log_metrics(metrics, step=step)
@@ -89,7 +89,7 @@ class MLflowTracker:
 
     def log_artifact(self, path: str) -> None:
         """Log a file artifact."""
-        # v35 ROOT FIX (L-1): see ``log_params`` — only append to the
+        # v35 ROOT FIX (L-1): see ``log_params`` -- only append to the
         # local log when MLflow is NOT active.
         if self.mlflow and self.run:
             self.mlflow.log_artifact(path)
@@ -99,14 +99,14 @@ class MLflowTracker:
     def set_tag(self, key: str, value: Any) -> None:
         """Set a tag on the current MLflow run.
 
-        v63 ROOT FIX (P2C-003+016 — ChEMBERTa silent-disable cascade):
+        v63 ROOT FIX (P2C-003+016 -- ChEMBERTa silent-disable cascade):
         the audit required that when ChEMBERTa is disabled (any of the
         3 fallback layers fires), the pipeline MUST log
         ``CHEMBERTA_DISABLED=true`` to MLflow so operators monitoring
         the MLflow dashboard can immediately see that the Graph
         Transformer trained on random Xavier features (not molecular
         structure). Without this tag, the only signal was a buried
-        WARNING log that production dashboards filtered out — exactly
+        WARNING log that production dashboards filtered out -- exactly
         the silent-degradation the audit named.
         """
         if self.mlflow and self.run:
@@ -142,11 +142,11 @@ class MLflowTracker:
         # self so it can be used as a context manager directly.
         self.end_run()
 
-    # v100 ROOT FIX (BUG P2-038 — dangling MLflow run via __del__):
+    # v100 ROOT FIX (BUG P2-038 -- dangling MLflow run via __del__):
     # The previous __del__ called end_run() at garbage-collection time,
     # which is NON-DETERMINISTIC. If the MLflowTracker was held by a
     # long-lived object (e.g. the pipeline's singleton logger), __del__
-    # might not fire until interpreter shutdown — by then, the MLflow
+    # might not fire until interpreter shutdown -- by then, the MLflow
     # tracking server may be unreachable, and end_run silently fails,
     # leaving the run dangling in the MLflow UI.
     #
@@ -156,7 +156,7 @@ class MLflowTracker:
     # The pipeline's main entry point now calls tracker.close() in its
     # finally block, so the MLflow run is ended deterministically even
     # on exception. __del__ remains as a fallback for callers that
-    # forget to call close() — but the docstring now warns that
+    # forget to call close() -- but the docstring now warns that
     # close() is the preferred path and __del__ is best-effort.
     def close(self) -> None:
         """Deterministically end the MLflow run.
@@ -164,7 +164,7 @@ class MLflowTracker:
         v100 ROOT FIX (BUG P2-038): callers should invoke close() in a
         try/finally block (or register with atexit) to ensure the MLflow
         run is ended BEFORE the tracking server becomes unreachable.
-        __del__ is a fallback for callers that forget — but __del__ is
+        __del__ is a fallback for callers that forget -- but __del__ is
         non-deterministic (fires at GC time, which may be after the
         tracking server is gone). close() is the only path that
         GUARANTEES end_run succeeds.
@@ -174,11 +174,11 @@ class MLflowTracker:
         except Exception:
             pass
 
-    # v43 ROOT FIX (P2 — no __del__ for dangling runs): if the caller
+    # v43 ROOT FIX (P2 -- no __del__ for dangling runs): if the caller
     # uses start_run() without a context manager AND forgets to call
     # end_run() or close(), the MLflow run is left dangling. __del__ is
     # a last-resort safety net that calls end_run() when the tracker is
-    # garbage-collected. v100 P2-038: callers should prefer close() —
+    # garbage-collected. v100 P2-038: callers should prefer close() --
     # __del__ is non-deterministic and may fire after the tracking
     # server is unreachable.
     def __del__(self):

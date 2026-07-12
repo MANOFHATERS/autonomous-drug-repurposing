@@ -14,7 +14,7 @@ Prefer ``from config import X`` over ``from config.settings import X``::
     from config import STRING_MIN_COMBINED_SCORE
     from config import CHEMBL_VERSION, STRING_VERSION
 
-The package-level import is complete — every non-deprecated setting is
+The package-level import is complete -- every non-deprecated setting is
 available directly.  ``from config.settings import X`` continues to work for
 backward compatibility but is not the recommended path.
 
@@ -62,13 +62,13 @@ Structured API
 --------------
 In addition to module-level attribute access, this package provides:
 
-- ``get_config()`` — full configuration as a ``ConfigDict`` dictionary.
-- ``get_config_summary()`` — credential-masked summary with provenance.
-- ``validate_config(strict=False)`` — validation results list.
-- ``initialize(configure_logging=True)`` — explicit eager loading.
-- ``reload()`` — re-import settings and clear cache.
-- ``is_loaded()`` — check whether settings have been loaded.
-- ``get_config_fingerprint()`` — SHA-256 digest for change detection.
+- ``get_config()`` -- full configuration as a ``ConfigDict`` dictionary.
+- ``get_config_summary()`` -- credential-masked summary with provenance.
+- ``validate_config(strict=False)`` -- validation results list.
+- ``initialize(configure_logging=True)`` -- explicit eager loading.
+- ``reload()`` -- re-import settings and clear cache.
+- ``is_loaded()`` -- check whether settings have been loaded.
+- ``get_config_fingerprint()`` -- SHA-256 digest for change detection.
 
 Re-export Policy
 ----------------
@@ -84,8 +84,8 @@ test in ``tests/test_config_init.py`` will catch omissions.
 
 Changelog
 ---------
-v1.0.0 (AUDIT-34) — Initial convenience imports (3 settings).
-v2.0.0 — Expanded to full facade with lazy loading, validation, credential
+v1.0.0 (AUDIT-34) -- Initial convenience imports (3 settings).
+v2.0.0 -- Expanded to full facade with lazy loading, validation, credential
     masking, structured API, and complete re-export of all non-deprecated
     settings across 16 domains.
 
@@ -95,14 +95,14 @@ config.settings : Full list of settings with their descriptions and defaults.
 """
 
 # ---------------------------------------------------------------------------
-# Package version — major when public API changes, minor for features, patch
+# Package version -- major when public API changes, minor for features, patch
 # for bug-fixes.  v2.0.0 reflects the complete rewrite from 2-line dead-code
 # file to comprehensive configuration facade.
 # ---------------------------------------------------------------------------
 __version__ = "2.0.0"
 
 # ---------------------------------------------------------------------------
-# Public API — __all__ defines every name available via ``from config import *``.
+# Public API -- __all__ defines every name available via ``from config import *``.
 # Listed alphabetically; includes all re-exported settings, public functions,
 # exception classes, and metadata constants.  The ``settings`` submodule is
 # deliberately excluded to prevent leakage of the implementation detail.
@@ -157,7 +157,7 @@ __all__ = (
     "DISGENET_API_URL",
     "DISGENET_URL",
     "DISGENET_USE_API",
-    # DisGeNET — institutional-grade operational settings (389-fix audit)
+    # DisGeNET -- institutional-grade operational settings (389-fix audit)
     "DISGENET_MIN_SCORE",
     "DISGENET_ALLOW_WEAK_EVIDENCE",
     "DISGENET_WEAK_EVIDENCE_THRESHOLD",  # v82 P1-3 root fix
@@ -202,7 +202,7 @@ __all__ = (
     # --- Settings: OMIM ---
     "OMIM_API_BASE",
     "OMIM_API_KEY",
-    # OMIM — institutional-grade operational settings (omim_pipeline.py rewrite)
+    # OMIM -- institutional-grade operational settings (omim_pipeline.py rewrite)
     "OMIM_REQUEST_INTERVAL",
     "OMIM_MAPPING_KEYS_INCLUDE",
     "OMIM_API_PAGE_LIMIT",
@@ -256,7 +256,7 @@ __all__ = (
 )
 
 # ---------------------------------------------------------------------------
-# Sensitive settings — names whose values must be masked in logs, summaries,
+# Sensitive settings -- names whose values must be masked in logs, summaries,
 # and any non-debug output.  Not in __all__ because this is an implementation
 # detail used by get_config_summary() and validate_config().
 # ---------------------------------------------------------------------------
@@ -301,7 +301,7 @@ __annotations__ = {
     "DISGENET_API_URL": str,
     "DISGENET_URL": str,
     "DISGENET_USE_API": bool,
-    # DisGeNET — institutional-grade operational settings (389-fix audit)
+    # DisGeNET -- institutional-grade operational settings (389-fix audit)
     "DISGENET_MIN_SCORE": float,
     "DISGENET_ALLOW_WEAK_EVIDENCE": bool,
     "DISGENET_WEAK_EVIDENCE_THRESHOLD": float,  # v82 P1-3 root fix
@@ -345,7 +345,7 @@ __annotations__ = {
     "DISGENET_SOURCE_WEIGHTS": dict,
     "OMIM_API_BASE": str,
     "OMIM_API_KEY": str,
-    # OMIM — institutional-grade operational settings
+    # OMIM -- institutional-grade operational settings
     "OMIM_REQUEST_INTERVAL": float,
     "OMIM_MAPPING_KEYS_INCLUDE": list,
     "OMIM_API_PAGE_LIMIT": int,
@@ -388,7 +388,7 @@ __annotations__ = {
 # Canonical list of all non-deprecated setting names that this package
 # re-exports.  Used by __getattr__, get_config, validate_config, and the
 # regression test.  When a new setting is added to config.settings, add its
-# name here AND to __all__ — the test_config_init.py regression test will
+# name here AND to __all__ -- the test_config_init.py regression test will
 # catch omissions.
 # ---------------------------------------------------------------------------
 _SETTING_NAMES = (
@@ -405,7 +405,7 @@ _SETTING_NAMES = (
     "CHEMBL_MAX_ROWS",
     "CHEMBL_SNAPSHOT_DATE",
     "CHEMBL_VERSION",
-    # ChEMBL — institutional-grade operational settings (chembl_pipeline.py rewrite)
+    # ChEMBL -- institutional-grade operational settings (chembl_pipeline.py rewrite)
     "CHEMBL_PAGE_SIZE",
     "CHEMBL_MAX_RETRIES",
     "CHEMBL_RETRY_BACKOFF_BASE",
@@ -436,7 +436,7 @@ _SETTING_NAMES = (
     "CHEMBL_VERSION_COUNT_RANGES",
     "DEFAULT_CHEMBL_VERSION",
     "VALID_CHEMBL_VERSIONS",
-    # DrugBank — institutional-grade operational settings (drugbank_pipeline.py rewrite)
+    # DrugBank -- institutional-grade operational settings (drugbank_pipeline.py rewrite)
     "DRUGBANK_VERSION",
     "DRUGBANK_XML_NAMESPACE",
     "DRUGBANK_TARGET_ORGANISMS",
@@ -483,7 +483,7 @@ _SETTING_NAMES = (
     "DISGENET_API_URL",
     "DISGENET_URL",
     "DISGENET_USE_API",
-    # DisGeNET — institutional-grade operational settings (389-fix audit)
+    # DisGeNET -- institutional-grade operational settings (389-fix audit)
     "DISGENET_MIN_SCORE",
     "DISGENET_ALLOW_WEAK_EVIDENCE",
     "DISGENET_WEAK_EVIDENCE_THRESHOLD",  # v82 P1-3 root fix
@@ -527,7 +527,7 @@ _SETTING_NAMES = (
     "DISGENET_SOURCE_WEIGHTS",
     "OMIM_API_BASE",
     "OMIM_API_KEY",
-    # OMIM — institutional-grade operational settings
+    # OMIM -- institutional-grade operational settings
     "OMIM_REQUEST_INTERVAL",
     "OMIM_MAPPING_KEYS_INCLUDE",
     "OMIM_API_PAGE_LIMIT",
@@ -583,7 +583,7 @@ _SETTING_NAMES = (
     "ENTITY_RESOLUTION_SOURCE_WHITELIST",
     "ENTITY_RESOLUTION_DEFAULT_ORGANISM",
     "ENTITY_RESOLUTION_MAPPING_SCHEMA_VERSION",
-    # PubChem pipeline (institutional-grade — fixes PUBCHEM_PIPELINE_MASTER_FIX_PROMPT.md).
+    # PubChem pipeline (institutional-grade -- fixes PUBCHEM_PIPELINE_MASTER_FIX_PROMPT.md).
     "PUBCHEM_PIPELINE_BATCH_SIZE",
     "PUBCHEM_PIPELINE_MIN_BACKOFF",
     "PUBCHEM_PIPELINE_MAX_BACKOFF",
@@ -606,10 +606,10 @@ _SETTING_NAMES = (
 
 # Known valid ChEMBL database versions (used by validate_config).
 _KNOWN_CHEMBL_VERSIONS = frozenset({"30", "31", "32", "33", "34", "35"})
-# Known valid STRING database versions (v11.0b, v11.5, v12.0 — v12.5 does NOT exist).
+# Known valid STRING database versions (v11.0b, v11.5, v12.0 -- v12.5 does NOT exist).
 _KNOWN_STRING_VERSIONS = frozenset({"11.0", "11.0b", "11.5", "12.0"})
 
-# Default DATABASE_URL substring — used to detect default credentials in prod.
+# Default DATABASE_URL substring -- used to detect default credentials in prod.
 _DEFAULT_DB_URL_PREFIX = "postgresql://cosmic:cosmic@"
 
 # ---------------------------------------------------------------------------
@@ -684,7 +684,7 @@ class ConfigValidationResult:
 
 
 # ---------------------------------------------------------------------------
-# ConfigDict — lightweight dict subclass for structured access
+# ConfigDict -- lightweight dict subclass for structured access
 # ---------------------------------------------------------------------------
 
 class ConfigDict(dict):
@@ -708,7 +708,7 @@ class ConfigDict(dict):
 # ---------------------------------------------------------------------------
 # _settings_loaded : whether config.settings has been successfully imported
 # _load_error      : the ImportError if loading failed, None otherwise
-# _resolved_settings : cache of resolved setting values (name → value)
+# _resolved_settings : cache of resolved setting values (name -> value)
 # _configure_logging  : whether logging.basicConfig should be called on load
 # ---------------------------------------------------------------------------
 _settings_loaded: bool = False
@@ -782,7 +782,7 @@ def _ensure_settings_loaded() -> None:
             ", ".join(sorted(_SETTING_NAMES)),
         )
 
-        # Run validation — in production, CRITICAL issues raise immediately.
+        # Run validation -- in production, CRITICAL issues raise immediately.
         _env = _resolved_settings.get("ENVIRONMENT", "development")
         _strict = _env == "production"
         _results = _run_validation()
@@ -967,14 +967,14 @@ def _run_validation() -> list:
                 )
             )
 
-    # ---- Range validation: STRING_MIN_COMBINED_SCORE (0–1000) ----
+    # ---- Range validation: STRING_MIN_COMBINED_SCORE (0-1000) ----
     # v65 ROOT FIX (P1C-003): the previous validation only warned when
     # score < 400, silently accepting the entire "low confidence" band
     # [400, 700). But the TOP-1 ROOT FIX (settings.py lines 913-921)
     # established that >= 700 is the canonical high-confidence cutoff
     # (>80% precision per Szklarczyk 2023), while 400 achieves only
     # ~50% precision. An operator who set STRING_MIN_COMBINED_SCORE=400
-    # (the old .env.example default) got NO warning — even though the
+    # (the old .env.example default) got NO warning -- even though the
     # KG would include ~75% more PPIs at ~30 lower precision points,
     # degrading downstream ML training. ROOT FIX: warn whenever score
     # < 700 (the scientifically-validated threshold), so operators who
@@ -993,12 +993,12 @@ def _run_validation() -> list:
             results.append(
                 ConfigValidationResult(
                     "WARNING", "STRING_MIN_COMBINED_SCORE",
-                    f"Value {score} is below 700 — the canonical high-confidence "
+                    f"Value {score} is below 700 -- the canonical high-confidence "
                     f"cutoff (Szklarczyk 2023, >80%% precision on KEGG benchmarks).  "
                     f"Score >= 400 captures ~5M interactions (25%% of STRING) at "
                     f"only ~50%% precision; score >= 700 captures ~500K (2.5%%) at "
                     f">80%% precision.  Lower values increase recall but introduce "
-                    f"false positives in drug repurposing — downstream ML models "
+                    f"false positives in drug repurposing -- downstream ML models "
                     f"train on noisy PPI edges."
                 )
             )
@@ -1006,7 +1006,7 @@ def _run_validation() -> list:
             results.append(
                 ConfigValidationResult(
                     "WARNING", "STRING_MIN_COMBINED_SCORE",
-                    f"Value {score} is above 900 — very stringent; excludes most "
+                    f"Value {score} is above 900 -- very stringent; excludes most "
                     f"moderate-confidence PPIs.  Score >= 700 captures ~500K "
                     f"interactions (2.5%% of STRING).  Higher values increase "
                     f"precision but may miss valid interactions."
@@ -1029,7 +1029,7 @@ def _run_validation() -> list:
             results.append(
                 ConfigValidationResult(
                     "WARNING", "CHEMBL_EXPECTED_DRUG_COUNT_MIN",
-                    "CHEMBL_EXPECTED_DRUG_COUNT_MIN is 0 or negative — drug count "
+                    "CHEMBL_EXPECTED_DRUG_COUNT_MIN is 0 or negative -- drug count "
                     "validation is effectively disabled."
                 )
             )
@@ -1162,7 +1162,7 @@ def _mask_sensitive(name: str, value: object) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Environment constant — read once at module load, cached in resolved settings
+# Environment constant -- read once at module load, cached in resolved settings
 # on first access.
 # ---------------------------------------------------------------------------
 import os as _os
@@ -1174,7 +1174,7 @@ ENVIRONMENT: str = (
 
 
 # ---------------------------------------------------------------------------
-# Module-level __getattr__ — lazy attribute resolution
+# Module-level __getattr__ -- lazy attribute resolution
 # ---------------------------------------------------------------------------
 # This function is called by Python when a name is not found in the module's
 # namespace.  We use it to lazily load settings on first access, so that
@@ -1189,7 +1189,7 @@ def __getattr__(name: str):
     dynamically from ``config.settings`` on first access, ensuring they always
     reflect the current value even if that module is refactored later.
     """
-    # Handle ENVIRONMENT specially — it may be accessed before full load.
+    # Handle ENVIRONMENT specially -- it may be accessed before full load.
     if name == "ENVIRONMENT":
         _ensure_settings_loaded()
         return _resolved_settings.get("ENVIRONMENT", "development")
@@ -1198,12 +1198,12 @@ def __getattr__(name: str):
         _ensure_settings_loaded()
         return _resolved_settings[name]
 
-    # Public functions and classes are defined in this module — they should
+    # Public functions and classes are defined in this module -- they should
     # have been found by normal attribute lookup.  If we reach here for a
     # name in __all__, it's a programming error.
     if name in __all__:
         raise AttributeError(
-            f"config package has no attribute '{name}' — this name is listed in "
+            f"config package has no attribute '{name}' -- this name is listed in "
             f"__all__ but is not a setting and has no implementation."
         )
 
@@ -1211,7 +1211,7 @@ def __getattr__(name: str):
 
 
 # ---------------------------------------------------------------------------
-# Module-level __dir__ — control dir() output
+# Module-level __dir__ -- control dir() output
 # ---------------------------------------------------------------------------
 # Ensures that ``dir(config)`` returns the public API (names in __all__)
 # plus the standard module attributes.  The ``settings`` submodule is
@@ -1239,7 +1239,7 @@ def initialize(configure_logging: bool = True) -> None:
     configure_logging : bool, optional
         If ``True`` (default), the ``logging.basicConfig()`` call in
         ``config.settings`` will execute normally.  If ``False``, logging
-        configuration is suppressed — useful in test environments where the
+        configuration is suppressed -- useful in test environments where the
         test framework manages logging.
 
     Examples
@@ -1263,7 +1263,7 @@ def reload() -> None:
 
     Use this when the environment has changed (e.g. after updating ``.env``)
     and you need the configuration to reflect the new values.  This is
-    idempotent — calling reload() multiple times is safe.
+    idempotent -- calling reload() multiple times is safe.
 
     Raises
     ------
@@ -1387,7 +1387,7 @@ def get_config() -> ConfigDict:
     Returns
     -------
     ConfigDict
-        Dictionary of all setting name → value pairs.
+        Dictionary of all setting name -> value pairs.
 
     Warning
     -------
@@ -1399,7 +1399,7 @@ def get_config() -> ConfigDict:
     ::
 
         cfg = config.get_config()
-        db_url = cfg["DATABASE_URL"]  # raw value — do not log!
+        db_url = cfg["DATABASE_URL"]  # raw value -- do not log!
     """
     _ensure_settings_loaded()
     return ConfigDict({name: _resolved_settings[name] for name in _SETTING_NAMES
@@ -1441,7 +1441,7 @@ def get_config_summary() -> dict:
         if name in _resolved_settings:
             summary[name] = _mask_sensitive(name, _resolved_settings[name])
 
-    # Provenance metadata — included for configuration traceability so that
+    # Provenance metadata -- included for configuration traceability so that
     # the configuration active during a particular pipeline run can be
     # reconstructed from logs.
     summary["_loaded_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -1500,7 +1500,7 @@ def get_config_fingerprint() -> str:
     parts = []
     for name in sorted(_SETTING_NAMES):
         if name in _resolved_settings:
-            # Mask sensitive values in the fingerprint too — the fingerprint
+            # Mask sensitive values in the fingerprint too -- the fingerprint
             # should detect value changes without embedding raw credentials.
             val = _mask_sensitive(name, _resolved_settings[name])
             parts.append(f"{name}={val}")

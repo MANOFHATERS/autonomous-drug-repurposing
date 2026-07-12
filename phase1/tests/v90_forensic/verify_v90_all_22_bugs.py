@@ -1,5 +1,5 @@
 """v90 FORENSIC VERIFICATION: exercises each of the 22 bug fixes against the
-ACTUAL code paths. This is NOT a smoke test — it imports the real modules
+ACTUAL code paths. This is NOT a smoke test -- it imports the real modules
 and asserts that the fixed behavior is in effect.
 
 Run: python /home/z/my-project/scripts/verify_v90_all_22_bugs.py
@@ -28,14 +28,14 @@ def check(bug_id, description, condition, detail=""):
         print(f"  [PASS] BUG #{bug_id}: {description}")
     else:
         FAIL.append((bug_id, description, detail))
-        print(f"  [FAIL] BUG #{bug_id}: {description} — {detail}")
+        print(f"  [FAIL] BUG #{bug_id}: {description} -- {detail}")
 
 def skip(bug_id, description, reason):
     SKIP.append((bug_id, description, reason))
-    print(f"  [SKIP] BUG #{bug_id}: {description} — {reason}")
+    print(f"  [SKIP] BUG #{bug_id}: {description} -- {reason}")
 
 print("=" * 78)
-print("v90 FORENSIC VERIFICATION — exercise each of the 22 bug fixes")
+print("v90 FORENSIC VERIFICATION -- exercise each of the 22 bug fixes")
 print("=" * 78)
 
 # ----------------------------------------------------------------------
@@ -50,7 +50,7 @@ try:
     # Don't execute (would require Airflow + DB); just read the source.
     src = (PHASE1 / "dags" / "master_pipeline_dag.py").read_text()
     # Strip Python comments (everything after #) before searching for
-    # the old broken wiring — v89's fix EXPLAINS the old wiring in a
+    # the old broken wiring -- v89's fix EXPLAINS the old wiring in a
     # comment, which falsely matches the simple substring search.
     import re
     code_only = re.sub(r"#.*", "", src)
@@ -156,7 +156,7 @@ except Exception as e:
     traceback.print_exc()
 
 # ----------------------------------------------------------------------
-# BUG #7 (P0): uniprot_to_string_id dict overwrite → multi-valued
+# BUG #7 (P0): uniprot_to_string_id dict overwrite -> multi-valued
 # ----------------------------------------------------------------------
 print("\n[BUG #7] uniprot_to_string_ids is multi-valued dict[str, set]")
 try:
@@ -235,7 +235,7 @@ try:
     before = len(r._dead_letter)
     r.add_uniprot_records([{"uniprot_id": "", "organism": "Homo sapiens"}])
     after = len(r._dead_letter)
-    check(11, "empty uniprot_id → dead-letter queue grows by 1",
+    check(11, "empty uniprot_id -> dead-letter queue grows by 1",
           after == before + 1,
           f"before={before}, after={after}")
 except Exception as e:
@@ -255,7 +255,7 @@ try:
     assert cb.state == "open", f"expected open, got {cb.state}"
     # Wait for reset_timeout.
     time.sleep(0.1)
-    # Call is_open() — should return True (still "open" state, not transitioned).
+    # Call is_open() -- should return True (still "open" state, not transitioned).
     state_before = cb.state
     flag_before = cb._half_open_probe_in_flight
     result = cb.is_open()
@@ -285,7 +285,7 @@ try:
     assert allowed, f"expected probe allowed, got {allowed}"
     assert cb.state == "half_open", f"expected half_open, got {cb.state}"
     assert cb._half_open_probe_in_flight is True
-    # Now record a failure — should transition to open AND clear the flag.
+    # Now record a failure -- should transition to open AND clear the flag.
     cb.record_failure()
     check(13, "after failed probe: state=open, _half_open_probe_in_flight=False",
           cb.state == "open" and cb._half_open_probe_in_flight is False,
@@ -389,7 +389,7 @@ except Exception as e:
     traceback.print_exc()
 
 # ----------------------------------------------------------------------
-# BUG #20 (P1): datetime.utcnow() deprecated → datetime.now(timezone.utc)
+# BUG #20 (P1): datetime.utcnow() deprecated -> datetime.now(timezone.utc)
 # ----------------------------------------------------------------------
 print("\n[BUG #20] master_pipeline_dag uses datetime.now(timezone.utc)")
 try:
@@ -457,5 +457,5 @@ if FAIL:
 if SKIP:
     print("\nSKIPPED checks:")
     for bug_id, desc, reason in SKIP:
-        print(f"  BUG #{bug_id}: {desc} — {reason}")
+        print(f"  BUG #{bug_id}: {desc} -- {reason}")
 sys.exit(0 if not FAIL else 1)

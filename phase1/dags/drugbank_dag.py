@@ -1,5 +1,5 @@
 """
-DrugBank DAG — standalone pipeline for DrugBank XML drug and target data.
+DrugBank DAG -- standalone pipeline for DrugBank XML drug and target data.
 
 Parses the DrugBank full-database XML file (requires manual download due
 to licensing).  Extracts drug metadata and target interactions, normalises
@@ -11,7 +11,7 @@ If the DrugBank XML file is not present the pipeline will raise a clear
 
 Can be triggered independently or as part of the master pipeline.
 Schedule: every Monday at 03:00 UTC (cron ``0 3 * * 1``).
-v49 ROOT FIX (Compound-4 — Sunday Morning Pile-Up): was previously
+v49 ROOT FIX (Compound-4 -- Sunday Morning Pile-Up): was previously
 ``0 3 * * 0`` (Sunday 03:00 UTC) which overlapped the master DAG
 window (Sunday 02:00 UTC, 8h timeout). Moved to Monday to eliminate
 the per-pipeline filelock conflict with the master. DrugBank XML is
@@ -25,21 +25,23 @@ from datetime import datetime
 
 # v89 ROOT FIX (BUG #39): shared sys.path bootstrap (see dags/_dags_init.py).
 from dags._dags_init import ensure_project_root  # noqa: F401
+# P1-050 ROOT FIX: explicit call (no longer auto-invoked at module import)
+ensure_project_root()
 
 from airflow.decorators import dag, task
 
-# v74 ROOT FIX (T-023 — retries on 4xx HTTP errors waste 60 min):
-# Use the shared retry policy: exponential backoff (5min → 10min → 20min
+# v74 ROOT FIX (T-023 -- retries on 4xx HTTP errors waste 60 min):
+# Use the shared retry policy: exponential backoff (5min -> 10min -> 20min
 # cap) AND a fail-fast decorator that converts HTTP 4xx (401 Unauthorized,
 # 403 Forbidden, 404 Not Found, etc.) to AirflowFailException so the task
 # is NOT retried. Retrying a 401 (bad API key) or 404 (wrong endpoint)
-# never succeeds — the original error is non-transient.
+# never succeeds -- the original error is non-transient.
 from dags._retry_policy import DEFAULT_RETRY_ARGS, fail_fast_on_http_4xx
 
-# v29 ROOT FIX (audit O-12): XCom used for large dataframes — anti-pattern.
+# v29 ROOT FIX (audit O-12): XCom used for large dataframes -- anti-pattern.
 # Now passes file paths via XCom. The single @task below returns None and the
 # DrugBankPipeline persists its output to processed_data/ (drugbank_drugs.csv).
-# Downstream DAGs (master pipeline) read that CSV by path — no DataFrame is
+# Downstream DAGs (master pipeline) read that CSV by path -- no DataFrame is
 # ever pushed to / pulled from XCom.
 
 DEFAULT_ARGS = {
@@ -49,12 +51,12 @@ DEFAULT_ARGS = {
 }
 
 
-# v89 ROOT FIX (BUG #25 / BUG #38): bare ``@task`` — retry params
+# v89 ROOT FIX (BUG #25 / BUG #38): bare ``@task`` -- retry params
 # inherited from DEFAULT_ARGS (spread from DEFAULT_RETRY_ARGS).
 @task
 @fail_fast_on_http_4xx
 def run_drugbank() -> None:
-    """Execute the full DrugBank pipeline: download (verify XML) → clean → load."""
+    """Execute the full DrugBank pipeline: download (verify XML) -> clean -> load."""
     from pipelines.drugbank_pipeline import DrugBankPipeline
     DrugBankPipeline().run()
 
@@ -62,8 +64,8 @@ def run_drugbank() -> None:
 @dag(
     dag_id="drugbank_pipeline",
     description="DrugBank ETL pipeline: drug and target data from XML",
-    # v49 ROOT FIX (Compound-4 — Sunday Morning Pile-Up):
-    # The v29 schedule was "0 3 * * 0" (Sunday 03:00 UTC) — this overlaps
+    # v49 ROOT FIX (Compound-4 -- Sunday Morning Pile-Up):
+    # The v29 schedule was "0 3 * * 0" (Sunday 03:00 UTC) -- this overlaps
     # the master DAG (Sunday 02:00 UTC, 8h timeout) and causes per-pipeline
     # filelock conflicts every week. ROOT FIX: move standalone DrugBank
     # to Monday 03:00 UTC. The master DAG remains the primary

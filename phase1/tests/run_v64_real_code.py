@@ -1,7 +1,7 @@
-"""v64 REAL CODE execution — runs actual production pipeline modules.
+"""v64 REAL CODE execution -- runs actual production pipeline modules.
 
 This is NOT a test file. It runs the REAL production code paths:
-  1. write_all_samples() — writes all 7 embedded sample CSVs to disk.
+  1. write_all_samples() -- writes all 7 embedded sample CSVs to disk.
   2. Phase 1 embedded sample DataFrames are loaded and validated.
   3. Phase 2 phase1_bridge staging runs on the embedded sample DataFrames.
   4. The Phase 2 kg_builder constructs a staged_graph.json from the bridge output.
@@ -25,7 +25,7 @@ import pandas as pd
 
 
 def step_1_write_all_samples():
-    """Step 1: Run write_all_samples() — writes 7 CSVs to a temp dir."""
+    """Step 1: Run write_all_samples() -- writes 7 CSVs to a temp dir."""
     print("\n=== STEP 1: write_all_samples() ===")
     from pipelines._embedded_samples import write_all_samples
     tmpdir = Path(tempfile.mkdtemp(prefix="v64_real_"))
@@ -33,7 +33,7 @@ def step_1_write_all_samples():
     print(f"Wrote {len(written)} sample CSVs to {tmpdir}")
     for key, path in written.items():
         df = pd.read_csv(path)
-        print(f"  {key:25s} → {path.name:45s}  rows={len(df):4d}  cols={len(df.columns)}")
+        print(f"  {key:25s} -> {path.name:45s}  rows={len(df):4d}  cols={len(df.columns)}")
     return tmpdir, written
 
 
@@ -117,15 +117,15 @@ def step_3_phase2_bridge_staging(tmpdir, written):
         print(f"  Calling phase1_bridge.{fname}()...")
         try:
             staged = fn(phase1_data) if fname == "stage_phase1_to_phase2" else fn(drugs_df)
-            print(f"  → {fname}() succeeded")
+            print(f"  -> {fname}() succeeded")
             break
         except Exception as exc:
-            print(f"  → {fname}() raised: {exc}")
+            print(f"  -> {fname}() raised: {exc}")
             continue
 
     if staged is None:
         # Fall back to manually exercising the _resolve_fda_approved + _to_bool helpers.
-        print("  (Bridge entry points require a DB — exercising helper functions directly.)")
+        print("  (Bridge entry points require a DB -- exercising helper functions directly.)")
         from drugos_graph.phase1_bridge import _resolve_fda_approved, _to_bool, _safe_str
         drug_nodes = []
         for _, row in drugs_df.iterrows():
@@ -165,7 +165,7 @@ def step_4_phase2_kg_builder(tmpdir):
 
 
 def step_5_pipeline_imports():
-    """Step 5: Import every Phase 1 pipeline module — verify no import errors."""
+    """Step 5: Import every Phase 1 pipeline module -- verify no import errors."""
     print("\n=== STEP 5: Import all Phase 1 pipeline modules ===")
     modules = [
         "pipelines.base_pipeline",
@@ -191,7 +191,7 @@ def step_5_pipeline_imports():
 
 
 def step_6_phase2_imports():
-    """Step 6: Import every Phase 2 module — verify no import errors."""
+    """Step 6: Import every Phase 2 module -- verify no import errors."""
     print("\n=== STEP 6: Import all Phase 2 modules ===")
     modules = [
         "drugos_graph.phase1_bridge",
@@ -212,7 +212,7 @@ def step_6_phase2_imports():
 
 def main():
     print("=" * 60)
-    print("v64 REAL CODE EXECUTION — actual production modules")
+    print("v64 REAL CODE EXECUTION -- actual production modules")
     print("=" * 60)
 
     step_5_pipeline_imports()

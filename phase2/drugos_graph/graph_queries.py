@@ -1,5 +1,5 @@
 """
-DrugOS Graph Module — Graph Query Utilities (Institutional Grade)
+DrugOS Graph Module -- Graph Query Utilities (Institutional Grade)
 ===================================================================
 Cypher query utilities for graph traversal, search, and drug repurposing
 candidate retrieval from the Neo4j knowledge graph.
@@ -31,8 +31,8 @@ Edge types are derived from CORE_EDGE_TYPES (config.py):
   - interacts_with (Gene->Gene, Protein->Protein, Compound->Compound)
   - participates_in (Gene/Protein->Pathway)
   - disrupted_in, associated_with (Pathway->Disease)
-  - causes_adverse_event (Compound->MedDRATerm) — canonical SIDER edge
-  - causes_side_effect (Compound->Side Effect) — legacy SIDER edge (migration fallback)
+  - causes_adverse_event (Compound->MedDRATerm) -- canonical SIDER edge
+  - causes_side_effect (Compound->Side Effect) -- legacy SIDER edge (migration fallback)
 
 SIDER Migration Note
 --------------------
@@ -61,7 +61,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional, Protocol, Sequence, Union, runtime_checkable
 
 # ─── Neo4j driver (optional dependency) ──────────────────────────────────
-# Fixes audit issue 6.10 — import specific exception types
+# Fixes audit issue 6.10 -- import specific exception types
 try:
     from neo4j import Driver, GraphDatabase
     try:
@@ -89,7 +89,7 @@ except ImportError:
     SessionExpired = Exception  # type: ignore[misc,assignment]
 
 # ─── Imports from canonical sources (config.py, utils.py) ────────────────
-# Fixes audit issues 1.1, 1.3, 12.13-12.15 — import from single sources of truth
+# Fixes audit issues 1.1, 1.3, 12.13-12.15 -- import from single sources of truth
 from .config import (  # noqa: E402
     Neo4jConfig,
     get_neo4j_config,
@@ -160,13 +160,13 @@ if STRUCTURED_LOGGING:
         if not logger.handlers:
             logger.addHandler(_handler)
     except Exception:
-        pass  # Non-critical — fall back to default formatting
+        pass  # Non-critical -- fall back to default formatting
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# SECTION A: Module-level constants (all from config/utils — no magic numbers)
+# SECTION A: Module-level constants (all from config/utils -- no magic numbers)
 # ═══════════════════════════════════════════════════════════════════════════
-# Fixes audit issues 12.1-12.10, 12.14-12.15 — all magic numbers externalized
+# Fixes audit issues 12.1-12.10, 12.14-12.15 -- all magic numbers externalized
 
 # ─── Label constants (from utils.py) ─────────────────────────────────────
 _LABEL_COMPOUND: str = DRKG_NODE_TYPE_TO_NEO4J_LABEL.get("Compound", "Compound")
@@ -175,24 +175,24 @@ _LABEL_GENE: str = DRKG_NODE_TYPE_TO_NEO4J_LABEL.get("Gene", "Gene")
 _LABEL_PROTEIN: str = DRKG_NODE_TYPE_TO_NEO4J_LABEL.get("Protein", "Protein")
 _LABEL_PATHWAY: str = DRKG_NODE_TYPE_TO_NEO4J_LABEL.get("Pathway", "Pathway")
 
-# Fixes KILL-1 — canonical adverse-event label and edge
+# Fixes KILL-1 -- canonical adverse-event label and edge
 _AE_LABEL: str = DRKG_NODE_TYPE_TO_NEO4J_LABEL.get("MedDRA_Term", "MedDRATerm")
 _AE_EDGE: str = SIDER_EDGE_TYPE  # "causes_adverse_event"
 _AE_LEGACY_EDGE: str = SIDER_LEGACY_EDGE_TYPE  # "causes_side_effect"
-# v43 ROOT FIX (P2 — _AE_LEGACY_LABEL key "Side_Effect" doesn't exist):
+# v43 ROOT FIX (P2 -- _AE_LEGACY_LABEL key "Side_Effect" doesn't exist):
 # The registry key is "Side Effect" (with space), NOT "Side_Effect"
 # (underscore). The previous .get("Side_Effect", "SideEffect") always
-# returned the default "SideEffect" — which happens to be correct, but
+# returned the default "SideEffect" -- which happens to be correct, but
 # by accident. Fix: use the correct key "Side Effect" so the lookup
 # actually works.
 _AE_LEGACY_LABEL: str = DRKG_NODE_TYPE_TO_NEO4J_LABEL.get("Side Effect", "SideEffect")
 
 # ─── Edge type derivation (from CORE_EDGE_TYPES) ─────────────────────────
-# Fixes KILL-2, KILL-3 — derive valid edge types per endpoint programmatically
+# Fixes KILL-2, KILL-3 -- derive valid edge types per endpoint programmatically
 def _edges_from_to(src: str, dst: str) -> list[str]:
     """Get all valid relation types from src to dst in CORE_EDGE_TYPES.
 
-    Fixes audit issue 12.14 — edge type lists derived from canonical source.
+    Fixes audit issue 12.14 -- edge type lists derived from canonical source.
     """
     return sorted({
         rel for s, rel, d in CORE_EDGE_TYPES if s == src and d == dst
@@ -210,7 +210,7 @@ _EDGES_COMPOUND_COMPOUND: list[str] = _edges_from_to("Compound", "Compound")
 _EDGES_GENE_GENE: list[str] = _edges_from_to("Gene", "Gene")
 _EDGES_PROTEIN_PROTEIN: list[str] = _edges_from_to("Protein", "Protein")
 
-# ─── Default parameters (from config — no magic numbers) ──────────────────
+# ─── Default parameters (from config -- no magic numbers) ──────────────────
 # Fixes audit issues 12.2-12.6
 DEFAULT_MAX_HOPS: int = 3
 DEFAULT_QUERY_LIMIT: int = 20
@@ -220,7 +220,7 @@ DEFAULT_PATHWAY_LIMIT: int = 10
 MAX_LIMIT: int = 10000
 
 # ─── Safety-tier thresholds (externalized, medically justified) ──────────
-# Fixes KILL-4, audit issues 12.7 — thresholds with medical rationale
+# Fixes KILL-4, audit issues 12.7 -- thresholds with medical rationale
 # RATIONALE: These thresholds are based on FDA adverse event reporting
 # patterns. Green = typical OTC drug profile. Yellow = requires monitoring.
 # Red = contraindicated without specialist oversight.
@@ -231,15 +231,15 @@ SAFETY_TIER_OT_THRESHOLD_YELLOW: int = 10
 DEFAULT_SAFETY_PROFILE_LIMIT: int = 1000
 
 # ─── MedDRA severity weights (PT/LLT/HLT/HLGT/SOC) ─────────────────────
-# Fixes KILL-4 — severity weighting by MedDRA term level
+# Fixes KILL-4 -- severity weighting by MedDRA term level
 # RATIONALE: PT (Preferred Term) is most specific; SOC (System Organ Class)
 # is broadest. Weight reflects diagnostic specificity.
 MEDDRA_SEVERITY_WEIGHTS: dict[str, float] = {
-    "PT": 1.0,   # Preferred Term — most specific
+    "PT": 1.0,   # Preferred Term -- most specific
     "LLT": 0.5,  # Lowest Level Term
     "HLT": 0.75, # High Level Term
     "HLGT": 0.5, # High Level Group Term
-    "SOC": 0.25, # System Organ Class — broadest
+    "SOC": 0.25, # System Organ Class -- broadest
 }
 DEFAULT_MEDDRA_WEIGHT: float = 0.5  # Unknown level defaults to moderate
 
@@ -271,32 +271,32 @@ class GraphQueryError(RuntimeError):
     All query-specific exceptions inherit from this base, allowing
     callers to catch any query failure with a single except block.
 
-    Fixes audit issue 9.12 — sanitized error for API consumers.
+    Fixes audit issue 9.12 -- sanitized error for API consumers.
     """
 
 class NodeNotFoundError(GraphQueryError):
     """Raised when a requested node does not exist in the graph.
 
-    Fixes audit issue 5.10 — replaces error dict return with typed exception.
+    Fixes audit issue 5.10 -- replaces error dict return with typed exception.
     """
 
 class InputValidationError(GraphQueryError, ValueError):
     """Raised when query input parameters fail validation.
 
-    Fixes audit issues 5.1-5.9 — structured validation errors.
+    Fixes audit issues 5.1-5.9 -- structured validation errors.
     """
 
 class RateLimitError(GraphQueryError):
     """Raised when query rate limit is exceeded.
 
-    Fixes audit issue 9.10 — rate limiting for DoS protection.
+    Fixes audit issue 9.10 -- rate limiting for DoS protection.
     """
 
 
 # ═══════════════════════════════════════════════════════════════════════════
 # SECTION C: Protocol (Interface) for GraphQueryService
 # ═══════════════════════════════════════════════════════════════════════════
-# Fixes audit issue 1.7 — Protocol for mocking, swapping, decorating
+# Fixes audit issue 1.7 -- Protocol for mocking, swapping, decorating
 
 @runtime_checkable
 class GraphQueryService(Protocol):
@@ -306,7 +306,7 @@ class GraphQueryService(Protocol):
     dependency injection, mocking in tests, and adapter pattern for
     alternative graph backends.
 
-    Fixes audit issue 1.7 — no Protocol/Interface existed.
+    Fixes audit issue 1.7 -- no Protocol/Interface existed.
     """
 
     def find_drug_candidates(
@@ -353,7 +353,7 @@ class GraphQueryService(Protocol):
 def _build_query_metadata() -> dict[str, str]:
     """Build lineage metadata for query results.
 
-    Fixes audit issues 16.1-16.7 — provenance tracking on all results.
+    Fixes audit issues 16.1-16.7 -- provenance tracking on all results.
     """
     return {
         "config_hash": CONFIG_HASH or compute_config_hash(),
@@ -419,7 +419,7 @@ class DrugRepurposingCandidate:
     def __post_init__(self):
         """Validate fields on construction.
 
-        Fixes audit issues 2.5, 3.18 — reject invalid values.
+        Fixes audit issues 2.5, 3.18 -- reject invalid values.
         """
         if not isinstance(self.drug_id, str) or not self.drug_id:
             raise InputValidationError("drug_id must be a non-empty string")
@@ -435,10 +435,10 @@ class DrugRepurposingCandidate:
             )
 
 
-# Backward-compat alias — DrugRepurposingCandidate is the canonical name.
-# Fixes audit issue 1.4 — DrugCandidate name collision with transe_model.
+# Backward-compat alias -- DrugRepurposingCandidate is the canonical name.
+# Fixes audit issue 1.4 -- DrugCandidate name collision with transe_model.
 # FIX-P3-4: removed dead _DrugCandidateAlias class (defined but never
-# instantiated — the actual alias is the direct assignment below).
+# instantiated -- the actual alias is the direct assignment below).
 DrugCandidate = DrugRepurposingCandidate  # backward-compat alias
 
 
@@ -537,8 +537,8 @@ class MechanisticPath:
 # ═══════════════════════════════════════════════════════════════════════════
 # SECTION E: KNOWN_REPURPOSING_SUCCESSES (corrected)
 # ═══════════════════════════════════════════════════════════════════════════
-# Fixes audit issues 3.14, 3.15 — scientifically correct disease names
-# Fixes audit issue 12.12 — loaded from module constant with YAML fallback
+# Fixes audit issues 3.14, 3.15 -- scientifically correct disease names
+# Fixes audit issue 12.12 -- loaded from module constant with YAML fallback
 
 KNOWN_REPURPOSING_SUCCESSES: list[dict[str, str]] = [
     {"drug_name": "Sildenafil", "disease_name": "Pulmonary Hypertension"},
@@ -560,8 +560,8 @@ KNOWN_REPURPOSING_SUCCESSES: list[dict[str, str]] = [
 # ═══════════════════════════════════════════════════════════════════════════
 # SECTION F: Cypher query constants (module-level, not inline)
 # ═══════════════════════════════════════════════════════════════════════════
-# Fixes audit issue 1.5 — queries extracted to module-level constants
-# Fixes audit issues 9.13 — Cypher defined as constants, not dynamically
+# Fixes audit issue 1.5 -- queries extracted to module-level constants
+# Fixes audit issues 9.13 -- Cypher defined as constants, not dynamically
 
 # FIX-P3-1: Removed dead _EVIDENCE_WEIGHT_CASE and _CAUSALITY_WEIGHT_CASE
 # constants. They were defined but never used anywhere in the file, and
@@ -592,7 +592,7 @@ def _validate_string_param(
 ) -> str:
     """Validate a string parameter.
 
-    Fixes audit issues 5.1, 5.5-5.9 — input validation guards.
+    Fixes audit issues 5.1, 5.5-5.9 -- input validation guards.
 
     Args:
         value: The value to validate.
@@ -623,7 +623,7 @@ def _validate_int_param(
 ) -> int:
     """Validate an integer parameter.
 
-    Fixes audit issues 4.18, 4.19, 5.2-5.4 — range validation.
+    Fixes audit issues 4.18, 4.19, 5.2-5.4 -- range validation.
 
     Args:
         value: The value to validate.
@@ -649,7 +649,7 @@ def _validate_int_param(
 def _clamp_score(score: float) -> float:
     """Clamp a score to [0.0, 1.0].
 
-    Fixes audit issue 3.18 — scores > 1.0 are scientifically invalid.
+    Fixes audit issue 3.18 -- scores > 1.0 are scientifically invalid.
     """
     return max(0.0, min(1.0, float(score)))
 
@@ -657,7 +657,7 @@ def _clamp_score(score: float) -> float:
 def _redact_for_log(value: str, max_len: int = 100) -> str:
     """Redact a string for safe logging (PII protection).
 
-    Fixes audit issues 9.1, 9.7, 11.2 — PII redaction in logs.
+    Fixes audit issues 9.1, 9.7, 11.2 -- PII redaction in logs.
     Truncates and escapes for safe inclusion in log messages.
     """
     if not value:
@@ -668,7 +668,7 @@ def _redact_for_log(value: str, max_len: int = 100) -> str:
 def _mask_properties(props: dict[str, Any]) -> dict[str, Any]:
     """Remove sensitive fields from node properties.
 
-    Fixes audit issue 9.3 — MASK_OUTPUT_FIELDS applied to all property returns.
+    Fixes audit issue 9.3 -- MASK_OUTPUT_FIELDS applied to all property returns.
     """
     return {
         k: v for k, v in props.items()
@@ -682,7 +682,7 @@ def _compute_weighted_severity(
 ) -> float:
     """Compute severity-weighted adverse event score.
 
-    Fixes KILL-4 — severity weighting by MedDRA term level.
+    Fixes KILL-4 -- severity weighting by MedDRA term level.
 
     Args:
         meddra_type: MedDRA term level (PT, LLT, HLT, HLGT, SOC).
@@ -700,7 +700,7 @@ def _compute_weighted_severity(
 def _compute_evidence_weight(edge_type: str) -> float:
     """Look up evidence strength weight for an edge type.
 
-    Fixes audit issues 3.19 — EDGE_EVIDENCE_STRENGTH integration.
+    Fixes audit issues 3.19 -- EDGE_EVIDENCE_STRENGTH integration.
 
     Args:
         edge_type: The relation type string.
@@ -717,7 +717,7 @@ def _compute_evidence_weight(edge_type: str) -> float:
 def _compute_causality_weight(edge_type: str) -> float:
     """Look up causality weight for an edge type.
 
-    Fixes audit issues 3.20 — EDGE_CAUSALITY integration.
+    Fixes audit issues 3.20 -- EDGE_CAUSALITY integration.
 
     Args:
         edge_type: The relation type string.
@@ -739,7 +739,7 @@ def _classify_safety_tier(
 ) -> str:
     """Classify a drug's safety tier based on adverse events and off-targets.
 
-    Fixes KILL-4 — medically justified safety-tier classification.
+    Fixes KILL-4 -- medically justified safety-tier classification.
     Withdrawn/terminated/illicit drugs are always 'red'.
 
     Args:
@@ -769,7 +769,7 @@ def _classify_safety_tier(
 def _safe_get(mapping: dict[str, Any], key: str, default: Any = None) -> Any:
     """Safe dict access with logging on missing key.
 
-    Fixes audit issue 4.3 — pair['drug_name'] KeyError.
+    Fixes audit issue 4.3 -- pair['drug_name'] KeyError.
     """
     if key in mapping:
         return mapping[key]
@@ -778,18 +778,18 @@ def _safe_get(mapping: dict[str, Any], key: str, default: Any = None) -> Any:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# SECTION H: DrugOSGraphQueries — Main query class
+# SECTION H: DrugOSGraphQueries -- Main query class
 # ═══════════════════════════════════════════════════════════════════════════
 
 class DrugOSGraphQueries:
     """Institutional-grade Cypher queries for the DrugOS knowledge graph.
 
     Provides five public methods for graph-based drug repurposing:
-      1. find_drug_candidates — multi-hop candidate discovery
-      2. get_mechanistic_pathway — biological pathway extraction
-      3. get_node_neighborhood — graph neighborhood exploration
-      4. get_drug_safety_profile — severity-weighted safety assessment
-      5. validate_known_repurposing — quality-checked validation
+      1. find_drug_candidates -- multi-hop candidate discovery
+      2. get_mechanistic_pathway -- biological pathway extraction
+      3. get_node_neighborhood -- graph neighborhood exploration
+      4. get_drug_safety_profile -- severity-weighted safety assessment
+      5. validate_known_repurposing -- quality-checked validation
 
     Supports context manager protocol for safe connection handling.
     All queries use canonical labels/edges from config.py and utils.py.
@@ -804,28 +804,28 @@ class DrugOSGraphQueries:
     """
 
     def __init__(self, config: Optional[Neo4jConfig] = None):
-        # Fixes audit issue 1.1 — use get_neo4j_config() singleton
+        # Fixes audit issue 1.1 -- use get_neo4j_config() singleton
         self.config = config or get_neo4j_config()
         self.driver: Optional[Driver] = None
         self._connected: bool = False
 
-        # Fixes audit issue 6.2 — circuit breaker for Neo4j queries
+        # Fixes audit issue 6.2 -- circuit breaker for Neo4j queries
         self._circuit_breaker: CircuitBreaker = CircuitBreaker(
             threshold=5, reset_after=60.0
         )
 
-        # Fixes audit issue 6.3 — dead letter queue for invalid results
+        # Fixes audit issue 6.3 -- dead letter queue for invalid results
         self._dead_letter: list[dict[str, Any]] = []
 
-        # Fixes audit issue 9.10 — rate limiting (100 queries per 60s)
+        # Fixes audit issue 9.10 -- rate limiting (100 queries per 60s)
         self._query_timestamps: list[float] = []
         self._rate_limit_count: int = 100
         self._rate_limit_window: float = 60.0
 
-        # Fixes audit issue 7.11 — optional result cache (TTL 300s)
+        # Fixes audit issue 7.11 -- optional result cache (TTL 300s)
         self._cache: dict[str, tuple[float, Any]] = {}
 
-        # Fixes audit issues 7.7, 7.8 — lineage tracking
+        # Fixes audit issues 7.7, 7.8 -- lineage tracking
         self._lineage: dict[str, str] = _build_query_metadata()
 
     # ─── Connection management ─────────────────────────────────────────
@@ -845,15 +845,15 @@ class DrugOSGraphQueries:
         """
         _check_neo4j_available()
 
-        # Fixes audit issue 1.8 — idempotent connect (no driver leak)
+        # Fixes audit issue 1.8 -- idempotent connect (no driver leak)
         if self.driver is not None and self._connected:
             logger.debug("Already connected to Neo4j (skipping duplicate connect)")
             return
 
-        # Fixes audit issue 7.5 — propagate global seed for reproducibility
+        # Fixes audit issue 7.5 -- propagate global seed for reproducibility
         set_global_seed()
 
-        # Fixes audit issue 7.8 — verify label map integrity before connecting
+        # Fixes audit issue 7.8 -- verify label map integrity before connecting
         try:
             verify_label_map_integrity()
         except RuntimeError as exc:
@@ -861,7 +861,7 @@ class DrugOSGraphQueries:
             audit_log("LABEL_MAP_INTEGRITY_FAILED", details=str(exc))
 
         # Create driver with configured pool size
-        # Fixes audit issue 6.9 — pass max_connection_pool_size
+        # Fixes audit issue 6.9 -- pass max_connection_pool_size
         self.driver = GraphDatabase.driver(
             self.config.uri,
             auth=(self.config.user, self.config.password),
@@ -869,7 +869,7 @@ class DrugOSGraphQueries:
             connection_timeout=self.config.connection_timeout,
         )
 
-        # Fixes audit issue 6.6 — verify connectivity (not lazy)
+        # Fixes audit issue 6.6 -- verify connectivity (not lazy)
         try:
             self.driver.verify_connectivity()
             self._connected = True
@@ -891,7 +891,7 @@ class DrugOSGraphQueries:
             },
         )
 
-        # Fixes audit issue 7.10 — log impact analysis for config dependencies
+        # Fixes audit issue 7.10 -- log impact analysis for config dependencies
         try:
             impact = compute_impact_analysis("CORE_EDGE_TYPES")
             if impact:
@@ -906,7 +906,7 @@ class DrugOSGraphQueries:
     def disconnect(self) -> None:
         """Close Neo4j connection idempotently.
 
-        Fixes audit issue 1.8 — idempotent disconnect.
+        Fixes audit issue 1.8 -- idempotent disconnect.
         """
         if self.driver is not None:
             try:
@@ -921,14 +921,14 @@ class DrugOSGraphQueries:
     def is_connected(self) -> bool:
         """Check if connected to Neo4j.
 
-        Fixes audit issue 6.13 — health-check method.
+        Fixes audit issue 6.13 -- health-check method.
         """
         return self._connected and self.driver is not None
 
     def health(self) -> dict[str, Any]:
         """Return health status of the query service.
 
-        Fixes audit issue 6.13 — health check for monitoring.
+        Fixes audit issue 6.13 -- health check for monitoring.
         """
         return {
             "connected": self.is_connected(),
@@ -948,7 +948,7 @@ class DrugOSGraphQueries:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> bool:
-        # Fixes audit issues 2.15, 4.14 — don't mask original exception
+        # Fixes audit issues 2.15, 4.14 -- don't mask original exception
         try:
             self.disconnect()
         except Exception:
@@ -960,12 +960,12 @@ class DrugOSGraphQueries:
     def __getstate__(self) -> dict[str, Any]:
         """Exclude password from pickle/serialization.
 
-        Fixes audit issue 9.11 — prevent password leak via pickle.
+        Fixes audit issue 9.11 -- prevent password leak via pickle.
         FIX-P3-13: previously replaced `config` (a Neo4jConfig) with the
         string "REDACTED". On unpickle, `self.config` would be a str and
         any method accessing `self.config.uri` raised AttributeError.
         Now set to None so the caller MUST re-attach a config before using
-        the unpickled instance — fails safe, no broken state.
+        the unpickled instance -- fails safe, no broken state.
         """
         state = self.__dict__.copy()
         if "config" in state and hasattr(state["config"], "password"):
@@ -1020,7 +1020,7 @@ class DrugOSGraphQueries:
             )
             # Reset circuit breaker on success
             self._circuit_breaker.record_success()
-            # Audit log (issue 9.9 — FDA 21 CFR Part 11)
+            # Audit log (issue 9.9 -- FDA 21 CFR Part 11)
             audit_log(
                 "QUERY_EXECUTED",
                 details=f"cypher_length={len(cypher)}, timeout={effective_timeout}",
@@ -1048,7 +1048,7 @@ class DrugOSGraphQueries:
     def _check_rate_limit(self) -> None:
         """Check and enforce rate limiting.
 
-        Fixes audit issue 9.10 — DoS protection.
+        Fixes audit issue 9.10 -- DoS protection.
         """
         now = time.time()
         # Prune old timestamps outside the window
@@ -1100,7 +1100,7 @@ class DrugOSGraphQueries:
             exclude_withdrawn: When True, withdrawn/terminated/illicit drugs
                 are excluded. Fixes KILL-4.
             offset: Pagination offset for result paging. (issue 2.13)
-            after_score: Cursor-based pagination — return results with score
+            after_score: Cursor-based pagination -- return results with score
                 below this value. (issue 2.13)
 
         Returns:
@@ -1304,7 +1304,7 @@ class DrugOSGraphQueries:
             # v42 FORENSIC ROOT FIX (P0-5): the previous code appended a
             # standalone ``WHERE ...`` clause AFTER the ``UNION ALL`` of the
             # branch queries, then continued with ``WITH * ORDER BY ...``.
-            # In Cypher, ``WHERE`` after ``UNION ALL`` is a SYNTAX ERROR —
+            # In Cypher, ``WHERE`` after ``UNION ALL`` is a SYNTAX ERROR --
             # ``WHERE`` must be a sub-clause of ``WITH`` or ``MATCH``.
             # Since ``exclude_withdrawn=True`` is the DEFAULT parameter,
             # ``where_clauses`` was non-empty on every default call, so
@@ -1345,7 +1345,7 @@ class DrugOSGraphQueries:
             extra={"run_id": RUN_ID},
         )
 
-        # ── Dedup by (drug_id, disease_id) — fixes 5.15 ──
+        # ── Dedup by (drug_id, disease_id) -- fixes 5.15 ──
         seen: dict[tuple[str, str], DrugRepurposingCandidate] = {}
         lineage = _build_query_metadata()
 
@@ -1393,7 +1393,7 @@ class DrugOSGraphQueries:
                 })
 
         # Deterministic sort with tiebreaker
-        # Fixes issues 7.1, 7.10 — deterministic ordering
+        # Fixes issues 7.1, 7.10 -- deterministic ordering
         ranked = sorted(
             seen.values(),
             key=lambda c: (c.score, c.drug_id),
@@ -1470,7 +1470,7 @@ class DrugOSGraphQueries:
         dc = DEFAULT_ENTITY_CONFIDENCE
         lineage = _build_query_metadata()
 
-        # Fixes 4.1: max_depth is validated int — safe f-string interpolation
+        # Fixes 4.1: max_depth is validated int -- safe f-string interpolation
         cypher = f"""
             MATCH path = (c:`{_LABEL_COMPOUND}` {{id: $drug_id}})-[*1..{max_depth}]-(d:`{_LABEL_DISEASE}` {{id: $disease_id}})
             WITH path,
@@ -1618,7 +1618,7 @@ class DrugOSGraphQueries:
 
         # Fixes 5.10: raise exception instead of returning error dict
         if center_rec is None:
-            # Log ID at DEBUG only (issue 9.2 — don't leak ID to caller)
+            # Log ID at DEBUG only (issue 9.2 -- don't leak ID to caller)
             logger.debug(
                 "Node not found: %s", node_id,
                 extra={"run_id": RUN_ID},
@@ -1738,7 +1738,7 @@ class DrugOSGraphQueries:
                     seen_se[se_id] = dict(rec)
                 if rec["source"] == "legacy":
                     logger.warning(
-                        "Legacy SIDER data found for drug '%s' — "
+                        "Legacy SIDER data found for drug '%s' -- "
                         "migration may be incomplete",
                         _redact_for_log(drug_id),
                         extra={"run_id": RUN_ID},
@@ -2022,7 +2022,7 @@ class DrugOSGraphQueries:
 # ═══════════════════════════════════════════════════════════════════════════
 # SECTION I: Module public API (__all__)
 # ═══════════════════════════════════════════════════════════════════════════
-# Fixes audit issue 4.24 — restrict import * to public API only
+# Fixes audit issue 4.24 -- restrict import * to public API only
 
 __all__: list[str] = [
     # Main class
@@ -2051,7 +2051,7 @@ __all__: list[str] = [
 # ═══════════════════════════════════════════════════════════════════════════
 # SECTION J: __main__ block (demo / smoke test)
 # ═══════════════════════════════════════════════════════════════════════════
-# Fixes audit issues 4.5, 4.23, 12.11 — use config logging, error handling
+# Fixes audit issues 4.5, 4.23, 12.11 -- use config logging, error handling
 
 if __name__ == "__main__":
     import sys

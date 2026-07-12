@@ -2,7 +2,7 @@
 
 Targeted unit tests for the 22 bugs fixed in the v100 forensic root-fix
 branch. Each test verifies a specific fix is in place and behaves
-correctly. Tests are HERMETIC — no network, no Neo4j, no Postgres.
+correctly. Tests are HERMETIC -- no network, no Neo4j, no Postgres.
 """
 from __future__ import annotations
 
@@ -53,14 +53,14 @@ def test_R_002_run_phase2_kg_builder_has_seed_param():
         except Exception:
             continue
         if not hasattr(mod, "run_phase2_kg_builder"):
-            continue  # Function deleted — valid R-INT-002 alternative fix.
+            continue  # Function deleted -- valid R-INT-002 alternative fix.
         sig = inspect.signature(mod.run_phase2_kg_builder)
         assert "seed" in sig.parameters, (
             "R-002 REGRESSION: run_phase2_kg_builder is missing 'seed' parameter"
         )
         return
     # If no file has the function, that's the R-INT-002 alternative fix
-    # (function deleted entirely) — valid.
+    # (function deleted entirely) -- valid.
 
 
 def test_R_003_R_004_no_duplicate_run_bridge_call():
@@ -168,7 +168,7 @@ def test_R_006_run_real_pipeline_has_phase1_wiring():
         # Must NOT call build_demo_graph as the default path.
         assert "num_drugs=args.num_drugs" not in src or \
                "phase1_staged_data=staged" in src, (
-            "R-006: no --demo flag AND no phase1_staged_data — synthetic fallback"
+            "R-006: no --demo flag AND no phase1_staged_data -- synthetic fallback"
         )
 
 
@@ -274,7 +274,7 @@ def test_P3_005_pathway_diff_runs_unconditionally():
     # The unreachable dead code (return inside try, then more code) must be gone.
     # The new structure has a single return after the try/except.
     # Accept either "v100 ROOT FIX (P3-005)" or "V92 ROOT FIX (BUG P3-005)"
-    # marker — both branches applied the same fix with different comment styles.
+    # marker -- both branches applied the same fix with different comment styles.
     assert (
         "v100 ROOT FIX (P3-005)" in src
         or "V92 ROOT FIX (BUG P3-005" in src
@@ -437,7 +437,7 @@ def test_P1_003_docker_compose_has_missing_mounts():
     exporters_count = src.count("./exporters:/opt/airflow/exporters")
     scripts_count = src.count("./scripts:/opt/airflow/scripts")
     assert data_count == 3, (
-        f"P1-003 INCOMPLETE: ./data mount appears {data_count} times (expected 3 — one per airflow service)"
+        f"P1-003 INCOMPLETE: ./data mount appears {data_count} times (expected 3 -- one per airflow service)"
     )
     assert exporters_count == 3, (
         f"P1-003 INCOMPLETE: ./exporters mount appears {exporters_count} times (expected 3)"

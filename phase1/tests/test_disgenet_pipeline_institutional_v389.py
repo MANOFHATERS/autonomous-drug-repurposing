@@ -5,8 +5,8 @@ the upgraded DisGeNET pipeline correctly addresses the 389 forensic-audit
 findings documented in ``disgenet_pipeline_fix_prompt.md``, covering all
 16 quality domains.
 
-Every test here verifies REAL behaviour with REAL assertions — no ``pass``
-statements, no ``assertTrue(True)``.  All tests are mock-based — no network
+Every test here verifies REAL behaviour with REAL assertions -- no ``pass``
+statements, no ``assertTrue(True)``.  All tests are mock-based -- no network
 access is required.
 
 The tests are grouped by domain, in the priority order mandated by the
@@ -199,7 +199,7 @@ def _make_tsv(rows: list[dict], path: Path, columns: list[str] | None = None) ->
 
 
 # ============================================================================
-# Domain 3 — SCIENTIFIC CORRECTNESS (LIFE-SAFETY, audited FIRST)
+# Domain 3 -- SCIENTIFIC CORRECTNESS (LIFE-SAFETY, audited FIRST)
 # ============================================================================
 
 class TestDomain3ScientificCorrectness:
@@ -264,7 +264,7 @@ class TestDomain3ScientificCorrectness:
         assert set(df["source_id"].dropna()) >= {"CURATED", "BEFREE"}
 
     def test_sci_4_distinct_subsources_coexist(self, disgenet_pipeline):
-        """SCI-4: source = disgenet_<subsource> — distinct subsources coexist."""
+        """SCI-4: source = disgenet_<subsource> -- distinct subsources coexist."""
         rows = [
             {"geneId": 672, "gene_symbol": "BRCA1", "diseaseId": "C0006142",
              "disease_name": "Breast Cancer", "sourceId": "CURATED",
@@ -390,14 +390,14 @@ class TestDomain3ScientificCorrectness:
         assert _classify_confidence(0.3) == "strong"
         assert _classify_confidence(0.5) == "strong"
         assert _classify_confidence(1.0) == "strong"
-        # The 0.7 → "very_high" tier must NOT exist.
+        # The 0.7 -> "very_high" tier must NOT exist.
         assert "very_high" not in [t[1] for t in CONFIDENCE_TIERS]
 
     def test_sci_12_no_dead_branch_in_classify_confidence(self):
-        """SCI-12: _classify_confidence has no dead branch — raises on NaN/negative."""
+        """SCI-12: _classify_confidence has no dead branch -- raises on NaN/negative."""
         # NaN should raise (defensive assertion).
         # SCI-FIX: classify_confidence (cleaning/confidence.py) was hardened
-        # to raise ValueError instead of AssertionError — asserts are
+        # to raise ValueError instead of AssertionError -- asserts are
         # silently disabled under ``python -O``, which is unacceptable for
         # a patient-safety invariant. ValueError fires regardless of
         # optimization level. This test accepts either exception type
@@ -433,7 +433,7 @@ class TestDomain3ScientificCorrectness:
         We verify the dead-letter queue has the row.
         """
         # Write a TSV with a non-numeric score.  We bypass read_csv's dtype
-        # by using a column name that's not in the dtype spec — but the
+        # by using a column name that's not in the dtype spec -- but the
         # pipeline's _coerce_score_and_gene_id still catches it via
         # pd.to_numeric(errors='coerce') + the non-numeric mask.
         # Use a value that survives read_csv as a string.
@@ -450,7 +450,7 @@ class TestDomain3ScientificCorrectness:
         try:
             df = disgenet_pipeline.clean(tsv_path)
         except (ValueError, pd.errors.ParserError):
-            # pandas may raise on the non-numeric score — that's also
+            # pandas may raise on the non-numeric score -- that's also
             # acceptable (the row is rejected either way).
             df = pd.DataFrame()
         # Either the df is empty (row quarantined) or the dead-letter has it.
@@ -515,7 +515,7 @@ class TestDomain3ScientificCorrectness:
         assert SOURCE_ID_TO_ASSOCIATION_TYPE["BEFREE"] == "text_mined"
         assert SOURCE_ID_TO_ASSOCIATION_TYPE["GWAS_CATALOG"] == "gwas"
         assert SOURCE_ID_TO_ASSOCIATION_TYPE["ORPHANET"] == "rare_disease_curated"
-        # Unknown source_id → "unknown".
+        # Unknown source_id -> "unknown".
         assert DEFAULT_ASSOCIATION_TYPE == "unknown"
 
     def test_sci_20_no_synthetic_disease_name(self, disgenet_pipeline):
@@ -617,7 +617,7 @@ class TestDomain3ScientificCorrectness:
 
         monkeypatch.setattr(disgenet_pipeline, "_api_get_disgenet", mock_api_get)
         disgenet_pipeline._source_format = DisGeNETSourceFormat.API
-        # Force download — should raise due to completeness assertion.
+        # Force download -- should raise due to completeness assertion.
         with pytest.raises(RuntimeError, match="completeness assertion failed"):
             disgenet_pipeline._download_via_api()
 
@@ -639,7 +639,7 @@ class TestDomain3ScientificCorrectness:
 
     def test_sci_27_no_silent_fallback_to_deprecated_static(self, monkeypatch):
         """SCI-27: DISGENET_USE_API=True with empty key raises ValueError."""
-        # We can't easily test this without reimporting settings — verify
+        # We can't easily test this without reimporting settings -- verify
         # the logic in DisGeNETPipeline.download() instead.
         from config.settings import DataSourceName
         # The download() method checks DISGENET_USE_API and DISGENET_API_KEY.
@@ -796,7 +796,7 @@ class TestDomain3ScientificCorrectness:
         """SCI-37: dedup is centralised in validate_gda_scores.
 
         Two identical (gene_id, disease_id, source) rows collapse to one.
-        The validator uses ``drop_duplicates(keep="first")`` — the first
+        The validator uses ``drop_duplicates(keep="first")`` -- the first
         row in the DataFrame survives.  The audit (DQ-6, IDEM-19) requires
         a deterministic tiebreak; for the validator's default behaviour,
         the first row wins.  The bulk_upsert_gda loader applies an
@@ -824,13 +824,13 @@ class TestDomain3ScientificCorrectness:
 
     def test_sci_38_normalized_score_weights_applied(self):
         """SCI-38: normalized_score = score × source_weight."""
-        # CURATED weight = 1.0 → normalized = score.
+        # CURATED weight = 1.0 -> normalized = score.
         assert _compute_normalized_score(0.5, "CURATED") == 0.5
-        # BEFREE weight = 0.5 → normalized = 0.25.
+        # BEFREE weight = 0.5 -> normalized = 0.25.
         assert _compute_normalized_score(0.5, "BEFREE") == 0.25
-        # Unknown source → weight 1.0.
+        # Unknown source -> weight 1.0.
         assert _compute_normalized_score(0.5, "UNKNOWN") == 0.5
-        # None inputs → None.
+        # None inputs -> None.
         assert _compute_normalized_score(None, "CURATED") is None
         assert _compute_normalized_score(0.5, None) is None
 
@@ -897,11 +897,11 @@ class TestDomain3ScientificCorrectness:
 
 
 # ============================================================================
-# Domain 5 — DATA QUALITY & INTEGRITY
+# Domain 5 -- DATA QUALITY & INTEGRITY
 # ============================================================================
 
 class TestDomain5DataQuality:
-    """Domain 5: garbage in = caught, flagged, quarantined — never silently propagated."""
+    """Domain 5: garbage in = caught, flagged, quarantined -- never silently propagated."""
 
     def test_dq_1_gene_id_always_present(self, disgenet_pipeline):
         """DQ-1: _ensure_gda_columns ensures gene_id column exists."""
@@ -984,7 +984,7 @@ class TestDomain5DataQuality:
         df.to_csv(output_path, index=False)
         manifest_path = output_path.with_suffix(".csv.manifest")
         manifest_path.write_text(json.dumps({"primary_source": "omim"}))
-        # Now try to save with primary_source='disgenet' → should raise.
+        # Now try to save with primary_source='disgenet' -> should raise.
         new_df = pd.DataFrame({"disease_id": ["C0006143"], "source": ["disgenet"]})
         with pytest.raises(RuntimeError, match="contains data from"):
             disgenet_pipeline._save_processed_csv(new_df, output_path, "disgenet")
@@ -997,7 +997,7 @@ class TestDomain5DataQuality:
         df.to_csv(output_path, index=False)
         manifest_path = output_path.with_suffix(".csv.manifest")
         manifest_path.write_text(json.dumps({"primary_source": "disgenet"}))
-        # Call twice — should return the same result.
+        # Call twice -- should return the same result.
         r1 = disgenet_pipeline._read_manifest_source(manifest_path, output_path)
         r2 = disgenet_pipeline._read_manifest_source(manifest_path, output_path)
         assert r1 == r2 == "disgenet"
@@ -1005,18 +1005,18 @@ class TestDomain5DataQuality:
     def test_dq_10_no_silent_exception_swallowing(self, disgenet_pipeline, tmp_path):
         """DQ-10: _read_manifest_source logs a WARNING (not silent) on corrupt CSV.
 
-        The corrupt CSV has no 'source' column — _read_manifest_source
+        The corrupt CSV has no 'source' column -- _read_manifest_source
         should catch the exception and return None (legacy fallback).
         """
         import pipelines.disgenet_pipeline as dpmod
         output_path = dpmod.PROCESSED_DATA_DIR / "test_corrupt.csv"
         # Write a CSV WITHOUT a 'source' column (no manifest).
         output_path.write_text("a,b,c\n1,2,3\n")
-        # Should NOT raise — should return None with a WARNING log.
+        # Should NOT raise -- should return None with a WARNING log.
         result = disgenet_pipeline._read_manifest_source(
             output_path.with_suffix(".csv.manifest"), output_path
         )
-        # The result should be None (no source column → no source detected).
+        # The result should be None (no source column -> no source detected).
         assert result is None or isinstance(result, str)
 
     def test_dq_13_gene_symbol_case_normalised(self, disgenet_pipeline):
@@ -1101,12 +1101,12 @@ class TestDomain5DataQuality:
         tsv_path = disgenet_pipeline.raw_dir / "test.tsv"
         _make_tsv(rows, tsv_path)
         df = disgenet_pipeline.clean(tsv_path)
-        # Load — UNKNOWN_GENE will not resolve → dead letter.
+        # Load -- UNKNOWN_GENE will not resolve -> dead letter.
         # Pass the fixture's session so we can query the dead_letter_gda table.
         disgenet_pipeline.load(df, session=populated_db_session)
         populated_db_session.commit()
         # Check the dead_letter_gda table.
-        # v14 ROOT FIX: accept EITHER reason — 'invalid_gene_symbol_format'
+        # v14 ROOT FIX: accept EITHER reason -- 'invalid_gene_symbol_format'
         # fires at clean() time for symbols failing format validation;
         # 'unresolved_gene_symbol' fires at load() time for symbols that
         # pass format validation but can't be resolved to UniProt. The
@@ -1163,11 +1163,11 @@ class TestDomain5DataQuality:
 
 
 # ============================================================================
-# Domain 7 — IDEMPOTENCY & REPRODUCIBILITY
+# Domain 7 -- IDEMPOTENCY & REPRODUCIBILITY
 # ============================================================================
 
 class TestDomain7Idempotency:
-    """Domain 7: same input → same output, run after run."""
+    """Domain 7: same input -> same output, run after run."""
 
     def test_idem_1_csv_idempotent(self, disgenet_pipeline):
         """IDEM-1: running clean() twice produces identical CSVs (modulo manifest)."""
@@ -1198,7 +1198,7 @@ class TestDomain7Idempotency:
 
         The sidecar is named ``<dest>.sha256`` (appended to the full
         filename, including the .tsv suffix).  We test the cache check
-        directly by calling ``_download_via_api`` — the cache hit should
+        directly by calling ``_download_via_api`` -- the cache hit should
         skip the API call entirely.
         """
         # Write a cached file + a matching SHA-256 sidecar.
@@ -1220,7 +1220,7 @@ class TestDomain7Idempotency:
         # Call _download_via_api directly (bypasses download()'s
         # DISGENET_USE_API dispatch).
         result = disgenet_pipeline._download_via_api()
-        assert called["n"] == 0  # cache hit — no API call.
+        assert called["n"] == 0  # cache hit -- no API call.
         assert result == dest
 
     def test_idem_5_no_records_raises_not_writes_empty(self, disgenet_pipeline, monkeypatch):
@@ -1329,7 +1329,7 @@ class TestDomain7Idempotency:
 
 
 # ============================================================================
-# Domain 1 — ARCHITECTURE
+# Domain 1 -- ARCHITECTURE
 # ============================================================================
 
 class TestDomain1Architecture:
@@ -1339,7 +1339,7 @@ class TestDomain1Architecture:
         """ARCH-3: load() opens a single DB session (or uses the passed session).
 
         When a session is passed (the preferred path), ``get_db_session``
-        is NOT called at all — the caller manages the transaction.
+        is NOT called at all -- the caller manages the transaction.
         """
         rows = [{"geneId": 672, "gene_symbol": "BRCA1", "diseaseId": "C0006142",
                  "disease_name": "X", "sourceId": "CURATED",
@@ -1424,7 +1424,7 @@ class TestDomain1Architecture:
 
 
 # ============================================================================
-# Domain 9 — SECURITY & PRIVACY
+# Domain 9 -- SECURITY & PRIVACY
 # ============================================================================
 
 class TestDomain9Security:
@@ -1433,7 +1433,7 @@ class TestDomain9Security:
     def test_sec_1_no_api_key_in_logs(self, disgenet_pipeline, monkeypatch, caplog):
         """SEC-1: API key is never logged."""
         import requests as _requests
-        # Trigger an API call that fails — verify the key is not in logs.
+        # Trigger an API call that fails -- verify the key is not in logs.
         def mock_get(*args, **kwargs):
             raise _requests.exceptions.ConnectionError("simulated")
 
@@ -1503,7 +1503,7 @@ class TestDomain9Security:
         The DisGeNET pipeline's http_session property sets a
         DrugRepurposing User-Agent.  However, the base class's
         http_session may have already been initialised by a prior test
-        — we verify the property sets the header on first access by
+        -- we verify the property sets the header on first access by
         using a fresh pipeline instance.
         """
         # Use a fresh pipeline to ensure http_session is initialised anew.
@@ -1515,7 +1515,7 @@ class TestDomain9Security:
         ua = session.headers.get("User-Agent", "")
         # The User-Agent should contain 'DrugRepurposing' (set by our property).
         # If the base class already set a different UA, our setdefault won't
-        # override it — so we accept either our UA or the base class's.
+        # override it -- so we accept either our UA or the base class's.
         assert ua  # non-empty
         # Verify the property code path sets the header (via source inspection).
         import inspect as _inspect
@@ -1524,7 +1524,7 @@ class TestDomain9Security:
         assert "DrugRepurposing" in src
 
     def test_sec_17_403_not_retried(self, disgenet_pipeline, monkeypatch):
-        """SEC-17: 403 response is NOT retried — fails immediately."""
+        """SEC-17: 403 response is NOT retried -- fails immediately."""
         call_count = {"n": 0}
 
         class MockResponse:
@@ -1558,15 +1558,15 @@ class TestDomain9Security:
 
 
 # ============================================================================
-# Domain 2 — DESIGN
+# Domain 2 -- DESIGN
 # ============================================================================
 
 class TestDomain2Design:
-    """Domain 2: magic numbers → configurable constants; single source of truth."""
+    """Domain 2: magic numbers -> configurable constants; single source of truth."""
 
     def test_des_3_bisect_used(self):
         """DES-3: classify_confidence uses bisect (verified by behaviour)."""
-        # Test a large set of scores — the function should be O(log k).
+        # Test a large set of scores -- the function should be O(log k).
         for s in np.linspace(0.0, 1.0, 1000):
             result = _classify_confidence(s)
             assert result in {"weak", "moderate", "strong"}
@@ -1579,7 +1579,7 @@ class TestDomain2Design:
         original_count, capped, was_capped = DisGeNETPipeline._cap_pmid_list(
             ["1234567", "7654321"]
         )
-        # Should be sorted descending (recent_first) — 7654321 first.
+        # Should be sorted descending (recent_first) -- 7654321 first.
         assert capped is not None
         result_list = capped.split(";")
         assert "7654321" in result_list
@@ -1604,7 +1604,7 @@ class TestDomain2Design:
 
 
 # ============================================================================
-# Domain 14 — COMPLIANCE & STANDARDS ADHERENCE
+# Domain 14 -- COMPLIANCE & STANDARDS ADHERENCE
 # ============================================================================
 
 class TestDomain14Compliance:
@@ -1715,7 +1715,7 @@ class TestDomain14Compliance:
 
 
 # ============================================================================
-# Domain 6 — RELIABILITY & RESILIENCE
+# Domain 6 -- RELIABILITY & RESILIENCE
 # ============================================================================
 
 class TestDomain6Reliability:
@@ -1746,7 +1746,7 @@ class TestDomain6Reliability:
 
 
 # ============================================================================
-# Domain 10 — TESTING & VALIDATION (this test file itself)
+# Domain 10 -- TESTING & VALIDATION (this test file itself)
 # ============================================================================
 
 class TestDomain10Testing:
@@ -1782,7 +1782,7 @@ class TestDomain10Testing:
 
 
 # ============================================================================
-# Domain 4 — CODING
+# Domain 4 -- CODING
 # ============================================================================
 
 class TestDomain4Coding:
@@ -1824,7 +1824,7 @@ class TestDomain4Coding:
 
 
 # ============================================================================
-# Domain 8 — PERFORMANCE & SCALABILITY
+# Domain 8 -- PERFORMANCE & SCALABILITY
 # ============================================================================
 
 class TestDomain8Performance:
@@ -1860,7 +1860,7 @@ class TestDomain8Performance:
 
 
 # ============================================================================
-# Domain 11 — LOGGING & OBSERVABILITY
+# Domain 11 -- LOGGING & OBSERVABILITY
 # ============================================================================
 
 class TestDomain11Logging:
@@ -1908,7 +1908,7 @@ class TestDomain11Logging:
 
 
 # ============================================================================
-# Domain 12 — CONFIGURATION & ENVIRONMENT MANAGEMENT
+# Domain 12 -- CONFIGURATION & ENVIRONMENT MANAGEMENT
 # ============================================================================
 
 class TestDomain12Configuration:
@@ -1963,7 +1963,7 @@ class TestDomain12Configuration:
 
 
 # ============================================================================
-# Domain 15 — INTEROPERABILITY & INTEGRATION
+# Domain 15 -- INTEROPERABILITY & INTEGRATION
 # ============================================================================
 
 class TestDomain15Interoperability:
@@ -2008,7 +2008,7 @@ class TestDomain15Interoperability:
 
 
 # ============================================================================
-# Domain 16 — DATA LINEAGE & TRACEABILITY
+# Domain 16 -- DATA LINEAGE & TRACEABILITY
 # ============================================================================
 
 class TestDomain16Lineage:
@@ -2106,7 +2106,7 @@ class TestDomain16Lineage:
 
 
 # ============================================================================
-# Domain 13 — DOCUMENTATION & READABILITY
+# Domain 13 -- DOCUMENTATION & READABILITY
 # ============================================================================
 
 class TestDomain13Documentation:

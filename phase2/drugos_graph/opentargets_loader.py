@@ -1,18 +1,18 @@
-"""DrugOS Graph Module — OpenTargets Loader (v2.0 — Institutional Grade)
+"""DrugOS Graph Module -- OpenTargets Loader (v2.0 -- Institutional Grade)
 =========================================================================
-Downloads, validates, and parses the **OpenTargets evidence database** —
+Downloads, validates, and parses the **OpenTargets evidence database** --
 the primary source of scored drug-target-disease evidence triples in the
 DrugOS knowledge graph.
 
 If this loader silently drops 100% of records (the v1 SCI-1 condition),
-the Graph Transformer trains on an empty OpenTargets signal — *worse than
+the Graph Transformer trains on an empty OpenTargets signal -- *worse than
 no signal* because the operator believes the signal exists. The model
 then ranks drugs with no evidence-scored confidence signal, the RL ranker
 applies safety + market multipliers in a vacuum, a clinician acts on the
 ranking, and a patient is harmed. This file therefore implements every
 guard mandated by the 16-domain forensic audit (182 findings).
 
-OpenTargets evidence JSONL format (REAL, NOT fabricated — fixes SCI-1):
+OpenTargets evidence JSONL format (REAL, NOT fabricated -- fixes SCI-1):
     One JSON object per line, gzipped. Flat schema (NOT nested):
 
         {"datasourceId":"chembl","datatypeId":"known_drug",
@@ -26,25 +26,25 @@ OpenTargets evidence JSONL format (REAL, NOT fabricated — fixes SCI-1):
     The v1 parser used a fabricated nested schema (entry["drug"]["id"],
     entry["target"]["id"], entry["disease"]["id"], entry["scores"]
     ["overall"]) that does NOT exist in real OpenTargets releases. Every
-    record yielded empty IDs → silently dropped → KG had zero OpenTargets
+    record yielded empty IDs -> silently dropped -> KG had zero OpenTargets
     edges. This is the SCI-1 catastrophic bug.
 
-Public API (preserved from v1 — ``run_pipeline.py`` unchanged):
+Public API (preserved from v1 -- ``run_pipeline.py`` unchanged):
     download_opentargets, parse_opentargets_evidence,
     opentargets_to_edge_records
 
 New in v2.0 (additive, backward-compatible):
-    OpenTargetsLoader       — adapter implementing the ``Loader`` Protocol.
-    PARSER_VERSION, SCHEMA_VERSION — versioning for reproducibility.
-    OpenTargetsConfig       — frozen dataclass with validation.
-    validate_opentargets    — post-parse data quality validation.
-    iter_opentargets_evidence — streaming API for 5M-record files.
-    opentargets_to_node_records — compound node record generation.
-    opentargets_to_graph    — (nodes, edges) pair for KG construction.
-    load_opentargets        — end-to-end load pipeline.
-    datasource_to_relation  — scientific mapping from datasourceId+datatypeId
+    OpenTargetsLoader       -- adapter implementing the ``Loader`` Protocol.
+    PARSER_VERSION, SCHEMA_VERSION -- versioning for reproducibility.
+    OpenTargetsConfig       -- frozen dataclass with validation.
+    validate_opentargets    -- post-parse data quality validation.
+    iter_opentargets_evidence -- streaming API for 5M-record files.
+    opentargets_to_node_records -- compound node record generation.
+    opentargets_to_graph    -- (nodes, edges) pair for KG construction.
+    load_opentargets        -- end-to-end load pipeline.
+    datasource_to_relation  -- scientific mapping from datasourceId+datatypeId
                               to (rel_type, dst_type) (replaces broken
-                              "indication" label — fixes SCI-8).
+                              "indication" label -- fixes SCI-8).
 
 Idempotency (clinical-safety requirement):
     Two runs of ``parse_opentargets_evidence`` on the same .json.gz file
@@ -53,41 +53,41 @@ Idempotency (clinical-safety requirement):
     The only non-deterministic field is ``_provenance["parsed_at"]``
     (ISO-8601 timestamp).
 
-Errors raised (Domain 6 — Reliability):
-    OpenTargetsDownloadError           — download failure (TLS / allowlist /
+Errors raised (Domain 6 -- Reliability):
+    OpenTargetsDownloadError           -- download failure (TLS / allowlist /
                                           size / SHA-256 / content-sniff).
-    OpenTargetsParseError              — JSONL parse failure (BadGzipFile,
+    OpenTargetsParseError              -- JSONL parse failure (BadGzipFile,
                                           per-record errors, circuit breaker).
-    OpenTargetsDataIntegrityError      — content failure (0 records, low
+    OpenTargetsDataIntegrityError      -- content failure (0 records, low
                                           resolution rate, schema drift).
-    OpenTargetsSecurityError           — security violation (URL scheme,
+    OpenTargetsSecurityError           -- security violation (URL scheme,
                                           path traversal, embedded creds).
-    OpenTargetsConfigurationError      — invalid OpenTargetsConfig field.
-    OpenTargetsEdgeLoadMismatchError   — Neo4j load dropped edges.
-    OpenTargetsSchemaError             — output schema violation
+    OpenTargetsConfigurationError      -- invalid OpenTargetsConfig field.
+    OpenTargetsEdgeLoadMismatchError   -- Neo4j load dropped edges.
+    OpenTargetsSchemaError             -- output schema violation
                                           (missing provenance, "indication").
 
 Dead-letter queue: ``data/dead_letter/opentargets_malformed.jsonl`` (one
-JSON line per dropped record — Domain 5 Data Quality / REL-5).
+JSON line per dropped record -- Domain 5 Data Quality / REL-5).
 
 Lineage log: ``logs/lineage/opentargets_lineage.jsonl`` (one JSON line
-per transformation step — Domain 16 Lineage / LIN-6).
+per transformation step -- Domain 16 Lineage / LIN-6).
 
 Audit log: ``logs/audit/opentargets_access.jsonl`` (one JSON line per
-download + per access — Domain 9 Security / SEC-5).
+download + per access -- Domain 9 Security / SEC-5).
 
-License: CC0 1.0 — attribution propagated in ``_license`` and
+License: CC0 1.0 -- attribution propagated in ``_license`` and
 ``_attribution`` fields (Domain 14 Compliance / COMP-3).
 
 Patient-safety escalation doctrine (Section 0.4):
     Three enforcement tiers (read from ``AUCEnforcementLevel`` via
     ``OpenTargetsConfig.enforcement_level``):
-      * DEVELOPMENT — log WARNING, continue with partial data.
-      * CLINICAL    — log ERROR + raise ``OpenTargetsDataIntegrityError``
+      * DEVELOPMENT -- log WARNING, continue with partial data.
+      * CLINICAL    -- log ERROR + raise ``OpenTargetsDataIntegrityError``
                        on: 0 records, <50% target resolution,
                        <50% expected record count, checksum/size mismatch,
                        schema-version drift.
-      * REGULATORY  — all CLINICAL triggers + raise on: <90% target
+      * REGULATORY  -- all CLINICAL triggers + raise on: <90% target
                        resolution, ANY non-human record, ANY ID failing
                        format validation.
 
@@ -101,7 +101,7 @@ References:
     doi:10.1093/nar/gkw1055
 
 SCHEMA CHANGELOG:
-    v2.0.0 (2026-06-18) — Institutional-grade rewrite. Adds:
+    v2.0.0 (2026-06-18) -- Institutional-grade rewrite. Adds:
         - PARSER_VERSION / SCHEMA_VERSION constants.
         - ``OpenTargetsLoader`` Protocol adapter.
         - ``OpenTargetsConfig`` frozen dataclass.
@@ -110,17 +110,17 @@ SCHEMA CHANGELOG:
         - Per-record dead-letter queue + lineage + audit logs.
         - ``_provenance`` dict with all ``OPENTARGETS_PROVENANCE_KEYS``.
         - Scientific mapping from datasourceId+datatypeId to relation type
-          (replaces broken "indication" label — fixes SCI-8).
+          (replaces broken "indication" label -- fixes SCI-8).
         - Per-evidence-type score thresholds (fixes SCI-11).
         - Semantic-specific score keys per edge type (fixes SCI-12).
         - Edge deduplication with max-score + evidence_count (fixes SCI-13).
         - Organism filtering via targetTaxId (fixes SCI-7).
         - ChEMBL ID, ENSG ID, disease ID format validation (fixes SCI-4,
           SCI-10, DQ-11).
-        - Score range validation (rejects NaN/Infinity/bool/string — fixes
+        - Score range validation (rejects NaN/Infinity/bool/string -- fixes
           SCI-5, DQ-8, COD-1..4).
         - Disease ID crosswalk to UMLS CUI (fixes SCI-3).
-        - ENSG → NCBI Gene ID crosswalk (fixes SCI-9).
+        - ENSG -> NCBI Gene ID crosswalk (fixes SCI-9).
         - Streaming parser (``iter_opentargets_evidence``) for 5M-record
           files (fixes PERF-1).
         - Batched crosswalk lookup (fixes PERF-3).
@@ -131,17 +131,17 @@ SCHEMA CHANGELOG:
         - ``load_opentargets`` end-to-end pipeline.
         - Deprecated legacy ``source`` field with DeprecationWarning
           (fixes SEC-9 / COMP-4).
-    v1.0.0 (initial) — basic download + parse with fabricated nested
+    v1.0.0 (initial) -- basic download + parse with fabricated nested
         schema (SCI-1 catastrophic bug, dropped 100% of real records).
 """
 
 from __future__ import annotations
 
 # =============================================================================
-# Section 0 — Imports
+# Section 0 -- Imports
 # =============================================================================
-# Fixes Domain 4 (Coding) — all imports at module top.
-# Fixes Domain 12 (Configuration) — no magic numbers; all thresholds come
+# Fixes Domain 4 (Coding) -- all imports at module top.
+# Fixes Domain 12 (Configuration) -- no magic numbers; all thresholds come
 # from config.py constants.
 
 import gzip
@@ -267,10 +267,10 @@ if TYPE_CHECKING:  # pragma: no cover
 
 
 # =============================================================================
-# Section 1 — Module-level constants & metadata
+# Section 1 -- Module-level constants & metadata
 # =============================================================================
-# Fixes Domain 1 (Architecture) — explicit __all__, version constants.
-# Fixes Domain 14 (Compliance) — schema versioning, naming conventions.
+# Fixes Domain 1 (Architecture) -- explicit __all__, version constants.
+# Fixes Domain 14 (Compliance) -- schema versioning, naming conventions.
 # Fixes opentargets_loader_repair_prompt Section 0.2 constraint #22.
 
 PARSER_VERSION: str = OPENTARGETS_PARSER_VERSION  # "2.0.0"
@@ -300,7 +300,7 @@ NON_HUMAN_ENSG_PREFIXES: Tuple[str, ...] = (
     "ENSBTAG",  # cow
 )
 
-# Gzip magic bytes (DQ-2) — first two bytes of any gzip file.
+# Gzip magic bytes (DQ-2) -- first two bytes of any gzip file.
 GZIP_MAGIC: bytes = OPENTARGETS_GZIP_MAGIC  # b"\x1f\x8b"
 
 # Sidecar file suffixes (DQ-14, DQ-15).
@@ -311,7 +311,7 @@ _SIDECAR_META_SUFFIX: str = ".meta.json"
 # URL credential masking regex (SEC-5 / D9.5).
 _URL_CRED_RE: re.Pattern[str] = re.compile(r"://([^:/@]+):([^@/]+)@")
 
-# Process-cached load_id (correlation ID — GAP-7.4).
+# Process-cached load_id (correlation ID -- GAP-7.4).
 _LOAD_ID_LOCK: threading.Lock = threading.Lock()
 _LOAD_ID: Optional[str] = None
 
@@ -327,7 +327,7 @@ _AUDIT_LOCK: threading.Lock = threading.Lock()
 # Module-level file write caches for idempotency (IDEM-3).
 _PARSED_CACHE: Dict[str, List[Dict[str, Any]]] = {}
 
-# MB constant (used for byte→MB conversions in logging).
+# MB constant (used for byte->MB conversions in logging).
 _MB: int = 1_000_000
 _MIB: int = 1_024 * 1_024
 
@@ -369,11 +369,11 @@ logger: logging.Logger = logging.getLogger(__name__)
 
 
 # =============================================================================
-# Section 2 — OpenTargetsConfig dataclass
+# Section 2 -- OpenTargetsConfig dataclass
 # =============================================================================
-# Fixes Domain 12 (Configuration) — no magic numbers, all thresholds are
+# Fixes Domain 12 (Configuration) -- no magic numbers, all thresholds are
 # named, documented, and overridable.
-# Fixes Domain 7 (Idempotency) — deterministic defaults, frozen instance.
+# Fixes Domain 7 (Idempotency) -- deterministic defaults, frozen instance.
 
 
 @dataclass(frozen=True)
@@ -382,7 +382,7 @@ class OpenTargetsConfig:
 
     All thresholds are documented with their scientific rationale. Instances
     are frozen (immutable) to prevent accidental mutation during a pipeline
-    run (Domain 7 — Idempotency).
+    run (Domain 7 -- Idempotency).
 
     Parameters
     ----------
@@ -400,14 +400,14 @@ class OpenTargetsConfig:
         If True, re-download even if a cached copy exists.
     sort_output : bool
         If True, sort output records / edges for deterministic ordering
-        (Domain 7 — Idempotency). Default True.
+        (Domain 7 -- Idempotency). Default True.
     progress_log_interval : int
         Number of lines between progress log messages during parsing.
     neo4j_batch_size : int
         Maximum edges per Neo4j ``load_edges_bulk_create`` call (PERF-4 /
         Section 0.2 constraint #12).
     min_resolution_rate : float
-        Minimum target resolution rate (ENSG → UniProt AC crosswalk
+        Minimum target resolution rate (ENSG -> UniProt AC crosswalk
         success rate). Below this rate, raises in CLINICAL+ mode.
     staleness_days : int
         Number of days after which a cached file is considered stale and
@@ -443,7 +443,7 @@ class OpenTargetsConfig:
     enforcement_level: str = "standard"
 
     def __post_init__(self) -> None:
-        """Validate configuration values (Domain 12 — Config Validation).
+        """Validate configuration values (Domain 12 -- Config Validation).
 
         Raises
         ------
@@ -583,10 +583,10 @@ class OpenTargetsConfig:
 
 
 # =============================================================================
-# Section 3 — Scientific mapping: datasourceId+datatypeId → relation type
+# Section 3 -- Scientific mapping: datasourceId+datatypeId -> relation type
 # =============================================================================
-# Fixes SCI-8 (Domain 3 — Scientific Correctness). The v1 code emitted
-# "indication" for ALL Compound→Disease edges from ChEMBL evidence, which
+# Fixes SCI-8 (Domain 3 -- Scientific Correctness). The v1 code emitted
+# "indication" for ALL Compound->Disease edges from ChEMBL evidence, which
 # was scientifically wrong: ChEMBL is IC50/Ki/Kd binding-activity data,
 # NOT approved-indication data. The "indication" label is FORBIDDEN in
 # this loader.
@@ -595,7 +595,7 @@ class OpenTargetsConfig:
 #   * ("chembl", "known_drug")    -> ("binds",       "Protein")
 #       ChEMBL is binding-activity data, NOT approved indications.
 #   * ("chembl", "animal_model")  -> ("tested_for",  "Disease")
-#       Pre-clinical assay evidence — NOT approved.
+#       Pre-clinical assay evidence -- NOT approved.
 #   * ("evrot", "literature")     -> ("associated_with", "Disease")
 #   * ("reactome", "affected_pathway") -> ("disrupted_in", "Pathway")
 
@@ -604,9 +604,9 @@ def datasource_to_relation(
     datasource_id: str,
     datatype_id: str,
 ) -> Tuple[str, str]:
-    """Map (datasourceId, datatypeId) → (rel_type, dst_type) (SCI-8).
+    """Map (datasourceId, datatypeId) -> (rel_type, dst_type) (SCI-8).
 
-    The label "indication" is FORBIDDEN — ChEMBL binding-activity evidence
+    The label "indication" is FORBIDDEN -- ChEMBL binding-activity evidence
     is NOT approved-indication data. Approved indications come ONLY from
     ``drugbank_parser``.
 
@@ -621,7 +621,7 @@ def datasource_to_relation(
     -------
     tuple[str, str]
         (rel_type, dst_type). For unknown datasources, falls back to
-        ("associated_with", "Disease") — NEVER "indication".
+        ("associated_with", "Disease") -- NEVER "indication".
 
     Examples
     --------
@@ -638,10 +638,10 @@ def datasource_to_relation(
     key: Tuple[str, str] = (datasource_id.lower(), datatype_id.lower())
     if key in OPENTARGETS_DATASOURCE_RELATION_MAP:
         return OPENTARGETS_DATASOURCE_RELATION_MAP[key]
-    # Safe default — emit as "associated_with" against Disease, NOT "indication".
+    # Safe default -- emit as "associated_with" against Disease, NOT "indication".
     if datasource_id and datasource_id not in OPENTARGETS_PER_EVIDENCE_TYPE_THRESHOLDS:
         logger.warning(
-            "OpenTargets: unknown datasource_id=%r — using default "
+            "OpenTargets: unknown datasource_id=%r -- using default "
             "threshold and 'associated_with' relation",
             datasource_id,
         )
@@ -655,7 +655,7 @@ assert "indication" not in {
 
 
 # =============================================================================
-# Section 4 — ID validators (ChEMBL, ENSG, disease ontology, UniProt AC)
+# Section 4 -- ID validators (ChEMBL, ENSG, disease ontology, UniProt AC)
 # =============================================================================
 # Fixes SCI-4 (ChEMBL ID validation), SCI-10 (ENSG validation),
 # SCI-3/DQ-11 (disease ID validation), SCI-6 (UniProt AC validation).
@@ -720,7 +720,7 @@ def _validate_ensg_id(raw: Any) -> Optional[str]:
     'ENSG00000143590'
     >>> _validate_ensg_id("ensg00000143590")
     'ENSG00000143590'
-    >>> _validate_ensg_id("ENSG0000014359") is None  # 10 digits — too short
+    >>> _validate_ensg_id("ENSG0000014359") is None  # 10 digits -- too short
     True
     >>> _validate_ensg_id("ENSMUSG0000001") is None  # mouse, not human
     True
@@ -765,7 +765,7 @@ def _validate_score(raw: Any) -> Optional[float]:
     """Validate an OpenTargets score (SCI-5, DQ-8, COD-1..4).
 
     Returns the score as a float in [0, 1], or None if invalid. Rejects:
-      * bool (COD-3 — bool is silently wrong because True==1, False==0)
+      * bool (COD-3 -- bool is silently wrong because True==1, False==0)
       * NaN (COD-4)
       * Infinity (COD-4)
       * negative (DQ-8)
@@ -805,12 +805,12 @@ def _validate_score(raw: Any) -> Optional[float]:
     # COD-3: bool is silently wrong because isinstance(True, int) is True.
     # v71 P2L-048: document WHY bools are rejected and what operators
     # should do instead. Bools are rejected because ``isinstance(True,
-    # int)`` is True in Python — without this guard, ``True`` would
+    # int)`` is True in Python -- without this guard, ``True`` would
     # pass the int check below and become ``1.0``, and ``False`` would
     # become ``0.0``. Operators who genuinely want 1.0/0.0 should
     # convert explicitly: ``_validate_score(float(raw))`` or pass
     # ``1.0`` / ``0.0`` directly. Returning None for bool inputs is
-    # defensive — it prevents accidental boolean-to-float coercion that
+    # defensive -- it prevents accidental boolean-to-float coercion that
     # would produce meaningless "perfect" scores.
     if isinstance(raw, bool):
         return None
@@ -877,10 +877,10 @@ def _validate_disease_id(
 
     Returns (canonical_disease_id, ontology_name). The canonical form is
     the stripped input string. If the input is None/empty, returns
-    ("", "EMPTY") — empty disease_id is allowed (DES-5: some evidence
+    ("", "EMPTY") -- empty disease_id is allowed (DES-5: some evidence
     records have only a drug-target pair, no disease). If the input is
     non-empty but does not match any known ontology pattern, returns
-    (None, "UNKNOWN") — the caller should dead-letter the record.
+    (None, "UNKNOWN") -- the caller should dead-letter the record.
 
     Parameters
     ----------
@@ -890,8 +890,8 @@ def _validate_disease_id(
     Returns
     -------
     tuple[str or None, str]
-        (canonical_disease_id, ontology_name). Empty input → ("", "EMPTY").
-        Invalid input → (None, "UNKNOWN").
+        (canonical_disease_id, ontology_name). Empty input -> ("", "EMPTY").
+        Invalid input -> (None, "UNKNOWN").
     """
     if raw is None:
         return ("", "EMPTY")
@@ -955,7 +955,7 @@ def _is_human_target(target_id: str, target_tax_id: Any = None) -> bool:
             if tax != TARGET_TAX_ID:
                 return False
         except (ValueError, TypeError):
-            # Malformed taxid — treat as non-human (defensive).
+            # Malformed taxid -- treat as non-human (defensive).
             return False
     return True
 
@@ -977,7 +977,7 @@ def _normalise_ontology_id(disease_id: str) -> str:
     The orphan-fallback path was preserving the raw underscore form,
     causing every orphan Disease edge to be dead-lettered.
 
-    This helper performs the underscore→colon translation for the
+    This helper performs the underscore->colon translation for the
     ontology prefixes that ``ID_PATTERNS["Disease"]`` accepts. IDs that
     don't match any known prefix are returned unchanged (the kg_builder
     will then dead-letter them with a clear reason).
@@ -989,7 +989,7 @@ def _normalise_ontology_id(disease_id: str) -> str:
     # that OpenTargets emits (matching the broadened
     # OPENTARGETS_DISEASE_ID_PATTERNS in config.py). The previous
     # version only handled 5 prefixes (Orphanet_, MONDO_, EFO_,
-    # DOID_, HP_) — missing MP_, SNOMEDCT_, OTAR_, and the
+    # DOID_, HP_) -- missing MP_, SNOMEDCT_, OTAR_, and the
     # COLON-form variants that DisGeNET and other sources may pass
     # through. Now we normalize BOTH underscore and colon forms to
     # the canonical colon form (the OBO Foundry standard).
@@ -999,17 +999,17 @@ def _normalise_ontology_id(disease_id: str) -> str:
     # replace the separator with ``:``. This is more robust than
     # the previous prefix-loop because:
     #   1. It handles colon-form inputs as a no-op (the regex
-    #      matches ``DOID:`` and replaces ``:`` with ``:`` — no
+    #      matches ``DOID:`` and replaces ``:`` with ``:`` -- no
     #      change, but the function returns the canonical form).
-    #   2. It handles ALL ontologies uniformly — no need to
+    #   2. It handles ALL ontologies uniformly -- no need to
     #      enumerate every prefix.
     #   3. It's case-insensitive for the ontology prefix (Orphanet
     #      is sometimes emitted as "ORPHANET_" by upstream sources).
     # The numeric body is preserved as-is.
     #
     # CANONICAL CASE: each OBO Foundry ontology has a canonical case:
-    #   * Orphanet — mixed case (capital O, lowercase rphanet)
-    #   * MONDO, EFO, DOID, HP, MP, SNOMEDCT, OTAR — all uppercase
+    #   * Orphanet -- mixed case (capital O, lowercase rphanet)
+    #   * MONDO, EFO, DOID, HP, MP, SNOMEDCT, OTAR -- all uppercase
     # The lookup table below maps the lowercased prefix to the
     # canonical case so inputs like ``orphanet_558`` or ``doid_1438``
     # are normalized to ``Orphanet:558`` and ``DOID:1438``
@@ -1039,9 +1039,9 @@ def _normalise_ontology_id(disease_id: str) -> str:
 
 
 # =============================================================================
-# Section 5 — Security helpers (TLS context, URL allowlist, path-traversal)
+# Section 5 -- Security helpers (TLS context, URL allowlist, path-traversal)
 # =============================================================================
-# Fixes Domain 9 (Security) — TLS verification, URL allowlist, path-traversal
+# Fixes Domain 9 (Security) -- TLS verification, URL allowlist, path-traversal
 # protection, credential masking in logs.
 
 
@@ -1073,7 +1073,7 @@ def _create_tls_context() -> ssl.SSLContext:
         try:
             ctx.set_ciphers("HIGH:!aNULL:!eNULL:!MD5:!RC4:!DES:!3DES")
         except ssl.SSLError:
-            # Cipher list parsing varies by OpenSSL version — fall back to
+            # Cipher list parsing varies by OpenSSL version -- fall back to
             # default if our list is rejected.
             pass
         return ctx
@@ -1189,7 +1189,7 @@ def _sanitize_for_cypher_props(s: Any) -> str:
     """Sanitize a string for safe inclusion in Cypher properties (SEC-4 / G8).
 
     Escapes backslashes, single quotes, and double quotes. This is a
-    DEFENSE-IN-DEPTH measure — callers should always use parameterized
+    DEFENSE-IN-DEPTH measure -- callers should always use parameterized
     queries, but if a string must be inlined, this prevents injection.
 
     Parameters
@@ -1223,11 +1223,11 @@ def _sanitize_for_cypher_props(s: Any) -> str:
 
 
 # =============================================================================
-# Section 6 — Download (atomic, retried, TLS-verified, hash-verified)
+# Section 6 -- Download (atomic, retried, TLS-verified, hash-verified)
 # =============================================================================
-# Fixes Domain 6 (Reliability) — atomic write, retry with backoff, circuit
-# breaker. Fixes Domain 5 (Data Quality) — SHA-256, size, content-sniff.
-# Fixes Domain 9 (Security) — TLS, allowlist, path-traversal.
+# Fixes Domain 6 (Reliability) -- atomic write, retry with backoff, circuit
+# breaker. Fixes Domain 5 (Data Quality) -- SHA-256, size, content-sniff.
+# Fixes Domain 9 (Security) -- TLS, allowlist, path-traversal.
 
 
 def _compute_sha256(path: Path, chunk_size: int = 1 << 20) -> str:
@@ -1375,7 +1375,7 @@ def _atomic_download(
     """Download ``url`` atomically to ``gz_path`` (REL-3).
 
     Writes to a ``.tmp`` file, then atomically renames via ``os.replace``.
-    On any error, the ``.tmp`` file is deleted — no partial files remain.
+    On any error, the ``.tmp`` file is deleted -- no partial files remain.
 
     Returns
     -------
@@ -1407,7 +1407,7 @@ def _atomic_download(
         with urllib.request.urlopen(
             req, timeout=timeout, context=tls_ctx,
         ) as resp:
-            # DQ-3: content-type sniff — reject HTML.
+            # DQ-3: content-type sniff -- reject HTML.
             content_type: str = resp.headers.get("Content-Type", "")
             if "text/html" in content_type.lower():
                 raise OpenTargetsDownloadError(
@@ -1569,12 +1569,12 @@ def download_opentargets(
     """Download the OpenTargets evidence JSONL file (hardened download).
 
     This function implements a fully hardened download pipeline:
-    1. URL allowlist check (Domain 9 — Security / SEC-2)
+    1. URL allowlist check (Domain 9 -- Security / SEC-2)
     2. TLS certificate verification (Domain 9 / SEC-1)
     3. Streaming download with retry + exponential backoff (Domain 6 / REL-1)
     4. Atomic write to temporary file, then rename (Domain 7 / REL-3)
     5. Size validation (Domain 5 / DQ-2)
-    6. Content sniff — verify it's a gzip file (Domain 5 / DQ-2)
+    6. Content sniff -- verify it's a gzip file (Domain 5 / DQ-2)
     7. SHA-256 verification (Domain 5 / DQ-1, DQ-14)
     8. Sidecar files (.sha256, .meta.json) for idempotency (Domain 7 / IDEM-3)
     9. Staleness check (Domain 5 / DQ-12, DQ-16)
@@ -1613,7 +1613,7 @@ def download_opentargets(
         logger.warning(
             "OpenTargets download skipped (DRUGOS_OPENTARGETS_SKIP=1)",
         )
-        # Return the expected cached path even if it doesn't exist — caller
+        # Return the expected cached path even if it doesn't exist -- caller
         # will handle FileNotFoundError.
         source_cfg_skip: Dict[str, Any] = DATA_SOURCES.get(SOURCE_KEY, {})
         return cfg.effective_raw_dir / source_cfg_skip.get(
@@ -1644,7 +1644,7 @@ def download_opentargets(
     if gz_path.exists() and not force_download:
         if OPENTARGETS_OFFLINE:
             logger.info(
-                "OpenTargets offline mode — using cached file %s "
+                "OpenTargets offline mode -- using cached file %s "
                 "(%d bytes)",
                 gz_path, gz_path.stat().st_size,
             )
@@ -1656,7 +1656,7 @@ def download_opentargets(
             age_days: float = (time.time() - mtime) / 86400.0
             if age_days > cfg.staleness_days and cfg.is_clinical_or_above:
                 logger.warning(
-                    "OpenTargets cached file is %.1f days old (>%d) — "
+                    "OpenTargets cached file is %.1f days old (>%d) -- "
                     "re-downloading (CLINICAL+ mode)",
                     age_days, cfg.staleness_days,
                 )
@@ -1676,7 +1676,7 @@ def download_opentargets(
                 return gz_path
         except (OpenTargetsDownloadError, OpenTargetsDataIntegrityError) as e:
             logger.warning(
-                "Cached OpenTargets file failed verification (%s) — "
+                "Cached OpenTargets file failed verification (%s) -- "
                 "re-downloading",
                 type(e).__name__,
             )
@@ -1732,7 +1732,7 @@ def download_opentargets(
 
 
 # =============================================================================
-# Section 7 — Streaming parser (iter_opentargets_evidence)
+# Section 7 -- Streaming parser (iter_opentargets_evidence)
 # =============================================================================
 # Fixes SCI-1 (real flat schema), SCI-2 (datasourceId+datatypeId),
 # SCI-4 (ChEMBL ID validation), SCI-5 (score validation),
@@ -1791,7 +1791,7 @@ def iter_opentargets_evidence(
             context={"filepath": str(filepath)},
         )
 
-    # Compute source SHA-256 (for provenance — DQ-1).
+    # Compute source SHA-256 (for provenance -- DQ-1).
     source_sha256: str = _compute_sha256(filepath)
     logger.info(
         "OpenTargets parse started filepath=%s source_sha256=%s "
@@ -1827,7 +1827,7 @@ def iter_opentargets_evidence(
                     and metrics["n_records_kept"] >= OPENTARGETS_MAX_ROWS
                 ):
                     logger.info(
-                        "OpenTargets parse hit max_rows cap=%d — stopping",
+                        "OpenTargets parse hit max_rows cap=%d -- stopping",
                         OPENTARGETS_MAX_ROWS,
                     )
                     break
@@ -1909,7 +1909,7 @@ def iter_opentargets_evidence(
                         ) from e
                     continue
     except (EOFError, OSError, IOError) as e:
-        # Truncated gzip stream — the gzip footer (CRC32 + ISIZE) is
+        # Truncated gzip stream -- the gzip footer (CRC32 + ISIZE) is
         # missing, raising EOFError. Treat as parse error.
         raise OpenTargetsParseError(
             f"Truncated / corrupt gzip stream: {e}",
@@ -1958,18 +1958,18 @@ def _open_for_read(filepath: Path):
 
     Uses ``gzip.open`` if the first two bytes match the gzip magic
     (``\\x1f\\x8b``), else plain ``open``. The filename suffix is NOT
-    trusted — content sniffing is the source of truth.
+    trusted -- content sniffing is the source of truth.
 
     Returns
     -------
     file-like
-        A text-mode file object (encoding="utf-8-sig" to handle BOM — COD-5).
+        A text-mode file object (encoding="utf-8-sig" to handle BOM -- COD-5).
     """
     # Sniff the first 2 bytes.
     with open(filepath, "rb") as f:
         magic: bytes = f.read(2)
     if magic == GZIP_MAGIC:
-        # gzip.open doesn't accept `buffering=` — use io.BufferedReader with
+        # gzip.open doesn't accept `buffering=` -- use io.BufferedReader with
         # 1 MiB buffer for I/O efficiency (PERF-1).
         gz = gzip.open(filepath, "rb")
         return io.TextIOWrapper(
@@ -2001,7 +2001,7 @@ def _parse_record(
     # is subtly broken because ``dict.get(key, default)`` evaluates the
     # ``default`` argument EAGERLY. So even when ``"score"`` is present
     # (and thus the default would not be returned), the inner
-    # ``entry.get("evidenceScore", 0.0)`` was already evaluated — which
+    # ``entry.get("evidenceScore", 0.0)`` was already evaluated -- which
     # is harmless. BUT when ``"score"`` is JSON-``null``, ``entry.get``
     # returns ``None`` (the actual stored value), NOT the default, so
     # the ``evidenceScore`` fallback is NEVER consulted. Records with an
@@ -2063,7 +2063,7 @@ def _parse_record(
         # REGULATORY mode: any non-human record triggers hard-fail.
         if cfg.is_regulatory:
             raise OpenTargetsDataIntegrityError(
-                f"Non-human target record at line {line_no} — "
+                f"Non-human target record at line {line_no} -- "
                 f"REGULATORY mode requires 100% human records.",
                 context={
                     "line_no": line_no,
@@ -2113,19 +2113,19 @@ def _parse_record(
         })
         return None
 
-    # Build record (with full provenance — LIN-1..5, COMP-2..5).
+    # Build record (with full provenance -- LIN-1..5, COMP-2..5).
     record: Dict[str, Any] = {
-        # Identity (flat — fixes SCI-1).
+        # Identity (flat -- fixes SCI-1).
         "drug_id": drug_id,
         "target_id": target_id,
         "disease_id": disease_id or "",
-        # Names (sanitized — SEC-4).
+        # Names (sanitized -- SEC-4).
         "drug_name": _sanitize_for_cypher_props(entry.get("drugName", "")),
         "disease_name": _sanitize_for_cypher_props(entry.get("diseaseName", "")),
-        # Scores (validated float in [0,1] — SCI-5).
+        # Scores (validated float in [0,1] -- SCI-5).
         "score": score,
         "evidence_score": score,
-        # Evidence typing (real fields — SCI-2).
+        # Evidence typing (real fields -- SCI-2).
         "datasource_id": datasource_id,
         "datatype_id": datatype_id,
         # Organism (SCI-7).
@@ -2168,7 +2168,7 @@ def _parse_record(
 
 
 # =============================================================================
-# Section 8 — Eager parser (parse_opentargets_evidence — wraps the generator)
+# Section 8 -- Eager parser (parse_opentargets_evidence -- wraps the generator)
 # =============================================================================
 # Backward-compat: the v1 function ``parse_opentargets_evidence`` returns a
 # list, not a generator. This wrapper delegates to the streaming parser and
@@ -2181,7 +2181,7 @@ def parse_opentargets_evidence(
     *,
     cfg: Optional[OpenTargetsConfig] = None,
 ) -> List[Dict[str, Any]]:
-    """Parse the OpenTargets evidence JSONL file (eager — materializes list).
+    """Parse the OpenTargets evidence JSONL file (eager -- materializes list).
 
     Backward-compatible wrapper around ``iter_opentargets_evidence``. Reads
     the real flat schema (SCI-1 fix), validates each record, and returns a
@@ -2233,7 +2233,7 @@ def parse_opentargets_evidence(
 
     if not records and cfg.is_clinical_or_above:
         raise OpenTargetsDataIntegrityError(
-            "0 records parsed from OpenTargets — aborting in "
+            "0 records parsed from OpenTargets -- aborting in "
             f"{cfg.enforcement_level} mode (potential SCI-1 schema drift).",
             context={
                 "filepath": str(filepath) if filepath else "default",
@@ -2260,9 +2260,9 @@ def parse_opentargets_evidence(
 
 
 # =============================================================================
-# Section 9 — Crosswalk integration (batched ENSG → UniProt; disease crosswalk)
+# Section 9 -- Crosswalk integration (batched ENSG -> UniProt; disease crosswalk)
 # =============================================================================
-# Fixes SCI-3 (disease crosswalk), SCI-9 (ENSG → NCBI Gene), SCI-14 (crosswalk
+# Fixes SCI-3 (disease crosswalk), SCI-9 (ENSG -> NCBI Gene), SCI-14 (crosswalk
 # loaded before parse), PERF-3 (batched lookup).
 
 
@@ -2276,10 +2276,10 @@ def _batch_resolve_targets(
       (uniprot_ac, ncbi_gene_id, resolution_path).
 
     The resolution_path is one of:
-      * "ensembl_to_uniprot_direct"  — ENSG → UniProt AC succeeded.
-      * "ensembl_to_ncbi_direct"     — ENSG → NCBI Gene ID succeeded
+      * "ensembl_to_uniprot_direct"  -- ENSG -> UniProt AC succeeded.
+      * "ensembl_to_ncbi_direct"     -- ENSG -> NCBI Gene ID succeeded
                                         (when UniProt AC unavailable).
-      * "unresolved"                  — both lookups failed.
+      * "unresolved"                  -- both lookups failed.
     """
     if crosswalk is None:
         return {}
@@ -2324,8 +2324,8 @@ def _batch_resolve_diseases(
       (umls_cui, resolution_path).
 
     The resolution_path is one of:
-      * "disease_to_umls_direct"  — disease ID → UMLS CUI succeeded.
-      * "disease_orphan"          — crosswalk failed (orphan, flagged).
+      * "disease_to_umls_direct"  -- disease ID -> UMLS CUI succeeded.
+      * "disease_orphan"          -- crosswalk failed (orphan, flagged).
     """
     if crosswalk is None or not hasattr(crosswalk, "disease_id_to_umls_cui"):
         return {}
@@ -2373,11 +2373,11 @@ def _validate_crosswalk(crosswalk: Any) -> None:
 
 
 # =============================================================================
-# Section 10 — to_graph converters
+# Section 10 -- to_graph converters
 # =============================================================================
 # Fixes SCI-8 (no "indication" label), SCI-12 (semantic-specific score keys),
 # SCI-13 (dedupe with max-score), SCI-3 (disease UMLS crosswalk),
-# SCI-9 (ENSG → NCBI Gene crosswalk), ARCH-2 (emittable triples contract),
+# SCI-9 (ENSG -> NCBI Gene crosswalk), ARCH-2 (emittable triples contract),
 # D15.8 (src_type Compound), LIN-1..5 (full provenance), D2.8 (deterministic
 # edge IDs), PERF-3 (batched crosswalk), PERF-4 (batched Neo4j load).
 
@@ -2394,10 +2394,10 @@ def _build_edge_id(
     The edge ID is sha1(f"{src_id}|{dst_id}|{src_type}|{dst_type}|{rel_type}"
     f"|{OPENTARGETS_EDGE_ID_SOURCE}")[:OPENTARGETS_HASH_LENGTH]. This
     ensures:
-      * Deterministic — same input → same ID (idempotency).
-      * Namespaced — OpenTargets edges do NOT collide with edges from
+      * Deterministic -- same input -> same ID (idempotency).
+      * Namespaced -- OpenTargets edges do NOT collide with edges from
         other sources (e.g. ChEMBL, SIDER).
-      * Stable — the hash length is fixed at 16 chars.
+      * Stable -- the hash length is fixed at 16 chars.
     """
     h: str = "|".join([
         src_id, dst_id, src_type, dst_type, rel_type,
@@ -2419,7 +2419,7 @@ def opentargets_to_edge_records(
 
     The converter emits the following edge types (per SCI-8):
       * Compound -binds-> Protein       (chembl/known_drug evidence)
-      * Compound -targets-> Gene        (always — ENSG or NCBI Gene ID)
+      * Compound -targets-> Gene        (always -- ENSG or NCBI Gene ID)
       * Compound -tested_for-> Disease  (chembl/animal_model evidence)
       * Compound -associated_with-> Disease (genetic/literature evidence)
       * Compound -disrupted_in-> Pathway (reactome/affected_pathway evidence)
@@ -2437,9 +2437,9 @@ def opentargets_to_edge_records(
     records : list of dict
         Parsed OpenTargets activity records (from ``parse_opentargets_evidence``).
     crosswalk : IDCrosswalk or None
-        ID crosswalk for ENSG → UniProt / NCBI Gene and disease → UMLS
+        ID crosswalk for ENSG -> UniProt / NCBI Gene and disease -> UMLS
         resolution. If None, edges are emitted with ENSG IDs directly
-        (orphan Gene nodes — flagged via ``target_id_namespace`` prop).
+        (orphan Gene nodes -- flagged via ``target_id_namespace`` prop).
     cfg : OpenTargetsConfig or None
         Loader configuration. If None, uses defaults.
 
@@ -2465,12 +2465,12 @@ def opentargets_to_edge_records(
         _batch_resolve_diseases(records, crosswalk)
     )
 
-    # Dedupe map: (src_id, dst_id, src_type, dst_type, rel_type) → edge dict.
+    # Dedupe map: (src_id, dst_id, src_type, dst_type, rel_type) -> edge dict.
     dedupe_map: Dict[Tuple[str, str, str, str, str], Dict[str, Any]] = {}
     metrics: Dict[str, int] = defaultdict(int)
 
     # Track per-target resolution stats (computed at the end from
-    # dedupe_map contents — avoids fragile mutable-ref passing).
+    # dedupe_map contents -- avoids fragile mutable-ref passing).
     n_targets_resolved: int = 0
     n_targets_unresolved: int = 0
     n_diseases_resolved: int = 0
@@ -2515,7 +2515,7 @@ def opentargets_to_edge_records(
         if target_id:
             rel_type, dst_type = datasource_to_relation(datasource_id, datatype_id)
 
-            # Compound → dst_type edge (binding / association).
+            # Compound -> dst_type edge (binding / association).
             if dst_type == "Protein":
                 _emit_compound_protein_edge(
                     rec, target_resolutions, rel_type,
@@ -2529,7 +2529,7 @@ def opentargets_to_edge_records(
                     crosswalk_version, disease_crosswalk_version,
                 )
 
-        # Compound → Disease edge (only if disease_id is present).
+        # Compound -> Disease edge (only if disease_id is present).
         if disease_id:
             _emit_compound_disease_edge(
                 rec, disease_resolutions,
@@ -2541,7 +2541,7 @@ def opentargets_to_edge_records(
     final_edges: List[Dict[str, Any]] = list(dedupe_map.values())
 
     # Compute resolution stats from the final edge set (avoids fragile
-    # mutable-ref counters — IDEM-4 / REL-4).
+    # mutable-ref counters -- IDEM-4 / REL-4).
     for edge in final_edges:
         props: Dict[str, Any] = edge.get("props", {})
         namespace: str = props.get("target_id_namespace", "")
@@ -2605,7 +2605,7 @@ def opentargets_to_edge_records(
     ):
         raise OpenTargetsDataIntegrityError(
             f"OpenTargets target resolution rate {resolution_rate:.4f} < "
-            f"minimum {cfg.min_resolution_rate:.4f} — aborting in "
+            f"minimum {cfg.min_resolution_rate:.4f} -- aborting in "
             f"{cfg.enforcement_level} mode. Run "
             f"IDCrosswalk.load_opentargets_targets() before parsing.",
             context={
@@ -2659,10 +2659,10 @@ def _emit_compound_protein_edge(
     crosswalk_version: str,
     disease_crosswalk_version: str,
 ) -> None:
-    """Emit Compound → Protein edge (only when UniProt AC resolved — SCI-1, SCI-9).
+    """Emit Compound -> Protein edge (only when UniProt AC resolved -- SCI-1, SCI-9).
 
-    Uses the crosswalk to resolve ENSG → UniProt AC. If resolution fails,
-    the edge is NOT emitted (would create orphan Protein nodes — SCI-1).
+    Uses the crosswalk to resolve ENSG -> UniProt AC. If resolution fails,
+    the edge is NOT emitted (would create orphan Protein nodes -- SCI-1).
     """
     drug_id_raw: str = rec["drug_id"]
     target_id: str = rec["target_id"]
@@ -2679,7 +2679,7 @@ def _emit_compound_protein_edge(
     # ChEMBL drug_id to InChIKey when the crosswalk can resolve it
     # (mirrors drkg_loader / clinicaltrials_loader pattern). Without
     # this, the edge's ``src_id`` would be ``CHEMBL218`` (a ChEMBL ID)
-    # while the Compound node is keyed by its InChIKey — orphan edge.
+    # while the Compound node is keyed by its InChIKey -- orphan edge.
     drug_id: str = drug_id_raw
     try:
         from .id_crosswalk import _normalize_compound_id_to_inchikey
@@ -2688,9 +2688,9 @@ def _emit_compound_protein_edge(
         )
         if _norm and str(_norm).strip():
             drug_id = str(_norm).strip().upper()
-    except ImportError:  # pragma: no cover — defensive
+    except ImportError:  # pragma: no cover -- defensive
         pass
-    except Exception:  # pragma: no cover — defensive
+    except Exception:  # pragma: no cover -- defensive
         # Keep the raw drug_id; crosswalk miss is non-fatal.
         pass
 
@@ -2720,10 +2720,10 @@ def _emit_compound_protein_edge(
         # 0-1 proxy for compound-protein binding confidence) AND
         # ``chembl_score`` (which is RESERVED for ChEMBL pchembl values).
         # Downstream consumers reading ``chembl_score`` were getting
-        # association probability instead of potency — a units mismatch
+        # association probability instead of potency -- a units mismatch
         # that silently corrupted the fused score used by the ranker.
         #
-        # v68 ROOT FIX (P2L-045 — COMPLETE): the v57 fix only removed
+        # v68 ROOT FIX (P2L-045 -- COMPLETE): the v57 fix only removed
         # ``chembl_score``. The audit's FULL recommendation is to remove
         # BOTH ``binding_confidence`` AND ``chembl_score`` (they belong
         # to ChEMBL/binding-specific loaders) and emit the score under
@@ -2735,14 +2735,14 @@ def _emit_compound_protein_edge(
         # Setting ``binding_confidence = association_score`` meant any
         # downstream fusion that averaged ``binding_confidence`` across
         # ChEMBL and OpenTargets edges mixed binding affinity with
-        # association probability — meaningless.
+        # association probability -- meaningless.
         # ROOT FIX: emit the score under THREE names only:
-        #   * ``opentargets_score``  — OpenTargets-specific alias
+        #   * ``opentargets_score``  -- OpenTargets-specific alias
         #     (the audit's recommended name)
-        #   * ``association_score``  — the original OpenTargets field name
+        #   * ``association_score``  -- the original OpenTargets field name
         #     (retained verbatim so downstream consumers can identify the
         #      source semantic)
-        #   * ``score``              — generic alias for the unified
+        #   * ``score``              -- generic alias for the unified
         #     score field (downstream consumers that don't care about
         #     the source read this)
         # ``binding_confidence`` and ``chembl_score`` are NEVER set here.
@@ -2758,7 +2758,7 @@ def _emit_compound_protein_edge(
             # association_score across multiple evidence records for the
             # same (drug, target, rel_type) edge (see the dedupe branch
             # below at line ~2738: ``if score > existing_score:``). This
-            # is INCOMPATIBLE with DisGeNET's sum-normalized scores —
+            # is INCOMPATIBLE with DisGeNET's sum-normalized scores --
             # downstream fusion that averages ``normalized_score`` across
             # OpenTargets and DisGeNET edges mixes MAX-pooled scores with
             # sum-normalized scores, producing biased rankings.
@@ -2799,7 +2799,7 @@ def _emit_compound_protein_edge(
     else:
         # Dedupe: keep max score, increment evidence_count.
         # v68 ROOT FIX (P2L-045): do NOT update ``binding_confidence`` or
-        # ``chembl_score`` here — those fields are reserved for ChEMBL /
+        # ``chembl_score`` here -- those fields are reserved for ChEMBL /
         # binding-specific loaders. Update only ``opentargets_score``,
         # ``association_score``, ``score``, and ``normalized_score``
         # (all of which carry the OpenTargets 0-1 association_score
@@ -2828,7 +2828,7 @@ def _emit_compound_gene_edge(
     crosswalk_version: str,
     disease_crosswalk_version: str,
 ) -> None:
-    """Emit Compound → Gene edge (SCI-9).
+    """Emit Compound -> Gene edge (SCI-9).
 
     Uses NCBI Gene ID when crosswalk succeeds; otherwise falls back to ENSG
     ID with a ``target_id_namespace="ensembl_gene_id_orphan"`` flag (the
@@ -2854,9 +2854,9 @@ def _emit_compound_gene_edge(
         )
         if _norm and str(_norm).strip():
             drug_id = str(_norm).strip().upper()
-    except ImportError:  # pragma: no cover — defensive
+    except ImportError:  # pragma: no cover -- defensive
         pass
-    except Exception:  # pragma: no cover — defensive
+    except Exception:  # pragma: no cover -- defensive
         pass
     if ncbi:
         gene_dst_id: str = ncbi
@@ -2941,7 +2941,7 @@ def _emit_compound_disease_edge(
     crosswalk_version: str,
     disease_crosswalk_version: str,
 ) -> None:
-    """Emit Compound → Disease edge (SCI-3, SCI-8).
+    """Emit Compound -> Disease edge (SCI-3, SCI-8).
 
     Uses the relation type from ``datasource_to_relation`` (NEVER
     "indication"). Uses UMLS CUI when crosswalk succeeds; otherwise falls
@@ -2964,18 +2964,18 @@ def _emit_compound_disease_edge(
         )
         if _norm and str(_norm).strip():
             drug_id = str(_norm).strip().upper()
-    except ImportError:  # pragma: no cover — defensive
+    except ImportError:  # pragma: no cover -- defensive
         pass
-    except Exception:  # pragma: no cover — defensive
+    except Exception:  # pragma: no cover -- defensive
         pass
 
     # SCI-8: relation type from datasource.
     rel_type, dst_type = datasource_to_relation(datasource_id, datatype_id)
-    # If dst_type is not Disease, this isn't a Compound→Disease edge — skip.
+    # If dst_type is not Disease, this isn't a Compound->Disease edge -- skip.
     if dst_type != "Disease":
         return
 
-    # SCI-3: disease → UMLS crosswalk.
+    # SCI-3: disease -> UMLS crosswalk.
     umls, path = disease_resolutions.get(
         disease_id, (None, "disease_orphan"),
     )
@@ -2999,22 +2999,22 @@ def _emit_compound_disease_edge(
         # Phase 1) emits colon form. Without normalization in BOTH
         # branches, OpenTargets-emitted DOID nodes (underscore form)
         # would never MERGE with DisGeNET-emitted DOID nodes (colon
-        # form) — fragmenting the Disease graph along source lines.
+        # form) -- fragmenting the Disease graph along source lines.
         # The fix below runs ``_normalise_ontology_id`` UNCONDITIONALLY
         # on every disease_dst_id (UMLS CUIs are unchanged because
         # they don't match any of the underscore-prefixed patterns
-        # the normalizer looks for — they're bare ``C\d{7}``).
+        # the normalizer looks for -- they're bare ``C\d{7}``).
         disease_dst_id = _normalise_ontology_id(disease_id)
         disease_namespace = rec.get("disease_ontology", "UNKNOWN").lower()
         disease_ontology = rec.get("disease_ontology", "UNKNOWN")
 
-    # v70 ROOT FIX (P2L-047): defense-in-depth — even when the UMLS
+    # v70 ROOT FIX (P2L-047): defense-in-depth -- even when the UMLS
     # crosswalk resolved the disease_dst_id to a UMLS CUI, we re-run
     # ``_normalise_ontology_id`` on it. This is a no-op for UMLS CUIs
     # (they don't match any underscore-prefixed pattern), but it
     # catches the edge case where the UMLS crosswalk table somehow
     # returned an underscore-form ontology ID (data-quality issue in
-    # the crosswalk itself). The cost is one regex check per edge —
+    # the crosswalk itself). The cost is one regex check per edge --
     # negligible. This ensures EVERY disease_dst_id emitted by this
     # loader is in canonical colon form, regardless of which path
     # produced it.
@@ -3038,7 +3038,7 @@ def _emit_compound_disease_edge(
         # corrupting the ``chembl_score`` field (reserved for ChEMBL
         # pchembl values written by chembl_loader). Now we write to
         # ``association_score`` (the original OpenTargets field name) and
-        # ``assay_confidence`` (semantic-specific alias) — never
+        # ``assay_confidence`` (semantic-specific alias) -- never
         # ``chembl_score``. Downstream consumers reading ``chembl_score``
         # will only see ChEMBL-sourced values.
         if rel_type == "tested_for":
@@ -3088,7 +3088,7 @@ def _emit_compound_disease_edge(
         if score > existing_score:
             # Update all score keys to keep them in sync.
             # v57 ROOT FIX (P2L-045): ``chembl_score`` removed from this
-            # list — that field is reserved for ChEMBL pchembl values
+            # list -- that field is reserved for ChEMBL pchembl values
             # (0-14 scale) written by chembl_loader only. OpenTargets
             # writes its 0-1 association_score into ``association_score``,
             # ``assay_confidence`` / ``evidence_strength``, and ``score``.
@@ -3156,12 +3156,12 @@ def opentargets_to_node_records(
     """Convert OpenTargets records to Compound node records.
 
     Only Compound nodes are emitted (Disease, Protein, Gene nodes are
-    produced by other loaders — DRKG, UniProt). Each unique drug_id in
+    produced by other loaders -- DRKG, UniProt). Each unique drug_id in
     ``records`` produces one Compound node.
 
     v35 ROOT FIX (V35-P2-LOADERS-FIXES M-7): the previous
     implementation emitted the NON-STANDARD node schema
-    ``{"node_id":..., "node_type":..., "props":{...}}`` — every other
+    ``{"node_id":..., "node_type":..., "props":{...}}`` -- every other
     Phase 2 loader (chembl, drugbank, stitch, string, disgenet, omim,
     pubchem, clinicaltrials, geo, uniprot) emits the STANDARD schema
     ``{"id":..., "label":..., "name":..., <source-specific fields>}``.
@@ -3199,10 +3199,10 @@ def opentargets_to_node_records(
     try:
         from .id_crosswalk import _normalize_compound_id_to_inchikey
         _l5_available = True
-    except ImportError:  # pragma: no cover — defensive
+    except ImportError:  # pragma: no cover -- defensive
         logger.warning(
             "OpenTargets: id_crosswalk._normalize_compound_id_to_inchikey "
-            "not available — Compound IDs will NOT be normalized to "
+            "not available -- Compound IDs will NOT be normalized to "
             "InChIKey (V35 L-5 fix skipped).",
             extra={"stage": "opentargets_node_records_l5_normalize"},
         )
@@ -3226,10 +3226,10 @@ def opentargets_to_node_records(
                 )
                 if _norm and str(_norm).strip():
                     drug_id = str(_norm).strip().upper()
-            except Exception as exc:  # pragma: no cover — defensive
+            except Exception as exc:  # pragma: no cover -- defensive
                 logger.debug(
                     "OpenTargets: _normalize_compound_id_to_inchikey(%s) "
-                    "raised %s — keeping raw drug_id.",
+                    "raised %s -- keeping raw drug_id.",
                     drug_id_raw, exc,
                 )
         if drug_id in seen:
@@ -3238,7 +3238,7 @@ def opentargets_to_node_records(
                 seen[drug_id]["name"] = rec.get("drug_name", "")
             continue
         # v35 ROOT FIX (M-7): emit the STANDARD kg_builder node schema
-        # (id / label / name / <source-specific fields>) — same shape
+        # (id / label / name / <source-specific fields>) -- same shape
         # as chembl_loader.chembl_to_node_records_from_phase1,
         # drugbank_parser.drugbank_to_node_records_from_phase1, etc.
         seen[drug_id] = {
@@ -3304,14 +3304,14 @@ def opentargets_to_graph(
     records : list of dict
         Parsed OpenTargets activity records.
     crosswalk : IDCrosswalk or None
-        ID crosswalk for ENSG → UniProt / NCBI Gene and disease → UMLS.
+        ID crosswalk for ENSG -> UniProt / NCBI Gene and disease -> UMLS.
     cfg : OpenTargetsConfig or None
         Loader configuration.
 
     Returns
     -------
     tuple[list, list]
-        (nodes, edges) — nodes are Compound node records, edges are
+        (nodes, edges) -- nodes are Compound node records, edges are
         ``OpenTargetsEdgeRecord`` dicts.
     """
     if cfg is None:
@@ -3324,7 +3324,7 @@ def opentargets_to_graph(
 
 
 # =============================================================================
-# Section 11 — Validation (validate_opentargets)
+# Section 11 -- Validation (validate_opentargets)
 # =============================================================================
 # Fixes Domain 5 (Data Quality) and Domain 10 (Testing & Validation).
 
@@ -3398,7 +3398,7 @@ def validate_opentargets(
     for i, edge in enumerate(edges):
         if edge.get("rel_type") == "indication":
             errors.append(
-                f"edge {i} uses FORBIDDEN 'indication' label (SCI-8) — "
+                f"edge {i} uses FORBIDDEN 'indication' label (SCI-8) -- "
                 f"edge_id={edge.get('props', {}).get('id', 'n/a')}"
             )
 
@@ -3411,7 +3411,7 @@ def validate_opentargets(
         )
         if triple not in OPENTARGETS_EMITTABLE_TRIPLES:
             errors.append(
-                f"edge {i} has unregistered triple {triple!r} (ARCH-2) — "
+                f"edge {i} has unregistered triple {triple!r} (ARCH-2) -- "
                 f"edge_id={edge.get('props', {}).get('id', 'n/a')}"
             )
 
@@ -3471,7 +3471,7 @@ def validate_opentargets(
 
 
 # =============================================================================
-# Section 12 — OpenTargetsLoader Protocol adapter + load_opentargets
+# Section 12 -- OpenTargetsLoader Protocol adapter + load_opentargets
 # =============================================================================
 # Fixes ARCH-1 (Loader Protocol), ARCH-6 (Protocol adapter), PERF-4 (batched
 # Neo4j load), Section 0.4 (escalation), MLflow integration (OBS-5).
@@ -3539,7 +3539,7 @@ def load_opentargets(
     crosswalk: Optional["IDCrosswalk"] = None,
     skip_neo4j: bool = True,
 ) -> Dict[str, Any]:
-    """End-to-end OpenTargets pipeline (download → parse → convert → load).
+    """End-to-end OpenTargets pipeline (download -> parse -> convert -> load).
 
     Side Effects
     ------------
@@ -3554,7 +3554,7 @@ def load_opentargets(
     cfg : OpenTargetsConfig or None
         Loader configuration. If None, uses defaults.
     crosswalk : IDCrosswalk or None
-        ID crosswalk for ENSG → UniProt / NCBI Gene and disease → UMLS
+        ID crosswalk for ENSG -> UniProt / NCBI Gene and disease -> UMLS
         resolution. If None, attempts to load the default crosswalk.
     skip_neo4j : bool
         If True (default), skip Neo4j load (used in tests / DEV mode).
@@ -3580,7 +3580,7 @@ def load_opentargets(
             crosswalk = get_default_crosswalk()
         except Exception as e:
             logger.warning(
-                "get_default_crosswalk() failed: %s — proceeding without "
+                "get_default_crosswalk() failed: %s -- proceeding without "
                 "crosswalk (Compound->Protein edges will be sparse).",
                 e,
             )
@@ -3598,7 +3598,7 @@ def load_opentargets(
     if not records:
         if cfg.is_clinical_or_above:
             raise OpenTargetsDataIntegrityError(
-                "0 records parsed from OpenTargets — aborting in "
+                "0 records parsed from OpenTargets -- aborting in "
                 f"{cfg.enforcement_level} mode (potential SCI-1 schema "
                 "drift or empty source file).",
                 context={
@@ -3630,7 +3630,7 @@ def load_opentargets(
     report: Dict[str, Any] = validate_opentargets(records, edges, cfg)
     if not report["is_valid"] and cfg.is_clinical_or_above:
         raise OpenTargetsDataIntegrityError(
-            "OpenTargets validation failed in CLINICAL+ mode — "
+            "OpenTargets validation failed in CLINICAL+ mode -- "
             f"{len(report['errors'])} errors.",
             context={
                 "errors": report["errors"][:10],
@@ -3679,9 +3679,9 @@ def _load_opentargets_crosswalk_files(
     """Load OpenTargets crosswalk files if present (SCI-14).
 
     Loads (if available in ``RAW_DIR``):
-      * ``opentargets_targets.json.gz`` — ENSG → UniProt AC mappings.
-      * ``opentargets_diseases.json.gz`` — disease → UMLS CUI mappings.
-      * ``ensembl_to_ncbi_gene.tsv`` — ENSG → NCBI Gene ID mappings.
+      * ``opentargets_targets.json.gz`` -- ENSG -> UniProt AC mappings.
+      * ``opentargets_diseases.json.gz`` -- disease -> UMLS CUI mappings.
+      * ``ensembl_to_ncbi_gene.tsv`` -- ENSG -> NCBI Gene ID mappings.
     """
     raw_dir: Path = cfg.effective_raw_dir
     targets_path: Path = raw_dir / "opentargets_targets.json.gz"
@@ -3745,7 +3745,7 @@ def _load_edges_to_neo4j_batched(
         from .config import Neo4jConfig
     except ImportError as e:
         logger.warning(
-            "Cannot load Neo4j builder — skipping Neo4j load: %s", e,
+            "Cannot load Neo4j builder -- skipping Neo4j load: %s", e,
         )
         return
 
@@ -3798,7 +3798,7 @@ def _load_edges_to_neo4j_batched(
 
 
 # =============================================================================
-# Section 13 — Utilities (timestamps, IDs, dead-letter, lineage, audit logs)
+# Section 13 -- Utilities (timestamps, IDs, dead-letter, lineage, audit logs)
 # =============================================================================
 # Fixes Domain 11 (Observability), Domain 16 (Lineage), Domain 9 (Security).
 
@@ -3809,7 +3809,7 @@ def _iso_now() -> str:
 
 
 def _get_load_id() -> str:
-    """Return the process-cached load_id (correlation ID — GAP-7.4).
+    """Return the process-cached load_id (correlation ID -- GAP-7.4).
 
     The load_id is generated once per process (UUID4 hex prefix) and
     cached for the lifetime of the process. This allows all log entries
@@ -3828,7 +3828,7 @@ def _get_load_id() -> str:
 
 
 def _reset_load_id() -> None:
-    """Reset the process-cached load_id (test helper — D11.2)."""
+    """Reset the process-cached load_id (test helper -- D11.2)."""
     global _LOAD_ID
     with _LOAD_ID_LOCK:
         _LOAD_ID = None
@@ -3907,7 +3907,7 @@ def _write_audit_log(event: str, **fields: Any) -> None:
 
 
 # =============================================================================
-# Section 14 — Deprecation warning for legacy `source` field (SEC-9, COMP-4)
+# Section 14 -- Deprecation warning for legacy `source` field (SEC-9, COMP-4)
 # =============================================================================
 # The legacy `source` field on edges is deprecated in favor of `_source`.
 # This warning is emitted ONCE per process when a caller accesses the
@@ -3934,168 +3934,168 @@ def _warn_legacy_source_field() -> None:
 
 
 # =============================================================================
-# FIX HISTORY — All 182 audit findings addressed
+# FIX HISTORY -- All 182 audit findings addressed
 # =============================================================================
 # This section documents every audit issue ID addressed by this file.
-# (opentargets_loader_repair_prompt.md — all 182 findings.)
+# (opentargets_loader_repair_prompt.md -- all 182 findings.)
 #
-# Domain 3 — Scientific Correctness (SCI-1..SCI-15):
-#   SCI-1  — Parser now reads REAL flat schema (drugId/targetId/diseaseId/
+# Domain 3 -- Scientific Correctness (SCI-1..SCI-15):
+#   SCI-1  -- Parser now reads REAL flat schema (drugId/targetId/diseaseId/
 #            score/datasourceId/datatypeId), not fabricated nested schema.
 #            Fix: iter_opentargets_evidence() + _parse_record().
-#   SCI-2  — Reads datasourceId + datatypeId (real fields), not sourceID
+#   SCI-2  -- Reads datasourceId + datatypeId (real fields), not sourceID
 #            (legacy pre-2022). Fix: _parse_record().
-#   SCI-3  — Disease ID crosswalked to UMLS CUI via
+#   SCI-3  -- Disease ID crosswalked to UMLS CUI via
 #            IDCrosswalk.load_opentargets_diseases(). Fix:
 #            _batch_resolve_diseases() + _emit_compound_disease_edge().
-#   SCI-4  — ChEMBL ID validated via ^CHEMBL\d+$ regex. Fix: _validate_chembl_id().
-#   SCI-5  — Score validated: rejects bool, NaN, Infinity, negative, >1,
+#   SCI-4  -- ChEMBL ID validated via ^CHEMBL\d+$ regex. Fix: _validate_chembl_id().
+#   SCI-5  -- Score validated: rejects bool, NaN, Infinity, negative, >1,
 #            non-numeric strings. Fix: _validate_score().
-#   SCI-6  — UniProt AC validated via standard regex. Fix: _validate_uniprot_ac().
-#   SCI-7  — Organism filter: rejects non-human ENSG prefixes (ENSMUSG, etc.)
+#   SCI-6  -- UniProt AC validated via standard regex. Fix: _validate_uniprot_ac().
+#   SCI-7  -- Organism filter: rejects non-human ENSG prefixes (ENSMUSG, etc.)
 #            and non-9606 targetTaxId. Fix: _is_human_target().
-#   SCI-8  — Relation type "indication" FORBIDDEN. Datasource→relation map
+#   SCI-8  -- Relation type "indication" FORBIDDEN. Datasource->relation map
 #            emits scientifically correct labels (binds, tested_for,
 #            associated_with, disrupted_in, modulates). Fix:
 #            datasource_to_relation() + static assertion.
-#   SCI-9  — ENSG → NCBI Gene crosswalk via
+#   SCI-9  -- ENSG -> NCBI Gene crosswalk via
 #            IDCrosswalk.load_ensembl_to_ncbi_gene(). Fix:
 #            _batch_resolve_targets() + _emit_compound_gene_edge().
-#   SCI-10 — ENSG ID validated via ^ENSG\d{11}$ regex. Fix: _validate_ensg_id().
-#   SCI-11 — Per-evidence-type thresholds in
+#   SCI-10 -- ENSG ID validated via ^ENSG\d{11}$ regex. Fix: _validate_ensg_id().
+#   SCI-11 -- Per-evidence-type thresholds in
 #            OPENTARGETS_PER_EVIDENCE_TYPE_THRESHOLDS. Fix: _parse_record().
-#   SCI-12 — Semantic-specific score keys per edge type
+#   SCI-12 -- Semantic-specific score keys per edge type
 #            (binding_confidence, assay_confidence, evidence_strength).
 #            Fix: _emit_compound_*_edge().
-#   SCI-13 — Edge deduplication by (src_id, dst_id, src_type, dst_type,
+#   SCI-13 -- Edge deduplication by (src_id, dst_id, src_type, dst_type,
 #            rel_type) keeping max-score + evidence_count. Fix:
 #            opentargets_to_edge_records() + dedupe_map.
-#   SCI-14 — Crosswalk files loaded BEFORE parsing in load_opentargets().
+#   SCI-14 -- Crosswalk files loaded BEFORE parsing in load_opentargets().
 #            Fix: _load_opentargets_crosswalk_files().
-#   SCI-15 — 0 records raises OpenTargetsDataIntegrityError in CLINICAL+ mode.
+#   SCI-15 -- 0 records raises OpenTargetsDataIntegrityError in CLINICAL+ mode.
 #            Fix: parse_opentargets_evidence() + load_opentargets().
 #
-# Domain 5 — Data Quality (DQ-1..DQ-16):
-#   DQ-1   — SHA-256 verified against pinned value. Fix: _verify_downloaded_file().
-#   DQ-2   — Size + gzip magic bytes verified. Fix: _verify_downloaded_file().
-#   DQ-3   — Content-type sniffed (HTML rejected). Fix: _atomic_download().
-#   DQ-8   — Score range [0, 1] validated. Fix: _validate_score().
-#   DQ-11  — Disease ID validated against EFO/MONDO/HP/MP/Orphanet/SNOMED/
+# Domain 5 -- Data Quality (DQ-1..DQ-16):
+#   DQ-1   -- SHA-256 verified against pinned value. Fix: _verify_downloaded_file().
+#   DQ-2   -- Size + gzip magic bytes verified. Fix: _verify_downloaded_file().
+#   DQ-3   -- Content-type sniffed (HTML rejected). Fix: _atomic_download().
+#   DQ-8   -- Score range [0, 1] validated. Fix: _validate_score().
+#   DQ-11  -- Disease ID validated against EFO/MONDO/HP/MP/Orphanet/SNOMED/
 #            OTAR/DOID/UMLS patterns. Fix: _validate_disease_id().
-#   DQ-12  — Staleness check (>180 days triggers re-download in CLINICAL+).
+#   DQ-12  -- Staleness check (>180 days triggers re-download in CLINICAL+).
 #            Fix: download_opentargets().
-#   DQ-13  — Schema-version check via .meta.json sidecar. Fix: _write_sidecar_files().
-#   DQ-14  — .sha256 sidecar written. Fix: _write_sidecar_files().
-#   DQ-15  — .meta.json sidecar written. Fix: _write_sidecar_files().
-#   DQ-16  — Stale-file freshness check enforced in CLINICAL+ mode.
+#   DQ-13  -- Schema-version check via .meta.json sidecar. Fix: _write_sidecar_files().
+#   DQ-14  -- .sha256 sidecar written. Fix: _write_sidecar_files().
+#   DQ-15  -- .meta.json sidecar written. Fix: _write_sidecar_files().
+#   DQ-16  -- Stale-file freshness check enforced in CLINICAL+ mode.
 #            Fix: download_opentargets().
 #
-# Domain 6 — Reliability (REL-1..REL-13):
-#   REL-1  — Retry with exponential backoff + jitter. Fix: _download_with_retry().
-#   REL-2  — Download timeout enforced. Fix: _atomic_download().
-#   REL-3  — Atomic write via .tmp + os.replace. Fix: _atomic_download().
-#   REL-4  — Per-record error isolation in parse loop. Fix: iter_opentargets_evidence().
-#   REL-5  — Dead-letter queue at data/dead_letter/opentargets_malformed.jsonl.
+# Domain 6 -- Reliability (REL-1..REL-13):
+#   REL-1  -- Retry with exponential backoff + jitter. Fix: _download_with_retry().
+#   REL-2  -- Download timeout enforced. Fix: _atomic_download().
+#   REL-3  -- Atomic write via .tmp + os.replace. Fix: _atomic_download().
+#   REL-4  -- Per-record error isolation in parse loop. Fix: iter_opentargets_evidence().
+#   REL-5  -- Dead-letter queue at data/dead_letter/opentargets_malformed.jsonl.
 #            Fix: _write_dead_letter().
-#   REL-6  — Checkpoint/resume (via parsed_cache_dir). Fix: load_opentargets().
-#   REL-7  — Graceful degradation when crosswalk unavailable (DEV mode).
+#   REL-6  -- Checkpoint/resume (via parsed_cache_dir). Fix: load_opentargets().
+#   REL-7  -- Graceful degradation when crosswalk unavailable (DEV mode).
 #            Fix: opentargets_to_edge_records().
-#   REL-8  — Typed exceptions for all failure modes. Fix: exceptions.py.
-#   REL-9  — Circuit breaker on consecutive per-record failures.
+#   REL-8  -- Typed exceptions for all failure modes. Fix: exceptions.py.
+#   REL-9  -- Circuit breaker on consecutive per-record failures.
 #            Fix: iter_opentargets_evidence().
-#   REL-11 — _LoggingRedirectHandler (forward legacy logger to structlog).
+#   REL-11 -- _LoggingRedirectHandler (forward legacy logger to structlog).
 #            Fix: module-level logger setup.
-#   REL-13 — _get_opener singleton (TLS context cached).
+#   REL-13 -- _get_opener singleton (TLS context cached).
 #            Fix: _create_tls_context().
 #
-# Domain 7 — Idempotency (IDEM-1..IDEM-9):
-#   IDEM-1 — Thread-safe load_id via double-checked locking. Fix: _get_load_id().
-#   IDEM-3 — Parsed cache keyed by source SHA-256. Fix: load_opentargets().
-#   IDEM-4 — Deterministic output ordering (sort_output=True default).
+# Domain 7 -- Idempotency (IDEM-1..IDEM-9):
+#   IDEM-1 -- Thread-safe load_id via double-checked locking. Fix: _get_load_id().
+#   IDEM-3 -- Parsed cache keyed by source SHA-256. Fix: load_opentargets().
+#   IDEM-4 -- Deterministic output ordering (sort_output=True default).
 #            Fix: parse_opentargets_evidence(), opentargets_to_edge_records().
-#   IDEM-9 — set_global_seed(SEED) called in load_opentargets.
+#   IDEM-9 -- set_global_seed(SEED) called in load_opentargets.
 #            Fix: load_opentargets().
 #
-# Domain 9 — Security (SEC-1..SEC-5):
-#   SEC-1  — TLS 1.2+, cert verification, hostname check. Fix: _create_tls_context().
-#   SEC-2  — URL allowlist enforced. Fix: _validate_url_against_allowlist().
-#   SEC-3  — Path-traversal protection on output filename. Fix: _validate_filename_safe().
-#   SEC-4  — Data sanitization on all string props (Cypher injection prevention).
+# Domain 9 -- Security (SEC-1..SEC-5):
+#   SEC-1  -- TLS 1.2+, cert verification, hostname check. Fix: _create_tls_context().
+#   SEC-2  -- URL allowlist enforced. Fix: _validate_url_against_allowlist().
+#   SEC-3  -- Path-traversal protection on output filename. Fix: _validate_filename_safe().
+#   SEC-4  -- Data sanitization on all string props (Cypher injection prevention).
 #            Fix: _sanitize_for_cypher_props().
-#   SEC-5  — Audit log with operator ID, timestamp, URL, SHA-256, size.
+#   SEC-5  -- Audit log with operator ID, timestamp, URL, SHA-256, size.
 #            Fix: _write_audit_log().
 #
-# Domain 12 — Configuration (CONF-1..CONF-9):
-#   CONF-1 — Config validation in OpenTargetsConfig.__post_init__.
+# Domain 12 -- Configuration (CONF-1..CONF-9):
+#   CONF-1 -- Config validation in OpenTargetsConfig.__post_init__.
 #            Fix: OpenTargetsConfig.
-#   CONF-2 — Env-var overrides (DRUGOS_OPENTARGETS_*). Fix: config.py.
-#   CONF-4 — Crosswalk contract validation. Fix: _validate_crosswalk().
-#   CONF-8 — Every default documented in docstring. Fix: OpenTargetsConfig.
+#   CONF-2 -- Env-var overrides (DRUGOS_OPENTARGETS_*). Fix: config.py.
+#   CONF-4 -- Crosswalk contract validation. Fix: _validate_crosswalk().
+#   CONF-8 -- Every default documented in docstring. Fix: OpenTargetsConfig.
 #
-# Domain 11 — Observability (LOG-1..LOG-5):
-#   LOG-3  — Progress logging every N lines. Fix: iter_opentargets_evidence().
-#   LOG-4  — Full metrics at end of parse. Fix: iter_opentargets_evidence().
-#   LOG-5  — Per-edge-type counts logged. Fix: opentargets_to_edge_records().
+# Domain 11 -- Observability (LOG-1..LOG-5):
+#   LOG-3  -- Progress logging every N lines. Fix: iter_opentargets_evidence().
+#   LOG-4  -- Full metrics at end of parse. Fix: iter_opentargets_evidence().
+#   LOG-5  -- Per-edge-type counts logged. Fix: opentargets_to_edge_records().
 #
-# Domain 16 — Lineage (LIN-1..LIN-12):
-#   LIN-1  — source on every edge. Fix: _build_edge_provenance().
-#   LIN-2  — Transformation log. Fix: _write_lineage_log().
-#   LIN-4  — Resolution path per edge. Fix: _build_edge_provenance().
-#   LIN-6  — Lineage log at logs/lineage/opentargets_lineage.jsonl.
+# Domain 16 -- Lineage (LIN-1..LIN-12):
+#   LIN-1  -- source on every edge. Fix: _build_edge_provenance().
+#   LIN-2  -- Transformation log. Fix: _write_lineage_log().
+#   LIN-4  -- Resolution path per edge. Fix: _build_edge_provenance().
+#   LIN-6  -- Lineage log at logs/lineage/opentargets_lineage.jsonl.
 #            Fix: _write_lineage_log().
 #
-# Domain 14 — Compliance (COMP-1..COMP-9):
-#   COMP-2 — Full _provenance on every edge. Fix: _build_edge_provenance().
-#   COMP-3 — _source, _license, _attribution, _schema_version on every edge.
+# Domain 14 -- Compliance (COMP-1..COMP-9):
+#   COMP-2 -- Full _provenance on every edge. Fix: _build_edge_provenance().
+#   COMP-3 -- _source, _license, _attribution, _schema_version on every edge.
 #            Fix: _emit_compound_*_edge().
-#   COMP-4 — Deprecation warning on legacy `source` field. Fix: _warn_legacy_source_field().
-#   COMP-5 — License compliance check (CC0 1.0). Fix: LICENSE constant.
-#   COMP-9 — Typed exceptions for all failure modes. Fix: exceptions.py.
+#   COMP-4 -- Deprecation warning on legacy `source` field. Fix: _warn_legacy_source_field().
+#   COMP-5 -- License compliance check (CC0 1.0). Fix: LICENSE constant.
+#   COMP-9 -- Typed exceptions for all failure modes. Fix: exceptions.py.
 #
-# Domain 1 — Architecture (ARCH-1..ARCH-9):
-#   ARCH-1 — OpenTargetsLoader Protocol adapter. Fix: OpenTargetsLoader class.
-#   ARCH-2 — OPENTARGETS_EMITTABLE_TRIPLES contract. Fix: validate_opentargets().
-#   ARCH-4 — TypedDicts in schemas.py. Fix: schemas.py.
-#   ARCH-5 — OpenTargetsConfig dataclass. Fix: OpenTargetsConfig.
-#   ARCH-6 — isinstance(OpenTargetsLoader(), Loader) returns True.
+# Domain 1 -- Architecture (ARCH-1..ARCH-9):
+#   ARCH-1 -- OpenTargetsLoader Protocol adapter. Fix: OpenTargetsLoader class.
+#   ARCH-2 -- OPENTARGETS_EMITTABLE_TRIPLES contract. Fix: validate_opentargets().
+#   ARCH-4 -- TypedDicts in schemas.py. Fix: schemas.py.
+#   ARCH-5 -- OpenTargetsConfig dataclass. Fix: OpenTargetsConfig.
+#   ARCH-6 -- isinstance(OpenTargetsLoader(), Loader) returns True.
 #            Fix: OpenTargetsLoader class.
-#   ARCH-7 — Lazy import of IDCrosswalk (no circular dependency).
+#   ARCH-7 -- Lazy import of IDCrosswalk (no circular dependency).
 #            Fix: TYPE_CHECKING import.
-#   ARCH-8 — __all__ explicit. Fix: __all__.
-#   ARCH-9 — tests/test_opentargets_loader_protocol.py.
+#   ARCH-8 -- __all__ explicit. Fix: __all__.
+#   ARCH-9 -- tests/test_opentargets_loader_protocol.py.
 #            Fix: tests/test_opentargets_loader_protocol.py.
 #
-# Domain 4 — Coding (COD-1..COD-10):
-#   COD-1  — Score bool check. Fix: _validate_score().
-#   COD-2  — Score NaN check. Fix: _validate_score().
-#   COD-3  — Score bool subclass of int rejected. Fix: _validate_score().
-#   COD-4  — Score Infinity check. Fix: _validate_score().
-#   COD-5  — UTF-8 BOM stripped. Fix: _open_for_read().
-#   COD-10 — Gzip magic byte sniffing (not filename extension). Fix: _open_for_read().
+# Domain 4 -- Coding (COD-1..COD-10):
+#   COD-1  -- Score bool check. Fix: _validate_score().
+#   COD-2  -- Score NaN check. Fix: _validate_score().
+#   COD-3  -- Score bool subclass of int rejected. Fix: _validate_score().
+#   COD-4  -- Score Infinity check. Fix: _validate_score().
+#   COD-5  -- UTF-8 BOM stripped. Fix: _open_for_read().
+#   COD-10 -- Gzip magic byte sniffing (not filename extension). Fix: _open_for_read().
 #
-# Domain 8 — Performance (PERF-1..PERF-10):
-#   PERF-1 — Streaming parser (iter_opentargets_evidence). Fix: iter_opentargets_evidence().
-#   PERF-2 — Streaming converter (iter_opentargets_edges).
+# Domain 8 -- Performance (PERF-1..PERF-10):
+#   PERF-1 -- Streaming parser (iter_opentargets_evidence). Fix: iter_opentargets_evidence().
+#   PERF-2 -- Streaming converter (iter_opentargets_edges).
 #            Fix: opentargets_to_edge_records() (batched).
-#   PERF-3 — Batched crosswalk lookup. Fix: _batch_resolve_targets().
-#   PERF-4 — Batched Neo4j load at 50K edges per transaction.
+#   PERF-3 -- Batched crosswalk lookup. Fix: _batch_resolve_targets().
+#   PERF-4 -- Batched Neo4j load at 50K edges per transaction.
 #            Fix: _load_edges_to_neo4j_batched().
 #
-# Domain 13 — Documentation (DOC-1..DOC-11):
-#   DOC-1  — Module docstring 200+ lines. Fix: this docstring.
-#   DOC-2  — Docstring describes REAL flat schema. Fix: this docstring.
-#   DOC-4  — README section. Fix: README.md.
-#   DOC-5  — Data dictionary. Fix: docs/opentargets_data_dictionary.md.
-#   DOC-6  — Runbook. Fix: docs/opentargets_runbook.md.
+# Domain 13 -- Documentation (DOC-1..DOC-11):
+#   DOC-1  -- Module docstring 200+ lines. Fix: this docstring.
+#   DOC-2  -- Docstring describes REAL flat schema. Fix: this docstring.
+#   DOC-4  -- README section. Fix: README.md.
+#   DOC-5  -- Data dictionary. Fix: docs/opentargets_data_dictionary.md.
+#   DOC-6  -- Runbook. Fix: docs/opentargets_runbook.md.
 #
-# Domain 15 — Interoperability (INT-1..INT-9):
-#   INT-1  — Interface contracts stable (v1 signatures preserved). Fix: parse_opentargets_evidence().
-#   INT-7  — Release migration script. Fix: scripts/migrate_opentargets_release.py.
+# Domain 15 -- Interoperability (INT-1..INT-9):
+#   INT-1  -- Interface contracts stable (v1 signatures preserved). Fix: parse_opentargets_evidence().
+#   INT-7  -- Release migration script. Fix: scripts/migrate_opentargets_release.py.
 #
-# Domain 10 — Testing (TEST-1..TEST-12):
-#   TEST-1 — 60+ unit tests. Fix: tests/test_opentargets_loader.py.
-#   TEST-2 — 15+ download tests. Fix: tests/test_opentargets_loader.py.
-#   TEST-3 — Integration tests. Fix: tests/test_opentargets_integration.py.
-#   TEST-4 — 24+ fixtures. Fix: tests/fixtures/opentargets/.
-#   TEST-5 — Edge case tests. Fix: tests/test_opentargets_loader.py.
+# Domain 10 -- Testing (TEST-1..TEST-12):
+#   TEST-1 -- 60+ unit tests. Fix: tests/test_opentargets_loader.py.
+#   TEST-2 -- 15+ download tests. Fix: tests/test_opentargets_loader.py.
+#   TEST-3 -- Integration tests. Fix: tests/test_opentargets_integration.py.
+#   TEST-4 -- 24+ fixtures. Fix: tests/fixtures/opentargets/.
+#   TEST-5 -- Edge case tests. Fix: tests/test_opentargets_loader.py.
 # =============================================================================

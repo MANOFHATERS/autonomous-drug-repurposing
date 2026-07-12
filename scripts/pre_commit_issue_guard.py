@@ -4,18 +4,18 @@
 Runs in <0.1 seconds locally. No CI needed. Blocks commits that violate
 the issue-ownership contract:
 
-  1. If you edit a file owned by an issue CLAIMED by another agent → BLOCK
-  2. If you edit an immutable file (migration 001-011) → BLOCK
-  3. If you edit a file owned by an issue marked DONE → WARN (did you
+  1. If you edit a file owned by an issue CLAIMED by another agent -> BLOCK
+  2. If you edit an immutable file (migration 001-011) -> BLOCK
+  3. If you edit a file owned by an issue marked DONE -> WARN (did you
      mean to reopen the issue? claim it first)
-  4. If you add a new code file not in the FILE→ISSUE map → REMIND
+  4. If you add a new code file not in the FILE->ISSUE map -> REMIND
      (add it to the map so others know who owns it)
 
 HOW IT WORKS:
   - Reads ISSUE_OWNERSHIP.md (the single source of truth)
-  - Builds FILE → ISSUE_ID → (STATUS, AGENT_ID) mapping
+  - Builds FILE -> ISSUE_ID -> (STATUS, AGENT_ID) mapping
   - For each staged file, checks who owns it
-  - If owned by a CLAIMED issue and the claimer is NOT you → BLOCK
+  - If owned by a CLAIMED issue and the claimer is NOT you -> BLOCK
 
 INSTALL (run once per clone, from repo root):
     cp scripts/pre_commit_issue_guard.py .git/hooks/pre-commit
@@ -70,7 +70,7 @@ def parse_ownership_map() -> tuple[dict[str, dict], dict[str, str]]:
 
     # Parse the ISSUE OWNERSHIP TABLE rows.
     # Format: ISSUE_ID | TITLE | PHASE | STATUS | AGENT_ID | BRANCH | CLAIMED_AT | FILES | MERGED | VERIFIED_AT | NOTES
-    # FILES is comma-separated. VERIFIED_AT is "—" if not verified.
+    # FILES is comma-separated. VERIFIED_AT is "--" if not verified.
     # We match lines that start with a known issue ID pattern.
     issue_pattern = re.compile(
         r"^(P[1-4]-\d{3}|FE-\d{3}|BUG-#\d+|DEDUP-\d{3}|GAP-\d{3})\s*\|\s*([^|]*?)\s*\|\s*(\S+)\s*\|\s*(\S+)\s*\|\s*([^|]*?)\s*\|\s*([^|]*?)\s*\|\s*([^|]*?)\s*\|\s*([^|]*?)\s*\|\s*([^|]*?)\s*\|\s*([^|]*?)\s*\|\s*(.*)$",
@@ -94,10 +94,10 @@ def parse_ownership_map() -> tuple[dict[str, dict], dict[str, str]]:
         for f in files:
             file_to_issues.setdefault(f, []).append(issue_id)
 
-    # Also parse the FILE → ISSUE MAP section (the inverse mapping)
-    # Format: <file_path> → <ISSUE_ID> (STATUS), <ISSUE_ID> (STATUS)
+    # Also parse the FILE -> ISSUE MAP section (the inverse mapping)
+    # Format: <file_path> -> <ISSUE_ID> (STATUS), <ISSUE_ID> (STATUS)
     file_map_pattern = re.compile(
-        r"^(\S+)\s*→\s*(.+)$",
+        r"^(\S+)\s*->\s*(.+)$",
         re.MULTILINE,
     )
     for m in file_map_pattern.finditer(content):
@@ -114,11 +114,11 @@ def parse_ownership_map() -> tuple[dict[str, dict], dict[str, str]]:
             elif issue_id == "DEPRECATED":
                 file_to_issues.setdefault(file_path, []).append("DEPRECATED")
             else:
-                # It's an issue ID — make sure it's in the issues dict
+                # It's an issue ID -- make sure it's in the issues dict
                 if issue_id not in issues:
                     issues[issue_id] = {
                         "status": status,
-                        "agent_id": "—",
+                        "agent_id": "--",
                         "files": [file_path],
                     }
                 file_to_issues.setdefault(file_path, []).append(issue_id)
@@ -135,7 +135,7 @@ def check_immutable_files(staged: set[str], file_to_issues: dict) -> list[str]:
             errors.append(
                 f"BLOCKED: {f} is IMMUTABLE. Editing it breaks the immutability "
                 f"contract. Create a NEW migration/file instead. "
-                f"See ISSUE_OWNERSHIP.md → FILE → ISSUE MAP."
+                f"See ISSUE_OWNERSHIP.md -> FILE -> ISSUE MAP."
             )
             continue
         # Also check by convention: migrations 001-011 are always immutable
@@ -157,19 +157,19 @@ def check_claimed_by_other(staged: set[str], issues: dict, file_to_issues: dict,
             continue  # editing the registry itself is always allowed
         owner_issues = file_to_issues.get(f, [])
         if not owner_issues:
-            continue  # file not in the map — handled by check_unmapped_files
+            continue  # file not in the map -- handled by check_unmapped_files
         for issue_id in owner_issues:
             if issue_id in ("IMMUTABLE", "SHARED", "DEPRECATED"):
                 continue
             issue = issues.get(issue_id, {})
             status = issue.get("status", "").upper()
-            agent = issue.get("agent_id", "—")
-            if status == "CLAIMED" and agent and agent != "—" and agent != current_agent:
+            agent = issue.get("agent_id", "--")
+            if status == "CLAIMED" and agent and agent != "--" and agent != current_agent:
                 errors.append(
                     f"BLOCKED: {f} is owned by issue {issue_id} which is "
                     f"CLAIMED by {agent} (since {issue.get('claimed_at', '?')}). "
                     f"Branch: {issue.get('branch', '?')}. "
-                    f"DO NOT TOUCH — pick another issue or wait for {agent} to finish. "
+                    f"DO NOT TOUCH -- pick another issue or wait for {agent} to finish. "
                     f"See ISSUE_OWNERSHIP.md."
                 )
     return errors
@@ -214,10 +214,10 @@ def check_unmapped_files(staged: set[str], file_to_issues: dict) -> list[str]:
         if "/tests/" in f or f.startswith("tests/") or f.startswith("phase1/tests/"):
             continue
         warnings.append(
-            f"REMINDER: {f} is not in ISSUE_OWNERSHIP.md → FILE → ISSUE MAP. "
+            f"REMINDER: {f} is not in ISSUE_OWNERSHIP.md -> FILE -> ISSUE MAP. "
             f"If this is a new code file, add an entry: claim a new issue ID "
             f"(or assign it to an existing issue) and add the file to that "
-            f"issue's FILES column + the FILE → ISSUE MAP section."
+            f"issue's FILES column + the FILE -> ISSUE MAP section."
         )
     return warnings
 
@@ -235,7 +235,7 @@ def check_deprecated_files(staged: set[str], file_to_issues: dict) -> list[str]:
 
 
 def main() -> int:
-    """Entry point — handles both pre-commit hook mode and `verify` subcommand."""
+    """Entry point -- handles both pre-commit hook mode and `verify` subcommand."""
     # Check for subcommand
     if len(sys.argv) > 1 and sys.argv[1] == "verify":
         return cmd_verify(sys.argv[2:])
@@ -250,7 +250,7 @@ def main() -> int:
 
 def run_pre_commit_hook() -> int:
     if not OWNERSHIP_FILE.exists():
-        print("⚠ ISSUE_OWNERSHIP.md not found — skipping ownership guard (bootstrap mode)")
+        print("⚠ ISSUE_OWNERSHIP.md not found -- skipping ownership guard (bootstrap mode)")
         return 0
 
     staged = get_staged_files()
@@ -271,7 +271,7 @@ def run_pre_commit_hook() -> int:
 
     if warnings:
         print("=" * 70)
-        print("ISSUE OWNERSHIP GUARD — WARNINGS (commit will proceed):")
+        print("ISSUE OWNERSHIP GUARD -- WARNINGS (commit will proceed):")
         print("=" * 70)
         for w in warnings:
             print(f"  ⚠️  {w}")
@@ -279,7 +279,7 @@ def run_pre_commit_hook() -> int:
 
     if errors:
         print("=" * 70)
-        print("ISSUE OWNERSHIP GUARD — ERRORS (commit BLOCKED):")
+        print("ISSUE OWNERSHIP GUARD -- ERRORS (commit BLOCKED):")
         print("=" * 70)
         for e in errors:
             print(f"  🚫 {e}")
@@ -297,12 +297,12 @@ def run_pre_commit_hook() -> int:
 
 
 # ====================================================================
-# VERIFY SUBCOMMAND — the partial-fix solution
+# VERIFY SUBCOMMAND -- the partial-fix solution
 # ====================================================================
 
-# Map of ISSUE_ID → verification test (file + function or pytest node)
-# The verify command runs these tests and flips DONE → VERIFIED (pass)
-# or DONE → REOPENED (fail).
+# Map of ISSUE_ID -> verification test (file + function or pytest node)
+# The verify command runs these tests and flips DONE -> VERIFIED (pass)
+# or DONE -> REOPENED (fail).
 #
 # To add a new verification: add an entry here pointing to a test that
 # exercises the fix. The test must return 0 on success, non-zero on fail.
@@ -356,7 +356,7 @@ VERIFICATION_TESTS: dict[str, dict] = {
         "check": "from database.models import Drug; chk = next((c for c in Drug.__table__.constraints if getattr(c, 'name', None) == 'chk_drugs_inchikey_format'), None); assert chk is not None; assert 'LENGTH(inchikey) <= 27' in str(chk.sqltext)",
     },
     # P1-008, P1-010, P1-011, P1-013..P1-017, P1-019, P1-020, P1-022, P1-023
-    # — add verification checks here as you go. Issues without a check
+    # -- add verification checks here as you go. Issues without a check
     # are reported as "NO TEST" in verify output.
 }
 
@@ -426,7 +426,7 @@ def cmd_verify(args: list[str]) -> int:
         print(f"  current status: {status}")
 
         if issue_id not in VERIFICATION_TESTS:
-            print(f"  ⚠  NO TEST — no verification check defined for {issue_id}")
+            print(f"  ⚠  NO TEST -- no verification check defined for {issue_id}")
             print(f"     Add an entry to VERIFICATION_TESTS in scripts/pre_commit_issue_guard.py")
             no_test.append(issue_id)
             continue
@@ -449,20 +449,20 @@ def cmd_verify(args: list[str]) -> int:
     print(f"RESULTS: {len(passed)} passed, {len(failed)} failed, {len(no_test)} no-test")
 
     if passed:
-        print(f"\n✓ PASSED (flip DONE → VERIFIED):")
+        print(f"\n✓ PASSED (flip DONE -> VERIFIED):")
         for iid in passed:
             print(f"  - {iid}")
         # Update the file
         _update_issue_statuses(passed, "VERIFIED")
-        print(f"\n  → ISSUE_OWNERSHIP.md updated. Commit + push to share.")
+        print(f"\n  -> ISSUE_OWNERSHIP.md updated. Commit + push to share.")
 
     if failed:
-        print(f"\n✗ FAILED (flip DONE → REOPENED):")
+        print(f"\n✗ FAILED (flip DONE -> REOPENED):")
         for iid, err in failed:
             print(f"  - {iid}: {err[:80]}")
         _update_issue_statuses([iid for iid, _ in failed], "REOPENED")
-        print(f"\n  → ISSUE_OWNERSHIP.md updated. These issues are now AVAILABLE for re-claiming.")
-        print(f"  → A second run should claim and re-fix these.")
+        print(f"\n  -> ISSUE_OWNERSHIP.md updated. These issues are now AVAILABLE for re-claiming.")
+        print(f"  -> A second run should claim and re-fix these.")
 
     if no_test:
         print(f"\n⚠ NO TEST (no verification check defined):")
@@ -480,7 +480,7 @@ def _update_issue_statuses(issue_ids: list[str], new_status: str) -> None:
 
     for issue_id in issue_ids:
         # Match the issue row and replace STATUS (4th column) with new_status
-        # and VERIFIED_AT (10th column) with now (if VERIFIED) or "—" (if REOPENED)
+        # and VERIFIED_AT (10th column) with now (if VERIFIED) or "--" (if REOPENED)
         pattern = re.compile(
             r"^((" + re.escape(issue_id) + r")\s*\|\s*[^|]*?\s*\|\s*\S+\s*\|\s*)(\S+)(\s*\|\s*[^|]*?\s*\|\s*[^|]*?\s*\|\s*[^|]*?\s*\|\s*[^|]*?\s*\|\s*[^|]*?\s*\|\s*)([^|]*?)(\s*\|\s*.*)$",
             re.MULTILINE,
@@ -488,7 +488,7 @@ def _update_issue_statuses(issue_ids: list[str], new_status: str) -> None:
         m = pattern.search(content)
         if m:
             prefix, _, _, middle, old_verified, suffix = m.groups()
-            new_verified = now if new_status == "VERIFIED" else "—"
+            new_verified = now if new_status == "VERIFIED" else "--"
             content = content.replace(
                 m.group(0),
                 prefix + new_status + middle + new_verified + suffix,
@@ -520,7 +520,7 @@ def cmd_list(args: list[str]) -> int:
         print(f"\n=== {status} ({len(items)}) ===")
         for iid, issue in items:
             title = issue.get("title", "")[:60]
-            agent = issue.get("agent_id", "—")
+            agent = issue.get("agent_id", "--")
             print(f"  {iid} | {title} | agent={agent}")
 
     return 0
@@ -548,11 +548,11 @@ def cmd_status(args: list[str]) -> int:
             print(f"  {status:12s} {count:3d} {bar}")
     print()
     print("Key:")
-    print("  AVAILABLE  — claim it")
-    print("  CLAIMED    — someone is working on it")
-    print("  DONE       — fix merged, NOT verified (run `verify`)")
-    print("  VERIFIED   — fix merged AND tests pass")
-    print("  REOPENED   — was DONE/VERIFIED but tests now fail — re-claim")
+    print("  AVAILABLE  -- claim it")
+    print("  CLAIMED    -- someone is working on it")
+    print("  DONE       -- fix merged, NOT verified (run `verify`)")
+    print("  VERIFIED   -- fix merged AND tests pass")
+    print("  REOPENED   -- was DONE/VERIFIED but tests now fail -- re-claim")
     return 0
 
 
