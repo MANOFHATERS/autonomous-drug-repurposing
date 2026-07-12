@@ -7255,23 +7255,45 @@ def step11b_train_graph_transformer(
     _disease_degree: dict = {}
     for _t in dst_list:
         _disease_degree[_t] = _disease_degree.get(_t, 0) + 1
-    # Build weighted pool for sampling (each disease appears
-    # proportionally to 1/(1+degree)).
-    _weighted_disease_pool: list = []
+    # v102 ROOT FIX (P2-041): the previous code built a materialized
+    # weighted pool via
+    #   _weight = max(1, int(1000 / (1 + _deg)))
+    #   _weighted_disease_pool.extend([_t] * _weight)
+    # The ``int()`` truncation SATURATED weights at 1 for any disease
+    # with degree >= 999 — hubs (DOID:4 "disease", TP53-linked cancers
+    # with thousands of edges) got weight 1, identical to mid-tier
+    # diseases with degree 999. The Bernoulli weighting FLATTENED to
+    # uniform for hubs, defeating Wang et al. 2014's prescription that
+    # hubs be sampled LESS often (their negatives are easy → weaker
+    # learning signal). Hub diseases were over-sampled as negatives,
+    # inflating HGT AUC because hub negatives are easy.
+    #
+    # ROOT FIX: build a FLOAT weight list (no int truncation) and use
+    # ``random.choices(population, weights=weights, k=1)[0]`` instead
+    # of materializing the pool. This preserves the true 1/(1+deg)
+    # Bernoulli distribution even for hubs with degree 1000+ (weight
+    # 0.001 vs 1.0 for degree 0 — a 1000x sampling ratio that the
+    # int-truncation form collapsed to 1x).
+    _disease_weights: list = []
     for _t in all_disease_indices:
         _deg = _disease_degree.get(_t, 0)
-        _weight = max(1, int(1000 / (1 + _deg)))  # inverse-degree weight
-        _weighted_disease_pool.extend([_t] * _weight)
-    # Fall back to uniform if the weighted pool is empty (no diseases).
-    if not _weighted_disease_pool:
-        _weighted_disease_pool = list(all_disease_indices)
+        # Float weight = 1 / (1 + degree). Wang et al. 2014 Bernoulli.
+        # No int truncation — preserves the true inverse-degree curve.
+        _disease_weights.append(1.0 / (1.0 + float(_deg)))
+    # Fall back to uniform (all-equal weights) if the population is
+    # non-empty but all weights are zero (degenerate: all diseases have
+    # infinite degree — impossible in practice but defensive).
+    if all(_w == 0.0 for _w in _disease_weights) and all_disease_indices:
+        _disease_weights = [1.0] * len(all_disease_indices)
     logger.info(
         "Step 11b: negative sampling — %d diseases, %d known_positives, "
         "%d held_out_pairs (val+test), Bernoulli degree-weighted "
-        "(pool_size=%d). Fixes P2C-011 (held_out contamination + "
-        "degree bias).",
+        "(float_weights, min=%.6f, max=%.6f). Fixes P2C-011 + P2-041 "
+        "(held_out contamination + degree bias, no int-truncation).",
         len(all_disease_indices), len(known_positives),
-        len(held_out_pairs), len(_weighted_disease_pool),
+        len(held_out_pairs),
+        min(_disease_weights) if _disease_weights else 0.0,
+        max(_disease_weights) if _disease_weights else 0.0,
     )
 
     def _make_negatives(positive_indices, rng=None) -> Dict[int, Tuple[int, int]]:
@@ -7306,7 +7328,22 @@ def step11b_train_graph_transformer(
             found = False
             while attempts < 50:
                 # v71 P2C-011: Bernoulli degree-weighted sampling.
-                t = _neg_rng.choice(_weighted_disease_pool)
+                # v102 P2-041: use random.choices with FLOAT weights
+                # instead of _neg_rng.choice on a materialized pool.
+                # The previous int-truncated pool saturated at weight 1
+                # for hubs (degree >= 999), flattening Bernoulli to
+                # uniform. random.choices accepts float weights directly,
+                # preserving the true 1/(1+deg) curve even for hubs.
+                if all_disease_indices and _disease_weights:
+                    t = _neg_rng.choices(
+                        all_disease_indices,
+                        weights=_disease_weights,
+                        k=1,
+                    )[0]
+                else:
+                    # No diseases available — skip this positive.
+                    n_skipped_no_neg += 1
+                    break
                 # v71 P2C-011: reject known_positives AND held_out_pairs.
                 if (h, t) in known_positives:
                     tried.add(t)

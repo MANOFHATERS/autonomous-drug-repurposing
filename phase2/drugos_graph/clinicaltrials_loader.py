@@ -3233,6 +3233,15 @@ def _normalise_trial_status(overall_status: Optional[str]) -> str:
     ``"Active, not recruiting"`` (with a comma). Lower-case and replace
     spaces / commas with underscores so callers can compare against a
     single canonical form (e.g. ``"unknown_status"``, ``"terminated"``).
+
+    v102 ROOT FIX (P2-042): this function returns the raw normalized
+    status string (e.g. "completed"). Callers that need to distinguish
+    "completed with positive result" from "completed with negative
+    result" should use the new ``_classify_trial_status`` helper, which
+    takes BOTH overall_status AND primary_outcome_met and returns a
+    richer status: "completed_positive", "completed_negative",
+    "completed_unknown", "terminated", "withdrawn", "suspended",
+    "unknown_status", or "" (empty for None input).
     """
     if not overall_status or not isinstance(overall_status, str):
         return ""
@@ -3241,6 +3250,84 @@ def _normalise_trial_status(overall_status: Optional[str]) -> str:
         .replace(" ", "_")
         .replace(",", "")
     )
+
+
+# v102 ROOT FIX (P2-042): richer trial status classifier that
+# distinguishes "completed with positive result" from "completed with
+# negative result". The previous ``_normalise_trial_status`` only
+# returned the raw normalized status string and did NOT take
+# primary_outcome_met into account — so callers could not tell whether
+# a "completed" trial had a positive or negative outcome without
+# separately inspecting primary_outcome_met. This helper centralizes
+# that logic so downstream code (rel_type assignment, evidence_strength
+# computation) has a single canonical status to switch on.
+_TRIAL_STATUS_COMPLETED_POSITIVE = "completed_positive"
+_TRIAL_STATUS_COMPLETED_NEGATIVE = "completed_negative"
+_TRIAL_STATUS_COMPLETED_UNKNOWN = "completed_unknown"
+_TRIAL_STATUS_TERMINATED = "terminated"
+_TRIAL_STATUS_WITHDRAWN = "withdrawn"
+_TRIAL_STATUS_SUSPENDED = "suspended"
+_TRIAL_STATUS_UNKNOWN = "unknown_status"
+
+
+def _classify_trial_status(
+    overall_status: Optional[str],
+    primary_outcome_met: Optional[bool],
+) -> str:
+    """Classify a trial's status into a canonical form that distinguishes outcomes.
+
+    Parameters
+    ----------
+    overall_status : str or None
+        The AACT ``overall_status`` value (e.g. "Completed", "Terminated").
+    primary_outcome_met : bool or None
+        ``True`` if the trial's primary endpoint was met, ``False`` if
+        missed, ``None`` if unavailable.
+
+    Returns
+    -------
+    str
+        One of:
+        - ``"completed_positive"``  — completed + primary_outcome_met=True
+        - ``"completed_negative"``  — completed + primary_outcome_met=False
+        - ``"completed_unknown"``   — completed + primary_outcome_met=None
+        - ``"terminated"``          — terminated early
+        - ``"withdrawn"``           — withdrawn before enrollment complete
+        - ``"suspended"``           — temporarily suspended
+        - ``"unknown_status"``      — AACT status is "Unknown status"
+        - ``""``                    — overall_status is None/empty
+
+    This is the v102 P2-042 ROOT FIX: the previous code path used
+    ``_normalise_trial_status`` (which only normalized the string) and
+    checked ``primary_outcome_met`` SEPARATELY at the rel_type
+    assignment site. That separation made it easy to forget the
+    negative-result branch — which is exactly what happened: completed
+    + False was emitted as "tested_for" (a weak POSITIVE signal) even
+    though the drug was PROVEN INEFFECTIVE. Centralizing the
+    classification here makes the negative-result branch UNMISSABLE.
+    """
+    s = _normalise_trial_status(overall_status)
+    if not s:
+        return ""
+    if s == "unknown_status":
+        return _TRIAL_STATUS_UNKNOWN
+    if s == "completed":
+        if primary_outcome_met is True:
+            return _TRIAL_STATUS_COMPLETED_POSITIVE
+        if primary_outcome_met is False:
+            return _TRIAL_STATUS_COMPLETED_NEGATIVE
+        return _TRIAL_STATUS_COMPLETED_UNKNOWN
+    if s == "terminated":
+        return _TRIAL_STATUS_TERMINATED
+    if s == "withdrawn":
+        return _TRIAL_STATUS_WITHDRAWN
+    if s == "suspended":
+        return _TRIAL_STATUS_SUSPENDED
+    # Active, Recruiting, Not yet recruiting, Available, etc.
+    # Return the raw normalized string for forward-compat with new
+    # AACT status values (callers can switch on the canonical forms
+    # above and treat anything else as "no override needed").
+    return s
 
 
 # Sentinel return values for ``_classify_trial_confidence``.
@@ -3791,11 +3878,25 @@ def _build_edge_record_from_dict(
     # This is the audit's recommended fix: "Emit ``rel_type='tested_for'``
     # for unknown outcomes and ``rel_type='treats'`` only for trials
     # meeting the primary endpoint."
-    # All other trials (unknown outcome, negative result, terminated,
-    # withdrawn, suspended) remain ``"tested_for"`` — they are evidence
-    # that the drug was TESTED for the disease, but NOT evidence that it
-    # TREATS the disease. Downstream training can now cleanly separate
-    # positive signal ("treats") from exploratory signal ("tested_for").
+    # All other trials (unknown outcome, terminated, withdrawn, suspended)
+    # remain ``"tested_for"`` — they are evidence that the drug was
+    # TESTED for the disease, but NOT evidence that it TREATS the disease.
+    # Downstream training can now cleanly separate positive signal
+    # ("treats") from exploratory signal ("tested_for").
+    #
+    # v102 ROOT FIX (P2-042): the previous fix kept rel_type="tested_for"
+    # for trials that completed but FAILED their primary endpoint
+    # (primary_outcome_met=False — drug proven INEFFECTIVE in Phase 3).
+    # The RL ranker treats "tested_for" as a weak POSITIVE signal — so
+    # known-failed drugs got a small positive bump in repurposing score,
+    # OPPOSITE of correct. ROOT FIX: emit ``rel_type="failed_for"`` for
+    # trials that completed AND primary_outcome_met is False. This is a
+    # NEGATIVE signal — the drug was tested and proven INEFFECTIVE for
+    # this disease. Downstream training can now cleanly separate:
+    #   - "treats"      = proven efficacy (positive label)
+    #   - "tested_for"  = tested, outcome unknown (neutral / weak positive)
+    #   - "failed_for"  = tested, proven INEFFECTIVE (negative label)
+    # "failed_for" is added to CORE_EDGE_TYPES in config.py.
     rel_type: str = "tested_for"
     if (
         overall_status_str is not None
@@ -3803,6 +3904,15 @@ def _build_edge_record_from_dict(
         and primary_outcome_met is True
     ):
         rel_type = "treats"
+    elif (
+        overall_status_str is not None
+        and _normalise_trial_status(overall_status_str) == "completed"
+        and primary_outcome_met is False
+    ):
+        # v102 P2-042: completed but FAILED primary endpoint.
+        # Drug proven INEFFECTIVE — emit as negative signal, not
+        # positive "tested_for" or neutral "tested_for".
+        rel_type = "failed_for"
 
     # Issue 2.3 / 7.1 — deterministic edge_id.
     edge_id: str = _build_edge_id(
