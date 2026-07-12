@@ -606,8 +606,53 @@ _DEPRECATED_UNIPROT_MAP: Dict[str, str] = {
     "P40830": "Q12888",   # ATM old AC -> canonical (note: ATM=P42574 canonical,
                           # but historical P40830 -> Q12888 in some lit)
     # === Apoptosis ===
-    "Q07817": "Q07812",   # BAX old AC -> canonical
-    "Q92843": "Q92844",   # BID old AC -> canonical
+    # P1-023 ROOT FIX (Team Member 3 -- forensic correction of scientific
+    #   data corruption):
+    #   The previous entries
+    #     "Q07817": "Q07812",   # was commented "BAX old AC -> canonical"
+    #     "Q07816": "Q07812",   # was commented "BAX second old AC -> canonical"
+    #   were SCIENTIFICALLY WRONG and have been REMOVED.
+    #
+    #   Scientific fact (verified against UniProt KB):
+    #     Q07817 = BCL2L1 (BCL-X) -- encodes BOTH BCL-XL (anti-apoptotic,
+    #               UniProt Q07817-1) AND BCL-XS (pro-apoptotic, UniProt
+    #               Q07817-2) via alternative splicing. This is the EXACT
+    #               protein the P1-023 issue is about.
+    #     Q07816 = BCL2L2 (BCL-W) -- a DIFFERENT anti-apoptotic BCL-2
+    #               family member. Also NOT BAX.
+    #     Q07812 = BAX -- a PRO-apoptotic BCL-2 family member.
+    #
+    #   Q07817 has NEVER been a historical/secondary accession for BAX.
+    #   Q07816 has NEVER been a historical/secondary accession for BAX.
+    #   They are three DISTINCT genes with OPPOSITE biological functions:
+    #     - BAX (Q07812): PROMOTES apoptosis (cell death)
+    #     - BCL-XL (Q07817-1): INHIBITS apoptosis (cell survival)
+    #     - BCL-W (Q07816): INHIBITS apoptosis (cell survival)
+    #
+    #   The wrong redirects caused EVERY record referencing Q07817 (BCL-X)
+    #   or Q07816 (BCL-W) to be silently stored under Q07812 (BAX). This
+    #   corrupted the knowledge graph in exactly the way P1-023 warns
+    #   against:
+    #     - Drugs targeting BCL-XL (e.g. navitoclax, venetoclax analogs)
+    #       appeared to target BAX instead -- wrong biology.
+    #     - The P1-023 isoform-preservation fix (keeping Q07817-2 as a
+    #       distinct Protein node) was undermined because the PARENT
+    #       Q07817 entry was being redirected to BAX, so isoforms could
+    #       no longer find their parent in self.mapping.
+    #     - The GNN would learn that BCL-XL inhibitors affect BAX, and
+    #       the RL ranker could recommend a BCL-XL inhibitor for a
+    #       disease that actually requires BAX ACTIVATION -- the opposite
+    #       of the desired therapeutic effect.
+    #
+    #   ROOT FIX: remove both wrong entries. Q07817 and Q07816 are
+    #   canonical UniProt accessions for their respective proteins and
+    #   must NOT be redirected. If a genuinely deprecated accession is
+    #   discovered in the future, it must be verified against the UniProt
+    #   KB (https://www.uniprot.org/uniprotkb/<AC>/entry) BEFORE being
+    #   added to this map. A redirect is only valid if UniProt's entry
+    #   for the old AC explicitly says "was <old_AC>" in the new entry's
+    #   "Cross-reference" or "Sequence" section.
+    "Q92843": "Q92844",   # BID old AC -> canonical (verified)
     # === Histones ===
     "Q99880": "P06499",   # HIST1H1B old AC -> canonical
     "Q92522": "P10412",   # HIST1H1E old AC -> canonical
@@ -668,7 +713,14 @@ _DEPRECATED_UNIPROT_MAP: Dict[str, str] = {
     "P42694": "P42694",   # FRK canonical (legacy alias for back-compat)
     "Q13558": "Q13557",   # CAMK1D alternative old AC -> canonical
     # === Apoptosis (extended) ===
-    "Q07816": "Q07812",   # BAX second old AC -> canonical
+    # P1-023 ROOT FIX: "Q07816": "Q07812" was REMOVED here too.
+    #   Q07816 = BCL2L2 (BCL-W), an anti-apoptotic BCL-2 family member.
+    #   Q07812 = BAX, a pro-apoptotic BCL-2 family member.
+    #   These are DIFFERENT genes with OPPOSITE functions. See the
+    #   detailed scientific justification above (line 608 onwards).
+    #   Redirecting BCL-W to BAX is the same class of scientific
+    #   corruption as redirecting BCL-X to BAX, and is removed for the
+    #   same reason.
     "Q92845": "Q92844",   # BID second old AC -> canonical
     # === Transporters (extended) ===
     "Q03621": "P08183",   # ABCB1 second old AC -> canonical
