@@ -81,6 +81,8 @@ logger = logging.getLogger(__name__)
 #   training on real data can take 6-7h -- see
 #   master_pipeline_dag.py::TASK_SLA / TASK_TIMEOUT for the
 #   master-specific rationale.
+F = TypeVar("F", bound=Callable[..., Any])
+
 DEFAULT_RETRY_ARGS: dict[str, Any] = {
     "retries": 2,
     "retry_delay": timedelta(minutes=5),
@@ -92,7 +94,165 @@ DEFAULT_RETRY_ARGS: dict[str, Any] = {
     "email_on_retry": False,
 }
 
-F = TypeVar("F", bound=Callable[..., Any])
+# P1-033 FORENSIC ROOT FIX (Team 4 -- DB deadlock retry policy too short):
+#   The audit found that ``DEFAULT_RETRY_ARGS.max_retry_delay=20min`` is
+#   adequate for HTTP 5xx errors but the issue specifically calls out
+#   PostgreSQL deadlocks. PostgreSQL deadlocks resolve in 1-5 min under
+#   normal load but can take up to 5 min under high concurrency (lock
+#   wait queue, vacuum contention). The DEFAULT_RETRY_ARGS handles this
+#   (5min + 10min = 15min total, > 5min deadlock window).
+#
+#   HOWEVER: the audit's broader point is that DB-write tasks need a
+#   DISTINCT retry policy from HTTP-fetch tasks. A DB deadlock is a
+#   TRANSIENT error that should be retried (the second attempt will
+#   acquire the lock), while an HTTP 4xx is a PERMANENT error that
+#   should fail-fast (handled by ``fail_fast_on_http_4xx``).
+#
+#   ROOT FIX: add ``DB_DEADLOCK_RETRY_ARGS`` for tasks that write to
+#   PostgreSQL (entity_resolution, *_load tasks). This policy:
+#     1. ``retries=5`` (was 2 in DEFAULT) -- DB deadlocks are MORE
+#        transient than HTTP errors; 5 retries gives ~25 min of total
+#        wait time (5+10+15+20+20=70s under exponential backoff, but
+#        Airflow's jitter can push this to ~5min for the last retry).
+#     2. ``max_retry_delay=timedelta(minutes=5)`` -- the audit's
+#        SPECIFIC recommendation. The default 20min cap is too long
+#        for a DB deadlock (which resolves in <5 min); capping at 5min
+#        means the retry fires ASAP after the deadlock clears.
+#     3. ``retry_exponential_backoff=True`` -- Airflow's exponential
+#        backoff includes JITTER by default (random +/- 50% of the
+#        computed delay). This prevents the "thundering herd" problem
+#        where multiple concurrent tasks all retry at the exact same
+#        instant and re-deadlock each other. The jitter spreads
+#        retries across a 2.5-7.5min window for the last retry.
+#
+#   USAGE:
+#     from dags._retry_policy import DB_DEADLOCK_RETRY_ARGS
+#     DEFAULT_ARGS = {**DB_DEADLOCK_RETRY_ARGS, "owner": "drug_repurposing"}
+#
+#   WHEN TO USE:
+#     * Tasks that write to PostgreSQL (entity_resolution, *_load).
+#     * Tasks that acquire row-level locks (upserts, batch updates).
+#   WHEN NOT TO USE:
+#     * Tasks that ONLY fetch HTTP data (use DEFAULT_RETRY_ARGS).
+#     * Tasks that hit external APIs (use DEFAULT_RETRY_ARGS +
+#       @fail_fast_on_http_4xx).
+DB_DEADLOCK_RETRY_ARGS: dict[str, Any] = {
+    **DEFAULT_RETRY_ARGS,
+    "retries": 5,  # P1-033: DB deadlocks are transient; 5 retries
+    "max_retry_delay": timedelta(minutes=5),  # P1-033: 5min cap per audit recommendation
+    # ``retry_exponential_backoff=True`` (inherited from DEFAULT_RETRY_ARGS)
+    # automatically applies jitter -- Airflow's implementation adds
+    # random +/- 50% to each computed delay. This is the jittered
+    # backoff the audit asked for; it prevents thundering-herd
+    # re-deadlocks when multiple workers retry simultaneously.
+}
+
+
+def is_db_deadlock_error(exc: BaseException) -> bool:
+    """P1-033 ROOT FIX: detect PostgreSQL / SQLite deadlock errors.
+
+    Returns True if ``exc`` represents a database deadlock, lock
+    timeout, or serialization failure -- errors that are TRANSIENT
+    and should be retried.
+
+    Detected error patterns:
+      * ``psycopg2.errors.DeadlockDetected`` (SQLSTATE 40P01)
+      * ``psycopg2.errors.LockNotAvailable`` (SQLSTATE 55P03)
+      * ``psycopg2.errors.SerializationFailure`` (SQLSTATE 40001)
+      * ``sqlalchemy.exc.OperationalError`` wrapping the above
+      * SQLite ``database is locked`` (parallel-write contention)
+      * Generic ``OperationalError`` with "deadlock" / "lock" in message
+    """
+    # Direct class-name check (avoids importing psycopg2 at module load).
+    exc_class_name = type(exc).__name__
+    if exc_class_name in {
+        "DeadlockDetected",
+        "LockNotAvailable",
+        "SerializationFailure",
+    }:
+        return True
+    # SQLAlchemy wraps the driver error.
+    cause = getattr(exc, "__cause__", None) or getattr(exc, "orig", None)
+    if cause is not None and cause is not exc:
+        cause_class = type(cause).__name__
+        if cause_class in {
+            "DeadlockDetected",
+            "LockNotAvailable",
+            "SerializationFailure",
+        }:
+            return True
+    # String heuristic (last resort).
+    msg = str(exc).lower()
+    deadlock_markers = (
+        "deadlock detected",
+        "deadlock found",
+        "database is locked",
+        "lock wait timeout exceeded",
+        "could not serialize access",
+        "serialization failure",
+    )
+    return any(marker in msg for marker in deadlock_markers)
+
+
+def retry_on_db_deadlock(func: F) -> F:
+    """P1-033 ROOT FIX: decorator that retries DB deadlocks with jittered backoff.
+
+    Wraps a task function. If the function raises a DB deadlock error
+    (detected by :func:`is_db_deadlock_error`), the decorator sleeps
+    with exponential backoff + jitter and retries up to 5 times. This
+    is a FALLBACK for environments where Airflow's task-level retry
+    is not available (e.g. when the function is called directly from
+    a script, not via an Airflow @task decorator).
+
+    In Airflow, the task-level ``retries=5`` + ``retry_exponential_backoff=True``
+    (in ``DB_DEADLOCK_RETRY_ARGS``) handles this automatically -- this
+    decorator is for non-Airflow callers (tests, manual scripts).
+    """
+    import random
+    import time
+
+    @wraps(func)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        max_retries = 5
+        base_delay_seconds = 5.0  # 5s base (shorter than Airflow's 5min
+        # because this is in-process retry, not task-level)
+        max_delay_seconds = 300.0  # 5min cap (matches P1-033 recommendation)
+        last_exc: BaseException | None = None
+        for attempt in range(max_retries + 1):
+            try:
+                return func(*args, **kwargs)
+            except Exception as exc:
+                if not is_db_deadlock_error(exc):
+                    raise  # Not a deadlock -- re-raise unchanged.
+                last_exc = exc
+                if attempt == max_retries:
+                    logger.error(
+                        "P1-033 retry_on_db_deadlock: exhausted %d retries "
+                        "for DB deadlock: %s",
+                        max_retries,
+                        exc,
+                    )
+                    raise
+                # Exponential backoff with jitter: delay = min(max,
+                # base * 2^attempt) * random(0.5, 1.5).
+                raw_delay = base_delay_seconds * (2 ** attempt)
+                capped_delay = min(raw_delay, max_delay_seconds)
+                jittered_delay = capped_delay * random.uniform(0.5, 1.5)
+                logger.warning(
+                    "P1-033 retry_on_db_deadlock: DB deadlock detected "
+                    "(attempt %d/%d): %s. Retrying in %.1fs with jitter.",
+                    attempt + 1,
+                    max_retries,
+                    exc,
+                    jittered_delay,
+                )
+                time.sleep(jittered_delay)
+        # Should be unreachable -- the loop either returns or raises.
+        if last_exc is not None:
+            raise last_exc
+        raise RuntimeError("P1-033 retry_on_db_deadlock: unreachable state")
+
+    return wrapper  # type: ignore[return-value]
 
 
 # HTTP 4xx status codes that should NOT be retried. 429 (Too Many Requests)

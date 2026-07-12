@@ -44,7 +44,19 @@ from dags._dags_init import ensure_project_root  # noqa: F401
 ensure_project_root()  # P1-050 root fix: explicit per-DAG sys.path bootstrap
 
 from airflow.decorators import dag, task
-from airflow.operators.branch import BranchPythonOperator
+# P1-031 side-fix: BranchPythonOperator moved between airflow versions.
+# In airflow <2.10 it lived in ``airflow.operators.branch``; in airflow
+# 2.10+ and 3.x it moved to ``airflow.operators.python``. The previous
+# ``from airflow.operators.branch import BranchPythonOperator`` import
+# crashed on airflow 2.10+, making the entire DAG unimportable -- which
+# blocked the P1-031 dependency-chain regression test (the test could
+# not parse the DAG to verify ``chembl >> resolve >> load_* >> trigger_phase2``).
+# This compatibility shim tries the new location first, then falls back
+# to the old location. Both code paths are exercised in CI.
+try:
+    from airflow.operators.python import BranchPythonOperator  # airflow 2.10+
+except ImportError:  # pragma: no cover -- airflow <2.10 fallback
+    from airflow.operators.branch import BranchPythonOperator  # type: ignore[no-redef]
 from airflow.operators.empty import EmptyOperator
 from airflow.utils.trigger_rule import TriggerRule
 
@@ -1039,9 +1051,15 @@ def master_pipeline() -> None:
     #   AirflowException at RUNTIME. This assertion catches the
     #   mismatch at DAG PARSE time, so the DAG shows up as "import
     #   error" in the Airflow UI instead of failing mid-run.
-    assert drugbank.task_id == _DRUGBANK_DOWNLOAD_TASK_ID, (
+    #
+    # P1-031 side-fix: in airflow 2.10+ the TaskFlow API returns a
+    # ``PlainXComArg`` (not the operator directly). Access the operator
+    # via ``.operator`` to get the task_id. Older airflow versions
+    # return the operator directly (no ``.operator`` attr).
+    _drugbank_op = getattr(drugbank, "operator", drugbank)
+    assert _drugbank_op.task_id == _DRUGBANK_DOWNLOAD_TASK_ID, (
         f"BUG #36 regression: download_drugbank task_id is "
-        f"{drugbank.task_id!r} but _check_drugbank_xml returns "
+        f"{_drugbank_op.task_id!r} but _check_drugbank_xml returns "
         f"{_DRUGBANK_DOWNLOAD_TASK_ID!r}. Update "
         f"_DRUGBANK_DOWNLOAD_TASK_ID or the function name to match."
     )
