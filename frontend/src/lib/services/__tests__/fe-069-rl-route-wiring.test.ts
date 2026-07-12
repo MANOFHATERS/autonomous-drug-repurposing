@@ -161,7 +161,10 @@ describe("FE-069: /api/rl route wiring — rate limit is actually called", () =>
   });
 
   test("GET /api/rl calls checkUserRateLimit with the authenticated userId", async () => {
-    await GET();
+    // FE-033 ROOT FIX: GET now accepts a NextRequest so it can read sort +
+    // pagination query params. Pass a minimal request.
+    const req = new NextRequest("http://localhost/api/rl", { method: "GET" });
+    await GET(req);
 
     expect(checkUserRateLimit).toHaveBeenCalledTimes(1);
     expect((checkUserRateLimit as jest.Mock).mock.calls[0][0]).toBe(AUTHED_USER.userId);
@@ -198,7 +201,9 @@ describe("FE-069: /api/rl route wiring — rate limit is actually called", () =>
       remaining: 0,
     });
 
-    const res = await GET();
+    // FE-033: GET now takes a NextRequest.
+    const req = new NextRequest("http://localhost/api/rl", { method: "GET" });
+    const res = await GET(req);
 
     expect(res.status).toBe(429);
     expect(res.headers.get("Retry-After")).toBe("30");
@@ -223,11 +228,18 @@ describe("FE-069: /api/rl route wiring — rate limit is actually called", () =>
   });
 
   test("GET /api/rl calls getRankedHypotheses when rate limit passes", async () => {
-    const res = await GET();
+    // FE-033: GET now takes a NextRequest. The route calls getRankedHypotheses
+    // with sort/sortDir/offset/pageSize (default pageSize=50, offset=0).
+    const req = new NextRequest("http://localhost/api/rl", { method: "GET" });
+    const res = await GET(req);
     expect(res.status).toBe(200);
     expect(getRankedHypotheses).toHaveBeenCalledTimes(1);
+    // The new call signature uses pageSize + offset (not `limit`). Default
+    // pageSize is 50, offset is 0. sort/sortDir are undefined (the route
+    // passes them through as undefined when not provided).
     expect((getRankedHypotheses as jest.Mock).mock.calls[0][0]).toMatchObject({
-      limit: 50,
+      pageSize: 50,
+      offset: 0,
     });
   });
 

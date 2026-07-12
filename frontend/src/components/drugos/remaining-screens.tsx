@@ -5,6 +5,10 @@ import { useDrugOSNav } from './nav-context';
 import { useSession } from './session-provider';
 import { api, type Invoice, type Plan, type Subscription, type AuditLog, type TeamMember } from '@/lib/api-client';
 import { roleLabel } from '@/lib/rbac';
+// FE-030 ROOT FIX: real-API hooks for SharedQueriesScreen / AnnotationsScreen.
+// Previously these screens rendered hardcoded fake colleagues. Now they call
+// the real /api/projects endpoint and render honest empty states.
+import { useApiList, LoadingSpinner, ErrorDisplay, EmptyState } from './use-api-data';
 import { useTheme } from 'next-themes';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription, CardFooter } from '@/components/ui/card';
@@ -28,7 +32,7 @@ import { Search, Plus, Download, ChevronRight, ChevronDown, Check, X, AlertTrian
 import { motion } from 'framer-motion';
 // FE-026 ROOT FIX: All data exports from mock-data.ts are now EMPTY arrays.
 // Components render empty states until migrated to real API calls.
-import { diseases, drugCandidates, clinicalTrials, users, auditLogs, subscriptionPlans, billingHistory, apiKeys, webhooks, usageMetrics, dataSources, dealPipeline, organization, featureFlags, systemStatus, savedQueries, blogPosts, careers } from '@/lib/mock-data';
+import { diseases, drugCandidates, clinicalTrials, users, auditLogs, subscriptionPlans, billingHistory, apiKeys, webhooks, usageMetrics, dataSources, dealPipeline, organization, featureFlags, systemStatus, savedQueries, blogPosts, careers } from '@/lib/empty-defaults';
 
 const PRIMARY = '#5B4FCF';
 const GREEN = '#1D9E75';
@@ -344,20 +348,29 @@ function ProjectsScreen() {
 // ═══════════════════════════════════════════
 // 5. SHARED QUERIES SCREEN
 // ═══════════════════════════════════════════
+// FE-030 ROOT FIX: The previous version rendered 4 hardcoded fake "shared
+// queries" attributed to fabricated colleagues ('Dr. Sarah Chen', 'James
+// Wilson', 'Dr. Priya Patel', 'Dr. Lisa Kim'). A researcher believed these
+// were real colleagues. Root fix: call the REAL /api/projects endpoint.
+// Projects ARE the shared queries. We render the real list, or an honest
+// empty state. We NEVER fabricate colleagues.
 function SharedQueriesScreen() {
-  const sharedQueries = [
-    { name: "Huntington's Top 10", sharedBy: 'Dr. Sarah Chen', date: '2 hours ago', candidates: 10, topScore: 87 },
-    { name: 'Rare Disease Panel v2', sharedBy: 'James Wilson', date: '1 day ago', candidates: 24, topScore: 82 },
-    { name: 'Oncology Cross-Filter', sharedBy: 'Dr. Priya Patel', date: '3 days ago', candidates: 45, topScore: 79 },
-    { name: 'ALS Candidates Filtered', sharedBy: 'Dr. Lisa Kim', date: '1 week ago', candidates: 8, topScore: 91 },
-  ];
+  const { data, loading, error, refetch } = useApiList(() => api.listProjects(), []);
+  const projects = data?.items ?? [];
   return (
     <FadeIn><div className="space-y-6">
-      <PageHeader title="Shared Queries" desc="Queries shared by your team members" />
-      <Card><CardContent className="p-0"><Table><TableHeader><TableRow><TableHead>Query Name</TableHead><TableHead>Shared By</TableHead><TableHead>Date</TableHead><TableHead>Candidates</TableHead><TableHead>Top Score</TableHead><TableHead></TableHead></TableRow></TableHeader>
-        <TableBody>{sharedQueries.map(q => (<TableRow key={q.name}><TableCell className="font-medium">{q.name}</TableCell><TableCell>{q.sharedBy}</TableCell><TableCell className="text-muted-foreground">{q.date}</TableCell><TableCell>{q.candidates}</TableCell>
-          <TableCell><span className="font-bold" style={{ color: q.topScore >= 80 ? GREEN : ORANGE }}>{q.topScore}</span></TableCell>
-          <TableCell><Button variant="outline" size="sm"><Copy className="h-3 w-3 mr-1" />Copy to My Queries</Button></TableCell></TableRow>))}</TableBody></Table></CardContent></Card>
+      <PageHeader title="Shared Queries" desc="Projects shared in your organization" actions={<Button variant="outline" size="sm" onClick={() => refetch()}><RefreshCw className="h-4 w-4 mr-1.5" />Refresh</Button>} />
+      {error && <ErrorDisplay error={error} onRetry={refetch} />}
+      {loading && <LoadingSpinner label="Loading projects..." />}
+      {!loading && !error && projects.length === 0 && (
+        <EmptyState title="No projects yet" description="Create a project to save and share drug-repurposing queries with your team." />
+      )}
+      {!loading && !error && projects.length > 0 && (
+        <Card><CardContent className="p-0"><Table><TableHeader><TableRow><TableHead>Project Name</TableHead><TableHead>Visibility</TableHead><TableHead>Created</TableHead><TableHead>Hypotheses</TableHead><TableHead>Comments</TableHead><TableHead></TableHead></TableRow></TableHeader>
+          <TableBody>{projects.map(p => { const created = new Date(p.createdAt); const createdLabel = isNaN(created.getTime()) ? '—' : created.toLocaleDateString(); return (<TableRow key={p.id}><TableCell className="font-medium">{p.name}</TableCell><TableCell><Badge variant="outline" className="text-xs capitalize">{p.visibility}</Badge></TableCell><TableCell className="text-muted-foreground">{createdLabel}</TableCell><TableCell>{p._count?.hypotheses ?? 0}</TableCell>
+          <TableCell>{p._count?.comments ?? 0}</TableCell>
+          <TableCell><Button variant="outline" size="sm"><Copy className="h-3 w-3 mr-1" />Copy to My Queries</Button></TableCell></TableRow>); })}</TableBody></Table></CardContent></Card>
+      )}
     </div></FadeIn>
   );
 }
@@ -365,18 +378,21 @@ function SharedQueriesScreen() {
 // ═══════════════════════════════════════════
 // 6. ANNOTATIONS SCREEN
 // ═══════════════════════════════════════════
+// FE-030 ROOT FIX: The previous version rendered 4 hardcoded fake
+// annotations attributed to fabricated colleagues. Root fix: there is no
+// global comments endpoint (comments are scoped to projects), so we render
+// an honest empty state. We NEVER fabricate comments or attribute them to
+// fake colleagues.
 function AnnotationsScreen() {
   const [newComment, setNewComment] = useState('');
-  const annotations = [
-    { candidate: 'Memantine', disease: "Huntington's", author: 'Dr. Sarah Chen', comment: 'Strong KG evidence. NMDA receptor modulation is well-documented. Consider off-target profiling for cardiac effects.', date: '2 hours ago', resolved: false },
-    { candidate: 'Sirolimus', disease: 'ALS', author: 'James Wilson', comment: 'mTOR pathway inhibition shows promise. Need to check for immunosuppression contraindications.', date: '1 day ago', resolved: false },
-    { candidate: 'Metformin', disease: 'Glioblastoma', author: 'Dr. Priya Patel', comment: 'AMPK activation mechanism is solid. Preclinical data from 3 independent labs.', date: '3 days ago', resolved: true },
-    { candidate: 'Dasatinib', disease: "Alzheimer's", author: 'Dr. Lisa Kim', comment: 'Src family kinase inhibition is novel for AD. Monitor for pleural effusion risk.', date: '1 week ago', resolved: false },
-  ];
+  const annotations: Array<{ candidate: string; disease: string; author: string; comment: string; date: string; resolved: boolean }> = [];
   return (
     <FadeIn><div className="space-y-6">
       <PageHeader title="Annotations" desc="Collaborative notes on drug candidates" actions={<Badge variant="outline">{annotations.filter(a => !a.resolved).length} Open</Badge>} />
       <div className="space-y-4">
+        {annotations.length === 0 && (
+          <EmptyState title="No annotations yet" description="Open a project to add comments and annotations to drug candidates. Annotations are scoped to projects — there is no global feed." />
+        )}
         {annotations.map((a, i) => (<Card key={i} className={a.resolved ? 'opacity-60' : ''}><CardContent className="p-4"><div className="flex items-start justify-between mb-2"><div className="flex items-center gap-2"><Badge variant="secondary" className="text-xs">{a.candidate}</Badge><Badge variant="outline" className="text-xs">{a.disease}</Badge>{a.resolved && <Badge className="text-xs bg-green-100 text-green-700">Resolved</Badge>}</div><Button variant="ghost" size="sm">{a.resolved ? 'Reopen' : 'Resolve'}</Button></div>
           <p className="text-sm">{a.comment}</p><div className="flex items-center gap-2 mt-3 text-xs text-muted-foreground"><span>{a.author}</span><span>·</span><span>{a.date}</span></div>
         </CardContent></Card>))}
@@ -1997,11 +2013,10 @@ function FeedbackScreen() {
   const [rating, setRating] = useState(0);
   const [category, setCategory] = useState('');
   const [description, setDescription] = useState('');
-  const recentFeedback = [
-    { user: 'Dr. Sarah Chen', rating: 5, category: 'Feature Request', feedback: 'Would love to see a dark mode option for late-night research sessions.', date: '2 days ago' },
-    { user: 'James Wilson', rating: 4, category: 'Improvement', feedback: 'Export functionality is great but would be better with custom formatting options.', date: '5 days ago' },
-    { user: 'Dr. Priya Patel', rating: 5, category: 'Praise', feedback: 'The knowledge graph visualization is incredibly helpful for understanding drug-disease relationships.', date: '1 week ago' },
-  ];
+  // FE-030 ROOT FIX: The previous version rendered 3 hardcoded fake feedback
+  // entries attributed to fabricated colleagues. There is no feedback API yet;
+  // we render an honest empty state instead of fabricating feedback.
+  const recentFeedback: Array<{ user: string; rating: number; category: string; feedback: string; date: string }> = [];
   return (
     <FadeIn><div className="space-y-6">
       <PageHeader title="Feedback" desc="Help us improve DrugOS" />
