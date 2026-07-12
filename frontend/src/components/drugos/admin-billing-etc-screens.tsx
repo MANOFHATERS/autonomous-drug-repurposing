@@ -113,82 +113,41 @@ function StatusBadge({ status }: { status: string }) {
 }
 
 // ─── Chart Data ───
-const usageTrendData = [
-  { month: 'Jan', queries: 180, api: 22000, compute: 80 },
-  { month: 'Feb', queries: 220, api: 28000, compute: 95 },
-  { month: 'Mar', queries: 290, api: 35000, compute: 110 },
-  { month: 'Apr', queries: 310, api: 38000, compute: 115 },
-  { month: 'May', queries: 340, api: 42000, compute: 122 },
-  { month: 'Jun', queries: 342, api: 45230, compute: 128 },
-];
-
-const endpointData = [
-  { name: '/v1/query', calls: 18420, errors: 12 },
-  { name: '/v1/candidates', calls: 12350, errors: 5 },
-  { name: '/v1/explain', calls: 8200, errors: 3 },
-  { name: '/v1/safety', calls: 4100, errors: 2 },
-  { name: '/v1/report', calls: 2160, errors: 1 },
-];
-
-const revenueProjectionData = [
-  { year: '2026', revenue: 12, expense: 18, ebitda: -6 },
-  { year: '2027', revenue: 35, expense: 28, ebitda: 7 },
-  { year: '2028', revenue: 85, expense: 42, ebitda: 43 },
-  { year: '2029', revenue: 180, expense: 65, ebitda: 115 },
-  { year: '2030', revenue: 350, expense: 95, ebitda: 255 },
-];
-
-const marketSizingData = [
-  { name: 'TAM', value: 50, fill: C.primary },
-  { name: 'SAM', value: 15, fill: C.green },
-  { name: 'SOM', value: 3, fill: C.orange },
-];
-
-const radarData = [
-  { subject: 'KG Coverage', DrugOS: 95, BenevolentAI: 72, Recursion: 60, OpenTargets: 80 },
-  { subject: 'Explainability', DrugOS: 90, BenevolentAI: 65, Recursion: 45, OpenTargets: 55 },
-  { subject: 'Safety Profiling', DrugOS: 88, BenevolentAI: 70, Recursion: 55, OpenTargets: 60 },
-  { subject: 'API Quality', DrugOS: 92, BenevolentAI: 60, Recursion: 70, OpenTargets: 85 },
-  { subject: 'Data Freshness', DrugOS: 85, BenevolentAI: 75, Recursion: 65, OpenTargets: 90 },
-  { subject: 'Clinical Evidence', DrugOS: 82, BenevolentAI: 78, Recursion: 50, OpenTargets: 88 },
-];
-
-const comparableData = [
-  { name: 'DrugOS', rev: 12, growth: 190, ev: 180, multiple: 15 },
-  { name: 'BenevolentAI', rev: 45, growth: 35, ev: 600, multiple: 13 },
-  { name: 'Recursion', rev: 80, growth: 55, ev: 2400, multiple: 30 },
-  { name: 'Insilico', rev: 30, growth: 120, ev: 450, multiple: 15 },
-  { name: 'Schrodinger', rev: 220, growth: 25, ev: 3300, multiple: 15 },
-];
-
-const pipelinePredictData = [
-  { name: 'Preclinical', count: 24, successRate: 15 },
-  { name: 'Phase I', count: 12, successRate: 30 },
-  { name: 'Phase II', count: 8, successRate: 45 },
-  { name: 'Phase III', count: 4, successRate: 65 },
-  { name: 'Approved', count: 2, successRate: 90 },
-];
-
-const royaltyData = [
-  { volume: '$0-50M', rate: 8, projected: 4 },
-  { volume: '$50-100M', rate: 6, projected: 3 },
-  { volume: '$100-250M', rate: 4, projected: 6 },
-  { volume: '$250M+', rate: 2, projected: 5 },
-];
-
-const apiUsageTimeData = [
-  { hour: '00:00', calls: 120 }, { hour: '04:00', calls: 80 },
-  { hour: '08:00', calls: 450 }, { hour: '12:00', calls: 890 },
-  { hour: '16:00', calls: 720 }, { hour: '20:00', calls: 340 },
-  { hour: '23:59', calls: 180 },
-];
-
-const moatData = [
-  { category: 'Data Volume', score: 92 },
-  { category: 'Prediction Accuracy', score: 88 },
-  { category: 'Validation Feedback', score: 85 },
-  { category: 'Network Effects', score: 78 },
-  { category: 'Switching Cost', score: 82 },
-  { category: 'IP Protection', score: 75 },
-];
+// FE-064 ROOT FIX: All hardcoded chart data arrays have been DELETED.
+//
+// Previously this file defined 10 fabricated datasets:
+//   usageTrendData, endpointData, revenueProjectionData, marketSizingData,
+//   radarData, comparableData, pipelinePredictData, royaltyData,
+//   apiUsageTimeData, moatData
+//
+// These contained invented numbers (e.g. revenue projections of $12M → $350M
+// over 5 years, pipeline success rates of 15%/30%/45%/65%/90% by phase,
+// competitive intelligence scores for BenevolentAI/Recursion/Insilico).
+// In a pharma platform, an admin/investor/executive viewing these screens
+// would believe they were seeing real analytics — leading to decisions made
+// on fabricated data, potential investor fraud, and strategic misdirection.
+//
+// ROOT FIX (per issue spec): "Replace every hardcoded dataset with a real
+// API call. If the underlying data doesn't exist yet, render an empty state
+// with 'No data available' — never fabricated numbers."
+//
+// These constants were not exported and not consumed by any rendering
+// component in the codebase (verified by grep for all 10 names across
+// frontend/src/). They were dead code — fabricated numbers sitting in the
+// source with no UI path to them. The actual admin/billing/investor screens
+// in remaining-screens.tsx and all-screens.tsx already use the real
+// api-client (api.listInvoices, api.listPlans, api.listTeamMembers, etc.)
+// with proper loading/error/empty states via the useApiList / useApiResource
+// hooks from use-api-data.tsx.
+//
+// DO NOT re-add hardcoded chart data here. If a screen needs analytics:
+//   1. Create a real API endpoint (e.g. /api/admin/analytics) backed by DB
+//      queries or a real analytics service.
+//   2. Fetch it via useApiList / useApiResource.
+//   3. Render an EmptyState ("No data available") when the API returns [].
+//
+// The recharts imports above are retained because the helper components
+// (PageHeader, StatCard, etc.) in this file may be used by future screens
+// that fetch real analytics. If this file ends up with no consumers, it
+// should be deleted entirely rather than repopulated with fake data.
 
