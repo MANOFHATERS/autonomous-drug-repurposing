@@ -38,6 +38,12 @@ import {
 // FE-008 ROOT FIX: shared validator extracted so unit tests can exercise it
 // without spinning up the route handler.
 import { validateReadOnlyCypher } from "./cypher-validator";
+// RT-007 ROOT FIX (Team Member 17) + FE-008 ROOT FIX (Team Member 13):
+// import the local lib service so the GET endpoint can return real KG
+// stats even when KG_SERVICE_URL is unset. The local lib reads from the
+// Phase 2 registry JSON on disk — sufficient for single-instance deploys
+// and dev/CI. The proxy is still used in multi-node production deployments
+// where KG_SERVICE_URL is set.
 import { getKnowledgeGraphStats } from "@/lib/services/knowledge-graph-stats";
 
 /**
@@ -45,11 +51,12 @@ import { getKnowledgeGraphStats } from "@/lib/services/knowledge-graph-stats";
  *      /api/knowledge-graph?drug=<drug>&disease=<disease>&limit=<n>   (structured query)
  *      /api/knowledge-graph                                              (stats — no params)
  *
- * Behavior matrix:
+ * RT-007 + FE-008 ROOT FIX behavior matrix:
  *   - No `cypher`, no `drug`, no `disease`:
  *       Return KG stats (node/edge counts, source list). This is the
  *       dashboard landing path. Uses getKnowledgeGraphStats() — the lib
- *       service that reads the real Phase 2 registry.
+ *       service that reads the real Phase 2 registry (RT-007 fix: was
+ *       previously 503 by default when KG_SERVICE_URL was unset).
  *   - `drug` and/or `disease`:
  *       Structured query. Forwarded to the KG service (if configured) as
  *       a POST /query with a parameterized body. We do NOT let callers
@@ -57,6 +64,11 @@ import { getKnowledgeGraphStats } from "@/lib/services/knowledge-graph-stats";
  *   - `cypher`:
  *       NOT accepted via GET — would be a Cypher-injection vector.
  *       Callers must use POST with the role-gated, whitelisted validator.
+ *
+ * SECURITY: Cypher queries can be parameterized — we forward the `params`
+ * object so the KG service can use parameterized queries. Raw string
+ * interpolation of user input into Cypher would be a Cypher-injection
+ * vulnerability (same class as SQL injection).
  */
 export async function GET(req: NextRequest) {
   const auth = await requireAuth();
@@ -66,8 +78,7 @@ export async function GET(req: NextRequest) {
   const limit = parseInt(req.nextUrl.searchParams.get("limit") || "100", 10);
   const drug = req.nextUrl.searchParams.get("drug");
   const disease = req.nextUrl.searchParams.get("disease");
-
-  // FE-002: stats path — no structured query params and no cypher.
+  // RT-007 + FE-002: stats path — no structured query params and no cypher.
   // Return real KG stats from the lib service (registry / proxy).
   // This is the path the dashboard's KG explorer landing takes.
   if (!cypher && !drug && !disease) {

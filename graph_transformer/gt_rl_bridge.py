@@ -1367,6 +1367,75 @@ class GTRLBridge:
         checkpoint_path = os.path.join(self.output_dir, "gt_checkpoint.pt")
         trainer.save_checkpoint(checkpoint_path)
 
+        # RT-006 ROOT FIX (Team Member 17): save graph_state.pt alongside
+        # the model checkpoint so the inference module (used by the
+        # frontend /api/predict and /api/top-k routes) can reload the
+        # EXACT graph topology the model was trained on. Without this,
+        # the frontend cannot run GT inference for arbitrary (drug, disease)
+        # pairs — the model is unreachable from the dashboard (RT-006).
+        #
+        # The graph_state contains:
+        #   - node_features: dict of node feature tensors
+        #   - edge_indices: dict of edge index tensors
+        #   - node_maps: dict of node name -> index (per node type)
+        #   - drug_names / disease_names: ordered lists (index = node idx)
+        #   - known_pairs: list of (drug, disease) tuples used for training
+        #   - node_features_dims: per-node-type feature dimension (used to
+        #     reconstruct the model with the right input dims)
+        #   - model_config: the model architecture params (embedding_dim,
+        #     num_layers, num_heads, dropout, etc.) so inference can
+        #     reconstruct the model architecture exactly.
+        graph_state_path = os.path.join(self.output_dir, "graph_state.pt")
+        try:
+            node_features_dims = {
+                ntype: int(feat.shape[1]) if feat.dim() > 1 else 1
+                for ntype, feat in self.node_features.items()
+            }
+            # Extract model config from the model object (best effort).
+            model_config: Dict[str, Any] = {}
+            try:
+                model_config = {
+                    "embedding_dim": int(getattr(self.model, "embedding_dim", 32)),
+                    "num_layers": int(getattr(self.model, "num_layers", 3)),
+                    "num_heads": int(getattr(self.model, "num_heads", 2)),
+                    "dropout": float(getattr(self.model, "dropout", 0.2)),
+                    "attention_dropout": float(getattr(self.model, "attention_dropout", 0.2)),
+                    "link_predictor_hidden_dims": list(
+                        getattr(self.model, "link_predictor_hidden_dims", [64, 32])
+                    ),
+                }
+            except Exception as cfg_exc:
+                logger.warning(
+                    f"RT-006: could not extract full model_config ({cfg_exc}); "
+                    f"saving minimal config. Inference will use defaults."
+                )
+            torch.save(
+                {
+                    "node_features": self.node_features,
+                    "edge_indices": self.edge_indices,
+                    "node_maps": self.node_maps,
+                    "drug_names": list(self.drug_names),
+                    "disease_names": list(self.disease_names),
+                    "known_pairs": list(self.known_pairs),
+                    "node_features_dims": node_features_dims,
+                    "model_config": model_config,
+                    "saved_at": pd.Timestamp.now().isoformat(),
+                },
+                graph_state_path,
+            )
+            logger.info(
+                f"RT-006 ROOT FIX: graph_state.pt saved to {graph_state_path} "
+                f"({len(self.drug_names)} drugs, {len(self.disease_names)} diseases, "
+                f"{len(self.known_pairs)} known pairs). The frontend /api/predict "
+                f"and /api/top-k routes can now run real GT inference."
+            )
+        except Exception as gs_exc:
+            logger.warning(
+                f"RT-006: could not save graph_state.pt ({gs_exc}). The "
+                f"frontend /api/predict and /api/top-k routes will not be "
+                f"able to run GT inference until this is fixed."
+            )
+
         return results
 
     # ------------------------------------------------------------------

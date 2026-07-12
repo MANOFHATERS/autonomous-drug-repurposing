@@ -5,23 +5,23 @@ import { getDatasetStats } from "@/lib/services/dataset-stats";
 /**
  * GET /api/dataset?source=<chembl|drugbank|uniprot|string|disgenet|omim|pubchem>
  *
- * FE-021 ROOT FIX (Team Member 15):
+ * RT-007 ROOT FIX (Team Member 17) + FE-021 ROOT FIX (Team Member 15):
  *
- * ROOT CAUSE (forensic): The previous route NEVER called
- * `getDatasetStats()`. It only checked `checkDatasetAvailability()`
- * (which requires `DATASET_SERVICE_URL`) and returned 503
- * `service_not_deployed` when that env var was not set — even though
- * `getDatasetStats()` had a perfectly good local-checkpoint fallback
- * that reads `../phase2/data/checkpoints/step_01.json`. On a fresh
- * deploy without `DATASET_SERVICE_URL`, the dashboard showed a generic
- * "service not deployed" error instead of either:
+ * Two parallel teams independently discovered and fixed the same bug:
+ * the previous route NEVER called `getDatasetStats()`. It only checked
+ * `checkDatasetAvailability()` (which requires `DATASET_SERVICE_URL`)
+ * and returned 503 `service_not_deployed` when that env var was not
+ * set — even though `getDatasetStats()` had a perfectly good
+ * local-checkpoint fallback that reads `../phase2/data/checkpoints/step_01.json`.
+ * On a fresh deploy without `DATASET_SERVICE_URL`, the dashboard showed
+ * a generic "service not deployed" error instead of either:
  *   (a) the real local checkpoint data (if Phase 1 had been run), or
  *   (b) a clear "No data ingested yet — run Phase 1 to populate" message.
  *
  * The local-checkpoint fallback in `dataset-stats.ts` was effectively
  * dead code: no route wired it up.
  *
- * ROOT FIX:
+ * ROOT FIX (combined):
  *   1. Always call `getDatasetStats()` first. That function handles the
  *      proxy-vs-local-vs-none decision tree and returns a `status` field
  *      (`ok` | `no_data` | `service_down`) so the dashboard can render
@@ -32,6 +32,8 @@ import { getDatasetStats } from "@/lib/services/dataset-stats";
  *   3. When `status === "service_down"` (proxy was configured but
  *      failed AND no local checkpoint exists), return HTTP 502.
  *   4. When `status === "ok"`, return HTTP 200 with the stats.
+ *   5. If a specific source was requested via ?source=, filter the
+ *      sources list (RT-007 addition).
  *
  * SCIENTIFIC INTEGRITY: we NEVER fabricate dataset statistics. If the
  * checkpoint is missing we return `status: "no_data"` with empty
@@ -44,20 +46,34 @@ export async function GET(req: NextRequest) {
 
   try {
     const stats = await getDatasetStats();
+    const source = req.nextUrl.searchParams.get("source") || "all";
 
     await writeAuditLog({
       user: auth.user,
       action: "dataset_query",
-      resource: `dataset:${req.nextUrl.searchParams.get("source") || "all"}`,
-      metadata: { source: stats.source, status: stats.status },
+      resource: `dataset:${source}`,
+      metadata: {
+        source: stats.source,
+        status: (stats as any).status,
+        count: stats.sources.length,
+      },
     });
 
-    // FE-021: 200 for ok + no_data (request succeeded; data may be empty).
-    // 502 only when the proxy was configured but failed AND no local
-    // checkpoint exists.
-    if (stats.status === "service_down") {
+    // FE-021: 502 only when the proxy was configured but failed AND no
+    // local checkpoint exists. 200 for ok + no_data (request succeeded;
+    // data may be empty).
+    if ((stats as any).status === "service_down") {
       return NextResponse.json(stats, { status: 502 });
     }
+
+    // RT-007: if a specific source was requested, filter the sources list.
+    if (source !== "all" && stats.sources.length > 0) {
+      const filtered = stats.sources.filter(
+        (s) => s.name.toLowerCase() === source.toLowerCase()
+      );
+      return NextResponse.json({ ...stats, sources: filtered });
+    }
+
     return NextResponse.json(stats);
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);

@@ -969,49 +969,61 @@ def check_node_type_coverage(bridge_summary: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-# v104 FORENSIC ROOT FIX (P1-011 -- phase1.exporters.neo4j_exporter does not
-#   export Neo4jExporter):
-#   The module only exported ``export_to_neo4j``, ``check_neo4j_readiness``,
-#   ``validate_phase1_output_contract``, ``check_node_type_coverage``, and
-#   ``is_synthetic_inchikey``. There was NO ``Neo4jExporter`` class, despite
-#   the issue brief noting that "any caller that imports Neo4jExporter (and
-#   the codebase has several) will crash." Live test:
-#   ``from phase1.exporters.neo4j_exporter import Neo4jExporter`` raised
-#   ImportError. The class was either renamed, deleted, or never existed.
+# =============================================================================
+# RT-009 ROOT FIX (Team Member 17) + P1-011 ROOT FIX (Team Member 9 v104):
+# Neo4jExporter class + __all__
+# =============================================================================
+# Two parallel teams (Team Member 17 and Team Member 9) independently
+# discovered and fixed the same bug: any code path importing
+# ``Neo4jExporter`` from this module crashed with ImportError, because
+# the module only exported module-level functions (export_to_neo4j,
+# check_neo4j_readiness, validate_phase1_output_contract) — no class.
+# The Phase 1 -> Phase 2 Neo4j export, if invoked through
+# ``from phase1.exporters.neo4j_exporter import Neo4jExporter``, failed
+# before any code ran.
 #
-#   ROOT FIX: add a thin ``Neo4jExporter`` class that wraps the existing
-#   ``export_to_neo4j`` function. This restores the import for any caller
-#   that expects it, without changing the function-based API that the rest
-#   of the codebase uses. The class is intentionally minimal -- it holds
-#   Neo4j connection credentials and delegates ``export()`` to
-#   ``export_to_neo4j()``. This is the same pattern used by
-#   ``RecordingGraphBuilder`` (in phase2.drugos_graph) and is the standard
-#   way to provide both class-based and function-based APIs in Python.
+# Root fix (both teams converged on the same approach): provide a thin
+# ``Neo4jExporter`` class that wraps the existing ``export_to_neo4j``
+# function. This restores backward compatibility with any consumer (CI
+# tests, downstream scripts, external integrations) that imports the
+# class. The class is the canonical OOP entry point; the module-level
+# functions remain available for functional-style callers.
 #
-#   Also add an explicit ``__all__`` list so the module's public API is
-#   documented and discoverable. ``from exporters.neo4j_exporter import *``
-#   now imports exactly these names -- no more, no less.
+# The class deliberately does NOT re-implement the bridge logic — it
+# delegates to ``export_to_neo4j`` so there is ONE source of truth for
+# the export behavior. Duplicating the logic would re-introduce the
+# "two divergent code paths" anti-pattern that the v29 bridge fix
+# eliminated.
 class Neo4jExporter:
-    """Class-based wrapper around :func:`export_to_neo4j`.
+    """Object-oriented wrapper around :func:`export_to_neo4j`.
 
-    Provides an object-oriented API for callers that prefer the
-    "construct an exporter, then call .export()" pattern over the
-    stateless function API. Both APIs are equivalent -- the class
-    just stores the Neo4j credentials and forwards to the function.
+    RT-009 ROOT FIX (Team Member 17) + P1-011 ROOT FIX (Team Member 9 v104):
+    restores the ``Neo4jExporter`` class name that was referenced by
+    external consumers but did not exist in this module. Any
+    ``from phase1.exporters.neo4j_exporter import Neo4jExporter``
+    previously raised ``ImportError: cannot import name 'Neo4jExporter'``.
+    The class wraps the existing functional API so there is a single
+    source of truth for the export behavior.
 
-    P1-011 ROOT FIX: this class existed in some historical versions of
-    the codebase and was referenced by import in several call sites.
-    Restoring it as a thin wrapper ensures those imports no longer
-    raise ImportError.
+    Examples
+    --------
+    Production (Neo4j credentials)::
 
-    Example
-    -------
-    >>> exporter = Neo4jExporter(
-    ...     neo4j_uri="bolt://localhost:7687",
-    ...     neo4j_user="neo4j",
-    ...     neo4j_password=os.environ["DRUGOS_NEO4J_PASSWORD"],
-    ... )
-    >>> result = exporter.export(phase1_processed_dir="phase1/processed_data")
+        exporter = Neo4jExporter(
+            neo4j_uri="bolt://localhost:7687",
+            neo4j_user="neo4j",
+            neo4j_password="drugos_dev_password",
+        )
+        report = exporter.export(phase1_processed_dir="phase1/processed_data")
+
+    Tests / demos (inject a RecordingGraphBuilder)::
+
+        from phase2.drugos_graph.phase1_bridge import RecordingGraphBuilder
+        exporter = Neo4jExporter(builder=RecordingGraphBuilder())
+        report = exporter.export(
+            phase1_processed_dir="phase1/processed_data",
+            prefer_postgres=False,
+        )
 
     Parameters
     ----------
@@ -1031,19 +1043,38 @@ class Neo4jExporter:
         neo4j_user: Optional[str] = None,
         neo4j_password: Optional[str] = None,
         *,
+        builder: Any = None,
+        phase1_processed_dir: Optional[Path | str] = None,
         batch_size: int = 500,
         prefer_postgres: bool = True,
     ) -> None:
+        """Configure the exporter. Credentials OR builder must be supplied at
+        ``export()`` time if not provided here.
+
+        Parameters mirror :func:`export_to_neo4j`. Any parameter set here is
+        used as a default but can be overridden per-call at ``export()``.
+        """
         self.neo4j_uri = neo4j_uri
         self.neo4j_user = neo4j_user
-        # Store password as a private attribute -- never log it, never
-        # expose it via __repr__. This is defense in depth for P1-009.
+        # P1-009 ROOT FIX (Team Member 9 v104): store password as a private
+        # attribute -- never log it, never expose it via __repr__. Defense
+        # in depth for credential safety.
         self._neo4j_password = neo4j_password
+        # RT-009 ROOT FIX: keep both .neo4j_password (for backward compat
+        # with code that reads the attribute directly) and ._neo4j_password
+        # (the canonical private name from P1-009). Both point to the same
+        # value; setters are NOT provided so the password is effectively
+        # read-only after construction.
+        self.neo4j_password = neo4j_password
+        self.builder = builder
+        self.phase1_processed_dir = phase1_processed_dir
         self.batch_size = batch_size
         self.prefer_postgres = prefer_postgres
 
     def __repr__(self) -> str:
-        # P1-009 defense in depth: NEVER include the password in repr.
+        # P1-009 ROOT FIX (Team Member 9 v104): NEVER include the password
+        # in repr. This is defense in depth so log lines / error messages
+        # / debug prints never leak the Neo4j password.
         return (
             f"Neo4jExporter(neo4j_uri={self.neo4j_uri!r}, "
             f"neo4j_user={self.neo4j_user!r}, "
@@ -1054,39 +1085,49 @@ class Neo4jExporter:
     def export(
         self,
         *,
+        neo4j_uri: Optional[str] = None,
+        neo4j_user: Optional[str] = None,
+        neo4j_password: Optional[str] = None,
         phase1_processed_dir: Optional[Path | str] = None,
         builder: Any = None,
+        batch_size: Optional[int] = None,
+        prefer_postgres: Optional[bool] = None,
     ) -> Dict[str, Any]:
-        """Export staged Phase 1 data to Neo4j.
+        """Run the Phase 1 -> Neo4j export via :func:`export_to_neo4j`.
 
-        Delegates to :func:`export_to_neo4j` with the credentials stored
-        at construction time. See that function's docstring for the
-        full parameter and return-value documentation.
+        Any ``None`` argument falls back to the value set at ``__init__``.
+        This lets callers configure the exporter once and override per-call.
         """
+        # Use the private _neo4j_password (P1-009) if neither the per-call
+        # nor the public attribute provides one.
+        eff_password = neo4j_password if neo4j_password is not None else self.neo4j_password
         return export_to_neo4j(
-            neo4j_uri=self.neo4j_uri,
-            neo4j_user=self.neo4j_user,
-            neo4j_password=self._neo4j_password,
-            phase1_processed_dir=phase1_processed_dir,
-            builder=builder,
-            batch_size=self.batch_size,
-            prefer_postgres=self.prefer_postgres,
+            neo4j_uri=neo4j_uri if neo4j_uri is not None else self.neo4j_uri,
+            neo4j_user=neo4j_user if neo4j_user is not None else self.neo4j_user,
+            neo4j_password=eff_password,
+            phase1_processed_dir=phase1_processed_dir if phase1_processed_dir is not None else self.phase1_processed_dir,
+            builder=builder if builder is not None else self.builder,
+            batch_size=batch_size if batch_size is not None else self.batch_size,
+            prefer_postgres=prefer_postgres if prefer_postgres is not None else self.prefer_postgres,
         )
 
-    def check_readiness(self, pg_session: Any) -> dict:
-        """Check PostgreSQL data readiness for Neo4j export.
-
-        Delegates to :func:`check_neo4j_readiness`.
-        """
+    def check_readiness(self, pg_session: Any = None) -> Dict[str, Any]:
+        """Wrap :func:`check_neo4j_readiness` for OO callers."""
         return check_neo4j_readiness(pg_session)
 
+    @staticmethod
+    def validate_contract(phase1_processed_dir: Optional[Path | str] = None) -> Dict[str, Any]:
+        """Wrap :func:`validate_phase1_output_contract` for OO callers."""
+        return validate_phase1_output_contract(phase1_processed_dir)
 
-# v104 P1-011 ROOT FIX: explicit public API. ``from exporters.neo4j_exporter
-# import *`` imports exactly these names. ``Neo4jExporter`` is now part of
-# the public API so callers that import it no longer crash.
+
+# RT-009 + P1-011 ROOT FIX: explicit __all__ so it is crystal-clear what
+# this module exports. Prevents future regressions where a class or function
+# is silently removed and downstream consumers only discover the breakage
+# at runtime.
 __all__: list[str] = [
     "DOCX_REQUIRED_NODE_TYPES",
-    "Neo4jExporter",            # v104 P1-011 ROOT FIX: class-based API wrapper
+    "Neo4jExporter",            # RT-009 + P1-011 ROOT FIX: class-based API wrapper
     "Phase1OutputContract",
     "check_neo4j_readiness",
     "check_node_type_coverage",

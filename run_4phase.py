@@ -252,8 +252,49 @@ def run_bridge(phase1_dir: Path) -> Tuple[Any, Any]:
 
     from drugos_graph.phase1_bridge import run_phase1_to_phase2
 
+    # RT-012 ROOT FIX (Team Member 17): honor USE_NEO4J_BUILDER env var so
+    # the Makefile's `make run` target can opt in to Neo4j persistence.
+    # When USE_NEO4J_BUILDER=1 AND DRUGOS_NEO4J_URI is set, we construct
+    # a real DrugOSGraphBuilder and pass it to the bridge — the KG is
+    # persisted to Neo4j. Otherwise we fall back to the bridge's default
+    # RecordingGraphBuilder (in-memory, NOT persisted) and print a clear
+    # warning so the engineer knows the KG is not persisted.
+    builder = None
+    use_neo4j = os.environ.get("USE_NEO4J_BUILDER", "").lower() in ("1", "true", "yes")
+    neo4j_uri = os.environ.get("DRUGOS_NEO4J_URI")
+    if use_neo4j and neo4j_uri:
+        try:
+            from drugos_graph import DrugOSGraphBuilder, Neo4jConfig
+            neo4j_cfg = Neo4jConfig(
+                uri=neo4j_uri,
+                user=os.environ.get("DRUGOS_NEO4J_USER", "neo4j"),
+                password=os.environ.get("DRUGOS_NEO4J_PASSWORD", ""),
+            )
+            builder = DrugOSGraphBuilder(neo4j_cfg)
+            logger.info(
+                "RT-012 ROOT FIX: using DrugOSGraphBuilder (persists to "
+                "Neo4j at %s). The KG will be queryable after this run.",
+                neo4j_uri,
+            )
+        except Exception as exc:
+            logger.warning(
+                "RT-012: USE_NEO4J_BUILDER=1 but could not construct "
+                "DrugOSGraphBuilder (%s). Falling back to "
+                "RecordingGraphBuilder (in-memory, NOT persisted).",
+                exc,
+            )
+            builder = None
+    else:
+        logger.warning(
+            "RT-012: DRUGOS_NEO4J_URI not set or USE_NEO4J_BUILDER unset. "
+            "Using RecordingGraphBuilder (in-memory, NOT persisted to "
+            "Neo4j). To persist: export DRUGOS_NEO4J_URI=bolt://localhost:7687 "
+            "and USE_NEO4J_BUILDER=1, then re-run."
+        )
+
     result = run_phase1_to_phase2(
         phase1_processed_dir=str(resolved_phase1_dir),
+        builder=builder,  # RT-012: None -> bridge uses RecordingGraphBuilder
         prefer_postgres=False,  # CSV path for dev/CI; set True for prod
     )
     builder = result["builder"]
@@ -336,11 +377,15 @@ def run_phase3_and_4(
     Uses the REAL Phase 2 HeteroData (passed as ``graph_data``) instead
     of ``build_demo_graph``.
 
-    P4-014 ROOT FIX: the ``allow_invalid_output`` parameter has been
-    REMOVED. The pipeline FAILS if scientific_validation fails — no
-    bypass. The Python API on ``GTRLBridge.run_full_pipeline`` retains
-    the parameter as a test-only escape hatch, but it is NOT reachable
-    from the CLI or from this function.
+    RT-004 ROOT FIX (Team Member 17) + P4-014 ROOT FIX (Team Member 12):
+    the ``allow_invalid_output`` parameter has been REMOVED entirely.
+    The scientific-validation gate is now UN-BYPASSABLE from this entry
+    point — if the gate fails, the pipeline fails with exit code 4.
+    No escape hatch exists in the CLI. A stressed engineer can no longer
+    ship invalid CSVs by passing ``--allow-invalid-output``. The Python
+    API on ``GTRLBridge.run_full_pipeline`` retains the parameter as a
+    test-only escape hatch, but it is NOT reachable from the CLI or
+    from this function.
     """
     logger.info("=" * 70)
     logger.info("PHASE 3 + 4: Graph Transformer Training + RL Ranking")
@@ -353,14 +398,17 @@ def run_phase3_and_4(
         device="cpu",
         seed=seed,
     )
+    # RT-004 ROOT FIX: allow_invalid_output is HARDCODED to False. The
+    # bridge's safety net cannot be disabled from run_4phase.py.
     candidates_df, results = bridge.run_full_pipeline(
         gt_epochs=gt_epochs,
         rl_timesteps=rl_timesteps,
         rl_top_n=rl_top_n,
+        # RT-004 + P4-014: allow_invalid_output is HARDCODED to False. The
+        # bridge's safety net cannot be disabled from run_4phase.py.
+        allow_invalid_output=False,
         # P4-016: pass the top-K limit to the bridge.
         gt_top_k=gt_top_k,
-        # P4-014: allow_invalid_output defaults to False (strict mode).
-        # The pipeline FAILS if scientific_validation fails.
         graph_data=graph_data,
     )
     return candidates_df, results
@@ -417,24 +465,17 @@ def main() -> int:
              "pairs (not recommended — produces 100+ MB CSVs at "
              "production scale).",
     )
-    # P4-014 ROOT FIX (Team Member 12): the --allow-invalid-output CLI
-    # flag has been REMOVED. The previous code allowed a stressed team
-    # member facing a pharma partner demo to bypass the
-    # scientific_validation gate by passing --allow-invalid-output (or
-    # setting RL_ALLOW_SCIENCE_FAILURE=1). The bypass then wrote a CSV
-    # with scientifically invalid predictions (AUC=0.403,
-    # metformin→epilepsy as the #3 candidate in the live test). The
-    # audit's compound-effect analysis: bypass → invalid CSV ships →
-    # pharma partner acts on invalid predictions → patient harm.
-    #
-    # The fix: if the scientific_validation gate fails, the pipeline
-    # FAILS — no exceptions, no bypass. The Python API parameter
-    # ``allow_invalid_output`` on ``GTRLBridge.run_full_pipeline`` is
-    # retained ONLY as a test-only escape hatch (the CI test suite
-    # needs a way to inspect invalid output for verification). It is
-    # NOT reachable from the CLI. A CI test
-    # (tests/test_team12_p4_012_to_018.py::test_p4_014_*) verifies
-    # the CLI flag does not exist.
+    # RT-004 ROOT FIX (Team Member 17) + P4-014 ROOT FIX (Team Member 12):
+    # the --allow-invalid-output CLI flag has been REMOVED entirely. The
+    # scientific-validation safety net is now UN-BYPASSABLE from this
+    # entry point. If the gate fails, the pipeline exits with code 4 —
+    # period. A stressed engineer can no longer ship invalid CSVs
+    # (degenerate RL candidates, AUC < 0.85, dangerous predictions like
+    # warfarin->epilepsy) by passing a debug flag. The Python API
+    # parameter ``allow_invalid_output`` on
+    # ``GTRLBridge.run_full_pipeline`` is retained ONLY as a test-only
+    # escape hatch (the CI test suite needs a way to inspect invalid
+    # output for verification). It is NOT reachable from the CLI.
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir)
@@ -450,10 +491,11 @@ def main() -> int:
         "rl_timesteps": args.rl_timesteps,
         "rl_top_n": args.rl_top_n,
         "seed": args.seed,
-        # P4-016: record the gt_top_k limit in the manifest for auditability.
+        # RT-004 + P4-016: record the gt_top_k limit in the manifest.
         "gt_top_k": args.gt_top_k,
-        # P4-014: the allow_invalid_output field is INTENTIONALLY ABSENT.
-        # The CLI flag was removed; there is no longer a bypass to record.
+        # RT-004 + P4-014: allow_invalid_output is always False — the
+        # scientific-validation gate cannot be bypassed from the CLI.
+        "allow_invalid_output": False,
     }
     _write_manifest(output_dir, phase1_dir, config_snapshot)
 
@@ -531,10 +573,6 @@ def main() -> int:
             # P4-016: pass the top-K limit to the bridge so it writes
             # only the top-K GT predictions to gt_predictions.csv.
             gt_top_k=args.gt_top_k,
-            # P4-014: allow_invalid_output is INTENTIONALLY NOT passed.
-            # The CLI flag was removed; the bridge defaults to
-            # allow_invalid_output=False (strict mode). The pipeline
-            # FAILS if scientific_validation fails — no CLI bypass.
         )
 
         # ─── Summary (R-022: removed duplicate 9-line block) ───────────
@@ -576,11 +614,16 @@ def main() -> int:
 
         if not overall_pass:
             print("\n" + "=" * 70)
-            print("SCIENTIFIC VALIDATION FAILED. Exiting non-zero.")
-            # P4-014 ROOT FIX: the --allow-invalid-output bypass has been
-            # REMOVED. The pipeline FAILS when scientific_validation fails
-            # — no exceptions. Fix the underlying issues (GT AUC, RL AUC,
-            # KP recovery, literature support) and re-run.
+            print("SCIENTIFIC VALIDATION FAILED. Exiting non-zero (exit code 4).")
+            # RT-004 + P4-014 ROOT FIX: the --allow-invalid-output bypass
+            # has been REMOVED. The pipeline FAILS when scientific_validation
+            # fails — no exceptions, no bypass. Fix the underlying issues
+            # (GT AUC, RL AUC, KP recovery, literature support) and re-run.
+            print("RT-004 + P4-014: the --allow-invalid-output escape hatch has")
+            print("been REMOVED. The scientific-validation gate is un-bypassable.")
+            print("The CSVs in the output directory were written BEFORE the gate")
+            print("fired — inspect them there for debugging. The gate ONLY")
+            print("controls the exit code, not whether artifacts are written.")
             print("Fix the failed checks above and re-run. There is NO bypass.")
             print("=" * 70)
             return 4

@@ -100,7 +100,9 @@ export interface RlRankerResponse {
   modelVersion?: string;
   generatedAt: string;
   count: number;
-  csvPath?: string;
+  // RT-008 ROOT FIX: csvPath is nullable — when no top_candidates_*.csv
+  // exists yet, this is null (we do NOT fall back to validated_hypotheses.csv).
+  csvPath?: string | null;
   note?: string;
 }
 
@@ -203,7 +205,7 @@ let cachedDefaultCsvPath: string | null = null;
 let cachedDefaultCsvPathAt = 0;
 const DEFAULT_PATH_CACHE_TTL_MS = 60 * 1000; // 60s
 
-async function resolveDefaultCsvPath(): Promise<string> {
+async function resolveDefaultCsvPath(): Promise<string | null> {
   // If a top_candidates_*.csv was found within the last TTL window,
   // reuse it (the per-path fs.watch in readLocalCsv invalidates the
   // PARSED cache when the file changes; this resolver cache only
@@ -230,13 +232,16 @@ async function resolveDefaultCsvPath(): Promise<string> {
     return latest;
   }
 
-  // No top_candidates_*.csv found — fall back to validated_hypotheses.csv.
-  // This is the dev bootstrap case (before the first RL run completes).
-  // The CSV parser tags rows with isKnownPositive=true when that column
-  // is present, so the UI can visually distinguish them.
-  cachedDefaultCsvPath = VALIDATED_HYPOTHESES_CSV;
+  // RT-008 + FE-003 ROOT FIX: NO top_candidates_*.csv found. Return null.
+  // The previous FE-003 code fell back to validated_hypotheses.csv (the
+  // INPUT file) — but RT-008 found that this is scientifically wrong: the
+  // dashboard would present known drugs (thalidomide, metformin, etc.)
+  // as "novel RL-ranked repurposing candidates". The fix: return null
+  // and let the caller (getRankedHypotheses) surface a clear
+  // "no RL output yet" message. We NEVER fall back to the INPUT file.
+  cachedDefaultCsvPath = null;
   cachedDefaultCsvPathAt = now;
-  return VALIDATED_HYPOTHESES_CSV;
+  return null;
 }
 
 /**
@@ -429,10 +434,29 @@ export async function getRankedHypotheses(opts?: {
     }
   }
 
+  // RT-008 + FE-003 ROOT FIX: resolve the RL OUTPUT path (never the
+  // INPUT file). If no top_candidates_*.csv exists yet, return an empty
+  // list with a clear "no RL output yet" note — do NOT fall back to
+  // validated_hypotheses.csv.
   const csvPath =
     process.env.RL_OUTPUT_CSV_PATH ||
     process.env.RL_LOCAL_CSV ||
     (await resolveDefaultCsvPath());
+  if (csvPath === null) {
+    return {
+      candidates: [],
+      source: "none",
+      generatedAt: new Date().toISOString(),
+      count: 0,
+      csvPath: null,
+      note:
+        "No RL-ranked candidates found. The Phase 4 RL ranker has not yet " +
+        "written a top_candidates_*.csv output. Run `python run_4phase.py` " +
+        "(or set RL_OUTPUT_CSV_PATH to point at an existing output CSV). " +
+        "RT-008 + FE-003 ROOT FIX: this route NEVER serves the INPUT file " +
+        "(rl/validated_hypotheses.csv) as candidate output.",
+    };
+  }
   let candidates = await readLocalCsv(csvPath);
 
   if (opts?.drug) {

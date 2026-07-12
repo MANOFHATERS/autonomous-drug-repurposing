@@ -1,0 +1,293 @@
+/**
+ * Graph Transformer (Phase 3) inference service — RT-006 ROOT FIX.
+ *
+ * Team Member 17: the audit (RT-006) found that
+ * `graph_transformer/inference/__init__.py` exports
+ * `predict_drug_disease_scores()` and `top_k_novel_predictions()`, but
+ * NO API route in `frontend/src/app/api/` invokes them. There was no
+ * `/api/predict` or `/api/top-k` route. A researcher asking
+ * "what is the GT score for drug X -> disease Y?" could not get an
+ * answer — the core ML model was unreachable from the dashboard.
+ *
+ * Root fix: this service loads the trained GT checkpoint from disk
+ * (written by run_4phase.py -> GTRLBridge to <output_dir>/checkpoints/)
+ * and exposes two methods that mirror the Python inference module:
+ *
+ *   1. predictPairs(pairs: [{drug, disease}]): scores for arbitrary pairs
+ *   2. topKNovel(topK: number): highest-scoring novel (drug, disease) pairs
+ *
+ * The service shells out to a small Python helper (`gt_inference.py`)
+ * rather than reimplementing the model in JS. This guarantees the JS
+ * and Python paths produce IDENTICAL predictions (no drift). The
+ * helper is invoked via `python3` with the repo root on sys.path.
+ *
+ * SCIENTIFIC INTEGRITY: if no checkpoint exists, we return
+ * `source: "none"` with an empty list — we NEVER fabricate predictions.
+ * A researcher who sees an empty list knows to run `python run_4phase.py`
+ * to train the model.
+ */
+
+import { promises as fs } from "fs";
+import nodeFs from "fs";
+import path from "path";
+import { spawn } from "child_process";
+import { randomUUID } from "crypto";
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+export interface DrugDiseasePair {
+  drug: string;
+  disease: string;
+}
+
+export interface GtPrediction {
+  drug: string;
+  disease: string;
+  score: number; // [0, 1]
+}
+
+export interface GtInferenceResponse {
+  predictions: GtPrediction[];
+  source: "gt_checkpoint" | "none";
+  modelVersion?: string;
+  generatedAt: string;
+  count: number;
+  checkpointPath?: string | null;
+  note?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Checkpoint resolution
+// ---------------------------------------------------------------------------
+
+const CHECKPOINT_CANDIDATE_DIRS = [
+  process.env.GT_CHECKPOINT_DIR,
+  // RT-006: the bridge writes gt_checkpoint.pt directly to <output_dir>
+  // (not to <output_dir>/checkpoints/). Check both locations for safety.
+  path.resolve(process.cwd(), "output_v100"),
+  path.resolve(process.cwd(), "output_v100", "checkpoints"),
+  path.resolve(process.cwd(), "output"),
+  path.resolve(process.cwd(), "output", "checkpoints"),
+  path.resolve(process.cwd(), "graph_transformer", "checkpoints"),
+].filter(Boolean) as string[];
+
+/**
+ * Find the latest trained GT checkpoint. The bridge writes
+ * `gt_checkpoint.pt` to <output_dir>/ (run_4phase.py default output is
+ * ./output_v100/). We pick the most-recently-modified `.pt` file across
+ * the candidate directories, preferring files named `gt_checkpoint.pt`
+ * or `best_model.pt`.
+ *
+ * Returns null if no checkpoint exists.
+ */
+function findLatestGtCheckpoint(): string | null {
+  for (const dir of CHECKPOINT_CANDIDATE_DIRS) {
+    let entries: string[] = [];
+    try {
+      entries = nodeFs.readdirSync(dir);
+    } catch {
+      continue;
+    }
+    // Prefer canonical names first, then fall back to any .pt file.
+    const PREFERRED = ["gt_checkpoint.pt", "best_model.pt"];
+    for (const pref of PREFERRED) {
+      const full = path.join(dir, pref);
+      try {
+        if (nodeFs.statSync(full).isFile()) return full;
+      } catch {
+        // skip
+      }
+    }
+    // Fall back to any .pt file (sorted by mtime desc).
+    const candidates = entries
+      .filter((name) => /\.pt$/i.test(name) && !/graph_state/i.test(name))
+      .map((name) => path.join(dir, name))
+      .filter((full) => {
+        try {
+          return nodeFs.statSync(full).isFile();
+        } catch {
+          return false;
+        }
+      });
+    if (candidates.length === 0) continue;
+    let best = candidates[0];
+    let bestMtime = -Infinity;
+    for (const c of candidates) {
+      try {
+        const m = nodeFs.statSync(c).mtimeMs;
+        if (m > bestMtime) {
+          bestMtime = m;
+          best = c;
+        }
+      } catch {
+        // skip
+      }
+    }
+    return best;
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// Python inference helper invocation
+// ---------------------------------------------------------------------------
+
+/**
+ * Spawn `gt_inference.py` (a small Python helper) to run the actual
+ * model inference. The helper loads the checkpoint, runs
+ * `predict_drug_disease_scores` or `top_k_novel_predictions`, and
+ * writes JSON to stdout.
+ *
+ * We use a tmp file for the request payload (not stdin) so large pair
+ * lists don't overflow the OS pipe buffer.
+ */
+async function runPythonInference(
+  checkpointPath: string,
+  mode: "predict" | "top_k",
+  payload: { pairs?: DrugDiseasePair[]; top_k?: number }
+): Promise<{ predictions: GtPrediction[]; modelVersion?: string }> {
+  const tmpDir = "/tmp";
+  const reqId = randomUUID();
+  const reqPath = path.join(tmpDir, `gt_inference_req_${reqId}.json`);
+  const respPath = path.join(tmpDir, `gt_inference_resp_${reqId}.json`);
+
+  try {
+    await fs.writeFile(reqPath, JSON.stringify({ checkpoint: checkpointPath, mode, ...payload }));
+
+    const repoRoot = process.cwd();
+    const scriptPath = path.resolve(repoRoot, "scripts", "gt_inference.py");
+
+    // If the helper doesn't exist, fail gracefully — caller surfaces a
+    // clear message. (The script is shipped with the repo per RT-006 fix.)
+    if (!nodeFs.existsSync(scriptPath)) {
+      throw new Error(`GT inference helper not found at ${scriptPath}. Run 'python run_4phase.py' first to train the model and ensure scripts/gt_inference.py is present.`);
+    }
+
+    await new Promise<void>((resolve, reject) => {
+      const child = spawn("python3", [scriptPath, reqPath, respPath], {
+        cwd: repoRoot,
+        env: { ...process.env, PYTHONPATH: repoRoot },
+      });
+      let stderr = "";
+      child.stderr.on("data", (d) => { stderr += d.toString(); });
+      child.on("error", reject);
+      child.on("close", (code) => {
+        if (code !== 0) reject(new Error(`gt_inference.py exited ${code}: ${stderr.slice(0, 1000)}`));
+        else resolve();
+      });
+    });
+
+    const respRaw = await fs.readFile(respPath, "utf8");
+    const resp = JSON.parse(respRaw);
+    if (resp.error) throw new Error(resp.error);
+    return { predictions: resp.predictions || [], modelVersion: resp.model_version };
+  } finally {
+    // Best-effort cleanup
+    try { await fs.unlink(reqPath); } catch { /* ignore */ }
+    try { await fs.unlink(respPath); } catch { /* ignore */ }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
+/**
+ * Score arbitrary (drug, disease) pairs with the trained GT model.
+ *
+ * Returns `{source: "none", predictions: [], ...}` if no checkpoint
+ * exists — we NEVER fabricate scores.
+ */
+export async function predictPairs(pairs: DrugDiseasePair[]): Promise<GtInferenceResponse> {
+  if (pairs.length === 0) {
+    return {
+      predictions: [],
+      source: "none",
+      generatedAt: new Date().toISOString(),
+      count: 0,
+      checkpointPath: null,
+      note: "No pairs supplied.",
+    };
+  }
+
+  const checkpointPath = findLatestGtCheckpoint();
+  if (checkpointPath === null) {
+    return {
+      predictions: [],
+      source: "none",
+      generatedAt: new Date().toISOString(),
+      count: 0,
+      checkpointPath: null,
+      note:
+        "No trained Graph Transformer checkpoint found. Run " +
+        "`python run_4phase.py` to train the model first. RT-006 ROOT FIX: " +
+        "this endpoint NEVER fabricates GT scores.",
+    };
+  }
+
+  try {
+    const { predictions, modelVersion } = await runPythonInference(checkpointPath, "predict", { pairs });
+    return {
+      predictions,
+      source: "gt_checkpoint",
+      modelVersion,
+      generatedAt: new Date().toISOString(),
+      count: predictions.length,
+      checkpointPath,
+    };
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return {
+      predictions: [],
+      source: "none",
+      generatedAt: new Date().toISOString(),
+      count: 0,
+      checkpointPath,
+      note: `GT inference failed: ${msg}`,
+    };
+  }
+}
+
+/**
+ * Return the top-K highest-scoring NOVEL (drug, disease) pairs from the
+ * trained GT model. "Novel" = not in the known_pairs list.
+ */
+export async function topKNovel(topK: number = 50): Promise<GtInferenceResponse> {
+  const checkpointPath = findLatestGtCheckpoint();
+  if (checkpointPath === null) {
+    return {
+      predictions: [],
+      source: "none",
+      generatedAt: new Date().toISOString(),
+      count: 0,
+      checkpointPath: null,
+      note:
+        "No trained Graph Transformer checkpoint found. Run " +
+        "`python run_4phase.py` to train the model first. RT-006 ROOT FIX.",
+    };
+  }
+
+  try {
+    const { predictions, modelVersion } = await runPythonInference(checkpointPath, "top_k", { top_k: topK });
+    return {
+      predictions,
+      source: "gt_checkpoint",
+      modelVersion,
+      generatedAt: new Date().toISOString(),
+      count: predictions.length,
+      checkpointPath,
+    };
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return {
+      predictions: [],
+      source: "none",
+      generatedAt: new Date().toISOString(),
+      count: 0,
+      checkpointPath,
+      note: `GT inference failed: ${msg}`,
+    };
+  }
+}
