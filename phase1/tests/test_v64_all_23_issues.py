@@ -255,31 +255,49 @@ def test_p1_011_chembl_target_name_matches_uniprot():
 
 
 # =========================================================================
-# P1-012 (compound): Phase 2 bridge resolves fda_approved from is_globally_approved
+# P1-012 (compound): Phase 2 bridge resolves fda_approved — SUPERSEDED by P2-002
 # =========================================================================
+# P2-002 FORENSIC ROOT FIX (v104 — Team Member 5, Phase 2 KG Bridge):
+# The previous P1-012 fix made _resolve_fda_approved FALL BACK to
+# is_globally_approved (max_phase==4) when is_fda_approved was None.
+# That conflated EMA/PMDA/NMPA approval with FDA approval — an EMA-only
+# drug was marked fda_approved=True, over-stating US market opportunity
+# for the RL ranker. The P2-002 fix REMOVED the fallback: when
+# is_fda_approved is None/NaN, the function returns None (unknown) —
+# NOT True, NOT False. This test was updated to assert the NEW correct
+# behavior. The old assertions (expecting True/False fallback) are GONE.
 def test_p1_012_fda_approved_falls_back_to_globally():
-    """P1-012: _resolve_fda_approved falls back to is_globally_approved."""
+    """P1-012 (superseded by P2-002): _resolve_fda_approved returns None
+    for unknown FDA status — does NOT fall back to is_globally_approved.
+
+    The function name is kept for backward-compat with CI references,
+    but the assertions now verify the P2-002 fix (no fallback).
+    """
     from drugos_graph.phase1_bridge import _resolve_fda_approved
     # Case 1: explicit True (DrugBank source) -> True.
     assert _resolve_fda_approved({"is_fda_approved": True}) is True
     # Case 2: explicit False (DrugBank source) -> False.
     assert _resolve_fda_approved({"is_fda_approved": False}) is False
-    # Case 3: None (ChEMBL source) + is_globally_approved=True -> True.
-    # THIS IS THE BUG FIX: previously _to_bool(None) = False.
+    # Case 3: None (ChEMBL source) + is_globally_approved=True -> None.
+    # P2-002 FIX: is_globally_approved (max_phase==4) means approved by
+    # ANY regulator (EMA/PMDA/NMPA/etc.), NOT FDA-specific. Returning
+    # True would conflate EMA approval with FDA approval. Return None
+    # (unknown) so the RL ranker treats it as a separate bucket.
     assert _resolve_fda_approved(
         {"is_fda_approved": None, "is_globally_approved": True}
-    ) is True, (
-        "P1-012 regression: ChEMBL drug (is_fda_approved=None) with "
-        "max_phase=4 should resolve to fda_approved=True via fallback"
+    ) is None, (
+        "P2-002 regression: ChEMBL drug (is_fda_approved=None) must "
+        "return None (unknown), NOT True. Falling back to "
+        "is_globally_approved conflates EMA/PMDA/NMPA with FDA."
     )
-    # Case 4: None + is_globally_approved=False -> False.
+    # Case 4: None + is_globally_approved=False -> None (still unknown).
     assert _resolve_fda_approved(
         {"is_fda_approved": None, "is_globally_approved": False}
-    ) is False
-    # Case 5: NaN + is_globally_approved=True -> True (pandas NaN case).
+    ) is None
+    # Case 5: NaN + is_globally_approved=True -> None (pandas NaN case).
     assert _resolve_fda_approved(
         {"is_fda_approved": float("nan"), "is_globally_approved": True}
-    ) is True
+    ) is None
 
 
 # =========================================================================
