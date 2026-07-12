@@ -1602,7 +1602,13 @@ class GTRLBridge:
                 # _compute_supplementary_features (D-02 audit finding).
                 p = np.clip(scores_np, 1e-7, 1 - 1e-7)
                 entropy = -(p * np.log(p) + (1 - p) * np.log(1 - p))
-                confidence_np = 1.0 - entropy / np.log(2)
+                # P3-027 ROOT FIX: clip confidence to [0,1] — fp32 rounding
+                # can push 1.0 - entropy/log(2) slightly outside [0,1]
+                # (e.g. -1e-9 or 1.0000001), which triggers spurious
+                # "confidence outside [0,1]" validation warnings downstream.
+                # Site 2 of 3 (site 1 at line ~1356 was already clipped;
+                # site 3 at line ~3853 is fixed in the same patch).
+                confidence_np = np.clip(1.0 - entropy / np.log(2), 0.0, 1.0)
 
                 # Build per-batch DataFrame: (B_drugs * num_diseases) rows
                 batch_drugs_tiled = np.repeat(
@@ -3850,7 +3856,13 @@ class GTRLBridge:
                 # Merge in confidence (binary prediction entropy)
                 p = np.clip(pool_df["gnn_score"].values, 1e-7, 1 - 1e-7)
                 entropy = -(p * np.log(p) + (1 - p) * np.log(1 - p))
-                pool_df["confidence"] = 1.0 - entropy / np.log(2)
+                # P3-027 ROOT FIX: clip confidence to [0,1] — site 3 of 3.
+                # Sites 1 (~1356) and 2 (~1605) are already clipped; this
+                # site was missed in the prior "fix," leaving the RL
+                # re-rank pool vulnerable to the same fp32 boundary
+                # overflow that produces spurious validation warnings
+                # and silent downstream clipping that masks real drift.
+                pool_df["confidence"] = np.clip(1.0 - entropy / np.log(2), 0.0, 1.0)
 
                 # Compute supplementary features (safety, market, pathway, etc.)
                 drug_map = self.node_maps.get("drug", {})
