@@ -25,8 +25,10 @@ import {
 } from "@/lib/services/rl-csv-cache";
 import {
   checkUserRateLimit,
-  resetUserRateLimit,
-  __clearAllUserRateLimitsForTests,
+  // FE-017: sync aliases so this existing test suite keeps working without
+  // rewriting every beforeEach/test to be async.
+  resetUserRateLimitSync as resetUserRateLimit,
+  __clearAllUserRateLimitsForTestsSync as __clearAllUserRateLimitsForTests,
 } from "@/lib/auth/per-user-rate-limit";
 
 describe("FE-069: /api/rl CSV cache", () => {

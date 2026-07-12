@@ -32,7 +32,7 @@ import { parsePagination } from "@/lib/pagination";
 // Return `{ items, total, page, pageSize, nextPageToken }` so the frontend
 // can render a paginated table and request the next page via the cursor.
 export async function GET(req: NextRequest) {
-  const guard = await requireAuthAndRateLimit();
+  const guard = await requireAuthAndRateLimit(req);
   if (guard.response !== null) return guard.response;
 
   const condition = req.nextUrl.searchParams.get("condition") || "";

@@ -162,6 +162,25 @@ function maybeCleanup() {
 // (full and v4-mapped forms), plus an explicit fallback for trusted-proxy
 // headers (cf-connecting-ip, true-client-ip) so deployments behind
 // Cloudflare/Akamai don't need X-Real-IP at all.
+//
+// FE-019 ROOT FIX (Team Member 14): The previous getClientIp() TRUSTED
+// X-Forwarded-For UNCONDITIONALLY. An attacker could set
+// `X-Forwarded-For: 1.2.3.4` to spoof any IP — bypassing IP-based rate
+// limits (rotate XFF → fresh bucket each time) and polluting the audit
+// log with fake IPs (forensic untraceability). The fix:
+//
+//   1. Add a `TRUSTED_PROXY_CIDR` env var (comma-separated CIDRs or IPs).
+//      When set, XFF is parsed RIGHT-TO-LEFT, skipping IPs in the trusted
+//      set, and the first untrusted IP is taken as the client. This is
+//      the standard nginx-style `real_ip_recursive` logic.
+//   2. When `TRUSTED_PROXY_CIDR` is NOT set, XFF is IGNORED entirely.
+//      Only `x-real-ip`, `cf-connecting-ip`, and `true-client-ip` are
+//      honored (these are set by the proxy itself, not the client).
+//   3. In Next.js route handlers we cannot access the socket's remote
+//      address directly (Next.js abstracts it away). So if NONE of the
+//      trusted headers are present, we return "unknown" — which is the
+//      safe default (multiple users sharing "unknown" is annoying but
+//      not a security hole, and the per-USER rate limiter still applies).
 const IPV4_OR_V6_RE =
   /^(?:(?:\d{1,3}\.){3}\d{1,3}|(?:[0-9a-fA-F]{1,4}:){2,7}[0-9a-fA-F]{0,4}|::(?:[fF]{4}:)?(?:\d{1,3}\.){3}\d{1,3})$/;
 
@@ -171,27 +190,129 @@ function isValidIp(s: string): boolean {
   return IPV4_OR_V6_RE.test(s);
 }
 
-function getClientIp(req: NextRequest): string {
-  // Trust X-Forwarded-For only if a known proxy set it. In production behind
-  // Caddy, Caddy sets X-Real-IP and X-Forwarded-For. We prefer X-Real-IP
-  // because it can't be spoofed by the client (Caddy overwrites it).
-  // We also honor cf-connecting-ip (Cloudflare) and true-client-ip (Akamai)
-  // for deployments where those proxies are in front.
-  const candidateHeaders = [
-    "x-real-ip",
-    "cf-connecting-ip",
-    "true-client-ip",
-    "x-forwarded-for",
-  ];
-  for (const h of candidateHeaders) {
-    const v = req.headers.get(h);
+// FE-019: Lazy-built trusted-proxy CIDR set. Parsed once from the env var
+// and cached for the process lifetime. Each entry is either a single IP
+// (matched by string equality after normalization) or a CIDR (matched by
+// ip-matching). We implement a minimal CIDR matcher here to avoid pulling
+// in a dependency — supporting IPv4 only because trusted proxies are
+// virtually always IPv4 internal addresses (10.x, 172.16-31.x, 192.168.x).
+let __trustedProxyCidrs: Array<{ kind: "ipv4"; bytes: number[]; mask: number }> | null = null;
+let __trustedProxyCidrsEnv = "";
+
+function getTrustedProxyCidrs(): Array<{ kind: "ipv4"; bytes: number[]; mask: number }> {
+  const env = process.env.TRUSTED_PROXY_CIDR || "";
+  if (__trustedProxyCidrs && env === __trustedProxyCidrsEnv) return __trustedProxyCidrs;
+  __trustedProxyCidrsEnv = env;
+  __trustedProxyCidrs = [];
+  if (!env) return __trustedProxyCidrs;
+  for (const raw of env.split(",")) {
+    const entry = raw.trim();
+    if (!entry) continue;
+    // Accept either "1.2.3.4" (treated as /32) or "10.0.0.0/8".
+    const slashIdx = entry.indexOf("/");
+    const ipStr = slashIdx === -1 ? entry : entry.slice(0, slashIdx);
+    const maskStr = slashIdx === -1 ? "32" : entry.slice(slashIdx + 1);
+    const parts = ipStr.split(".");
+    if (parts.length !== 4) continue; // skip malformed (only IPv4 supported)
+    const bytes = parts.map((p) => parseInt(p, 10));
+    if (bytes.some((b) => isNaN(b) || b < 0 || b > 255)) continue;
+    const mask = parseInt(maskStr, 10);
+    if (isNaN(mask) || mask < 0 || mask > 32) continue;
+    __trustedProxyCidrs.push({ kind: "ipv4", bytes, mask });
+  }
+  return __trustedProxyCidrs;
+}
+
+function ipInTrustedSet(ip: string): boolean {
+  const cidrs = getTrustedProxyCidrs();
+  if (cidrs.length === 0) return false;
+  // Only IPv4 supported in the trusted set (proxies are internal IPv4).
+  const parts = ip.split(".");
+  if (parts.length !== 4) return false;
+  const bytes = parts.map((p) => parseInt(p, 10));
+  if (bytes.some((b) => isNaN(b) || b < 0 || b > 255)) return false;
+  for (const cidr of cidrs) {
+    // Compare the leading `mask` bits of `bytes` and `cidr.bytes`.
+    let bitsLeft = cidr.mask;
+    for (let i = 0; i < 4 && bitsLeft > 0; i++) {
+      const maskByte = bitsLeft >= 8 ? 0xff : (0xff << (8 - bitsLeft)) & 0xff;
+      if ((bytes[i] & maskByte) !== (cidr.bytes[i] & maskByte)) {
+        break;
+      }
+      bitsLeft -= 8;
+    }
+    if (bitsLeft <= 0) return true;
+  }
+  return false;
+}
+
+/**
+ * FE-019: Extract the client IP from request headers, honoring
+ * `TRUSTED_PROXY_CIDR` for X-Forwarded-For parsing.
+ *
+ * Exported so `api-proxy-guard.ts` can use the SAME logic (the audit
+ * specifically called out that file as trusting XFF unconditionally).
+ *
+ * Logic:
+ *   1. Try `x-real-ip`, `cf-connecting-ip`, `true-client-ip` in order.
+ *      These are set by the proxy itself, not the client, so they're safe
+ *      to trust unconditionally (the proxy overwrites any client-supplied
+ *      value).
+ *   2. If none of those are present, try `x-forwarded-for`:
+ *      a. If `TRUSTED_PROXY_CIDR` is set, parse XFF right-to-left,
+ *         skipping IPs in the trusted set. The first untrusted IP is the
+ *         client. This is the standard nginx `real_ip_recursive` logic.
+ *      b. If `TRUSTED_PROXY_CIDR` is NOT set, IGNORE XFF entirely.
+ *         A client-supplied XFF is NOT trustworthy without a trusted
+ *         proxy chain.
+ *   3. If nothing matches, return "unknown".
+ */
+export function getClientIpFromHeaders(headers: {
+  get(name: string): string | null;
+}): string {
+  // Step 1: proxy-set headers (safe to trust unconditionally).
+  const safeHeaders = ["x-real-ip", "cf-connecting-ip", "true-client-ip"];
+  for (const h of safeHeaders) {
+    const v = headers.get(h);
     if (!v) continue;
-    // X-Forwarded-For may be a comma-separated list; the leftmost entry is
-    // the original client. Other headers should be a single IP.
     const first = v.split(",")[0].trim();
     if (first && isValidIp(first)) return first;
   }
+
+  // Step 2: X-Forwarded-For (only safe with a trusted-proxy chain).
+  const xff = headers.get("x-forwarded-for");
+  if (xff) {
+    const cidrs = getTrustedProxyCidrs();
+    if (cidrs.length === 0) {
+      // FE-019: TRUSTED_PROXY_CIDR not set → IGNORE XFF. Returning
+      // "unknown" is the safe default; the per-USER rate limiter still
+      // applies. (We deliberately do NOT return the leftmost XFF entry
+      // because that's the attacker-controlled one.)
+      return "unknown";
+    }
+    // Parse XFF right-to-left, skipping trusted proxies. The rightmost
+    // entry is the proxy that sent us the request; the next-to-rightmost
+    // is either another proxy or the real client.
+    const parts = xff.split(",").map((s) => s.trim()).filter(Boolean);
+    for (let i = parts.length - 1; i >= 0; i--) {
+      const ip = parts[i];
+      if (!isValidIp(ip)) continue;
+      if (ipInTrustedSet(ip)) continue; // skip trusted proxies
+      return ip; // first untrusted IP from the right = the real client
+    }
+    // All entries were trusted proxies — the request came directly from
+    // a trusted proxy. Fall through to "unknown" (the proxy's own IP is
+    // not a useful client identifier).
+  }
+
   return "unknown";
+}
+
+function getClientIp(req: NextRequest): string {
+  // FE-019: delegate to the shared header-based extractor so the logic
+  // is identical for `rate-limit.ts` (login brute-force) and
+  // `api-proxy-guard.ts` (per-user API throttling).
+  return getClientIpFromHeaders(req.headers);
 }
 
 /**
