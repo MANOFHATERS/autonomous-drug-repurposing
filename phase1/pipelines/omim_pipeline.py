@@ -322,6 +322,112 @@ OMIM_DOWNLOADS_URL_SANITISED: str = (
 )
 OMIM_API_GENE_MAP_ENDPOINT: str = "/geneMap"
 
+# P1-042 ROOT FIX (OMIM API key in URL path — scrub library logs):
+#   The OMIM downloads endpoint REQUIRES the API key in the URL path
+#   (``https://data.omim.org/downloads/{api_key}/morbidmap.txt``). HTTP
+#   Basic Auth and custom headers are NOT supported (verified — see
+#   ``_download_morbidmap`` docstring at line ~950: "We do NOT attempt
+#   header auth (it always returns 401 — BUG-2.1's 'FIX #12' was fake)").
+#   The URL-with-key exists in process memory and may leak via:
+#     (1) ``requests`` library debug logs (if ``requests`` is configured
+#         to log URLs at DEBUG level — common in dev environments).
+#     (2) urllib3 connection pool logs (``urllib3.connectionpool`` at
+#         DEBUG level logs the full URL on every request).
+#     (3) Stack traces if the request fails (the URL appears in the
+#         ``requests.exceptions.HTTPError`` message).
+#     (4) Core dumps (less common but possible on OOM kill).
+#   The application's own logs already sanitise the URL
+#   (``OMIM_DOWNLOADS_URL_SANITISED``), but library-level logs bypass
+#   the application's sanitisation.
+#
+#   ROOT FIX: install a process-wide ``logging.Filter`` on the
+#   ``urllib3.connectionpool`` and ``requests`` loggers that redacts any
+#   URL containing the OMIM API key. The filter is installed ONCE at
+#   module import. The redaction pattern matches the API key as a
+#   substring and replaces it with ``[REDACTED]``. This catches all
+#   library-level log messages regardless of where they originate.
+#
+#   The filter is safe to install unconditionally: if the API key is
+#   not set (dev/test environments), the filter is a no-op (the
+#   substring match finds nothing).
+_OMIM_API_KEY_REDACTION_FILTER_INSTALLED: bool = False
+
+
+class _OmimApiKeyRedactionFilter(logging.Filter):
+    """Redact the OMIM API key from any log record that contains it.
+
+    P1-042 ROOT FIX: this filter is installed on the ``urllib3.connectionpool``
+    and ``requests`` loggers to scrub the API key from library-level
+    debug logs. The filter mutates ``record.msg`` and ``record.args`` in
+    place, replacing any occurrence of the API key with ``[REDACTED]``.
+    """
+
+    def __init__(self, api_key: str) -> None:
+        super().__init__()
+        self._api_key = api_key
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if not self._api_key:
+            return True
+        # Redact in record.msg (str or %-format string).
+        if isinstance(record.msg, str) and self._api_key in record.msg:
+            record.msg = record.msg.replace(self._api_key, "[REDACTED]")
+        # Redact in record.args (tuple of args for %-format).
+        if record.args:
+            if isinstance(record.args, tuple):
+                new_args = tuple(
+                    arg.replace(self._api_key, "[REDACTED]")
+                    if isinstance(arg, str) and self._api_key in arg
+                    else arg
+                    for arg in record.args
+                )
+                record.args = new_args
+            elif isinstance(record.args, dict):
+                record.args = {
+                    k: (v.replace(self._api_key, "[REDACTED]")
+                        if isinstance(v, str) and self._api_key in v
+                        else v)
+                    for k, v in record.args.items()
+                }
+        return True
+
+
+def _install_omim_api_key_redaction_filter() -> None:
+    """Install the API-key redaction filter on library loggers (once).
+
+    P1-042 ROOT FIX: the filter is installed on:
+      - ``urllib3.connectionpool`` (logs full URLs at DEBUG level)
+      - ``requests`` (logs request URLs at DEBUG level in some configs)
+      - ``urllib3`` (parent — catches anything propagated up)
+    The filter is idempotent: re-calling this function does NOT add a
+    second filter (the module-level flag ``_OMIM_API_KEY_REDACTION_FILTER_INSTALLED``
+    guards against double-install on importlib.reload).
+    """
+    global _OMIM_API_KEY_REDACTION_FILTER_INSTALLED
+    if _OMIM_API_KEY_REDACTION_FILTER_INSTALLED:
+        return
+    try:
+        from config.settings import OMIM_API_KEY as _key
+    except Exception:  # noqa: BLE001 — defensive: config import never crashes
+        _key = ""
+    if not _key:
+        # No API key configured (dev/test) — filter would be a no-op.
+        # Still mark as installed so we don't retry on every import.
+        _OMIM_API_KEY_REDACTION_FILTER_INSTALLED = True
+        return
+    _filter = _OmimApiKeyRedactionFilter(_key)
+    for _logger_name in ("urllib3.connectionpool", "requests", "urllib3"):
+        logging.getLogger(_logger_name).addFilter(_filter)
+    _OMIM_API_KEY_REDACTION_FILTER_INSTALLED = True
+    logger.debug(
+        "P1-042: OMIM API key redaction filter installed on "
+        "urllib3.connectionpool / requests / urllib3 loggers."
+    )
+
+
+# Install the filter at module import (P1-042 ROOT FIX).
+_install_omim_api_key_redaction_filter()
+
 # BUG-2.3 / BUG-3.2 / BUG-12.12: per-mapping-key base scores.
 SCORE_TYPE_OMIM: str = "omim_mapping_key"
 SCORE_METHOD_DEFAULT: str = "omim_v1"
