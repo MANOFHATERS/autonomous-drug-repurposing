@@ -2230,6 +2230,54 @@ class KGNegativeSampler:
                 len(self.held_out_pairs), len(self._rejection_set),
                 len(self._held_out_entities),
             )
+        else:
+            # P2-019 ROOT FIX (v104): the v36 Chain 9 fix added
+            # ``held_out_pairs`` support and the rejection filter in
+            # ``combined_sampling`` (line ~2717), but the construction
+            # site has NO guard against callers that forget to pass
+            # ``held_out_pairs``. Without held-out pairs, the sampler
+            # CAN produce a negative that is actually a POSITIVE in the
+            # test set — false-negative contamination that structurally
+            # suppresses test AUC (the model "learns" to score true
+            # future positives as low). In production mode
+            # (DRUGOS_ENVIRONMENT=prod), this is a launch-blocking
+            # failure: the V1 launch criterion ">0.85 AUC on held-out
+            # drug-disease pairs" cannot be trusted if the sampler may
+            # be contaminating training with test-set positives. In dev
+            # mode, log CRITICAL so the operator sees the risk.
+            _env_mode_p2_019 = os.environ.get(
+                "DRUGOS_ENVIRONMENT", "dev"
+            ).lower()
+            _is_prod_p2_019 = _env_mode_p2_019 in ("prod", "production")
+            if _is_prod_p2_019:
+                raise ValueError(
+                    "KGNegativeSampler: held_out_pairs is EMPTY in "
+                    f"production mode (DRUGOS_ENVIRONMENT="
+                    f"{_env_mode_p2_019}). Without held_out_pairs, the "
+                    "sampler can produce negatives that are actually "
+                    "POSITIVES in the val/test set — false-negative "
+                    "contamination that structurally suppresses test "
+                    "AUC. The V1 launch criterion '>0.85 AUC on "
+                    "held-out drug-disease pairs' cannot be trusted "
+                    "under this contamination. Either: (a) pass "
+                    "held_out_pairs=val_known | test_known (the "
+                    "standard pattern, see run_pipeline.py step11 "
+                    "line ~6367), OR (b) set DRUGOS_ENVIRONMENT=dev "
+                    "to acknowledge you are accepting the "
+                    "contamination risk (development / unit tests "
+                    "only). (P2-019 root fix — production guard "
+                    "against missing held_out_pairs)"
+                )
+            logger.critical(
+                "KGNegativeSampler: held_out_pairs is EMPTY (dev mode "
+                "— DRUGOS_ENVIRONMENT=%s). The sampler CAN produce "
+                "negatives that are actually POSITIVES in the val/test "
+                "set (false-negative contamination). Test AUC may be "
+                "structurally suppressed. Pass held_out_pairs=val_known "
+                "| test_known to prevent this. (P2-019 root fix — dev "
+                "mode CRITICAL warning)",
+                _env_mode_p2_019,
+            )
 
         # v13 ROOT FIX (SW-14 / PS-12 / SW-15 / Compound-8):
         # ``relation_to_types`` maps relation_idx → (head_type, tail_type).

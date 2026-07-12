@@ -3649,7 +3649,69 @@ def sider_to_node_records(
             meddra_type_filter=meddra_type_filter,
             stereo_mode="flat",
         )
-    # D2.5 -- drop_duplicates by umls_id_meddra (node-level dedup).
+    # P2-016 ROOT FIX: dedupe AdverseEvent nodes by MedDRA preferred term
+    # (the side_effect_name column, lowercased) -- NOT by meddra_id /
+    # umls_id_meddra. SIDER's meddra.tsv lists the SAME adverse event under
+    # multiple MedDRA IDs (PT vs LLT for the same concept, e.g. "Nausea"
+    # as PT 10028813 and "Feeling queasy" as LLT 10048813 -- both map to
+    # the same condition "Nausea"). The previous code deduped by
+    # umls_id_meddra, which is DIFFERENT for PT vs LLT rows of the same
+    # concept, so the KG ended up with duplicate AdverseEvent nodes for
+    # the same condition. The RL ranker then learned them as distinct
+    # and could flag a drug as "safe" for one AE node but "unsafe" for
+    # its duplicate -- a patient-safety corruption.
+    #
+    # The fix: collapse nodes by the LOWERCASED side_effect_name. We keep
+    # the PT-preferential row (PT first via _dedupe's sort order) so the
+    # surviving node's name is the canonical MedDRA preferred term. The
+    # original umls_id_meddra / meddra_id are preserved in props for
+    # traceability, but the node ID is the PT meddra_id (set by
+    # _build_node_record) so downstream consumers see one node per
+    # condition.
+    #
+    # NOTE: this dedup is gated by the ``dedup`` parameter (same as the
+    # upstream _dedupe call). When dedup=False, the caller wants ALL rows
+    # emitted as nodes (no collapse) -- e.g. for debugging or for
+    # building a separate LLT-only subgraph.
+    if dedup and "side_effect_name" in df_filtered.columns and len(df_filtered) > 0:
+        # Create a lowercase-normalized key for case-insensitive dedup.
+        # Some SIDER releases use "Nausea" vs "nausea" for the same
+        # concept across PT/LLT rows -- lowercasing collapses them.
+        df_filtered = df_filtered.copy()
+        df_filtered["_ae_name_key"] = (
+            df_filtered["side_effect_name"]
+            .astype(str)
+            .str.strip()
+            .str.lower()
+        )
+        # Sort so PT rows come first (when meddra_type column exists)
+        # so the surviving row's name is the canonical preferred term.
+        if "meddra_type" in df_filtered.columns:
+            df_filtered["_sort_key"] = df_filtered["meddra_type"].map(
+                {t: i for i, t in enumerate(MEDDRA_TYPE_DEDUP_ORDER)}
+            ).fillna(len(MEDDRA_TYPE_DEDUP_ORDER))
+            df_filtered = df_filtered.sort_values(["_ae_name_key", "_sort_key"])
+            df_filtered = df_filtered.drop(columns=["_sort_key"])
+        else:
+            df_filtered = df_filtered.sort_values("_ae_name_key")
+        # Node-level dedup: one AdverseEvent node per lowercase name.
+        before_node_dedup = len(df_filtered)
+        df_filtered = df_filtered.drop_duplicates(subset=["_ae_name_key"], keep="first")
+        df_filtered = df_filtered.drop(columns=["_ae_name_key"])
+        after_node_dedup = len(df_filtered)
+        if before_node_dedup > after_node_dedup:
+            logger.info(
+                "sider_ae_node_dedup_by_preferred_term",
+                extra={
+                    "before": before_node_dedup,
+                    "after": after_node_dedup,
+                    "dropped": before_node_dedup - after_node_dedup,
+                    "note": "P2-016: collapsed PT/LLT duplicates by side_effect_name",
+                },
+            )
+    # D2.5 -- drop_duplicates by umls_id_meddra (node-level dedup, kept as
+    # a secondary dedup for backward compat -- harmless after the
+    # P2-016 name-based dedup above).
     if "umls_id_meddra" in df_filtered.columns:
         nodes_df: pd.DataFrame = df_filtered[["umls_id_meddra", "side_effect_name", "meddra_type", "umls_id_label"]].drop_duplicates(subset=["umls_id_meddra"], keep="first")
     else:

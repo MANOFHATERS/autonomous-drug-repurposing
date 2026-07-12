@@ -551,6 +551,33 @@ class ChembertaEmbeddingCorruptionError(ChembertaEncoderError):
     pass
 
 
+class ChembertaEncoderGPUOOMError(ChembertaEncoderError):
+    """Raised when the GPU runs out of memory AND the operator has not
+    explicitly opted into silent CPU fallback.
+
+    P2-025 ROOT FIX (Team 8): the previous code silently fell back to
+    CPU when GPU OOM'd even at batch_size=1. ChemBERTa on CPU is ~50x
+    slower than GPU — a full KG encoding that should take 10 minutes
+    takes 8 hours, causing Airflow task timeouts and a cascading KG
+    build failure. Worse, the fallback was logged at WARNING level
+    only, so ops had no clear signal that production was running
+    degraded.
+
+    ROOT FIX: RAISE this exception on GPU OOM (after exhausting the
+    batch_size halving strategy). The error message tells ops exactly
+    what to do: provision more GPU memory, reduce the dataset, OR set
+    ``DRUGOS_CHEMBERTA_ALLOW_CPU_FALLBACK=1`` to opt into silent
+    degradation (NOT recommended for production).
+
+    This exception subclasses ``ChembertaEncoderError`` so existing
+    callers that catch ``ChembertaEncoderError`` continue to handle
+    it. Callers that specifically want to recover from GPU OOM (e.g.
+    a job scheduler that retries on a larger instance) can catch
+    ``ChembertaEncoderGPUOOMError`` specifically.
+    """
+    pass
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # Private helper functions
 # ═══════════════════════════════════════════════════════════════════════
@@ -2346,34 +2373,98 @@ def encode_smiles(
             except torch.cuda.OutOfMemoryError:
                 # v35 ROOT FIX (H-12): with the while loop, ``i`` is
                 # NOT advanced on OOM -- the next iteration retries the
-                # SAME batch with a smaller batch_size (or after CPU
-                # fallback). This is the actual fix; the comment-only
-                # version in the for-loop was a no-op.
+                # SAME batch with a smaller batch_size (or, after the
+                # P2-025 fix, RAISES). This is the actual fix; the
+                # comment-only version in the for-loop was a no-op.
                 if current_batch_size > 4:
                     current_batch_size = max(current_batch_size // 2, 1)
                     logger.warning("CUDA OOM -- halved batch_size to %d", current_batch_size)
                     # Do NOT advance i -- retry the same batch.
                     continue
                 else:
-                    logger.error("CUDA OOM at batch_size=1 -- falling back to CPU")
-                    resolved_device = "cpu"
-                    model = model.to("cpu")
-                    # v43 ROOT FIX (P1 -- OOM device drift in cached model):
-                    # After moving the model to CPU, the _MODEL_CACHE still
-                    # holds a reference to the SAME model object (now on
-                    # CPU). The next call requesting GPU gets the CPU model
-                    # via cache hit -> device mismatch error on forward pass.
-                    # Fix: clear the cache so the next call re-loads the
-                    # model on the correct device.
-                    with _MODEL_CACHE_LOCK:
-                        _MODEL_CACHE.clear()
-                        logger.info(
-                            "Cleared chemberta model cache after OOM CPU "
-                            "fallback -- next call will re-load on the "
-                            "requested device."
+                    # P2-025 ROOT FIX (Team 8 — silent CPU fallback on
+                    # GPU OOM): the previous code silently moved the
+                    # model to CPU and continued encoding. ChemBERTa on
+                    # CPU is ~50x slower than GPU, causing Airflow
+                    # timeouts and cascading KG build failures. Worse,
+                    # the fallback was logged at WARNING level only,
+                    # giving ops no clear signal that production was
+                    # running degraded.
+                    #
+                    # ROOT FIX: RAISE ChembertaEncoderGPUOOMError so the
+                    # failure is loud and actionable. The error message
+                    # tells ops exactly what to do: provision more GPU
+                    # memory, reduce the dataset, OR explicitly opt
+                    # into silent degradation via
+                    # ``DRUGOS_CHEMBERTA_ALLOW_CPU_FALLBACK=1`` (NOT
+                    # recommended for production — it is the exact
+                    # silent-degradation bug P2-025 removes).
+                    #
+                    # The opt-in env var exists for dev/CI environments
+                    # where the operator has consciously decided to
+                    # accept the 50x slowdown because no GPU is
+                    # available. Production deployments MUST NOT set
+                    # this var — they should provision adequate GPU
+                    # memory instead.
+                    _allow_cpu_fallback = os.environ.get(
+                        "DRUGOS_CHEMBERTA_ALLOW_CPU_FALLBACK", "0"
+                    ).strip().lower() in ("1", "true", "yes", "on")
+
+                    if _allow_cpu_fallback:
+                        # Operator has EXPLICITLY opted into silent
+                        # CPU fallback. Log at ERROR level (not WARNING)
+                        # so the degradation is visible in production
+                        # dashboards, then proceed with the legacy
+                        # fallback path. This is the ONLY way to reach
+                        # the CPU fallback after P2-025.
+                        logger.error(
+                            "P2-025: CUDA OOM at batch_size=1 -- "
+                            "DRUGOS_CHEMBERTA_ALLOW_CPU_FALLBACK=1 is "
+                            "set, so falling back to CPU. ChemBERTa on "
+                            "CPU is ~50x slower than GPU. This fallback "
+                            "is NOT recommended for production -- "
+                            "provision more GPU memory instead."
                         )
-                    # Do NOT advance i -- retry the same batch on CPU.
-                    continue
+                        resolved_device = "cpu"
+                        model = model.to("cpu")
+                        # v43 ROOT FIX (P1 -- OOM device drift in cached model):
+                        # After moving the model to CPU, the _MODEL_CACHE still
+                        # holds a reference to the SAME model object (now on
+                        # CPU). The next call requesting GPU gets the CPU model
+                        # via cache hit -> device mismatch error on forward pass.
+                        # Fix: clear the cache so the next call re-loads the
+                        # model on the correct device.
+                        with _MODEL_CACHE_LOCK:
+                            _MODEL_CACHE.clear()
+                            logger.info(
+                                "Cleared chemberta model cache after OOM CPU "
+                                "fallback -- next call will re-load on the "
+                                "requested device."
+                            )
+                        # Do NOT advance i -- retry the same batch on CPU.
+                        continue
+                    else:
+                        # P2-025 default: RAISE. Do not silently
+                        # degrade. The error message is actionable --
+                        # it names the env var that opts into the
+                        # legacy fallback so a developer who hits
+                        # this in CI can unblock quickly, while
+                        # production deployments get the loud failure
+                        # they need.
+                        raise ChembertaEncoderGPUOOMError(
+                            "P2-025 ROOT FIX: CUDA OOM at batch_size=1 "
+                            "and DRUGOS_CHEMBERTA_ALLOW_CPU_FALLBACK is "
+                            "not set. The previous behavior silently "
+                            "fell back to CPU (50x slower), causing "
+                            "Airflow timeouts and cascading KG build "
+                            "failures. To fix: (1) provision a GPU "
+                            "with more memory, (2) reduce the "
+                            "dataset size, OR (3) set "
+                            "DRUGOS_CHEMBERTA_ALLOW_CPU_FALLBACK=1 to "
+                            "opt into the legacy silent CPU fallback "
+                            "(NOT recommended for production -- it "
+                            "is the exact bug P2-025 removes).",
+                        ) from None
 
             except ChembertaSMILESValidationError:
                 raise
@@ -2699,6 +2790,8 @@ __all__: list[str] = [
     "ChembertaEncoderError", "ChembertaCacheIntegrityError",
     "ChembertaSMILESValidationError", "ChembertaDeviceError",
     "ChembertaEmbeddingCorruptionError",
+    # P2-025 ROOT FIX (Team 8): GPU OOM no longer silently falls back to CPU.
+    "ChembertaEncoderGPUOOMError",
     "clear_model_cache", "clear_model_memory_cache",  # L-25: add alias
     "diff_caches", "register_consumer", "check_dependency_cves",
 ]

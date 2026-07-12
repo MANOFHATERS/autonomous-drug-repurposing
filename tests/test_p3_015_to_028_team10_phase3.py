@@ -259,26 +259,60 @@ def test_p3_021_kp_drugs_in_negative_sampling_pool():
 
 
 # ---------------------------------------------------------------------------
-# P3-022: evaluate_link_prediction must be documented as a CODE-PATH-IDENTICAL
-# sanity check (NOT "independent verification").
+# P3-022: evaluate_link_prediction must be GENUINELY INDEPENDENT (P3-017 fix).
+#
+# UPDATE (P3-017 forensic root fix, Team Member 10): the previous test
+# enforced HONEST documentation that the AUC was "code-path-identical"
+# (i.e. the same number computed twice, zero scientific value). The
+# P3-017 fix made evaluate_link_prediction GENUINELY independent by
+# adding:
+#   1. From-scratch Mann-Whitney U AUC (independent implementation)
+#   2. Dot-product cosine-similarity AUC (independent scorer, bypasses MLP)
+# So the "code-path-identical" documentation is no longer accurate --
+# the verification is now genuinely independent. This test is updated
+# to assert the NEW behavior: the evaluation module must document the
+# independent AUC computation (not the code-path-identical scope).
 # ---------------------------------------------------------------------------
 def test_p3_022_honest_documentation_of_verified_auc():
-    """The 'independent verification' claim must be corrected."""
+    """The 'verified AUC' must be GENUINELY independent (P3-017 fix).
+
+    Previously this test enforced that the evaluation module documented
+    the code-path-identical scope (honest about the limitation). The
+    P3-017 forensic root fix (Team Member 10) made the verification
+    genuinely independent via:
+      - from-scratch Mann-Whitney U AUC (independent implementation)
+      - dot-product cosine-similarity AUC (independent scorer)
+    So the documentation must now reflect the INDEPENDENT verification,
+    not the code-path-identical scope.
+    """
     eval_src = (_REPO_ROOT / "graph_transformer" / "evaluation" / "__init__.py").read_text()
     bridge_src = (_REPO_ROOT / "graph_transformer" / "gt_rl_bridge.py").read_text()
-    # The honest scope must be documented.
-    assert "CODE-PATH-IDENTICAL" in eval_src, (
-        "P3-022 FAIL: evaluation/__init__.py must document the code-path-identical scope."
+    # P3-017 ROOT FIX: the evaluation module must document the
+    # independent AUC computation (Mann-Whitney + dot-product).
+    assert "Mann-Whitney" in eval_src, (
+        "P3-022 FAIL: evaluation/__init__.py must document the "
+        "from-scratch Mann-Whitney U AUC (P3-017 independent verification)."
     )
-    assert "CODE-PATH-IDENTICAL" in bridge_src, (
-        "P3-022 FAIL: gt_rl_bridge.py must document the code-path-identical scope."
+    assert "auc_mannwhitney" in eval_src, (
+        "P3-022 FAIL: evaluation/__init__.py must expose auc_mannwhitney "
+        "(P3-017 independent AUC field)."
     )
-    # The old "INDEPENDENT verification" claim in the bridge call site must be gone.
-    # (The evaluation docstring may still contain "independent code path" in the
-    # numbered list of cross-check value — that's fine as long as the honest
-    # scope is added. We check the BRIDGE call site uses the new wording.)
-    assert "P3-022 sanity check" in bridge_src, (
-        "P3-022 FAIL: bridge call site must use 'P3-022 sanity check' wording."
+    assert "auc_dotproduct" in eval_src, (
+        "P3-022 FAIL: evaluation/__init__.py must expose auc_dotproduct "
+        "(P3-017 independent scorer, bypasses the MLP)."
+    )
+    # The bridge call site must propagate the independent AUCs.
+    assert "test_auc_mannwhitney" in bridge_src, (
+        "P3-022 FAIL: gt_rl_bridge.py must propagate test_auc_mannwhitney "
+        "(P3-017 independent AUC field)."
+    )
+    assert "test_auc_dotproduct" in bridge_src, (
+        "P3-022 FAIL: gt_rl_bridge.py must propagate test_auc_dotproduct "
+        "(P3-017 independent scorer AUC)."
+    )
+    assert "P3-017" in bridge_src, (
+        "P3-022 FAIL: gt_rl_bridge.py must reference P3-017 (the "
+        "independent AUC verification fix)."
     )
 
 
@@ -305,26 +339,33 @@ def test_p3_023_deprecated_build_reverse_edges_removed():
 
 
 # ---------------------------------------------------------------------------
-# P3-024: DrugRepurposingGraphTransformer must RAISE if len(edge_types) < 14.
+# P3-024 / P3-001 v104: DrugRepurposingGraphTransformer must RAISE if
+# len(edge_types) < 18 (canonical Phase 2 schema: 9 forward + 9 reverse).
+# Pre-v104 this was < 14, allowing the OLD 14-type schema to pass silently.
 # ---------------------------------------------------------------------------
-def test_p3_024_raises_value_error_for_fewer_than_14_edge_types():
-    """Model construction with <14 edge types must raise ValueError."""
+def test_p3_024_raises_value_error_for_fewer_than_18_edge_types():
+    """Model construction with <18 edge types must raise ValueError.
+
+    Updated for P3-001 ROOT FIX v104: threshold raised from 14 to 18.
+    """
     from graph_transformer.models.graph_transformer import DrugRepurposingGraphTransformer
     from graph_transformer.data import DEFAULT_FEATURE_DIMS
-    # Default (14 edge types) must succeed.
+    # Default (18 edge types) must succeed.
     m = DrugRepurposingGraphTransformer(
         feature_dims=DEFAULT_FEATURE_DIMS, embedding_dim=16, num_layers=3, num_heads=2,
     )
-    assert len(m.edge_types) >= 14
+    assert len(m.edge_types) == 18, (
+        f"expected canonical 18 edge types, got {len(m.edge_types)}"
+    )
     # 1 edge type must raise.
-    with pytest.raises(ValueError, match="at least 14 edge types"):
+    with pytest.raises(ValueError, match="at least 18 edge types"):
         DrugRepurposingGraphTransformer(
             feature_dims=DEFAULT_FEATURE_DIMS, embedding_dim=16, num_layers=3, num_heads=2,
             edge_types=[("drug", "inhibits", "protein")],
         )
-    # 7 edge types (forward only, no reverse) must raise.
+    # 9 edge types (forward only, no reverse) must raise.
     from graph_transformer.data import FORWARD_EDGE_TYPES
-    with pytest.raises(ValueError, match="at least 14 edge types"):
+    with pytest.raises(ValueError, match="at least 18 edge types"):
         DrugRepurposingGraphTransformer(
             feature_dims=DEFAULT_FEATURE_DIMS, embedding_dim=16, num_layers=3, num_heads=2,
             edge_types=FORWARD_EDGE_TYPES,
@@ -467,7 +508,7 @@ if __name__ == "__main__":
         ("test_p3_021_kp_drugs_in_negative_sampling_pool", test_p3_021_kp_drugs_in_negative_sampling_pool),
         ("test_p3_022_honest_documentation_of_verified_auc", test_p3_022_honest_documentation_of_verified_auc),
         ("test_p3_023_deprecated_build_reverse_edges_removed", test_p3_023_deprecated_build_reverse_edges_removed),
-        ("test_p3_024_raises_value_error_for_fewer_than_14_edge_types", test_p3_024_raises_value_error_for_fewer_than_14_edge_types),
+        ("test_p3_024_raises_value_error_for_fewer_than_18_edge_types", test_p3_024_raises_value_error_for_fewer_than_18_edge_types),
         ("test_p3_025_safe_batchnorm_documented", test_p3_025_safe_batchnorm_documented),
         ("test_p3_026_demo_auc_threshold_is_0_65", test_p3_026_demo_auc_threshold_is_0_65),
         # tests requiring the trained_bridge fixture:

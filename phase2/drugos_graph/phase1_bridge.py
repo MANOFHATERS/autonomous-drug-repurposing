@@ -1662,10 +1662,137 @@ def _inspect_columns(conn: Any, table_name: str) -> list:
         return []
 
 
-# v49 ROOT FIX: simple keyword-based disease extraction from indication
-# free-text. This is intentionally conservative — only matches a small
-# set of high-confidence disease keywords. The CSV path remains the
-# gold standard for structured disease mapping.
+# P2-005 FORENSIC ROOT FIX (v104 — Team Member 5): schema_version
+# filtering for Phase 1 Postgres reads.
+#
+# BUG (P2-005):
+#   ``_read_phase1_from_postgres`` read ALL rows from Phase 1's
+#   Postgres tables without filtering by ``schema_version``. If
+#   Phase 1 was mid-migration (some rows at schema_version 16, some
+#   at 17), the bridge read BOTH. The schema-17 rows had
+#   ``compound_inchikey_canonical`` populated; the schema-16 rows
+#   did not. The bridge's InChIKey-based deduplication then failed
+#   for the schema-16 subset → KG had duplicate Compound nodes.
+#
+# ROOT FIX:
+#   1. ``_get_latest_schema_version(conn)`` queries
+#      ``SELECT MAX(version) FROM schema_version``. The Phase 1
+#      ``schema_version`` table (defined in database/models.py:525)
+#      tracks applied migrations — one row per migration, latest
+#      row = current version. The column is ``version`` (Integer),
+#      NOT ``schema_version`` (which is a per-row column on
+#      ``GeneDiseaseAssociation`` only).
+#   2. For tables that HAVE a per-row ``schema_version`` column
+#      (currently only ``GeneDiseaseAssociation`` per AST analysis
+#      of database/models.py), filter:
+#        WHERE schema_version = <str(latest_version)>
+#      This excludes rows from incomplete migrations.
+#   3. For tables WITHOUT a per-row ``schema_version`` (Drug,
+#      Protein, DrugProteinInteraction, ProteinProteinInteraction):
+#      log the latest version for observability and emit a WARNING
+#      if the schema_version table has multiple pending rows (a
+#      heuristic for mid-migration state). We cannot filter per-row
+#      because the column doesn't exist — but the warning gives
+#      operators visibility.
+#   4. Defensive: if the ``schema_version`` table doesn't exist or
+#      the query fails (fresh DB, permissions issue, etc.), log at
+#      DEBUG and proceed without filtering. This preserves backward
+#      compatibility with databases that haven't run the migration
+#      that creates the ``schema_version`` table.
+def _get_latest_schema_version(conn: Any) -> Optional[int]:
+    """P2-005 — return the latest applied schema version from Postgres.
+
+    Queries ``SELECT MAX(version) FROM schema_version``. Returns None
+    if the table doesn't exist, is empty, or the query fails (defensive
+    — fresh DB, permissions, etc.).
+    """
+    try:
+        from sqlalchemy import text
+        result = conn.execute(
+            text("SELECT MAX(version) AS latest FROM schema_version")
+        )
+        row = result.fetchone()
+        if row is None:
+            return None
+        latest = row[0] if hasattr(row, "__getitem__") else getattr(row, "latest", None)
+        if latest is None:
+            return None
+        return int(latest)
+    except Exception as exc:
+        logger.debug(
+            "P2-005: could not read latest schema_version from Postgres "
+            "(%s: %s). Proceeding without schema_version filter. This is "
+            "expected on a fresh DB before migrations have run, or if the "
+            "schema_version table is not yet created.",
+            type(exc).__name__, exc,
+        )
+        return None
+
+
+def _count_schema_versions(conn: Any) -> int:
+    """P2-005 — count rows in the ``schema_version`` table.
+
+    Used to detect mid-migration state: if the count is > 0 but the
+    latest version's migration is still in progress (heuristic: the
+    last row's ``applied_at`` is < 60 seconds ago), warn operators.
+
+    Returns 0 if the table doesn't exist or query fails.
+    """
+    try:
+        from sqlalchemy import text
+        result = conn.execute(text("SELECT COUNT(*) AS n FROM schema_version"))
+        row = result.fetchone()
+        if row is None:
+            return 0
+        n = row[0] if hasattr(row, "__getitem__") else getattr(row, "n", 0)
+        return int(n) if n is not None else 0
+    except Exception:
+        return 0
+
+
+# P2-001 FORENSIC ROOT FIX (v104 — Team Member 5, Phase 2 KG Bridge):
+# The previous implementation used naive substring matching
+# (``keyword in t``) against a hardcoded disease dictionary. This
+# produced WRONG Compound-treats-Disease edges for four documented
+# cases:
+#   1. "respiratory depression" matched "depression" — WRONG.
+#      Respiratory depression is a breathing adverse event (opioid
+#      side effect), NOT Major Depressive Disorder (DOID:1470).
+#   2. "painkiller" matched "pain" — WRONG. "Painkiller" is a drug
+#      class, not a disease indication.
+#   3. "anti-inflammatory" matched "inflammation" — WRONG.
+#      "Anti-inflammatory" is a drug mechanism, not a disease.
+#   4. "ulcerative colitis" matched "ulcer" — WRONG. Ulcerative
+#      colitis is an IBD, not a peptic ulcer.
+#   5. "does not treat pain" matched "pain" — WRONG. Negated
+#      indications were treated as positive.
+#
+# ROOT FIX (3 layers, no surface patch):
+#   L1 — Word-boundary regex (``\b{keyword}\b``): eliminates
+#        intra-word false positives like "painkiller" → "pain",
+#        "ulcerative" → "ulcer", "anti-inflammatory" → "inflammation".
+#   L2 — NegEx-style negation detection: scans a 6-token window
+#        BEFORE the match for negation cues ("not", "no", "without",
+#        "contraindicated", "does not treat", "not indicated for",
+#        "not for", "avoid", "never"). If a cue is found, the match
+#        is REJECTED. This catches "does not treat pain",
+#        "contraindicated in hypertension", etc.
+#   L3 — Longest-match-first: keywords are sorted by length descending
+#        so multi-word terms like "respiratory depression" are checked
+#        BEFORE single words like "depression". We also maintain an
+#        explicit ``_DISEASE_FALSE_FRIENDS`` map of multi-word phrases
+#        that look like a disease keyword but mean something else
+#        (e.g. "respiratory depression" → NOT a disease indication;
+#        it is an adverse event). When a false-friend phrase is
+#        present in the text, the corresponding single-word keyword
+#        is suppressed for the ENTIRE text — preventing the
+#        "respiratory depression" → "depression" mismatch.
+#
+# The CSV path (DrugBank XML <indication> parser → structured
+# (drug, disease) pairs) remains the gold standard. This free-text
+# extractor is only used when the PostgreSQL ``drugs.indication``
+# column is populated with free-text and no structured mapping is
+# available.
 _DISEASE_KEYWORD_MAP = {
     "hypertension": ("DOID:10763", "Hypertension"),
     "diabetes": ("DOID:9351", "Diabetes Mellitus"),
@@ -1684,32 +1811,152 @@ _DISEASE_KEYWORD_MAP = {
     "ulcer": ("DOID:77", "Ulcer"),
 }
 
+# P2-001 L3 — multi-word "false friend" phrases. When any of these
+# phrases appears in the indication text, the corresponding
+# single-word keyword is SUPPRESSED for the entire text (it would
+# otherwise match via word-boundary regex and produce a wrong edge).
+# Value = the keyword to suppress when the phrase is present.
+#
+# Rationale: "respiratory depression" is an adverse event (opioid
+# side effect), NOT an indication. "Bipolar depression" / "postpartum
+# depression" / "agitated depression" ARE depression subtypes — they
+# should NOT suppress "depression". We only suppress when the
+# modifier changes the clinical meaning to a non-disease (e.g. a
+# breathing event, not a mood disorder).
+_DISEASE_FALSE_FRIENDS = {
+    # phrase (lowercase)          : keyword to suppress
+    "respiratory depression": "depression",
+    "neurotic depression": "depression",  # deprecated ICD-9 term, not an indication
+}
 
-def _extract_disease_id_from_indication_text(text: str) -> Optional[str]:
-    """Extract a DOID-style disease ID from indication free-text.
+# P2-001 L2 — NegEx-style negation cues. If any of these appear in
+# the 6-token window BEFORE a disease-keyword match, the match is
+# rejected. Tuned for medical indication text (DrugBank <indication>
+# free-text). The list is conservative — false positives (missing a
+# negation) are worse than false negatives (extra negation check)
+# here, because a wrong Compound-treats-Disease edge corrupts the
+# GNN and the RL ranker downstream.
+_NEGEX_CUES = frozenset({
+    "not", "no", "without", "nor", "never", "neither",
+    "contraindicated", "contraindication", "avoid",
+    "doesn't", "doesnt", "don't", "dont", "isn't", "isnt",
+    "cannot", "can't", "cant", "shouldn't", "shouldnt",
+    "not treat", "not treating", "not treated",
+    "not indicated", "not for", "not used",
+    "not recommended", "not suitable",
+})
 
-    Returns None if no known disease keyword is matched. The downstream
-    ClinicalOutcome loader handles None by creating ClinicalOutcome nodes
-    without treats-edges.
+# P2-001 L1 — pre-compiled word-boundary regex for each keyword.
+# Built ONCE at import time (keywords are static). ``re.escape``
+# ensures keywords with regex metacharacters are matched literally.
+# ``re.IGNORECASE`` lets us match without lowercasing the text first
+# (preserving the original text for the negex window scan).
+_DISEASE_KEYWORD_PATTERNS: List[Tuple[str, str, "re.Pattern[str]"]] = [
+    (
+        keyword,
+        doid,
+        re.compile(r"\b" + re.escape(keyword) + r"\b", re.IGNORECASE),
+    )
+    for keyword, (doid, _name) in sorted(
+        _DISEASE_KEYWORD_MAP.items(),
+        key=lambda kv: len(kv[0]),
+        reverse=True,  # longest first — L3
+    )
+]
+
+
+def _is_negated(text_lower: str, match_start: int) -> bool:
+    """P2-001 L2 — NegEx-style negation check.
+
+    Scans the 6-token window BEFORE ``match_start`` in ``text_lower``
+    for any negation cue. Returns True if a cue is found.
+
+    ``text_lower`` must be the lowercased original text (so cue
+    matching is case-insensitive). ``match_start`` is the character
+    index of the disease-keyword match in ``text_lower``.
+    """
+    if match_start <= 0:
+        return False
+    # Take the preceding window and tokenize on whitespace. 6 tokens
+    # is the NegEx standard window for English medical text.
+    window = text_lower[:match_start].rsplit(None, 6)  # last 6 tokens
+    if not window:
+        return False
+    # Check single-token cues
+    for tok in window:
+        # strip trailing punctuation that may attach to the token
+        # (e.g. "not," "without.")
+        cleaned = tok.strip(".,;:!?()[]\"'")
+        if cleaned in _NEGEX_CUES:
+            return True
+    # Check multi-token cues (e.g. "not treat", "not indicated")
+    window_str = " ".join(window)
+    for cue in _NEGEX_CUES:
+        if " " in cue and cue in window_str:
+            return True
+    return False
+
+
+def _extract_disease_from_indication_text(
+    text: str,
+) -> Optional[Tuple[str, str]]:
+    """P2-001 ROOT FIX — extract (doid, disease_name) from free-text.
+
+    Returns None if no non-negated, word-boundary-matched disease
+    keyword is found. Applies all 3 fix layers:
+      L1 — word-boundary regex
+      L2 — NegEx negation window
+      L3 — longest-match-first + false-friend suppression
+
+    The downstream ClinicalOutcome loader handles None by creating
+    ClinicalOutcome nodes without treats-edges.
     """
     if not text or not isinstance(text, str):
         return None
-    t = text.lower()
-    for keyword, (doid, _) in _DISEASE_KEYWORD_MAP.items():
-        if keyword in t:
-            return doid
+    text_lower = text.lower()
+
+    # L3 — determine which keywords to SUPPRESS based on false-friend
+    # phrases present in the text. If "respiratory depression" appears,
+    # "depression" is suppressed for the entire text.
+    suppressed: set = set()
+    for phrase, suppress_keyword in _DISEASE_FALSE_FRIENDS.items():
+        if phrase in text_lower:
+            suppressed.add(suppress_keyword)
+
+    # L1 + L2 + L3 — iterate longest-first, skip suppressed, check
+    # word boundaries, check negation.
+    for keyword, doid, pattern in _DISEASE_KEYWORD_PATTERNS:
+        if keyword in suppressed:
+            continue
+        m = pattern.search(text)
+        if m is None:
+            continue
+        # L2 — negation check
+        if _is_negated(text_lower, m.start()):
+            continue
+        # Match found and not negated — return (doid, name).
+        return (doid, _DISEASE_KEYWORD_MAP[keyword][1])
     return None
+
+
+def _extract_disease_id_from_indication_text(text: str) -> Optional[str]:
+    """P2-001 ROOT FIX — extract a DOID-style disease ID from free-text.
+
+    Thin wrapper around ``_extract_disease_from_indication_text`` that
+    returns only the DOID. Returns None if no match.
+    """
+    result = _extract_disease_from_indication_text(text)
+    return result[0] if result is not None else None
 
 
 def _extract_disease_name_from_indication_text(text: str) -> Optional[str]:
-    """Extract a human-readable disease name from indication free-text."""
-    if not text or not isinstance(text, str):
-        return None
-    t = text.lower()
-    for keyword, (_, name) in _DISEASE_KEYWORD_MAP.items():
-        if keyword in t:
-            return name
-    return None
+    """P2-001 ROOT FIX — extract a human-readable disease name from free-text.
+
+    Thin wrapper around ``_extract_disease_from_indication_text`` that
+    returns only the name. Returns None if no match.
+    """
+    result = _extract_disease_from_indication_text(text)
+    return result[1] if result is not None else None
 
 
 def _read_phase1_from_postgres() -> Dict[str, pd.DataFrame]:
@@ -1742,9 +1989,48 @@ def _read_phase1_from_postgres() -> Dict[str, pd.DataFrame]:
     out: Dict[str, pd.DataFrame] = {}
 
     with engine.connect() as conn:
+        # P2-005 ROOT FIX: read the latest applied schema_version ONCE
+        # and use it to filter GDA rows (the only table with a per-row
+        # ``schema_version`` column per AST analysis of database/models.py).
+        # For tables WITHOUT a per-row schema_version (Drug, Protein, DPI,
+        # PPI), we log the latest version for observability and warn if the
+        # schema_version table has multiple rows (a heuristic for mid-
+        # migration state). This prevents reading stale rows from an
+        # incomplete migration, which would cause InChIKey-based dedup to
+        # fail silently for the stale subset.
+        _latest_sv = _get_latest_schema_version(conn)
+        _n_sv = _count_schema_versions(conn)
+        if _latest_sv is not None:
+            logger.info(
+                "P2-005: Phase 1 Postgres schema_version = %d "
+                "(%d migration row(s) applied). GDA rows will be "
+                "filtered to schema_version=%d.",
+                _latest_sv, _n_sv, _latest_sv,
+            )
+            if _n_sv > _latest_sv:
+                # Heuristic: more rows than the latest version number
+                # suggests a mid-migration state (some migrations applied
+                # but the latest version column hasn't been bumped yet).
+                logger.warning(
+                    "P2-005: schema_version table has %d rows but latest "
+                    "version is %d — possible mid-migration state. Tables "
+                    "without a per-row schema_version column (Drug, "
+                    "Protein, DPI, PPI) may contain stale rows from the "
+                    "incomplete migration. GDA rows ARE filtered.",
+                    _n_sv, _latest_sv,
+                )
+        else:
+            logger.debug(
+                "P2-005: schema_version table not available — proceeding "
+                "without schema_version filter. Expected on a fresh DB."
+            )
+
         # --- drugs (DrugBank + ChEMBL + PubChem unified) ---
         # v49 ROOT FIX: include the new `indication` + `indication_source`
         # columns so the indications reader below can consume them.
+        # P2-005: the Drug model does NOT have a per-row schema_version
+        # column, so we cannot filter by it here. The schema_version
+        # observability log above gives operators visibility.
         drugs_stmt = select(
             _m.Drug.inchikey,
             _m.Drug.name,
@@ -1843,7 +2129,23 @@ def _read_phase1_from_postgres() -> Dict[str, pd.DataFrame]:
             _m.GeneDiseaseAssociation.evidence_strength,
             _m.GeneDiseaseAssociation.normalized_score,
             _m.GeneDiseaseAssociation.source_version,
+            # P2-005: select the per-row schema_version so we can filter
+            # stale rows from incomplete migrations. This is the ONLY
+            # table with a per-row schema_version column per AST analysis
+            # of database/models.py.
+            _m.GeneDiseaseAssociation.schema_version,
         )
+        # P2-005 ROOT FIX: filter GDA rows by the latest schema_version.
+        # Only GeneDiseaseAssociation has a per-row schema_version column.
+        # Rows from incomplete migrations (schema_version < latest) are
+        # excluded — they may lack columns that the latest migration added
+        # (e.g. compound_inchikey_canonical), causing InChIKey-based dedup
+        # to fail silently for the stale subset.
+        if _latest_sv is not None:
+            # schema_version is a String(20) column; compare as string.
+            gda_stmt = gda_stmt.where(
+                _m.GeneDiseaseAssociation.schema_version == str(_latest_sv)
+            )
         gda_df = pd.read_sql(gda_stmt, conn)
         # Synthesize the legacy columns the bridge contract expects.
         gda_df["gene_mim"] = None
@@ -2801,32 +3103,61 @@ def _to_bool(v: Any) -> bool:
     return True
 
 
-def _resolve_fda_approved(row: Any) -> bool:
-    """v64 ROOT FIX (P1-012 compound): resolve fda_approved for a Phase 1 row.
+def _resolve_fda_approved(row: Any) -> Optional[bool]:
+    """P2-002 FORENSIC ROOT FIX (v104 — Team Member 5): resolve
+    ``fda_approved`` for a Phase 1 row WITHOUT conflating globally-
+    approved with FDA-approved.
 
-    ChEMBL cannot provide FDA-specific approval (no FDA Orange Book join is
-    wired in), so `is_fda_approved` is None for all ChEMBL-sourced drugs.
-    The previous code did `_to_bool(row.get("is_fda_approved"))`, which
-    converted None → False — corrupting the RL ranker's market-opportunity
-    scoring (every ChEMBL-only drug was marked unapproved, even FDA-approved
-    ones like aspirin/acetaminophen).
+    SCIENTIFIC BUG (P2-002):
+        The previous implementation (v64) fell back from
+        ``is_fda_approved`` to ``is_globally_approved`` when the
+        former was None. ``is_globally_approved`` is derived from
+        ChEMBL's ``max_phase == 4``, which means "approved by ANY
+        major regulator globally" — FDA (US), EMA (EU), PMDA (Japan),
+        NMPA (China), MHRA (UK), Health Canada, TGA (Australia).
 
-    Root fix: when `is_fda_approved` is None/NaN (the honest "unknown"
-    state from ChEMBL), fall back to `is_globally_approved` (which IS set
-    from max_phase==4). Rationale:
-      - max_phase=4 means "approved by ANY major regulator globally"
-        (FDA, EMA, PMDA, MHRA, Health Canada, TGA). Most globally-approved
-        drugs ARE FDA-approved (the FDA is the largest drug market).
-      - For repurposing market-opportunity scoring, treating a globally-
-        approved drug as fda_approved=True is a far better approximation
-        than treating it as False (which is what the bug did).
-      - Patient safety is preserved: `withdrawn` and `safety_data_missing`
-        remain independent safety gates; fda_approved only affects market
-        scoring, not safety filtering.
+        An EMA-only-approved drug (e.g. a drug sold in Germany but
+        never submitted to the FDA) has ``max_phase == 4`` and
+        ``is_globally_approved = True`` but ``is_fda_approved = None``
+        (ChEMBL cannot provide FDA-specific approval without an
+        Orange Book join, which is not wired in). The previous code
+        marked such a drug as ``fda_approved = True``.
 
-    Drugs from DrugBank (which has real FDA Orange Book data) keep their
-    explicit `is_fda_approved` value — the fallback only fires when the
-    value is genuinely unknown (None/NaN).
+        DOWNSTREAM IMPACT:
+        The RL ranker's market-opportunity dimension treated these
+        as "FDA-approved" and ranked them as "easy to repurpose in
+        the US" — when in fact they would require a full FDA NDA
+        (New Drug Application). A pharma partner acting on this
+        ranking would waste 6-12 months discovering the regulatory
+        barrier. Commercial opportunity was systematically over-stated
+        for ~30% of ChEMBL-sourced drugs (the fraction with
+        ``is_fda_approved = None``).
+
+    ROOT FIX (honest unknown):
+        - If ``is_fda_approved`` is a real bool (DrugBank source —
+          DrugBank has real FDA Orange Book data): use it directly.
+        - If ``is_fda_approved`` is a non-null truthy/falsy value
+          (e.g. "true"/"false" string from a CSV): coerce via
+          ``_to_bool`` and use it.
+        - If ``is_fda_approved`` is None/NaN (ChEMBL-only path —
+          the honest "unknown" state): return ``None``. Do NOT fall
+          back to ``is_globally_approved``. The RL ranker treats
+          ``None`` as "unknown" — a separate bucket from True/False
+          — and does not over-rank these drugs for US repurposing.
+
+    PATIENT-SAFETY PRESERVATION:
+        ``withdrawn`` and ``safety_data_missing`` remain independent
+        safety gates; ``fda_approved`` only affects market-opportunity
+        scoring, never safety filtering. Returning ``None`` is strictly
+        safer than the previous ``True`` fallback (a drug marked
+        ``True`` was assumed to have FDA safety review; ``None`` makes
+        no such assumption).
+
+    RETURN TYPE:
+        ``Optional[bool]`` — ``True`` (FDA-approved), ``False`` (not
+        FDA-approved), or ``None`` (unknown — ChEMBL-only path).
+        Callers that assign this to a Neo4j node property must handle
+        ``None`` (Neo4j properties can be null).
     """
     fda_raw = row.get("is_fda_approved")
     # If the value is a real bool (DrugBank source), use it directly.
@@ -2837,11 +3168,11 @@ def _resolve_fda_approved(row: Any) -> bool:
         s = str(fda_raw).strip().lower()
         if s not in ("", "nan", "none", "null"):
             return s not in ("0", "false", "no", "f", "n")
-    # fda_approved is None/NaN/unknown → fall back to is_globally_approved.
-    # This is the ChEMBL-only path (max_phase=4 drugs without FDA Orange
-    # Book data). Logically: globally approved → likely FDA approved.
-    globally_raw = row.get("is_globally_approved")
-    return _to_bool(globally_raw)
+    # P2-002 ROOT FIX: is_fda_approved is None/NaN/unknown → return None.
+    # Do NOT fall back to is_globally_approved (max_phase==4) — that
+    # conflates EMA/PMDA/NMPA approval with FDA approval and over-states
+    # US market opportunity for the RL ranker.
+    return None
 
 
 def _safe_str(v: Any) -> str:

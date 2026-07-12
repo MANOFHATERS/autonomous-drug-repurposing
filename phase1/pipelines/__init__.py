@@ -2834,6 +2834,52 @@ def _main(argv: list[str]) -> None:
                 print(f"  {key}: {path.name}")
         except Exception as exc:
             print(f"[v49] WARN: failed to write embedded samples: {exc}")
+        # v104 FORENSIC ROOT FIX (P1-007 -- python -m pipelines all NEVER
+        #   calls run_entity_resolution()):
+        #   The previous code ran all 7 pipelines (chembl, omim, drugbank,
+        #   uniprot, string, disgenet, pubchem) and wrote embedded
+        #   samples, but NEVER invoked run_entity_resolution(). This is
+        #   the EXACT bug a prior v75 ROOT FIX was supposed to fix for
+        #   download_parallel.py -- but the fix was applied only to
+        #   download_parallel.py, not to the CLI entry point. Result:
+        #   ChEMBL, DrugBank, PubChem, and STITCH all inserted Compound
+        #   nodes with their own internal IDs. The entity resolver (which
+        #   merges 'acetylsalicylic acid' from ChEMBL with 'Aspirin' from
+        #   DrugBank via InChIKey matching) was never invoked. The KG
+        #   had 4 duplicate nodes for every drug that appears in
+        #   multiple sources -- the Phase 2 graph was 4x inflated, the
+        #   GNN's message-passing propagated across duplicates as if
+        #   distinct, and the RL ranker could rank the same drug 4 times
+        #   under different source-specific IDs.
+        #
+        #   ROOT FIX: after the pipeline loop AND after the embedded
+        #   samples are written (so Phase 2 always has data to work
+        #   with), invoke run_entity_resolution(). If entity resolution
+        #   fails (e.g. no drug CSVs were written because all pipelines
+        #   failed), log a WARNING and continue -- the pipeline should
+        #   still exit 0 if any pipeline succeeded, so the operator can
+        #   diagnose via the FAILED list above. Entity resolution is
+        #   critical for KG correctness but is NOT a hard dependency
+        #   for the pipeline to make progress.
+        if succeeded:
+            try:
+                from entity_resolution.run import run_entity_resolution
+                print("\n[v104 P1-007] Running entity resolution to merge "
+                      "cross-source Compound duplicates ...")
+                er_result = run_entity_resolution()
+                er_mapping_count = (
+                    er_result.get("drug_mappings", 0)
+                    if isinstance(er_result, dict)
+                    else 0
+                )
+                print(f"[v104 P1-007] Entity resolution complete: "
+                      f"{er_mapping_count} canonical drug entities")
+            except Exception as er_exc:
+                print(f"[v104 P1-007] WARN: entity resolution failed -- {er_exc}")
+                import traceback as _tb
+                _tb.print_exc()
+        else:
+            print("[v104 P1-007] SKIP entity resolution: no pipelines succeeded")
         # Exit 0 if at least 1 pipeline succeeded OR samples were written.
         if succeeded:
             _sys.exit(0)

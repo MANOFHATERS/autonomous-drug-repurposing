@@ -323,6 +323,9 @@ __all__: List[str] = [
     "_parse_atc_codes",       # FIX 3.7
     "_parse_categories",      # FIX 3.10
     "_parse_interactions",    # FIX 3.9
+    "_parse_food_interactions",   # P2-010 ROOT FIX -- new
+    "_parse_herb_interactions",   # P2-010 ROOT FIX -- new
+    "_classify_food_herb_severity",  # P2-010 ROOT FIX -- new
     # ── Public parsing functions (preserved from v1) ──
     "parse_drug",             # FIX 1.10, 2.14
     "parse_drug_strict",      # FIX 2.14, G.18 -- new (raises on invalid)
@@ -332,6 +335,7 @@ __all__: List[str] = [
     "drugbank_to_node_records",          # FIX 2.1, 3.10-3.16, G.4, G.5, G.8, G.14, G.15
     "drugbank_to_target_edges",          # FIX 3.2-3.5, 3.18-3.20, G.3, G.6, G.7
     "drugbank_to_interaction_edges",     # FIX 3.9 -- new
+    "drugbank_to_food_herb_edges",       # P2-010 ROOT FIX -- new
     "drugbank_to_graph",                 # FIX 1.13 -- new (combined pass)
     "to_nodes",                          # FIX 13.8 -- alias for new callers
     "to_edges",                          # FIX 13.8 -- alias for new callers
@@ -662,6 +666,21 @@ class DrugRecord:
 
     # ── Drug-drug interactions (FIX 3.9, FIX 2.13 -- typed) ────────────
     interactions: List[Dict[str, Any]] = field(default_factory=list)
+
+    # ── Drug-food and Drug-herb interactions (P2-010 ROOT FIX).
+    # DrugBank's XML has <food-interactions> and <herb-interactions>
+    # elements alongside <drug-interactions>. The previous parser only
+    # parsed <drug-interaction> elements, missing safety-critical food
+    # interactions (e.g. grapefruit juice + statins = rhabdomyolysis)
+    # and herb interactions (e.g. St. John's Wort + warfarin = reduced
+    # anticoagulation). The RL ranker's safety_score dimension then
+    # under-flags drugs with severe food/herb interactions -- a patient-
+    # safety corruption. Each entry is a dict with keys: ``description``,
+    # ``severity`` (classified from the description), ``kind`` ("food"
+    # or "herb"), and ``orphan_interaction`` (always False -- food/herb
+    # partners are not in the drugbank-id namespace).
+    food_interactions: List[Dict[str, Any]] = field(default_factory=list)
+    herb_interactions: List[Dict[str, Any]] = field(default_factory=list)
 
     # ── Privacy / compliance (FIX 9.8) ─────────────────────────────────
     sensitive: bool = False
@@ -1989,6 +2008,205 @@ def _parse_interactions(
     return interactions
 
 
+def _parse_food_interactions(
+    drug_elem: ET.Element,
+    ns: Optional[Mapping[str, str]] = None,
+    drugbank_id: str = "",
+) -> List[Dict[str, Any]]:
+    """Parse ``<food-interaction>`` elements (P2-010 ROOT FIX).
+
+    DrugBank's XML contains ``<food-interactions>`` alongside
+    ``<drug-interactions>``. Each child ``<food-interaction>`` element
+    has a single ``<description>`` child (no partner drugbank-id, no
+    name -- the food is described in free text within the description).
+
+    Example element::
+
+        <food-interactions>
+          <food-interaction>
+            <description>
+              Take with food. Food increases bioavailability.
+            </description>
+          </food-interaction>
+          <food-interaction>
+            <description>
+              Grapefruit juice increases serum concentration of
+              atorvastatin -> risk of rhabdomyolysis.
+            </description>
+          </food-interaction>
+        </food-interactions>
+
+    The previous parser only parsed ``<drug-interaction>`` elements,
+    silently dropping ALL food interactions. For drugs with critical
+    food interactions (e.g. grapefruit juice + statins = rhabdomyolysis,
+    MAOIs + tyramine = hypertensive crisis), the KG was missing safety-
+    critical information. The RL ranker's safety_score dimension then
+    under-flags drugs with severe food interactions, recommending a
+    statin without flagging the grapefruit-juice risk -- a patient-
+    safety corruption.
+
+    Args:
+        drug_elem: ``<drug>`` XML element.
+        ns: namespace mapping.
+        drugbank_id: drug ID for context in logs.
+
+    Returns:
+        List of dicts with keys: ``name`` (extracted from description
+        or "food-interaction" if unparseable), ``description``,
+        ``severity``, ``kind`` ("food"), ``orphan_interaction`` (False).
+    """
+    ns = ns or DB_NS
+    food_interactions: List[Dict[str, Any]] = []
+    for inter in drug_elem.findall(
+        "db:food-interactions/db:food-interaction", ns
+    ):
+        description = _safe_text(inter, "description", ns)
+        if not description:
+            # Skip empty <food-interaction> elements.
+            continue
+        # Extract a short name from the description -- DrugBank food
+        # interactions don't have a <name> child, so we use the first
+        # 80 chars of the description as a recognizable label.
+        name = description.strip()[:80]
+        severity = _classify_food_herb_severity(description)
+        food_interactions.append({
+            "drugbank_id": "",  # food partners have no drugbank-id
+            "name": name,
+            "description": description,
+            "severity": severity,
+            "kind": "food",
+            "orphan_interaction": False,
+        })
+    if food_interactions:
+        logger.debug(
+            "Parsed %d food-interaction elements for drug %s (P2-010)",
+            len(food_interactions), drugbank_id,
+        )
+    return food_interactions
+
+
+def _parse_herb_interactions(
+    drug_elem: ET.Element,
+    ns: Optional[Mapping[str, str]] = None,
+    drugbank_id: str = "",
+) -> List[Dict[str, Any]]:
+    """Parse ``<herb-interaction>`` elements (P2-010 ROOT FIX).
+
+    DrugBank's XML contains ``<herb-interactions>`` alongside
+    ``<drug-interactions>``. Each child ``<herb-interaction>`` element
+    has a ``<name>`` (the herb name) and a ``<description>`` child.
+
+    Example element::
+
+        <herb-interactions>
+          <herb-interaction>
+            <name>St. John's Wort</name>
+            <description>
+              The therapeutic efficacy of Warfarin can be decreased
+              when used in combination with St. John's Wort.
+            </description>
+          </herb-interaction>
+        </herb-interactions>
+
+    The previous parser only parsed ``<drug-interaction>`` elements,
+    silently dropping ALL herb interactions. For drugs with critical
+    herb interactions (e.g. St. John's Wort + warfarin = reduced
+    anticoagulation, St. John's Wort + SSRIs = serotonin syndrome),
+    the KG was missing safety-critical information.
+
+    Args:
+        drug_elem: ``<drug>`` XML element.
+        ns: namespace mapping.
+        drugbank_id: drug ID for context in logs.
+
+    Returns:
+        List of dicts with keys: ``name`` (herb name), ``description``,
+        ``severity``, ``kind`` ("herb"), ``orphan_interaction`` (False).
+    """
+    ns = ns or DB_NS
+    herb_interactions: List[Dict[str, Any]] = []
+    for inter in drug_elem.findall(
+        "db:herb-interactions/db:herb-interaction", ns
+    ):
+        herb_name = _safe_text(inter, "name", ns)
+        description = _safe_text(inter, "description", ns)
+        if not description and not herb_name:
+            continue
+        if not herb_name:
+            herb_name = "herb-interaction"
+        severity = _classify_food_herb_severity(description)
+        herb_interactions.append({
+            "drugbank_id": "",  # herb partners have no drugbank-id
+            "name": herb_name,
+            "description": description,
+            "severity": severity,
+            "kind": "herb",
+            "orphan_interaction": False,
+        })
+    if herb_interactions:
+        logger.debug(
+            "Parsed %d herb-interaction elements for drug %s (P2-010)",
+            len(herb_interactions), drugbank_id,
+        )
+    return herb_interactions
+
+
+def _classify_food_herb_severity(description: str) -> str:
+    """Classify food/herb interaction severity from free-text description.
+
+    P2-010 ROOT FIX: DrugBank food/herb interactions don't carry an
+    explicit severity field, so we infer it from the description text.
+    The classification is intentionally conservative -- when in doubt,
+    classify as ``"moderate"`` rather than ``"unknown"`` so the RL
+    ranker doesn't silently under-flag a safety signal.
+
+    Severity rubric (ordered -- first match wins):
+      * ``"severe"``: description mentions rhabdomyolysis, serotonin
+        syndrome, hypertensive crisis, bleeding, death, fatal, lethal,
+        contraindicated, or "do not take".
+      * ``"moderate"``: description mentions "avoid", "caution",
+        "monitor", "increased risk", "decreased effect", "increased
+        concentration", or "reduced efficacy".
+      * ``"mild"``: description mentions "take with food", "bioavailability",
+        "absorption", or "well-tolerated".
+      * ``"unknown"``: no match (rare -- most descriptions match at
+        least one keyword).
+    """
+    if not description:
+        return "unknown"
+    desc_lower = description.lower()
+    # Severe: life-threatening interactions.
+    severe_keywords = (
+        "rhabdomyolysis", "serotonin syndrome", "hypertensive crisis",
+        "death", "fatal", "lethal", "contraindicated", "do not take",
+        "do not use", "life-threatening", "death", "fatal",
+        "bleeding", "hemorrhage", "serum concentration", "toxicity",
+    )
+    for kw in severe_keywords:
+        if kw in desc_lower:
+            return "severe"
+    # Moderate: clinically significant but not immediately life-threatening.
+    moderate_keywords = (
+        "avoid", "caution", "monitor", "increased risk",
+        "decreased effect", "decreased efficacy", "reduced efficacy",
+        "increased concentration", "decreased concentration",
+        "may decrease", "may increase", "interfere", "potentiates",
+        "inhibits", "induces",
+    )
+    for kw in moderate_keywords:
+        if kw in desc_lower:
+            return "moderate"
+    # Mild: dietary advice.
+    mild_keywords = (
+        "take with food", "bioavailability", "absorption",
+        "well-tolerated", "food increases", "food decreases",
+    )
+    for kw in mild_keywords:
+        if kw in desc_lower:
+            return "mild"
+    return "unknown"
+
+
 def _classify_severity(description: str) -> str:
     """Classify interaction severity from free-text description.
 
@@ -2400,6 +2618,17 @@ def _parse_drug_fields(
     # Drug-drug interactions (FIX 3.9)
     interactions = _parse_interactions(xml_elem, ns, drugbank_id)
 
+    # P2-010 ROOT FIX: drug-food and drug-herb interactions. DrugBank's
+    # XML has <food-interactions> and <herb-interactions> alongside
+    # <drug-interactions>. The previous parser silently dropped them,
+    # missing safety-critical signals (e.g. grapefruit juice + statins
+    # = rhabdomyolysis, St. John's Wort + warfarin = reduced
+    # anticoagulation). The new parsers emit dicts with kind="food" /
+    # "herb" so drugbank_to_food_herb_edges can create
+    # causes_adverse_event edges.
+    food_interactions = _parse_food_interactions(xml_elem, ns, drugbank_id)
+    herb_interactions = _parse_herb_interactions(xml_elem, ns, drugbank_id)
+
     # Privacy / compliance (FIX 9.5, 9.8)
     pii_detected = (
         _detect_pii(indication)
@@ -2434,6 +2663,8 @@ def _parse_drug_fields(
         "categories": categories,
         "external_ids": external_ids,
         "interactions": interactions,
+        "food_interactions": food_interactions,
+        "herb_interactions": herb_interactions,
         "sensitive": sensitive,
     }
 
@@ -4259,6 +4490,148 @@ def drugbank_to_interaction_edges(
     return edges
 
 
+def drugbank_to_food_herb_edges(
+    drugs: List[DrugRecord],
+) -> List[Dict[str, Any]]:
+    """Extract Drug-Food and Drug-Herb adverse-event edges from DrugBank records.
+
+    P2-010 ROOT FIX: DrugBank's XML contains ``<food-interactions>`` and
+    ``<herb-interactions>`` elements alongside ``<drug-interactions>``.
+    The previous parser only emitted Drug-Drug interaction edges (via
+    ``drugbank_to_interaction_edges``), silently dropping ALL food and
+    herb interactions. For drugs with critical food interactions (e.g.
+    grapefruit juice + statins = rhabdomyolysis, MAOIs + tyramine =
+    hypertensive crisis) or herb interactions (St. John's Wort +
+    warfarin = reduced anticoagulation), the KG was missing safety-
+    critical information. The RL ranker's safety_score dimension then
+    under-flags drugs with severe food/herb interactions.
+
+    This function emits two new edge types per the P2-010 fix spec:
+      * ``(Compound)-[:causes_adverse_event]->(Food)``  for food interactions
+      * ``(Compound)-[:causes_adverse_event]->(Herb)``  for herb interactions
+
+    The dst_type is ``"Food"`` or ``"Herb"`` (new node types -- the
+    kg_builder will create them on first encounter). The dst_id is a
+    stable hash of the food/herb name so the same food/herb across
+    multiple drugs merges into one node. The ``severity`` is classified
+    from the free-text description via ``_classify_food_herb_severity``.
+
+    Args:
+        drugs: list of DrugRecord objects (with ``food_interactions`` and
+            ``herb_interactions`` populated by ``_parse_food_interactions``
+            and ``_parse_herb_interactions``).
+
+    Returns:
+        List of edge dicts with keys: ``src_id``, ``dst_id``,
+        ``src_type``, ``dst_type``, ``rel_type``, ``relation``,
+        ``description``, ``severity``, ``kind`` ("food"/"herb"),
+        ``partner_name``, ``_provenance``, ``_source``, ``_license``,
+        ``_attribution``, ``_commercial_use_allowed``.
+    """
+    edges: List[Dict[str, Any]] = []
+    parsed_at = _iso_now()
+    n_food = 0
+    n_herb = 0
+
+    for drug in drugs:
+        if not drug.drugbank_id:
+            continue
+        drug_provenance = _build_node_provenance(drug)
+        # v42 FORENSIC ROOT FIX (P0-3): use the shared helper for
+        # canonical_id resolution so all emission sites stay in lockstep.
+        canonical_id, compound_id_aliases = _resolve_compound_canonical_id(drug)
+        if not canonical_id:
+            continue
+
+        # Food-interaction edges.
+        for inter in drug.food_interactions:
+            description = inter.get("description", "")
+            partner_name = inter.get("name", "food-interaction")
+            severity = inter.get("severity", "unknown")
+            # Stable dst_id: hash of the food name so the same food
+            # across multiple drugs merges into one node. Use SHA1
+            # truncated to 16 chars -- collisions are astronomically
+            # unlikely for food/herb names (<< 10^6 distinct names).
+            import hashlib as _hashlib
+            dst_id_raw = f"Food:{partner_name.lower().strip()}"
+            dst_id = "Food:" + _hashlib.sha1(
+                partner_name.lower().strip().encode("utf-8")
+            ).hexdigest()[:16]
+            edge_provenance = dict(drug_provenance)
+            edge_provenance["edge_relation"] = "causes_adverse_event"
+            edge_provenance["interaction_kind"] = "food"
+            edge: Dict[str, Any] = {
+                "src_id": canonical_id,
+                "dst_id": dst_id,
+                "src_type": "Compound",
+                "dst_type": "Food",
+                "rel_type": "causes_adverse_event",
+                "relation": "causes_adverse_event",
+                # Legacy aliases for downstream consumers.
+                "drug_a_id": drug.drugbank_id,
+                "drug_b_id": dst_id,
+                "partner_name": partner_name,
+                "description": description,
+                "severity": severity,
+                "kind": "food",
+                "orphan_interaction": False,
+                "compound_id_aliases": compound_id_aliases,
+                "_provenance": edge_provenance,
+                "_source": "drugbank",
+                "_license": DRUGBANK_LICENSE,
+                "_attribution": DRUGBANK_ATTRIBUTION,
+                "_commercial_use_allowed": False,
+                "_schema_version": "1.1.0-p2-010",
+                "parsed_at": parsed_at,
+            }
+            edges.append(edge)
+            n_food += 1
+
+        # Herb-interaction edges.
+        for inter in drug.herb_interactions:
+            description = inter.get("description", "")
+            partner_name = inter.get("name", "herb-interaction")
+            severity = inter.get("severity", "unknown")
+            import hashlib as _hashlib
+            dst_id = "Herb:" + _hashlib.sha1(
+                partner_name.lower().strip().encode("utf-8")
+            ).hexdigest()[:16]
+            edge_provenance = dict(drug_provenance)
+            edge_provenance["edge_relation"] = "causes_adverse_event"
+            edge_provenance["interaction_kind"] = "herb"
+            edge = {
+                "src_id": canonical_id,
+                "dst_id": dst_id,
+                "src_type": "Compound",
+                "dst_type": "Herb",
+                "rel_type": "causes_adverse_event",
+                "relation": "causes_adverse_event",
+                "drug_a_id": drug.drugbank_id,
+                "drug_b_id": dst_id,
+                "partner_name": partner_name,
+                "description": description,
+                "severity": severity,
+                "kind": "herb",
+                "orphan_interaction": False,
+                "compound_id_aliases": compound_id_aliases,
+                "_provenance": edge_provenance,
+                "_source": "drugbank",
+                "_license": DRUGBANK_LICENSE,
+                "_attribution": DRUGBANK_ATTRIBUTION,
+                "_commercial_use_allowed": False,
+                "_schema_version": "1.1.0-p2-010",
+                "parsed_at": parsed_at,
+            }
+            edges.append(edge)
+            n_herb += 1
+
+    logger.info(
+        "DrugBank -> kg_builder: %d food-interaction edges + %d herb-interaction edges (P2-010)",
+        n_food, n_herb,
+    )
+    return edges
+
+
 # =============================================================================
 # Section 16 -- drugbank_to_graph (FIX 1.13) & get_non_withdrawn_drug_ids (FIX 3.11)
 # =============================================================================
@@ -4843,6 +5216,8 @@ def _dict_to_drugrecord(d: Mapping[str, Any]) -> DrugRecord:
         categories=d.get("categories", []),
         external_ids=d.get("external_ids", {}),
         interactions=d.get("interactions", []),
+        food_interactions=d.get("food_interactions", []),
+        herb_interactions=d.get("herb_interactions", []),
         sensitive=d.get("sensitive", False),
         _provenance=d.get("_provenance", {}),
         _canonical_id_source=d.get("_canonical_id_source", ""),

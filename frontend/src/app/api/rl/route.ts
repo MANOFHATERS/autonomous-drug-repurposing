@@ -75,6 +75,7 @@ export async function POST(req: NextRequest) {
     sortDir?: string;
     page?: number;
     pageSize?: number;
+    orgId?: string;
   };
   try {
     body = await req.json();
@@ -98,22 +99,57 @@ export async function POST(req: NextRequest) {
   const pageRaw = Math.max(0, Math.floor(Number(body.page ?? 0) || 0));
   const offset = pageRaw * pageSizeRaw;
 
+  // FE-007 ROOT FIX (Team Member 13): accept an explicit orgId.
+  //
+  // The POST body may carry `orgId` to scope the RL candidate persistence
+  // to a specific org. This is critical for pharma consortia users who
+  // are members of multiple orgs — without this, the previous code used
+  // `findFirst({ orderBy: { joinedAt: "asc" } })` which always picked
+  // the user's FIRST org, even if they intended to query for a different
+  // org. Cross-org data leakage was possible.
+  //
+  // Resolution order:
+  //   1. body.orgId (explicit) — wins.
+  //   2. query string ?orgId=... — also explicit.
+  //   3. auth.user.orgId — the user's CURRENT active org (from the
+  //      session token, NOT their first org by joinedAt). This is the
+  //      default — it respects the org the user is currently switched
+  //      into in the dashboard.
+  //   4. null — no org scoping. persistRlCandidates will skip persistence
+  //      (it cannot create a project without an org).
+  //
+  // SECURITY: the orgId MUST be one of the user's actual memberships.
+  // persistRlCandidates verifies this with `organizationMember.findFirst`
+  // before creating or finding a project. A user cannot inject an orgId
+  // for an org they don't belong to.
+  const explicitOrgId =
+    (body.orgId && typeof body.orgId === "string" ? body.orgId : undefined) ||
+    (req.nextUrl.searchParams.get("orgId") || undefined);
+  const targetOrgId = explicitOrgId || auth.user.orgId || null;
+
   const availability = checkRlAvailability();
-  const hasLocalCsv = Boolean(process.env.RL_OUTPUT_CSV_PATH || process.env.RL_LOCAL_CSV);
+  // FE-003 ROOT FIX: the local-CSV path is no longer gated on the env
+  // var being set. The lib service `rl-ranker.ts` now resolves the
+  // default path to the LATEST `top_candidates_*.csv` file (the real
+  // Phase 4 output), falling back to `validated_hypotheses.csv` only
+  // when no top_candidates_*.csv exists. The dashboard therefore shows
+  // real RL predictions by default — not the 4 hardcoded known-positive
+  // FDA-approved drugs in validated_hypotheses.csv.
+  //
+  // We always attempt the local-CSV path when RL_SERVICE_URL is unset.
+  // The lib service handles the "no CSV file exists" case gracefully
+  // (returns source: "none" with an empty candidate list), and the
+  // route returns 503 only if the service is unset AND the lib returns
+  // zero candidates AND the resolved CSV path does not exist.
+  const hasLocalCsv = Boolean(
+    process.env.RL_OUTPUT_CSV_PATH ||
+      process.env.RL_LOCAL_CSV ||
+      process.env.RL_OUTPUT_DIR
+  );
   if (!availability.available && !hasLocalCsv) {
-    return NextResponse.json(
-      {
-        error: "service_not_deployed",
-        service: availability.service,
-        description: availability.description,
-        reason: availability.reason,
-        documentation:
-          "See Phase 4 of the build plan (RL-Driven Hypothesis Ranking). " +
-          "Set RL_SERVICE_URL to proxy to the standalone RL service, or " +
-          "RL_OUTPUT_CSV_PATH to read a local output CSV in dev mode.",
-      },
-      { status: 503 }
-    );
+    // Even without env vars, the lib service may find a top_candidates_*.csv
+    // in the default search locations. Defer to getRankedHypotheses() — if
+    // it returns source: "none", we return 503 below.
   }
 
   try {
@@ -125,7 +161,36 @@ export async function POST(req: NextRequest) {
       offset,
       pageSize: pageSizeRaw,
     });
-    await persistRlCandidates(auth.user.userId, result.candidates);
+
+    // FE-003 (Team 13): if neither the service URL is set nor any local CSV
+    // was found, the lib returns source: "none" with an empty candidate
+    // list. Return 503 so the dashboard shows a clear "RL not run yet"
+    // state instead of presenting an empty table.
+    if (!availability.available && result.source === "none") {
+      return NextResponse.json(
+        {
+          error: "service_not_deployed",
+          service: availability.service,
+          description: availability.description,
+          reason:
+            availability.reason +
+            " No local top_candidates_*.csv file was found in rl/, " +
+            "rl/output/, or $RL_OUTPUT_DIR either. Run the Phase 4 RL " +
+            "ranker (rl/rl_drug_ranker.py) to produce real predictions, " +
+            "or set RL_SERVICE_URL to proxy to the standalone service.",
+          documentation:
+            "See Phase 4 of the build plan (RL-Driven Hypothesis " +
+            "Ranking). Set RL_SERVICE_URL to proxy to the standalone " +
+            "RL service, or RL_OUTPUT_CSV_PATH / RL_OUTPUT_DIR to read " +
+            "a local output CSV in dev mode.",
+        },
+        { status: 503 }
+      );
+    }
+
+    // FE-007 (Team 13): pass targetOrgId so persistence is scoped to the
+    // user's intended org, not their first org by joinedAt.
+    await persistRlCandidates(auth.user.userId, result.candidates, targetOrgId);
     await writeAuditLog({
       user: auth.user,
       action: "rl_query",
@@ -192,6 +257,8 @@ export async function GET(req: NextRequest) {
   const pageRaw = Math.max(0, Math.floor(Number(sp.get('page') ?? 0) || 0));
   const offset = pageRaw * pageSizeRaw;
 
+  const availability = checkRlAvailability();
+
   try {
     const result = await getRankedHypotheses({
       sort,
@@ -199,6 +266,31 @@ export async function GET(req: NextRequest) {
       offset,
       pageSize: pageSizeRaw,
     });
+
+    // FE-003 (Team 13): same 503 fallback as POST. The dashboard's RL page
+    // calls GET to populate the table — if neither the service nor a local
+    // CSV is available, return 503 so the UI shows a clear state.
+    if (!availability.available && result.source === "none") {
+      return NextResponse.json(
+        {
+          error: "service_not_deployed",
+          service: availability.service,
+          description: availability.description,
+          reason:
+            availability.reason +
+            " No local top_candidates_*.csv file was found in rl/, " +
+            "rl/output/, or $RL_OUTPUT_DIR either. Run the Phase 4 RL " +
+            "ranker (rl/rl_drug_ranker.py) to produce real predictions, " +
+            "or set RL_SERVICE_URL to proxy to the standalone service.",
+          documentation:
+            "See Phase 4 of the build plan (RL-Driven Hypothesis " +
+            "Ranking).",
+        },
+        { status: 503 }
+      );
+    }
+
+
     return NextResponse.json({
       candidates: result.candidates,
       source: result.source,
@@ -236,22 +328,67 @@ export async function GET(req: NextRequest) {
  *   - Re-running the RL agent upserts into the same dedicated project
  *     (keyed on the project name + ownerId) so re-runs update scores
  *     rather than creating duplicate projects.
+ *
+ * FE-007 ROOT FIX (Team Member 13): the function now accepts a `targetOrgId`
+ * parameter. This is the org the candidate persistence should be scoped to.
+ * Resolution:
+ *   - If `targetOrgId` is provided, we verify the user is a member of
+ *     that org (organizationMember.findFirst) and use it.
+ *   - If `targetOrgId` is null, we fall back to the user's FIRST org
+ *     membership by joinedAt asc (the original behavior) — but only as
+ *     a last resort. The route layer passes `auth.user.orgId` (the
+ *     user's CURRENT active org from the session) by default, so this
+ *     fallback is rarely hit.
+ *
+ * SECURITY: the membership check is mandatory — a user cannot inject an
+ * orgId for an org they don't belong to. If the membership check fails,
+ * we SKIP persistence (return early) rather than falling back to the
+ * first org — that would be a security hole.
  */
-async function persistRlCandidates(userId: string, candidates: RankedHypothesis[]): Promise<void> {
+async function persistRlCandidates(
+  userId: string,
+  candidates: RankedHypothesis[],
+  targetOrgId: string | null
+): Promise<void> {
   if (candidates.length === 0) return;
   try {
-    const membership = await db.organizationMember.findFirst({
-      where: { userId },
-      orderBy: { joinedAt: "asc" },
-    });
-    if (!membership) return;
+    // FE-007: resolve the org to persist into.
+    let organizationId: string | null = null;
+    if (targetOrgId) {
+      // Verify the user is a member of the target org. SECURITY: this
+      // is mandatory — without it, a user could inject any orgId.
+      const membership = await db.organizationMember.findFirst({
+        where: { userId, organizationId: targetOrgId },
+      });
+      if (!membership) {
+        // The user is NOT a member of the target org. Refuse to persist
+        // — do NOT silently fall back to the first org (that would be
+        // a security hole). Log and return.
+        console.warn(
+          `persistRlCandidates: user ${userId} is not a member of org ${targetOrgId}; skipping persistence.`
+        );
+        return;
+      }
+      organizationId = targetOrgId;
+    } else {
+      // No target org provided — fall back to the user's first org by
+      // joinedAt asc. This is the original behavior, preserved for
+      // backward compat. The route layer passes auth.user.orgId (the
+      // CURRENT active org) by default, so this branch is rare.
+      const membership = await db.organizationMember.findFirst({
+        where: { userId },
+        orderBy: { joinedAt: "asc" },
+      });
+      if (!membership) return;
+      organizationId = membership.organizationId;
+    }
 
     // FE-037: Find or create a DEDICATED 'RL Predictions' project OWNED
     // BY the calling user. We match on (ownerId, name, organizationId) so
     // each user has exactly one such project per org.
     const RL_PROJECT_NAME = "RL Predictions";
     let project = await db.project.findFirst({
-      where: { ownerId: userId, name: RL_PROJECT_NAME, organizationId: membership.organizationId },
+      where: { ownerId: userId, name: RL_PROJECT_NAME, organizationId },
     });
     if (!project) {
       try {
@@ -262,7 +399,7 @@ async function persistRlCandidates(userId: string, candidates: RankedHypothesis[
             status: "active",
             visibility: "private", // FE-037: private — never org-visible by default.
             ownerId: userId,
-            organizationId: membership.organizationId,
+            organizationId,
             tags: "rl,predictions,auto-generated",
           },
         });
@@ -270,7 +407,7 @@ async function persistRlCandidates(userId: string, candidates: RankedHypothesis[
         // Race: another concurrent request created the project between
         // our findFirst and create. Re-fetch.
         project = await db.project.findFirst({
-          where: { ownerId: userId, name: RL_PROJECT_NAME, organizationId: membership.organizationId },
+          where: { ownerId: userId, name: RL_PROJECT_NAME, organizationId },
         });
         if (!project) return;
       }

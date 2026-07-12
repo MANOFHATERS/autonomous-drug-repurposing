@@ -14,17 +14,104 @@ number.
 
 The full production run (DRUGOS_DOWNLOAD_MODE=full) replaces these
 samples with the complete datasets from each source's API.
+
+P1-019 ROOT FIX (Team-2): embedded samples are now HARD-GATED against
+production use. The previous code would happily ingest 10 fake drugs
+into the KG if a misconfigured Helm chart set ``SAMPLES=embedded`` (or
+``DRUGOS_DOWNLOAD_MODE=sample``) in production -- producing a KG with
+fake drug-protein interactions that the GNN would learn from and the
+RL ranker would recommend. The fix adds a runtime guard
+(``_assert_not_production``) called at the top of every public function
+in this module. In production, calling any function here raises
+``RuntimeError`` immediately. In staging/development, a WARNING is
+logged so operators know the KG is being built from sample data.
 """
 from __future__ import annotations
 
 import logging
+import os
 import pandas as pd
 
 logger = logging.getLogger(__name__)
 
 
+def _is_production_environment() -> bool:
+    """Return True iff the current environment is production.
+
+    Reads ``DRUGOS_ENVIRONMENT`` (canonical) with fallback to ``ENVIRONMENT``
+    (legacy). Treats empty-string and unset as production (defensive --
+    the settings.py module does the same).
+    """
+    _env = (
+        os.environ.get("DRUGOS_ENVIRONMENT")
+        or os.environ.get("ENVIRONMENT", "production")
+        or "production"
+    )
+    return _env.lower().strip() == "production"
+
+
+def _is_samples_explicitly_enabled() -> bool:
+    """Return True iff the operator EXPLICITLY asked for sample data.
+
+    Checks ``SAMPLES=embedded`` (legacy) OR ``DRUGOS_DOWNLOAD_MODE=sample``.
+    Both are explicit opt-ins -- their presence means the operator intended
+    to use sample data.
+    """
+    _samples = (os.environ.get("SAMPLES") or "").lower().strip()
+    _mode = (os.environ.get("DRUGOS_DOWNLOAD_MODE") or "").lower().strip()
+    return _samples == "embedded" or _mode == "sample"
+
+
+def _assert_not_production(caller_name: str) -> None:
+    """P1-019 ROOT FIX: runtime guard against production use of sample data.
+
+    Raises ``RuntimeError`` if:
+      - The environment is production AND sample data is being requested.
+      - OR ``SAMPLES=embedded`` is set AND ``DRUGOS_ENVIRONMENT=production``.
+
+    Logs a WARNING in staging/development so operators know the KG is being
+    built from sample data (not real API data).
+    """
+    if _is_production_environment():
+        if _is_samples_explicitly_enabled():
+            raise RuntimeError(
+                f"P1-019 ROOT FIX: {caller_name}() refused to return "
+                f"embedded sample data in PRODUCTION. A misconfigured "
+                f"deploy set SAMPLES=embedded (or DRUGOS_DOWNLOAD_MODE=sample) "
+                f"in a production environment -- ingesting fake data into "
+                f"the KG would corrupt the GNN's training signal and cause "
+                f"the RL ranker to recommend drugs based on FAKE evidence. "
+                f"Fix the Helm chart / env config: set DRUGOS_DOWNLOAD_MODE=full "
+                f"and DRUGOS_ENVIRONMENT=production. If you intended a dev "
+                f"run, set DRUGOS_ENVIRONMENT=development explicitly."
+            )
+        # Production without SAMPLES=embedded: still refuse -- the function
+        # was called, which means a pipeline is trying to use sample data.
+        raise RuntimeError(
+            f"P1-019 ROOT FIX: {caller_name}() refused to return embedded "
+            f"sample data in PRODUCTION. Embedded samples are for development "
+            f"ONLY. Set DRUGOS_ENVIRONMENT=development to use them, or fix "
+            f"the pipeline to use the real API downloader."
+        )
+    # Non-production: log a WARNING so the audit trail records that the KG
+    # is being built from sample data.
+    logger.warning(
+        "[%s] P1-019: returning embedded SAMPLE data -- KG will contain "
+        "fake drug/disease/protein records. Acceptable ONLY for local "
+        "development. Environment=%s, SAMPLES=%s, DRUGOS_DOWNLOAD_MODE=%s.",
+        caller_name,
+        os.environ.get("DRUGOS_ENVIRONMENT") or os.environ.get("ENVIRONMENT", "production"),
+        os.environ.get("SAMPLES", "(unset)"),
+        os.environ.get("DRUGOS_DOWNLOAD_MODE", "(unset)"),
+    )
+
+
 def embedded_chembl_molecules() -> pd.DataFrame:
-    """10 FDA-approved drugs with valid InChIKeys + SMILES + ChEMBL IDs."""
+    """10 FDA-approved drugs with valid InChIKeys + SMILES + ChEMBL IDs.
+
+    P1-019 ROOT FIX: raises RuntimeError if called in production.
+    """
+    _assert_not_production("embedded_chembl_molecules")
     return pd.DataFrame([
         {"chembl_id": "CHEMBL112", "name": "Aspirin", "smiles": "CC(=O)OC1=CC=CC=C1C(=O)O",
          "inchikey": "BSYNRYMUTXBXSQ-UHFFFAOYSA-N", "molecular_weight": 180.16,
@@ -85,7 +172,10 @@ def embedded_chembl_activities() -> pd.DataFrame:
     Schema matches ``_PHASE1_EXPECTED_COLUMNS['chembl_activities']`` in
     phase1_bridge.py: requires ``molecule_chembl_id``,
     ``target_chembl_id``, ``pchembl_value``, ``standard_relation``.
+
+    P1-019 ROOT FIX: raises RuntimeError if called in production.
     """
+    _assert_not_production("embedded_chembl_activities")
     return pd.DataFrame([
         {"molecule_chembl_id": "CHEMBL112", "target_chembl_id": "CHEMBL218", "uniprot_id": "P23219",
          "target_name": "PTGS1 (COX-1)", "activity_type": "IC50", "activity_value": 100.0,
@@ -131,6 +221,8 @@ def embedded_chembl_activities() -> pd.DataFrame:
 
 
 def embedded_uniprot_proteins() -> pd.DataFrame:
+    """P1-019 ROOT FIX: raises RuntimeError if called in production."""
+    _assert_not_production("embedded_uniprot_proteins")
     """UniProt proteins referenced by the ChEMBL sample activities."""
     return pd.DataFrame([
         {"uniprot_id": "P23219", "uniprot_ac": "P23219", "protein_name": "Prostaglandin G/H synthase 1",
@@ -169,6 +261,8 @@ def embedded_uniprot_proteins() -> pd.DataFrame:
 
 
 def embedded_string_ppi() -> pd.DataFrame:
+    """P1-019 ROOT FIX: raises RuntimeError if called in production."""
+    _assert_not_production("embedded_string_ppi")
     """STRING PPIs between the sample proteins (high-confidence edges only)."""
     return pd.DataFrame([
         {"protein1": "9606.ENSP00000000233", "protein2": "9606.ENSP00000000412",
@@ -245,6 +339,8 @@ def embedded_string_ppi() -> pd.DataFrame:
 
 
 def embedded_drugbank_drugs() -> pd.DataFrame:
+    """P1-019 ROOT FIX: raises RuntimeError if called in production."""
+    _assert_not_production("embedded_drugbank_drugs")
     """DrugBank drugs (mirrors ChEMBL samples with DrugBank IDs + indications)."""
     return pd.DataFrame([
         # v64 ROOT FIX (P1-017): added chembl_id and pubchem_cid columns
@@ -350,6 +446,8 @@ def embedded_drugbank_drugs() -> pd.DataFrame:
 
 
 def embedded_drugbank_interactions() -> pd.DataFrame:
+    """P1-019 ROOT FIX: raises RuntimeError if called in production."""
+    _assert_not_production("embedded_drugbank_interactions")
     """DrugBank drug-target interactions for the sample drugs."""
     return pd.DataFrame([
         {"drugbank_id": "DB00945", "uniprot_id": "P23219", "target_name": "PTGS1",
@@ -376,6 +474,8 @@ def embedded_drugbank_interactions() -> pd.DataFrame:
 
 
 def embedded_drugbank_indications() -> pd.DataFrame:
+    """P1-019 ROOT FIX: raises RuntimeError if called in production."""
+    _assert_not_production("embedded_drugbank_indications")
     """DrugBank structured indications (drug -> disease).
 
     v79 FORENSIC ROOT FIX (P0-B1 + P0-B5 -- DOID/OMIM mismatch + missing
@@ -507,6 +607,8 @@ def embedded_drugbank_indications() -> pd.DataFrame:
 
 
 def embedded_omim_gda() -> pd.DataFrame:
+    """P1-019 ROOT FIX: raises RuntimeError if called in production."""
+    _assert_not_production("embedded_omim_gda")
     """OMIM gene-disease associations for the sample proteins."""
     return pd.DataFrame([
         # v64 ROOT FIX (P1-016): gene_id and phenotype_mim changed from
@@ -563,6 +665,8 @@ def embedded_omim_gda() -> pd.DataFrame:
 
 
 def embedded_omim_susceptibility() -> pd.DataFrame:
+    """P1-019 ROOT FIX: raises RuntimeError if called in production."""
+    _assert_not_production("embedded_omim_susceptibility")
     """P2-10 ROOT FIX: OMIM gene-disease susceptibility associations.
 
     The previous code mapped ``omim_susceptibility`` to the SAME function
@@ -581,6 +685,8 @@ def embedded_omim_susceptibility() -> pd.DataFrame:
 
 
 def embedded_disgenet_gda() -> pd.DataFrame:
+    """P1-019 ROOT FIX: raises RuntimeError if called in production."""
+    _assert_not_production("embedded_disgenet_gda")
     """DisGeNET gene-disease associations (curated subset for sample genes)."""
     return pd.DataFrame([
         # v64 ROOT FIX (P1-016): gene_id changed from string to integer
@@ -610,6 +716,8 @@ def embedded_disgenet_gda() -> pd.DataFrame:
 
 
 def embedded_pubchem_enrichment() -> pd.DataFrame:
+    """P1-019 ROOT FIX: raises RuntimeError if called in production."""
+    _assert_not_production("embedded_pubchem_enrichment")
     """PubChem physicochemical properties for the sample drugs.
 
     Schema matches ``_PHASE1_EXPECTED_COLUMNS['pubchem_enrichment']`` in
@@ -660,6 +768,8 @@ def embedded_pubchem_enrichment() -> pd.DataFrame:
 
 
 def write_all_samples(processed_dir) -> dict:
+    """P1-019 ROOT FIX: raises RuntimeError if called in production."""
+    _assert_not_production("write_all_samples")
     """Write all embedded sample datasets as CSVs to the processed_data dir.
 
     Used as a last-resort fallback when ANY pipeline cannot reach its API

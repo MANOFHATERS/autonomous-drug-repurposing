@@ -1037,9 +1037,14 @@ def compute_auc(
     """Compute AUC (Area Under ROC Curve) for link prediction.
 
     This function is deterministic across environments. The sklearn
-    path is an optimisation; results are verified against the
-    canonical Mann-Whitney implementation on every call when
-    ``EvaluationConfig.verify_sklearn_agreement=True``.
+    path is the default; results are verified against the canonical
+    Mann-Whitney implementation on every call ONLY when
+    ``EvaluationConfig.verify_sklearn_agreement=True`` (default False
+    since P2-023 root fix -- the per-call verification was O(n_pos *
+    n_neg) and added ~30 minutes per epoch on 100K x 100K eval sets).
+    Operators who want the cross-check should call
+    ``verify_auc_against_manual`` ONCE at end of training instead of
+    re-enabling per-call verification.
 
     Scientific Rationale:  # Fixes E3-005
         v39 ROOT FIX (P2 #30): corrected the docstring. The previous
@@ -1828,6 +1833,225 @@ def _manual_auc(
             }
         )
     return clamped
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# P2-023 ROOT FIX (Team 8) -- explicit end-of-training AUC verification helper
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def verify_auc_against_manual(
+    pos_scores: np.ndarray,
+    neg_scores: np.ndarray,
+    higher_is_better: Optional[bool] = None,
+    *,
+    model: Optional[Any] = None,
+    model_score_direction: Optional[str] = None,
+    atol: float = 1e-8,
+) -> Dict[str, Any]:
+    """Verify sklearn ``roc_auc_score`` against the Mann-Whitney manual AUC.
+
+    P2-023 ROOT FIX (Team 8): the previous default
+    ``EvaluationConfig.verify_sklearn_agreement=True`` caused
+    ``compute_auc`` to call ``_manual_auc`` (an O(n_pos * n_neg)
+    Mann-Whitney U statistic) on EVERY AUC computation to cross-check
+    sklearn's O(n log n) result. On large eval sets (100K positives x
+    100K negatives = 10^10 comparisons) this added ~30 minutes per
+    epoch, with the training loop spending >90% of its wall-clock time
+    in evaluation.
+
+    The fix removes the per-call cross-check (default is now False --
+    see ``config.py`` P2-023 fix). Operators who want the cross-check
+    call this helper ONCE at end of training, NOT inside the training
+    loop. This preserves the BUG-C-007 audit protection (catching
+    silent numerical drift between manual and sklearn paths) without
+    the per-epoch 50x slowdown.
+
+    The function:
+      1. Resolves ``higher_is_better`` using the same priority order
+         as ``compute_auc`` (explicit arg > model_score_direction >
+         model.score_direction).
+      2. Computes sklearn AUC via ``roc_auc_score``.
+      3. Computes manual AUC via ``_manual_auc`` (Mann-Whitney U).
+      4. Asserts they agree within ``atol`` (default 1e-8, relaxed
+         from the previous 1e-12 because sklearn uses the trapezoidal
+         rule over ROC points while _manual_auc uses the Mann-Whitney
+         U statistic -- the two are mathematically equivalent but
+         numerically distinct at the ~1e-10 level due to FP
+         summation order and tie-handling interpolation).
+      5. Returns a dict with both values, the absolute delta, and a
+         ``passes`` boolean. Raises ``EvaluationReproducibilityError``
+         only if the two paths diverge by more than ``atol``.
+
+    Args:
+        pos_scores: Scores for positive (true) edges.
+        neg_scores: Scores for negative (false) edges.
+        higher_is_better: Optional explicit direction. If None, resolved
+            from ``model_score_direction`` or ``model.score_direction``.
+        model: Optional model implementing ``KGEmbeddingModel`` Protocol.
+        model_score_direction: Optional string direction override.
+        atol: Absolute tolerance for agreement. Default 1e-8.
+
+    Returns:
+        Dict with keys: ``sklearn_auc``, ``manual_auc``, ``abs_delta``,
+        ``atol``, ``passes``, ``n_pos``, ``n_neg``.
+
+    Raises:
+        EvaluationInputError: If direction cannot be resolved (mirrors
+            ``compute_auc`` P2-007 behaviour).
+        EvaluationReproducibilityError: If sklearn and manual paths
+            disagree by more than ``atol``.
+        EvaluationIntegrityError: If sklearn is not installed or the
+            input arrays are degenerate.
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> pos = np.array([0.9, 0.8, 0.7])
+    >>> neg = np.array([0.4, 0.3, 0.2])
+    >>> result = verify_auc_against_manual(pos, neg, higher_is_better=True)
+    >>> result["passes"]
+    True
+    >>> # At end of training:
+    >>> # result = verify_auc_against_manual(
+    >>> #     final_pos_scores, final_neg_scores, model=trained_model)
+    >>> # if not result["passes"]:
+    >>> #     raise EvaluationReproducibilityError("drift detected")
+    """
+    # Resolve direction using the SAME priority order as compute_auc.
+    # This is intentionally NOT a call into compute_auc to avoid the
+    # authorization / imbalanced-eval-set guards (this helper is for
+    # one-shot end-of-training verification, not for the training
+    # loop's per-epoch path).
+    if higher_is_better is None:
+        if model_score_direction is not None:
+            _sd = str(model_score_direction).strip().lower()
+            if _sd not in ("lower_better", "higher_better"):
+                raise EvaluationInputError(
+                    f"verify_auc_against_manual: model_score_direction="
+                    f"{model_score_direction!r} is not one of "
+                    f"'lower_better' / 'higher_better'. (P2-023)",
+                    context={
+                        "reason": "invalid_score_direction",
+                        "model_score_direction": model_score_direction,
+                    },
+                )
+            higher_is_better = (_sd == "higher_better")
+        elif model is not None:
+            _sd_attr = getattr(model, "score_direction", None)
+            if _sd_attr is None:
+                _legacy_attr = getattr(model, "score_higher_is_better", None)
+                if isinstance(_legacy_attr, bool):
+                    higher_is_better = bool(_legacy_attr)
+                else:
+                    raise EvaluationInputError(
+                        f"verify_auc_against_manual: model "
+                        f"{type(model).__name__} does NOT declare "
+                        f"'score_direction' nor the legacy "
+                        f"'score_higher_is_better'. Cannot infer AUC "
+                        f"direction. (P2-023)",
+                        context={
+                            "reason": "model_missing_score_direction",
+                            "model_class": type(model).__name__,
+                        },
+                    )
+            else:
+                _sd = str(_sd_attr).strip().lower()
+                if _sd not in ("lower_better", "higher_better"):
+                    raise EvaluationInputError(
+                        f"verify_auc_against_manual: model "
+                        f"{type(model).__name__}.score_direction="
+                        f"{_sd_attr!r} is not one of 'lower_better' / "
+                        f"'higher_better'. (P2-023)",
+                        context={
+                            "reason": "invalid_model_score_direction",
+                            "model_class": type(model).__name__,
+                            "score_direction": _sd_attr,
+                        },
+                    )
+                higher_is_better = (_sd == "higher_better")
+        else:
+            raise EvaluationInputError(
+                "verify_auc_against_manual: no AUC direction source "
+                "provided. Pass higher_is_better, model_score_direction, "
+                "OR model. (P2-023 root fix -- prevents silent AUC "
+                "inversion for HGT callers, mirrors compute_auc P2-007)",
+                context={"reason": "no_direction_source"},
+            )
+
+    pos_scores = np.asarray(pos_scores)
+    neg_scores = np.asarray(neg_scores)
+
+    if len(pos_scores) == 0 or len(neg_scores) == 0:
+        raise EvaluationIntegrityError(
+            "verify_auc_against_manual: cannot verify on empty pos or "
+            "neg arrays.",
+            context={
+                "reason": "empty_input",
+                "n_pos": int(len(pos_scores)),
+                "n_neg": int(len(neg_scores)),
+            },
+        )
+
+    try:
+        from sklearn.metrics import roc_auc_score
+    except ImportError as exc:
+        raise EvaluationIntegrityError(
+            "verify_auc_against_manual: sklearn is not installed. The "
+            "verification helper requires sklearn.metrics.roc_auc_score "
+            "(the O(n log n) sorted-rank implementation). Install with "
+            "`pip install scikit-learn`. (P2-023)",
+            context={"reason": "sklearn_not_installed"},
+        ) from exc
+
+    labels = np.concatenate(
+        [np.ones(len(pos_scores)), np.zeros(len(neg_scores))]
+    )
+    scores = np.concatenate([pos_scores, neg_scores])
+    if not higher_is_better:
+        scores = -scores
+
+    sklearn_auc = float(roc_auc_score(labels, scores))
+    manual_auc = float(_manual_auc(pos_scores, neg_scores, higher_is_better))
+    abs_delta = abs(sklearn_auc - manual_auc)
+    passes = abs_delta <= atol
+
+    _log_structured(
+        logging.INFO,
+        "auc_verification_explicit",
+        sklearn_auc=sklearn_auc,
+        manual_auc=manual_auc,
+        abs_delta=abs_delta,
+        atol=atol,
+        passes=passes,
+        n_pos=int(len(pos_scores)),
+        n_neg=int(len(neg_scores)),
+    )
+
+    if not passes:
+        raise EvaluationReproducibilityError(
+            "verify_auc_against_manual: sklearn and manual AUC paths "
+            f"disagree by {abs_delta} (> atol={atol}). This indicates "
+            "numerical drift between roc_auc_score and _manual_auc. "
+            "(P2-023 end-of-training verification)",
+            context={
+                "sklearn_auc": sklearn_auc,
+                "manual_auc": manual_auc,
+                "abs_delta": abs_delta,
+                "atol": atol,
+                "n_pos": int(len(pos_scores)),
+                "n_neg": int(len(neg_scores)),
+            },
+        )
+
+    return {
+        "sklearn_auc": sklearn_auc,
+        "manual_auc": manual_auc,
+        "abs_delta": abs_delta,
+        "atol": atol,
+        "passes": passes,
+        "n_pos": int(len(pos_scores)),
+        "n_neg": int(len(neg_scores)),
+    }
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -2655,6 +2879,26 @@ def evaluate_link_prediction(
         # EvaluationResult.metrics docstring).
         metrics: Dict[str, Any] = {"auc": _to_native_float(auc_value)}
 
+        # P2-021 ROOT FIX (v104): store ``higher_is_better`` on the
+        # result so ``_compute_bootstrap_ci`` can pass it to
+        # ``_manual_auc``. The previous code resolved
+        # ``higher_is_better`` (from the explicit arg, from
+        # ``model_score_direction``, or from
+        # ``model.score_direction``) and used it to compute the point
+        # AUC — but did NOT store it on the result. The bootstrap CI
+        # then called ``_manual_auc(pos_sample, neg_sample)`` WITHOUT
+        # ``higher_is_better``, which defaults to ``False`` (TransE
+        # direction). For an HGT model (``higher_is_better=True``),
+        # every bootstrap iteration computed ``1 - true_AUC``, so the
+        # CI was INVERTED around the (correct) point estimate — e.g.
+        # "AUC = 0.85, CI = [0.10, 0.20]" — which is absurd and would
+        # get an FDA submission rejected. The bug was dormant in the
+        # default pipeline (``bootstrap_ci=False``) but would fire
+        # the moment a regulatory submission path enabled it. Root
+        # fix: record the resolved direction on the result so the
+        # bootstrap path reads the SAME direction the point AUC used.
+        metrics["auc_higher_is_better"] = bool(higher_is_better)
+
         # Compute ranking metrics via single-pass
         input_quality: Dict[str, int] = {}
         if ranked_lists is not None:
@@ -3445,6 +3689,28 @@ def _compute_bootstrap_ci(
         # behaviour, kept as the default for backward compatibility)
         # destroys that pairing and yields CIs that misrepresent the
         # variance of the per-query metric.
+        #
+        # P2-021 ROOT FIX (v104): read ``higher_is_better`` from the
+        # result's metrics dict (set by ``evaluate_link_prediction``
+        # at line ~2676) and pass it to every ``_manual_auc`` call.
+        # The previous code called ``_manual_auc(pos_sample,
+        # neg_sample)`` WITHOUT ``higher_is_better``, which defaults
+        # to ``False`` (TransE direction). For HGT models
+        # (``higher_is_better=True``), every bootstrap iteration
+        # computed ``1 - true_AUC``, producing an INVERTED CI around
+        # the (correct) point estimate — e.g. "AUC = 0.85,
+        # CI = [0.10, 0.20]". This bug was dormant in the default
+        # pipeline (``bootstrap_ci=False``) but would fire the moment
+        # a regulatory submission path enabled it.
+        #
+        # The resolved direction defaults to ``False`` (TransE) for
+        # backward compatibility with EvaluationResult instances
+        # constructed by older code paths that did not set
+        # ``metrics["auc_higher_is_better"]``. New code paths
+        # (evaluate_link_prediction) always set it.
+        _p2_021_hib = bool(
+            result.metrics.get("auc_higher_is_better", False)
+        )
         if paired:
             if len(pos_scores) != len(neg_scores):
                 raise ValueError(
@@ -3458,13 +3724,23 @@ def _compute_bootstrap_ci(
                 idx = rng.integers(0, n_paired, size=n_paired)
                 pos_sample = pos_scores[idx]
                 neg_sample = neg_scores[idx]
-                bootstrap_aucs.append(_manual_auc(pos_sample, neg_sample))
+                bootstrap_aucs.append(
+                    _manual_auc(
+                        pos_sample, neg_sample,
+                        higher_is_better=_p2_021_hib,
+                    )
+                )
         else:
             bootstrap_aucs = []
             for _ in range(n_bootstrap):
                 pos_sample = rng.choice(pos_scores, size=n_pos, replace=True)
                 neg_sample = rng.choice(neg_scores, size=n_neg, replace=True)
-                bootstrap_aucs.append(_manual_auc(pos_sample, neg_sample))
+                bootstrap_aucs.append(
+                    _manual_auc(
+                        pos_sample, neg_sample,
+                        higher_is_better=_p2_021_hib,
+                    )
+                )
 
     bootstrap_aucs = np.array(bootstrap_aucs)
     return {
@@ -3538,6 +3814,11 @@ __all__: List[str] = [
     "mean_reciprocal_rank",
     "hits_at_k",
     "evaluate_link_prediction",
+    # P2-023 ROOT FIX (Team 8) -- explicit end-of-training AUC verification
+    # helper. Operators call this ONCE at end of training instead of
+    # relying on the per-call ``verify_sklearn_agreement`` flag (which
+    # adds O(n_pos * n_neg) Mann-Whitney U cost to every compute_auc).
+    "verify_auc_against_manual",
     # Builder / factory
     "build_ranked_lists",
     "scores_to_ranked_lists",

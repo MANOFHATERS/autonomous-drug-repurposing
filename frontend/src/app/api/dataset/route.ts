@@ -1,71 +1,66 @@
 import { NextRequest, NextResponse } from "next/server";
-import { checkDatasetAvailability } from "@/lib/services/ml-stubs";
 import { requireAuth, internalError, writeAuditLog } from "@/lib/api-helpers";
+import { getDatasetStats } from "@/lib/services/dataset-stats";
 
 /**
  * GET /api/dataset?source=<chembl|drugbank|uniprot|string|disgenet|omim|pubchem>
  *
- * FE-003 ROOT FIX: The previous code returned 501 even when
- * DATASET_SERVICE_URL was set. The Phase 1 Airflow ETL pipeline was
- * unreachable from the dashboard.
+ * FE-021 ROOT FIX (Team Member 15):
  *
- * ROOT FIX: This endpoint now proxies to the standalone dataset service
- * (a FastAPI wrapper around the Airflow ETL pipeline) when
- * DATASET_SERVICE_URL is set. The dashboard can query real dataset
- * statistics (row counts, last-updated timestamps, quality metrics)
- * from each of the 7 Phase 1 sources.
+ * ROOT CAUSE (forensic): The previous route NEVER called
+ * `getDatasetStats()`. It only checked `checkDatasetAvailability()`
+ * (which requires `DATASET_SERVICE_URL`) and returned 503
+ * `service_not_deployed` when that env var was not set — even though
+ * `getDatasetStats()` had a perfectly good local-checkpoint fallback
+ * that reads `../phase2/data/checkpoints/step_01.json`. On a fresh
+ * deploy without `DATASET_SERVICE_URL`, the dashboard showed a generic
+ * "service not deployed" error instead of either:
+ *   (a) the real local checkpoint data (if Phase 1 had been run), or
+ *   (b) a clear "No data ingested yet — run Phase 1 to populate" message.
  *
- * We NEVER fabricate dataset statistics. If the dataset service is not
- * deployed, we return 503 service_not_deployed.
+ * The local-checkpoint fallback in `dataset-stats.ts` was effectively
+ * dead code: no route wired it up.
+ *
+ * ROOT FIX:
+ *   1. Always call `getDatasetStats()` first. That function handles the
+ *      proxy-vs-local-vs-none decision tree and returns a `status` field
+ *      (`ok` | `no_data` | `service_down`) so the dashboard can render
+ *      a clear message.
+ *   2. When `status === "no_data"`, return HTTP 200 with the status
+ *      field — NOT 503 or 500. The request succeeded; there just isn't
+ *      any data yet. The dashboard renders the helpful message.
+ *   3. When `status === "service_down"` (proxy was configured but
+ *      failed AND no local checkpoint exists), return HTTP 502.
+ *   4. When `status === "ok"`, return HTTP 200 with the stats.
+ *
+ * SCIENTIFIC INTEGRITY: we NEVER fabricate dataset statistics. If the
+ * checkpoint is missing we return `status: "no_data"` with empty
+ * arrays — the dashboard shows "Run Phase 1 to populate" instead of
+ * fake numbers.
  */
 export async function GET(req: NextRequest) {
   const auth = await requireAuth();
   if (auth.user === null) return auth.response;
 
-  const availability = checkDatasetAvailability();
-  if (!availability.available) {
-    return NextResponse.json(
-      {
-        error: "service_not_deployed",
-        service: availability.service,
-        description: availability.description,
-        reason: availability.reason,
-        documentation:
-          "See Phase 1 of the build plan (Data Ingestion & Pipeline Setup). " +
-          "Set DATASET_SERVICE_URL to enable the proxy.",
-      },
-      { status: 503 }
-    );
-  }
-
-  const datasetUrl = process.env.DATASET_SERVICE_URL!;
-  const source = req.nextUrl.searchParams.get("source") || "all";
-  const limit = parseInt(req.nextUrl.searchParams.get("limit") || "100", 10);
-
   try {
-    const upstream = await fetch(
-      `${datasetUrl.replace(/\/$/, "")}/stats?source=${encodeURIComponent(source)}&limit=${limit}`,
-      { headers: { Accept: "application/json" } }
-    );
-    if (!upstream.ok) {
-      const text = await upstream.text();
-      return NextResponse.json(
-        {
-          error: "dataset_service_error",
-          message: `Dataset service returned ${upstream.status}: ${text.slice(0, 500)}`,
-        },
-        { status: 502 }
-      );
-    }
-    const data = await upstream.json();
+    const stats = await getDatasetStats();
+
     await writeAuditLog({
       user: auth.user,
       action: "dataset_query",
-      resource: `dataset:${source}`,
-      metadata: { source },
+      resource: `dataset:${req.nextUrl.searchParams.get("source") || "all"}`,
+      metadata: { source: stats.source, status: stats.status },
     });
-    return NextResponse.json(data);
-  } catch (e: any) {
-    return internalError(`Dataset service proxy failed: ${e.message}`);
+
+    // FE-021: 200 for ok + no_data (request succeeded; data may be empty).
+    // 502 only when the proxy was configured but failed AND no local
+    // checkpoint exists.
+    if (stats.status === "service_down") {
+      return NextResponse.json(stats, { status: 502 });
+    }
+    return NextResponse.json(stats);
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return internalError(`Dataset stats failed: ${msg}`);
   }
 }

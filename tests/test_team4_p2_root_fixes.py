@@ -390,16 +390,31 @@ def test_p1_047_dag_schedules_staggered():
 
 
 # =============================================================================
-# Issue 11 (P1-048): SCHEMA_VERSION_FALLBACK bumped to 13
+# Issue 11 (P1-003 / superseded P1-048): SCHEMA_VERSION_FALLBACK semantics
 # =============================================================================
-def test_p1_048_schema_version_fallback_bumped():
-    """P1-048: SCHEMA_VERSION_FALLBACK must equal the max migration version."""
+# v104 FORENSIC ROOT FIX (P1-003): the previous test asserted
+# ``SCHEMA_VERSION_FALLBACK == max_mig``. That assertion was the BUG FARM --
+# it forced every contributor to bump the fallback when adding a migration,
+# which is exactly the chore that was forgotten for migrations 016 and 017.
+# The new semantics (P1-003): ``SCHEMA_VERSION_FALLBACK = 0`` means "if the
+# migrations directory is missing, treat as fresh install -- apply ALL
+# migrations." The real correctness check is that ``SCHEMA_VERSION`` (the
+# derived value, NOT the fallback) equals ``max_mig`` when the migrations
+# directory is present.
+def test_p1_003_schema_version_fallback_is_zero():
+    """P1-003: SCHEMA_VERSION_FALLBACK must be 0 (fresh-install semantics)."""
     sys.path.insert(0, str(REPO_ROOT / "phase1"))
-    # Force re-import in case it was cached
     if "database.base" in sys.modules:
         del sys.modules["database.base"]
-    from database.base import SCHEMA_VERSION_FALLBACK
-    # Count migration files
+    from database.base import SCHEMA_VERSION_FALLBACK, SCHEMA_VERSION
+    assert SCHEMA_VERSION_FALLBACK == 0, (
+        f"P1-003 REGRESSION: SCHEMA_VERSION_FALLBACK must be 0 "
+        f"(fresh-install semantics -- the old 'bump on new migration' "
+        f"contract was the bug farm). Got {SCHEMA_VERSION_FALLBACK}."
+    )
+    # The REAL correctness check: when the migrations directory is present
+    # (which it is in this repo), SCHEMA_VERSION (derived) must equal the
+    # max migration version. This is the invariant that matters.
     mig_dir = REPO_ROOT / "phase1" / "database" / "migrations"
     mig_versions = []
     for f in mig_dir.glob("0*.sql"):
@@ -411,14 +426,17 @@ def test_p1_048_schema_version_fallback_bumped():
         except ValueError:
             continue
     max_mig = max(mig_versions) if mig_versions else 0
-    assert SCHEMA_VERSION_FALLBACK == max_mig, (
-        f"P1-048 REGRESSION: SCHEMA_VERSION_FALLBACK ({SCHEMA_VERSION_FALLBACK}) "
-        f"must equal max migration version ({max_mig})."
+    assert SCHEMA_VERSION == max_mig, (
+        f"P1-003 REGRESSION: SCHEMA_VERSION ({SCHEMA_VERSION}) must equal "
+        f"max migration version ({max_mig}) when migrations dir is present."
     )
-    assert SCHEMA_VERSION_FALLBACK >= 13, (
-        f"P1-048 REGRESSION: SCHEMA_VERSION_FALLBACK must be >= 13 "
-        f"(migrations 010-013 were added), got {SCHEMA_VERSION_FALLBACK}."
-    )
+
+
+# Backward-compat alias: older CI runners may still call the old name.
+# Delegate to the new test so old test-collection does not break.
+def test_p1_048_schema_version_fallback_bumped():
+    """P1-048 (superseded by P1-003): delegate to the new semantics test."""
+    test_p1_003_schema_version_fallback_is_zero()
 
 
 # =============================================================================

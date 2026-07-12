@@ -3394,6 +3394,22 @@ class UniProtPipeline(BasePipeline):
             "correlation_id": getattr(self, "correlation_id", None),
             "triggered_by": getattr(self, "triggered_by", None),  # SEC20 / COMP1
             "uniprot_release": getattr(self, "source_version", None) or UNIPROT_RELEASE,
+            # P1-016 ROOT FIX (Team-2): add a "release fingerprint" field
+            # so downstream consumers (KG build, Graph Transformer, RL
+            # ranker) can verify that two runs used the SAME UniProt
+            # release. The fingerprint is ``release||raw_sha256`` -- a
+            # collision-free identifier for "the exact bytes used". If
+            # two runs have the same fingerprint, they are byte-identical
+            # at the UniProt level. If they differ, downstream phases
+            # can detect the drift and invalidate cached embeddings.
+            "release_fingerprint": (
+                f"{getattr(self, 'source_version', None) or UNIPROT_RELEASE}"
+                f"||{_sha256(raw_path) or 'unknown'}"
+            ),
+            "release_is_pinned": (
+                (getattr(self, "source_version", None) or UNIPROT_RELEASE)
+                != "current_release"
+            ),
             "query": self.uniprot_query,
             "fields": list(self.uniprot_fields),
             "raw_file": str(raw_path),

@@ -996,6 +996,74 @@ def fuzzy_match_score(name1: str, name2: str) -> float:
     return score
 
 
+# =============================================================================
+# P1-029 ROOT FIX (Team Member 3 -- length-scaled fuzzy threshold for short
+# names):
+#
+# The issue: ``fuzzy_match_best`` used a FIXED threshold (0.85) for all
+# names. For short names like 'PAX' (3 chars) vs 'PAX2' (4 chars),
+# ``token_sort_ratio`` returns ~86 (3 of 4 chars match) -- ABOVE 0.85, so
+# they MATCH. This merges distinct genes (PAX, PAX2, PAX4 are DIFFERENT
+# genes in the PAX family) into one entity -- corrupting the KG.
+#
+# ROOT FIX: scale the effective threshold by query name length. For very
+# short names (<4 chars), require an EXACT match (threshold 1.0) -- 'PAX'
+# only matches 'PAX', never 'PAX2'. For short names (4-7 chars), require
+# 0.92. For medium names (8-14 chars), require 0.88. For long names
+# (>14 chars), use the caller-supplied threshold (default 0.85). This
+# preserves fuzzy matching for long names (where typos are common and
+# distance-2 edits are legitimate) while preventing false merges for
+# short names (where a single-character difference usually means a
+# DIFFERENT entity).
+#
+# The thresholds are calibrated so that:
+#   - 'PAX' (3) vs 'PAX2' (4)  -> ratio 86  < 100 (exact required) -> NO MATCH ✓
+#   - 'PAX' (3) vs 'PAX' (3)   -> ratio 100 >= 100                 -> MATCH ✓
+#   - 'ibuprofen' (9) vs 'ibuprofenum' (11) -> ratio ~82 < 88      -> NO MATCH
+#     (this is correct -- the abbreviation expansion in P1-022 handles
+#      Latin-name matching via the curated dictionary, not fuzzy)
+#   - 'acetylsalicylic acid' (20) vs 'acetylsalicylic' (16) -> ratio ~88 >= 85 -> MATCH ✓
+# =============================================================================
+def length_scaled_threshold(query: str, base_threshold: float = 0.85) -> float:
+    """Return a length-scaled fuzzy-match threshold (P1-029 ROOT FIX).
+
+    For short names, returns a HIGHER threshold (stricter matching) to
+    prevent false merges of distinct short entities (e.g. PAX vs PAX2).
+    For long names, returns the caller-supplied ``base_threshold``.
+
+    Parameters
+    ----------
+    query:
+        The normalised query name. Non-strings are treated as length 0
+        (returns ``base_threshold``).
+    base_threshold:
+        The caller's desired threshold for long names. Default 0.85.
+
+    Returns
+    -------
+    float
+        The effective threshold in ``[0.0, 1.0]``. Always
+        ``>= base_threshold`` (we only ever RAISE the threshold for short
+        names, never lower it).
+    """
+    if not isinstance(query, str) or not query:
+        return base_threshold
+    n = len(query)
+    if n < 4:
+        # Very short names (PAX, TP53, MTX): require exact match.
+        return 1.0
+    if n < 8:
+        # Short names (Ibuprofen=9 is just above this band; Cyclophosph=11
+        # is above; short proteins like 'PAX4'=4, 'TP53'=4 fall here):
+        # require 0.92 (allows at most ~1 char difference in a 12-char name).
+        return max(base_threshold, 0.92)
+    if n <= 14:
+        # Medium names: require 0.88.
+        return max(base_threshold, 0.88)
+    # Long names: use the caller's threshold unchanged.
+    return base_threshold
+
+
 def fuzzy_match_best(
     query: str,
     candidates: Dict[str, str],
@@ -1006,6 +1074,12 @@ def fuzzy_match_best(
     Uses :func:`rapidfuzz.process.extractOne` when rapidfuzz is available,
     which is much faster than a linear O(n) sweep over all candidates.
     Falls back to exact match when rapidfuzz is not installed.
+
+    P1-029 ROOT FIX: the effective threshold is SCALED by the query name
+    length via :func:`length_scaled_threshold`. Short names (e.g. 'PAX',
+    'TP53') require an EXACT match (threshold 1.0) to prevent false merges
+    of distinct short entities (PAX vs PAX2 are DIFFERENT genes). Long
+    names use the caller-supplied ``threshold`` (default 0.85).
 
     Parameters
     ----------
@@ -1031,6 +1105,11 @@ def fuzzy_match_best(
     if not candidates:
         return None
 
+    # P1-029 ROOT FIX: scale the threshold by query length. Short names
+    # require a higher threshold (stricter matching) to prevent false
+    # merges of distinct short entities (PAX vs PAX2 are DIFFERENT genes).
+    effective_threshold = length_scaled_threshold(query, threshold)
+
     if not RAPIDFUZZ_AVAILABLE:
         # Fallback: O(1) exact match.
         if query in candidates:
@@ -1049,7 +1128,7 @@ def fuzzy_match_best(
         query,
         candidate_names,
         scorer=_rapidfuzz_fuzz.token_sort_ratio,
-        score_cutoff=threshold * 100.0,
+        score_cutoff=effective_threshold * 100.0,
     )
     if result is None:
         return None

@@ -1880,21 +1880,35 @@ class PyGBuilder(GraphBuilderProtocol):
                             _existing_edge_attr = data[et].get(
                                 "edge_attr", None
                             )
-                            assert (
-                                _existing_edge_attr is None
-                            ), (
-                                f"P2-017 ROOT FIX: edge type {et} has "
-                                f"edge_attr set (shape "
-                                f"{_existing_edge_attr.shape}). The "
-                                f"manual torch.flip(edge_index, [0]) "
-                                f"would reverse edge_index but NOT "
-                                f"edge_attr, producing reverse edges "
-                                f"with WRONG attributes. Migrate to "
-                                f"ToUndirected() from "
-                                f"torch_geometric.transforms which "
-                                f"handles both. (P2-017 root fix — "
-                                f"latent edge_attr corruption guard)"
-                            )
+                            # P2-017 ROOT FIX (v104): replace `assert` with
+                            # an explicit if-check-raise. Under `python -O`
+                            # (optimized mode, common in production Docker
+                            # images to reduce image size), ALL `assert`
+                            # statements are stripped at bytecode-compile
+                            # time. The v103 assertion therefore silently
+                            # disappeared in production, allowing the
+                            # manual ``torch.flip(edge_index, [0])`` below
+                            # to corrupt reverse-edge ``edge_attr`` (the
+                            # forward edge_attr would be paired with the
+                            # reversed edge_index). The if-check-raise is
+                            # NOT stripped under -O, so the invariant is
+                            # enforced in every runtime mode.
+                            if _existing_edge_attr is not None:
+                                raise ValueError(
+                                    f"P2-017 ROOT FIX: edge type {et} has "
+                                    f"edge_attr set (shape "
+                                    f"{_existing_edge_attr.shape}). The "
+                                    f"manual torch.flip(edge_index, [0]) "
+                                    f"would reverse edge_index but NOT "
+                                    f"edge_attr, producing reverse edges "
+                                    f"with WRONG attributes. Migrate to "
+                                    f"ToUndirected() from "
+                                    f"torch_geometric.transforms which "
+                                    f"handles both. (P2-017 root fix — "
+                                    f"latent edge_attr corruption guard, "
+                                    f"if-check-raise so it survives "
+                                    f"python -O)"
+                                )
                             data[
                                 dst,
                                 f"{REVERSE_EDGE_PREFIX}{rel}",
@@ -1918,20 +1932,26 @@ class PyGBuilder(GraphBuilderProtocol):
                     _existing_edge_attr_t = data[target_edge_type].get(
                         "edge_attr", None
                     )
-                    assert (
-                        _existing_edge_attr_t is None
-                    ), (
-                        f"P2-017 ROOT FIX: target edge type "
-                        f"{target_edge_type} has edge_attr set (shape "
-                        f"{_existing_edge_attr_t.shape}). The manual "
-                        f"torch.flip(edge_index, [0]) would reverse "
-                        f"edge_index but NOT edge_attr, producing "
-                        f"reverse edges with WRONG attributes. "
-                        f"Migrate to ToUndirected() from "
-                        f"torch_geometric.transforms which handles "
-                        f"both. (P2-017 root fix — latent edge_attr "
-                        f"corruption guard, second call site)"
-                    )
+                    # P2-017 ROOT FIX (v104): replace `assert` with an
+                    # explicit if-check-raise. Under `python -O`, asserts
+                    # are stripped, so the v103 assertion silently
+                    # disappeared in production Docker images. The
+                    # if-check-raise is NOT stripped, so the invariant
+                    # is enforced in every runtime mode.
+                    if _existing_edge_attr_t is not None:
+                        raise ValueError(
+                            f"P2-017 ROOT FIX: target edge type "
+                            f"{target_edge_type} has edge_attr set (shape "
+                            f"{_existing_edge_attr_t.shape}). The manual "
+                            f"torch.flip(edge_index, [0]) would reverse "
+                            f"edge_index but NOT edge_attr, producing "
+                            f"reverse edges with WRONG attributes. "
+                            f"Migrate to ToUndirected() from "
+                            f"torch_geometric.transforms which handles "
+                            f"both. (P2-017 root fix — latent edge_attr "
+                            f"corruption guard, second call site, "
+                            f"if-check-raise so it survives python -O)"
+                        )
                     data[
                         dst, f"{REVERSE_EDGE_PREFIX}{rel}", src
                     ].edge_index = torch.flip(edge_index, [0])

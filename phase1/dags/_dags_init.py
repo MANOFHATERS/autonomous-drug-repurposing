@@ -70,6 +70,65 @@ def ensure_project_root() -> str:
     return _PROJECT_ROOT
 
 
+def require_airflow() -> tuple:
+    """P1-034 ROOT FIX: import airflow lazily, with a CLEAR error if missing.
+
+    The audit found that DAG files do ``from airflow.decorators import
+    dag, task`` at module top. If airflow is not installed (CI env that
+    only tests cleaning logic), the import crashes with ``ModuleNotFoundError``
+    -- but ``test_dag_structure.py`` used to ``pytest.importorskip('airflow')``
+    which SILENTLY SKIPPED all DAG structure validation. Result: DAG
+    structure bugs (like P1-031 missing task dependencies) went
+    undetected in CI.
+
+    This helper provides a SINGLE place where the airflow import is
+    resolved. It returns the ``(dag, task)`` tuple on success. On
+    failure, it raises ``RuntimeError`` with a clear remediation message
+    naming:
+      * The exact ``pip install`` command (``pip install apache-airflow>=2.8.0``)
+      * The requirements file path (``requirements.txt``)
+      * The reason the import is required (DAG files need it)
+
+    DAG files SHOULD continue to use ``from airflow.decorators import
+    dag, task`` directly (top-level import is fine NOW that airflow is
+    in requirements.txt). This helper is for TESTS and SCRIPTS that
+    want to verify airflow is importable before proceeding, with a
+    better error than ``ModuleNotFoundError``.
+
+    Usage in tests::
+
+        from dags._dags_init import require_airflow
+        dag, task = require_airflow()  # raises RuntimeError if airflow missing
+
+    Returns
+    -------
+    tuple
+        ``(dag, task)`` -- the two TaskFlow API decorators.
+
+    Raises
+    ------
+    RuntimeError
+        If ``apache-airflow`` is not installed. The error message
+        includes the exact ``pip install`` remediation.
+    """
+    try:
+        from airflow.decorators import dag, task
+        return dag, task
+    except ImportError as exc:
+        raise RuntimeError(
+            "P1-034: apache-airflow is NOT installed. The Drug Repurposing "
+            "platform's DAG files (phase1/dags/*.py) require "
+            "apache-airflow>=2.8.0 at import time. Without it, DAG "
+            "structure validation tests are SILENTLY SKIPPED -- which "
+            "is how DAG bugs like P1-031 (missing task dependencies) "
+            "shipped to production. Remediation: run "
+            "'pip install -r requirements.txt' (which pins "
+            "apache-airflow>=2.8.0) OR 'pip install apache-airflow>=2.8.0'. "
+            "Then re-run the tests. Original ImportError: "
+            f"{exc}"
+        ) from exc
+
+
 # P1-050 FORENSIC ROOT FIX (Team 4): the module-level
 # ``ensure_project_root()`` call has been REMOVED. Each DAG file must
 # now explicitly call ``ensure_project_root()`` at the top of its module

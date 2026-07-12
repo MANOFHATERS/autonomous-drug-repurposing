@@ -3177,6 +3177,30 @@ class PubChemPipeline(BasePipeline):
                 "isotope_info": isotope_info,
                 "salt_form": salt_form,
                 "protonation_state": protonation_state,
+                # P1-018 ROOT FIX (Team-2): ``stereo_parent_cid`` links
+                # stereoisomers without collapsing them. Stereoisomers
+                # (e.g. (R)-thalidomide CID 5462502 vs (S)-thalidomide CID
+                # 5462504 vs racemic CID 3672) have DIFFERENT InChIKeys
+                # (the stereo layer differs) but SHARE the first 14 chars
+                # of the InChIKey (the connectivity layer / molecular
+                # skeleton). We populate ``stereo_parent_cid`` in a
+                # post-parse grouping step (see ``_assign_stereo_parent_cids``)
+                # by grouping on the InChIKey connectivity prefix and
+                # picking the lowest CID in each group as the parent.
+                # This preserves stereochemistry (each CID is a SEPARATE
+                # Compound node in the KG) while providing the linkage
+                # for downstream entity resolution. The previous code
+                # collapsed stereoisomers via a ``_stereo_collapse()``
+                # function that mapped all stereoisomers to the racemic
+                # CID -- scientifically wrong for chiral drugs like
+                # thalidomide (the (R)-enantiomer is sedative, the
+                # (S)-enantiomer is teratogenic).
+                "stereo_parent_cid": None,  # populated post-parse
+                "inchikey_connectivity_layer": (
+                    response_inchikey.split("-")[0]
+                    if response_inchikey and "-" in response_inchikey
+                    else None
+                ),
                 "source": "pubchem",
                 "source_id": source_id,
                 "source_version": source_version,
@@ -3241,7 +3265,51 @@ class PubChemPipeline(BasePipeline):
             record["_source_batch_idx"] = batch_idx
             record["_source_response_sha256"] = batch_sha256
 
+        # P1-018 ROOT FIX (Team-2): assign ``stereo_parent_cid`` to each
+        # record by grouping on the InChIKey connectivity layer (first 14
+        # chars). Stereoisomers share this prefix; the lowest CID in each
+        # group is the parent. This does NOT collapse stereoisomers --
+        # each remains a separate Compound node -- but provides the
+        # linkage for downstream entity resolution and KG build.
+        self._assign_stereo_parent_cids(list(by_inchikey.values()))
+
         return list(by_inchikey.values())
+
+    @staticmethod
+    def _assign_stereo_parent_cids(records: list[dict[str, Any]]) -> None:
+        """P1-018 ROOT FIX: assign ``stereo_parent_cid`` to each record.
+
+        Groups records by ``inchikey_connectivity_layer`` (first 14 chars
+        of the InChIKey -- the molecular skeleton, shared by stereoisomers).
+        Within each group, the lowest CID is the ``stereo_parent_cid``.
+        Mutates records in place.
+
+        For thalidomide:
+          CID 5462502 (R) -> inchikey_connectivity_layer = "CPALVAVH...X"
+          CID 5462504 (S) -> inchikey_connectivity_layer = "CPALVAVH...X"
+          CID 3672 (rac)  -> inchikey_connectivity_layer = "CPALVAVH...X"
+        All three get ``stereo_parent_cid = 3672`` (the lowest CID).
+        Each remains a SEPARATE Compound node in the KG -- the
+        stereochemistry (isomeric_smiles) is preserved. The GNN can
+        learn DISTINCT embeddings for (R)- vs (S)-thalidomide, which is
+        life-safety-critical (the (S)-enantiomer is teratogenic).
+        """
+        # Group CIDs by connectivity layer.
+        groups: dict[str, list[int]] = {}
+        for rec in records:
+            layer = rec.get("inchikey_connectivity_layer")
+            cid = rec.get("pubchem_cid")
+            if layer and cid is not None:
+                groups.setdefault(layer, []).append(int(cid))
+        # Assign parent (lowest CID in each group).
+        for rec in records:
+            layer = rec.get("inchikey_connectivity_layer")
+            cid = rec.get("pubchem_cid")
+            if layer and cid is not None and layer in groups:
+                rec["stereo_parent_cid"] = min(groups[layer])
+            else:
+                # No connectivity layer or singleton -- parent is itself.
+                rec["stereo_parent_cid"] = cid
 
     # ------------------------------------------------------------------
     # Internals: type conversion helpers

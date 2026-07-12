@@ -90,6 +90,32 @@ def _safe_gene_id_from_mim(gene_mim: Any, gene_symbol: str) -> Optional[str]:
                 raw, mim_int, gene_symbol,
             )
             return f"SYM:{gene_symbol}" if gene_symbol else None
+        # P2-012 ROOT FIX: validate the MIM leading digit is in [1-6].
+        # OMIM's leading digit has semantic meaning per OMIM's FAQs:
+        #   1 = autosomal dominant (e.g. 100650 — Marfan syndrome)
+        #   2 = autosomal recessive (e.g. 215400 — cystic fibrosis)
+        #   3 = X-linked           (e.g. 300376 — Duchenne muscular dystrophy)
+        #   4 = Y-linked           (e.g. 400005 — Y-linked deafness)
+        #   5 = mitochondrial       (e.g. 516060 — MELAS)
+        #   6 = autosomal (newly assigned post-1994) (e.g. 603903)
+        # A leading 0 (e.g. 099999) is NOT a valid OMIM ID -- it is
+        # either a string-padded 5-digit number or a malformed input.
+        # A leading 7/8/9 (e.g. 700000, 800000, 900000) is in the 6-digit
+        # range but has NO semantic meaning in OMIM's numbering scheme --
+        # such MIMs do not exist in the OMIM database. Without this
+        # check, malformed MIMs would be loaded into the KG and may
+        # match DisGeNET diseases incorrectly during entity resolution.
+        leading_digit = mim_int // 100000
+        if leading_digit not in (1, 2, 3, 4, 5, 6):
+            logger.warning(
+                "omim_loader: gene_mim=%r has invalid leading digit %d "
+                "(must be 1-6 per OMIM numbering: 1=autosomal dominant, "
+                "2=autosomal recessive, 3=X-linked, 4=Y-linked, "
+                "5=mitochondrial, 6=autosomal); falling back to SYM:%s "
+                "(P2-012)",
+                raw, leading_digit, gene_symbol,
+            )
+            return f"SYM:{gene_symbol}" if gene_symbol else None
         return f"MIM:{mim_int}"
     except (TypeError, ValueError):
         logger.warning(

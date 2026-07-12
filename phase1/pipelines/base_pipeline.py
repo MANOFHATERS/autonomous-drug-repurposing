@@ -436,6 +436,22 @@ class SchemaValidationError(PipelineError):
     """Raised when a cleaned DataFrame violates schema/v1.json (SCI-3.12)."""
 
 
+class PipelineValidationError(PipelineError):
+    """P1-020 ROOT FIX (Team-2): raised when ``validate_output()`` fails
+    AFTER load -- i.e. the pipeline ran download -> clean -> load but the
+    final state is invalid (zero rows loaded, required columns missing,
+    FK violations, etc.). The previous code only called
+    ``validate_output()`` BEFORE persist (on the in-memory DataFrame),
+    which meant a load() that silently inserted 0 rows (due to an
+    upstream API failure masked by a fallback path) would NOT be caught.
+    The fix adds a POST-LOAD validation call that raises this exception
+    if records_loaded == 0 while records_cleaned > 0 (the signature of a
+    silent load failure), plus a re-validation of the final DataFrame
+    state. This is the "validate at the END of run()" contract the audit
+    required.
+    """
+
+
 class DownloadError(PipelineError):
     """Raised when a download fails after all retries (REL-6.4)."""
 
@@ -1452,6 +1468,59 @@ class BasePipeline(ABC):
                     # v83 P0-C11: 'warning' -> 'partial' (DB CHECK constraint
                     # only allows 'running'/'success'/'failed'/'partial').
                     status = "partial"
+
+                # P1-020 ROOT FIX (Team-2): POST-LOAD validation.
+                # ``validate_output()`` was already called on the in-memory
+                # ``clean_df`` BEFORE persist (line ~1354), which validates
+                # schema/columns. But that check CANNOT catch a load() that
+                # silently inserted 0 rows (e.g. an upstream API failure
+                # masked by a fallback path returned an empty DataFrame
+                # that passed schema validation but loaded nothing). The
+                # audit explicitly required: "Call self.validate_output()
+                # at the end of run(). If validation fails, raise
+                # PipelineValidationError. Add a CI test that mocks a
+                # zero-row insert and verifies the error."
+                #
+                # ROOT FIX: after load(), re-run validate_output() on the
+                # final state AND add an explicit zero-load guard. The
+                # zero-load guard catches the "silent 0-row insert" case
+                # that schema validation alone cannot detect.
+                if not skip_load and not dry_run and records_cleaned > 0:
+                    if records_loaded == 0:
+                        # The signature of a silent load failure: we had
+                        # cleaned records to load, but load() inserted 0.
+                        # This is NEVER acceptable in production -- it
+                        # means the KG has gaps that downstream phases
+                        # won't detect. Raise PipelineValidationError so
+                        # the Airflow task fails and the operator is
+                        # notified.
+                        raise PipelineValidationError(
+                            f"[{self.source_name}] P1-020 POST-LOAD "
+                            f"VALIDATION FAILED: records_cleaned="
+                            f"{records_cleaned} but records_loaded=0. "
+                            f"The load() step silently inserted 0 rows "
+                            f"(likely an upstream API failure masked by "
+                            f"a fallback path, or a DB connection issue). "
+                            f"The KG would have gaps -- downstream phases "
+                            f"(KG build, Graph Transformer, RL ranker) "
+                            f"would produce incomplete rankings. The "
+                            f"pipeline FAILS LOUDLY per the institutional-"
+                            f"grade contract. (P1-020 ROOT FIX)"
+                        )
+                    # Re-validate the final DataFrame state (defense-in-
+                    # depth: catches any corruption introduced between
+                    # the pre-persist validation and the post-load check).
+                    _post_valid, _post_errors = self.validate_output(clean_df)
+                    if not _post_valid and self.strict_validation:
+                        raise PipelineValidationError(
+                            f"[{self.source_name}] P1-020 POST-LOAD "
+                            f"SCHEMA VALIDATION FAILED: {_post_errors}. "
+                            f"The cleaned DataFrame passed pre-persist "
+                            f"validation but failed post-load re-validation "
+                            f"-- the DataFrame may have been mutated by "
+                            f"load() (which should NOT happen). "
+                            f"(P1-020 ROOT FIX)"
+                        )
             elif dry_run:
                 logger.info("[%s] Dry run: skipping load()", self.source_name)
                 records_loaded = 0
@@ -1459,7 +1528,18 @@ class BasePipeline(ABC):
             if status == "running":
                 status = "success"
 
-        except (OSError, ValueError, RuntimeError, KeyError, TypeError, ImportError, ConnectionError, TimeoutError) as exc:
+        except (OSError, ValueError, RuntimeError, KeyError, TypeError, ImportError, ConnectionError, TimeoutError, PipelineError) as exc:
+            # P1-020 ROOT FIX (Team-2): added ``PipelineError`` to the
+            # caught types so that ``PipelineValidationError`` (raised by
+            # the post-load validation above) is caught here, status is
+            # set to "failed", the audit record is written correctly, and
+            # the exception is re-raised. Without this, a
+            # ``PipelineValidationError`` would propagate PAST the except
+            # (because it's not a subclass of any caught type), the
+            # finally block would write the audit record with
+            # status="running" (the last value set before the raise), and
+            # the operator would see a misleading "running" status in the
+            # audit trail for a pipeline that actually failed.
             status = "failed"
             # v85 FORENSIC ROOT FIX (BUG #51): narrowed from broad
             # ``except Exception``. The pipeline's download/clean/load

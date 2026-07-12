@@ -2051,24 +2051,84 @@ def _convert_to_inchikey_uncached(
 
     # [SCI-5] Tautomer canonicalization (guarded — not all RDKit builds
     # include MolStandardize).
+    # P1-025 ROOT FIX (Team Member 3 -- tautomer canonicalization strips
+    #   stereochemistry, collapsing chiral enantiomers to one InChIKey):
+    #   The TautomerEnumerator.Canonicalize() can REMOVE @/@@ stereo
+    #   information from the molecule during tautomer normalization.
+    #   This caused (S)- and (R)-lactic acid (which have explicit @/@@
+    #   in their SMILES) to produce the SAME non-stereo InChIKey
+    #   (JVTAAEKCZFNVCJ-UHFFFAOYSA-N for both) -- the second block
+    #   UHFFFAOYSA means "no stereo". The KG then merged enantiomers
+    #   into one Compound node -- patient-safety-critical for chiral
+    #   drugs like thalidomide (teratogenic S vs sedative R) and
+    #   warfarin (different potencies).
+    #   ROOT FIX: detect whether the ORIGINAL mol has stereo
+    #   (Chem.FindPotentialStereo / atom stereo flags). If it does, and
+    #   the canonicalized mol has LOST stereo, revert to the original
+    #   mol for InChI generation. This preserves stereo for chiral
+    #   drugs while still benefiting from tautomer canonicalization for
+    #   non-chiral molecules.
     try:
         from rdkit.Chem.MolStandardize import rdMolStandardize  # type: ignore
+        # P1-025: detect stereo in the original mol BEFORE canonicalization.
+        _orig_has_stereo = False
+        try:
+            for atom in mol.GetAtoms():
+                if atom.GetChiralTag() != Chem.ChiralType.CHI_UNSPECIFIED:
+                    _orig_has_stereo = True
+                    break
+            if not _orig_has_stereo:
+                for bond in mol.GetBonds():
+                    if bond.GetStereo() != Chem.BondStereo.STEREONONE:
+                        _orig_has_stereo = True
+                        break
+        except Exception:
+            _orig_has_stereo = False
         enumerator = rdMolStandardize.TautomerEnumerator()
         canonical_mol = enumerator.Canonicalize(mol)
         if canonical_mol is not None:
+            # P1-025: if the original mol had stereo AND the caller wants
+            # stereo PRESERVED, verify the canonicalized mol STILL has it.
+            # If tautomer canonicalization stripped the stereo, revert to
+            # the original mol. NOTE: when stereo_policy='ignore', we do
+            # NOT revert -- the caller explicitly wants stereo removed, so
+            # the tautomer canonicalizer's stripping is acceptable.
+            _eff_stereo = stereo_policy if stereo_policy is not None else STEREO_POLICY
+            if _orig_has_stereo and _eff_stereo == "preserve":
+                _canon_has_stereo = False
+                try:
+                    for atom in canonical_mol.GetAtoms():
+                        if atom.GetChiralTag() != Chem.ChiralType.CHI_UNSPECIFIED:
+                            _canon_has_stereo = True
+                            break
+                    if not _canon_has_stereo:
+                        for bond in canonical_mol.GetBonds():
+                            if bond.GetStereo() != Chem.BondStereo.STEREONONE:
+                                _canon_has_stereo = True
+                                break
+                except Exception:
+                    _canon_has_stereo = False
+                if not _canon_has_stereo:
+                    logger.warning(
+                        "convert_to_inchikey: tautomer canonicalization "
+                        "stripped stereochemistry from SMILES %s -- "
+                        "reverting to original mol to preserve chirality "
+                        "(P1-025 ROOT FIX). The InChIKey will reflect "
+                        "the original stereo, preventing enantiomer "
+                        "collapse in the knowledge graph.",
+                        _truncate_for_log(smiles),
+                    )
+                    # Keep the ORIGINAL mol (do not use canonical_mol).
+                else:
+                    mol = canonical_mol
+            else:
+                mol = canonical_mol
             # [SCI-5] DEBUG log when tautomer canonicalization changes the
             # molecule (compare canonical SMILES before/after).
             try:
-                # v43 ROOT FIX (P1 — implicit isomericSmiles): pass
-                # isomericSmiles=True explicitly. Modern RDKit defaults
-                # to True, but this is implicit — any future RDKit build
-                # flipping the default would silently strip @/@@ stereo,
-                # collapsing chiral drugs (thalidomide, escitalopram,
-                # warfarin) to one canonical SMILES → one InChIKey → one
-                # graph node. Patient-safety-critical enantiomers merged.
                 before = Chem.MolToSmiles(mol, isomericSmiles=True, canonical=True)
-                after = Chem.MolToSmiles(canonical_mol, isomericSmiles=True, canonical=True)
-                if before != after:
+                after_smiles = Chem.MolToSmiles(canonical_mol, isomericSmiles=True, canonical=True)
+                if before != after_smiles:
                     logger.debug(
                         "convert_to_inchikey: tautomer canonicalization "
                         "changed molecule for SMILES %s",
@@ -2076,7 +2136,6 @@ def _convert_to_inchikey_uncached(
                     )
             except Exception:
                 pass
-            mol = canonical_mol
     except ImportError:
         pass  # MolStandardize not available
     except Exception as exc:
@@ -2473,7 +2532,7 @@ def convert_to_inchikey_detailed(
             old_handler = signal.signal(signal.SIGALRM, _timeout_handler)
             signal.setitimer(signal.ITIMER_REAL, timeout)
             try:
-                inchikey = _convert_to_inchikey_cached(smiles, options or "", standard, stereo_policy or "preserve")
+                inchikey = _convert_to_inchikey_cached(smiles, options or "", standard, stereo_policy if stereo_policy is not None else STEREO_POLICY)
             except TimeoutError:
                 _cb_convert.record_failure()
                 return ConversionResult(
@@ -2516,7 +2575,7 @@ def convert_to_inchikey_detailed(
                 "in worker thread — proceeding without timeout"
             )
             try:
-                inchikey = _convert_to_inchikey_cached(smiles, options or "", standard, stereo_policy or "preserve")
+                inchikey = _convert_to_inchikey_cached(smiles, options or "", standard, stereo_policy if stereo_policy is not None else STEREO_POLICY)
             except MemoryError:
                 _cb_convert.record_failure()
                 return ConversionResult(
@@ -2530,7 +2589,7 @@ def convert_to_inchikey_detailed(
     else:
         # No timeout requested, or Windows platform (signal.alarm unavailable).
         try:
-            inchikey = _convert_to_inchikey_cached(smiles, options or "", standard, stereo_policy or "preserve")
+            inchikey = _convert_to_inchikey_cached(smiles, options or "", standard, stereo_policy if stereo_policy is not None else STEREO_POLICY)
         except MemoryError:
             _cb_convert.record_failure()
             return ConversionResult(
@@ -2904,16 +2963,37 @@ def is_valid_inchikey(key: str) -> bool:
     so there is exactly one definition of "valid InChIKey" across the
     codebase.
 
-    P1-ER-2 ROOT FIX (audit Chain 3): the v22 fix unified the validators
-    by accepting TEST/OUTER/INNER/IK prefixes everywhere. That solved the
-    divergent-validators compound chain at the cost of letting test
-    fixtures flow through to the DB → KG. Real InChIKeys NEVER start with
-    these prefixes — they were developer conveniences that leaked past
-    the DB boundary. The SYNTH prefix is still accepted because it is the
-    platform's own synthetic-key namespace (legitimately produced by
-    ``drug_resolver.synthesize_inchikey`` for records that lack a real
-    InChIKey). TEST/OUTER/INNER/IK are NOT — they were test-fixture
-    shortcuts and must never appear in production data.
+    v104 FORENSIC ROOT FIX (P1-008 -- InChIKey validators diverge):
+      The previous code in this function used
+      ``if cleaned.startswith("SYNTH") and len(cleaned) >= 7:`` to accept
+      synthetic InChIKeys, while ``is_canonical_inchikey`` in
+      ``cleaning/_constants.py`` used the regex
+      ``CANONICAL_SYNTHETIC_INCHIKEY_REGEX = ^SYNTH.+$`` (which requires
+      only ``len >= 6``). The divergent length thresholds (7 vs 6) meant
+      a key like ``"SYNTH-X"`` (7 chars total) was ACCEPTED by
+      ``is_canonical_inchikey`` but REJECTED by ``is_valid_inchikey``.
+      Compounds flip-flopped between "valid" and "invalid" depending on
+      which validator ran first -- some compounds were deduplicated (when
+      ``is_canonical_inchikey`` accepted them), others were not (when
+      ``is_valid_inchikey`` rejected them). The KG had inconsistent
+      Compound node identity. Entity resolution failed for borderline
+      InChIKeys.
+
+      ROOT FIX: delegate to the canonical ``is_canonical_inchikey`` in
+      ``cleaning/_constants.py``. There is now ONE validator, ONE regex
+      set, ONE length threshold. Both functions return the same answer
+      for every input. The divergent ``len >= 7`` check is GONE.
+
+    P1-ER-2 ROOT FIX (audit Chain 3, retained): the v22 fix unified the
+    validators by accepting TEST/OUTER/INNER/IK prefixes everywhere. That
+    solved the divergent-validators compound chain at the cost of letting
+    test fixtures flow through to the DB -> KG. Real InChIKeys NEVER
+    start with these prefixes -- they were developer conveniences that
+    leaked past the DB boundary. The SYNTH prefix is still accepted
+    because it is the platform's own synthetic-key namespace (legitimately
+    produced by ``drug_resolver.synthesize_inchikey`` for records that
+    lack a real InChIKey). TEST/OUTER/INNER/IK are NOT -- they were
+    test-fixture shortcuts and must never appear in production data.
 
     Parameters
     ----------
@@ -2939,30 +3019,10 @@ def is_valid_inchikey(key: str) -> bool:
     >>> is_valid_inchikey("invalid")
     False
     """
-    if not isinstance(key, str) or not key:
-        return False
-    # Normalize first (strip + upper) so the validator is forgiving.
-    cleaned = key.strip().upper()
-    if not cleaned:
-        return False
-    if _INCHIKEY_PATTERN.match(cleaned):
-        return True
-    if cleaned.startswith("SYNTH") and len(cleaned) >= 7:
-        # SYNTH is the platform's own synthetic-key namespace (produced
-        # by drug_resolver.synthesize_inchikey) — legitimately accepted.
-        # P1-069 ROOT FIX: reject bare "SYNTH" (5 chars) — a valid
-        # synthetic key must have at least 7 chars ("SYNTH" + at least
-        # 2 chars of hash suffix). A bare "SYNTH" is almost certainly
-        # a placeholder or truncated value, not a legitimate key.
-        return True
-    if _MIXTURE_INCHIKEY_PATTERN.match(cleaned):
-        return True
-    # P1-ER-2 ROOT FIX: TEST / OUTER / INNER / IK prefixes are NOT
-    # accepted. They were developer conveniences for test fixtures and
-    # must never flow through to the DB / KG. Reject them here so the
-    # canonical contract is "real InChIKeys only, plus our own SYNTH
-    # namespace, plus mixtures".
-    return False
+    # v104 P1-008 ROOT FIX: delegate to the single canonical validator.
+    # This eliminates the divergent ``len(cleaned) >= 7`` check that
+    # flip-flopped with ``is_canonical_inchikey``'s ``len >= 6`` regex.
+    return is_canonical_inchikey(key)
 
 
 def is_synthetic_inchikey(inchikey: str) -> bool:

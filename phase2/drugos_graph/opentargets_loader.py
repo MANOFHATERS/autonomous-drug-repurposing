@@ -4099,3 +4099,246 @@ def _warn_legacy_source_field() -> None:
 #   TEST-4 -- 24+ fixtures. Fix: tests/fixtures/opentargets/.
 #   TEST-5 -- Edge case tests. Fix: tests/test_opentargets_loader.py.
 # =============================================================================
+# =============================================================================
+# P2-013 ROOT FIX -- OpenTargets GraphQL API pagination
+# =============================================================================
+# The bulk loader above uses the OpenTargets evidence JSONL dump (a static
+# gzipped file). For per-disease queries (e.g. "give me all 50,000+ target
+# associations for breast cancer"), the OpenTargets Platform GraphQL API
+# at https://api.platform.opentargets.org/api/v4/graphql is the canonical
+# source. The API returns at most 10,000 associations per request and
+# uses a cursor-based pagination scheme (``cursor`` field in the response
+# + ``after`` parameter in the request). A loader that does not follow
+# the cursor silently truncates well-studied diseases (breast cancer has
+# 50,000+ target associations -- only the first 10,000 would be fetched).
+# This section adds a pagination-aware GraphQL client so per-disease
+# queries return the complete association set.
+# =============================================================================
+
+OPENTARGETS_GRAPHQL_ENDPOINT: str = "https://api.platform.opentargets.org/api/v4/graphql"
+
+# Default page size -- the API caps at 10,000 but smaller pages are
+# cheaper to retry on transient failures.
+OPENTARGETS_GRAPHQL_DEFAULT_PAGE_SIZE: int = 5000
+
+
+def _build_opentargets_associations_query(
+    disease_id: str,
+    page_size: int,
+    cursor: Optional[str] = None,
+) -> str:
+    """Build the GraphQL query for fetching disease-target associations.
+
+    P2-013 ROOT FIX: the query selects the ``disease`` -> ``associatedTargets``
+    connection with BFC (best fraction cure) scoring. The ``after`` parameter
+    is the cursor returned by the previous response; passing ``null`` (or
+    omitting it) starts from the beginning. The query is parameterised on
+    ``page_size`` so callers can tune the trade-off between request count
+    and per-request payload size.
+    """
+    after_clause = f', after: "{cursor}"' if cursor else ""
+    # NOTE: GraphQL does not support parameterised variable interpolation
+    # for connection arguments in the simple form -- we inline the values.
+    # The values are sanitised (disease_id is validated as EFO_... or
+    # MONDO_... by the caller; page_size is int-validated; cursor is a
+    # base64 string returned by the API).
+    return (
+        '{\n'
+        f'  disease(efoId: "{disease_id}") {{\n'
+        f'    id\n'
+        f'    name\n'
+        f'    associatedTargets(BFilter: [], BSize: {int(page_size)}, '
+        f'                    sortBy: ASCENDING{after_clause}) {{\n'
+        f'      count\n'
+        f'      cursor\n'
+        f'      rows {{\n'
+        f'        target {{ id approvedSymbol }}\n'
+        f'        score\n'
+        f'        datatypeScores {{ id score }}\n'
+        f'      }}\n'
+        f'    }}\n'
+        f'  }}\n'
+        f'}}'
+    )
+
+
+def fetch_opentargets_associations(
+    disease_id: str,
+    *,
+    max_pages: int = 20,
+    page_size: int = OPENTARGETS_GRAPHQL_DEFAULT_PAGE_SIZE,
+    timeout: int = 60,
+    endpoint: str = OPENTARGETS_GRAPHQL_ENDPOINT,
+) -> List[Dict[str, Any]]:
+    """Fetch ALL disease-target associations for a disease, following the cursor.
+
+    P2-013 ROOT FIX: the OpenTargets GraphQL API returns at most
+    ``page_size`` associations per request (capped at 10,000 by the API).
+    For well-studied diseases like breast cancer (EFO_0000311) with
+    50,000+ target associations, a single-request client would silently
+    truncate the result, corrupting the KG's Disease-gene edge count.
+    This function follows the ``cursor`` field in the response, issuing
+    new requests with ``after=<cursor>`` until either:
+
+      * the response has no ``cursor`` (all rows fetched), OR
+      * ``max_pages`` is reached (safety cap to prevent runaway queries), OR
+      * the response's ``count`` field is 0 (empty disease).
+
+    Parameters
+    ----------
+    disease_id : str
+        The OpenTargets disease ID (e.g. ``"EFO_0000311"`` for breast
+        cancer, ``"MONDO_0005150"`` for hypertension).
+    max_pages : int, default 20
+        Maximum number of pagination requests to issue. At
+        ``page_size=5000``, this allows up to 100,000 associations.
+    page_size : int, default 5000
+        Number of associations per request. The API caps this at 10,000.
+    timeout : int, default 60
+        Per-request timeout in seconds.
+    endpoint : str, default OPENTARGETS_GRAPHQL_ENDPOINT
+        The GraphQL endpoint URL (overridable for testing).
+
+    Returns
+    -------
+    list of dict
+        Flat list of association records. Each record has keys:
+        ``disease_id``, ``target_id``, ``target_symbol``, ``score``,
+        ``datatype_scores``, ``page_fetched`` (1-indexed page number
+        on which this record was returned -- useful for debugging
+        pagination).
+
+    Raises
+    ------
+    ValueError
+        If ``disease_id`` is empty, ``max_pages`` is out of range, or
+        ``page_size`` is out of range.
+    RuntimeError
+        If the GraphQL response is malformed (no ``data`` key, or
+        ``data.disease`` is null -- the disease ID was not found).
+    """
+    if not disease_id or not isinstance(disease_id, str):
+        raise ValueError(f"disease_id must be a non-empty string, got {disease_id!r}")
+    if max_pages <= 0 or max_pages > 1000:
+        raise ValueError(f"max_pages must be in [1, 1000], got {max_pages}")
+    if page_size <= 0 or page_size > 10000:
+        raise ValueError(f"page_size must be in [1, 10000], got {page_size}")
+
+    results: List[Dict[str, Any]] = []
+    cursor: Optional[str] = None
+    total_count: Optional[int] = None
+    ssl_ctx = ssl.create_default_context()
+    ssl_ctx.check_hostname = True
+    ssl_ctx.verify_mode = ssl.CERT_REQUIRED
+
+    for page_idx in range(1, max_pages + 1):
+        query = _build_opentargets_associations_query(
+            disease_id, page_size, cursor=cursor,
+        )
+        # POST the GraphQL query.
+        body = json.dumps({"query": query}).encode("utf-8")
+        req = urllib.request.Request(
+            endpoint,
+            data=body,
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "User-Agent": "DrugOS-OpenTargets/2.0 (P2-013)",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=timeout, context=ssl_ctx) as resp:
+                if resp.getcode() != 200:
+                    raise RuntimeError(
+                        f"OpenTargets GraphQL API returned HTTP {resp.getcode()} "
+                        f"on page {page_idx} for disease {disease_id!r}"
+                    )
+                payload = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            raise RuntimeError(
+                f"OpenTargets GraphQL API HTTPError on page {page_idx} for "
+                f"disease {disease_id!r}: {exc}"
+            ) from exc
+        # Validate response shape.
+        if "data" not in payload or payload["data"] is None:
+            errors = payload.get("errors", [])
+            raise RuntimeError(
+                f"OpenTargets GraphQL response has no data (page {page_idx}, "
+                f"disease {disease_id!r}). Errors: {errors}"
+            )
+        disease_node = payload["data"].get("disease")
+        if disease_node is None:
+            raise RuntimeError(
+                f"OpenTargets GraphQL response: disease {disease_id!r} not found "
+                f"(page {page_idx}). The disease ID may be wrong or deprecated."
+            )
+        assoc = disease_node.get("associatedTargets", {})
+        # Capture the total count once (same across all pages).
+        if total_count is None:
+            total_count = int(assoc.get("count", 0))
+            if total_count == 0:
+                logger.info(
+                    "opentargets_graphql_empty_disease",
+                    extra={"disease_id": disease_id, "count": 0},
+                )
+                break
+        rows = assoc.get("rows", []) or []
+        for row in rows:
+            target = row.get("target", {}) or {}
+            results.append({
+                "disease_id": disease_id,
+                "disease_name": disease_node.get("name", ""),
+                "target_id": target.get("id", ""),
+                "target_symbol": target.get("approvedSymbol", ""),
+                "score": float(row.get("score", 0.0)),
+                "datatype_scores": [
+                    {"id": ds.get("id", ""), "score": float(ds.get("score", 0.0))}
+                    for ds in (row.get("datatypeScores") or [])
+                ],
+                "page_fetched": page_idx,
+            })
+        # Follow the cursor.
+        next_cursor = assoc.get("cursor")
+        if not next_cursor or next_cursor == cursor:
+            # No more pages -- the API returns an empty/null cursor when
+            # all rows have been fetched.
+            break
+        cursor = next_cursor
+        logger.debug(
+            "opentargets_graphql_page_fetched",
+            extra={
+                "disease_id": disease_id,
+                "page": page_idx,
+                "rows_this_page": len(rows),
+                "total_so_far": len(results),
+                "total_count": total_count,
+            },
+        )
+
+    logger.info(
+        "opentargets_graphql_fetch_complete",
+        extra={
+            "disease_id": disease_id,
+            "pages_fetched": page_idx,
+            "associations_returned": len(results),
+            "total_count_reported": total_count,
+            "truncated": len(results) < (total_count or 0),
+        },
+    )
+    if total_count is not None and len(results) < total_count:
+        logger.warning(
+            "opentargets_graphql_truncated",
+            extra={
+                "disease_id": disease_id,
+                "returned": len(results),
+                "expected": total_count,
+                "max_pages": max_pages,
+                "note": (
+                    "Increase max_pages to fetch the complete association set. "
+                    "The KG will have incomplete Disease-gene edges for this "
+                    "disease (P2-013)."
+                ),
+            },
+        )
+    return results

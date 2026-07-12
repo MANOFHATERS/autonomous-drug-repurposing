@@ -1379,7 +1379,8 @@ def temporal_split_pairs(
     positive_pairs: List[Dict],
     cutoff_year: int = DEFAULT_CUTOFF_YEAR,
     approval_years: Optional[Dict[Tuple[str, str], int]] = None,
-    split_mode: str = "drug_first_approval",
+    split_mode: str = "indication_first_approval",
+    random_state: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Split positive pairs by approval year for temporal evaluation.
 
@@ -1399,42 +1400,68 @@ def temporal_split_pairs(
     When approval_years is None or empty, falls back to deterministic
     random split using SEED from config (IDE-001).
 
-    KNOWN LIMITATION (v100 ROOT FIX BUG P2-042):
-    The default split_mode="drug_first_approval" (v88 BUG #34) assigns each
-    (drug, disease) pair to a split based on the drug's FIRST approval year
-    across ALL diseases. This guarantees no drug appears in both train and
-    test (no drug-level leakage in that direction). HOWEVER, it also means
-    the test set NEVER contains a drug the model has already seen in
-    training -- the model's drug embeddings for test drugs are randomly
-    initialized, so the test AUC reflects ZERO extrapolation to new drugs.
-    Concrete example: a drug approved in 2018 for Disease X (train) and in
-    2022 for Disease Y is placed in TRAIN for BOTH pairs (because
-    drug_first_approval=2018 <= cutoff-2=2018); Disease Y never makes it to
-    test. The reported AUC thus measures performance on completely-unseen
-    drugs, NOT on new indications for known drugs. For the drug-repurposing
-    use case (predicting new indications for APPROVED drugs), use
-    split_mode="pair_level".
+    P2-020 ROOT FIX (v104): the previous default
+    ``split_mode="drug_first_approval"`` (v88 BUG #34) evaluates the
+    COLD-START DRUG task — can the model predict drug-disease
+    interactions for NEW drugs? The platform's stated use case (DOCX
+    Section 4) is drug REPURPOSING — finding NEW INDICATIONS for
+    EXISTING (already-approved) drugs. The cold-start drug task is
+    HARDER and IRRELEVANT to the platform's commercial goal; a model
+    that works fine for repurposing would look broken when evaluated
+    on cold-start drugs. The default is now
+    ``split_mode="indication_first_approval"`` — an alias for the
+    pair-level split that evaluates the repurposing task. The same
+    drug may appear in train (for disease X) and test (for disease
+    Y); the test AUC measures extrapolation to NEW INDICATIONS for
+    KNOWN drugs, which is exactly what a pharma partner pays for.
 
-    Split modes (v100 ROOT FIX BUG P2-042):
-      - "drug_first_approval" (default, v88 BUG #34): split by the drug's
-        FIRST approval year across all diseases. No drug appears in both
-        train and test. Test AUC measures extrapolation to NEW DRUGS.
-        Backward-compatible default.
-      - "pair_level": split by the (drug, disease) pair's OWN approval
-        year. The same drug may appear in train (for disease X) and test
-        (for disease Y). Test AUC measures extrapolation to NEW
-        INDICATIONS for known drugs -- the drug-repurposing use case.
+    Split modes (v100 ROOT FIX BUG P2-042 + v104 P2-020 default change):
+      - "indication_first_approval" (DEFAULT since v104 / P2-020):
+        alias for ``pair_level``. Splits by the (drug, disease)
+        pair's OWN approval year. The same drug may appear in train
+        (disease X) and test (disease Y). Test AUC measures
+        extrapolation to NEW INDICATIONS for KNOWN drugs -- the
+        drug-repurposing use case the platform is built for.
+      - "pair_level": identical to ``indication_first_approval``
+        (kept as a backward-compat alias for code that predates
+        v104 / P2-020).
+      - "drug_first_approval" (v88 BUG #34 legacy): split by the
+        drug's FIRST approval year across all diseases. No drug
+        appears in both train and test. Test AUC measures
+        extrapolation to NEW DRUGS (cold-start) -- a harder,
+        commercially-irrelevant task for this platform. Kept for
+        backward compatibility; new code should use
+        ``indication_first_approval``.
 
     Args:
         positive_pairs: Positive example dicts with 'drug_id' and 'disease_id'.
         cutoff_year: Year boundary for temporal split.
         approval_years: Optional {(drug_id, disease_id): year} mapping.
-        split_mode: (v100 ROOT FIX BUG P2-042) "drug_first_approval"
-            (default) splits by the drug's first approval year across all
-            diseases -- backward compatible with v88 BUG #34. "pair_level"
-            splits by the (drug, disease) pair's own approval year --
-            stricter; allows the same drug in train and test for different
-            diseases (tests new-indication extrapolation).
+        split_mode: (v104 P2-020 root fix) Default is now
+            ``"indication_first_approval"`` — evaluates the drug-
+            repurposing task (new indications for known drugs). This
+            is an alias for ``"pair_level"``. Use
+            ``"drug_first_approval"`` only for the cold-start drug
+            extrapolation task (legacy, harder, not the platform's
+            commercial use case).
+        random_state: (v104 P2-022 root fix) Explicit integer seed for
+            the random fallback path (used only when
+            ``approval_years`` is None/empty AND
+            ``DRUGOS_ALLOW_TEMPORAL_RANDOM_FALLBACK=1`` is set).
+            Defaults to ``config.SEED`` (42). Passing an explicit
+            ``random_state`` makes the split REPRODUCIBLE across
+            runs independent of any global state — required for FDA
+            21 CFR Part 11 reproducibility and for comparing model
+            versions. The previous code called
+            ``sklearn.model_selection.train_test_split``-equivalent
+            shuffling with the global ``SEED`` but did not expose
+            the seed as a parameter, so two runs with the same data
+            could in principle produce different splits if any
+            upstream code mutated the global RNG state. The fix
+            makes the seed an explicit function argument and uses a
+            LOCAL ``random.Random(random_state)`` instance (not the
+            global RNG) so the split is hermetic to upstream RNG
+            mutations.
 
     Returns
     -------
@@ -1452,6 +1479,8 @@ def temporal_split_pairs(
 
     Raises:
         ValueError: If cutoff_year is outside reasonable range. (CFG-005)
+        ValueError: (v104 P2-020) If split_mode is not one of the
+            valid values.
     """
     # v100 ROOT FIX (BUG P2-028): the Returns section above now documents
     # the "dropped" key that v28 (P2-B-10) added to the return dict.
@@ -1536,16 +1565,34 @@ def temporal_split_pairs(
                 },
             )
         # IDE-001: Use set_global_seed() for reproducibility instead of bare random
+        # P2-022 ROOT FIX (v104): use the EXPLICIT ``random_state`` parameter
+        # (defaulting to ``SEED``) instead of the bare module-level ``SEED``.
+        # The previous code called ``set_global_seed(SEED)`` and
+        # ``random.Random(SEED)`` — both correct, but neither accepted an
+        # explicit per-call seed. FDA 21 CFR Part 11 reproducibility
+        # requires that the EXACT seed used to produce a split is recorded
+        # and reproducible independent of any global state. The fix:
+        # resolve ``random_state`` once at function entry (defaulting to
+        # ``config.SEED``), use a LOCAL ``random.Random(random_state)``
+        # instance (NOT the global RNG), and record the resolved seed in
+        # the split metadata so downstream consumers can verify
+        # reproducibility. The local RNG is hermetic to upstream
+        # ``set_global_seed`` calls — two runs with the same
+        # ``random_state`` and same data produce IDENTICAL splits even
+        # if other code mutates the global RNG between runs.
+        _p2_022_seed = int(random_state) if random_state is not None else int(SEED)
         logger.warning(
             "No approval year data -- DRUGOS_ALLOW_TEMPORAL_RANDOM_FALLBACK=1 "
-            "is set, falling back to deterministic random split (seed=%d). "
-            "WARNING: this violates the temporal evaluation guarantee -- "
-            "the returned split is NOT a temporal split. (H-5)",
-            SEED,
+            "is set, falling back to deterministic random split (seed=%d, "
+            "random_state=%r). WARNING: this violates the temporal "
+            "evaluation guarantee -- the returned split is NOT a temporal "
+            "split. (H-5 / P2-022 root fix — explicit random_state)",
+            _p2_022_seed, random_state,
         )
-        set_global_seed(SEED)
-        import random
-        rng = random.Random(SEED)  # Explicit seeded RNG for determinism
+        # P2-022: do NOT call set_global_seed here — that would mutate
+        # global RNG state and break hermeticity. Use a LOCAL RNG only.
+        import random as _random_p2_022
+        rng = _random_p2_022.Random(_p2_022_seed)  # LOCAL seeded RNG
         shuffled = sorted(positive_pairs, key=lambda p: (
             p.get("drug_id", ""), p.get("disease_id", "")
         ))  # IDE-002: Sort first for deterministic ordering
@@ -1568,7 +1615,8 @@ def temporal_split_pairs(
             "_split_metadata": {
                 "method": "random",
                 "cutoff_year": cutoff_year,
-                "seed": SEED,
+                "seed": _p2_022_seed,  # P2-022: record the resolved seed
+                "random_state": random_state,  # P2-022: the raw arg (None → SEED)
                 "train_count": n_train,
                 "val_count": n_val,
                 "test_count": n - n_train - n_val,
@@ -1619,20 +1667,41 @@ def temporal_split_pairs(
         drug_year = drug_first_approval.get(drug_id_v88)
 
         # v100 ROOT FIX (BUG P2-042): honor split_mode.
-        # - "drug_first_approval" (default, v88 BUG #34): split by the
+        # - "drug_first_approval" (v88 BUG #34 legacy): split by the
         #   drug's FIRST approval year across all diseases. Guarantees
         #   no drug appears in both train and test, but the test set
         #   then never contains a drug the model has already learned
         #   (zero extrapolation to new drugs -- see KNOWN LIMITATION in
         #   the docstring).
-        # - "pair_level": split by the (drug, disease) pair's OWN
+        # - "pair_level" / "indication_first_approval" (DEFAULT since
+        #   v104 / P2-020): split by the (drug, disease) pair's OWN
         #   approval year. The same drug may appear in train (disease X)
         #   and test (disease Y) -- tests temporal extrapolation to NEW
         #   INDICATIONS for known drugs (the drug-repurposing use case).
-        if split_mode == "pair_level":
+        #   "indication_first_approval" is the v104 default name;
+        #   "pair_level" is kept as a backward-compat alias.
+        if split_mode in ("pair_level", "indication_first_approval"):
             split_year = year
-        else:  # "drug_first_approval" (default; v88 BUG #34 logic)
+        elif split_mode == "drug_first_approval":
             split_year = drug_year if drug_year is not None else year
+        else:
+            # P2-020 ROOT FIX (v104): reject unknown split_mode values
+            # loudly rather than silently falling through to the
+            # ``drug_first_approval`` branch (the previous ``else``
+            # clause). A typo like ``"indication_first_approval"`` vs
+            # ``"indication-first-approval"`` would have silently
+            # produced the wrong split (cold-start drug task instead of
+            # repurposing task) — the V1 launch AUC would be evaluated
+            # on the wrong task with no error. Raise so the operator
+            # sees the typo immediately.
+            raise ValueError(
+                f"temporal_split_pairs: unknown split_mode="
+                f"{split_mode!r}. Valid values: 'indication_first_approval' "
+                f"(DEFAULT, v104 P2-020 — repurposing task), 'pair_level' "
+                f"(alias for indication_first_approval), "
+                f"'drug_first_approval' (legacy cold-start drug task). "
+                f"(P2-020 root fix — explicit rejection of unknown modes)"
+            )
 
         if split_year is None:
             no_year.append(pair)
