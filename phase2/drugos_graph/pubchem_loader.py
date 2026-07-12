@@ -25,6 +25,23 @@ from typing import Any, Dict, List, Optional, Union
 
 import pandas as pd
 
+# v102 ROOT FIX (P2-036): route InChIKey normalization through the
+# centralized helper so this loader produces the SAME canonical form
+# as phase1_bridge.py and chembl_loader.py.
+try:
+    from .utils import normalize_inchikey as _normalize_inchikey
+except Exception:  # pragma: no cover — fallback for direct-script execution
+    def _normalize_inchikey(inchikey):  # type: ignore[no-redef]
+        if inchikey is None:
+            return ""
+        try:
+            ik = str(inchikey).strip()
+        except Exception:
+            return ""
+        if not ik or ik.lower() in ("nan", "none", "null", "na"):
+            return ""
+        return ik.upper()
+
 logger = logging.getLogger(__name__)
 
 _DEFAULT_PHASE1_PROCESSED_DIR: Path = (
@@ -326,8 +343,15 @@ def pubchem_to_node_records(df: pd.DataFrame) -> List[Dict[str, Any]]:
 
         # InChIKey — Phase 1's canonical key. Uppercase to satisfy
         # kg_builder.ID_PATTERNS["Compound"] regex (must be uppercase).
-        inchikey = str(row_dict.get("inchikey") or "").strip()
-        inchikey = "" if inchikey.lower() == "nan" else inchikey.upper()
+        #
+        # v102 P2-036: route through centralized ``normalize_inchikey`` so
+        # this loader produces the SAME canonical form as phase1_bridge
+        # and chembl_loader (strip + upper + placeholder-collapse).
+        # Previously this loader used ``inchikey.upper()`` WITHOUT strip,
+        # so a " RZBJ...AN " input from a malformed PubChem extract
+        # would dead-letter while chembl_loader's ``.strip().upper()``
+        # would succeed — the SAME compound got two canonical IDs.
+        inchikey = _normalize_inchikey(row_dict.get("inchikey"))
 
         # Choose canonical ID: InChIKey preferred, else CID<pid> if we
         # somehow have a CID without an InChIKey (raw-SD-record path).

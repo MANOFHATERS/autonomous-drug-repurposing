@@ -162,6 +162,23 @@ except Exception:  # pragma: no cover — fallback for direct-script execution
     class DrugOSDataError(Exception):
         """Local fallback when the package cannot be imported."""
 
+# v102 ROOT FIX (P2-036): centralize InChIKey normalization so every
+# loader produces the SAME canonical form. Falls back to a local
+# implementation if utils cannot be imported (direct-script execution).
+try:
+    from .utils import normalize_inchikey as _normalize_inchikey
+except Exception:  # pragma: no cover — fallback for direct-script execution
+    def _normalize_inchikey(inchikey):  # type: ignore[no-redef]
+        if inchikey is None:
+            return ""
+        try:
+            ik = str(inchikey).strip()
+        except Exception:
+            return ""
+        if not ik or ik.lower() in ("nan", "none", "null", "na"):
+            return ""
+        return ik.upper()
+
 logger = logging.getLogger(__name__)
 
 
@@ -3544,7 +3561,18 @@ def stage_phase1_to_phase2(
             # but if any source emits a lowercase InChIKey it would be
             # dead-lettered. Uppercase explicitly here so the canonical
             # ID always matches the ID_PATTERNS regex.
-            inchikey_canonical = inchikey.upper() if inchikey else ""
+            #
+            # v102 ROOT FIX (P2-036): route through the centralized
+            # ``normalize_inchikey`` helper so this loader produces the
+            # SAME canonical form as chembl_loader and pubchem_loader
+            # (uppercase + strip + placeholder-collapsed). Previously
+            # ``inchikey.upper() if inchikey else ""`` did NOT strip
+            # whitespace, so a " RZBJ...AN " input would dead-letter
+            # while chembl_loader's ``.strip().upper()`` would succeed —
+            # the SAME compound landed as TWO canonical IDs depending
+            # on which loader ran. Centralizing eliminates this class
+            # of bug.
+            inchikey_canonical = _normalize_inchikey(inchikey)
             if inchikey_canonical and not inchikey_canonical.startswith("SYNTH"):
                 canonical_id = inchikey_canonical
             else:
