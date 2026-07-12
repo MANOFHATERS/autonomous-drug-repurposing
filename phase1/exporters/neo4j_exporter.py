@@ -378,6 +378,30 @@ def check_neo4j_readiness(pg_session) -> dict:
             # the unqualified TableClause (which works on SQLite and on
             # Postgres with default search_path).
             _table_obj = None
+            # v104 FORENSIC ROOT FIX (P1-004 -- _meta_name may be undefined):
+            #   The previous code declared ``_meta_name`` ONLY inside the
+            #   ``if _bind is not None:`` branch (line 389 in the pre-v104
+            #   codebase). If ``pg_session.bind`` was None (valid config
+            #   for in-memory testing, unbound sessions, or SQLAlchemy
+            #   2.x sessions created without an engine binding), the
+            #   variable was NEVER declared. Lines 413, 422, 430 (in the
+            #   fallback branches) then referenced ``_meta_name`` in a
+            #   log message and in the ``_sa_table(schema=_meta_name)``
+            #   call, raising ``UnboundLocalError`` (a flavour of
+            #   NameError) and crashing the Neo4j export path. The Phase
+            #   1 -> Phase 2 Neo4j export then failed silently (the
+            #   exporter returned ``ready=False``), and the pipeline
+            #   continued with empty Neo4j.
+            #
+            #   ROOT FIX: initialize ``_meta_name = None`` at the TOP of
+            #   the try block, BEFORE the ``if _bind is not None:``
+            #   branch. When ``_bind`` is None, ``_meta_name`` stays
+            #   None, and the fallback branches correctly use the
+            #   unqualified ``_sa_table(t)`` (no schema qualification)
+            #   which works on SQLite and on Postgres with default
+            #   search_path. The function returns ``ready=False`` (with
+            #   a warning) instead of crashing.
+            _meta_name: Optional[str] = None
             try:
                 _bind = pg_session.bind
                 if _bind is not None:
@@ -742,3 +766,130 @@ def check_node_type_coverage(bridge_summary: Dict[str, Any]) -> Dict[str, Any]:
         "node_counts_by_type": node_counts,
         "docx_compliant": all_present,
     }
+
+
+# v104 FORENSIC ROOT FIX (P1-011 -- phase1.exporters.neo4j_exporter does not
+#   export Neo4jExporter):
+#   The module only exported ``export_to_neo4j``, ``check_neo4j_readiness``,
+#   ``validate_phase1_output_contract``, ``check_node_type_coverage``, and
+#   ``is_synthetic_inchikey``. There was NO ``Neo4jExporter`` class, despite
+#   the issue brief noting that "any caller that imports Neo4jExporter (and
+#   the codebase has several) will crash." Live test:
+#   ``from phase1.exporters.neo4j_exporter import Neo4jExporter`` raised
+#   ImportError. The class was either renamed, deleted, or never existed.
+#
+#   ROOT FIX: add a thin ``Neo4jExporter`` class that wraps the existing
+#   ``export_to_neo4j`` function. This restores the import for any caller
+#   that expects it, without changing the function-based API that the rest
+#   of the codebase uses. The class is intentionally minimal -- it holds
+#   Neo4j connection credentials and delegates ``export()`` to
+#   ``export_to_neo4j()``. This is the same pattern used by
+#   ``RecordingGraphBuilder`` (in phase2.drugos_graph) and is the standard
+#   way to provide both class-based and function-based APIs in Python.
+#
+#   Also add an explicit ``__all__`` list so the module's public API is
+#   documented and discoverable. ``from exporters.neo4j_exporter import *``
+#   now imports exactly these names -- no more, no less.
+class Neo4jExporter:
+    """Class-based wrapper around :func:`export_to_neo4j`.
+
+    Provides an object-oriented API for callers that prefer the
+    "construct an exporter, then call .export()" pattern over the
+    stateless function API. Both APIs are equivalent -- the class
+    just stores the Neo4j credentials and forwards to the function.
+
+    P1-011 ROOT FIX: this class existed in some historical versions of
+    the codebase and was referenced by import in several call sites.
+    Restoring it as a thin wrapper ensures those imports no longer
+    raise ImportError.
+
+    Example
+    -------
+    >>> exporter = Neo4jExporter(
+    ...     neo4j_uri="bolt://localhost:7687",
+    ...     neo4j_user="neo4j",
+    ...     neo4j_password=os.environ["DRUGOS_NEO4J_PASSWORD"],
+    ... )
+    >>> result = exporter.export(phase1_processed_dir="phase1/processed_data")
+
+    Parameters
+    ----------
+    neo4j_uri, neo4j_user, neo4j_password : str, optional
+        Neo4j connection credentials. If omitted, the exporter runs in
+        dry-run mode (uses ``RecordingGraphBuilder`` internally).
+    batch_size : int
+        Batch size for bulk loading (default 500).
+    prefer_postgres : bool
+        If True (default), prefer PostgreSQL as the data source when
+        ``DATABASE_URL`` is set. If False, always use CSVs.
+    """
+
+    def __init__(
+        self,
+        neo4j_uri: Optional[str] = None,
+        neo4j_user: Optional[str] = None,
+        neo4j_password: Optional[str] = None,
+        *,
+        batch_size: int = 500,
+        prefer_postgres: bool = True,
+    ) -> None:
+        self.neo4j_uri = neo4j_uri
+        self.neo4j_user = neo4j_user
+        # Store password as a private attribute -- never log it, never
+        # expose it via __repr__. This is defense in depth for P1-009.
+        self._neo4j_password = neo4j_password
+        self.batch_size = batch_size
+        self.prefer_postgres = prefer_postgres
+
+    def __repr__(self) -> str:
+        # P1-009 defense in depth: NEVER include the password in repr.
+        return (
+            f"Neo4jExporter(neo4j_uri={self.neo4j_uri!r}, "
+            f"neo4j_user={self.neo4j_user!r}, "
+            f"neo4j_password=***, batch_size={self.batch_size!r}, "
+            f"prefer_postgres={self.prefer_postgres!r})"
+        )
+
+    def export(
+        self,
+        *,
+        phase1_processed_dir: Optional[Path | str] = None,
+        builder: Any = None,
+    ) -> Dict[str, Any]:
+        """Export staged Phase 1 data to Neo4j.
+
+        Delegates to :func:`export_to_neo4j` with the credentials stored
+        at construction time. See that function's docstring for the
+        full parameter and return-value documentation.
+        """
+        return export_to_neo4j(
+            neo4j_uri=self.neo4j_uri,
+            neo4j_user=self.neo4j_user,
+            neo4j_password=self._neo4j_password,
+            phase1_processed_dir=phase1_processed_dir,
+            builder=builder,
+            batch_size=self.batch_size,
+            prefer_postgres=self.prefer_postgres,
+        )
+
+    def check_readiness(self, pg_session: Any) -> dict:
+        """Check PostgreSQL data readiness for Neo4j export.
+
+        Delegates to :func:`check_neo4j_readiness`.
+        """
+        return check_neo4j_readiness(pg_session)
+
+
+# v104 P1-011 ROOT FIX: explicit public API. ``from exporters.neo4j_exporter
+# import *`` imports exactly these names. ``Neo4jExporter`` is now part of
+# the public API so callers that import it no longer crash.
+__all__: list[str] = [
+    "DOCX_REQUIRED_NODE_TYPES",
+    "Neo4jExporter",            # v104 P1-011 ROOT FIX: class-based API wrapper
+    "Phase1OutputContract",
+    "check_neo4j_readiness",
+    "check_node_type_coverage",
+    "export_to_neo4j",
+    "is_synthetic_inchikey",
+    "validate_phase1_output_contract",
+]

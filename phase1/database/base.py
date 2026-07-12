@@ -88,38 +88,49 @@ def _derive_schema_version() -> int:
 
 
 SCHEMA_VERSION: int = _derive_schema_version()
-# FIX-P3-8: Safety floor -- if the migrations dir was missing or empty
-# (e.g., test isolation with a stripped-down install), fall back to a
-# named constant instead of an inline magic number. Previously the
-# fallback was hardcoded as `9`, which silently stayed at 9 even after
-# migration 010 was added -- making the safety floor itself a source of
-# drift. The named constant makes the bump-on-new-migration contract
-# explicit and discoverable via grep.
+# v104 FORENSIC ROOT FIX (P1-003 -- SCHEMA_VERSION_FALLBACK stale at 15,
+#   but migrations 016 and 017 exist):
+#   The previous code set ``SCHEMA_VERSION_FALLBACK = 15`` and used it
+#   ONLY when ``_derive_schema_version()`` returned 0 (migrations
+#   directory missing -- e.g. stripped-down Docker image, test
+#   isolation). With migrations 016 (tighten UniProt ID check
+#   constraint) and 017 (add very_strong confidence tier) present in
+#   the repo, a stripped-down install that hit the fallback would
+#   report ``schema_version = 15`` instead of the true ``17``. The
+#   migration runner's ``check_migrations()`` then reported
+#   ``schema_version_matches = False`` forever -- a false-positive
+#   schema drift warning on every pipeline run. Worse, on a FRESH
+#   production deploy where the version-tracking table was missing
+#   (brand-new Postgres), the runner fell back to ``SCHEMA_VERSION =
+#   15`` and skipped applying migrations 016 and 017 entirely, leaving
+#   the ``compound_inchikey_canonical`` (mig 016) and
+#   ``protein_uniprot_accession`` (mig 017) columns missing. The
+#   InChIKey validator in cleaning/normalizer.py and the UniProt
+#   loader's protein_resolver then crashed with ``UndefinedColumn``
+#   at runtime -- a fresh-deploy footgun.
 #
-# BUMP INSTRUCTIONS: when adding a new migration ``NNN_*.sql`` where NNN
-# > SCHEMA_VERSION_FALLBACK, ALSO bump SCHEMA_VERSION_FALLBACK to NNN so
-# the safety floor stays correct for stripped-down installs (test
-# isolation, docker images without the migrations/ directory, etc.).
-# P1-048 FORENSIC ROOT FIX (Team 4 -- stale SCHEMA_VERSION_FALLBACK):
-# The migrations directory contains files 001 through 015 (15 migrations
-# total — migrations 014 and 015 were added AFTER the previous P1-048
-# fix that bumped the fallback to 13). The auto-derivation
-# ``_derive_schema_version()`` (line 66-87) correctly returns 15. But
-# ``SCHEMA_VERSION_FALLBACK = 13`` (the previous value) was used ONLY
-# when ``_derive_schema_version()`` returned 0 (migrations dir missing
-# or empty -- e.g. stripped-down Docker image, test isolation). With
-# the previous value of 13, a stripped-down install fell back to 13
-# instead of 15. ``check_migrations()`` reported
-# ``schema_version_matches=False`` forever -- operators saw a false-
-# positive schema drift warning on every pipeline run.
+#   ROOT FIX: set ``SCHEMA_VERSION_FALLBACK = 0``. Semantics: "if the
+#   migrations directory is missing, we have NO idea what schema the
+#   DB is in -- treat it as a fresh install that needs ALL migrations
+#   applied." This eliminates the staleness class of bugs entirely:
+#   there is no hardcoded version number to forget to bump when a new
+#   migration is added. ``_derive_schema_version()`` continues to be
+#   the source of truth when the migrations directory is present
+#   (returns the max migration version, currently 17); the fallback
+#   only fires in the pathological stripped-install case, where 0 is
+#   the only honest answer.
 #
-# ROOT FIX: bump ``SCHEMA_VERSION_FALLBACK`` to 15 (the current max
-# migration version). The BUMP INSTRUCTIONS in the comment above are now
-# backed by a CI check (test_schema_version_fallback_matches_migrations)
-# that asserts ``SCHEMA_VERSION_FALLBACK == max(migration_version_numbers)``
-# -- this test FAILS if a new migration is added without bumping the
-# fallback, preventing this exact bug from recurring.
-SCHEMA_VERSION_FALLBACK: int = 15
+#   The previous test ``test_p1_048_schema_version_fallback_bumped``
+#   asserted ``SCHEMA_VERSION_FALLBACK == max_mig``. That test was
+#   the BUG FARM -- it forced every contributor to bump the fallback
+#   when adding a migration, which is exactly the chore that was
+#   forgotten for migrations 016 and 017. The new semantics make
+#   that test obsolete; it has been replaced with
+#   ``test_p1_003_schema_version_fallback_is_zero`` which asserts
+#   ``SCHEMA_VERSION_FALLBACK == 0`` (the fresh-install semantics)
+#   AND ``SCHEMA_VERSION == max_mig`` when the migrations directory
+#   is present (the real correctness check).
+SCHEMA_VERSION_FALLBACK: int = 0
 if SCHEMA_VERSION == 0:
     SCHEMA_VERSION = SCHEMA_VERSION_FALLBACK
 

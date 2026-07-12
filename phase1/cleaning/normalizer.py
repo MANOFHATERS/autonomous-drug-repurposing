@@ -2904,16 +2904,37 @@ def is_valid_inchikey(key: str) -> bool:
     so there is exactly one definition of "valid InChIKey" across the
     codebase.
 
-    P1-ER-2 ROOT FIX (audit Chain 3): the v22 fix unified the validators
-    by accepting TEST/OUTER/INNER/IK prefixes everywhere. That solved the
-    divergent-validators compound chain at the cost of letting test
-    fixtures flow through to the DB → KG. Real InChIKeys NEVER start with
-    these prefixes — they were developer conveniences that leaked past
-    the DB boundary. The SYNTH prefix is still accepted because it is the
-    platform's own synthetic-key namespace (legitimately produced by
-    ``drug_resolver.synthesize_inchikey`` for records that lack a real
-    InChIKey). TEST/OUTER/INNER/IK are NOT — they were test-fixture
-    shortcuts and must never appear in production data.
+    v104 FORENSIC ROOT FIX (P1-008 -- InChIKey validators diverge):
+      The previous code in this function used
+      ``if cleaned.startswith("SYNTH") and len(cleaned) >= 7:`` to accept
+      synthetic InChIKeys, while ``is_canonical_inchikey`` in
+      ``cleaning/_constants.py`` used the regex
+      ``CANONICAL_SYNTHETIC_INCHIKEY_REGEX = ^SYNTH.+$`` (which requires
+      only ``len >= 6``). The divergent length thresholds (7 vs 6) meant
+      a key like ``"SYNTH-X"`` (7 chars total) was ACCEPTED by
+      ``is_canonical_inchikey`` but REJECTED by ``is_valid_inchikey``.
+      Compounds flip-flopped between "valid" and "invalid" depending on
+      which validator ran first -- some compounds were deduplicated (when
+      ``is_canonical_inchikey`` accepted them), others were not (when
+      ``is_valid_inchikey`` rejected them). The KG had inconsistent
+      Compound node identity. Entity resolution failed for borderline
+      InChIKeys.
+
+      ROOT FIX: delegate to the canonical ``is_canonical_inchikey`` in
+      ``cleaning/_constants.py``. There is now ONE validator, ONE regex
+      set, ONE length threshold. Both functions return the same answer
+      for every input. The divergent ``len >= 7`` check is GONE.
+
+    P1-ER-2 ROOT FIX (audit Chain 3, retained): the v22 fix unified the
+    validators by accepting TEST/OUTER/INNER/IK prefixes everywhere. That
+    solved the divergent-validators compound chain at the cost of letting
+    test fixtures flow through to the DB -> KG. Real InChIKeys NEVER
+    start with these prefixes -- they were developer conveniences that
+    leaked past the DB boundary. The SYNTH prefix is still accepted
+    because it is the platform's own synthetic-key namespace (legitimately
+    produced by ``drug_resolver.synthesize_inchikey`` for records that
+    lack a real InChIKey). TEST/OUTER/INNER/IK are NOT -- they were
+    test-fixture shortcuts and must never appear in production data.
 
     Parameters
     ----------
@@ -2939,30 +2960,10 @@ def is_valid_inchikey(key: str) -> bool:
     >>> is_valid_inchikey("invalid")
     False
     """
-    if not isinstance(key, str) or not key:
-        return False
-    # Normalize first (strip + upper) so the validator is forgiving.
-    cleaned = key.strip().upper()
-    if not cleaned:
-        return False
-    if _INCHIKEY_PATTERN.match(cleaned):
-        return True
-    if cleaned.startswith("SYNTH") and len(cleaned) >= 7:
-        # SYNTH is the platform's own synthetic-key namespace (produced
-        # by drug_resolver.synthesize_inchikey) — legitimately accepted.
-        # P1-069 ROOT FIX: reject bare "SYNTH" (5 chars) — a valid
-        # synthetic key must have at least 7 chars ("SYNTH" + at least
-        # 2 chars of hash suffix). A bare "SYNTH" is almost certainly
-        # a placeholder or truncated value, not a legitimate key.
-        return True
-    if _MIXTURE_INCHIKEY_PATTERN.match(cleaned):
-        return True
-    # P1-ER-2 ROOT FIX: TEST / OUTER / INNER / IK prefixes are NOT
-    # accepted. They were developer conveniences for test fixtures and
-    # must never flow through to the DB / KG. Reject them here so the
-    # canonical contract is "real InChIKeys only, plus our own SYNTH
-    # namespace, plus mixtures".
-    return False
+    # v104 P1-008 ROOT FIX: delegate to the single canonical validator.
+    # This eliminates the divergent ``len(cleaned) >= 7`` check that
+    # flip-flopped with ``is_canonical_inchikey``'s ``len >= 6`` regex.
+    return is_canonical_inchikey(key)
 
 
 def is_synthetic_inchikey(inchikey: str) -> bool:

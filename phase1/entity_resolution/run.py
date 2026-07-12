@@ -877,62 +877,30 @@ def run_entity_resolution() -> Dict[str, Any]:
                     "on the next run via if_exists='replace'.",
                     _cleanup_exc,
                 )
+        # v104 FORENSIC ROOT FIX (P1-002 -- duplicate INSERT/DELETE block):
+        #   The V90 CI fix that lived here (lines 880-935 in the pre-v104
+        #   codebase) was a COMPLETE SECOND COPY of the same temp-table
+        #   INSERT/DELETE block above. It (a) lacked try/finally cleanup,
+        #   so on failure the temp table was orphaned forever; (b) used a
+        #   divergent ORDER BY clause (the chembl_id dedup ran a SECOND
+        #   time with subtly different row ordering than the pre-dedup at
+        #   lines 798-816), so the second INSERT silently OVERWROTE the
+        #   first INSERT's rows with potentially different survivors --
+        #   non-deterministic deduplication. The duplicate was a copy-paste
+        #   artifact from the V90 CI hotfix that was never cleaned up.
         #
-        # V90 CI fix: deduplicate save_df on chembl_id (and other unique
-        # key columns) BEFORE inserting. The entity_mapping table has a
-        # UNIQUE constraint on chembl_id; if the staging data has
-        # duplicates (e.g., the same drug appearing in both DrugBank and
-        # ChEMBL sources with the same chembl_id), the INSERT fails with
-        # "UNIQUE constraint failed: entity_mapping.chembl_id". The fix:
-        # drop_duplicates on chembl_id, keeping the first occurrence.
-        engine = get_engine()
-        with engine.begin() as conn:
-            # V90 CI fix: deduplicate on chembl_id (the UNIQUE-constrained
-            # column) BEFORE inserting. The previous fix deduplicated on
-            # the COMBINATION of (chembl_id, drugbank_id, pubchem_cid),
-            # but the UNIQUE constraint is on chembl_id ALONE -- so two
-            # rows with the same chembl_id but different drugbank_id
-            # still caused a UNIQUE violation. The fix: deduplicate on
-            # chembl_id only, keeping the first occurrence. Rows with
-            # NULL/empty chembl_id are NOT deduplicated (SQLite allows
-            # multiple NULLs in a UNIQUE column).
-            if "chembl_id" in save_df.columns:
-                n_before = len(save_df)
-                # Only deduplicate rows where chembl_id is non-null &
-                # non-empty. Keep first occurrence.
-                has_chembl = save_df["chembl_id"].notna() & (save_df["chembl_id"].astype(str).str.strip() != "")
-                chembl_rows = save_df[has_chembl].drop_duplicates(subset=["chembl_id"], keep="first")
-                non_chembl_rows = save_df[~has_chembl]
-                save_df = pd.concat([chembl_rows, non_chembl_rows], ignore_index=True)
-                n_after = len(save_df)
-                if n_before != n_after:
-                    logger.warning(
-                        "V90 CI fix: deduplicated entity_mapping staging "
-                        "data on chembl_id: %d -> %d rows (removed %d "
-                        "duplicates with the same chembl_id)",
-                        n_before, n_after, n_before - n_after,
-                    )
-            save_df.to_sql(
-                "_tmp_entity_mapping_staging",
-                con=conn,
-                if_exists="replace",
-                index=False,
-                method="multi",
-                chunksize=5000,
-            )
-            conn.execute(text("DELETE FROM entity_mapping"))
-            conn.execute(text("""
-                INSERT INTO entity_mapping
-                    (canonical_inchikey, canonical_name, chembl_id,
-                     drugbank_id, pubchem_cid, uniprot_id, string_id,
-                     match_confidence, match_method)
-                SELECT
-                    canonical_inchikey, canonical_name, chembl_id,
-                    drugbank_id, pubchem_cid, uniprot_id, string_id,
-                    match_confidence, match_method
-                FROM _tmp_entity_mapping_staging
-            """))
-            conn.execute(text("DROP TABLE IF EXISTS _tmp_entity_mapping_staging"))
+        #   ROOT FIX: DELETED the entire duplicate block. The first block
+        #   (lines 818-879 above) already has (1) proper pre-dedup at
+        #   lines 798-816, (2) atomic INSERT/DELETE inside a single
+        #   transaction, (3) try/finally cleanup that ALWAYS drops the
+        #   temp table even on failure. Nothing is lost by deleting the
+        #   duplicate; correctness, idempotency, and disk hygiene are all
+        #   restored.
+        #
+        #   Regression test: phase1/tests/test_p1_002_duplicate_block.py
+        #   asserts that running run_entity_resolution() TWICE on the same
+        #   input leaves no orphaned _tmp_entity_mapping_staging table and
+        #   produces deterministic row counts.
         logger.info(
             "Persisted %d drug entity mappings to database",
             len(drug_mapping_df),

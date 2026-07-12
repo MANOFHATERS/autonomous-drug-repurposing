@@ -198,19 +198,51 @@ CANONICAL_NON_HUMAN_GENE_SYMBOL_REGEX: re.Pattern[str] = re.compile(
 # v35 ROOT FIX: canonical OMIM disease ID regex (single source of truth)
 # ============================================================================
 #
-# OMIM IDs are 6-digit numbers in current use (e.g. 104300 for Marfan
-# syndrome), but historical MIM numbers can be as short as 4 digits (the
-# earliest MIM numbers, e.g. 1000-series from the 1960s). 7-digit MIM
-# numbers do not exist in current OMIM data but are tolerated for forward
-# compatibility (in case OMIM ever expands its ID space).
+# v104 FORENSIC ROOT FIX (P1-005 -- OMIM MIM-number range diverges across
+#   3 modules):
+#   The previous code accepted 4-7 digit MIM numbers (``^[0-9]{4,7}$``).
+#   This diverged from BOTH:
+#     - omim_pipeline.py:701 which validates ``100100 <= mim <= 999999``
+#       (strict 6-digit OMIM range per OMIM's own numbering convention).
+#     - disgenet_pipeline.py:418 which used ``_OMIM_MIM_MAX = 9999999``
+#       (7-digit, allowing forward-expansion that OMIM has never used).
+#   When DisGeNET loaded a 7-digit MIM (which does not exist in current
+#   OMIM data), the OMIM pipeline rejected it during cross-source
+#   validation, silently dropping the disease. The KG then had the
+#   disease from DisGeNET but not from OMIM -- and the entity resolver
+#   could not merge them because the MIM formats did not match. Disease
+#   nodes were duplicated in the KG, GNN assigned different embeddings
+#   to the same disease, and the RL ranker could rank the same drug
+#   twice for the same disease under different MIM aliases.
 #
-# All pipelines that ingest OMIM IDs (DisGeNET, OMIM, drug-resolver, DB
-# loaders) MUST import this regex. ``database.models.Disease.disease_id``
-# keeps a portable SQLite-compatible CHECK constraint (LENGTH 4-10) and
-# delegates the strict format check to this regex at the Python layer.
+#   ROOT FIX: standardize on the OMIM canonical format -- 6 digits,
+#   numeric range [100100, 999999]. The regex ``^[1-9][0-9]{5}$``
+#   enforces 6 digits starting with 1-9 (covers all OMIM ranges:
+#   100100-199999 autosomal dominant, 200000-299999 autosomal recessive,
+#   300000-399999 X-linked, 400000-499999 Y-linked, 500000-599999
+#   mitochondrial, 600000-999999 post-1994 autosomal loci). The
+#   numeric range check [100100, 999999] is the second layer (rejects
+#   100000-100099 which match the regex but are below OMIM's first
+#   official phenotype MIM). All three modules (omim_pipeline,
+#   disgenet_pipeline, _constants) now import this SAME regex and the
+#   SAME range constants.
+#
+#   The issue brief suggested ``^1[0-9]{6}$`` (strict 6-digit starting
+#   with 1) -- but that regex would reject ALL legitimate MIMs starting
+#   with 2-9 (e.g. 600000-series post-1994 loci which are the BULK of
+#   current OMIM entries). We use the scientifically-correct
+#   ``^[1-9][0-9]{5}$`` instead, combined with the [100100, 999999]
+#   numeric range check.
 CANONICAL_OMIM_DISEASE_ID_REGEX: re.Pattern[str] = re.compile(
-    r"^(?:OMIM:)?[0-9]{4,7}$"
+    r"^(?:OMIM:)?[1-9][0-9]{5}$"
 )
+
+# v104 P1-005: OMIM MIM numeric range -- SINGLE source of truth.
+# All modules (omim_pipeline, disgenet_pipeline, _constants, drug_resolver,
+# DB loaders) MUST import these constants. Divergence = silent disease
+# deduplication failure (see P1-005 compound effect above).
+OMIM_MIM_MIN: int = 100100  # First official OMIM phenotype MIM number
+OMIM_MIM_MAX: int = 999999  # Last 6-digit MIM (OMIM has not expanded to 7 digits)
 
 
 # ============================================================================

@@ -178,6 +178,8 @@ import requests
 from cleaning._constants import (
     normalize_gene_symbol,  # v29 ROOT FIX (audit P1-24)
     normalize_uniprot_id,   # v29 ROOT FIX (audit P1-24)
+    OMIM_MIM_MAX,           # v104 P1-005 ROOT FIX: canonical OMIM MIM range
+    OMIM_MIM_MIN,           # v104 P1-005 ROOT FIX: canonical OMIM MIM range
 )
 from cleaning.confidence import (
     CONFIDENCE_TIER_METHOD_VERSION,
@@ -692,16 +694,23 @@ class OMIMRecord:
                 f"(line {self.source_line_number})"
             )
         # BUG-3.7, BUG-3.14: phenotype_mim range and positivity.
+        # v104 P1-005 ROOT FIX: import the canonical range constants from
+        # cleaning/_constants.py (single source of truth). The previous
+        # code hardcoded ``100100`` and ``999999`` inline, which diverged
+        # from disgenet_pipeline.py (which used ``9999999``) and from
+        # _constants.py (which accepted 4-7 digits). All three modules
+        # now use the SAME constants -- divergence = silent disease
+        # deduplication failure.
         if self.phenotype_mim is not None:
             if self.phenotype_mim <= 0:
                 raise ValueError(
                     f"phenotype_mim {self.phenotype_mim} <= 0 "
                     f"(line {self.source_line_number})"
                 )
-            if not (100100 <= self.phenotype_mim <= 999999):
+            if not (OMIM_MIM_MIN <= self.phenotype_mim <= OMIM_MIM_MAX):
                 raise ValueError(
                     f"phenotype_mim {self.phenotype_mim} outside OMIM range "
-                    f"[100100, 999999] (line {self.source_line_number})"
+                    f"[{OMIM_MIM_MIN}, {OMIM_MIM_MAX}] (line {self.source_line_number})"
                 )
 
     @classmethod
