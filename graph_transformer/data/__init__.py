@@ -41,13 +41,44 @@ NODE_TYPES: List[str] = [
 # other sub-modules. Single source of truth -- see B7 fix.
 DEFAULT_NODE_TYPES: List[str] = NODE_TYPES
 
-# 14 edge types (7 forward + 7 reverse). Every node type receives at least
+# 18 edge types (9 forward + 9 reverse). Every node type receives at least
 # one incoming edge type, which is required for heterogeneous message
 # passing in the Graph Transformer.
+#
+# P3-001/P3-002/P3-009 ROOT FIX (Team Member 9, forensic root fix):
+# The original schema had 14 edge types (7 forward + 7 reverse) and ONLY
+# supported "inhibits"/"activates" for drug→protein edges. This forced the
+# Phase 2→3 adapter to map ("Compound","targets","Protein") → "inhibits"
+# (WRONG — "targets" means "binds to, direction UNKNOWN", not inhibition)
+# and ("Compound","allosterically_modulates","Protein") → "activates"
+# (WRONG — allosteric modulators can be PAM or NAM). The scientifically
+# correct fix is to add TWO new neutral forward edge types — "binds"
+# (direction-unknown binding) and "modulates" (allosteric modulation
+# without PAM/NAM disambiguation) — plus their reverse counterparts
+# "bound_by" and "modulated_by". This:
+#   1. Preserves the binding/modulation signal (institutional-grade —
+#      do not silently drop potentially useful drug-protein interactions).
+#   2. Keeps the drug→protein→pathway→disease 3-hop pattern CONNECTED
+#      for drugs whose only Phase 2 action is "targets" or
+#      "allosterically_modulates" (dropping those edges would disconnect
+#      the drug from the protein layer, breaking the core scientific
+#      requirement per the DOCX).
+#   3. Does NOT teach the GT model that all binding = inhibition
+#      (the original bug corrupted the multi-hop signal).
+#   4. Lets future PAM/NAM disambiguation (via ChEMBL standard_type/
+#      standard_relation) split "modulates" into "activates"/"inhibits"
+#      without another schema change — just remap the Phase 2 relation.
+# ("Compound","unknown","Protein") is intentionally NOT mapped to any
+# Phase 3 edge type — unknown mechanisms must NEVER be mapped to a
+# specific mechanism (per the P3-001 issue mandate). The adapter DROPS
+# unknown edges with an INFO log.
 EDGE_TYPES: List[Tuple[str, str, str]] = [
     # Forward edges
     ("drug", "inhibits", "protein"),
     ("drug", "activates", "protein"),
+    # P3-001/P3-002 root fix: neutral binding + modulation edge types.
+    ("drug", "binds", "protein"),
+    ("drug", "modulates", "protein"),
     ("protein", "part_of", "pathway"),
     ("pathway", "disrupted_in", "disease"),
     ("drug", "treats", "disease"),
@@ -56,6 +87,9 @@ EDGE_TYPES: List[Tuple[str, str, str]] = [
     # Reverse edges (ensure every node type receives incoming messages)
     ("protein", "inhibited_by", "drug"),
     ("protein", "activated_by", "drug"),
+    # P3-001/P3-002 root fix: reverse of binds + modulates.
+    ("protein", "bound_by", "drug"),
+    ("protein", "modulated_by", "drug"),
     ("pathway", "has_member", "protein"),
     ("disease", "disrupted_by", "pathway"),
     ("disease", "treated_by", "drug"),
@@ -64,8 +98,8 @@ EDGE_TYPES: List[Tuple[str, str, str]] = [
 ]
 
 # Forward edge types only (used by graph builder for reverse-edge synthesis).
-FORWARD_EDGE_TYPES: List[Tuple[str, str, str]] = EDGE_TYPES[:7]
-REVERSE_EDGE_TYPES: List[Tuple[str, str, str]] = EDGE_TYPES[7:]
+FORWARD_EDGE_TYPES: List[Tuple[str, str, str]] = EDGE_TYPES[:9]
+REVERSE_EDGE_TYPES: List[Tuple[str, str, str]] = EDGE_TYPES[9:]
 
 # Canonical default edge types -- re-exported for use by other sub-modules
 # (B7 fix: single source of truth).
@@ -75,6 +109,9 @@ DEFAULT_EDGE_TYPES: List[Tuple[str, str, str]] = EDGE_TYPES
 REVERSE_RELATION_MAP: Dict[str, str] = {
     "inhibits": "inhibited_by",
     "activates": "activated_by",
+    # P3-001/P3-002 root fix: reverse relations for the new neutral types.
+    "binds": "bound_by",
+    "modulates": "modulated_by",
     "part_of": "has_member",
     "disrupted_in": "disrupted_by",
     "treats": "treated_by",
@@ -247,11 +284,12 @@ def self_check() -> Dict[str, bool]:
     """Run a smoke test of the data package."""
     checks: Dict[str, bool] = {}
     checks["node_types_defined"] = len(NODE_TYPES) == 5
-    checks["edge_types_14"] = len(EDGE_TYPES) == 14
+    # P3-001/P3-002 root fix: 18 edge types (9 forward + 9 reverse) — was 14.
+    checks["edge_types_18"] = len(EDGE_TYPES) == 18
     checks["feature_dims_complete"] = set(DEFAULT_FEATURE_DIMS.keys()) == set(NODE_TYPES)
     checks["all_edge_types_valid"] = (
         all(validate_edge_type(et) is None for et in EDGE_TYPES)
-        if checks["edge_types_14"]
+        if checks["edge_types_18"]
         else False
     )
     checks["label_leaking_edges_subset_of_edge_types"] = LABEL_LEAKING_EDGES.issubset(
