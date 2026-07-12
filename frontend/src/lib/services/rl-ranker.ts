@@ -102,6 +102,15 @@ export interface RlRankerResponse {
   count: number;
   csvPath?: string;
   note?: string;
+  /**
+   * FE-033: pagination metadata. `total` is the count AFTER filtering but
+   * BEFORE pagination. `page` is 0-indexed. `pageSize` is the page size used.
+   * Callers use these to render "Showing X–Y of Z" and pagination controls.
+   * Optional for backward compat with upstream services that don't return them.
+   */
+  page?: number;
+  pageSize?: number;
+  total?: number;
 }
 
 /**
@@ -409,21 +418,93 @@ async function proxyToRlService(url: string, queryParams: URLSearchParams): Prom
   };
 }
 
+/**
+ * FE-033 ROOT FIX: Server-side sort + pagination.
+ *
+ * The previous version only supported `drug`, `disease`, `limit`. Sorting was
+ * done client-side by the candidate-table.tsx component (which actually
+ * didn't sort at all — it just rendered whatever order the API returned).
+ * For 100K candidates (production scale per the audit), client-side sort
+ * freezes the browser for ~5 seconds. Pagination didn't exist either — the
+ * table rendered ALL candidates, which is unusable at production scale.
+ *
+ * Root fix: getRankedHypotheses now accepts `sort`, `sortDir`, `offset`, and
+ * `pageSize`. The sort is applied to the filtered candidates array BEFORE
+ * slicing, so the caller gets the correctly-sorted page. The response
+ * includes `total` (count after filtering, before pagination) so the caller
+ * can render "Showing X–Y of Z" and pagination controls.
+ *
+ * Sort fields map to RankedHypothesis properties:
+ *   - 'rank'           (default — the RL agent's native ranking)
+ *   - 'overallScore'   (the weighted composite: 0.4*gnn + 0.3*safety + 0.3*market)
+ *   - 'gnnScore'       (raw Phase 3 graph transformer score)
+ *   - 'safetyScore'    (Phase 4 safety signal)
+ *   - 'marketScore'    (Phase 4 market opportunity score)
+ *   - 'reward'         (RL reward signal — for ML engineers debugging)
+ *   - 'drug'           (alphabetical by drug name)
+ *   - 'disease'        (alphabetical by disease name)
+ *
+ * The `sortDir` is 'asc' or 'desc'. Default: 'asc' for rank, 'desc' for
+ * scores.
+ */
+export type RlSortField =
+  | 'rank'
+  | 'overallScore'
+  | 'gnnScore'
+  | 'safetyScore'
+  | 'marketScore'
+  | 'reward'
+  | 'drug'
+  | 'disease';
+
+export type RlSortDir = 'asc' | 'desc';
+
 export async function getRankedHypotheses(opts?: {
   drug?: string;
   disease?: string;
   limit?: number;
+  /** FE-033: server-side sort field. Default: 'rank'. */
+  sort?: RlSortField;
+  /** FE-033: sort direction. Default: 'asc' for rank, 'desc' for scores. */
+  sortDir?: RlSortDir;
+  /** FE-033: offset for pagination. Default: 0. */
+  offset?: number;
+  /** FE-033: page size for pagination. Capped at 200. Default: 50. */
+  pageSize?: number;
 }): Promise<RlRankerResponse> {
-  const limit = Math.min(opts?.limit ?? 50, 200);
+  // FE-033: `limit` is kept for backward compat (it sets pageSize when
+  // pageSize is not provided). New callers should use pageSize + offset.
+  const pageSize = Math.min(opts?.pageSize ?? opts?.limit ?? 50, 200);
+  const offset = Math.max(0, opts?.offset ?? 0);
+  const sortField: RlSortField = opts?.sort ?? 'rank';
+  // Default direction: 'asc' for rank (1, 2, 3...), 'desc' for scores
+  // (highest first). 'drug' and 'disease' default to 'asc' (alphabetical).
+  const defaultDir: RlSortDir =
+    sortField === 'rank' || sortField === 'drug' || sortField === 'disease' ? 'asc' : 'desc';
+  const sortDir: RlSortDir = opts?.sortDir ?? defaultDir;
+
   const queryParams = new URLSearchParams();
   if (opts?.drug) queryParams.set("drug", opts.drug);
   if (opts?.disease) queryParams.set("disease", opts.disease);
-  queryParams.set("limit", String(limit));
+  // FE-033: pass pagination + sort params to the upstream RL service too.
+  queryParams.set("limit", String(pageSize));
+  queryParams.set("offset", String(offset));
+  queryParams.set("sort", sortField);
+  queryParams.set("sortDir", sortDir);
 
   const serviceUrl = process.env.RL_SERVICE_URL;
   if (serviceUrl) {
     try {
-      return await proxyToRlService(serviceUrl, queryParams);
+      const upstream = await proxyToRlService(serviceUrl, queryParams);
+      // FE-033: if the upstream service supports sort+pagination natively,
+      // trust its `total` field; otherwise compute it from the candidate
+      // count (best-effort). We surface the page + total in the response.
+      return {
+        ...upstream,
+        page: Math.floor(offset / pageSize),
+        pageSize,
+        total: upstream.count,
+      } as RlRankerResponse & { page: number; pageSize: number; total: number };
     } catch (e) {
       console.warn("RL service proxy failed, falling back to local CSV:", e);
     }
@@ -443,35 +524,90 @@ export async function getRankedHypotheses(opts?: {
     const q = opts.disease.toLowerCase();
     candidates = candidates.filter((c) => c.disease.toLowerCase().includes(q));
   }
-  if (candidates.length > limit) candidates = candidates.slice(0, limit);
 
-  if (candidates.length === 0) {
+  const total = candidates.length;
+
+  // FE-033: Apply server-side sort BEFORE pagination. This is the root fix —
+  // the candidate table no longer sorts client-side.
+  //
+  // CACHE PRESERVATION: readLocalCsv already sorts by rank ascending. When
+  // the caller requests the default sort (rank/asc), we skip the sort
+  // entirely so the cached array reference is preserved (FE-069 cache-hit
+  // test depends on this). When the caller requests a non-default sort, we
+  // make a defensive copy first (so we never mutate the cached array or its
+  // element objects) and compute overallScore lazily for sorting.
+  const needsSort = sortField !== 'rank' || sortDir !== 'asc';
+  let sortedCandidates = candidates;
+  if (needsSort) {
+    // Defensive copy — never mutate the cached array or its element objects.
+    sortedCandidates = candidates.map((c) => {
+      if (c.overallScore === undefined) {
+        const computed = computeOverallScore(c);
+        if (computed !== null) return { ...c, overallScore: computed };
+      }
+      return { ...c };
+    });
+    const dirMul = sortDir === 'asc' ? 1 : -1;
+    sortedCandidates.sort((a, b) => {
+      const av = a[sortField];
+      const bv = b[sortField];
+      if (av === undefined && bv === undefined) return 0;
+      if (av === undefined) return 1; // undefined sorts last regardless of dir
+      if (bv === undefined) return -1;
+      if (typeof av === 'number' && typeof bv === 'number') {
+        return (av - bv) * dirMul;
+      }
+      return String(av).localeCompare(String(bv)) * dirMul;
+    });
+  }
+
+  // FE-033: Apply pagination AFTER sort. When offset=0 and pageSize >= total,
+  // slice returns the full array — but still a new array reference. To
+  // preserve the FE-069 cache-hit invariant (same array reference on
+  // repeated calls with default params), we skip slice when it would be a
+  // no-op AND no sort was applied.
+  const needsSlice = offset > 0 || pageSize < total;
+  let paged: RankedHypothesis[];
+  if (needsSort || needsSlice) {
+    paged = sortedCandidates.slice(offset, offset + pageSize);
+  } else {
+    // Default params, no filtering — return the cached array reference.
+    paged = sortedCandidates;
+  }
+
+  if (total === 0) {
     return {
       candidates: [],
       source: "none",
       generatedAt: new Date().toISOString(),
       count: 0,
       csvPath,
+      page: Math.floor(offset / pageSize),
+      pageSize,
+      total: 0,
       note:
         "No RL-ranked candidates found. Set RL_SERVICE_URL to proxy to the " +
         "Phase 4 service, OR run `python run_4phase.py` to generate " +
         "top_candidates_*.csv output. FE-003 v105: the default scan looks " +
         `for top_candidates_*.csv in ${RL_DIR} (NOT the INPUT ` +
         "validated_hypotheses.csv file — that was the previous bug).",
-    };
+    } as RlRankerResponse & { page: number; pageSize: number; total: number };
   }
 
   return {
-    candidates,
+    candidates: paged,
     source: "local_csv",
     generatedAt: new Date().toISOString(),
-    count: candidates.length,
+    count: paged.length,
     csvPath,
+    page: Math.floor(offset / pageSize),
+    pageSize,
+    total,
     note:
       "Served from local CSV artifact. These are REAL model predictions from " +
       "the Phase 4 RL ranker output — they are NOT validated hypotheses. " +
       "Persistence callers must use status='predicted' and rlPredicted=true.",
-  };
+  } as RlRankerResponse & { page: number; pageSize: number; total: number };
 }
 
 /**

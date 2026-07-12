@@ -61,11 +61,49 @@ import {
   sidebarCategories,
   type ScreenCategory,
 } from '@/lib/screens';
-// FE-026 ROOT FIX: notifications array is now empty (was fabricated data).
-// The shell should call api.listNotifications() — see api-client.ts.
-// For now, the empty array renders an empty notifications dropdown.
-import { notifications } from '@/lib/mock-data';
+// FE-029 ROOT FIX: The shell previously imported `notifications` from the
+// (now-deleted) `mock-data.ts` and rendered hardcoded 'Dr. Sarah Chen' /
+// 'sarah.chen@drugos.io' / 'SC' in the user dropdown. Both were fabricated:
+// a researcher named 'John Smith' saw 'Dr. Sarah Chen' in their dropdown and
+// audit-trail entries were attributed to the wrong identity.
+//
+// Root fix:
+//   1. The user dropdown now reads from `useSession()` — the real
+//      authenticated user returned by /api/auth/me. When the session is
+//      loading or absent, we render a neutral placeholder ('…' / 'Guest'),
+//      NEVER a fabricated name.
+//   2. The notifications dropdown now fetches real notifications from
+//      /api/notifications via the `useNotifications` hook. On error or empty,
+//      it renders an honest empty state — never fabricated "Sarah Chen
+//      published a hypothesis" entries.
+import { useSession } from '@/components/drugos/session-provider';
+import { useNotifications } from '@/components/drugos/use-api-data';
 import { cn } from '@/lib/utils';
+
+/**
+ * FE-029: Compute initials from a real user's display name.
+ *
+ * Strategy: take the first letter of the first two whitespace-separated
+ * tokens, uppercased. If the name is null/empty, return '??' so the avatar
+ * is never blank. Single-token names (e.g. "Manoj") return the first two
+ * letters uppercased ("MA"). Email-only identities fall back to the first
+ * two letters of the local part.
+ *
+ * This function is PURE and unit-tested in fe-029-to-036-team16.test.ts.
+ */
+export function getInitials(name: string | null | undefined): string {
+  if (!name || !name.trim()) return '??';
+  const trimmed = name.trim();
+  const tokens = trimmed.split(/\s+/).filter(Boolean);
+  if (tokens.length === 0) return '??';
+  if (tokens.length === 1) {
+    // Single token: take first two chars (e.g. "Manoj" -> "MA").
+    const t = tokens[0];
+    return t.slice(0, 2).toUpperCase();
+  }
+  // Multi-token: first char of first token + first char of last token.
+  return (tokens[0][0] + tokens[tokens.length - 1][0]).toUpperCase();
+}
 
 // ---- Icon Map ----
 
@@ -343,7 +381,27 @@ function SidebarContent({
 
 export function AppShell({ activeScreen, onNavigate, children }: AppShellProps) {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  const unreadCount = notifications.filter((n) => !n.read).length;
+  // FE-029 ROOT FIX: useSession() returns the REAL authenticated user from
+  // /api/auth/me. We render neutral placeholders while loading or signed out
+  // — NEVER a fabricated name like 'Dr. Sarah Chen'.
+  const session = useSession();
+  // FE-029 ROOT FIX: useNotifications() fetches the REAL notification feed
+  // from /api/notifications. We render an honest empty state when there are
+  // no notifications — NEVER fabricated "Sarah Chen published a hypothesis".
+  const { notifications: realNotifications, unreadCount } = useNotifications();
+
+  // Resolve the display name + email + initials from the real session.
+  // While the session is loading or the user is signed out, we show a
+  // neutral placeholder so the avatar is never blank and never lies.
+  const displayName = session.loading
+    ? '…'
+    : session.user?.name || session.user?.email || 'Guest';
+  const displayEmail = session.loading
+    ? ''
+    : session.user?.email || '';
+  const displayInitials = session.loading
+    ? '…'
+    : getInitials(session.user?.name || session.user?.email);
 
   const handleNavigate = useCallback(
     (screenId: string) => {
@@ -461,7 +519,13 @@ export function AppShell({ activeScreen, onNavigate, children }: AppShellProps) 
                   </Badge>
                 </DropdownMenuLabel>
                 <DropdownMenuSeparator />
-                {notifications.slice(0, 5).map((notif) => (
+                {realNotifications.length === 0 && (
+                  <div className="px-3 py-6 text-center text-xs text-muted-foreground">
+                    No notifications yet. You&rsquo;ll see hypothesis updates,
+                    collaborator activity, and system alerts here.
+                  </div>
+                )}
+                {realNotifications.slice(0, 5).map((notif) => (
                   <DropdownMenuItem
                     key={notif.id}
                     className="flex flex-col items-start gap-1 p-3 cursor-pointer"
@@ -477,33 +541,35 @@ export function AppShell({ activeScreen, onNavigate, children }: AppShellProps) 
                         )}
                       />
                       <span className="text-sm font-medium truncate">{notif.title}</span>
-                      {!notif.read && (
+                      {!notif.readAt && (
                         <Badge className="ml-auto text-[9px] h-4">New</Badge>
                       )}
                     </div>
-                    <span className="text-xs text-muted-foreground line-clamp-1">{notif.message}</span>
+                    <span className="text-xs text-muted-foreground line-clamp-1">{notif.body}</span>
                   </DropdownMenuItem>
                 ))}
               </DropdownMenuContent>
             </DropdownMenu>
 
-            {/* User Menu */}
+            {/* User Menu — FE-029 ROOT FIX: rendered from useSession() */}
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <Button variant="ghost" size="sm" className="h-8 gap-2 px-2">
                   <Avatar className="h-6 w-6">
                     <AvatarFallback className="bg-primary text-primary-foreground text-[10px]">
-                      SC
+                      {displayInitials}
                     </AvatarFallback>
                   </Avatar>
-                  <span className="hidden sm:inline text-sm font-medium">Dr. Sarah Chen</span>
+                  <span className="hidden sm:inline text-sm font-medium">{displayName}</span>
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end" className="w-56">
                 <DropdownMenuLabel>
                   <div className="flex flex-col">
-                    <span>Dr. Sarah Chen</span>
-                    <span className="text-xs font-normal text-muted-foreground">sarah.chen@drugos.io</span>
+                    <span>{displayName}</span>
+                    {displayEmail && (
+                      <span className="text-xs font-normal text-muted-foreground">{displayEmail}</span>
+                    )}
                   </div>
                 </DropdownMenuLabel>
                 <DropdownMenuSeparator />
@@ -517,7 +583,12 @@ export function AppShell({ activeScreen, onNavigate, children }: AppShellProps) 
                   <Sun className="mr-2 h-4 w-4" /> Theme
                 </DropdownMenuItem>
                 <DropdownMenuSeparator />
-                <DropdownMenuItem>
+                {/* FE-029: Sign Out calls the real session.signOut() which
+                    hits /api/auth/logout and hard-navigates to /login. */}
+                <DropdownMenuItem
+                  onClick={() => session.signOut()}
+                  disabled={session.loading || !session.user}
+                >
                   <LogOut className="mr-2 h-4 w-4" /> Sign Out
                 </DropdownMenuItem>
               </DropdownMenuContent>

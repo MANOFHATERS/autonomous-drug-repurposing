@@ -68,11 +68,16 @@ jest.mock("@/lib/services/rl-ranker", () => ({
 
 // Mock the per-user rate limiter. Default implementation delegates to the
 // real one so the route truly exercises the limiter; tests override per-case.
+//
+// FE-017: the route now calls `checkUserRateLimitDistributed` (async) with a
+// sync fallback to `checkUserRateLimit`. We mock BOTH so tests can override
+// either. By default both delegate to the real implementations.
 jest.mock("@/lib/auth/per-user-rate-limit", () => {
   const actual = jest.requireActual("@/lib/auth/per-user-rate-limit");
   return {
     ...actual,
     checkUserRateLimit: jest.fn(actual.checkUserRateLimit),
+    checkUserRateLimitDistributed: jest.fn(actual.checkUserRateLimitDistributed),
   };
 });
 
@@ -92,7 +97,7 @@ import { requireAuth, requireCsrfOrSend } from "@/lib/api-helpers";
 import { POST, GET } from "@/app/api/rl/route";
 import { NextRequest } from "next/server";
 import { getRankedHypotheses } from "@/lib/services/rl-ranker";
-import { checkUserRateLimit } from "@/lib/auth/per-user-rate-limit";
+import { checkUserRateLimit, checkUserRateLimitDistributed } from "@/lib/auth/per-user-rate-limit";
 
 const AUTHED_USER = {
   userId: "curuser000000000000000001",
@@ -109,6 +114,11 @@ describe("FE-069: /api/rl route wiring — rate limit is actually called", () =>
     const actual = jest.requireActual("@/lib/auth/per-user-rate-limit");
     (checkUserRateLimit as jest.Mock).mockImplementation(actual.checkUserRateLimit);
     (checkUserRateLimit as jest.Mock).mockClear();
+    // FE-017: the route now calls the async distributed limiter; restore
+    // its real implementation too so tests that don't override it exercise
+    // the real in-memory backend (REDIS_URL is unset in tests).
+    (checkUserRateLimitDistributed as jest.Mock).mockImplementation(actual.checkUserRateLimitDistributed);
+    (checkUserRateLimitDistributed as jest.Mock).mockClear();
 
     // Auth: simulate an authenticated user.
     (getAuthenticatedUser as jest.Mock).mockResolvedValue(AUTHED_USER);
@@ -154,22 +164,34 @@ describe("FE-069: /api/rl route wiring — rate limit is actually called", () =>
     });
     await POST(req);
 
-    expect(checkUserRateLimit).toHaveBeenCalledTimes(1);
-    // First arg must be the userId — proves the route is passing the
-    // authenticated user's id, not a hardcoded string or undefined.
-    expect((checkUserRateLimit as jest.Mock).mock.calls[0][0]).toBe(AUTHED_USER.userId);
+    // FE-017: the route now calls the ASYNC distributed limiter. The sync
+    // limiter is only a fallback. Either way, the userId must be passed.
+    const limiterCalls = (checkUserRateLimitDistributed as jest.Mock).mock.calls.length
+      + (checkUserRateLimit as jest.Mock).mock.calls.length;
+    expect(limiterCalls).toBeGreaterThanOrEqual(1);
+    const firstCall = (checkUserRateLimitDistributed as jest.Mock).mock.calls[0]
+      ?? (checkUserRateLimit as jest.Mock).mock.calls[0];
+    expect(firstCall[0]).toBe(AUTHED_USER.userId);
   });
 
   test("GET /api/rl calls checkUserRateLimit with the authenticated userId", async () => {
-    await GET();
+    // FE-033 ROOT FIX: GET now accepts a NextRequest so it can read sort +
+    // pagination query params. Pass a minimal request.
+    const req = new NextRequest("http://localhost/api/rl", { method: "GET" });
+    await GET(req);
 
-    expect(checkUserRateLimit).toHaveBeenCalledTimes(1);
-    expect((checkUserRateLimit as jest.Mock).mock.calls[0][0]).toBe(AUTHED_USER.userId);
+    const limiterCalls = (checkUserRateLimitDistributed as jest.Mock).mock.calls.length
+      + (checkUserRateLimit as jest.Mock).mock.calls.length;
+    expect(limiterCalls).toBeGreaterThanOrEqual(1);
+    const firstCall = (checkUserRateLimitDistributed as jest.Mock).mock.calls[0]
+      ?? (checkUserRateLimit as jest.Mock).mock.calls[0];
+    expect(firstCall[0]).toBe(AUTHED_USER.userId);
   });
 
   test("POST /api/rl returns 429 with Retry-After when rate limit is exceeded", async () => {
-    // Force the limiter to report "blocked".
-    (checkUserRateLimit as jest.Mock).mockReturnValue({
+    // Force the limiter to report "blocked". FE-017: the route calls the
+    // async distributed limiter first, so mock THAT one.
+    (checkUserRateLimitDistributed as jest.Mock).mockResolvedValue({
       blocked: true,
       retryAfterSeconds: 42,
       remaining: 0,
@@ -192,13 +214,15 @@ describe("FE-069: /api/rl route wiring — rate limit is actually called", () =>
   });
 
   test("GET /api/rl returns 429 with Retry-After when rate limit is exceeded", async () => {
-    (checkUserRateLimit as jest.Mock).mockReturnValue({
+    (checkUserRateLimitDistributed as jest.Mock).mockResolvedValue({
       blocked: true,
       retryAfterSeconds: 30,
       remaining: 0,
     });
 
-    const res = await GET();
+    // FE-033: GET now takes a NextRequest.
+    const req = new NextRequest("http://localhost/api/rl", { method: "GET" });
+    const res = await GET(req);
 
     expect(res.status).toBe(429);
     expect(res.headers.get("Retry-After")).toBe("30");
@@ -238,8 +262,8 @@ describe("FE-069: /api/rl route wiring — rate limit is actually called", () =>
   });
 
   test("GET /api/rl calls getRankedHypotheses when rate limit passes", async () => {
-    // FE-003 ROOT FIX: same as POST — mock non-empty candidates so the
-    // route returns 200 and the wiring assertion holds.
+    // FE-003 ROOT FIX: mock non-empty candidates so the route returns 200
+    // and the wiring assertion holds (otherwise the 503 fallback fires).
     (getRankedHypotheses as jest.Mock).mockResolvedValue({
       candidates: [
         { drug: "metformin", disease: "breast cancer", rank: 1, gnnScore: 0.85 },
@@ -250,11 +274,18 @@ describe("FE-069: /api/rl route wiring — rate limit is actually called", () =>
       csvPath: "/tmp/x",
       note: "test",
     });
-    const res = await GET();
+    // FE-033: GET now takes a NextRequest. The route calls getRankedHypotheses
+    // with sort/sortDir/offset/pageSize (default pageSize=50, offset=0).
+    const req = new NextRequest("http://localhost/api/rl", { method: "GET" });
+    const res = await GET(req);
     expect(res.status).toBe(200);
     expect(getRankedHypotheses).toHaveBeenCalledTimes(1);
+    // The new call signature uses pageSize + offset (not `limit`). Default
+    // pageSize is 50, offset is 0. sort/sortDir are undefined (the route
+    // passes them through as undefined when not provided).
     expect((getRankedHypotheses as jest.Mock).mock.calls[0][0]).toMatchObject({
-      limit: 50,
+      pageSize: 50,
+      offset: 0,
     });
   });
 

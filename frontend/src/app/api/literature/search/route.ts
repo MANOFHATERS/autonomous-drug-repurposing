@@ -22,7 +22,7 @@ import {
 // the service's `articles` field to `items` and pass through `total`,
 // `limit`, and `offset` for paginated follow-up requests.
 export async function GET(req: NextRequest) {
-  const guard = await requireAuthAndRateLimit();
+  const guard = await requireAuthAndRateLimit(req);
   if (guard.response !== null) return guard.response;
 
   const query = req.nextUrl.searchParams.get("q") || "";
